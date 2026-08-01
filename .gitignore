@@ -1,0 +1,60 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Local credentials (never commit)
+local/
+
+# Environment files (contain secrets — .env.example is committed, .env is not)
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated reports and sample data (contain real business data)
+docs/reports/*.html
+docs/reports/*.json
+docs/sample-data/
+
+# Persistent bind-mount data (Docker volumes — never commit)
+data/
+
+# Dashboard App
+dashboard/node_modules/
+dashboard/.next/
+dashboard/tsconfig.tsbuildinfo
+
+# Coverage
+.coverage
+coverage.xml
+htmlcov/
+
+# Runtime/temp
+*.log
+tmp/
+_*.py
+!__init__.py
+_*.json
+
+# Vitest coverage output
+dashboard/coverage/
+otel/local/*.jsonl
+otel/local/*.json
+
+# Playwright e2e output (local runs; CI uploads these as workflow artifacts)
+dashboard/test-results/
+dashboard/playwright-report/
+node_modules/

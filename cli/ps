@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Stub for system-wide use: put this script in your PATH (e.g. ~/bin/ps-analytics or /usr/local/bin/ps-analytics).
+# When run from any directory inside a project worktree, walks up to find .ps-project or cli/
+# and execs that project's cli/ps.sh. Works with multiple worktrees.
+
+set -e
+
+find_project_root() {
+    local dir
+    dir="$(pwd)"
+    while [ -n "$dir" ] && [ "$dir" != "/" ]; do
+        if [ -f "${dir}/.ps-project" ] || { [ -d "${dir}/cli" ] && [ -f "${dir}/cli/ps.sh" ]; }; then
+            echo "$dir"
+            return 0
+        fi
+        dir="$(dirname "$dir")"
+    done
+    return 1
+}
+
+REPO_ROOT=""
+if REPO_ROOT="$(find_project_root)"; then
+    exec "$REPO_ROOT/cli/ps.sh" "$@"
+else
+    echo "ps: not inside a powershop-analytics project (no .ps-project or cli/ps.sh found)" >&2
+    echo "Run from a project directory." >&2
+    exit 1
+fi

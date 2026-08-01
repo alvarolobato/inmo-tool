@@ -1,0 +1,256 @@
+# PowerShop Analytics — production stack
+# Uses pre-built Docker Hub images. No local build required.
+#
+# Quick install:
+#   curl -fsSL https://raw.githubusercontent.com/alvarolobato/powershop-analytics/main/deploy/install.sh | bash
+#
+# Manual install:
+#   mkdir ~/powershop && cd ~/powershop
+#   curl -LO https://github.com/alvarolobato/powershop-analytics/releases/latest/download/docker-compose.prod.yml
+#   mv docker-compose.prod.yml docker-compose.yml
+#   curl -LO https://github.com/alvarolobato/powershop-analytics/releases/latest/download/wren-config.yaml
+#   cp /path/to/.env.example .env && $EDITOR .env
+#   mkdir -p ~/.config/powershop-analytics
+#   docker compose up -d
+#
+# Data directories (auto-created, survive restarts):
+#   ./data/postgres   — PostgreSQL data
+#   ./data/qdrant     — Qdrant vector store
+#   ./data/wren       — WrenAI config/state/SQLite
+#
+# Dashboard config (settings saved via /admin/config UI):
+#   ~/.config/powershop-analytics/config.yaml  — persisted dashboard settings
+
+networks:
+  wren:
+    driver: bridge
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — mirror of the 4D source data
+  # pg_stat_statements required for /admin/slow-queries
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    # Default Docker /dev/shm is 64 MB; parallel-query workers (heavy home /
+    # dashboard aggregations) exhaust it and fail with "could not resize shared
+    # memory segment ... No space left on device". Must stay in sync with the
+    # dev docker-compose.yml. Do NOT drop this — `ps prod update` overwrites the
+    # prod compose from this file, so a missing line silently breaks production.
+    shm_size: 1gb
+    command: postgres -c shared_preload_libraries=pg_stat_statements -c pg_stat_statements.track=all
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_in_production}
+      POSTGRES_DB: ${POSTGRES_DB:-powershop}
+    ports:
+      - "${HOST_BIND:-0.0.0.0}:5432:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    networks:
+      - wren
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-powershop}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # ETL — extracts data from 4D and loads into PostgreSQL
+  # Scheduler mode: nightly full sync at ETL_CRON_HOUR (default 02:00 UTC)
+  #                 + hourly delta sync.
+  # One-off sync:   docker compose run --rm etl python -m etl.main --once
+  # ---------------------------------------------------------------------------
+  etl:
+    image: ${DOCKERHUB_NAMESPACE:-alobato}/powershop-etl:${ETL_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      P4D_HOST: ${P4D_HOST:-}
+      P4D_PORT: ${P4D_PORT:-19812}
+      P4D_USER: ${P4D_USER:-}
+      P4D_PASSWORD: ${P4D_PASSWORD:-}
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-change_me_in_production}@postgres:5432/${POSTGRES_DB:-powershop}
+      ETL_CRON_HOUR: ${ETL_CRON_HOUR:-2}
+    networks:
+      - wren
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # WrenAI — bootstrap (initialises shared data volume)
+  # ---------------------------------------------------------------------------
+  bootstrap:
+    image: ghcr.io/canner/wren-bootstrap:${WREN_BOOTSTRAP_VERSION:-0.1.5}
+    restart: on-failure
+    platform: ${PLATFORM:-linux/amd64}
+    environment:
+      DATA_PATH: /app/data
+    volumes:
+      - ./data/wren:/app/data
+    command: /bin/sh /app/init.sh
+    networks:
+      - wren
+
+  # ---------------------------------------------------------------------------
+  # WrenAI — engine (semantic/query layer)
+  # ---------------------------------------------------------------------------
+  wren-engine:
+    image: ghcr.io/canner/wren-engine:${WREN_ENGINE_VERSION:-0.22.0}
+    restart: on-failure
+    platform: ${PLATFORM:-linux/amd64}
+    expose:
+      - ${WREN_ENGINE_PORT:-8080}
+      - ${WREN_ENGINE_SQL_PORT:-7432}
+    volumes:
+      - ./data/wren:/usr/src/app/etc
+    networks:
+      - wren
+    depends_on:
+      - bootstrap
+
+  # ---------------------------------------------------------------------------
+  # WrenAI — ibis server (data source connectivity, incl. PostgreSQL)
+  # ---------------------------------------------------------------------------
+  ibis-server:
+    image: ghcr.io/canner/wren-engine-ibis:${IBIS_SERVER_VERSION:-0.22.0}
+    restart: on-failure
+    platform: ${PLATFORM:-linux/amd64}
+    expose:
+      - ${IBIS_SERVER_PORT:-8000}
+    environment:
+      WREN_ENGINE_ENDPOINT: http://wren-engine:${WREN_ENGINE_PORT:-8080}
+    networks:
+      - wren
+    depends_on:
+      - wren-engine
+
+  # ---------------------------------------------------------------------------
+  # WrenAI — AI service (LLM orchestration via OpenRouter)
+  # ---------------------------------------------------------------------------
+  wren-ai-service:
+    image: ghcr.io/canner/wren-ai-service:${WREN_AI_SERVICE_VERSION:-0.29.0}
+    restart: on-failure
+    platform: ${PLATFORM:-linux/amd64}
+    expose:
+      - ${WREN_AI_SERVICE_PORT:-5555}
+    ports:
+      - "${HOST_BIND:-0.0.0.0}:${AI_SERVICE_FORWARD_PORT:-5555}:${WREN_AI_SERVICE_PORT:-5555}"
+    environment:
+      PYTHONUNBUFFERED: 1
+      CONFIG_PATH: /app/config.yaml
+      OPENAI_API_BASE: https://openrouter.ai/api/v1
+      OPENAI_API_KEY: ${OPENROUTER_API_KEY:-}
+      LITELLM_API_BASE: https://openrouter.ai/api/v1
+      LITELLM_API_KEY: ${OPENROUTER_API_KEY:-}
+      QDRANT_HOST: qdrant
+      SHOULD_FORCE_DEPLOY: "1"
+      WREN_AI_SERVICE_PORT: ${WREN_AI_SERVICE_PORT:-5555}
+      WREN_LLM_MODEL: ${WREN_LLM_MODEL:-openrouter/anthropic/claude-sonnet-4-20250514}
+      WREN_AI_SERVICE_VERSION: ${WREN_AI_SERVICE_VERSION:-0.29.0}
+    volumes:
+      - ./wren-config.yaml:/app/config.yaml:ro
+      - ./data/wren:/app/data:ro
+    networks:
+      - wren
+    depends_on:
+      - qdrant
+      - wren-engine
+
+  # ---------------------------------------------------------------------------
+  # WrenAI — UI (web interface, port 3000)
+  # ---------------------------------------------------------------------------
+  wren-ui:
+    image: ghcr.io/canner/wren-ui:${WREN_UI_VERSION:-0.32.2}
+    restart: on-failure
+    platform: ${PLATFORM:-linux/amd64}
+    environment:
+      DB_TYPE: sqlite
+      SQLITE_FILE: /app/data/db.sqlite3
+      WREN_ENGINE_ENDPOINT: http://wren-engine:${WREN_ENGINE_PORT:-8080}
+      WREN_AI_ENDPOINT: http://wren-ai-service:${WREN_AI_SERVICE_PORT:-5555}
+      IBIS_SERVER_ENDPOINT: http://ibis-server:${IBIS_SERVER_PORT:-8000}
+      GENERATION_MODEL: ${WREN_LLM_MODEL:-anthropic/claude-sonnet-4-20250514}
+      WREN_ENGINE_PORT: ${WREN_ENGINE_PORT:-8080}
+      WREN_AI_SERVICE_VERSION: ${WREN_AI_SERVICE_VERSION:-0.29.0}
+      WREN_UI_VERSION: ${WREN_UI_VERSION:-0.32.2}
+      WREN_ENGINE_VERSION: ${WREN_ENGINE_VERSION:-0.22.0}
+      WREN_PRODUCT_VERSION: ${WREN_PRODUCT_VERSION:-0.29.1}
+      USER_UUID: ${USER_UUID:-}
+      POSTHOG_API_KEY: ${POSTHOG_API_KEY:-phc_nhF32aj4xHXOZb0oqr2cn4Oy9uiWzz6CCP4KZmRq9aE}
+      POSTHOG_HOST: ${POSTHOG_HOST:-https://app.posthog.com}
+      TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-true}
+      NEXT_PUBLIC_USER_UUID: ${USER_UUID:-}
+      NEXT_PUBLIC_POSTHOG_API_KEY: ${POSTHOG_API_KEY:-phc_nhF32aj4xHXOZb0oqr2cn4Oy9uiWzz6CCP4KZmRq9aE}
+      NEXT_PUBLIC_POSTHOG_HOST: ${POSTHOG_HOST:-https://app.posthog.com}
+      NEXT_PUBLIC_TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-true}
+      EXPERIMENTAL_ENGINE_RUST_VERSION: ${EXPERIMENTAL_ENGINE_RUST_VERSION:-false}
+    ports:
+      - "${HOST_BIND:-0.0.0.0}:${HOST_PORT:-3000}:3000"
+    volumes:
+      - ./data/wren:/app/data
+    networks:
+      - wren
+    depends_on:
+      - wren-ai-service
+      - wren-engine
+
+  # ---------------------------------------------------------------------------
+  # Qdrant — vector store for WrenAI embeddings
+  # ---------------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:v1.11.0
+    restart: on-failure
+    expose:
+      - 6333
+      - 6334
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    networks:
+      - wren
+
+  # ---------------------------------------------------------------------------
+  # Dashboard App — AI-generated dashboards (Next.js + Tremor, port 4000)
+  # ---------------------------------------------------------------------------
+  dashboard:
+    image: ${DOCKERHUB_NAMESPACE:-alobato}/powershop-dashboard:${DASHBOARD_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_in_production}
+      POSTGRES_DB: ${POSTGRES_DB:-powershop}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      # Set true when the dashboard is served over HTTPS (behind TLS termination).
+      # Leave unset on plain HTTP (e.g. LAN access by IP) so the cookie is stored.
+      ADMIN_COOKIE_SECURE: ${ADMIN_COOKIE_SECURE:-}
+      # Public URLs for reverse-proxy / custom domain deployments.
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:4000}
+      WREN_PUBLIC_URL: ${WREN_PUBLIC_URL:-http://localhost:3000}
+      # config.yaml location — points to the host-mounted persistent directory.
+      CONFIG_FILE: /config/config.yaml
+      # LLM settings (provider, model, etc.) intentionally NOT set as env vars
+      # here — configure them via /admin/config so the UI can edit them.
+      # Env-sourced keys render read-only in the config UI.
+    volumes:
+      # CRITICAL: :rw — the dashboard writes config.yaml when settings are saved
+      # via /admin/config. Without :rw all changes are lost on container restart.
+      - ${POWERSHOP_CONFIG_DIR:-${HOME}/.config/powershop-analytics}:/config:rw
+    ports:
+      - "${HOST_BIND:-0.0.0.0}:${DASHBOARD_PORT:-4000}:4000"
+    networks:
+      - wren
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4000/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

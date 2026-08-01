@@ -1,0 +1,164 @@
+# EDOT (Elastic Agent in OTel Collector mode) configuration for PowerShop Analytics.
+#
+# Exporter selection:
+#   ELASTIC_OTLP_ENDPOINT unset → elasticsearch exporter falls back to a
+#     dummy endpoint (http://localhost:1) that immediately refuses connections;
+#     retry exhausts and drops silently. Spans are captured by the file exporter.
+#   ELASTIC_OTLP_ENDPOINT set   → spans/metrics/logs flow to Elastic Cloud APM.
+#     File exporter continues writing to ./otel/local/ for offline inspection.
+#
+# Both exporters are always defined in all pipelines so OTel Collector starts
+# cleanly without "unreferenced exporter" validation errors. In local dev only
+# the file exporter produces useful output.
+#
+# See docker-compose.yml for the ENVIRONMENT env var (development / production).
+
+extensions:
+  health_check:
+    endpoint: "0.0.0.0:13133"
+  zpages:
+    endpoint: "0.0.0.0:55679"
+
+receivers:
+  # OTLP receiver — accepts traces, metrics, and logs from ETL and Dashboard.
+  otlp:
+    protocols:
+      grpc:
+        endpoint: "0.0.0.0:4317"
+      http:
+        endpoint: "0.0.0.0:4318"
+
+  # Filelog receiver — ingests container stdout from Docker JSON log files.
+  # Parses the standard Docker JSON log format ({"log":"...","stream":"stdout","time":"..."}).
+  filelog:
+    include:
+      - /var/lib/docker/containers/*/*.log
+    start_at: end
+    operators:
+      - type: json_parser
+        timestamp:
+          parse_from: attributes.time
+          layout: '%Y-%m-%dT%H:%M:%S.%LZ'
+      - type: move
+        from: attributes.log
+        to: body
+      - type: remove
+        field: attributes.time
+
+processors:
+  # Memory limiter — prevents OOM when export stalls and the queue fills.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  # Batch processor — groups records for efficient export.
+  batch:
+    send_batch_size: 512
+    timeout: 5s
+    send_batch_max_size: 1024
+
+  # Resource processor — stamps deployment.environment on every signal.
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: "${env:ENVIRONMENT}"
+        action: upsert
+
+  # Attributes processor — PII and secret redaction.
+  # Deletes a fixed set of exact attribute keys known to carry credentials.
+  # Mirrors the denylist in dashboard/lib/llm-provider/sanitize.ts.
+  attributes/redact:
+    actions:
+      - key: http.request.header.authorization
+        action: delete
+      - key: http.response.header.set-cookie
+        action: delete
+      # Drop any credential attributes that app code might accidentally add.
+      # db.user carries the 4D ERP / PostgreSQL username, which reveals internal
+      # account naming conventions; treated as sensitive here per policy.
+      - key: db.user
+        action: delete
+      - key: p4d.password
+        action: delete
+      - key: openrouter.api_key
+        action: delete
+      - key: postgres.password
+        action: delete
+
+  # Tail sampling — applied to traces only.
+  # Decision wait of 10s gives the collector time to see all spans in a trace
+  # before deciding whether to keep or drop the trace.
+  # A trace is kept if any policy matches (OR logic):
+  #   1. Keep all error traces (never lose a failed turn).
+  #   2. Keep all traces > 5s (slow requests are the ones worth debugging).
+  #   3. Sample 10% of normal traces (LLM tool loops produce 20+ spans per turn;
+  #      tail-sampling keeps error traces 100% while reducing volume for normal turns).
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 50000
+    expected_new_traces_per_sec: 10
+    policies:
+      - name: keep-errors
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      - name: keep-slow-traces
+        type: latency
+        latency:
+          threshold_ms: 5000
+      - name: sample-normal
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 10
+
+exporters:
+  # File exporter — always-on local sink. In production this writes a rolling
+  # log alongside the Elastic export; in local dev it is the only useful sink.
+  file:
+    path: /var/log/otel/local.jsonl
+    rotation:
+      max_megabytes: 50
+      max_days: 7
+      max_backups: 3
+
+  # Elasticsearch (OTLP/HTTP) exporter — ships to Elastic Cloud APM.
+  # Falls back to http://localhost:1 (connection refused) when
+  # ELASTIC_OTLP_ENDPOINT is not set; retry exhausts and drops silently,
+  # so the file exporter captures all data in local dev without errors.
+  otlphttp/elasticsearch:
+    endpoint: "${env:ELASTIC_OTLP_ENDPOINT:-http://localhost:1}"
+    headers:
+      Authorization: "ApiKey ${env:ELASTIC_OTLP_API_KEY:-placeholder}"
+    compression: gzip
+    timeout: 10s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 30s
+    sending_queue:
+      enabled: true
+      num_consumers: 4
+      queue_size: 2048
+
+service:
+  extensions: [health_check, zpages]
+  pipelines:
+    # Traces — tail-sampled before export so error and slow traces are always kept.
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/redact, resource, tail_sampling, batch]
+      exporters: [file, otlphttp/elasticsearch]
+
+    # Metrics — no sampling (metrics are pre-aggregated before ingestion).
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/redact, resource, batch]
+      exporters: [file, otlphttp/elasticsearch]
+
+    # Logs — container stdout (filelog) + OTel log API records (otlp).
+    logs:
+      receivers: [otlp, filelog]
+      processors: [memory_limiter, attributes/redact, resource, batch]
+      exporters: [file, otlphttp/elasticsearch]

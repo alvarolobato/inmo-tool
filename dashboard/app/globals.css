@@ -1,0 +1,197 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================
+   CSS Design Tokens — dark theme (default)
+   ============================================================ */
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b0c0f;
+  --bg-1: #111317;
+  --bg-2: #161920;
+  --bg-3: #1d2029;
+  --border: #23262f;
+  --border-strong: #2f3340;
+  --fg: #eceff4;
+  --fg-muted: #9aa0ab;
+  --fg-subtle: #5d626c;
+  --up: #34d399;
+  --up-bg: rgba(52, 211, 153, 0.12);
+  --down: #fb7185;
+  --down-bg: rgba(251, 113, 133, 0.12);
+  --warn: #fbbf24;
+  --warn-bg: rgba(251, 191, 36, 0.12);
+  --grid: rgba(255, 255, 255, 0.04);
+  /* Density: comfort (default) */
+  --gap: 18px;
+  --pad: 20px;
+  --kpi-pad: 22px;
+  --gap-section: 1.5rem;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #fafaf7;
+  --bg-1: #ffffff;
+  --bg-2: #f4f4ef;
+  --bg-3: #ebebe5;
+  --border: #e4e4de;
+  --border-strong: #d4d4cc;
+  --fg: #1a1a1a;
+  --fg-muted: #5f5f5f;
+  --fg-subtle: #9a9a9a;
+  --up: #059669;
+  --up-bg: rgba(5, 150, 105, 0.12);
+  --down: #dc2626;
+  --down-bg: rgba(220, 38, 38, 0.12);
+  --warn: #d97706;
+  --warn-bg: rgba(217, 119, 6, 0.12);
+  --grid: rgba(0, 0, 0, 0.04);
+  --gap: 18px;
+  --pad: 20px;
+  --kpi-pad: 22px;
+  --gap-section: 1.5rem;
+}
+
+/* ============================================================
+   Accent palette variants
+   ============================================================ */
+
+:root[data-accent="electric"],
+:root:not([data-accent]) {
+  --accent: #7c5cff;
+  --accent-2: #22d3ee;
+  --accent-soft: rgba(124, 92, 255, 0.14);
+}
+
+:root[data-accent="citrus"] {
+  --accent: #f59e0b;
+  --accent-2: #10b981;
+  --accent-soft: rgba(245, 158, 11, 0.14);
+}
+
+:root[data-accent="magenta"] {
+  --accent: #ec4899;
+  --accent-2: #8b5cf6;
+  --accent-soft: rgba(236, 72, 153, 0.14);
+}
+
+:root[data-accent="mono"] {
+  --accent: #e5e5e5;
+  --accent-2: #a3a3a3;
+  --accent-soft: rgba(229, 229, 229, 0.14);
+}
+
+/* ============================================================
+   Density variants
+   ============================================================ */
+
+:root[data-density="compact"] {
+  --gap: 12px;
+  --pad: 14px;
+  --kpi-pad: 16px;
+  --gap-section: 1rem;
+}
+
+:root[data-density="comfort"],
+:root:not([data-density]) {
+  --gap: 18px;
+  --pad: 20px;
+  --kpi-pad: 22px;
+  --gap-section: 1.5rem;
+}
+
+:root[data-density="spacious"] {
+  --gap: 26px;
+  --pad: 28px;
+  --kpi-pad: 30px;
+  --gap-section: 2rem;
+}
+
+/* ============================================================
+   Global body tokens
+   ============================================================ */
+
+body {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* ============================================================
+   Main content area — default padding; dashboard pages opt out
+   ============================================================ */
+
+.main-content {
+  padding: var(--pad, 20px);
+}
+
+/* Dashboard view pages manage their own internal padding */
+.main-content:has([data-no-main-padding]) {
+  padding: 0;
+}
+
+/* ============================================================
+   Animations
+   ============================================================ */
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(1.3);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ============================================================
+   Prism dark syntax highlighting for JSON spec editor
+   ============================================================ */
+
+.token.property { color: #c084fc; }
+.token.string { color: #34d399; }
+.token.number { color: #60a5fa; }
+.token.boolean { color: #f472b6; }
+.token.null { color: #6b7280; }
+.token.punctuation { color: #94a3b8; }
+.token.operator { color: #94a3b8; }
+
+/* ============================================================
+   Print-friendly styles: hide controls, show only dashboard content
+   ============================================================ */
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+
+  body {
+    background: white !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Remove margin adjustments from chat sidebar */
+  .transition-all {
+    margin-right: 0 !important;
+  }
+}

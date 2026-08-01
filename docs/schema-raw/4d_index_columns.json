@@ -1,0 +1,2264 @@
+{
+  "Aena": [
+    "Proceso"
+  ],
+  "Albaranes": [
+    "Abono",
+    "Actualizadas",
+    "CajaEntrada",
+    "EnviadoB",
+    "Exportado",
+    "Fabricacion",
+    "Facturadas",
+    "FechaRecibido",
+    "Modificada",
+    "NAlbaran",
+    "NLineas",
+    "NPedido",
+    "NumCaja",
+    "NumProveedor",
+    "NumTienda",
+    "NumTransportis",
+    "OrdenTraspaso",
+    "PickingRealizado",
+    "Proveedor",
+    "Recibidas",
+    "RegAlbaran",
+    "Serie",
+    "TiendaEntrada",
+    "TiendaSalida",
+    "TipoTraspaso",
+    "Transportista"
+  ],
+  "Arancelarios": [
+    "Codigo"
+  ],
+  "Articulos": [
+    "ActivoLengow",
+    "ActivoNeteven",
+    "ActivoShoppingFeed",
+    "AgrupadoSM",
+    "Anulado",
+    "ArrMarActPeso",
+    "Articulo",
+    "Calculo",
+    "CCJOMaterial",
+    "CCNivel",
+    "CCRefeJOFACM",
+    "CEClieCCCon",
+    "ClaveColor",
+    "ClaveCriterioX",
+    "ClaveCriterioY",
+    "ClaveCriterioZ",
+    "ClaveGrupo",
+    "ClaveMarca",
+    "ClaveSeccion",
+    "ClaveSerie",
+    "ClaveTemporada",
+    "CodArticulo2",
+    "Codigo",
+    "CodigoBarra",
+    "Color",
+    "CriterioXO3",
+    "CriterioYO4",
+    "CriterioZO6",
+    "DepaSeccFabr",
+    "Descripcion",
+    "EmplJOTiACCCom",
+    "EnviadoB",
+    "EsServicio",
+    "FamiGrupSeri",
+    "FechaCreacion",
+    "FechaModifica",
+    "HoraModifica",
+    "Identificador1",
+    "Identificador2",
+    "Identificador3",
+    "JOCajeWebEnvio",
+    "JOCCNFactCarC",
+    "JOCCOfRePatr",
+    "JOCCRepaEquipa",
+    "JOCCTelefOferta",
+    "JOCCTiMeFFab",
+    "JOFACliTipoFa",
+    "JONumMarca",
+    "JONumTipoArt",
+    "JOSTCCFCP2DFI",
+    "JOSTCCFPP2HIA",
+    "JOSTFecAcePr3D",
+    "JOSTFecEntPr4H",
+    "JOSTFecNacPr3H",
+    "JOSTFecVenPr4D",
+    "MarcaO2",
+    "Medida10",
+    "Modelo",
+    "Moneda",
+    "NoCatalogoCloud",
+    "NoCatalogoList",
+    "NoEstadistica",
+    "NoInventariabl",
+    "NoPSCommerceM",
+    "NoWebJOGarRep",
+    "NumClasN1B2B",
+    "NumClasN2B2B",
+    "NumClasN3B2B",
+    "NumColor",
+    "NumDepartament",
+    "NumFamilia",
+    "NumMarca",
+    "NumProveedor",
+    "NumSubfamilia",
+    "NumTemporada",
+    "NumTemporadaOr",
+    "Objeto",
+    "OPJOCCFotAPEdi",
+    "OPTipoArticulo",
+    "PActiva",
+    "PosicionAlmacen",
+    "PrCosteNe",
+    "Precio1",
+    "Precio1Neto",
+    "Precio2",
+    "Precio2Neto",
+    "Precio3Neto",
+    "Precio4Neto",
+    "ProC1CCEnlazado",
+    "ProC2FACom2",
+    "ProC3FACom3",
+    "Promociones",
+    "PromoDesde",
+    "Proveedor",
+    "RegArticulo",
+    "SerieFacturacion",
+    "SerieO5",
+    "Sexo",
+    "SinFichasStock",
+    "SMAutoreposicion",
+    "Stock",
+    "SubfMode",
+    "TarifaFabrica",
+    "TemporadaO1",
+    "TieneImagen",
+    "UbicacionAlmacen1",
+    "UnidadPromocion",
+    "VolumenNumero",
+    "WebClasifica1B2B",
+    "WebClasifica2B2B",
+    "WebClasifica3B2B",
+    "WebPreferencias",
+    "WSTarifas"
+  ],
+  "Avisos": [
+    "FechaFin",
+    "FechaInicio"
+  ],
+  "BalanceoStock": [
+    "Codigo",
+    "Talla",
+    "TiendaDestino",
+    "TiendaOrigen"
+  ],
+  "BarrasAsociado": [
+    "Codigo",
+    "FModifica",
+    "HModifica",
+    "NumArticulo",
+    "RegBarras"
+  ],
+  "Cajas": [
+    "Caja",
+    "Cajero",
+    "CCRepuesta",
+    "EnviadoCentral",
+    "Exportada",
+    "Fecha",
+    "FechaCreacion",
+    "FechaModifica",
+    "Hora",
+    "HoraCierre",
+    "NumCaja",
+    "NumCajero",
+    "NumTienda",
+    "RegCaja",
+    "TI",
+    "Tienda",
+    "TotalDevolucion",
+    "TotalFormas",
+    "TotalGeneral",
+    "TotalGeneralC",
+    "TotalMetalico",
+    "TotalVenta"
+  ],
+  "Cajeros": [
+    "Cajero",
+    "Codigo",
+    "RegCajero"
+  ],
+  "Cambios": [
+    "Moneda"
+  ],
+  "CambiosSeries": [
+    "RegCambio"
+  ],
+  "CambiosSeriesGeneral": [
+    "RegCambio"
+  ],
+  "Catalogos": [
+    "Articulo",
+    "ColorFabricante",
+    "Comentarios",
+    "Descripcion",
+    "DirectoTienda",
+    "Modelo",
+    "Proveedor",
+    "Solicitado",
+    "Traspasado"
+  ],
+  "CCArreglos": [
+    "Arreglo"
+  ],
+  "CCFicCamiseria": [
+    "CodigoCajero",
+    "FechaPedido",
+    "NumCliente",
+    "RegCamiseria",
+    "Tienda"
+  ],
+  "CCFicSastreria": [
+    "CodigoCajero",
+    "FechaPedido",
+    "NumCliente",
+    "RegSastreria",
+    "Tienda"
+  ],
+  "CCLineasCompr": [
+    "Abono",
+    "Articulo",
+    "Caja",
+    "ClaveSerie",
+    "Codigo",
+    "Color",
+    "ColorFabricant",
+    "CriterioX",
+    "CriterioY",
+    "CriterioZ",
+    "Descripcion",
+    "Fecha",
+    "Grupo",
+    "Mes",
+    "Modelo",
+    "NLinea",
+    "NPedido",
+    "NumArticulo",
+    "NumCaja",
+    "NumColor",
+    "NumGrupo",
+    "NumMarca",
+    "NumPedido",
+    "NumProveedor",
+    "NumSeccion",
+    "NumTemporada",
+    "NumTienda",
+    "PIva",
+    "Referencia",
+    "RegLineaCompra",
+    "Seccion",
+    "Sexo",
+    "Temporada",
+    "Tienda"
+  ],
+  "CCLooks": [
+    "NumArticulo",
+    "RegLook"
+  ],
+  "CCMedTarReg": [
+    "Carga",
+    "NTarjeta"
+  ],
+  "CCOPColores": [
+    "Color",
+    "FModifica",
+    "HModifica",
+    "NoPSCommerce",
+    "NoPSCommerceM",
+    "RegColor"
+  ],
+  "CCOPCriXDiam": [
+    "CriterioXDiame",
+    "FModifica",
+    "HModifica",
+    "NoPSCommerce",
+    "NoPSCommerceM",
+    "UnidadPromocion",
+    "VolumenImporte"
+  ],
+  "CCOPCriYEsfe": [
+    "CriterioYEsfer",
+    "FModifica",
+    "HModifica",
+    "NoPSCommerce",
+    "NoPSCommerceM",
+    "SerieEmpresa",
+    "UnidadPromocion",
+    "VolumenImporte"
+  ],
+  "CCOPCriZCili": [
+    "AnuladoPromocion",
+    "CriterioZCilin",
+    "FModifica",
+    "HModifica",
+    "NoPSCommerce",
+    "NoPSCommerceM",
+    "SerieEmpresa",
+    "UnidadPromocion",
+    "VolumenImporte"
+  ],
+  "CCOPLotePuEj": [
+    "FModifica",
+    "HModifica",
+    "LotePuenteEje"
+  ],
+  "CCOPMarcTrat": [
+    "FModifica",
+    "HModifica",
+    "MarcaTratamien",
+    "NoPSCommerce",
+    "NoPSCommerceM",
+    "RegMarca",
+    "SerieEmpresa",
+    "UnidadPromocion",
+    "VolumenImporte"
+  ],
+  "CCOPSeriCali": [
+    "Clave",
+    "FModifica",
+    "HModifica",
+    "SerieCalibre"
+  ],
+  "CCOPTempTipo": [
+    "Adicion",
+    "FModifica",
+    "HModifica",
+    "RebajasActiva",
+    "RegTemporada",
+    "TemporadaActiv",
+    "TemporadaTipo"
+  ],
+  "CCPorcentajeTemp": [
+    "Cliente",
+    "NumCliente",
+    "NumTemporada"
+  ],
+  "CCPosGesDoc": [
+    "RegDocumento"
+  ],
+  "CCRepartoC": [
+    "RegReparto",
+    "Reparto"
+  ],
+  "CCRepartoD": [
+    "NumReparto",
+    "Tienda"
+  ],
+  "CCSexos": [
+    "SerieEmpresa",
+    "UnidadPromocion",
+    "VolumenImporte"
+  ],
+  "CCStock": [
+    "FechaModifica",
+    "NumArticulo"
+  ],
+  "ClasificadoresN1B2B": [
+    "ClasificadorN1",
+    "RegClasN1B2B"
+  ],
+  "ClasificadoresN2B2B": [
+    "ClasificadorN2",
+    "RegClasN2B2B"
+  ],
+  "ClasificadoresN3B2B": [
+    "ClasificadorN3",
+    "RegClasN3B2B"
+  ],
+  "ClasificaMkPl": [
+    "Clasificador"
+  ],
+  "Clientes": [
+    "Anulado",
+    "Calculo",
+    "CIF",
+    "Cliente",
+    "ClubSocios",
+    "CMaquina",
+    "Codigo",
+    "Comercial",
+    "CuentaContable",
+    "Deposito",
+    "DiaNacimientoAnual",
+    "email",
+    "EnviadoCentral",
+    "FechaCreacion",
+    "FechaModifica",
+    "FechaNacimient",
+    "FechaUltiCumplePromo",
+    "Franquiciado",
+    "Mailing",
+    "Marketing1",
+    "Marketing2",
+    "Marketing3",
+    "Marketing4",
+    "Marketing5",
+    "Marketing6",
+    "Marketing7",
+    "Mayorista",
+    "Movil",
+    "NombreComercial",
+    "NumComercial",
+    "NumTransportis",
+    "OPProxGraduCO",
+    "OPProxGraduOP",
+    "Pais",
+    "Password",
+    "PasswordHash",
+    "Poblacion",
+    "Postal",
+    "Provincia",
+    "RegCliente",
+    "Tarifa",
+    "TarifaSocio",
+    "TarjetaPuntos",
+    "Telefono",
+    "Tienda",
+    "TiendaOnLine",
+    "TipoCliente",
+    "Transportista",
+    "UltimaCompraF",
+    "UltimaCompraI",
+    "UltimoAñoCumpleAviso",
+    "Usuario",
+    "Wapping_ID",
+    "ZonaComercial",
+    "ZonaLogistica"
+  ],
+  "CobrosFacturas": [
+    "Abono",
+    "Cliente",
+    "Exportado",
+    "Fecha",
+    "Forma",
+    "Importe",
+    "Mayor",
+    "Mes",
+    "NumCliente",
+    "NumComercial",
+    "NumFactura",
+    "Pagado",
+    "RECuentaBanco",
+    "REFechaRemesa",
+    "RegCobroRefAde",
+    "RENRecibo",
+    "RENRemesa",
+    "Tienda"
+  ],
+  "Comisiones": [
+    "Caja",
+    "CodigoCajero",
+    "NumCajero"
+  ],
+  "Composicion": [
+    "FAComponente",
+    "NumArticulo",
+    "RegComposicion"
+  ],
+  "Compras": [
+    "Abono",
+    "Caja",
+    "Deposito",
+    "EnviadoCentral",
+    "Fabricacion",
+    "FechaPedido",
+    "FechaRecibido",
+    "FechaServMax",
+    "FechaServMin",
+    "Mediadopor",
+    "Modificada",
+    "NAlbaran",
+    "NPedido",
+    "NumCaja",
+    "NumFabricante",
+    "NumProveedor",
+    "NumTemporada",
+    "NumTienda",
+    "PedidoOrigen",
+    "Proveedor",
+    "RegPedido",
+    "Reposicion",
+    "Serie",
+    "Temporada",
+    "Tienda"
+  ],
+  "ComprasExternas": [
+    "RegPedido"
+  ],
+  "Comunica": [
+    "Maquina",
+    "Proceso",
+    "String2"
+  ],
+  "ConfiguradorPVP": [
+    "Concepto"
+  ],
+  "Contadores": [
+    "Contador1",
+    "Contador10",
+    "Contador11",
+    "Contador12",
+    "Contador2",
+    "Contador3",
+    "Contador4",
+    "Contador5",
+    "Contador6",
+    "Contador7",
+    "Contador8",
+    "Contador9",
+    "Tipo"
+  ],
+  "Control": [
+    "Caja",
+    "Entrada",
+    "Fecha",
+    "Salida",
+    "Tienda"
+  ],
+  "Controles": [
+    "Cajero",
+    "CodMaq",
+    "Fecha",
+    "Hora",
+    "RegControl",
+    "RegVenta",
+    "Tienda",
+    "Tipo"
+  ],
+  "CriteriosPromocion": [
+    "Descripcion",
+    "FModifica",
+    "HModifica",
+    "PrecioDescuento"
+  ],
+  "CRMAsociados": [
+    "Cliente",
+    "NumCampaña",
+    "NumCliente"
+  ],
+  "CRMCampañas": [
+    "RegNumero"
+  ],
+  "CRMCargaOPPrue": [
+    "DCodigoCP",
+    "DDescriEmail",
+    "DefinitivoAviso",
+    "DEsferaPais",
+    "DNumArticulo",
+    "FechaCompra",
+    "ICodigoProv",
+    "IDescriPobla",
+    "INumArtImpC",
+    "NumOPCliente",
+    "OKLeido",
+    "OpticoCliente",
+    "RegPrueNuC"
+  ],
+  "CRMCuestionarios": [
+    "GrupoTiendas",
+    "RegNumero"
+  ],
+  "CRMDetalleCue": [
+    "IntTicket",
+    "NumCuestionario"
+  ],
+  "CRMVisitados": [
+    "Cliente",
+    "Codigo",
+    "NumCliente"
+  ],
+  "Cubo": [
+    "CalculoEnUso",
+    "CBColor",
+    "CBCriterioX",
+    "CBCriterioY",
+    "CBCriterioZ",
+    "CBGrupo",
+    "CBMarca",
+    "CBModelo",
+    "CBProveedor",
+    "CBSeccion",
+    "CBSexo",
+    "CBTemporada",
+    "CBTienda",
+    "CodigoValor",
+    "NivelElegido",
+    "PCImpPedNetCI",
+    "Tienda",
+    "VVentasCI"
+  ],
+  "CuentasBancarias": [
+    "CuentaGlobal"
+  ],
+  "DepaSeccFabr": [
+    "Anulado",
+    "Clave",
+    "DepaSeccFabr",
+    "FModifica",
+    "HModifica",
+    "NoPSCommerce",
+    "NoPSCommerceM",
+    "RegDepartament",
+    "UnidadPromocion",
+    "VolumenImporte"
+  ],
+  "DescCantidad": [
+    "NumArticulo",
+    "RegCantidad"
+  ],
+  "DetalleInventa": [
+    "NumInventario"
+  ],
+  "DetalleSaftAnula": [
+    "Codigo",
+    "NumAnulado"
+  ],
+  "DivisionAlbaran": [
+    "Caja",
+    "NumLineaAlbaran",
+    "RegDivision"
+  ],
+  "DivisionCompra": [
+    "Caja",
+    "NumLineaCompra",
+    "Porcentaje",
+    "RegDivision"
+  ],
+  "DivisionPedido": [
+    "Caja",
+    "NumFamilia"
+  ],
+  "Domingo": [
+    "Fecha",
+    "Hora",
+    "NumeroG",
+    "Optico",
+    "Tipo"
+  ],
+  "Eventos": [
+    "FechaHora",
+    "ID",
+    "Tabla",
+    "TipoEvento"
+  ],
+  "Exportaciones": [
+    "CCStock",
+    "Codigo",
+    "FechaModifica",
+    "STStock",
+    "Tienda",
+    "TiendaCodigo"
+  ],
+  "FAArtCompo": [
+    "Componente",
+    "NumArtículo"
+  ],
+  "FAArtFases": [
+    "NumArticulo"
+  ],
+  "FAColores": [
+    "ClaveColor",
+    "Color",
+    "RegColor"
+  ],
+  "FAComentarios": [
+    "Codigo"
+  ],
+  "FAComponentes": [
+    "Componente"
+  ],
+  "FAConsumos": [
+    "Componente",
+    "NAlbaran1",
+    "NAlbaran2",
+    "NumOrden"
+  ],
+  "Facturas": [
+    "Abono",
+    "Cliente",
+    "EnviadoCentral",
+    "Exportado",
+    "FechaCreacion",
+    "FechaFactura",
+    "FechaModifica",
+    "NFactura",
+    "NumCliente",
+    "Prueba",
+    "RegFactura",
+    "SerieFV",
+    "TarjetaFinancia",
+    "TBAI_AnuladoEnviado",
+    "TBAI_AnuladoEnviado12",
+    "TBAI_AnuladoEnviar12",
+    "TBAI_AnuladoFecha",
+    "TBAI_AnuladoFirmado",
+    "TBAI_Enviado",
+    "TBAI_Enviado12",
+    "TBAI_Enviar12",
+    "TBAI_Firmado",
+    "Tienda"
+  ],
+  "FacturasCompra": [
+    "Abono",
+    "Caja",
+    "Cajero",
+    "Exportado",
+    "FechaFactura",
+    "NFactura",
+    "NumCaja",
+    "NumProveedor",
+    "NumTienda",
+    "Proveedor",
+    "RegFactura",
+    "SerieFC",
+    "Tienda"
+  ],
+  "FADetFases": [
+    "Fase",
+    "Numero",
+    "NumProveedor",
+    "NumTipo",
+    "Proveedor",
+    "Subcontratado"
+  ],
+  "FAFabricacion": [
+    "AFabricar",
+    "Entrada",
+    "Facturado",
+    "Fase",
+    "FechaCompromiso",
+    "FechaEntrega",
+    "FechaInicio",
+    "NFactura",
+    "Numero",
+    "NumOrden",
+    "NumProveedor",
+    "OrdenCostura",
+    "Pagado",
+    "Proveedor",
+    "RegFabricacion",
+    "RUnidades",
+    "Salida",
+    "Subcontratado"
+  ],
+  "FAFases": [
+    "Fase",
+    "NumProveedor",
+    "Proveedor",
+    "Subcontratado"
+  ],
+  "FAFichaAFabricar": [
+    "RegFichaAFabricar"
+  ],
+  "FAFichaAMedida": [
+    "Arreglo1",
+    "Arreglo10",
+    "Arreglo11",
+    "Arreglo12",
+    "Arreglo13",
+    "Arreglo14",
+    "Arreglo15",
+    "Arreglo16",
+    "Arreglo17",
+    "Arreglo18",
+    "Arreglo19",
+    "Arreglo2",
+    "Arreglo20",
+    "Arreglo3",
+    "Arreglo4",
+    "Arreglo5",
+    "Arreglo6",
+    "Arreglo7",
+    "Arreglo8",
+    "Arreglo9",
+    "Caja",
+    "Cajero",
+    "Cliente",
+    "Codigo",
+    "Fecha",
+    "Modista1",
+    "Modista10",
+    "Modista11",
+    "Modista12",
+    "Modista13",
+    "Modista14",
+    "Modista15",
+    "Modista16",
+    "Modista17",
+    "Modista18",
+    "Modista19",
+    "Modista2",
+    "Modista20",
+    "Modista3",
+    "Modista4",
+    "Modista5",
+    "Modista6",
+    "Modista7",
+    "Modista8",
+    "Modista9",
+    "NumVenta",
+    "RegFAFichaAMedida"
+  ],
+  "FAGrupos": [
+    "ClaveGrupo",
+    "Grupo",
+    "RegGrupo"
+  ],
+  "FAJOBolsa": [
+    "Fecha",
+    "Hora",
+    "NumOficial"
+  ],
+  "FAMateriales": [
+    "Anulado",
+    "ClaveColor",
+    "ClaveGrupo",
+    "ClaveSeccion",
+    "ClaveSerie",
+    "ClaveTempora",
+    "CodArticulo2",
+    "Codigo",
+    "Color",
+    "Descripcion",
+    "Grupo",
+    "ManoObra",
+    "NumColor",
+    "NumGrupo",
+    "NumProveedor",
+    "NumSeccion",
+    "NumSerie",
+    "NumTempora",
+    "Proveedor",
+    "RegArticulo",
+    "Seccion",
+    "SerieMetal",
+    "Stock",
+    "Subcontratado",
+    "Temporada"
+  ],
+  "FamiGrupMarc": [
+    "Anulado",
+    "Clave",
+    "FamiGrupMarc",
+    "FModifica",
+    "HModifica",
+    "NoPSCommerce",
+    "NoPSCommerceM",
+    "RegFamilia",
+    "UnidadPromocion",
+    "VolumenImporte"
+  ],
+  "FAOrdenes": [
+    "ACortar",
+    "AFabricar",
+    "Calculos",
+    "Componente",
+    "ConsumosA",
+    "FechaCompromiso",
+    "FechaEntrega",
+    "FechaInicio",
+    "Marcada",
+    "NumArticulo",
+    "Numero",
+    "Pedidas",
+    "PrecioPrevisto",
+    "PrecioReal",
+    "Recibidas",
+    "RegOrden",
+    "RepartoCl",
+    "RepartoFa"
+  ],
+  "FAPatronaje": [
+    "NumArticulo"
+  ],
+  "FAPedidos": [
+    "Asignadas",
+    "Cliente",
+    "Codigo",
+    "FechaPedido",
+    "FechaServicio",
+    "NPedido",
+    "Numero",
+    "NumOrden",
+    "PedidoCliente"
+  ],
+  "FARecepciones": [
+    "NumFabricacion",
+    "Recepcion",
+    "RegRecepciones"
+  ],
+  "FASecciones": [
+    "ClaveSeccion",
+    "RegSeccion",
+    "Seccion"
+  ],
+  "FASeries": [
+    "ClaveSerie",
+    "RegSerie",
+    "Serie"
+  ],
+  "FATiposFab": [
+    "RegTipo",
+    "TipoFabricacion"
+  ],
+  "FATraspasos": [
+    "Codigo",
+    "Entrada",
+    "Fecha"
+  ],
+  "FOCliMUPre": [
+    "MCriterioX",
+    "MCriterioY",
+    "MCriterioZ",
+    "MGrupo",
+    "MMarca",
+    "MProveedor",
+    "MSeccion",
+    "MSerie",
+    "MSexo",
+    "MTemporada",
+    "MTienda"
+  ],
+  "FOFotografiaCotejo": [
+    "Albaranado",
+    "Caja",
+    "Cajero",
+    "CCOCodigoR1",
+    "CEMCodigoR3",
+    "CFEFechaActual",
+    "CHOHoraActual",
+    "Cliente",
+    "ClienteExterno",
+    "Codigo1",
+    "Codigo2",
+    "Codigo3",
+    "Codigo4",
+    "CPUDiasEntrega",
+    "CTACodigoR2",
+    "CTICodigoR4",
+    "Descripcion1",
+    "Descripcion2",
+    "Descripcion3",
+    "Descripcion4",
+    "EnviadoB",
+    "ExporLabor",
+    "ExporTienda",
+    "FechaCompro",
+    "FechaEntrega",
+    "FechaRecogida",
+    "FechaRevelado",
+    "HoraCompro",
+    "HorasEntrega",
+    "Laboratorio",
+    "NSobre",
+    "NumCliente",
+    "RegCarrete",
+    "TCliente",
+    "TNegativo",
+    "TPapel",
+    "TTrabajo"
+  ],
+  "FONegMUArt": [
+    "Generado",
+    "MCriterioX",
+    "MCriterioY",
+    "MCriterioZ",
+    "MGrupo",
+    "MMarca",
+    "MProveedor",
+    "MSeccion",
+    "MSerie",
+    "MSexo",
+    "MTemporada"
+  ],
+  "FOPapelCCOrdenes": [
+    "CCFecha",
+    "CCNumero"
+  ],
+  "FormasPago": [
+    "Activo",
+    "FormaPago",
+    "NuestroBanco",
+    "SuBanco"
+  ],
+  "FOTrabajoAPExcep": [
+    "APNumero",
+    "APTienda",
+    "APValor"
+  ],
+  "GCAlbaranes": [
+    "Abono",
+    "ClaveTemporada",
+    "Cliente",
+    "Comercial",
+    "ContabilizadoB",
+    "Contacto",
+    "Deposito",
+    "EnviadoB",
+    "EnviadoCixxonia",
+    "ExportadoCentro",
+    "FechaEnvio",
+    "FechaRecepcion",
+    "MarketPlace",
+    "Modifica",
+    "NAlbaran",
+    "NExpedicion",
+    "NLineas",
+    "NoActualizar",
+    "NumCliente",
+    "NumComercial",
+    "NumTemporada",
+    "NumTransportis",
+    "PedidoCliente",
+    "PermitirServir",
+    "Posicion",
+    "RegAlbaran",
+    "RetenidoFacturar",
+    "SerieAVM",
+    "Servido",
+    "Taras",
+    "TarasNoValidas",
+    "Tarifa",
+    "Temporada",
+    "TiendaAlmacen",
+    "TipoAlbaran",
+    "TipoPedido",
+    "Transportista"
+  ],
+  "GCAsignaciones": [
+    "NumCliente",
+    "NumComercial"
+  ],
+  "GCComerciales": [
+    "CIF",
+    "Comercial",
+    "Password",
+    "PasswordHash",
+    "RegComercial",
+    "Usuario"
+  ],
+  "GCContactos": [
+    "CodigoECIPRESTA",
+    "Contacto",
+    "NumCliente",
+    "OperacionalFA",
+    "OperacionalPA",
+    "OperacionalPI",
+    "OperacionalRE"
+  ],
+  "GCFacturas": [
+    "Abono",
+    "ClaveTemporada",
+    "Cliente",
+    "CobrosGenerado",
+    "Comercial",
+    "Contacto",
+    "EnviadoB",
+    "FacturaAnulada",
+    "FechaFactura",
+    "FechaLiquidaci",
+    "Modifica",
+    "NFactura",
+    "NumCliente",
+    "NumComercial",
+    "NumTemporada",
+    "NumTransportis",
+    "Prueba",
+    "RegFactura",
+    "SerieFVM",
+    "Tarifa",
+    "TBAI_AnuladoEnviado",
+    "TBAI_AnuladoEnviado12",
+    "TBAI_AnuladoEnviar12",
+    "TBAI_AnuladoFecha",
+    "TBAI_AnuladoFirmado",
+    "TBAI_Enviado",
+    "TBAI_Enviado12",
+    "TBAI_Enviar12",
+    "TBAI_Firmado",
+    "Temporada",
+    "TiendaAlmacen",
+    "Transportista"
+  ],
+  "GCGestionIncidencias": [
+    "Cerrada",
+    "Cliente",
+    "Contacto",
+    "Documento",
+    "Enviada",
+    "FechaIncidencia",
+    "NombreEmpleado",
+    "NumCliente",
+    "RegIncidencia",
+    "Serie",
+    "TipoDocumento",
+    "TipoIncidencia"
+  ],
+  "GCIncidencias": [
+    "FechaRegula",
+    "Tienda"
+  ],
+  "GCLinAlbarane": [
+    "Abono",
+    "Articulo",
+    "CCFacturada",
+    "Cliente",
+    "Codigo",
+    "Color",
+    "Deposito",
+    "Descripcion",
+    "Facturadas",
+    "FechaAlbaran",
+    "Lote",
+    "Modelo",
+    "NAlbaran",
+    "NLinea",
+    "NPedido",
+    "NumAlbaran",
+    "NumArticulo",
+    "NumCliente",
+    "NumColor",
+    "NumDepartament",
+    "NumFamilia",
+    "NumMarca",
+    "NumProveedor",
+    "NumSubfamilia",
+    "NumTemporada",
+    "Objeto",
+    "PedidoCliente",
+    "PSCTiendaCon",
+    "RegLinea",
+    "SerieAVM"
+  ],
+  "GCLinFacturas": [
+    "Abono",
+    "Articulo",
+    "Cliente",
+    "Codigo",
+    "Color",
+    "Descripcion",
+    "FechaFactura",
+    "LoteMPNumero",
+    "Mes",
+    "NMes",
+    "NumArticulo",
+    "NumCliente",
+    "NumColor",
+    "NumComercial",
+    "NumDepartament",
+    "NumFactura",
+    "NumFamilia",
+    "NumMarca",
+    "NumProveedor",
+    "NumSubfamilia",
+    "NumTemporada",
+    "OPTipoModelo",
+    "PIva",
+    "PRE",
+    "RegLinea",
+    "SerieFVM",
+    "SuAlbaran",
+    "SuPedido"
+  ],
+  "GCLinPedidos": [
+    "Articulo",
+    "B2CAnulada",
+    "Cliente",
+    "Codigo",
+    "Color",
+    "Deposito",
+    "Descripcion",
+    "Entregadas",
+    "FechaPedido",
+    "Lote",
+    "Modelo",
+    "Modificar",
+    "NLinea",
+    "NPedido",
+    "NumArticulo",
+    "NumCliente",
+    "NumColor",
+    "NumDepartament",
+    "NumFamilia",
+    "NumMarca",
+    "NumPedido",
+    "NumProveedor",
+    "NumSubfamilia",
+    "NumTemporada",
+    "Pendientes",
+    "PSCTiendaAsi",
+    "PSCTiendaCon",
+    "RegLinea",
+    "Retenida",
+    "SeriePVM",
+    "TipoPedido"
+  ],
+  "GCPedidos": [
+    "Abono",
+    "ClaveTemporada",
+    "Cliente",
+    "Comercial",
+    "ConPortes",
+    "Contacto",
+    "Deposito",
+    "Entregadas",
+    "EnviadoB",
+    "FechaPedido",
+    "FecServicioMin",
+    "IntegradorMK",
+    "MarketPlace",
+    "Modifica",
+    "NLineas",
+    "NoRevisado",
+    "NPedido",
+    "NumCliente",
+    "NumComercial",
+    "NumTemporada",
+    "NumTransportis",
+    "PedidoCliente",
+    "Pendientes",
+    "PSCCobrado",
+    "RegPedido",
+    "SeriePVM",
+    "Tarifa",
+    "Temporada",
+    "TiendaAlmacen",
+    "TipoComision",
+    "TipoPedido",
+    "Transportista",
+    "VentaGenerada"
+  ],
+  "GCPedidoTipo": [
+    "ClaveSerie",
+    "NumFamilia",
+    "TipoTienda"
+  ],
+  "GCTransporte": [
+    "RegTransporte",
+    "Transporte"
+  ],
+  "GestionNoVenta": [
+    "Fecha",
+    "NoStock",
+    "Tienda"
+  ],
+  "GrupoArtPromo": [
+    "AnuladoPromocion",
+    "Descripcion",
+    "EsTextoTicket",
+    "FModifica",
+    "HModifica",
+    "SerieEmpresa",
+    "UnidadPromocion",
+    "VolumenImporte"
+  ],
+  "IMPEnvios": [
+    "NEnvio"
+  ],
+  "InformeReposicion": [
+    "RegReposicion"
+  ],
+  "Informes": [
+    "Maquina",
+    "Numerico1",
+    "Numerico28",
+    "Numerico6",
+    "Numerico8",
+    "Proceso"
+  ],
+  "InformesCaja": [
+    "Maquina",
+    "Proceso"
+  ],
+  "IntTiempos": [
+    "DiaMes",
+    "HoraF",
+    "HoraI",
+    "Intervalo",
+    "Maquina",
+    "Proceso"
+  ],
+  "Inventarios": [
+    "FechaInventa",
+    "FechaRegula",
+    "Hora",
+    "RegInventario",
+    "Tienda"
+  ],
+  "JOConsumoTaller": [
+    "Codigo",
+    "NumArticuloC",
+    "NumArticuloT"
+  ],
+  "JODetalleRepar": [
+    "FechaFin",
+    "FechaInicio",
+    "NumArticulo",
+    "Oficial",
+    "Subcontratado",
+    "TipoTrabajo"
+  ],
+  "JOMarcas": [
+    "FechaCreacion",
+    "FModifica",
+    "HModifica",
+    "Marca",
+    "NoPSCommerce",
+    "NoPSCommerceM",
+    "RegMarca",
+    "UnidadPromocion",
+    "VolumenImporte"
+  ],
+  "JOMedidas": [
+    "FModifica",
+    "HModifica"
+  ],
+  "JOMetales": [
+    "FModifica",
+    "HModifica"
+  ],
+  "JOOficiales": [
+    "Oficial",
+    "RegOficial",
+    "Subcontratado"
+  ],
+  "JOTiposArticul": [
+    "Codigo",
+    "FechaCreacion",
+    "FechaModifica",
+    "RegTipoArticul",
+    "TipoArticulo"
+  ],
+  "JOTipTrabInventa": [
+    "OficialINTie",
+    "RegOficialINNum",
+    "RegTipoTrabajo",
+    "SubcontratadoINImp",
+    "TipoTrabajoINCod"
+  ],
+  "Jueves": [
+    "Fecha",
+    "Hora",
+    "NumeroG",
+    "Optico",
+    "Tipo"
+  ],
+  "JuevesT": [
+    "Fecha",
+    "Hora",
+    "NumeroG",
+    "Optico",
+    "Tipo"
+  ],
+  "LCajas": [
+    "Cajero",
+    "Central",
+    "Codigo",
+    "CodigoC",
+    "CodigoT",
+    "Empresa",
+    "FechaModifica",
+    "InfP",
+    "NumCajero",
+    "NumTienda",
+    "RegCaja"
+  ],
+  "LinAlbaranes": [
+    "Abono",
+    "Articulo",
+    "CodArticulo2",
+    "Codigo",
+    "Color",
+    "ColorFabricant",
+    "Deposito",
+    "Descripcion",
+    "NFactura",
+    "NLinea",
+    "NPedido",
+    "NumAlbaran",
+    "NumArticulo",
+    "NumColor",
+    "NumGrupo",
+    "NumMarca",
+    "NumProveedor",
+    "NumSeccion",
+    "NumSubfamilia",
+    "NumTemporada",
+    "Objeto",
+    "Recibidas",
+    "RegLineaAlbaran",
+    "Ubica1MexNum"
+  ],
+  "LineasCompras": [
+    "Abono",
+    "Caja",
+    "CodArticulo2",
+    "Codigo",
+    "Deposito",
+    "Descripcion",
+    "Fecha",
+    "Mes",
+    "NPedido",
+    "NumArticulo",
+    "NumCaja",
+    "NumColor",
+    "NumDepartament",
+    "NumFamilia",
+    "NumPedido",
+    "NumProveedor",
+    "NumSubfamilia",
+    "NumTienda",
+    "Objeto",
+    "OPJOTipArtPes",
+    "PIva",
+    "PRecargo",
+    "RegLineaCompra",
+    "Tienda"
+  ],
+  "LineasInformeReposicion": [
+    "Codigo",
+    "NumReposicion",
+    "Talla",
+    "TiendaDestino"
+  ],
+  "LineasPedidosB2B": [
+    "NumArticulo",
+    "NumPedidoB2B",
+    "RegLinea"
+  ],
+  "LineasVentas": [
+    "Caja",
+    "CCModeloCod2",
+    "CCOPTallaOjo",
+    "Cliente",
+    "Codigo",
+    "CodigoCajero",
+    "CodigoEmpleado",
+    "Criterio1",
+    "Criterio2",
+    "Criterio3",
+    "Descripcion",
+    "EnRebajas",
+    "Entrada",
+    "FechaCreacion",
+    "FechaModifica",
+    "Hora",
+    "JOCCReparArreg",
+    "Mes",
+    "MovimientoCaja",
+    "NDia",
+    "NDocumento",
+    "NFactura",
+    "NMes",
+    "NSemana",
+    "NumArticulo",
+    "NumCliente",
+    "NumColor",
+    "NumDepartament",
+    "NumFactura",
+    "NumFamilia",
+    "NumMarca",
+    "NumProveedor",
+    "NumSubfamilia",
+    "NumTemporada",
+    "NumVentas",
+    "Objeto",
+    "PIva",
+    "Puesto",
+    "RegLineas",
+    "TicketAsociDevolu",
+    "Tienda",
+    "TipoDocumento"
+  ],
+  "Listas": [
+    "Numero"
+  ],
+  "Logistica": [
+    "Maquina",
+    "Numerico1",
+    "Numerico2",
+    "Numerico3",
+    "Proceso",
+    "Texto3"
+  ],
+  "LOGNivel1": [
+    "Almacen",
+    "Nivel1",
+    "RegNivel1"
+  ],
+  "LOGNivel2": [
+    "Nivel2",
+    "NumNivel1",
+    "RegNivel2",
+    "Tipo"
+  ],
+  "LOGNivel3": [
+    "Nivel3",
+    "NumNivel2",
+    "RegNivel3"
+  ],
+  "Logs": [
+    "Fecha",
+    "Hora",
+    "ID",
+    "Proceso"
+  ],
+  "Lunes": [
+    "Fecha",
+    "Hora",
+    "NumeroG",
+    "Optico",
+    "Tipo"
+  ],
+  "LunesT": [
+    "Fecha",
+    "Hora",
+    "NumeroG",
+    "Optico",
+    "Tipo"
+  ],
+  "Martes": [
+    "Fecha",
+    "Hora",
+    "NumeroG",
+    "Optico",
+    "Tipo"
+  ],
+  "MartesT": [
+    "Fecha",
+    "Hora",
+    "NumeroG",
+    "Optico",
+    "Tipo"
+  ],
+  "Miercoles": [
+    "Fecha",
+    "Hora",
+    "NumeroG",
+    "Optico",
+    "Tipo"
+  ],
+  "MiercolesT": [
+    "Fecha",
+    "Hora",
+    "NumeroG",
+    "Optico",
+    "Tipo"
+  ],
+  "Monedas": [
+    "Moneda",
+    "Pais"
+  ],
+  "MonedasBilletes": [
+    "Billete",
+    "Valor"
+  ],
+  "Movimientos": [
+    "Codigo",
+    "Entrada",
+    "Tipo"
+  ],
+  "Nextail": [
+    "Codigo",
+    "FechaImporta",
+    "FechaPedido"
+  ],
+  "OFFComprasDetail": [
+    "NumCompra"
+  ],
+  "OFFComprasHeader": [
+    "RegCompra"
+  ],
+  "OPClientes": [
+    "FechaRecogida",
+    "ImpCodigoCli",
+    "ImpTipoGra",
+    "LMRCilindroD",
+    "LMRCilindroI",
+    "LMREsferaD",
+    "LMREsferaI",
+    "MMRCilindroD",
+    "MMRCilindroI",
+    "MMREsferaD",
+    "MMREsferaI",
+    "NumCliente",
+    "Optico",
+    "RegOPCliente",
+    "TipoRecogida"
+  ],
+  "OPCoeficientesAena": [
+    "RegCoeficiente"
+  ],
+  "OPColoracionTareas": [
+    "Coloracion",
+    "FModifica",
+    "GTEnviada",
+    "GTRegTarea",
+    "HModifica"
+  ],
+  "OPColorCrist": [
+    "Coloracion",
+    "NumArticulo",
+    "RegColorCrist"
+  ],
+  "OPEspecialA": [
+    "Desde",
+    "Hasta",
+    "Incremento",
+    "NumArticulo",
+    "RegEspecialA"
+  ],
+  "OPEspecialE": [
+    "Desde",
+    "Hasta",
+    "Incremento",
+    "NumArticulo",
+    "RegEspecialE"
+  ],
+  "OPGenerosTareas": [
+    "FModifica",
+    "Genero",
+    "HModifica"
+  ],
+  "OPMaterialesMotivos": [
+    "FModifica",
+    "HModifica",
+    "Material"
+  ],
+  "OPOferta": [
+    "Cilindro",
+    "DesEsfON",
+    "DesEsfOP",
+    "EsferaRN",
+    "EsferaRP",
+    "HasEsfON",
+    "HasEsfOP",
+    "NumArticulo",
+    "RegOferta"
+  ],
+  "OPOpticosPresencia": [
+    "Activo",
+    "BOptico",
+    "CPDiaMes",
+    "CPDiaSemana",
+    "CPEmpleado",
+    "CPFecha",
+    "CPMes",
+    "CPMotivo",
+    "CPSemana",
+    "CPTienda",
+    "Optico"
+  ],
+  "OPPotenciaA": [
+    "HastaCilindro",
+    "HastaEsfera",
+    "NumArticulo",
+    "RegPotenciaA"
+  ],
+  "OPPotenciaE": [
+    "HastaEsfera",
+    "NumArticulo",
+    "RegPotenciaE"
+  ],
+  "OPRadiosAdicioVales": [
+    "Activo",
+    "Adicion",
+    "Codigo",
+    "CrearValeDevolucion",
+    "CrearValeVenta",
+    "FModifica",
+    "GrupoPromoTienda",
+    "HModifica",
+    "NVale",
+    "RadioAdicion",
+    "ValePromocional"
+  ],
+  "OPRefraccionNews": [
+    "FModifica",
+    "HModifica",
+    "IRefraccion"
+  ],
+  "OPSupleCrista": [
+    "NumArticulo",
+    "RegSupleCrist",
+    "Suplemento"
+  ],
+  "OPSuplementosGE": [
+    "FModifica",
+    "GEClave",
+    "GECodigo",
+    "GETienda",
+    "HModifica",
+    "Suplemento"
+  ],
+  "OPTablaDiotriaValesC": [
+    "DeDiotrias",
+    "HastaDiotrias",
+    "Material",
+    "NVale",
+    "RegTablaD",
+    "ValePromocional"
+  ],
+  "OPTrataCrista": [
+    "NumArticulo",
+    "RegTrataCrist",
+    "Tratamiento"
+  ],
+  "PackingList": [
+    "Caja",
+    "Lote",
+    "NAlbaran",
+    "NPacking",
+    "Serie"
+  ],
+  "PackQueue": [
+    "Año",
+    "DiaMes",
+    "DiaSemana",
+    "Dispositivo",
+    "Fecha",
+    "Hora",
+    "MediaHora",
+    "Mes",
+    "Puesto",
+    "Semana",
+    "Tienda"
+  ],
+  "PackStreet": [
+    "Año",
+    "DiaMes",
+    "DiaSemana",
+    "Dispositivo",
+    "Fecha",
+    "Hora",
+    "MediaHora",
+    "Mes",
+    "Puesto",
+    "Semana",
+    "Tienda"
+  ],
+  "PackVisitors": [
+    "Año",
+    "DiaMes",
+    "DiaSemana",
+    "Dispositivo",
+    "Fecha",
+    "Hora",
+    "MediaHora",
+    "Mes",
+    "Puesto",
+    "Semana",
+    "Tienda"
+  ],
+  "PagosCompras": [
+    "Abono",
+    "Caja",
+    "Exportado",
+    "Fecha",
+    "Forma",
+    "Importe",
+    "Mayor",
+    "Mes",
+    "NumFacturaC",
+    "NumProveedor",
+    "Pagado",
+    "Proveedor",
+    "RegPagos",
+    "Tienda"
+  ],
+  "PagosVentas": [
+    "Caja",
+    "Cliente",
+    "CodigoCajero",
+    "CodigoForma",
+    "CodigoTarjeta",
+    "Entrada",
+    "FechaCreacion",
+    "FechaModifica",
+    "Forma",
+    "Hora",
+    "ImporteCob",
+    "Mes",
+    "MovimientoCaja",
+    "NTATRCHVA",
+    "NumCliente",
+    "NumVentas",
+    "PagodeCredito",
+    "PagodeReserva",
+    "PSNumero",
+    "Puesto",
+    "RegPagos",
+    "TarjetaPuntos",
+    "Tienda"
+  ],
+  "PedidosB2B": [
+    "NumCliente",
+    "RegPedidoB2B"
+  ],
+  "PIInterface": [
+    "Maquina",
+    "Proceso"
+  ],
+  "PLCajas": [
+    "Caja"
+  ],
+  "PNMensajes": [
+    "FModifica",
+    "Grupo",
+    "HModifica"
+  ],
+  "PrestaPrecios": [
+    "ID"
+  ],
+  "Presupuestos": [
+    "Tienda"
+  ],
+  "Proveedores": [
+    "Codigo",
+    "FModifica",
+    "HModifica",
+    "NombreComercial",
+    "NoPSCommerce",
+    "NoPSCommerceM",
+    "Proveedor",
+    "RegProveedor",
+    "Traspaso",
+    "UnidadPromocion",
+    "VolumenImporte"
+  ],
+  "PSCComentarios": [
+    "NumArticulo"
+  ],
+  "PuestosTienda": [
+    "NumTienda"
+  ],
+  "ReposicionAnulada": [
+    "Codigo"
+  ],
+  "ReserTraspa": [
+    "ArtiDesc",
+    "CajaCreacion",
+    "CajaDestino",
+    "CajaOrigen",
+    "Codigo",
+    "ContabilizadoB",
+    "EnviadoB",
+    "Fecha",
+    "Realizado",
+    "RegResTra",
+    "Talla"
+  ],
+  "RFIDMovimientos": [
+    "NumNumeroSerie",
+    "RegMovimiento"
+  ],
+  "RFIDNumerosSerie": [
+    "Codigo",
+    "FechaTV",
+    "NAlbaranC",
+    "NAlbaranV",
+    "NumArticulo",
+    "NumeroSerieRFID",
+    "RegNumeroSerie",
+    "SerieC",
+    "SerieTV",
+    "SerieV",
+    "TiendaTV"
+  ],
+  "RFIDSinMovimiento": [
+    "Codigo",
+    "Ean",
+    "Objeto"
+  ],
+  "RRHHAcceso": [
+    "CodigoEmpleado",
+    "NumEmpleado",
+    "Opcion"
+  ],
+  "RRHHAusencias": [
+    "CodigoEmpleado",
+    "DiaMes",
+    "DiaSemana",
+    "Fecha",
+    "Finalizada",
+    "Mes",
+    "RegAusencia",
+    "Semana",
+    "Tienda"
+  ],
+  "RRHHBajas": [
+    "BajaTurno",
+    "CodigoEmpleado",
+    "DiaMes",
+    "DiaSemana",
+    "Fecha",
+    "Mes",
+    "RegBajas",
+    "Semana",
+    "Tienda"
+  ],
+  "RRHHBeneficios": [
+    "CodigoEmpleado"
+  ],
+  "RRHHComisiones": [
+    "Año",
+    "CodigoEmpleado",
+    "Mes"
+  ],
+  "RRHHComportamiento": [
+    "CodigoEmpleado",
+    "Fecha",
+    "Tienda"
+  ],
+  "RRHHConocimientos": [
+    "CodigoEmpleado"
+  ],
+  "RRHHContratos": [
+    "CodigoEmpleado"
+  ],
+  "RRHHControlPresencia": [
+    "Ano",
+    "ClaveTD",
+    "ClaveTDE",
+    "CodEmpleado",
+    "DiaMes",
+    "DiaSemana",
+    "Fecha",
+    "Mes",
+    "RegControlPresencia",
+    "Semana",
+    "Tienda"
+  ],
+  "RRHHEmpleados": [
+    "CodigoEmpleado",
+    "FechaModifica",
+    "Password",
+    "PasswordHash",
+    "RegEmpleado",
+    "Usuario"
+  ],
+  "RRHHExperiencia": [
+    "CodigoEmpleado"
+  ],
+  "RRHHFamiliares": [
+    "CodigoEmpleado"
+  ],
+  "RRHHHistorial": [
+    "CodigoEmpleado"
+  ],
+  "RRHHHorasExtras": [
+    "CodigoEmpleado",
+    "FechaHoraExtra",
+    "Tienda"
+  ],
+  "RRHHSalarios": [
+    "CodigoEmpleado"
+  ],
+  "RRHHTitulaciones": [
+    "CodigoEmpleado"
+  ],
+  "RRHHTurnos": [
+    "CodigoEmpleado",
+    "ModificaCentral",
+    "ModificaTienda",
+    "RegTurnos"
+  ],
+  "RRHHVacaciones": [
+    "Año",
+    "CodigoEmpleado"
+  ],
+  "Sabado": [
+    "Fecha",
+    "Hora",
+    "NumeroG",
+    "Optico",
+    "Tipo"
+  ],
+  "SaftAnulados": [
+    "RegAnulado"
+  ],
+  "SemiCodigo": [
+    "CODIGOBARRAL",
+    "InfP",
+    "Maquina",
+    "Proceso"
+  ],
+  "ServicioSO": [
+    "Cliente",
+    "DatosRechazo",
+    "FechaConfirmacion",
+    "FechaEnvioAS",
+    "FechaEnvioC",
+    "FechaRecepcionTV",
+    "FechaServicio",
+    "NDocumento",
+    "NumGCLinPedido",
+    "NumLineaVenta",
+    "NumTraspaso",
+    "PedidoCliente",
+    "RegServicio",
+    "TiendaAS",
+    "TiendaEO",
+    "TiendaTV"
+  ],
+  "SolicitudOnLine": [
+    "Codigo",
+    "Confirmada",
+    "FechaConfirmada",
+    "FechaEnvio",
+    "FechaSolicitud",
+    "RegSolicitud",
+    "TiendaConfirma",
+    "TiendaSolicita"
+  ],
+  "STDivisionCompra": [
+    "NumLineaC",
+    "RegDivision"
+  ],
+  "SubfamModelo": [
+    "FModifica",
+    "HModifica",
+    "NoPSCommerce",
+    "NoPSCommerceM",
+    "RegSubfamilia",
+    "SubfamModelo",
+    "UnidadPromocion",
+    "VolumenImporte"
+  ],
+  "Tarifas": [
+    "Clave",
+    "Indice",
+    "Tarifa"
+  ],
+  "Tarjetas": [
+    "Cliente",
+    "Codigo",
+    "CodigoArticulo",
+    "DepaSeccFabr",
+    "Porcentaje",
+    "PorcentajeVale",
+    "Tarjeta",
+    "ValeCompraSup",
+    "ValePorcentaje",
+    "ValeRegalo",
+    "ValeTotal"
+  ],
+  "TarjetasRegalo": [
+    "Anulada",
+    "Consumido",
+    "Disponible",
+    "Fecha",
+    "Importe",
+    "NTarjeta",
+    "Tienda"
+  ],
+  "TarjetasTienda": [
+    "NumTienda"
+  ],
+  "TBAIEnvioDetalle": [
+    "CodigoRespuestaNoOK",
+    "Fecha",
+    "NumEnvio",
+    "Numero",
+    "RegEnvioDetalle",
+    "Serie",
+    "TipoRespuesta"
+  ],
+  "TBAIEnvios": [
+    "Fecha",
+    "Hora",
+    "RegEnvio",
+    "Subcapitulo",
+    "TipoFactura",
+    "TipoRespuesta"
+  ],
+  "Tiendas": [
+    "Cajero",
+    "Codigo",
+    "CodigoC",
+    "CornerECI",
+    "Departamento",
+    "Direccion",
+    "Franquiciado",
+    "Grupo",
+    "InfP",
+    "Proyecto",
+    "RegTienda",
+    "TipoTienda",
+    "UltimaActualizacion",
+    "WebNoRepoMA",
+    "WebNoRepoMI"
+  ],
+  "TiposAlbaranVenta": [
+    "ID"
+  ],
+  "Traspasos": [
+    "CajaEntrada",
+    "CajaSalida",
+    "Codigo",
+    "Descripcion",
+    "Documento",
+    "Entrada",
+    "EnviadoB",
+    "FechaE",
+    "FechaS",
+    "Objeto",
+    "RegTraspaso",
+    "Talla",
+    "TiendaEntrada",
+    "TiendaSalida",
+    "Tipo"
+  ],
+  "TraspasosFallidos": [
+    "Objeto"
+  ],
+  "TxtVentaAcumulada": [
+    "ActivoDesde",
+    "ActivoHasta",
+    "ID",
+    "ImporteDesde",
+    "ImporteHasta"
+  ],
+  "Vales": [
+    "Entrega",
+    "Numero",
+    "Recepcion"
+  ],
+  "ValesClientes": [
+    "GENNumVenta",
+    "GENUUID",
+    "NumCliente",
+    "NVale"
+  ],
+  "Ventas": [
+    "Caja",
+    "CCFRecogida",
+    "Cliente",
+    "CodigoCajero",
+    "CodigoMovCaja",
+    "Entrada",
+    "EnviadaEASServer",
+    "EnviadoCentral",
+    "EnviadoSubcent",
+    "ExpAutomata",
+    "ExpAutomata2",
+    "Exportado",
+    "FacturadoVenta",
+    "FechaCreacion",
+    "FechaModifica",
+    "Hora",
+    "MovimientoCaja",
+    "NCFD",
+    "NDocumento",
+    "NoStock",
+    "NumCliente",
+    "NumPedido",
+    "NumTraspaso",
+    "PedidoWeb",
+    "Pendiente",
+    "Prueba",
+    "Puesto",
+    "RegVentas",
+    "ReservaAnulada",
+    "SerieV",
+    "TarjetaFinancia",
+    "TarjetaRegaloID",
+    "TBAI_AnuladoEnviado",
+    "TBAI_AnuladoEnviado12",
+    "TBAI_AnuladoEnviar12",
+    "TBAI_AnuladoFecha",
+    "TBAI_AnuladoFirmado",
+    "TBAI_Enviado",
+    "TBAI_Enviado12",
+    "TBAI_Enviar12",
+    "TBAI_Firmado",
+    "Tienda",
+    "TipoDocumento",
+    "TipoVenta",
+    "TotalPendiente",
+    "TotalReserva",
+    "ValeRegaloImp"
+  ],
+  "VentasCorners": [
+    "CCModelo",
+    "Codigo",
+    "CodigoEmpleado",
+    "Criterio1",
+    "Criterio2",
+    "Criterio3",
+    "ECITienda",
+    "ECIVendedor",
+    "Entrada",
+    "Fecha",
+    "Hora",
+    "Mes",
+    "MovimientoCaja",
+    "NDia",
+    "NMes",
+    "NTicket",
+    "NumArticulo",
+    "NumColor",
+    "NumDepartamento",
+    "NumFamilia",
+    "NumMarca",
+    "NumProveedor",
+    "NumSubfamilia",
+    "NumTemporada",
+    "Talla",
+    "TiendaCorner"
+  ],
+  "VentasEnEspera": [
+    "NumCliente",
+    "Recuperado",
+    "Tienda",
+    "Unificador"
+  ],
+  "VentasEnviadas": [
+    "NumVenta"
+  ],
+  "VentasPSCloud": [
+    "Estado",
+    "ID",
+    "NumCliente",
+    "Tienda"
+  ],
+  "Viernes": [
+    "Fecha",
+    "Hora",
+    "NumeroG",
+    "Optico",
+    "Tipo"
+  ],
+  "ViernesT": [
+    "Fecha",
+    "Hora",
+    "NumeroG",
+    "Optico",
+    "Tipo"
+  ],
+  "WebClasifica1TO": [
+    "WebClasifica1TO"
+  ],
+  "WebClasifica2TO": [
+    "WebClasifica2TO"
+  ],
+  "WebClasifica3TO": [
+    "WebClasifica3TO"
+  ]
+}

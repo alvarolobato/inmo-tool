@@ -1,0 +1,37 @@
+# Golden fixture — sample span attributes that the collector's attributes/redact
+# processor MUST strip before export.
+#
+# Documents the PII / secret attributes that must not appear in exported spans.
+# Intended for use by a future integration test harness (not yet implemented).
+#
+# Format: each entry is an OTLP span attribute that should NOT appear in the
+# exported telemetry after the redaction processor runs.
+#
+# Verification: inject a test span containing these attributes into the collector
+# via OTLP, capture the file exporter output, and assert none of the "must_not_contain"
+# values appear in the exported JSON.
+
+redaction_tests:
+  - description: "Authorization header stripped from HTTP span"
+    inject_attribute:
+      key: http.request.header.authorization
+      value: "Bearer sk-ant-oat01-fake-token-for-testing-ABCDEF"
+    must_not_contain: "sk-ant-oat01-fake-token-for-testing-ABCDEF"
+
+  - description: "PostgreSQL password not leaked via db attributes"
+    inject_attribute:
+      key: postgres.password
+      value: "super-secret-pg-password-XYZ"
+    must_not_contain: "super-secret-pg-password-XYZ"
+
+  - description: "OpenRouter API key not leaked"
+    inject_attribute:
+      key: openrouter.api_key
+      value: "sk-or-v1-test-leak-XYZ-123456789"
+    must_not_contain: "sk-or-v1-test-leak-XYZ-123456789"
+
+  - description: "4D database password not leaked"
+    inject_attribute:
+      key: p4d.password
+      value: "4d-source-password-LEAK-TEST"
+    must_not_contain: "4d-source-password-LEAK-TEST"

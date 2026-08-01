@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.powershop.claude-token-sync</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__REPO_ROOT__/scripts/sync-claude-token.sh</string>
+  </array>
+
+  <!-- Run at load (when launchctl bootstraps the agent) and every 5 minutes. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <!-- Also fire on demand: when a process (typically the dashboard container)
+       writes/touches the kick file, launchd runs the sync script immediately.
+       This is the recovery path for the case where my own use of `claude` on
+       the host rotates the Keychain refresh_token while the container still
+       holds the previous access_token (now revoked server-side). The kick
+       only ever triggers the same mirror-from-Keychain script — it never
+       refreshes anything itself, preserving D-025's single-refresher rule. -->
+  <key>WatchPaths</key>
+  <array>
+    <string>__HOME__/.config/powershop-analytics/.claude-token-kick</string>
+  </array>
+
+  <!-- Capture both streams to the same log file so the cause of any error is
+       in one place. The launchd agent runs as the user, so the log inherits
+       the user's permissions. -->
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/com.powershop.claude-token-sync.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/com.powershop.claude-token-sync.log</string>
+
+  <!-- Inherit PATH so /usr/bin/security and /usr/bin/python3 are found. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+  </dict>
+</dict>
+</plist>

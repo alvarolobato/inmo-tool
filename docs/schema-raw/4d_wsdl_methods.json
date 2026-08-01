@@ -1,0 +1,574 @@
+{
+  "WS_JS_GetClienteEvolucion": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4"
+  ],
+  "WS_JS_GrabarPedidoB2B": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4",
+    "Entrada5",
+    "Entrada6"
+  ],
+  "WS_JS_GrabarIncidenciaB2B": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4",
+    "Entrada5"
+  ],
+  "WS_JS_GetIncidenciasListas": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetClienteIncidencias": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4"
+  ],
+  "WS_JS_GetPreferenciasB2B": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetPortesPedidoB2B": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4",
+    "Entrada5",
+    "Entrada6"
+  ],
+  "WS_JS_GetArbolCloud": [
+    "Entrada1"
+  ],
+  "WS_JS_GetSliderCloud": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetClienteEstadCloud": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3"
+  ],
+  "WS_JS_GetParametrosCloud": [
+    "Entrada1"
+  ],
+  "WS_JS_GetPedidosCabeceras": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4",
+    "Entrada5",
+    "Entrada6",
+    "Entrada7",
+    "Entrada8",
+    "Entrada9",
+    "Entrada10",
+    "Entrada11",
+    "Entrada12",
+    "Entrada13",
+    "Entrada14"
+  ],
+  "WS_JS_GetPedido": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4",
+    "Entrada5",
+    "Entrada6",
+    "Entrada7"
+  ],
+  "WS_JS_GetFacturasCabeceras": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4",
+    "Entrada5",
+    "Entrada6",
+    "Entrada7",
+    "Entrada8",
+    "Entrada9",
+    "Entrada10",
+    "Entrada11",
+    "Entrada12",
+    "Entrada13",
+    "Entrada14"
+  ],
+  "WS_JS_GetFactura": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4",
+    "Entrada5",
+    "Entrada6",
+    "Entrada7"
+  ],
+  "WS_JS_GetAlbaranesCabeceras": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4",
+    "Entrada5",
+    "Entrada6",
+    "Entrada7",
+    "Entrada8",
+    "Entrada9",
+    "Entrada10",
+    "Entrada11",
+    "Entrada12",
+    "Entrada13",
+    "Entrada14"
+  ],
+  "WS_JS_GetAlbaran": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4",
+    "Entrada5",
+    "Entrada6",
+    "Entrada7"
+  ],
+  "WS_JS_GetTarjetasPago": [
+    "Entrada1"
+  ],
+  "WS_JS_GetVentasCloud": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetClienteComercial": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4"
+  ],
+  "WS_JS_GrabarVentaCloud": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4",
+    "Entrada5"
+  ],
+  "WS_JS_GetSetTurnos": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4"
+  ],
+  "WS_JS_GetArqueo": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4"
+  ],
+  "WS_JS_GetEstadoAlbaran": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_AperturaCierreCajasCloud": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3"
+  ],
+  "WS_JS_EstadoImpresoraXML": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetSetCliente": [
+    "Entrada1"
+  ],
+  "WS_JS_GetTicketsCloud": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_ImprimirTicketCloud": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3"
+  ],
+  "WS_JS_ImprimirTicketRCloud": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3"
+  ],
+  "WS_JS_GrabarPedidoB2B_I": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4",
+    "Entrada5",
+    "Entrada6"
+  ],
+  "WS_JS_GrabarVentaCloud_I": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4"
+  ],
+  "WS_JS_GetTablaIDs": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetTicketsCloud_I": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_Mobile": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetPedido_I": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4",
+    "Entrada5",
+    "Entrada6",
+    "Entrada7"
+  ],
+  "WS_JS_GetPedidosCabeceras_I": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4",
+    "Entrada5",
+    "Entrada6",
+    "Entrada7",
+    "Entrada8",
+    "Entrada9",
+    "Entrada10",
+    "Entrada11",
+    "Entrada12",
+    "Entrada13",
+    "Entrada14"
+  ],
+  "WS_JS_GetArticuloMobile": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetListasMobile": [
+    "Entrada1"
+  ],
+  "WS_JS_SetCliente_I": [
+    "Entrada1"
+  ],
+  "WS_JS_GrabarPedidoZalando": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_SalidasTransito": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3"
+  ],
+  "WS_JS_SalidasOrdenes": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3"
+  ],
+  "WS_JS_Amichi2019": [
+    "Entrada1"
+  ],
+  "WS_JS_GetSetCajas": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4"
+  ],
+  "WS_JS_SetCliente": [
+    "Entrada1"
+  ],
+  "WS_JS_EntradaTransito": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3"
+  ],
+  "WS_JS_GetCodigoTalla": [
+    "Entrada1"
+  ],
+  "WS_JS_ConsultarTarjetaRegalo": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_Entrada": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_Solicitudes": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetListas": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetArticulosFiltro": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GrabarAlbaranC": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3"
+  ],
+  "WS_JS_OrdenSubCentrales": [
+    "Entrada1"
+  ],
+  "WS_JS_GrabarPSubCentral": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GrabarTicketEspera": [
+    "Entrada1"
+  ],
+  "WS_JS_InfoTraking": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetParametrosB2C": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetClientes": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetInfoTiendas": [],
+  "WS_JS_GetFacturas": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_CaritoAbandonado": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3"
+  ],
+  "WS_JS_GetSetAlbaranes": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetCompras": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GrabarPedidoB2C_I": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4"
+  ],
+  "WS_JS_GetTickets_I": [
+    "Entrada1"
+  ],
+  "WS_JS_GetSetInventarios": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4",
+    "Entrada5",
+    "Entrada6",
+    "Entrada7"
+  ],
+  "WS_JS_GetArticulosCloud": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetArticuloCloud": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4"
+  ],
+  "WS_JS_GetArtCloud": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4",
+    "Entrada5",
+    "Entrada6",
+    "Entrada7",
+    "Entrada8"
+  ],
+  "WS_JS_StockTiendas": [
+    "Entrada1"
+  ],
+  "WS_JS_GetSetUbicaciones": [
+    "Entrada1"
+  ],
+  "WS_JS_GetTicketPDF": [
+    "Entrada1"
+  ],
+  "WS_JS_GetHistoricoArticulo": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetArticulos": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4",
+    "Entrada5",
+    "Entrada6",
+    "Entrada7"
+  ],
+  "WS_JS_GetArtMin_I": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4",
+    "Entrada5",
+    "Entrada6",
+    "Entrada7"
+  ],
+  "WS_JS_GetArtMin": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4",
+    "Entrada5",
+    "Entrada6",
+    "Entrada7"
+  ],
+  "WS_JS_ClienteFidelizacion": [
+    "Entrada1"
+  ],
+  "WS_JS_GetCliente": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3"
+  ],
+  "WS_JS_GetStock": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3"
+  ],
+  "WS_JS_GetSetFirmaCliente": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_FSDesgloseStock": [
+    "Entrada1"
+  ],
+  "WS_JS_DesgloseStock": [
+    "Entrada1"
+  ],
+  "WS_JS_InfoTracking": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_PSListAutenticar": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetArbolList": [
+    "Entrada1"
+  ],
+  "WS_JS_PSListGetSetLista": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GrabarPedidoB2C": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4"
+  ],
+  "WS_JS_GetStockFab": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3"
+  ],
+  "WS_JS_GetStockUbicaciones": [
+    "Entrada1"
+  ],
+  "WS_JS_DesgloseStockTienda": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetSetIncidencias": [
+    "Entrada1"
+  ],
+  "WS_JS_PrintEtiCajas": [
+    "Entrada1"
+  ],
+  "WS_JS_Notificar": [
+    "Entrada1"
+  ],
+  "WS_JS_PSListGestDisp": [
+    "Entrada1"
+  ],
+  "WS_JS_GetPackingList": [
+    "Entrada1"
+  ],
+  "WS_JS_GrabarAlbaranV": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3"
+  ],
+  "WS_JS_AplicarPromosCloud": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3"
+  ],
+  "WS_JS_GetSetServiciosOmnia": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_SetInfoTracking": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3"
+  ],
+  "WS_JS_GetVentas_I": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetStockTiendas": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetUniVentas": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_GetFiltroTiendas": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3"
+  ],
+  "WS_JS_GetArtiStockModifTienda": [
+    "Entrada1"
+  ],
+  "WS_JS_GetStockInventarios": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_Kyubi": [
+    "Entrada1"
+  ],
+  "WS_JS_GetArtStockPrecio": [
+    "Entrada1",
+    "Entrada2",
+    "Entrada3",
+    "Entrada4",
+    "Entrada5",
+    "Entrada6",
+    "Entrada7"
+  ],
+  "WS_JS_InfoTrackingMin": [
+    "Entrada1",
+    "Entrada2"
+  ],
+  "WS_JS_CheckPedidos": [
+    "Entrada1"
+  ],
+  "WS_JS_GetPedidoLineasDevolver": [
+    "Entrada1"
+  ],
+  "WS_JS_StockTiendasEAN": [
+    "Entrada1"
+  ]
+}

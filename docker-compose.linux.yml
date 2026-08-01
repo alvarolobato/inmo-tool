@@ -1,0 +1,14 @@
+# Linux override — re-adds the /var/lib/docker/containers bind-mount for the
+# OTel filelog receiver. Not used on macOS (Docker Desktop runs containers
+# inside a VM so the host path does not exist).
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.linux.yml up -d
+#
+# Or add to COMPOSE_FILE in your .env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.linux.yml
+
+services:
+  otel-collector:
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro

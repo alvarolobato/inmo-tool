@@ -1,0 +1,37 @@
+name: Load Knowledge Bundle
+description: >
+  Extracts ## LLM:* marker sections from requested knowledge MD files and
+  emits a concatenated bundle suitable for prepending to a Claude prompt.
+
+inputs:
+  slices:
+    description: >
+      Comma-separated list of slice names to include.
+      Valid names: data-decisions, etl-sync-strategy, architecture-sales,
+      architecture-wholesale, architecture-stock, architecture-purchasing,
+      architecture-products, architecture-customers, architecture-stores,
+      4d-sql-dialect, data-access, sql-pairs.
+      Unknown names produce a warning and are skipped (not a hard failure).
+    required: true
+
+outputs:
+  bundle:
+    description: >
+      Concatenated markdown of all extracted LLM:* sections, wrapped with a
+      "## Data Platform Knowledge" header and a "---" footer.
+      Empty string when no slices produce content.
+    value: ${{ steps.extract.outputs.bundle }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Python dependencies
+      shell: bash
+      run: python3 -m pip install --quiet PyYAML
+    - name: Extract knowledge bundle
+      id: extract
+      shell: bash
+      env:
+        INPUT_SLICES: ${{ inputs.slices }}
+        GITHUB_WORKSPACE: ${{ github.workspace }}
+      run: python3 "${{ github.action_path }}/extract.py"

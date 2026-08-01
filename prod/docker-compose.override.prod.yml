@@ -1,0 +1,80 @@
+# Production overrides for the powershop-analytics stack.
+#
+# Use:
+#   docker compose -f docker-compose.yml -f prod/docker-compose.override.prod.yml up -d --build
+#
+# The base docker-compose.yml already runs cleanly on the prod Mac
+# (configured via PROD_HOST / PROD_PATH in .env). Prod-specific
+# environment values come from the deployment directory's .env (or the
+# centralized ~/.config/powershop-analytics/.env) — that's where you put a
+# distinct POSTGRES_PASSWORD, ADMIN_API_KEY, OPENROUTER_API_KEY (only if
+# DASHBOARD_LLM_PROVIDER=openrouter), DASHBOARD_PORT, etc.
+#
+# Add prod-only adjustments below as they appear. We start with the minimum:
+# stricter restart policies on the long-running services and explicit
+# log rotation so the boxes don't fill the disk after a few months.
+
+services:
+  postgres:
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  etl:
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  dashboard:
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  wren-ui:
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  wren-ai-service:
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  wren-engine:
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  ibis-server:
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  qdrant:
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

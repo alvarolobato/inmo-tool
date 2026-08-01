@@ -1,0 +1,15 @@
+p4d
+# psycopg2-binary bundles libpq and is sufficient for this Docker-based ETL.
+# If deploying with a system libpq (e.g., for security patching), replace with
+# psycopg2 and install libpq-dev before building.
+psycopg2-binary
+python-dotenv
+PyYAML>=6.0
+schedule
+# OpenTelemetry — SDK + OTLP exporter + auto-instrumentors
+opentelemetry-distro>=0.49b0
+opentelemetry-exporter-otlp-proto-grpc>=1.28.0
+opentelemetry-instrumentation-psycopg2>=0.49b0
+opentelemetry-instrumentation-requests>=0.49b0
+opentelemetry-api>=1.28.0
+opentelemetry-sdk>=1.28.0

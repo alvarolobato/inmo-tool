@@ -1,0 +1,103 @@
+# AI Factory Configuration
+# Shared settings for all AI factory workflows
+
+# Claude Code Action defaults
+claude:
+  model: "claude-sonnet-4-20250514"
+  max_turns: 50
+  # The action reads CLAUDE.md automatically for project context
+
+# Label system
+labels:
+  # Execution control (issue-level)
+  trigger: "ai-work"          # AI should implement this issue
+  blocked: "ai-blocked"       # AI is blocked, needs human input
+  planned: "fact-planned"       # AI has posted a plan
+  in_progress: "fact-in-progress" # AI is currently working
+  task: "fact-task"             # Sub-task created by planner (with ai-work, triggers implement phase)
+  needs_rewrite: "fact-needs-rewrite"  # Sub-issue body mangled (JSX/generics stripped) — repair before acting
+  auto_retry: "fact-auto-retry" # Watchdog retries automatically; pairs with ai-blocked
+  no_ai: "no-ai"              # Human-only
+  no_review: "no-pr-review"   # Skip AI PR review on this PR
+  awaiting_owner: "ai-awaiting-owner"  # Automated review cycle done — owner merges when ready
+  ci_failing: "fact-ci-failing"            # CI workflow red; AI CI remediation may run
+  ready_for_review: "fact-ready-for-review"  # Address-feedback finished; trigger next PR review
+
+  # Priority (highest first)
+  priorities:
+    - "p0-critical"
+    - "p1-high"
+    - "p2-medium"
+    - "p3-low"
+
+  # Categories (only labels emitted by an active discovery agent today)
+  categories:
+    - "ai-bug"     # ai-bug-hunter.yml
+    - "ai-idea"    # ai-feature-ideas.yml
+
+  # Components
+  components:
+    - "comp-etl"
+    - "comp-dashboard"
+    - "comp-wren"
+    - "comp-cli"
+    - "comp-infra"
+    - "comp-docs"
+
+  # AI Factory — phased PR review (see ai-worker / ai-pr-review / ai-address-feedback)
+  # Per D-021, exactly 1 Copilot pass + 1 Opus pass. No multi-round retries.
+  review_phases:
+    - "fact-phase-copilot"   # Awaiting / in Copilot review (before Opus)
+    - "fact-cp-after-1"      # Addressed feedback after Copilot review
+    - "fact-phase-opus"      # In Opus review pass
+    - "fact-o-after-1"       # Addressed after Opus review (terminal for AI review)
+
+  # Auto-managed by ai-pr-mergeability.yml (created on demand)
+  mergeability:
+    - "ai-merge-conflict"  # PR has unresolvable merge conflict
+    - "ai-stale-base"      # PR was rebased onto latest main
+
+  # PR size
+  sizes:
+    - "size-xs"     # <10 lines
+    - "size-s"      # <50 lines
+    - "size-m"      # <200 lines
+    - "size-l"      # <500 lines
+    - "size-xl"     # 500+ lines
+
+  # PR risk
+  risks:
+    - "risk-low"    # docs, tests only
+    - "risk-medium" # app code
+    - "risk-high"   # config, CI, ETL schema, Docker
+
+# Schedule defaults (UTC)
+schedules:
+  daily_morning: "0 9 * * 1-5"    # Weekdays 09:00
+  daily_midday: "0 11 * * 1-5"    # Weekdays 11:00
+  weekly_monday: "0 10 * * 1"     # Monday 10:00
+  weekly_tuesday: "0 14 * * 2"    # Tuesday 14:00
+  weekly_wednesday: "0 14 * * 3"  # Wednesday 14:00
+  weekly_thursday: "0 14 * * 4"   # Thursday 14:00
+  weekly_friday: "0 10 * * 5"     # Friday 10:00
+  weekly_sunday: "0 20 * * 0"     # Sunday 20:00
+
+# Title prefixes for AI-created issues (only those still produced by an active agent)
+title_prefixes:
+  bug_hunter: "[bug-hunter]"
+  dashboard_audit: "[dashboard-audit]"
+  etl_health: "[etl-health]"
+  sql_validator: "[sql-validator]"
+  feature_ideas: "[feature-ideas]"
+  project_summary: "[project-summary]"
+  stale: "[stale]"
+
+# Factory Manager (strategic oversight, every 4 h) — see issue #558 / D-029.
+# The watchdog is fast + rule-per-object (every 15 min, no LLM); the manager is
+# slow + cross-system + LLM-driven, handling what the watchdog structurally cannot.
+manager:
+  schedule: "0 */4 * * *"              # every 4 h UTC
+  model: "claude-opus-4-7"             # latest Opus; was claude-opus-4-6 in #558 spec
+  max_turns: 80
+  kill_switch_label: "no-ai-manager"
+  tracking_label: "fact-manager-tracking"

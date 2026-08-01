@@ -1,0 +1,512 @@
+# PowerShop Analytics — unified configuration schema
+# Each entry defines one configuration key with its env-var mapping, type,
+# section, sensitivity, default value, description, restart requirements,
+# and which component(s) consume it.
+#
+# Field reference:
+#   key          dot-namespaced identifier (e.g. fourd.host)
+#   env          name of the corresponding environment variable
+#   type         string | int | bool | enum
+#   enum_values  allowed values when type==enum
+#   sensitive    true → value contains secrets; redact in API responses
+#   default      null means required (no default)
+#   section      grouping label for the admin UI
+#   description  human-readable description (Spanish for end-users)
+#   requires_restart  list of service names that need a restart when this key changes
+#   components   list of systems that read this key: dashboard | etl | cli | docker
+
+# -----------------------------------------------------------------------------
+# 4D Database (source ERP — read-only access)
+# -----------------------------------------------------------------------------
+- key: fourd.host
+  env: P4D_HOST
+  type: string
+  sensitive: false
+  default: null
+  section: "4D"
+  description: "Hostname o IP del servidor 4D (puerto SQL 19812)."
+  requires_restart: [etl]
+  components: [etl, cli]
+
+- key: fourd.port
+  env: P4D_PORT
+  type: int
+  sensitive: false
+  default: 19812
+  section: "4D"
+  description: "Puerto TCP del servidor SQL 4D."
+  requires_restart: [etl]
+  components: [etl, cli]
+
+- key: fourd.user
+  env: P4D_USER
+  type: string
+  sensitive: false
+  default: null
+  section: "4D"
+  description: "Usuario SQL del servidor 4D."
+  requires_restart: [etl]
+  components: [etl, cli]
+
+- key: fourd.password
+  env: P4D_PASSWORD
+  type: string
+  sensitive: true
+  default: null
+  section: "4D"
+  description: "Contraseña SQL del servidor 4D."
+  requires_restart: [etl]
+  components: [etl, cli]
+
+# -----------------------------------------------------------------------------
+# PostgreSQL (local mirror — destination for ETL)
+# -----------------------------------------------------------------------------
+- key: postgres.user
+  env: POSTGRES_USER
+  type: string
+  sensitive: false
+  default: "postgres"
+  section: "PostgreSQL"
+  description: "Usuario de PostgreSQL."
+  requires_restart: [etl, dashboard]
+  components: [etl, dashboard, docker]
+
+- key: postgres.password
+  env: POSTGRES_PASSWORD
+  type: string
+  sensitive: true
+  default: "change_me_in_production"
+  section: "PostgreSQL"
+  description: "Contraseña de PostgreSQL."
+  requires_restart: [etl, dashboard]
+  components: [etl, dashboard, docker]
+
+- key: postgres.db
+  env: POSTGRES_DB
+  type: string
+  sensitive: false
+  default: "powershop"
+  section: "PostgreSQL"
+  description: "Nombre de la base de datos PostgreSQL."
+  requires_restart: [etl, dashboard]
+  components: [etl, dashboard, docker]
+
+- key: postgres.host
+  env: POSTGRES_HOST
+  type: string
+  sensitive: false
+  default: "localhost"
+  section: "PostgreSQL"
+  description: "Host del servidor PostgreSQL."
+  requires_restart: [etl, dashboard]
+  components: [etl, dashboard]
+
+- key: postgres.port
+  env: POSTGRES_PORT
+  type: int
+  sensitive: false
+  default: 5432
+  section: "PostgreSQL"
+  description: "Puerto del servidor PostgreSQL."
+  requires_restart: [etl, dashboard]
+  components: [etl, dashboard]
+
+- key: postgres.dsn
+  env: POSTGRES_DSN
+  type: string
+  sensitive: true
+  default: null
+  section: "PostgreSQL"
+  description: "DSN completo de PostgreSQL (anula las variables individuales). Ej: postgresql://user:pass@host:5432/db"
+  requires_restart: [etl, dashboard]
+  components: [etl, dashboard]
+
+# -----------------------------------------------------------------------------
+# OpenRouter / LLM
+# -----------------------------------------------------------------------------
+- key: openrouter.api_key
+  env: OPENROUTER_API_KEY
+  type: string
+  sensitive: true
+  default: null
+  section: "OpenRouter"
+  description: "Clave API de OpenRouter para LLM y embeddings."
+  requires_restart: []
+  components: [dashboard, docker]
+
+- key: wren.llm_model
+  env: WREN_LLM_MODEL
+  type: string
+  sensitive: false
+  default: "anthropic/claude-sonnet-4"
+  section: "WrenAI"
+  description: "Modelo LLM para WrenAI text-to-SQL (identificador OpenRouter)."
+  requires_restart: [wren-ai-service, wren-ui]
+  components: [docker]
+
+# -----------------------------------------------------------------------------
+# Dashboard LLM
+# -----------------------------------------------------------------------------
+- key: dashboard.llm_provider
+  env: DASHBOARD_LLM_PROVIDER
+  type: enum
+  enum_values: [cli, openrouter, e2e-stub, mock]
+  sensitive: false
+  default: "cli"
+  section: "Dashboard LLM"
+  description: "Proveedor LLM del dashboard. 'cli' (recomendado): usa el binario claude del host vía agente launchd que mantiene ~/.claude/.credentials.json sincronizado con el llavero. 'openrouter': usa la API HTTP con OPENROUTER_API_KEY. 'e2e-stub': respuesta enlatada sin ejecutar código LLM (tests e2e de UI). 'mock': modelo guionizado que recorre TODO el pipeline real (assembleRequest → runner → herramientas SQL reales → persistencia) — tests e2e de integración LLM."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.llm_model_openrouter
+  env: DASHBOARD_LLM_MODEL_OPENROUTER
+  type: string
+  sensitive: false
+  default: null
+  section: "Dashboard LLM"
+  description: "Modelo OpenRouter por defecto del dashboard. Cualquier ajuste por flujo (generate / modify / analyze / weekly) tiene prioridad sobre este valor."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.llm_model_openrouter_generate
+  env: DASHBOARD_LLM_MODEL_OPENROUTER_GENERATE
+  type: string
+  sensitive: false
+  default: null
+  section: "Dashboard LLM"
+  description: "Modelo OpenRouter para generación de dashboards (genera el spec inicial desde un prompt). Si está vacío, cae en dashboard.llm_model_openrouter."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.llm_model_openrouter_modify
+  env: DASHBOARD_LLM_MODEL_OPENROUTER_MODIFY
+  type: string
+  sensitive: false
+  default: null
+  section: "Dashboard LLM"
+  description: "Modelo OpenRouter para modificación de dashboards existentes (más SQL agéntico, conviene un modelo fuerte). Si está vacío, cae en dashboard.llm_model_openrouter."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.llm_model_openrouter_analyze
+  env: DASHBOARD_LLM_MODEL_OPENROUTER_ANALYZE
+  type: string
+  sensitive: false
+  default: null
+  section: "Dashboard LLM"
+  description: "Modelo OpenRouter para análisis narrativo de un dashboard ya cargado (no hace falta SQL; un modelo barato y rápido suele ir mejor). Si está vacío, cae en dashboard.llm_model_openrouter."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.llm_model_openrouter_weekly
+  env: DASHBOARD_LLM_MODEL_OPENROUTER_WEEKLY
+  type: string
+  sensitive: false
+  default: null
+  section: "Dashboard LLM"
+  description: "Modelo OpenRouter para la revisión semanal (digest largo, lectura de muchos números). Si está vacío, cae en dashboard.llm_model_openrouter."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.llm_model_cli
+  env: DASHBOARD_LLM_MODEL_CLI
+  type: string
+  sensitive: false
+  default: "claude-sonnet-4-6"
+  section: "Dashboard LLM"
+  description: "Modelo CLI nativo de Claude (p.ej. claude-sonnet-4-6). No usa formato OpenRouter."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.llm_cli_driver
+  env: DASHBOARD_LLM_CLI_DRIVER
+  type: enum
+  enum_values: [claude_code]
+  sensitive: false
+  default: "claude_code"
+  section: "Dashboard LLM"
+  description: "Driver CLI para el dashboard cuando provider=cli."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.llm_cli_bin
+  env: DASHBOARD_LLM_CLI_BIN
+  type: string
+  sensitive: false
+  default: "claude"
+  section: "Dashboard LLM"
+  description: "Binario CLI para el provider cli (ruta absoluta o en PATH)."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.llm_cli_extra_args
+  env: DASHBOARD_LLM_CLI_EXTRA_ARGS
+  type: string
+  sensitive: false
+  default: null
+  section: "Dashboard LLM"
+  description: "Argumentos extra para el CLI (separados por espacios, sin interpolación shell)."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.llm_cli_timeout_ms
+  env: DASHBOARD_LLM_CLI_TIMEOUT_MS
+  type: int
+  sensitive: false
+  default: 120000
+  section: "Dashboard LLM"
+  description: "Timeout en ms para llamadas al CLI LLM."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.llm_cli_max_capture_bytes
+  env: DASHBOARD_LLM_CLI_MAX_CAPTURE_BYTES
+  type: int
+  sensitive: false
+  default: 8000000
+  section: "Dashboard LLM"
+  description: "Máximo de bytes capturados de la salida CLI."
+  requires_restart: []
+  components: [dashboard]
+
+# -----------------------------------------------------------------------------
+# Agentic tool-calling
+# -----------------------------------------------------------------------------
+- key: dashboard.agentic_tools_enabled
+  env: DASHBOARD_AGENTIC_TOOLS_ENABLED
+  type: bool
+  sensitive: false
+  default: true
+  section: "Agentic"
+  description: "Habilita el loop de herramientas agentic para generate/modify/analyze."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.agentic_max_tool_rounds
+  env: DASHBOARD_AGENTIC_MAX_TOOL_ROUNDS
+  type: int
+  sensitive: false
+  default: 8
+  section: "Agentic"
+  description: "Máximo de rondas de herramientas por petición."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.agentic_max_tool_calls
+  env: DASHBOARD_AGENTIC_MAX_TOOL_CALLS
+  type: int
+  sensitive: false
+  default: 24
+  section: "Agentic"
+  description: "Máximo de llamadas totales a herramientas por petición."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.agentic_tool_timeout_ms
+  env: DASHBOARD_AGENTIC_TOOL_TIMEOUT_MS
+  type: int
+  sensitive: false
+  default: 15000
+  section: "Agentic"
+  description: "Timeout en ms por llamada a herramienta."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.agentic_max_rows
+  env: DASHBOARD_AGENTIC_MAX_ROWS
+  type: int
+  sensitive: false
+  default: 200
+  section: "Agentic"
+  description: "Máximo de filas devueltas por execute_query."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.agentic_max_columns
+  env: DASHBOARD_AGENTIC_MAX_COLUMNS
+  type: int
+  sensitive: false
+  default: 30
+  section: "Agentic"
+  description: "Máximo de columnas devueltas por execute_query."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.agentic_max_result_chars
+  env: DASHBOARD_AGENTIC_MAX_RESULT_CHARS
+  type: int
+  sensitive: false
+  default: 20000
+  section: "Agentic"
+  description: "Máximo de caracteres del JSON de resultado de herramienta enviado al modelo."
+  requires_restart: []
+  components: [dashboard]
+
+# -----------------------------------------------------------------------------
+# Dashboard App
+# -----------------------------------------------------------------------------
+- key: dashboard.app_public_url
+  env: APP_PUBLIC_URL
+  type: string
+  sensitive: false
+  default: "http://localhost:4000"
+  section: "Dashboard App"
+  description: "URL pública del Dashboard App (usada en enlaces externos y reverse-proxy). Ej: https://dashboard.example.com"
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.wren_public_url
+  env: WREN_PUBLIC_URL
+  type: string
+  sensitive: false
+  default: "http://localhost:3000"
+  section: "Dashboard App"
+  description: "URL pública de WrenAI (enlace 'Wren' del menú principal). Ej: https://wren.example.com"
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.port
+  env: DASHBOARD_PORT
+  type: int
+  sensitive: false
+  default: 4000
+  section: "Dashboard App"
+  description: "Puerto HTTP del Dashboard App."
+  requires_restart: [dashboard]
+  components: [docker]
+
+- key: dashboard.admin_api_key
+  env: ADMIN_API_KEY
+  type: string
+  sensitive: true
+  default: null
+  section: "Dashboard App"
+  description: "Clave secreta para /api/admin/* y la sesión de admin. Solo env var; config.yaml se ignora intencionalmente para esta clave para evitar escalada de privilegios a través de la UI."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.admin_cookie_secure
+  env: ADMIN_COOKIE_SECURE
+  type: bool
+  sensitive: false
+  default: false
+  section: "Dashboard App"
+  description: "Fija la cookie de admin como Secure (solo HTTPS). Activar detrás de TLS."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.llm_daily_budget_usd
+  env: LLM_DAILY_BUDGET_USD
+  type: string
+  sensitive: false
+  default: null
+  section: "Dashboard App"
+  description: "Límite de gasto diario LLM en USD (ej: 5.00). Sin valor = sin límite."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.query_cost_limit
+  env: QUERY_COST_LIMIT
+  type: int
+  sensitive: false
+  default: null
+  section: "Dashboard App"
+  description: "Rechaza consultas cuando el coste EXPLAIN supera este umbral. 0 o sin valor = sin límite."
+  requires_restart: []
+  components: [dashboard]
+
+# -----------------------------------------------------------------------------
+# ETL
+# -----------------------------------------------------------------------------
+- key: etl.cron_hour
+  env: ETL_CRON_HOUR
+  type: int
+  sensitive: false
+  default: 2
+  section: "ETL"
+  description: "Hora UTC a la que se ejecuta la sincronización completa nocturna (truncate + insert; refleja borrados duros del 4D). Solo env var; los cambios en config.yaml se ignoran (etl/main.py lee únicamente ETL_CRON_HOUR del entorno). Requiere reiniciar el contenedor ETL."
+  requires_restart: [etl]
+  components: [etl, docker]
+
+- key: etl.delta_cron_minute
+  env: ETL_DELTA_CRON_MINUTE
+  type: int
+  sensitive: false
+  default: 0
+  section: "ETL"
+  description: "Minuto de cada hora en que arranca la sincronización delta (0-59). La completa nocturna también arranca a este minuto en la hora ETL_CRON_HOUR; el firing de delta a esa hora se salta automáticamente al detectar que ya hay run activa. Solo env var. Requiere reiniciar el contenedor ETL."
+  requires_restart: [etl]
+  components: [etl, docker]
+
+- key: etl.delta_lookback_days
+  env: ETL_DELTA_LOOKBACK_DAYS
+  type: int
+  sensitive: false
+  default: 1
+  section: "ETL"
+  description: "Días de solapamiento que aplica la sincronización delta: en lugar de consultar desde el watermark exacto, consulta desde watermark - N días. Protege contra el retraso de replicación H3 (filas presentes en 4D pero no visibles al driver p4d cuando arranca el sync nocturno). El upsert es idempotente; re-obtener los últimos N días solo añade UPDATEs para filas sin cambios. 0 deshabilita el solapamiento. Solo env var. Requiere reiniciar el contenedor ETL (se lee una vez al arrancar)."
+  requires_restart: [etl]
+  components: [etl, docker]
+
+# -----------------------------------------------------------------------------
+# Infra / Docker Hub
+# -----------------------------------------------------------------------------
+- key: infra.host_bind
+  env: HOST_BIND
+  type: string
+  sensitive: false
+  default: "0.0.0.0"
+  section: "Infra"
+  description: "Interfaz de red a la que se vinculan los puertos host. 0.0.0.0=todas, 127.0.0.1=loopback."
+  requires_restart: [dashboard]
+  components: [docker]
+
+- key: infra.etl_version
+  env: ETL_VERSION
+  type: string
+  sensitive: false
+  default: "latest"
+  section: "Infra"
+  description: "Tag de imagen Docker Hub para el ETL."
+  requires_restart: [etl]
+  components: [docker]
+
+- key: infra.dashboard_version
+  env: DASHBOARD_VERSION
+  type: string
+  sensitive: false
+  default: "latest"
+  section: "Infra"
+  description: "Tag de imagen Docker Hub para el Dashboard."
+  requires_restart: [dashboard]
+  components: [docker]
+
+- key: infra.dockerhub_namespace
+  env: DOCKERHUB_NAMESPACE
+  type: string
+  sensitive: false
+  default: "alobato"
+  section: "Infra"
+  description: "Namespace de Docker Hub para publicar imágenes."
+  requires_restart: []
+  components: [docker]
+
+- key: infra.dockerhub_username
+  env: DOCKERHUB_USERNAME
+  type: string
+  sensitive: false
+  default: null
+  section: "Infra"
+  description: "Usuario de Docker Hub (para GitHub Actions)."
+  requires_restart: []
+  components: [docker]
+
+- key: infra.dockerhub_token
+  env: DOCKERHUB_TOKEN
+  type: string
+  sensitive: true
+  default: null
+  section: "Infra"
+  description: "Token de acceso Docker Hub (para GitHub Actions)."
+  requires_restart: []
+  components: [docker]
