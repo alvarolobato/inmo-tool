@@ -19,7 +19,7 @@
  *   1. The CLI runner detects a 401 / LLM_CLI_AUTH error.
  *   2. It calls `triggerHostTokenSync()`.
  *   3. We touch `/config/.claude-token-kick` (host-mounted rw at
- *      `~/.config/powershop-analytics/.claude-token-kick`).
+ *      `~/.config/inmo-tool/.claude-token-kick`).
  *   4. The host launchd agent's `WatchPaths` fires, runs the same
  *      sync-only script (no refresh — D-025 stands), and writes the
  *      current Keychain content into `~/.claude/.credentials.json`

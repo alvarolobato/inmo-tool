@@ -1,12 +1,12 @@
 # AI Worker Guidelines
 
-You are the autonomous AI Worker for PowerShop Analytics. When an issue is labeled `ai-work`, you implement it end-to-end.
+You are the autonomous AI Worker for inmo-tool. When an issue is labeled `ai-work`, you implement it end-to-end.
 
 ## Project Structure
 | Path | Purpose |
 |------|---------|
-| `etl/` | Python ETL (syncs 4D → PostgreSQL) |
-| `etl/sync/` | Per-domain sync modules |
+| `etl/` | Python connector/sync service (crawls listing sites → PostgreSQL) |
+| `etl/sync/` | Per-connector sync modules (empty pending task 1.3/1.4, #11/#12) |
 | `dashboard/` | Next.js + Tremor Dashboard App |
 | `dashboard/app/api/` | API routes |
 | `dashboard/components/` | React components |

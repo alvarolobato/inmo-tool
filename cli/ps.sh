@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# ps.sh - PowerShop Analytics unified CLI dispatcher
+# ps.sh - inmo-tool unified CLI dispatcher
 # Invoked by the repo-root stub (ps). Parses command group and delegates to cli/commands/<group>.sh.
 #
 
@@ -19,13 +19,14 @@ Usage: ps <command> [options] [args]
 
 Available commands:
   setup        First-time setup and prerequisites check
-  stack        Docker Compose stack management (up/down/update/status/logs/open/destroy)
-  etl          ETL operations (run/status/tables/logs)
-  sql          4D SQL operations (schema, query, explore)
-  wren         WrenAI knowledge management (push/validate/status)
+  stack        Docker Compose stack management (up/down/update/status/logs/destroy)
+  etl          Connector/sync operations (run/status/tables/logs) — commands are stubs until Phase 1.3-1.5 land
   dashboard    Dashboard App management (open/logs/restart/status)
-  prod         Production stack control (bootstrap/deploy/logs/status/restart/login/ssh)
   config       Show current configuration
+
+  (no "prod" group yet — this project has no production deployment target;
+  the source project's prod tooling was removed as PowerShop/WrenAI-specific
+  dead weight rather than kept unused. Re-add when there's a real target.)
 
 Help commands:
   ps help                  Show this help
@@ -38,19 +39,9 @@ Examples:
   ps stack update          Pull latest, rebuild images, restart stack
   ps stack status          Show container status
   ps stack logs [svc]      Tail logs
-  ps etl run               Run ETL sync once
-  ps sql tables            List all 4D tables
-  ps sql query "SELECT ..."  Run a read-only SQL query
-  ps sql describe <table>  Show columns for a table
-  ps wren push             Push knowledge to WrenAI (merge strategy)
-  ps wren validate         Validate SQL pairs against PostgreSQL
-  ps wren status           Show knowledge counts
+  ps etl run               Run connector sync once (once implemented, task 1.5 / #13)
   ps dashboard open        Open Dashboard App in browser
   ps dashboard status      Show dashboard container status
-  ps prod deploy           Deploy main to production (git pull + compose up)
-  ps prod status           Production services + Claude token expiry
-  ps prod logs [svc]       Tail production logs
-  ps prod login            Interactive ssh to run "claude /login" on prod
   ps config                Show loaded configuration
 EOF
 }

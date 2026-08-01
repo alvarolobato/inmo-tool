@@ -21,8 +21,10 @@ def _all_docs() -> set[Path]:
     """All .md files under docs/ that must be reachable."""
     result = set()
     for p in DOCS_DIR.rglob("*.md"):
-        # Skip on-demand decision files (intentionally excluded)
-        if p.parent.name == "decisions" and p.name.startswith("D-"):
+        # Skip on-demand decision files (intentionally excluded), including
+        # docs/decisions/archive/D-NN-*.md — the source project's inactive
+        # decision history, kept for git archaeology only (see AGENTS.md).
+        if "decisions" in p.parts and p.name.startswith("D-"):
             continue
         result.add(p.resolve())
     return result

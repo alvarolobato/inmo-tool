@@ -6,8 +6,8 @@
 #
 # What it does:
 #   1. Resolves the repo root (the directory two levels above this script).
-#   2. Renders scripts/launchd/com.powershop.claude-token-sync.plist.template
-#      into ~/Library/LaunchAgents/com.powershop.claude-token-sync.plist
+#   2. Renders scripts/launchd/com.inmotool.claude-token-sync.plist.template
+#      into ~/Library/LaunchAgents/com.inmotool.claude-token-sync.plist
 #      with __REPO_ROOT__ and __HOME__ substituted.
 #   3. Bootstraps it via launchctl. Tries `launchctl bootstrap gui/<uid>` first
 #      (modern API, macOS 10.10+) and falls back to `launchctl load` for older
@@ -23,9 +23,9 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
-TEMPLATE="$SCRIPT_DIR/launchd/com.powershop.claude-token-sync.plist.template"
-PLIST="$HOME/Library/LaunchAgents/com.powershop.claude-token-sync.plist"
-LABEL="com.powershop.claude-token-sync"
+TEMPLATE="$SCRIPT_DIR/launchd/com.inmotool.claude-token-sync.plist.template"
+PLIST="$HOME/Library/LaunchAgents/com.inmotool.claude-token-sync.plist"
+LABEL="com.inmotool.claude-token-sync"
 
 if [ ! -f "$TEMPLATE" ]; then
   echo "ERROR: Template not found at $TEMPLATE" >&2
@@ -42,7 +42,7 @@ mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
 # immediate Keychain → ~/.claude/.credentials.json sync (recovery path
 # for the case where a host-side `claude` invocation rotates the
 # refresh_token while the container still holds the previous access_token).
-KICK_DIR="$HOME/.config/powershop-analytics"
+KICK_DIR="$HOME/.config/inmo-tool"
 KICK_FILE="$KICK_DIR/.claude-token-kick"
 mkdir -p "$KICK_DIR"
 [ -e "$KICK_FILE" ] || : > "$KICK_FILE"
@@ -74,9 +74,9 @@ launchctl kickstart -k "gui/$UID_REAL/$LABEL" 2>/dev/null || true
 echo "Installed launchd agent: $LABEL"
 echo "  Plist:      $PLIST"
 echo "  Repo root:  $REPO_ROOT"
-echo "  Log file:   $HOME/Library/Logs/com.powershop.claude-token-sync.log"
+echo "  Log file:   $HOME/Library/Logs/com.inmotool.claude-token-sync.log"
 echo "  Interval:   every 2 hours (StartInterval=7200)"
 echo
 echo "Verify:"
 echo "  launchctl list | grep $LABEL"
-echo "  tail -n 10 \$HOME/Library/Logs/com.powershop.claude-token-sync.log"
+echo "  tail -n 10 \$HOME/Library/Logs/com.inmotool.claude-token-sync.log"

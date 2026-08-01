@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 export const metadata = {
-  title: "Admin — PowerShop Analytics",
+  title: "Admin — inmo-tool",
 };
 
 const ADMIN_LINKS = [

@@ -1,19 +1,18 @@
 # PR Review Guidelines
 
-You are reviewing a pull request for the PowerShop Analytics project.
+You are reviewing a pull request for the inmo-tool project.
 
 ## Project Overview
-- Python ETL syncing data from 4D database to PostgreSQL (18M+ rows)
-- WrenAI for ad-hoc text-to-SQL queries (40+ instructions, 52+ SQL pairs)
-- Next.js + Tremor Dashboard App for AI-generated dashboards
+- Python connector service crawling real-estate listing sites into PostgreSQL (see issue #1 for the full spec)
+- Dedup engine collapsing duplicate cross-site listings into one property record
+- Next.js + Tremor Dashboard App for AI-assisted candidate review
 - CLI (`ps`) for all operations
 
 ## Critical Rules
-1. **Read-only SQL**: NEVER allow INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/TRUNCATE
-2. **No credentials**: No API keys, passwords, or secrets in code
-3. **No customer data**: No PII or business data in committed files
-4. **4D PKs are NUMERIC**: Primary keys use Real (float) with .99 suffix — store as NUMERIC, never FLOAT8
-5. **No `SELECT *`**: For wide tables (Articulos 379 cols, CCStock 582 cols), always specify columns
+1. **No credentials**: No API keys, passwords, or secrets in code
+2. **No scraped personal data**: No owner names/phone numbers/real prices from live listings in committed files
+3. **Connectors are read-only against source sites**: no automated form submission or contacting sellers — see issue #1 §15
+4. **`profile_listing_state` (and anything downstream) keys on `property_id`, never `listing_id`** — this is the mechanism that makes dedup matter; see issue #1's "Review addressed" notes for why this was flagged as a defect
 
 ## Exit Criteria verification — FIRST, BLOCKING
 

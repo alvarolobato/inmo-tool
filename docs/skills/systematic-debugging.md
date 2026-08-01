@@ -1,8 +1,8 @@
 # Skill: Systematic Debugging
 
-> Adapted from [ChrisWiles/claude-code-showcase](https://github.com/ChrisWiles/claude-code-showcase). Applied to this project's specific debugging challenges (4D SQL, ETL pipeline, WrenAI, Dashboard App).
+> Adapted from [ChrisWiles/claude-code-showcase](https://github.com/ChrisWiles/claude-code-showcase). Applied to this project's connector/dedup/scoring pipeline and Dashboard App.
 
-**Use when**: Investigating bugs, fixing test failures, troubleshooting unexpected behavior, or debugging the ETL/WrenAI/Dashboard pipeline.
+**Use when**: Investigating bugs, fixing test failures, troubleshooting unexpected behavior, or debugging the connector/dedup/dashboard pipeline.
 
 ## Core Principle
 
@@ -65,94 +65,7 @@ Apply the scientific method:
 
 ## Project-Specific Debugging Playbooks
 
-### ETL Sync Failures
-
-```
-Symptom: "FAILED duration_ms=X: <error>"
-│
-├── "Failed to parse statement"
-│   → 4D SQL syntax issue
-│   → Check: Does 4D use <> instead of !=?
-│   → Check: Column name case-sensitive? (use original 4D casing)
-│   → Check: Does column exist? Run: ps sql query "SELECT COLUMN_NAME FROM _USER_COLUMNS WHERE TABLE_NAME='X'"
-│
-├── "Failed to execute statement"
-│   → Column doesn't exist or type incompatible
-│   → Check: Run the exact SELECT with LIMIT 1 in the CLI
-│   → Check: Is there a type-0 column? Filter via get_queryable_columns()
-│
-├── "UniqueViolation: duplicate key"
-│   → NUMERIC precision issue (PKs rounded)
-│   → Check: Is the column NUMERIC(20,3)? Was it (20,2)?
-│   → Check: Are n_albaran/n_factura actually unique? (They're NOT)
-│
-├── "cannot truncate a table referenced in a foreign key constraint"
-│   → FK blocks TRUNCATE
-│   → Fix: Use TRUNCATE ... CASCADE
-│
-└── OOM / container killed
-    → Table too large for single fetch (>2M rows)
-    → Fix: Progressive sync by partition key (e.g., by store for Exportaciones)
-```
-
-### WrenAI Query Failures
-
-```
-Symptom: Question returns "no database schema available"
-│
-├── Check qdrant Document collection: are points > 0?
-│   → If 0: recreate_index may have wiped it. Set recreate_index: false.
-│   → Re-deploy: mutation { deploy(force: true) }
-│
-├── Check AI service is running (not in restart loop)
-│   → docker compose logs wren-ai-service | grep -v "no port"
-│   → If "Timeout: wren-ui did not start": SHOULD_FORCE_DEPLOY is set. Remove it.
-│
-└── Check MDL hash matches between wren-ui and AI service
-
-Symptom: "Request timed out: 30 seconds"
-│
-└── LLM call too slow (27 tables in context)
-    → Increase engine_timeout in wren-config.yaml (120s recommended)
-
-Symptom: "AuthenticationError: No cookie auth credentials found"
-│
-└── OPENROUTER_API_KEY not passed to container
-    → Check: docker compose exec -T wren-ai-service env | grep OPENROUTER
-    → Fix: Add OPENROUTER_API_KEY to wren-ai-service environment in docker-compose.yml
-
-Symptom: "No field named lv.entrada"
-│
-└── LLM referenced a column on the wrong table
-    → entrada is on ps_ventas, NOT ps_lineas_ventas
-    → Fix: Add/improve instruction listing exact columns per table
-```
-
-### Dashboard App Failures
-
-```
-Symptom: LLM returns text instead of JSON spec
-│
-└── Prompt doesn't constrain output format strongly enough
-    → Fix: Improve system prompt with explicit JSON format requirement
-    → Add: "ALWAYS return valid JSON. NEVER return explanatory text."
-
-Symptom: Widget shows error badge
-│
-├── Check the widget's SQL in browser DevTools (Network tab)
-├── Run the SQL manually: docker compose exec -T postgres psql -U postgres -d powershop -c "..."
-│   → If syntax error: LLM generated bad SQL. Add SQL pair as example.
-│   → If no data: date range issue (fecha_creacion filtering)
-│   → If column not found: LLM used wrong column name. Add instruction.
-│
-└── Check /api/query response for error details
-
-Symptom: Dashboard generation timeout
-│
-└── OpenRouter LLM call took too long
-    → Check: Is the prompt too large? (context window limit)
-    → Fix: Reduce SQL pairs in context (sample, don't include all 52)
-```
+**Reset for this project.** The playbooks that lived here (4D SQL parsing errors, WrenAI qdrant/deploy failures, PowerShop dashboard widget SQL errors) were tied to systems this repo no longer has (see issue #9). Real playbooks belong here once real failure patterns emerge from the connector/dedup/scoring pipeline and the new Dashboard App — add them as you hit and solve non-obvious failures, per [agent-efficiency.md](agent-efficiency.md), rather than inventing speculative ones now. Likely first candidates once Phase 1 lands: connector rate-limit/circuit-breaker trips (task 1.3, #11), dedup false-positive/false-negative merges (task 2.2, #16).
 
 ---
 
@@ -187,11 +100,11 @@ Before claiming a bug is fixed:
 - [ ] Full test suite passes
 - [ ] No "quick fix" rationalization used
 - [ ] Fix is minimal and focused
-- [ ] Gotcha documented in relevant skill file (data-access.md, dashboard-app.md)
+- [ ] Gotcha documented in the relevant skill file (add one under `docs/skills/` if none fits yet)
 - [ ] `DECISIONS.md` + `docs/decisions/D-NN-*.md` updated if architectural
 
 ## Integration with Other Skills
 
 - **testing-patterns**: Write test that reproduces the bug before fixing
-- **data-access**: Check gotchas list — the bug may already be documented
+- Check whichever domain skill doc under `docs/skills/` covers the area — the bug may already be documented as a gotcha
 - **agent-efficiency**: If the fix required significant investigation, create an issue to improve docs

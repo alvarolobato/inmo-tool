@@ -1,6 +1,6 @@
 # Skill: Testing Patterns
 
-> Adapted from [ChrisWiles/claude-code-showcase](https://github.com/ChrisWiles/claude-code-showcase). Modified for this project's dual stack: Python (ETL) + TypeScript (Dashboard App).
+> Adapted from [ChrisWiles/claude-code-showcase](https://github.com/ChrisWiles/claude-code-showcase). Modified for this project's dual stack: Python (connectors/ETL) + TypeScript (Dashboard App). Examples below are illustrative — the real factories/fixtures land as Phase 1 tasks (schema in #10, connector framework in #11) are implemented; update these examples once real modules exist to copy from.
 
 **Use when**: Writing unit tests, creating test factories, or following TDD workflow.
 
@@ -26,19 +26,19 @@
 
 ---
 
-## Python Testing (ETL, scripts)
+## Python Testing (connectors, ETL, scripts)
 
 ### Framework: pytest
 
 ```bash
-# Run all ETL tests
+# Run all tests
 python -m pytest etl/tests/ -v
 
 # Run with coverage
 python -m pytest etl/tests/ --cov=etl
 
 # Run specific test
-python -m pytest etl/tests/test_sync_ventas.py -v
+python -m pytest etl/tests/test_dedup_engine.py -v
 ```
 
 ### Factory Pattern (Python)
@@ -46,47 +46,41 @@ python -m pytest etl/tests/test_sync_ventas.py -v
 ```python
 from decimal import Decimal
 
-def make_venta(**overrides) -> dict:
-    """Factory for ps_ventas row dicts."""
+def make_listing(**overrides) -> dict:
+    """Factory for a normalized listing row dict (see task 1.2, #10, for the real schema)."""
     defaults = {
-        "reg_ventas": Decimal("10001.641"),
-        "n_documento": Decimal("641001.0"),
-        "tienda": "641",
-        "fecha_creacion": "2026-03-30",
-        "total_si": Decimal("24.79"),
-        "total": Decimal("30.49"),
-        "num_cliente": Decimal("0"),
-        "tipo_documento": "Ticket",
-        "entrada": True,
+        "source": "idealista",
+        "external_id": "12345678",
+        "price": Decimal("185000.00"),
+        "m2_built": 78,
+        "rooms": 3,
+        "listing_kind": "particular",
+        "description": "Piso luminoso, sin ascensor.",
     }
     return {**defaults, **overrides}
 
 # Usage
-def test_venta_is_return():
-    venta = make_venta(entrada=False, total_si=Decimal("-15.00"))
-    assert not venta["entrada"]
-    assert venta["total_si"] < 0
+def test_listing_below_threshold_excluded_by_hard_filter():
+    listing = make_listing(price=Decimal("500000.00"))
+    assert not passes_price_filter(listing, max_price=Decimal("300000.00"))
 ```
 
-### Mocking 4D Connection
+### Mocking an external connector source
 
 ```python
 from unittest.mock import MagicMock, patch
 
-@patch("etl.db.fourd.get_connection")
-def test_sync_articulos(mock_conn):
-    mock_cursor = MagicMock()
-    mock_cursor.fetchall.return_value = [
-        (Decimal("1.99"), "12345", "CAMISA", "Test article"),
+@patch("etl.connectors.base.fetch_page")
+def test_discover_paginates_until_empty_page(mock_fetch):
+    mock_fetch.side_effect = [
+        {"results": [{"id": "1"}, {"id": "2"}]},
+        {"results": []},
     ]
-    mock_cursor.description = [
-        (b"REGARTICULO",), (b"CODIGO",), (b"CCREFEJOFACM",), (b"DESCRIPCION",),
-    ]
-    mock_conn.return_value.cursor.return_value = mock_cursor
-    # ... test sync function
+    ids = list(discover(scope={}))
+    assert ids == ["1", "2"]
 ```
 
-### PostgreSQL Integration Tests
+### PostgreSQL integration tests
 
 ```python
 import pytest
@@ -103,29 +97,25 @@ def pg_conn():
     yield conn
     conn.close()
 
-def test_ventas_count(pg_conn):
+def test_property_count(pg_conn):
     with pg_conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM ps_ventas")
+        cur.execute("SELECT COUNT(*) FROM property")
         count = cur.fetchone()[0]
-    assert count > 0, "ps_ventas should have data"
+    assert count >= 0
 ```
 
-### Test Structure (Python)
+### Test structure (Python)
 
 ```python
-class TestSyncVentas:
-    """Tests for the ventas sync module."""
+class TestDedupEngine:
+    """Tests for the dedup engine (task 2.2, #16)."""
 
-    def test_count_matches_source(self, pg_conn, fourd_conn):
-        """Row count in PG should match 4D."""
+    def test_matching_cadastral_ref_merges(self, pg_conn):
+        """Exact cadastral_ref match should merge two properties."""
         pass
 
-    def test_total_si_not_null(self, pg_conn):
-        """total_si should be non-null for 90%+ of rows."""
-        pass
-
-    def test_delta_only_fetches_modified(self, pg_conn, fourd_conn):
-        """With a recent watermark, only recent rows should sync."""
+    def test_phone_only_match_never_auto_merges(self, pg_conn):
+        """Phone-in-description match alone should downgrade to a suggestion."""
         pass
 ```
 
@@ -143,93 +133,71 @@ cd dashboard && npm test
 cd dashboard && npm run test:coverage
 
 # Run specific file
-cd dashboard && npx vitest run components/widgets/KpiRow.test.tsx
+cd dashboard && npx vitest run components/CandidateCard.test.tsx
 ```
 
 ### Factory Pattern (TypeScript)
 
 ```typescript
-import type { DashboardSpec, Widget } from '@/lib/schema';
+import type { Property, ProfileListingState } from '@/lib/types';
 
-export const makeDashboardSpec = (
-  overrides?: Partial<DashboardSpec>
-): DashboardSpec => ({
-  title: 'Test Dashboard',
-  description: 'Test description',
-  widgets: [makeKpiWidget()],
+export const makeProperty = (
+  overrides?: Partial<Property>
+): Property => ({
+  id: 'p1',
+  price: 185000,
+  m2Built: 78,
+  rooms: 3,
   ...overrides,
 });
 
-export const makeKpiWidget = (
-  overrides?: Partial<Widget>
-): Widget => ({
-  id: 'w1',
-  type: 'kpi_row',
-  items: [
-    { label: 'Ventas Netas', sql: 'SELECT 100 AS value', format: 'currency', prefix: '€' },
-  ],
-  ...overrides,
-});
-
-export const makeBarChartWidget = (
-  overrides?: Partial<Widget>
-): Widget => ({
-  id: 'w2',
-  type: 'bar_chart',
-  title: 'Ventas por Tienda',
-  sql: "SELECT tienda AS label, SUM(total_si) AS value FROM ps_ventas GROUP BY tienda",
-  x: 'label',
-  y: 'value',
+export const makeProfileListingState = (
+  overrides?: Partial<ProfileListingState>
+): ProfileListingState => ({
+  profileId: 'profile1',
+  propertyId: 'p1',
+  score: 0.72,
+  pipelineStage: 'new',
   ...overrides,
 });
 ```
 
-### Component Testing
+### Component testing
 
 ```typescript
 import { render, screen } from '@testing-library/react';
-import { KpiRow } from '@/components/widgets/KpiRow';
-import { makeKpiWidget } from '@/test/factories';
+import { CandidateCard } from '@/components/CandidateCard';
+import { makeProperty, makeProfileListingState } from '@/test/factories';
 
-describe('KpiRow', () => {
-  it('should render KPI labels', () => {
-    const widget = makeKpiWidget();
-    const data = [{ value: 12345.67 }];
-    render(<KpiRow spec={widget} data={data} />);
-    expect(screen.getByText('Ventas Netas')).toBeTruthy();
-  });
-
-  it('should format currency in European style', () => {
-    const widget = makeKpiWidget();
-    const data = [{ value: 12345.67 }];
-    render(<KpiRow spec={widget} data={data} />);
-    expect(screen.getByText('€12.345,67')).toBeTruthy();
+describe('CandidateCard', () => {
+  it('should render the price', () => {
+    const property = makeProperty({ price: 185000 });
+    const state = makeProfileListingState();
+    render(<CandidateCard property={property} state={state} />);
+    expect(screen.getByText('185.000 €')).toBeTruthy();
   });
 });
 ```
 
-### API Route Testing
+### API route testing
 
 ```typescript
-import { POST } from '@/app/api/dashboard/generate/route';
+import { POST } from '@/app/api/profiles/route';
 
-describe('POST /api/dashboard/generate', () => {
-  it('should return valid dashboard spec', async () => {
-    const req = new Request('http://localhost/api/dashboard/generate', {
+describe('POST /api/profiles', () => {
+  it('should create a profile and return 201', async () => {
+    const req = new Request('http://localhost/api/profiles', {
       method: 'POST',
-      body: JSON.stringify({ prompt: 'ventas del mes' }),
+      body: JSON.stringify({ name: 'High-yield rentals' }),
     });
     const res = await POST(req);
-    const data = await res.json();
-    expect(data.title).toBeDefined();
-    expect(data.widgets).toBeInstanceOf(Array);
-    expect(data.widgets.length).toBeGreaterThan(0);
+    expect(res.status).toBe(201);
   });
 
-  it('should reject empty prompt', async () => {
-    const req = new Request('http://localhost/api/dashboard/generate', {
+  it('should reject an empty name', async () => {
+    const req = new Request('http://localhost/api/profiles', {
       method: 'POST',
-      body: JSON.stringify({ prompt: '' }),
+      body: JSON.stringify({ name: '' }),
     });
     const res = await POST(req);
     expect(res.status).toBe(400);
@@ -247,29 +215,29 @@ describe('POST /api/dashboard/generate', () => {
 expect(mockFetchData).toHaveBeenCalled();
 
 // Good - testing actual behavior
-expect(screen.getByText('12.345,67 €')).toBeTruthy();
+expect(screen.getByText('185.000 €')).toBeTruthy();
 ```
 
 ### Not using factories
 ```python
 # Bad - duplicated, inconsistent test data
 def test_1():
-    venta = {"reg_ventas": Decimal("1.99"), "total_si": Decimal("10")}
+    listing = {"price": Decimal("1.99"), "m2_built": 10}
 
 def test_2():
-    venta = {"reg_ventas": Decimal("2.99")}  # Missing total_si!
+    listing = {"price": Decimal("2.99")}  # Missing m2_built!
 
 # Good - reusable factory
-venta = make_venta(total_si=Decimal("10"))
+listing = make_listing(m2_built=10)
 ```
 
 ### Testing implementation instead of behavior
 ```python
 # Bad - testing internal state
-assert sync._offset == 5000
+assert connector._page_offset == 5000
 
 # Good - testing observable behavior
-assert pg_count == fourd_count
+assert len(ingested_ids) == expected_count
 ```
 
 ## Best Practices
@@ -280,7 +248,7 @@ assert pg_count == fourd_count
 4. **Organize with describe/class blocks** by feature area
 5. **Clear mocks between tests** (`jest.clearAllMocks()` / `MagicMock.reset_mock()`)
 6. **Keep tests focused** — one behavior per test
-7. **For ETL**: integration tests with real PG, skip if no connection
+7. **For connectors/ETL**: integration tests with real PG, skip if no connection
 8. **For Dashboard**: unit tests for components, integration for API routes
 
 ---

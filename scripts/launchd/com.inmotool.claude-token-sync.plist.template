@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.powershop.claude-token-sync</string>
+  <string>com.inmotool.claude-token-sync</string>
 
   <key>ProgramArguments</key>
   <array>
@@ -26,16 +26,16 @@
        refreshes anything itself, preserving D-025's single-refresher rule. -->
   <key>WatchPaths</key>
   <array>
-    <string>__HOME__/.config/powershop-analytics/.claude-token-kick</string>
+    <string>__HOME__/.config/inmo-tool/.claude-token-kick</string>
   </array>
 
   <!-- Capture both streams to the same log file so the cause of any error is
        in one place. The launchd agent runs as the user, so the log inherits
        the user's permissions. -->
   <key>StandardOutPath</key>
-  <string>__HOME__/Library/Logs/com.powershop.claude-token-sync.log</string>
+  <string>__HOME__/Library/Logs/com.inmotool.claude-token-sync.log</string>
   <key>StandardErrorPath</key>
-  <string>__HOME__/Library/Logs/com.powershop.claude-token-sync.log</string>
+  <string>__HOME__/Library/Logs/com.inmotool.claude-token-sync.log</string>
 
   <!-- Inherit PATH so /usr/bin/security and /usr/bin/python3 are found. -->
   <key>EnvironmentVariables</key>

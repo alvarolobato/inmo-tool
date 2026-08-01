@@ -6,8 +6,8 @@
 
 set -euo pipefail
 
-PLIST="$HOME/Library/LaunchAgents/com.powershop.claude-token-sync.plist"
-LABEL="com.powershop.claude-token-sync"
+PLIST="$HOME/Library/LaunchAgents/com.inmotool.claude-token-sync.plist"
+LABEL="com.inmotool.claude-token-sync"
 UID_REAL=$(id -u)
 
 launchctl bootout "gui/$UID_REAL/$LABEL" 2>/dev/null || true

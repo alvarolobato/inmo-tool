@@ -1,4 +1,4 @@
-# EDOT (Elastic Agent in OTel Collector mode) configuration for PowerShop Analytics.
+# EDOT (Elastic Agent in OTel Collector mode) configuration for inmo-tool.
 #
 # Exporter selection:
 #   ELASTIC_OTLP_ENDPOINT unset → elasticsearch exporter falls back to a
@@ -75,11 +75,9 @@ processors:
       - key: http.response.header.set-cookie
         action: delete
       # Drop any credential attributes that app code might accidentally add.
-      # db.user carries the 4D ERP / PostgreSQL username, which reveals internal
+      # db.user carries the PostgreSQL username, which reveals internal
       # account naming conventions; treated as sensitive here per policy.
       - key: db.user
-        action: delete
-      - key: p4d.password
         action: delete
       - key: openrouter.api_key
         action: delete

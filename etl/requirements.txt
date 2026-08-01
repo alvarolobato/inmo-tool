@@ -1,4 +1,3 @@
-p4d
 # psycopg2-binary bundles libpq and is sufficient for this Docker-based ETL.
 # If deploying with a system libpq (e.g., for security patching), replace with
 # psycopg2 and install libpq-dev before building.

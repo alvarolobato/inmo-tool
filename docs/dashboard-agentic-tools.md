@@ -1,6 +1,8 @@
 # Dashboard App — Agentic LLM tools
 
-This document describes the **native tool-calling** path for the Dashboard App LLM (`generate`, `modify`, `analyze`). Decision record: [D-018](decisions/D-018-agentic-tools.md).
+This document describes the **native tool-calling** path for the Dashboard App LLM (`generate`, `modify`, `analyze`). Decision record: [decisions/archive/D-018-agentic-tools.md](decisions/archive/D-018-agentic-tools.md) (archived — see [D-004](decisions/D-004-no-worker-workflows.md) and DECISIONS.md for this repo's active decisions).
+
+> **Status**: the tool-loop runner/provider mechanism (`dashboard/lib/llm-tools/runner.ts`, OpenRouter/CLI dual-driver support, the feature flag, the failure policy) is real reusable architecture kept as-is per issue #1 §14. The **tool catalog below is the old project's PowerShop-mirror inspection tools** (`ps_*` table listing/describe/query) — task 4.1 (#24) and friends replace this with a catalog over inmo-tool's own schema (property/listing/search_profile inspection, dedup-suggestion review, etc.), not the `ps_*` tables described here.
 
 ## Overview
 

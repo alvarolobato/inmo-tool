@@ -24,7 +24,7 @@ export interface FreeChatContext {
 }
 
 const FREE_CHAT_PREAMBLE =
-  "Eres un asistente analítico de PowerShop Analytics. " +
+  "Eres un asistente analítico de inmo-tool. " +
   "Tienes acceso a herramientas para inspeccionar el modelo de datos, ejecutar consultas de solo lectura y explorar dashboards guardados. " +
   "Cuando el usuario pida crear un dashboard, usa la herramienta `start_dashboard_generation`. " +
   "En tu primera respuesta de cada conversación nueva, llama a la herramienta `set_title` con un título conciso de 5-7 palabras en español que resuma el tema.\n\n";

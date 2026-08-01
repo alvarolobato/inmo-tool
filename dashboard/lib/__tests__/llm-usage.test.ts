@@ -215,7 +215,7 @@ describe("logUsage", () => {
 describe("checkDailyBudget", () => {
   beforeEach(() => {
     mockQuery.mockReset();
-    // Isolate from any local ~/.config/powershop-analytics/config.yaml so the
+    // Isolate from any local ~/.config/inmo-tool/config.yaml so the
     // central config loader does not silently flip the dashboard LLM provider
     // (e.g. to "cli") and short-circuit checkDailyBudget. Pointing CONFIG_FILE
     // at a non-existent path forces the loader to use env > schema-defaults

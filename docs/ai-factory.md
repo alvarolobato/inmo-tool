@@ -1,6 +1,6 @@
 # AI Factory — User Guide
 
-> The AI Factory is an autonomous development pipeline for PowerShop Analytics. It uses Claude (via GitHub Actions) to discover work, plan implementations, write code, review PRs, and manage deployments. This guide explains **how humans use it**.
+> The AI Factory is an autonomous development pipeline for inmo-tool. It uses Claude (via GitHub Actions) to discover work, plan implementations, write code, review PRs, and manage deployments. This guide explains **how humans use it**.
 
 ## What the AI Factory Does For You
 
@@ -29,7 +29,7 @@ Add these secrets to the repository (`Settings → Secrets and variables → Act
 | `ANTHROPIC_API_KEY` | **Yes** | Powers all AI workflows (Claude Code Action) |
 | `DOCKERHUB_USERNAME` | For releases | Pushes Docker images |
 | `DOCKERHUB_TOKEN` | For releases | Pushes Docker images |
-| `OPENROUTER_API_KEY` | Optional | Used by WrenAI and Dashboard App (existing secret) |
+| `OPENROUTER_API_KEY` | Optional | Used by the Dashboard App LLM provider (existing secret) |
 
 Once `ANTHROPIC_API_KEY` is set, the factory activates automatically. Scheduled workflows start running on their cron, and event-driven workflows respond to issues/PRs/comments.
 
@@ -138,7 +138,6 @@ The previous day's summary is closed automatically. Read this, label a few issue
 | **Project Summary** | Weekdays 09:00 | Daily digest (your morning briefing) |
 | **ETL Health Monitor** | Weekdays 08:00 | Checks ETL code/schema/sync for issues |
 | **Bug Hunter** | Weekdays 11:00 | Scans recently changed files for bugs |
-| **SQL Pair Validator** | Monday 10:00 | Validates WrenAI SQL pairs against schema |
 | **Docs Patrol** | Tuesday 14:00 | Checks docs are accurate and current |
 | **Dashboard Audit** | Wednesday 14:00 | Builds + tests dashboard, reviews quality |
 | **Feature Ideas** | Thursday 14:00 | Brainstorms 3-5 actionable ideas |

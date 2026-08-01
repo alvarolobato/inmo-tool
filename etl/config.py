@@ -2,14 +2,14 @@
 
 Precedence (env > config.yaml > schema defaults):
   1. Real environment variables (set before Python starts)
-  2. config.yaml at CONFIG_FILE env var or ~/.config/powershop-analytics/config.yaml
+  2. config.yaml at CONFIG_FILE env var or ~/.config/inmo-tool/config.yaml
   3. Hardcoded defaults from config/schema.yaml
 
 For backward-compatibility the module also loads .env files in the legacy order
 so existing deployments that rely on python-dotenv keep working:
   1. .env in current directory (worktree symlink → centralized, or docker-compose)
   2. local/.env (repo-local override)
-  3. ~/.config/powershop-analytics/.env (centralized)
+  3. ~/.config/inmo-tool/.env (centralized)
 
 Real environment variables always win (override=False).
 """
@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 # Legacy .env loading (backward-compat; real env vars always win)
 # ---------------------------------------------------------------------------
 
-_CONFIG_DIR = Path.home() / ".config" / "powershop-analytics"
+_CONFIG_DIR = Path.home() / ".config" / "inmo-tool"
 for _candidate in [
     Path(
         ".env"

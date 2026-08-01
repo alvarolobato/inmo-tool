@@ -28,7 +28,7 @@ const days = Math.round(expiresIn / 86400000);
 if (expiresIn <= 0) {
   console.log(`[claude-auth] WARNING: token expired ${Math.abs(hours)}h ago.`);
   console.log('[claude-auth] Regenerate: run `claude /install-github-app` on the host,');
-  console.log('[claude-auth] then update CLAUDE_CODE_OAUTH_TOKEN in ~/.config/powershop-analytics/.env.');
+  console.log('[claude-auth] then update CLAUDE_CODE_OAUTH_TOKEN in ~/.config/inmo-tool/.env.');
 } else {
   console.log(`[claude-auth] Token valid for ${days} days (${hours}h).`);
 }

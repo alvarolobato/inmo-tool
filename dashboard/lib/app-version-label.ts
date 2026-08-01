@@ -5,7 +5,7 @@
  */
 
 export interface AppFooterLines {
-  /** e.g. "PowerShop Analytics v0.1.0" */
+  /** e.g. "inmo-tool v0.1.0" */
   primary: string;
   /** Shown under primary when the tree is not an exact release tag (commit id, dirty, etc.) */
   secondary: string | null;
@@ -19,7 +19,7 @@ function isExactReleaseTag(describe: string): boolean {
 export function formatAppFooterLines(pkgVersion: string, gitDescribe: string): AppFooterLines {
   const v = pkgVersion.trim() || "0.0.0";
   const d = gitDescribe.trim();
-  const primary = `PowerShop Analytics v${v}`;
+  const primary = `inmo-tool v${v}`;
 
   if (!d || isExactReleaseTag(d)) {
     return { primary, secondary: null };

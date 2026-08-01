@@ -22,7 +22,7 @@ function toolResult(content: string): ChatCompletionMessageParam {
 // Flow detection keys off each flow's unique ROLE sentence (not tool names,
 // which appear in every agentic prompt). Include the terminal tool name too so
 // the round-1 scripting in modify/analyze is exercised end to end.
-const CHAT_SYS = "Eres un asistente analítico de PowerShop Analytics.";
+const CHAT_SYS = "Eres un asistente analítico de inmo-tool.";
 const MODIFY_SYS =
   "You are an expert AI dashboard modifier for PowerShop. Call apply_dashboard_modification with the validated spec.";
 const ANALYZE_SYS =
