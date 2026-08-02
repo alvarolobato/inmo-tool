@@ -91,7 +91,7 @@ services:
   # ---------------------------------------------------------------------------
   # ETL / connector sync — currently a stub scheduler (task 1.1); real
   # connector framework lands in task 1.3 (#11), first connector in task 1.4 (#12).
-  # For a one-off sync: docker compose run --rm etl python main.py --once
+  # For a one-off sync: docker compose run --rm etl python -m etl.main --once
   # ---------------------------------------------------------------------------
   etl:
     build: ./etl

@@ -121,6 +121,8 @@ Credentials live in `~/.config/inmo-tool/` (centralized) so they work across git
 
 See [D-004](docs/decisions/D-004-no-worker-workflows.md) — don't push to `.github/workflows/` without a credential carrying `workflow` OAuth scope, and never bypass a blocked push via the GitHub API. The source project's `.github/workflows/*.yml` files (AI factory automation) were copied into this repo but sit **untracked on disk**, not committed, for exactly this reason — propose corrected YAML in a PR body for a human to commit, per D-004.
 
+When a task's changes require workflow-file edits that can't be pushed, file the proposed YAML under `docs/pending-workflow-changes/<task-slug>.md` (fenced `yaml` block per affected file) and link it here as it accumulates — see [docs/pending-workflow-changes/phase-1-1.md](docs/pending-workflow-changes/phase-1-1.md) for the first example, covering the workflows broken by task 1.1's content removal.
+
 ### Backwards compatibility — default is to break it
 
 **This project has a single deployment target** (local dev today; no production instance yet, no external API consumers). There is no reason to maintain backwards compatibility for its own sake.

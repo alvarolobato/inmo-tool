@@ -50,7 +50,7 @@
   env: POSTGRES_DB
   type: string
   sensitive: false
-  default: "powershop"
+  default: "inmotool"
   section: "PostgreSQL"
   description: "Nombre de la base de datos PostgreSQL."
   requires_restart: [etl, dashboard]

@@ -1,5 +1,7 @@
 # AI Factory — User Guide
 
+> **Not yet wired up in this repo.** This document is inherited from the source project (powershop-analytics) essentially unchanged and describes *its* fully operational AI Factory in detail — labels, workflow files, review rounds, decision IDs (D-011, D-021, D-025, D-028, D-030–D-031, D-034, D-037–D-038) that belong to *that* project's decision log, now preserved under [`docs/decisions/archive/`](decisions/archive/) for reference. None of the `.github/workflows/ai-*.yml` files it describes are committed to this repo yet — see [D-004](decisions/D-004-no-worker-workflows.md) — and this repo's live decision log ([DECISIONS.md](../DECISIONS.md)) currently has 4 entries, not the dozens referenced below. Read this as a conceptual design reference for what a fully-built factory could look like, not as documentation of inmo-tool's current (nonexistent) automation. The current, actually-in-effect process is [D-003](decisions/D-003-review-policy.md) and the "AI Factory lifecycle — not yet wired up" section of [AGENTS.md](../AGENTS.md).
+
 > The AI Factory is an autonomous development pipeline for inmo-tool. It uses Claude (via GitHub Actions) to discover work, plan implementations, write code, review PRs, and manage deployments. This guide explains **how humans use it**.
 
 ## What the AI Factory Does For You
@@ -158,7 +160,7 @@ Two workflows remain disabled (`ai-docs-patrol.yml.disabled`, `ai-security-audit
 ### Mental model — two nested loops (default single-track path)
 
 1. **Issue loop** — a feature request goes from "open" to "all phases merged" via the **planner** (which edits the issue body in place) and the **implementer** (which walks each phase's checklist and opens one PR per phase).
-2. **PR loop** — each phase's PR goes from "opened" to "merged" via two automated review passes (Copilot, then Opus, per [D-021](decisions/D-021-two-review-rounds.md)) plus the human merge.
+2. **PR loop** — each phase's PR goes from "opened" to "merged" via two automated review passes (Copilot, then Opus, per [D-021](decisions/archive/D-021-two-review-rounds.md)) plus the human merge.
 
 When `ai-decompose` is present, a third loop is active: the **sub-issue loop** — each sub-issue goes from "queued" to "PR opened" via the implementer. The old three-loop model applies.
 
@@ -187,7 +189,7 @@ Add ai-decompose?
 
 Only AI-Factory labels are listed. Component / priority / size / risk labels are unrelated to the lifecycle.
 
-Labels split into two groups: **owner-facing** (coloured; human adds/removes) and **`fact-*` internal state** (grey `#ededed`; workflows toggle, owner ignores). See [D-034](decisions/D-034-single-track-issues.md) for the rationale and [docs/issue-format.md § Label conventions](issue-format.md#label-conventions) for the full enumeration.
+Labels split into two groups: **owner-facing** (coloured; human adds/removes) and **`fact-*` internal state** (grey `#ededed`; workflows toggle, owner ignores). See [D-034](decisions/archive/D-034-single-track-issues.md) for the rationale and [docs/issue-format.md § Label conventions](issue-format.md#label-conventions) for the full enumeration.
 
 #### Owner-facing labels
 
@@ -250,7 +252,7 @@ flowchart TD
 **Walkthrough**
 
 1. Issue is created — by a human, or by a discovery agent on a cron. The triage workflow runs first and applies component / priority / category labels.
-2. The issue sits in the backlog until a **human** explicitly adds `ai-plan` or `ai-work`. Issues from the **business-review** workflow carry `needs-human-approval` and never get `ai-work` until the owner approves — see [D-028](decisions/D-028-weekly-business-review.md).
+2. The issue sits in the backlog until a **human** explicitly adds `ai-plan` or `ai-work`. Issues from the **business-review** workflow carry `needs-human-approval` and never get `ai-work` until the owner approves — see [D-028](decisions/archive/D-028-weekly-business-review.md).
 3. **`ai-plan` path**: the planner edits the issue body in place — adds `## Plan`, structures `## Phase N — <name>` headings with `### Tasks` checklists, posts a short analysis comment, sets `fact-planned`. It stops without creating sub-issues or implementing anything. The owner reviews the refined body and adds `ai-work` when ready.
 4. **`ai-work` path (body already structured)**: if `fact-planned` is set and the body has `## Phase` headings, the implementer skips planning and walks Phase 1's `### Tasks` checklist directly.
 5. **`ai-work` path (body unstructured)**: if `fact-planned` is absent, the planner runs inline (same body-edit as the `ai-plan` path, sets `fact-planned`) and then continues immediately to implementation.
@@ -340,7 +342,7 @@ flowchart TD
 1. The sub-issue carries both `fact-task` and `ai-work`. The implement job fires.
 2. The implement agent reads the sub-issue, **then the parent** (body + comments — architectural rationale lives there, per #517).
 3. **Sibling-PR pre-flight check**: if any sibling sub-issue already has a PR that covers the same work, the agent closes this sub-issue with a "covered by PR #X" comment.
-4. Otherwise: branch, code, test, commit, push, open PR with the correct closing-keyword form per [D-037](decisions/D-037-multi-phase-no-auto-close.md) — `Closes #<N>` for single-phase issues; `Part of #<N> (Phase X of Y)` for any non-final phase or a final phase with unverified EC items.
+4. Otherwise: branch, code, test, commit, push, open PR with the correct closing-keyword form per [D-037](decisions/archive/D-037-multi-phase-no-auto-close.md) — `Closes #<N>` for single-phase issues; `Part of #<N> (Phase X of Y)` for any non-final phase or a final phase with unverified EC items.
 5. Idempotency guard and Copilot request same as single-track path.
 
 **Human checkpoints (legacy path)**
@@ -377,9 +379,9 @@ flowchart LR
 3. **Convergence.** Both `fact-cp-after-1` and `fact-o-after-1` are on the PR. Address-feedback removes the phase labels, clears `fact-ready-for-review`, adds `ai-awaiting-owner`. The PR is now waiting for a human merge.
 4. **Pre-merge digest.** `ai-pre-merge-digest.yml` fires when `ai-awaiting-owner` is applied. Within ~3 minutes it posts one structured comment summarising both review rounds: a recommendation (merge/hold/discuss), a reviewer table with themes and resolved/open thread counts, and bulleted addressed/open lists. Idempotent per head-SHA — a force-push triggers one new digest; a re-fire on the same SHA is a no-op. If the PR carries `no-ai` or `no-pr-review`, the digest is skipped. See [`.github/ai-factory/prompts/pre-merge-digest.md`](.github/ai-factory/prompts/pre-merge-digest.md) for the agent prompt.
 5. **Human merge.** The owner reviews the PR (the AI's review history and the digest comment are both inline), checks CI is green, clicks **Merge**. The PR's `Closes #<issue>` body trailer closes the issue (or sub-issue). When all phases of a parent issue are merged, the owner closes the parent.
-6. **EC validation (final-phase merges).** When a final-phase PR merges, `ai-post-merge-verify.yml` dispatches `ai-ec-validator.yml` for the linked issue. The validator runs `parse-ec.sh` + `verify-ec.sh` to check each `**EC-N**` item deterministically, posts a single structured comment with `[✅ verified]`, `[⏳ human-only]`, or `[✗ failed]` markers, ticks verified items in the issue body, and either closes the issue (if zero EC items remain unchecked) or labels it `fact-awaiting-human-validation` (if any human-only items remain). The owner manually ticks human-only items and can re-trigger the validator by adding `ai-validate-ec`. See [D-038](decisions/D-038-llm-ec-validation.md) and [`.github/ai-factory/prompts/ec-validator.md`](.github/ai-factory/prompts/ec-validator.md).
+6. **EC validation (final-phase merges).** When a final-phase PR merges, `ai-post-merge-verify.yml` dispatches `ai-ec-validator.yml` for the linked issue. The validator runs `parse-ec.sh` + `verify-ec.sh` to check each `**EC-N**` item deterministically, posts a single structured comment with `[✅ verified]`, `[⏳ human-only]`, or `[✗ failed]` markers, ticks verified items in the issue body, and either closes the issue (if zero EC items remain unchecked) or labels it `fact-awaiting-human-validation` (if any human-only items remain). The owner manually ticks human-only items and can re-trigger the validator by adding `ai-validate-ec`. See [D-038](decisions/archive/D-038-llm-ec-validation.md) and [`.github/ai-factory/prompts/ec-validator.md`](.github/ai-factory/prompts/ec-validator.md).
 
-**Why exactly two reviews and not more** — per [D-021](decisions/D-021-two-review-rounds.md), iterating "until there are no comments" produced long loops where late nit-pick rounds blocked merges without meaningfully improving the code. Two independent reviews each run once is the cap. Genuinely blocking issues from a later round are escalated to the human owner rather than triggering a third round.
+**Why exactly two reviews and not more** — per [D-021](decisions/archive/D-021-two-review-rounds.md), iterating "until there are no comments" produced long loops where late nit-pick rounds blocked merges without meaningfully improving the code. Two independent reviews each run once is the cap. Genuinely blocking issues from a later round are escalated to the human owner rather than triggering a third round.
 
 **Human checkpoints in Phase 3**
 
@@ -399,7 +401,7 @@ The AI Factory's recovery and oversight layer has two tiers with distinct respon
 
 **Watchdog** (`ai-watchdog.yml`, cadence: every 30 min + on PR review and PR close events — landed per D-030): fast, stateless, rule-per-object. Each of its 12 steps applies a deterministic if/then rule to a single issue or PR. No LLM involved — just `gh` CLI queries and label/dispatch operations. Designed to recover transient failures within minutes.
 
-> **Schedule queue saturation (D-030):** The watchdog was originally configured `*/15 * * * *` but in practice fired every 3–4 hours — roughly 1/8 of the intended cadence. GitHub silently drops scheduled runs when a repo's cron queue is saturated; with 9+ active cron workflows competing for dispatch slots, the 15-min cadence was being observed as 3–4 hours. The cron was bumped to `*/30` (halving schedule pressure) and two event triggers were added — `pull_request_review: [submitted]` and `pull_request: [closed]` — so the `fact-phase-opus` transition fires within seconds of Opus submitting a review, and label cleanup runs immediately on PR close. The `fact-ci-failing` clearance rule benefits primarily from the shorter cron cadence rather than from these specific event triggers. See [D-030](decisions/D-030-watchdog-cadence.md).
+> **Schedule queue saturation (D-030):** The watchdog was originally configured `*/15 * * * *` but in practice fired every 3–4 hours — roughly 1/8 of the intended cadence. GitHub silently drops scheduled runs when a repo's cron queue is saturated; with 9+ active cron workflows competing for dispatch slots, the 15-min cadence was being observed as 3–4 hours. The cron was bumped to `*/30` (halving schedule pressure) and two event triggers were added — `pull_request_review: [submitted]` and `pull_request: [closed]` — so the `fact-phase-opus` transition fires within seconds of Opus submitting a review, and label cleanup runs immediately on PR close. The `fact-ci-failing` clearance rule benefits primarily from the shorter cron cadence rather than from these specific event triggers. See [D-030](decisions/archive/D-030-watchdog-cadence.md).
 
 **Factory Manager** (`ai-factory-manager.yml`, every 4 h): slow, stateful (reads full context across all objects), LLM reasoning (Opus) over the aggregate factory state. Handles what the watchdog structurally cannot: cross-PR patterns, strategic triage, stale/superseded issue cleanup, and enhancement proposals.
 
@@ -632,10 +634,10 @@ This is the canonical list of human touchpoints across the entire lifecycle. **O
 | 8 | PR is `ai-awaiting-owner` | Review the PR + the inline AI review history; merge or request changes | Per PR |
 | 9 | You disagree with a Copilot or Opus comment | Reply yourself or override at merge | Per disagreement |
 | 10 | A workflow is mis-firing (rare bug in the factory) | Open an issue tagged `ai-factory`; if urgent, add `ai-blocked` + `no-ai` to the affected items | Very rare |
-| 11 | OAuth token actually expired and the host can't refresh through Cloudflare | Run `ps prod login` (or `claude /login` on the relevant host) | Per token-expiry incident — see [D-025](decisions/D-025-oauth-single-refresher.md) |
-| 12 | A `business-review` issue arrives with `needs-human-approval` | Decide whether to authorize: remove `needs-human-approval`, add `ai-work` (or close) | Weekly per [D-028](decisions/D-028-weekly-business-review.md) |
+| 11 | OAuth token actually expired and the host can't refresh through Cloudflare | Run `ps prod login` (or `claude /login` on the relevant host) | Per token-expiry incident — see [D-025](decisions/archive/D-025-oauth-single-refresher.md) |
+| 12 | A `business-review` issue arrives with `needs-human-approval` | Decide whether to authorize: remove `needs-human-approval`, add `ai-work` (or close) | Weekly per [D-028](decisions/archive/D-028-weekly-business-review.md) |
 | 13 | You want to fast-merge without review | Add `no-pr-review` before opening, merge yourself | Per exception |
-| 14 | Token refresh required across the launchd-synced container | One-time `claude /login` interactively; agent syncs from the keychain | Per token-expiry incident — see [D-025](decisions/D-025-oauth-single-refresher.md) |
+| 14 | Token refresh required across the launchd-synced container | One-time `claude /login` interactively; agent syncs from the keychain | Per token-expiry incident — see [D-025](decisions/archive/D-025-oauth-single-refresher.md) |
 | 15 | Manager session report posted on tracking issue | Skim the "Decisions awaiting owner" section; act on items that need sign-off | Every 4 h (or daily digest) |
 | 16 | Manager filed an enhancement proposal (`ai-factory + agent-efficiency` issue) | Review the proposal; add `ai-work` if accepted | Per filed issue |
 | 17 | Manager filed a product bug issue | Review the filed issue; add `ai-work` or close if noise | Per filed issue |
@@ -650,7 +652,7 @@ This is the canonical list of human touchpoints across the entire lifecycle. **O
 3. Implementer walks Phase 1's 2 tasks sequentially (~5 min). Ticks both checkboxes. Opens one PR. Requests Copilot.
 4. Copilot reviews the PR (~5 min). Address-feedback dispatches Opus.
 5. Opus reviews the PR (~5 min). Address-feedback converges to `ai-awaiting-owner`.
-6. Owner reviews and merges the PR. Issue closes via `Closes #N` (single-phase issues only — see [D-037](decisions/D-037-multi-phase-no-auto-close.md) for multi-phase rules).
+6. Owner reviews and merges the PR. Issue closes via `Closes #N` (single-phase issues only — see [D-037](decisions/archive/D-037-multi-phase-no-auto-close.md) for multi-phase rules).
 7. **Total wall time: ~18–25 minutes. Owner effort: ~5 minutes** (reading + clicking merge).
 
 #### Recovered failure — transient flake
@@ -782,5 +784,5 @@ Adding a slice or rewiring an existing one is a single-line YAML edit in the wor
 
 - [AGENTS.md](../AGENTS.md) — Project agent guidelines (read by all AI workflows)
 - [ARCHITECTURE.md](../ARCHITECTURE.md) — System architecture
-- [DECISIONS.md](../DECISIONS.md) — Decision index (AI Factory decisions D-011 through D-014, D-021, D-028–D-031); full rationale in `docs/decisions/D-NN-<slug>.md`
+- [DECISIONS.md](../DECISIONS.md) — this repo's current decision index (4 entries so far); the AI-Factory-specific decisions this guide references (D-011, D-021, D-028–D-031, D-034, D-037–D-038) are archived under `docs/decisions/archive/D-NN-<slug>.md`, inherited from the source project
 - [docs/skills/](skills/) — Domain-specific skill docs that workflows consult

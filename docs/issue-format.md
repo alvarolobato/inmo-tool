@@ -42,9 +42,7 @@ The planner fills this in when it refines the issue body via `ai-plan` or `ai-wo
   - **Files**: any files with issues
   - **Acceptance**: `docker compose run --rm etl python -m pytest && python -m ruff check etl/ && python -m mypy etl/`
 
-- [ ] N-1) Copilot review (one round only) per [D-021](docs/decisions/D-021-two-review-rounds.md)
-
-- [ ] N) Opus review (one round only, clean context) per [D-021](docs/decisions/D-021-two-review-rounds.md)
+- [ ] N) Task review (one round only, clean context) per [D-003](docs/decisions/D-003-review-policy.md)
 
 ## Exit criteria / Validation
 
@@ -205,7 +203,7 @@ This is the right default for **single-phase** issues, but a foot-gun for
 **multi-phase** issues: Phase 1's PR would prematurely close the parent even
 though Phases 2…N are still pending.
 
-Per [D-037](decisions/D-037-multi-phase-no-auto-close.md), the rule is:
+Per [D-037](decisions/archive/D-037-multi-phase-no-auto-close.md), the rule is:
 
 | PR for… | Use in body | Use NOT |
 |---------|-------------|---------|
@@ -245,7 +243,7 @@ Closes #720
 Closes #720
 ```
 
-This is enforced by three layers ([D-037](decisions/D-037-multi-phase-no-auto-close.md)):
+This is enforced by three layers ([D-037](decisions/archive/D-037-multi-phase-no-auto-close.md)):
 
 1. **Worker self-check** — the AI worker's pre-`gh pr create` shell guard
    refuses to create a PR whose body contains a forbidden closing keyword.
@@ -288,33 +286,20 @@ git worktree remove ../<repo>-<worktree-name>
 
 ## PR and review policy
 
-Every PR gets **exactly two review rounds, in order, each run only once**:
+Per [D-003](decisions/D-003-review-policy.md): this repo doesn't have Copilot or the AI-factory workflows wired up yet (`.github/workflows/` isn't committed — see [D-004](decisions/D-004-no-worker-workflows.md)), so the source project's Copilot-then-Opus bot-driven two-round policy (archived as [D-021](decisions/archive/D-021-two-review-rounds.md)) doesn't apply mechanically here. Until that automation is committed, review is:
 
-1. **One Copilot review** (bot).
-2. **One Opus review**, started from a **clean context** (fresh Claude Code session with no prior history about this PR or its implementation).
+1. **Per task**: each task-level issue is implemented on its own branch/PR. A fresh reviewer pass (clean context, no prior involvement in the implementation) reviews the PR before it's considered ready.
+2. **Per phase**: once every task PR in a phase is implemented, a second fresh review pass evaluates the phase as a whole — cross-task coherence, not just per-task correctness — before the phase is handed off.
+3. **Once per checkpoint, not iterated**: each review round runs once. Findings get addressed, then the process moves on — no looping a single round until "no more feedback." A genuinely disputed or unresolvable finding escalates to the owner instead of triggering a third pass.
 
-After each round: address every comment with either a code change or an inline reply, then move on. **Do not re-request the same reviewer.** Iterating "until there are no comments" is no longer the policy — it was too much. If a later round surfaces a genuinely blocking issue, use judgement and escalate to the human owner rather than looping. See [D-021](decisions/D-021-two-review-rounds.md).
-
-Once both rounds are complete and `ai-awaiting-owner` is applied, the **pre-merge digest** agent fires automatically (`ai-pre-merge-digest.yml`). It posts one comment summarising both review rounds — a recommendation (merge / hold / discuss), a reviewer table with themes, and bulleted addressed/open lists — so the owner can make a merge decision without reading each thread individually. Skipped if the PR carries `no-ai` or `no-pr-review`.
+There's no automated pre-merge digest yet (`ai-pre-merge-digest.yml` isn't committed) — the owner reviews the PR/issue history directly to decide on merging.
 
 Rules:
 - Every piece of work goes through a PR, even solo work.
-- **Round 1 — Copilot.** Request via the REST API:
-  ```bash
-  gh api repos/{owner}/{repo}/pulls/{PR#}/requested_reviewers \
-    --method POST -f 'reviewers[]=copilot-pull-request-reviewer[bot]'
-  ```
-  Do NOT use `gh pr review --request copilot` (doesn't work) or `gh pr edit --add-reviewer copilot` (can't resolve bot users). The REST API with `copilot-pull-request-reviewer[bot]` is the only working CLI method.
-  - **From GitHub Actions**, the default `GITHUB_TOKEN` **cannot** assign `copilot-pull-request-reviewer[bot]` — the API returns 200 but with an empty `requested_reviewers` array. Workflows must use a PAT stored in the repo secret `COPILOT_PAT` (fine-grained PAT, scope `Pull requests: Read and write`). Pattern:
-    ```bash
-    GH_TOKEN="$COPILOT_PAT" gh api repos/{owner}/{repo}/pulls/{PR#}/requested_reviewers \
-      --method POST -f 'reviewers[]=copilot-pull-request-reviewer[bot]'
-    ```
-    Always verify the response contains `Copilot` in `requested_reviewers` before claiming the review was requested.
-  - Poll for the review: `gh api repos/{owner}/{repo}/pulls/{PR#}/reviews --jq '[.[] | {state, user: .user.login, body}]'`.
-  - Address every comment with a code change or inline reply. **One round only — do not re-request Copilot.**
-- **Round 2 — Opus, clean context.** Start a new Claude Code session (no prior conversation about this PR or the branch) and run the PR review flow on this PR number. Reply inline to every comment; apply the correct fixes. **One round only — do not re-request Opus.**
-- **Merge** after both rounds are done and every comment has a change or a reply. Unresolved disagreement → flag to the human owner; don't start a third round to paper over it.
+- **Task review**: a fresh reviewer (no prior context on this PR) reviews it once. Address every comment with a code change or an explicit reply, then move on — don't re-request the same reviewer for the same PR.
+- **Phase review**: after all of a phase's task PRs are implemented, a fresh reviewer evaluates the phase's combined diff once. Same rule — address and move on, don't iterate.
+- **Merge**: the owner reviews and merges (or requests changes) — this repo has no auto-merge (see [D-002](decisions/D-002-humans-approve-merges.md)). Unresolved disagreement from a review round → flag to the owner; don't start a third round to paper over it.
+- **Revisit when** `.github/workflows/` is committed and Copilot review is configured — at that point, re-evaluate whether to adopt the source project's exact Copilot+Opus bot policy verbatim or keep this per-task/per-phase split (see D-003's own "Revisit when").
 
 ## Phase execution order
 

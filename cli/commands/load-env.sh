@@ -46,4 +46,4 @@ EOF
 _REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 load_env_file "${_REPO_ROOT}/local/.env"
-load_env_file "${HOME}/.config/powershop-analytics/.env"
+load_env_file "${HOME}/.config/inmo-tool/.env"
