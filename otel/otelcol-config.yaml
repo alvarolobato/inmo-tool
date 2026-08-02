@@ -16,8 +16,13 @@
 extensions:
   health_check:
     endpoint: "0.0.0.0:13133"
-  zpages:
-    endpoint: "0.0.0.0:55679"
+  # zpages removed (task 1.6, #14): the pinned elastic-agent:8.16.0 image's
+  # OTel collector build does not compile it in — confirmed live, the
+  # container logs "unknown type: zpages (valid values: [memory_limiter
+  # file_storage health_check pprof])" and never becomes healthy, which
+  # blocks etl/dashboard from starting at all (both depend_on
+  # otel-collector: service_healthy). Not a config typo; re-add only if a
+  # future image pin's valid-extensions list includes it again.
 
 receivers:
   # OTLP receiver — accepts traces, metrics, and logs from ETL and Dashboard.
@@ -84,31 +89,17 @@ processors:
       - key: postgres.password
         action: delete
 
-  # Tail sampling — applied to traces only.
-  # Decision wait of 10s gives the collector time to see all spans in a trace
-  # before deciding whether to keep or drop the trace.
-  # A trace is kept if any policy matches (OR logic):
-  #   1. Keep all error traces (never lose a failed turn).
-  #   2. Keep all traces > 5s (slow requests are the ones worth debugging).
-  #   3. Sample 10% of normal traces (LLM tool loops produce 20+ spans per turn;
-  #      tail-sampling keeps error traces 100% while reducing volume for normal turns).
-  tail_sampling:
-    decision_wait: 10s
-    num_traces: 50000
-    expected_new_traces_per_sec: 10
-    policies:
-      - name: keep-errors
-        type: status_code
-        status_code:
-          status_codes: [ERROR]
-      - name: keep-slow-traces
-        type: latency
-        latency:
-          threshold_ms: 5000
-      - name: sample-normal
-        type: probabilistic
-        probabilistic:
-          sampling_percentage: 10
+  # Tail sampling removed (task 1.6, #14): the pinned elastic-agent:8.16.0
+  # image's OTel collector build does not compile this processor in either
+  # (same "unknown type" failure as zpages above — confirmed live) and,
+  # unlike zpages, this one is referenced inside a pipeline, not just
+  # `service.extensions`, so it silently prevented the collector from
+  # starting at all rather than just disabling a feature. The original
+  # design intent is preserved in the traces pipeline's comment below —
+  # re-add with the `elastictrace`/whatever processor this image's actual
+  # valid-processors list (logged on failed startup) offers as the
+  # equivalent, rather than assuming `tail_sampling` will exist again on a
+  # future image pin.
 
 exporters:
   # File exporter — always-on local sink. In production this writes a rolling
@@ -141,12 +132,14 @@ exporters:
       queue_size: 2048
 
 service:
-  extensions: [health_check, zpages]
+  extensions: [health_check]
   pipelines:
-    # Traces — tail-sampled before export so error and slow traces are always kept.
+    # Traces — no tail-sampling (see the processors section above for why);
+    # every trace is exported as-is until that's re-added against a
+    # compatible processor.
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, attributes/redact, resource, tail_sampling, batch]
+      processors: [memory_limiter, attributes/redact, resource, batch]
       exporters: [file, otlphttp/elasticsearch]
 
     # Metrics — no sampling (metrics are pre-aggregated before ingestion).

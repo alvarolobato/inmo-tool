@@ -1,12 +1,17 @@
 # inmo-tool — local stack
 # Services: PostgreSQL mirror + connector sync scheduler + OTel collector + Dashboard App
 #
-# Status: first-pass cleanup (task 1.1, #9) — removed the source project's WrenAI
-# stack (bootstrap/wren-engine/ibis-server/wren-ai-service/wren-ui/qdrant, 6
-# containers) and 4D-specific env vars. Full adaptation (a real connector-runner
-# service, whatever else Phase 1 needs) is task 1.6 (#14) — this pass only
-# removes dead services so `docker compose config` doesn't reference anything
-# that no longer exists in this project.
+# Status: task 1.1 (#9) removed the source project's WrenAI stack (bootstrap/
+# wren-engine/ibis-server/wren-ai-service/wren-ui/qdrant, 6 containers) and
+# 4D-specific env vars. Task 1.6 (#14) verified `docker compose up -d` brings
+# up exactly these 4 services end-to-end (postgres, etl, otel-collector,
+# dashboard — all healthy) and fixed a real blocker found in the process: the
+# pinned elastic-agent:8.16.0 image doesn't support the `tail_sampling`
+# processor or `zpages` extension this config originally referenced, which
+# left otel-collector permanently unhealthy and blocked etl/dashboard from
+# starting at all (see otel/otelcol-config.yaml for the fix). The `etl`
+# service name is kept as-is rather than renamed to something like
+# "connector-runner" — not worth the doc/script churn for a cosmetic rename.
 #
 # Quick start (symlink to centralized credentials):
 #   ln -sf ~/.config/inmo-tool/.env .env
