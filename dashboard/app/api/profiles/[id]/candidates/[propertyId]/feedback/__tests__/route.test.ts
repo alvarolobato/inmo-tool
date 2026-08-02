@@ -147,6 +147,45 @@ describe.runIf(dbAvailable)("feedback event API — real Postgres", () => {
     );
   }
 
+  /**
+   * Task 3.4 (#23) introduced MIN_TRAINING_EXAMPLES (4x the 8-feature model
+   * = 32) — below it, retrain.ts now stays in cold-start mode even with
+   * both classes present, which is new, correct behavior these
+   * pre-existing tests didn't originally have to account for (they were
+   * written when 1 accept + 1 reject was already enough to train). Pads a
+   * profile's training set with generic, uncontested filler examples via
+   * the real feedback route (not a direct DB write) so a real retrain
+   * actually fires, without disturbing whichever specific property/label
+   * pair the calling test cares about.
+   */
+  async function fillPastTrainingThreshold(pool: Pool, profileId: number, pairs = 18) {
+    for (let i = 0; i < pairs; i++) {
+      const acceptId = await insertProperty(pool);
+      const rejectId = await insertProperty(pool);
+      await markMatched(pool, profileId, acceptId);
+      await markMatched(pool, profileId, rejectId);
+      await POST(makeRequest({ feedbackType: "accept" }), ctx(profileId, acceptId));
+      await POST(makeRequest({ feedbackType: "reject" }), ctx(profileId, rejectId));
+    }
+  }
+
+  /**
+   * Single-class variant for the "going one-sided" test below: that test's
+   * whole premise is that the negative class disappears entirely when its
+   * one real reject gets flipped to accept — balanced accept/reject filler
+   * (the helper above) would leave permanent filler rejects behind and
+   * silently defeat that premise. Pads with `count` accept-only filler
+   * examples instead, so the real reject stays the *only* negative example
+   * in the pool until the test itself removes it.
+   */
+  async function fillPastTrainingThresholdSingleClass(pool: Pool, profileId: number, count = 36) {
+    for (let i = 0; i < count; i++) {
+      const id = await insertProperty(pool);
+      await markMatched(pool, profileId, id);
+      await POST(makeRequest({ feedbackType: "accept" }), ctx(profileId, id));
+    }
+  }
+
   it("note does not affect accept/reject state", async () => {
     await withRealDb(async (pool) => {
       const propertyId = await insertProperty(pool);
@@ -332,21 +371,35 @@ describe.runIf(dbAvailable)("feedback event API — real Postgres", () => {
       );
       expect(before.rows.every((r) => r.score === null)).toBe(true);
 
-      // Only one class so far (accept) — retrain should decline to train
-      // (needs both classes), so scores stay null after this alone. Per
-      // issue #22 (task 3.3), rank_explanation should still be set to the
-      // honest cold-start message — the candidate list shouldn't show a
-      // blank explanation just because no model exists yet.
+      // Only one class so far (accept) — retrain should decline to *train*
+      // (needs both classes), but per task 3.4 (#23) EC-1 it must still
+      // write a real, deterministic cold-start score (price-per-m²
+      // ascending) rather than leaving score at NULL — a fresh profile with
+      // sparse feedback must show a sensibly-ordered list, not a blank one.
+      // rank_explanation stays the honest "not personalized yet" message
+      // (issue #22, task 3.3) even though score itself is now non-null.
       await POST(makeRequest({ feedbackType: "accept" }), ctx(profileId, cheapPropertyId));
       const afterFirstOnly = await pool.query<{ score: string | null; rank_explanation: string | null }>(
         "SELECT score, rank_explanation FROM profile_listing_state WHERE profile_id = $1 AND property_id = ANY($2::bigint[])",
         [profileId, [cheapPropertyId, priceyPropertyId]],
       );
-      expect(afterFirstOnly.rows.every((r) => r.score === null)).toBe(true);
+      expect(afterFirstOnly.rows.every((r) => r.score !== null)).toBe(true);
       expect(afterFirstOnly.rows.every((r) => r.rank_explanation === COLD_START_EXPLANATION)).toBe(true);
 
-      // Now both classes exist — this POST should trigger a real retrain +
-      // rescore of the whole matched pool before the response returns.
+      // Task 3.4 (#23): both classes existing isn't enough on its own
+      // anymore — MIN_TRAINING_EXAMPLES (32, at the current 8-feature
+      // model) also has to be cleared. Pad past it with neutral filler
+      // (no listing/price, so it contributes zero signal to
+      // price_per_m2_relative's weight specifically — see the helper's own
+      // comment) before the real second class arrives, so this test keeps
+      // exercising "does a real retrain fire and learn the right
+      // direction", not "does the threshold gate correctly" (that's
+      // pipeline.test.ts's job).
+      await fillPastTrainingThreshold(pool, profileId);
+
+      // Now both classes exist and the threshold is cleared — this POST
+      // should trigger a real retrain + rescore of the whole matched pool
+      // before the response returns.
       const res = await POST(makeRequest({ feedbackType: "reject" }), ctx(profileId, priceyPropertyId));
       expect(res.status).toBe(201);
 
@@ -369,7 +422,10 @@ describe.runIf(dbAvailable)("feedback event API — real Postgres", () => {
         [profileId],
       );
       expect(model.rows).toHaveLength(1);
-      expect(model.rows[0].training_example_count).toBe(2);
+      // 1 (cheap, accept) + 36 (18 filler pairs) + 1 (pricey, reject) — see
+      // fillPastTrainingThreshold; exact count isn't the point of this test,
+      // just that a real training run happened at all.
+      expect(model.rows[0].training_example_count).toBe(38);
 
       // The accepted (cheap) property should score higher than the
       // rejected (pricey) one — the model actually learned the direction,
@@ -404,8 +460,12 @@ describe.runIf(dbAvailable)("feedback event API — real Postgres", () => {
       await markMatched(pool, profileId, acceptedThenStarredId);
       await markMatched(pool, profileId, rejectedId);
 
-      // accept + reject: both classes present, training succeeds (mirrors
-      // the EC-3 test above).
+      // Task 3.4 (#23): clear MIN_TRAINING_EXAMPLES first — see the EC-3
+      // test above for why this is now necessary.
+      await fillPastTrainingThreshold(pool, profileId);
+
+      // accept + reject: both classes present, threshold cleared, training
+      // succeeds (mirrors the EC-3 test above).
       await POST(makeRequest({ feedbackType: "accept" }), ctx(profileId, acceptedThenStarredId));
       await POST(makeRequest({ feedbackType: "reject" }), ctx(profileId, rejectedId));
 
@@ -413,7 +473,7 @@ describe.runIf(dbAvailable)("feedback event API — real Postgres", () => {
         "SELECT training_example_count FROM profile_scoring_model WHERE profile_id = $1",
         [profileId],
       );
-      expect(afterAccept.rows[0].training_example_count).toBe(2);
+      expect(afterAccept.rows[0].training_example_count).toBe(38);
 
       // Star the same property task 3.1 says this *replaces* the accept as
       // its current state. If star weren't treated as a positive label,
@@ -426,7 +486,7 @@ describe.runIf(dbAvailable)("feedback event API — real Postgres", () => {
         "SELECT training_example_count FROM profile_scoring_model WHERE profile_id = $1",
         [profileId],
       );
-      expect(afterStar.rows[0].training_example_count).toBe(2);
+      expect(afterStar.rows[0].training_example_count).toBe(38);
 
       const scores = await pool.query<{ property_id: number; score: string | null }>(
         "SELECT property_id, score FROM profile_listing_state WHERE profile_id = $1 AND property_id = ANY($2::bigint[])",
@@ -527,7 +587,16 @@ describe.runIf(dbAvailable)("feedback event API — real Postgres", () => {
       await markMatched(pool, profileId, acceptedId);
       await markMatched(pool, profileId, rejectedThenAcceptedId);
 
-      // Both classes present: training succeeds, real score + explanation land.
+      // Task 3.4 (#23): clear MIN_TRAINING_EXAMPLES first — see the EC-3
+      // test above for why this is now necessary. Single-class (accept-only)
+      // filler, not the balanced pair helper: this test's whole point is
+      // that the negative class disappears entirely later on, which balanced
+      // filler would permanently prevent (see that helper's own comment).
+      await fillPastTrainingThresholdSingleClass(pool, profileId);
+
+      // Both classes present, threshold cleared: training succeeds, real
+      // score + explanation land. rejectedThenAcceptedId is the *only*
+      // negative example in the whole pool at this point.
       await POST(makeRequest({ feedbackType: "accept" }), ctx(profileId, acceptedId));
       await POST(makeRequest({ feedbackType: "reject" }), ctx(profileId, rejectedThenAcceptedId));
 

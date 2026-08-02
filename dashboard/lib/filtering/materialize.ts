@@ -28,6 +28,7 @@ import { withTransaction } from "@/lib/db-write";
 import type { PoolClient } from "pg";
 import { buildScopeWhereClause } from "./scope-query";
 import { getProfileById, listActiveProfiles } from "@/lib/db/profiles";
+import { scoreNewCandidates } from "@/lib/scoring/pipeline";
 
 export interface MaterializeResult {
   profileId: number;
@@ -57,12 +58,21 @@ export async function materializeProfile(profileId: number): Promise<Materialize
 
   const { whereSql, params } = buildScopeWhereClause(profile.scope);
 
-  return withTransaction(async (client: PoolClient) => {
-    const matchedRows = await client.query<{ id: number }>(
+  const result = await withTransaction(async (client: PoolClient) => {
+    const matchedRows = await client.query<{ id: string }>(
       `SELECT property.id FROM property WHERE ${whereSql}`,
       params,
     );
-    const matchedIds = matchedRows.rows.map((r) => r.id);
+    // `property.id` is BIGSERIAL — pg returns bigint columns as strings at
+    // runtime regardless of what a query's generic type parameter claims.
+    // This was previously harmless (matchedIds only ever fed back into
+    // `unnest($n::bigint[])`, which accepts stringified bigints fine), but
+    // task 3.4 (#23) added a real in-memory Number-keyed lookup consumer
+    // (scoreNewCandidates) that a silent string/number mismatch defeats
+    // entirely — reproduced directly while building that wiring, not
+    // hypothetical. Convert at the source rather than rely on every
+    // consumer to remember to normalize.
+    const matchedIds = matchedRows.rows.map((r) => Number(r.id));
 
     if (matchedIds.length > 0) {
       await client.query(
@@ -101,8 +111,29 @@ export async function materializeProfile(profileId: number): Promise<Materialize
       profileId,
       matchedCount: matchedIds.length,
       unmatchedCount: Number(unmatchedTotal.rows[0].count),
+      matchedIds,
     };
   });
+
+  // Task 3.4 (#23): close the "materialized after the last retrain stays
+  // score=NULL forever" gap `retrain.ts` documents. Runs after (not inside)
+  // the materialize transaction — it's a separate scoring concern with its
+  // own advisory lock (see scoreNewCandidates), and scoring never needs to
+  // roll back if it fails after a successful materialize; a candidate that
+  // matched but isn't scored yet degrades gracefully in the UI (task 3.3),
+  // it isn't a correctness problem the way a partially-materialized match
+  // set would be. Passing every matched id (not just ones this run flipped
+  // from unmatched->matched) is deliberate and safe, not wasteful in any
+  // way that matters: scoring is a pure function of a candidate's own data
+  // plus the profile's current model/cold-start state, so re-scoring an
+  // already-correctly-scored candidate reproduces the same number — this
+  // also mops up any pre-existing never-scored rows for the profile, not
+  // just ones this specific run just matched.
+  if (result.matchedIds.length > 0) {
+    await scoreNewCandidates(profileId, result.matchedIds);
+  }
+
+  return { profileId: result.profileId, matchedCount: result.matchedCount, unmatchedCount: result.unmatchedCount };
 }
 
 /** One profile's outcome from {@link materializeAllProfiles} — success or isolated failure. */

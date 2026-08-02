@@ -320,6 +320,18 @@ ALTER TABLE profile_listing_state ADD COLUMN IF NOT EXISTS matched BOOLEAN NOT N
 CREATE INDEX IF NOT EXISTS idx_profile_listing_state_profile_matched
     ON profile_listing_state (profile_id, matched);
 
+-- Task 3.4 (#23) wrap-up (Fable review of PR #93): distinguishes a real
+-- trained-model score from a deterministic cold-start heuristic score.
+-- Before this column existed, the only way to tell them apart was
+-- string-equality against explain.ts's COLD_START_EXPLANATION text (used
+-- this way in a test) — fragile, since that's UI copy that could change for
+-- cosmetic reasons alone. NULL means "never scored", matching `score`'s own
+-- nullability rather than a third scoring state to keep in sync. ALTER, not
+-- part of CREATE TABLE above, for the same already-migrated-database reason
+-- as `matched`.
+ALTER TABLE profile_listing_state ADD COLUMN IF NOT EXISTS score_kind TEXT
+    CHECK (score_kind IN ('cold_start', 'trained'));
+
 -- feedback_event.property_id (not listing_id) is what the feedback's
 -- identity is keyed on, matching profile_listing_state above. listing_id
 -- is kept only as an optional "which site listing was the user actually

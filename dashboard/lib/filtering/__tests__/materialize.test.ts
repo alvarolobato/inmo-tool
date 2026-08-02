@@ -19,6 +19,21 @@ vi.mock("pg", () => ({
   },
 }));
 
+// Task 3.4 (#23): materializeProfile now calls scoreNewCandidates after its
+// own transaction commits. This file's mocks only simulate the match/unmatch
+// upsert's own query sequence — the scoring pipeline (and whichever extra
+// pool.query() calls it would make) has its own dedicated tests
+// (pipeline.test.ts) and a real-Postgres integration test proving the actual
+// wiring; stub it out here so this file keeps testing exactly what it always
+// tested, not scoring internals it isn't about. vi.hoisted() (not a plain
+// `const mock... = vi.fn()`) is required here — vitest's automatic
+// mock-prefixed-variable hoisting didn't pick up a chained
+// `.mockResolvedValue(...)` initializer, only a bare `vi.fn()`, and left the
+// variable in the TDZ when the hoisted vi.mock factory below tried to close
+// over it.
+const { mockScoreNewCandidates } = vi.hoisted(() => ({ mockScoreNewCandidates: vi.fn().mockResolvedValue(null) }));
+vi.mock("@/lib/scoring/pipeline", () => ({ scoreNewCandidates: mockScoreNewCandidates }));
+
 import { materializeProfile, materializeAllProfiles } from "../materialize";
 import { resetPool } from "@/lib/db-write";
 

@@ -9,29 +9,30 @@ import { CandidateCard } from "./CandidateCard";
 
 /**
  * Candidate feed for one profile (task 2.5, #19) — one card per property,
- * cursor-paginated. No scoring/ranking yet (Phase 3): default order is
- * most-recently-materialized property first (server-side `ORDER BY id DESC`,
- * see lib/candidates.ts), a reasonable placeholder until Phase 3's score
- * exists to order by instead.
+ * cursor-paginated. Task 3.4 (#23): globally ordered best-score-first across
+ * pages (server-side `ORDER BY score DESC NULLS LAST, id DESC`, see
+ * lib/candidates.ts) — the cursor is an opaque string carrying both score
+ * and id so pagination stays correct under that compound sort; this
+ * component never inspects or constructs cursor values itself.
  */
 export function CandidateList({ profileId }: { profileId: number }) {
   const [items, setItems] = useState<CandidateRow[]>([]);
-  const [cursor, setCursor] = useState<number | null>(null);
+  const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<ApiErrorResponse | string | null>(null);
 
   const fetchPage = useCallback(
-    async (afterCursor: number | null, replace: boolean) => {
+    async (afterCursor: string | null, replace: boolean) => {
       const url = new URL(`/api/profiles/${profileId}/candidates`, window.location.origin);
-      if (afterCursor !== null) url.searchParams.set("cursor", String(afterCursor));
+      if (afterCursor !== null) url.searchParams.set("cursor", afterCursor);
       const res = await fetch(url.toString().replace(window.location.origin, ""));
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         setError(isApiErrorResponse(body) ? body : "Error al cargar los candidatos.");
         return;
       }
-      const page: { items: CandidateRow[]; nextCursor: number | null } = await res.json();
+      const page: { items: CandidateRow[]; nextCursor: string | null } = await res.json();
       setItems((prev) => (replace ? page.items : [...prev, ...page.items]));
       setCursor(page.nextCursor);
     },
