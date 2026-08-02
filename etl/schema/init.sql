@@ -539,6 +539,19 @@ CREATE TABLE IF NOT EXISTS connector_run_results (
     UNIQUE (run_id, connector_name)
 );
 
+-- Issue #99 hardening: an operator disabling a connector via connector_config
+-- previously left zero trace — no connector_run_results row, no count
+-- anywhere — making a run where every connector is disabled indistinguishable
+-- from a healthy, fully-successful empty run. 'skipped' plus
+-- connectors_skipped close that gap: a disabled connector now gets a real
+-- result row (status='skipped', not counted toward connectors_ok/failed)
+-- so an operator can actually see "this ran, but I told it not to do
+-- anything" rather than a suspiciously-quiet clean run.
+ALTER TABLE connector_run_results DROP CONSTRAINT IF EXISTS connector_run_results_status_check;
+ALTER TABLE connector_run_results ADD CONSTRAINT connector_run_results_status_check
+    CHECK (status IN ('ok', 'failed', 'circuit_open', 'skipped'));
+ALTER TABLE connector_runs ADD COLUMN IF NOT EXISTS connectors_skipped INTEGER;
+
 CREATE INDEX IF NOT EXISTS idx_connector_run_results_run_id ON connector_run_results (run_id);
 -- Recent-runs lookups (dashboards, `ps connector status`-style queries)
 -- filter/sort on started_at; unindexed, that's a seq scan once this table
@@ -569,8 +582,10 @@ CREATE INDEX IF NOT EXISTS idx_connector_runs_started_at ON connector_runs (star
 --                                  broadening ingestion ahead of profiles
 --                                  that don't exist yet.
 --   filters                    -> a flexible bag of connector-specific
---                                  native site filters (e.g. {"min_rooms":
---                                  2} for fotocasa), not a fixed column
+--                                  native site filters (e.g. {"rooms": 2}
+--                                  for fotocasa — an EXACT-match filter on
+--                                  Fotocasa's side, confirmed live, hence
+--                                  `rooms` not `min_rooms`), not a fixed column
 --                                  per site-per-filter — issue #99 only
 --                                  confirmed one filter dimension
 --                                  (Fotocasa room count) as real via live

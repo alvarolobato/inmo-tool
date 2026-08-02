@@ -287,7 +287,7 @@ class FotocasaConnector(Connector):
         resolves to (or None if unresolvable) IS the right dedup/coverage
         key: two scopes resolving to the same slug hit the identical URL.
 
-        `min_rooms` is folded into the key (issue #99): two scopes with the
+        `rooms` is folded into the key (issue #99): two scopes with the
         same geography but different room-count filters hit genuinely
         different URLs (confirmed live — see docs/architecture/connectors.md),
         so they must not be deduplicated against each other in
@@ -296,8 +296,8 @@ class FotocasaConnector(Connector):
         geography = _resolve_geography(scope)
         if geography is None:
             return None
-        if scope.min_rooms is not None:
-            return f"{geography}:min_rooms={scope.min_rooms}"
+        if scope.rooms is not None:
+            return f"{geography}:rooms={scope.rooms}"
         return geography
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
@@ -327,12 +327,14 @@ class FotocasaConnector(Connector):
         # narrower result set with its own heading ("... con 2
         # habitaciones"), not an SEO-alias page identical to the
         # unfiltered URL — see docs/architecture/connectors.md for the
-        # verification. Price-range/property-type filters are visibly
-        # present in the site's own UI but their URL mechanism wasn't
-        # observable via static fetch — not wired in here, needs its own
-        # feasibility spike first (issue #99).
+        # verification. This is an EXACT-match filter, not "N or more"
+        # (every result in the live sample had exactly N rooms) — hence
+        # `ConnectorScope.rooms`, not `min_rooms`. Price-range/property-type
+        # filters are visibly present in the site's own UI but their URL
+        # mechanism wasn't observable via static fetch — not wired in here,
+        # needs its own feasibility spike first (issue #99).
         rooms_segment = (
-            f"{scope.min_rooms}-habitaciones/" if scope.min_rooms is not None else ""
+            f"{scope.rooms}-habitaciones/" if scope.rooms is not None else ""
         )
         url = f"{_BASE_URL}/es/comprar/viviendas/{geography}/todas-las-zonas/{rooms_segment}l"
         throttle()
