@@ -134,13 +134,31 @@ def evaluate_pair(
     return fuzzy.evaluate(a, b)
 
 
-def _pair_already_recorded(cur, listing_id_a: int, listing_id_b: int) -> bool:
-    lo, hi = sorted((listing_id_a, listing_id_b))
+def _load_recorded_pairs(cur) -> set[tuple[int, int]]:
+    """Preload every already-recorded suggestion pair once per run (issue #61).
+
+    Previously one `SELECT 1` per candidate pair, layered on top of the
+    O(n^2) pairwise scan — i.e. O(n^2) round-trips. One query up front
+    instead: the table only ever holds pairs a previous run already
+    suggested, so it's bounded by suggestions filed, not by n^2.
+
+    Excludes `status='confirmed'` (issue #60): a confirmed suggestion is a
+    pair a human has approved for merging but which hasn't been merged yet.
+    Skipping it here is what made the queue write-only — the engine would
+    never look at the pair again, so nothing could ever act on the
+    confirmation. Leaving it *out* of this set lets a normal `run` re-
+    evaluate and merge it, alongside the explicit `dedup confirm` path.
+
+    'rejected' and 'conflict' stay in the skip set on purpose: 'rejected'
+    is a human saying "these are not the same property", and 'conflict'
+    needs `dedup resolve-conflict` (an explicit human decision), not a
+    silent re-evaluation on the next run.
+    """
     cur.execute(
-        "SELECT 1 FROM suggested_merge WHERE listing_id_a = %s AND listing_id_b = %s",
-        (lo, hi),
+        "SELECT listing_id_a, listing_id_b FROM suggested_merge "
+        "WHERE status <> 'confirmed'"
     )
-    return cur.fetchone() is not None
+    return {(row[0], row[1]) for row in cur.fetchall()}
 
 
 def file_suggestion(
@@ -229,12 +247,13 @@ def run(conn) -> DedupRunResult:
     result = DedupRunResult()
 
     with conn.cursor() as cur:
+        recorded_pairs = _load_recorded_pairs(cur)
         for i in range(len(listings)):
             for j in range(i + 1, len(listings)):
                 a, b = listings[i], listings[j]
                 if a.property_id == b.property_id:
                     continue
-                if _pair_already_recorded(cur, a.listing_id, b.listing_id):
+                if tuple(sorted((a.listing_id, b.listing_id))) in recorded_pairs:
                     continue
 
                 result.pairs_compared += 1
@@ -260,6 +279,177 @@ def run(conn) -> DedupRunResult:
                     result.suggested += 1
 
     return result
+
+
+def _fetch_listing_record(conn, listing_id: int) -> ListingRecord | None:
+    """Fetch one listing by id in the same shape `fetch_listing_records` yields."""
+    for record in fetch_listing_records(conn):
+        if record.listing_id == listing_id:
+            return record
+    return None
+
+
+def confirm_suggestion(conn, suggestion_id: int) -> tuple[int, int, bool]:
+    """Merge the pair behind a `suggested_merge` row (issue #60).
+
+    This is the missing half of the suggestion queue: `run` files
+    medium-confidence pairs for human review, and until now nothing could
+    ever act on that review — the pair was skipped forever on subsequent
+    runs, so approving a suggestion had no effect whatsoever.
+
+    Reuses `perform_merge` rather than reimplementing the merge, so a
+    human-confirmed merge is recorded in `property_merge_log` identically
+    to an auto-merge and is revertable by the same `revert` path. The
+    original suggestion's `match_basis`/`confidence` carry through, so the
+    log records *why* the pair was originally flagged, not a synthetic
+    "because a human said so".
+
+    Returns (survivor_property_id, losing_property_id, had_conflict).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT listing_id_a, listing_id_b, match_basis, confidence, status, detail "
+            "FROM suggested_merge WHERE id = %s",
+            (suggestion_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise ValueError(f"No suggested_merge row with id={suggestion_id}")
+        listing_id_a, listing_id_b, match_basis, confidence, status, detail = row
+        if status in ("confirmed", "rejected"):
+            raise ValueError(
+                f"Suggestion {suggestion_id} is already {status} — nothing to do"
+            )
+        if status == "conflict":
+            raise ValueError(
+                f"Suggestion {suggestion_id} is flagged 'conflict' (a merge-time "
+                "state clash needing a human decision). Use "
+                "`ps dedup resolve-conflict` to record that decision instead."
+            )
+
+    a = _fetch_listing_record(conn, listing_id_a)
+    b = _fetch_listing_record(conn, listing_id_b)
+    if a is None or b is None:
+        raise ValueError(
+            f"Suggestion {suggestion_id} references a listing that no longer "
+            f"exists (a={listing_id_a}, b={listing_id_b})"
+        )
+    if a.property_id == b.property_id:
+        # Already unified by some other merge since the suggestion was filed.
+        # Mark it resolved rather than raising: the human's intent (these are
+        # the same property) is already satisfied.
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE suggested_merge SET status = 'confirmed', resolved_at = NOW() "
+                "WHERE id = %s",
+                (suggestion_id,),
+            )
+        conn.commit()
+        raise ValueError(
+            f"Suggestion {suggestion_id}'s listings already share property "
+            f"{a.property_id} (merged by another pair since it was filed) — "
+            "marked confirmed, no new merge needed"
+        )
+
+    evaluation = PairEvaluation(
+        basis=match_basis,
+        confidence=confidence,
+        decision="merge",
+        detail=detail if isinstance(detail, dict) else json.loads(detail or "{}"),
+    )
+    survivor_id, losing_id, had_conflict = perform_merge(conn, a, b, evaluation)
+
+    # Provenance goes on the suggestion row, not property_merge_log.detail —
+    # that column holds reconcile_merge's revert snapshot, and `revert` reads
+    # it structurally, so mixing unrelated keys into it would be writing into
+    # someone else's payload. The link is recoverable from this side: the
+    # suggestion records which merge resolved it.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE suggested_merge
+               SET status = 'confirmed',
+                   resolved_at = NOW(),
+                   detail = detail || %s::jsonb
+             WHERE id = %s
+            """,
+            (
+                json.dumps(
+                    {
+                        "confirmed_merge": {
+                            "survivor_property_id": survivor_id,
+                            "losing_property_id": losing_id,
+                            "had_conflict": had_conflict,
+                        }
+                    }
+                ),
+                suggestion_id,
+            ),
+        )
+    conn.commit()
+    return survivor_id, losing_id, had_conflict
+
+
+def reject_suggestion(conn, suggestion_id: int) -> None:
+    """Mark a suggestion as "these are not the same property" (issue #60).
+
+    The pair stays in the skip set (see `_load_recorded_pairs`), so the
+    engine won't re-suggest it on every future run — which is the whole
+    point of recording the human's "no".
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT status FROM suggested_merge WHERE id = %s", (suggestion_id,)
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise ValueError(f"No suggested_merge row with id={suggestion_id}")
+        if row[0] == "confirmed":
+            raise ValueError(
+                f"Suggestion {suggestion_id} was already confirmed and merged — "
+                "use `ps dedup revert <merge_log_id>` to undo that merge instead"
+            )
+        cur.execute(
+            "UPDATE suggested_merge SET status = 'rejected', resolved_at = NOW() "
+            "WHERE id = %s",
+            (suggestion_id,),
+        )
+    conn.commit()
+
+
+def resolve_conflict(conn, suggestion_id: int) -> None:
+    """Clear a 'conflict' flag once a human has dealt with it (issue #60).
+
+    A `conflict` row is filed by `reconcile.reconcile_merge` when a merge
+    unions two properties whose per-profile state genuinely disagrees (e.g.
+    accepted in one profile, rejected in the other) — the merge itself
+    already happened; what's flagged is that a human should look at the
+    resulting state. Without this, such a row sat in permanent limbo:
+    surfaced by `ps dedup suggestions` forever, with nothing able to clear it.
+
+    This only records that the human has resolved it — it deliberately
+    doesn't try to auto-repair the profile state, because the whole reason
+    it was flagged is that the correct resolution isn't mechanically
+    derivable.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT status FROM suggested_merge WHERE id = %s", (suggestion_id,)
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise ValueError(f"No suggested_merge row with id={suggestion_id}")
+        if row[0] != "conflict":
+            raise ValueError(
+                f"Suggestion {suggestion_id} has status '{row[0]}', not 'conflict' "
+                "— resolve-conflict only applies to merge-time state clashes"
+            )
+        cur.execute(
+            "UPDATE suggested_merge SET status = 'rejected', resolved_at = NOW() "
+            "WHERE id = %s",
+            (suggestion_id,),
+        )
+    conn.commit()
 
 
 def _restore_profile_listing_state(

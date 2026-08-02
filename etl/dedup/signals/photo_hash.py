@@ -19,7 +19,43 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT_SECONDS = 10
-_HASH_HAMMING_THRESHOLD = 8  # imagehash default hash_size=8 -> 64-bit hash
+
+# phash (DCT-based), not average_hash — issue #61.
+#
+# average_hash compares each pixel to the image mean, so a flat, low-detail
+# photo (a white wall, an empty room, an over-exposed façade — extremely
+# common in property listings) collapses to a near-uniform bit pattern, and
+# two *unrelated* flat photos land close together by construction. Measured
+# over 60 synthetic flat pairs: average_hash<=8 false-positived on 10% of
+# them, at distances of 9-13 — i.e. right on top of the old threshold.
+# phash's DCT basis doesn't degenerate that way: the same 60 pairs had a
+# minimum distance of 18, with zero pairs under 12.
+#
+# Threshold 10, not the ~5 issue #61 floated: 5 would reject genuinely
+# duplicate photos that have merely been re-encoded or cropped (a 5% crop
+# alone measures 8) — precisely the cross-posted-listing case this signal
+# exists to catch. Measured over 64 realistic duplicate transforms (resize,
+# JPEG re-encode down to q35, crop, blur, brightness), phash<=10 matches 48
+# where average_hash<=8 matched 49 — no meaningful loss in real matching,
+# all of the false-positive reduction.
+#
+# Known, accepted miss — watermarks: a portal watermark bar is the one
+# common transform phash does *not* absorb. Measured across three source
+# images, a bar covering ~2% of the frame already sits at distance 8-10
+# (at the threshold), and larger bars run to 12-22 — overlapping the
+# distance range of genuinely unrelated flat photos (floor ~18). No single
+# cutoff separates those two populations, so this is not tunable away:
+# raising the threshold far enough to catch watermarked duplicates
+# re-admits exactly the false positives this change was made to remove.
+#
+# That trade is taken deliberately in the false-negative direction, because
+# this signal only ever files a *suggestion* (capped at
+# _MAX_SUGGESTION_CONFIDENCE; the engine never treats photo_hash as an
+# auto-merge basis). A miss costs one suggestion nobody sees; a false
+# positive costs a human reviewing — or confirming — a bogus pair.
+# See TestWatermarkLimitation in etl/tests/test_dedup_signals_photo_hash.py,
+# which pins this so a future retune has to revisit it consciously.
+_HASH_HAMMING_THRESHOLD = 10  # imagehash default hash_size=8 -> 64-bit hash
 MIN_MATCH_RATIO = Decimal("0.60")
 _MAX_SUGGESTION_CONFIDENCE = Decimal("0.800")
 
@@ -39,7 +75,7 @@ def fetch_hashes(photo_urls: tuple[str, ...]) -> list[imagehash.ImageHash]:
                 response.raise_for_status()
                 response.raw.decode_content = True
                 image = Image.open(response.raw)
-                hashes.append(imagehash.average_hash(image))
+                hashes.append(imagehash.phash(image))
         except Exception as exc:  # noqa: BLE001 - genuinely best-effort per photo
             logger.warning("photo_hash: failed to fetch/hash %s: %s", url, exc)
     return hashes
