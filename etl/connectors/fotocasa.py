@@ -282,6 +282,14 @@ class FotocasaConnector(Connector):
     # disables (the orchestrator's withdrawal auto-transition).
     discovers_full_inventory = False
 
+    # Issue #100: the one native site filter live-verified as real for this
+    # site (issue #99) — Fotocasa's `/N-habitaciones/` URL segment, an
+    # EXACT-match room count, not a minimum. Price range and property type
+    # exist in Fotocasa's own sidebar UI but their URL mechanism is
+    # unconfirmed (docs/architecture/connectors.md), so they're deliberately
+    # absent here rather than shipped as controls that might silently no-op.
+    supported_filters = ("rooms",)
+
     def scope_key(self, scope: ConnectorScope) -> str | None:
         """Delegate to `_resolve_geography` — the actual slug this scope
         resolves to (or None if unresolvable) IS the right dedup/coverage

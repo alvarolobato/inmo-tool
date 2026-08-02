@@ -96,6 +96,29 @@ def main() -> None:
 
     etl.connectors.register_all()  # registers real connectors (task 1.4) — see module docstring for why this is a deferred call, not an import-time side effect
 
+    # Publish the registry for the connector-management UI (issue #100) and
+    # seed a disabled connector_config row for any connector that lacks one.
+    #
+    # NOT best-effort any more (issue #100 review): that seeding is what makes
+    # a brand-new connector born disabled, and `_scopes_for_connector` treats a
+    # *missing* row as enabled (issue #71's default). So if this fails, the
+    # rows don't exist, and a sweep would ingest a whole city from a connector
+    # the operator never enabled — precisely what the disabled-by-default rule
+    # exists to prevent. Skip the sweep instead and let the next restart retry;
+    # not ingesting is always the safe direction here.
+    registry_synced = False
+    try:
+        orchestrator.sync_connector_registry(conn_pg)
+        registry_synced = True
+    except Exception:
+        logger.exception(
+            "connector_registry sync failed — skipping this startup's connector "
+            "sweep entirely, because connectors whose connector_config row was "
+            "never seeded would otherwise run enabled-by-default. The connector "
+            "management UI may also show a stale list until the next restart."
+        )
+        conn_pg.rollback()
+
     if not orchestrator.CONNECTORS:
         logger.warning(
             "No connectors registered yet — see Phase 1.4 (issue #12). "
@@ -104,9 +127,15 @@ def main() -> None:
 
     if args.once:
         try:
-            orchestrator.run_all_connectors(
-                conn_pg, trigger="cli", connector_name=args.connector
-            )
+            if registry_synced:
+                orchestrator.run_all_connectors(
+                    conn_pg, trigger="cli", connector_name=args.connector
+                )
+            else:
+                logger.error(
+                    "Skipping the connector sweep: connector_registry sync "
+                    "failed, so disabled-by-default seeding is unverified."
+                )
             # Also drain any pending browser-extension captures (issue
             # #75) in --once mode — mainly so `ps connector run` / manual
             # testing can exercise the capture path without waiting for
@@ -140,6 +169,17 @@ def main() -> None:
         daemon=True,
     )
     capture_thread.start()
+
+    if not registry_synced:
+        # Same reasoning as the --once branch: without the seeded rows, every
+        # connector would sweep enabled-by-default. Exit rather than idle so
+        # the container's restart policy retries the sync from scratch.
+        logger.error(
+            "Not starting the connector scheduler: connector_registry sync "
+            "failed, so disabled-by-default seeding is unverified. Exiting so "
+            "the container restarts and retries."
+        )
+        sys.exit(1)
 
     # Long-running container mode (docker-compose CMD): a fresh connection
     # per cycle, same pattern the source project used, so a dropped

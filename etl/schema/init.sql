@@ -610,6 +610,60 @@ CREATE TABLE IF NOT EXISTS connector_config (
     updated_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
+-- Issue #100: what connectors *exist*, as opposed to connector_config's
+-- "how is this one configured". The connector management UI has to list
+-- every registered connector — including ones with no connector_config
+-- row and no run history yet — but the registry itself
+-- (etl/connectors/__init__.py's register_all() -> orchestrator.CONNECTORS)
+-- lives in Python, and the dashboard is TypeScript in a separate
+-- container with no shared filesystem or RPC channel.
+--
+-- Three ways to bridge that were considered:
+--   1. Hardcode the connector list in TypeScript. Rejected: two sources of
+--      truth for "which connectors exist", silently drifting the moment
+--      anyone adds a connector in Python without remembering to edit a TS
+--      constant — exactly the class of bug this project keeps finding.
+--   2. Derive the list from connector_run_results history. Rejected: a
+--      newly-added connector, or one an operator disabled before it ever
+--      ran, would be invisible in the UI — including the "everything is
+--      off until I configure it" state the owner explicitly asked for.
+--   3. (chosen) The ETL upserts its own registry here at startup. The
+--      Python registry stays the single source of truth, the dashboard
+--      reads real rows, and adding a connector in Python makes it appear
+--      in the UI with no TypeScript change at all. Same "signal via a
+--      Postgres row" pattern this codebase already uses for
+--      etl_manual_trigger and extension_capture rather than inventing
+--      cross-container HTTP.
+--
+-- Written by etl/orchestrator.sync_connector_registry(), called from
+-- etl/main.py after register_all(). Rows are never deleted by that sync:
+-- a connector removed from the Python registry keeps its row (marked
+-- registered=false) so its historical runs still resolve to a name in the
+-- UI instead of rendering as an orphan id.
+CREATE TABLE IF NOT EXISTS connector_registry (
+    connector_name            TEXT         PRIMARY KEY,
+    -- false once a connector disappears from the Python registry (renamed,
+    -- retired) — distinct from connector_config.enabled, which is an
+    -- operator's deliberate "don't run this", not "this no longer exists".
+    registered                BOOLEAN      NOT NULL DEFAULT true,
+    rate_limit_per_minute     INTEGER,
+    discovers_full_inventory  BOOLEAN,
+    -- Whether this connector's discover() can ever run at all. Idealista
+    -- is capture-only (issue #75): scope_key() always returns None, so the
+    -- orchestrator skips it every sweep by design. The UI needs to render
+    -- that as "capture-only, nothing to schedule" rather than offering
+    -- geography/filter controls that would silently do nothing.
+    supports_discovery        BOOLEAN      NOT NULL DEFAULT true,
+    -- Native site-filter keys this connector actually honours in
+    -- discover(), as a JSON array (e.g. ["rooms"] for fotocasa). Issue #99
+    -- only confirmed one filter dimension as real via live verification;
+    -- the UI renders a control per key listed here and nothing for a
+    -- connector with an empty list, so an unconfirmed filter never ships
+    -- as a control that appears to work but doesn't.
+    supported_filters         JSONB        NOT NULL DEFAULT '[]'::jsonb,
+    updated_at                TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
 -- Browser-extension listing capture (issue #75): a queue table, not a
 -- synchronous request/response — the dashboard (Node/TypeScript) and the
 -- ETL orchestrator (Python, where the Idealista connector's normalize()
