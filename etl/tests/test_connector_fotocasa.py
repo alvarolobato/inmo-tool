@@ -19,7 +19,17 @@ import requests
 from etl.connectors import fotocasa as fotocasa_module
 from etl.connectors.base import ConnectorError, ConnectorScope, RawListing
 from etl.connectors.fotocasa import FotocasaConnector
+from etl.orchestrator import _upsert_canonical_listing
 from etl.tests.robots_matcher import is_allowed, load_star_block_rules
+
+_SCHEMA_SQL = Path(__file__).parent.parent / "schema" / "init.sql"
+
+
+def _apply_schema(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(_SCHEMA_SQL.read_text(encoding="utf-8"))
+    conn.commit()
+
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -939,6 +949,101 @@ class TestReferenceCode:
         )
         canonical = FotocasaConnector().normalize(raw)
         assert canonical.reference_code is None
+
+    def test_neighbour_carousel_reference_does_not_win_over_the_subject(self):
+        """A "similar properties" carousel card carrying its own reference must
+        not be attributed to the subject listing.
+
+        This is the bug class `extraction.scoped_text` exists for — it bit
+        Vivantial (price), Solvia (latent) and Servihabitat (m2). A reference
+        code is a short opaque string with no self-evidently-wrong value, so a
+        neighbour's would be silently accepted and then fed to the dedup
+        signal (etl/dedup/signals/reference_code.py), where a wrong code is
+        worse than a missing one: it can corroborate a false merge.
+
+        The subject's reference lives in the contact-detail component; the
+        neighbour's is inside a carousel card. Asserting the subject wins
+        pins the ordering, so a future refactor that broadens the selector
+        (or switches to an unscoped page-text regex) fails here.
+        """
+        raw = RawListing(
+            external_id="190239270",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/es/comprar/vivienda/sevilla-capital/trastero/190239270/d",
+                "props": {
+                    "realEstate": {
+                        "price": 100000,
+                        "address": {},
+                        "coordinates": {},
+                        "features": {},
+                        "descriptions": {},
+                        "multimedia": [],
+                    }
+                },
+                "html": (
+                    "<html><body>"
+                    '<section class="re-Carousel-similar">'
+                    '  <article class="re-CardSimilar">'
+                    '    <ul class="re-FormContactDetail-referenceAlias">'
+                    "      <li>Referencia: NEIGHBOUR999</li>"
+                    "    </ul>"
+                    "  </article>"
+                    "</section>"
+                    '<div class="re-DetailContact">'
+                    '  <ul class="re-FormContactDetail-referenceAlias">'
+                    "    <li>Referencia: LCSE43927</li>"
+                    "  </ul>"
+                    "</div>"
+                    "</body></html>"
+                ),
+            },
+        )
+        canonical = FotocasaConnector().normalize(raw)
+        assert canonical.reference_code == "LCSE43927"
+
+    def test_reference_survives_the_round_trip_to_listing_reference_code(self, pg_conn):
+        """Issue #149's AC: the code must reach `listing.reference_code`, not
+        merely be parsed.
+
+        `normalize()` returns a well-formed dataclass whether or not the value
+        actually lands in the column the dedup signal reads. PR #138 shipped a
+        mapping where 19 normalize()-only tests passed while 100% of real
+        ingests failed on a CHECK constraint, so a parse assertion is not
+        evidence of persistence. Uses the exact listing from the bug report
+        (190239270 / LCSE43927).
+        """
+        _apply_schema(pg_conn)
+        raw = RawListing(
+            external_id="190239270",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/es/comprar/vivienda/sevilla-capital/trastero/190239270/d",
+                "props": {
+                    "realEstate": {
+                        "price": 12000,
+                        "reference": "LCSE43927",
+                        "buildingType": "Flat",
+                        "address": {},
+                        "coordinates": {},
+                        "features": {},
+                        "descriptions": {},
+                        "multimedia": [],
+                    }
+                },
+            },
+        )
+        _upsert_canonical_listing(pg_conn, FotocasaConnector().normalize(raw))
+        pg_conn.commit()
+
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "SELECT reference_code FROM listing "
+                "WHERE source = 'fotocasa' AND external_id = '190239270'"
+            )
+            row = cur.fetchone()
+        assert row is not None, "nothing persisted"
+        assert row[0] == "LCSE43927"
 
 
 class TestSchemaSupersetFields:

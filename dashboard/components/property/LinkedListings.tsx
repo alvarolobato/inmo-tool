@@ -63,6 +63,22 @@ export function LinkedListings({ listings }: { listings: PropertyListingDetail[]
             {l.current_price !== null && (
               <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>{fmtEUR0(l.current_price)}</span>
             )}
+            {/* Seller/agency reference (#72). Monospace because it's an opaque
+                identifier the user cross-references against the source portal
+                by eye — proportional digits make transcription errors easy. */}
+            {l.reference_code !== null && (
+              <span
+                data-testid="listing-reference-code"
+                title="Referencia del anunciante"
+                style={{
+                  fontSize: 11,
+                  fontFamily: "var(--font-mono, ui-monospace, monospace)",
+                  color: "var(--fg-muted)",
+                }}
+              >
+                Ref. {l.reference_code}
+              </span>
+            )}
             {formatSeenDate(l.first_seen_at) !== null && (
               <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>
                 Visto desde {formatSeenDate(l.first_seen_at)}
