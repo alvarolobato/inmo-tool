@@ -124,6 +124,12 @@ class IdealistaConnector(Connector):
     # rather than removed: a future genuinely-automated Idealista path
     # (unlikely, but not this connector's call to foreclose) would need
     # them, and there's no harm in configuring something that's never used.
+    # Issue #100: capture-only. scope_key() always returns None, so the
+    # orchestrator skips every scope for this connector by design — there
+    # is no live discover() to schedule, scope, or filter. The connector
+    # management UI reads this to render an explicit "capture-only" state
+    # rather than geography/filter controls that could never take effect.
+    supports_discovery = False
     discovers_full_inventory = False  # No discover() sweep ever runs at all
     # (not even a partial one) — see EC-relevant note in
     # docs/architecture/connectors.md: withdrawal auto-transition

@@ -6,6 +6,10 @@ import { usePathname } from "next/navigation";
 
 const ADMIN_NAV = [
   { href: "/etl", label: "Monitor ETL" },
+  // Connector management (#100). An operator surface, so it lives in this
+  // admin strip rather than the main TopBar — same reasoning (and the same
+  // middleware gating, via the `/etl/:path*` matcher) as Monitor ETL above.
+  { href: "/etl/connectors", label: "Conectores" },
   { href: "/admin/slow-queries", label: "Consultas lentas" },
   { href: "/admin/tool-calls", label: "Herramientas LLM" },
   { href: "/admin/usage", label: "Uso LLM" },

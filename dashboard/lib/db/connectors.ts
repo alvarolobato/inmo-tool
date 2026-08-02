@@ -1,0 +1,311 @@
+/**
+ * Connector management persistence (issue #100) — server-only (imports
+ * lib/db-write, the `pg` client). Never import this from a client
+ * component; use lib/connectors-schema.ts for types/validation instead.
+ */
+
+import { sql } from "@/lib/db-write";
+import {
+  ConnectorFiltersSchema,
+  GeographyOverrideSchema,
+  type ConnectorConfigPatch,
+  type ConnectorFilters,
+  type ConnectorLastRun,
+  type ConnectorView,
+  type DerivedScopeSource,
+  type GeographyOverride,
+} from "@/lib/connectors-schema";
+
+interface RegistryRow {
+  connector_name: string;
+  registered: boolean;
+  rate_limit_per_minute: number | string | null;
+  discovers_full_inventory: boolean | null;
+  supports_discovery: boolean;
+  supported_filters: unknown;
+  enabled: boolean | null;
+  geography_override: unknown;
+  filters: unknown;
+  has_config: boolean;
+}
+
+interface LastRunRow {
+  connector_name: string;
+  run_id: number | string;
+  status: string;
+  started_at: string | null;
+  finished_at: string | null;
+  discovered_count: number | string;
+  fetched_count: number | string;
+  error_count: number | string;
+  error_msg: string | null;
+}
+
+interface ProfileScopeRow {
+  id: number | string;
+  name: string;
+  scope: unknown;
+}
+
+/**
+ * `pg` returns BIGINT/BIGSERIAL columns as strings (JS numbers can't hold
+ * the full int64 range), and INTEGER columns as numbers. Normalising here
+ * keeps a string id from leaking through a `number`-typed field into the
+ * API response — the exact bug class this project has now hit three times
+ * (property_id in task 2.5, feedback id in task 3.1, a test helper in 2.7).
+ */
+function num(value: number | string | null | undefined): number {
+  if (value === null || value === undefined) return 0;
+  return typeof value === "number" ? value : Number(value);
+}
+
+function parseGeographyOverride(raw: unknown): GeographyOverride | null {
+  if (raw === null || raw === undefined) return null;
+  const parsed = GeographyOverrideSchema.safeParse(raw);
+  // A malformed stored override is shown as "no override" rather than
+  // throwing: the ETL already treats a malformed row as fall-back-to-
+  // profile-scope (etl/orchestrator.py `_scopes_for_connector`), so the UI
+  // must not claim an override is in effect when the ETL will ignore it.
+  return parsed.success ? parsed.data : null;
+}
+
+function parseFilters(raw: unknown): ConnectorFilters {
+  if (raw === null || raw === undefined) return {};
+  const parsed = ConnectorFiltersSchema.safeParse(raw);
+  return parsed.success ? parsed.data : {};
+}
+
+function parseSupportedFilters(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((v): v is string => typeof v === "string");
+}
+
+/**
+ * Every active search profile's geography — the union the ETL derives a
+ * connector's default scope from when it has no explicit override (issue
+ * #71). Surfaced per connector so an operator can see *what* "derived from
+ * profiles" actually resolves to, which is precisely the visibility gap
+ * that made ingestion feel unpredictable (issue #96).
+ *
+ * Note this deliberately does NOT replicate the ETL's nearest-city
+ * resolution (`etl/connectors/geography.py`): that's site-specific Python,
+ * and duplicating it here would create a second source of truth that
+ * silently drifts. This shows the *inputs* to that resolution, honestly
+ * labelled as such, rather than guessing at its output.
+ */
+async function fetchDerivedScopeSources(): Promise<DerivedScopeSource[]> {
+  const rows = await sql<ProfileScopeRow>(
+    `SELECT id, name, scope
+       FROM search_profile
+      WHERE archived_at IS NULL
+      ORDER BY id`,
+  );
+
+  const sources: DerivedScopeSource[] = [];
+  for (const row of rows) {
+    const scope = row.scope;
+    if (typeof scope !== "object" || scope === null) continue;
+    const geography = (scope as { geography?: unknown }).geography;
+    if (typeof geography !== "object" || geography === null) continue;
+    const center = (geography as { center?: unknown }).center;
+    const radiusKm = (geography as { radius_km?: unknown }).radius_km;
+    if (
+      !Array.isArray(center) ||
+      center.length !== 2 ||
+      typeof center[0] !== "number" ||
+      typeof center[1] !== "number" ||
+      typeof radiusKm !== "number"
+    ) {
+      // Same posture as the ETL: skip a malformed profile rather than
+      // failing the whole listing.
+      continue;
+    }
+    sources.push({
+      profile_id: num(row.id),
+      profile_name: row.name,
+      center: [center[0], center[1]],
+      radius_km: radiusKm,
+    });
+  }
+  return sources;
+}
+
+async function fetchLastRuns(): Promise<Map<string, ConnectorLastRun>> {
+  // DISTINCT ON gives the most recent result row per connector in one pass.
+  const rows = await sql<LastRunRow>(
+    `SELECT DISTINCT ON (r.connector_name)
+            r.connector_name,
+            r.run_id,
+            r.status,
+            r.started_at,
+            r.finished_at,
+            r.discovered_count,
+            r.fetched_count,
+            r.error_count,
+            r.error_msg
+       FROM connector_run_results r
+       ORDER BY r.connector_name, r.run_id DESC`,
+  );
+
+  const byName = new Map<string, ConnectorLastRun>();
+  for (const row of rows) {
+    byName.set(row.connector_name, {
+      run_id: num(row.run_id),
+      status: row.status,
+      started_at: row.started_at,
+      finished_at: row.finished_at,
+      discovered_count: num(row.discovered_count),
+      fetched_count: num(row.fetched_count),
+      error_count: num(row.error_count),
+      error_msg: row.error_msg,
+    });
+  }
+  return byName;
+}
+
+/**
+ * Every registered connector, joined against its config (defaults applied
+ * when no row exists), the profile-derived scope inputs, and its last run.
+ */
+export async function listConnectors(): Promise<ConnectorView[]> {
+  const [registryRows, lastRuns, derivedFrom] = await Promise.all([
+    // LEFT JOIN, not INNER: a connector that has never been configured must
+    // still appear — that's the default state of this table, and the
+    // "everything is off until I configure it" flow depends on seeing them.
+    sql<RegistryRow>(
+      `SELECT g.connector_name,
+              g.registered,
+              g.rate_limit_per_minute,
+              g.discovers_full_inventory,
+              g.supports_discovery,
+              g.supported_filters,
+              c.enabled,
+              c.geography_override,
+              c.filters,
+              (c.connector_name IS NOT NULL) AS has_config
+         FROM connector_registry g
+         LEFT JOIN connector_config c ON c.connector_name = g.connector_name
+        ORDER BY g.registered DESC, g.connector_name`,
+    ),
+    fetchLastRuns(),
+    fetchDerivedScopeSources(),
+  ]);
+
+  return registryRows.map((row) => {
+    const override = parseGeographyOverride(row.geography_override);
+    // Absent config row => enabled (matches the column default and the
+    // ETL's "no row means issue #71's unmodified default" behaviour).
+    const enabled = row.enabled ?? true;
+    const supportsDiscovery = row.supports_discovery;
+
+    let scopeSource: ConnectorView["scopeSource"];
+    if (!supportsDiscovery) {
+      scopeSource = "capture-only";
+    } else if (override) {
+      scopeSource = "override";
+    } else if (derivedFrom.length > 0) {
+      scopeSource = "profiles";
+    } else {
+      scopeSource = "none";
+    }
+
+    return {
+      name: row.connector_name,
+      registered: row.registered,
+      rate_limit_per_minute:
+        row.rate_limit_per_minute === null ? null : num(row.rate_limit_per_minute),
+      discovers_full_inventory: row.discovers_full_inventory,
+      supports_discovery: supportsDiscovery,
+      supported_filters: parseSupportedFilters(row.supported_filters),
+      usingDefaults: !row.has_config,
+      enabled,
+      geography_override: override,
+      filters: parseFilters(row.filters),
+      scopeSource,
+      // Only meaningful when the scope actually comes from profiles.
+      derivedFrom: scopeSource === "profiles" ? derivedFrom : [],
+      lastRun: lastRuns.get(row.connector_name) ?? null,
+    };
+  });
+}
+
+export interface ConnectorRegistryInfo {
+  name: string;
+  supports_discovery: boolean;
+  supported_filters: string[];
+}
+
+/** Registry metadata for one connector, or null if it isn't registered. */
+export async function getConnectorRegistryInfo(
+  name: string,
+): Promise<ConnectorRegistryInfo | null> {
+  const rows = await sql<{
+    connector_name: string;
+    supports_discovery: boolean;
+    supported_filters: unknown;
+  }>(
+    `SELECT connector_name, supports_discovery, supported_filters
+       FROM connector_registry
+      WHERE connector_name = $1`,
+    [name],
+  );
+  if (rows.length === 0) return null;
+  return {
+    name: rows[0].connector_name,
+    supports_discovery: rows[0].supports_discovery,
+    supported_filters: parseSupportedFilters(rows[0].supported_filters),
+  };
+}
+
+/**
+ * Apply a partial config change, creating the `connector_config` row if it
+ * doesn't exist yet (the common case — the table starts empty).
+ *
+ * Only the fields present in `patch` are written; everything else keeps its
+ * stored value, so toggling `enabled` can never silently clear a geography
+ * override an operator set earlier. This is done with COALESCE against the
+ * existing row inside a single upsert rather than read-then-write, so two
+ * concurrent PATCHes can't interleave into a lost update.
+ */
+export async function updateConnectorConfig(
+  name: string,
+  patch: ConnectorConfigPatch,
+): Promise<void> {
+  const setEnabled = patch.enabled !== undefined;
+  // Distinguish "not supplied" (leave alone) from "explicitly null" (clear
+  // the override) — `null` is a meaningful value here, not just absence.
+  const setGeography = Object.prototype.hasOwnProperty.call(patch, "geography_override");
+  const setFilters = patch.filters !== undefined;
+
+  await sql(
+    `INSERT INTO connector_config (
+        connector_name, enabled, geography_override, filters, updated_at
+     )
+     VALUES (
+        $1,
+        COALESCE($3::boolean, true),
+        $5::jsonb,
+        COALESCE($7::jsonb, '{}'::jsonb),
+        NOW()
+     )
+     ON CONFLICT (connector_name) DO UPDATE SET
+        enabled = CASE WHEN $2 THEN COALESCE($3::boolean, connector_config.enabled)
+                       ELSE connector_config.enabled END,
+        geography_override = CASE WHEN $4 THEN $5::jsonb
+                                  ELSE connector_config.geography_override END,
+        filters = CASE WHEN $6 THEN COALESCE($7::jsonb, '{}'::jsonb)
+                       ELSE connector_config.filters END,
+        updated_at = NOW()`,
+    [
+      name,
+      setEnabled,
+      setEnabled ? patch.enabled : null,
+      setGeography,
+      setGeography && patch.geography_override
+        ? JSON.stringify(patch.geography_override)
+        : null,
+      setFilters,
+      setFilters ? JSON.stringify(patch.filters) : null,
+    ],
+  );
+}

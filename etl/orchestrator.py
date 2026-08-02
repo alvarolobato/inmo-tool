@@ -10,6 +10,7 @@ empty registry is a supported, tested no-op (EC-4).
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -450,6 +451,79 @@ def _reconcile_stale_runs(conn) -> None:
             "(likely from a crashed prior process)",
             reconciled,
         )
+
+
+def sync_connector_registry(conn) -> None:
+    """Mirror the in-process CONNECTORS registry into `connector_registry`.
+
+    Issue #100: the connector-management UI has to list every connector
+    that *exists* — including ones with no `connector_config` row and no
+    run history yet — but the registry lives here in Python while the
+    dashboard is TypeScript in a separate container. Rather than duplicate
+    the connector list in TypeScript (two sources of truth, guaranteed to
+    drift the first time someone adds a connector without remembering to
+    update the mirror), the ETL publishes its own registry to a table the
+    dashboard reads. Adding a connector in Python makes it appear in the
+    UI with no TypeScript change at all. See `connector_registry`'s comment
+    block in etl/schema/init.sql for the alternatives considered.
+
+    Called from etl/main.py at startup, after register_all(). Idempotent.
+
+    Rows are never deleted here: a connector removed from the Python
+    registry is marked `registered = false` instead, so its historical
+    `connector_run_results` rows still resolve to a name in the UI rather
+    than rendering as an orphan. Any row not currently registered gets
+    flipped to false in the same pass, which is what makes a *rename*
+    (old name retired, new name added) show up correctly rather than
+    leaving two rows both claiming to be live.
+    """
+    with conn.cursor() as cur:
+        for connector in CONNECTORS:
+            cur.execute(
+                """
+                INSERT INTO connector_registry (
+                    connector_name, registered, rate_limit_per_minute,
+                    discovers_full_inventory, supports_discovery,
+                    supported_filters, updated_at
+                )
+                VALUES (%s, true, %s, %s, %s, %s::jsonb, NOW())
+                ON CONFLICT (connector_name) DO UPDATE SET
+                    registered = true,
+                    rate_limit_per_minute = EXCLUDED.rate_limit_per_minute,
+                    discovers_full_inventory = EXCLUDED.discovers_full_inventory,
+                    supports_discovery = EXCLUDED.supports_discovery,
+                    supported_filters = EXCLUDED.supported_filters,
+                    updated_at = NOW()
+                """,
+                (
+                    connector.name,
+                    connector.rate_limit_per_minute,
+                    connector.discovers_full_inventory,
+                    connector.supports_discovery,
+                    json.dumps(list(connector.supported_filters)),
+                ),
+            )
+
+        known = [c.name for c in CONNECTORS]
+        if known:
+            cur.execute(
+                "UPDATE connector_registry SET registered = false, updated_at = NOW() "
+                "WHERE registered = true AND connector_name <> ALL(%s)",
+                (known,),
+            )
+        else:
+            # No connectors registered at all (a supported state — see
+            # etl/main.py). Everything previously known is now unregistered.
+            cur.execute(
+                "UPDATE connector_registry SET registered = false, updated_at = NOW() "
+                "WHERE registered = true"
+            )
+    conn.commit()
+    logger.info(
+        "connector_registry synced (%d registered: %s)",
+        len(CONNECTORS),
+        ", ".join(sorted(c.name for c in CONNECTORS)) or "(none)",
+    )
 
 
 def _warn_unrecognized_connector_config_names(conn) -> None:

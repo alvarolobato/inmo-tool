@@ -96,6 +96,18 @@ def main() -> None:
 
     etl.connectors.register_all()  # registers real connectors (task 1.4) — see module docstring for why this is a deferred call, not an import-time side effect
 
+    # Publish the registry for the connector-management UI (issue #100).
+    # Best-effort: this is UI metadata, not something a sweep depends on —
+    # a failure here must not stop the ETL from actually ingesting.
+    try:
+        orchestrator.sync_connector_registry(conn_pg)
+    except Exception:
+        logger.exception(
+            "connector_registry sync failed — the connector management UI may "
+            "show a stale connector list; ingestion is unaffected"
+        )
+        conn_pg.rollback()
+
     if not orchestrator.CONNECTORS:
         logger.warning(
             "No connectors registered yet — see Phase 1.4 (issue #12). "
