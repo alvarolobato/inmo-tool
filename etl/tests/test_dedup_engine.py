@@ -372,19 +372,55 @@ class TestReferenceCodeSignal:
             assert confidence == Decimal("0.500")
             assert status == "pending"
 
-    def test_shared_reference_code_with_same_agency_auto_merges(self, dedup_db):
+    def test_shared_reference_code_with_same_agency_only_is_suggestion_not_merge(
+        self, dedup_db
+    ):
+        # Same agency name is NOT independent corroboration on its own
+        # (Opus review of #86): two listings from one agency always match
+        # on contact_raw by construction, so a batch/campaign code or a
+        # copy-paste error across an agency's own unrelated listings must
+        # not auto-merge just because the agency name matches. Deliberately
+        # mismatched size/price with no proximity corroboration — this
+        # should land as a same-agency-tier suggestion (0.750), not a merge.
         _insert_pair(
             dedup_db,
             "idealista",
             "fotocasa",
             "ref-code-same-agency",
-            # Deliberately mismatched size/price — same-agency-name
-            # corroboration alone must be sufficient, independent of the
-            # address/size/price fallback path.
             m2_built_a=Decimal(40),
             m2_built_b=Decimal(200),
             current_price_a=Decimal(150000),
             current_price_b=Decimal(600000),
+            contact_raw_a="Inmobiliaria Sevilla 2000",
+            contact_raw_b="INMOBILIARIA SEVILLA 2000",
+            reference_code_a="NS603",
+            reference_code_b="ns603",
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 1
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT match_basis, confidence, status FROM suggested_merge")
+            basis, confidence, status = cur.fetchone()
+            assert basis == "reference_code"
+            assert confidence == Decimal("0.750")
+            assert status == "pending"
+
+    def test_shared_reference_code_with_same_agency_and_proximity_auto_merges(
+        self, dedup_db
+    ):
+        # Same agency PLUS real proximity corroboration should still merge —
+        # the proximity check alone is sufficient, agency identity is
+        # incidental here.
+        _insert_pair(
+            dedup_db,
+            "idealista",
+            "fotocasa",
+            "ref-code-same-agency-and-proximity",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(285000),
+            current_price_b=Decimal(279000),
             contact_raw_a="Inmobiliaria Sevilla 2000",
             contact_raw_b="INMOBILIARIA SEVILLA 2000",
             reference_code_a="NS603",
@@ -401,6 +437,35 @@ class TestReferenceCodeSignal:
             basis, confidence = cur.fetchone()
             assert basis == "reference_code"
             assert confidence == Decimal("0.900")
+
+    @pytest.mark.parametrize("placeholder", ["0", "-", "REF", "sin referencia"])
+    def test_placeholder_reference_codes_never_match(self, dedup_db, placeholder):
+        # Low-cardinality/placeholder values ("0", "-", "REF") must never be
+        # treated as real reference codes — otherwise unrelated listings
+        # sharing a default/unset value would manufacture false matches.
+        # Parametrized (one pair per test run, not accumulated in a loop)
+        # so this test is only about reference_code staying inert on
+        # placeholder values, not about isolating it from every other
+        # signal in the engine when multiple pairs coexist in one DB.
+        _insert_pair(
+            dedup_db,
+            "idealista",
+            "fotocasa",
+            "ref-code-placeholder",
+            address_a="Calle Alfa 1",
+            address_b="Avenida Omega 99",
+            m2_built_a=Decimal(40),
+            m2_built_b=Decimal(200),
+            current_price_a=Decimal(150000),
+            current_price_b=Decimal(600000),
+            contact_raw_a="Inmobiliaria Uno",
+            contact_raw_b="Inmobiliaria Dos",
+            reference_code_a=placeholder,
+            reference_code_b=placeholder,
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 0
 
     def test_shared_reference_code_with_size_price_corroboration_auto_merges(
         self, dedup_db

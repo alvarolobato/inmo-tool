@@ -17,35 +17,44 @@ practice (a formal per-property record ID), not something that becomes
 less trustworthy specifically because a listing is agency-run — the
 opposite of phone numbers, where an agency's front-desk line being shared
 across many unrelated listings is exactly the failure mode to guard
-against. The real risk here is symmetric regardless of listing_kind: two
-listings share a code by coincidence, not because one side is an agency.
-So corroboration here checks two independent things instead of a
-particular/agency split:
+against.
 
-1. Same seller/agency name (`listing.contact_raw`, already captured by
-   both Fotocasa and Milanuncios into a plain column — no new pipeline
-   needed) — the strongest available corroboration, since a genuine
-   internal-reference-code collision between the *same* agency's own two
-   listings would be a data-entry error on their end, not the
-   coincidence this signal exists to guard against.
-2. Address/coordinates/size proximity, mirroring phone_extract._corroborated
+**Same-agency-name is NOT independent corroboration and must never alone
+justify an auto-merge.** Two listings from one agency always match on
+`contact_raw` by construction — an agency's batch/campaign code, a CRM
+template placeholder left unedited, or a copy-paste error across many of
+its own unrelated listings would otherwise auto-merge every such pair.
+"Same agency, same code" is informative (real coincidences across
+*different* agencies are far less likely than a single agency's own
+data-entry slip), so it still earns a mid-confidence *suggestion* — never
+a merge decision on its own. Corroboration strong enough to merge is
+either address/coordinates/size proximity (independent of agency) as
+described below, or same-agency PLUS that same proximity check:
+
+1. Address/coordinates/size proximity, mirroring phone_extract._corroborated
    exactly (coords+size when both sides publish coordinates, falling back
-   to size+price proximity otherwise).
+   to size+price proximity otherwise) — sufficient for merge on its own,
+   regardless of agency.
+2. Same seller/agency name (`listing.contact_raw`, already captured by
+   both Fotocasa and Milanuncios into a plain column) with NO proximity
+   corroboration — suggestion only, at a lower confidence than the
+   uncorroborated case is wrong; this is more informative than a bare
+   coincidence, but still not proof of the same property.
 
-Confidence scale kept to two tiers (uncorroborated-suggest /
-corroborated-merge), not phone_extract's three — there's no
-listing_kind-ambiguity middle tier here since this signal isn't gated on
-listing_kind at all.
+Three confidence tiers: bare match (weakest), same-agency-only (some
+signal, still not auto-merge-safe), and proximity-corroborated (merge).
 """
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 
 from etl.dedup.signals.address_coords import coords_close, prices_close, sizes_close
 from etl.dedup.types import ListingRecord, PairEvaluation
 
 _UNCORROBORATED_CONFIDENCE = Decimal("0.500")
+_SAME_AGENCY_ONLY_CONFIDENCE = Decimal("0.750")
 _CORROBORATED_CONFIDENCE = Decimal("0.900")
 
 # Same tolerances phone_extract._corroborated uses for its price/size
@@ -54,9 +63,32 @@ _CORROBORATED_CONFIDENCE = Decimal("0.900")
 _CORROBORATION_SIZE_RATIO = Decimal("0.05")
 _CORROBORATION_PRICE_RATIO = Decimal("0.10")
 
+# Reference codes short enough or generic enough to be placeholder/default
+# values rather than a real per-property identifier — multiple unrelated
+# listings coincidentally sharing "0" or "REF" is not a signal, it's noise.
+# Require a minimum length and at least one digit; deny known placeholders
+# outright regardless of length.
+_MIN_CODE_LENGTH = 4
+_PLACEHOLDER_CODES = frozenset(
+    {
+        "0",
+        "-",
+        "n/a",
+        "na",
+        "ref",
+        "sin referencia",
+        "sinreferencia",
+        "sin-referencia",
+        "pendiente",
+        "tbd",
+        "todo",
+    }
+)
+_HAS_DIGIT_RE = re.compile(r"\d")
+
 
 def _normalize(code: str | None) -> str | None:
-    """Case/whitespace-insensitive comparison key.
+    """Case/whitespace-insensitive comparison key, rejecting placeholders.
 
     Reference codes are short human-facing strings (e.g. "NS603"), not a
     structured identifier with its own canonical casing rule — normalizing
@@ -64,11 +96,25 @@ def _normalize(code: str | None) -> str | None:
     slightly differently by two portals' own display logic, without
     attempting anything more aggressive (stripping punctuation, say) that
     could start conflating genuinely different codes.
+
+    Values that are too short, digit-free, or a known placeholder string
+    (default/unset markers a listing tool might leave behind) are rejected
+    outright — these are exactly the low-cardinality values multiple
+    unrelated listings would coincidentally share, which would otherwise
+    manufacture matches out of noise rather than real per-property IDs.
     """
     if not code:
         return None
     normalized = code.strip().casefold()
-    return normalized or None
+    if not normalized:
+        return None
+    if normalized in _PLACEHOLDER_CODES:
+        return None
+    if len(normalized) < _MIN_CODE_LENGTH:
+        return None
+    if not _HAS_DIGIT_RE.search(normalized):
+        return None
+    return normalized
 
 
 def _same_agency(a: ListingRecord, b: ListingRecord) -> bool:
@@ -77,9 +123,12 @@ def _same_agency(a: ListingRecord, b: ListingRecord) -> bool:
     return bool(a_name) and a_name == b_name
 
 
-def _corroborated(a: ListingRecord, b: ListingRecord) -> bool:
-    if _same_agency(a, b):
-        return True
+def _proximity_corroborated(a: ListingRecord, b: ListingRecord) -> bool:
+    """Address/coordinates/size proximity — independent of agency identity.
+
+    Sufficient for a merge decision on its own; mirrors
+    phone_extract._corroborated's coords+size / size+price fallback shape.
+    """
     if coords_close(a.lat, a.lon, b.lat, b.lon) and sizes_close(
         a.m2_built, b.m2_built, Decimal("0.05")
     ):
@@ -97,17 +146,31 @@ def evaluate(a: ListingRecord, b: ListingRecord) -> PairEvaluation | None:
 
     detail = {"shared_reference_code": a.reference_code}
 
-    if not _corroborated(a, b):
+    if _proximity_corroborated(a, b):
         return PairEvaluation(
             basis="reference_code",
-            confidence=_UNCORROBORATED_CONFIDENCE,
+            confidence=_CORROBORATED_CONFIDENCE,
+            decision="merge",
+            detail=detail,
+        )
+
+    if _same_agency(a, b):
+        # Same agency, same code, but no independent proximity evidence —
+        # more informative than a bare coincidence (issue #86 review: a
+        # batch/campaign code or a copy-paste error across an agency's own
+        # unrelated listings would otherwise auto-merge on agency identity
+        # alone), so this earns a higher suggestion confidence, but never
+        # a merge decision.
+        return PairEvaluation(
+            basis="reference_code",
+            confidence=_SAME_AGENCY_ONLY_CONFIDENCE,
             decision="suggest",
             detail=detail,
         )
 
     return PairEvaluation(
         basis="reference_code",
-        confidence=_CORROBORATED_CONFIDENCE,
-        decision="merge",
+        confidence=_UNCORROBORATED_CONFIDENCE,
+        decision="suggest",
         detail=detail,
     )
