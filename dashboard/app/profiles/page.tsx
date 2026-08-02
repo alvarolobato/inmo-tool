@@ -38,6 +38,31 @@ export default function ProfilesPage() {
     fetchProfiles();
   }, [fetchProfiles]);
 
+  // Materialization (task 2.4, #18) is triggered explicitly from here rather
+  // than server-side inside POST/PATCH /api/profiles — see
+  // lib/filtering/materialize.ts's docstring for why. Best-effort: a
+  // materialize failure shouldn't block the profile save from succeeding or
+  // surface as if the save itself failed — it's logged and swallowed, the
+  // candidate list (task 2.5) will just be stale until the next successful
+  // materialize call.
+  const triggerMaterialize = async (id: number) => {
+    try {
+      const res = await fetch(`/api/profiles/${id}/materialize`, { method: "POST" });
+      if (!res.ok) {
+        // fetch() only rejects on network failure, not on a 4xx/5xx
+        // response — without this check a 500 here was silently treated as
+        // success and never logged (Opus review, PR #57).
+        console.error(
+          "No se pudieron recalcular los candidatos tras guardar el perfil:",
+          res.status,
+          await res.text().catch(() => ""),
+        );
+      }
+    } catch (err) {
+      console.error("No se pudieron recalcular los candidatos tras guardar el perfil:", err);
+    }
+  };
+
   const handleCreate = async (values: ProfileFormValues) => {
     const res = await fetch("/api/profiles", {
       method: "POST",
@@ -48,8 +73,10 @@ export default function ProfilesPage() {
       const body = await res.json().catch(() => null);
       throw new Error(isApiErrorResponse(body) ? body.error : "No se pudo crear el perfil.");
     }
+    const created: SearchProfileRow = await res.json();
     setMode({ kind: "none" });
     await fetchProfiles();
+    await triggerMaterialize(created.id);
   };
 
   const handleUpdate = async (id: number, values: ProfileFormValues) => {
@@ -64,6 +91,7 @@ export default function ProfilesPage() {
     }
     setMode({ kind: "none" });
     await fetchProfiles();
+    await triggerMaterialize(id);
   };
 
   const handleArchive = async (id: number) => {

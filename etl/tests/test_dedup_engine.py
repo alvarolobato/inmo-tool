@@ -106,12 +106,14 @@ def _insert_profile(conn, name: str = "test profile") -> int:
         return cur.fetchone()[0]
 
 
-def _set_pls(conn, profile_id: int, property_id: int, stage: str) -> None:
+def _set_pls(
+    conn, profile_id: int, property_id: int, stage: str, matched: bool = True
+) -> None:
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO profile_listing_state (profile_id, property_id, pipeline_stage) "
-            "VALUES (%s, %s, %s)",
-            (profile_id, property_id, stage),
+            "INSERT INTO profile_listing_state (profile_id, property_id, pipeline_stage, matched) "
+            "VALUES (%s, %s, %s, %s)",
+            (profile_id, property_id, stage, matched),
         )
     conn.commit()
 
@@ -560,6 +562,66 @@ class TestReconciliation:
             )
             feedback_types = [row[0] for row in cur.fetchall()]
             assert feedback_types == ["accept", "note"]
+
+    def test_reconcile_combines_matched_with_or_and_revert_restores_both_sides(
+        self, dedup_db
+    ):
+        """Opus review of PR #57: `matched` was added (task 2.4, #18) after
+        reconcile.py/engine.py were first written, so neither knew about it.
+        A merge must not silently drop one side's `matched=true` just
+        because the other side was `false`, and revert must restore each
+        side's *own* pre-merge value, not the merged OR result."""
+        _listing_a, prop_a, _listing_b, prop_b = _insert_pair(
+            dedup_db,
+            "idealista",
+            "fotocasa",
+            "reconcile-matched",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            listing_kind_a="particular",
+            listing_kind_b="particular",
+            description_a="Piso reformado, tel 655667788",
+            description_b="Piso reformado, tel 655667788",
+            current_price_a=Decimal(280000),
+            current_price_b=Decimal(275000),
+        )
+        profile_id = _insert_profile(dedup_db)
+        # Same stage on both sides (identical_stage_dropped branch) so this
+        # test isolates `matched` reconciliation from stage reconciliation.
+        _set_pls(dedup_db, profile_id, prop_a, "new", matched=False)
+        _set_pls(dedup_db, profile_id, prop_b, "new", matched=True)
+        dedup_db.commit()
+
+        result = engine.run(dedup_db)
+        assert result.merged == 1
+        assert result.conflicts == 0
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT property_id, matched FROM profile_listing_state WHERE profile_id = %s",
+                (profile_id,),
+            )
+            rows = cur.fetchall()
+            assert len(rows) == 1
+            _survivor_property_id, matched = rows[0]
+            assert matched is True, (
+                "OR-combination: either side matched=true should win"
+            )
+
+            cur.execute("SELECT id FROM property_merge_log ORDER BY id DESC LIMIT 1")
+            merge_log_id = cur.fetchone()[0]
+
+        engine.revert(dedup_db, merge_log_id)
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT property_id, matched FROM profile_listing_state "
+                "WHERE profile_id = %s ORDER BY property_id",
+                (profile_id,),
+            )
+            restored = dict(cur.fetchall())
+            assert restored[prop_a] is False
+            assert restored[prop_b] is True
 
     def test_reconcile_flags_genuine_conflicts_for_human_review(self, dedup_db):
         listing_a, prop_a, listing_b, prop_b = _insert_pair(

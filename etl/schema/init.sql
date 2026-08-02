@@ -256,6 +256,19 @@ CREATE INDEX IF NOT EXISTS idx_profile_listing_state_property
 CREATE INDEX IF NOT EXISTS idx_profile_listing_state_profile_score
     ON profile_listing_state (profile_id, score DESC);
 
+-- Task 2.4 (#18): a property that once matched a profile's hard filters but
+-- no longer does (scope edited narrower, or the property's own data changed)
+-- has its row flipped to matched=false rather than deleted — a row can carry
+-- feedback/notes/pipeline_stage by the time it stops matching, and deleting
+-- it would silently destroy that history. Candidate-list UI (task 2.5)
+-- filters on `matched = true`; a `false` row stays queryable for audit /
+-- "why did this disappear" purposes. ALTER, not part of CREATE TABLE above,
+-- for the same already-migrated-database reason as listing.missed_discovery_count.
+ALTER TABLE profile_listing_state ADD COLUMN IF NOT EXISTS matched BOOLEAN NOT NULL DEFAULT true;
+
+CREATE INDEX IF NOT EXISTS idx_profile_listing_state_profile_matched
+    ON profile_listing_state (profile_id, matched);
+
 -- feedback_event.property_id (not listing_id) is what the feedback's
 -- identity is keyed on, matching profile_listing_state above. listing_id
 -- is kept only as an optional "which site listing was the user actually

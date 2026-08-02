@@ -112,19 +112,24 @@ def _read_detail(row_detail) -> dict:
 
 def _serialize_pls_row(row: tuple) -> dict:
     """Snapshot a profile_listing_state row (score, rank_explanation,
-    pipeline_stage, notes, last_scored_at) into a JSON-safe dict.
+    pipeline_stage, notes, last_scored_at, matched) into a JSON-safe dict.
 
     score is NUMERIC -> Decimal from psycopg2; stored as str so revert can
     round-trip it exactly via Decimal(str(...)) rather than through a lossy
     float. last_scored_at is a datetime -> isoformat string, or None.
+
+    `matched` (task 2.4, issue #18) was added after this module was first
+    written — included here so revert restores it correctly instead of
+    leaving whatever value the merge's own reconciliation happened to set.
     """
-    score, rank_explanation, pipeline_stage, notes, last_scored_at = row
+    score, rank_explanation, pipeline_stage, notes, last_scored_at, matched = row
     return {
         "score": str(score) if score is not None else None,
         "rank_explanation": rank_explanation,
         "pipeline_stage": pipeline_stage,
         "notes": notes,
         "last_scored_at": last_scored_at.isoformat() if last_scored_at else None,
+        "matched": matched,
     }
 
 
@@ -209,7 +214,7 @@ def reconcile_merge(
 
         cur.execute(
             "SELECT profile_id, score, rank_explanation, pipeline_stage, notes, "
-            "last_scored_at FROM profile_listing_state WHERE property_id = %s",
+            "last_scored_at, matched FROM profile_listing_state WHERE property_id = %s",
             (losing_property_id,),
         )
         losing_rows = cur.fetchall()
@@ -217,11 +222,12 @@ def reconcile_merge(
         for losing_row in losing_rows:
             profile_id = losing_row[0]
             losing_stage = losing_row[3]
+            losing_matched = losing_row[6]
             losing_snapshot = _serialize_pls_row(losing_row[1:])
 
             cur.execute(
-                "SELECT score, rank_explanation, pipeline_stage, notes, last_scored_at "
-                "FROM profile_listing_state WHERE property_id = %s AND profile_id = %s",
+                "SELECT score, rank_explanation, pipeline_stage, notes, last_scored_at, "
+                "matched FROM profile_listing_state WHERE property_id = %s AND profile_id = %s",
                 (survivor_property_id, profile_id),
             )
             survivor_row = cur.fetchone()
@@ -244,6 +250,13 @@ def reconcile_merge(
                 continue
 
             survivor_stage = survivor_row[2]
+            survivor_matched = survivor_row[5]
+            # Combine matched with OR on merge: if either side currently
+            # satisfies its profile's hard-filter scope, the merged property
+            # should too — the properties being merged are, by definition,
+            # the same real-world unit, so whichever side's data happened to
+            # pass the filter is evidence the merged identity qualifies.
+            merged_matched = bool(survivor_matched) or bool(losing_matched)
 
             if survivor_stage == losing_stage:
                 # Identical stage on both sides — drop the now-redundant
@@ -260,9 +273,10 @@ def reconcile_merge(
                 survivor_snapshot = _serialize_pls_row(survivor_row)
                 cur.execute(
                     "UPDATE profile_listing_state "
-                    "SET score = NULL, rank_explanation = NULL, last_scored_at = NULL "
+                    "SET score = NULL, rank_explanation = NULL, last_scored_at = NULL, "
+                    "matched = %s "
                     "WHERE property_id = %s AND profile_id = %s",
-                    (survivor_property_id, profile_id),
+                    (merged_matched, survivor_property_id, profile_id),
                 )
                 cur.execute(
                     "DELETE FROM profile_listing_state "
@@ -309,9 +323,10 @@ def reconcile_merge(
                 survivor_snapshot = _serialize_pls_row(survivor_row)
                 cur.execute(
                     "UPDATE profile_listing_state "
-                    "SET score = NULL, rank_explanation = NULL, last_scored_at = NULL "
+                    "SET score = NULL, rank_explanation = NULL, last_scored_at = NULL, "
+                    "matched = %s "
                     "WHERE property_id = %s AND profile_id = %s",
-                    (survivor_property_id, profile_id),
+                    (merged_matched, survivor_property_id, profile_id),
                 )
                 cur.execute(
                     "DELETE FROM profile_listing_state "
@@ -345,9 +360,10 @@ def reconcile_merge(
                 )
             cur.execute(
                 "UPDATE profile_listing_state "
-                "SET score = NULL, rank_explanation = NULL, last_scored_at = NULL "
+                "SET score = NULL, rank_explanation = NULL, last_scored_at = NULL, "
+                "matched = %s "
                 "WHERE property_id = %s AND profile_id = %s",
-                (survivor_property_id, profile_id),
+                (merged_matched, survivor_property_id, profile_id),
             )
             cur.execute(
                 "DELETE FROM profile_listing_state "
