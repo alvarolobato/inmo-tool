@@ -72,7 +72,7 @@ describe("loadDashboardLlmConfig", () => {
       vi.stubEnv("DASHBOARD_LLM_MODEL_OPENROUTER", "default-or");
       const c = loadDashboardLlmConfig();
       expect(getEffectiveDashboardModel(c, "modify")).toBe("default-or");
-      expect(getEffectiveDashboardModel(c, "weekly")).toBe("default-or");
+      expect(getEffectiveDashboardModel(c, "analyze")).toBe("default-or");
     });
 
     it("ignores the per-flow override on the cli provider", () => {

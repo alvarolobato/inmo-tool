@@ -124,23 +124,12 @@ describe("savedDashboardCandidates", () => {
 });
 
 describe("findQueryOrigin — template matching", () => {
-  it("matches a ps_ventas query to the Ventas template", () => {
-    const rawSql =
-      "SELECT SUM(total_si) AS value FROM ps_ventas v WHERE v.entrada = true AND v.tienda <> '99' AND v.fecha_creacion >= $1 AND v.fecha_creacion <= $2";
-    const origin = findQueryOrigin(rawSql);
-    expect(origin).not.toBeNull();
-    expect(origin!.source).toMatch(/Template.*Ventas/i);
-    expect(origin!.locationHint).toContain("dashboard/lib/templates/ventas.ts");
-  });
-
-  it("matches a ps_stock_tienda query to the Stock template", () => {
-    const rawSql =
-      "SELECT tienda, SUM(stock) AS total_stock FROM ps_stock_tienda WHERE tienda <> '99' GROUP BY tienda ORDER BY total_stock DESC";
-    const origin = findQueryOrigin(rawSql);
-    expect(origin).not.toBeNull();
-    // Should match the stock template since it primarily references ps_stock_tienda
-    expect(origin!.locationHint).toContain("dashboard/lib/templates/stock.ts");
-  });
+  // The two positive-match cases that lived here ("matches a ps_ventas query
+  // to the Ventas template" / the ps_stock_tienda equivalent) were removed in
+  // #101: they asserted against dashboard/lib/templates/*, the PowerShop
+  // retail dashboard templates deleted with the dashboard-builder feature.
+  // findQueryOrigin's template matcher now has no templates to match, so both
+  // correctly return null. The negative cases below still hold and are kept.
 
   it("returns null for a non-ps_* query", () => {
     const rawSql = "SELECT 1 AS health_check";

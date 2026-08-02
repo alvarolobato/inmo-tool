@@ -2,7 +2,6 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import type { DashboardSpec } from "@/lib/schema";
-import type { WidgetState } from "@/components/DashboardRenderer";
 import PreviousConversations from "@/components/PreviousConversations";
 import type { InitialContext } from "@/lib/conversation-types";
 import type { ChatMessage } from "./conversation/types";
@@ -27,8 +26,6 @@ export interface ChatSidebarProps {
   onToggle: () => void;
   /** Saved dashboard id for agentic analyze tools (optional). */
   dashboardId?: number;
-  /** Live widget data from DashboardRenderer (unused but kept for API compat). */
-  widgetData?: Map<number, WidgetState>;
   /** Initial analyze messages — kept for API compat, no longer rendered directly. */
   initialAnalyzeMessages?: ChatMessage[];
   /** Initial modify messages — kept for API compat, no longer rendered directly. */

@@ -130,7 +130,6 @@ export function loadDashboardLlmConfig(): DashboardLlmConfig {
     generate: readStr(cfg, "dashboard.llm_model_openrouter_generate"),
     modify: readStr(cfg, "dashboard.llm_model_openrouter_modify"),
     analyze: readStr(cfg, "dashboard.llm_model_openrouter_analyze"),
-    weekly: readStr(cfg, "dashboard.llm_model_openrouter_weekly"),
   };
 
   const cliModel =

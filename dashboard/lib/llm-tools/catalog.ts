@@ -2,10 +2,11 @@
  * OpenAI-format tool definitions for OpenRouter chat.completions.
  *
  * Named catalogs:
- *   FREE_CHAT_TOOLS         — data + dashboard inspection only (free-chat flow)
- *   DASHBOARD_AGENTIC_TOOLS — inspection + modify/analyze (generate/modify/analyze flows,
- *                             which still serve historical dashboard-attached conversations
- *                             viewed via /k/[id] — see #101)
+ *   FREE_CHAT_TOOLS         — data + dashboard inspection + set_title (free-chat flow)
+ *   DASHBOARD_AGENTIC_TOOLS — inspection + modify/analyze; also the runner's
+ *                             DEFAULT catalog when no override is passed
+ *                             (see llm-tools/runner.ts), so it backs ordinary
+ *                             chat turns, not just dashboard flows.
  *
  * Structure:
  *   DATA_INSPECTION_TOOLS (private) — read-only SQL + dashboard inspect tools
@@ -15,10 +16,20 @@
  *
  * #101 removed start_dashboard_generation (chat → new-dashboard handoff) and
  * submit_weekly_review — both exclusively served /paneles and /review, which
- * no longer exist in this product. The remaining inspection/modify/analyze
- * tools were deliberately left in place: they back /k/[id]'s viewing/editing
- * of dashboards that already exist in the `dashboards` table, a decision
- * scoped separately from #101 (see that issue for the full reasoning).
+ * no longer exist in this product.
+ *
+ * apply_dashboard_modification / submit_dashboard_analysis are RETAINED, and
+ * the earlier justification for keeping them ("they back /k/[id]'s dashboard
+ * viewer") is now void — that viewer was deleted in this same change. They
+ * stay for a different, narrower reason: DASHBOARD_AGENTIC_TOOLS is the
+ * runner's default catalog, and these two names are still referenced by live
+ * chat machinery (turn-background.ts's staged-result handling, the modify/
+ * analyze system prompts, and the mock provider used by the e2e suite).
+ * Removing them is a flow-catalog refactor, not a deletion — Phase 4 (#24)
+ * owns replacing generate/modify/analyze wholesale with the domain flows
+ * (occupancy/condition/redflags/extract/chat/compare), which is where these
+ * should die. Until then they are unreachable in practice (no UI can start a
+ * modify/analyze turn) but harmless.
  */
 
 import type { ChatCompletionTool } from "openai/resources/chat/completions";

@@ -1,7 +1,5 @@
 import { notFound } from "next/navigation";
-import { Suspense } from "react";
 import { ConversationPane } from "@/components/ConversationPane";
-import DashboardSurface from "@/components/surfaces/DashboardSurface";
 import HomeSurface from "@/components/surfaces/HomeSurface";
 import AdminSurface from "@/components/surfaces/AdminSurface";
 import { fetchConversation } from "@/lib/conversation-api";
@@ -15,43 +13,20 @@ interface PageProps {
   params: Promise<{ id: string }>;
 }
 
-function LoadingSpinner() {
-  return (
-    <div className="flex justify-center py-12">
-      <div
-        className="h-8 w-8 animate-spin rounded-full border-4 border-t-transparent"
-        style={{ borderColor: "var(--border)", borderTopColor: "var(--accent)" }}
-        role="status"
-        aria-label="Cargando"
-      />
-    </div>
-  );
-}
-
 export default async function ConversationInContextPage({ params }: PageProps) {
   const { id } = await params;
   const conv = await fetchConversation(id);
   if (!conv) notFound();
 
-  const { context_kind, context_ref, context_url, mode } = conv;
+  const { context_kind, context_url } = conv;
 
-  // Derive sidebar tab from conversation mode
-  const chatTabMode: "modificar" | "analizar" =
-    mode === "analyze" ? "analizar" : "modificar";
-
-  if (context_kind === "dashboard" && context_ref) {
-    return (
-      <Suspense fallback={<LoadingSpinner />}>
-        <DashboardSurface
-          dashboardId={context_ref}
-          preloadedConversation={conv}
-          initialChatTabMode={chatTabMode}
-          kMode
-          contextUrl={context_url}
-        />
-      </Suspense>
-    );
-  }
+  // context_kind === 'dashboard' deliberately has NO branch here (#101): the
+  // generic dashboard-builder feature this product inherited from
+  // powershop-analytics was removed, along with every /api/dashboard/* route
+  // its viewer called at runtime. Historical dashboard-attached conversations
+  // still exist in the `conversations` table, so they fall through to the
+  // chat-only viewer below and remain readable — they just no longer render a
+  // dashboard alongside the transcript.
 
   if (context_kind === "home") {
     return (

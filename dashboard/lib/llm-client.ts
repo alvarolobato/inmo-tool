@@ -68,7 +68,7 @@ export interface LlmRequest {
    * Logical flow name — used for telemetry, per-flow model selection, and as
    * the default `endpoint` when none is provided.
    */
-  flow: "generate" | "modify" | "analyze" | "suggest" | "gap" | "summary" | "weekly" | string;
+  flow: "generate" | "modify" | "analyze" | "suggest" | "gap" | "summary" | string;
   /**
    * System prompt split into stable (cache-friendly) and optional volatile
    * (dynamic context). Task 4 will inject `cache_control` on the stable part.
@@ -115,7 +115,7 @@ const EMPTY_USAGE: NormalizedUsage = {
 };
 
 function narrowDashboardLlmFlow(flow: string | undefined): DashboardLlmFlow | undefined {
-  if (flow === "generate" || flow === "modify" || flow === "analyze" || flow === "weekly") {
+  if (flow === "generate" || flow === "modify" || flow === "analyze") {
     return flow;
   }
   return undefined;

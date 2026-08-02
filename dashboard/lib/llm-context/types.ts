@@ -28,12 +28,4 @@ export interface FlowVars {
     description: string;
     widgetTitles?: string[];
   }>;
-
-  // ── weekly review ──────────────────────────────────────────────────────────
-  /** Formatted SQL query results for the weekly review. */
-  queryResults?: string;
-  /** Spanish description of the reviewed week (e.g. "Semana 2026-01-01 a …"). */
-  reviewedWeekDescription?: string;
-  /** Controls the review generation angle. */
-  generationMode?: "initial" | "refresh_data" | "alternate_angle";
 }
