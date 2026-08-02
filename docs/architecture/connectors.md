@@ -82,7 +82,32 @@ Only one filter dimension is confirmed real and wired in — the rest are docume
 
 This was found live during Phase 1's phase-level review: Fotocasa's `discover()` only reads page 1 of search results (robots.txt disallows pagination — see the connectors skill), against a real inventory of 11,000+ listings for a single geography, sorted by relevance. Treating a Fotocasa listing's absence from 3 sweeps as "withdrawn" would have been wrong far more often than right — corrupting exactly the signal issue #1 §10 calls out as a first-class value-add (real withdrawals, relistings-at-a-lower-price).
 
+Zone partitioning (issue #65, see the section below) improved Fotocasa's coverage by roughly two orders of magnitude, but **did not change this flag** — and the reason is worth stating, because "we fixed coverage" is exactly the sort of claim that tempts someone to flip it. Each zone slice is still capped at its own first ~30 listings, so a busy neighbourhood with 200 active listings still contributes only 30, and a perfectly active listing can be absent from a sweep purely because it ranked 31st in its zone. Absence still proves nothing. `discovers_full_inventory` stays `False` until a connector can enumerate its scope, not merely sample it widely.
+
 `Connector.discovers_full_inventory` (`etl/connectors/base.py`, default `True`) gates this: when a connector sets it to `False`, `run_connector` skips `_reconcile_missed_discoveries` entirely for that connector — not just a raised threshold, since even accumulating a miss-count that never triggers anything would still be tracking a meaningless number. Fotocasa sets `discovers_full_inventory = False`. A connector should only claim `True` when its `discover()` genuinely enumerates (or very nearly enumerates) everything active in its scope — pagination through the full result set, an API that returns a complete listing, etc. Until a connector can honestly claim full coverage, its listings simply never auto-transition to `withdrawn` from absence alone (a human/future mechanism would need to confirm removal some other way).
+
+## Partitioning a search space to get past a page-1 cap (and the rate limit that makes it work)
+
+Several sites disallow pagination in robots.txt while leaving *filtered* search paths allowed. Where that holds, sweeping many narrow allowed slices beats fetching one broad page — same compliance posture, far more coverage. Issue #65 established the pattern on Fotocasa; expect it to generalize.
+
+**The mechanics.** Fotocasa's city page embeds ~160 neighbourhood links of the form `/es/comprar/viviendas/{geography}/{zone}/l`, none matched by any Disallow rule. Each returns its own ~30-listing slice, and the slices barely overlap (live-verified: Chamberí vs the unfiltered page shared 0 listings; Chamberí vs Barrio de Salamanca shared 0). `discover()` reads those slugs from the city page itself rather than a hardcoded table, so the list tracks the site as zones are added or renamed. The zone regex is scoped to the requested geography — city pages link *other* cities too, and an unscoped match silently ingests the wrong city's listings.
+
+**Path segments are allowed; query strings are not.** On Fotocasa, `minPrice`, `maxPrice`, `minRooms`, `maxRooms`, `propertySubtypeIds` and `filter=*` (bar an `isnewconstruction` carve-out) are all Disallowed, while zone / property-type / room-count *path segments* are fine. `fotocasa._search_url` therefore builds URLs with no query string at all, and `test_every_constructed_url_is_robots_allowed` drives a real sweep and checks every requested URL against the real robots.txt — so adding a disallowed filter later fails a test rather than quietly shipping.
+
+**Do not trust `protego` for these decisions.** Issue #65's spike found protego 0.5.0 reporting the connector's own working, 200-serving URL as Disallowed: its `_quote_pattern()` runs `urlparse()` over raw pattern text, which drops a literal `?` when only `$` follows it, so `/*/l?$` is evaluated as `/*/l$`. `etl/tests/robots_matcher.py` implements the documented spec directly (only `*` and trailing `$` are special; longest match wins; ties to Allow) and is the reference used by the compliance test.
+
+**The rate limit is the load-bearing part, and it is measured, not guessed.** Turning a 1-request sweep into ~161 makes pacing a correctness concern rather than a courtesy one. Measured on Fotocasa:
+
+| Rate | Behaviour |
+|---|---|
+| 20/min (3s apart) | First ~4 zones return full data; every page after that is **HTTP 200 with the `__initial_props__` payload missing entirely** — the soft-block page — and it persists for minutes after the burst stops. |
+| 3/min (20s apart) | Sustained full data (31/30/30 listings across consecutive real zones). |
+
+The failure mode is why this matters: sweeping too fast does not raise an error or trip the circuit breaker, it silently returns *fewer listings* while every request still looks successful. Fotocasa is therefore pinned at `rate_limit_per_minute = 3`, which puts a full 161-request sweep at roughly 54 minutes. `max_zones_per_sweep` (default `None`, meaning all) bounds that when the schedule can't absorb it.
+
+`discover()` counts zones that failed *and* zones that returned zero listings, and logs at ERROR when more than 80% of a sweep comes back in either state — real neighbourhoods reliably return ~30 listings, so a mostly-empty sweep is the signature of throttling, not of a city full of empty districts. Without that check the degenerate case looks like an ordinary successful run.
+
+**When adding this to another connector**: verify the allowed/disallowed split against that site's own robots.txt (don't assume Fotocasa's shape), confirm slices genuinely differ rather than being SEO aliases of the same result set, and characterise the site's rate tolerance *before* setting `rate_limit_per_minute` — the sustainable rate for a 160-request sweep is unlikely to be the one that worked for a single request.
 
 ## Reusing `property_web_scraper` — the reference project for this domain
 

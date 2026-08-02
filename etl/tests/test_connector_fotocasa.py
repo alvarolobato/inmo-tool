@@ -14,9 +14,12 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
+import requests
 
+from etl.connectors import fotocasa as fotocasa_module
 from etl.connectors.base import ConnectorError, ConnectorScope, RawListing
 from etl.connectors.fotocasa import FotocasaConnector
+from etl.tests.robots_matcher import is_allowed, load_star_block_rules
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -179,6 +182,304 @@ class TestDiscover:
                 ConnectorScope(geography="madrid"), throttle=lambda: None
             )
         mock_get.assert_not_called()
+
+
+class TestZonePartitioning:
+    """Issue #65: lift coverage past the ~30-listing page-1 cap by sweeping
+    the neighbourhood ("zone") slices Fotocasa itself links from the city
+    page — all robots.txt-allowed, no pagination, no query-string filters."""
+
+    def _responses_by_url(self):
+        """Map URL -> fixture, so a patched requests.get can answer each
+        zone request with its own page rather than one shared blob (which
+        would make a 'did we actually sweep the zones?' assertion vacuous)."""
+        base = _read_fixture("fotocasa_sample_search_zones.html")
+        chamberi = _read_fixture("fotocasa_sample_search_zone_chamberi.html")
+
+        def fake_get(url, **_kwargs):
+            if "/todas-las-zonas/" in url:
+                return _mock_response(base, url=url)
+            if "/chamberi/" in url:
+                return _mock_response(chamberi, url=url)
+            # Every other zone: a valid page with no listings of its own.
+            return _mock_response('<script id="__initial_props__">{}</script>', url=url)
+
+        return fake_get
+
+    def test_discover_sweeps_zones_and_unions_their_listings(self):
+        """The headline behaviour: ids from the zone pages must be added to
+        the baseline page's ids. The fixtures share no ids, so a connector
+        that silently ignored zones would return only the baseline two and
+        fail here."""
+        with patch(
+            "etl.connectors.fotocasa.requests.get",
+            side_effect=self._responses_by_url(),
+        ):
+            ids = FotocasaConnector().discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+        # 190011971/190022222 from the city page, 190044444/190055555 from Chamberí.
+        assert sorted(ids) == ["190011971", "190022222", "190044444", "190055555"]
+
+    def test_zone_slugs_are_scoped_to_the_requested_geography(self):
+        """The city page links other cities' zone pages too. Sweeping one of
+        those would 200 with real listings from the WRONG city and quietly
+        pollute the geography the operator asked for — so the barcelona zone
+        link in the fixture must never be requested during a madrid sweep."""
+        with patch(
+            "etl.connectors.fotocasa.requests.get",
+            side_effect=self._responses_by_url(),
+        ) as mock_get:
+            FotocasaConnector().discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+        requested = [call.args[0] for call in mock_get.call_args_list]
+        assert not any("barcelona" in url for url in requested)
+        assert all("/madrid-capital/" in url for url in requested)
+
+    def test_todas_las_zonas_is_not_swept_as_if_it_were_a_neighbourhood(self):
+        """`todas-las-zonas` is the unfiltered page discover() already
+        fetched, not a zone — re-fetching it would waste a request against a
+        live site for zero new listings."""
+        with patch(
+            "etl.connectors.fotocasa.requests.get",
+            side_effect=self._responses_by_url(),
+        ) as mock_get:
+            FotocasaConnector().discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+        requested = [call.args[0] for call in mock_get.call_args_list]
+        assert sum("/todas-las-zonas/" in url for url in requested) == 1
+
+    def test_one_failing_zone_does_not_abort_the_whole_sweep(self):
+        """A sweep is ~161 requests against a live site; a single transient
+        failure must degrade coverage, not destroy it. The baseline page and
+        the surviving zones must still come back."""
+        base = _read_fixture("fotocasa_sample_search_zones.html")
+        chamberi = _read_fixture("fotocasa_sample_search_zone_chamberi.html")
+
+        def flaky_get(url, **_kwargs):
+            if "/todas-las-zonas/" in url:
+                return _mock_response(base, url=url)
+            if "/chamberi/" in url:
+                return _mock_response(chamberi, url=url)
+            if "/carabanchel/" in url:
+                raise requests.Timeout("simulated zone timeout")
+            return _mock_response('<script id="__initial_props__">{}</script>', url=url)
+
+        with patch("etl.connectors.fotocasa.requests.get", side_effect=flaky_get):
+            ids = FotocasaConnector().discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+        assert sorted(ids) == ["190011971", "190022222", "190044444", "190055555"]
+
+    def test_base_page_failure_still_raises(self):
+        """The per-zone tolerance must NOT leak into the base page: if that
+        fails there are no zone slugs and no baseline, so returning an empty
+        list would look to the orchestrator like 'every listing vanished'."""
+        with (
+            patch(
+                "etl.connectors.fotocasa.requests.get",
+                side_effect=requests.Timeout("simulated base failure"),
+            ),
+            pytest.raises(ConnectorError, match="request failed"),
+        ):
+            FotocasaConnector().discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+
+    def test_throttle_is_called_once_per_request(self):
+        """The sweep is ~161 requests where it used to be 1 — the shared
+        per-connector limiter is the only thing pacing it, so every request
+        must go through the throttle, not just the first."""
+        calls = {"n": 0}
+
+        def counting_throttle():
+            calls["n"] += 1
+
+        with patch(
+            "etl.connectors.fotocasa.requests.get",
+            side_effect=self._responses_by_url(),
+        ) as mock_get:
+            FotocasaConnector().discover(
+                ConnectorScope(geography="madrid-capital"),
+                throttle=counting_throttle,
+            )
+        assert calls["n"] == len(mock_get.call_args_list)
+        assert calls["n"] > 1  # guards against a regression to single-request
+
+    def test_rooms_filter_applies_to_every_zone_url(self):
+        """A rooms-filtered scope must carry the filter into each zone slice
+        too — live-verified that `.../chamberi/2-habitaciones/l` is a real,
+        robots-allowed, data-serving URL shape."""
+        with patch(
+            "etl.connectors.fotocasa.requests.get",
+            side_effect=self._responses_by_url(),
+        ) as mock_get:
+            FotocasaConnector().discover(
+                ConnectorScope(geography="madrid-capital", rooms=2),
+                throttle=lambda: None,
+            )
+        requested = [call.args[0] for call in mock_get.call_args_list]
+        assert len(requested) > 1
+        assert all(url.endswith("/2-habitaciones/l") for url in requested)
+
+
+class TestSweepPacingAndBounds:
+    """Issue #65 live measurement: at 20 req/min Fotocasa starts returning
+    HTTP 200 pages with the `__initial_props__` payload missing after ~4
+    zone requests, and keeps doing so for minutes. At 3 req/min it serves
+    full data consistently. These guard the settings that encode that."""
+
+    def test_rate_limit_is_low_enough_for_a_multi_request_sweep(self):
+        """A regression here wouldn't fail loudly — it would silently return
+        fewer listings while every request still looked like a 200 success,
+        defeating the coverage this change exists to gain."""
+        assert FotocasaConnector.rate_limit_per_minute <= 4
+
+    def test_max_zones_per_sweep_bounds_the_request_count(self):
+        base = _read_fixture("fotocasa_sample_search_zones.html")
+        chamberi = _read_fixture("fotocasa_sample_search_zone_chamberi.html")
+
+        def fake_get(url, **_kwargs):
+            body = base if "/todas-las-zonas/" in url else chamberi
+            return _mock_response(body, url=url)
+
+        class BoundedConnector(FotocasaConnector):
+            max_zones_per_sweep = 2
+
+        with patch(
+            "etl.connectors.fotocasa.requests.get", side_effect=fake_get
+        ) as mock_get:
+            BoundedConnector().discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+        # 1 base page + at most 2 zones.
+        assert len(mock_get.call_args_list) == 3
+
+    def test_default_sweeps_every_discovered_zone(self):
+        """The bound is opt-in: defaulting it small would disguise an
+        operator choice about coverage as a property of the connector."""
+        assert FotocasaConnector.max_zones_per_sweep is None
+
+    def test_soft_block_page_counts_as_a_failed_zone_not_an_empty_one(self):
+        """The measured soft-block shape is HTTP 200 with no
+        __initial_props__. It must be treated as a failure (so it feeds the
+        'all zones failed' alarm), never as a legitimately empty zone."""
+        base = _read_fixture("fotocasa_sample_search_zones.html")
+
+        def soft_blocking_get(url, **_kwargs):
+            if "/todas-las-zonas/" in url:
+                return _mock_response(base, url=url)
+            return _mock_response("<html><body>no payload</body></html>", url=url)
+
+        connector = FotocasaConnector()
+        with (
+            patch(
+                "etl.connectors.fotocasa.requests.get", side_effect=soft_blocking_get
+            ),
+            patch.object(fotocasa_module.logger, "error") as mock_error,
+        ):
+            ids = connector.discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+        # Baseline survives; zones contribute nothing.
+        assert sorted(ids) == ["190011971", "190022222"]
+        assert mock_error.called, "a fully-soft-blocked sweep must log an error"
+
+    def test_mostly_empty_sweep_warns_about_probable_throttling(self):
+        """Real neighbourhoods return ~30 listings each, so a sweep where
+        almost every zone yields nothing is the signature of throttling, not
+        of a city full of empty neighbourhoods."""
+        base = _read_fixture("fotocasa_sample_search_zones.html")
+
+        def empty_zone_get(url, **_kwargs):
+            if "/todas-las-zonas/" in url:
+                return _mock_response(base, url=url)
+            # Valid page shape, zero listings.
+            return _mock_response('<script id="__initial_props__">{}</script>', url=url)
+
+        with (
+            patch("etl.connectors.fotocasa.requests.get", side_effect=empty_zone_get),
+            patch.object(fotocasa_module.logger, "error") as mock_error,
+        ):
+            FotocasaConnector().discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+        assert mock_error.called
+        assert "soft-blocking" in str(mock_error.call_args)
+
+
+class TestRobotsCompliance:
+    """Issue #65 made this connector fetch ~161 URLs per sweep instead of 1.
+    That is only defensible if every one of them is robots.txt-allowed, so
+    assert it against the real robots.txt rather than trusting the URL
+    builder by inspection."""
+
+    def _rules(self):
+        return load_star_block_rules(_read_fixture("fotocasa_robots.txt"))
+
+    def test_every_constructed_url_is_robots_allowed(self):
+        """Drive a real sweep, capture every URL actually requested, and
+        check each against the real robots.txt. This is the test that should
+        fail if someone later adds a query-string filter (minPrice, filter=,
+        propertySubtypeIds…) — all of which Fotocasa disallows — or reaches
+        for a pagination path."""
+        rules = self._rules()
+        base = _read_fixture("fotocasa_sample_search_zones.html")
+        chamberi = _read_fixture("fotocasa_sample_search_zone_chamberi.html")
+
+        def fake_get(url, **_kwargs):
+            body = base if "/todas-las-zonas/" in url else chamberi
+            return _mock_response(body, url=url)
+
+        for scope in (
+            ConnectorScope(geography="madrid-capital"),
+            ConnectorScope(geography="madrid-capital", rooms=2),
+        ):
+            with patch(
+                "etl.connectors.fotocasa.requests.get", side_effect=fake_get
+            ) as mock_get:
+                FotocasaConnector().discover(scope, throttle=lambda: None)
+            requested = [call.args[0] for call in mock_get.call_args_list]
+            assert requested, "sweep made no requests — assertion would be vacuous"
+            for url in requested:
+                allowed, reason = is_allowed(rules, url)
+                assert allowed, f"{url} is robots.txt-disallowed: {reason}"
+
+    def test_the_matcher_actually_rejects_the_disallowed_patterns(self):
+        """Guards the guard: if the matcher said yes to everything, the test
+        above would pass no matter what the connector did. These are the
+        real disallowed shapes from Fotocasa's robots.txt (pagination, the
+        query-string filters, and the bare city-name segment)."""
+        rules = self._rules()
+        base = "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital"
+        must_be_disallowed = [
+            f"{base}/todas-las-zonas/l/2",
+            f"{base}/todas-las-zonas/l?minPrice=100000",
+            f"{base}/todas-las-zonas/l?maxPrice=200000",
+            f"{base}/todas-las-zonas/l?minRooms=2",
+            f"{base}/todas-las-zonas/l?propertySubtypeIds=1",
+            "https://www.fotocasa.es/es/comprar/viviendas/madrid/todas-las-zonas/l",
+        ]
+        for url in must_be_disallowed:
+            allowed, _ = is_allowed(rules, url)
+            assert not allowed, f"matcher wrongly allowed {url}"
+
+    def test_matcher_allows_the_zone_shape_the_connector_relies_on(self):
+        """The other half of guarding the guard — a matcher that rejected
+        everything would also make the sweep test pass vacuously if it were
+        ever inverted. These shapes must be allowed."""
+        rules = self._rules()
+        base = "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital"
+        for url in (
+            f"{base}/todas-las-zonas/l",
+            f"{base}/chamberi/l",
+            f"{base}/barrio-de-salamanca/l",
+            f"{base}/chamberi/2-habitaciones/l",
+        ):
+            allowed, reason = is_allowed(rules, url)
+            assert allowed, f"matcher wrongly disallowed {url}: {reason}"
 
 
 class TestNormalize:
