@@ -42,7 +42,7 @@ from __future__ import annotations
 import re
 from decimal import Decimal
 
-from etl.dedup.signals.address_coords import coords_close, sizes_close
+from etl.dedup.signals.address_coords import coords_close, prices_close, sizes_close
 from etl.dedup.types import ListingRecord, PairEvaluation
 
 # Spanish mobile/landline: 9 digits starting 6/7/8/9, optional +34 prefix,
@@ -82,12 +82,6 @@ def extract_phones(text: str | None) -> set[str]:
     return found
 
 
-def _prices_close(a: Decimal | None, b: Decimal | None, tolerance: Decimal) -> bool:
-    if a is None or b is None or a <= 0 or b <= 0:
-        return False
-    return abs(a - b) / max(a, b) <= tolerance
-
-
 def _corroborated(a: ListingRecord, b: ListingRecord) -> bool:
     if coords_close(a.lat, a.lon, b.lat, b.lon) and sizes_close(
         a.m2_built, b.m2_built, Decimal("0.05")
@@ -98,7 +92,7 @@ def _corroborated(a: ListingRecord, b: ListingRecord) -> bool:
     # project's actual connectors.
     return sizes_close(
         a.m2_built, b.m2_built, _CORROBORATION_SIZE_RATIO
-    ) and _prices_close(a.current_price, b.current_price, _CORROBORATION_PRICE_RATIO)
+    ) and prices_close(a.current_price, b.current_price, _CORROBORATION_PRICE_RATIO)
 
 
 def evaluate(a: ListingRecord, b: ListingRecord) -> PairEvaluation | None:

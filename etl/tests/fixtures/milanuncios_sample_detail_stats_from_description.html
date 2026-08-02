@@ -1,0 +1,12 @@
+<!--
+Synthetic fixture for issue #78's must-fix (Opus review, PR #85): proves
+the description-text fallback for rooms/bathrooms/m2_built actually fires
+and recovers the correct values, not just that it exists as dead code.
+`ad.attributes` deliberately omits `bedrooms`/`bathrooms`/`squareMeters`
+(simulating a renamed/restructured primary source) while `ad.description`
+still spells the same stats out in prose, exactly as real Milanuncios
+listings do (see milanuncios_sample_detail.html's docstring).
+-->
+<html><head><title>Milanuncios</title></head><body>
+<script>window.__INITIAL_PROPS__ = JSON.parse("{\"ad\": {\"id\": \"700000002\", \"title\": \"Sevilla\", \"description\": \"Piso reformado en Sevilla con 92,5 m2 construidos, 3 habitaciones y 2 banios. Muy luminoso.\", \"category\": {\"id\": 131, \"name\": \"Venta de pisos\", \"slug\": \"venta-de-pisos\"}, \"sellerType\": {\"value\": \"private\", \"isPrivate\": true}, \"price\": {\"cashPrice\": {\"value\": 210000}}, \"location\": {\"province\": {\"id\": 41, \"name\": \"Sevilla\", \"slug\": \"sevilla\"}, \"city\": {\"id\": 55, \"name\": \"Sevilla\", \"slug\": \"sevilla\"}, \"geolocation\": {\"latitude\": 37.389092, \"longitude\": -5.984459}}, \"attributes\": [{\"type\": \"floor\", \"fieldFormatted\": \"planta\", \"value\": \"2\", \"valueFormatted\": \"2a\"}], \"images\": [], \"author\": {\"id\": \"1\", \"userName\": \"Particular\"}, \"origin\": {\"name\": \"inner\"}, \"contactMethods\": {\"chat\": false, \"phone\": false, \"form\": true}}}");</script>
+</body></html>

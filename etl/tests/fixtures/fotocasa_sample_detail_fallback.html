@@ -1,0 +1,23 @@
+<!--
+Synthetic fixture for issue #77's fallback-chain retrofit. The embedded
+__initial_props__ JSON has rooms/bathrooms/surface/price all explicitly
+null/absent (simulating a Fotocasa redesign that renames/removes these
+JSON paths), while the surrounding HTML carries the real, live-verified
+markup structure (icon-anchored stat row + price display) these values
+are still recoverable from — verified live 2026-08-02 against a real
+listing (external_id 189316512: rooms=2, bathrooms=2, surface=60,
+price=379000 — the same values baked into this fixture's HTML, so this
+fixture doubles as a regression check that the fallback selectors
+produce the values a real page actually has).
+-->
+<html lang="es"><head><title>Piso en venta</title></head><body>
+<script type="application/json" id="__initial_props__">{"realEstate": {"energyCertificate": "F", "address": {"district": "Centro", "neighborhood": "Embajadores - Lavapiés", "municipality": " Madrid Capital", "city": " Madrid Capital", "province": "Madrid", "upperLevel": "Embajadores - Lavapiés", "zipCode": "28012"}, "buildingType": "Flat", "clientAlias": "Engel & Völkers", "clientId": 5501234567, "clientName": "ENGEL VOLKERS MADRID SL", "clientUrl": "/es/inmobiliaria-engel-volkers/comprar/inmuebles/espana/todas-las-zonas/l?clientId=5501234567", "coordinates": {"latitude": 40.4098, "longitude": -3.7003, "accuracy": 0}, "descriptions": {"es-ES": "Acogedor apartamento recién reformado en una tranquila pero céntrica zona."}, "features": {"rooms": null, "bathrooms": null, "surface": null, "energyCertificate": 6, "conservationState": 2, "antiquity": 9, "floor": 3, "surfaceLand": 0}, "featuresList": [{"label": "typology", "literal": "FEATURES.TYPOLOGY", "value": "flat"}, {"label": "floor", "literal": "FEATURES.FLOOR", "value": "Bajos"}, {"label": "elevator", "literal": "FEATURES.ELEVATOR", "value": "YES"}], "multimedia": [{"src": "https://static.fotocasa.es/images/ads/aaaa1111.jpg", "type": "image"}], "price": null, "reducedPrice": null, "clientTypeId": 3}}</script>
+<div aria-label="Precio del inmueble" class="flex flex-col sm:flex-row sm:gap-lg" role="region"><span class="text-on-surface text-display-3 ml:text-display-2">379.000 €</span></div>
+<ul aria-label="Características principales" class="flex flex-row gap-2xl items-center flex-wrap list-none my-none p-none" role="region">
+<li class="flex flex-col gap-sm items-center"><svg viewBox="0 0 24 24" data-title="double_bed" fill="currentColor" stroke="none" class="shrink-0 text-current w-40 h-40" aria-hidden="true" focusable="false"></svg><span class="text-body-1"><span class="font-bold">2</span> habs.</span></li>
+<li class="flex flex-col gap-sm items-center"><svg viewBox="0 0 24 24" data-title="bathroom_tub" fill="currentColor" stroke="none" class="shrink-0 text-current w-40 h-40" aria-hidden="true" focusable="false"></svg><span class="text-body-1"><span class="font-bold">2</span> baños</span></li>
+<li class="flex flex-col gap-sm items-center"><svg viewBox="0 0 24 24" data-title="dimensions_block" fill="currentColor" stroke="none" class="shrink-0 text-current w-40 h-40" aria-hidden="true" focusable="false"></svg><span class="text-body-1"><span class="font-bold">60</span> m²</span></li>
+<li class="flex flex-col gap-sm items-center"><svg viewBox="0 0 24 24" data-title="floor" fill="currentColor" stroke="none" class="shrink-0 text-current w-40 h-40" aria-hidden="true" focusable="false"></svg><span class="text-body-1">Bajos</span></li>
+</ul>
+<div><ul class="re-FormContactDetail-referenceAlias"><li>Referencia: XY789</li></ul></div>
+</body></html>

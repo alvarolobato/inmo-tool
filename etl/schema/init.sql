@@ -93,6 +93,23 @@ CREATE TABLE IF NOT EXISTS listing (
     UNIQUE (source, external_id)
 );
 
+-- ALTER, not a column in the CREATE TABLE above (same reasoning as
+-- listing.missed_discovery_count/operation elsewhere in this file): this
+-- file must stay safe to re-run against an already-migrated database, and
+-- `reference_code` was added after `listing`'s original CREATE TABLE.
+--
+-- Seller/agency-assigned reference code (e.g. Fotocasa's "Referencia:
+-- NS603") — a dedicated column, not raw_extra, because the dedup engine
+-- (etl/dedup/signals/reference_code.py, issue #72) needs to compare it
+-- across every listing pair; NOT globally unique (two different
+-- agencies can coincidentally use the same code) so it carries no
+-- UNIQUE constraint — see that signal module for the corroboration
+-- discipline this requires.
+ALTER TABLE listing ADD COLUMN IF NOT EXISTS reference_code TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_listing_reference_code ON listing (reference_code)
+    WHERE reference_code IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_listing_property_id  ON listing (property_id);
 -- Both of these are kept, not redundant: a b-tree composite index on
 -- (source, status) only serves queries that filter on `source` (alone, or
@@ -357,11 +374,20 @@ CREATE TABLE IF NOT EXISTS property_merge_log (
     id                  BIGSERIAL    PRIMARY KEY,
     property_id         BIGINT       REFERENCES property(id),
     merged_listing_ids  BIGINT[],
-    match_basis         TEXT         CHECK (match_basis IN ('cadastral','address_coords','phone','photo_hash','fuzzy')),
+    match_basis         TEXT         CHECK (match_basis IN ('cadastral','address_coords','phone','reference_code','photo_hash','fuzzy')),
     confidence          NUMERIC(4,3),
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     reverted_at         TIMESTAMPTZ
 );
+
+-- 'reference_code' (issue #72) was added to the CHECK list above after
+-- this table's original CREATE TABLE — inert against an already-migrated
+-- database (CREATE TABLE IF NOT EXISTS is a no-op there), so the live
+-- constraint needs its own migration or a pre-#72 database would reject
+-- every real 'reference_code' insert at runtime.
+ALTER TABLE property_merge_log DROP CONSTRAINT IF EXISTS property_merge_log_match_basis_check;
+ALTER TABLE property_merge_log ADD CONSTRAINT property_merge_log_match_basis_check
+    CHECK (match_basis IN ('cadastral','address_coords','phone','reference_code','photo_hash','fuzzy'));
 
 -- ALTER, not a column in the CREATE TABLE above (same reasoning as
 -- listing.missed_discovery_count in task 1.4): this file must stay safe to
@@ -410,7 +436,7 @@ CREATE TABLE IF NOT EXISTS suggested_merge (
     id            BIGSERIAL    PRIMARY KEY,
     listing_id_a  BIGINT       NOT NULL REFERENCES listing(id),
     listing_id_b  BIGINT       NOT NULL REFERENCES listing(id),
-    match_basis   TEXT         NOT NULL CHECK (match_basis IN ('cadastral','address_coords','phone','photo_hash','fuzzy')),
+    match_basis   TEXT         NOT NULL CHECK (match_basis IN ('cadastral','address_coords','phone','reference_code','photo_hash','fuzzy')),
     confidence    NUMERIC(4,3),
     status        TEXT         NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','rejected','conflict')),
     detail        JSONB        NOT NULL DEFAULT '{}',
@@ -418,6 +444,13 @@ CREATE TABLE IF NOT EXISTS suggested_merge (
     resolved_at   TIMESTAMPTZ,
     CHECK (listing_id_a <> listing_id_b)
 );
+
+-- 'reference_code' (issue #72) was added to the CHECK list above after
+-- this table's original CREATE TABLE — same inert-on-existing-DB issue as
+-- property_merge_log's identical constraint above; migrate it too.
+ALTER TABLE suggested_merge DROP CONSTRAINT IF EXISTS suggested_merge_match_basis_check;
+ALTER TABLE suggested_merge ADD CONSTRAINT suggested_merge_match_basis_check
+    CHECK (match_basis IN ('cadastral','address_coords','phone','reference_code','photo_hash','fuzzy'));
 
 -- Prevents the engine from re-suggesting the same pair on every run
 -- regardless of which listing was recorded as "a" vs "b" (the engine
@@ -482,6 +515,53 @@ CREATE INDEX IF NOT EXISTS idx_connector_run_results_run_id ON connector_run_res
 -- filter/sort on started_at; unindexed, that's a seq scan once this table
 -- has any real history.
 CREATE INDEX IF NOT EXISTS idx_connector_runs_started_at ON connector_runs (started_at DESC);
+
+-- Browser-extension listing capture (issue #75): a queue table, not a
+-- synchronous request/response — the dashboard (Node/TypeScript) and the
+-- ETL orchestrator (Python, where the Idealista connector's normalize()
+-- and the shared extraction.py fallback-chain helper live) run in
+-- separate containers with no shared filesystem or RPC channel. This
+-- mirrors the same "signal via a Postgres row" pattern this project
+-- already uses for etl_manual_trigger (force-resync) rather than
+-- inventing cross-container HTTP or duplicating the Idealista field
+-- mapping in TypeScript (which issue #75 explicitly wants to avoid — a
+-- future automated Idealista connector, if one ever becomes viable, must
+-- share one source of truth with this capture path, not a second,
+-- drifting implementation).
+--
+-- Flow: POST /api/extension/capture inserts a 'pending' row and returns
+-- immediately; etl/capture.py's background poll (started alongside the
+-- connector scheduler loop, etl/main.py) picks it up, runs the matching
+-- connector's normalize() + the same _upsert_canonical_listing() the
+-- automated sweep uses, and marks the row 'done'/'failed'. The dashboard
+-- polls GET /api/extension/capture/[id] for the result.
+CREATE TABLE IF NOT EXISTS extension_capture (
+    id               BIGSERIAL    PRIMARY KEY,
+    url              TEXT         NOT NULL,
+    -- Nullable, not NOT NULL: nulled out once a capture reaches 'done' —
+    -- the raw HTML is only useful transiently, for debugging a failed
+    -- parse; keeping every full page capture forever is unbounded storage
+    -- growth for data with no ongoing value (Opus review, PR #87). A
+    -- 'failed' row keeps its html for debugging.
+    html             TEXT,
+    connector_name   TEXT,
+    status           TEXT         NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','done','failed')),
+    error_msg        TEXT,
+    property_id      BIGINT       REFERENCES property(id),
+    listing_id       BIGINT       REFERENCES listing(id),
+    fields_extracted INTEGER,
+    fields_available INTEGER,
+    title            TEXT,
+    price_display    TEXT,
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    processed_at     TIMESTAMPTZ
+);
+
+-- The poll query is `WHERE status = 'pending' ORDER BY created_at`; a
+-- partial index keeps this cheap forever regardless of how many
+-- done/failed rows accumulate (they're never re-scanned by the poll).
+CREATE INDEX IF NOT EXISTS idx_extension_capture_pending
+    ON extension_capture (created_at) WHERE status = 'pending';
 
 
 -- ============================================================
@@ -956,3 +1036,4 @@ ANALYZE feedback_event;
 ANALYZE ai_assessment;
 ANALYZE property_merge_log;
 ANALYZE suggested_merge;
+ANALYZE extension_capture;

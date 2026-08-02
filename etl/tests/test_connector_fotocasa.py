@@ -271,6 +271,251 @@ class TestNormalize:
         assert canonical.raw_extra["antiquity"] == 7
 
 
+class TestFallbackChain:
+    """Issue #77: property_web_scraper's es_fotocasa.json mapping keeps a
+    CSS-selector fallback for exactly these four fields (their embedded-JSON
+    path is the fragile part most likely to shift on a redesign). Their own
+    selectors no longer match the live site as of this connector's own
+    live spot-check (2026-08-02) — Fotocasa migrated to a Tailwind-utility
+    design system with no semantic BEM classes. These fallback selectors
+    are freshly verified against a real listing instead (icon-anchored via
+    `data-title`, not layout classes) — see fotocasa.py's
+    `_icon_stat_text`/`_price_fallback_text` docstrings.
+    """
+
+    def test_falls_back_to_css_when_json_fields_are_null(self):
+        html = _read_fixture("fotocasa_sample_detail_fallback.html")
+        connector = FotocasaConnector()
+        with patch(
+            "etl.connectors.fotocasa.requests.get", return_value=_mock_response(html)
+        ):
+            raw = connector.fetch_detail("190099999", throttle=lambda: None)
+        canonical = connector.normalize(raw)
+
+        # Values baked into the fixture's HTML match the real listing this
+        # fixture is modeled on (external_id 189316512) — this is also a
+        # live-data regression check, not just "some fallback fired".
+        assert canonical.rooms == 2
+        assert canonical.bathrooms == 2
+        assert canonical.m2_built == Decimal(60)
+        assert canonical.current_price == Decimal(379000)
+        # reference_code (issue #72): absent from this fixture's JSON
+        # (no "reference" key in realEstate), recovered from the
+        # ".re-FormContactDetail-referenceAlias" CSS fallback.
+        assert canonical.reference_code == "XY789"
+
+    def test_json_path_wins_over_css_when_both_are_present(self):
+        """The fallback chain must not override a perfectly good JSON
+        value just because HTML markup also happens to be present.
+
+        Uses genuinely different, non-empty values on both paths (JSON:
+        3/1/74/205000; HTML: 9/9/999/999000) — a version of this test that
+        only has real markup on the JSON side can't distinguish "JSON wins
+        because it's tried first" from "JSON is the only side with a
+        value" (Opus review, PR #84: the prior fixture had no icon markup
+        at all).
+        """
+        raw = RawListing(
+            external_id="993",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/x",
+                "props": {
+                    "realEstate": {
+                        "price": 205000,
+                        "address": {},
+                        "coordinates": {},
+                        "features": {"rooms": 3, "bathrooms": 1, "surface": 74},
+                        "descriptions": {},
+                        "multimedia": [],
+                    }
+                },
+                "html": (
+                    '<div aria-label="Precio del inmueble"><span>999.000 €</span></div>'
+                    '<ul aria-label="Características principales">'
+                    '<li><svg data-title="double_bed"></svg>'
+                    '<span class="text-body-1"><span class="font-bold">9</span> habs.</span></li>'
+                    '<li><svg data-title="bathroom_tub"></svg>'
+                    '<span class="text-body-1"><span class="font-bold">9</span> baños</span></li>'
+                    '<li><svg data-title="dimensions_block"></svg>'
+                    '<span class="text-body-1"><span class="font-bold">999</span> m²</span></li>'
+                    "</ul>"
+                ),
+            },
+        )
+        canonical = FotocasaConnector().normalize(raw)
+        assert canonical.rooms == 3
+        assert canonical.bathrooms == 1
+        assert canonical.m2_built == Decimal(74)
+        assert canonical.current_price == Decimal(205000)
+
+    def test_css_fallback_also_returns_none_when_html_lacks_the_markup_too(self):
+        """Belt-and-braces: a listing where both JSON and HTML are missing
+        the field must not crash and must yield None, not a stray 0/False
+        from a getter that partially matched."""
+        raw = RawListing(
+            external_id="996",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/x",
+                "props": {
+                    "realEstate": {
+                        "price": None,
+                        "address": {},
+                        "coordinates": {},
+                        "features": {"rooms": None, "bathrooms": None, "surface": None},
+                        "descriptions": {},
+                        "multimedia": [],
+                    }
+                },
+                "html": "<html><body>no markup here</body></html>",
+            },
+        )
+        canonical = FotocasaConnector().normalize(raw)
+        assert canonical.rooms is None
+        assert canonical.bathrooms is None
+        assert canonical.m2_built is None
+        assert canonical.current_price is None
+
+
+class TestReferenceCode:
+    """Issue #72: seller/agency reference code — e.g. "Referencia: NS603"
+    live-verified (2026-08-02) against the real Sevilla listing cited in
+    that issue (`realEstate.reference` matches the rendered
+    ".re-FormContactDetail-referenceAlias" text exactly on that listing).
+    The CSS-fallback path is covered by
+    TestFallbackChain.test_falls_back_to_css_when_json_fields_are_null.
+    """
+
+    def test_extracts_reference_from_json_primary_path(self):
+        raw = RawListing(
+            external_id="992",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/x",
+                "props": {
+                    "realEstate": {
+                        "price": 100000,
+                        "reference": "NS603",
+                        "address": {},
+                        "coordinates": {},
+                        "features": {},
+                        "descriptions": {},
+                        "multimedia": [],
+                    }
+                },
+            },
+        )
+        canonical = FotocasaConnector().normalize(raw)
+        assert canonical.reference_code == "NS603"
+
+    def test_missing_reference_yields_none_not_empty_string(self):
+        raw = RawListing(
+            external_id="991",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/x",
+                "props": {
+                    "realEstate": {
+                        "price": 100000,
+                        "address": {},
+                        "coordinates": {},
+                        "features": {},
+                        "descriptions": {},
+                        "multimedia": [],
+                    }
+                },
+                "html": "<html><body>no reference markup here</body></html>",
+            },
+        )
+        canonical = FotocasaConnector().normalize(raw)
+        assert canonical.reference_code is None
+
+
+class TestSchemaSupersetFields:
+    """Issue #77's AC: city/province/postal_code/m2_plot populated from data
+    this connector already parses but previously flattened into `address`
+    or dropped into `raw_extra` only."""
+
+    def test_populates_city_province_postal_code_and_m2_plot(self):
+        html = _read_fixture("fotocasa_sample_detail.html")
+        connector = FotocasaConnector()
+        with patch(
+            "etl.connectors.fotocasa.requests.get", return_value=_mock_response(html)
+        ):
+            raw = connector.fetch_detail("190011971", throttle=lambda: None)
+        canonical = connector.normalize(raw)
+        assert canonical.city == "Madrid Capital"
+        assert canonical.province == "Madrid"
+        assert canonical.postal_code == "28031"
+        # This fixture's surfaceLand is 0, which means "not a plot-having
+        # property type", not "a real zero-m² plot" — treated as absent
+        # (Opus review, PR #84; see the dedicated m2_plot test below for a
+        # real non-zero value).
+        assert canonical.m2_plot is None
+
+    def test_m2_plot_nonzero_surface_land_is_preserved(self):
+        raw = RawListing(
+            external_id="994",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/x",
+                "props": {
+                    "realEstate": {
+                        "price": 500000,
+                        "address": {},
+                        "coordinates": {},
+                        "features": {"surfaceLand": 850},
+                        "descriptions": {},
+                        "multimedia": [],
+                    }
+                },
+                "html": "<html><body></body></html>",
+            },
+        )
+        canonical = FotocasaConnector().normalize(raw)
+        assert canonical.m2_plot == Decimal(850)
+
+    def test_operation_is_always_sale_for_this_connector(self):
+        """This connector only ever requests Fotocasa's /comprar/ URLs —
+        it has no rental discover()/fetch_detail() path at all, so
+        operation='sale' reflects what the connector structurally is, not
+        an unverified default masking missing data."""
+        html = _read_fixture("fotocasa_sample_detail.html")
+        connector = FotocasaConnector()
+        with patch(
+            "etl.connectors.fotocasa.requests.get", return_value=_mock_response(html)
+        ):
+            raw = connector.fetch_detail("190011971", throttle=lambda: None)
+        canonical = connector.normalize(raw)
+        assert canonical.operation == "sale"
+
+    def test_missing_address_fields_yield_none_not_empty_string(self):
+        raw = RawListing(
+            external_id="995",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/x",
+                "props": {
+                    "realEstate": {
+                        "price": 100000,
+                        "address": {},
+                        "coordinates": {},
+                        "features": {},
+                        "descriptions": {},
+                        "multimedia": [],
+                    }
+                },
+                "html": "<html><body></body></html>",
+            },
+        )
+        canonical = FotocasaConnector().normalize(raw)
+        assert canonical.city is None
+        assert canonical.province is None
+        assert canonical.postal_code is None
+        assert canonical.m2_plot is None
+
+
 class TestPriceChangeHistory:
     def test_price_change_between_fetches_produces_different_canonical_prices(self):
         """EC-4 (connector half): two fetches of the same external_id with a
