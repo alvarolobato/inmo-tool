@@ -48,7 +48,12 @@ from etl.dedup.types import ListingRecord, PairEvaluation
 # Spanish mobile/landline: 9 digits starting 6/7/8/9, optional +34 prefix,
 # optional spaces/dots/hyphens as separators. Matches the pattern already
 # noted (but not wired up, per PR #54's review) in etl/connectors/milanuncios.py.
-_PHONE_RE = re.compile(r"(?:\+34[\s.-]?)?[6789]\d{2}[\s.-]?\d{3}[\s.-]?\d{3}")
+# Digit-boundary guards ((?<!\d)/(?!\d), added after Opus review of PR #55)
+# stop this from matching *inside* a longer digit run — without them,
+# "Ref. 600123456789" would extract a phantom "600123456".
+_PHONE_RE = re.compile(
+    r"(?<!\d)(?:\+34[\s.-]?)?[6789]\d{2}[\s.-]?\d{3}[\s.-]?\d{3}(?!\d)"
+)
 
 _UNCORROBORATED_CONFIDENCE = Decimal("0.500")
 _CORROBORATED_UNCONFIRMED_KIND_CONFIDENCE = Decimal("0.750")

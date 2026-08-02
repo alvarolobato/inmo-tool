@@ -119,7 +119,7 @@ def evaluate_pair(
     hashes_a = hash_cache.get(a)
     hashes_b = hash_cache.get(b)
     ratio = photo_hash.match_ratio(hashes_a, hashes_b)
-    if ratio is not None and Decimal(str(ratio)) >= photo_hash._MIN_MATCH_RATIO:
+    if ratio is not None and Decimal(str(ratio)) >= photo_hash.MIN_MATCH_RATIO:
         return PairEvaluation(
             basis="photo_hash",
             confidence=photo_hash.confidence_for_ratio(ratio),
@@ -181,20 +181,8 @@ def perform_merge(
             "UPDATE listing SET property_id = %s WHERE property_id = %s",
             (survivor_id, losing_id),
         )
-        cur.execute(
-            "INSERT INTO property_merge_log "
-            "(property_id, losing_property_id, merged_listing_ids, match_basis, confidence) "
-            "VALUES (%s, %s, %s, %s, %s)",
-            (
-                survivor_id,
-                losing_id,
-                moved_listing_ids,
-                result.basis,
-                result.confidence,
-            ),
-        )
 
-    had_conflict = reconcile.reconcile_merge(
+    had_conflict, snapshot = reconcile.reconcile_merge(
         conn,
         survivor_id,
         losing_id,
@@ -203,6 +191,23 @@ def perform_merge(
         match_basis=result.basis,
         match_confidence=result.confidence,
     )
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO property_merge_log "
+            "(property_id, losing_property_id, merged_listing_ids, match_basis, "
+            "confidence, detail) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (
+                survivor_id,
+                losing_id,
+                moved_listing_ids,
+                result.basis,
+                result.confidence,
+                json.dumps(snapshot),
+            ),
+        )
+
     conn.commit()
     return survivor_id, losing_id, had_conflict
 
@@ -253,33 +258,113 @@ def run(conn) -> DedupRunResult:
     return result
 
 
+def _restore_profile_listing_state(
+    cur, survivor_id: int, losing_id: int, op: dict
+) -> None:
+    """Undo one entry from reconcile.reconcile_merge's snapshot (see that
+    module's docstring for the four `kind` shapes)."""
+    profile_id = op["profile_id"]
+    kind = op["kind"]
+
+    if kind == "rekeyed_no_prior_survivor_state":
+        cur.execute(
+            "UPDATE profile_listing_state SET property_id = %s "
+            "WHERE property_id = %s AND profile_id = %s",
+            (losing_id, survivor_id, profile_id),
+        )
+        return
+
+    losing_row = op["losing_row"]
+    cur.execute(
+        """
+        INSERT INTO profile_listing_state
+            (profile_id, property_id, score, rank_explanation, pipeline_stage,
+             notes, last_scored_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (profile_id, property_id) DO UPDATE SET
+            score = EXCLUDED.score,
+            rank_explanation = EXCLUDED.rank_explanation,
+            pipeline_stage = EXCLUDED.pipeline_stage,
+            notes = EXCLUDED.notes,
+            last_scored_at = EXCLUDED.last_scored_at
+        """,
+        (
+            profile_id,
+            losing_id,
+            Decimal(losing_row["score"]) if losing_row["score"] is not None else None,
+            losing_row["rank_explanation"],
+            losing_row["pipeline_stage"],
+            losing_row["notes"],
+            losing_row["last_scored_at"],
+        ),
+    )
+
+    if "survivor_before" in op:
+        # This branch also mutated the survivor's own row in place (stage
+        # possibly bumped, score/rank_explanation/last_scored_at nulled) —
+        # restore it to what it was immediately before the merge. Every
+        # kind except rekeyed_no_prior_survivor_state carries this now
+        # (reconcile.py nulls the survivor's score in all three merge
+        # branches, not just stage_reconciled — Opus review, PR #55).
+        before = op["survivor_before"]
+        cur.execute(
+            """
+            UPDATE profile_listing_state
+            SET score = %s, rank_explanation = %s, pipeline_stage = %s,
+                notes = %s, last_scored_at = %s
+            WHERE property_id = %s AND profile_id = %s
+            """,
+            (
+                Decimal(before["score"]) if before["score"] is not None else None,
+                before["rank_explanation"],
+                before["pipeline_stage"],
+                before["notes"],
+                before["last_scored_at"],
+                survivor_id,
+                profile_id,
+            ),
+        )
+
+
 def revert(conn, merge_log_id: int) -> None:
-    """Undo an auto-merge: point the moved listings back at the losing property.
+    """Undo an auto-merge: point the moved listings back at the losing
+    property, and restore the pre-merge profile_listing_state/feedback_event
+    state that reconcile.reconcile_merge changed (see its module docstring
+    for exactly what's captured and what isn't).
 
     The losing side's `property` row is never deleted (RESTRICT + engine.py
     only ever reassigns listing.property_id, never issues a DELETE) — it
-    just stops having any listing pointing at it once merged away. Revert is
-    therefore an exact pointer restoration, not a reconstruction: point
-    every listing this merge moved back at `losing_property_id`, which still
-    physically exists with its original field values untouched.
+    just stops having any listing pointing at it once merged away, which is
+    what makes pointer restoration possible at all: point every listing this
+    merge moved back at `losing_property_id`, which still physically exists
+    with its original field values untouched.
 
-    Documented limitation (issue #16 item 8): if per-profile state was
-    reconciled (issue #16 item 6 — score/rank_explanation nulled, a stage
-    reassigned, or a conflict recorded) and then *new* feedback arrived on
-    the surviving property after the merge, that post-merge feedback can't
-    be un-mixed back onto the correct original property — this restores
-    listing.property_id pointers exactly, not a perfect state rollback.
+    Documented limitation (still real, after the PR #55 review round fixed
+    the bigger data-loss bug this function used to have): if *new* feedback
+    or scoring activity happened on the surviving property after the merge
+    but before this revert, that new activity isn't retroactively un-mixed —
+    it stays on the survivor. What this function does restore, exactly, is
+    whatever reconcile_merge changed at merge time (profile_listing_state
+    rows it deleted/modified, feedback_event rows it re-keyed) — the
+    previously-silent state loss that existed even with zero post-merge
+    activity, which is the common case.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT losing_property_id, merged_listing_ids, reverted_at "
+            "SELECT losing_property_id, merged_listing_ids, reverted_at, detail, property_id "
             "FROM property_merge_log WHERE id = %s",
             (merge_log_id,),
         )
         row = cur.fetchone()
         if row is None:
             raise ValueError(f"No property_merge_log row with id={merge_log_id}")
-        losing_property_id, merged_listing_ids, reverted_at = row
+        (
+            losing_property_id,
+            merged_listing_ids,
+            reverted_at,
+            detail,
+            survivor_property_id,
+        ) = row
         if reverted_at is not None:
             raise ValueError(
                 f"Merge {merge_log_id} was already reverted at {reverted_at}"
@@ -296,6 +381,18 @@ def revert(conn, merge_log_id: int) -> None:
             "UPDATE listing SET property_id = %s WHERE id = ANY(%s)",
             (losing_property_id, merged_listing_ids),
         )
+
+        snapshot = detail if isinstance(detail, dict) else json.loads(detail or "{}")
+        for feedback_event_id in snapshot.get("rekeyed_feedback_event_ids", ()):
+            cur.execute(
+                "UPDATE feedback_event SET property_id = %s WHERE id = %s",
+                (losing_property_id, feedback_event_id),
+            )
+        for op in snapshot.get("profile_listing_state_ops", ()):
+            _restore_profile_listing_state(
+                cur, survivor_property_id, losing_property_id, op
+            )
+
         cur.execute(
             "UPDATE property_merge_log SET reverted_at = NOW() WHERE id = %s",
             (merge_log_id,),

@@ -11,6 +11,7 @@ from __future__ import annotations
 from decimal import Decimal
 from pathlib import Path
 
+import psycopg2
 import pytest
 
 from etl.dedup import engine
@@ -178,6 +179,21 @@ class TestCadastralExactMatch:
         assert evaluation.confidence == Decimal("1.000")
         assert evaluation.decision == "merge"
 
+    def test_cadastral_ref_unique_constraint_makes_ec2_db_scenario_unreachable(
+        self, dedup_db
+    ):
+        """Pins the claim the docstring above makes: if this UNIQUE constraint
+        is ever dropped from the schema, this test starts failing loudly
+        (a second insert would silently succeed instead of raising), which
+        is the signal that EC-2's real scenario has become reachable again
+        and this whole class's signal-dispatch-only testing approach should
+        be revisited — rather than that gap staying silent forever.
+        """
+        _insert_property(dedup_db, cadastral_ref="1234567AB1234C0001AB")
+        with pytest.raises(psycopg2.errors.UniqueViolation):
+            _insert_property(dedup_db, cadastral_ref="1234567AB1234C0001AB")
+        dedup_db.rollback()
+
 
 class TestPhoneSignal:
     def test_phone_match_with_size_mismatch_is_suggestion_not_merge(self, dedup_db):
@@ -242,6 +258,14 @@ class TestPhoneSignal:
         result = engine.run(dedup_db)
         assert result.merged == 1
         assert result.suggested == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT match_basis, confidence FROM property_merge_log "
+                "ORDER BY created_at DESC LIMIT 1"
+            )
+            basis, confidence = cur.fetchone()
+            assert basis == "phone"
+            assert confidence == Decimal("0.900")
 
         # Not corroborated: same phone, wildly different price/size -> suggestion only.
         _insert_pair(
@@ -268,6 +292,41 @@ class TestPhoneSignal:
             )
             (confidence,) = cur.fetchone()
             assert confidence == Decimal("0.500")
+
+    def test_corroborated_phone_with_unconfirmed_kind_is_suggestion_not_merge(
+        self, dedup_db
+    ):
+        """The 0.75 tier from phone_extract.py's module docstring: corroborated
+        (matching size/price proximity) but listing_kind is None on one or
+        both sides — not a positively-confirmed 'particular', so this must
+        NOT reach the 0.9 auto-merge tier, but it's also stronger evidence
+        than an uncorroborated match, so it must NOT collapse to the 0.5
+        tier either. Previously untested (Opus review, PR #55) despite the
+        engine having shipped with this exact branch since task 2.2 landed.
+        """
+        _insert_pair(
+            dedup_db,
+            "idealista",
+            "fotocasa",
+            "unconfirmed-kind-corroborated",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            listing_kind_a="particular",
+            listing_kind_b=None,
+            description_a="Piso reformado, tel 622334455",
+            description_b="Piso reformado, tel 622334455",
+            current_price_a=Decimal(285000),
+            current_price_b=Decimal(279000),
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 1
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT match_basis, confidence, status FROM suggested_merge")
+            basis, confidence, status = cur.fetchone()
+            assert basis == "phone"
+            assert confidence == Decimal("0.750")
+            assert status == "pending"
 
 
 class TestNoSignal:
@@ -324,6 +383,125 @@ class TestRevert:
         with pytest.raises(ValueError, match="already reverted"):
             engine.revert(dedup_db, merge_log_id)
 
+    def test_revert_restores_reconciled_profile_state_and_feedback_events(
+        self, dedup_db
+    ):
+        """The bug Opus's review of PR #55 actually caught: the original
+        revert() restored listing.property_id pointers only, silently
+        losing every profile_listing_state row reconcile_merge deleted (and
+        never re-keying feedback_event back) — a real data-loss bug on a
+        revert operation, not a documented limitation worth accepting.
+        Covers both restoration shapes: a profile where only the losing
+        side had state (simple re-key) and one where both sides had
+        differing, non-conflicting stages (the survivor's own row gets
+        mutated in place and must be restored too, not just re-created for
+        the losing side).
+        """
+        _listing_a, prop_a, _listing_b, prop_b = _insert_pair(
+            dedup_db,
+            "idealista",
+            "fotocasa",
+            "revert-full-state",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            listing_kind_a="particular",
+            listing_kind_b="particular",
+            description_a="Piso reformado, tel 655667788",
+            description_b="Piso reformado, tel 655667788",
+            current_price_a=Decimal(320000),
+            current_price_b=Decimal(315000),
+        )
+        survivor_id, losing_id = sorted((prop_a, prop_b))
+
+        profile_only_losing = _insert_profile(dedup_db, "only-losing-had-state")
+        _set_pls(dedup_db, profile_only_losing, losing_id, "reviewing")
+
+        profile_both = _insert_profile(dedup_db, "both-sides-had-state")
+        _set_pls(dedup_db, profile_both, survivor_id, "new")
+        _set_pls(dedup_db, profile_both, losing_id, "interested")
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "UPDATE profile_listing_state SET score = 4.2, rank_explanation = 'pre-merge score' "
+                "WHERE profile_id = %s AND property_id = %s",
+                (profile_both, survivor_id),
+            )
+            cur.execute(
+                "INSERT INTO feedback_event (profile_id, property_id, feedback_type) "
+                "VALUES (%s, %s, 'accept')",
+                (profile_both, losing_id),
+            )
+        dedup_db.commit()
+
+        result = engine.run(dedup_db)
+        assert result.merged == 1
+
+        # Sanity-check the pre-revert (post-merge) state matches what
+        # reconcile_merge is documented to do, before proving revert undoes it.
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM profile_listing_state WHERE profile_id = %s",
+                (profile_only_losing,),
+            )
+            assert cur.fetchone()[0] == 1  # simple re-key, one row total
+            cur.execute(
+                "SELECT pipeline_stage, score, rank_explanation "
+                "FROM profile_listing_state WHERE profile_id = %s AND property_id = %s",
+                (profile_both, survivor_id),
+            )
+            stage, score, rank_explanation = cur.fetchone()
+            assert stage == "interested"  # bumped from 'new'
+            assert score is None and rank_explanation is None  # nulled for rescoring
+            cur.execute(
+                "SELECT count(*) FROM feedback_event WHERE profile_id = %s AND property_id = %s",
+                (profile_both, survivor_id),
+            )
+            assert cur.fetchone()[0] == 1  # re-keyed onto survivor
+
+            cur.execute("SELECT id FROM property_merge_log ORDER BY id DESC LIMIT 1")
+            (merge_log_id,) = cur.fetchone()
+
+        engine.revert(dedup_db, merge_log_id)
+
+        with dedup_db.cursor() as cur:
+            # profile_only_losing: row must exist again under the losing
+            # property, at its original stage.
+            cur.execute(
+                "SELECT property_id, pipeline_stage FROM profile_listing_state "
+                "WHERE profile_id = %s",
+                (profile_only_losing,),
+            )
+            restored_property_id, restored_stage = cur.fetchone()
+            assert restored_property_id == losing_id
+            assert restored_stage == "reviewing"
+
+            # profile_both: the survivor's row must be back to its
+            # pre-merge values, AND the losing side's row must exist again.
+            cur.execute(
+                "SELECT pipeline_stage, score, rank_explanation "
+                "FROM profile_listing_state WHERE profile_id = %s AND property_id = %s",
+                (profile_both, survivor_id),
+            )
+            stage, score, rank_explanation = cur.fetchone()
+            assert stage == "new"
+            assert score == Decimal("4.200")
+            assert rank_explanation == "pre-merge score"
+
+            cur.execute(
+                "SELECT pipeline_stage FROM profile_listing_state "
+                "WHERE profile_id = %s AND property_id = %s",
+                (profile_both, losing_id),
+            )
+            (restored_losing_stage,) = cur.fetchone()
+            assert restored_losing_stage == "interested"
+
+            # feedback_event must be back on the losing property, not the survivor.
+            cur.execute(
+                "SELECT property_id FROM feedback_event WHERE profile_id = %s",
+                (profile_both,),
+            )
+            (fb_property_id,) = cur.fetchone()
+            assert fb_property_id == losing_id
+
 
 class TestReconciliation:
     def test_reconcile_unions_feedback_keeps_most_advanced_stage(self, dedup_db):
@@ -345,6 +523,15 @@ class TestReconciliation:
         _set_pls(dedup_db, profile_id, prop_a, "new")
         _set_pls(dedup_db, profile_id, prop_b, "interested")
         with dedup_db.cursor() as cur:
+            # A feedback_event on EACH side — "union" is only meaningfully
+            # tested if both sides contribute a row; a single event on just
+            # the losing side (the original version of this test) can't
+            # distinguish "unioned" from "re-keyed and the other one lost".
+            cur.execute(
+                "INSERT INTO feedback_event (profile_id, property_id, feedback_type) "
+                "VALUES (%s, %s, 'note')",
+                (profile_id, prop_a),
+            )
             cur.execute(
                 "INSERT INTO feedback_event (profile_id, property_id, feedback_type) "
                 "VALUES (%s, %s, 'accept')",
@@ -367,10 +554,12 @@ class TestReconciliation:
             assert stage == "interested"
 
             cur.execute(
-                "SELECT count(*) FROM feedback_event WHERE profile_id = %s AND property_id = %s",
+                "SELECT feedback_type FROM feedback_event "
+                "WHERE profile_id = %s AND property_id = %s ORDER BY feedback_type",
                 (profile_id, survivor_property_id),
             )
-            assert cur.fetchone()[0] == 1
+            feedback_types = [row[0] for row in cur.fetchall()]
+            assert feedback_types == ["accept", "note"]
 
     def test_reconcile_flags_genuine_conflicts_for_human_review(self, dedup_db):
         listing_a, prop_a, listing_b, prop_b = _insert_pair(
@@ -390,6 +579,14 @@ class TestReconciliation:
         profile_id = _insert_profile(dedup_db)
         _set_pls(dedup_db, profile_id, prop_a, "rejected")
         _set_pls(dedup_db, profile_id, prop_b, "offer_made")
+        survivor_id = min(prop_a, prop_b)
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "UPDATE profile_listing_state SET score = 3.0 "
+                "WHERE profile_id = %s AND property_id = %s",
+                (profile_id, survivor_id),
+            )
+        dedup_db.commit()
 
         result = engine.run(dedup_db)
         assert result.merged == 1
@@ -399,10 +596,19 @@ class TestReconciliation:
             # Exactly one PLS row survives — the PK forbids two for the
             # same (profile, property) pair; that's the point being tested.
             cur.execute(
-                "SELECT count(*) FROM profile_listing_state WHERE profile_id = %s",
+                "SELECT score FROM profile_listing_state WHERE profile_id = %s",
                 (profile_id,),
             )
-            assert cur.fetchone()[0] == 1
+            rows = cur.fetchall()
+            assert len(rows) == 1
+            (score,) = rows[0]
+            # The surviving row's score is nulled even though the conflict
+            # left its pipeline_stage untouched — the property's identity
+            # changed via merge, so a pre-merge score is stale regardless
+            # of which reconciliation branch handled the stage (Opus
+            # review, PR #55 — previously only the non-conflict
+            # differing-stage branch did this).
+            assert score is None
 
             cur.execute(
                 "SELECT status, detail FROM suggested_merge WHERE listing_id_a = %s OR listing_id_b = %s",

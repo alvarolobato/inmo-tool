@@ -332,6 +332,16 @@ CREATE TABLE IF NOT EXISTS property_merge_log (
 -- to reconstruct a plausible-looking property row from scratch.
 ALTER TABLE property_merge_log ADD COLUMN IF NOT EXISTS losing_property_id BIGINT REFERENCES property(id);
 
+-- ALTER, same re-runnable-migration reasoning as losing_property_id above.
+--
+-- Snapshot of what etl.dedup.reconcile.reconcile_merge changed on
+-- profile_listing_state/feedback_event for this merge, so etl.dedup.engine.
+-- revert can restore pre-merge per-profile state (score, pipeline_stage,
+-- which feedback_event rows lived on which side) — not just listing->
+-- property pointers. See reconcile.py's module docstring for the snapshot
+-- shape (a list of per-profile "ops" plus the re-keyed feedback_event ids).
+ALTER TABLE property_merge_log ADD COLUMN IF NOT EXISTS detail JSONB NOT NULL DEFAULT '{}';
+
 CREATE INDEX IF NOT EXISTS idx_property_merge_log_property_id
     ON property_merge_log (property_id);
 

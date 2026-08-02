@@ -101,27 +101,29 @@ def test_dedup_pair_fixtures_end_to_end_through_real_dedup_engine(pg_conn):
     ListingRecord pair, the genuine Fotocasa+Milanuncios round trip.
 
     Expected outcome, confirmed by running it rather than assumed: an
-    auto-merge on `address_coords` (signal 2), not phone (signal 3). Both
-    fixtures carry the identical lat/lon (40.4324, -3.7025) real Fotocasa
-    and Milanuncios listings *can* publish (see `realEstate.coordinates` /
-    `location.geolocation` in etl/connectors/fotocasa.py and milanuncios.py)
-    — signal 2 fires before phone is ever evaluated, per the priority order
-    in etl.dedup.engine.evaluate_pair. This is a meaningfully different (and
-    arguably better) proof than "phone matched": it confirms the *earlier*,
-    higher-confidence signal in the priority chain also works end-to-end
-    against real connector output, not just the fallback.
+    auto-merge on `phone` (signal 3), not `address_coords` (signal 2), even
+    though both fixtures carry identical lat/lon (40.4324, -3.7025) — because
+    address_coords now also requires the two addresses' normalized text to
+    agree (Opus review, PR #55: coordinates+size alone risk false-positiving
+    two different flats in the same building), and this project's two
+    connectors publish address text at very different granularity: Fotocasa
+    includes neighborhood/district ("Trafalgar, Chamberí, Madrid Capital"),
+    Milanuncios only ever publishes city/province ("Madrid, Madrid") — see
+    address_coords.py's module docstring. Those two strings don't clear the
+    80% similarity bar, so signal 2 correctly declines and signal 3 (phone,
+    corroborated via the still-matching coordinates) is what actually fires.
+    This is real, useful signal about this project's data, not a fixture
+    artifact: a Fotocasa/Milanuncios pair will realistically always resolve
+    via phone, not address_coords — see
+    test_dedup_pair_no_coords_fixtures_end_to_end_merges_on_phone below for
+    the same conclusion from a pair that doesn't have coordinates at all.
 
     Note for whoever next samples real production data: a live sweep against
     both sites earlier in this task's development found zero listings with
     non-null lat/lon among real (non-fixture) results — this fixture's
     shared coordinates are realistic in *shape* (both sites can publish
     them) but the *overlap itself* was constructed for this test, not
-    observed live. Fotocasa's listing_kind for this fixture is still
-    genuinely None (not 'particular') — see the assert below — which is why
-    a *second* fixture pair without matching coordinates would be needed to
-    actually exercise the phone-corroboration-but-unconfirmed-kind tier
-    end-to-end; the synthetic ListingRecord tests in test_dedup_engine.py
-    cover that path directly instead.
+    observed live.
     """
     sql = _SCHEMA_SQL.read_text(encoding="utf-8")
     with pg_conn.cursor() as cur:
@@ -137,7 +139,10 @@ def test_dedup_pair_fixtures_end_to_end_through_real_dedup_engine(pg_conn):
             "999000001", throttle=lambda: None
         )
     fotocasa_listing = FotocasaConnector().normalize(fotocasa_raw)
-    assert fotocasa_listing.listing_kind is None  # see docstring — not a bug
+    # clientId=null + clientAlias="Particular" is Fotocasa's verified
+    # private-seller marker (etl/connectors/fotocasa_mapping.py) — this
+    # fixture correctly resolves to 'particular', not None.
+    assert fotocasa_listing.listing_kind == "particular"
 
     milanuncios_html = _read_fixture("milanuncios_sample_detail_dedup_pair.html")
     with patch(
@@ -164,7 +169,7 @@ def test_dedup_pair_fixtures_end_to_end_through_real_dedup_engine(pg_conn):
                 "ORDER BY created_at DESC LIMIT 1"
             )
             survivor_property_id, basis, confidence = cur.fetchone()
-        assert basis == "address_coords"
+        assert basis == "phone"
         assert confidence == Decimal("0.900")
 
         with pg_conn.cursor() as cur:
@@ -201,6 +206,111 @@ def test_dedup_pair_fixtures_end_to_end_through_real_dedup_engine(pg_conn):
             cur.execute(
                 "DELETE FROM listing WHERE source IN ('fotocasa', 'milanuncios') "
                 "AND external_id IN ('999000001', '700000123')"
+            )
+            if property_ids:
+                cur.execute(
+                    "DELETE FROM property WHERE id = ANY(%s)", (list(property_ids),)
+                )
+        pg_conn.commit()
+
+
+def test_dedup_pair_no_coords_fixtures_end_to_end_merges_on_phone(pg_conn):
+    """Companion to the coords-pair test above: proves the phone-corroborated
+    auto-merge path (etl.dedup.signals.phone_extract) end-to-end through the
+    real connectors, which the coords pair can't — it auto-merges on
+    address_coords (a higher-priority signal) before phone is ever reached.
+
+    Both fixtures omit coordinates entirely, so address_coords.evaluate
+    returns None for this pair (coords_close short-circuits on missing
+    input) and phone_extract.evaluate is the signal that actually fires.
+    Corroboration falls back to price+size proximity (phone_extract's
+    documented fallback when coordinates aren't available on both sides) —
+    same size (70m²) and prices within its 10% tolerance (285000/279000,
+    ~2.1% apart) satisfy it. Both sides resolve to listing_kind='particular'
+    (Fotocasa via clientId=null+"Particular", Milanuncios via
+    sellerType.isPrivate=true), landing this in the full 0.9-confidence
+    auto-merge tier, not the 0.75 unconfirmed-kind suggestion.
+    """
+    sql = _SCHEMA_SQL.read_text(encoding="utf-8")
+    with pg_conn.cursor() as cur:
+        cur.execute(sql)
+    pg_conn.commit()
+
+    fotocasa_html = _read_fixture("fotocasa_sample_detail_dedup_pair_no_coords.html")
+    with patch(
+        "etl.connectors.fotocasa.requests.get",
+        return_value=_mock_response(fotocasa_html, "https://www.fotocasa.es/x"),
+    ):
+        fotocasa_raw = FotocasaConnector().fetch_detail(
+            "999000002", throttle=lambda: None
+        )
+    fotocasa_listing = FotocasaConnector().normalize(fotocasa_raw)
+    assert fotocasa_listing.lat is None
+    assert fotocasa_listing.listing_kind == "particular"
+
+    milanuncios_html = _read_fixture(
+        "milanuncios_sample_detail_dedup_pair_no_coords.html"
+    )
+    with patch(
+        "etl.connectors.milanuncios.requests.get",
+        return_value=_mock_response(milanuncios_html, "https://www.milanuncios.com/x"),
+    ):
+        milanuncios_raw = MilanunciosConnector().fetch_detail(
+            "700000124", throttle=lambda: None
+        )
+    milanuncios_listing = MilanunciosConnector().normalize(milanuncios_raw)
+    assert milanuncios_listing.lat is None
+    assert milanuncios_listing.listing_kind == "particular"
+
+    try:
+        orchestrator._upsert_canonical_listing(pg_conn, fotocasa_listing)
+        orchestrator._upsert_canonical_listing(pg_conn, milanuncios_listing)
+
+        result = engine.run(pg_conn)
+        assert result.merged == 1
+        assert result.suggested == 0
+
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "SELECT property_id, match_basis, confidence FROM property_merge_log "
+                "ORDER BY created_at DESC LIMIT 1"
+            )
+            survivor_property_id, basis, confidence = cur.fetchone()
+        assert basis == "phone"
+        assert confidence == Decimal("0.900")
+
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT property_id FROM listing "
+                "WHERE source IN ('fotocasa', 'milanuncios') "
+                "AND external_id IN ('999000002', '700000124')"
+            )
+            property_ids_after = {row[0] for row in cur.fetchall()}
+        assert property_ids_after == {survivor_property_id}
+    finally:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "SELECT property_id FROM listing WHERE source IN ('fotocasa', 'milanuncios') "
+                "AND external_id IN ('999000002', '700000124')"
+            )
+            property_ids = {row[0] for row in cur.fetchall()}
+            cur.execute(
+                "SELECT property_id, losing_property_id FROM property_merge_log "
+                "WHERE property_id = ANY(%s) OR losing_property_id = ANY(%s)",
+                (list(property_ids), list(property_ids)),
+            )
+            for survivor, loser in cur.fetchall():
+                property_ids.add(survivor)
+                if loser is not None:
+                    property_ids.add(loser)
+            cur.execute(
+                "DELETE FROM property_merge_log WHERE property_id = ANY(%s) OR losing_property_id = ANY(%s)",
+                (list(property_ids), list(property_ids)),
+            )
+            cur.execute("DELETE FROM suggested_merge")
+            cur.execute(
+                "DELETE FROM listing WHERE source IN ('fotocasa', 'milanuncios') "
+                "AND external_id IN ('999000002', '700000124')"
             )
             if property_ids:
                 cur.execute(

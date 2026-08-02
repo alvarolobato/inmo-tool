@@ -279,7 +279,9 @@ class FotocasaConnector(Connector):
             external_id=raw.external_id,
             source=raw.source,
             url=raw.raw.get("url"),
-            listing_kind=infer_listing_kind(client_url, client_name),
+            listing_kind=infer_listing_kind(
+                client_url, client_name, real_estate.get("clientId")
+            ),
             status="active",
             current_price=_to_decimal(real_estate.get("price")),
             description=(

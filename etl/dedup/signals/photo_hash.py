@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT_SECONDS = 10
 _HASH_HAMMING_THRESHOLD = 8  # imagehash default hash_size=8 -> 64-bit hash
-_MIN_MATCH_RATIO = Decimal("0.60")
+MIN_MATCH_RATIO = Decimal("0.60")
 _MAX_SUGGESTION_CONFIDENCE = Decimal("0.800")
 
 
@@ -33,10 +33,13 @@ def fetch_hashes(photo_urls: tuple[str, ...]) -> list[imagehash.ImageHash]:
     hashes: list[imagehash.ImageHash] = []
     for url in photo_urls:
         try:
-            response = requests.get(url, timeout=_REQUEST_TIMEOUT_SECONDS, stream=True)
-            response.raw.decode_content = True
-            image = Image.open(response.raw)
-            hashes.append(imagehash.average_hash(image))
+            with requests.get(
+                url, timeout=_REQUEST_TIMEOUT_SECONDS, stream=True
+            ) as response:
+                response.raise_for_status()
+                response.raw.decode_content = True
+                image = Image.open(response.raw)
+                hashes.append(imagehash.average_hash(image))
         except Exception as exc:  # noqa: BLE001 - genuinely best-effort per photo
             logger.warning("photo_hash: failed to fetch/hash %s: %s", url, exc)
     return hashes
@@ -66,12 +69,12 @@ def match_ratio(
 
 
 def confidence_for_ratio(ratio: float) -> Decimal:
-    """Scale a match ratio in [_MIN_MATCH_RATIO, 1.0] to a confidence in
-    [_MIN_MATCH_RATIO, _MAX_SUGGESTION_CONFIDENCE] per issue #16's 0.6-0.8 range.
+    """Scale a match ratio in [MIN_MATCH_RATIO, 1.0] to a confidence in
+    [MIN_MATCH_RATIO, _MAX_SUGGESTION_CONFIDENCE] per issue #16's 0.6-0.8 range.
     """
     ratio_d = Decimal(str(round(ratio, 3)))
-    span = _MAX_SUGGESTION_CONFIDENCE - _MIN_MATCH_RATIO
-    scaled = _MIN_MATCH_RATIO + (ratio_d - _MIN_MATCH_RATIO) * span / (
-        Decimal("1.0") - _MIN_MATCH_RATIO
+    span = _MAX_SUGGESTION_CONFIDENCE - MIN_MATCH_RATIO
+    scaled = MIN_MATCH_RATIO + (ratio_d - MIN_MATCH_RATIO) * span / (
+        Decimal("1.0") - MIN_MATCH_RATIO
     )
     return min(scaled, _MAX_SUGGESTION_CONFIDENCE)

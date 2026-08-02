@@ -53,7 +53,7 @@ cmd_suggestions() {
         -U "${POSTGRES_USER:-postgres}" \
         -d "${POSTGRES_DB:-inmotool}" \
         -v ON_ERROR_STOP=1 \
-        -c "SELECT id, listing_id_a, listing_id_b, match_basis, confidence, status, created_at FROM suggested_merge WHERE status IN ('pending','conflict') ORDER BY created_at DESC"
+        -c "SELECT id, listing_id_a, listing_id_b, match_basis, confidence, status, detail, created_at FROM suggested_merge WHERE status IN ('pending','conflict') ORDER BY created_at DESC"
 }
 
 SUBCMD="${1:-}"

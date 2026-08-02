@@ -22,12 +22,21 @@ _MAX_PRICE_RATIO = Decimal("0.20")
 _MAX_CONFIDENCE = Decimal("0.590")  # strictly below the 0.6 auto-merge-adjacent bar
 
 _ABBREVIATIONS = {
-    r"\bc/\b": "calle",
-    r"\bcl\.\b": "calle",
-    r"\bavda\.?\b": "avenida",
-    r"\bav\.\b": "avenida",
-    r"\bpza\.?\b": "plaza",
-    r"\bpº\b": "paseo",
+    # Trailing `(?!\w)` rather than `\b`: a `\b` word-boundary assertion
+    # requires an actual word/non-word transition, which "c/ trafalgar" or
+    # "cl. mayor" never have at the point right after the `/`/`.` (both
+    # that character and the following space are non-word — no transition,
+    # so `\b` silently never matches). `(?!\w)` just asserts "not a word
+    # character next", which the following space satisfies either way.
+    # Found dead in review (PR #55): these three never matched their
+    # real-world space-separated form, silently breaking the single most
+    # common Spanish address abbreviation pattern.
+    r"\bc/(?!\w)": "calle",
+    r"\bcl\.?(?!\w)": "calle",
+    r"\bavda\.?(?!\w)": "avenida",
+    r"\bav\.?(?!\w)": "avenida",
+    r"\bpza\.?(?!\w)": "plaza",
+    r"\bpº(?!\w)": "paseo",
 }
 
 
