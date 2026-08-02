@@ -34,10 +34,12 @@ const MOCK_RUNS_RESPONSE = {
       finished_at: "2026-04-10T03:00:00Z",
       duration_ms: 3600000,
       status: "success",
-      total_tables: 22,
-      tables_ok: 22,
-      tables_failed: 0,
-      total_rows_synced: 45000,
+      total_connectors: 2,
+      connectors_ok: 2,
+      connectors_failed: 0,
+      connectors_skipped: 0,
+      total_discovered: 72,
+      total_fetched: 45,
       trigger: "scheduled",
     },
   ],
@@ -52,10 +54,12 @@ const MOCK_RUNNING_RUNS_RESPONSE = {
       finished_at: null,
       duration_ms: null,
       status: "running",
-      total_tables: 22,
-      tables_ok: 0,
-      tables_failed: 0,
-      total_rows_synced: 0,
+      total_connectors: 2,
+      connectors_ok: 0,
+      connectors_failed: 0,
+      connectors_skipped: 0,
+      total_discovered: 0,
+      total_fetched: 0,
       trigger: "manual",
     },
   ],
@@ -66,24 +70,24 @@ const MOCK_STATS_RESPONSE = {
   duration_trend: [
     { started_at: "2026-04-10T02:00:00Z", duration_ms: 3600000, status: "success" },
   ],
-  rows_trend: [
-    { started_at: "2026-04-10T02:00:00Z", total_rows_synced: 45000 },
+  listings_trend: [
+    { started_at: "2026-04-10T02:00:00Z", discovered: 72, fetched: 45 },
   ],
-  table_durations: [
-    { table_name: "ps_ventas", avg_duration_ms: 900000, last_duration_ms: 850000 },
+  connector_durations: [
+    { connector_name: "fotocasa", avg_duration_ms: 900000, last_duration_ms: 850000 },
   ],
-  top_tables_by_rows: [
-    { table_name: "ps_ventas", rows_synced: 45000 },
+  top_connectors_by_listings: [
+    { connector_name: "fotocasa", fetched_count: 45 },
   ],
   success_rate: { total: 10, success: 9, partial: 1, failed: 0 },
   last_run: {
     run_id: 1,
     duration_ms: 3600000,
-    total_rows_synced: 45000,
-    throughput_rows_per_sec: 12.5,
+    total_discovered: 72,
+    total_fetched: 45,
+    fetch_rate: 0.625,
   },
-  watermarks: { max_age_seconds: 3600, table_name: "ps_ventas" },
-  errors_24h: { runs_failed: 0, tables_failed: 0 },
+  errors_24h: { runs_failed: 0, connectors_failed: 0 },
 };
 
 // ---------------------------------------------------------------------------
@@ -267,7 +271,7 @@ describe("EtlMonitorPage", () => {
     const kpiRow = screen.getByTestId("kpi-row");
     const dashValues = kpiRow.querySelectorAll("p.text-xl");
     const dashTexts = Array.from(dashValues).map((el) => el.textContent);
-    // "Última sincronización", "Duración", and "Filas sincronizadas" all show "—"
+    // "Última sincronización", "Duración", and "Anuncios guardados" all show "—"
     expect(dashTexts.filter((t) => t === "—").length).toBeGreaterThanOrEqual(3);
   });
 
@@ -282,189 +286,72 @@ describe("EtlMonitorPage", () => {
     });
   });
 
-  // ── 9. "Sincronizar ahora" button renders and is enabled when idle ────────
+  // ── 9. Manual-trigger affordances are gone (issue #104) ──────────────────
 
-  it("renders the sync button enabled when no run is active", async () => {
+  it("renders no sync/force-resync buttons", async () => {
+    // Both used to POST /api/etl/run, which the connector orchestrator never
+    // polls for — the route was a hard 501 and the buttons were dead. An
+    // affordance that always fails is worse than none.
     globalThis.fetch = mockFetch();
     render(<EtlMonitorPage />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("sync-now-button")).toBeInTheDocument();
+      expect(screen.getByTestId("kpi-row")).toBeInTheDocument();
     });
 
-    const button = screen.getByTestId("sync-now-button");
-    expect(button).not.toBeDisabled();
-    expect(button).toHaveTextContent("Sincronizar ahora");
+    expect(screen.queryByTestId("sync-now-button")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("force-resync-button")).not.toBeInTheDocument();
   });
 
-  // ── 10. Button is disabled and shows spinner when a run is running ────────
-
-  it("disables the sync button and shows spinner while a run is running", async () => {
-    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
-      if (url.startsWith("/api/etl/runs")) {
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve(MOCK_RUNNING_RUNS_RESPONSE),
-        });
-      }
-      if (url.startsWith("/api/etl/stats")) {
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve(MOCK_STATS_RESPONSE),
-        });
-      }
-      return Promise.resolve({ ok: false, json: () => Promise.resolve({}) });
-    });
-
-    render(<EtlMonitorPage />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId("sync-now-button")).toBeDisabled();
-    });
-
-    const button = screen.getByTestId("sync-now-button");
-    expect(button).toHaveTextContent("Sincronizando…");
-  });
-
-  // ── 11. Clicking button calls POST /api/etl/run ───────────────────────────
-
-  it("calls POST /api/etl/run when clicked and is idle", async () => {
-    const fetchMock = vi.fn().mockImplementation((url: string, options?: RequestInit) => {
-      if (url === "/api/etl/run" && options?.method === "POST") {
-        return Promise.resolve({ ok: true, status: 202, json: () => Promise.resolve({ trigger_id: 1 }) });
-      }
-      if (url.startsWith("/api/etl/runs")) {
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve(MOCK_RUNS_RESPONSE),
-        });
-      }
-      if (url.startsWith("/api/etl/stats")) {
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve(MOCK_STATS_RESPONSE),
-        });
-      }
-      return Promise.resolve({ ok: false, json: () => Promise.resolve({}) });
-    });
+  it("never calls POST /api/etl/run", async () => {
+    const fetchMock = mockFetch();
     globalThis.fetch = fetchMock;
-
     render(<EtlMonitorPage />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("sync-now-button")).not.toBeDisabled();
+      expect(screen.getByTestId("run-list")).toBeInTheDocument();
     });
 
-    await act(async () => {
-      fireEvent.click(screen.getByTestId("sync-now-button"));
+    const posted = fetchMock.mock.calls.some((call) => {
+      const url = call[0] as string;
+      const opts = call[1] as RequestInit | undefined;
+      return url === "/api/etl/run" || opts?.method === "POST";
     });
-
-    await waitFor(() => {
-      const postCalls = fetchMock.mock.calls.filter(
-        ([url, opts]: [string, RequestInit | undefined]) =>
-          url === "/api/etl/run" && opts?.method === "POST"
-      );
-      expect(postCalls.length).toBe(1);
-    });
+    expect(posted).toBe(false);
   });
 
-  // ── 12. 501 response (the real one /api/etl/run returns — task 1.6/#14
-  //        Phase 1 review: the manual trigger is disabled, see route.ts)
-  //        surfaces the route's real detail message, not a generic one ─────
-
-  it("shows the route's detail message when POST /api/etl/run returns 501 (manual trigger disabled)", async () => {
-    const fetchMock = vi.fn().mockImplementation((url: string, options?: RequestInit) => {
-      if (url === "/api/etl/run" && options?.method === "POST") {
-        return Promise.resolve({ ok: false, status: 501, json: () => Promise.resolve({ error: "not_implemented", detail: "Manual ETL trigger is disabled" }) });
-      }
-      if (url.startsWith("/api/etl/runs")) {
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve(MOCK_RUNS_RESPONSE),
-        });
-      }
-      if (url.startsWith("/api/etl/stats")) {
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve(MOCK_STATS_RESPONSE),
-        });
-      }
-      return Promise.resolve({ ok: false, json: () => Promise.resolve({}) });
-    });
-    globalThis.fetch = fetchMock;
-
+  it("points the operator at the CLI and the connector management page", async () => {
+    globalThis.fetch = mockFetch();
     render(<EtlMonitorPage />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("sync-now-button")).not.toBeDisabled();
+      expect(screen.getByTestId("kpi-row")).toBeInTheDocument();
     });
 
-    await act(async () => {
-      fireEvent.click(screen.getByTestId("sync-now-button"));
-    });
-
-    // page.tsx's triggerSync treats 501 like 400 — surfaces the route's
-    // real `detail` string instead of the generic fallback message.
-    await waitFor(() => {
-      expect(screen.getByText("Manual ETL trigger is disabled")).toBeInTheDocument();
-    });
+    expect(screen.getByText(/ps connector run/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /Gestionar conectores/ }),
+    ).toHaveAttribute("href", "/etl/connectors");
   });
 
-  // ── 13. Button stays disabled while POST is in-flight ─────────────────────
+  // ── 10. Funnel KPIs replace the old row-count/watermark ones ──────────────
 
-  it("button stays disabled while POST /api/etl/run is in-flight", async () => {
-    let resolvePost!: (value: Response) => void;
-    const postPromise = new Promise<Response>((resolve) => {
-      resolvePost = resolve;
-    });
-
-    const fetchMock = vi.fn().mockImplementation((url: string, options?: RequestInit) => {
-      if (url === "/api/etl/run" && options?.method === "POST") {
-        return postPromise;
-      }
-      if (url.startsWith("/api/etl/runs")) {
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve(MOCK_RUNS_RESPONSE),
-        });
-      }
-      if (url.startsWith("/api/etl/stats")) {
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve(MOCK_STATS_RESPONSE),
-        });
-      }
-      return Promise.resolve({ ok: false, json: () => Promise.resolve({}) });
-    });
-    globalThis.fetch = fetchMock;
-
+  it("renders the discovered/fetched funnel KPIs", async () => {
+    globalThis.fetch = mockFetch();
     render(<EtlMonitorPage />);
 
-    // Wait for idle state
     await waitFor(() => {
-      expect(screen.getByTestId("sync-now-button")).not.toBeDisabled();
+      expect(screen.getByTestId("kpi-last-fetched")).toBeInTheDocument();
     });
 
-    // Click the button to start the POST (in-flight)
-    await act(async () => {
-      fireEvent.click(screen.getByTestId("sync-now-button"));
-    });
-
-    // While POST is pending the button must be disabled and show "Iniciando…"
-    expect(screen.getByTestId("sync-now-button")).toBeDisabled();
-    expect(screen.getByTestId("sync-now-button")).toHaveTextContent("Iniciando…");
-
-    // Resolve the POST → button re-enables (no active run in this mock)
-    await act(async () => {
-      resolvePost({
-        ok: true,
-        status: 202,
-        json: () => Promise.resolve({ trigger_id: 1 }),
-      } as unknown as Response);
-    });
-
+    expect(screen.getByTestId("kpi-last-fetched")).toHaveTextContent("45");
+    // fetch_rate 0.625 renders as a percentage.
     await waitFor(() => {
-      expect(screen.getByTestId("sync-now-button")).not.toBeDisabled();
+      expect(screen.getByTestId("kpi-fetch-rate")).toHaveTextContent("63%");
     });
+    // The watermark KPI is gone with the table that fed it.
+    expect(screen.queryByTestId("kpi-watermark-age")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("kpi-throughput")).not.toBeInTheDocument();
   });
+
 });

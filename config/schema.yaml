@@ -87,6 +87,29 @@
   components: [etl, dashboard]
 
 # -----------------------------------------------------------------------------
+# ETL -> Dashboard callback (issue #94)
+# -----------------------------------------------------------------------------
+- key: etl.dashboard_base_url
+  env: ETL_DASHBOARD_BASE_URL
+  type: string
+  sensitive: false
+  default: "http://dashboard:4000"
+  section: "ETL"
+  description: "URL base del dashboard, vista desde el contenedor ETL. Al terminar cada ciclo de conectores, el orquestador hace POST a {base}/api/profiles/materialize-all para que los inmuebles recién ingeridos se materialicen y puntúen sin intervención manual (issue #94). El valor por defecto usa el DNS interno de docker-compose; ponlo a cadena vacía para desactivar el aviso por completo."
+  requires_restart: [etl]
+  components: [etl]
+
+- key: etl.dashboard_callback_timeout_seconds
+  env: ETL_DASHBOARD_CALLBACK_TIMEOUT_SECONDS
+  type: int
+  sensitive: false
+  default: 30
+  section: "ETL"
+  description: "Tiempo máximo de espera (segundos) del aviso POST al dashboard tras un ciclo de conectores. Al agotarse se registra un warning y el ciclo se da por bueno igualmente: los datos ya están ingeridos y la materialización es idempotente, así que se recupera en el siguiente ciclo."
+  requires_restart: [etl]
+  components: [etl]
+
+# -----------------------------------------------------------------------------
 # OpenRouter / LLM
 # -----------------------------------------------------------------------------
 - key: openrouter.api_key

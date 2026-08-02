@@ -1,25 +1,24 @@
 /**
  * GET /api/etl/stats
  *
- * Returns aggregated time-series data for ETL monitoring charts.
- * Uses the last 30 runs (except for KPIs scoped to a fixed 24h window).
+ * Aggregated time-series data for the connector monitoring charts.
+ * Uses the last 30 runs (except KPIs scoped to a fixed 24h window).
  *
- * Response shape:
- *   {
- *     duration_trend: [{ started_at, duration_ms, status }],
- *     rows_trend: [{ started_at, total_rows_synced }],
- *     table_durations: [{ table_name, avg_duration_ms, last_duration_ms }],
- *     top_tables_by_rows: [{ table_name, rows_synced }],
- *     success_rate: { total, success, partial, failed },
- *     last_run: {
- *       run_id: number | null,
- *       duration_ms: number | null,
- *       total_rows_synced: number | null,
- *       throughput_rows_per_sec: number | null
- *     },
- *     watermarks: { max_age_seconds: number | null, table_name: string | null },
- *     errors_24h: { runs_failed: number, tables_failed: number }
- *   }
+ * Issue #104 repointed this off the source project's orphaned
+ * `etl_sync_runs`/`etl_sync_run_tables` onto `connector_runs`/
+ * `connector_run_results`. Two shape changes worth calling out:
+ *
+ *   - "rows synced" became the ingestion funnel. The old model had a
+ *     single `total_rows_synced` per run; this one distinguishes
+ *     *discovered* (listings a connector found) from *fetched* (listings
+ *     it actually parsed and stored). The gap between them is the useful
+ *     signal — it widens when a site changes markup or starts
+ *     soft-blocking, well before a run outright fails.
+ *   - The watermark-age KPI is gone. It read `etl_watermarks`, which the
+ *     per-table delta sync populated; the connector orchestrator has no
+ *     watermark concept and nothing writes that table anymore, so the KPI
+ *     could only ever render "—". Replaced by connector error counts,
+ *     which are real here.
  *
  * Error codes:
  *   500 - Database error
@@ -40,20 +39,21 @@ export interface DurationTrendPoint {
   status: string;
 }
 
-export interface RowsTrendPoint {
+export interface ListingsTrendPoint {
   started_at: string;
-  total_rows_synced: number | null;
+  discovered: number | null;
+  fetched: number | null;
 }
 
-export interface TableDuration {
-  table_name: string;
+export interface ConnectorDuration {
+  connector_name: string;
   avg_duration_ms: number;
   last_duration_ms: number | null;
 }
 
-export interface TableRows {
-  table_name: string;
-  rows_synced: number;
+export interface ConnectorListings {
+  connector_name: string;
+  fetched_count: number;
 }
 
 export interface SuccessRate {
@@ -66,33 +66,29 @@ export interface SuccessRate {
 export interface LastRunSummary {
   run_id: number | null;
   duration_ms: number | null;
-  total_rows_synced: number | null;
-  throughput_rows_per_sec: number | null;
-}
-
-export interface WatermarkInfo {
-  max_age_seconds: number | null;
-  table_name: string | null;
+  total_discovered: number | null;
+  total_fetched: number | null;
+  /** fetched / discovered, 0–1. NULL when nothing was discovered. */
+  fetch_rate: number | null;
 }
 
 export interface Errors24h {
   runs_failed: number;
-  tables_failed: number;
+  connectors_failed: number;
 }
 
 export interface EtlStatsResponse {
   duration_trend: DurationTrendPoint[];
-  rows_trend: RowsTrendPoint[];
-  table_durations: TableDuration[];
-  top_tables_by_rows: TableRows[];
+  listings_trend: ListingsTrendPoint[];
+  connector_durations: ConnectorDuration[];
+  top_connectors_by_listings: ConnectorListings[];
   success_rate: SuccessRate;
   last_run: LastRunSummary;
-  watermarks: WatermarkInfo;
   errors_24h: Errors24h;
 }
 
 const LAST_N_RUNS = 30;
-const TOP_TABLES_BY_ROWS = 10;
+const TOP_CONNECTORS = 10;
 
 export async function GET(): Promise<NextResponse> {
   const requestId = generateRequestId();
@@ -101,40 +97,57 @@ export async function GET(): Promise<NextResponse> {
     // All queries are independent reads -- run in parallel.
     const [
       trendResult,
-      tableDurResult,
+      connectorDurResult,
       rateResult,
-      topRowsResult,
+      topListingsResult,
       lastRunResult,
-      watermarkResult,
       errorsResult,
     ] = await Promise.all([
+      // Run-level trend + funnel totals for the last N runs.
       query(
-        `SELECT started_at, duration_ms, status, total_rows_synced
-         FROM etl_sync_runs
-         ORDER BY started_at DESC
+        `SELECT r.started_at, r.duration_ms, r.status,
+                agg.total_discovered, agg.total_fetched
+         FROM connector_runs r
+         LEFT JOIN LATERAL (
+             SELECT SUM(res.discovered_count) AS total_discovered,
+                    SUM(res.fetched_count)    AS total_fetched
+             FROM connector_run_results res
+             WHERE res.run_id = r.id
+         ) agg ON TRUE
+         ORDER BY r.started_at DESC
          LIMIT $1`,
         [LAST_N_RUNS],
       ),
 
-      // Per-table avg and last duration scoped to last N runs.
+      // Per-connector avg and last duration, scoped to the last N runs.
+      // Duration is derived (connector_run_results has no duration column,
+      // unlike the etl_sync_run_tables this replaced).
       query(
         `SELECT
-             t.table_name,
-             COALESCE(ROUND(AVG(t.duration_ms))::int, 0) AS avg_duration_ms,
-             (SELECT t2.duration_ms
-              FROM etl_sync_run_tables t2
-              JOIN etl_sync_runs r2 ON r2.id = t2.run_id
-              WHERE t2.table_name = t.table_name
+             c.connector_name,
+             COALESCE(ROUND(AVG(
+                 EXTRACT(EPOCH FROM (c.finished_at - c.started_at)) * 1000
+             ))::int, 0) AS avg_duration_ms,
+             (SELECT ROUND(
+                         EXTRACT(EPOCH FROM (c2.finished_at - c2.started_at)) * 1000
+                     )::bigint
+              FROM connector_run_results c2
+              JOIN connector_runs r2 ON r2.id = c2.run_id
+              WHERE c2.connector_name = c.connector_name
+                AND c2.started_at IS NOT NULL
+                AND c2.finished_at IS NOT NULL
               ORDER BY r2.started_at DESC
               LIMIT 1) AS last_duration_ms
-        FROM etl_sync_run_tables t
-        JOIN etl_sync_runs r ON r.id = t.run_id
-        WHERE r.id IN (
-              SELECT id FROM etl_sync_runs
+        FROM connector_run_results c
+        JOIN connector_runs r ON r.id = c.run_id
+        WHERE c.started_at IS NOT NULL
+          AND c.finished_at IS NOT NULL
+          AND r.id IN (
+              SELECT id FROM connector_runs
               ORDER BY started_at DESC
               LIMIT $1
             )
-        GROUP BY t.table_name
+        GROUP BY c.connector_name
         ORDER BY avg_duration_ms DESC`,
         [LAST_N_RUNS],
       ),
@@ -146,69 +159,65 @@ export async function GET(): Promise<NextResponse> {
              COUNT(*) FILTER (WHERE status = 'partial') AS partial,
              COUNT(*) FILTER (WHERE status = 'failed') AS failed
         FROM (
-              SELECT status FROM etl_sync_runs
+              SELECT status FROM connector_runs
               ORDER BY started_at DESC
               LIMIT $1
             ) sub`,
         [LAST_N_RUNS],
       ),
 
-      // Top N tables by rows synced in the most recent finished (success/partial) run.
-      // Returns empty if the latest finished run has no etl_sync_run_tables rows.
+      // Listings fetched per connector in the most recent finished run.
       query(
-        `SELECT t.table_name, t.rows_synced
-         FROM etl_sync_run_tables t
-         WHERE t.run_id = (
-             SELECT r.id FROM etl_sync_runs r
+        `SELECT c.connector_name, c.fetched_count
+         FROM connector_run_results c
+         WHERE c.run_id = (
+             SELECT r.id FROM connector_runs r
              WHERE r.status IN ('success', 'partial')
              ORDER BY r.started_at DESC
              LIMIT 1
          )
-         ORDER BY t.rows_synced DESC
+         ORDER BY c.fetched_count DESC
          LIMIT $1`,
-        [TOP_TABLES_BY_ROWS],
+        [TOP_CONNECTORS],
       ),
 
-      // Summary for the "last run" KPI row. Throughput is computed server-side
-      // to avoid the browser having to handle the divide-by-zero case.
+      // "Last run" KPI row. fetch_rate is computed server-side to keep the
+      // divide-by-zero case out of the browser.
       query(
         `SELECT
-             id,
-             duration_ms,
-             total_rows_synced,
+             r.id,
+             r.duration_ms,
+             agg.total_discovered,
+             agg.total_fetched,
              CASE
-                 WHEN duration_ms IS NULL OR duration_ms <= 0 THEN NULL
-                 ELSE (total_rows_synced::numeric / (duration_ms / 1000.0))::numeric(12, 2)
-             END AS throughput_rows_per_sec
-         FROM etl_sync_runs
-         WHERE status IN ('success', 'partial')
-         ORDER BY started_at DESC
+                 WHEN COALESCE(agg.total_discovered, 0) = 0 THEN NULL
+                 ELSE (agg.total_fetched::numeric / agg.total_discovered)::numeric(6, 4)
+             END AS fetch_rate
+         FROM connector_runs r
+         LEFT JOIN LATERAL (
+             SELECT SUM(res.discovered_count) AS total_discovered,
+                    SUM(res.fetched_count)    AS total_fetched
+             FROM connector_run_results res
+             WHERE res.run_id = r.id
+         ) agg ON TRUE
+         WHERE r.status IN ('success', 'partial')
+         ORDER BY r.started_at DESC
          LIMIT 1`,
       ),
 
-      // Oldest watermark age (seconds). Only considers watermarks known to be
-      // watermark-backed (status='ok' or 'error'), mirroring how set_watermark
-      // writes rows from the ETL. A fresh DB returns NULL.
-      query(
-        `SELECT table_name,
-                EXTRACT(EPOCH FROM (NOW() - last_sync_at))::bigint AS age_seconds
-         FROM etl_watermarks
-         WHERE status IN ('ok', 'error')
-         ORDER BY last_sync_at ASC
-         LIMIT 1`,
-      ),
-
-      // Error counts in the rolling 24h window — one query returns both
-      // aggregates so the route stays on a single round-trip.
+      // Rolling 24h error counts. A connector result counts as failed for
+      // both 'failed' and 'circuit_open' — a tripped breaker is a real
+      // ingestion problem, not a neutral outcome. 'skipped' is deliberately
+      // excluded: an operator disabling a connector is not an error.
       query(
         `SELECT
-             (SELECT COUNT(*) FROM etl_sync_runs
+             (SELECT COUNT(*) FROM connector_runs
               WHERE status = 'failed'
                 AND started_at > NOW() - INTERVAL '24 hours') AS runs_failed,
-             (SELECT COUNT(*) FROM etl_sync_run_tables t
-              JOIN etl_sync_runs r ON r.id = t.run_id
-              WHERE t.status = 'failed'
-                AND r.started_at > NOW() - INTERVAL '24 hours') AS tables_failed`,
+             (SELECT COUNT(*) FROM connector_run_results c
+              JOIN connector_runs r ON r.id = c.run_id
+              WHERE c.status IN ('failed', 'circuit_open')
+                AND r.started_at > NOW() - INTERVAL '24 hours') AS connectors_failed`,
       ),
     ]);
 
@@ -220,21 +229,25 @@ export async function GET(): Promise<NextResponse> {
       status: String(row[2]),
     }));
 
-    const rowsTrend: RowsTrendPoint[] = reversedRows.map((row) => ({
+    const listingsTrend: ListingsTrendPoint[] = reversedRows.map((row) => ({
       started_at: toIsoOrNull(row[0]) ?? "",
-      total_rows_synced: row[3] != null ? Number(row[3]) : null,
+      discovered: row[3] != null ? Number(row[3]) : null,
+      fetched: row[4] != null ? Number(row[4]) : null,
     }));
 
-    const tableDurations: TableDuration[] = tableDurResult.rows.map((row) => ({
-      table_name: String(row[0]),
-      avg_duration_ms: Number(row[1]),
-      last_duration_ms: row[2] != null ? Number(row[2]) : null,
-    }));
+    const connectorDurations: ConnectorDuration[] = connectorDurResult.rows.map(
+      (row) => ({
+        connector_name: String(row[0]),
+        avg_duration_ms: Number(row[1]),
+        last_duration_ms: row[2] != null ? Number(row[2]) : null,
+      }),
+    );
 
-    const topTablesByRows: TableRows[] = topRowsResult.rows.map((row) => ({
-      table_name: String(row[0]),
-      rows_synced: Number(row[1] ?? 0),
-    }));
+    const topConnectorsByListings: ConnectorListings[] =
+      topListingsResult.rows.map((row) => ({
+        connector_name: String(row[0]),
+        fetched_count: Number(row[1] ?? 0),
+      }));
 
     const rr = rateResult.rows[0] ?? [0, 0, 0, 0];
     const successRate: SuccessRate = {
@@ -249,48 +262,40 @@ export async function GET(): Promise<NextResponse> {
       ? {
           run_id: lastRunRow[0] != null ? Number(lastRunRow[0]) : null,
           duration_ms: lastRunRow[1] != null ? Number(lastRunRow[1]) : null,
-          total_rows_synced:
+          total_discovered:
             lastRunRow[2] != null ? Number(lastRunRow[2]) : null,
-          throughput_rows_per_sec:
-            lastRunRow[3] != null ? Number(lastRunRow[3]) : null,
+          total_fetched: lastRunRow[3] != null ? Number(lastRunRow[3]) : null,
+          fetch_rate: lastRunRow[4] != null ? Number(lastRunRow[4]) : null,
         }
       : {
           run_id: null,
           duration_ms: null,
-          total_rows_synced: null,
-          throughput_rows_per_sec: null,
+          total_discovered: null,
+          total_fetched: null,
+          fetch_rate: null,
         };
-
-    const wmRow = watermarkResult.rows[0];
-    const watermarks: WatermarkInfo = wmRow
-      ? {
-          table_name: wmRow[0] != null ? String(wmRow[0]) : null,
-          max_age_seconds: wmRow[1] != null ? Number(wmRow[1]) : null,
-        }
-      : { table_name: null, max_age_seconds: null };
 
     const errRow = errorsResult.rows[0] ?? [0, 0];
     const errors24h: Errors24h = {
       runs_failed: Number(errRow[0] ?? 0),
-      tables_failed: Number(errRow[1] ?? 0),
+      connectors_failed: Number(errRow[1] ?? 0),
     };
 
     const response: EtlStatsResponse = {
       duration_trend: durationTrend,
-      rows_trend: rowsTrend,
-      table_durations: tableDurations,
-      top_tables_by_rows: topTablesByRows,
+      listings_trend: listingsTrend,
+      connector_durations: connectorDurations,
+      top_connectors_by_listings: topConnectorsByListings,
       success_rate: successRate,
       last_run: lastRun,
-      watermarks,
       errors_24h: errors24h,
     };
     return NextResponse.json(response);
   } catch (err) {
-    console.error(`[${requestId}] Error loading ETL stats:`, err);
+    console.error(`[${requestId}] Error loading connector stats:`, err);
     return NextResponse.json(
       formatApiError(
-        "No se pudieron cargar las estadísticas de ETL. Inténtalo de nuevo.",
+        "No se pudieron cargar las estadísticas de conectores. Inténtalo de nuevo.",
         "DB_QUERY",
         sanitizeErrorMessage(err),
         requestId,

@@ -23,7 +23,7 @@ export function buildPgPoolConfig(opts: { max: number }): PoolConfig {
     port: parseInt(process.env.POSTGRES_PORT || "5432", 10),
     user: process.env.POSTGRES_USER || "postgres",
     password: process.env.POSTGRES_PASSWORD || "",
-    database: process.env.POSTGRES_DB || "powershop",
+    database: process.env.POSTGRES_DB || "inmotool",
     max: opts.max,
     statement_timeout: STATEMENT_TIMEOUT_MS,
     connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,

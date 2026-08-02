@@ -114,9 +114,67 @@ def _get_postgres_dsn() -> str:
     return ""
 
 
+def _get_dashboard_base_url() -> str:
+    """Base URL of the dashboard as reachable from the ETL container (issue #94).
+
+    Empty string disables the post-run materialize callback entirely — a
+    supported configuration (e.g. running the ETL standalone with no
+    dashboard container), not an error.
+
+    The environment variable is checked *before* the config loader, and an
+    explicitly-empty value is honoured rather than treated as "unset". The
+    loader coerces empty to None and would fall through to the schema
+    default, silently re-enabling a callback the operator deliberately
+    turned off — caught by test_empty_base_url_disables_the_call.
+    """
+    if "ETL_DASHBOARD_BASE_URL" in os.environ:
+        return os.environ["ETL_DASHBOARD_BASE_URL"].strip()
+    value = _loader_get("etl.dashboard_base_url", default=None)
+    if value is not None:
+        return str(value).strip()
+    return "http://dashboard:4000"
+
+
+def _get_dashboard_callback_timeout_seconds() -> int:
+    """Timeout for the post-run materialize callback (issue #94).
+
+    Environment first, then the config loader — the same precedence as
+    `_get_dashboard_base_url` above, so the two knobs for this callback behave
+    consistently.
+    """
+    value: object | None = os.environ.get("ETL_DASHBOARD_CALLBACK_TIMEOUT_SECONDS")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = _loader_get("etl.dashboard_callback_timeout_seconds", default=None)
+    if value is None:
+        value = "30"
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 30
+    # A non-positive timeout would mean "fail instantly" in requests, which
+    # is never what an operator means — treat it as "use the default".
+    return parsed if parsed > 0 else 30
+
+
+def _get_admin_api_key() -> str:
+    """Shared admin key used to authenticate the dashboard callback (issue #94).
+
+    Read from the environment only, never from config.yaml — mirrors the
+    dashboard's own `adminApiKeyValid` reasoning: a key that is writable from
+    the config UI could be replaced by an attacker with file-write access to
+    lock out the real admin.
+    """
+    return (os.environ.get("ADMIN_API_KEY") or "").strip()
+
+
 @dataclass
 class Config:
     postgres_dsn: str = field(default_factory=_get_postgres_dsn)
+    dashboard_base_url: str = field(default_factory=_get_dashboard_base_url)
+    dashboard_callback_timeout_seconds: int = field(
+        default_factory=_get_dashboard_callback_timeout_seconds
+    )
+    admin_api_key: str = field(default_factory=_get_admin_api_key)
 
     def __post_init__(self) -> None:
         self.postgres_dsn = self.postgres_dsn.strip()

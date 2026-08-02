@@ -3,8 +3,7 @@
  *
  * The middleware forwards the originally requested path as `?redirect=<path>`
  * to `/admin/login`. After a successful login, we return the user to that
- * target — but only if the value is a safe local path that actually lives
- * inside the admin area (either `/admin/*` or `/etl*`).
+ * target — but only if the value is a safe *local* path.
  *
  * Rejecting everything else prevents open-redirect attacks where a crafted
  * value like `//evil.example.com` or `https://evil.example.com` would send
@@ -28,8 +27,16 @@ export const DEFAULT_ADMIN_LANDING = "/admin/slow-queries";
 // eslint-disable-next-line no-control-regex
 const CONTROL_OR_WHITESPACE = /[\x00-\x1F\x7F\s]/;
 
-// Matches local paths that live inside the admin area.
-const ADMIN_AREA_PATH = /^\/(admin|etl)(\/|\?|#|$)/;
+// Matches any local application path.
+//
+// Previously restricted to `/admin` and `/etl`, back when those were the only
+// gated surfaces. Every page is now gated (this is a single-operator tool —
+// see `middleware.ts`), so a user can be bounced to login from anywhere and
+// must be able to return there. The open-redirect protections below (absolute
+// local path only, no protocol-relative `//host`, no backslashes, no control
+// characters) are what actually prevent off-site redirection, and they are
+// unchanged.
+const ADMIN_AREA_PATH = /^\/(?!\/)/;
 
 /**
  * Returns a sanitized local redirect path, or the default landing page if the
@@ -40,7 +47,6 @@ const ADMIN_AREA_PATH = /^\/(admin|etl)(\/|\?|#|$)/;
  *   a scheme such as `http:`/`https:`/`javascript:`/`data:`).
  * - do not contain a backslash (rejects quirks like `/\evil.example.com`).
  * - contain no control characters or whitespace.
- * - begin with `/admin` or `/etl` followed by `/`, `?`, `#`, or end-of-string.
  * - are not the login page itself.
  *
  * The bare `/admin` (and `/admin/`, with or without query/hash) is also mapped

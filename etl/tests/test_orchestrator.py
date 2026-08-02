@@ -1477,3 +1477,184 @@ class TestSchemaSupersetFieldsPersistAcrossRevisit:
             assert operation == "sale"
         finally:
             _cleanup(pg_conn, source)
+
+
+class TestMaterializeAllNotification:
+    """Issue #94: a completed connector run must trigger materialization +
+    scoring in the dashboard, instead of leaving fresh listings unscored
+    until a human clicks something.
+
+    These tests target `notify_materialize_all` directly with a stubbed
+    `requests.post` — the real cross-container HTTP round trip is covered by
+    the live end-to-end verification recorded in the PR, which is the only
+    way to prove the two services actually agree on the credential.
+    """
+
+    @staticmethod
+    def _stub_requests(monkeypatch, *, calls, response=None, raises=None):
+        """Install a fake `requests` module capturing POSTs into `calls`."""
+        import sys
+        import types
+
+        def fake_post(url, **kwargs):
+            calls.append({"url": url, **kwargs})
+            if raises is not None:
+                raise raises
+            return response
+
+        fake_requests = types.ModuleType("requests")
+        fake_requests.post = fake_post  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    @staticmethod
+    def _response(status_code: int):
+        class _Resp:
+            def __init__(self, code: int) -> None:
+                self.status_code = code
+                self.ok = 200 <= code < 300
+
+        return _Resp(status_code)
+
+    def test_posts_to_dashboard_with_admin_key(self, monkeypatch):
+        """The happy path: correct URL, and the shared admin key attached.
+
+        The key must actually be sent — the endpoint fails closed, so a
+        notification without it would 401 and silently leave listings
+        unscored, which is the exact bug #94 exists to fix.
+        """
+        calls: list[dict] = []
+        self._stub_requests(monkeypatch, calls=calls, response=self._response(200))
+        monkeypatch.setenv("ETL_DASHBOARD_BASE_URL", "http://dashboard:4000")
+        monkeypatch.setenv("ADMIN_API_KEY", "s3cret")
+        monkeypatch.setenv("POSTGRES_DSN", "postgresql://u@localhost:5432/d")
+
+        assert orchestrator.notify_materialize_all(trigger="test") is True
+        assert len(calls) == 1
+        assert calls[0]["url"] == "http://dashboard:4000/api/profiles/materialize-all"
+        assert calls[0]["headers"]["x-admin-key"] == "s3cret"
+
+    def test_trailing_slash_in_base_url_does_not_double_up(self, monkeypatch):
+        calls: list[dict] = []
+        self._stub_requests(monkeypatch, calls=calls, response=self._response(200))
+        monkeypatch.setenv("ETL_DASHBOARD_BASE_URL", "http://dashboard:4000/")
+        monkeypatch.setenv("ADMIN_API_KEY", "s3cret")
+        monkeypatch.setenv("POSTGRES_DSN", "postgresql://u@localhost:5432/d")
+
+        orchestrator.notify_materialize_all()
+        assert calls[0]["url"] == "http://dashboard:4000/api/profiles/materialize-all"
+
+    def test_empty_base_url_disables_the_call(self, monkeypatch):
+        """Running the ETL with no dashboard is a supported setup, not an error."""
+        calls: list[dict] = []
+        self._stub_requests(monkeypatch, calls=calls, response=self._response(200))
+        monkeypatch.setenv("ETL_DASHBOARD_BASE_URL", "")
+        monkeypatch.setenv("POSTGRES_DSN", "postgresql://u@localhost:5432/d")
+
+        assert orchestrator.notify_materialize_all() is False
+        assert calls == []
+
+    def test_connection_error_is_swallowed(self, monkeypatch):
+        """A dashboard that is down must not fail the connector run.
+
+        Ingest is already committed by the time this runs; losing the
+        notification only means candidates stay unscored until the next run
+        (materialization is idempotent, so it self-heals).
+        """
+        calls: list[dict] = []
+        self._stub_requests(
+            monkeypatch, calls=calls, raises=OSError("connection refused")
+        )
+        monkeypatch.setenv("ETL_DASHBOARD_BASE_URL", "http://dashboard:4000")
+        monkeypatch.setenv("ADMIN_API_KEY", "s3cret")
+        monkeypatch.setenv("POSTGRES_DSN", "postgresql://u@localhost:5432/d")
+
+        assert orchestrator.notify_materialize_all() is False
+
+    def test_401_is_reported_as_a_distinct_warning(self, monkeypatch, caplog):
+        """A key mismatch is an operator error worth naming explicitly.
+
+        Without this, a misconfigured shared secret would look identical to
+        "the dashboard is briefly down" and nobody would find out why
+        scoring silently stopped.
+        """
+        calls: list[dict] = []
+        self._stub_requests(monkeypatch, calls=calls, response=self._response(401))
+        monkeypatch.setenv("ETL_DASHBOARD_BASE_URL", "http://dashboard:4000")
+        monkeypatch.setenv("ADMIN_API_KEY", "wrong-key")
+        monkeypatch.setenv("POSTGRES_DSN", "postgresql://u@localhost:5432/d")
+
+        with caplog.at_level("WARNING", logger="etl.orchestrator"):
+            assert orchestrator.notify_materialize_all() is False
+        assert any(
+            "401" in r.message or "unauthorized" in r.message.lower()
+            for r in caplog.records
+        )
+
+    def test_missing_admin_key_warns_instead_of_silently_no_opping(
+        self, monkeypatch, caplog
+    ):
+        calls: list[dict] = []
+        self._stub_requests(monkeypatch, calls=calls, response=self._response(401))
+        monkeypatch.setenv("ETL_DASHBOARD_BASE_URL", "http://dashboard:4000")
+        monkeypatch.delenv("ADMIN_API_KEY", raising=False)
+        monkeypatch.setenv("POSTGRES_DSN", "postgresql://u@localhost:5432/d")
+
+        with caplog.at_level("WARNING", logger="etl.orchestrator"):
+            orchestrator.notify_materialize_all()
+        assert any("ADMIN_API_KEY" in r.message for r in caplog.records)
+        # Still attempted (so the 401 surfaces in logs) rather than skipped.
+        assert len(calls) == 1
+        assert "x-admin-key" not in calls[0]["headers"]
+
+    def test_run_all_connectors_notifies_after_finishing(self, pg_conn, monkeypatch):
+        """The wiring itself: a completed run calls the notifier.
+
+        Asserts it fires AFTER the run row is finalized — the run's own
+        bookkeeping must be durable before an outbound call that can hang.
+        """
+        _apply_schema(pg_conn)
+        monkeypatch.setattr(orchestrator, "CONNECTORS", [])
+
+        seen: list[str] = []
+
+        def fake_notify(trigger: str = "scheduler") -> bool:
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM connector_runs ORDER BY id DESC LIMIT 1"
+                )
+                (status,) = cur.fetchone()
+            seen.append(status)
+            return True
+
+        monkeypatch.setattr(orchestrator, "notify_materialize_all", fake_notify)
+        run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+        try:
+            assert seen == ["success"], (
+                "notification must fire after the run row is finalized"
+            )
+        finally:
+            with pg_conn.cursor() as cur:
+                cur.execute("DELETE FROM connector_runs WHERE id = %s", (run_id,))
+            pg_conn.commit()
+
+    def test_notification_failure_does_not_fail_the_run(self, pg_conn, monkeypatch):
+        """Even an unexpected exception in the notifier must not lose the run."""
+        _apply_schema(pg_conn)
+        monkeypatch.setattr(orchestrator, "CONNECTORS", [])
+
+        def boom(trigger: str = "scheduler") -> bool:
+            raise RuntimeError("notifier exploded")
+
+        monkeypatch.setattr(orchestrator, "notify_materialize_all", boom)
+        run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+        try:
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM connector_runs WHERE id = %s", (run_id,)
+                )
+                (status,) = cur.fetchone()
+            assert status == "success"
+        finally:
+            with pg_conn.cursor() as cur:
+                cur.execute("DELETE FROM connector_runs WHERE id = %s", (run_id,))
+            pg_conn.commit()

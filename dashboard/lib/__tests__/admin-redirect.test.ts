@@ -38,11 +38,6 @@ describe("safeAdminRedirectTarget", () => {
       ["javascript:alert(1)", "javascript: scheme"],
       ["data:text/html,<script>alert(1)</script>", "data: URL"],
       ["mailto:a@b.c", "mailto: scheme"],
-      // Non-admin local paths.
-      ["/", "root"],
-      ["/dashboard/42", "dashboard path"],
-      ["/review", "review page"],
-      ["/api/admin/usage", "api path (handled via header auth, not session)"],
       // Admin-login itself would loop.
       ["/admin/login", "login page"],
       ["/admin/login?redirect=/etl", "login page with query"],
@@ -53,20 +48,33 @@ describe("safeAdminRedirectTarget", () => {
       ["/admin/slow-queries\r\nSet-Cookie: x=1", "CRLF injection"],
       ["/admin/\tslow-queries", "tab character"],
       ["/admin/ slow-queries", "inner space"],
-      // Prefix tricks that must not match `/admin` or `/etl`.
-      ["/administrator", "prefix collision /admin"],
-      ["/admin-tools", "hyphen after admin"],
-      ["/etlsomething", "etl prefix collision"],
-      ["/etl-stats", "hyphen after etl"],
       // Missing leading slash.
       ["admin/slow-queries", "relative path"],
-      // (Bare /admin is now a valid target — it shows the admin index page.)
-      // Dot-segment bypass attempts — normalize to a non-admin path.
-      ["/admin/../", "dot-segment escaping admin root"],
-      ["/admin/../dashboard", "dot-segment escaping to dashboard"],
-      ["/etl/../../somewhere", "double dot-segment escaping etl"],
     ])("rejects %s (%s)", (value, _label) => {
       expect(safeAdminRedirectTarget(value as string | null | undefined)).toBe(DEFAULT_ADMIN_LANDING);
+    });
+  });
+
+  describe("accepts any safe local path (every page is gated, so login can bounce back anywhere)", () => {
+    it.each([
+      ["/", "root"],
+      ["/profiles", "profiles list"],
+      ["/profiles/7/map", "nested profile path"],
+      ["/conversations", "conversations"],
+      ["/etl/connectors", "connector management"],
+      ["/administrator", "path that merely starts with 'admin'"],
+      ["/profiles?filter=x#top", "query and hash preserved"],
+    ])("accepts %s (%s)", (value, _label) => {
+      expect(safeAdminRedirectTarget(value)).toBe(value);
+    });
+
+    it.each([
+      // Dot segments still normalize; the result must remain a local path.
+      ["/admin/../", "/"],
+      ["/admin/../profiles", "/profiles"],
+      ["/etl/../../somewhere", "/somewhere"],
+    ])("normalizes %s to %s", (value, expected) => {
+      expect(safeAdminRedirectTarget(value)).toBe(expected);
     });
   });
 

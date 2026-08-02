@@ -17,18 +17,18 @@ globalThis.ResizeObserver = ResizeObserverMock as unknown as typeof ResizeObserv
 
 const EMPTY_STATS: EtlStatsData = {
   duration_trend: [],
-  rows_trend: [],
-  table_durations: [],
-  top_tables_by_rows: [],
+  listings_trend: [],
+  connector_durations: [],
+  top_connectors_by_listings: [],
   success_rate: { total: 0, success: 0, partial: 0, failed: 0 },
   last_run: {
     run_id: null,
     duration_ms: null,
-    total_rows_synced: null,
-    throughput_rows_per_sec: null,
+    total_discovered: null,
+    total_fetched: null,
+    fetch_rate: null,
   },
-  watermarks: { max_age_seconds: null, table_name: null },
-  errors_24h: { runs_failed: 0, tables_failed: 0 },
+  errors_24h: { runs_failed: 0, connectors_failed: 0 },
 };
 
 const POPULATED_STATS: EtlStatsData = {
@@ -37,27 +37,27 @@ const POPULATED_STATS: EtlStatsData = {
     { started_at: "2026-04-11T02:00:00Z", duration_ms: 1800000, status: "partial" },
     { started_at: "2026-04-12T02:00:00Z", duration_ms: null, status: "failed" },
   ],
-  rows_trend: [
-    { started_at: "2026-04-10T02:00:00Z", total_rows_synced: 45000 },
-    { started_at: "2026-04-11T02:00:00Z", total_rows_synced: 30000 },
+  listings_trend: [
+    { started_at: "2026-04-10T02:00:00Z", discovered: 72, fetched: 45 },
+    { started_at: "2026-04-11T02:00:00Z", discovered: 68, fetched: 30 },
   ],
-  table_durations: [
-    { table_name: "ps_ventas", avg_duration_ms: 900000, last_duration_ms: 850000 },
-    { table_name: "ps_stock", avg_duration_ms: 2700000, last_duration_ms: 2600000 },
+  connector_durations: [
+    { connector_name: "fotocasa", avg_duration_ms: 900000, last_duration_ms: 850000 },
+    { connector_name: "milanuncios", avg_duration_ms: 2700000, last_duration_ms: 2600000 },
   ],
-  top_tables_by_rows: [
-    { table_name: "ps_stock_tienda", rows_synced: 12_300_000 },
-    { table_name: "ps_lineas_ventas", rows_synced: 1_700_000 },
+  top_connectors_by_listings: [
+    { connector_name: "fotocasa", fetched_count: 28 },
+    { connector_name: "milanuncios", fetched_count: 17 },
   ],
   success_rate: { total: 30, success: 25, partial: 3, failed: 2 },
   last_run: {
     run_id: 42,
     duration_ms: 3600000,
-    total_rows_synced: 45000,
-    throughput_rows_per_sec: 12.5,
+    total_discovered: 72,
+    total_fetched: 45,
+    fetch_rate: 0.625,
   },
-  watermarks: { max_age_seconds: 90_000, table_name: "ps_stock" },
-  errors_24h: { runs_failed: 1, tables_failed: 2 },
+  errors_24h: { runs_failed: 1, connectors_failed: 2 },
 };
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -71,16 +71,24 @@ describe("EvolutionCharts", () => {
   it("shows empty states when stats are empty", () => {
     render(<EvolutionCharts stats={EMPTY_STATS} />);
     const emptyMessages = screen.getAllByText("Sin datos disponibles");
-    // 5 empty charts: duration, rows, top-slowest, top-rows, outcomes
+    // 5 empty charts: duration, listings funnel, slowest connectors,
+    // listings-per-connector, outcomes
     expect(emptyMessages.length).toBe(5);
   });
 
-  it("renders the top-tables-by-rows panel when rows are available", () => {
+  it("renders the per-connector listings panel when data is available", () => {
     render(<EvolutionCharts stats={POPULATED_STATS} />);
-    expect(screen.getByTestId("top-tables-by-rows")).toBeInTheDocument();
+    expect(screen.getByTestId("top-connectors-by-listings")).toBeInTheDocument();
     expect(
-      screen.getByText("Top tablas por filas (última sincronización)"),
+      screen.getByText("Anuncios guardados por conector (última ejecución)"),
     ).toBeInTheDocument();
+  });
+
+  it("renders the discovered-vs-stored funnel chart", () => {
+    // Two series, not one — the gap between them is the health signal this
+    // project has and the per-table model it replaced did not.
+    render(<EvolutionCharts stats={POPULATED_STATS} />);
+    expect(screen.getByTestId("listings-funnel-chart")).toBeInTheDocument();
   });
 
   it("renders duration trend chart title", () => {
@@ -90,17 +98,17 @@ describe("EvolutionCharts", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders rows trend chart title", () => {
+  it("renders listings funnel chart title", () => {
     render(<EvolutionCharts stats={POPULATED_STATS} />);
     expect(
-      screen.getByText("Filas sincronizadas por ejecución")
+      screen.getByText("Anuncios por ejecución (encontrados vs. guardados)")
     ).toBeInTheDocument();
   });
 
-  it("renders top tables chart title", () => {
+  it("renders slowest-connectors chart title", () => {
     render(<EvolutionCharts stats={POPULATED_STATS} />);
     expect(
-      screen.getByText("Top 10 tablas más lentas (duración media)")
+      screen.getByText("Conectores más lentos (duración media)")
     ).toBeInTheDocument();
   });
 

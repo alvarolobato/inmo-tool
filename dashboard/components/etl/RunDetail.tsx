@@ -7,44 +7,40 @@ import { Card, BarChart, Badge } from "@tremor/react";
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export type RunStatus = "success" | "partial" | "failed" | "running";
-export type TableStatus = "success" | "failed" | "running";
-export type SyncMethod = "full_refresh" | "upsert_delta" | "append";
-export type Trigger = "scheduled" | "manual";
-export type RunKind = "delta" | "full";
+/** connector_run_results.status — 'skipped' and 'circuit_open' are #99/#11 additions. */
+export type ConnectorStatus = "ok" | "failed" | "circuit_open" | "skipped";
 
-export interface EtlSyncRun {
+export interface ConnectorRun {
   id: number;
   started_at: string;
   finished_at: string | null;
   duration_ms: number | null;
   status: RunStatus;
-  /** 'delta' for the hourly watermark sweep, 'full' for the nightly truncate-and-reinsert pass. */
-  kind: RunKind;
-  total_tables: number;
-  tables_ok: number;
-  tables_failed: number;
-  total_rows_synced: number;
-  trigger: Trigger;
+  total_connectors: number | null;
+  connectors_ok: number | null;
+  connectors_failed: number | null;
+  connectors_skipped: number | null;
+  total_discovered: number | null;
+  total_fetched: number | null;
+  trigger: string;
 }
 
-export interface EtlSyncTableStat {
+export interface ConnectorRunResult {
   id: number;
-  table_name: string;
+  connector_name: string;
   started_at: string;
   finished_at: string | null;
   duration_ms: number | null;
-  status: TableStatus;
-  rows_synced: number | null;
-  rows_total_after: number | null;
-  sync_method: SyncMethod;
-  watermark_from: string | null;
-  watermark_to: string | null;
+  status: ConnectorStatus;
+  discovered_count: number;
+  fetched_count: number;
+  error_count: number;
   error_msg: string | null;
 }
 
 export interface EtlRunDetailData {
-  run: EtlSyncRun;
-  tables: EtlSyncTableStat[];
+  run: ConnectorRun;
+  connectors: ConnectorRunResult[];
 }
 
 // ─── Format helpers ──────────────────────────────────────────────────────────
@@ -77,53 +73,50 @@ function formatDatetime(iso: string): string {
   }
 }
 
-function formatWatermark(iso: string | null): string {
-  if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleString("es-ES", {
-      year: "numeric", month: "2-digit", day: "2-digit",
-      hour: "2-digit", minute: "2-digit",
-    });
-  } catch {
-    return iso;
-  }
-}
-
 // ─── Badge helpers ───────────────────────────────────────────────────────────
 
 type BadgeColor = "emerald" | "red" | "amber" | "blue" | "gray";
 
-function statusBadgeColor(status: RunStatus | TableStatus): BadgeColor {
+function statusBadgeColor(status: RunStatus | ConnectorStatus): BadgeColor {
   switch (status) {
     case "success": return "emerald";
+    case "ok": return "emerald";
     case "failed": return "red";
     case "partial": return "amber";
+    // A tripped breaker is amber, not red: the connector stopped itself on
+    // purpose after too many errors. It's a real problem worth surfacing,
+    // but distinct from an outright failure.
+    case "circuit_open": return "amber";
+    // Gray, deliberately not red/amber — an operator disabling a connector
+    // is a normal state, not an alert (issue #99).
+    case "skipped": return "gray";
     case "running": return "blue";
     default: return "gray";
   }
 }
 
-function statusLabel(status: RunStatus | TableStatus): string {
+function statusLabel(status: RunStatus | ConnectorStatus): string {
   switch (status) {
     case "success": return "Completado";
+    case "ok": return "OK";
     case "failed": return "Error";
     case "partial": return "Parcial";
+    case "circuit_open": return "Circuito abierto";
+    case "skipped": return "Omitido";
     case "running": return "En curso";
     default: return status;
   }
 }
 
-function syncMethodLabel(method: SyncMethod): string {
-  switch (method) {
-    case "full_refresh": return "Recarga completa";
-    case "upsert_delta": return "Upsert delta";
-    case "append": return "Añadir";
-    default: return method;
-  }
-}
+const TRIGGER_LABELS: Record<string, string> = {
+  scheduled: "Programado",
+  startup: "Arranque",
+  manual: "Manual",
+  cli: "CLI",
+};
 
-function triggerLabel(trigger: Trigger): string {
-  return trigger === "scheduled" ? "Programado" : "Manual";
+function triggerLabel(trigger: string): string {
+  return TRIGGER_LABELS[trigger] ?? trigger;
 }
 
 // ─── KPI Card ─────────────────────────────────────────────────────────────────
@@ -148,18 +141,18 @@ function KpiCard({ label, value, sub }: KpiCardProps) {
 
 // ─── Duration Bar Chart ───────────────────────────────────────────────────────
 
-interface DurationChartProps { tables: EtlSyncTableStat[]; }
+interface DurationChartProps { connectors: ConnectorRunResult[]; }
 
-function DurationChart({ tables }: DurationChartProps) {
-  const sorted = [...tables]
-    .filter((t) => t.duration_ms !== null && t.duration_ms > 0 && t.status !== "running")
+function DurationChart({ connectors }: DurationChartProps) {
+  const sorted = [...connectors]
+    .filter((c) => c.duration_ms !== null && c.duration_ms > 0)
     .sort((a, b) => (b.duration_ms ?? 0) - (a.duration_ms ?? 0));
 
   if (sorted.length === 0) {
     return (
       <Card className="p-4">
         <h3 className="mb-4 text-sm font-medium text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis">
-          Tiempo por tabla
+          Tiempo por conector
         </h3>
         <p className="text-center text-sm text-tremor-content dark:text-dark-tremor-content">
           Sin datos de duración
@@ -168,22 +161,27 @@ function DurationChart({ tables }: DurationChartProps) {
     );
   }
 
-  const chartData = sorted.map((t) => ({
-    name: t.table_name.replace(/^ps_/, ""),
-    Completado: t.status === "success" ? (t.duration_ms ?? 0) : 0,
-    Error: t.status === "failed" ? (t.duration_ms ?? 0) : 0,
+  // Every status a row can carry must appear here, or a row with a real
+  // duration renders as an empty bar (a skipped connector can still record
+  // one — #99).
+  const chartData = sorted.map((c) => ({
+    name: c.connector_name,
+    OK: c.status === "ok" ? (c.duration_ms ?? 0) : 0,
+    Error: c.status === "failed" ? (c.duration_ms ?? 0) : 0,
+    "Circuito abierto": c.status === "circuit_open" ? (c.duration_ms ?? 0) : 0,
+    Omitido: c.status === "skipped" ? (c.duration_ms ?? 0) : 0,
   }));
 
   return (
     <Card className="p-4">
       <h3 className="mb-4 text-sm font-medium text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis">
-        Tiempo por tabla
+        Tiempo por conector
       </h3>
       <BarChart
         data={chartData}
         index="name"
-        categories={["Completado", "Error"]}
-        colors={["emerald", "red"]}
+        categories={["OK", "Error", "Circuito abierto", "Omitido"]}
+        colors={["emerald", "red", "amber", "gray"]}
         valueFormatter={(v: number) => formatDuration(v)}
         stack={true}
         showLegend={true}
@@ -196,9 +194,9 @@ function DurationChart({ tables }: DurationChartProps) {
 
 // ─── Per-table stats table ────────────────────────────────────────────────────
 
-interface TableStatsTableProps { tables: EtlSyncTableStat[]; }
+interface ConnectorStatsTableProps { connectors: ConnectorRunResult[]; }
 
-function TableStatsTable({ tables }: TableStatsTableProps) {
+function ConnectorStatsTable({ connectors }: ConnectorStatsTableProps) {
   const [expandedErrors, setExpandedErrors] = useState<Set<number>>(new Set());
 
   const toggleError = (id: number) => {
@@ -211,56 +209,60 @@ function TableStatsTable({ tables }: TableStatsTableProps) {
 
   return (
     <Card className="p-4">
-      <h3 className="mb-4 text-sm font-medium text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis">
-        Detalle por tabla
+      <h3 className="mb-1 text-sm font-medium text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis">
+        Detalle por conector
       </h3>
+      <p className="mb-4 text-xs text-tremor-content-subtle dark:text-dark-tremor-content-subtle">
+        Encontrados → guardados es el embudo de ingesta: una diferencia grande
+        suele indicar que el sitio ha cambiado su HTML o está bloqueando.
+      </p>
       <div className="overflow-x-auto">
-        <table className="w-full text-xs" data-testid="table-stats">
+        <table className="w-full text-xs" data-testid="connector-stats">
           <thead>
             <tr className="border-b border-tremor-border dark:border-dark-tremor-border">
-              <th className="pb-2 pr-3 text-left font-medium text-tremor-content dark:text-dark-tremor-content">Tabla</th>
+              <th className="pb-2 pr-3 text-left font-medium text-tremor-content dark:text-dark-tremor-content">Conector</th>
               <th className="pb-2 pr-3 text-left font-medium text-tremor-content dark:text-dark-tremor-content">Estado</th>
-              <th className="pb-2 pr-3 text-left font-medium text-tremor-content dark:text-dark-tremor-content">Método</th>
-              <th className="pb-2 pr-3 text-right font-medium text-tremor-content dark:text-dark-tremor-content">Filas sync.</th>
-              <th className="pb-2 pr-3 text-right font-medium text-tremor-content dark:text-dark-tremor-content">Total est.</th>
-              <th className="pb-2 pr-3 text-right font-medium text-tremor-content dark:text-dark-tremor-content">Duración</th>
-              <th className="pb-2 pr-3 text-left font-medium text-tremor-content dark:text-dark-tremor-content">Marca desde</th>
-              <th className="pb-2 text-left font-medium text-tremor-content dark:text-dark-tremor-content">Marca hasta</th>
+              <th className="pb-2 pr-3 text-right font-medium text-tremor-content dark:text-dark-tremor-content" title="Anuncios localizados en la fase de descubrimiento">Encontrados</th>
+              <th className="pb-2 pr-3 text-right font-medium text-tremor-content dark:text-dark-tremor-content" title="Anuncios descargados, normalizados y guardados">Guardados</th>
+              <th className="pb-2 pr-3 text-right font-medium text-tremor-content dark:text-dark-tremor-content" title="Anuncios que fallaron al descargar o parsear">Errores</th>
+              <th className="pb-2 text-right font-medium text-tremor-content dark:text-dark-tremor-content">Duración</th>
             </tr>
           </thead>
           <tbody>
-            {tables.map((t) => (
-              <React.Fragment key={t.id}>
+            {connectors.map((c) => (
+              <React.Fragment key={c.id}>
                 <tr
                   className="border-b border-tremor-border/50 dark:border-dark-tremor-border/50 hover:bg-tremor-background-subtle dark:hover:bg-dark-tremor-background-subtle"
-                  data-testid={`table-row-${t.table_name}`}
+                  data-testid={`connector-row-${c.connector_name}`}
                 >
-                  <td className="py-2 pr-3 font-mono text-tremor-content-strong dark:text-dark-tremor-content-strong">{t.table_name}</td>
+                  <td className="py-2 pr-3 font-mono text-tremor-content-strong dark:text-dark-tremor-content-strong">{c.connector_name}</td>
                   <td className="py-2 pr-3">
-                    <Badge color={statusBadgeColor(t.status)} size="xs">{statusLabel(t.status)}</Badge>
+                    <Badge color={statusBadgeColor(c.status)} size="xs">{statusLabel(c.status)}</Badge>
                   </td>
-                  <td className="py-2 pr-3">
-                    <span className="rounded bg-tremor-background-subtle dark:bg-dark-tremor-background-subtle px-1.5 py-0.5 text-tremor-content dark:text-dark-tremor-content">
-                      {syncMethodLabel(t.sync_method)}
-                    </span>
-                  </td>
-                  <td className="py-2 pr-3 text-right tabular-nums text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis">{formatNumber(t.rows_synced)}</td>
-                  <td className="py-2 pr-3 text-right tabular-nums text-tremor-content dark:text-dark-tremor-content" title="Estimado basado en total tras la sincronización">{formatNumber(t.rows_total_after)}</td>
-                  <td className="py-2 pr-3 text-right tabular-nums text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis">{formatDuration(t.duration_ms)}</td>
-                  <td className="py-2 pr-3 text-tremor-content dark:text-dark-tremor-content">{t.sync_method === "upsert_delta" ? formatWatermark(t.watermark_from) : "—"}</td>
-                  <td className="py-2 text-tremor-content dark:text-dark-tremor-content">{t.sync_method === "upsert_delta" ? formatWatermark(t.watermark_to) : "—"}</td>
+                  <td className="py-2 pr-3 text-right tabular-nums text-tremor-content dark:text-dark-tremor-content">{formatNumber(c.discovered_count)}</td>
+                  <td className="py-2 pr-3 text-right tabular-nums text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis">{formatNumber(c.fetched_count)}</td>
+                  <td className={`py-2 pr-3 text-right tabular-nums ${c.error_count > 0 ? "text-red-500 dark:text-red-400" : "text-tremor-content dark:text-dark-tremor-content"}`}>{formatNumber(c.error_count)}</td>
+                  <td className="py-2 text-right tabular-nums text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis">{formatDuration(c.duration_ms)}</td>
                 </tr>
-                {t.error_msg && (
-                  <tr key={`${t.id}-error`} className="border-b border-tremor-border/50 dark:border-dark-tremor-border/50" data-testid={`table-row-${t.table_name}-error`}>
-                    <td colSpan={8} className="pb-2 pt-0 pl-2">
+                {c.error_msg && (
+                  <tr key={`${c.id}-error`} className="border-b border-tremor-border/50 dark:border-dark-tremor-border/50" data-testid={`connector-row-${c.connector_name}-error`}>
+                    <td colSpan={6} className="pb-2 pt-0 pl-2">
+                      {/*
+                        On a 'skipped' row this is the reason (e.g. "disabled
+                        via connector_config") — informational, not an error,
+                        so it must not render in alarm-red. On failed/
+                        circuit_open it's the orchestrator's per-scope detail,
+                        currently the only record of which geography a
+                        connector actually ran against.
+                      */}
                       <button
                         type="button"
-                        onClick={() => toggleError(t.id)}
-                        aria-expanded={expandedErrors.has(t.id)}
-                        aria-label={`Ver error de ${t.table_name}`}
-                        className="text-left text-red-500 dark:text-red-400 hover:underline"
+                        onClick={() => toggleError(c.id)}
+                        aria-expanded={expandedErrors.has(c.id)}
+                        aria-label={`Ver detalle de ${c.connector_name}`}
+                        className={`text-left hover:underline ${c.status === "skipped" ? "text-tremor-content dark:text-dark-tremor-content" : "text-red-500 dark:text-red-400"}`}
                       >
-                        {expandedErrors.has(t.id) ? t.error_msg : t.error_msg.length > 120 ? `${t.error_msg.slice(0, 120)}… (ver más)` : t.error_msg}
+                        {expandedErrors.has(c.id) ? c.error_msg : c.error_msg.length > 120 ? `${c.error_msg.slice(0, 120)}… (ver más)` : c.error_msg}
                       </button>
                     </td>
                   </tr>
@@ -349,7 +351,25 @@ export function RunDetail({ runId }: RunDetailProps) {
     );
   }
 
-  const { run, tables } = data;
+  const { run, connectors } = data;
+  const skipped = run.connectors_skipped ?? 0;
+  const failed = run.connectors_failed ?? 0;
+
+  // "3 / 0 / 1" = ok / error / omitted. The skipped segment only appears
+  // when there is one, so a normal run reads as a clean pair.
+  const connectorsValue =
+    run.connectors_ok === null
+      ? "—"
+      : skipped > 0
+        ? `${run.connectors_ok} / ${failed} / ${skipped}`
+        : `${run.connectors_ok} / ${failed}`;
+
+  const connectorsSub =
+    failed > 0
+      ? `${failed} con error${skipped > 0 ? ` · ${skipped} omitido${skipped === 1 ? "" : "s"}` : ""}`
+      : skipped > 0
+        ? `${skipped} omitido${skipped === 1 ? "" : "s"}`
+        : "Sin errores";
 
   return (
     <div className="space-y-6" data-testid="run-detail">
@@ -363,26 +383,36 @@ export function RunDetail({ runId }: RunDetailProps) {
                 <span className="flex items-center gap-1"><span className="h-2 w-2 animate-pulse rounded-full" style={{ background: "var(--accent)" }} />En progreso...</span>
               ) : statusLabel(run.status)}
             </Badge>
-            <Badge color={run.kind === "delta" ? "blue" : "gray"} data-testid="kind-badge">
-              {run.kind === "delta" ? "Delta" : "Completa"}
-            </Badge>
           </div>
           <p className="text-sm text-tremor-content dark:text-dark-tremor-content">
             Iniciada: {formatDatetime(run.started_at)}{run.finished_at && ` · Finalizada: ${formatDatetime(run.finished_at)}`}
           </p>
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4" data-testid="kpi-row">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-5" data-testid="kpi-row">
         <KpiCard label="Duración total" value={formatDuration(run.duration_ms)} />
-        <KpiCard label="Filas sincronizadas" value={formatNumber(run.total_rows_synced)} />
-        <KpiCard label="Tablas" value={`${run.tables_ok} / ${run.tables_failed}`} sub={run.tables_failed > 0 ? `${run.tables_failed} con error` : "Sin errores"} />
+        <KpiCard
+          label="Anuncios encontrados"
+          value={formatNumber(run.total_discovered)}
+          sub="Fase de descubrimiento"
+        />
+        <KpiCard
+          label="Anuncios guardados"
+          value={formatNumber(run.total_fetched)}
+          sub="Descargados y almacenados"
+        />
+        <KpiCard
+          label="Conectores"
+          value={connectorsValue}
+          sub={connectorsSub}
+        />
         <KpiCard label="Disparado por" value={triggerLabel(run.trigger)} />
       </div>
-      {tables.length > 0 && <DurationChart tables={tables} />}
-      {tables.length > 0 && <TableStatsTable tables={tables} />}
-      {tables.length === 0 && (
+      {connectors.length > 0 && <DurationChart connectors={connectors} />}
+      {connectors.length > 0 && <ConnectorStatsTable connectors={connectors} />}
+      {connectors.length === 0 && (
         <Card className="p-4">
-          <p className="text-center text-sm text-tremor-content dark:text-dark-tremor-content">Sin estadísticas de tablas disponibles</p>
+          <p className="text-center text-sm text-tremor-content dark:text-dark-tremor-content">Sin resultados de conectores para esta ejecución</p>
         </Card>
       )}
     </div>

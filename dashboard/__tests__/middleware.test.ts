@@ -102,8 +102,12 @@ describe("middleware — admin UI gating", () => {
       expect(res.status).toBe(401);
     });
 
-    it("returns 401 JSON for /api/etl/run POST without cookie or header", async () => {
-      const res = middleware(makeRequest("/api/etl/run", { method: "POST" }));
+    it("returns 401 JSON for a mutating /api/etl/* route without cookie or header", async () => {
+      // PATCH /api/etl/connectors/[name] (#100) is the mutating ETL route;
+      // the old /api/etl/run this used to assert on was deleted in #104.
+      const res = middleware(
+        makeRequest("/api/etl/connectors/fotocasa", { method: "PATCH" }),
+      );
       expect(res.status).toBe(401);
     });
 
@@ -199,9 +203,20 @@ describe("middleware — admin UI gating", () => {
       expect(location).toContain("redirect=%2Fetl");
     });
 
-    it("does not interfere with non-admin paths", () => {
+    it("redirects application pages to login (every page is gated)", () => {
+      // With no key configured nothing can authenticate, so no gated surface
+      // may be served. `/` is an application page, not a public probe.
       const res = middleware(makeRequest("/"));
-      expect(res.headers.get("location")).toBeNull();
+      expect(res.headers.get("location")).toContain("/admin/login");
+    });
+
+    it("still serves the public health/readiness probes", () => {
+      // Container orchestrators hit these before any credential exists.
+      for (const p of ["/api/health", "/api/ready"]) {
+        const res = middleware(makeRequest(p));
+        expect(res.status, `${p} should pass through`).toBe(200);
+        expect(res.headers.get("location")).toBeNull();
+      }
     });
   });
 });

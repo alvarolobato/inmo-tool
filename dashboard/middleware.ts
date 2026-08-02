@@ -1,26 +1,40 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { isApiPath, isPublicApiPath } from "@/lib/api-auth-policy";
 
 /**
- * Paths that require the `ps_admin` session cookie (same auth as `/admin/*`).
- * The ETL monitor lives outside `/admin` but is still an administration
- * surface, so we gate it here instead of duplicating the flow.
+ * UI paths that require the `ps_admin` session cookie.
+ *
+ * This is a single-operator tool (issue #1 §16 rules out multi-tenancy), so
+ * every surface is an operator surface: the candidate list, map, property
+ * detail and conversations all render the operator's own private investment
+ * research. They are gated on the same cookie as `/admin/*`, which also keeps
+ * each page consistent with the APIs it calls — gating the APIs alone would
+ * leave pages that render nothing but errors for a logged-out visitor.
+ *
+ * `/admin/login` must stay reachable, otherwise there is no way to obtain the
+ * cookie in the first place.
  */
 function isAdminUiPath(pathname: string): boolean {
   if (pathname === "/admin/login") return false;
-  if (pathname === "/admin" || pathname.startsWith("/admin/")) return true;
-  if (pathname === "/etl" || pathname.startsWith("/etl/")) return true;
-  return false;
+  // API routes are handled by the gated-API branch, which answers with 401 for
+  // machine callers. Falling through to the UI branch here would redirect a
+  // *valid* header-authenticated API request to the login page (307), breaking
+  // server-to-server callers such as the ETL post-run scoring callback.
+  if (isApiPath(pathname)) return false;
+  // Next.js internals and static assets never reach here (see `config.matcher`),
+  // so anything left is an application page.
+  return true;
 }
 
 /**
- * ETL data API routes. Gated by the `ps_admin` cookie — the ETL UI calls
- * these same-origin and the browser attaches the cookie automatically.
- * Leaving them ungated would expose sync status and manual-trigger POSTs
- * even when the UI itself is protected.
+ * API routes requiring the admin credential: everything under `/api/` except
+ * the small public allow-list in `lib/api-auth-policy.ts`.
+ *
+ * Gate-by-default is deliberate — see that module for why.
  */
-function isEtlApiPath(pathname: string): boolean {
-  return pathname === "/api/etl" || pathname.startsWith("/api/etl/");
+function isGatedApiPath(pathname: string): boolean {
+  return isApiPath(pathname) && !isPublicApiPath(pathname);
 }
 
 function buildLoginRedirect(request: NextRequest, errorCode?: "2"): URL {
@@ -55,15 +69,17 @@ function adminBearerValid(request: NextRequest, expected: string): boolean {
 export function middleware(request: NextRequest): NextResponse {
   const { pathname } = request.nextUrl;
 
+  // Public probes are served before any credential check so container
+  // orchestrators can reach them (they have no way to hold a credential).
+  if (isPublicApiPath(pathname)) {
+    return NextResponse.next();
+  }
+
   const adminKey = process.env.ADMIN_API_KEY?.trim();
   if (!adminKey) {
-    if (pathname.startsWith("/api/admin")) {
-      return NextResponse.json(
-        { error: "admin_not_configured", detail: "Set ADMIN_API_KEY in the environment." },
-        { status: 503 },
-      );
-    }
-    if (isEtlApiPath(pathname)) {
+    // Fail closed: with no key configured nothing can be authorized, so no
+    // gated surface may be served.
+    if (isGatedApiPath(pathname)) {
       return NextResponse.json(
         { error: "admin_not_configured", detail: "Set ADMIN_API_KEY in the environment." },
         { status: 503 },
@@ -75,19 +91,11 @@ export function middleware(request: NextRequest): NextResponse {
     return NextResponse.next();
   }
 
-  if (pathname.startsWith("/api/admin")) {
-    // Accept x-admin-key / Bearer header (server-to-server) OR the ps_admin
-    // session cookie (same-origin UI calls from /admin/* pages).
-    const cookie = request.cookies.get("ps_admin")?.value;
-    if (cookie !== adminKey && !adminBearerValid(request, adminKey)) {
-      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-    }
-  }
-
-  if (isEtlApiPath(pathname)) {
-    // Same-origin UI calls carry the `ps_admin` cookie set by /admin/login.
-    // Also accept the header/Bearer scheme for server-to-server callers that
-    // already authenticate against /api/admin/*.
+  if (isGatedApiPath(pathname)) {
+    // Accept x-admin-key / Bearer header (server-to-server callers such as the
+    // ETL orchestrator and the browser extension) OR the ps_admin session
+    // cookie, which browsers attach automatically to same-origin fetches from
+    // the UI.
     const cookie = request.cookies.get("ps_admin")?.value;
     if (cookie !== adminKey && !adminBearerValid(request, adminKey)) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -105,11 +113,9 @@ export function middleware(request: NextRequest): NextResponse {
 }
 
 export const config = {
-  matcher: [
-    "/api/admin/:path*",
-    "/api/etl/:path*",
-    "/admin/:path*",
-    "/etl",
-    "/etl/:path*",
-  ],
+  // Match everything except Next.js internals, the favicon, and static assets.
+  // Gating is then decided in `middleware()` above (gate-by-default for
+  // `/api/*`; every UI page except `/admin/login`), so a newly added route or
+  // page is protected without touching this matcher.
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|txt|xml|webmanifest)$).*)"],
 };
