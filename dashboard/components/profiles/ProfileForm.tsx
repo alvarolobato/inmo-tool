@@ -7,6 +7,7 @@ import {
   type Scope,
   type ThesisParams,
 } from "@/lib/profiles-schema";
+import { LocationPicker } from "./LocationPicker";
 
 export interface ProfileFormValues {
   name: string;
@@ -151,68 +152,19 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
 
       <fieldset style={fieldsetStyle}>
         <legend style={legendStyle}>Zona (radio desde un punto)</legend>
-        <div style={{ ...rowStyle, marginTop: 6 }}>
-          <div style={colStyle}>
-            <label style={labelStyle}>Latitud</label>
-            <input
-              type="number"
-              step="any"
-              value={values.scope.geography.center[0]}
-              onChange={(e) =>
-                setValues((v) => ({
-                  ...v,
-                  scope: {
-                    ...v.scope,
-                    geography: {
-                      ...v.scope.geography,
-                      center: [Number(e.target.value), v.scope.geography.center[1]],
-                    },
-                  },
-                }))
-              }
-              style={inputStyle}
-            />
-          </div>
-          <div style={colStyle}>
-            <label style={labelStyle}>Longitud</label>
-            <input
-              type="number"
-              step="any"
-              value={values.scope.geography.center[1]}
-              onChange={(e) =>
-                setValues((v) => ({
-                  ...v,
-                  scope: {
-                    ...v.scope,
-                    geography: {
-                      ...v.scope.geography,
-                      center: [v.scope.geography.center[0], Number(e.target.value)],
-                    },
-                  },
-                }))
-              }
-              style={inputStyle}
-            />
-          </div>
-          <div style={colStyle}>
-            <label style={labelStyle}>Radio (km)</label>
-            <input
-              type="number"
-              min={0.1}
-              step="any"
-              value={values.scope.geography.radius_km}
-              onChange={(e) =>
-                setValues((v) => ({
-                  ...v,
-                  scope: {
-                    ...v.scope,
-                    geography: { ...v.scope.geography, radius_km: Number(e.target.value) },
-                  },
-                }))
-              }
-              style={inputStyle}
-            />
-          </div>
+        <div style={{ marginTop: 6 }}>
+          <LocationPicker
+            value={{ center: values.scope.geography.center, radiusKm: values.scope.geography.radius_km }}
+            onChange={({ center, radiusKm }) =>
+              setValues((v) => ({
+                ...v,
+                scope: {
+                  ...v.scope,
+                  geography: { ...v.scope.geography, center, radius_km: radiusKm },
+                },
+              }))
+            }
+          />
         </div>
       </fieldset>
 
