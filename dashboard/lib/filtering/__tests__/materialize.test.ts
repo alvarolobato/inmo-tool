@@ -117,6 +117,37 @@ describe("materializeProfile", () => {
     expect(countCall[1]).toEqual([1]);
   });
 
+  it("still returns a successful result when scoreNewCandidates throws (Fable phase-3 review)", async () => {
+    mockPoolQuery.mockResolvedValueOnce({ rows: [profileRow()] }); // getProfileById
+
+    mockClientQuery
+      .mockResolvedValueOnce(undefined) // BEGIN
+      .mockResolvedValueOnce({ rows: [{ id: 10 }, { id: 11 }] }) // SELECT property.id WHERE ...
+      .mockResolvedValueOnce({ rowCount: 2 }) // INSERT ... ON CONFLICT DO UPDATE
+      .mockResolvedValueOnce({ rowCount: 1 }) // UPDATE ... matched = false
+      .mockResolvedValueOnce({ rows: [{ count: "1" }] }) // SELECT COUNT(*) ... matched = false
+      .mockResolvedValueOnce(undefined); // COMMIT
+
+    mockScoreNewCandidates.mockRejectedValueOnce(new Error("boom: scoring exploded"));
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // The match/unmatch transaction already committed successfully — a
+    // scoring failure afterward must not surface as a thrown error, which
+    // would previously propagate straight out of materializeProfile into
+    // the single-profile route's generic catch as a false 500, and into
+    // materializeAllProfiles's per-profile catch as a misreported "error"
+    // outcome for a materialization that actually succeeded.
+    await expect(materializeProfile(1)).resolves.toEqual({
+      profileId: 1,
+      matchedCount: 2,
+      unmatchedCount: 1,
+    });
+
+    expect(mockScoreNewCandidates).toHaveBeenCalledWith(1, [10, 11]);
+    expect(consoleErrorSpy).toHaveBeenCalled();
+    consoleErrorSpy.mockRestore();
+  });
+
   it("unmatches every previously-matched row when the new matching set is empty, without an INSERT (EC-2 edge case)", async () => {
     mockPoolQuery.mockResolvedValueOnce({ rows: [profileRow()] });
 
