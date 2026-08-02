@@ -29,14 +29,31 @@ Throttle = Callable[[], None]
 class ConnectorScope:
     """What a connector should look for.
 
-    Deliberately simple (free-text geography, not a polygon/radius) for
-    Phase 1 — issue #11's "Additional Context" notes that profile-driven
-    scoping is aspirational until Phase 2's search_profile exists. Task 1.4
-    is free to construct one hardcoded scope; later phases derive scope from
-    the union of active search_profile rows instead of hand-writing it.
+    Issue #71 closes the gap this docstring used to describe as aspirational:
+    the orchestrator now derives scope from the union of active
+    `search_profile` rows (`etl.orchestrator._active_profile_scopes`) instead
+    of a hand-written literal. `search_profile.scope.geography` is a
+    radius-from-a-point (`{center: [lat, lon], radius_km}`, see
+    `dashboard/lib/profiles-schema.ts`), so that's the shape carried here too
+    — `center`/`radius_km`, not a free-text city slug.
+
+    Deliberately NOT a shared slug registry mapping (lat, lon) -> a site's
+    URL-path slug: different sites encode geography completely differently
+    (Fotocasa uses a hyphenated city slug, Milanuncios its own path segment;
+    a future Idealista/pisos.com connector may use neither), and a shared
+    registry would need updating every time a new site connector is added.
+    Each connector already owns its own site-specific URL/query construction
+    (that's the whole point of the `discover`/`fetch_detail`/`normalize`
+    split per `docs/architecture/connectors.md`) — so translating a
+    (center, radius_km) point into whatever geography encoding a given site
+    needs is that connector's own job, not this module's. `geography` is
+    kept as a free-text escape hatch for tests/manual construction that want
+    to bypass point-based translation entirely.
     """
 
-    geography: str
+    geography: str = ""
+    center: tuple[float, float] | None = None  # (lat, lon)
+    radius_km: float | None = None
     property_types: tuple[str, ...] = field(default_factory=tuple)
 
 

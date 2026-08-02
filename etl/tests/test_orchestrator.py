@@ -18,10 +18,37 @@ from etl.tests.fixtures.dummy_connector import DiscoverFailsConnector, DummyConn
 _SCHEMA_SQL = Path(__file__).parent.parent / "schema" / "init.sql"
 
 
+_TEST_PROFILE_NAME = "orchestrator-test-fixture-profile"
+
+
 def _apply_schema(conn) -> None:
     sql = _SCHEMA_SQL.read_text(encoding="utf-8")
     with conn.cursor() as cur:
         cur.execute(sql)
+    # Issue #71: run_all_connectors() now derives discovery scope from active
+    # search_profile rows and does nothing at all with zero of them. Every
+    # test in this file exercises the dummy connector, which ignores
+    # `scope` entirely (see fixtures/dummy_connector.py) — so the exact
+    # geography here is irrelevant, only that at least one active profile
+    # exists. Idempotent (checks by name first) so re-running this against
+    # a DB that already has the fixture profile from a prior test doesn't
+    # accumulate duplicates.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM search_profile WHERE name = %s AND archived_at IS NULL",
+            (_TEST_PROFILE_NAME,),
+        )
+        if cur.fetchone() is None:
+            cur.execute(
+                "INSERT INTO search_profile (name, scope) VALUES (%s, %s)",
+                (
+                    _TEST_PROFILE_NAME,
+                    (
+                        '{"geography": {"type": "radius", '
+                        '"center": [40.4168, -3.7038], "radius_km": 10}}'
+                    ),
+                ),
+            )
     conn.commit()
 
 
@@ -572,4 +599,112 @@ class TestCircuitBreakerIntegration:
                     (connector.name,),
                 )
                 cur.execute("DELETE FROM connector_runs WHERE id = %s", (run_id,))
+            pg_conn.commit()
+
+
+class TestProfileDrivenScope:
+    """Issue #71: discovery scope comes from active search_profile rows,
+    not a hardcoded default."""
+
+    def test_active_profile_geography_reaches_the_connector_not_madrid(self, pg_conn):
+        _apply_schema(pg_conn)
+        # A second, Sevilla-scoped profile alongside _apply_schema's
+        # Madrid-centered fixture profile — proves the orchestrator unions
+        # scopes across *all* active profiles, not just the first one found.
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO search_profile (name, scope) VALUES (%s, %s) RETURNING id",
+                (
+                    "sevilla-test-profile",
+                    (
+                        '{"geography": {"type": "radius", '
+                        '"center": [37.3891, -5.9845], "radius_km": 15}}'
+                    ),
+                ),
+            )
+            (sevilla_profile_id,) = cur.fetchone()
+        pg_conn.commit()
+
+        connector = DummyConnector(name="scope-probe")
+        orchestrator.CONNECTORS[:] = [connector]
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            # Two active profiles (the Madrid fixture from _apply_schema +
+            # the Sevilla one just inserted) with distinct geographies ->
+            # the connector must have been asked to discover() twice, once
+            # per scope, and one of those calls must carry Sevilla's
+            # center — not silently collapsed to a single Madrid-only call.
+            assert len(connector.scopes_seen) == 2
+            centers = {s.center for s in connector.scopes_seen}
+            assert (37.3891, -5.9845) in centers
+            assert (40.4168, -3.7038) in centers
+
+            # discovered_count/fetched_count are summed across both scopes
+            # (3 dummy listings x 2 scopes) in the single aggregated
+            # connector_run_results row (issue #71 — one row per connector
+            # per run, not one per scope; see run_all_connectors).
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT discovered_count, fetched_count FROM "
+                    "connector_run_results WHERE run_id = %s AND connector_name = %s",
+                    (run_id, connector.name),
+                )
+                discovered, fetched = cur.fetchone()
+            assert discovered == 6
+            assert fetched == 6
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM search_profile WHERE id = %s", (sevilla_profile_id,)
+                )
+            pg_conn.commit()
+
+    def test_zero_active_profiles_runs_no_connector_at_all(self, pg_conn):
+        _apply_schema(pg_conn)
+        # Archive (not delete) every active profile, including
+        # _apply_schema's fixture one — archived_at IS NOT NULL must be
+        # excluded from scope derivation just like a genuinely empty table.
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE search_profile SET archived_at = NOW() "
+                "WHERE archived_at IS NULL"
+            )
+        pg_conn.commit()
+
+        connector = DummyConnector(name="should-not-run")
+        orchestrator.CONNECTORS[:] = [connector]
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            assert connector.scopes_seen == []
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, total_connectors, connectors_ok, "
+                    "connectors_failed FROM connector_runs WHERE id = %s",
+                    (run_id,),
+                )
+                status, total, ok, failed = cur.fetchone()
+            assert (status, total, ok, failed) == ("success", 0, 0, 0)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM connector_run_results WHERE run_id = %s",
+                    (run_id,),
+                )
+                (result_row_count,) = cur.fetchone()
+            assert result_row_count == 0
+        finally:
+            orchestrator.CONNECTORS.clear()
+            with pg_conn.cursor() as cur:
+                cur.execute("DELETE FROM connector_runs WHERE id = %s", (run_id,))
+                # Restore the fixture profile other tests in this module
+                # depend on _apply_schema having (re-)created as active.
+                cur.execute(
+                    "UPDATE search_profile SET archived_at = NULL WHERE name = %s",
+                    (_TEST_PROFILE_NAME,),
+                )
             pg_conn.commit()
