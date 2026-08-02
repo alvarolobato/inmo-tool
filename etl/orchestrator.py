@@ -86,7 +86,10 @@ def _update_existing_listing(
                rooms = COALESCE(%s, rooms), bathrooms = COALESCE(%s, bathrooms),
                floor = COALESCE(%s, floor), has_elevator = COALESCE(%s, has_elevator),
                year_built = COALESCE(%s, year_built),
-               energy_rating = COALESCE(%s, energy_rating)
+               energy_rating = COALESCE(%s, energy_rating),
+               city = COALESCE(%s, city), province = COALESCE(%s, province),
+               postal_code = COALESCE(%s, postal_code), m2_plot = COALESCE(%s, m2_plot),
+               features = CASE WHEN %s THEN %s ELSE features END
          WHERE id = %s
         """,
         (
@@ -102,6 +105,12 @@ def _update_existing_listing(
             canonical.has_elevator,
             canonical.year_built,
             canonical.energy_rating,
+            canonical.city,
+            canonical.province,
+            canonical.postal_code,
+            canonical.m2_plot,
+            bool(canonical.features),
+            list(canonical.features),
             property_id,
         ),
     )
@@ -113,7 +122,8 @@ def _update_existing_listing(
                current_price = COALESCE(%s, current_price),
                description = COALESCE(%s, description),
                photo_urls = %s, contact_raw = COALESCE(%s, contact_raw),
-               raw_extra = %s, missed_discovery_count = 0
+               raw_extra = %s, missed_discovery_count = 0,
+               operation = COALESCE(%s, operation)
          WHERE id = %s
         """,
         (
@@ -125,6 +135,7 @@ def _update_existing_listing(
             list(canonical.photo_urls),
             canonical.contact_raw,
             _to_jsonb_param(canonical.raw_extra),
+            canonical.operation,
             listing_id,
         ),
     )
@@ -185,8 +196,9 @@ def _upsert_canonical_listing(conn, canonical: CanonicalListingVersion) -> None:
                 """
                 INSERT INTO property
                     (address, lat, lon, property_type, m2_built, m2_useful,
-                     rooms, bathrooms, floor, has_elevator, year_built, energy_rating)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     rooms, bathrooms, floor, has_elevator, year_built, energy_rating,
+                     city, province, postal_code, m2_plot, features)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
@@ -202,6 +214,11 @@ def _upsert_canonical_listing(conn, canonical: CanonicalListingVersion) -> None:
                     canonical.has_elevator,
                     canonical.year_built,
                     canonical.energy_rating,
+                    canonical.city,
+                    canonical.province,
+                    canonical.postal_code,
+                    canonical.m2_plot,
+                    list(canonical.features),
                 ),
             )
             property_id = cur.fetchone()[0]
@@ -211,8 +228,8 @@ def _upsert_canonical_listing(conn, canonical: CanonicalListingVersion) -> None:
                 INSERT INTO listing
                     (property_id, source, external_id, url, listing_kind, status,
                      first_seen_at, last_seen_at, current_price, description,
-                     photo_urls, contact_raw, raw_extra)
-                VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW(), %s, %s, %s, %s, %s)
+                     photo_urls, contact_raw, raw_extra, operation)
+                VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW(), %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
@@ -227,6 +244,7 @@ def _upsert_canonical_listing(conn, canonical: CanonicalListingVersion) -> None:
                     list(canonical.photo_urls),
                     canonical.contact_raw,
                     _to_jsonb_param(canonical.raw_extra),
+                    canonical.operation,
                 ),
             )
             listing_id = cur.fetchone()[0]

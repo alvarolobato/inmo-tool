@@ -109,6 +109,21 @@ class CanonicalListingVersion:
     year_built: int | None
     energy_rating: str | None
     raw_extra: dict[str, Any] = field(default_factory=dict)
+    # Schema superset vs. property_web_scraper's field model (issue #76).
+    # Defaulted (unlike the fields above) so existing connectors/tests don't
+    # need updating just to add this dataclass shape — populating these from
+    # real connector data is the Fotocasa/Milanuncios retrofit issues' job
+    # (#77/#78), not this one.
+    city: str | None = None
+    province: str | None = None
+    postal_code: str | None = None
+    m2_plot: Decimal | None = None
+    features: tuple[str, ...] = field(default_factory=tuple)
+    # 'sale' | 'rent' — listing-level, not property-level (see
+    # etl/schema/init.sql's `listing.operation`). Both live connectors only
+    # ever discover sale listings today; defaulted to match the schema
+    # column's own default rather than forcing every call site to specify it.
+    operation: str = "sale"
 
 
 class ConnectorError(Exception):
