@@ -267,13 +267,24 @@ test.describe("feedback rescoring the whole pool (EC-4)", () => {
     expect(response.status()).toBe(201);
     await expect(clickedCard.getByTestId("feedback-accept")).toHaveAttribute("aria-pressed", "true");
 
-    const after = await pool.query<{ score: string | null }>(
-      "SELECT score FROM profile_listing_state WHERE profile_id = $1 AND property_id = $2",
+    const after = await pool.query<{ score: string | null; score_kind: string | null }>(
+      "SELECT score, score_kind FROM profile_listing_state WHERE profile_id = $1 AND property_id = $2",
       [profileId, bystanderId],
     );
     const scoreAfter = after.rows[0].score;
 
     expect(scoreAfter).not.toBeNull();
     expect(scoreAfter).not.toBe(scoreBefore);
+    // A bystander's score also transitions from null to non-null on the
+    // *below-threshold* cold-start path, so "some score appeared" alone
+    // doesn't prove the real training path fired at 32 examples (Fable
+    // review of PR #93) — score_kind and the model's training_example_count
+    // do prove it.
+    expect(after.rows[0].score_kind).toBe("trained");
+    const model = await pool.query<{ training_example_count: number }>(
+      "SELECT training_example_count FROM profile_scoring_model WHERE profile_id = $1",
+      [profileId],
+    );
+    expect(model.rows[0].training_example_count).toBe(32);
   });
 });

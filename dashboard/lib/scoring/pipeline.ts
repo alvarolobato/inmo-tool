@@ -74,27 +74,80 @@ async function fetchUsableModel(profileId: number): Promise<StoredCoefficients |
   return row.coefficients;
 }
 
+/** `min_price / m2_built` for one candidate, or `null` when either is unknown/non-positive. */
+export function pricePerM2(row: { min_price: number | null; m2_built: number | null }): number | null {
+  if (row.min_price === null || row.m2_built === null || row.m2_built <= 0) return null;
+  return row.min_price / row.m2_built;
+}
+
+/**
+ * Median price-per-m² across a candidate pool — the reference point
+ * {@link computeColdStartScore} falls back to when a profile has no price
+ * band configured (see that function's docstring for why this matters).
+ * Median, not mean, so a single outlier listing (a misfitted mansion in an
+ * apartment-focused pool) doesn't skew every other candidate's cold-start
+ * score.
+ */
+export function poolMedianPricePerM2(inputs: ScoringInputRow[]): number | null {
+  const values = inputs
+    .map(pricePerM2)
+    .filter((v): v is number => v !== null)
+    .sort((a, b) => a - b);
+  if (values.length === 0) return null;
+  const mid = Math.floor(values.length / 2);
+  return values.length % 2 === 0 ? (values[mid - 1] + values[mid]) / 2 : values[mid];
+}
+
 /**
  * Deterministic, explainable cold-start ranking signal (issue #23 Technical
- * approach #1): price-per-m² ascending, i.e. cheapest-relative-to-this-
- * profile's-band scores highest. Reuses `price_per_m2_relative` (already
- * computed by task 3.2's feature extraction as
- * candidate-price-per-m² / profile's-target-price-per-m², where 1.0 means
- * "priced exactly at what this profile considers typical") rather than a
- * second, parallel price computation.
+ * approach #1): price-per-m² ascending, i.e. cheapest scores highest.
+ * Reuses `price_per_m2_relative` (already computed by task 3.2's feature
+ * extraction as candidate-price-per-m² / profile's-target-price-per-m²,
+ * where 1.0 means "priced exactly at what this profile considers typical")
+ * as the primary signal, since it's relative to what *this profile* actually
+ * wants, not just relative to other candidates.
  *
  * `1 / (1 + v)` is monotonically decreasing in `v` and maps the whole
  * (0, ∞) range into (0, 1) — at the profile's own target price (v=1) this
  * is exactly 0.5, matching a real trained model's sigmoid-output range so
  * cold-start and trained scores are at least on comparable footing even
- * though they're not the same kind of number. `v` unknown (missing price or
- * size data, or no price band configured on the profile) scores exactly 0.5
- * too — neutral, not a guess in either direction.
+ * though they're not the same kind of number.
+ *
+ * `price_per_m2_relative` is `null` in two genuinely different situations
+ * that used to collapse into the same "return 0.5 for everyone" behavior
+ * (found in Fable's review of PR #93: a profile with no price band scored
+ * every single candidate exactly 0.5, producing a fully arbitrary/tied
+ * cold-start order — the ordering this function exists to provide):
+ *
+ * 1. The candidate's own price/size data is missing — nothing to rank this
+ *    specific candidate by. Still returns 0.5 (neutral, no fallback data
+ *    exists).
+ * 2. The *profile* has no price band configured at all — common, not an
+ *    edge case (issue #17 didn't make a price band mandatory) — but the
+ *    candidate's own price/size ARE known. Falls back to the candidate's
+ *    price-per-m² relative to the whole matched pool's median
+ *    ({@link poolMedianPricePerM2}), so cold-start ordering still reflects
+ *    "cheaper than comparable options in this pool" instead of a tie,
+ *    passed in by the caller since computing it requires the whole pool.
  */
-export function computeColdStartScore(raw: ReturnType<typeof extractRaw>): number {
+export function computeColdStartScore(
+  raw: ReturnType<typeof extractRaw>,
+  poolFallback?: { pricePerM2: number | null; poolMedianPricePerM2: number | null },
+): number {
   const v = raw.price_per_m2_relative;
-  if (v === null || v <= 0) return 0.5;
-  return 1 / (1 + v);
+  if (v !== null && v > 0) return 1 / (1 + v);
+
+  if (
+    poolFallback &&
+    poolFallback.pricePerM2 !== null &&
+    poolFallback.pricePerM2 > 0 &&
+    poolFallback.poolMedianPricePerM2 !== null &&
+    poolFallback.poolMedianPricePerM2 > 0
+  ) {
+    return 1 / (1 + poolFallback.pricePerM2 / poolFallback.poolMedianPricePerM2);
+  }
+
+  return 0.5;
 }
 
 interface ScoredCandidate {
@@ -104,9 +157,14 @@ interface ScoredCandidate {
 }
 
 function scoreColdStart(inputs: ScoringInputRow[], scope: Scope): ScoredCandidate[] {
+  const medianPricePerM2 = poolMedianPricePerM2(inputs);
   return inputs.map((row) => {
     const raw = extractRaw(row, scope);
-    return { propertyId: row.property_id, score: computeColdStartScore(raw), explanation: COLD_START_EXPLANATION };
+    const score = computeColdStartScore(raw, {
+      pricePerM2: pricePerM2(row),
+      poolMedianPricePerM2: medianPricePerM2,
+    });
+    return { propertyId: row.property_id, score, explanation: COLD_START_EXPLANATION };
   });
 }
 
@@ -177,14 +235,29 @@ export async function scoreNewCandidates(
     const ids = scored.map((s) => s.propertyId);
     const scores = scored.map((s) => s.score);
     const explanations = scored.map((s) => s.explanation);
+    // materializeProfile passes *every* currently-matched id, not just ones
+    // newly matched this run (deliberate — see its own comment), so a
+    // cold-start write here can and does land on a property that already
+    // has a valid score from a past successful training run (e.g. the
+    // profile has since dropped back below MIN_TRAINING_EXAMPLES). retrain.ts
+    // already established the rule for exactly this situation (Opus review
+    // of PR #92, item 3): a cold-start write must never clobber a still-valid
+    // prior score/explanation pair, to avoid showing a real number next to
+    // "not personalized yet". This write path was missing that same guard
+    // (Fable review of PR #93) — apply it here too, but only for cold-start
+    // writes; a real trained-model score is always current and correct, and
+    // must overwrite unconditionally (that's the whole point of rescoring).
+    const coldStartGuard = model === null ? "AND pls.score IS NULL" : "";
+    const scoreKind = model === null ? "cold_start" : "trained";
     await client.query(
       `UPDATE profile_listing_state AS pls
-         SET score = data.score, rank_explanation = data.explanation, last_scored_at = NOW()
+         SET score = data.score, rank_explanation = data.explanation, score_kind = $5, last_scored_at = NOW()
         FROM (SELECT unnest($2::bigint[]) AS property_id,
                      unnest($3::numeric[]) AS score,
                      unnest($4::text[]) AS explanation) AS data
-       WHERE pls.profile_id = $1 AND pls.property_id = data.property_id`,
-      [profileId, ids, scores, explanations],
+       WHERE pls.profile_id = $1 AND pls.property_id = data.property_id
+         ${coldStartGuard}`,
+      [profileId, ids, scores, explanations, scoreKind],
     );
   });
 

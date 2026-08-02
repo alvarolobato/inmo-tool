@@ -309,13 +309,21 @@ describe.runIf(dbAvailable)("materializeProfile — real Postgres", () => {
 
       await materializeProfile(profileId);
 
-      const { rows } = await pool.query<{ score: string | null; rank_explanation: string | null }>(
-        "SELECT score, rank_explanation FROM profile_listing_state WHERE profile_id = $1 AND property_id = $2",
+      const { rows } = await pool.query<{
+        score: string | null;
+        rank_explanation: string | null;
+        score_kind: string | null;
+      }>(
+        "SELECT score, rank_explanation, score_kind FROM profile_listing_state WHERE profile_id = $1 AND property_id = $2",
         [profileId, propertyId],
       );
       expect(rows).toHaveLength(1);
       expect(rows[0].score).not.toBeNull();
       expect(rows[0].rank_explanation).not.toBeNull();
+      // score_kind, not string-matching rank_explanation's text (Fable
+      // review of PR #93) — a real marker survives the cold-start UI copy
+      // changing for cosmetic reasons.
+      expect(rows[0].score_kind).toBe("cold_start");
     });
   });
 
@@ -359,16 +367,21 @@ describe.runIf(dbAvailable)("materializeProfile — real Postgres", () => {
       await insertListing(pool, newPropertyId);
       await materializeProfile(profileId);
 
-      const { rows } = await pool.query<{ score: string | null; rank_explanation: string | null }>(
-        "SELECT score, rank_explanation FROM profile_listing_state WHERE profile_id = $1 AND property_id = $2",
+      const { rows } = await pool.query<{
+        score: string | null;
+        rank_explanation: string | null;
+        score_kind: string | null;
+      }>(
+        "SELECT score, rank_explanation, score_kind FROM profile_listing_state WHERE profile_id = $1 AND property_id = $2",
         [profileId, newPropertyId],
       );
       expect(rows).toHaveLength(1);
       expect(rows[0].score).not.toBeNull();
-      // Grounded in the real model, not the fixed cold-start message —
-      // proves scoreNewCandidates picked up the existing trained model
-      // rather than falling back to cold-start ordering for a candidate
-      // that arrived after training.
+      // score_kind='trained' (not string-matching against the fixed
+      // cold-start message — Fable review of PR #93) proves scoreNewCandidates
+      // picked up the existing trained model rather than falling back to
+      // cold-start ordering for a candidate that arrived after training.
+      expect(rows[0].score_kind).toBe("trained");
       expect(rows[0].rank_explanation).not.toBe(COLD_START_EXPLANATION);
     });
   }, 20000);

@@ -14,7 +14,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { listCandidates } from "@/lib/candidates";
+import { decodeCursor, listCandidates } from "@/lib/candidates";
 import { getProfileById } from "@/lib/db/profiles";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
@@ -43,15 +43,17 @@ export async function GET(
   const rawCursor = searchParams.get("cursor");
   const rawLimit = searchParams.get("limit");
 
-  let cursor: number | null = null;
+  // Cursor is an opaque string (encodes a compound score+id keyset key, see
+  // lib/candidates.ts) — validate it decodes, but don't parse it ourselves.
+  let cursor: string | null = null;
   if (rawCursor !== null) {
-    cursor = parsePositiveInt(rawCursor);
-    if (cursor === null) {
+    if (decodeCursor(rawCursor) === null) {
       return NextResponse.json(
         formatApiError("Cursor no válido.", "VALIDATION", undefined, requestId),
         { status: 400 },
       );
     }
+    cursor = rawCursor;
   }
 
   let limit: number | undefined;
