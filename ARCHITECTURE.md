@@ -10,7 +10,7 @@ inmo-tool crawls real-estate listing sites, mirrors normalized/deduplicated list
 
 **Flow at a glance:** Listing sites (per-site connectors, scheduled) → Postgres mirror (`property`/`listing`/... — schema defined in task 1.2, #10) → Dedup engine (task 2.2, #16) → per-profile scoring (Phase 3) → Dashboard App (Next.js + Tremor, reused shell from the source project) with an LLM chat layer (Phase 4) for conversational search/analysis.
 
-Full data model and ER diagram: **TODO — task 1.2 (#10)** will add `docs/architecture/data-model.md`.
+Full data model and ER diagram: see [docs/architecture/data-model.md](docs/architecture/data-model.md) (task 1.2, #10) — every table's purpose, the entity-relationship overview, and the `property_id`-vs-`listing_id` keying rationale that makes deduplication actually work.
 
 ## Components
 
@@ -23,7 +23,7 @@ Full data model and ER diagram: **TODO — task 1.2 (#10)** will add `docs/archi
 ### 2. PostgreSQL
 
 - **Bind mount**: `./data/postgres/` (see [D-001](docs/decisions/D-001-bind-mounts.md))
-- **Schema**: TODO — task 1.2 (#10)
+- **Schema**: `property`, `listing`, `listing_price_history`, `listing_status_event`, `owner_identity` (+ join table), `search_profile`, `profile_listing_state`, `feedback_event`, `ai_assessment`, `property_merge_log` — see [docs/architecture/data-model.md](docs/architecture/data-model.md) and [D-005](docs/decisions/D-005-numeric-vs-uuid-keys.md) (task 1.2, #10). Pre-existing dashboard/LLM/ETL-observability infrastructure tables (`dashboards`, `conversations`, `llm_*`, `etl_sync_runs`, etc.) are inherited as-is — later phases reuse them.
 
 ### 3. Dashboard App (`dashboard/`)
 

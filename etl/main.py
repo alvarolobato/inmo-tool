@@ -40,10 +40,11 @@ _NOT_YET_IMPLEMENTED = (
 def _init_schema(conn_pg) -> None:
     """Execute etl/schema/init.sql against PostgreSQL (idempotent — IF NOT EXISTS).
 
-    init.sql is still the inherited PowerShop schema (ps_* tables) at this
-    point in the stack — it creates tables this project doesn't use. Schema
-    replacement with the real property/listing/profile model is Phase 1.2
-    (issue #10), not this task's job.
+    init.sql now defines the real property/listing/profile model (Phase 1.2,
+    issue #10) alongside the pre-existing dashboard/LLM/ETL-observability
+    infrastructure tables inherited from the source project (dashboards,
+    conversations, llm_*, etl_sync_runs, etc.) — those are left untouched
+    here since later phases still depend on them as-is.
     """
     sql = _SCHEMA_SQL_PATH.read_text(encoding="utf-8")
     with conn_pg.cursor() as cur:
