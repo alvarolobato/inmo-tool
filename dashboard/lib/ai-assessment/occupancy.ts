@@ -131,8 +131,20 @@ export class NoListingsError extends Error {
   }
 }
 
+/**
+ * Raw shapes as `pg` actually returns them — NOT as the schema declares them.
+ *
+ * `id` is BIGSERIAL, and node-postgres hands BIGINT back as a **string**
+ * (int8 exceeds JS's safe integer range, so pg-types deliberately refuses to
+ * guess). Without an explicit Number() these flow into `ListingSnapshot`
+ * typed as `number` while actually holding `"17"`, and every downstream
+ * `===` against a real number silently fails. Caught by
+ * occupancy.integration.test.ts, which is exactly the bug class a mocked
+ * `sql()` cannot see. NUMERIC columns have the same property — that is what
+ * `num()` below exists for.
+ */
 interface RawListingRow {
-  id: number;
+  id: string;
   source: string;
   url: string | null;
   status: string;
@@ -143,7 +155,7 @@ interface RawListingRow {
 }
 
 interface RawPropertyRow {
-  id: number;
+  id: string;
   property_type: string | null;
   m2_built: string | null;
   rooms: number | null;
@@ -188,8 +200,8 @@ export async function loadPropertyListings(
   );
 
   return rows.map((l) => ({
-    propertyId: prop.id,
-    listingId: l.id,
+    propertyId: Number(prop.id),
+    listingId: Number(l.id),
     source: l.source,
     url: l.url ?? undefined,
     description: l.description ?? undefined,
