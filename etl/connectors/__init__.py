@@ -27,6 +27,7 @@ def register_all() -> None:
     site twice per sweep.
     """
     from etl.connectors.fotocasa import FotocasaConnector
+    from etl.connectors.idealista import IdealistaConnector
     from etl.connectors.milanuncios import MilanunciosConnector
     from etl.orchestrator import CONNECTORS
 
@@ -35,3 +36,9 @@ def register_all() -> None:
         CONNECTORS.append(FotocasaConnector())
     if MilanunciosConnector.name not in registered_names:
         CONNECTORS.append(MilanunciosConnector())
+    if IdealistaConnector.name not in registered_names:
+        # scope_key() always returns None (issue #75 — capture-only, never
+        # crawls) — registering it here is self-documenting (CONNECTORS is
+        # "every known site"), not functionally load-bearing for the
+        # orchestrator's normal sweep, which skips it every time.
+        CONNECTORS.append(IdealistaConnector())

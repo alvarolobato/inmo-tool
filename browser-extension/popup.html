@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=380" />
+  <title>Inmo-Tool — Capturar anuncio</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header class="header">
+    <div class="header-left">
+      <img src="icons/icon-48.png" alt="" class="header-icon" />
+      <h1 class="header-title">Inmo-Tool</h1>
+    </div>
+    <a href="options.html" target="_blank" class="settings-btn" title="Configuración">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    </a>
+  </header>
+
+  <div id="state-loading" class="state">
+    <div class="spinner"></div>
+    <p class="state-text">Extrayendo datos del anuncio…</p>
+  </div>
+
+  <div id="state-unsupported" class="state hidden">
+    <div class="state-icon">🌐</div>
+    <p class="state-text">Este sitio no está soportado.</p>
+    <p class="state-sub">Navega a un anuncio de Idealista y vuelve a intentarlo.</p>
+  </div>
+
+  <div id="state-error" class="state hidden">
+    <div class="state-icon">⚠️</div>
+    <p id="error-message" class="state-text">Algo salió mal</p>
+    <button id="retry-btn" class="btn btn-primary">Reintentar</button>
+  </div>
+
+  <div id="state-results" class="hidden">
+    <div class="result-summary">
+      <div class="result-header">
+        <h2 id="result-title" class="result-title"></h2>
+      </div>
+      <p id="result-price" class="result-price"></p>
+      <p id="result-rate" class="extraction-rate"></p>
+      <a id="view-property-link" href="#" target="_blank" class="btn btn-primary btn-view-results hidden">
+        Ver en Inmo-Tool
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+      </a>
+    </div>
+
+    <div class="actions">
+      <button id="copy-json-btn" class="btn btn-secondary">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        Copiar JSON
+      </button>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

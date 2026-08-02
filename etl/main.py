@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import threading
 from pathlib import Path
 
 logging.basicConfig(
@@ -106,6 +107,13 @@ def main() -> None:
             orchestrator.run_all_connectors(
                 conn_pg, trigger="cli", connector_name=args.connector
             )
+            # Also drain any pending browser-extension captures (issue
+            # #75) in --once mode — mainly so `ps connector run` / manual
+            # testing can exercise the capture path without waiting for
+            # the long-running poll thread below.
+            from etl import capture
+
+            capture.process_pending_captures(conn_pg)
         except orchestrator.UnknownConnectorError as exc:
             # Caught specifically, not bare ValueError — an unrelated
             # ValueError from somewhere inside a connector's own code
@@ -118,6 +126,20 @@ def main() -> None:
         return
 
     conn_pg.close()
+
+    # Browser-extension capture polling (issue #75) runs on its own much
+    # shorter interval than the hourly connector sweep, in a separate
+    # thread — a human waiting on the extension's popup for a result
+    # shouldn't wait up to an hour. daemon=True: this thread must not keep
+    # the process alive if the main scheduler loop below ever exits.
+    from etl import capture
+
+    capture_thread = threading.Thread(
+        target=capture.run_capture_poll_loop,
+        args=(lambda: postgres.get_connection(config),),
+        daemon=True,
+    )
+    capture_thread.start()
 
     # Long-running container mode (docker-compose CMD): a fresh connection
     # per cycle, same pattern the source project used, so a dropped
