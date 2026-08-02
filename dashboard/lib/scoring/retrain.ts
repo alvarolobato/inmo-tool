@@ -25,6 +25,7 @@
 
 import { sql, withTransaction } from "@/lib/db-write";
 import { getProfileById } from "@/lib/db/profiles";
+import { COLD_START_EXPLANATION, explainScore } from "./explain";
 import { extractRaw, fetchScoringInputs, FEATURE_NAMES } from "./features";
 import { computeNormalization, normalizeVector, scoreNormalized, trainLogisticRegression } from "./model";
 
@@ -110,6 +111,20 @@ export async function retrainAndRescoreProfile(profileId: number): Promise<Retra
   const negativeCount = trainingPropertyIds.length - positiveCount;
 
   if (positiveCount === 0 || negativeCount === 0) {
+    // No trained model yet, but the candidate list (task 2.5) still needs
+    // something honest to show rather than a blank explanation field —
+    // issue #22's EC-2: state plainly that scoring isn't personalized yet,
+    // don't fabricate a feature-based sentence from coefficients that don't
+    // exist. `score` itself is left untouched (still NULL, or whatever a
+    // prior successful training run set it to — going one-sided on feedback
+    // later shouldn't erase a still-valid previous model's scores).
+    await sql(
+      `UPDATE profile_listing_state
+          SET rank_explanation = $2
+        WHERE profile_id = $1 AND matched = true`,
+      [profileId, COLD_START_EXPLANATION],
+    );
+
     return {
       profileId,
       trained: false,
@@ -147,7 +162,14 @@ export async function retrainAndRescoreProfile(profileId: number): Promise<Retra
   const scored = inputs.map((row) => {
     const raw = rawByProperty.get(row.property_id)!;
     const x = normalizeVector(raw, normalization);
-    return { propertyId: row.property_id, score: scoreNormalized({ weights, bias }, x) };
+    return {
+      propertyId: row.property_id,
+      score: scoreNormalized({ weights, bias }, x),
+      // Task 3.3 (#22): grounded in this same candidate's real feature
+      // vector and this same freshly-trained model — never stale relative
+      // to the score it's explaining, since both are computed together here.
+      explanation: explainScore(raw, { weights, bias, normalization }),
+    };
   });
 
   // Advisory lock, same pattern/reasoning as `feedback.ts`'s per-property
@@ -176,12 +198,15 @@ export async function retrainAndRescoreProfile(profileId: number): Promise<Retra
 
     const propertyIds = scored.map((s) => s.propertyId);
     const scores = scored.map((s) => s.score);
+    const explanations = scored.map((s) => s.explanation);
     await client.query(
       `UPDATE profile_listing_state AS pls
-         SET score = data.score, last_scored_at = NOW()
-        FROM (SELECT unnest($2::bigint[]) AS property_id, unnest($3::numeric[]) AS score) AS data
+         SET score = data.score, rank_explanation = data.explanation, last_scored_at = NOW()
+        FROM (SELECT unnest($2::bigint[]) AS property_id,
+                     unnest($3::numeric[]) AS score,
+                     unnest($4::text[]) AS explanation) AS data
        WHERE pls.profile_id = $1 AND pls.property_id = data.property_id`,
-      [profileId, propertyIds, scores],
+      [profileId, propertyIds, scores, explanations],
     );
   });
 

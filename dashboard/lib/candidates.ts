@@ -33,6 +33,10 @@ export interface CandidateRow {
   /** Earliest first_seen_at across all of the property's listings. */
   first_seen_at: string | null;
   listings: CandidateListingSummary[];
+  /** Task 3.2 (#21): null until this profile has a trained model, or the property hasn't been rescored since one was trained. */
+  score: number | null;
+  /** Task 3.3 (#22): human-readable, model-grounded explanation of `score` — a cold-start message when `score` is null because no model exists yet, not because this specific property hasn't been rescored. */
+  rank_explanation: string | null;
 }
 
 export interface CandidatePage {
@@ -55,6 +59,8 @@ interface RawCandidateRow {
   min_price: string | null;
   first_seen_at: string | null;
   listings: CandidateListingSummary[];
+  score: string | null;
+  rank_explanation: string | null;
 }
 
 /**
@@ -89,6 +95,8 @@ export async function listCandidates(
        (SELECT MIN(l3.first_seen_at)
           FROM listing l3
          WHERE l3.property_id = p.id) AS first_seen_at,
+       pls.score,
+       pls.rank_explanation,
        COALESCE(
          (SELECT json_agg(
                    json_build_object(
@@ -131,6 +139,8 @@ export async function listCandidates(
     min_price: r.min_price !== null ? Number(r.min_price) : null,
     first_seen_at: r.first_seen_at,
     listings: r.listings,
+    score: r.score !== null ? Number(r.score) : null,
+    rank_explanation: r.rank_explanation,
   }));
 
   const nextCursor = hasMore ? items[items.length - 1].property_id : null;

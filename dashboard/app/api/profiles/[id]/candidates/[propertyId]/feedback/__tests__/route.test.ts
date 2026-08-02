@@ -19,6 +19,7 @@ import { buildPgPoolConfig } from "@/lib/db-shared";
 import { resetPool } from "@/lib/db-write";
 import { createProfile } from "@/lib/db/profiles";
 import type { Scope } from "@/lib/profiles-schema";
+import { COLD_START_EXPLANATION } from "@/lib/scoring/explain";
 import { GET, POST } from "../route";
 
 // Far from candidates.integration.test.ts's and materialize.integration.test.ts's
@@ -332,24 +333,36 @@ describe.runIf(dbAvailable)("feedback event API — real Postgres", () => {
       expect(before.rows.every((r) => r.score === null)).toBe(true);
 
       // Only one class so far (accept) — retrain should decline to train
-      // (needs both classes), so scores stay null after this alone.
+      // (needs both classes), so scores stay null after this alone. Per
+      // issue #22 (task 3.3), rank_explanation should still be set to the
+      // honest cold-start message — the candidate list shouldn't show a
+      // blank explanation just because no model exists yet.
       await POST(makeRequest({ feedbackType: "accept" }), ctx(profileId, cheapPropertyId));
-      const afterFirstOnly = await pool.query<{ score: string | null }>(
-        "SELECT score FROM profile_listing_state WHERE profile_id = $1 AND property_id = ANY($2::bigint[])",
+      const afterFirstOnly = await pool.query<{ score: string | null; rank_explanation: string | null }>(
+        "SELECT score, rank_explanation FROM profile_listing_state WHERE profile_id = $1 AND property_id = ANY($2::bigint[])",
         [profileId, [cheapPropertyId, priceyPropertyId]],
       );
       expect(afterFirstOnly.rows.every((r) => r.score === null)).toBe(true);
+      expect(afterFirstOnly.rows.every((r) => r.rank_explanation === COLD_START_EXPLANATION)).toBe(true);
 
       // Now both classes exist — this POST should trigger a real retrain +
       // rescore of the whole matched pool before the response returns.
       const res = await POST(makeRequest({ feedbackType: "reject" }), ctx(profileId, priceyPropertyId));
       expect(res.status).toBe(201);
 
-      const after = await pool.query<{ property_id: number; score: string | null }>(
-        "SELECT property_id, score FROM profile_listing_state WHERE profile_id = $1 AND property_id = ANY($2::bigint[])",
+      const after = await pool.query<{ property_id: number; score: string | null; rank_explanation: string | null }>(
+        "SELECT property_id, score, rank_explanation FROM profile_listing_state WHERE profile_id = $1 AND property_id = ANY($2::bigint[])",
         [profileId, [cheapPropertyId, priceyPropertyId]],
       );
       expect(after.rows.every((r) => r.score !== null)).toBe(true);
+      // A real, model-grounded explanation now replaces the cold-start
+      // message (task 3.3, #22) — and each candidate's own explanation
+      // differs, since it's computed per-candidate from that candidate's own
+      // feature vector, not one shared template string.
+      expect(after.rows.every((r) => r.rank_explanation !== null)).toBe(true);
+      expect(after.rows.every((r) => r.rank_explanation !== COLD_START_EXPLANATION)).toBe(true);
+      const explanations = new Set(after.rows.map((r) => r.rank_explanation));
+      expect(explanations.size).toBe(2);
 
       const model = await pool.query<{ training_example_count: number }>(
         "SELECT training_example_count FROM profile_scoring_model WHERE profile_id = $1",

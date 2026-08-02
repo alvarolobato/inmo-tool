@@ -58,6 +58,8 @@ describe("listCandidates", () => {
     min_price: null,
     first_seen_at: null,
     listings: [],
+    score: null,
+    rank_explanation: null,
   });
 
   it("sets nextCursor only when a real next page exists (extra row is fetched and trimmed, not inferred from a full page)", async () => {
@@ -109,6 +111,8 @@ describe("listCandidates", () => {
           rooms: 2,
           min_price: "279000.00",
           first_seen_at: "2026-07-01T00:00:00.000Z",
+          score: "0.732",
+          rank_explanation: "Ranking alto: precio un 8% por debajo de lo habitual en este perfil.",
           listings: [
             { id: 10, source: "fotocasa", url: "https://fotocasa.example/10", current_price: 285000 },
             { id: 11, source: "milanuncios", url: "https://milanuncios.example/11", current_price: 279000 },
@@ -126,5 +130,22 @@ describe("listCandidates", () => {
     expect(page.items[0].lat).toBe(40.4324);
     expect(page.items[0].m2_built).toBe(70);
     expect(page.items[0].min_price).toBe(279000);
+  });
+
+  it("coerces score (a pg NUMERIC, returned as a string) to a JSON number, and passes rank_explanation through untouched", async () => {
+    mockPoolQuery.mockResolvedValueOnce({
+      rows: [{ ...stubRow(1), score: "0.500", rank_explanation: "Sin motivos concretos que destacar todavía para este candidato." }],
+    });
+    const page = await listCandidates(1);
+    expect(page.items[0].score).toBe(0.5);
+    expect(typeof page.items[0].score).toBe("number");
+    expect(page.items[0].rank_explanation).toBe("Sin motivos concretos que destacar todavía para este candidato.");
+  });
+
+  it("leaves score and rank_explanation null when the property hasn't been scored yet", async () => {
+    mockPoolQuery.mockResolvedValueOnce({ rows: [stubRow(1)] });
+    const page = await listCandidates(1);
+    expect(page.items[0].score).toBeNull();
+    expect(page.items[0].rank_explanation).toBeNull();
   });
 });
