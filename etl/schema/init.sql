@@ -523,6 +523,11 @@ CREATE TABLE IF NOT EXISTS connector_run_results (
     connector_name   TEXT         NOT NULL,
     started_at       TIMESTAMPTZ,
     finished_at      TIMESTAMPTZ,
+    -- This inline CHECK is the original (3-value) definition, kept as-is
+    -- for a correct history on a fresh install — it's superseded below by
+    -- an ALTER adding 'skipped' (issue #99). Reading this line alone gives
+    -- a stale picture of what's actually allowed on a real database; see
+    -- the ALTER a few lines down for the current 4-value constraint.
     status           TEXT         NOT NULL DEFAULT 'ok' CHECK (status IN ('ok','failed','circuit_open')),
     discovered_count INTEGER      NOT NULL DEFAULT 0,
     fetched_count    INTEGER      NOT NULL DEFAULT 0,
@@ -539,11 +544,71 @@ CREATE TABLE IF NOT EXISTS connector_run_results (
     UNIQUE (run_id, connector_name)
 );
 
+-- Issue #99 hardening: an operator disabling a connector via connector_config
+-- previously left zero trace — no connector_run_results row, no count
+-- anywhere — making a run where every connector is disabled indistinguishable
+-- from a healthy, fully-successful empty run. 'skipped' plus
+-- connectors_skipped close that gap: a disabled connector now gets a real
+-- result row (status='skipped', not counted toward connectors_ok/failed)
+-- so an operator can actually see "this ran, but I told it not to do
+-- anything" rather than a suspiciously-quiet clean run.
+ALTER TABLE connector_run_results DROP CONSTRAINT IF EXISTS connector_run_results_status_check;
+ALTER TABLE connector_run_results ADD CONSTRAINT connector_run_results_status_check
+    CHECK (status IN ('ok', 'failed', 'circuit_open', 'skipped'));
+ALTER TABLE connector_runs ADD COLUMN IF NOT EXISTS connectors_skipped INTEGER;
+
 CREATE INDEX IF NOT EXISTS idx_connector_run_results_run_id ON connector_run_results (run_id);
 -- Recent-runs lookups (dashboards, `ps connector status`-style queries)
 -- filter/sort on started_at; unindexed, that's a seq scan once this table
 -- has any real history.
 CREATE INDEX IF NOT EXISTS idx_connector_runs_started_at ON connector_runs (started_at DESC);
+
+-- Issue #99: an explicit, operator-visible override on top of issue #71's
+-- union-of-active-profiles scope derivation. A connector with no row here
+-- (the common case — this table starts empty) keeps #71's default
+-- behavior unchanged. A row's presence is what an operator toggles from
+-- the connector-management UI (#100), not a config file, so it survives
+-- container restarts and is queryable by the same dashboard that renders
+-- it.
+--
+--   enabled = false            -> orchestrator skips this connector
+--                                  entirely, before ever deriving a scope
+--                                  or calling discover() (never counted
+--                                  as ok/failed in connector_runs).
+--   geography_override IS NULL -> scope still comes from the union of
+--                                  active search_profile rows (#71's
+--                                  default), even with a row present here
+--                                  (e.g. a row that only sets `filters`).
+--   geography_override set     -> {"center": [lat, lon], "radius_km": n},
+--                                  same shape as search_profile.scope.geography
+--                                  (dashboard/lib/profiles-schema.ts) —
+--                                  used INSTEAD of the profile union for
+--                                  this connector, e.g. an operator
+--                                  broadening ingestion ahead of profiles
+--                                  that don't exist yet.
+--   filters                    -> a flexible bag of connector-specific
+--                                  native site filters (e.g. {"rooms": 2}
+--                                  for fotocasa — an EXACT-match filter on
+--                                  Fotocasa's side, confirmed live, hence
+--                                  `rooms` not `min_rooms`), not a fixed column
+--                                  per site-per-filter — issue #99 only
+--                                  confirmed one filter dimension
+--                                  (Fotocasa room count) as real via live
+--                                  verification; price/property-type and
+--                                  Milanuncios' equivalent are still
+--                                  unconfirmed (docs/architecture/connectors.md),
+--                                  so this stays additive rather than a
+--                                  schema migration per future finding.
+--                                  A connector that doesn't recognise a
+--                                  key in here ignores it, it doesn't
+--                                  error — see etl/orchestrator.py.
+CREATE TABLE IF NOT EXISTS connector_config (
+    connector_name      TEXT         PRIMARY KEY,
+    enabled              BOOLEAN      NOT NULL DEFAULT true,
+    geography_override   JSONB,
+    filters              JSONB        NOT NULL DEFAULT '{}'::jsonb,
+    updated_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
 
 -- Browser-extension listing capture (issue #75): a queue table, not a
 -- synchronous request/response — the dashboard (Node/TypeScript) and the

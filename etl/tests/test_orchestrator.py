@@ -144,6 +144,440 @@ class TestOrchestratorEndToEnd:
             pg_conn.commit()
 
 
+class TestConnectorConfig:
+    """Issue #99: connector_config's disable/override layer on top of #71's
+    union-of-active-profiles default."""
+
+    def _cleanup_config(self, conn, *names: str) -> None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM connector_config WHERE connector_name = ANY(%s)",
+                (list(names),),
+            )
+        conn.commit()
+
+    def test_disabled_connector_never_runs_despite_matching_active_profile(
+        self, pg_conn
+    ):
+        _apply_schema(pg_conn)
+        connector = DummyConnector(name="test-disabled-connector")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO connector_config (connector_name, enabled) "
+                "VALUES (%s, false)",
+                (connector.name,),
+            )
+        pg_conn.commit()
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            # The disabled connector must never even reach discover().
+            assert connector.scopes_seen == []
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT total_connectors, connectors_ok, connectors_failed, "
+                    "connectors_skipped FROM connector_runs WHERE id = %s",
+                    (run_id,),
+                )
+                total, ok, failed, run_skipped = cur.fetchone()
+            # Issue #99 hardening: a disabled connector is now visibly
+            # skipped, not silently absent from every count — it's counted
+            # in total_connectors and connectors_skipped, but not toward
+            # ok/failed, since "told not to run" is neither a success nor
+            # a failure.
+            assert total == 1
+            assert ok == 0
+            assert failed == 0
+            assert run_skipped == 1
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM connector_run_results "
+                    "WHERE run_id = %s AND connector_name = %s",
+                    (run_id, connector.name),
+                )
+                (status,) = cur.fetchone()
+            # A real result row exists now — 'skipped', not absent — so a
+            # fully-disabled run is distinguishable from a fully-healthy
+            # empty one by inspection, not just by the total_connectors
+            # count.
+            assert status == "skipped"
+        finally:
+            orchestrator.CONNECTORS.clear()
+            self._cleanup_config(pg_conn, connector.name)
+            _cleanup(pg_conn, connector.name, run_id)
+
+    def test_geography_override_ignores_active_profile_scope(self, pg_conn):
+        _apply_schema(pg_conn)
+        connector = DummyConnector(name="test-override-connector")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        override_center = [37.3891, -5.9845]  # Sevilla — the fixture profile is Madrid
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO connector_config "
+                "(connector_name, geography_override) VALUES (%s, %s)",
+                (connector.name, '{"center": [37.3891, -5.9845], "radius_km": 8}'),
+            )
+        pg_conn.commit()
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            assert len(connector.scopes_seen) == 1
+            seen = connector.scopes_seen[0]
+            assert seen.center == (override_center[0], override_center[1])
+            assert seen.radius_km == 8.0
+        finally:
+            orchestrator.CONNECTORS.clear()
+            self._cleanup_config(pg_conn, connector.name)
+            _cleanup(pg_conn, connector.name, run_id)
+
+    @pytest.mark.parametrize(
+        ("case_name", "geography_override_json", "filters_json"),
+        [
+            (
+                "string-override-array-filters",
+                '"not-an-object"',
+                "[1, 2, 3]",
+            ),
+            (
+                "array-override",
+                "[1, 2, 3]",
+                "{}",
+            ),
+            (
+                "dict-override-non-numeric-coords",
+                '{"center": ["abc", "def"], "radius_km": 5}',
+                "{}",
+            ),
+            (
+                "array-filters-only",
+                None,
+                "[1, 2, 3]",
+            ),
+        ],
+    )
+    def test_malformed_geography_override_falls_back_without_crashing_the_run(
+        self, pg_conn, case_name, geography_override_json, filters_json
+    ):
+        """Issue #99 hardening: geography_override/filters are JSONB, so a hand-edited
+        or buggily-written row can hold a JSON string/list/int instead of an object,
+        or a well-shaped dict with non-numeric values inside it. Before the
+        isinstance(..., dict) guards and the try/except around the float()
+        conversions, any of these raised uncaught (AttributeError or ValueError)
+        and aborted the entire run — not just this connector — for every
+        connector in the registry. Parametrized (issue #99 review, round 2) to
+        cover all four malformed shapes verified to actually reach this code
+        path, since a future connector-management UI (#100) can produce any of
+        them from a human's typo, not just the one shape the first pass tested."""
+        _apply_schema(pg_conn)
+        malformed = DummyConnector(name=f"test-malformed-override-{case_name}")
+        healthy = DummyConnector(name=f"test-malformed-sibling-{case_name}")
+        orchestrator.CONNECTORS[:] = [malformed, healthy]
+        run_id = None
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO connector_config "
+                "(connector_name, geography_override, filters) VALUES (%s, %s, %s)",
+                (malformed.name, geography_override_json, filters_json),
+            )
+        pg_conn.commit()
+        try:
+            # Must not raise — this is the crash this test exists to rule out.
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, connectors_ok, connectors_failed, total_connectors "
+                    "FROM connector_runs WHERE id = %s",
+                    (run_id,),
+                )
+                status, ok, failed, total = cur.fetchone()
+            assert status == "success"
+            assert total == 2
+            assert failed == 0
+            assert ok == 2
+
+            # The malformed connector still ran — falling back to the
+            # profile-derived default scope rather than being skipped.
+            assert len(malformed.scopes_seen) == 1
+            # The sibling connector (no config row at all) is unaffected.
+            assert len(healthy.scopes_seen) == 1
+        finally:
+            orchestrator.CONNECTORS.clear()
+            self._cleanup_config(pg_conn, malformed.name, healthy.name)
+            _cleanup(pg_conn, malformed.name, run_id)
+            _cleanup(pg_conn, healthy.name)
+
+    def test_malformed_profile_coordinates_fall_back_without_crashing_the_run(
+        self, pg_conn
+    ):
+        """Issue #99 review, round 2: _active_profile_scopes had the identical
+        unguarded float() conversion as _scopes_for_connector's
+        geography_override handling, one call earlier in the same run path.
+        A search_profile with a 2-element center list of non-numeric strings
+        passes the isinstance(list)/len==2 guard, then raised an uncaught
+        ValueError on float(center[0]) — aborting the run for every
+        connector, not just skipping that one profile's contribution. This
+        proves the malformed profile is skipped with a warning while a
+        sibling valid profile's scope still reaches the connector."""
+        _apply_schema(pg_conn)
+        malformed_profile_name = "orchestrator-test-malformed-coords-profile"
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO search_profile (name, scope) VALUES (%s, %s)",
+                (
+                    malformed_profile_name,
+                    (
+                        '{"geography": {"type": "radius", '
+                        '"center": ["abc", "def"], "radius_km": 10}}'
+                    ),
+                ),
+            )
+        pg_conn.commit()
+        connector = DummyConnector(name="test-malformed-profile-coords")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            # Must not raise — this is the crash this test exists to rule out.
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, connectors_ok, connectors_failed, total_connectors "
+                    "FROM connector_runs WHERE id = %s",
+                    (run_id,),
+                )
+                status, ok, failed, total = cur.fetchone()
+            assert status == "success"
+            assert total == 1
+            assert failed == 0
+            assert ok == 1
+
+            # Exactly one scope reached the connector: the valid Madrid
+            # fixture profile from _apply_schema. The malformed profile's
+            # scope was skipped, not substituted with garbage and not
+            # allowed to abort discovery for the valid profile alongside it.
+            assert connector.scopes_seen == [
+                orchestrator.ConnectorScope(center=(40.4168, -3.7038), radius_km=10.0)
+            ]
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM search_profile WHERE name = %s",
+                    (malformed_profile_name,),
+                )
+            pg_conn.commit()
+
+    def test_override_on_one_connector_does_not_affect_another(self, pg_conn):
+        _apply_schema(pg_conn)
+        overridden = DummyConnector(name="test-override-a")
+        default_connector = DummyConnector(name="test-override-b")
+        orchestrator.CONNECTORS[:] = [overridden, default_connector]
+        run_id = None
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO connector_config "
+                "(connector_name, geography_override) VALUES (%s, %s)",
+                (overridden.name, '{"center": [37.3891, -5.9845], "radius_km": 8}'),
+            )
+        pg_conn.commit()
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            assert len(overridden.scopes_seen) == 1
+            assert overridden.scopes_seen[0].center == (37.3891, -5.9845)
+
+            # default_connector has no config row — must still use the
+            # fixture profile's Madrid-centered geography, #71's default,
+            # completely unaffected by the other connector's override.
+            assert len(default_connector.scopes_seen) == 1
+            assert default_connector.scopes_seen[0].center == (40.4168, -3.7038)
+        finally:
+            orchestrator.CONNECTORS.clear()
+            self._cleanup_config(pg_conn, overridden.name)
+            _cleanup(pg_conn, overridden.name, run_id)
+            _cleanup(pg_conn, default_connector.name, run_id)
+
+    def test_no_config_row_keeps_issue_71_default_behavior(self, pg_conn):
+        """A row with both fields null is equivalent to no row at all."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(name="test-null-config-connector")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO connector_config (connector_name) VALUES (%s)",
+                (connector.name,),
+            )
+        pg_conn.commit()
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            assert len(connector.scopes_seen) == 1
+            assert connector.scopes_seen[0].center == (40.4168, -3.7038)
+        finally:
+            orchestrator.CONNECTORS.clear()
+            self._cleanup_config(pg_conn, connector.name)
+            _cleanup(pg_conn, connector.name, run_id)
+
+    def test_filters_rooms_flows_through_to_scope(self, pg_conn):
+        _apply_schema(pg_conn)
+        connector = DummyConnector(name="test-filters-connector")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO connector_config (connector_name, filters) "
+                "VALUES (%s, %s)",
+                (connector.name, '{"rooms": 2}'),
+            )
+        pg_conn.commit()
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            assert len(connector.scopes_seen) == 1
+            assert connector.scopes_seen[0].rooms == 2
+            # The profile-derived geography is still applied underneath —
+            # filters augment the base scope, they don't replace it.
+            assert connector.scopes_seen[0].center == (40.4168, -3.7038)
+        finally:
+            orchestrator.CONNECTORS.clear()
+            self._cleanup_config(pg_conn, connector.name)
+            _cleanup(pg_conn, connector.name, run_id)
+
+    def test_zero_profiles_with_override_still_runs(self, pg_conn):
+        """Issue #99's headline claim: an explicit override can have real
+        work to do even when no search profile exists at all — this is the
+        whole reason "no profiles -> skip everything" moved from a
+        whole-run early-return to a per-connector decision."""
+        _apply_schema(pg_conn)
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE search_profile SET archived_at = NOW() "
+                "WHERE name = %s AND archived_at IS NULL",
+                (_TEST_PROFILE_NAME,),
+            )
+        pg_conn.commit()
+        connector = DummyConnector(name="test-zero-profiles-override")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO connector_config "
+                "(connector_name, geography_override) VALUES (%s, %s)",
+                (connector.name, '{"center": [37.3891, -5.9845], "radius_km": 8}'),
+            )
+        pg_conn.commit()
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            assert len(connector.scopes_seen) == 1
+            assert connector.scopes_seen[0].center == (37.3891, -5.9845)
+        finally:
+            orchestrator.CONNECTORS.clear()
+            self._cleanup_config(pg_conn, connector.name)
+            _cleanup(pg_conn, connector.name, run_id)
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE search_profile SET archived_at = NULL WHERE name = %s",
+                    (_TEST_PROFILE_NAME,),
+                )
+            pg_conn.commit()
+
+    def test_zero_profiles_no_override_still_noops(self, pg_conn):
+        """The other half of issue #71's original guarantee: a connector
+        with no override and zero active profiles must still do nothing —
+        moving the early-return to per-connector must not have quietly
+        broken the no-op path for connectors that never asked for an
+        override."""
+        _apply_schema(pg_conn)
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE search_profile SET archived_at = NOW() "
+                "WHERE name = %s AND archived_at IS NULL",
+                (_TEST_PROFILE_NAME,),
+            )
+        pg_conn.commit()
+        connector = DummyConnector(name="test-zero-profiles-no-override")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            assert connector.scopes_seen == []
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE search_profile SET archived_at = NULL WHERE name = %s",
+                    (_TEST_PROFILE_NAME,),
+                )
+            pg_conn.commit()
+
+    def test_disable_isolation_does_not_affect_other_connector(self, pg_conn):
+        """Disabling connector A must not affect connector B's independent
+        profile-derived-default behavior in the same run — the existing
+        override-isolation test proves this for overrides, this proves it
+        for disable specifically."""
+        _apply_schema(pg_conn)
+        disabled = DummyConnector(name="test-disable-isolation-a")
+        default_connector = DummyConnector(name="test-disable-isolation-b")
+        orchestrator.CONNECTORS[:] = [disabled, default_connector]
+        run_id = None
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO connector_config (connector_name, enabled) "
+                "VALUES (%s, false)",
+                (disabled.name,),
+            )
+        pg_conn.commit()
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            assert disabled.scopes_seen == []
+            assert len(default_connector.scopes_seen) == 1
+            assert default_connector.scopes_seen[0].center == (40.4168, -3.7038)
+        finally:
+            orchestrator.CONNECTORS.clear()
+            self._cleanup_config(pg_conn, disabled.name)
+            _cleanup(pg_conn, disabled.name, run_id)
+            _cleanup(pg_conn, default_connector.name, run_id)
+
+    def test_unrecognized_connector_config_name_logs_a_warning(self, pg_conn, caplog):
+        """Issue #99 review, round 2: a connector_config row naming a
+        connector that isn't registered currently just silently does
+        nothing — _scopes_for_connector looks it up by exact name and finds
+        no row, indistinguishable from "never configured". Once #100's
+        connector-management UI lets an operator type/pick a name directly,
+        a typo needs to be visible, not a quiet no-op."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(name="test-name-filter-known")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO connector_config (connector_name) VALUES (%s)",
+                ("test-name-filter-typo",),
+            )
+        pg_conn.commit()
+        try:
+            with caplog.at_level("WARNING", logger="etl.orchestrator"):
+                run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            assert any(
+                "test-name-filter-typo" in record.message for record in caplog.records
+            ), "an unrecognized connector_config row must be logged, not silent"
+            # The typo'd row has no effect on the actually-registered connector.
+            assert len(connector.scopes_seen) == 1
+        finally:
+            orchestrator.CONNECTORS.clear()
+            self._cleanup_config(pg_conn, "test-name-filter-typo")
+            _cleanup(pg_conn, connector.name, run_id)
+
+
 class TestConnectorNameFilter:
     """Backs `ps connector run <name>` (task 1.5, #13)."""
 
@@ -475,6 +909,84 @@ class TestCircuitBreakerIntegration:
             run_ids = []
         finally:
             orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            for r in run_ids:
+                with pg_conn.cursor() as cur:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+                pg_conn.commit()
+
+    def test_rooms_filtered_scope_never_marks_withdrawn(self, pg_conn):
+        """Issue #99 review, round 2: the same false-positive-withdrawal risk
+        `discovers_full_inventory=False` guards against also applies when a
+        connector that DOES discover its full unfiltered inventory has a
+        `rooms` filter applied via connector_config — the filter narrows
+        what THIS run's discover() call returns, so an absence means "didn't
+        match the filter" just as easily as "genuinely gone". A listing that
+        stops matching a newly-applied filter must never be auto-withdrawn,
+        and the miss-counter itself must not even accumulate (matching the
+        partial-inventory guarantee immediately above)."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="rooms-filtered-test",
+            external_ids=("r-1", "r-2"),
+            discovers_full_inventory=True,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM listing WHERE source = %s AND external_id = %s",
+                    (connector.name, "r-2"),
+                )
+                assert cur.fetchone()[0] == "active"
+
+            # A rooms filter narrows this connector's scope from here on —
+            # r-2 stops matching (or the connector simply stops returning
+            # it, indistinguishable from the connector's own perspective).
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO connector_config (connector_name, filters) "
+                    "VALUES (%s, %s)",
+                    (connector.name, '{"rooms": 2}'),
+                )
+            pg_conn.commit()
+            connector.external_ids = ("r-1",)
+
+            for _ in range(orchestrator._WITHDRAWAL_THRESHOLD + 5):
+                run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, missed_discovery_count FROM listing "
+                    "WHERE source = %s AND external_id = %s",
+                    (connector.name, "r-2"),
+                )
+                status, missed = cur.fetchone()
+            assert status == "active", (
+                "a rooms-filtered scope must never auto-withdraw a listing "
+                "that simply no longer matches the filter"
+            )
+            assert missed == 0, (
+                "miss-counting itself must be skipped for a filtered scope, "
+                "not just the withdrawal threshold"
+            )
+
+            for r in run_ids:
+                with pg_conn.cursor() as cur:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+            run_ids = []
+        finally:
+            orchestrator.CONNECTORS.clear()
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM connector_config WHERE connector_name = %s",
+                    (connector.name,),
+                )
+            pg_conn.commit()
             _cleanup(pg_conn, connector.name, None)
             for r in run_ids:
                 with pg_conn.cursor() as cur:

@@ -1,0 +1,18 @@
+<!--
+Synthetic fixture for the ROOMS-FILTERED search results page
+(".../2-habitaciones/l"), issue #99. Deliberately built with listing IDs
+that DON'T overlap with fotocasa_sample_search.html's (190011971,
+190022222, 190033333) — the point of this fixture is to prove that a
+room-filtered discover() call parses into a genuinely different listing
+set, not just that the request URL contains the right path segment
+(test_rooms_filter_is_appended_to_the_request_url already covers the
+URL-shape claim; this fixture backs the separate, stronger claim that the
+filter actually changes which listings get discovered).
+-->
+<html lang="es"><head><title>Comprar viviendas con 2 habitaciones</title></head><body>
+<script type="application/json" id="__initial_props__">{"counters": {"realEstates": 2}}</script>
+<div class="re-SearchResult">
+  <a href="/es/comprar/vivienda/madrid-capital/2-habitaciones-ascensor/290044444/d" class="re-Card-link">Piso de 2 habitaciones en Chamartín</a>
+  <a href="/es/comprar/vivienda/madrid-capital/2-habitaciones-terraza/290055555/d" class="re-Card-link">Piso de 2 habitaciones en Arganzuela</a>
+</div>
+</body></html>
