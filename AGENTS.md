@@ -21,17 +21,17 @@ This is a **public repository** — no credentials, scraped personal data (owner
 | `dashboard/` | Dashboard App — Next.js + Tremor. LLM plumbing (`lib/llm-context/`, `lib/llm-tools/`) and shell are reused from the source project; UI content is being replaced phase by phase (Phase 2+). |
 | `cli/` | Unified CLI (`ps`) — dispatcher pattern (`cli/ps` stub → `cli/ps.sh` → `cli/commands/<group>.sh`), reused as-is. |
 | `cli/commands/` | Command implementations. `sql.sh`/`wren.sh`/`prod.sh` (4D/WrenAI/old-prod-specific) were removed in task 1.1. `connector.sh`/`db.sh`/`dedup.sh` (task 1.5, #13) replaced the placeholder `etl.sh` — see `docs/skills/cli.md`. |
-| `etl/` | Python sync service — will house the connector framework (task 1.3, #11) and per-site connectors (task 1.4+, #12/#15). Domain-specific PowerShop sync modules were removed in task 1.1. |
+| `etl/` | Connector/sync service — the `Connector` contract (`connectors/base.py`), orchestrator (`orchestrator.py`: rate limiting, circuit breaker, withdrawal detection), and the first real connector (`connectors/fotocasa.py`). Domain-specific PowerShop sync modules were removed in task 1.1. `db/postgres.py`'s generic DML/watermark/manual-trigger helpers are inherited but mostly unused by the new pipeline — not yet a deliberate keep-or-delete call. |
 | `scripts/` | Operational scripts. Claude OAuth token launchd sync (macOS) is kept as-is — generic mechanism, not PowerShop-specific. |
 | `docs/` | Documentation. |
 | `docs/skills/` | AI agent skills (domain-specific guides) — see [docs/skills/skills.md](docs/skills/skills.md) for what's kept vs. pending. |
 | `docs/decisions/` | Active decision index (`DECISIONS.md`) + per-decision files, fresh for this project. |
 | `docs/decisions/archive/` | Source project's full decision history — inactive, kept for context. |
-| `config/schema.yaml`, `dashboard/config/schema.yaml` | Central config schema (env var ↔ admin-UI key mapping). 4D/WrenAI-specific keys removed in task 1.1; connector-specific keys land as those tasks do. |
+| `config/schema.yaml`, `dashboard/config/schema.yaml` | Central config schema (env var ↔ admin-UI key mapping). 4D/WrenAI-specific keys removed in task 1.1; a dead ETL-cron pair (`etl.cron_hour`/`etl.delta_cron_minute`, never read by the new orchestrator) removed in task 1.6. |
 | `local/` | Local config/credentials (git-ignored) |
 | `data/` | Bind-mounted data (postgres, ...) — git-ignored |
-| `docker-compose.yml` | Local stack. WrenAI/4D services removed in task 1.1's first pass; full adaptation (new connector-runner service) is task 1.6 (#14). |
-| `.env.example` | Environment variable template (no real secrets) — minimal skeleton after task 1.1; grows as connector/LLM tasks land. |
+| `docker-compose.yml` | Local stack: `postgres` + `otel-collector` + `etl` + `dashboard` — verified live to all start healthy (task 1.6, #14), which also found and fixed a real bug (the pinned OTel image didn't support the config's `tail_sampling`/`zpages`, which silently blocked every service from starting — see `otel/otelcol-config.yaml`). |
+| `.env.example` | Environment variable template (no real secrets) — grows as connector/LLM tasks land. |
 
 ---
 

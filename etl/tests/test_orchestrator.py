@@ -399,6 +399,59 @@ class TestCircuitBreakerIntegration:
                     cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
                 pg_conn.commit()
 
+    def test_partial_inventory_connector_never_marks_withdrawn(self, pg_conn):
+        """Phase 1 phase-level review finding: a connector whose discover()
+        only sees a subset of its real inventory (Fotocasa: page 1 of
+        11,361+ real listings, relevance-sorted) must never have absences
+        counted against it at all — not even a bounded miss-counter — since
+        an absence from a partial sweep proves nothing about whether the
+        listing is still active. discovers_full_inventory=False must
+        disable reconciliation entirely, not just raise the threshold."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="partial-inventory-test",
+            external_ids=("p-1", "p-2"),
+            discovers_full_inventory=False,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            # p-2 "disappears" for many sweeps — far more than
+            # _WITHDRAWAL_THRESHOLD would tolerate for a full-inventory
+            # connector.
+            connector.external_ids = ("p-1",)
+            for _ in range(orchestrator._WITHDRAWAL_THRESHOLD + 5):
+                run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, missed_discovery_count FROM listing "
+                    "WHERE source = %s AND external_id = %s",
+                    (connector.name, "p-2"),
+                )
+                status, missed = cur.fetchone()
+            assert status == "active", (
+                "a partial-coverage connector must never auto-withdraw"
+            )
+            assert missed == 0, (
+                "miss-counting itself must be skipped, not just the threshold"
+            )
+
+            for r in run_ids:
+                with pg_conn.cursor() as cur:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+            run_ids = []
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            for r in run_ids:
+                with pg_conn.cursor() as cur:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+                pg_conn.commit()
+
     def test_withdrawn_listing_reappearing_resets_miss_counter(self, pg_conn):
         """PR #49 review finding: a withdrawn listing that reappears and is
         successfully re-fetched must have its miss counter reset — otherwise

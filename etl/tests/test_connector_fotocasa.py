@@ -33,6 +33,15 @@ def _mock_response(text: str, url: str = "https://www.fotocasa.es/x") -> Mock:
     return resp
 
 
+def test_fotocasa_does_not_claim_full_inventory_coverage():
+    """Phase 1 phase-level review finding: discover() only ever sees page 1
+    of real search results (robots.txt disallows pagination) against a real
+    inventory in the thousands — discovers_full_inventory=False is what
+    stops the orchestrator from ever auto-marking a Fotocasa listing
+    withdrawn just because one sweep didn't happen to surface it."""
+    assert FotocasaConnector.discovers_full_inventory is False
+
+
 class TestDiscover:
     def test_discover_finds_unique_external_ids_from_search_page(self):
         html = _read_fixture("fotocasa_sample_search.html")

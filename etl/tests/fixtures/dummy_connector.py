@@ -29,11 +29,13 @@ class DummyConnector(Connector):
         circuit_breaker_error_rate: float = 0.30,
         circuit_breaker_min_attempts: int = 2,
         price: int = 150000,
+        discovers_full_inventory: bool = True,
     ) -> None:
         self.name = name
         self.rate_limit_per_minute = rate_limit_per_minute
         self.circuit_breaker_error_rate = circuit_breaker_error_rate
         self.circuit_breaker_min_attempts = circuit_breaker_min_attempts
+        self.discovers_full_inventory = discovers_full_inventory
         # Mutable on purpose (not frozen at construction like the other
         # params) — task 1.4's withdrawal-detection and price-history tests
         # need a single DummyConnector instance whose discover() result /

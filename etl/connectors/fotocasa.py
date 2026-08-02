@@ -156,6 +156,17 @@ class FotocasaConnector(Connector):
     # Catastro service. Nothing about Phase 1's proof-of-pipeline goal needs
     # to run fast.
     rate_limit_per_minute = 20
+    # False: discover() only ever sees page 1 of search results (robots.txt
+    # disallows pagination — see the module docstring), and a live check
+    # during the Phase 1 phase-level review found madrid-capital alone has
+    # 11,361 listings sorted by relevance (not a stable date order), with
+    # only ~30 returned per sweep — under 0.3% coverage. An active listing
+    # scoring off page 1 between sweeps is a real, likely occurrence, not
+    # an edge case, so 3 consecutive "misses" from this connector proves
+    # nothing about whether a listing is actually still active. See
+    # Connector.discovers_full_inventory's docstring for what this
+    # disables (the orchestrator's withdrawal auto-transition).
+    discovers_full_inventory = False
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         geography = scope.geography or "madrid-capital"

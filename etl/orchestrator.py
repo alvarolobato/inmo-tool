@@ -437,7 +437,15 @@ def run_connector(conn, connector: Connector, scope: ConnectorScope) -> dict:
 
     limiter.acquire()
     external_ids = connector.discover(scope, throttle=limiter.acquire)
-    if external_ids:
+    if not connector.discovers_full_inventory:
+        # A partial-coverage connector's discover() results say nothing
+        # about whether an absent listing is actually gone (see
+        # Connector.discovers_full_inventory's docstring — Phase 1
+        # phase-level review found this would otherwise false-positive
+        # real inventory into 'withdrawn'). Skip reconciliation entirely
+        # rather than accumulate a miss-count that means nothing.
+        pass
+    elif external_ids:
         _reconcile_missed_discoveries(conn, connector.name, set(external_ids))
     else:
         # An empty discover() result is never trusted enough to bump every
