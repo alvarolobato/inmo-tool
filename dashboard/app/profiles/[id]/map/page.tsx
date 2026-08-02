@@ -8,7 +8,7 @@ import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
 import type { SearchProfileRow } from "@/lib/profiles-schema";
 import { ProfileSwitcher } from "@/components/layout/ProfileSwitcher";
-import { CandidateList } from "@/components/candidates/CandidateList";
+import { MapView } from "@/components/map/MapView";
 
 function parseId(raw: string | string[] | undefined): number | null {
   const value = Array.isArray(raw) ? raw[0] : raw;
@@ -17,7 +17,7 @@ function parseId(raw: string | string[] | undefined): number | null {
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
-export default function ProfileCandidateFeedPage() {
+export default function ProfileMapPage() {
   const params = useParams<{ id: string }>();
   const id = parseId(params.id);
 
@@ -64,19 +64,12 @@ export default function ProfileCandidateFeedPage() {
     <main style={{ maxWidth: 960, margin: "0 auto", padding: 24 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <div>
-          <Link href="/profiles" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
-            ← Perfiles de búsqueda
+          <Link href={`/profiles/${id}`} style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+            ← {loading ? "Cargando…" : profile?.name ?? "Perfil"}
           </Link>
-          <h1 style={{ fontSize: 20, fontWeight: 600, color: "var(--fg)", margin: "4px 0 0" }}>
-            {loading ? "Cargando…" : profile?.name ?? "Perfil"}
-          </h1>
+          <h1 style={{ fontSize: 20, fontWeight: 600, color: "var(--fg)", margin: "4px 0 0" }}>Mapa de candidatos</h1>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <Link href={`/profiles/${id}/map`} style={{ fontSize: 13, color: "var(--fg-muted)" }}>
-            Ver mapa →
-          </Link>
-          <ProfileSwitcher currentId={id} />
-        </div>
+        <ProfileSwitcher currentId={id} />
       </div>
 
       {error && <ErrorDisplay error={error} className="mt-4" />}
@@ -87,9 +80,7 @@ export default function ProfileCandidateFeedPage() {
         </p>
       )}
 
-      {!loading && !error && profile !== null && profile.archived_at === null && (
-        <CandidateList profileId={id} />
-      )}
+      {!loading && !error && profile !== null && profile.archived_at === null && <MapView profileId={id} />}
     </main>
   );
 }
