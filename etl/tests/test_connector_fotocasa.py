@@ -93,6 +93,45 @@ class TestDiscover:
                 ConnectorScope(geography="madrid-capital"), throttle=lambda: None
             )
 
+    def test_min_rooms_filter_is_appended_to_the_request_url(self):
+        """Issue #99: rooms-count filtering via URL path segment was
+        confirmed live to genuinely narrow Fotocasa's results, not just an
+        SEO alias — a scope carrying min_rooms must produce a request URL
+        with that segment, and a scope without it must not."""
+        html = _read_fixture("fotocasa_sample_search.html")
+        with patch(
+            "etl.connectors.fotocasa.requests.get", return_value=_mock_response(html)
+        ) as mock_get:
+            FotocasaConnector().discover(
+                ConnectorScope(geography="madrid-capital", min_rooms=2),
+                throttle=lambda: None,
+            )
+        requested_url = mock_get.call_args.args[0]
+        assert "/2-habitaciones/" in requested_url
+
+        with patch(
+            "etl.connectors.fotocasa.requests.get", return_value=_mock_response(html)
+        ) as mock_get_no_filter:
+            FotocasaConnector().discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+        unfiltered_url = mock_get_no_filter.call_args.args[0]
+        assert "habitaciones" not in unfiltered_url
+
+    def test_scope_key_distinguishes_min_rooms_from_unfiltered(self):
+        """Two scopes with the same geography but a different min_rooms
+        filter must not be treated as the same crawl target by the
+        orchestrator's seen_scope_keys dedup — they hit different URLs."""
+        connector = FotocasaConnector()
+        unfiltered = connector.scope_key(ConnectorScope(geography="madrid-capital"))
+        filtered = connector.scope_key(
+            ConnectorScope(geography="madrid-capital", min_rooms=2)
+        )
+        assert unfiltered != filtered
+        assert unfiltered == connector.scope_key(
+            ConnectorScope(geography="madrid-capital")
+        )
+
     def test_discover_rejects_robots_txt_disallowed_bare_geography(self):
         """robots.txt disallows the literal "/madrid/" path segment (not the
         hyphenated "madrid-capital" this connector's default uses) — a

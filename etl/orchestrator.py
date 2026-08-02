@@ -9,6 +9,7 @@ empty registry is a supported, tested no-op (EC-4).
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from datetime import datetime, timezone
@@ -609,6 +610,90 @@ def _active_profile_scopes(conn) -> list[ConnectorScope]:
     return list(seen.values())
 
 
+def _scopes_for_connector(
+    conn, connector_name: str, profile_scopes: list[ConnectorScope]
+) -> tuple[list[ConnectorScope], bool]:
+    """Resolve one connector's actual scopes for this run, per issue #99's
+    hybrid model: an explicit `connector_config` row overrides the shared
+    `_active_profile_scopes` default; a connector with no row (the common
+    case — this table starts empty) keeps issue #71's behavior unchanged.
+
+    Returns (scopes, enabled). `enabled=False` means the caller must skip
+    this connector entirely — before ever deriving a scope or calling
+    discover() — and must NOT record a connector_runs row for it (an
+    operator turning a connector off is not a failure, and shouldn't add
+    'failed'/'ok' noise to run history). This is a different, more absolute
+    case than `enabled=True, scopes=[]` (nothing to do this run because
+    there's no override and no active profile reaches this connector's
+    coverage — issue #71's existing, already-normal no-op path).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT enabled, geography_override, filters "
+            "FROM connector_config WHERE connector_name = %s",
+            (connector_name,),
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        # No config row at all: issue #71's default, unmodified.
+        return profile_scopes, True
+
+    enabled, geography_override, filters = row
+    if not enabled:
+        return [], False
+
+    if geography_override:
+        center = geography_override.get("center")
+        radius_km = geography_override.get("radius_km")
+        if (
+            isinstance(center, list)
+            and len(center) == 2
+            and not isinstance(radius_km, bool)
+            and isinstance(radius_km, (int, float))
+        ):
+            base_scopes = [
+                ConnectorScope(
+                    center=(float(center[0]), float(center[1])),
+                    radius_km=float(radius_km),
+                )
+            ]
+        else:
+            # Malformed override shouldn't silently disable the connector
+            # or crash the run — fall back to the profile-derived default,
+            # same "don't let one bad row block everything else" posture
+            # _active_profile_scopes already takes for a malformed profile.
+            logger.warning(
+                "connector_config for %s: geography_override malformed "
+                "(expected {center: [lat, lon], radius_km: n}, got %r) — "
+                "falling back to profile-derived scope",
+                connector_name,
+                geography_override,
+            )
+            base_scopes = profile_scopes
+    else:
+        base_scopes = profile_scopes
+
+    filters = filters or {}
+    min_rooms = filters.get("min_rooms")
+    if min_rooms is not None and not isinstance(min_rooms, bool):
+        try:
+            min_rooms_int = int(min_rooms)
+        except (TypeError, ValueError):
+            logger.warning(
+                "connector_config for %s: filters.min_rooms=%r is not a "
+                "valid integer — ignoring",
+                connector_name,
+                min_rooms,
+            )
+        else:
+            base_scopes = [
+                dataclasses.replace(s, min_rooms=min_rooms_int) for s in base_scopes
+            ]
+
+    return base_scopes, True
+
+
 def run_all_connectors(
     conn, trigger: str = "scheduler", connector_name: str | None = None
 ) -> int:
@@ -616,6 +701,14 @@ def run_all_connectors(
 
     Safe to call with an empty CONNECTORS registry (EC-4) — records a run
     with total_connectors=0 and returns immediately.
+
+    Scope resolution per connector (issue #99, evolving #71): a
+    `connector_config` row, when present, can disable a connector outright
+    or override its scope with an explicit geography + native filters,
+    independent of what search profiles exist. A connector with no config
+    row falls back to issue #71's original default — scope derived from
+    the union of every active search_profile's geography. See
+    `_scopes_for_connector`.
 
     `connector_name`, when given, restricts the run to that one connector
     (task 1.5, #13 — backs `ps connector run <name>`). Unknown names raise
@@ -639,25 +732,43 @@ def run_all_connectors(
     ok = 0
     failed = 0
 
-    scopes = _active_profile_scopes(conn)
-    if not scopes:
-        # Issue #71: no active search profiles means nothing to discover —
-        # NOT a fallback to some hardcoded geography. This isn't an error
-        # (a fresh install with zero profiles yet is entirely normal), but
-        # it's WARNING rather than INFO: the resulting run record
-        # (total_connectors=len(CONNECTORS), zero scopes attempted) is
-        # otherwise indistinguishable in the logs from an empty CONNECTORS
-        # registry doing nothing for a completely different reason — this
-        # line is what tells an operator which situation they're actually
-        # looking at.
-        logger.warning(
-            "run_all_connectors: no active search profiles — skipping "
-            "connector discovery entirely (nothing to derive scope from)"
-        )
-        _finish_connector_run(conn, run_id, ok, failed)
-        return run_id
+    # Issue #99: this is now only the shared *default* input, not the final
+    # word — each connector below resolves its own actual scopes via
+    # _scopes_for_connector, which may override it entirely (explicit
+    # geography_override) or ignore it (disabled). No blanket early-return
+    # here anymore: a connector-level override can still have real work to
+    # do even with zero active search profiles, so "no profiles" can no
+    # longer mean "skip literally everything" at the whole-run level — it's
+    # now evaluated per connector, same place enabled/disabled is.
+    profile_scopes = _active_profile_scopes(conn)
 
     for connector in connectors_to_run:
+        scopes, enabled = _scopes_for_connector(conn, connector.name, profile_scopes)
+        if not enabled:
+            # Issue #99: an operator explicitly turned this connector off.
+            # No connector_run_results row at all — this is not an
+            # attempted-and-failed run, it's "we were told not to run
+            # this", and shouldn't count toward ok/failed or clutter run
+            # history with a status that doesn't fit either bucket.
+            logger.info(
+                "Connector %s: disabled via connector_config — skipping "
+                "entirely this run",
+                connector.name,
+            )
+            continue
+        if not scopes:
+            # Same posture issue #71 established for "no active profiles":
+            # not an error, nothing to record — just genuinely nothing for
+            # this connector to do this run (no override, and no active
+            # profile's geography resolves to its coverage).
+            logger.warning(
+                "Connector %s: no scopes to discover this run (no "
+                "connector_config override and no active search profile "
+                "reaches its coverage) — skipping",
+                connector.name,
+            )
+            continue
+
         started_at = datetime.now(timezone.utc)
         discovered_total = 0
         fetched_total = 0

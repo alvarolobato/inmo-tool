@@ -545,6 +545,51 @@ CREATE INDEX IF NOT EXISTS idx_connector_run_results_run_id ON connector_run_res
 -- has any real history.
 CREATE INDEX IF NOT EXISTS idx_connector_runs_started_at ON connector_runs (started_at DESC);
 
+-- Issue #99: an explicit, operator-visible override on top of issue #71's
+-- union-of-active-profiles scope derivation. A connector with no row here
+-- (the common case — this table starts empty) keeps #71's default
+-- behavior unchanged. A row's presence is what an operator toggles from
+-- the connector-management UI (#100), not a config file, so it survives
+-- container restarts and is queryable by the same dashboard that renders
+-- it.
+--
+--   enabled = false            -> orchestrator skips this connector
+--                                  entirely, before ever deriving a scope
+--                                  or calling discover() (never counted
+--                                  as ok/failed in connector_runs).
+--   geography_override IS NULL -> scope still comes from the union of
+--                                  active search_profile rows (#71's
+--                                  default), even with a row present here
+--                                  (e.g. a row that only sets `filters`).
+--   geography_override set     -> {"center": [lat, lon], "radius_km": n},
+--                                  same shape as search_profile.scope.geography
+--                                  (dashboard/lib/profiles-schema.ts) —
+--                                  used INSTEAD of the profile union for
+--                                  this connector, e.g. an operator
+--                                  broadening ingestion ahead of profiles
+--                                  that don't exist yet.
+--   filters                    -> a flexible bag of connector-specific
+--                                  native site filters (e.g. {"min_rooms":
+--                                  2} for fotocasa), not a fixed column
+--                                  per site-per-filter — issue #99 only
+--                                  confirmed one filter dimension
+--                                  (Fotocasa room count) as real via live
+--                                  verification; price/property-type and
+--                                  Milanuncios' equivalent are still
+--                                  unconfirmed (docs/architecture/connectors.md),
+--                                  so this stays additive rather than a
+--                                  schema migration per future finding.
+--                                  A connector that doesn't recognise a
+--                                  key in here ignores it, it doesn't
+--                                  error — see etl/orchestrator.py.
+CREATE TABLE IF NOT EXISTS connector_config (
+    connector_name      TEXT         PRIMARY KEY,
+    enabled              BOOLEAN      NOT NULL DEFAULT true,
+    geography_override   JSONB,
+    filters              JSONB        NOT NULL DEFAULT '{}'::jsonb,
+    updated_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
 -- Browser-extension listing capture (issue #75): a queue table, not a
 -- synchronous request/response — the dashboard (Node/TypeScript) and the
 -- ETL orchestrator (Python, where the Idealista connector's normalize()
