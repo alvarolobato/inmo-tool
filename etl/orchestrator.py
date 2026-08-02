@@ -1156,7 +1156,139 @@ def run_all_connectors(
         )
 
     _finish_connector_run(conn, run_id, ok, failed, skipped)
+
+    # Issue #94: a completed run used to leave freshly-ingested properties
+    # unscored indefinitely — `scoreNewCandidates`/`materializeProfile` were
+    # only ever reachable from two dashboard-side API routes, so nothing
+    # scored a new listing until a human clicked something. Notify the
+    # dashboard now that the run's bookkeeping is committed.
+    #
+    # Deliberately AFTER _finish_connector_run, never inside it: the run's
+    # own record must already be durable before an outbound HTTP call that
+    # can hang or fail. A callback failure must not retroactively make a
+    # successful ingest look like a failed run.
+    #
+    # notify_materialize_all() already swallows its own failures, so this
+    # guard is belt-and-braces: it keeps an unexpected bug (or a test double)
+    # in the notifier from destroying an already-committed run's return
+    # value, which is what callers use to look the run up afterwards.
+    try:
+        notify_materialize_all(trigger=trigger)
+    except Exception:
+        logger.warning(
+            "materialize-all notification raised unexpectedly — ingest is "
+            "committed and the run record is final; continuing",
+            exc_info=True,
+        )
+
     return run_id
+
+
+def notify_materialize_all(trigger: str = "scheduler") -> bool:
+    """POST the dashboard's materialize-all endpoint after a connector run.
+
+    Cross-service by necessity: the connector orchestrator is Python and the
+    hard-filter/scoring pipeline is TypeScript inside the dashboard
+    container, so this is an HTTP call over the compose network rather than
+    a direct function call. `materialize.ts`'s own docstring already named
+    this exact design as the intended follow-up.
+
+    Never raises. Ingest has already succeeded and been committed by the
+    time this runs; a materialize/scoring failure is a *degraded* outcome
+    (candidates render unscored, which the UI handles gracefully — task 3.3)
+    rather than a correctness problem worth failing the run over. This
+    mirrors the log-and-swallow discipline `materializeProfile` already
+    applies to its own `scoreNewCandidates` call, and the scheduler loop's
+    per-iteration isolation.
+
+    Safe to retry/overlap: materialization is idempotent (an upsert plus a
+    full recompute of the match set) and re-scoring an already-scored
+    candidate reproduces the same number, so a duplicate or retried call
+    cannot corrupt state — it just recomputes the same answer.
+
+    Returns True when the dashboard acknowledged the call, False on any
+    failure or when the callback is disabled by configuration.
+    """
+    # Imported lazily so importing this module never requires `requests` or a
+    # valid config — several orchestrator tests construct scopes and run
+    # connectors against a stripped environment.
+    import requests
+
+    from etl.config import Config
+
+    try:
+        cfg = Config()
+    except Exception:
+        logger.warning(
+            "materialize-all notification skipped: ETL config unavailable",
+            exc_info=True,
+        )
+        return False
+
+    base_url = cfg.dashboard_base_url.rstrip("/")
+    if not base_url:
+        logger.info(
+            "materialize-all notification disabled (etl.dashboard_base_url is empty) — "
+            "newly ingested listings stay unscored until a manual materialize"
+        )
+        return False
+
+    url = f"{base_url}/api/profiles/materialize-all"
+    headers = {"content-type": "application/json"}
+    if cfg.admin_api_key:
+        headers["x-admin-key"] = cfg.admin_api_key
+    else:
+        # The endpoint fails closed when ADMIN_API_KEY is unset, so this call
+        # will 401. Warn rather than silently no-op: an operator who set up
+        # the ETL without the shared key needs to know why scoring stopped.
+        logger.warning(
+            "ADMIN_API_KEY not set for the ETL container — the materialize-all "
+            "notification will be rejected (401) and newly ingested listings "
+            "will stay unscored"
+        )
+
+    try:
+        response = requests.post(
+            url,
+            headers=headers,
+            json={"trigger": trigger},
+            timeout=cfg.dashboard_callback_timeout_seconds,
+        )
+    except Exception as exc:  # noqa: BLE001 — see below
+        # Deliberately broad. `requests` raises a wide family of errors
+        # (RequestException subclasses, plus socket/SSL/DNS errors that leak
+        # through as OSError), and a *new* unanticipated one must still not
+        # take down a run whose data is already committed. The correct
+        # behaviour for every possible failure here is identical: log it,
+        # degrade to unscored candidates, carry on.
+        logger.warning(
+            "materialize-all notification to %s failed (%s) — ingest is "
+            "committed and unaffected; candidates will be scored on the next "
+            "successful run or a manual trigger",
+            url,
+            exc,
+        )
+        return False
+
+    if response.status_code == 401:
+        logger.warning(
+            "materialize-all notification to %s rejected: 401 unauthorized. "
+            "The ETL's ADMIN_API_KEY must match the dashboard's.",
+            url,
+        )
+        return False
+
+    if not response.ok:
+        logger.warning(
+            "materialize-all notification to %s returned HTTP %s — ingest is "
+            "committed and unaffected",
+            url,
+            response.status_code,
+        )
+        return False
+
+    logger.info("materialize-all notification to %s acknowledged", url)
+    return True
 
 
 def run_scheduler_loop(conn_factory, interval_seconds: int = 3600) -> None:

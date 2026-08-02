@@ -112,6 +112,16 @@ services:
       # (inside the container) which does not exist.
       CONFIG_FILE: /config/config.yaml
       CONFIG_SCHEMA_PATH: /app/config/schema.yaml
+      # Issue #94: after each connector run the orchestrator POSTs
+      # {base}/api/profiles/materialize-all so newly ingested listings get
+      # materialized into profiles and scored without a manual trigger.
+      # Uses compose's service-name DNS on the shared `app` network; the
+      # dashboard listens on 4000 inside the container regardless of which
+      # host port DASHBOARD_PORT publishes. Set to "" to disable the call.
+      ETL_DASHBOARD_BASE_URL: ${ETL_DASHBOARD_BASE_URL:-http://dashboard:4000}
+      # Same shared secret the dashboard validates (`adminApiKeyValid`) —
+      # materialize-all is an authenticated write trigger, not a public one.
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
       # OTel SDK env vars — picked up automatically by opentelemetry-instrument
       OTEL_SERVICE_NAME: inmo-tool-etl
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
