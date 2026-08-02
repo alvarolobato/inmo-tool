@@ -118,7 +118,11 @@ services:
       # Uses compose's service-name DNS on the shared `app` network; the
       # dashboard listens on 4000 inside the container regardless of which
       # host port DASHBOARD_PORT publishes. Set to "" to disable the call.
-      ETL_DASHBOARD_BASE_URL: ${ETL_DASHBOARD_BASE_URL:-http://dashboard:4000}
+      # `-` (not `:-`) so an explicitly empty value survives: setting
+      # ETL_DASHBOARD_BASE_URL= in .env disables the post-run scoring callback.
+      # With `:-` the default would be substituted for empty as well as unset,
+      # silently re-enabling something the operator turned off.
+      ETL_DASHBOARD_BASE_URL: ${ETL_DASHBOARD_BASE_URL-http://dashboard:4000}
       # Same shared secret the dashboard validates (`adminApiKeyValid`) —
       # materialize-all is an authenticated write trigger, not a public one.
       ADMIN_API_KEY: ${ADMIN_API_KEY:-}

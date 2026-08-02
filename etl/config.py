@@ -136,10 +136,17 @@ def _get_dashboard_base_url() -> str:
 
 
 def _get_dashboard_callback_timeout_seconds() -> int:
-    """Timeout for the post-run materialize callback (issue #94)."""
-    value = _loader_get("etl.dashboard_callback_timeout_seconds", default=None)
+    """Timeout for the post-run materialize callback (issue #94).
+
+    Environment first, then the config loader — the same precedence as
+    `_get_dashboard_base_url` above, so the two knobs for this callback behave
+    consistently.
+    """
+    value: object | None = os.environ.get("ETL_DASHBOARD_CALLBACK_TIMEOUT_SECONDS")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = _loader_get("etl.dashboard_callback_timeout_seconds", default=None)
     if value is None:
-        value = os.environ.get("ETL_DASHBOARD_CALLBACK_TIMEOUT_SECONDS", "30")
+        value = "30"
     try:
         parsed = int(value)
     except (TypeError, ValueError):
