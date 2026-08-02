@@ -82,7 +82,10 @@ def main() -> None:
         conn_pg.close()
         sys.exit(1)
 
+    import etl.connectors
     from etl import orchestrator
+
+    etl.connectors.register_all()  # registers real connectors (task 1.4) — see module docstring for why this is a deferred call, not an import-time side effect
 
     if not orchestrator.CONNECTORS:
         logger.warning(

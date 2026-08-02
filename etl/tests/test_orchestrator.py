@@ -211,6 +211,224 @@ class TestCircuitBreakerIntegration:
             orchestrator.CONNECTORS.clear()
             _cleanup(pg_conn, connector.name, run_id)
 
+    def test_price_change_appends_history_row_not_overwrite(self, pg_conn):
+        """EC-4 (orchestrator half, task 1.4/#12): a real price change across
+        two runs of the same connector appends a listing_price_history row
+        rather than silently overwriting the prior price."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="price-history-test", external_ids=("p-1",), price=205000
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            connector.price = 195000
+            run_id_2 = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT current_price FROM listing WHERE source = %s AND external_id = %s",
+                    (connector.name, "p-1"),
+                )
+                assert cur.fetchone() == (195000,)
+
+                cur.execute(
+                    "SELECT h.price FROM listing_price_history h "
+                    "JOIN listing l ON l.id = h.listing_id "
+                    "WHERE l.source = %s AND l.external_id = %s ORDER BY h.observed_at",
+                    (connector.name, "p-1"),
+                )
+                prices = [row[0] for row in cur.fetchall()]
+            assert prices == [205000, 195000]  # both observations kept, not overwritten
+
+            for r in (run_id, run_id_2):
+                with pg_conn.cursor() as cur:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+            run_id = None
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+
+    def test_listing_withdrawn_after_n_consecutive_missed_discoveries(self, pg_conn):
+        """EC-5 (task 1.4/#12): a listing absent from discover() for
+        _WITHDRAWAL_THRESHOLD consecutive runs transitions to 'withdrawn'
+        with a listing_status_event — but NOT before the threshold, since a
+        single miss is treated as normal sweep noise, not a real signal."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(name="withdrawal-test", external_ids=("w-1", "w-2"))
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            def _status(external_id: str) -> str:
+                with pg_conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT status FROM listing WHERE source = %s AND external_id = %s",
+                        (connector.name, external_id),
+                    )
+                    return cur.fetchone()[0]
+
+            assert _status("w-1") == "active"
+            assert _status("w-2") == "active"
+
+            # w-2 stops appearing in discover() from here on.
+            connector.external_ids = ("w-1",)
+
+            assert orchestrator._WITHDRAWAL_THRESHOLD == 3, (
+                "test assumes the documented threshold — update this test if "
+                "the constant changes"
+            )
+
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert _status("w-2") == "active", "one miss must not withdraw a listing"
+
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert _status("w-2") == "active", "two misses must not withdraw a listing"
+
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert _status("w-2") == "withdrawn", (
+                "three consecutive misses must withdraw"
+            )
+            assert _status("w-1") == "active", (
+                "still-discovered listing must be unaffected"
+            )
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT ls.status FROM listing_status_event ls "
+                    "JOIN listing l ON l.id = ls.listing_id "
+                    "WHERE l.source = %s AND l.external_id = %s ORDER BY ls.observed_at",
+                    (connector.name, "w-2"),
+                )
+                events = [row[0] for row in cur.fetchall()]
+            assert events[-1] == "withdrawn"
+
+            # A withdrawn listing that reappears resets the miss counter and
+            # goes back to active on its next successful upsert (not tested
+            # further here — dedup/relist semantics are a later-phase
+            # concern per issue #1 §10 — this only proves the counter itself
+            # doesn't get stuck permanently against a listing).
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT missed_discovery_count FROM listing "
+                    "WHERE source = %s AND external_id = %s",
+                    (connector.name, "w-2"),
+                )
+                assert cur.fetchone()[0] == 3
+
+            for r in run_ids:
+                with pg_conn.cursor() as cur:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+            run_ids = []
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            for r in run_ids:
+                with pg_conn.cursor() as cur:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+                pg_conn.commit()
+
+    def test_withdrawn_listing_reappearing_resets_miss_counter(self, pg_conn):
+        """PR #49 review finding: a withdrawn listing that reappears and is
+        successfully re-fetched must have its miss counter reset — otherwise
+        a single subsequent miss would immediately re-withdraw it, since
+        _reconcile_missed_discoveries only resets counters for still-'active'
+        rows and a withdrawn listing no longer qualifies."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(name="reappear-test", external_ids=("r-1", "r-2"))
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            connector.external_ids = ("r-1",)
+            for _ in range(orchestrator._WITHDRAWAL_THRESHOLD):
+                run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, missed_discovery_count FROM listing "
+                    "WHERE source = %s AND external_id = %s",
+                    (connector.name, "r-2"),
+                )
+                status, missed = cur.fetchone()
+            assert status == "withdrawn"
+            assert missed == orchestrator._WITHDRAWAL_THRESHOLD
+
+            # r-2 reappears and is successfully re-fetched.
+            connector.external_ids = ("r-1", "r-2")
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, missed_discovery_count FROM listing "
+                    "WHERE source = %s AND external_id = %s",
+                    (connector.name, "r-2"),
+                )
+                status, missed = cur.fetchone()
+            assert status == "active", "a re-fetched listing must go back to active"
+            assert missed == 0, "the miss counter must reset on a real reappearance"
+
+            for r in run_ids:
+                with pg_conn.cursor() as cur:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+            run_ids = []
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            for r in run_ids:
+                with pg_conn.cursor() as cur:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+                pg_conn.commit()
+
+    def test_empty_discover_result_does_not_cascade_into_withdrawals(self, pg_conn):
+        """PR #49 review finding: even a connector bug that returns [] from
+        discover() (instead of raising, as a well-behaved connector should
+        on a soft-block/interruption page — see fotocasa.py) must not be
+        able to mass-withdraw a source's entire inventory. Second line of
+        defense on top of fotocasa.py's own ConnectorError-on-block-page."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="empty-discover-test", external_ids=("e-1", "e-2")
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            connector.external_ids = ()  # simulates a buggy connector returning []
+            for _ in range(orchestrator._WITHDRAWAL_THRESHOLD + 2):
+                run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, missed_discovery_count FROM listing "
+                    "WHERE source = %s ORDER BY external_id",
+                    (connector.name,),
+                )
+                rows = cur.fetchall()
+            assert rows == [("active", 0), ("active", 0)], (
+                "an empty discover() result must never bump miss-counters or withdraw"
+            )
+
+            for r in run_ids:
+                with pg_conn.cursor() as cur:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+            run_ids = []
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            for r in run_ids:
+                with pg_conn.cursor() as cur:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+                pg_conn.commit()
+
     def test_discover_failure_is_recorded_as_failed_not_a_crash(self, pg_conn):
         _apply_schema(pg_conn)
         connector = DiscoverFailsConnector()

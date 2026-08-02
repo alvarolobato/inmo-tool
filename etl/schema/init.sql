@@ -94,8 +94,29 @@ CREATE TABLE IF NOT EXISTS listing (
 );
 
 CREATE INDEX IF NOT EXISTS idx_listing_property_id  ON listing (property_id);
+-- Both of these are kept, not redundant: a b-tree composite index on
+-- (source, status) only serves queries that filter on `source` (alone, or
+-- with status) — leftmost-prefix matching means it can't efficiently serve
+-- a `WHERE status = ...` query with no `source` predicate. idx_listing_status
+-- covers that pattern (e.g. "all active listings across every source");
+-- idx_listing_source_status covers "active listings for source X" (the
+-- withdrawal-reconciliation query below, and any future per-connector view).
 CREATE INDEX IF NOT EXISTS idx_listing_status       ON listing (status);
+CREATE INDEX IF NOT EXISTS idx_listing_source_status ON listing (source, status);
 CREATE INDEX IF NOT EXISTS idx_listing_last_seen_at ON listing (last_seen_at);
+
+-- Consecutive discover() sweeps a still-'active' listing was absent from.
+-- Added in task 1.4 (#12) to implement EC-5 (withdrawal detection) — a
+-- listing missing from one sweep isn't necessarily gone (pagination noise,
+-- a transient per-item fetch failure, falling off page 1 as newer listings
+-- push it down), so the orchestrator only marks 'withdrawn' after several
+-- consecutive misses, not one. See etl.orchestrator._reconcile_missed_discoveries.
+-- ALTER, not a column in the CREATE TABLE above: a column added inside
+-- `CREATE TABLE IF NOT EXISTS` is a no-op against a table that already
+-- exists (as this one will, once task 1.2's schema has been applied once)
+-- — this file must be safe to re-run against an already-migrated database,
+-- not just a fresh one.
+ALTER TABLE listing ADD COLUMN IF NOT EXISTS missed_discovery_count SMALLINT NOT NULL DEFAULT 0;
 
 -- ============================================================
 -- Change tracking (append-only)

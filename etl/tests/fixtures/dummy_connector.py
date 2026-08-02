@@ -28,12 +28,19 @@ class DummyConnector(Connector):
         rate_limit_per_minute: int = 6000,  # fast for tests — not what's under test here
         circuit_breaker_error_rate: float = 0.30,
         circuit_breaker_min_attempts: int = 2,
+        price: int = 150000,
     ) -> None:
         self.name = name
         self.rate_limit_per_minute = rate_limit_per_minute
         self.circuit_breaker_error_rate = circuit_breaker_error_rate
         self.circuit_breaker_min_attempts = circuit_breaker_min_attempts
-        self._external_ids = external_ids
+        # Mutable on purpose (not frozen at construction like the other
+        # params) — task 1.4's withdrawal-detection and price-history tests
+        # need a single DummyConnector instance whose discover() result /
+        # fetch price can change between successive run_all_connectors()
+        # calls, simulating successive real-world sweeps.
+        self.external_ids = external_ids
+        self.price = price
         self._failing_ids = failing_ids
         # IDs that fetch/normalize fine but fail at persist time — simulates
         # a mid-transaction DB error (as opposed to `failing_ids`, which
@@ -43,7 +50,7 @@ class DummyConnector(Connector):
         self._db_error_ids = db_error_ids
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
-        return list(self._external_ids)
+        return list(self.external_ids)
 
     def fetch_detail(self, external_id: str, throttle: Throttle) -> RawListing:
         if external_id in self._failing_ids:
@@ -51,7 +58,7 @@ class DummyConnector(Connector):
         return RawListing(
             external_id=external_id,
             source=self.name,
-            raw={"price": 150000, "address": f"Test address {external_id}"},
+            raw={"price": self.price, "address": f"Test address {external_id}"},
         )
 
     def normalize(self, raw: RawListing) -> CanonicalListingVersion:
