@@ -47,7 +47,17 @@ export default function ProfilesPage() {
   // materialize call.
   const triggerMaterialize = async (id: number) => {
     try {
-      await fetch(`/api/profiles/${id}/materialize`, { method: "POST" });
+      const res = await fetch(`/api/profiles/${id}/materialize`, { method: "POST" });
+      if (!res.ok) {
+        // fetch() only rejects on network failure, not on a 4xx/5xx
+        // response — without this check a 500 here was silently treated as
+        // success and never logged (Opus review, PR #57).
+        console.error(
+          "No se pudieron recalcular los candidatos tras guardar el perfil:",
+          res.status,
+          await res.text().catch(() => ""),
+        );
+      }
     } catch (err) {
       console.error("No se pudieron recalcular los candidatos tras guardar el perfil:", err);
     }

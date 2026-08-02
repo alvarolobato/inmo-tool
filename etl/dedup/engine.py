@@ -279,14 +279,15 @@ def _restore_profile_listing_state(
         """
         INSERT INTO profile_listing_state
             (profile_id, property_id, score, rank_explanation, pipeline_stage,
-             notes, last_scored_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+             notes, last_scored_at, matched)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (profile_id, property_id) DO UPDATE SET
             score = EXCLUDED.score,
             rank_explanation = EXCLUDED.rank_explanation,
             pipeline_stage = EXCLUDED.pipeline_stage,
             notes = EXCLUDED.notes,
-            last_scored_at = EXCLUDED.last_scored_at
+            last_scored_at = EXCLUDED.last_scored_at,
+            matched = EXCLUDED.matched
         """,
         (
             profile_id,
@@ -296,22 +297,29 @@ def _restore_profile_listing_state(
             losing_row["pipeline_stage"],
             losing_row["notes"],
             losing_row["last_scored_at"],
+            # Older snapshots (taken before task 2.4 added `matched`) won't
+            # have this key — default to True rather than silently reverting
+            # a row to "excluded from every candidate feed" on a merge that
+            # predates the column's existence.
+            losing_row.get("matched", True),
         ),
     )
 
     if "survivor_before" in op:
         # This branch also mutated the survivor's own row in place (stage
-        # possibly bumped, score/rank_explanation/last_scored_at nulled) —
-        # restore it to what it was immediately before the merge. Every
-        # kind except rekeyed_no_prior_survivor_state carries this now
-        # (reconcile.py nulls the survivor's score in all three merge
-        # branches, not just stage_reconciled — Opus review, PR #55).
+        # possibly bumped, score/rank_explanation/last_scored_at/matched
+        # nulled or recomputed) — restore it to what it was immediately
+        # before the merge. Every kind except rekeyed_no_prior_survivor_state
+        # carries this now (reconcile.py nulls the survivor's score in all
+        # three merge branches, not just stage_reconciled — Opus review,
+        # PR #55; matched follows the same all-three-branches treatment,
+        # Opus review, PR #57).
         before = op["survivor_before"]
         cur.execute(
             """
             UPDATE profile_listing_state
             SET score = %s, rank_explanation = %s, pipeline_stage = %s,
-                notes = %s, last_scored_at = %s
+                notes = %s, last_scored_at = %s, matched = %s
             WHERE property_id = %s AND profile_id = %s
             """,
             (
@@ -320,6 +328,7 @@ def _restore_profile_listing_state(
                 before["pipeline_stage"],
                 before["notes"],
                 before["last_scored_at"],
+                before.get("matched", True),
                 survivor_id,
                 profile_id,
             ),

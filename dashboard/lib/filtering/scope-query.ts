@@ -22,17 +22,30 @@ export interface ScopeQuery {
 }
 
 /**
- * Builds a `$n` placeholder as plain string concatenation, deliberately NOT
- * via the `` `$${n}` `` template-literal idiom (a literal "$" immediately
- * followed by an interpolation): Next.js's production build (SWC/Terser)
- * folds this file's several adjacent `` `...` + `...` `` template-literal
- * concatenations into merged literals, and one such fold corrupted the
- * multi-part Haversine expression into invalid SQL ("$1cos(radians(..."
- * with no space/paren separating the placeholder from the next token) —
- * `next build`/vitest-on-unminified-source never caught it; only hitting the
- * real running container did. `ph()` sidesteps the whole class of bug: no
- * "$" character ever sits directly adjacent to a template interpolation
- * marker anywhere in this file.
+ * Builds a `$n` placeholder as plain string concatenation.
+ *
+ * CORRECTED ROOT CAUSE (a prior version of this comment blamed Next.js's
+ * production minifier "folding" `` `$${n}` `` template literals into
+ * corrupted SQL — that explanation was wrong and has been retracted).
+ * String constant-folding is semantics-preserving by construction: merging
+ * adjacent literals concatenates their exact byte content, it cannot delete
+ * a character (e.g. a separating space) from the middle of one. If it did,
+ * most JavaScript in existence would break, not just this file — and in
+ * fact this codebase has ~16 other live call sites using the exact same
+ * `` `$${n}` `` idiom (lib/conversations.ts, lib/sql-filters.ts,
+ * app/api/admin/interactions/route.ts) that work correctly in production.
+ * The actual defect in the original draft of this file was an ordinary
+ * missing-separator bug in hand-written string concatenation (a fragment
+ * boundary without the intervening `" * "`/space), unrelated to template
+ * literals, minification, or SWC — it was overwritten in the same commit
+ * that introduced `ph()`, so the exact original line no longer exists to
+ * cite. `ph()` itself carries no special bug-avoidance property; it was
+ * simply rewritten carefully. What actually prevents a regression is the
+ * `haversineKm` SQL-shape test below (`buildScopeWhereClause` tests),
+ * which asserts the generated expression is well-formed — added specifically
+ * because this bug was only caught by hitting a real running container,
+ * and a plain string-concatenation typo like this should be a unit-test
+ * failure, not a live-environment discovery.
  */
 function ph(n: number): string {
   return "$" + n;
@@ -89,6 +102,19 @@ export function buildScopeWhereClause(scope: Scope): ScopeQuery {
       haversineKm(latPh, lonPh) +
       " <= " +
       radiusPh,
+  );
+
+  // --- Active-listing requirement (unconditional) ---
+  // A property with no currently-active listing (sold, withdrawn, expired —
+  // or every listing simply removed) must never materialize as a live
+  // candidate, independent of whether a price band is set. This used to
+  // live only inside the price-band subquery below, which meant a profile
+  // with no price filter had no status requirement at all and could
+  // materialize sold/withdrawn properties (issue #18 names listing-level
+  // status explicitly). Kept as its own EXISTS rather than folded into the
+  // price subquery so it applies unconditionally.
+  conditions.push(
+    "EXISTS (SELECT 1 FROM listing WHERE listing.property_id = property.id AND listing.status = 'active')",
   );
 
   // --- Property type(s) ---

@@ -27,6 +27,17 @@ describe("buildScopeWhereClause", () => {
     expect(params[3]).toEqual(["piso", "atico"]);
   });
 
+  // Regression test for a real bug (PR #57 review): the active-listing
+  // requirement previously lived only inside the price-band subquery, so a
+  // profile with no price filter had no status requirement at all and
+  // could materialize sold/withdrawn/expired properties as candidates.
+  it("requires at least one active listing unconditionally, even with no price band set", () => {
+    const { whereSql } = buildScopeWhereClause(baseScope());
+    expect(whereSql).toContain(
+      "EXISTS (SELECT 1 FROM listing WHERE listing.property_id = property.id AND listing.status = 'active')",
+    );
+  });
+
   it("omits size/price conditions entirely when unset (no dangling AND, no null params)", () => {
     const { whereSql, params } = buildScopeWhereClause(baseScope());
     expect(whereSql).not.toContain("m2_built");
@@ -118,5 +129,38 @@ describe("buildScopeWhereClause", () => {
       geography: { type: "polygon" } as unknown as Scope["geography"],
     };
     expect(() => buildScopeWhereClause(bad)).toThrow();
+  });
+
+  // Regression test for a real bug (PR #57): the Haversine expression is
+  // assembled from several hand-concatenated string fragments, and an
+  // earlier draft dropped a separator between two of them, producing SQL
+  // like "$1cos(radians(..." — a plain missing-space/operator typo, not a
+  // build-tool artifact (see the corrected root-cause note on `ph()` above).
+  // That defect only surfaced by hitting a real running container; this
+  // test exists so a similar concatenation mistake fails here instead.
+  it("produces a well-formed Haversine expression with no missing separators between fragments", () => {
+    const { whereSql } = buildScopeWhereClause(baseScope());
+
+    // A placeholder or a closing paren must never be immediately followed
+    // by an identifier character with no operator/space/paren between them
+    // (the exact shape of the "$1cos(radians(" corruption).
+    expect(whereSql).not.toMatch(/\$\d+[a-zA-Z]/);
+    expect(whereSql).not.toMatch(/\)[a-zA-Z]/);
+
+    // Every '(' must have a matching ')' — a dropped fragment boundary in
+    // string concatenation commonly manifests as unbalanced parens too.
+    const opens = (whereSql.match(/\(/g) ?? []).length;
+    const closes = (whereSql.match(/\)/g) ?? []).length;
+    expect(opens).toBe(closes);
+
+    // Pin the exact known-good shape of the multi-part Haversine expression
+    // so any future hand-edit to the fragment list is caught immediately.
+    expect(whereSql).toContain(
+      "(6371 * acos(least(1, greatest(-1, " +
+        "cos(radians($1)) * cos(radians(property.lat)) * " +
+        "cos(radians(property.lon) - radians($2)) + " +
+        "sin(radians($1)) * sin(radians(property.lat))" +
+        "))))",
+    );
   });
 });

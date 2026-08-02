@@ -31,8 +31,10 @@ import { getProfileById, listActiveProfiles } from "@/lib/db/profiles";
 
 export interface MaterializeResult {
   profileId: number;
-  matched: number;
-  unmatched: number;
+  /** Total properties currently matching this profile's scope (a snapshot, not a delta). */
+  matchedCount: number;
+  /** Total properties with a preserved-but-unmatched row for this profile (a snapshot, not a delta). */
+  unmatchedCount: number;
 }
 
 /**
@@ -62,49 +64,78 @@ export async function materializeProfile(profileId: number): Promise<Materialize
     );
     const matchedIds = matchedRows.rows.map((r) => r.id);
 
-    let matchedCount = 0;
     if (matchedIds.length > 0) {
-      const upsert = await client.query(
+      await client.query(
         `INSERT INTO profile_listing_state (profile_id, property_id, matched)
          SELECT $1, unnest($2::bigint[]), true
-         ON CONFLICT (profile_id, property_id) DO UPDATE SET matched = true
-         RETURNING property_id`,
+         ON CONFLICT (profile_id, property_id) DO UPDATE SET matched = true`,
         [profileId, matchedIds],
       );
-      matchedCount = upsert.rowCount ?? 0;
     }
 
     // Flip previously-matched rows that are no longer in the matching set.
     // `<> ALL($2::bigint[])` on an empty array is vacuously true for every
     // row — correct: a profile that now matches zero properties should
     // unmatch everything it previously matched.
-    const unmatch = await client.query(
+    await client.query(
       `UPDATE profile_listing_state
        SET matched = false
        WHERE profile_id = $1 AND matched = true AND property_id <> ALL($2::bigint[])`,
       [profileId, matchedIds],
     );
 
+    // Both fields are current totals (a snapshot after this run), not
+    // this-run deltas — matchedCount from the WHERE-clause result itself
+    // (not a driver-reported rowCount, which reflects rows affected by the
+    // upsert, a subtly different thing), unmatchedCount from a fresh count
+    // so it reflects the true total including rows unmatched by an earlier
+    // run, not just the ones this run just flipped (Opus review, PR #57 —
+    // the original version mixed a total with a this-run delta in the same
+    // response shape under confusingly similar field names).
+    const unmatchedTotal = await client.query<{ count: string }>(
+      `SELECT COUNT(*) FROM profile_listing_state WHERE profile_id = $1 AND matched = false`,
+      [profileId],
+    );
+
     return {
       profileId,
-      matched: matchedCount,
-      unmatched: unmatch.rowCount ?? 0,
+      matchedCount: matchedIds.length,
+      unmatchedCount: Number(unmatchedTotal.rows[0].count),
     };
   });
 }
+
+/** One profile's outcome from {@link materializeAllProfiles} — success or isolated failure. */
+export type MaterializeAllOutcome =
+  | ({ status: "ok" } & MaterializeResult)
+  | { status: "error"; profileId: number; error: string };
 
 /**
  * Re-materializes every active (non-archived) profile. The "simplest v1"
  * approach issue #18 names for the after-new-listings-land trigger — cheap
  * enough at this project's current data volumes (issue #18 Technical
  * approach item 4), not yet wired to run automatically on a schedule.
+ *
+ * One profile's failure does not abort the batch or hide the others'
+ * success: each profile is isolated in its own try/catch, and the caller
+ * gets a per-profile status rather than an all-or-nothing 500 that would
+ * misrepresent already-committed successful materializations as if nothing
+ * had happened (Opus review, PR #57).
  */
-export async function materializeAllProfiles(): Promise<MaterializeResult[]> {
+export async function materializeAllProfiles(): Promise<MaterializeAllOutcome[]> {
   const profiles = await listActiveProfiles();
-  const results: MaterializeResult[] = [];
+  const results: MaterializeAllOutcome[] = [];
   for (const profile of profiles) {
-    const result = await materializeProfile(profile.id);
-    if (result) results.push(result);
+    try {
+      const result = await materializeProfile(profile.id);
+      if (result) results.push({ status: "ok", ...result });
+    } catch (err) {
+      results.push({
+        status: "error",
+        profileId: profile.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
   return results;
 }

@@ -73,11 +73,17 @@ describe("materializeProfile", () => {
       .mockResolvedValueOnce({ rows: [{ id: 10 }, { id: 11 }] }) // SELECT property.id WHERE ...
       .mockResolvedValueOnce({ rowCount: 2 }) // INSERT ... ON CONFLICT DO UPDATE
       .mockResolvedValueOnce({ rowCount: 1 }) // UPDATE ... matched = false
+      .mockResolvedValueOnce({ rows: [{ count: "1" }] }) // SELECT COUNT(*) ... matched = false
       .mockResolvedValueOnce(undefined); // COMMIT
 
     const result = await materializeProfile(1);
 
-    expect(result).toEqual({ profileId: 1, matched: 2, unmatched: 1 });
+    // Both fields are current totals (a snapshot after this run), not
+    // this-run deltas — matchedCount is the size of the matching set itself,
+    // unmatchedCount comes from a fresh COUNT (Opus review, PR #57: the
+    // original version mixed a total with a this-run delta under
+    // confusingly similar field names).
+    expect(result).toEqual({ profileId: 1, matchedCount: 2, unmatchedCount: 1 });
 
     const selectCall = mockClientQuery.mock.calls[1];
     expect(selectCall[0]).toContain("SELECT property.id FROM property WHERE");
@@ -90,6 +96,10 @@ describe("materializeProfile", () => {
     expect(unmatchCall[0]).toContain("SET matched = false");
     expect(unmatchCall[0]).toContain("property_id <> ALL($2::bigint[])");
     expect(unmatchCall[1]).toEqual([1, [10, 11]]);
+
+    const countCall = mockClientQuery.mock.calls[4];
+    expect(countCall[0]).toContain("SELECT COUNT(*) FROM profile_listing_state");
+    expect(countCall[1]).toEqual([1]);
   });
 
   it("unmatches every previously-matched row when the new matching set is empty, without an INSERT (EC-2 edge case)", async () => {
@@ -99,11 +109,12 @@ describe("materializeProfile", () => {
       .mockResolvedValueOnce(undefined) // BEGIN
       .mockResolvedValueOnce({ rows: [] }) // SELECT -> zero matches
       .mockResolvedValueOnce({ rowCount: 3 }) // UPDATE ... matched = false (all previously matched)
+      .mockResolvedValueOnce({ rows: [{ count: "3" }] }) // SELECT COUNT(*) ... matched = false
       .mockResolvedValueOnce(undefined); // COMMIT
 
     const result = await materializeProfile(1);
 
-    expect(result).toEqual({ profileId: 1, matched: 0, unmatched: 3 });
+    expect(result).toEqual({ profileId: 1, matchedCount: 0, unmatchedCount: 3 });
     // No INSERT statement should run when matchedIds is empty.
     const queries = mockClientQuery.mock.calls.map((c) => c[0]);
     expect(queries.some((q) => typeof q === "string" && q.includes("INSERT INTO profile_listing_state"))).toBe(
@@ -119,6 +130,7 @@ describe("materializeProfile", () => {
       .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ count: "0" }] })
       .mockResolvedValueOnce(undefined);
 
     await materializeProfile(1);
@@ -137,11 +149,53 @@ describe("materializeAllProfiles", () => {
       .mockResolvedValueOnce({ rows: [profileRow({ id: 1 })] }) // getProfileById(1) inside materializeProfile
       .mockResolvedValueOnce({ rows: [profileRow({ id: 2 })] }); // getProfileById(2)
 
-    mockClientQuery.mockResolvedValue({ rows: [], rowCount: 0 });
+    // Generic per-query-shape stub rather than a strict sequence: this test
+    // covers materializeAllProfiles' aggregation, not materializeProfile's
+    // own query correctness (covered above) — but it still has to return a
+    // real `count` row for the COUNT(*) query, or `Number(rows[0].count)`
+    // throws on `rows[0]` being undefined.
+    mockClientQuery.mockImplementation((sql: unknown) => {
+      if (typeof sql === "string" && sql.includes("SELECT COUNT(*)")) {
+        return Promise.resolve({ rows: [{ count: "0" }] });
+      }
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    });
 
     const results = await materializeAllProfiles();
 
     expect(results).toHaveLength(2);
+    expect(results.every((r) => r.status === "ok")).toBe(true);
     expect(results.map((r) => r.profileId)).toEqual([1, 2]);
+  });
+
+  it("isolates one profile's failure so the others' results are still reported, not lost in an all-or-nothing throw", async () => {
+    mockPoolQuery
+      .mockResolvedValueOnce({ rows: [profileRow({ id: 1 }), profileRow({ id: 2 })] }) // listActiveProfiles
+      .mockResolvedValueOnce({ rows: [profileRow({ id: 1 })] }) // getProfileById(1)
+      .mockResolvedValueOnce({ rows: [profileRow({ id: 2 })] }); // getProfileById(2)
+
+    let call = 0;
+    mockClientQuery.mockImplementation((sql: unknown) => {
+      call += 1;
+      // Profile 1's transaction: BEGIN then blow up on the SELECT.
+      if (call === 2) {
+        return Promise.reject(new Error("simulated DB error for profile 1"));
+      }
+      if (typeof sql === "string" && sql.includes("SELECT COUNT(*)")) {
+        return Promise.resolve({ rows: [{ count: "0" }] });
+      }
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    });
+
+    const results = await materializeAllProfiles();
+
+    expect(results).toHaveLength(2);
+    expect(results[0]).toEqual({
+      status: "error",
+      profileId: 1,
+      error: "simulated DB error for profile 1",
+    });
+    expect(results[1].status).toBe("ok");
+    expect(results[1].profileId).toBe(2);
   });
 });
