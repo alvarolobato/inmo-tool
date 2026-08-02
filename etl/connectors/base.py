@@ -212,6 +212,29 @@ class Connector(ABC):
     # auto-transition to withdrawn from absence alone.
     discovers_full_inventory: bool = True
 
+    # Issue #100 (connector management UI): declarative metadata the
+    # dashboard reads via connector_registry, so the UI renders what a
+    # connector can actually do rather than assuming every connector is
+    # configurable the same way.
+    #
+    # supports_discovery=False means discover() never runs for this
+    # connector under any scope (Idealista — capture-only, issue #75,
+    # scope_key() always returns None). Geography/filter controls for such
+    # a connector would be controls that silently do nothing, so the UI
+    # renders it as capture-only instead.
+    supports_discovery: bool = True
+
+    # Native site-filter keys this connector genuinely honours in
+    # discover(), consumed as `ConnectorScope` fields set from
+    # connector_config.filters. The UI renders one control per key here and
+    # nothing at all for an empty tuple — deliberately opt-in, so a filter
+    # dimension that hasn't been live-verified for a site (issue #99
+    # confirmed only Fotocasa's room count; price/property-type and
+    # Milanuncios' equivalent remain unconfirmed per
+    # docs/architecture/connectors.md) can never ship as a control that
+    # looks functional but isn't.
+    supported_filters: tuple[str, ...] = ()
+
     def scope_key(self, scope: ConnectorScope) -> str | None:
         """Return a string identifying what this scope actually resolves to.
 

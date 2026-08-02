@@ -4,22 +4,24 @@
 
 You are labeling and routing an issue (ai-issue-triage) or sweeping stale items (ai-stale-manager). Output is **labels and comments**, never code.
 
+> **Note on automation:** the AI-factory workflows this file was originally written for are **not committed in this repo** (see D-004). No label triggers a worker, nothing auto-closes on a schedule, and there is no weekly business-review flow. Triage here is pure categorization to keep the backlog readable for the owner. The prompt/config content under `.github/ai-factory/` **is** present in the repo — it's only the `.github/workflows/*.yml` files that would trigger it that are missing, so treat this guidance as manually-dispatched, not absent.
+
 ## Binding rules
 
-- **D-014** — the binding label is `ai-work` (triggers the worker), `ai-blocked` (pauses), `no-ai` (excludes). Priority labels (`p0-critical` → `p3-low`) order work. Apply these per the issue's content; never apply them blindly.
-- **D-028** — `business-review` issues carry `needs-human-approval` from the moment they're created. Don't strip that label during triage.
+- **Labels here are descriptive, not executable.** No label causes work to start — the owner decides what gets implemented. Apply labels that describe what an issue *is* (component, kind, rough priority) per the issue's content; never apply them blindly, and don't apply labels implying an automated pipeline will act on them.
+- **Don't close an issue as done without verifying against `origin/main`.** Work sitting on an unmerged branch is not done; this repo has already had an issue closed prematurely on exactly that mistake.
 
 ## How to triage
 
 1. Read the issue title + body.
 2. Apply phase / component / priority labels per the patterns in `AGENTS.md` (read on demand if unsure).
-3. **Don't** add `ai-work` during triage. That's a deliberate human decision; triage stops at categorization.
-4. For stale-manager: follow the rules in `ai-stale-manager.yml`'s own prompt — they distinguish AI-created issues (close after 21 days, never auto-close `p0`/`p1`), human-created issues (label `stale` + comment after 30 days, close 14 days later), and PRs (ping after 14 days; close after 7 days of CI failure; close draft PRs > 30 days). Don't apply a single 14/30-day rule to everything.
+3. Triage stops at categorization — deciding what actually gets implemented is the owner's call.
+4. When sweeping for staleness, check whether an issue's *description* has gone stale (referencing files, functions, or behaviour that has since changed) as well as whether the issue itself is still wanted. A stale description on a still-valid issue warrants a correcting comment, not a close.
 
 ## What NOT to do
 
 - Don't open new issues — triage classifies existing ones.
 - Don't comment on every issue — only when a label change or a "still relevant?" check is needed.
-- Don't escalate to `ai-blocked` without a specific reason in the comment.
+- Don't close issues in bulk on age alone. There is no auto-stale automation in this repo, and the backlog is small enough that a real read beats a date heuristic.
 
 Domain detail (label catalogue, priority criteria) lives in `AGENTS.md` and `docs/ai-factory.md`. Read on demand.

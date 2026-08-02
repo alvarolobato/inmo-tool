@@ -9,7 +9,7 @@ describe("prompts", () => {
 
     it("includes the role description", () => {
       expect(prompt).toContain("dashboard generator");
-      expect(prompt).toContain("Spanish retail");
+      expect(prompt).toContain("real-estate");
     });
 
     it("includes widget type definitions", () => {

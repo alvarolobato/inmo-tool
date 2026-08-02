@@ -81,7 +81,7 @@ describe("assembleRequest", () => {
     expect(result.text).toBe("mocked response");
     const callArgs = mockLlmComplete.mock.calls[0]?.[0];
     expect(callArgs?.systemPrompt?.stable).toContain("dashboard generator");
-    expect(callArgs?.systemPrompt?.stable).toContain("PowerShop");
+    expect(callArgs?.systemPrompt?.stable).toContain("Inmo-Tool");
   });
 
   it("for modify flow: systemPrompt.volatile contains the currentSpec", async () => {

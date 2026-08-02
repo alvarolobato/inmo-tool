@@ -20,7 +20,7 @@ describe("buildAnalyzePrompt", () => {
   it("includes role definition in Spanish", () => {
     const prompt = buildAnalyzePrompt(sampleData);
     expect(prompt).toContain("analista de datos experto");
-    expect(prompt).toContain("PowerShop");
+    expect(prompt).toContain("Inmo-Tool");
   });
 
   it("includes output rules (Spanish, markdown, specific numbers)", () => {
