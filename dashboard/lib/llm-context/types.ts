@@ -94,6 +94,19 @@ export interface FlowVars {
   /** The listing under assessment. */
   listing?: ListingSnapshot;
   /**
+   * Every live listing of ONE deduplicated property, newest-first.
+   *
+   * Assessments key on the property, not the advert (#25): a flat listed on
+   * three portals is one physical thing with one true occupancy status, and
+   * the three descriptions are three witnesses to it. Passing them together
+   * lets a portal that says nothing be rescued by a sibling that says
+   * "se vende con inquilino" — unreachable when assessing one listing at a
+   * time, and the reason this is a list rather than `listing`.
+   *
+   * Takes precedence over `listing` when both are set.
+   */
+  listings?: ListingSnapshot[];
+  /**
    * Free-text description when the caller has only the text (e.g. re-running
    * an assessment from a stored `listing.description` without re-reading the
    * whole row). Falls back to `listing.description` when omitted.

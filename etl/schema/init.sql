@@ -372,15 +372,26 @@ CREATE TABLE IF NOT EXISTS profile_scoring_model (
 );
 
 -- ============================================================
--- AI assessments (Phase 4 generates these; this task only creates
--- the table). listing_id is NOT NULL — an assessment is always about
--- a specific listing's published content (description/photos), even
--- though scoring/feedback elsewhere key on property_id.
+-- AI assessments (Phase 4 generates these).
+--
+-- Keyed on property_id, NOT listing_id (#25). An assessment answers a
+-- question about the *physical property* ("is it occupied?"), not about
+-- one portal's advert copy. Keying on listing_id — as this table did
+-- until #25 — meant a property deduplicated across three portals got
+-- three LLM calls, three bills, and three verdicts that could disagree
+-- with nothing to reconcile them. It also starved each call: occupancy
+-- is precisely the fact one seller discloses and another omits, so the
+-- union of the merged listings' descriptions is strictly better input
+-- than any single listing's.
+--
+-- Provenance is not lost: which portal's text produced the verdict is
+-- carried inside `result` as `evidence_source`, so an investor can go
+-- and check the claim (issue #1 §9 — evidence shown, not just a label).
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS ai_assessment (
     id              BIGSERIAL    PRIMARY KEY,
-    listing_id      BIGINT       NOT NULL REFERENCES listing(id),
+    property_id     BIGINT       NOT NULL REFERENCES property(id),
     assessment_type TEXT         NOT NULL CHECK (assessment_type IN ('occupancy','condition','redflags','extract','compare')),
     result          JSONB        NOT NULL,
     confidence      NUMERIC(4,3),
@@ -389,10 +400,15 @@ CREATE TABLE IF NOT EXISTS ai_assessment (
     generated_at    TIMESTAMPTZ,
     -- NULLS NOT DISTINCT (PG15+): without it, Postgres treats every NULL
     -- prompt_version as distinct, so this constraint would silently allow
-    -- unlimited duplicate (listing_id, assessment_type, NULL) rows —
+    -- unlimited duplicate (property_id, assessment_type, NULL) rows —
     -- defeating the point of the uniqueness check for any assessment
     -- generated before prompt_version tracking existed for that flow.
-    UNIQUE NULLS NOT DISTINCT (listing_id, assessment_type, prompt_version)
+    --
+    -- Named explicitly rather than left to Postgres' auto-naming so the
+    -- fresh-install path and the migration path below converge on one
+    -- constraint instead of quietly creating two equivalent ones.
+    CONSTRAINT ai_assessment_property_key
+        UNIQUE NULLS NOT DISTINCT (property_id, assessment_type, prompt_version)
 );
 
 -- The flow catalog gained `compare` in #24 (Phase 4.1). Re-stated as an
@@ -402,6 +418,61 @@ CREATE TABLE IF NOT EXISTS ai_assessment (
 ALTER TABLE ai_assessment DROP CONSTRAINT IF EXISTS ai_assessment_assessment_type_check;
 ALTER TABLE ai_assessment ADD CONSTRAINT ai_assessment_assessment_type_check
     CHECK (assessment_type IN ('occupancy','condition','redflags','extract','compare'));
+
+-- #25: re-key listing_id → property_id on databases that already have the
+-- old shape. The CREATE TABLE above is a no-op for them, so without this
+-- block an existing install would keep the listing-keyed constraint and
+-- reject the per-property writes this task makes.
+--
+-- Backfill is total, not best-effort: listing_id was NOT NULL REFERENCES
+-- listing(id), and listing.property_id is itself NOT NULL, so every
+-- pre-existing row resolves to exactly one property. Dropping the column
+-- also drops the unique constraint that used it, so no constraint name
+-- has to be guessed.
+ALTER TABLE ai_assessment ADD COLUMN IF NOT EXISTS property_id BIGINT REFERENCES property(id);
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'ai_assessment' AND column_name = 'listing_id'
+    ) THEN
+        UPDATE ai_assessment a
+           SET property_id = l.property_id
+          FROM listing l
+         WHERE a.listing_id = l.id
+           AND a.property_id IS NULL;
+
+        -- Two rows that were distinct per-listing can collapse onto one
+        -- property. Keep the newest and drop the rest, so SET NOT NULL and
+        -- the new unique constraint below both succeed.
+        DELETE FROM ai_assessment a
+              USING ai_assessment b
+              WHERE a.property_id = b.property_id
+                AND a.assessment_type = b.assessment_type
+                AND a.prompt_version IS NOT DISTINCT FROM b.prompt_version
+                AND a.id < b.id;
+
+        ALTER TABLE ai_assessment DROP COLUMN listing_id;
+    END IF;
+END
+$$;
+
+ALTER TABLE ai_assessment ALTER COLUMN property_id SET NOT NULL;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'ai_assessment_property_key'
+    ) THEN
+        ALTER TABLE ai_assessment ADD CONSTRAINT ai_assessment_property_key
+            UNIQUE NULLS NOT DISTINCT (property_id, assessment_type, prompt_version);
+    END IF;
+END
+$$;
+
+CREATE INDEX IF NOT EXISTS idx_ai_assessment_property_type
+    ON ai_assessment (property_id, assessment_type);
 
 -- ============================================================
 -- Deduplication audit trail (Phase 2 task 2.2, issue #16, writes here)

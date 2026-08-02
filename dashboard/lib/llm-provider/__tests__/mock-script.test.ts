@@ -73,8 +73,12 @@ describe("mockRunStep — assessment flows", () => {
     expect(step.kind).toBe("final");
     if (step.kind === "final") {
       const parsed = JSON.parse(step.content);
-      expect(parsed.status).toBe("vacant");
-      expect(typeof parsed.confidence).toBe("number");
+      // Three independent axes since #145 — occupancy is one of them, not the
+      // whole verdict.
+      expect(parsed.occupancy.status).toBe("vacant");
+      expect(typeof parsed.occupancy.confidence).toBe("number");
+      expect(parsed.transaction.kind).toBe("compraventa");
+      expect(parsed.ownership.extent).toBe("pleno_dominio");
     }
   });
 
@@ -126,6 +130,6 @@ describe("mockSingleShotText", () => {
 
   it("returns the assessment JSON for a single-shot assessment flow", () => {
     const text = mockSingleShotText([sys(promptFor("occupancy")), user("evalúa")]);
-    expect(JSON.parse(text).status).toBe("vacant");
+    expect(JSON.parse(text).occupancy.status).toBe("vacant");
   });
 });

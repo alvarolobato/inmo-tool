@@ -278,7 +278,7 @@ class TestOwnerIdentityRetention:
 
 class TestAiAssessmentUniqueness:
     def test_null_prompt_version_is_not_distinct(self, pg_conn):
-        """UNIQUE NULLS NOT DISTINCT: two assessments for the same listing +
+        """UNIQUE NULLS NOT DISTINCT: two assessments for the same property +
         type with prompt_version left NULL must collide, not silently
         duplicate (the bug: default UNIQUE treats every NULL as distinct).
         """
@@ -286,13 +286,11 @@ class TestAiAssessmentUniqueness:
         property_id = _insert_property(pg_conn)
         pg_conn.commit()
         try:
-            listing_id = _insert_listing(pg_conn, property_id, "idealista", "ai-dup")
-            pg_conn.commit()
             with pg_conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO ai_assessment (listing_id, assessment_type, result) "
+                    "INSERT INTO ai_assessment (property_id, assessment_type, result) "
                     "VALUES (%s, 'occupancy', '{}'::jsonb)",
-                    (listing_id,),
+                    (property_id,),
                 )
             pg_conn.commit()
             with (
@@ -300,19 +298,209 @@ class TestAiAssessmentUniqueness:
                 pg_conn.cursor() as cur,
             ):
                 cur.execute(
-                    "INSERT INTO ai_assessment (listing_id, assessment_type, result) "
+                    "INSERT INTO ai_assessment (property_id, assessment_type, result) "
                     "VALUES (%s, 'occupancy', '{}'::jsonb)",
-                    (listing_id,),
+                    (property_id,),
                 )
         finally:
             pg_conn.rollback()
             with pg_conn.cursor() as cur:
-                # ai_assessment.listing_id has no ON DELETE CASCADE (deliberate
-                # — see data-model.md), so it must be cleared before listing.
+                # ai_assessment.property_id has no ON DELETE CASCADE (deliberate
+                # — see data-model.md), so it must be cleared before property.
                 cur.execute(
-                    "DELETE FROM ai_assessment WHERE listing_id IN "
-                    "(SELECT id FROM listing WHERE property_id = %s)",
+                    "DELETE FROM ai_assessment WHERE property_id = %s", (property_id,)
+                )
+                cur.execute(
+                    "DELETE FROM listing WHERE property_id = %s", (property_id,)
+                )
+                cur.execute("DELETE FROM property WHERE id = %s", (property_id,))
+            pg_conn.commit()
+
+    def test_two_listings_of_one_property_share_a_single_assessment(self, pg_conn):
+        """#25's core guarantee: a property deduplicated across portals gets
+        ONE occupancy verdict, not one per advert.
+
+        Under the old listing_id key this test could not fail — two listings
+        meant two legitimately-distinct rows. Keyed on property_id the second
+        insert must collide, which is precisely what stops three portals
+        producing three contradictory answers about one physical flat.
+        """
+        _apply_schema(pg_conn)
+        property_id = _insert_property(pg_conn)
+        pg_conn.commit()
+        try:
+            _insert_listing(pg_conn, property_id, "fotocasa", "occ-a")
+            _insert_listing(pg_conn, property_id, "milanuncios", "occ-b")
+            pg_conn.commit()
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO ai_assessment "
+                    "(property_id, assessment_type, result, prompt_version) "
+                    "VALUES (%s, 'occupancy', '{}'::jsonb, 'occupancy/v1')",
                     (property_id,),
+                )
+            pg_conn.commit()
+            with (
+                pytest.raises(psycopg2.errors.UniqueViolation),
+                pg_conn.cursor() as cur,
+            ):
+                cur.execute(
+                    "INSERT INTO ai_assessment "
+                    "(property_id, assessment_type, result, prompt_version) "
+                    "VALUES (%s, 'occupancy', '{}'::jsonb, 'occupancy/v1')",
+                    (property_id,),
+                )
+        finally:
+            pg_conn.rollback()
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM ai_assessment WHERE property_id = %s", (property_id,)
+                )
+                cur.execute(
+                    "DELETE FROM listing WHERE property_id = %s", (property_id,)
+                )
+                cur.execute("DELETE FROM property WHERE id = %s", (property_id,))
+            pg_conn.commit()
+
+
+class TestAiAssessmentRekeyMigration:
+    """#25 re-keyed ai_assessment from listing_id to property_id.
+
+    Fresh installs get the new shape straight from CREATE TABLE and never
+    execute the migration block — so passing schema tests prove nothing about
+    the upgrade path that every existing database will actually take. These
+    tests rebuild the OLD shape by hand, re-apply init.sql, and assert the
+    backfill lands.
+    """
+
+    @staticmethod
+    def _install_old_shape(conn) -> None:
+        """Recreate ai_assessment as it existed before #25 (listing-keyed)."""
+        with conn.cursor() as cur:
+            cur.execute("DROP TABLE IF EXISTS ai_assessment")
+            cur.execute(
+                """
+                CREATE TABLE ai_assessment (
+                    id              BIGSERIAL    PRIMARY KEY,
+                    listing_id      BIGINT       NOT NULL REFERENCES listing(id),
+                    assessment_type TEXT         NOT NULL,
+                    result          JSONB        NOT NULL,
+                    confidence      NUMERIC(4,3),
+                    model           TEXT,
+                    prompt_version  TEXT,
+                    generated_at    TIMESTAMPTZ,
+                    UNIQUE NULLS NOT DISTINCT (listing_id, assessment_type, prompt_version)
+                )
+                """
+            )
+        conn.commit()
+
+    def test_migration_collapses_duplicates_keeping_newest(self, pg_conn):
+        """Two listings of ONE property, each with its own occupancy verdict.
+
+        Legal under the old listing key, illegal under the new property key.
+        The migration must keep exactly one row — the newest — and must not
+        abort the whole init.sql run on a unique violation.
+        """
+        _apply_schema(pg_conn)
+        property_id = _insert_property(pg_conn)
+        pg_conn.commit()
+        try:
+            listing_a = _insert_listing(pg_conn, property_id, "fotocasa", "mig-a")
+            listing_b = _insert_listing(pg_conn, property_id, "milanuncios", "mig-b")
+            pg_conn.commit()
+
+            self._install_old_shape(pg_conn)
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO ai_assessment "
+                    "(listing_id, assessment_type, result, prompt_version) "
+                    "VALUES (%s, 'occupancy', '{\"status\":\"vacant\"}'::jsonb, 'occupancy/v1')",
+                    (listing_a,),
+                )
+                cur.execute(
+                    "INSERT INTO ai_assessment "
+                    "(listing_id, assessment_type, result, prompt_version) "
+                    "VALUES (%s, 'occupancy', '{\"status\":\"tenanted\"}'::jsonb, 'occupancy/v1')",
+                    (listing_b,),
+                )
+            pg_conn.commit()
+
+            _apply_schema(pg_conn)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT property_id, result->>'status' FROM ai_assessment "
+                    "WHERE property_id = %s",
+                    (property_id,),
+                )
+                rows = cur.fetchall()
+                assert len(rows) == 1, f"expected one collapsed row, got {rows}"
+                assert rows[0][0] == property_id
+                # a.id < b.id keeps the higher id — the second insert.
+                assert rows[0][1] == "tenanted"
+
+                cur.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name = 'ai_assessment' AND column_name = 'listing_id'"
+                )
+                assert cur.fetchone() is None, "listing_id should have been dropped"
+        finally:
+            pg_conn.rollback()
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM ai_assessment WHERE property_id = %s", (property_id,)
+                )
+                cur.execute(
+                    "DELETE FROM listing WHERE property_id = %s", (property_id,)
+                )
+                cur.execute("DELETE FROM property WHERE id = %s", (property_id,))
+            pg_conn.commit()
+
+    def test_migration_backfills_property_id_from_listing(self, pg_conn):
+        """A single old-shape row must land on its listing's property, and the
+        re-keyed table must then reject a second verdict for that property."""
+        _apply_schema(pg_conn)
+        property_id = _insert_property(pg_conn)
+        pg_conn.commit()
+        try:
+            listing_id = _insert_listing(pg_conn, property_id, "fotocasa", "mig-solo")
+            pg_conn.commit()
+
+            self._install_old_shape(pg_conn)
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO ai_assessment "
+                    "(listing_id, assessment_type, result, prompt_version) "
+                    "VALUES (%s, 'occupancy', '{\"status\":\"vacant\"}'::jsonb, 'occupancy/v1')",
+                    (listing_id,),
+                )
+            pg_conn.commit()
+
+            _apply_schema(pg_conn)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT property_id FROM ai_assessment WHERE property_id = %s",
+                    (property_id,),
+                )
+                assert cur.fetchall() == [(property_id,)]
+
+            with (
+                pytest.raises(psycopg2.errors.UniqueViolation),
+                pg_conn.cursor() as cur,
+            ):
+                cur.execute(
+                    "INSERT INTO ai_assessment "
+                    "(property_id, assessment_type, result, prompt_version) "
+                    "VALUES (%s, 'occupancy', '{}'::jsonb, 'occupancy/v1')",
+                    (property_id,),
+                )
+        finally:
+            pg_conn.rollback()
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM ai_assessment WHERE property_id = %s", (property_id,)
                 )
                 cur.execute(
                     "DELETE FROM listing WHERE property_id = %s", (property_id,)

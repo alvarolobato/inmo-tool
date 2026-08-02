@@ -42,7 +42,11 @@ export const MOCK_PROBE_SQL = "SELECT COUNT(*) AS n FROM listing";
  * llm-context/system-prompt.ts and are unique per flow.
  */
 export function detectMockFlow(systemPromptText: string): MockFlow {
-  if (systemPromptText.includes("Tarea: estado de ocupación")) return "occupancy";
+  // Coupled to buildOccupancyPrompt's heading in llm-context/system-prompt.ts.
+  // It stopped saying "estado de ocupación" in #145, when the flow widened from
+  // occupancy alone to occupancy + venta de deuda + venta parcial.
+  if (systemPromptText.includes("Tarea: ¿qué se compra exactamente"))
+    return "occupancy";
   if (systemPromptText.includes("Tarea: estado de conservación")) return "condition";
   if (systemPromptText.includes("Tarea: señales de alerta")) return "redflags";
   if (systemPromptText.includes("Tarea: extracción de campos")) return "extract";
@@ -54,10 +58,31 @@ export function detectMockFlow(systemPromptText: string): MockFlow {
 function mockAssessmentJson(flow: Exclude<MockFlow, "chat">): string {
   switch (flow) {
     case "occupancy":
+      // Three independent axes since #145. Kept as the clean/default case so
+      // e2e assertions stay simple; the interesting combinations are unit-
+      // tested against parseOccupancyResult rather than driven through here.
       return JSON.stringify({
-        status: "vacant",
-        confidence: 0.9,
-        evidence: "se entrega libre de inquilinos",
+        occupancy: {
+          status: "vacant",
+          confidence: 0.9,
+          evidence: "se entrega libre de inquilinos",
+          // #25 keys assessments on the property and feeds the model every
+          // merged listing, so a verdict has to name which advert it read.
+          evidence_source: "fotocasa",
+        },
+        transaction: {
+          kind: "compraventa",
+          confidence: 0.7,
+          evidence: "",
+          evidence_source: null,
+        },
+        ownership: {
+          extent: "pleno_dominio",
+          share_pct: null,
+          confidence: 0.7,
+          evidence: "",
+          evidence_source: null,
+        },
         reasoning: "El anuncio indica entrega libre (mock e2e).",
       });
     case "condition":

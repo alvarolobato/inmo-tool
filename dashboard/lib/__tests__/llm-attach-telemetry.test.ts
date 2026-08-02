@@ -98,7 +98,7 @@ describe("ctx reference identity — assembleRequest (regression)", () => {
       },
     );
 
-    await assessOccupancy(LISTING, { ctx: callerCtx });
+    await assessOccupancy([LISTING], { ctx: callerCtx });
 
     // If assembleRequest shallow-clones ctx, these fail — the mutation lands on
     // the clone and the caller's ctx is untouched.
@@ -128,7 +128,7 @@ describe("ctx reference identity — assembleRequest (regression)", () => {
       },
     );
 
-    await assessOccupancy(LISTING, { ctx: callerCtx });
+    await assessOccupancy([LISTING], { ctx: callerCtx });
 
     expect(callerCtx.llmProvider).toBe("cli");
     expect(typeof callerCtx.llmDriver).toBe("string");

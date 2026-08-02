@@ -63,7 +63,7 @@ describe("llm", () => {
       delete process.env.OPENROUTER_API_KEY;
       resetClient();
       resetDashboardLlmConfigCache();
-      await expect(assessOccupancy(LISTING)).rejects.toThrow(
+      await expect(assessOccupancy([LISTING])).rejects.toThrow(
         "OPENROUTER_API_KEY is not set. Set it in your environment, config.yaml, or .env file."
       );
     });
@@ -75,9 +75,11 @@ describe("llm", () => {
         ],
       });
 
-      const result = await assessOccupancy(LISTING);
+      const result = await assessOccupancy([LISTING]);
 
-      expect(result).toBe('{"title": "Test", "widgets": []}');
+      // #25 returns { text, model } rather than a bare string, so a stored
+      // verdict can record which model produced it.
+      expect(result.text).toBe('{"title": "Test", "widgets": []}');
       expect(mockCreate).toHaveBeenCalledWith(
         expect.objectContaining({
           messages: expect.arrayContaining([
@@ -97,7 +99,7 @@ describe("llm", () => {
         choices: [{ message: { content: "{}" } }],
       });
 
-      await assessOccupancy(LISTING);
+      await assessOccupancy([LISTING]);
 
       const rawContent = mockCreate.mock.calls[0][0].messages.find(
         (m: { role: string }) => m.role === "system"
@@ -108,7 +110,10 @@ describe("llm", () => {
 
       // Domain framing + this flow's task, from buildOccupancyPrompt.
       expect(systemContent).toContain("inversión inmobiliaria");
-      expect(systemContent).toContain("Tarea: estado de ocupación");
+      // #145 widened this flow from occupancy-only to three independent axes
+      // (occupancy / what is transmitted / how much right), so the heading
+      // moved. It is also what detectMockFlow keys on — keep them in step.
+      expect(systemContent).toContain("Tarea: ¿qué se compra exactamente");
       expect(systemContent).toContain("occupied_illegally");
       // The volatile half must carry the actual listing under assessment.
       expect(systemContent).toContain("libre de inquilinos");
@@ -122,7 +127,7 @@ describe("llm", () => {
         choices: [{ message: { content: null } }],
       });
 
-      await expect(assessOccupancy(LISTING)).rejects.toThrow(
+      await expect(assessOccupancy([LISTING])).rejects.toThrow(
         "LLM returned an empty response"
       );
     });
@@ -135,7 +140,7 @@ describe("llm", () => {
         choices: [{ message: { content: "{}" } }],
       });
 
-      await assessOccupancy(LISTING);
+      await assessOccupancy([LISTING]);
 
       expect(mockCreate).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -153,7 +158,7 @@ describe("llm", () => {
         choices: [{ message: { content: "{}" } }],
       });
 
-      await assessOccupancy(LISTING);
+      await assessOccupancy([LISTING]);
 
       expect(mockCreate).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -186,12 +191,12 @@ describe("llm", () => {
         });
 
       const setTimeoutSpy = vi.spyOn(global, "setTimeout");
-      const resultPromise = assessOccupancy(LISTING);
+      const resultPromise = assessOccupancy([LISTING]);
 
       await vi.runAllTimersAsync();
       const result = await resultPromise;
 
-      expect(result).toBe('{"ok":true}');
+      expect(result.text).toBe('{"ok":true}');
       expect(mockCreate).toHaveBeenCalledTimes(3);
       expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 1000);
       expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 2000);
@@ -201,7 +206,7 @@ describe("llm", () => {
       const error400 = Object.assign(new Error("Bad request"), { status: 400 });
       mockCreate.mockRejectedValue(error400);
 
-      await expect(assessOccupancy(LISTING)).rejects.toMatchObject({
+      await expect(assessOccupancy([LISTING])).rejects.toMatchObject({
         status: 400,
       });
       expect(mockCreate).toHaveBeenCalledTimes(1);
@@ -216,12 +221,12 @@ describe("llm", () => {
         });
 
       const setTimeoutSpy = vi.spyOn(global, "setTimeout");
-      const resultPromise = assessOccupancy(LISTING);
+      const resultPromise = assessOccupancy([LISTING]);
 
       await vi.runAllTimersAsync();
       const result = await resultPromise;
 
-      expect(result).toBe('{"ok":true}');
+      expect(result.text).toBe('{"ok":true}');
       expect(mockCreate).toHaveBeenCalledTimes(2);
       expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 1000);
     });
@@ -233,7 +238,7 @@ describe("llm", () => {
       mockCreate.mockRejectedValue(error503);
 
       // Attach rejection handler before advancing timers to avoid unhandled rejection
-      const assertion = expect(assessOccupancy(LISTING)).rejects.toMatchObject({
+      const assertion = expect(assessOccupancy([LISTING])).rejects.toMatchObject({
         status: 503,
       });
       await vi.runAllTimersAsync();
@@ -253,7 +258,7 @@ describe("llm", () => {
         });
 
       const setTimeoutSpy = vi.spyOn(global, "setTimeout");
-      const resultPromise = assessOccupancy(LISTING);
+      const resultPromise = assessOccupancy([LISTING]);
 
       await vi.runAllTimersAsync();
       await resultPromise;
@@ -273,7 +278,7 @@ describe("llm", () => {
         });
 
       const setTimeoutSpy = vi.spyOn(global, "setTimeout");
-      const resultPromise = assessOccupancy(LISTING);
+      const resultPromise = assessOccupancy([LISTING]);
 
       await vi.runAllTimersAsync();
       await resultPromise;
@@ -294,7 +299,7 @@ describe("llm", () => {
         });
 
       const setTimeoutSpy = vi.spyOn(global, "setTimeout");
-      const resultPromise = assessOccupancy(LISTING);
+      const resultPromise = assessOccupancy([LISTING]);
 
       await vi.runAllTimersAsync();
       await resultPromise;
@@ -354,7 +359,7 @@ describe("llm", () => {
         return { choices: [{ message: { content: "{}" } }] };
       });
 
-      await assessOccupancy(LISTING);
+      await assessOccupancy([LISTING]);
 
       expect(callOrder).toEqual(["budget", "llm"]);
     });
@@ -365,7 +370,7 @@ describe("llm", () => {
         // no usage field
       });
 
-      await assessOccupancy(LISTING);
+      await assessOccupancy([LISTING]);
 
       expect(mockLogUsage).toHaveBeenLastCalledWith(
         "occupancy",
@@ -382,7 +387,7 @@ describe("llm", () => {
         usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
       });
 
-      await assessOccupancy(LISTING);
+      await assessOccupancy([LISTING]);
 
       expect(mockLogUsage).toHaveBeenLastCalledWith(
         "occupancy",
@@ -397,7 +402,7 @@ describe("llm", () => {
       const { BudgetExceededError } = await import("../llm-usage");
       mockCheckDailyBudget.mockRejectedValue(new BudgetExceededError());
 
-      await expect(assessOccupancy(LISTING)).rejects.toThrow(BudgetExceededError);
+      await expect(assessOccupancy([LISTING])).rejects.toThrow(BudgetExceededError);
       expect(mockCreate).not.toHaveBeenCalled();
     });
   });

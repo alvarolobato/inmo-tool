@@ -41,13 +41,18 @@ export interface AssessmentOpts {
 /**
  * Run a single-shot assessment flow over one listing.
  *
- * Shared by occupancy / condition / redflags / extract: they differ only in
- * their prompt (owned by buildSystemPrompt) and in how the caller parses the
- * result, not in how the request is executed. Temperature is pinned low —
- * these are extraction tasks, not creative ones.
+ * Shared by condition / redflags / extract: they differ only in their prompt
+ * (owned by buildSystemPrompt) and in how the caller parses the result, not in
+ * how the request is executed. Temperature is pinned low — these are
+ * extraction tasks, not creative ones.
+ *
+ * Occupancy is deliberately NOT on this path: #25 moved it to property level,
+ * where it reads every merged listing at once rather than one advert.
+ * #26–#28 should follow when they land — the same "one portal omits what
+ * another discloses" argument applies to condition and red flags.
  */
 async function runListingAssessment(
-  flow: "occupancy" | "condition" | "redflags" | "extract",
+  flow: "condition" | "redflags" | "extract",
   listing: ListingSnapshot,
   opts?: AssessmentOpts,
 ): Promise<string> {
@@ -76,13 +81,42 @@ async function runListingAssessment(
 
 /**
  * #25 — Assess whether a property is vacant, tenanted, or illegally occupied.
- * Returns the model's raw JSON text; #25 owns parsing and caching it.
+ *
+ * Takes EVERY live listing of one deduplicated property, not a single listing:
+ * the same flat on three portals is one physical thing with one true occupancy
+ * status, and reading all three descriptions together is strictly better
+ * evidence than reading one (a portal that says nothing gets rescued by a
+ * sibling that says "se vende con inquilino"). See lib/ai-assessment/occupancy.ts.
+ *
+ * Returns the raw JSON text plus the model that produced it, so the caller can
+ * record which model a stored verdict came from.
  */
-export function assessOccupancy(
-  listing: ListingSnapshot,
+export async function assessOccupancy(
+  listings: ListingSnapshot[],
   opts?: AssessmentOpts,
-): Promise<string> {
-  return runListingAssessment("occupancy", listing, opts);
+): Promise<{ text: string; model: string }> {
+  await checkDailyBudget();
+
+  const result = await assembleRequest(
+    "occupancy",
+    { listings },
+    null,
+    "Evalúa los tres ejes del inmueble según las instrucciones (occupancy): " +
+      "ocupación, qué se transmite (compraventa o venta de deuda) y cuánto " +
+      "derecho se transmite (pleno dominio, nuda propiedad, proindiviso…).",
+    {
+      ctx: opts?.ctx,
+      requestId: opts?.requestId ?? null,
+      endpoint: "occupancy",
+      temperature: 0,
+      maxOutputTokens: 2048,
+    },
+  );
+
+  if (!result.text) {
+    throw new Error('LLM returned an empty response for flow "occupancy"');
+  }
+  return { text: result.text, model: result.model };
 }
 
 /**

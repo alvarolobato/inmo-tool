@@ -57,10 +57,20 @@ Cadastral-reference matching was considered and dropped before implementation �
 Property × Search Profile → hard filters → learned scoring model → profile_listing_state → Dashboard candidate feed
 ```
 
-### AI-assisted assessment — not yet built (Phase 4, #24–#30)
+### AI-assisted assessment (Phase 4, #24–#30 — occupancy landed in #25)
 ```
-Listing description/photos → occupancy/condition/red-flag flows → ai_assessment (cached, versioned)
+ALL live listings of one deduplicated property
+  → occupancy flow (property-level, runs after dedup consolidation)
+  → ai_assessment (cached, versioned, keyed on property_id)
+
+single listing description/photos
+  → condition / red-flag / extract flows (still listing-level, #26–#28)
+  → ai_assessment
 ```
+Occupancy reads every merged advert at once so a portal that omits a
+disclosure is rescued by a sibling that carries it; see
+[data-model.md](docs/architecture/data-model.md#ai_assessment) for why the
+table is keyed on the property rather than the listing.
 
 ## Configuration
 
