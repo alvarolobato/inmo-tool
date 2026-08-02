@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { CandidateRow } from "@/lib/candidates";
 import { PROPERTY_TYPE_LABELS, type PROPERTY_TYPES } from "@/lib/profiles-schema";
 import { fmtEUR0, fmtInt } from "@/components/widgets/format";
@@ -7,12 +8,9 @@ import { fmtEUR0, fmtInt } from "@/components/widgets/format";
  * Multiple linked `listing` rows (post task-2.2 dedup) render as multiple
  * source badges on a single card, e.g. "Fotocasa + Milanuncios".
  *
- * No click-through to a property detail page yet: task 2.8 (property detail
- * page) doesn't exist in this stack yet, so the card is intentionally
- * non-interactive for now rather than linking to a route that would 404.
- * Wire up navigation once #44 lands.
+ * Links to the property detail page (task 2.8, #44).
  */
-export function CandidateCard({ candidate }: { candidate: CandidateRow }) {
+export function CandidateCard({ candidate, profileId }: { candidate: CandidateRow; profileId: number }) {
   const sources = [...new Set(candidate.listings.map((l) => l.source))].sort();
   const typeLabel =
     candidate.property_type !== null &&
@@ -30,7 +28,8 @@ export function CandidateCard({ candidate }: { candidate: CandidateRow }) {
       : null;
 
   return (
-    <div
+    <Link
+      href={`/profiles/${profileId}/properties/${candidate.property_id}`}
       data-testid="candidate-card"
       data-property-id={candidate.property_id}
       style={{
@@ -41,6 +40,8 @@ export function CandidateCard({ candidate }: { candidate: CandidateRow }) {
         display: "flex",
         flexDirection: "column",
         gap: 6,
+        textDecoration: "none",
+        color: "inherit",
       }}
     >
       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
@@ -79,6 +80,6 @@ export function CandidateCard({ candidate }: { candidate: CandidateRow }) {
       {firstSeen !== null && (
         <p style={{ margin: 0, fontSize: 11, color: "var(--fg-subtle)" }}>Visto por primera vez: {firstSeen}</p>
       )}
-    </div>
+    </Link>
   );
 }

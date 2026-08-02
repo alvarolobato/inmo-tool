@@ -197,12 +197,10 @@ test("pin click opens popover with correct data and detail-link affordance", asy
   await expect(popup).toBeVisible();
   await expect(popup.getByText(/€/)).toBeVisible();
 
-  // No property detail page exists yet (task 2.8, #44) — same documented
-  // gap task 2.5's CandidateCard has. The popover shows an honest pending
-  // affordance rather than a link that would 404; this asserts that
-  // affordance is present, which is the "working" (non-broken) contract
-  // this task can actually deliver before #44 lands.
-  await expect(popup.locator('[data-testid="map-popup-detail-link-pending"]')).toBeVisible();
+  // Property detail page now exists (task 2.8, #44) — the popup links to it.
+  const detailLink = popup.locator('[data-testid="map-popup-detail-link"]');
+  await expect(detailLink).toBeVisible();
+  await expect(detailLink).toHaveAttribute("href", new RegExp(`^/profiles/${profileId}/properties/\\d+$`));
 });
 
 test("stage filter narrows the visible pins to the correct candidate", async ({ page }) => {

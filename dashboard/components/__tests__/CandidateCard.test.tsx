@@ -23,11 +23,16 @@ function candidate(overrides: Partial<CandidateRow> = {}): CandidateRow {
 
 describe("CandidateCard", () => {
   it("renders address, price, type/size/rooms, and a single source badge", () => {
-    render(<CandidateCard candidate={candidate()} />);
+    render(<CandidateCard candidate={candidate()} profileId={5} />);
     expect(screen.getByText("Calle Trafalgar, Chamberí, Madrid")).toBeInTheDocument();
     expect(screen.getByText("279.000 €")).toBeInTheDocument();
     expect(screen.getByText(/Piso.*70 m².*2 hab\./)).toBeInTheDocument();
     expect(screen.getByText("fotocasa")).toBeInTheDocument();
+  });
+
+  it("links to the property detail page for this profile", () => {
+    render(<CandidateCard candidate={candidate({ property_id: 42 })} profileId={5} />);
+    expect(screen.getByTestId("candidate-card")).toHaveAttribute("href", "/profiles/5/properties/42");
   });
 
   it("shows one badge per distinct source for a deduplicated property with multiple listings", () => {
@@ -39,6 +44,7 @@ describe("CandidateCard", () => {
             { id: 11, source: "milanuncios", url: "https://y", current_price: 279000 },
           ],
         })}
+        profileId={5}
       />,
     );
     expect(screen.getByText("fotocasa")).toBeInTheDocument();
@@ -56,6 +62,7 @@ describe("CandidateCard", () => {
           min_price: null,
           first_seen_at: null,
         })}
+        profileId={5}
       />,
     );
     expect(screen.getByText("Dirección no disponible")).toBeInTheDocument();

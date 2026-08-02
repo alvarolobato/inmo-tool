@@ -82,7 +82,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
         }}
       >
         {items.map((c) => (
-          <CandidateCard key={c.property_id} candidate={c} />
+          <CandidateCard key={c.property_id} candidate={c} profileId={profileId} />
         ))}
       </div>
 
