@@ -1,10 +1,14 @@
 /**
  * GET /api/etl/runs/[id]
  *
- * Returns a single ETL sync run with all per-table stats.
+ * Returns a single connector orchestrator run with its per-connector results.
+ *
+ * Reads `connector_runs` + `connector_run_results` (issue #104). The old
+ * per-table equivalents (`etl_sync_runs`/`etl_sync_run_tables`) are
+ * orphaned — nothing has written to them since Phase 1.1.
  *
  * Response shape:
- *   { run: EtlSyncRun, tables: EtlSyncRunTable[] }
+ *   { run: ConnectorRun, connectors: ConnectorRunResult[] }
  *
  * Error codes:
  *   400 - Invalid ID
@@ -20,26 +24,13 @@ import {
   sanitizeErrorMessage,
 } from "@/lib/errors";
 import { toIsoOrNull } from "@/lib/format";
-import type { EtlSyncRun } from "../../types";
+import type { ConnectorRun, ConnectorRunResult } from "../../types";
 
-export interface EtlSyncRunTable {
-  id: number;
-  table_name: string;
-  started_at: string;
-  finished_at: string | null;
-  duration_ms: number | null;
-  status: string;
-  rows_synced: number | null;
-  rows_total_after: number | null;
-  sync_method: string | null;
-  watermark_from: string | null;
-  watermark_to: string | null;
-  error_msg: string | null;
-}
+export type { ConnectorRun, ConnectorRunResult };
 
 export interface EtlRunDetailResponse {
-  run: EtlSyncRun;
-  tables: EtlSyncRunTable[];
+  run: ConnectorRun;
+  connectors: ConnectorRunResult[];
 }
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -73,20 +64,27 @@ export async function GET(
 
   try {
     const runResult = await query(
-      `SELECT id, started_at, finished_at, duration_ms, status,
-              total_tables, tables_ok, tables_failed, total_rows_synced, trigger,
-              kind
-       FROM etl_sync_runs
-       WHERE id = $1`,
+      `SELECT r.id, r.started_at, r.finished_at, r.duration_ms, r.status,
+              r.total_connectors, r.connectors_ok, r.connectors_failed,
+              r.connectors_skipped, r.trigger,
+              agg.total_discovered, agg.total_fetched
+       FROM connector_runs r
+       LEFT JOIN LATERAL (
+           SELECT SUM(res.discovered_count) AS total_discovered,
+                  SUM(res.fetched_count)    AS total_fetched
+           FROM connector_run_results res
+           WHERE res.run_id = r.id
+       ) agg ON TRUE
+       WHERE r.id = $1`,
       [id],
     );
 
     if (runResult.rows.length === 0) {
       return NextResponse.json(
         formatApiError(
-          "Run de ETL no encontrado.",
+          "Ejecución de conectores no encontrada.",
           "NOT_FOUND",
-          `No existe ningún run con ID ${id}.`,
+          `No existe ninguna ejecución con ID ${id}.`,
           requestId,
         ),
         { status: 404 },
@@ -94,52 +92,56 @@ export async function GET(
     }
 
     const r = runResult.rows[0];
-    const run: EtlSyncRun = {
+    const run: ConnectorRun = {
       id: Number(r[0]),
       started_at: toIsoOrNull(r[1]) ?? "",
       finished_at: toIsoOrNull(r[2]),
       duration_ms: r[3] != null ? Number(r[3]) : null,
       status: String(r[4]),
-      total_tables: r[5] != null ? Number(r[5]) : null,
-      tables_ok: r[6] != null ? Number(r[6]) : null,
-      tables_failed: r[7] != null ? Number(r[7]) : null,
-      total_rows_synced: r[8] != null ? Number(r[8]) : null,
+      total_connectors: r[5] != null ? Number(r[5]) : null,
+      connectors_ok: r[6] != null ? Number(r[6]) : null,
+      connectors_failed: r[7] != null ? Number(r[7]) : null,
+      connectors_skipped: r[8] != null ? Number(r[8]) : null,
       trigger: String(r[9]),
-      kind: r[10] === "delta" ? "delta" : "full",
+      total_discovered: r[10] != null ? Number(r[10]) : null,
+      total_fetched: r[11] != null ? Number(r[11]) : null,
     };
 
-    const tablesResult = await query(
-      `SELECT id, table_name, started_at, finished_at, duration_ms, status,
-              rows_synced, rows_total_after, sync_method,
-              watermark_from, watermark_to, error_msg
-       FROM etl_sync_run_tables
+    // duration_ms is derived here: connector_run_results stores start/finish
+    // timestamps but no duration column (unlike etl_sync_run_tables did).
+    const resultsResult = await query(
+      `SELECT id, connector_name, started_at, finished_at, status,
+              discovered_count, fetched_count, error_count, error_msg,
+              CASE
+                  WHEN started_at IS NULL OR finished_at IS NULL THEN NULL
+                  ELSE ROUND(EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000)::bigint
+              END AS duration_ms
+       FROM connector_run_results
        WHERE run_id = $1
-       ORDER BY started_at ASC`,
+       ORDER BY started_at ASC, connector_name ASC`,
       [id],
     );
 
-    const tables: EtlSyncRunTable[] = tablesResult.rows.map((row) => ({
+    const connectors: ConnectorRunResult[] = resultsResult.rows.map((row) => ({
       id: Number(row[0]),
-      table_name: String(row[1]),
+      connector_name: String(row[1]),
       started_at: toIsoOrNull(row[2]) ?? "",
       finished_at: toIsoOrNull(row[3]),
-      duration_ms: row[4] != null ? Number(row[4]) : null,
-      status: String(row[5]),
-      rows_synced: row[6] != null ? Number(row[6]) : null,
-      rows_total_after: row[7] != null ? Number(row[7]) : null,
-      sync_method: row[8] != null ? String(row[8]) : null,
-      watermark_from: toIsoOrNull(row[9]),
-      watermark_to: toIsoOrNull(row[10]),
-      error_msg: row[11] != null ? String(row[11]) : null,
+      status: String(row[4]),
+      discovered_count: row[5] != null ? Number(row[5]) : 0,
+      fetched_count: row[6] != null ? Number(row[6]) : 0,
+      error_count: row[7] != null ? Number(row[7]) : 0,
+      error_msg: row[8] != null ? String(row[8]) : null,
+      duration_ms: row[9] != null ? Number(row[9]) : null,
     }));
 
-    const response: EtlRunDetailResponse = { run, tables };
+    const response: EtlRunDetailResponse = { run, connectors };
     return NextResponse.json(response);
   } catch (err) {
-    console.error(`[${requestId}] Error loading ETL run ${id}:`, err);
+    console.error(`[${requestId}] Error loading connector run ${id}:`, err);
     return NextResponse.json(
       formatApiError(
-        "No se pudo cargar el run de ETL. Inténtalo de nuevo.",
+        "No se pudo cargar la ejecución de conectores. Inténtalo de nuevo.",
         "DB_QUERY",
         sanitizeErrorMessage(err),
         requestId,

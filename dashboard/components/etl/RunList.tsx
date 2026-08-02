@@ -6,18 +6,19 @@ import { formatDuration, formatNumber } from "@/lib/etl-format";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export interface EtlSyncRun {
+export interface ConnectorRun {
   id: number;
   started_at: string;
   finished_at: string | null;
   duration_ms: number | null;
   status: string;
-  /** 'delta' (hourly watermark sweep) or 'full' (nightly truncate-and-reinsert). */
-  kind: "delta" | "full";
-  total_tables: number | null;
-  tables_ok: number | null;
-  tables_failed: number | null;
-  total_rows_synced: number | null;
+  total_connectors: number | null;
+  connectors_ok: number | null;
+  connectors_failed: number | null;
+  /** Issue #99 — NULL on runs recorded before that column existed. */
+  connectors_skipped: number | null;
+  total_discovered: number | null;
+  total_fetched: number | null;
   trigger: string;
 }
 
@@ -25,8 +26,25 @@ export interface EtlSyncRun {
 
 type BadgeColor = "emerald" | "amber" | "red" | "blue" | "gray";
 
-function statusBadgeColor(status: string): BadgeColor {
-  switch (status) {
+/**
+ * A run where every connector was skipped is recorded as `status='success'`
+ * by the orchestrator (it only downgrades on failures), so it would otherwise
+ * render as a green "Completado" — the badge operators scan first. Since #106
+ * made connectors disabled-by-default, that is exactly what a fresh install
+ * produces: nothing ran, yet the list looks healthy. Treat it as its own
+ * neutral state rather than a success.
+ */
+function isNoActivityRun(run: ConnectorRun): boolean {
+  return (
+    (run.connectors_skipped ?? 0) > 0 &&
+    (run.connectors_ok ?? 0) === 0 &&
+    (run.connectors_failed ?? 0) === 0
+  );
+}
+
+function statusBadgeColor(run: ConnectorRun): BadgeColor {
+  if (isNoActivityRun(run)) return "gray";
+  switch (run.status) {
     case "success": return "emerald";
     case "partial": return "amber";
     case "failed": return "red";
@@ -35,13 +53,14 @@ function statusBadgeColor(status: string): BadgeColor {
   }
 }
 
-function statusLabel(status: string): string {
-  switch (status) {
+function statusLabel(run: ConnectorRun): string {
+  if (isNoActivityRun(run)) return "Sin actividad";
+  switch (run.status) {
     case "success": return "Completado";
     case "partial": return "Parcial";
     case "failed": return "Error";
     case "running": return "En curso";
-    default: return status;
+    default: return run.status;
   }
 }
 
@@ -61,21 +80,27 @@ function formatDatetime(iso: string): string {
 
 const TRIGGER_LABELS: Record<string, string> = {
   scheduled: "Programado",
+  startup: "Arranque",
   manual: "Manual",
+  cli: "CLI",
 };
 
 function triggerLabel(trigger: string): string {
   return TRIGGER_LABELS[trigger] ?? trigger;
 }
 
-function kindLabel(kind: "delta" | "full"): string {
-  return kind === "delta" ? "Delta" : "Completa";
-}
-
-function kindBadgeColor(kind: "delta" | "full"): BadgeColor {
-  // Delta = blue (cheap, frequent, watermark sweep).
-  // Full  = gray (heavy nightly job; not an alert state, just denser).
-  return kind === "delta" ? "blue" : "gray";
+/**
+ * "3 / 0 / 1" = ok / failed / skipped. Skipped is only rendered when the
+ * column has a value (it's NULL on pre-#99 runs) AND is non-zero, so the
+ * common case stays a clean two-number cell — but a run where an operator
+ * disabled something never looks identical to a healthy empty one, which
+ * is the whole reason #99 added the counter.
+ */
+function connectorCounts(run: ConnectorRun): string {
+  if (run.connectors_ok === null) return "—";
+  const base = `${run.connectors_ok} / ${run.connectors_failed ?? 0}`;
+  if (run.connectors_skipped) return `${base} / ${run.connectors_skipped}`;
+  return base;
 }
 
 // ─── Loading skeleton ─────────────────────────────────────────────────────────
@@ -96,7 +121,7 @@ function RunListSkeleton() {
 // ─── Main component ───────────────────────────────────────────────────────────
 
 interface RunListProps {
-  runs: EtlSyncRun[];
+  runs: ConnectorRun[];
   total: number;
   page: number;
   perPage: number;
@@ -121,7 +146,8 @@ export function RunList({ runs, total, page, perPage, loading, onPageChange }: R
           No hay ejecuciones registradas
         </p>
         <p className="mt-1 text-sm text-tremor-content dark:text-dark-tremor-content">
-          Las ejecuciones de ETL aparecerán aquí una vez que el pipeline esté instrumentado.
+          Las ejecuciones aparecerán aquí cuando el orquestador de conectores
+          complete su primer barrido.
         </p>
       </div>
     );
@@ -134,11 +160,16 @@ export function RunList({ runs, total, page, perPage, loading, onPageChange }: R
           <thead className="bg-tremor-background-muted dark:bg-dark-tremor-background-muted">
             <tr>
               <th className="px-4 py-3 text-left text-xs font-medium text-tremor-content dark:text-dark-tremor-content uppercase tracking-wider">Estado</th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-tremor-content dark:text-dark-tremor-content uppercase tracking-wider">Tipo</th>
               <th className="px-4 py-3 text-left text-xs font-medium text-tremor-content dark:text-dark-tremor-content uppercase tracking-wider">Iniciada</th>
               <th className="px-4 py-3 text-left text-xs font-medium text-tremor-content dark:text-dark-tremor-content uppercase tracking-wider">Duración</th>
-              <th className="px-4 py-3 text-left text-xs font-medium text-tremor-content dark:text-dark-tremor-content uppercase tracking-wider">Tablas OK / Error</th>
-              <th className="px-4 py-3 text-right text-xs font-medium text-tremor-content dark:text-dark-tremor-content uppercase tracking-wider">Filas sync.</th>
+              <th
+                className="px-4 py-3 text-left text-xs font-medium text-tremor-content dark:text-dark-tremor-content uppercase tracking-wider"
+                title="Conectores OK / con error / omitidos"
+              >
+                Conectores
+              </th>
+              <th className="px-4 py-3 text-right text-xs font-medium text-tremor-content dark:text-dark-tremor-content uppercase tracking-wider" title="Anuncios encontrados en la fase de descubrimiento">Encontrados</th>
+              <th className="px-4 py-3 text-right text-xs font-medium text-tremor-content dark:text-dark-tremor-content uppercase tracking-wider" title="Anuncios descargados y guardados">Guardados</th>
               <th className="px-4 py-3 text-left text-xs font-medium text-tremor-content dark:text-dark-tremor-content uppercase tracking-wider">Disparado</th>
             </tr>
           </thead>
@@ -155,15 +186,8 @@ export function RunList({ runs, total, page, perPage, loading, onPageChange }: R
                     className="flex items-center"
                     aria-label={`Ver ejecución ${run.id}`}
                   >
-                    <Badge color={statusBadgeColor(run.status)} size="xs">
-                      {statusLabel(run.status)}
-                    </Badge>
-                  </Link>
-                </td>
-                <td className="px-4 py-3">
-                  <Link href={`/etl/${run.id}`} className="block">
-                    <Badge color={kindBadgeColor(run.kind)} size="xs">
-                      {kindLabel(run.kind)}
+                    <Badge color={statusBadgeColor(run)} size="xs">
+                      {statusLabel(run)}
                     </Badge>
                   </Link>
                 </td>
@@ -177,16 +201,22 @@ export function RunList({ runs, total, page, perPage, loading, onPageChange }: R
                     {formatDuration(run.duration_ms)}
                   </Link>
                 </td>
-                <td className="px-4 py-3 text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis">
+                <td
+                  className="px-4 py-3 tabular-nums text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis"
+                  data-testid={`run-connectors-${run.id}`}
+                >
                   <Link href={`/etl/${run.id}`} className="block">
-                    {run.tables_ok !== null
-                      ? `${run.tables_ok} / ${run.tables_failed ?? 0}`
-                      : "—"}
+                    {connectorCounts(run)}
+                  </Link>
+                </td>
+                <td className="px-4 py-3 text-right tabular-nums text-tremor-content dark:text-dark-tremor-content">
+                  <Link href={`/etl/${run.id}`} className="block">
+                    {formatNumber(run.total_discovered)}
                   </Link>
                 </td>
                 <td className="px-4 py-3 text-right tabular-nums text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis">
                   <Link href={`/etl/${run.id}`} className="block">
-                    {formatNumber(run.total_rows_synced)}
+                    {formatNumber(run.total_fetched)}
                   </Link>
                 </td>
                 <td className="px-4 py-3 text-tremor-content dark:text-dark-tremor-content">
