@@ -1,8 +1,26 @@
 # Dashboard App — Agentic LLM tools
 
-This document describes the **native tool-calling** path for the Dashboard App LLM (`generate`, `modify`, `analyze`). Decision record: [decisions/archive/D-018-agentic-tools.md](decisions/archive/D-018-agentic-tools.md) (archived — see [D-004](decisions/D-004-no-worker-workflows.md) and DECISIONS.md for this repo's active decisions).
+This document describes the **native tool-calling** path for the Dashboard App LLM. Decision record: [decisions/archive/D-018-agentic-tools.md](decisions/archive/D-018-agentic-tools.md) (archived — see [D-004](decisions/D-004-no-worker-workflows.md) and DECISIONS.md for this repo's active decisions).
 
-> **Status**: the tool-loop runner/provider mechanism (`dashboard/lib/llm-tools/runner.ts`, OpenRouter/CLI dual-driver support, the feature flag, the failure policy) is real reusable architecture kept as-is per issue #1 §14. The **tool catalog below is the old project's PowerShop-mirror inspection tools** (`ps_*` table listing/describe/query) — task 4.1 (#24) and friends replace this with a catalog over inmo-tool's own schema (property/listing/search_profile inspection, dedup-suggestion review, etc.), not the `ps_*` tables described here.
+> **Status (updated by #24)**: the tool-loop runner/provider mechanism
+> (`dashboard/lib/llm-tools/runner.ts`, OpenRouter/CLI dual-driver support, the
+> feature flag, the failure policy) is real reusable architecture kept as-is per
+> issue #1 §14 — that part of this document is current.
+>
+> The flows it serves are **not** the old `generate`/`modify`/`analyze` set:
+> #24 replaced the catalog with `occupancy`/`condition`/`redflags`/`extract`/
+> `compare` (single-shot, no tools) plus `chat` (the only flow that takes the
+> tool loop). Tool *selection* is `toolsForFlow()` in
+> `dashboard/lib/llm-context/tools.ts`; an empty array is what routes a flow to
+> the single-shot path.
+>
+> The inspection tools were renamed off the `ps_*` mirror convention
+> (`list_ps_tables` → `list_tables`, `describe_ps_table` → `describe_table`) and
+> are now restricted to an explicit domain allowlist — see `LLM_VISIBLE_TABLES`
+> in `dashboard/lib/llm-tools/handlers/sql.ts`. The dashboard write-back tools
+> (`apply_dashboard_modification`, `submit_dashboard_analysis`) and their
+> `ctx.modifyResult`/`ctx.analyzeResult` side-channel were removed with the
+> dashboard-builder feature (#101, #24).
 
 ## Overview
 
@@ -12,20 +30,17 @@ This document describes the **native tool-calling** path for the Dashboard App L
 - **Feature flag**: `DASHBOARD_AGENTIC_TOOLS_ENABLED` — default **true**. Set to `false` to force the legacy **single-shot** completion (no tools).
 - **Failure policy**: If the runner throws (limits, empty final content), API routes return HTTP **500** with `code: AGENTIC_RUNNER` — **no silent fallback** to single-shot.
 
-## Tool catalog (MVP)
+## Tool catalog
+
+Available to the `chat` flow only (`CHAT_TOOLS`); assessment flows get none.
 
 | Tool | Purpose |
 |------|---------|
 | `validate_query` | Read-only check + optional cost (EXPLAIN) + SQL lint hints |
 | `execute_query` | Run SELECT/WITH; rows/columns truncated |
 | `explain_query` | `EXPLAIN (FORMAT JSON)` without ANALYZE |
-| `list_ps_tables` | List `ps_*` mirror tables |
-| `describe_ps_table` | Column metadata for one `ps_*` table |
-| `list_dashboards` | Saved dashboards (id, name, updated_at) |
-| `get_dashboard_spec` | Full JSON spec by id |
-| `get_dashboard_queries` | All embedded SQL strings with widget paths |
-| `get_dashboard_widget_raw_values` | Execute one widget’s primary SQL (date tokens substituted) |
-| `get_dashboard_all_widget_status` | Per-SQL read-only + cost + lint status |
+| `list_tables` | List the domain tables in `LLM_VISIBLE_TABLES` |
+| `describe_table` | Column metadata for one allowlisted table |
 
 ## Limits (environment variables)
 

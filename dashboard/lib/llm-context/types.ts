@@ -61,6 +61,15 @@ export interface ListingSnapshot {
   url?: string;
   title?: string;
   description?: string;
+  /**
+   * 'sale' | 'rent'. Load-bearing for occupancy: a rental listing is expected
+   * to be tenanted, so the same wording ("actualmente alquilado") that flags a
+   * sale listing as occupied is unremarkable on a rental. Without it the model
+   * assesses a rental blind.
+   */
+  operation?: string | null;
+  /** piso | chalet | local | nave | garaje | terreno | edificio | … */
+  propertyType?: string | null;
   price?: number | null;
   m2Built?: number | null;
   rooms?: number | null;

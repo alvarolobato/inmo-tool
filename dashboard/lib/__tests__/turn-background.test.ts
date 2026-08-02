@@ -65,6 +65,11 @@ vi.mock("@/lib/llm-client", () => ({
 
 vi.mock("@/lib/llm-context", () => ({
   assembleRequest: (...a: unknown[]) => mockAssembleRequest(...a),
+  // Real implementation, not a stub: runGenericTurn narrows conversation.mode
+  // through this before calling assembleRequest, so stubbing it true/false
+  // would hide whether legacy modes actually fall back to chat.
+  isLlmFlow: (value: string) =>
+    ["occupancy", "condition", "redflags", "extract", "compare", "chat"].includes(value),
 }));
 
 const mockSql = vi.fn();
@@ -483,5 +488,29 @@ describe("runTurnBackground — generic fallback path", () => {
 
     expect(mockAssembleRequest).toHaveBeenCalledOnce();
     expect(mockUpdateTurnStatus).toHaveBeenLastCalledWith(TURN_ID, "complete");
+  });
+
+  it("narrows an unrecognised legacy mode to the chat flow", async () => {
+    // `conversations.mode` is free text and predates the #24 flow catalog, so
+    // rows written by the inherited product still carry 'view', 'generate',
+    // 'analyze'. buildSystemPrompt has no case for those and returns an empty
+    // prompt, so passing the raw value through would bill a real LLM call with
+    // no system prompt and no tools.
+    const conv = makeConv({ mode: "generate", context_kind: "dashboard" });
+
+    await runTurnBackground(TURN_ID, conv, "genérame algo");
+
+    expect(mockAssembleRequest).toHaveBeenCalledOnce();
+    const flowArg = mockAssembleRequest.mock.calls[0]?.[0];
+    expect(flowArg).toBe("chat");
+    expect(flowArg).not.toBe("generate");
+  });
+
+  it("passes a recognised flow through unchanged", async () => {
+    const conv = makeConv({ mode: "occupancy", context_kind: "dashboard" });
+
+    await runTurnBackground(TURN_ID, conv, "¿está ocupado?");
+
+    expect(mockAssembleRequest.mock.calls[0]?.[0]).toBe("occupancy");
   });
 });

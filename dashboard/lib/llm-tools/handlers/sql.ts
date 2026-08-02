@@ -27,6 +27,78 @@ const TableSchema = z.object({
     .regex(/^[a-z_][a-z0-9_]*$/i, "table must be a plain identifier"),
 });
 
+/**
+ * Domain tables the LLM may see, describe, and query.
+ *
+ * An allowlist, not a denylist: `public` also holds the app's own operational
+ * tables — `conversations`/`conversation_messages`/`turn_events` (the chat's
+ * own transcripts), `llm_errors`/`llm_usage`/`llm_interactions` (prompt text
+ * and spend), `connector_config`/`extension_capture` — none of which are ever
+ * a legitimate answer to a question about properties, and all of which the
+ * chat could otherwise read back to a user or feed into its own context.
+ *
+ * The pre-port code got this incidentally right via a `^ps_` prefix filter on
+ * the mirrored source tables; this schema names its tables plainly, so the
+ * restriction has to be explicit. Adding a table here is a deliberate act.
+ */
+export const LLM_VISIBLE_TABLES: readonly string[] = [
+  "property",
+  "listing",
+  "listing_price_history",
+  "listing_status_event",
+  "search_profile",
+  "profile_listing_state",
+  "feedback_event",
+  "ai_assessment",
+  "property_merge_log",
+  "suggested_merge",
+] as const;
+
+const LLM_VISIBLE_TABLE_SET = new Set<string>(LLM_VISIBLE_TABLES);
+
+export function isLlmVisibleTable(table: string): boolean {
+  return LLM_VISIBLE_TABLE_SET.has(table.toLowerCase());
+}
+
+/**
+ * Table identifiers referenced by a SQL statement, lower-cased.
+ *
+ * Deliberately over-collects (it matches after FROM/JOIN/UPDATE/INTO, including
+ * inside comments or strings) because this feeds a *deny* decision: an extra
+ * candidate can only cause a safe rejection, whereas a missed one would let a
+ * non-visible table through. `validateReadOnly` already blocks DML/DDL, so the
+ * realistic bypass to close is a SELECT reaching a table it shouldn't.
+ */
+export function referencedTables(sql: string): string[] {
+  const found = new Set<string>();
+  const re = /\b(?:from|join|into|update)\s+(?:only\s+)?(?:"?public"?\.)?"?([a-z_][a-z0-9_]*)"?/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(sql)) !== null) {
+    const name = m[1]?.toLowerCase();
+    if (name) found.add(name);
+  }
+  return [...found];
+}
+
+/**
+ * Reject a query touching anything outside {@link LLM_VISIBLE_TABLES}.
+ *
+ * `information_schema`/`pg_catalog` lookups are allowed through: they expose
+ * only metadata, and `describe_table` is itself built on one. Returns a message
+ * for the caller to surface, or null when the query is acceptable.
+ */
+export function disallowedTableReason(sql: string): string | null {
+  const referenced = referencedTables(sql).filter(
+    (t) => !t.startsWith("pg_") && t !== "columns" && t !== "tables",
+  );
+  const blocked = referenced.filter((t) => !isLlmVisibleTable(t));
+  if (blocked.length === 0) return null;
+  return (
+    `Query references table(s) not available to this assistant: ${blocked.join(", ")}. ` +
+    `Available tables: ${LLM_VISIBLE_TABLES.join(", ")}.`
+  );
+}
+
 /** Agentic SQL tools must not accept bare EXPLAIN / EXPLAIN ANALYZE (cost bypass + side effects). */
 function agenticSelectOrWithReason(sql: string): string | null {
   const trimmed = sql.trimStart();
@@ -67,6 +139,14 @@ export async function handleValidateQuery(
       valid: false,
       lint_issues: lintWidgetSql(args.sql),
       reason: agenticSqlErr,
+    });
+  }
+  const tableErr = disallowedTableReason(args.sql);
+  if (tableErr) {
+    return toolOk({
+      valid: false,
+      lint_issues: lintWidgetSql(args.sql),
+      reason: tableErr,
     });
   }
   try {
@@ -131,6 +211,10 @@ export async function handleExplainQuery(
       error: "explain_query only supports SELECT/WITH (not bare EXPLAIN).",
     });
   }
+  const explainTableErr = disallowedTableReason(args.sql);
+  if (explainTableErr) {
+    return toolOk({ explain: null, error: explainTableErr });
+  }
   try {
     const planSql = `EXPLAIN (FORMAT JSON) ${args.sql}`;
     validateReadOnly(planSql);
@@ -167,6 +251,10 @@ export async function handleExecuteQuery(
       columns: [],
       error: agenticSqlErr,
     });
+  }
+  const executeTableErr = disallowedTableReason(args.sql);
+  if (executeTableErr) {
+    return toolOk({ rows: [], columns: [], error: executeTableErr });
   }
   try {
     validateReadOnly(args.sql);
@@ -221,20 +309,21 @@ export async function handleListTables(
   _rawArgs: string,
   ctx: LlmAgenticContext,
 ): Promise<ToolResponseBody> {
-  // Every base table in `public`. The old `^ps_` filter was a PowerShop-mirror
-  // convention; this schema names its tables plainly (property, listing,
-  // search_profile, …), so filtering on a prefix would hide everything.
+  // Only the domain tables in LLM_VISIBLE_TABLES, intersected with what the
+  // database actually has (so a table not yet migrated in is simply absent
+  // rather than advertised and then failing on describe). The allowlist is
+  // applied in SQL rather than filtering afterwards so the operational tables
+  // never leave the database.
   const sql = `
     SELECT table_name
     FROM information_schema.tables
     WHERE table_schema = 'public'
       AND table_type = 'BASE TABLE'
+      AND table_name = ANY($1)
     ORDER BY table_name
-    LIMIT 500
   `;
   try {
-    validateReadOnly(sql);
-    const res = await query(sql);
+    const res = await query(sql, [LLM_VISIBLE_TABLES as unknown as string[]]);
     const names = res.rows.map((r) => String(r[0]));
     return toolOk({ tables: names });
   } catch {
@@ -251,6 +340,16 @@ export async function handleDescribeTable(
     args = TableSchema.parse(JSON.parse(rawArgs || "{}"));
   } catch {
     return toolError("INVALID_ARGS", "Invalid arguments for describe_table.", ctx);
+  }
+  if (!isLlmVisibleTable(args.table)) {
+    // Not DB_ERROR: the table may well exist. It is simply not one this
+    // assistant is allowed to introspect (see LLM_VISIBLE_TABLES).
+    return toolError(
+      "INVALID_ARGS",
+      `Table "${args.table}" is not available to this assistant. ` +
+        `Available tables: ${LLM_VISIBLE_TABLES.join(", ")}.`,
+      ctx,
+    );
   }
   try {
     const res = await query(

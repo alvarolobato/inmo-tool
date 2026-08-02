@@ -563,8 +563,20 @@ async function runGenericTurn(
   turnId: string,
   seq: () => number,
 ): Promise<TurnReply> {
-  const { assembleRequest } = await import("@/lib/llm-context");
-  const flowRaw = conversation.mode ?? "chat";
+  const { assembleRequest, isLlmFlow } = await import("@/lib/llm-context");
+  // `conversation.mode` is free text in the DB and predates the Phase 4 flow
+  // catalog — rows written by the inherited product still carry 'generate',
+  // 'analyze', etc. buildSystemPrompt has no case for those and falls through
+  // to an empty prompt, so passing the raw value would bill a real LLM call
+  // with no system prompt and no tools. Anything unrecognised is chat.
+  const modeRaw = conversation.mode ?? "chat";
+  const flowRaw = isLlmFlow(modeRaw) ? modeRaw : "chat";
+  if (flowRaw !== modeRaw) {
+    console.warn(
+      `[turn-background] conversation ${conversationId} has unrecognised mode ` +
+        `"${modeRaw}" (legacy or corrupt); falling back to the chat flow.`,
+    );
+  }
   const ctxWrite: ContextWriteHandle = { done: Promise.resolve() };
   // agenticCtx is captured so we can read back any tool calls after the run.
   const agenticCtx: import("@/lib/llm-tools/types").LlmAgenticContext = {

@@ -226,4 +226,70 @@ describe("assembleRequest", () => {
     ).resolves.toHaveProperty("text", "mocked response");
     expect(onSystemPromptReady).toHaveBeenCalled();
   });
+
+  // The suite above pins DASHBOARD_AGENTIC_TOOLS_ENABLED=false and stubs
+  // CHAT_TOOLS to [], so every test lands on the single-shot llmComplete path.
+  // That leaves the branch that actually routes a flow into the tool loop
+  // untested — and toolsForFlow() returning a non-empty array *is* the switch,
+  // so a regression there would silently turn chat into a single-shot call (or
+  // worse, hand tools to an assessment flow) with no test failing.
+  describe("agentic branch", () => {
+    beforeEach(() => {
+      vi.stubEnv("DASHBOARD_AGENTIC_TOOLS_ENABLED", "true");
+      // runAgenticChat resolves { content, usage } — not the { text, usage }
+      // shape llmComplete uses. assembleRequest normalises them to a common
+      // AssembleResult, which is exactly what this test pins.
+      mockRunAgenticChat.mockResolvedValue({
+        content: "agentic response",
+        usage: {
+          prompt_tokens: 11,
+          completion_tokens: 22,
+          total_tokens: 33,
+          cache_creation_input_tokens: null,
+          cache_read_input_tokens: null,
+        },
+        provider: "openrouter",
+      });
+    });
+
+    it("routes chat through runAgenticChat, not llmComplete, when tools exist", async () => {
+      const { CHAT_TOOLS } = await import("@/lib/llm-tools/catalog");
+      // Guard the guard: with an empty catalog this test would pass for the
+      // wrong reason (no tools → single-shot → but we'd never notice).
+      (CHAT_TOOLS as unknown[]).push({
+        type: "function",
+        function: { name: "list_tables", parameters: { type: "object", properties: {} } },
+      });
+      try {
+        const result = await assembleRequest("chat", {}, null, "¿Qué pisos tengo?");
+        expect(mockRunAgenticChat).toHaveBeenCalledTimes(1);
+        expect(mockLlmComplete).not.toHaveBeenCalled();
+        expect(result.text).toBe("agentic response");
+        expect(result.usage?.total_tokens).toBe(33);
+        const tools = mockRunAgenticChat.mock.calls[0]?.[0]?.tools;
+        expect(Array.isArray(tools)).toBe(true);
+        expect(tools.length).toBeGreaterThan(0);
+      } finally {
+        (CHAT_TOOLS as unknown[]).length = 0;
+      }
+    });
+
+    it("keeps single-listing assessment flows off the tool loop even when tools are enabled", async () => {
+      const { CHAT_TOOLS } = await import("@/lib/llm-tools/catalog");
+      (CHAT_TOOLS as unknown[]).push({
+        type: "function",
+        function: { name: "list_tables", parameters: { type: "object", properties: {} } },
+      });
+      try {
+        // An assessment must not acquire tools: it would let the model query
+        // other properties mid-assessment, which is the cross-property bleed
+        // the single-shot design exists to prevent.
+        await assembleRequest("occupancy", {}, null, "Evalúa");
+        expect(mockRunAgenticChat).not.toHaveBeenCalled();
+        expect(mockLlmComplete).toHaveBeenCalledTimes(1);
+      } finally {
+        (CHAT_TOOLS as unknown[]).length = 0;
+      }
+    });
+  });
 });

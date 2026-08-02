@@ -62,7 +62,13 @@ function formatListing(l: ListingSnapshot, label = "ANUNCIO"): string {
 
   const lines = [
     field("id_propiedad", l.propertyId),
+    // Emitted so an assessment can be traced back to the exact listing row it
+    // came from — ai_assessment keys on listing_id, not property_id, and a
+    // deduplicated property can have several listings with different text.
+    field("id_anuncio", l.listingId),
     field("portal", l.source),
+    field("operacion", l.operation),
+    field("tipo_inmueble", l.propertyType),
     field("titulo", l.title),
     field("precio_eur", l.price),
     field("m2_construidos", l.m2Built),
@@ -140,6 +146,27 @@ nombres de tablas ni de columnas.`;
 // ── Per-flow prompt builders ──────────────────────────────────────────────────
 //
 // Each returns { stable, volatile? }. Tasks #25–#30 replace these bodies.
+//
+// ENUM LANGUAGE CONVENTION (applies to every value a flow emits into
+// ai_assessment.result, and to any enum added by #25–#30):
+//
+//   English  — generic system state, the same idea in any market:
+//              occupancy `vacant`/`tenanted`/`unknown`, and in the schema
+//              listing.status, operation, pipeline_stage, score_kind,
+//              feedback_type.
+//   Spanish  — Spanish real-estate market categories, where translating
+//              loses a real distinction: condition `obra_nueva` /
+//              `a_reformar` / `a_rehabilitar`, and in the schema
+//              property_type (`piso`, `atico`, …) and listing_kind
+//              (`particular`).
+//
+// This is the rule the existing schema already follows, not a new one, and
+// it's why occupancy and condition legitimately differ. `a_reformar` vs
+// `a_rehabilitar` is a genuine market distinction (cosmetic refurbishment vs
+// structural rehabilitation) that "needs_renovation" would flatten, exactly
+// as "flat" flattens `piso` vs `atico`. Values stay machine-readable and
+// stable; Spanish *display* labels belong at render time — see
+// lib/listing-status-labels.ts for that pattern.
 
 /** #25 — occupancy: is the property tenanted / occupied / vacant? */
 export function buildOccupancyPrompt(vars: FlowVars): {

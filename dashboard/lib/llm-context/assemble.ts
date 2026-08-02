@@ -54,9 +54,12 @@ export interface AssembleExecutionOpts {
   /** Pre-loaded prior messages (skips DB load when provided). */
   priorMessages?: HistoryMessage[];
   /**
-   * Mutable agentic context. Tool handlers write side-channel results back to
-   * ctx (ctx.modifyResult, ctx.analyzeResult). The caller reads these AFTER
-   * assembleRequest() returns.
+   * Mutable agentic context. The runner appends each tool round-trip to
+   * `ctx.toolCalls`, which the caller reads AFTER assembleRequest() returns to
+   * persist what was queried alongside the assistant message. (The old
+   * `ctx.modifyResult` / `ctx.analyzeResult` write-back slots went away with
+   * the dashboard publish tools in #24 — the real-estate flows return their
+   * JSON directly rather than staging it on ctx.)
    * When omitted a minimal context is constructed from requestId + endpoint.
    */
   ctx?: LlmAgenticContext;

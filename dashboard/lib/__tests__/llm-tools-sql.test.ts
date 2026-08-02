@@ -122,3 +122,95 @@ describe("SQL tool handlers", () => {
     }
   });
 });
+
+// ── Table allowlist (#24 review) ─────────────────────────────────────────────
+//
+// `public` holds the app's own operational tables alongside the domain ones:
+// conversations/conversation_messages/turn_events (the chat's own transcripts),
+// llm_errors/llm_usage (prompt text and spend), connector_config,
+// extension_capture. None is ever a legitimate answer to a question about
+// properties, and the chat could otherwise read its own history back to a user.
+// The pre-port code excluded them incidentally via a `^ps_` prefix filter; this
+// schema names tables plainly, so the restriction has to be explicit.
+describe("SQL tool table allowlist", () => {
+  it("describe_table refuses a table outside the allowlist", async () => {
+    const out = await handleDescribeTable(
+      JSON.stringify({ table: "conversation_messages" }),
+      ctx,
+    );
+    expect(out.ok).toBe(false);
+    if (!out.ok) {
+      expect(out.code).toBe("INVALID_ARGS");
+      expect(out.message).toContain("not available");
+    }
+  });
+
+  it("describe_table refuses the llm_errors table (prompt text + spend)", async () => {
+    const out = await handleDescribeTable(JSON.stringify({ table: "llm_errors" }), ctx);
+    expect(out.ok).toBe(false);
+  });
+
+  it("execute_query refuses a SELECT against conversation_messages", async () => {
+    const out = await handleExecuteQuery(
+      JSON.stringify({ sql: "SELECT content FROM conversation_messages" }),
+      ctx,
+    );
+    // toolOk with an error payload: the model sees a usable refusal, not a crash.
+    expect(out.ok).toBe(true);
+    if (out.ok) {
+      const body = out.data as { error?: string; rows?: unknown[] };
+      expect(body.error).toContain("not available");
+      expect(body.rows).toEqual([]);
+    }
+  });
+
+  it("execute_query refuses a non-visible table reached through a JOIN", async () => {
+    const out = await handleExecuteQuery(
+      JSON.stringify({
+        sql: "SELECT p.id FROM property p JOIN conversations c ON c.id = p.id",
+      }),
+      ctx,
+    );
+    expect(out.ok).toBe(true);
+    if (out.ok) {
+      const body = out.data as { error?: string };
+      expect(body.error).toContain("conversations");
+    }
+  });
+
+  it("validate_query reports a non-visible table as invalid rather than valid", async () => {
+    const out = await handleValidateQuery(
+      JSON.stringify({ sql: "SELECT * FROM turn_events" }),
+      ctx,
+    );
+    expect(out.ok).toBe(true);
+    if (out.ok) {
+      const body = out.data as { valid?: boolean; reason?: string };
+      expect(body.valid).toBe(false);
+      expect(body.reason).toContain("not available");
+    }
+  });
+
+  it("explain_query refuses a non-visible table", async () => {
+    const out = await handleExplainQuery(
+      JSON.stringify({ sql: "SELECT * FROM connector_config" }),
+      ctx,
+    );
+    expect(out.ok).toBe(true);
+    if (out.ok) {
+      const body = out.data as { error?: string };
+      expect(body.error).toContain("not available");
+    }
+  });
+
+  it("allows the domain tables the assistant is meant to answer from", async () => {
+    for (const table of ["property", "listing", "search_profile", "ai_assessment"]) {
+      const out = await handleDescribeTable(JSON.stringify({ table }), ctx);
+      // Either it describes the table, or it fails on the DB connection in a
+      // unit-test environment — what it must NOT do is refuse on the allowlist.
+      if (!out.ok) {
+        expect(out.code).not.toBe("INVALID_ARGS");
+      }
+    }
+  });
+});
