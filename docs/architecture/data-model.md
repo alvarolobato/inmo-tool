@@ -114,6 +114,49 @@ Same keying logic as above: `property_id NOT NULL` is what identifies what the f
 
 Append-only — a correction or changed mind is a new row (`feedback_type = 'correction'` or a fresh `accept`/`reject`), never an `UPDATE` of a prior event. The full history is what a future scoring-model retrain (Phase 3) or an audit of "why did the tool think this was a good match three weeks ago" needs.
 
+### `score` / `rank_explanation` / `score_kind` (Phase 3, issues #21–23)
+
+Three columns on `profile_listing_state` that Phase 1's schema created but left unwritten until Phase 3:
+
+- **`score`** — a `NUMERIC` in `(0, 1)`, either a real trained-model prediction or a deterministic cold-start heuristic (see below). `NULL` means "never scored" — a candidate that materialized (task 2.4) but hasn't yet gone through either scoring path.
+- **`rank_explanation`** — a human-readable Spanish sentence grounded in the actual computation that produced `score`, not a generic template. Built by `dashboard/lib/scoring/explain.ts`'s `explainScore()` from the same feature vector, weights, bias, and normalization stats used to compute the score itself — the explanation and the number it explains always come from one shared computation, never two independently-derived things that could drift apart.
+- **`score_kind`** — `'cold_start'` or `'trained'`, `NULL` alongside a `NULL` score. Added late in task 3.4's review round (Fable's review of PR #93) to replace a fragile string-equality check against `explain.ts`'s `COLD_START_EXPLANATION` UI text as the only way to tell the two kinds of score apart — that text is cosmetic copy that could change for unrelated reasons and silently break the distinction. Written by every scoring code path (`retrain.ts`, `pipeline.ts`'s `scoreNewCandidates`) but **not currently read by any UI query** (candidate list, map, property detail) — this is deliberate, not dead weight: `rank_explanation`'s own text already communicates cold-start-vs-trained to the user, so no UI currently needs the column as a separate signal. It exists for internal correctness (distinguishing the two scoring paths without depending on UI copy) and as a hook for a future feature that might want to filter/badge on it explicitly.
+
+### `profile_scoring_model` — one trained model per profile
+
+```sql
+profile_id              BIGINT PRIMARY KEY REFERENCES search_profile(id) ON DELETE CASCADE
+coefficients            JSONB  NOT NULL
+trained_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+training_example_count  INTEGER NOT NULL
+```
+
+`coefficients` carries the whole model — feature names, weights, bias, and the z-score normalization stats (mean/std per feature) used to standardize a candidate's raw features before scoring — as one JSONB blob rather than one column per field, since the exact shape is expected to evolve as later phases add features (Phase 4's AI-derived inputs, Phase 5's yield/days-on-market) and a JSONB blob absorbs that without a migration each time. A hand-rolled, L2-regularized logistic regression (not a library), trained via batch gradient descent on that profile's own `feedback_event` history — `accept`/`star` label positive, `reject` labels negative (a `star` **replaces** `accept` as a property's current-state toggle per the feedback UI, task 3.1, but both still count as positive training labels — a real bug, caught in review, where starring your only accepted property silently zeroed out the positive class and permanently halted training for that profile).
+
+**Normalization statistics are computed from the full matched candidate pool, not just the labeled (feedback-having) subset** — a real train/serve skew bug, caught in review of task 3.2: computing mean/std from ~10 labeled rows and then applying those stats to score hundreds of unlabeled candidates pushed most feature vectors into saturated, uninformative regions of the sigmoid. Pool-wide stats are used consistently both when training and when scoring.
+
+**`MIN_TRAINING_EXAMPLES`** (`dashboard/lib/scoring/pipeline.ts`) gates when a real trained model is trusted over cold-start ordering: `4 × FEATURE_NAMES.length` (32 at the current 8-feature model), landing in the middle of issue #23's "roughly 3-5x feature count" range — picked without real usage data to tune against, worth revisiting once there is some. Below this threshold, `retrain.ts` still fits a model if both classes exist (L2 regularization keeps a tiny fit non-degenerate — no coefficient blowup), but `profile_listing_state` uses cold-start ordering instead of that under-trained fit, since a handful of points can't meaningfully separate an 8-dimensional space well enough to be more useful than the simpler heuristic.
+
+### Cold-start scoring (no trained model yet, or below the training threshold)
+
+`computeColdStartScore` (`dashboard/lib/scoring/pipeline.ts`) — price-per-m² ascending (cheapest scores highest), via `1 / (1 + v)` where `v` is `price_per_m2_relative` (task 3.2's feature: candidate price-per-m² divided by the profile's target price-per-m², so `v = 1` means "priced exactly at what this profile's price/size band considers typical" — this reference point is a per-profile constant, so a scored candidate is being compared against *this profile's own* notion of a typical price, not the general market). At `v = 1` the result is exactly 0.5, matching a real trained model's sigmoid output range so cold-start and trained scores are least on comparable footing even though they're not the same kind of number.
+
+`price_per_m2_relative` is `null` in two genuinely different situations that used to collapse into the same "score everyone 0.5" behavior (a real bug, caught in Fable's review of PR #93 — a profile with no configured price band scored every single candidate identically, producing a fully arbitrary/tied cold-start order, which defeats the entire point of cold-start ordering):
+
+1. The candidate's own price/size data is missing — nothing to rank this specific candidate by; still 0.5, no fallback data exists for this one candidate.
+2. The *profile* has no price band configured at all (common — issue #17 never made a price band mandatory) but the candidate's own price/size ARE known. Falls back to `poolMedianPricePerM2` — the candidate's price-per-m² relative to the whole matched pool's *median* (not mean, so one outlier listing doesn't skew every other candidate's score) — so cold-start ordering still reflects "cheaper than comparable options in this pool" instead of a tie.
+
+### Scoring trigger points
+
+Two, both in `dashboard/lib/scoring/`, not the Python ETL side:
+
+1. **`retrain.ts`'s `retrainAndRescoreProfile`** — runs after every real (non-no-op) `accept`/`reject`/`star` feedback event, called synchronously from the feedback API route and awaited before the response returns. Retrains the model (if enough examples exist) and rescores every one of the profile's matched candidates, not just the one that got feedback.
+2. **`pipeline.ts`'s `scoreNewCandidates`** — closes a gap `retrain.ts` explicitly documents: a candidate materialized (task 2.4) *after* a profile's last retrain would otherwise sit at `score = NULL` indefinitely until the next feedback event happens to retrain-and-rescore everything. Called from `materialize.ts` right after new `matched = true` rows land, scoring just those rows against whichever state currently applies (a valid trained model if the threshold is met, cold-start ordering otherwise) — without retraining the model itself; retraining only ever happens in response to feedback.
+
+Both writers guard their cold-start `UPDATE`s with `score IS NULL` so a profile that goes one-sided again after having trained successfully doesn't have a real prior score/explanation silently clobbered by a fresh cold-start write (a real bug, caught in review of PR #92 for `retrain.ts` and brought in line for `pipeline.ts` in Fable's review of PR #93).
+
+**Not yet wired**: a connector run (Python, `etl/`) finishing and landing new listings does not itself trigger scoring for any profile — a freshly-ingested property only gets scored once a human (or the UI) explicitly re-triggers per-profile materialization, which then calls `scoreNewCandidates` per the trigger above. Tracked as issue #94 (also gated on a real gap: `POST /api/profiles/materialize-all` is currently unauthenticated).
+
 ## AI assessments
 
 ### `ai_assessment`

@@ -160,11 +160,19 @@ export function explainScore(
   // could have its top individual factor be a small positive while smaller,
   // less-prominent negatives outweigh it in total; the "ranked high/low"
   // framing should match the actual score, not just the loudest input.
-  // "Encaja bien/mal", not "Ranking alto/bajo": candidates.ts orders this
-  // profile's list by property id, not by score, so there is no actual rank
-  // to report — an absolute sigmoid-0.5 cutoff would otherwise mislabel the
+  // "Encaja bien/mal", not "Ranking alto/bajo": originally chosen (Opus
+  // review of PR #92, item 2) because candidates.ts ordered this profile's
+  // list by property id, not by score, so there was no actual rank to
+  // report and an absolute sigmoid-0.5 cutoff would mislabel the
   // best-scoring candidate in a mostly-rejected, early-life profile as
-  // "Ranking bajo" (Opus review of PR #92, item 2).
+  // "Ranking bajo". Task 3.4 (#23) made candidates.ts sort globally by
+  // score, so a real rank now exists — kept "Encaja bien/mal" anyway
+  // (Fable phase-3 review) rather than switching to rank language, since
+  // this sentence is generated from one candidate's own feature
+  // contributions with no visibility into the rest of the pool; a
+  // "ranked high" claim implied more certainty about relative standing
+  // than a single-candidate computation actually has, especially in a
+  // small/early-life pool where one new listing can reorder everything.
   const total = contributions.reduce((sum, c) => sum + c.contribution, 0) + model.bias;
   const prefix = total >= 0 ? "Encaja bien con tu perfil: " : "Encaja mal con tu perfil: ";
 

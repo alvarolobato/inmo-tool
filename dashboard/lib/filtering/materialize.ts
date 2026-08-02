@@ -129,8 +129,23 @@ export async function materializeProfile(profileId: number): Promise<Materialize
   // already-correctly-scored candidate reproduces the same number — this
   // also mops up any pre-existing never-scored rows for the profile, not
   // just ones this specific run just matched.
+  //
+  // Isolated in its own try/catch (Fable phase-3 review): a scoring failure
+  // here previously propagated straight out of materializeProfile, turning
+  // an already-committed successful match into a 500 from the single-profile
+  // route, and into a misreported "error" outcome from materializeAllProfiles
+  // — in both cases contradicting this comment's own "isn't a correctness
+  // problem" claim. Mirrors the feedback route's existing log-and-swallow
+  // pattern for the equivalent retrainAndRescoreProfile call.
   if (result.matchedIds.length > 0) {
-    await scoreNewCandidates(profileId, result.matchedIds);
+    try {
+      await scoreNewCandidates(profileId, result.matchedIds);
+    } catch (err) {
+      console.error(
+        `[materializeProfile] No se pudieron puntuar los candidatos nuevos del perfil ${profileId}:`,
+        err,
+      );
+    }
   }
 
   return { profileId: result.profileId, matchedCount: result.matchedCount, unmatchedCount: result.unmatchedCount };
