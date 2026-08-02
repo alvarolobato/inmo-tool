@@ -79,6 +79,7 @@ from etl.connectors.solvia_mapping import (
     extract_m2_plot,
     extract_operation,
     extract_photo_urls,
+    map_property_type,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,12 +101,28 @@ _NG_STATE_RE = re.compile(
 # Detail URLs are absolute in the SSR markup:
 # https://www.solvia.es/es/propiedades/comprar/piso-illescas-3-dormitorios-147621-184464
 # The trailing "<idPromocion>-<idVivienda>" pair is the stable identity; the
-# leading slug is descriptive and changes with the title. external_id is the
-# full slug because fetch_detail needs the whole path to re-fetch — the site
-# does not serve a detail page from the numeric ids alone.
+# leading slug is descriptive and changes whenever the title does (room count,
+# municipality renaming, type reclassification).
+#
+# external_id is therefore the numeric pair ALONE, not the full slug. `listing`
+# is keyed on (source, external_id), so a slug-derived id would make a retitled
+# listing look like a brand-new property: a duplicate `listing` row for one
+# flat, which then pollutes dedup rather than updating in place (#138 review).
+#
+# This is safe because Solvia serves the detail page from a placeholder slug —
+# verified live during the review: /es/propiedades/comprar/x-147621-184464
+# returns HTTP 200 with byte-identical `propertyBasicDetail` (idVivienda
+# 184464, idPromocion 147621, same price/address/refCatastral) to the real
+# slug. Fotocasa's connector relies on the same trick.
+# The trailing (?![\w-]) matters: hrefs appear both bare and inside tracking
+# URLs ("...-64377-160385&url=https://..."), and without the boundary the
+# numeric pair would be re-matched mid-string against the embedded copy.
 _DETAIL_HREF_RE = re.compile(
-    r"https://www\.solvia\.es(/es/propiedades/comprar/[a-z0-9-]+)"
+    r"https://www\.solvia\.es/es/propiedades/comprar/[a-z0-9-]+?-(\d+-\d+)(?![\w-])"
 )
+
+# Any non-empty slug works; "x" mirrors Fotocasa's placeholder convention.
+_DETAIL_PATH_TEMPLATE = "/es/propiedades/comprar/x-{external_id}"
 
 # (provincia, municipio) path segments per known city centroid. An explicit
 # table, not a slugify() of the centroid name: Solvia's provincia slugs are
@@ -232,7 +249,7 @@ class SolviaConnector(Connector):
         return external_ids
 
     def fetch_detail(self, external_id: str, throttle: Throttle) -> RawListing:
-        url = f"{_BASE_URL}{external_id}"
+        url = f"{_BASE_URL}{_DETAIL_PATH_TEMPLATE.format(external_id=external_id)}"
         html = _get(url, throttle, context="fetch_detail")
         state = _parse_ng_state(html, context="fetch_detail")
         detail = state.get("propertyBasicDetail")
@@ -282,9 +299,24 @@ class SolviaConnector(Connector):
         def _price_from_markup() -> Any:
             if str(detail.get("mostrarPrecio", "S")).upper() == "N":
                 return None
-            match = re.search(r'data-price="([0-9]+(?:\.[0-9]+)?)"', html) or re.search(
-                r"([0-9]{1,3}(?:\.[0-9]{3})+)\s*€", html
-            )
+            # `data-price` is an explicit attribute, safe to search document-
+            # wide. The bare "123.456 €" pattern is NOT: a detail page also
+            # renders "similar properties" cards, and an unscoped search
+            # happily returns a neighbour's price. The Vivantial connector
+            # (#139) shipped exactly that bug — 310.000 € read off an
+            # adjacent card instead of the listing's real 288.000 € — so
+            # restrict the text pattern to the main price container.
+            match = re.search(r'data-price="([0-9]+(?:\.[0-9]+)?)"', html)
+            if match is None:
+                price_block = re.search(
+                    r'<[^>]+class="[^"]*\b(?:price|precio)\b[^"]*"[^>]*>(.{0,400}?)</',
+                    html,
+                    re.DOTALL | re.IGNORECASE,
+                )
+                if price_block is not None:
+                    match = re.search(
+                        r"([0-9]{1,3}(?:\.[0-9]{3})+)\s*€", price_block.group(1)
+                    )
             if match is None:
                 return None
             return _to_decimal(match.group(1).replace(".", ""))
@@ -293,22 +325,37 @@ class SolviaConnector(Connector):
             _price_from_state, _price_from_markup, field="current_price"
         )
 
-        # Rooms/bathrooms: structured first, then the URL slug, which encodes
-        # room count ("...-3-dormitorios-...") and survives a JSON rename.
+        # Rooms: structured first, then the descriptive slug, which encodes
+        # the room count ("...-3-dormitorios-...").
+        #
+        # The slug is read from `og:url` in the document, not from
+        # raw.external_id — external_id is now the bare numeric pair, and
+        # fetch_detail requests a placeholder slug. Verified live: under a
+        # placeholder fetch `rel="canonical"` echoes the placeholder back
+        # ("x-147621-184464") but `og:url` still carries the real slug
+        # ("piso-illescas-3-dormitorios-147621-184464"), so og:url is the
+        # only fallback source that survives our own URL construction.
         def _rooms_from_state() -> Any:
             return _to_int(detail.get("totalDormitorios"))
 
-        def _rooms_from_slug() -> Any:
-            match = re.search(r"-(\d+)-dormitorios?-", raw.external_id)
+        def _rooms_from_og_url_slug() -> Any:
+            match = re.search(r'og:url"\s+content="[^"]*?-(\d+)-dormitorios?-', html)
             return int(match.group(1)) if match else None
 
-        rooms = first_present(_rooms_from_state, _rooms_from_slug, field="rooms")
+        rooms = first_present(_rooms_from_state, _rooms_from_og_url_slug, field="rooms")
 
-        property_type = first_present(
+        raw_property_type = first_present(
             lambda: _named(detail.get("tipoVivienda")),
             lambda: _named(detail.get("categoriaTipoVivienda")),
             field="property_type",
         )
+        property_type = map_property_type(raw_property_type)
+        if raw_property_type:
+            # Keep the source vocabulary: the map is lossy by design
+            # (Bajo/Estudio/Dúplex all collapse to 'piso', Trastero has no
+            # schema equivalent at all), and the original is the only way to
+            # tell those apart later or to notice an unmapped value appearing.
+            raw_extra["tipo_vivienda_raw"] = raw_property_type
 
         city = first_present(
             lambda: _named(detail.get("poblacion")),

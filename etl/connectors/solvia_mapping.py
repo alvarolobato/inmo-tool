@@ -16,8 +16,91 @@ exists, so the fields most likely to move carry CSS/`<title>` fallbacks.
 
 from __future__ import annotations
 
+import unicodedata
 from decimal import Decimal, InvalidOperation
 from typing import Any
+
+from etl.connectors.extraction import first_present
+
+# `tipoVivienda.name` -> property.property_type, whose CHECK constraint
+# (etl/schema/init.sql) allows only:
+#   'piso','chalet','atico','local','nave','garaje','terreno','edificio'
+#
+# Without this translation every Solvia INSERT raises CheckViolation: the
+# site's vocabulary ("Piso", "Locales", "Nave Industrial", ...) overlaps
+# ours only by accident. Both existing connectors carry the equivalent map
+# (fotocasa_mapping.BUILDING_TYPE_MAP, milanuncios_mapping's own) for the
+# same reason.
+#
+# Keys are accent-folded lowercase (see `_fold`) so "Dúplex"/"Duplex"/
+# "DÚPLEX" all resolve — Solvia's casing is inconsistent across trees and
+# an exact-match dict would silently drop the accented variants.
+#
+# Every value below marked (v) was read from a live `tipoVivienda.name` on
+# a real listing during the #138 review, one per slug family across the
+# viviendas/locales/garajes/naves/suelos/oficinas/trasteros search trees.
+# The unmarked ones are plausible siblings kept because an unmapped value
+# costs a NULL rather than a wrong answer.
+_PROPERTY_TYPE_MAP: dict[str, str] = {
+    # Flats and flat-likes
+    "piso": "piso",  # (v)
+    "bajo": "piso",  # (v) ground-floor flat, not a distinct schema type
+    "estudio": "piso",  # (v)
+    "duplex": "piso",  # (v) "Dúplex"
+    "apartamento": "piso",
+    "atico": "atico",
+    # Houses
+    "casa": "chalet",  # (v)
+    "chalet": "chalet",
+    "chalet adosado": "chalet",  # (v)
+    "chalet pareado": "chalet",
+    "chalet independiente": "chalet",
+    "casa adosada": "chalet",
+    "adosado": "chalet",
+    "pareado": "chalet",
+    # Commercial / industrial
+    "local": "local",
+    "locales": "local",  # (v) Solvia pluralises this one
+    "oficina": "local",  # schema has no 'oficina'; 'local' is the closest
+    "oficinas": "local",  # (v)
+    "nave": "nave",
+    "nave industrial": "nave",  # (v)
+    # Parking
+    "garaje": "garaje",  # (v)
+    "plaza de garaje": "garaje",
+    "parking": "garaje",
+    # Land
+    "terreno": "terreno",
+    "solar": "terreno",
+    "solares": "terreno",  # (v)
+    "suelo": "terreno",
+    "finca": "terreno",
+    # Whole buildings
+    "edificio": "edificio",
+    # Deliberately unmapped, though real and observed:
+    #   "Trastero" (v) — a storage room. The schema has no equivalent and
+    #   'local'/'garaje' would both be wrong, so it resolves to NULL. The
+    #   raw value survives in raw_extra either way.
+}
+
+
+def _fold(value: str) -> str:
+    """Lowercase and strip accents, so 'Dúplex' and 'Duplex' collapse."""
+    decomposed = unicodedata.normalize("NFKD", value.strip().lower())
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
+def map_property_type(raw_type: str | None) -> str | None:
+    """Translate Solvia's type name to the schema vocabulary; None if unknown.
+
+    None rather than a guess: `property_type` is nullable, so an unmapped
+    value costs a missing field, whereas a wrong guess silently mis-files a
+    property in every downstream filter and score.
+    """
+    if not raw_type or not raw_type.strip():
+        return None
+    return _PROPERTY_TYPE_MAP.get(_fold(raw_type))
+
 
 # `caracteristicas` booleans worth surfacing as `features` slug tokens.
 # Deliberately a curated allowlist, not "every true boolean": the raw
@@ -94,6 +177,23 @@ def _yes_no(value: Any) -> bool | None:
     return None
 
 
+def _photo_urls_from_key(detail: dict[str, Any], key: str) -> tuple[str, ...] | None:
+    """De-duplicated image URLs from one `listaImagenes*` key, or None."""
+    images = detail.get(key)
+    if not isinstance(images, list):
+        return None
+    urls: list[str] = []
+    for entry in images:
+        if not isinstance(entry, dict):
+            continue
+        url = entry.get("url")
+        if isinstance(url, str) and url.strip():
+            cleaned = url.strip().replace("\\", "/")
+            if cleaned not in urls:
+                urls.append(cleaned)
+    return tuple(urls) or None
+
+
 def extract_photo_urls(detail: dict[str, Any]) -> tuple[str, ...]:
     """Highest-resolution image list, de-duplicated, order preserved.
 
@@ -103,23 +203,20 @@ def extract_photo_urls(detail: dict[str, Any]) -> tuple[str, ...]:
     lose exactly the detail that signal discriminates on. Backslashes in
     the CDN paths are real in Solvia's payload (Windows-style separators
     leaking through), normalised here rather than at every call site.
+
+    Routed through `first_present` rather than a hand-rolled loop so a
+    getter that *raises* (rather than returning None) is logged with its
+    field name instead of vanishing — the observability #77 added
+    deliberately, which a bespoke `for` loop silently forfeits.
     """
-    for key in ("listaImagenesInmuebleOriginal", "listaImagenesInmueble"):
-        images = detail.get(key)
-        if not isinstance(images, list):
-            continue
-        urls: list[str] = []
-        for entry in images:
-            if not isinstance(entry, dict):
-                continue
-            url = entry.get("url")
-            if isinstance(url, str) and url.strip():
-                cleaned = url.strip().replace("\\", "/")
-                if cleaned not in urls:
-                    urls.append(cleaned)
-        if urls:
-            return tuple(urls)
-    return ()
+    return (
+        first_present(
+            lambda: _photo_urls_from_key(detail, "listaImagenesInmuebleOriginal"),
+            lambda: _photo_urls_from_key(detail, "listaImagenesInmueble"),
+            field="photo_urls",
+        )
+        or ()
+    )
 
 
 def extract_features(detail: dict[str, Any]) -> tuple[str, ...]:
@@ -192,10 +289,18 @@ def extract_address(detail: dict[str, Any]) -> str | None:
     is a genuine fallback rather than a different field wearing a
     different name.
     """
-    direccion = detail.get("direccion")
-    if isinstance(direccion, str) and direccion.strip():
-        return direccion.strip()
-    return _named(detail.get("promocion"))
+
+    def _from_direccion() -> str | None:
+        direccion = detail.get("direccion")
+        if isinstance(direccion, str) and direccion.strip():
+            return direccion.strip()
+        return None
+
+    return first_present(
+        _from_direccion,
+        lambda: _named(detail.get("promocion")),
+        field="address",
+    )
 
 
 def extract_m2_built(detail: dict[str, Any]) -> Decimal | None:
@@ -207,13 +312,18 @@ def extract_m2_built(detail: dict[str, Any]) -> Decimal | None:
     built-surface detail. Prefer the advertised one for comparability with
     other portals, which also advertise built surface.
     """
-    primary = _to_decimal(detail.get("m2"))
-    if primary is not None:
-        return primary
-    caracteristicas = detail.get("caracteristicas")
-    if isinstance(caracteristicas, dict):
-        return _to_decimal(caracteristicas.get("supConstruida"))
-    return None
+
+    def _from_caracteristicas() -> Decimal | None:
+        caracteristicas = detail.get("caracteristicas")
+        if isinstance(caracteristicas, dict):
+            return _to_decimal(caracteristicas.get("supConstruida"))
+        return None
+
+    return first_present(
+        lambda: _to_decimal(detail.get("m2")),
+        _from_caracteristicas,
+        field="m2_built",
+    )
 
 
 def extract_m2_plot(detail: dict[str, Any]) -> Decimal | None:

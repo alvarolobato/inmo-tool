@@ -19,8 +19,17 @@ import pytest
 
 from etl.connectors.base import ConnectorError, ConnectorScope
 from etl.connectors.solvia import SolviaConnector
+from etl.connectors.solvia_mapping import map_property_type
+from etl.orchestrator import _upsert_canonical_listing
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
+SCHEMA_SQL = pathlib.Path(__file__).resolve().parents[1] / "schema" / "init.sql"
+
+
+def _apply_schema(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(SCHEMA_SQL.read_text(encoding="utf-8"))
+    conn.commit()
 
 
 def _read(name: str) -> str:
@@ -81,11 +90,10 @@ class TestDiscover:
                 ConnectorScope(geography="alicante/torrevieja"), throttle=_noop_throttle
             )
         assert len(ids) == 3
-        assert all(i.startswith("/es/propiedades/comprar/") for i in ids)
-        assert (
-            "/es/propiedades/comprar/apartamento-torrevieja-2-dormitorios-220640-267805"
-            in ids
-        )
+        # The stable "<idPromocion>-<idVivienda>" pair, NOT the descriptive
+        # slug: the slug changes when the title does, which would make a
+        # retitled listing look like a new property (#138 review).
+        assert ids == ["220640-267805", "222830-270617", "224346-272477"]
 
     def test_page_without_ng_state_raises_rather_than_reporting_zero_listings(self):
         """A soft-block/structural change must not look like an empty geography.
@@ -115,7 +123,7 @@ class TestNormalize:
             return_value=_mock_response(_read("solvia_sample_detail.html")),
         ):
             raw = connector.fetch_detail(
-                "/es/propiedades/comprar/apartamento-torrevieja-2-dormitorios-220640-267805",
+                "220640-267805",
                 throttle=_noop_throttle,
             )
         return connector.normalize(raw)
@@ -127,7 +135,7 @@ class TestNormalize:
         assert c.rooms == 2
         assert c.bathrooms == 1
         assert c.m2_built == Decimal(50)
-        assert c.property_type == "Apartamento"
+        assert c.property_type == "piso"  # "Apartamento" -> schema vocabulary
         assert c.address == "C/ Villa Madrid"
         assert c.operation == "sale"
         assert c.status == "active"
@@ -213,14 +221,15 @@ class TestFallbackChains:
             "etl.connectors.solvia.requests.get", return_value=_mock_response(rebuilt)
         ):
             raw = connector.fetch_detail(
-                "/es/propiedades/comprar/apartamento-torrevieja-2-dormitorios-220640-267805",
+                "220640-267805",
                 throttle=_noop_throttle,
             )
         return connector.normalize(raw)
 
     def test_rooms_falls_back_to_url_slug_when_json_key_is_renamed(self):
         c = self._normalize_with_mutated_state(lambda s: s.pop("totalDormitorios"))
-        # "...-2-dormitorios-..." in the external_id still yields the answer.
+        # "...-2-dormitorios-..." in the page's own canonical URL still
+        # yields the answer (external_id is now the bare numeric pair).
         assert c.rooms == 2
 
     def test_m2_falls_back_to_superficie_construida(self):
@@ -235,7 +244,12 @@ class TestFallbackChains:
 
     def test_property_type_falls_back_to_category(self):
         c = self._normalize_with_mutated_state(lambda s: s.pop("tipoVivienda"))
-        assert c.property_type == "Viviendas"
+        # The fallback path fires (categoriaTipoVivienda == "Viviendas"), but
+        # "Viviendas" is not a schema value, so it maps to None rather than
+        # being written raw — which is what previously broke every INSERT.
+        assert c.property_type is None
+        # The raw value still survives for diagnosis.
+        assert c.raw_extra["tipo_vivienda_raw"] == "Viviendas"
 
     def test_withheld_price_is_none_not_a_markup_misparse(self):
         """`mostrarPrecio == 'N'` is a real state, not a parse failure.
@@ -262,3 +276,136 @@ class TestRegistration:
         connector = next(c for c in CONNECTORS if c.name == "solvia")
         # 20 of a geography's listings per sweep — absence proves nothing.
         assert connector.discovers_full_inventory is False
+
+
+class TestPropertyTypeMapping:
+    """Solvia's vocabulary must be translated to the schema's, not passed through.
+
+    `property.property_type` carries a CHECK constraint allowing only
+    ('piso','chalet','atico','local','nave','garaje','terreno','edificio').
+    Passing Solvia's own names ("Apartamento", "Locales", "Nave Industrial")
+    straight through makes every INSERT raise CheckViolation — see
+    TestDatabaseRoundTrip for the test that actually catches that.
+
+    The values below marked (v) were read from live `tipoVivienda.name`
+    fields during the #138 review, one per slug family across the
+    viviendas/locales/garajes/naves/suelos/oficinas/trasteros trees.
+    """
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("Piso", "piso"),  # (v)
+            ("Bajo", "piso"),  # (v)
+            ("Estudio", "piso"),  # (v)
+            ("Dúplex", "piso"),  # (v) accented
+            ("Casa", "chalet"),  # (v)
+            ("Chalet adosado", "chalet"),  # (v)
+            ("Locales", "local"),  # (v) Solvia pluralises
+            ("Oficinas", "local"),  # (v)
+            ("Nave Industrial", "nave"),  # (v)
+            ("Solares", "terreno"),  # (v)
+            ("Garaje", "garaje"),  # (v)
+            ("Apartamento", "piso"),
+            ("Ático", "atico"),
+        ],
+    )
+    def test_real_site_vocabulary_maps_into_the_schema_check(self, raw, expected):
+        assert map_property_type(raw) == expected
+
+    @pytest.mark.parametrize("raw", ["duplex", "DÚPLEX", "  Dúplex  "])
+    def test_case_and_accent_folding(self, raw):
+        """Solvia's casing/accenting is inconsistent across trees."""
+        assert map_property_type(raw) == "piso"
+
+    @pytest.mark.parametrize("raw", [None, "", "   ", "Viviendas", "Trastero"])
+    def test_unknown_values_yield_none_rather_than_a_guess(self, raw):
+        """None costs a NULL; a guess silently mis-files a property forever.
+
+        "Trastero" (v) is real and deliberately unmapped — a storage room
+        has no schema equivalent, and 'local'/'garaje' would both be wrong.
+        "Viviendas" is the categoriaTipoVivienda fallback value.
+        """
+        assert map_property_type(raw) is None
+
+
+class TestDatabaseRoundTrip:
+    """The gap that let the property_type bug ship.
+
+    Every other test in this file stops at `normalize()`, so a value that
+    is structurally fine but violates a schema CHECK passes them all while
+    failing 100% of real ingests. These drive the real orchestrator
+    persistence path against a real database instead.
+    """
+
+    def _persist(self, pg_conn):
+        _apply_schema(pg_conn)
+        connector = SolviaConnector()
+        with patch(
+            "etl.connectors.solvia.requests.get",
+            return_value=_mock_response(_read("solvia_sample_detail.html")),
+        ):
+            raw = connector.fetch_detail("220640-267805", throttle=_noop_throttle)
+        canonical = connector.normalize(raw)
+        _upsert_canonical_listing(pg_conn, canonical)
+        pg_conn.commit()
+        return canonical
+
+    def test_normalized_listing_actually_persists(self, pg_conn):
+        """Would have failed with CheckViolation before the mapping fix."""
+        self._persist(pg_conn)
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT p.property_type, p.city, p.province, p.postal_code,
+                       p.m2_built, p.rooms, l.current_price, l.source,
+                       l.external_id, l.operation
+                  FROM listing l JOIN property p ON p.id = l.property_id
+                 WHERE l.source = 'solvia'
+                """
+            )
+            row = cur.fetchone()
+        assert row is not None, "no row persisted"
+        (
+            property_type,
+            city,
+            province,
+            postal_code,
+            m2_built,
+            rooms,
+            price,
+            source,
+            external_id,
+            operation,
+        ) = row
+        assert property_type == "piso"
+        assert city == "Torrevieja"
+        assert province == "Alicante/Alacant"
+        assert postal_code == "03133"
+        assert m2_built == Decimal(50)
+        assert rooms == 2
+        assert price == Decimal(169000)
+        assert source == "solvia"
+        assert external_id == "220640-267805"
+        assert operation == "sale"
+
+    def test_re_ingest_updates_in_place_rather_than_duplicating(self, pg_conn):
+        """The stable numeric external_id is what makes this hold.
+
+        With the old slug-derived id, a retitled listing produced a second
+        `listing` row for the same flat — a phantom duplicate that then
+        polluted dedup rather than updating the original.
+        """
+        self._persist(pg_conn)
+        connector = SolviaConnector()
+        with patch(
+            "etl.connectors.solvia.requests.get",
+            return_value=_mock_response(_read("solvia_sample_detail.html")),
+        ):
+            raw = connector.fetch_detail("220640-267805", throttle=_noop_throttle)
+        _upsert_canonical_listing(pg_conn, connector.normalize(raw))
+        pg_conn.commit()
+
+        with pg_conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM listing WHERE source = 'solvia'")
+            assert cur.fetchone()[0] == 1
