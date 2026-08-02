@@ -65,21 +65,16 @@ vi.mock("@/lib/llm-client", () => ({
 
 vi.mock("@/lib/llm-context", () => ({
   assembleRequest: (...a: unknown[]) => mockAssembleRequest(...a),
+  // Real implementation, not a stub: runGenericTurn narrows conversation.mode
+  // through this before calling assembleRequest, so stubbing it true/false
+  // would hide whether legacy modes actually fall back to chat.
+  isLlmFlow: (value: string) =>
+    ["occupancy", "condition", "redflags", "extract", "compare", "chat"].includes(value),
 }));
 
 const mockSql = vi.fn();
-const mockUpdateDashboardSpecWithVersion = vi.fn();
 vi.mock("@/lib/db-write", () => ({
   sql: (...a: unknown[]) => mockSql(...a),
-  updateDashboardSpecWithVersion: (...a: unknown[]) =>
-    mockUpdateDashboardSpecWithVersion(...a),
-}));
-
-const mockAnalyzeDashboard = vi.fn();
-const mockModifyDashboard = vi.fn();
-vi.mock("@/lib/llm", () => ({
-  analyzeDashboard: (...a: unknown[]) => mockAnalyzeDashboard(...a),
-  modifyDashboard: (...a: unknown[]) => mockModifyDashboard(...a),
 }));
 
 import { runTurnBackground } from "@/lib/turn-background";
@@ -134,8 +129,6 @@ beforeEach(() => {
     return { text: "LLM reply", usage: {}, model: "m" };
   });
   mockSql.mockResolvedValue([]);
-  mockAnalyzeDashboard.mockResolvedValue("Analysis result");
-  mockModifyDashboard.mockResolvedValue("Modify result");
 });
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -487,99 +480,37 @@ describe("runTurnBackground — stream-state durability (#825/#834)", () => {
   });
 });
 
-describe("runTurnBackground — dashboard analyze path", () => {
-  it("calls analyzeDashboard and completes turn", async () => {
-    const conv = makeConv({ mode: "analyze", context_kind: "dashboard", context_ref: "42" });
-    mockSql.mockResolvedValue([{ spec: { widgets: [] } }]);
-
-    await runTurnBackground(TURN_ID, conv, "explain the data");
-
-    expect(mockAnalyzeDashboard).toHaveBeenCalledOnce();
-    expect(mockUpdateTurnStatus).toHaveBeenLastCalledWith(TURN_ID, "complete");
-  });
-
-  it("does NOT emit spec_update for analyze turns", async () => {
-    const conv = makeConv({ mode: "analyze", context_kind: "dashboard", context_ref: "42" });
-    mockSql.mockResolvedValue([]);
-
-    await runTurnBackground(TURN_ID, conv, "analyze");
-
-    const specCall = mockInsertTurnEvent.mock.calls.find(([, , type]) => type === "spec_update");
-    expect(specCall).toBeUndefined();
-  });
-
-  it("handles missing dashboard spec gracefully", async () => {
-    const conv = makeConv({ mode: "analyze", context_kind: "dashboard", context_ref: "999" });
-    mockSql.mockResolvedValue([]);
-
-    await runTurnBackground(TURN_ID, conv, "analyze");
-
-    expect(mockUpdateTurnStatus).toHaveBeenLastCalledWith(TURN_ID, "complete");
-  });
-});
-
-describe("runTurnBackground — dashboard modify path", () => {
-  it("emits spec_update when modifyDashboard sets modifyResult", async () => {
-    const conv = makeConv({ mode: "modify", context_kind: "dashboard", context_ref: "42" });
-    mockSql.mockResolvedValue([{ spec: { widgets: [] } }]);
-    mockUpdateDashboardSpecWithVersion.mockResolvedValue({ id: 42 });
-    mockModifyDashboard.mockImplementation(
-      (_spec: unknown, _msg: unknown, agenticCtx: Record<string, unknown>) => {
-        agenticCtx.modifyResult = { spec: { widgets: [{ type: "kpi" }] }, summary: "Updated" };
-        return Promise.resolve("I've updated the dashboard.");
-      },
-    );
-
-    await runTurnBackground(TURN_ID, conv, "add a KPI widget");
-
-    // Persisted through the single versioned writer with the user prompt.
-    expect(mockUpdateDashboardSpecWithVersion).toHaveBeenCalledWith(
-      42,
-      { widgets: [{ type: "kpi" }] },
-      "add a KPI widget",
-    );
-    const specCall = mockInsertTurnEvent.mock.calls.find(([, , type]) => type === "spec_update");
-    expect(specCall).toBeDefined();
-    expect((specCall?.[3] as Record<string, unknown>).prompt).toBe("add a KPI widget");
-  });
-
-  it("does not emit spec_update when modifyResult is absent", async () => {
-    const conv = makeConv({ mode: "modify", context_kind: "dashboard", context_ref: "42" });
-    mockSql.mockResolvedValue([{ spec: { widgets: [] } }]);
-
-    await runTurnBackground(TURN_ID, conv, "change colors");
-
-    const specCall = mockInsertTurnEvent.mock.calls.find(([, , type]) => type === "spec_update");
-    expect(specCall).toBeUndefined();
-  });
-
-  it("completes without spec_update when DB persist fails", async () => {
-    const conv = makeConv({ mode: "modify", context_kind: "dashboard", context_ref: "42" });
-    mockSql.mockResolvedValue([{ spec: { widgets: [] } }]);
-    mockUpdateDashboardSpecWithVersion.mockRejectedValueOnce(new Error("DB write failure"));
-    mockModifyDashboard.mockImplementation(
-      (_spec: unknown, _msg: unknown, agenticCtx: Record<string, unknown>) => {
-        agenticCtx.modifyResult = { spec: { widgets: [] }, summary: "" };
-        return Promise.resolve("Updated.");
-      },
-    );
-
-    await runTurnBackground(TURN_ID, conv, "tweak layout");
-
-    // Turn completes successfully even if spec persist failed
-    expect(mockUpdateTurnStatus).toHaveBeenLastCalledWith(TURN_ID, "complete");
-    const specCall = mockInsertTurnEvent.mock.calls.find(([, , type]) => type === "spec_update");
-    expect(specCall).toBeUndefined();
-  });
-});
-
 describe("runTurnBackground — generic fallback path", () => {
-  it("uses assembleRequest for non-chat, non-analyze, non-modify modes", async () => {
+  it("uses assembleRequest for modes other than free-chat", async () => {
     const conv = makeConv({ mode: "view", context_kind: "dashboard" });
 
     await runTurnBackground(TURN_ID, conv, "show me the data");
 
     expect(mockAssembleRequest).toHaveBeenCalledOnce();
     expect(mockUpdateTurnStatus).toHaveBeenLastCalledWith(TURN_ID, "complete");
+  });
+
+  it("narrows an unrecognised legacy mode to the chat flow", async () => {
+    // `conversations.mode` is free text and predates the #24 flow catalog, so
+    // rows written by the inherited product still carry 'view', 'generate',
+    // 'analyze'. buildSystemPrompt has no case for those and returns an empty
+    // prompt, so passing the raw value through would bill a real LLM call with
+    // no system prompt and no tools.
+    const conv = makeConv({ mode: "generate", context_kind: "dashboard" });
+
+    await runTurnBackground(TURN_ID, conv, "genérame algo");
+
+    expect(mockAssembleRequest).toHaveBeenCalledOnce();
+    const flowArg = mockAssembleRequest.mock.calls[0]?.[0];
+    expect(flowArg).toBe("chat");
+    expect(flowArg).not.toBe("generate");
+  });
+
+  it("passes a recognised flow through unchanged", async () => {
+    const conv = makeConv({ mode: "occupancy", context_kind: "dashboard" });
+
+    await runTurnBackground(TURN_ID, conv, "¿está ocupado?");
+
+    expect(mockAssembleRequest.mock.calls[0]?.[0]).toBe("occupancy");
   });
 });

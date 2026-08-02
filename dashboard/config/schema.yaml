@@ -53,40 +53,58 @@
   description: "Modelo OpenRouter por defecto (id vendor/modelo). Vacío = anthropic/claude-sonnet-4."
   requires_restart: []
 
-- key: dashboard.llm_model_openrouter_generate
-  env: DASHBOARD_LLM_MODEL_OPENROUTER_GENERATE
+- key: dashboard.llm_model_openrouter_occupancy
+  env: DASHBOARD_LLM_MODEL_OPENROUTER_OCCUPANCY
   type: string
   sensitive: false
   default: null
   section: "Dashboard LLM"
-  description: "Override OpenRouter para generación de dashboards. Vacío = usa llm_model_openrouter."
+  description: "Override OpenRouter para evaluación de ocupación. Vacío = usa llm_model_openrouter."
   requires_restart: []
 
-- key: dashboard.llm_model_openrouter_modify
-  env: DASHBOARD_LLM_MODEL_OPENROUTER_MODIFY
+- key: dashboard.llm_model_openrouter_condition
+  env: DASHBOARD_LLM_MODEL_OPENROUTER_CONDITION
   type: string
   sensitive: false
   default: null
   section: "Dashboard LLM"
-  description: "Override OpenRouter para modificación de dashboards. Vacío = usa llm_model_openrouter."
+  description: "Override OpenRouter para evaluación de estado de conservación. Vacío = usa llm_model_openrouter."
   requires_restart: []
 
-- key: dashboard.llm_model_openrouter_analyze
-  env: DASHBOARD_LLM_MODEL_OPENROUTER_ANALYZE
+- key: dashboard.llm_model_openrouter_redflags
+  env: DASHBOARD_LLM_MODEL_OPENROUTER_REDFLAGS
   type: string
   sensitive: false
   default: null
   section: "Dashboard LLM"
-  description: "Override OpenRouter para análisis. Vacío = usa llm_model_openrouter."
+  description: "Override OpenRouter para extracción de señales de alerta legales. Vacío = usa llm_model_openrouter."
   requires_restart: []
 
-- key: dashboard.llm_model_openrouter_weekly
-  env: DASHBOARD_LLM_MODEL_OPENROUTER_WEEKLY
+- key: dashboard.llm_model_openrouter_extract
+  env: DASHBOARD_LLM_MODEL_OPENROUTER_EXTRACT
   type: string
   sensitive: false
   default: null
   section: "Dashboard LLM"
-  description: "Override OpenRouter para revisiones semanales. Vacío = usa llm_model_openrouter."
+  description: "Override OpenRouter para extracción de campos estructurados. Vacío = usa llm_model_openrouter."
+  requires_restart: []
+
+- key: dashboard.llm_model_openrouter_compare
+  env: DASHBOARD_LLM_MODEL_OPENROUTER_COMPARE
+  type: string
+  sensitive: false
+  default: null
+  section: "Dashboard LLM"
+  description: "Override OpenRouter para comparativa de candidatos. Vacío = usa llm_model_openrouter."
+  requires_restart: []
+
+- key: dashboard.llm_model_openrouter_chat
+  env: DASHBOARD_LLM_MODEL_OPENROUTER_CHAT
+  type: string
+  sensitive: false
+  default: null
+  section: "Dashboard LLM"
+  description: "Override OpenRouter para chat conversacional. Vacío = usa llm_model_openrouter."
   requires_restart: []
 
 - key: dashboard.llm_model_cli

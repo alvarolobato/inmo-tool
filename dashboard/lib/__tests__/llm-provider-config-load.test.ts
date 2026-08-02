@@ -60,33 +60,33 @@ describe("loadDashboardLlmConfig", () => {
     it("uses the per-flow override when set", () => {
       vi.stubEnv("DASHBOARD_LLM_PROVIDER", "openrouter");
       vi.stubEnv("DASHBOARD_LLM_MODEL_OPENROUTER", "default-or");
-      vi.stubEnv("DASHBOARD_LLM_MODEL_OPENROUTER_MODIFY", "claude-opus-4");
-      vi.stubEnv("DASHBOARD_LLM_MODEL_OPENROUTER_ANALYZE", "claude-haiku-4");
+      vi.stubEnv("DASHBOARD_LLM_MODEL_OPENROUTER_CONDITION", "claude-opus-4");
+      vi.stubEnv("DASHBOARD_LLM_MODEL_OPENROUTER_OCCUPANCY", "claude-haiku-4");
       const c = loadDashboardLlmConfig();
-      expect(getEffectiveDashboardModel(c, "modify")).toBe("claude-opus-4");
-      expect(getEffectiveDashboardModel(c, "analyze")).toBe("claude-haiku-4");
+      expect(getEffectiveDashboardModel(c, "condition")).toBe("claude-opus-4");
+      expect(getEffectiveDashboardModel(c, "occupancy")).toBe("claude-haiku-4");
     });
 
     it("falls back to llm_model_openrouter when the per-flow override is empty", () => {
       vi.stubEnv("DASHBOARD_LLM_PROVIDER", "openrouter");
       vi.stubEnv("DASHBOARD_LLM_MODEL_OPENROUTER", "default-or");
       const c = loadDashboardLlmConfig();
-      expect(getEffectiveDashboardModel(c, "modify")).toBe("default-or");
-      expect(getEffectiveDashboardModel(c, "analyze")).toBe("default-or");
+      expect(getEffectiveDashboardModel(c, "condition")).toBe("default-or");
+      expect(getEffectiveDashboardModel(c, "occupancy")).toBe("default-or");
     });
 
     it("ignores the per-flow override on the cli provider", () => {
       vi.stubEnv("DASHBOARD_LLM_PROVIDER", "cli");
       vi.stubEnv("DASHBOARD_LLM_MODEL_CLI", "m-cli");
-      vi.stubEnv("DASHBOARD_LLM_MODEL_OPENROUTER_MODIFY", "claude-opus-4");
+      vi.stubEnv("DASHBOARD_LLM_MODEL_OPENROUTER_CONDITION", "claude-opus-4");
       const c = loadDashboardLlmConfig();
-      expect(getEffectiveDashboardModel(c, "modify")).toBe("m-cli");
+      expect(getEffectiveDashboardModel(c, "condition")).toBe("m-cli");
     });
 
     it("returns llm_model_openrouter when called without a flow", () => {
       vi.stubEnv("DASHBOARD_LLM_PROVIDER", "openrouter");
       vi.stubEnv("DASHBOARD_LLM_MODEL_OPENROUTER", "default-or");
-      vi.stubEnv("DASHBOARD_LLM_MODEL_OPENROUTER_GENERATE", "claude-sonnet-4");
+      vi.stubEnv("DASHBOARD_LLM_MODEL_OPENROUTER_CHAT", "claude-sonnet-4");
       const c = loadDashboardLlmConfig();
       expect(getEffectiveDashboardModel(c)).toBe("default-or");
     });

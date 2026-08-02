@@ -18,7 +18,7 @@ import type { AgenticErrorDiagnostic } from "@/lib/errors";
 const orCfg: DashboardLlmConfig = {
   provider: "openrouter",
   openrouterModel: "anthropic/claude-sonnet-4",
-  openrouterModelByFlow: { generate: "", modify: "", analyze: "" },
+  openrouterModelByFlow: { occupancy: "", condition: "", redflags: "", extract: "", compare: "", chat: "" },
   cliModel: "sonnet",
   cliDriver: "claude_code",
   cliBin: "claude",

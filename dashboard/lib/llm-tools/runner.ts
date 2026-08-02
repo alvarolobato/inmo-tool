@@ -8,7 +8,7 @@ import type {
   ChatCompletionTool,
 } from "openai/resources/chat/completions";
 import { logLlmToolCall } from "./logging";
-import { DASHBOARD_AGENTIC_TOOLS } from "./catalog";
+import { CHAT_TOOLS } from "./catalog";
 import { setConversationTitleOnce } from "@/lib/conversations";
 import { getAgenticConfig } from "./config";
 import {
@@ -23,19 +23,9 @@ import {
   handleValidateQuery,
   handleExecuteQuery,
   handleExplainQuery,
-  handleListPsTables,
-  handleDescribePsTable,
+  handleListTables,
+  handleDescribeTable,
 } from "./handlers/sql";
-import {
-  handleListDashboards,
-  handleGetDashboardSpec,
-  handleGetDashboardQueries,
-  handleGetDashboardWidgetRawValues,
-  handleGetDashboardAllWidgetStatus,
-  handleValidateDashboardSpec,
-  handleApplyDashboardModification,
-  handleSubmitDashboardAnalysis,
-} from "./handlers/dashboards";
 import type { AgenticModelAdapter, AgenticRunStepInput } from "./runner-types";
 import { CliRunnerError } from "@/lib/llm-client";
 import { sanitize } from "@/lib/llm-provider/sanitize";
@@ -125,10 +115,10 @@ export interface AgenticRunParams {
    */
   enableReasoning?: boolean;
   /**
-   * Explicit tool catalog for this run. When omitted, defaults to
-   * DASHBOARD_AGENTIC_TOOLS (full catalog, backwards-compatible).
-   * Use FREE_CHAT_TOOLS for free-chat flows that should only expose
-   * inspection + set_title.
+   * Explicit tool catalog for this run. When omitted, defaults to CHAT_TOOLS
+   * (read-only inspection + set_title). In practice assembleRequest always
+   * passes `toolsForFlow(flow)` explicitly; this default only covers direct
+   * callers of runAgenticChat inside llm-context.
    */
   tools?: ChatCompletionTool[];
 }
@@ -173,26 +163,10 @@ async function dispatchTool(
       return handleExecuteQuery(rawArgs, ctx);
     case "explain_query":
       return handleExplainQuery(rawArgs, ctx);
-    case "list_ps_tables":
-      return handleListPsTables(rawArgs, ctx);
-    case "describe_ps_table":
-      return handleDescribePsTable(rawArgs, ctx);
-    case "list_dashboards":
-      return handleListDashboards(rawArgs, ctx);
-    case "get_dashboard_spec":
-      return handleGetDashboardSpec(rawArgs, ctx);
-    case "get_dashboard_queries":
-      return handleGetDashboardQueries(rawArgs, ctx);
-    case "get_dashboard_widget_raw_values":
-      return handleGetDashboardWidgetRawValues(rawArgs, ctx);
-    case "get_dashboard_all_widget_status":
-      return handleGetDashboardAllWidgetStatus(rawArgs, ctx);
-    case "validate_dashboard_spec":
-      return handleValidateDashboardSpec(rawArgs, ctx);
-    case "apply_dashboard_modification":
-      return handleApplyDashboardModification(rawArgs, ctx);
-    case "submit_dashboard_analysis":
-      return handleSubmitDashboardAnalysis(rawArgs, ctx);
+    case "list_tables":
+      return handleListTables(rawArgs, ctx);
+    case "describe_table":
+      return handleDescribeTable(rawArgs, ctx);
     case "set_title": {
       if (!ctx.conversationId) {
         return toolError("SET_TITLE_NO_CONV", "set_title requires a conversation context", ctx);
@@ -250,7 +224,7 @@ export async function runAgenticChat(params: AgenticRunParams): Promise<AgenticR
   } = params;
 
   const cfg = getAgenticConfig();
-  const tools: ChatCompletionTool[] = toolsOverride ?? DASHBOARD_AGENTIC_TOOLS;
+  const tools: ChatCompletionTool[] = toolsOverride ?? CHAT_TOOLS;
   const usage = emptyUsage();
 
   const systemMessage: ChatCompletionMessageParam =

@@ -3,30 +3,32 @@
  *
  * All LLM calls in the dashboard must go through `assembleRequest()`.
  * CI enforces this via `dashboard/scripts/check-llm-context.sh`.
+ * Rationale: docs/decisions/D-006-llm-context-centralization.md
  */
 
 export {
   assembleRequest,
   type AssembleResult,
   type AssembleExecutionOpts,
-  type FlowVars,
-  type HistoryMessage,
 } from "./assemble";
 
 export {
+  LLM_FLOWS,
+  SINGLE_SHOT_FLOWS,
+  isLlmFlow,
+  type LlmFlow,
+  type FlowVars,
+  type ListingSnapshot,
+} from "./types";
+
+export {
   buildSystemPrompt,
-  buildGeneratePromptSplit,
-  buildModifyPromptSplit,
-  buildAnalyzePrompt,
-  buildSuggestionPrompt,
-  buildSuggestPrompt,
-  buildGapAnalysisPrompt,
-  buildFreeChatContext,
-  buildAgenticToolPreamble,
-  type FreeChatContext,
-  type AnalyzeAction,
-  type BuildAnalyzePromptOptions,
-  VALID_ANALYZE_ACTIONS,
+  buildOccupancyPrompt,
+  buildConditionPrompt,
+  buildRedflagsPrompt,
+  buildExtractPrompt,
+  buildComparePrompt,
+  buildChatPrompt,
 } from "./system-prompt";
 
 export {
@@ -35,6 +37,7 @@ export {
   flattenStoredMessage,
   formatToolCallsForHistory,
   HISTORY_MAX_MESSAGES,
+  type HistoryMessage,
 } from "./history";
 
 export { toolsForFlow } from "./tools";

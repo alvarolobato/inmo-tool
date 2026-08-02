@@ -72,16 +72,8 @@ vi.mock("@/lib/llm-tools/handlers/sql", () => ({
   handleValidateQuery: vi.fn().mockResolvedValue(ok({ valid: true })),
   handleExecuteQuery: vi.fn().mockResolvedValue(ok({ rows: [], columns: [] })),
   handleExplainQuery: vi.fn().mockResolvedValue(ok({ explain: [] })),
-  handleListPsTables: vi.fn().mockResolvedValue(ok({ tables: ["ps_ventas"] })),
-  handleDescribePsTable: vi.fn().mockResolvedValue(ok({ columns: [] })),
-}));
-
-vi.mock("@/lib/llm-tools/handlers/dashboards", () => ({
-  handleListDashboards: vi.fn().mockResolvedValue(ok({ dashboards: [] })),
-  handleGetDashboardSpec: vi.fn().mockResolvedValue(ok({ spec: {} })),
-  handleGetDashboardQueries: vi.fn().mockResolvedValue(ok({ queries: [] })),
-  handleGetDashboardWidgetRawValues: vi.fn().mockResolvedValue(ok({ rows: [] })),
-  handleGetDashboardAllWidgetStatus: vi.fn().mockResolvedValue(ok({ widgets: [] })),
+  handleListTables: vi.fn().mockResolvedValue(ok({ tables: ["listing"] })),
+  handleDescribeTable: vi.fn().mockResolvedValue(ok({ columns: [] })),
 }));
 
 const mockSetConversationTitleOnce = vi.fn().mockResolvedValue(undefined);
@@ -136,7 +128,7 @@ describe("runAgenticChat", () => {
       .fn()
       .mockReturnValueOnce(
         makeToolCallStream(
-          [{ id: "call_1", function: { name: "list_ps_tables", arguments: "{}" } }],
+          [{ id: "call_1", function: { name: "list_tables", arguments: "{}" } }],
           { prompt_tokens: 5, completion_tokens: 0, total_tokens: 5 },
         ),
       )
@@ -169,7 +161,7 @@ describe("runAgenticChat", () => {
       .fn()
       .mockReturnValueOnce(
         makeToolCallStream(
-          [{ id: "call_1", function: { name: "list_ps_tables", arguments: "{}" } }],
+          [{ id: "call_1", function: { name: "list_tables", arguments: "{}" } }],
           { prompt_tokens: 5, completion_tokens: 0, total_tokens: 5 },
         ),
       )
@@ -200,12 +192,12 @@ describe("runAgenticChat", () => {
     expect(runCtx.toolCalls).toHaveLength(1);
     expect(runCtx.toolCalls?.[0]).toMatchObject({
       id: "call_1",
-      name: "list_ps_tables",
+      name: "list_tables",
       arguments: "{}",
       ok: true,
     });
     // The result payload the model received is captured (contains the tool output).
-    expect(runCtx.toolCalls?.[0].result).toContain("ps_ventas");
+    expect(runCtx.toolCalls?.[0].result).toContain("listing");
     expect(typeof runCtx.toolCalls?.[0].ms).toBe("number");
   });
 
@@ -213,7 +205,7 @@ describe("runAgenticChat", () => {
     vi.stubEnv("DASHBOARD_AGENTIC_MAX_TOOL_ROUNDS", "1");
     const create = vi.fn().mockReturnValue(
       makeToolCallStream(
-        [{ id: "c1", function: { name: "list_ps_tables", arguments: "{}" } }],
+        [{ id: "c1", function: { name: "list_tables", arguments: "{}" } }],
         { prompt_tokens: 1, completion_tokens: 0, total_tokens: 1 },
       ),
     );
@@ -238,8 +230,8 @@ describe("runAgenticChat", () => {
     const create = vi.fn().mockReturnValue(
       makeToolCallStream(
         [
-          { id: "a", function: { name: "list_ps_tables", arguments: "{}" } },
-          { id: "b", function: { name: "list_ps_tables", arguments: "{}" } },
+          { id: "a", function: { name: "list_tables", arguments: "{}" } },
+          { id: "b", function: { name: "list_tables", arguments: "{}" } },
         ],
         { prompt_tokens: 1, completion_tokens: 0, total_tokens: 1 },
       ),

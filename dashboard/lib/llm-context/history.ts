@@ -18,6 +18,7 @@ import { getOpenRouterClient, openRouterChatCompletion } from "@/lib/llm-provide
 import { claudeCliSingleShot } from "@/lib/llm-provider/cli/claude-code";
 import { callWithCircuitBreaker } from "@/lib/llm-circuit-breaker";
 import { logUsage } from "@/lib/llm-usage";
+import { SINGLE_SHOT_FLOWS } from "./types";
 
 export type HistoryMessage = { role: "user" | "assistant"; content: string };
 
@@ -139,6 +140,14 @@ export async function buildHistory(
   conversationId: string | null,
   opts?: { priorMessages?: HistoryMessage[]; flow?: string },
 ): Promise<HistoryMessage[]> {
+  // Single-shot assessment flows (occupancy/condition/redflags/extract/compare)
+  // evaluate one payload in isolation — prior turns are not just unnecessary
+  // but actively harmful, since an earlier listing's text in context invites
+  // the model to carry findings across unrelated properties. Short-circuit
+  // before any DB read or summarisation call. Returns [] rather than throwing
+  // so a caller that passes a conversationId out of habit still behaves.
+  if (opts?.flow && SINGLE_SHOT_FLOWS.has(opts.flow)) return [];
+
   if (opts?.priorMessages) return capHistory(opts.priorMessages, HISTORY_MAX_MESSAGES, opts.flow);
   if (!conversationId) return [];
 

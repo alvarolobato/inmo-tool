@@ -3,7 +3,6 @@
  */
 
 import type { DashboardCliDriverId, DashboardLlmProviderId } from "@/lib/llm-provider/types";
-import type { DashboardSpec } from "@/lib/schema";
 
 /** High-level events from the tool loop (UI streaming + server logs). */
 export type AgenticProgressEvent =
@@ -84,24 +83,12 @@ export interface LlmAgenticContext {
   /** When `llmProvider` is `cli`, which driver binary/protocol is used. */
   llmDriver?: DashboardCliDriverId | null;
 
-  // ── Publish-tool side-channel slots ────────────────────────────────────────
-  // These slots are populated by the publish-tool handlers and read by the
-  // route AFTER the agentic loop returns. Handlers MUST only stage results
-  // here — they MUST NOT persist directly to the database (dashboards /
-  // weekly_reviews). The route is the single point of persistence.
-
-  /**
-   * Staged result for the `apply_dashboard_modification` tool.
-   * Set by `handleApplyDashboardModification`; read by the modify route.
-   * The LAST call wins — the route always uses the final value after the loop.
-   */
-  modifyResult?: { spec: DashboardSpec; summary: string } | null;
-
-  /**
-   * Staged result for the `submit_dashboard_analysis` tool.
-   * Set by `handleSubmitDashboardAnalysis`; read by the analyze route.
-   */
-  analyzeResult?: { markdown: string; summary: string } | null;
+  // Note: the `modifyResult` / `analyzeResult` publish-tool side-channel slots
+  // were removed in #24 along with `apply_dashboard_modification` and
+  // `submit_dashboard_analysis`. The real-estate flow catalog has no
+  // write-back tools — assessment flows return JSON directly — so nothing
+  // stages results on ctx any more. Reintroducing a slot here means
+  // reintroducing a tool that persists outside the route's control; don't.
 
   /**
    * Tool calls captured during the agentic run, in execution order. Populated

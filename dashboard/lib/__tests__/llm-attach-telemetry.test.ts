@@ -1,29 +1,29 @@
 /**
- * Regression test for the bug where ctx was shallow-cloned, breaking
- * the publish-tool flow.
+ * Regression test for the bug where ctx was shallow-cloned instead of mutated
+ * in place, silently dropping everything the agentic run wrote back to it.
  *
  * Background:
- *   The agentic tool handlers (submit_dashboard_analysis,
- *   apply_dashboard_modification — see lib/llm-tools/handlers/dashboards.ts)
- *   stage their result on the ctx object: `ctx.analyzeResult = ...`,
- *   `ctx.modifyResult = ...`. The API routes read these fields AFTER
- *   the agentic run completes (e.g. analyzeCtx.analyzeResult).
+ *   `assembleRequest` receives `opts.ctx` and the runner mutates it during the
+ *   run — telemetry (`llmProvider`, `llmDriver`) and the tool-call record
+ *   (`toolCalls`) are written onto that object, and callers read them AFTER the
+ *   call returns (turn-background persists ctx.toolCalls on the assistant
+ *   message so later turns keep the tool context).
  *
- *   If ctx is shallow-cloned instead of mutated in place, the handlers
- *   write into the clone and the route reads null from the original.
- *   The user sees:
+ *   If ctx is shallow-cloned rather than mutated, every one of those writes
+ *   lands on the clone and the caller sees nothing. Nothing about that contract
+ *   is type-checked, so it needs a test.
  *
- *     "El modelo no publicó el análisis. Inténtalo de nuevo."
+ * Contract: assembleRequest MUST pass ctx by reference to runAgenticChat and
+ * never clone it.
  *
- *   even though the model DID call the publish tool successfully.
+ * #24 note: this test previously asserted on `ctx.analyzeResult`, staged by the
+ * `submit_dashboard_analysis` publish tool. That tool and the dashboard flows
+ * were removed with the flow-catalog rewrite, so it now asserts the same
+ * reference-identity contract through the ctx fields that survive.
  *
- * Contract: assembleRequest MUST pass ctx by reference to runAgenticChat
- * and not clone it. Tool handlers mutate ctx in place; the caller reads
- * side-channel results (analyzeResult, modifyResult) after the call returns.
- *
- * Note: This test mocks assembleRequest at the llm-context level to simulate
- * the in-place mutation contract. The implementation is verified by the
- * assemble.test.ts unit tests.
+ * Note: this mocks assembleRequest at the llm-context level to simulate the
+ * in-place mutation contract. The implementation itself is covered by
+ * llm-context/__tests__/assemble.test.ts.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -45,15 +45,20 @@ vi.mock("../llm-usage", () => ({
   BudgetExceededError: class BudgetExceededError extends Error {},
 }));
 
-// Mock assembleRequest — the single seam through which all LLM calls now flow.
-// We simulate the in-place ctx mutation contract: the mock writes analyzeResult
-// onto the opts.ctx that was passed in, exactly as the real runner does.
+// Mock assembleRequest — the single seam through which all LLM calls flow.
+// The mock simulates the in-place ctx mutation contract: it writes onto the
+// same opts.ctx object it was handed, exactly as the real runner does.
 vi.mock("../llm-context", () => ({
   assembleRequest: (...a: unknown[]) => mockAssembleRequest(...a),
 }));
 
-import { analyzeDashboard } from "../llm";
+import { assessOccupancy } from "../llm";
 import type { LlmAgenticContext } from "../llm-tools/types";
+
+const LISTING = {
+  propertyId: 1,
+  description: "Piso reformado, se entrega libre de inquilinos.",
+};
 
 describe("ctx reference identity — assembleRequest (regression)", () => {
   beforeEach(() => {
@@ -62,59 +67,68 @@ describe("ctx reference identity — assembleRequest (regression)", () => {
     mockAssembleRequest.mockReset();
   });
 
-  it("propagates ctx mutations made inside the agentic run back to the caller's ctx", async () => {
+  it("propagates ctx mutations made inside the run back to the caller's ctx", async () => {
     const callerCtx: LlmAgenticContext = {
       requestId: "req_test",
-      endpoint: "analyzeDashboard",
-      dashboardId: 1,
-      analyzeResult: null,
+      endpoint: "occupancy",
+      toolCalls: [],
     };
 
-    // Simulate the publish-tool handler staging the result on ctx, the way
-    // submit_dashboard_analysis does in real runs. assembleRequest receives
-    // opts.ctx and mutates it in place (llmProvider, llmDriver, analyzeResult).
     mockAssembleRequest.mockImplementation(
-      async (_flow: unknown, _vars: unknown, _convId: unknown, _msg: unknown, opts: { ctx?: LlmAgenticContext }) => {
+      async (
+        _flow: unknown,
+        _vars: unknown,
+        _convId: unknown,
+        _msg: unknown,
+        opts: { ctx?: LlmAgenticContext },
+      ) => {
         if (opts?.ctx) {
-          opts.ctx.analyzeResult = {
-            markdown: "# Análisis\n\nVentas suben 12 %.",
-            summary: "Ventas suben 12 %.",
-          };
+          opts.ctx.toolCalls = [
+            {
+              name: "execute_query",
+              arguments: { sql: "SELECT 1" },
+              result: { rows: [[1]] },
+              success: true,
+            } as unknown as NonNullable<LlmAgenticContext["toolCalls"]>[number],
+          ];
           opts.ctx.llmProvider = "cli";
           opts.ctx.llmDriver = "claude_code";
         }
-        return { text: "Análisis publicado.", usage: {}, model: "m" };
+        return { text: '{"status":"vacant"}', usage: {}, model: "m" };
       },
     );
 
-    await analyzeDashboard("[serialized]", "Explícame el dashboard", undefined, callerCtx);
+    await assessOccupancy(LISTING, { ctx: callerCtx });
 
-    // If assembleRequest shallow-clones ctx, this assertion fails — the
-    // mutation lands on the clone and the caller's ctx stays null.
-    expect(callerCtx.analyzeResult).not.toBeNull();
-    expect(callerCtx.analyzeResult?.summary).toBe("Ventas suben 12 %.");
-    expect(callerCtx.analyzeResult?.markdown).toContain("Ventas suben 12 %");
+    // If assembleRequest shallow-clones ctx, these fail — the mutation lands on
+    // the clone and the caller's ctx is untouched.
+    expect(callerCtx.toolCalls).toHaveLength(1);
+    expect(callerCtx.toolCalls?.[0]?.name).toBe("execute_query");
   });
 
   it("also exposes the telemetry fields assembleRequest sets (llmProvider, llmDriver)", async () => {
     const callerCtx: LlmAgenticContext = {
       requestId: "req_test_2",
-      endpoint: "analyzeDashboard",
-      dashboardId: 1,
-      analyzeResult: null,
+      endpoint: "occupancy",
     };
 
     mockAssembleRequest.mockImplementation(
-      async (_flow: unknown, _vars: unknown, _convId: unknown, _msg: unknown, opts: { ctx?: LlmAgenticContext }) => {
+      async (
+        _flow: unknown,
+        _vars: unknown,
+        _convId: unknown,
+        _msg: unknown,
+        opts: { ctx?: LlmAgenticContext },
+      ) => {
         if (opts?.ctx) {
           opts.ctx.llmProvider = "cli";
           opts.ctx.llmDriver = "claude_code";
         }
-        return { text: "", usage: {}, model: "m" };
+        return { text: "{}", usage: {}, model: "m" };
       },
     );
 
-    await analyzeDashboard("[serialized]", "anything", undefined, callerCtx);
+    await assessOccupancy(LISTING, { ctx: callerCtx });
 
     expect(callerCtx.llmProvider).toBe("cli");
     expect(typeof callerCtx.llmDriver).toBe("string");

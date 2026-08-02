@@ -381,7 +381,7 @@ CREATE TABLE IF NOT EXISTS profile_scoring_model (
 CREATE TABLE IF NOT EXISTS ai_assessment (
     id              BIGSERIAL    PRIMARY KEY,
     listing_id      BIGINT       NOT NULL REFERENCES listing(id),
-    assessment_type TEXT         NOT NULL CHECK (assessment_type IN ('occupancy','condition','redflags','extract')),
+    assessment_type TEXT         NOT NULL CHECK (assessment_type IN ('occupancy','condition','redflags','extract','compare')),
     result          JSONB        NOT NULL,
     confidence      NUMERIC(4,3),
     model           TEXT,
@@ -394,6 +394,14 @@ CREATE TABLE IF NOT EXISTS ai_assessment (
     -- generated before prompt_version tracking existed for that flow.
     UNIQUE NULLS NOT DISTINCT (listing_id, assessment_type, prompt_version)
 );
+
+-- The flow catalog gained `compare` in #24 (Phase 4.1). Re-stated as an
+-- ALTER because the CREATE TABLE above is a no-op against a database that
+-- already has ai_assessment — an inline edit alone would leave existing
+-- installs rejecting every 'compare' row at runtime.
+ALTER TABLE ai_assessment DROP CONSTRAINT IF EXISTS ai_assessment_assessment_type_check;
+ALTER TABLE ai_assessment ADD CONSTRAINT ai_assessment_assessment_type_check
+    CHECK (assessment_type IN ('occupancy','condition','redflags','extract','compare'));
 
 -- ============================================================
 -- Deduplication audit trail (Phase 2 task 2.2, issue #16, writes here)

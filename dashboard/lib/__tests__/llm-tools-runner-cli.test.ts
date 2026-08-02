@@ -16,14 +16,6 @@ vi.mock("@/lib/llm-tools/handlers/sql", () => ({
   handleDescribePsTable: vi.fn(),
 }));
 
-vi.mock("@/lib/llm-tools/handlers/dashboards", () => ({
-  handleListDashboards: vi.fn(),
-  handleGetDashboardSpec: vi.fn(),
-  handleGetDashboardQueries: vi.fn(),
-  handleGetDashboardWidgetRawValues: vi.fn(),
-  handleGetDashboardAllWidgetStatus: vi.fn(),
-}));
-
 vi.mock("@/lib/llm-provider/cli/claude-code", () => ({
   claudeCliAgenticStep: mockClaudeStep,
 }));
@@ -120,7 +112,7 @@ describe("runAgenticChat (CLI adapter)", () => {
     mockClaudeStep
       .mockResolvedValueOnce({
         kind: "tools",
-        calls: [{ name: "list_ps_tables", arguments: "{}" }],
+        calls: [{ name: "list_tables", arguments: "{}" }],
       })
       .mockResolvedValueOnce({ kind: "final", content: '{"ok":true}' });
 

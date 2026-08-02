@@ -90,25 +90,19 @@ interface AssembleExecutionOpts {
 }
 ```
 
-**Side-channel ctx results**: Tool handlers mutate `ctx` in place during the agentic run. The caller reads these fields **after** `assembleRequest()` returns:
+**ctx fields the run populates**, read by the caller **after** `assembleRequest()` returns:
 
 | ctx field | Set by | Used by |
 |-----------|--------|---------|
-| `ctx.modifyResult` | `apply_dashboard_modification` tool | `modifyDashboard()` in `llm.ts` |
-| `ctx.analyzeResult` | `submit_dashboard_analysis` tool | `analyzeDashboard()` in `llm.ts` |
-| `ctx.reviewResult` | `submit_weekly_review` tool | `generateReview*()` in `llm.ts` |
+| `ctx.toolCalls` | the tool-loop runner | `turn-background.ts`, persisted on the assistant message |
 | `ctx.llmProvider` | `assembleRequest` itself | Telemetry, `turn-background.ts` |
 | `ctx.llmDriver` | `assembleRequest` itself | Telemetry |
 
-Example — reading a side-channel result:
-
-```typescript
-const ctx: LlmAgenticContext = { requestId: "req_abc", endpoint: "modifyDashboard" };
-await assembleRequest("modify", { currentSpec }, null, userPrompt, { ctx });
-if (ctx.modifyResult) {
-  const { spec, summary } = ctx.modifyResult;
-}
-```
+> The write-back side-channel slots (`ctx.modifyResult`, `ctx.analyzeResult`,
+> `ctx.reviewResult`) were removed in #24 along with the dashboard publish
+> tools that set them. The real-estate flows return their JSON in the response
+> text rather than staging it on `ctx`; nothing mutates `ctx` except the runner
+> appending to `toolCalls`.
 
 ### `buildSystemPrompt(flow, vars): { stable: string; volatile?: string }`
 
@@ -136,13 +130,14 @@ Bounds the history sent to the LLM. When over the cap, older messages are summar
 ### `toolsForFlow(flow): ChatCompletionTool[]`
 
 Returns the tool catalog slice for this flow:
-- `generate` / `modify` / `analyze` / `weekly` → `DASHBOARD_AGENTIC_TOOLS`
-- `chat` → `FREE_CHAT_TOOLS` (11 tools including `start_dashboard_generation`)
-- `summary` / `suggest` / `gap` → `[]` (no tools for these single-shot flows)
+- `chat` → `CHAT_TOOLS` (read-only inspection over the `LLM_VISIBLE_TABLES` allowlist)
+- `occupancy` / `condition` / `redflags` / `extract` / `compare` → `[]`
 
-### `buildFreeChatContext(): FreeChatContext`
-
-Returns `{ systemPrompt: { stable }, tools }` for snapshot + display purposes. The `tools` array is the full `FREE_CHAT_TOOLS` catalog formatted as `ChatCompletionTool[]`.
+The empty array is not merely an optimisation — it **is** the switch that routes
+a flow to the single-shot `llmComplete` path instead of the tool loop. An
+assessment flow must never acquire tools: it could then query other properties
+mid-assessment, which is the cross-property bleed the single-shot design (and
+the matching `buildHistory` short-circuit) exists to prevent.
 
 ## Named flows
 
@@ -200,12 +195,14 @@ vi.mock("@/lib/llm-context", () => ({
 // In beforeEach:
 mockAssembleRequest.mockResolvedValue({ text: "response", usage: {}, model: "m" });
 
-// To simulate side-channel ctx mutation (e.g. for modifyDashboard):
+// To simulate the runner recording tool calls on ctx:
 mockAssembleRequest.mockImplementation(async (_flow, _vars, _convId, _msg, opts) => {
   if (opts?.ctx) {
-    opts.ctx.modifyResult = { spec: { widgets: [] }, summary: "Updated" };
+    opts.ctx.toolCalls = [
+      { id: "c1", name: "list_tables", arguments: "{}", result: "{}", ok: true, ms: 3 },
+    ];
   }
-  return { text: "Updated the dashboard.", usage: {}, model: "m" };
+  return { text: "He consultado las tablas.", usage: {}, model: "m" };
 });
 ```
 

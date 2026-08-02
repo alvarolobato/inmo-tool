@@ -30,8 +30,15 @@ vi.mock("../llm-usage", () => ({
 }));
 
 import { _resetCircuitBreaker } from "../llm-circuit-breaker";
-import { generateDashboard, modifyDashboard, resetClient } from "../llm";
+import { assessOccupancy, compareCandidates, resetClient } from "../llm";
+import type { ListingSnapshot } from "../llm-context";
 import { resetDashboardLlmConfigCache } from "../llm-model-config";
+
+const LISTING: ListingSnapshot = {
+  propertyId: 1,
+  description: "Piso reformado en Chamberí, se entrega libre de inquilinos.",
+};
+const LISTING_B: ListingSnapshot = { propertyId: 2, description: "Ático a reformar." };
 
 describe("llm", () => {
   beforeEach(() => {
@@ -51,12 +58,12 @@ describe("llm", () => {
     _resetCircuitBreaker();
   });
 
-  describe("generateDashboard", () => {
+  describe("assessOccupancy", () => {
     it("throws if OPENROUTER_API_KEY is not set (openrouter provider)", async () => {
       delete process.env.OPENROUTER_API_KEY;
       resetClient();
       resetDashboardLlmConfigCache();
-      await expect(generateDashboard("test")).rejects.toThrow(
+      await expect(assessOccupancy(LISTING)).rejects.toThrow(
         "OPENROUTER_API_KEY is not set. Set it in your environment, config.yaml, or .env file."
       );
     });
@@ -68,7 +75,7 @@ describe("llm", () => {
         ],
       });
 
-      const result = await generateDashboard("Créame un dashboard de ventas");
+      const result = await assessOccupancy(LISTING);
 
       expect(result).toBe('{"title": "Test", "widgets": []}');
       expect(mockCreate).toHaveBeenCalledWith(
@@ -77,20 +84,20 @@ describe("llm", () => {
             expect.objectContaining({ role: "system" }),
             expect.objectContaining({
               role: "user",
-              content: "Créame un dashboard de ventas",
+              content: expect.stringContaining("occupancy"),
             }),
           ]),
-          temperature: 0.2,
+          temperature: 0,
         })
       );
     });
 
-    it("system prompt contains key sections", async () => {
+    it("system prompt carries the occupancy task and the listing payload", async () => {
       mockCreate.mockResolvedValue({
         choices: [{ message: { content: "{}" } }],
       });
 
-      await generateDashboard("test");
+      await assessOccupancy(LISTING);
 
       const rawContent = mockCreate.mock.calls[0][0].messages.find(
         (m: { role: string }) => m.role === "system"
@@ -99,10 +106,15 @@ describe("llm", () => {
         ? (rawContent as { text?: string }[]).map((b) => b.text ?? "").join("\n")
         : rawContent;
 
-      expect(systemContent).toContain("dashboard generator");
-      expect(systemContent).toContain("kpi_row");
-      expect(systemContent).toContain("ps_ventas");
-      expect(systemContent).toContain("total_si");
+      // Domain framing + this flow's task, from buildOccupancyPrompt.
+      expect(systemContent).toContain("inversión inmobiliaria");
+      expect(systemContent).toContain("Tarea: estado de ocupación");
+      expect(systemContent).toContain("occupied_illegally");
+      // The volatile half must carry the actual listing under assessment.
+      expect(systemContent).toContain("libre de inquilinos");
+      // And must NOT carry the retired dashboard-generation content.
+      expect(systemContent).not.toContain("kpi_row");
+      expect(systemContent).not.toContain("ps_ventas");
     });
 
     it("throws on empty LLM response", async () => {
@@ -110,7 +122,7 @@ describe("llm", () => {
         choices: [{ message: { content: null } }],
       });
 
-      await expect(generateDashboard("test")).rejects.toThrow(
+      await expect(assessOccupancy(LISTING)).rejects.toThrow(
         "LLM returned an empty response"
       );
     });
@@ -123,7 +135,7 @@ describe("llm", () => {
         choices: [{ message: { content: "{}" } }],
       });
 
-      await generateDashboard("test");
+      await assessOccupancy(LISTING);
 
       expect(mockCreate).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -141,7 +153,7 @@ describe("llm", () => {
         choices: [{ message: { content: "{}" } }],
       });
 
-      await generateDashboard("test");
+      await assessOccupancy(LISTING);
 
       expect(mockCreate).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -174,7 +186,7 @@ describe("llm", () => {
         });
 
       const setTimeoutSpy = vi.spyOn(global, "setTimeout");
-      const resultPromise = generateDashboard("test");
+      const resultPromise = assessOccupancy(LISTING);
 
       await vi.runAllTimersAsync();
       const result = await resultPromise;
@@ -189,7 +201,7 @@ describe("llm", () => {
       const error400 = Object.assign(new Error("Bad request"), { status: 400 });
       mockCreate.mockRejectedValue(error400);
 
-      await expect(generateDashboard("test")).rejects.toMatchObject({
+      await expect(assessOccupancy(LISTING)).rejects.toMatchObject({
         status: 400,
       });
       expect(mockCreate).toHaveBeenCalledTimes(1);
@@ -204,7 +216,7 @@ describe("llm", () => {
         });
 
       const setTimeoutSpy = vi.spyOn(global, "setTimeout");
-      const resultPromise = generateDashboard("test");
+      const resultPromise = assessOccupancy(LISTING);
 
       await vi.runAllTimersAsync();
       const result = await resultPromise;
@@ -221,7 +233,7 @@ describe("llm", () => {
       mockCreate.mockRejectedValue(error503);
 
       // Attach rejection handler before advancing timers to avoid unhandled rejection
-      const assertion = expect(generateDashboard("test")).rejects.toMatchObject({
+      const assertion = expect(assessOccupancy(LISTING)).rejects.toMatchObject({
         status: 503,
       });
       await vi.runAllTimersAsync();
@@ -241,7 +253,7 @@ describe("llm", () => {
         });
 
       const setTimeoutSpy = vi.spyOn(global, "setTimeout");
-      const resultPromise = generateDashboard("test");
+      const resultPromise = assessOccupancy(LISTING);
 
       await vi.runAllTimersAsync();
       await resultPromise;
@@ -261,7 +273,7 @@ describe("llm", () => {
         });
 
       const setTimeoutSpy = vi.spyOn(global, "setTimeout");
-      const resultPromise = generateDashboard("test");
+      const resultPromise = assessOccupancy(LISTING);
 
       await vi.runAllTimersAsync();
       await resultPromise;
@@ -282,7 +294,7 @@ describe("llm", () => {
         });
 
       const setTimeoutSpy = vi.spyOn(global, "setTimeout");
-      const resultPromise = generateDashboard("test");
+      const resultPromise = assessOccupancy(LISTING);
 
       await vi.runAllTimersAsync();
       await resultPromise;
@@ -291,18 +303,18 @@ describe("llm", () => {
     });
   });
 
-  describe("modifyDashboard", () => {
-    it("includes current spec in the system prompt", async () => {
-      const currentSpec = '{"title":"Existing","widgets":[]}';
+  describe("compareCandidates", () => {
+    it("includes every candidate and the thesis in the system prompt", async () => {
       mockCreate.mockResolvedValue({
-        choices: [
-          { message: { content: '{"title":"Updated","widgets":[]}' } },
-        ],
+        choices: [{ message: { content: '{"ranking":[]}' } }],
       });
 
-      const result = await modifyDashboard(currentSpec, "Añade el margen");
+      const result = await compareCandidates(
+        [LISTING, LISTING_B],
+        "Comprar para alquilar con rentabilidad > 6%",
+      );
 
-      expect(result).toBe('{"title":"Updated","widgets":[]}');
+      expect(result).toBe('{"ranking":[]}');
 
       const rawContent = mockCreate.mock.calls[0][0].messages.find(
         (m: { role: string }) => m.role === "system"
@@ -310,21 +322,18 @@ describe("llm", () => {
       const systemContent = Array.isArray(rawContent)
         ? (rawContent as { text?: string }[]).map((b) => b.text ?? "").join("\n")
         : rawContent;
-      expect(systemContent).toContain("Existing");
-      expect(systemContent).toContain("dashboard modifier");
+
+      expect(systemContent).toContain("Tarea: comparativa de candidatos");
+      expect(systemContent).toContain("CANDIDATO 1");
+      expect(systemContent).toContain("CANDIDATO 2");
+      expect(systemContent).toContain("rentabilidad > 6%");
     });
 
-    it("sends user modification prompt", async () => {
-      mockCreate.mockResolvedValue({
-        choices: [{ message: { content: "{}" } }],
-      });
-
-      await modifyDashboard("{}", "Añade gráfico de tendencia");
-
-      const userContent = mockCreate.mock.calls[0][0].messages.find(
-        (m: { role: string }) => m.role === "user"
-      )?.content;
-      expect(userContent).toBe("Añade gráfico de tendencia");
+    it("rejects a comparison of fewer than two candidates before calling the LLM", async () => {
+      await expect(compareCandidates([LISTING])).rejects.toThrow(
+        "compareCandidates requires at least two candidates",
+      );
+      expect(mockCreate).not.toHaveBeenCalled();
     });
   });
 
@@ -345,7 +354,7 @@ describe("llm", () => {
         return { choices: [{ message: { content: "{}" } }] };
       });
 
-      await generateDashboard("test");
+      await assessOccupancy(LISTING);
 
       expect(callOrder).toEqual(["budget", "llm"]);
     });
@@ -356,14 +365,14 @@ describe("llm", () => {
         // no usage field
       });
 
-      await generateDashboard("test");
+      await assessOccupancy(LISTING);
 
       expect(mockLogUsage).toHaveBeenLastCalledWith(
-        "generateDashboard",
+        "occupancy",
         "anthropic/claude-sonnet-4",
         { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cache_creation_input_tokens: null, cache_read_input_tokens: null },
         { provider: "openrouter", driver: null },
-        { requestId: "req_local" },
+        { requestId: null },
       );
     });
 
@@ -373,14 +382,14 @@ describe("llm", () => {
         usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
       });
 
-      await generateDashboard("test");
+      await assessOccupancy(LISTING);
 
       expect(mockLogUsage).toHaveBeenLastCalledWith(
-        "generateDashboard",
+        "occupancy",
         "anthropic/claude-sonnet-4",
         { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150, cache_creation_input_tokens: null, cache_read_input_tokens: null },
         { provider: "openrouter", driver: null },
-        { requestId: "req_local" },
+        { requestId: null },
       );
     });
 
@@ -388,7 +397,7 @@ describe("llm", () => {
       const { BudgetExceededError } = await import("../llm-usage");
       mockCheckDailyBudget.mockRejectedValue(new BudgetExceededError());
 
-      await expect(generateDashboard("test")).rejects.toThrow(BudgetExceededError);
+      await expect(assessOccupancy(LISTING)).rejects.toThrow(BudgetExceededError);
       expect(mockCreate).not.toHaveBeenCalled();
     });
   });

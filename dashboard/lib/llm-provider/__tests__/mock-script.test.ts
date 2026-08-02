@@ -4,10 +4,10 @@ import {
   mockRunStep,
   mockSingleShotText,
   detectMockFlow,
-  mockDashboardSpec,
   MOCK_PROBE_SQL,
   __resetMockCallId,
 } from "@/lib/llm-provider/mock/script";
+import { buildSystemPrompt } from "@/lib/llm-context";
 
 function sys(text: string): ChatCompletionMessageParam {
   return { role: "system", content: text };
@@ -19,30 +19,35 @@ function toolResult(content: string): ChatCompletionMessageParam {
   return { role: "tool", tool_call_id: "c1", content };
 }
 
-// Flow detection keys off each flow's unique ROLE sentence (not tool names,
-// which appear in every agentic prompt). Include the terminal tool name too so
-// the round-1 scripting in modify/analyze is exercised end to end.
-const CHAT_SYS = "Eres un asistente analítico de inmo-tool.";
-const MODIFY_SYS =
-  "You are an expert AI dashboard modifier for Inmo-Tool. Call apply_dashboard_modification with the validated spec.";
-const ANALYZE_SYS =
-  "Eres un analista de datos experto para Inmo-Tool. Llama a submit_dashboard_analysis.";
-const GENERATE_SYS = "You are an expert AI dashboard generator for Inmo-Tool.";
+/**
+ * Build each flow's marker text from the REAL prompt builder rather than
+ * hardcoding a copy. If a prompt's task heading is reworded, detectMockFlow
+ * silently stops recognising that flow and every e2e run degrades to the chat
+ * script — these tests are what catch that, so they must read the same source
+ * of truth the runtime does.
+ */
+const promptFor = (flow: string): string => buildSystemPrompt(flow, {}).stable;
 
 beforeEach(() => __resetMockCallId());
 
 describe("detectMockFlow", () => {
-  it("maps each flow from its system prompt markers", () => {
-    expect(detectMockFlow(MODIFY_SYS)).toBe("modify");
-    expect(detectMockFlow(ANALYZE_SYS)).toBe("analyze");
-    expect(detectMockFlow(GENERATE_SYS)).toBe("generate");
-    expect(detectMockFlow(CHAT_SYS)).toBe("chat");
+  it("maps each flow from its real assembled system prompt", () => {
+    expect(detectMockFlow(promptFor("occupancy"))).toBe("occupancy");
+    expect(detectMockFlow(promptFor("condition"))).toBe("condition");
+    expect(detectMockFlow(promptFor("redflags"))).toBe("redflags");
+    expect(detectMockFlow(promptFor("extract"))).toBe("extract");
+    expect(detectMockFlow(promptFor("compare"))).toBe("compare");
+    expect(detectMockFlow(promptFor("chat"))).toBe("chat");
+  });
+
+  it("falls back to chat for an unrecognised prompt", () => {
+    expect(detectMockFlow("texto totalmente ajeno")).toBe("chat");
   });
 });
 
 describe("mockRunStep — chat flow", () => {
   it("round 0 calls execute_query against real data", () => {
-    const step = mockRunStep([sys(CHAT_SYS), user("¿cuántas ventas hay?")]);
+    const step = mockRunStep([sys(promptFor("chat")), user("¿cuántos anuncios hay?")]);
     expect(step.kind).toBe("tools");
     if (step.kind === "tools") {
       expect(step.tool_calls[0].function.name).toBe("execute_query");
@@ -52,8 +57,8 @@ describe("mockRunStep — chat flow", () => {
 
   it("round 1 returns prose embedding the probe result", () => {
     const step = mockRunStep([
-      sys(CHAT_SYS),
-      user("¿cuántas ventas hay?"),
+      sys(promptFor("chat")),
+      user("¿cuántos anuncios hay?"),
       { role: "assistant", content: "", tool_calls: [] },
       toolResult('{"rows":[{"n":"42"}]}'),
     ]);
@@ -62,65 +67,65 @@ describe("mockRunStep — chat flow", () => {
   });
 });
 
-describe("mockRunStep — modify flow", () => {
-  it("round 1 calls apply_dashboard_modification with a valid-shaped spec", () => {
-    const step = mockRunStep([
-      sys(MODIFY_SYS),
-      user("añade un kpi de ventas"),
-      { role: "assistant", content: "", tool_calls: [] },
-      toolResult('{"rows":[{"n":"42"}]}'),
-    ]);
-    expect(step.kind).toBe("tools");
-    if (step.kind === "tools") {
-      expect(step.tool_calls[0].function.name).toBe("apply_dashboard_modification");
-      const args = JSON.parse(step.tool_calls[0].function.arguments);
-      expect(args.spec.widgets[0].type).toBe("kpi_row");
-      expect(typeof args.change_summary).toBe("string");
-    }
-  });
-});
-
-describe("mockRunStep — analyze flow", () => {
-  it("round 1 calls submit_dashboard_analysis", () => {
-    const step = mockRunStep([
-      sys(ANALYZE_SYS),
-      user("analiza esto"),
-      { role: "assistant", content: "", tool_calls: [] },
-      toolResult('{"rows":[{"n":"42"}]}'),
-    ]);
-    expect(step.kind).toBe("tools");
-    if (step.kind === "tools") {
-      expect(step.tool_calls[0].function.name).toBe("submit_dashboard_analysis");
-      // Args must match the real tool schema (analysis_markdown / brief_summary).
-      const args = JSON.parse(step.tool_calls[0].function.arguments);
-      expect(typeof args.analysis_markdown).toBe("string");
-      expect(typeof args.brief_summary).toBe("string");
-    }
-  });
-});
-
-describe("mockRunStep — generate flow", () => {
-  it("returns a valid-shaped JSON spec as the final message (no tool round)", () => {
-    const step = mockRunStep([sys(GENERATE_SYS), user("créame un panel de ventas")]);
+describe("mockRunStep — assessment flows", () => {
+  it("occupancy returns a single-shot JSON verdict, no tool round", () => {
+    const step = mockRunStep([sys(promptFor("occupancy")), user("evalúa")]);
     expect(step.kind).toBe("final");
     if (step.kind === "final") {
       const parsed = JSON.parse(step.content);
-      expect(parsed.title).toBeTruthy();
-      expect(parsed.widgets[0].type).toBe("kpi_row");
+      expect(parsed.status).toBe("vacant");
+      expect(typeof parsed.confidence).toBe("number");
+    }
+  });
+
+  it("condition returns a condition verdict with an issues array", () => {
+    const step = mockRunStep([sys(promptFor("condition")), user("evalúa")]);
+    expect(step.kind).toBe("final");
+    if (step.kind === "final") {
+      const parsed = JSON.parse(step.content);
+      expect(parsed.condition).toBe("reformado");
+      expect(Array.isArray(parsed.issues)).toBe(true);
+    }
+  });
+
+  it("redflags returns an empty flags array (a valid, common result)", () => {
+    const step = mockRunStep([sys(promptFor("redflags")), user("evalúa")]);
+    expect(step.kind).toBe("final");
+    if (step.kind === "final") {
+      expect(JSON.parse(step.content).flags).toEqual([]);
+    }
+  });
+
+  it("extract returns the structured-field shape with nulls preserved", () => {
+    const step = mockRunStep([sys(promptFor("extract")), user("evalúa")]);
+    expect(step.kind).toBe("final");
+    if (step.kind === "final") {
+      const parsed = JSON.parse(step.content);
+      expect(parsed.rooms).toBe(3);
+      expect(parsed.year_built).toBeNull();
+      expect(Array.isArray(parsed.features)).toBe(true);
+    }
+  });
+
+  it("compare returns a ranking ordered by rank", () => {
+    const step = mockRunStep([sys(promptFor("compare")), user("compara")]);
+    expect(step.kind).toBe("final");
+    if (step.kind === "final") {
+      const parsed = JSON.parse(step.content);
+      expect(parsed.ranking[0].rank).toBe(1);
+      expect(parsed.ranking).toHaveLength(2);
     }
   });
 });
 
 describe("mockSingleShotText", () => {
-  it("returns a Spanish title for the title flow", () => {
+  it("returns a Spanish title for the title prompt", () => {
     const text = mockSingleShotText([sys("Genera un título conciso..."), user("hola")]);
     expect(text).toBe("Conversación de prueba e2e");
   });
-});
 
-describe("mockDashboardSpec", () => {
-  it("produces a kpi_row widget with seeded-data SQL", () => {
-    const spec = mockDashboardSpec("X") as { widgets: Array<{ items: Array<{ sql: string }> }> };
-    expect(spec.widgets[0].items[0].sql).toContain("ps_ventas");
+  it("returns the assessment JSON for a single-shot assessment flow", () => {
+    const text = mockSingleShotText([sys(promptFor("occupancy")), user("evalúa")]);
+    expect(JSON.parse(text).status).toBe("vacant");
   });
 });

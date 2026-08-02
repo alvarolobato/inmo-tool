@@ -46,19 +46,21 @@ function makeGetRequest(qs: string): NextRequest {
 }
 
 describe("GET /api/conversations", () => {
-  it("passes multiple mode params as modes array to listConversations", async () => {
-    const req = makeGetRequest("mode=generate&mode=modify");
+  it("passes a valid mode param as a 1-element modes array", async () => {
+    const req = makeGetRequest("mode=chat");
     await GET(req);
     expect(mockListConversations).toHaveBeenCalledWith(
-      expect.objectContaining({ modes: ["generate", "modify"] })
+      expect.objectContaining({ modes: ["chat"] })
     );
   });
 
-  it("passes single mode param as a 1-element modes array", async () => {
-    const req = makeGetRequest("mode=analyze");
+  // #24 narrowed VALID_MODES to just `chat`; the retired dashboard modes must
+  // be dropped from the filter rather than passed through to the query.
+  it("drops mode params that are not valid modes", async () => {
+    const req = makeGetRequest("mode=chat&mode=analyze&mode=generate");
     await GET(req);
     expect(mockListConversations).toHaveBeenCalledWith(
-      expect.objectContaining({ modes: ["analyze"] })
+      expect.objectContaining({ modes: ["chat"] })
     );
   });
 
@@ -186,7 +188,7 @@ describe("POST /api/conversations", () => {
       c_url: "/c/conv-123",
       k_url: "/k/conv-123",
     });
-    const res = await POST(makeRequest({ mode: "analyze", context_kind: "dashboard", context_ref: "42" }));
+    const res = await POST(makeRequest({ mode: "chat", context_kind: "global" }));
     expect(res.status).toBe(201);
     const body = await res.json();
     expect(body.id).toBe("conv-123");
@@ -210,7 +212,7 @@ describe("POST /api/conversations", () => {
 
   it("returns 500 when createConversation throws", async () => {
     mockCreateConversation.mockRejectedValue(new Error("DB error"));
-    const res = await POST(makeRequest({ mode: "generate" }));
+    const res = await POST(makeRequest({ mode: "chat" }));
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body.code).toBe("DB_ERROR");

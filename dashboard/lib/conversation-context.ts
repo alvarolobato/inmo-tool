@@ -12,9 +12,8 @@
  */
 
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
-import { FREE_CHAT_TOOLS } from "@/lib/llm-tools/catalog";
 import { getAgenticConfig } from "@/lib/llm-tools/config";
-import { buildStableKnowledgePart } from "@/lib/prompts";
+import { buildSystemPrompt, toolsForFlow } from "@/lib/llm-context";
 import { loadDashboardLlmConfig, getEffectiveDashboardModel } from "@/lib/llm-provider/config";
 import type { InitialContext } from "@/lib/conversation-types";
 
@@ -23,20 +22,20 @@ export interface FreeChatContext {
   tools: ChatCompletionTool[];
 }
 
-const FREE_CHAT_PREAMBLE =
-  "Eres un asistente analítico de inmo-tool. " +
-  "Tienes acceso a herramientas para inspeccionar el modelo de datos, ejecutar consultas de solo lectura y explorar dashboards guardados. " +
-  "En tu primera respuesta de cada conversación nueva, llama a la herramienta `set_title` con un título conciso de 5-7 palabras en español que resuma el tema.\n\n";
-
 /**
  * Build the system prompt and tool catalog for a free-chat conversation
- * (context_kind='global'). Returns the stable knowledge bundle prefixed with
- * a Spanish preamble plus the FREE_CHAT_TOOLS catalog.
+ * (`context_kind='global'`).
+ *
+ * Delegates to the `chat` flow's builders rather than assembling a second
+ * prompt of its own: this snapshot is shown to the user as "Contexto original",
+ * so if it drifted from what assembleRequest actually sends, the UI would be
+ * lying about the request. One source of truth, per #24.
  */
 export function buildFreeChatContext(): FreeChatContext {
+  const { stable } = buildSystemPrompt("chat", {});
   return {
-    systemPrompt: { stable: FREE_CHAT_PREAMBLE + buildStableKnowledgePart() },
-    tools: FREE_CHAT_TOOLS,
+    systemPrompt: { stable },
+    tools: toolsForFlow("chat"),
   };
 }
 

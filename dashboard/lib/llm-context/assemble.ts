@@ -41,7 +41,7 @@ import type { FlowVars } from "./types";
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
-export type { FlowVars, HistoryMessage };
+export type { HistoryMessage };
 
 export interface AssembleResult {
   text: string;
@@ -54,9 +54,12 @@ export interface AssembleExecutionOpts {
   /** Pre-loaded prior messages (skips DB load when provided). */
   priorMessages?: HistoryMessage[];
   /**
-   * Mutable agentic context. Tool handlers write side-channel results back to
-   * ctx (ctx.modifyResult, ctx.analyzeResult). The caller reads these AFTER
-   * assembleRequest() returns.
+   * Mutable agentic context. The runner appends each tool round-trip to
+   * `ctx.toolCalls`, which the caller reads AFTER assembleRequest() returns to
+   * persist what was queried alongside the assistant message. (The old
+   * `ctx.modifyResult` / `ctx.analyzeResult` write-back slots went away with
+   * the dashboard publish tools in #24 — the real-estate flows return their
+   * JSON directly rather than staging it on ctx.)
    * When omitted a minimal context is constructed from requestId + endpoint.
    */
   ctx?: LlmAgenticContext;
@@ -73,9 +76,9 @@ export interface AssembleExecutionOpts {
 /**
  * Assemble and execute an LLM request for a named flow.
  *
- * @param flow           - Flow name: "generate" | "modify" | "analyze" | "suggest" |
- *                         "gap" | "chat" | "summary" | string
- * @param vars           - Per-flow input variables (currentSpec, serializedData, etc.)
+ * @param flow           - Flow name: "occupancy" | "condition" | "redflags" |
+ *                         "extract" | "compare" | "chat" (see LLM_FLOWS)
+ * @param vars           - Per-flow input variables (listing, candidates, etc.)
  * @param conversationId - Conversation ID for history loading (null → no history)
  * @param userMessage    - The user message to append to history
  * @param opts           - Execution options (ctx, temperature, tokens, streaming)
@@ -113,7 +116,8 @@ export async function assembleRequest(
   }));
 
   // 4. Resolve tools + the exact system prompt that will be sent. Single-shot
-  // flows (suggest/gap/summary/title) return [] from toolsForFlow and
+  // assessment flows (occupancy/condition/redflags/extract/compare) return []
+  // from toolsForFlow and
   // must stay on the llmComplete path to preserve strict JSON-only outputs.
   const tools = toolsForFlow(flow);
   const fullSystemPrompt = volatile ? `${stable}\n\n${volatile}` : stable;
