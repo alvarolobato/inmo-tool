@@ -23,7 +23,6 @@ export function TopBar({
   freshnessText: propFreshnessText,
   freshnessStale: propFreshnessStale,
   freshnessTooltip: propFreshnessTooltip,
-  wrenPublicUrl = "http://localhost:3000",
 }: TopBarProps) {
   const pathname = usePathname();
   const ctx = useFreshness();
@@ -31,13 +30,18 @@ export function TopBar({
   const freshnessStale = propFreshnessStale ?? ctx.freshnessStale;
   const freshnessTooltip = propFreshnessTooltip ?? ctx.freshnessTooltip;
 
+  // Wren nav link removed: WrenAI doesn't exist in this project (removed in
+  // task 1.1). Paneles/Conversaciones/Revisión are left in place — audited
+  // in #63's fix and confirmed they don't hard-crash on load like Inicio
+  // did, though their content is still PowerShop-era and slated for
+  // replacement by later phases (candidate list #19, map #43, property
+  // detail #44, deal workspace #36-38).
   const navLinks = [
     { href: "/inicio", label: "Inicio" },
     { href: "/paneles", label: "Paneles" },
     { href: "/profiles", label: "Perfiles" },
     { href: "/conversations", label: "Conversaciones" },
     { href: "/review", label: "Revisión" },
-    { href: wrenPublicUrl, label: "Wren", external: true },
   ] as const;
 
   return (
@@ -47,7 +51,7 @@ export function TopBar({
     >
       {/* Left: logo + nav */}
       <div className="flex items-center gap-6 px-5">
-        {/* Powershop bolt logo */}
+        {/* Inmo-Tool bolt logo (shape kept from the source project, unbranded) */}
         <div className="flex items-center gap-1.5">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path d="M4 2 L14 2 L20 11 L10 22 L4 22 L4 13 L11 13 L8 9 L4 9 Z" fill="var(--accent)" />
@@ -61,17 +65,7 @@ export function TopBar({
               color: "var(--fg)",
             }}
           >
-            Powershop
-          </span>
-          <span
-            style={{
-              fontFamily: "var(--font-jetbrains), monospace",
-              fontSize: 11,
-              color: "var(--fg-subtle)",
-              marginLeft: 2,
-            }}
-          >
-            ANALYTICS
+            Inmo-Tool
           </span>
         </div>
 

@@ -13,8 +13,8 @@ import "./globals.css";
 export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
-  title: "PowerShop Dashboard",
-  description: "Cuadros de mando generados con inteligencia artificial para inmo-tool",
+  title: "Inmo-Tool",
+  description: "Plataforma de búsqueda de inversión inmobiliaria con IA",
 };
 
 // Fonts are self-hosted under public/fonts/ to avoid network fetches at Docker
