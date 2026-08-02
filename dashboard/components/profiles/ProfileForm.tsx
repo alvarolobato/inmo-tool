@@ -1,18 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { PROPERTY_TYPES, type Scope, type ThesisParams } from "@/lib/profiles-schema";
-
-const PROPERTY_TYPE_LABELS: Record<(typeof PROPERTY_TYPES)[number], string> = {
-  piso: "Piso",
-  chalet: "Chalet",
-  atico: "Ático",
-  local: "Local comercial",
-  nave: "Nave industrial",
-  garaje: "Garaje",
-  terreno: "Terreno",
-  edificio: "Edificio completo",
-};
+import {
+  PROPERTY_TYPES,
+  PROPERTY_TYPE_LABELS,
+  type Scope,
+  type ThesisParams,
+} from "@/lib/profiles-schema";
 
 export interface ProfileFormValues {
   name: string;

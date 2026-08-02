@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { ErrorDisplay } from "@/components/ErrorDisplay";
 import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
@@ -222,6 +223,12 @@ export default function ProfilesPage() {
                 </p>
               </div>
               <div style={{ display: "flex", gap: 6 }}>
+                <Link
+                  href={`/profiles/${p.id}`}
+                  style={{ ...actionButtonStyle, textDecoration: "none", display: "inline-block" }}
+                >
+                  Ver candidatos
+                </Link>
                 <button
                   onClick={() => setMode({ kind: "edit", profile: p })}
                   disabled={busyId === p.id}
