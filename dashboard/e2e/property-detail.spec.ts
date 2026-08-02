@@ -176,9 +176,16 @@ test("shows all linked listings and combined history for deduplicated property",
   ).toHaveAttribute("data-status", "withdrawn");
 
   // Combined chart: both sources' price history contribute to one chart,
-  // not two separate ones — assert the chart svg exists and the status
-  // timeline (which can't be a numeric line series) lists the withdrawal.
-  await expect(page.locator(".recharts-responsive-container, svg").first()).toBeVisible();
+  // not two separate ones. Assert real connected lines were drawn, not just
+  // "some svg exists" — that assertion previously passed even when the
+  // chart rendered zero-length paths and a single dot with nothing joining
+  // them (#73 review: forward-fill bug, chart was silently empty).
+  const lineCurves = page.locator(".recharts-line-curve");
+  await expect(lineCurves).toHaveCount(2); // one per source: fotocasa, milanuncios
+  const pathData = await lineCurves.evaluateAll((els) => els.map((el) => el.getAttribute("d") ?? ""));
+  for (const d of pathData) {
+    expect(d, `line path should contain a real line-to command, got: ${d}`).toMatch(/L\s*[\d.]/);
+  }
   await expect(page.getByTestId("status-event-timeline")).toContainText(/retirado/i);
 });
 

@@ -29,6 +29,13 @@ export interface DetailSection {
   title: string;
   order: number;
   content: ReactNode;
+  /**
+   * Optional header-row content rendered next to the title (e.g. task #27's
+   * AI-assessment confidence badge, task #37's "Añadir nota" action button).
+   * Added pre-emptively (#73 review) so those later sections don't have to
+   * duplicate the section wrapper or hack around a fixed title-only header.
+   */
+  headerRight?: ReactNode;
 }
 
 export function DetailSections({ sections }: { sections: DetailSection[] }) {
@@ -37,7 +44,10 @@ export function DetailSections({ sections }: { sections: DetailSection[] }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       {sorted.map((s) => (
         <section key={s.id} data-section-id={s.id}>
-          <h2 style={{ margin: "0 0 8px", fontSize: 14, fontWeight: 600, color: "var(--fg)" }}>{s.title}</h2>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+            <h2 style={{ margin: "0 0 8px", fontSize: 14, fontWeight: 600, color: "var(--fg)" }}>{s.title}</h2>
+            {s.headerRight}
+          </div>
           {s.content}
         </section>
       ))}

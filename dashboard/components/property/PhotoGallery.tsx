@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /**
  * Photo gallery for the property detail page (task 2.8, #44, EC-2): the
@@ -9,9 +9,34 @@ import { useState } from "react";
  * better/different photos on different sites. Simple grid + click-to-enlarge
  * lightbox using local state — issue #44 explicitly says no carousel
  * library is needed for this.
+ *
+ * Accessibility (fixed in #73 review): thumbnails are real <button>s (not
+ * bare <img onClick>) so they're keyboard-focusable/activatable for free;
+ * Escape closes the open lightbox; focus moves to the lightbox's close
+ * button on open and returns to the triggering thumbnail on close.
  */
 export function PhotoGallery({ photoUrls }: { photoUrls: string[] }) {
   const [openIndex, setOpenIndex] = useState<number | null>(null);
+  const thumbRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const lastOpenedFromRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (openIndex === null) return;
+    closeButtonRef.current?.focus();
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpenIndex(null);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [openIndex]);
+
+  const closeLightbox = () => {
+    const returnTo = lastOpenedFromRef.current;
+    setOpenIndex(null);
+    if (returnTo !== null) thumbRefs.current[returnTo]?.focus();
+  };
 
   if (photoUrls.length === 0) {
     return (
@@ -32,29 +57,47 @@ export function PhotoGallery({ photoUrls }: { photoUrls: string[] }) {
         }}
       >
         {photoUrls.map((url, i) => (
-          // eslint-disable-next-line @next/next/no-img-element -- external, unpredictable-domain photo URLs from scraped listings; next/image's domain allowlist isn't a good fit here.
-          <img
+          <button
             key={url}
-            src={url}
-            alt={`Foto ${i + 1} de la propiedad`}
+            ref={(el) => {
+              thumbRefs.current[i] = el;
+            }}
+            type="button"
             data-testid="photo-gallery-thumb"
-            onClick={() => setOpenIndex(i)}
+            onClick={() => {
+              lastOpenedFromRef.current = i;
+              setOpenIndex(i);
+            }}
+            aria-label={`Ampliar foto ${i + 1} de la propiedad`}
             style={{
-              width: "100%",
-              aspectRatio: "4 / 3",
-              objectFit: "cover",
+              padding: 0,
+              border: "1px solid var(--border)",
               borderRadius: 6,
               cursor: "pointer",
-              border: "1px solid var(--border)",
+              background: "none",
+              display: "block",
             }}
-          />
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element -- external, unpredictable-domain photo URLs from scraped listings; next/image's domain allowlist isn't a good fit here. */}
+            <img
+              src={url}
+              alt={`Foto ${i + 1} de la propiedad`}
+              style={{
+                width: "100%",
+                aspectRatio: "4 / 3",
+                objectFit: "cover",
+                borderRadius: 5,
+                display: "block",
+              }}
+            />
+          </button>
         ))}
       </div>
 
       {openIndex !== null && (
         <div
           data-testid="photo-gallery-lightbox"
-          onClick={() => setOpenIndex(null)}
+          onClick={closeLightbox}
           style={{
             position: "fixed",
             inset: 0,
@@ -66,11 +109,38 @@ export function PhotoGallery({ photoUrls }: { photoUrls: string[] }) {
             cursor: "zoom-out",
           }}
         >
+          <button
+            ref={closeButtonRef}
+            type="button"
+            data-testid="photo-gallery-lightbox-close"
+            onClick={(e) => {
+              e.stopPropagation();
+              closeLightbox();
+            }}
+            aria-label="Cerrar foto ampliada"
+            style={{
+              position: "absolute",
+              top: 16,
+              right: 16,
+              width: 40,
+              height: 40,
+              borderRadius: "50%",
+              border: "none",
+              background: "rgba(255,255,255,0.15)",
+              color: "#fff",
+              fontSize: 20,
+              cursor: "pointer",
+              zIndex: 1001,
+            }}
+          >
+            ×
+          </button>
           {/* eslint-disable-next-line @next/next/no-img-element -- see thumbnail note above */}
           <img
             src={photoUrls[openIndex]}
             alt={`Foto ${openIndex + 1} ampliada`}
             style={{ maxWidth: "90vw", maxHeight: "90vh", objectFit: "contain" }}
+            onClick={(e) => e.stopPropagation()}
           />
         </div>
       )}

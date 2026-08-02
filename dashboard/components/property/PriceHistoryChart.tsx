@@ -1,7 +1,7 @@
 import { Card, LineChart } from "@tremor/react";
 import type { PriceHistoryPoint, StatusEventPoint } from "@/lib/property-detail";
 import { fmtEUR0 } from "@/components/widgets/format";
-import { STATUS_LABELS } from "@/components/property/LinkedListings";
+import { STATUS_LABELS } from "@/lib/listing-status-labels";
 
 /**
  * Combined price/status history for the property detail page (task 2.8,
@@ -13,11 +13,15 @@ import { STATUS_LABELS } from "@/components/property/LinkedListings";
  * the chart instead of plotted as a line series.
  *
  * One category (line) per source site. Rows are keyed by exact observed_at
- * date — this does not forward-fill a source's price between two of its own
- * observations (e.g. "flat at 300k from day 1 to day 40" won't draw a
- * horizontal segment unless a price point was recorded on the days between),
- * which is a reasonable MVP simplification: it shows every real observed
- * price change accurately, it just doesn't interpolate between them.
+ * date, one row per date any source was observed on. Because different
+ * sources are rarely observed on the same date, a source's value is
+ * forward-filled into every later row until its next real observation —
+ * without this, Tremor/Recharts only draws a dot for a series with a single
+ * total value and nothing at all for a series whose 2+ points never share a
+ * row, which silently rendered as an empty chart (caught in #73 review).
+ * Forward-fill produces an honest step line: "this source's last known price
+ * was X until we observed otherwise" — never drawn before a source's first
+ * real observation.
  */
 export function PriceHistoryChart({
   priceHistory,
@@ -49,9 +53,23 @@ export function PriceHistoryChart({
     }
   }
 
-  const chartData = [...byDate.values()]
-    .sort((a, b) => a.sortKey.localeCompare(b.sortKey))
-    .map(({ Fecha, values }) => ({ Fecha, ...values }));
+  const orderedRows = [...byDate.values()].sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+
+  // Forward-fill each source's last known price into rows where it wasn't
+  // observed, starting only after that source's first real observation.
+  const lastKnown: Record<string, number> = {};
+  const chartData = orderedRows.map(({ Fecha, values }) => {
+    const row: Record<string, string | number> = { Fecha };
+    for (const source of sources) {
+      if (values[source] !== undefined) {
+        lastKnown[source] = values[source];
+      }
+      if (lastKnown[source] !== undefined) {
+        row[source] = lastKnown[source];
+      }
+    }
+    return row;
+  });
 
   const sortedStatusEvents = [...statusEvents].sort((a, b) => b.observed_at.localeCompare(a.observed_at));
 
@@ -71,6 +89,8 @@ export function PriceHistoryChart({
             valueFormatter={(v: number) => fmtEUR0(v)}
             yAxisWidth={70}
             showLegend={sources.length > 1}
+            connectNulls
+            autoMinValue
           />
         </Card>
       )}

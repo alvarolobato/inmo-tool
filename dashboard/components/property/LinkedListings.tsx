@@ -1,13 +1,16 @@
 import type { PropertyListingDetail } from "@/lib/property-detail";
 import { fmtEUR0 } from "@/components/widgets/format";
+import { STATUS_LABELS } from "@/lib/listing-status-labels";
 
-export const STATUS_LABELS: Record<string, string> = {
-  active: "Activo",
-  reserved: "Reservado",
-  sold: "Vendido",
-  withdrawn: "Retirado",
-  expired: "Caducado",
+const LISTING_KIND_LABELS: Record<string, string> = {
+  particular: "Particular",
+  agency: "Agencia",
 };
+
+function formatSeenDate(iso: string | null): string | null {
+  if (iso === null) return null;
+  return new Date(iso).toLocaleDateString("es-ES", { day: "2-digit", month: "short", year: "numeric" });
+}
 
 /**
  * Every `listing` row linked to this property (task 2.8, #44, EC-1/EC-3):
@@ -52,8 +55,23 @@ export function LinkedListings({ listings }: { listings: PropertyListingDetail[]
             <span style={{ fontSize: 12, color: "var(--fg)" }}>
               {STATUS_LABELS[l.status] ?? l.status}
             </span>
+            {l.listing_kind !== null && (
+              <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+                {LISTING_KIND_LABELS[l.listing_kind] ?? l.listing_kind}
+              </span>
+            )}
             {l.current_price !== null && (
               <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>{fmtEUR0(l.current_price)}</span>
+            )}
+            {formatSeenDate(l.first_seen_at) !== null && (
+              <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+                Visto desde {formatSeenDate(l.first_seen_at)}
+              </span>
+            )}
+            {formatSeenDate(l.last_seen_at) !== null && l.last_seen_at !== l.first_seen_at && (
+              <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+                · última vez {formatSeenDate(l.last_seen_at)}
+              </span>
             )}
           </div>
           {l.url !== null && (

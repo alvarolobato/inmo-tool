@@ -253,4 +253,24 @@ test.describe("clustering", () => {
     await expect(cluster).toHaveCount(1);
     await expect(cluster).toHaveText("2");
   });
+
+  test("clicking a cluster-list item navigates to that property's detail page", async ({ page }) => {
+    skipIfNoDb(test);
+
+    await page.goto(`/profiles/${clusterProfileId}/map`);
+    await expect(page.locator(".leaflet-container")).toBeVisible();
+
+    await page.locator('[data-testid="map-cluster"]').click();
+    const itemLinks = page.locator('[data-testid="map-cluster-item-link"]');
+    await expect(itemLinks).toHaveCount(2);
+
+    const targetPropertyId = await itemLinks.first().getAttribute("data-property-id");
+    expect(targetPropertyId).toMatch(/^\d+$/);
+
+    await itemLinks.first().click();
+    await expect(page).toHaveURL(
+      new RegExp(`/profiles/${clusterProfileId}/properties/${targetPropertyId}$`),
+    );
+    await expect(page.getByTestId("property-detail-page")).toBeVisible();
+  });
 });
