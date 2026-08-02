@@ -1,0 +1,14 @@
+<!--
+Synthetic block/interruption-page fixture — no live Milanuncios block page
+was actually observed during the Phase 2.1 feasibility spike (unlike
+Fotocasa in task 1.4), but the same defensive principle applies: a page
+lacking the __INITIAL_PROPS__ marker (a soft block, a "removed ad" page, a
+site redesign) must make discover()/fetch_detail() raise ConnectorError,
+never silently return empty/wrong data. This fixture is a generic stand-in
+for "any page without the expected marker," not a captured real response.
+-->
+<!DOCTYPE html>
+<html>
+<head><title>Anuncio no disponible</title></head>
+<body><p>Este anuncio ya no esta disponible.</p></body>
+</html>
