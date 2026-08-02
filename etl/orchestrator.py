@@ -33,6 +33,13 @@ CONNECTORS: list[Connector] = []
 # aspirational for this task).
 _DEFAULT_SCOPE = ConnectorScope(geography="")
 
+# Consecutive discover() sweeps a listing must be absent from before it's
+# marked withdrawn (issue #12 EC-5). Picked to tolerate one-off pagination
+# noise or a transient per-item failure without over-tolerating a listing
+# that's genuinely gone — not empirically tuned yet, revisit once real
+# sweep-to-sweep variance is observed in practice.
+_WITHDRAWAL_THRESHOLD = 3
+
 
 def _update_existing_listing(
     cur,
@@ -249,6 +256,62 @@ def _upsert_canonical_listing(conn, canonical: CanonicalListingVersion) -> None:
     conn.commit()
 
 
+def _reconcile_missed_discoveries(
+    conn, source: str, discovered_external_ids: set[str]
+) -> None:
+    """Track discover()-sweep absences; mark withdrawn after N consecutive misses.
+
+    Called once per connector run, right after discover() returns, before
+    any fetch_detail happens — this only needs the *set* of external_ids
+    discover() found, not their detail data. A listing missing from one
+    sweep isn't necessarily gone (pagination noise, falling off page 1 as
+    newer listings push it down, a transient site hiccup on that one
+    query) — see issue #12 EC-5 and _WITHDRAWAL_THRESHOLD's docstring.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, external_id, missed_discovery_count FROM listing "
+            "WHERE source = %s AND status = 'active'",
+            (source,),
+        )
+        active_listings = cur.fetchall()
+
+        for listing_id, external_id, missed_count in active_listings:
+            if external_id in discovered_external_ids:
+                if missed_count != 0:
+                    cur.execute(
+                        "UPDATE listing SET missed_discovery_count = 0 WHERE id = %s",
+                        (listing_id,),
+                    )
+                continue
+
+            new_count = missed_count + 1
+            if new_count >= _WITHDRAWAL_THRESHOLD:
+                cur.execute(
+                    "UPDATE listing SET status = 'withdrawn', missed_discovery_count = %s "
+                    "WHERE id = %s",
+                    (new_count, listing_id),
+                )
+                cur.execute(
+                    "INSERT INTO listing_status_event (listing_id, observed_at, status) "
+                    "VALUES (%s, NOW(), 'withdrawn')",
+                    (listing_id,),
+                )
+                logger.info(
+                    "Connector %s: listing external_id=%s marked withdrawn after "
+                    "%d consecutive missed discoveries",
+                    source,
+                    external_id,
+                    new_count,
+                )
+            else:
+                cur.execute(
+                    "UPDATE listing SET missed_discovery_count = %s WHERE id = %s",
+                    (new_count, listing_id),
+                )
+    conn.commit()
+
+
 def _to_jsonb_param(value: dict) -> str:
     import json
 
@@ -363,6 +426,7 @@ def run_connector(conn, connector: Connector, scope: ConnectorScope) -> dict:
 
     limiter.acquire()
     external_ids = connector.discover(scope, throttle=limiter.acquire)
+    _reconcile_missed_discoveries(conn, connector.name, set(external_ids))
 
     fetched = 0
     errors = 0

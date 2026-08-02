@@ -1,0 +1,25 @@
+<!--
+Trimmed synthetic fixture, structurally accurate to a real Fotocasa search
+results page fetched during the Phase 1.4 feasibility spike (2026-08-02),
+not a verbatim copy of the full ~1.1MB real page. Only the anchor href
+pattern discover() actually parses is preserved.
+
+Three distinct listings (190011971, 190022222, 190033333). 190011971 is
+linked twice (main card + a "similar listings" widget) to exercise
+discover()'s dedup. A gallery-thumbnail href with a query string is
+included to confirm it's correctly excluded (matches only the bare
+`.../<id>/d"` pattern, not `.../<id>/d?multimedia=...`).
+-->
+<html lang="es"><head><title>Comprar viviendas</title></head><body>
+<div class="re-SearchResult">
+  <a href="/es/comprar/vivienda/madrid-capital/calefaccion-ascensor-no-amueblado/190011971/d" class="re-Card-link">Piso en Santa Eugenia</a>
+  <a href="/es/comprar/vivienda/madrid-capital/atico-terraza/190022222/d" class="re-Card-link">Ático en Retiro</a>
+  <a href="/es/comprar/vivienda/madrid-capital/duplex-garaje/190033333/d" class="re-Card-link">Dúplex en Chamberí</a>
+</div>
+<div class="re-SimilarListings">
+  <a href="/es/comprar/vivienda/madrid-capital/calefaccion-ascensor-no-amueblado/190011971/d" class="re-Card-link">Piso en Santa Eugenia (similar)</a>
+</div>
+<div class="re-Card-gallery-thumb">
+  <a href="/es/comprar/vivienda/madrid-capital/atico-terraza/190022222/d?multimedia=image&amp;isGalleryOpen=true">foto</a>
+</div>
+</body></html>
