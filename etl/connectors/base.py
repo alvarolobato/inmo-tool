@@ -130,6 +130,23 @@ class Connector(ABC):
     circuit_breaker_min_attempts: int = 10
     circuit_breaker_window: int = 20
 
+    # Whether discover() sees the connector's *entire* active inventory for
+    # its scope on every sweep, or only some subset of it (e.g. one search-
+    # results page out of hundreds, when robots.txt or the source disallows
+    # pagination). This gates withdrawal detection (issue #12 EC-5,
+    # etl.orchestrator._reconcile_missed_discoveries): a listing missing
+    # from a *partial* sweep tells you nothing about whether it's still
+    # active — it may simply have scored below the cutoff of whatever
+    # subset this sweep covered, especially under a relevance/recency sort
+    # rather than a stable one. Treating that as "3 misses -> withdrawn"
+    # would corrupt exactly the signal issue #1 §10 calls out as valuable
+    # (real withdrawals, relistings-at-a-lower-price). Default True (most
+    # connectors should aim for full coverage); a connector that can't
+    # achieve it (like Fotocasa, page-1-only per its own docstring) must
+    # override this to False and accept that its listings never
+    # auto-transition to withdrawn from absence alone.
+    discovers_full_inventory: bool = True
+
     @abstractmethod
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         """Return external_ids that exist for this scope. Cheap; no full fetch.

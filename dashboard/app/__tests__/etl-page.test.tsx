@@ -368,12 +368,14 @@ describe("EtlMonitorPage", () => {
     });
   });
 
-  // ── 12. 409 response keeps UI in running state without showing error ───────
+  // ── 12. 501 response (the real one /api/etl/run returns — task 1.6/#14
+  //        Phase 1 review: the manual trigger is disabled, see route.ts)
+  //        surfaces the route's real detail message, not a generic one ─────
 
-  it("handles 409 from POST /api/etl/run silently", async () => {
+  it("shows the route's detail message when POST /api/etl/run returns 501 (manual trigger disabled)", async () => {
     const fetchMock = vi.fn().mockImplementation((url: string, options?: RequestInit) => {
       if (url === "/api/etl/run" && options?.method === "POST") {
-        return Promise.resolve({ ok: false, status: 409, json: () => Promise.resolve({ error: "already_running", run_id: 2 }) });
+        return Promise.resolve({ ok: false, status: 501, json: () => Promise.resolve({ error: "not_implemented", detail: "Manual ETL trigger is disabled" }) });
       }
       if (url.startsWith("/api/etl/runs")) {
         return Promise.resolve({
@@ -401,9 +403,10 @@ describe("EtlMonitorPage", () => {
       fireEvent.click(screen.getByTestId("sync-now-button"));
     });
 
-    // No error message should appear for a 409
+    // page.tsx's triggerSync treats 501 like 400 — surfaces the route's
+    // real `detail` string instead of the generic fallback message.
     await waitFor(() => {
-      expect(screen.queryByText("Error al iniciar la sincronización")).not.toBeInTheDocument();
+      expect(screen.getByText("Manual ETL trigger is disabled")).toBeInTheDocument();
     });
   });
 

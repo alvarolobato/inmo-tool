@@ -1,6 +1,6 @@
 # Connector framework — contract, rate limiting, circuit breaking
 
-> Implements issue #1 §4 (per-site connectors) and issue #11 (Phase 1.3: the framework/harness). No real site connector exists yet — that's issue #12 (task 1.4). This document describes what task 1.4 (and every later connector) plugs into, not any specific site's scraping logic.
+> Implements issue #1 §4 (per-site connectors) and issue #11 (Phase 1.3: the framework/harness). Fotocasa (issue #12, task 1.4) is the first real connector built against this contract — see [connectors.md skill](../skills/connectors.md) for the site-specific findings (feasibility spike, JSON-over-HTML-scraping, field-mapping judgment calls) from building it. This document stays about the framework itself, not any one site's scraping logic.
 
 ## The `Connector` contract
 
@@ -30,7 +30,7 @@ When tripped mid-run, the orchestrator stops processing remaining discovered IDs
 
 ## Orchestration and persistence (`etl/orchestrator.py`)
 
-`run_all_connectors` iterates `CONNECTORS` (empty until issue #12 registers the first real one — a no-op empty registry is a supported, tested state), running each through `run_connector`'s discover → fetch_detail → normalize → persist cycle, and records one `connector_runs` row plus one `connector_run_results` row per connector per run for observability (which connector, when, how many discovered/fetched/errored, real elapsed duration).
+`run_all_connectors` iterates `CONNECTORS` (registered via `etl/connectors/__init__.py`'s `register_all()` — Fotocasa today, task 2.1's second connector adds one line there), running each through `run_connector`'s discover → fetch_detail → normalize → persist cycle, and records one `connector_runs` row plus one `connector_run_results` row per connector per run for observability (which connector, when, how many discovered/fetched/errored, real elapsed duration). An empty `CONNECTORS` registry is still a supported, tested state (issue #11 EC-4) — the loop runs cleanly with zero connectors.
 
 Persistence (`_upsert_canonical_listing`) follows the schema's core invariant (see [`data-model.md`](data-model.md)): every new `(source, external_id)` gets its own singleton `property` row at ingest, never a deferred-null reference. Re-visits update the existing `listing`/`property` row via `_update_existing_listing`, and every column update is **COALESCE-guarded** (new value if present, otherwise keep the old one) rather than a blind overwrite — this matters even before any dedup exists, since a single connector re-fetch can transiently fail to surface a field, and it matters even more once Phase 2's dedup engine (issue #16) reassigns a listing's `property_id` onto a property shared with another listing: neither listing's re-visit should be able to erase what the other contributed.
 
@@ -40,4 +40,12 @@ The insert path also handles the inherent race in "check if it exists, then inse
 
 A crashed process (killed container, OOM, host reboot) can leave a `connector_runs` row stuck at `status='running'` forever. `run_all_connectors` reconciles any such stale row to `failed` before starting a new run, so staleness never accumulates silently.
 
-`run_scheduler_loop` isolates each scheduled iteration in its own try/except — a transient failure in one iteration is logged and the loop continues at the next interval, rather than killing the long-running container process.
+`run_scheduler_loop` isolates each scheduled iteration in its own try/except — a transient failure in one iteration is logged and the loop continues at the next interval, rather than killing the long-running container process. It also runs every connector once immediately on startup, before the first sleep — not just on the hourly boundary. Combined with `restart: unless-stopped` in `docker-compose.yml`, this means every container restart is itself a live scrape of every registered connector's site, not only the scheduled hourly runs (see the [connectors skill](../skills/connectors.md) for the operational implication).
+
+## Withdrawal detection requires knowing whether a connector actually sees its full inventory
+
+`_reconcile_missed_discoveries` marks a listing `withdrawn` after `_WITHDRAWAL_THRESHOLD` (3) consecutive `discover()` sweeps that don't include it. This is only a valid signal when `discover()` genuinely covers the connector's active inventory for its scope — if it only ever returns a subset (one search-results page out of hundreds, a top-N-by-relevance cut, etc.), then a listing's absence from one sweep tells you nothing: it may simply have scored below whatever cutoff that sweep's subset represents, especially under a relevance/recency sort rather than a stable one.
+
+This was found live during Phase 1's phase-level review: Fotocasa's `discover()` only reads page 1 of search results (robots.txt disallows pagination — see the connectors skill), against a real inventory of 11,000+ listings for a single geography, sorted by relevance. Treating a Fotocasa listing's absence from 3 sweeps as "withdrawn" would have been wrong far more often than right — corrupting exactly the signal issue #1 §10 calls out as a first-class value-add (real withdrawals, relistings-at-a-lower-price).
+
+`Connector.discovers_full_inventory` (`etl/connectors/base.py`, default `True`) gates this: when a connector sets it to `False`, `run_connector` skips `_reconcile_missed_discoveries` entirely for that connector — not just a raised threshold, since even accumulating a miss-count that never triggers anything would still be tracking a meaningless number. Fotocasa sets `discovers_full_inventory = False`. A connector should only claim `True` when its `discover()` genuinely enumerates (or very nearly enumerates) everything active in its scope — pagination through the full result set, an API that returns a complete listing, etc. Until a connector can honestly claim full coverage, its listings simply never auto-transition to `withdrawn` from absence alone (a human/future mechanism would need to confirm removal some other way).
