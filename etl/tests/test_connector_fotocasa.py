@@ -271,6 +271,140 @@ class TestNormalize:
         assert canonical.raw_extra["antiquity"] == 7
 
 
+class TestFallbackChain:
+    """Issue #77: property_web_scraper's es_fotocasa.json mapping keeps a
+    CSS-selector fallback for exactly these four fields (their embedded-JSON
+    path is the fragile part most likely to shift on a redesign). Their own
+    selectors no longer match the live site as of this connector's own
+    live spot-check (2026-08-02) — Fotocasa migrated to a Tailwind-utility
+    design system with no semantic BEM classes. These fallback selectors
+    are freshly verified against a real listing instead (icon-anchored via
+    `data-title`, not layout classes) — see fotocasa.py's
+    `_icon_stat_text`/`_price_fallback_text` docstrings.
+    """
+
+    def test_falls_back_to_css_when_json_fields_are_null(self):
+        html = _read_fixture("fotocasa_sample_detail_fallback.html")
+        connector = FotocasaConnector()
+        with patch(
+            "etl.connectors.fotocasa.requests.get", return_value=_mock_response(html)
+        ):
+            raw = connector.fetch_detail("190099999", throttle=lambda: None)
+        canonical = connector.normalize(raw)
+
+        # Values baked into the fixture's HTML match the real listing this
+        # fixture is modeled on (external_id 189316512) — this is also a
+        # live-data regression check, not just "some fallback fired".
+        assert canonical.rooms == 2
+        assert canonical.bathrooms == 2
+        assert canonical.m2_built == Decimal(60)
+        assert canonical.current_price == Decimal(379000)
+
+    def test_json_path_wins_over_css_when_both_are_present(self):
+        """The fallback chain must not override a perfectly good JSON
+        value just because HTML markup also happens to be present."""
+        html = _read_fixture("fotocasa_sample_detail.html")
+        connector = FotocasaConnector()
+        with patch(
+            "etl.connectors.fotocasa.requests.get", return_value=_mock_response(html)
+        ):
+            raw = connector.fetch_detail("190011971", throttle=lambda: None)
+        canonical = connector.normalize(raw)
+        # This fixture's own HTML body has no icon-stat markup at all (it's
+        # a script-only trimmed fixture) — if the fallback silently won,
+        # these would be None instead of the JSON's real values.
+        assert canonical.rooms == 3
+        assert canonical.bathrooms == 1
+        assert canonical.m2_built == Decimal(74)
+        assert canonical.current_price == Decimal(205000)
+
+    def test_css_fallback_also_returns_none_when_html_lacks_the_markup_too(self):
+        """Belt-and-braces: a listing where both JSON and HTML are missing
+        the field must not crash and must yield None, not a stray 0/False
+        from a getter that partially matched."""
+        raw = RawListing(
+            external_id="996",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/x",
+                "props": {
+                    "realEstate": {
+                        "price": None,
+                        "address": {},
+                        "coordinates": {},
+                        "features": {"rooms": None, "bathrooms": None, "surface": None},
+                        "descriptions": {},
+                        "multimedia": [],
+                    }
+                },
+                "html": "<html><body>no markup here</body></html>",
+            },
+        )
+        canonical = FotocasaConnector().normalize(raw)
+        assert canonical.rooms is None
+        assert canonical.bathrooms is None
+        assert canonical.m2_built is None
+        assert canonical.current_price is None
+
+
+class TestSchemaSupersetFields:
+    """Issue #77's AC: city/province/postal_code/m2_plot populated from data
+    this connector already parses but previously flattened into `address`
+    or dropped into `raw_extra` only."""
+
+    def test_populates_city_province_postal_code_and_m2_plot(self):
+        html = _read_fixture("fotocasa_sample_detail.html")
+        connector = FotocasaConnector()
+        with patch(
+            "etl.connectors.fotocasa.requests.get", return_value=_mock_response(html)
+        ):
+            raw = connector.fetch_detail("190011971", throttle=lambda: None)
+        canonical = connector.normalize(raw)
+        assert canonical.city == "Madrid Capital"
+        assert canonical.province == "Madrid"
+        assert canonical.postal_code == "28031"
+        assert canonical.m2_plot == Decimal(0)
+
+    def test_operation_is_always_sale_for_this_connector(self):
+        """This connector only ever requests Fotocasa's /comprar/ URLs —
+        it has no rental discover()/fetch_detail() path at all, so
+        operation='sale' reflects what the connector structurally is, not
+        an unverified default masking missing data."""
+        html = _read_fixture("fotocasa_sample_detail.html")
+        connector = FotocasaConnector()
+        with patch(
+            "etl.connectors.fotocasa.requests.get", return_value=_mock_response(html)
+        ):
+            raw = connector.fetch_detail("190011971", throttle=lambda: None)
+        canonical = connector.normalize(raw)
+        assert canonical.operation == "sale"
+
+    def test_missing_address_fields_yield_none_not_empty_string(self):
+        raw = RawListing(
+            external_id="995",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/x",
+                "props": {
+                    "realEstate": {
+                        "price": 100000,
+                        "address": {},
+                        "coordinates": {},
+                        "features": {},
+                        "descriptions": {},
+                        "multimedia": [],
+                    }
+                },
+                "html": "<html><body></body></html>",
+            },
+        )
+        canonical = FotocasaConnector().normalize(raw)
+        assert canonical.city is None
+        assert canonical.province is None
+        assert canonical.postal_code is None
+        assert canonical.m2_plot is None
+
+
 class TestPriceChangeHistory:
     def test_price_change_between_fetches_produces_different_canonical_prices(self):
         """EC-4 (connector half): two fetches of the same external_id with a
