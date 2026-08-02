@@ -5,19 +5,39 @@
  * The "simplest v1" trigger issue #18 names for the after-new-listings-land
  * case: cheap enough at this project's current data volumes to re-run for
  * all profiles rather than target only the ones a specific connector run
- * might have affected. Not yet wired to run automatically after a connector
- * cycle (Phase 1.3's orchestrator is a separate Python process/container) —
- * a manual or future-scheduled call for now; see materialize.ts's docstring.
+ * might have affected.
+ *
+ * Called automatically by the Python connector orchestrator at the end of
+ * every run (issue #94 — see `notify_materialize_all` in
+ * `etl/orchestrator.py`), closing the gap where a freshly-ingested property
+ * stayed unscored indefinitely until a human manually triggered
+ * materialization. Still callable by hand for an out-of-band refresh.
+ *
+ * Auth: requires the admin key (issue #94). This is a cross-container,
+ * network-facing write trigger — it re-materializes every profile and kicks
+ * off scoring — so it is gated exactly like `/api/admin/*` and the extension
+ * capture route (#75's security fix). `middleware.ts`'s matcher does NOT
+ * cover `/api/profiles/*`, so the check lives in the handler; both mechanisms
+ * accept the same credential forms (`x-admin-key`, `Authorization: Bearer`,
+ * or the `ps_admin` cookie), so an operator's browser session and the ETL's
+ * header-based call both authenticate against the same secret.
  *
  * Error codes:
+ *   401 — Missing/invalid admin credentials
  *   500 — Unexpected error
  */
 
+import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { materializeAllProfiles } from "@/lib/filtering/materialize";
+import { adminApiKeyValid, adminUnauthorized } from "@/lib/admin-api-auth";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
-export async function POST(): Promise<NextResponse> {
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  if (!adminApiKeyValid(request)) {
+    return adminUnauthorized();
+  }
+
   const requestId = generateRequestId();
   try {
     const results = await materializeAllProfiles();
