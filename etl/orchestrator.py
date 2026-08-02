@@ -126,6 +126,7 @@ def _update_existing_listing(
                current_price = COALESCE(%s, current_price),
                description = COALESCE(%s, description),
                photo_urls = %s, contact_raw = COALESCE(%s, contact_raw),
+               reference_code = COALESCE(%s, reference_code),
                raw_extra = %s, missed_discovery_count = 0,
                operation = COALESCE(%s, operation)
          WHERE id = %s
@@ -138,6 +139,7 @@ def _update_existing_listing(
             canonical.description,
             list(canonical.photo_urls),
             canonical.contact_raw,
+            canonical.reference_code,
             _to_jsonb_param(canonical.raw_extra),
             canonical.operation,
             listing_id,
@@ -232,8 +234,8 @@ def _upsert_canonical_listing(conn, canonical: CanonicalListingVersion) -> None:
                 INSERT INTO listing
                     (property_id, source, external_id, url, listing_kind, status,
                      first_seen_at, last_seen_at, current_price, description,
-                     photo_urls, contact_raw, raw_extra, operation)
-                VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW(), %s, %s, %s, %s, %s,
+                     photo_urls, contact_raw, reference_code, raw_extra, operation)
+                VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW(), %s, %s, %s, %s, %s, %s,
                         COALESCE(%s, 'sale'))
                 RETURNING id
                 """,
@@ -248,6 +250,7 @@ def _upsert_canonical_listing(conn, canonical: CanonicalListingVersion) -> None:
                     canonical.description,
                     list(canonical.photo_urls),
                     canonical.contact_raw,
+                    canonical.reference_code,
                     _to_jsonb_param(canonical.raw_extra),
                     canonical.operation,
                 ),

@@ -129,6 +129,12 @@ class CanonicalListingVersion:
     # to 'sale' every time a connector that doesn't set this re-fetches a
     # listing. INSERT path defaults an unset value to 'sale' explicitly.
     operation: Literal["sale", "rent"] | None = None
+    # Seller/agency-assigned reference code (issue #72), e.g. Fotocasa's
+    # "Referencia: NS603" — a dedup signal, not a unique key (see
+    # etl/schema/init.sql's column comment). Defaulted None for the same
+    # reason as the other superset fields above: existing connectors/tests
+    # don't need updating for this dataclass shape to gain the field.
+    reference_code: str | None = None
 
     def __post_init__(self) -> None:
         if self.operation is not None and self.operation not in _VALID_OPERATIONS:

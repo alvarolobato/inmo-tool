@@ -74,6 +74,19 @@ def sizes_close(a_m2: Decimal | None, b_m2: Decimal | None, tolerance: Decimal) 
     return ratio <= tolerance
 
 
+def prices_close(a: Decimal | None, b: Decimal | None, tolerance: Decimal) -> bool:
+    """True when both prices are present and within `tolerance` of each other.
+
+    Shared by phone_extract.py and reference_code.py's corroboration
+    fallback (price+size proximity when coordinates aren't available on
+    both sides) — moved here rather than duplicated or imported as a
+    private symbol across sibling signal modules.
+    """
+    if a is None or b is None or a <= 0 or b <= 0:
+        return False
+    return abs(a - b) / max(a, b) <= tolerance
+
+
 def coords_close(
     a_lat: Decimal | None,
     a_lon: Decimal | None,

@@ -89,9 +89,20 @@ CREATE TABLE IF NOT EXISTS listing (
     description    TEXT,
     photo_urls     TEXT[],
     contact_raw    TEXT,
+    -- Seller/agency-assigned reference code (e.g. Fotocasa's "Referencia:
+    -- NS603") — a dedicated column, not raw_extra, because the dedup engine
+    -- (etl/dedup/signals/reference_code.py, issue #72) needs to compare it
+    -- across every listing pair; NOT globally unique (two different
+    -- agencies can coincidentally use the same code) so it carries no
+    -- UNIQUE constraint — see that signal module for the corroboration
+    -- discipline this requires.
+    reference_code TEXT,
     raw_extra      JSONB        NOT NULL DEFAULT '{}',
     UNIQUE (source, external_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_listing_reference_code ON listing (reference_code)
+    WHERE reference_code IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_listing_property_id  ON listing (property_id);
 -- Both of these are kept, not redundant: a b-tree composite index on
@@ -357,7 +368,7 @@ CREATE TABLE IF NOT EXISTS property_merge_log (
     id                  BIGSERIAL    PRIMARY KEY,
     property_id         BIGINT       REFERENCES property(id),
     merged_listing_ids  BIGINT[],
-    match_basis         TEXT         CHECK (match_basis IN ('cadastral','address_coords','phone','photo_hash','fuzzy')),
+    match_basis         TEXT         CHECK (match_basis IN ('cadastral','address_coords','phone','reference_code','photo_hash','fuzzy')),
     confidence          NUMERIC(4,3),
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     reverted_at         TIMESTAMPTZ
@@ -410,7 +421,7 @@ CREATE TABLE IF NOT EXISTS suggested_merge (
     id            BIGSERIAL    PRIMARY KEY,
     listing_id_a  BIGINT       NOT NULL REFERENCES listing(id),
     listing_id_b  BIGINT       NOT NULL REFERENCES listing(id),
-    match_basis   TEXT         NOT NULL CHECK (match_basis IN ('cadastral','address_coords','phone','photo_hash','fuzzy')),
+    match_basis   TEXT         NOT NULL CHECK (match_basis IN ('cadastral','address_coords','phone','reference_code','photo_hash','fuzzy')),
     confidence    NUMERIC(4,3),
     status        TEXT         NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','rejected','conflict')),
     detail        JSONB        NOT NULL DEFAULT '{}',

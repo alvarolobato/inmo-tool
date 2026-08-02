@@ -241,6 +241,28 @@ def _price_fallback_text(soup: BeautifulSoup) -> str | None:
     return el.get_text(strip=True)
 
 
+_REFERENCE_FALLBACK_RE = re.compile(r"Referencia:\s*(\S+)")
+
+
+def _reference_fallback_text(soup: BeautifulSoup) -> str | None:
+    """The agent-contact reference line: `<ul
+    class="re-FormContactDetail-referenceAlias"><li>Referencia: NS603</li>
+    </ul>`. Verified live (2026-08-02) against a real Sevilla listing
+    (the same "NS603" example cited in issue #72) — matches
+    `realEstate.reference` from the embedded JSON exactly. `re-*` is a
+    semantic BEM-style class name Fotocasa uses for this component (not a
+    Tailwind utility class like the ones that broke property_web_scraper's
+    selectors), so it's a reasonable fallback anchor on its own, but the
+    regex over the `<li>`'s text (rather than trusting the class survives
+    forever) keeps this consistent with `_icon_stat_text`'s more defensive
+    approach."""
+    el = soup.select_one(".re-FormContactDetail-referenceAlias li")
+    if el is None:
+        return None
+    match = _REFERENCE_FALLBACK_RE.search(el.get_text())
+    return match.group(1) if match else None
+
+
 class FotocasaConnector(Connector):
     name = "fotocasa"
     # Conservative default — issue #1 §15's "good-neighbor crawling" applies
@@ -418,6 +440,14 @@ class FotocasaConnector(Connector):
             lambda: text_to_int(_icon_stat_text(soup(), "bathroom_tub")),
             field="bathrooms",
         )
+        # Seller/agency reference code (issue #72), e.g. "Referencia: NS603" —
+        # a dedup signal (etl/dedup/signals/reference_code.py), not a unique
+        # key: two different agencies can coincidentally use the same code.
+        reference_code = first_present(
+            lambda: (real_estate.get("reference") or "").strip() or None,
+            lambda: _reference_fallback_text(soup()),
+            field="reference_code",
+        )
         m2_built = first_present(
             lambda: _to_decimal(features.get("surface")),
             lambda: _to_decimal(
@@ -445,6 +475,7 @@ class FotocasaConnector(Connector):
             ),
             photo_urls=photo_urls,
             contact_raw=client_name,
+            reference_code=reference_code,
             address=address,
             lat=_to_decimal(coords.get("latitude")),
             lon=_to_decimal(coords.get("longitude")),

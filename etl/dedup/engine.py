@@ -28,6 +28,7 @@ from etl.dedup.signals import (
     fuzzy,
     phone_extract,
     photo_hash,
+    reference_code,
 )
 from etl.dedup.types import ListingRecord, PairEvaluation
 
@@ -56,7 +57,7 @@ def fetch_listing_records(conn) -> list[ListingRecord]:
             SELECT l.id, l.property_id, l.source, l.external_id, l.listing_kind,
                    l.description, l.photo_urls,
                    p.cadastral_ref, p.address, p.lat, p.lon, p.m2_built,
-                   l.current_price
+                   l.current_price, l.contact_raw, l.reference_code
               FROM listing l
               JOIN property p ON p.id = l.property_id
             """
@@ -77,6 +78,8 @@ def fetch_listing_records(conn) -> list[ListingRecord]:
             lon=row[10],
             m2_built=row[11],
             current_price=row[12],
+            contact_raw=row[13],
+            reference_code=row[14],
         )
         for row in rows
     ]
@@ -111,6 +114,7 @@ def evaluate_pair(
         cadastral.evaluate,
         address_coords.evaluate,
         phone_extract.evaluate,
+        reference_code.evaluate,
     ):
         result = evaluate_fn(a, b)
         if result is not None:

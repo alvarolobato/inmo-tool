@@ -44,6 +44,8 @@ One row per (source site, external listing ID) — a specific site's advertiseme
 
 **Cross-cutting landmine for #31, not yet fixed**: the dedup engine (`etl/dedup/engine.py`) has no `operation` predicate, and the candidate list's price aggregation (`dashboard/lib/candidates.ts`, `MIN(current_price)` across a property's active listings) doesn't filter on it either. Once a rental connector exists, dedup merging a sale listing and a rental listing of the same underlying property (e.g. an investor's flat listed both for sale and, separately, for rent) would let the rental price poison the sale-price aggregation, or vice versa. Not a problem today (both live connectors are sale-only) — a real one the moment #31 ships.
 
+**`reference_code`** (`TEXT`, issue #72): the seller/agency-assigned reference code shown on the listing page (e.g. Fotocasa's "Referencia: NS603" — `realEstate.reference` in its embedded JSON, with a CSS fallback per issue #77's fallback-chain pattern). Deliberately not `UNIQUE` — agencies assign these independently, so two unrelated agencies coincidentally using the same short code is a real possibility, not an edge case. See `etl/dedup/signals/reference_code.py` for the corroboration discipline this requires (a bare match is never sufficient for auto-merge — same principle as phone-in-description, see `match_basis` below).
+
 ### `listing_price_history` / `listing_status_event`
 Append-only event logs. Every observed price is a new row (not an overwrite) so a chart of "price over time" and a "days since last price drop" computation are both just a `SELECT ... ORDER BY observed_at`, no reconstruction from diffs needed. Same for status transitions (active → reserved/sold/withdrawn/expired, and relistings) — issue #1 §10's "withdrawn and relisted at a lower price" pattern is a query over this table, not a bespoke tracked flag.
 
@@ -122,7 +124,7 @@ This task only creates the table. Generating assessments is Phase 4 (issues #24�
 ## Deduplication audit trail
 
 ### `property_merge_log`
-Every automatic merge is recorded here: which property survived, which listings were folded into it, on what basis (`cadastral`/`address_coords`/`phone`/`photo_hash`/`fuzzy`), at what confidence, and — if an operator later decides the merge was wrong — when it was reverted. `match_basis` includes `cadastral` for completeness even though issue #16 (after owner feedback — see #42, closed) treats cadastral-reference matching as a rare opportunistic check rather than something with a dedicated lookup connector; the column doesn't assume otherwise, it just records whatever basis actually fired.
+Every automatic merge is recorded here: which property survived, which listings were folded into it, on what basis (`cadastral`/`address_coords`/`phone`/`reference_code`/`photo_hash`/`fuzzy`), at what confidence, and — if an operator later decides the merge was wrong — when it was reverted. `match_basis` includes `cadastral` for completeness even though issue #16 (after owner feedback — see #42, closed) treats cadastral-reference matching as a rare opportunistic check rather than something with a dedicated lookup connector; the column doesn't assume otherwise, it just records whatever basis actually fired. `reference_code` (issue #72) was added after the original 5-signal list in issue #1 §6 — a real gap in that list, not a late addition to the schema's design.
 
 This task only creates the table. The matching engine that writes to it is Phase 2 (issue #16).
 
