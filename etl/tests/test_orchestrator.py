@@ -8,8 +8,10 @@ nothing meaningful.
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -1113,6 +1115,202 @@ class TestCircuitBreakerIntegration:
                     (connector.name,),
                 )
                 cur.execute("DELETE FROM connector_runs WHERE id = %s", (run_id,))
+            pg_conn.commit()
+
+
+class TestMultiScopeWithdrawalReconciliation:
+    """PR #139 review: reconciliation must run once per connector per run,
+    against the UNION of every scope's ids — never once per scope."""
+
+    # name -> (center, the ids this city's discover() returns). Mutable on
+    # purpose: test_a_genuinely_gone_listing... swaps one city's ids
+    # mid-test to simulate a listing disappearing between sweeps, then
+    # restores them in a finally.
+    _CITIES: ClassVar[dict[str, tuple[tuple[float, float], tuple[str, ...]]]] = {
+        "madrid": ((40.4168, -3.7038), ("m-1",)),
+        "sevilla": ((37.3891, -5.9845), ("s-1",)),
+        "barcelona": ((41.3851, 2.1734), ("b-1",)),
+        "valencia": ((39.4699, -0.3763), ("v-1",)),
+    }
+
+    def _seed_profiles(self, conn) -> None:
+        with conn.cursor() as cur:
+            for name, (center, _ids) in self._CITIES.items():
+                cur.execute(
+                    "SELECT 1 FROM search_profile WHERE name = %s "
+                    "AND archived_at IS NULL",
+                    (f"multiscope-{name}",),
+                )
+                if cur.fetchone() is None:
+                    cur.execute(
+                        "INSERT INTO search_profile (name, scope) VALUES (%s, %s)",
+                        (
+                            f"multiscope-{name}",
+                            json.dumps(
+                                {
+                                    "geography": {
+                                        "type": "radius",
+                                        "center": [center[0], center[1]],
+                                        "radius_km": 10,
+                                    }
+                                }
+                            ),
+                        ),
+                    )
+        conn.commit()
+
+    def _per_scope_connector(self):
+        """A connector whose discover() returns DIFFERENT ids per scope —
+        which is the realistic shape (each city sweep sees its own city's
+        listings) and the one that exposes the bug. DummyConnector returns
+        the same ids for every scope, so it cannot reproduce this.
+        """
+        cities = self._CITIES
+
+        class PerScopeConnector(DummyConnector):
+            def discover(self, scope, throttle):
+                self.scopes_seen.append(scope)
+                if scope.center is None:
+                    return []
+                nearest = min(
+                    cities.items(),
+                    key=lambda kv: (
+                        (kv[1][0][0] - scope.center[0]) ** 2
+                        + (kv[1][0][1] - scope.center[1]) ** 2
+                    ),
+                )
+                return list(nearest[1][1])
+
+            def scope_key(self, scope):
+                if scope.center is None:
+                    return None
+                return min(
+                    cities.items(),
+                    key=lambda kv: (
+                        (kv[1][0][0] - scope.center[0]) ** 2
+                        + (kv[1][0][1] - scope.center[1]) ** 2
+                    ),
+                )[0]
+
+        return PerScopeConnector(
+            name="multiscope-test",
+            external_ids=(),
+            discovers_full_inventory=True,
+        )
+
+    def test_listing_present_in_one_scope_is_not_withdrawn_by_the_others(self, pg_conn):
+        """The bug: `_reconcile_missed_discoveries` sweeps every active row
+        for the source with no scope predicate, so reconciling per scope
+        counted a Madrid listing as "missed" during the Sevilla, Barcelona
+        and Valencia sweeps. With _WITHDRAWAL_THRESHOLD == 3, four scopes
+        withdrew live inventory inside a SINGLE run.
+
+        Vivantial (#120) is the first connector to set
+        discovers_full_inventory=True, which is what made this reachable —
+        while every connector was False, reconciliation never ran at all.
+        """
+        _apply_schema(pg_conn)
+        self._seed_profiles(pg_conn)
+        connector = self._per_scope_connector()
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            assert orchestrator._WITHDRAWAL_THRESHOLD == 3, (
+                "this test is calibrated against a threshold of 3 vs 4 scopes"
+            )
+
+            # One run. Four scopes, each discovering only its own city's id.
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert len(connector.scopes_seen) == 4, (
+                f"expected 4 scopes, saw {len(connector.scopes_seen)}"
+            )
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT external_id, status, missed_discovery_count "
+                    "FROM listing WHERE source = %s ORDER BY external_id",
+                    (connector.name,),
+                )
+                rows = cur.fetchall()
+
+            assert len(rows) == 4, f"expected all 4 cities ingested, got {rows}"
+            for external_id, status, missed in rows:
+                assert status == "active", (
+                    f"{external_id} withdrawn after a single run — per-scope "
+                    "reconciliation counted the other 3 scopes as misses"
+                )
+                assert missed == 0, (
+                    f"{external_id} accumulated {missed} misses in one run; "
+                    "the union of all scopes' ids contains it"
+                )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            with pg_conn.cursor() as cur:
+                for r in run_ids:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+                cur.execute(
+                    "DELETE FROM search_profile WHERE name LIKE 'multiscope-%%'"
+                )
+            pg_conn.commit()
+
+    def test_a_genuinely_gone_listing_still_withdraws_across_scopes(self, pg_conn):
+        """The fix must not disable reconciliation — a listing absent from
+        the whole union, for THRESHOLD consecutive runs, must still
+        withdraw. Otherwise the multi-scope fix would silently trade one
+        bug for another."""
+        _apply_schema(pg_conn)
+        self._seed_profiles(pg_conn)
+        connector = self._per_scope_connector()
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            # m-1 genuinely disappears, but the Madrid sweep still returns
+            # listings (m-2 replaces it). Modelling this as an *empty*
+            # Madrid result would instead trip the empty-discover
+            # fail-safe, which deliberately disables reconciliation
+            # run-wide — a different code path, and not what's under test.
+            self._CITIES["madrid"] = ((40.4168, -3.7038), ("m-2",))
+            try:
+                for _ in range(orchestrator._WITHDRAWAL_THRESHOLD):
+                    run_ids.append(
+                        orchestrator.run_all_connectors(pg_conn, trigger="test")
+                    )
+
+                with pg_conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT status FROM listing WHERE source = %s "
+                        "AND external_id = %s",
+                        (connector.name, "m-1"),
+                    )
+                    (status,) = cur.fetchone()
+                assert status == "withdrawn", (
+                    "a listing absent from the full union for THRESHOLD runs "
+                    "must still withdraw — the fix must not disable "
+                    "reconciliation outright"
+                )
+
+                with pg_conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT status FROM listing WHERE source = %s "
+                        "AND external_id = %s",
+                        (connector.name, "s-1"),
+                    )
+                    (sevilla_status,) = cur.fetchone()
+                assert sevilla_status == "active", "other cities unaffected"
+            finally:
+                self._CITIES["madrid"] = ((40.4168, -3.7038), ("m-1",))
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            with pg_conn.cursor() as cur:
+                for r in run_ids:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+                cur.execute(
+                    "DELETE FROM search_profile WHERE name LIKE 'multiscope-%%'"
+                )
             pg_conn.commit()
 
 

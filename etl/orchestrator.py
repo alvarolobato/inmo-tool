@@ -302,12 +302,28 @@ def _reconcile_missed_discoveries(
 ) -> None:
     """Track discover()-sweep absences; mark withdrawn after N consecutive misses.
 
-    Called once per connector run, right after discover() returns, before
-    any fetch_detail happens — this only needs the *set* of external_ids
-    discover() found, not their detail data. A listing missing from one
-    sweep isn't necessarily gone (pagination noise, falling off page 1 as
-    newer listings push it down, a transient site hiccup on that one
-    query) — see issue #12 EC-5 and _WITHDRAWAL_THRESHOLD's docstring.
+    A listing missing from one sweep isn't necessarily gone (pagination
+    noise, falling off page 1 as newer listings push it down, a transient
+    site hiccup) — see issue #12 EC-5 and _WITHDRAWAL_THRESHOLD's docstring.
+
+    **Called once per connector per run, against the union of every
+    scope's discovered ids — never per scope.** This query sweeps every
+    active row for `source`, with no scope predicate, because a listing's
+    row carries no record of which scope discovered it. So passing one
+    scope's ids here marks every listing belonging to *other* scopes as
+    missed. With `_WITHDRAWAL_THRESHOLD = 3` and >=4 enabled scopes,
+    that withdraws live inventory within a single run — a Madrid listing
+    is legitimately absent from the Sevilla, Barcelona and Valencia
+    sweeps, and three misses is all it takes.
+
+    That bug was latent while every connector set
+    `discovers_full_inventory = False` (reconciliation never ran at all).
+    Vivantial (#120) is the first connector to claim `True`, which is what
+    made it reachable — caught in review before it shipped.
+
+    The caller must also skip reconciliation entirely when any scope
+    failed: a partial union is indistinguishable from genuine absence, so
+    a failed Sevilla sweep would withdraw Sevilla's live listings.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -616,35 +632,37 @@ def run_connector(
     # a safe reconciliation source the moment a filter narrows what this
     # particular scope's discover() call actually returns.
     scope_is_filtered = scope.rooms is not None
-    if not connector.discovers_full_inventory or scope_is_filtered:
-        # A partial-coverage connector's discover() results say nothing
-        # about whether an absent listing is actually gone (see
-        # Connector.discovers_full_inventory's docstring — Phase 1
-        # phase-level review found this would otherwise false-positive
-        # real inventory into 'withdrawn'). Skip reconciliation entirely
-        # rather than accumulate a miss-count that means nothing.
-        if scope_is_filtered and connector.discovers_full_inventory:
-            logger.info(
-                "Connector %s: scope=%r carries a narrowing filter — "
-                "skipping withdrawal reconciliation for this scope even "
-                "though the connector otherwise discovers full inventory",
-                connector.name,
-                scope,
-            )
-    elif external_ids:
-        _reconcile_missed_discoveries(conn, connector.name, set(external_ids))
-    else:
-        # An empty discover() result is never trusted enough to bump every
-        # active listing's miss-counter — a well-behaved connector should
-        # already raise ConnectorError on a soft-block/interruption page
-        # rather than return an empty list (see fotocasa.py's
-        # _INITIAL_PROPS_MARKER check), but this is a second line of
-        # defense: even a connector bug that returns [] instead of raising
-        # must not be able to mass-withdraw a source's entire inventory.
-        logger.warning(
-            "Connector %s: discover() returned zero external_ids — skipping "
-            "withdrawal reconciliation this run (see run_connector docstring)",
+    # Whether THIS scope's discovered ids may contribute to the run-level
+    # withdrawal reconciliation the caller performs after every scope has
+    # run. Reconciliation itself deliberately does NOT happen here — see
+    # `_reconcile_missed_discoveries`' docstring for why per-scope
+    # reconciliation is unsafe for a full-inventory connector.
+    reconcilable = connector.discovers_full_inventory and not scope_is_filtered
+    if scope_is_filtered and connector.discovers_full_inventory:
+        # Issue #99 hardening, unchanged in intent: a filtered scope's
+        # absences mean "doesn't match this filter" as easily as "gone".
+        logger.info(
+            "Connector %s: scope=%r carries a narrowing filter — excluding "
+            "it from withdrawal reconciliation even though the connector "
+            "otherwise discovers full inventory",
             connector.name,
+            scope,
+        )
+    if reconcilable and not external_ids:
+        # An empty discover() result is never trusted enough to feed
+        # reconciliation — a well-behaved connector should already raise
+        # ConnectorError on a soft-block/interruption page rather than
+        # return an empty list (see fotocasa.py's _INITIAL_PROPS_MARKER
+        # check), but this is a second line of defense: even a connector
+        # bug that returns [] instead of raising must not be able to
+        # mass-withdraw a source's entire inventory.
+        reconcilable = False
+        logger.warning(
+            "Connector %s: discover() returned zero external_ids for "
+            "scope=%r — excluding it from withdrawal reconciliation this "
+            "run (see run_connector docstring)",
+            connector.name,
+            scope,
         )
 
     fetched = 0
@@ -697,6 +715,11 @@ def run_connector(
         "fetched_count": fetched,
         "error_count": errors,
         "circuit_open": circuit_open,
+        # Returned rather than acted on here: withdrawal reconciliation is
+        # a per-connector-per-run decision the caller makes against the
+        # union of every scope's ids. See _reconcile_missed_discoveries.
+        "discovered_external_ids": set(external_ids),
+        "reconcilable": reconcilable,
     }
 
 
@@ -1032,6 +1055,14 @@ def run_all_connectors(
             window=connector.circuit_breaker_window,
         )
         seen_scope_keys: set[str] = set()
+        # Withdrawal reconciliation runs once per connector per run,
+        # against the union of every scope's discovered ids — never per
+        # scope (see _reconcile_missed_discoveries' docstring: the sweep
+        # has no scope predicate, so per-scope reconciliation withdraws
+        # other scopes' live listings). `reconcilable_union` stays True
+        # only while every scope processed so far was a safe contributor.
+        discovered_union: set[str] = set()
+        reconcilable_union = True
 
         for scope_index, scope in enumerate(scopes):
             if breaker.tripped:
@@ -1088,6 +1119,11 @@ def run_all_connectors(
                 Exception
             ) as exc:  # one scope's discover() failing shouldn't skip the rest
                 any_scope_failed = True
+                # A failed scope leaves a hole in the union: its listings
+                # are absent not because they're gone but because we never
+                # looked. Reconciling against a partial union would
+                # withdraw them.
+                reconcilable_union = False
                 logger.exception(
                     "Connector %s: discover() failed for scope=%r",
                     connector.name,
@@ -1100,9 +1136,28 @@ def run_all_connectors(
             fetched_total += result["fetched_count"]
             error_total += result["error_count"]
             any_circuit_open = any_circuit_open or result["circuit_open"]
+            discovered_union |= result["discovered_external_ids"]
+            reconcilable_union = reconcilable_union and result["reconcilable"]
             scope_summaries.append(
                 f"{scope_key}: discovered={result['discovered_count']} "
                 f"fetched={result['fetched_count']} errors={result['error_count']}"
+            )
+
+        # Withdrawal reconciliation: once per connector per run, against
+        # the union of every scope's ids. Doing it inside run_connector
+        # (i.e. per scope) would mark every listing outside the current
+        # scope as missed, because the sweep has no scope predicate — with
+        # >=4 scopes that withdraws live inventory in a single run. See
+        # _reconcile_missed_discoveries' docstring.
+        if reconcilable_union and discovered_union:
+            _reconcile_missed_discoveries(conn, connector.name, discovered_union)
+        elif not reconcilable_union:
+            logger.info(
+                "Connector %s: skipping withdrawal reconciliation this run "
+                "(a scope failed, was filtered, returned nothing, or the "
+                "connector doesn't claim full inventory) — an incomplete "
+                "union can't distinguish 'gone' from 'not looked at'",
+                connector.name,
             )
 
         # connector_run_results.status CHECK only allows 'ok'/'failed'/
