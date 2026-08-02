@@ -29,6 +29,33 @@ vi.mock("../llm-usage", () => ({
   },
 }));
 
+// Run the real config loader, but against a config.yaml that does not exist, so
+// these tests read env vars and schema defaults only — never the developer's
+// ~/.config/inmo-tool/config.yaml.
+//
+// getOpenRouterApiKey() prefers the loader's value over process.env, and a
+// scaffolded config.yaml still holds `openrouter.api_key: your_openrouter_api_key`.
+// That placeholder is truthy, so "throws if OPENROUTER_API_KEY is not set" stopped
+// asserting anything locally while still passing in CI, where no config.yaml exists.
+//
+// Note this delegates rather than returning a stub object: getSystemConfig() is
+// itself the env-var reader (env > file > default), so stubbing it empty would
+// also blank DASHBOARD_LLM_PROVIDER and silently route these tests to the CLI
+// provider, spawning a real `claude` process.
+vi.mock("@/lib/system-config/loader", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/system-config/loader")>();
+  return {
+    ...actual,
+    getSystemConfig: (opts?: Parameters<typeof actual.getSystemConfig>[0]) =>
+      actual.getSystemConfig({
+        ...opts,
+        configPath: "/nonexistent/inmo-tool-test-config.yaml",
+        noCache: true,
+      }),
+  };
+});
+
 import { _resetCircuitBreaker } from "../llm-circuit-breaker";
 import { assessOccupancy, compareCandidates, resetClient } from "../llm";
 import type { ListingSnapshot } from "../llm-context";
