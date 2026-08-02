@@ -48,6 +48,60 @@ export interface LocationPickerValue {
   radiusKm: number;
 }
 
+/**
+ * A numeric text input that keeps its own local string state, only
+ * propagating a real number upward once the text parses to a finite value.
+ *
+ * Fixes a real bug (Opus review, PR #103): binding a plain <input
+ * type="number"> directly to a numeric prop with `onChange={(e) =>
+ * onChange(Number(e.target.value))}` coerces an empty string to `0` (JS's
+ * `Number("") === 0`), which — for a lat/lng field — silently teleported
+ * the map to [0, 0] (off the coast of Africa) the instant a user cleared
+ * the field to type a new value, instead of treating "empty" as "not yet
+ * entered." Tracking the raw text locally lets the field genuinely be
+ * empty mid-edit without forcing a bogus numeric value on the parent.
+ */
+function NumericTextInput({
+  value,
+  onChange,
+  min,
+  style,
+  testId,
+}: {
+  value: number;
+  onChange: (next: number) => void;
+  min?: number;
+  style?: React.CSSProperties;
+  testId?: string;
+}) {
+  const [text, setText] = useState(String(value));
+
+  // Stay in sync when the value changes from outside this input (e.g. the
+  // map picker or a search selection updating the coordinates) — but not
+  // on every render, so this doesn't fight with the user's own typing.
+  useEffect(() => {
+    setText((current) => (Number(current) === value ? current : String(value)));
+  }, [value]);
+
+  return (
+    <input
+      type="number"
+      min={min}
+      step="any"
+      value={text}
+      onChange={(e) => {
+        const raw = e.target.value;
+        setText(raw);
+        if (raw.trim() === "") return; // genuinely empty — don't propagate 0
+        const parsed = Number(raw);
+        if (Number.isFinite(parsed)) onChange(parsed);
+      }}
+      style={style}
+      data-testid={testId}
+    />
+  );
+}
+
 export function LocationPicker({
   value,
   onChange,
@@ -57,22 +111,47 @@ export function LocationPicker({
 }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<GeocodeResult[]>([]);
+  const [searched, setSearched] = useState(false);
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [showResults, setShowResults] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Set by selectResult() right before it calls setQuery(result.label), so
+  // the effect below can tell "query changed because the user picked a
+  // result" (skip re-searching) from "query changed because the user is
+  // typing" (search for real). Without this, selecting a result set the
+  // input's text to the full label, which re-triggered this same effect a
+  // debounce-interval later — a redundant Nominatim request and the
+  // dropdown reopening over the map the user had just interacted with.
+  const skipNextSearchRef = useRef(false);
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (skipNextSearchRef.current) {
+      skipNextSearchRef.current = false;
+      return;
+    }
     if (query.trim().length < 3) {
       setResults([]);
       setSearchError(null);
+      setSearched(false);
       return;
     }
     setSearching(true);
+    // Stale-response guard: this component's own search box has no
+    // hard limit on how fast a user can retype, and Nominatim's own
+    // response latency isn't guaranteed to preserve request order, so an
+    // older, slower request could otherwise resolve after a newer one and
+    // overwrite its (more current) results. Mirrors the `cancelled` flag
+    // pattern already established in components/map/MapView.tsx, plus a
+    // real AbortController so the superseded request is actually cancelled
+    // rather than just ignored on arrival.
+    let cancelled = false;
+    const controller = new AbortController();
     debounceRef.current = setTimeout(() => {
-      fetch(`/api/geocode?q=${encodeURIComponent(query.trim())}`)
+      const currentQuery = query.trim();
+      fetch(`/api/geocode?q=${encodeURIComponent(currentQuery)}`, { signal: controller.signal })
         .then(async (res) => {
           if (!res.ok) {
             const body = await res.json().catch(() => null);
@@ -81,23 +160,32 @@ export function LocationPicker({
           return res.json();
         })
         .then((body: { items: GeocodeResult[] }) => {
+          if (cancelled) return;
           setResults(body.items);
           setShowResults(true);
           setSearchError(null);
+          setSearched(true);
         })
         .catch((err) => {
+          if (cancelled || (err instanceof Error && err.name === "AbortError")) return;
           setResults([]);
           setSearchError(err instanceof Error ? err.message : "No se pudo buscar la ubicación.");
+          setSearched(true);
         })
-        .finally(() => setSearching(false));
+        .finally(() => {
+          if (!cancelled) setSearching(false);
+        });
     }, SEARCH_DEBOUNCE_MS);
     return () => {
+      cancelled = true;
+      controller.abort();
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, [query]);
 
   const selectResult = (result: GeocodeResult) => {
     onChange({ center: [result.lat, result.lon], radiusKm: value.radiusKm });
+    skipNextSearchRef.current = true;
     setQuery(result.label);
     setShowResults(false);
   };
@@ -167,6 +255,11 @@ export function LocationPicker({
       {searching && (
         <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--fg-muted)" }}>Buscando…</p>
       )}
+      {!searching && searched && !searchError && results.length === 0 && (
+        <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--fg-muted)" }}>
+          Sin resultados para esta búsqueda.
+        </p>
+      )}
       {searchError && (
         <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--down)" }}>{searchError}</p>
       )}
@@ -184,14 +277,12 @@ export function LocationPicker({
 
       <div style={{ marginTop: 10 }}>
         <label style={labelStyle}>Radio (km)</label>
-        <input
-          type="number"
+        <NumericTextInput
           min={0.1}
-          step="any"
           value={value.radiusKm}
-          onChange={(e) => onChange({ center: value.center, radiusKm: Number(e.target.value) })}
+          onChange={(radiusKm) => onChange({ center: value.center, radiusKm })}
           style={{ ...inputStyle, maxWidth: 140 }}
-          data-testid="location-radius-input"
+          testId="location-radius-input"
         />
       </div>
 
@@ -216,24 +307,20 @@ export function LocationPicker({
         <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
           <div style={{ flex: 1 }}>
             <label style={labelStyle}>Latitud</label>
-            <input
-              type="number"
-              step="any"
+            <NumericTextInput
               value={value.center[0]}
-              onChange={(e) => onChange({ center: [Number(e.target.value), value.center[1]], radiusKm: value.radiusKm })}
+              onChange={(lat) => onChange({ center: [lat, value.center[1]], radiusKm: value.radiusKm })}
               style={inputStyle}
-              data-testid="location-lat-input"
+              testId="location-lat-input"
             />
           </div>
           <div style={{ flex: 1 }}>
             <label style={labelStyle}>Longitud</label>
-            <input
-              type="number"
-              step="any"
+            <NumericTextInput
               value={value.center[1]}
-              onChange={(e) => onChange({ center: [value.center[0], Number(e.target.value)], radiusKm: value.radiusKm })}
+              onChange={(lon) => onChange({ center: [value.center[0], lon], radiusKm: value.radiusKm })}
               style={inputStyle}
-              data-testid="location-lon-input"
+              testId="location-lon-input"
             />
           </div>
         </div>

@@ -41,7 +41,8 @@ export type ErrorCode =
   | "UNKNOWN"
   | "AGENTIC_RUNNER"
   | "METHOD_NOT_ALLOWED"
-  | "GEOCODE_ERROR";
+  | "GEOCODE_ERROR"
+  | "RATE_LIMITED";
 
 /**
  * Rich diagnostic payload attached to AGENTIC_RUNNER errors so the UI
