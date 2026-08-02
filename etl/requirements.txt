@@ -10,6 +10,12 @@ requests>=2.31.0
 imagehash>=4.3.1
 Pillow>=10.0.0
 rapidfuzz>=3.0.0
+# CSS-selector fallback extraction (issue #77) — connectors' primary
+# strategy is embedded-JSON parsing (no parser needed), but a fallback
+# chain for fields whose JSON path could get renamed needs real HTML
+# parsing. html.parser (stdlib) is the default parser; no lxml/cssselect
+# needed at inmo-tool's crawl volume.
+beautifulsoup4>=4.12.0
 # OpenTelemetry — SDK + OTLP exporter + auto-instrumentors
 opentelemetry-distro>=0.49b0
 opentelemetry-exporter-otlp-proto-grpc>=1.28.0

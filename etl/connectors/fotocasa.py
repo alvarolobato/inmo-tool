@@ -41,6 +41,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import requests
+from bs4 import BeautifulSoup
 
 from etl.connectors.base import (
     CanonicalListingVersion,
@@ -49,6 +50,11 @@ from etl.connectors.base import (
     ConnectorScope,
     RawListing,
     Throttle,
+)
+from etl.connectors.extraction import (
+    first_present,
+    strip_price_punctuation,
+    text_to_int,
 )
 from etl.connectors.fotocasa_mapping import infer_listing_kind, map_property_type
 from etl.connectors.geography import nearest_city
@@ -182,6 +188,59 @@ def _to_has_elevator(elevator_value: Any) -> bool | None:
     return None
 
 
+# CSS-selector fallback chain for the four fields property_web_scraper's
+# es_fotocasa.json mapping flags as most likely to shift shape on a site
+# redesign (count_bedrooms/count_bathrooms/constructed_area/price_float).
+# Their own selectors (`.re-DetailHeader-rooms span span` etc., last
+# checked by them 2026-02-20) no longer match anything on the live site as
+# of this connector's own live spot-check (issue #77) — Fotocasa migrated
+# to a Tailwind-utility-class design system with no semantic BEM classes.
+# These selectors are freshly verified against real listings instead,
+# anchored on SVG icon identifiers (`data-title="..."`) rather than layout
+# classes, which should be materially more redesign-resistant since
+# icon-name attributes tend to be tied to a component's *meaning*, not its
+# current visual styling.
+_STAT_NUMBER_RE = re.compile(r"\d[\d.,]*")
+
+
+def _icon_stat_text(soup: BeautifulSoup, icon_title: str) -> str | None:
+    """Find the numeric stat next to a named stat-row icon.
+
+    Fotocasa renders each of rooms/bathrooms/surface/floor as
+    `<li><svg data-title="{icon}">...</svg><span class="text-body-1">
+    <span class="font-bold">{value}</span> {unit label}</span></li>` in a
+    `<ul aria-label="Características principales">` block. Verified live
+    (2026-08-02) against a real listing (id 189316512: rooms=2, bathrooms=2,
+    surface=60, all matching the same listing's embedded-JSON values).
+
+    Locates the right `<li>` via `data-title` (an icon-name attribute tied
+    to the row's *meaning*, not its current visual styling) but then reads
+    the number via a regex over the `<li>`'s own text rather than a
+    `.font-bold` CSS class — depending on a specific Tailwind utility class
+    surviving the next redesign would undercut the whole point of this
+    fallback, which exists precisely because property_web_scraper's own
+    class-based selectors already broke once (Opus review, PR #84).
+    """
+    svg = soup.select_one(f'svg[data-title="{icon_title}"]')
+    if svg is None:
+        return None
+    li = svg.find_parent("li")
+    if li is None:
+        return None
+    match = _STAT_NUMBER_RE.search(li.get_text())
+    return match.group(0) if match else None
+
+
+def _price_fallback_text(soup: BeautifulSoup) -> str | None:
+    """The main price display: `<div aria-label="Precio del inmueble">
+    <span>379.000 €</span></div>`. Verified live (2026-08-02) against the
+    same listing referenced in `_icon_stat_text`'s docstring."""
+    el = soup.select_one('div[aria-label="Precio del inmueble"] span')
+    if el is None:
+        return None
+    return el.get_text(strip=True)
+
+
 class FotocasaConnector(Connector):
     name = "fotocasa"
     # Conservative default — issue #1 §15's "good-neighbor crawling" applies
@@ -292,7 +351,11 @@ class FotocasaConnector(Connector):
         return RawListing(
             external_id=external_id,
             source=self.name,
-            raw={"url": response.url, "props": props},
+            # `html` is only parsed (BeautifulSoup) in normalize() if a
+            # JSON-path field actually comes back empty — the fallback
+            # chain's whole point is to not pay HTML-parsing cost on the
+            # happy path where the embedded JSON has everything.
+            raw={"url": response.url, "props": props, "html": response.text},
         )
 
     def normalize(self, raw: RawListing) -> CanonicalListingVersion:
@@ -304,6 +367,17 @@ class FotocasaConnector(Connector):
         coords = real_estate.get("coordinates") or {}
         descriptions = real_estate.get("descriptions") or {}
         multimedia = real_estate.get("multimedia") or []
+
+        # BeautifulSoup only gets built if a JSON-path field actually comes
+        # back empty (see fetch_detail's comment) — a plain mutable cell
+        # rather than functools.cache since this is a one-shot per-call
+        # helper, not something worth the decorator machinery for.
+        _soup_cache: list[BeautifulSoup | None] = [None]
+
+        def soup() -> BeautifulSoup:
+            if _soup_cache[0] is None:
+                _soup_cache[0] = BeautifulSoup(raw.raw.get("html", ""), "html.parser")
+            return _soup_cache[0]
 
         address_parts = [
             address_block.get("upperLevel"),
@@ -329,6 +403,34 @@ class FotocasaConnector(Connector):
         client_name = real_estate.get("clientName") or real_estate.get("clientAlias")
         client_url = real_estate.get("clientUrl")
 
+        # Fallback chain (issue #77): embedded JSON is the primary strategy
+        # for all four fields; a live CSS fallback (icon-anchored, see
+        # _icon_stat_text/_price_fallback_text) recovers the value if the
+        # JSON path is ever renamed/restructured. HTML is only parsed if
+        # the JSON side comes back empty.
+        rooms = first_present(
+            lambda: _to_int(features.get("rooms")),
+            lambda: text_to_int(_icon_stat_text(soup(), "double_bed")),
+            field="rooms",
+        )
+        bathrooms = first_present(
+            lambda: _to_int(features.get("bathrooms")),
+            lambda: text_to_int(_icon_stat_text(soup(), "bathroom_tub")),
+            field="bathrooms",
+        )
+        m2_built = first_present(
+            lambda: _to_decimal(features.get("surface")),
+            lambda: _to_decimal(
+                text_to_int(_icon_stat_text(soup(), "dimensions_block"))
+            ),
+            field="m2_built",
+        )
+        current_price = first_present(
+            lambda: _to_decimal(real_estate.get("price")),
+            lambda: _to_decimal(strip_price_punctuation(_price_fallback_text(soup()))),
+            field="current_price",
+        )
+
         return CanonicalListingVersion(
             external_id=raw.external_id,
             source=raw.source,
@@ -337,7 +439,7 @@ class FotocasaConnector(Connector):
                 client_url, client_name, real_estate.get("clientId")
             ),
             status="active",
-            current_price=_to_decimal(real_estate.get("price")),
+            current_price=current_price,
             description=(
                 descriptions.get("es-ES") or next(iter(descriptions.values()), None)
             ),
@@ -347,12 +449,12 @@ class FotocasaConnector(Connector):
             lat=_to_decimal(coords.get("latitude")),
             lon=_to_decimal(coords.get("longitude")),
             property_type=map_property_type(real_estate.get("buildingType")),
-            m2_built=_to_decimal(features.get("surface")),
+            m2_built=m2_built,
             m2_useful=None,  # Fotocasa's `features.surface` doesn't distinguish
             # built vs. useful area in the fields observed during the
             # feasibility spike — revisit if a sampled listing shows both.
-            rooms=_to_int(features.get("rooms")),
-            bathrooms=_to_int(features.get("bathrooms")),
+            rooms=rooms,
+            bathrooms=bathrooms,
             floor=_features_list_value(features_list, "floor"),  # human-readable
             # (e.g. "2ª planta"), not `features.floor`'s integer code — see
             # _features_list_value's docstring for why the coded value would
@@ -366,6 +468,36 @@ class FotocasaConnector(Connector):
             # (e.g. "more than N years"), not a literal year — mapping it
             # to `year_built` would fabricate false precision. Kept raw.
             energy_rating=real_estate.get("energyCertificate"),
+            # Schema superset vs. property_web_scraper (issue #76/#77): this
+            # connector already parsed these into address/raw_extra and
+            # discarded the structure — promoted to real columns here.
+            city=(address_block.get("city") or "").strip() or None,
+            province=(address_block.get("province") or "").strip() or None,
+            postal_code=(address_block.get("zipCode") or "").strip() or None,
+            # `0` from `features.surfaceLand` means "not a plot-having
+            # property type" / unknown, not "a plot of zero square meters" —
+            # treated as absent so it doesn't get COALESCE-persisted as a
+            # real measurement on every revisit (Opus review, PR #84).
+            m2_plot=_to_decimal(features.get("surfaceLand")) or None,
+            # `features` (TEXT[] amenity slugs, e.g. terraza/trastero) is
+            # deliberately left empty here — issue #77's acceptance
+            # criteria only requires city/province/postal_code/m2_plot;
+            # this connector's detail JSON (`realEstate.features`) doesn't
+            # carry the same boolean-amenity shape property_web_scraper's
+            # mapping assumes, and mapping it correctly needs its own
+            # investigation (left for a follow-up, not silently invented
+            # here from an unverified guess).
+            operation="sale",  # This connector's discover() only ever
+            # requests Fotocasa's /comprar/ (buy) search URLs, and no
+            # transaction-type key was found in `realEstate`'s embedded
+            # JSON during this connector's feasibility spike to derive this
+            # from real data instead. Caveat (Opus review, PR #84):
+            # fetch_detail()'s own URL is a placeholder slug that Fotocasa's
+            # routing ignores except for the trailing id — so this rests on
+            # discover() never having handed this connector a rental
+            # listing's id, not on anything fetch_detail() itself can
+            # verify per-listing. Revisit if a rental-aware discover() or a
+            # real operation-indicating JSON key is ever found.
             raw_extra={
                 "clientTypeId": real_estate.get("clientTypeId"),
                 "clientId": real_estate.get("clientId"),
