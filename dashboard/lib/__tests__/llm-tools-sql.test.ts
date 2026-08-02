@@ -3,7 +3,7 @@ import {
   handleExecuteQuery,
   handleValidateQuery,
   handleExplainQuery,
-  handleDescribePsTable,
+  handleDescribeTable,
 } from "@/lib/llm-tools/handlers/sql";
 
 const ctx = { requestId: "req_sql_test", endpoint: "test" };
@@ -103,22 +103,22 @@ describe("SQL tool handlers", () => {
     }
   });
 
-  it("describe_ps_table returns INVALID_ARGS for malformed JSON", async () => {
-    const out = await handleDescribePsTable("not-json", ctx);
+  it("describe_table returns INVALID_ARGS for malformed JSON", async () => {
+    const out = await handleDescribeTable("not-json", ctx);
     expect(out.ok).toBe(false);
     if (!out.ok) {
       expect(out.code).toBe("INVALID_ARGS");
     }
   });
 
-  it("describe_ps_table rejects non-ps_* table names via the schema regex", async () => {
-    const out = await handleDescribePsTable(
-      JSON.stringify({ table: "users" }),
-      ctx,
-    );
-    expect(out.ok).toBe(false);
-    if (!out.ok) {
-      expect(out.code).toBe("INVALID_ARGS");
+  // #24 widened this from a `ps_*` prefix rule to a plain-identifier rule: this
+  // schema names its tables plainly (property, listing, …). The regex is still
+  // the guard that keeps anything non-identifier-shaped out of the query.
+  it("describe_table rejects table names that are not plain identifiers", async () => {
+    for (const bad of ["users; DROP TABLE listing", "public.listing", "líst-ing", ""]) {
+      const out = await handleDescribeTable(JSON.stringify({ table: bad }), ctx);
+      expect(out.ok).toBe(false);
+      if (!out.ok) expect(out.code).toBe("INVALID_ARGS");
     }
   });
 });

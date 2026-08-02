@@ -1,24 +1,31 @@
 /**
  * Tool catalog lookup by flow.
  *
- * Phase 1 stub — returns the appropriate tool catalog based on the flow name.
+ * Only `chat` gets tools. The five assessment flows (occupancy, condition,
+ * redflags, extract, compare) are single-shot structured-output tasks: they
+ * read a listing the caller already loaded and return a fixed JSON shape.
+ * Handing them a tool loop would add rounds, cost and non-determinism to a task
+ * that has none of the ambiguity a tool loop exists to resolve.
+ *
+ * Because `toolsForFlow()` returns `[]` for those flows, assemble.ts routes
+ * them down the single-shot `llmComplete` path automatically — the tool
+ * catalog *is* the switch between the two execution paths.
  */
 
-import { DASHBOARD_AGENTIC_TOOLS, FREE_CHAT_TOOLS } from "@/lib/llm-tools/catalog";
+import { CHAT_TOOLS } from "@/lib/llm-tools/catalog";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
-
-// Flows that are always single-shot (JSON-only output, no tool calls needed).
-const SINGLE_SHOT_FLOWS = new Set(["suggest", "gap", "summary", "title"]);
+import { SINGLE_SHOT_FLOWS } from "./types";
 
 /**
  * Return the tool catalog for a given LLM flow.
  *
- * - "chat"                          → FREE_CHAT_TOOLS (data inspection + set_title)
- * - "suggest" | "gap" | "summary" | "title" → [] (single-shot, no tools)
- * - all other flows                 → DASHBOARD_AGENTIC_TOOLS (full catalog)
+ * - "chat" → CHAT_TOOLS (read-only data inspection + set_title)
+ * - every assessment flow → [] (single-shot, no tools)
+ * - unknown flow → [] (fail closed: an unrecognised flow must not silently
+ *   inherit a tool catalog it was never reviewed against)
  */
 export function toolsForFlow(flow: string): ChatCompletionTool[] {
+  if (flow === "chat") return CHAT_TOOLS;
   if (SINGLE_SHOT_FLOWS.has(flow)) return [];
-  if (flow === "chat") return FREE_CHAT_TOOLS;
-  return DASHBOARD_AGENTIC_TOOLS;
+  return [];
 }

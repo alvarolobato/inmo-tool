@@ -23,7 +23,14 @@
 |----|--------------|
 | [D-005](docs/decisions/D-005-numeric-vs-uuid-keys.md) | Real-estate schema tables use `BIGSERIAL` integer PKs, not `NUMERIC` (no source-system precision constraint like the archived project had) or UUIDs (no distributed-write requirement). |
 
+
 *(Phase 1 tasks 1.3–1.4 will add connector-framework decisions here as they're made)*
+
+## AI layer
+
+| ID | Binding rule |
+|----|--------------|
+| [D-006](docs/decisions/D-006-llm-context-centralization.md) | All LLM calls go through `assembleRequest()` in `dashboard/lib/llm-context/`. No file outside that directory may import `llmComplete` or `runAgenticChat`; CI enforces it via `check-llm-context.sh`. |
 
 ## Product
 

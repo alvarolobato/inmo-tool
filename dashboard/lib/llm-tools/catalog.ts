@@ -2,39 +2,40 @@
  * OpenAI-format tool definitions for OpenRouter chat.completions.
  *
  * Named catalogs:
- *   FREE_CHAT_TOOLS         — data + dashboard inspection + set_title (free-chat flow)
- *   DASHBOARD_AGENTIC_TOOLS — inspection + modify/analyze; also the runner's
- *                             DEFAULT catalog when no override is passed
- *                             (see llm-tools/runner.ts), so it backs ordinary
- *                             chat turns, not just dashboard flows.
+ *   CHAT_TOOLS — read-only data inspection + set_title. The only non-empty
+ *                catalog, used by the `chat` flow (#29) and the runner's
+ *                default when no override is passed.
  *
  * Structure:
- *   DATA_INSPECTION_TOOLS (private) — read-only SQL + dashboard inspect tools
- *   FREE_CHAT_TOOLS = DATA_INSPECTION_TOOLS + set_title
- *   DASHBOARD_AGENTIC_TOOLS = DATA_INSPECTION_TOOLS + validate_dashboard_spec
- *                             + apply_dashboard_modification + submit_dashboard_analysis
+ *   DATA_INSPECTION_TOOLS (private) — read-only SQL + schema introspection
+ *   CHAT_TOOLS = DATA_INSPECTION_TOOLS + set_title
  *
- * #101 removed start_dashboard_generation (chat → new-dashboard handoff) and
- * submit_weekly_review — both exclusively served /paneles and /review, which
- * no longer exist in this product.
+ * ## What #24 removed, and why
  *
- * apply_dashboard_modification / submit_dashboard_analysis are RETAINED, and
- * the earlier justification for keeping them ("they back /k/[id]'s dashboard
- * viewer") is now void — that viewer was deleted in this same change. They
- * stay for a different, narrower reason: DASHBOARD_AGENTIC_TOOLS is the
- * runner's default catalog, and these two names are still referenced by live
- * chat machinery (turn-background.ts's staged-result handling, the modify/
- * analyze system prompts, and the mock provider used by the e2e suite).
- * Removing them is a flow-catalog refactor, not a deletion — Phase 4 (#24)
- * owns replacing generate/modify/analyze wholesale with the domain flows
- * (occupancy/condition/redflags/extract/chat/compare), which is where these
- * should die. Until then they are unreachable in practice (no UI can start a
- * modify/analyze turn) but harmless.
+ * The inherited catalog carried a second tier of dashboard-authoring tools:
+ * `validate_dashboard_spec`, `apply_dashboard_modification`,
+ * `submit_dashboard_analysis`, plus seven `*_dashboard_*` inspection tools.
+ * All of them existed to let the model author and publish BI dashboard specs.
+ *
+ * #101 deleted the entire dashboard feature (page, routes, viewer components)
+ * but deliberately kept these three tools, because at the time they were still
+ * named by live chat machinery (turn-background's staged-result handling, the
+ * modify/analyze prompts, the e2e mock provider) and pulling them would have
+ * destabilised the chat it was preserving. It explicitly deferred the removal
+ * to this task, which replaces the whole flow catalog anyway.
+ *
+ * That deferral is now settled: the modify/analyze flows are gone, so the
+ * staged side-channel they wrote into (`ctx.modifyResult` / `ctx.analyzeResult`)
+ * has no producer and no consumer, and the tools are unreachable. Removed.
+ *
+ * The read-only inspection tools survive, renamed off the `ps_*` mirror
+ * convention (`list_ps_tables` → `list_tables`), since answering "which of my
+ * candidates dropped in price this week" genuinely needs to query the mirror.
  */
 
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
-/** Read-only SQL and dashboard inspection tools shared across all flows. */
+/** Read-only SQL and schema-introspection tools. */
 const DATA_INSPECTION_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
@@ -45,7 +46,10 @@ const DATA_INSPECTION_TOOLS: ChatCompletionTool[] = [
       parameters: {
         type: "object",
         properties: {
-          sql: { type: "string", description: "Single SELECT/WITH/EXPLAIN statement, no semicolons." },
+          sql: {
+            type: "string",
+            description: "Single SELECT/WITH/EXPLAIN statement, no semicolons.",
+          },
         },
         required: ["sql"],
       },
@@ -56,7 +60,7 @@ const DATA_INSPECTION_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "execute_query",
       description:
-        "Execute a read-only SELECT/WITH against the PostgreSQL mirror. Results are capped (rows/columns/chars).",
+        "Execute a read-only SELECT/WITH against the PostgreSQL mirror of ingested listings. Results are capped (rows/columns/chars).",
       parameters: {
         type: "object",
         properties: {
@@ -71,7 +75,7 @@ const DATA_INSPECTION_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "explain_query",
       description:
-        "Return PostgreSQL JSON plan for EXPLAIN (FORMAT JSON) without ANALYZE (does not execute the query).",
+        "Return the PostgreSQL JSON plan for EXPLAIN (FORMAT JSON) without ANALYZE (does not execute the query).",
       parameters: {
         type: "object",
         properties: {
@@ -84,206 +88,30 @@ const DATA_INSPECTION_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
-      name: "list_ps_tables",
-      description: "List public mirror tables whose names start with ps_.",
+      name: "list_tables",
+      description:
+        "List the base tables in the public schema (property, listing, search_profile, profile_listing_state, …). Call this before writing SQL against a table you have not inspected.",
       parameters: { type: "object", properties: {} },
     },
   },
   {
     type: "function",
     function: {
-      name: "describe_ps_table",
-      description: "Describe columns for a single ps_* table (information_schema).",
+      name: "describe_table",
+      description:
+        "Describe the columns of one table (name, data type, nullability) from information_schema.",
       parameters: {
         type: "object",
         properties: {
-          table: { type: "string", description: "Table name including ps_ prefix." },
+          table: { type: "string", description: "Table name, e.g. 'listing'." },
         },
         required: ["table"],
       },
     },
   },
-  {
-    type: "function",
-    function: {
-      name: "list_dashboards",
-      description: "List saved dashboards (id, name, short description, updated_at).",
-      parameters: {
-        type: "object",
-        properties: {
-          limit: { type: "integer", description: "Max rows (default 30, max 100)." },
-        },
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "get_dashboard_spec",
-      description: "Load the JSON spec for a saved dashboard by numeric id.",
-      parameters: {
-        type: "object",
-        properties: {
-          dashboard_id: { type: "integer" },
-        },
-        required: ["dashboard_id"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "get_dashboard_queries",
-      description:
-        "List all SQL strings embedded in a saved dashboard (widget paths, labels, sql text).",
-      parameters: {
-        type: "object",
-        properties: {
-          dashboard_id: { type: "integer" },
-        },
-        required: ["dashboard_id"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "get_dashboard_widget_raw_values",
-      description:
-        "Execute the primary SQL for one widget of a saved dashboard. For kpi_row pass kpi_item_index. Date tokens (:curr_from, etc.) are substituted from optional date_range (ISO YYYY-MM-DD) or default last 30 days UTC.",
-      parameters: {
-        type: "object",
-        properties: {
-          dashboard_id: { type: "integer" },
-          widget_index: { type: "integer", description: "0-based index in spec.widgets" },
-          kpi_item_index: {
-            type: "integer",
-            description: "Required for kpi_row primary sql; 0-based item index.",
-          },
-          date_range: {
-            type: "object",
-            properties: {
-              curr_from: { type: "string" },
-              curr_to: { type: "string" },
-              comp_from: { type: "string" },
-              comp_to: { type: "string" },
-            },
-          },
-        },
-        required: ["dashboard_id", "widget_index"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "get_dashboard_all_widget_status",
-      description:
-        "Run read-only validation + cost check + SQL lint on every SQL string in a saved dashboard; does not execute full queries.",
-      parameters: {
-        type: "object",
-        properties: {
-          dashboard_id: { type: "integer" },
-        },
-        required: ["dashboard_id"],
-      },
-    },
-  },
 ];
 
-/** Full tool catalog for generate / modify / analyze / review flows. */
-export const DASHBOARD_AGENTIC_TOOLS: ChatCompletionTool[] = [
-  ...DATA_INSPECTION_TOOLS,
-  {
-    type: "function",
-    function: {
-      name: "validate_dashboard_spec",
-      description:
-        "Validate a candidate dashboard JSON spec before emitting it as the final answer. Runs Zod structural validation and SQL heuristic lint on every widget. Returns { ok, errors[], warnings[], hint }. Call this on every generate/modify task and only emit the final JSON when ok=true.",
-      parameters: {
-        type: "object",
-        properties: {
-          spec: {
-            type: "object",
-            description:
-              "Candidate dashboard spec (the same JSON you would emit as the final answer).",
-            additionalProperties: true,
-          },
-        },
-        required: ["spec"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "apply_dashboard_modification",
-      description:
-        "Call this tool EXACTLY ONCE at the end of a dashboard modification task, after validate_dashboard_spec returns ok=true. " +
-        "Pass the fully updated dashboard spec and a 2–4 sentence Spanish change_summary describing what you changed. " +
-        "The tool stages the spec in a request-scoped side-channel; the route persists it after you return. " +
-        "After this tool returns { ok: true, applied: true }, write your final assistant message as a friendly Spanish reply to the user (≤ 4 sentences) describing the change. " +
-        "NEVER emit the JSON spec as your final answer — it MUST go through this tool.",
-      parameters: {
-        type: "object",
-        properties: {
-          spec: {
-            type: "object",
-            description: "The fully updated dashboard spec (byte-for-byte the same object that validate_dashboard_spec just approved with ok=true).",
-            additionalProperties: true,
-          },
-          change_summary: {
-            type: "string",
-            description: "2–4 sentences in Spanish summarising what you changed in the dashboard. Max 1000 characters.",
-          },
-        },
-        required: ["spec", "change_summary"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "submit_dashboard_analysis",
-      description:
-        "Call this tool EXACTLY ONCE at the end of a dashboard analysis task. " +
-        "Pass the full markdown analysis body and a brief_summary (≤ 500 chars, Spanish). " +
-        "The tool stages the analysis; the route persists it. " +
-        "After this tool returns { ok: true, applied: true }, write your final assistant message as a friendly Spanish chat reply to the user (≤ 4 sentences). " +
-        "NEVER emit the analysis markdown as your final answer — it MUST go through this tool.",
-      parameters: {
-        type: "object",
-        properties: {
-          analysis_markdown: {
-            type: "string",
-            description: "The full analysis in markdown format (Spanish). Max 30 KB.",
-          },
-          brief_summary: {
-            type: "string",
-            description: "1–2 sentences in Spanish summarising the key finding. Max 500 characters.",
-          },
-        },
-        required: ["analysis_markdown", "brief_summary"],
-      },
-    },
-  },
-];
-
-// ── Inspection tools (no side-effects, read-only) ─────────────────────────────
-const INSPECTION_TOOL_NAMES = new Set([
-  "list_ps_tables",
-  "describe_ps_table",
-  "validate_query",
-  "execute_query",
-  "explain_query",
-  "list_dashboards",
-  "get_dashboard_spec",
-  "get_dashboard_queries",
-  "get_dashboard_widget_raw_values",
-  "get_dashboard_all_widget_status",
-]);
-
-/** Free-chat-only: lets the LLM set a concise conversation title on first response. */
+/** Lets the model set a concise conversation title on its first response. */
 const SET_TITLE_TOOL: ChatCompletionTool = {
   type: "function",
   function: {
@@ -304,22 +132,22 @@ const SET_TITLE_TOOL: ChatCompletionTool = {
 };
 
 /**
- * Tools available in the free-chat flow: 10 inspection tools + set_title = 11 tools.
- * Does NOT include modification/analysis/review-publish/dashboard-generation tools.
- * (start_dashboard_generation and submit_weekly_review were removed by #101 —
- * both were the inherited PowerShop dashboard-builder/weekly-review generator,
- * with no product fit here and no page left to hand off to.)
+ * Tools available to the `chat` flow: 5 read-only inspection tools + set_title.
+ *
+ * Every tool here is read-only by construction — there is no write-capable tool
+ * in any catalog. Assessment flows (occupancy/condition/redflags/extract/
+ * compare) receive `[]` from `toolsForFlow()` and never enter the tool loop.
  */
-export const FREE_CHAT_TOOLS: ChatCompletionTool[] = [
-  ...DASHBOARD_AGENTIC_TOOLS.filter(
-    (t): t is Extract<ChatCompletionTool, { type: "function" }> =>
-      t.type === "function" && INSPECTION_TOOL_NAMES.has(t.function.name),
-  ),
+export const CHAT_TOOLS: ChatCompletionTool[] = [
+  ...DATA_INSPECTION_TOOLS,
   SET_TITLE_TOOL,
 ];
 
-/**
- * All tools, including modification and analysis. Use for flows that need
- * full access or for future catalog expansion.
- */
-export const FULL_DASHBOARD_TOOLS: ChatCompletionTool[] = DASHBOARD_AGENTIC_TOOLS;
+/** Names of the read-only inspection tools (no side effects). */
+export const INSPECTION_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "validate_query",
+  "execute_query",
+  "explain_query",
+  "list_tables",
+  "describe_table",
+]);

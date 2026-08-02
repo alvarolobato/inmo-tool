@@ -8,7 +8,7 @@ import { runCliProcess, runCliProcessStreaming, assertCliSuccess } from "./proce
 import { CliRunnerError } from "./errors";
 import { serializeChatMessagesForCli } from "./transcript";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
-import { DASHBOARD_AGENTIC_TOOLS } from "@/lib/llm-tools/catalog";
+import { CHAT_TOOLS } from "@/lib/llm-tools/catalog";
 import { sanitize, sanitizeArgv, sanitizeTail } from "../sanitize";
 import { triggerHostTokenSync } from "./host-token-sync";
 
@@ -68,7 +68,7 @@ UTF-8 stdin format:
 Use exact tool names from the tool catalog JSON. Arguments must be a JSON string (escaped JSON inside JSON), matching OpenAI function-calling style.`;
 
 function buildCompactToolCatalogJson(): string {
-  const tools = DASHBOARD_AGENTIC_TOOLS.filter((t) => t.type === "function").map((t) => ({
+  const tools = CHAT_TOOLS.filter((t) => t.type === "function").map((t) => ({
     type: "function" as const,
     function: {
       name: t.function.name,

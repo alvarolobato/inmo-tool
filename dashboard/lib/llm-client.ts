@@ -31,6 +31,9 @@ import { createDashboardAgenticAdapter } from "./llm-provider/registry";
 import { logUsage } from "./llm-usage";
 import { callWithCircuitBreaker } from "./llm-circuit-breaker";
 import type { DashboardLlmFlow, DashboardLlmProviderId } from "./llm-provider/types";
+// Direct module import (not the ./llm-context barrel) to avoid a cycle:
+// llm-context/assemble imports this file. ./llm-context/types imports nothing.
+import { isLlmFlow } from "./llm-context/types";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
 // Re-exports for callers that previously imported directly from provider modules.
@@ -115,10 +118,7 @@ const EMPTY_USAGE: NormalizedUsage = {
 };
 
 function narrowDashboardLlmFlow(flow: string | undefined): DashboardLlmFlow | undefined {
-  if (flow === "generate" || flow === "modify" || flow === "analyze") {
-    return flow;
-  }
-  return undefined;
+  return flow !== undefined && isLlmFlow(flow) ? flow : undefined;
 }
 
 function assembleSystemPrompt(req: LlmRequest): string {

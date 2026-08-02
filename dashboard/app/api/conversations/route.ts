@@ -17,17 +17,11 @@ import {
 } from "@/lib/llm-provider/config";
 import type { DashboardLlmFlow } from "@/lib/llm-provider/types";
 
-const VALID_MODES = new Set([
-  "generate",
-  "modify",
-  "analyze",
-  "summary",
-  "title",
-  "weekly",
-  "chat",
-  "suggest",
-  "gap",
-]);
+// Conversation modes double as the LLM flow for per-flow model routing.
+// Only `chat` is conversational; the assessment flows (#25-#30) run as one-shot
+// server-side calls, not as user-facing conversations, so they are not valid
+// modes here. See lib/llm-context/types.ts LLM_FLOWS.
+const VALID_MODES = new Set(["chat"]);
 
 // ── GET ───────────────────────────────────────────────────────────────────────
 

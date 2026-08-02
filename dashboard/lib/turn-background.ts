@@ -108,7 +108,7 @@ interface ProgressEmitter {
 /**
  * Creates an onAgenticProgress callback that emits SSE events for streaming
  * tokens, extended thinking, and tool progress. Used by both runFreeChatTurn
- * and runDashboardTurn so behaviour is identical across conversation modes.
+ * so behaviour is identical across conversation modes.
  *
  * Event inserts are serialised through a per-turn promise chain so turn_events
  * BIGSERIAL ids match the allocated seq order (fire-and-forget inserts could
@@ -123,7 +123,7 @@ function makeProgressHandler(
   conversationId: string,
   turnId: string,
   seq: () => number,
-  /** When true, token streaming is suppressed (analyze/modify use tool calls for output). */
+  /** When true, token streaming is suppressed (flows whose output arrives via tool calls). */
   suppressTokens = false,
 ): ProgressEmitter {
   let inToolRound = false;
@@ -159,7 +159,7 @@ function makeProgressHandler(
       return;
     } else if (event.type === "model_text_delta" && event.text) {
       // model_text_delta.text is CUMULATIVE — replace, never append.
-      // For dashboard modes (analyze/modify), ALL text deltas are tool-call JSON —
+      // When suppressed, ALL text deltas are tool-call JSON —
       // suppress them so users don't see raw JSON streaming.
       if (!inToolRound && !suppressTokens) {
         enqueue("token", { text: event.text });
@@ -204,7 +204,7 @@ function makeProgressHandler(
  * first LLM call). The heavy payload never touches Postgres — only the pointer
  * does. Best-effort: a write/DB failure must not break the turn.
  *
- * Wired for every conversation mode (free-chat, analyze/modify, generic).
+ * Wired for every conversation mode (free-chat, generic).
  */
 /** Mutable holder so the caller can await the (async) context-log write. */
 interface ContextWriteHandle {
@@ -302,8 +302,10 @@ export async function runTurnBackground(
   const mode = conversation.mode;
   const isFreeChatConv = conversation.context_kind === "global" || mode === "chat";
   // One progress emitter per turn: serialised event inserts + final thinking
-  // capture. Token streaming is suppressed for dashboard modes (analyze/modify
-  // always end with a tool call, never prose — text deltas are tool-call JSON).
+  // capture. No current flow suppresses token streaming: #24 removed the
+  // dashboard analyze/modify modes, whose output arrived as a terminal tool
+  // call rather than prose. The parameter is kept because the emitter is
+  // shared, and a future flow may reintroduce that shape.
   // Declared OUTSIDE the try so the catch block can flush the insert chain
   // before pruning — otherwise queued token/thinking inserts could land after
   // pruneStreamEvents and resurrect the rows it just deleted.
@@ -311,7 +313,7 @@ export async function runTurnBackground(
     conversationId,
     turnId,
     seq,
-    mode === "analyze" || mode === "modify",
+    false,
   );
 
   try {
@@ -393,28 +395,6 @@ export async function runTurnBackground(
       );
       assistantText = res.text;
       assistantToolCalls = res.toolCalls;
-    } else if (mode === "analyze" || mode === "modify") {
-      const dashResult = await runDashboardTurn(
-        mode,
-        conversation,
-        userMessage,
-        priorMessages,
-        requestId,
-        conversationId,
-        turnId,
-        seq,
-        progress,
-      );
-      assistantText = dashResult.text;
-      assistantToolCalls = dashResult.toolCalls;
-      // Notify SSE clients when a modify turn produced a new dashboard spec.
-      if (dashResult.spec) {
-        await emitTurnEvent(conversationId, turnId, seq(), "spec_update", {
-          spec: dashResult.spec,
-          summary: dashResult.summary ?? "",
-          prompt: userMessage,
-        });
-      }
     } else {
       // Fallback: generic single-shot chat completion.
       const res = await runGenericTurn(
@@ -571,108 +551,6 @@ async function runFreeChatTurn(
       }).catch(() => {});
     }
     throw err;
-  }
-}
-
-interface DashboardTurnResult {
-  text: string;
-  /** Tool calls the model made this turn (execute_query, describe_table, …). */
-  toolCalls: AgenticToolCallRecord[];
-  /** Set when apply_dashboard_modification tool staged a new spec. */
-  spec?: import("@/lib/schema").DashboardSpec;
-  summary?: string;
-}
-
-async function runDashboardTurn(
-  mode: string,
-  conversation: ConversationRow,
-  userMessage: string,
-  priorMessages: Array<{ role: "user" | "assistant"; content: string }>,
-  requestId: string,
-  conversationId: string,
-  turnId: string,
-  seq: () => number,
-  progress: ProgressEmitter,
-): Promise<DashboardTurnResult> {
-  const { sql } = await import("@/lib/db-write");
-  const ctxWrite: ContextWriteHandle = { done: Promise.resolve() };
-  // agenticCtx is mutated in-place by tool handlers (modifyResult, analyzeResult).
-  const agenticCtx: import("@/lib/llm-tools/types").LlmAgenticContext = {
-    requestId,
-    endpoint: (mode === "analyze" ? "analyzeDashboard" : "modifyDashboard") as
-      | "analyzeDashboard"
-      | "modifyDashboard",
-    conversationId: conversation.id,
-    // Wire agentic progress events to SSE. The emitter was created with token
-    // streaming suppressed for dashboard modes — analyze/modify always end with
-    // a tool call (submit_dashboard_analysis or apply_dashboard_modification),
-    // never prose, so model_text_delta is JSON.
-    onAgenticProgress: progress.handler,
-    // Write the exact payload sent to the LLM to this turn's context-log file.
-    onSystemPromptReady: makeSystemPromptReadyHandler(
-      conversation,
-      mode,
-      userMessage,
-      priorMessages,
-      requestId,
-      conversation.id,
-      turnId,
-      seq,
-      ctxWrite,
-    ),
-  };
-
-  let currentSpec = "";
-  let dashId: number | undefined;
-  if (conversation.context_ref) {
-    dashId = Number(conversation.context_ref);
-    if (Number.isFinite(dashId)) {
-      const specRows = await sql<{ spec: unknown }>(
-        `SELECT spec FROM dashboards WHERE id = $1`,
-        [dashId],
-      ).catch(() => [] as { spec: unknown }[]);
-      currentSpec = specRows[0]?.spec ? JSON.stringify(specRows[0].spec) : "";
-    }
-  }
-
-  if (mode === "analyze") {
-    const { analyzeDashboard } = await import("@/lib/llm");
-    const text = await analyzeDashboard(
-      currentSpec,
-      userMessage,
-      undefined,
-      agenticCtx,
-      priorMessages,
-    );
-    await ctxWrite.done; // ensure the context-log file + pointer are persisted
-    return { text, toolCalls: agenticCtx.toolCalls ?? [] };
-  } else {
-    const { modifyDashboard } = await import("@/lib/llm");
-    const text = await modifyDashboard(currentSpec, userMessage, agenticCtx, priorMessages);
-    await ctxWrite.done; // ensure the context-log file + pointer are persisted
-    const toolCalls = agenticCtx.toolCalls ?? [];
-
-    // If the agentic runner called apply_dashboard_modification, persist the new
-    // spec through the single versioned writer: previous spec is snapshotted
-    // into dashboard_versions and updated_at is bumped, exactly like a manual
-    // save via PUT /api/dashboard/:id. The server is the ONLY writer for
-    // chat-driven modifications — the frontend only updates local state on
-    // the spec_update event (no second PUT).
-    if (agenticCtx.modifyResult && dashId !== undefined && Number.isFinite(dashId)) {
-      const { spec, summary } = agenticCtx.modifyResult;
-      try {
-        const { updateDashboardSpecWithVersion } = await import("@/lib/db-write");
-        const persisted = await updateDashboardSpecWithVersion(dashId, spec, userMessage);
-        if (persisted !== null) {
-          return { text, toolCalls, spec, summary };
-        }
-        console.error(`[turn-background] spec persist skipped: dashboard ${dashId} not found`);
-      } catch (err) {
-        console.error(`[turn-background] spec persist failed for dashboard ${dashId}:`, err);
-      }
-    }
-
-    return { text, toolCalls };
   }
 }
 

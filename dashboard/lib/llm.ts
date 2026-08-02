@@ -1,15 +1,22 @@
 /**
- * Dashboard LLM entry points — thin wrappers around assembleRequest().
+ * Domain LLM entry points — thin wrappers around assembleRequest().
  *
  * Every public function delegates to `assembleRequest(flow, vars, ...)` in
- * `dashboard/lib/llm-context/`.  No prompt assembly or LLM calls happen here
- * directly; all of that is owned by llm-context/assemble.ts (the single
- * seam enforced by CI via check-llm-context.sh).
+ * `dashboard/lib/llm-context/`. No prompt assembly or LLM calls happen here
+ * directly; all of that is owned by llm-context/assemble.ts (the single seam
+ * enforced by CI via check-llm-context.sh).
  *
  * This file retains:
  *  - Public API contracts (function signatures, return types)
- *  - `checkDailyBudget()` gate (not inside assembleRequest)
- *  - Re-exports consumed by routes and turn-background
+ *  - the `checkDailyBudget()` gate (deliberately outside assembleRequest, so
+ *    the budget is charged per user-facing operation, not per internal call)
+ *  - re-exports consumed by routes and turn-background
+ *
+ * #24 replaced the dashboard-generation API (generateDashboard, modifyDashboard,
+ * analyzeDashboard, suggestDashboards, analyzeGaps, generateSuggestions) with
+ * the real-estate assessment flows below. Each assessment returns the model's
+ * raw text; parsing and persisting the JSON belongs to the flow's own task
+ * (#25–#30), which knows the shape it asked for.
  */
 
 import { checkDailyBudget } from "./llm-usage";
@@ -17,7 +24,7 @@ import { AgenticRunnerError } from "./llm-tools/runner";
 import { resetClient } from "./llm-client";
 import type { LlmAgenticContext, AgenticProgressEvent } from "./llm-tools/types";
 import { assembleRequest } from "./llm-context";
-import type { FlowVars } from "./llm-context";
+import type { FlowVars, ListingSnapshot } from "./llm-context";
 
 export { BudgetExceededError } from "./llm-usage";
 export { CircuitBreakerOpenError } from "./llm-circuit-breaker";
@@ -25,248 +32,126 @@ export { AgenticRunnerError };
 export type { LlmAgenticContext, AgenticProgressEvent } from "./llm-tools/types";
 export { resetClient };
 
-// ── Public API ─────────────────────────────────────────────────────────────────
-
-/**
- * Generate a new dashboard from a user prompt (in Spanish).
- *
- * Returns the raw LLM response text, which should be a JSON dashboard spec.
- */
-export async function generateDashboard(
-  userPrompt: string,
-  ctx?: LlmAgenticContext,
-): Promise<string> {
-  await checkDailyBudget();
-
-  const requestCtx: LlmAgenticContext = ctx ?? {
-    requestId: "req_local",
-    endpoint: "generateDashboard",
-  };
-
-  const result = await assembleRequest(
-    "generate",
-    {},
-    null,
-    userPrompt,
-    {
-      ctx: requestCtx,
-      requestId: requestCtx.requestId ?? "req_local",
-      endpoint: "generateDashboard",
-      temperature: 0.2,
-      maxOutputTokens: 8192,
-    },
-  );
-
-  if (!result.text) {
-    throw new Error("LLM returned an empty response");
-  }
-
-  return result.text;
+/** Shared options accepted by every assessment helper. */
+export interface AssessmentOpts {
+  requestId?: string | null;
+  ctx?: LlmAgenticContext;
 }
 
 /**
- * Modify an existing dashboard based on a user prompt (in Spanish).
+ * Run a single-shot assessment flow over one listing.
  *
- * Returns the raw LLM response text, which should be the full updated JSON spec.
+ * Shared by occupancy / condition / redflags / extract: they differ only in
+ * their prompt (owned by buildSystemPrompt) and in how the caller parses the
+ * result, not in how the request is executed. Temperature is pinned low —
+ * these are extraction tasks, not creative ones.
  */
-export async function modifyDashboard(
-  currentSpec: string,
-  userPrompt: string,
-  ctx?: LlmAgenticContext,
-  priorTurns?: ReadonlyArray<{ role: "user" | "assistant"; content: string }>,
+async function runListingAssessment(
+  flow: "occupancy" | "condition" | "redflags" | "extract",
+  listing: ListingSnapshot,
+  opts?: AssessmentOpts,
 ): Promise<string> {
   await checkDailyBudget();
 
-  const requestCtx: LlmAgenticContext = ctx ?? {
-    requestId: "req_local",
-    endpoint: "modifyDashboard",
-  };
-
-  const priorMessages = (priorTurns ?? []).map((t) => ({
-    role: t.role,
-    content: t.content,
-  }));
-
-  const vars: FlowVars = { currentSpec };
-
+  const vars: FlowVars = { listing };
   const result = await assembleRequest(
-    "modify",
+    flow,
     vars,
     null,
-    userPrompt,
+    `Evalúa el anuncio según las instrucciones (${flow}).`,
     {
-      ctx: requestCtx,
-      priorMessages,
-      requestId: requestCtx.requestId ?? "req_local",
-      endpoint: "modifyDashboard",
-      temperature: 0.2,
-      maxOutputTokens: 8192,
-    },
-  );
-
-  return result.text;
-}
-
-/**
- * Suggest dashboards for a given role, avoiding overlap with existing ones.
- *
- * Returns raw JSON string: array of {name, description, prompt}.
- */
-export async function suggestDashboards(
-  role: string,
-  existingDashboards: { title: string; description: string }[],
-  opts?: { requestId?: string },
-): Promise<string> {
-  await checkDailyBudget();
-
-  const vars: FlowVars = { role, existingDashboards };
-
-  const result = await assembleRequest(
-    "suggest",
-    vars,
-    null,
-    `Sugiere 3-4 dashboards útiles para el rol: ${role}`,
-    {
+      ctx: opts?.ctx,
       requestId: opts?.requestId ?? null,
-      endpoint: "suggestDashboards",
-      temperature: 0.2,
-      maxOutputTokens: 8192,
+      endpoint: flow,
+      temperature: 0,
+      maxOutputTokens: 2048,
     },
   );
 
   if (!result.text) {
-    throw new Error("LLM returned an empty response");
+    throw new Error(`LLM returned an empty response for flow "${flow}"`);
   }
   return result.text;
 }
 
 /**
- * Analyze coverage gaps in the existing set of dashboards.
- *
- * Returns raw JSON string: array of {area, description, suggestedPrompt}.
+ * #25 — Assess whether a property is vacant, tenanted, or illegally occupied.
+ * Returns the model's raw JSON text; #25 owns parsing and caching it.
  */
-export async function analyzeGaps(
-  existingDashboards: {
-    title: string;
-    description: string;
-    widgetTitles: string[];
-  }[],
-  opts?: { requestId?: string },
+export function assessOccupancy(
+  listing: ListingSnapshot,
+  opts?: AssessmentOpts,
+): Promise<string> {
+  return runListingAssessment("occupancy", listing, opts);
+}
+
+/**
+ * #26 — Assess the property's renovation state.
+ * Returns the model's raw JSON text.
+ */
+export function assessCondition(
+  listing: ListingSnapshot,
+  opts?: AssessmentOpts,
+): Promise<string> {
+  return runListingAssessment("condition", listing, opts);
+}
+
+/**
+ * #27 — Extract legal/financial red flags worth a lawyer's review.
+ * Returns the model's raw JSON text. An empty `flags` array is a normal result.
+ */
+export function extractRedFlags(
+  listing: ListingSnapshot,
+  opts?: AssessmentOpts,
+): Promise<string> {
+  return runListingAssessment("redflags", listing, opts);
+}
+
+/**
+ * #28 — Recover structured fields from a free-text description, so listings
+ * whose portal published no structured data are not unfairly excluded by the
+ * hard filters.
+ * Returns the model's raw JSON text.
+ */
+export function extractStructuredFields(
+  listing: ListingSnapshot,
+  opts?: AssessmentOpts,
+): Promise<string> {
+  return runListingAssessment("extract", listing, opts);
+}
+
+/**
+ * #38 — Compare 2+ candidates against the profile's investment thesis.
+ * Returns the model's raw JSON text.
+ */
+export async function compareCandidates(
+  candidates: ListingSnapshot[],
+  profileThesis?: string,
+  opts?: AssessmentOpts,
 ): Promise<string> {
   await checkDailyBudget();
 
-  const vars: FlowVars = { existingDashboards };
+  if (candidates.length < 2) {
+    throw new Error("compareCandidates requires at least two candidates");
+  }
 
+  const vars: FlowVars = { candidates, profileThesis };
   const result = await assembleRequest(
-    "gap",
+    "compare",
     vars,
     null,
-    "Analiza los dashboards existentes e identifica las áreas de negocio importantes que no están cubiertas.",
+    "Compara los candidatos según las instrucciones.",
     {
+      ctx: opts?.ctx,
       requestId: opts?.requestId ?? null,
-      endpoint: "analyzeGaps",
-      temperature: 0.2,
-      maxOutputTokens: 8192,
-    },
-  );
-
-  if (!result.text) {
-    throw new Error("LLM returned an empty response");
-  }
-  return result.text;
-}
-
-/**
- * Analyze dashboard data in response to a user question (in Spanish).
- *
- * Returns the raw LLM response text, which will be markdown-formatted analysis.
- */
-export async function analyzeDashboard(
-  serializedData: string,
-  userPrompt: string,
-  action?: string,
-  ctx?: LlmAgenticContext,
-  priorTurns?: ReadonlyArray<{ role: "user" | "assistant"; content: string }>,
-): Promise<string> {
-  await checkDailyBudget();
-
-  const requestCtx: LlmAgenticContext = ctx ?? {
-    requestId: "req_local",
-    endpoint: "analyzeDashboard",
-  };
-
-  const priorMessages = (priorTurns ?? []).map((t) => ({
-    role: t.role,
-    content: t.content,
-  }));
-
-  const vars: FlowVars = {
-    serializedData,
-    action,
-    dashboardId: requestCtx.dashboardId,
-  };
-
-  const result = await assembleRequest(
-    "analyze",
-    vars,
-    null,
-    userPrompt,
-    {
-      ctx: requestCtx,
-      priorMessages,
-      requestId: requestCtx.requestId ?? "req_local",
-      endpoint: "analyzeDashboard",
-      temperature: 0.3,
+      endpoint: "compare",
+      temperature: 0,
       maxOutputTokens: 4096,
     },
   );
 
-  return result.text;
-}
-
-/**
- * Generate follow-up question suggestions based on the last exchange.
- *
- * Returns an array of suggestion strings, or [] on any failure (never throws).
- */
-export async function generateSuggestions(
-  serializedData: string,
-  lastExchange: string,
-  opts?: { requestId?: string },
-): Promise<string[]> {
-  try {
-    await checkDailyBudget();
-
-    const vars: FlowVars = { serializedData };
-
-    // buildSuggestionPrompt returns a plain string used as the user message
-    // (no system prompt). We pass it as userMessage with flow "summary".
-    const { buildSuggestionPrompt } = await import("./analyze-prompts");
-    const userMessage = buildSuggestionPrompt(serializedData, lastExchange);
-
-    const result = await assembleRequest(
-      "summary",
-      vars,
-      null,
-      userMessage,
-      {
-        requestId: opts?.requestId ?? null,
-        endpoint: "generateSuggestions",
-        temperature: 0.5,
-        maxOutputTokens: 512,
-      },
-    );
-
-    const content = result.text;
-    const fenced = content.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
-    const jsonStr = fenced ? fenced[1].trim() : content.trim();
-
-    const parsed = JSON.parse(jsonStr);
-    if (Array.isArray(parsed) && parsed.every((s) => typeof s === "string")) {
-      return parsed as string[];
-    }
-    return [];
-  } catch {
-    return [];
+  if (!result.text) {
+    throw new Error('LLM returned an empty response for flow "compare"');
   }
+  return result.text;
 }

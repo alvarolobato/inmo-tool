@@ -36,8 +36,8 @@ vi.mock("@/lib/conversations", () => ({
 }));
 
 vi.mock("@/lib/llm-tools/catalog", () => ({
-  DASHBOARD_AGENTIC_TOOLS: [],
-  FREE_CHAT_TOOLS: [],
+  CHAT_TOOLS: [],
+  INSPECTION_TOOL_NAMES: new Set<string>(),
 }));
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -69,35 +69,42 @@ describe("assembleRequest", () => {
   });
 
   it("returns AssembleResult with correct model field", async () => {
-    const result = await assembleRequest("generate", {}, null, "Crear dashboard de ventas");
+    const result = await assembleRequest("occupancy", {}, null, "Evalúa el anuncio");
     expect(result).toHaveProperty("text");
     expect(result).toHaveProperty("usage");
     expect(result).toHaveProperty("model");
     expect(typeof result.model).toBe("string");
   });
 
-  it("for generate flow: stable system prompt contains role description", async () => {
-    const result = await assembleRequest("generate", {}, null, "Crear dashboard de ventas");
+  it("for occupancy flow: stable system prompt contains the domain + task framing", async () => {
+    const result = await assembleRequest("occupancy", {}, null, "Evalúa el anuncio");
     expect(result.text).toBe("mocked response");
     const callArgs = mockLlmComplete.mock.calls[0]?.[0];
-    expect(callArgs?.systemPrompt?.stable).toContain("dashboard generator");
-    expect(callArgs?.systemPrompt?.stable).toContain("PowerShop");
+    expect(callArgs?.systemPrompt?.stable).toContain("inversión inmobiliaria");
+    expect(callArgs?.systemPrompt?.stable).toContain("Tarea: estado de ocupación");
   });
 
-  it("for modify flow: systemPrompt.volatile contains the currentSpec", async () => {
-    const spec = JSON.stringify({ title: "Test", widgets: [] });
+  it("for compare flow: systemPrompt.volatile carries every candidate", async () => {
     await assembleRequest(
-      "modify",
-      { currentSpec: spec, agenticMode: false },
+      "compare",
+      {
+        candidates: [
+          { propertyId: 1, description: "Piso reformado" },
+          { propertyId: 2, description: "Ático a reformar" },
+        ],
+        profileThesis: "Alquiler de larga duración",
+      },
       null,
-      "Añade un gráfico de ventas",
+      "Compara",
     );
     const callArgs = mockLlmComplete.mock.calls[0]?.[0];
-    expect(callArgs?.systemPrompt?.volatile).toContain(spec);
+    expect(callArgs?.systemPrompt?.volatile).toContain("CANDIDATO 1");
+    expect(callArgs?.systemPrompt?.volatile).toContain("CANDIDATO 2");
+    expect(callArgs?.systemPrompt?.volatile).toContain("Alquiler de larga duración");
   });
 
   it("history is empty when no conversationId and no priorMessages", async () => {
-    await assembleRequest("generate", {}, null, "Test prompt");
+    await assembleRequest("occupancy", {}, null, "Test prompt");
     const callArgs = mockLlmComplete.mock.calls[0]?.[0];
     // messages should only contain the user message (no prior turns)
     expect(callArgs?.messages).toHaveLength(1);
@@ -106,7 +113,7 @@ describe("assembleRequest", () => {
 
   it("userMessage appears as last message in messages array", async () => {
     const userMsg = "¿Cuáles son las ventas del mes?";
-    await assembleRequest("generate", {}, null, userMsg);
+    await assembleRequest("occupancy", {}, null, userMsg);
     const callArgs = mockLlmComplete.mock.calls[0]?.[0];
     const lastMsg = callArgs?.messages[callArgs.messages.length - 1];
     expect(lastMsg?.role).toBe("user");
@@ -118,7 +125,7 @@ describe("assembleRequest", () => {
       { role: "user" as const, content: "Mensaje previo" },
       { role: "assistant" as const, content: "Respuesta previa" },
     ];
-    await assembleRequest("generate", {}, null, "Nueva pregunta", { priorMessages });
+    await assembleRequest("chat", {}, null, "Nueva pregunta", { priorMessages });
     expect(mockLoadMessages).not.toHaveBeenCalled();
     const callArgs = mockLlmComplete.mock.calls[0]?.[0];
     expect(callArgs?.messages).toHaveLength(3); // 2 prior + 1 new
@@ -129,16 +136,60 @@ describe("assembleRequest", () => {
       { role: "user", content: "Hola", created_at: "2026-01-01" },
       { role: "assistant", content: "Hola! ¿En qué puedo ayudarte?", created_at: "2026-01-01" },
     ]);
-    await assembleRequest("generate", {}, "conv-abc123", "Nueva pregunta");
+    await assembleRequest("chat", {}, "conv-abc123", "Nueva pregunta");
     expect(mockLoadMessages).toHaveBeenCalledWith("conv-abc123");
     const callArgs = mockLlmComplete.mock.calls[0]?.[0];
     expect(callArgs?.messages).toHaveLength(3); // 2 from DB + 1 new
   });
 
   it("flow field is passed through to llmComplete", async () => {
-    await assembleRequest("suggest", {}, null, "Sugiere dashboards");
+    await assembleRequest("compare", {}, null, "Compara los candidatos");
     const callArgs = mockLlmComplete.mock.calls[0]?.[0];
-    expect(callArgs?.flow).toBe("suggest");
+    expect(callArgs?.flow).toBe("compare");
+  });
+
+  // EC-2 (#24): the ported plumbing runs end to end for an assessment flow
+  // before any real flow logic exists, so #25-#30 build on a proven seam.
+  it("assembleRequest works for stub occupancy flow", async () => {
+    const result = await assembleRequest(
+      "occupancy",
+      { listing: { propertyId: 7, description: "Se entrega libre de inquilinos." } },
+      null,
+      "Evalúa el anuncio",
+    );
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        text: "mocked response",
+        model: expect.any(String),
+        usage: expect.objectContaining({ total_tokens: 30 }),
+      }),
+    );
+
+    // Single-shot path: no tools, so it must not touch the agentic runner.
+    expect(mockRunAgenticChat).not.toHaveBeenCalled();
+    expect(mockLlmComplete).toHaveBeenCalledTimes(1);
+
+    // The listing payload reaches the model in the volatile half.
+    const callArgs = mockLlmComplete.mock.calls[0]?.[0];
+    expect(callArgs?.systemPrompt?.volatile).toContain("libre de inquilinos");
+  });
+
+  it("single-shot assessment flows carry no conversation history", async () => {
+    mockLoadMessages.mockResolvedValueOnce([
+      { role: "user", content: "Un anuncio anterior", created_at: "2026-01-01" },
+    ]);
+
+    // Both a conversationId and explicit priorMessages are supplied; an
+    // assessment must ignore both — carrying another listing's text into the
+    // context is how findings leak across unrelated properties.
+    await assembleRequest("occupancy", {}, "conv-xyz", "Evalúa", {
+      priorMessages: [{ role: "user", content: "Otro anuncio" }],
+    });
+
+    expect(mockLoadMessages).not.toHaveBeenCalled();
+    const callArgs = mockLlmComplete.mock.calls[0]?.[0];
+    expect(callArgs?.messages).toHaveLength(1); // just the new user message
   });
 
   // Regression guard (issue: llm-context-missing): every flow must surface the
@@ -147,15 +198,15 @@ describe("assembleRequest", () => {
   // Before the fix this callback was dead — assembleRequest never invoked it.
   it("invokes ctx.onSystemPromptReady with the assembled system prompt + tools", async () => {
     const onSystemPromptReady = vi.fn();
-    await assembleRequest("generate", {}, null, "Crear dashboard de ventas", {
-      ctx: { requestId: "req_1", endpoint: "generate", onSystemPromptReady },
+    await assembleRequest("occupancy", {}, null, "Evalúa el anuncio", {
+      ctx: { requestId: "req_1", endpoint: "occupancy", onSystemPromptReady },
     });
 
     expect(onSystemPromptReady).toHaveBeenCalledTimes(1);
     const [systemPrompt, tools] = onSystemPromptReady.mock.calls[0];
     // Full prompt = stable (+ volatile) — must match what was sent to the LLM.
     expect(typeof systemPrompt).toBe("string");
-    expect(systemPrompt).toContain("dashboard generator");
+    expect(systemPrompt).toContain("Tarea: estado de ocupación");
     const sent = mockLlmComplete.mock.calls[0]?.[0]?.systemPrompt;
     const expectedFull = sent?.volatile
       ? `${sent.stable}\n\n${sent.volatile}`
@@ -169,8 +220,8 @@ describe("assembleRequest", () => {
       throw new Error("boom");
     });
     await expect(
-      assembleRequest("generate", {}, null, "Crear dashboard", {
-        ctx: { requestId: "req_2", endpoint: "generate", onSystemPromptReady },
+      assembleRequest("occupancy", {}, null, "Evalúa", {
+        ctx: { requestId: "req_2", endpoint: "occupancy", onSystemPromptReady },
       }),
     ).resolves.toHaveProperty("text", "mocked response");
     expect(onSystemPromptReady).toHaveBeenCalled();

@@ -127,9 +127,12 @@ export function loadDashboardLlmConfig(): DashboardLlmConfig {
   // Per-flow OpenRouter overrides. Empty string means "no override" — the
   // resolver will fall back to openrouterModel.
   const openrouterModelByFlow: Record<DashboardLlmFlow, string> = {
-    generate: readStr(cfg, "dashboard.llm_model_openrouter_generate"),
-    modify: readStr(cfg, "dashboard.llm_model_openrouter_modify"),
-    analyze: readStr(cfg, "dashboard.llm_model_openrouter_analyze"),
+    occupancy: readStr(cfg, "dashboard.llm_model_openrouter_occupancy"),
+    condition: readStr(cfg, "dashboard.llm_model_openrouter_condition"),
+    redflags: readStr(cfg, "dashboard.llm_model_openrouter_redflags"),
+    extract: readStr(cfg, "dashboard.llm_model_openrouter_extract"),
+    compare: readStr(cfg, "dashboard.llm_model_openrouter_compare"),
+    chat: readStr(cfg, "dashboard.llm_model_openrouter_chat"),
   };
 
   const cliModel =

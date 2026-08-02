@@ -24,7 +24,7 @@ const TableSchema = z.object({
   table: z
     .string()
     .min(1)
-    .regex(/^ps_[a-z0-9_]+$/i, "table must be a ps_* identifier"),
+    .regex(/^[a-z_][a-z0-9_]*$/i, "table must be a plain identifier"),
 });
 
 /** Agentic SQL tools must not accept bare EXPLAIN / EXPLAIN ANALYZE (cost bypass + side effects). */
@@ -217,16 +217,18 @@ export async function handleExecuteQuery(
   }
 }
 
-export async function handleListPsTables(
+export async function handleListTables(
   _rawArgs: string,
   ctx: LlmAgenticContext,
 ): Promise<ToolResponseBody> {
+  // Every base table in `public`. The old `^ps_` filter was a PowerShop-mirror
+  // convention; this schema names its tables plainly (property, listing,
+  // search_profile, …), so filtering on a prefix would hide everything.
   const sql = `
     SELECT table_name
     FROM information_schema.tables
     WHERE table_schema = 'public'
       AND table_type = 'BASE TABLE'
-      AND table_name ~ '^ps_'
     ORDER BY table_name
     LIMIT 500
   `;
@@ -240,7 +242,7 @@ export async function handleListPsTables(
   }
 }
 
-export async function handleDescribePsTable(
+export async function handleDescribeTable(
   rawArgs: string,
   ctx: LlmAgenticContext,
 ): Promise<ToolResponseBody> {
@@ -248,7 +250,7 @@ export async function handleDescribePsTable(
   try {
     args = TableSchema.parse(JSON.parse(rawArgs || "{}"));
   } catch {
-    return toolError("INVALID_ARGS", "Invalid arguments for describe_ps_table.", ctx);
+    return toolError("INVALID_ARGS", "Invalid arguments for describe_table.", ctx);
   }
   try {
     const res = await query(

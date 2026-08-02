@@ -1,112 +1,90 @@
 import { describe, it, expect } from "vitest";
-import {
-  DASHBOARD_AGENTIC_TOOLS,
-  FREE_CHAT_TOOLS,
-  FULL_DASHBOARD_TOOLS,
-} from "@/lib/llm-tools/catalog";
+import type { ChatCompletionTool } from "openai/resources/chat/completions";
+import { CHAT_TOOLS, INSPECTION_TOOL_NAMES } from "@/lib/llm-tools/catalog";
+import { toolsForFlow } from "@/lib/llm-context";
+import { LLM_FLOWS } from "@/lib/llm-context/types";
+
+const names = (tools: ChatCompletionTool[]): string[] =>
+  tools
+    .filter((t): t is Extract<ChatCompletionTool, { type: "function" }> => t.type === "function")
+    .map((t) => t.function.name);
 
 describe("llm-tools catalog", () => {
-  describe("FREE_CHAT_TOOLS", () => {
-    it("contains exactly 11 tools (10 inspection + set_title)", () => {
-      expect(FREE_CHAT_TOOLS).toHaveLength(11);
+  describe("CHAT_TOOLS", () => {
+    it("contains exactly 6 tools (5 inspection + set_title)", () => {
+      expect(CHAT_TOOLS).toHaveLength(6);
     });
 
-    it("includes all 10 inspection tools", () => {
-      const names = FREE_CHAT_TOOLS.map((t) => t.function.name);
-      expect(names).toContain("list_ps_tables");
-      expect(names).toContain("describe_ps_table");
-      expect(names).toContain("validate_query");
-      expect(names).toContain("execute_query");
-      expect(names).toContain("explain_query");
-      expect(names).toContain("list_dashboards");
-      expect(names).toContain("get_dashboard_spec");
-      expect(names).toContain("get_dashboard_queries");
-      expect(names).toContain("get_dashboard_widget_raw_values");
-      expect(names).toContain("get_dashboard_all_widget_status");
+    it("includes every read-only inspection tool", () => {
+      const n = names(CHAT_TOOLS);
+      expect(n).toContain("validate_query");
+      expect(n).toContain("execute_query");
+      expect(n).toContain("explain_query");
+      expect(n).toContain("list_tables");
+      expect(n).toContain("describe_table");
     });
 
     it("includes set_title", () => {
-      const names = FREE_CHAT_TOOLS.map((t) => t.function.name);
-      expect(names).toContain("set_title");
+      expect(names(CHAT_TOOLS)).toContain("set_title");
     });
 
-    it("does NOT include start_dashboard_generation", () => {
-      const names = FREE_CHAT_TOOLS.map((t) => t.function.name);
-      expect(names).not.toContain("start_dashboard_generation");
+    it("set_title has a required 'title' parameter", () => {
+      const setTitle = CHAT_TOOLS.find(
+        (t) => t.type === "function" && t.function.name === "set_title",
+      );
+      expect(setTitle).toBeDefined();
+      if (setTitle?.type === "function") {
+        const params = setTitle.function.parameters as {
+          properties: Record<string, unknown>;
+          required: string[];
+        };
+        expect(params.properties).toHaveProperty("title");
+        expect(params.required).toContain("title");
+      }
     });
 
-    it("does NOT include apply_dashboard_modification", () => {
-      const names = FREE_CHAT_TOOLS.map((t) => t.function.name);
-      expect(names).not.toContain("apply_dashboard_modification");
+    /**
+     * #24 removed the dashboard-authoring tier. These names must never come
+     * back without a deliberate decision: they let the model publish an
+     * artifact, and this product has no artifact for them to publish.
+     */
+    it("contains no dashboard-authoring or write tools", () => {
+      const n = names(CHAT_TOOLS);
+      for (const retired of [
+        "validate_dashboard_spec",
+        "apply_dashboard_modification",
+        "submit_dashboard_analysis",
+        "start_dashboard_generation",
+        "submit_weekly_review",
+        "list_dashboards",
+        "get_dashboard_spec",
+        "get_dashboard_queries",
+        "get_dashboard_widget_raw_values",
+        "get_dashboard_all_widget_status",
+      ]) {
+        expect(n).not.toContain(retired);
+      }
     });
 
-    it("does NOT include submit_dashboard_analysis", () => {
-      const names = FREE_CHAT_TOOLS.map((t) => t.function.name);
-      expect(names).not.toContain("submit_dashboard_analysis");
-    });
-
-    it("does NOT include validate_dashboard_spec", () => {
-      const names = FREE_CHAT_TOOLS.map((t) => t.function.name);
-      expect(names).not.toContain("validate_dashboard_spec");
-    });
-
-    it("does NOT include submit_weekly_review", () => {
-      const names = FREE_CHAT_TOOLS.map((t) => t.function.name);
-      expect(names).not.toContain("submit_weekly_review");
-    });
-  });
-
-  describe("set_title tool", () => {
-    it("is present in FREE_CHAT_TOOLS", () => {
-      const names = FREE_CHAT_TOOLS.map((t) => t.function.name);
-      expect(names).toContain("set_title");
-    });
-
-    it("is NOT present in DASHBOARD_AGENTIC_TOOLS", () => {
-      const names = DASHBOARD_AGENTIC_TOOLS.map((t) => t.function.name);
-      expect(names).not.toContain("set_title");
-    });
-
-    it("has required 'title' parameter", () => {
-      const tool = FREE_CHAT_TOOLS.find((t) => t.function.name === "set_title");
-      const required = tool?.function.parameters?.required as string[] | undefined;
-      expect(required).toContain("title");
-    });
-  });
-
-  describe("FULL_DASHBOARD_TOOLS", () => {
-    it("contains all tools from DASHBOARD_AGENTIC_TOOLS", () => {
-      expect(FULL_DASHBOARD_TOOLS).toBe(DASHBOARD_AGENTIC_TOOLS);
-    });
-
-    it("does NOT contain start_dashboard_generation", () => {
-      const names = FULL_DASHBOARD_TOOLS.map((t) => t.function.name);
-      expect(names).not.toContain("start_dashboard_generation");
+    it("every tool except set_title is a declared read-only inspection tool", () => {
+      const n = names(CHAT_TOOLS).filter((x) => x !== "set_title");
+      for (const name of n) expect(INSPECTION_TOOL_NAMES.has(name)).toBe(true);
     });
   });
 
-  describe("DASHBOARD_AGENTIC_TOOLS", () => {
-    it("does NOT contain start_dashboard_generation or submit_weekly_review", () => {
-      const names = DASHBOARD_AGENTIC_TOOLS.map((t) => t.function.name);
-      expect(names).not.toContain("start_dashboard_generation");
-      expect(names).not.toContain("submit_weekly_review");
+  describe("toolsForFlow", () => {
+    it("gives the chat flow the full chat catalog", () => {
+      expect(toolsForFlow("chat")).toEqual(CHAT_TOOLS);
     });
 
-    it("still contains all remaining original tools", () => {
-      const names = DASHBOARD_AGENTIC_TOOLS.map((t) => t.function.name);
-      expect(names).toContain("validate_query");
-      expect(names).toContain("execute_query");
-      expect(names).toContain("explain_query");
-      expect(names).toContain("list_ps_tables");
-      expect(names).toContain("describe_ps_table");
-      expect(names).toContain("list_dashboards");
-      expect(names).toContain("get_dashboard_spec");
-      expect(names).toContain("get_dashboard_queries");
-      expect(names).toContain("get_dashboard_widget_raw_values");
-      expect(names).toContain("get_dashboard_all_widget_status");
-      expect(names).toContain("validate_dashboard_spec");
-      expect(names).toContain("apply_dashboard_modification");
-      expect(names).toContain("submit_dashboard_analysis");
+    it("gives every assessment flow an empty catalog (single-shot)", () => {
+      for (const flow of LLM_FLOWS.filter((f) => f !== "chat")) {
+        expect(toolsForFlow(flow)).toEqual([]);
+      }
+    });
+
+    it("fails closed for an unknown flow", () => {
+      expect(toolsForFlow("definitely-not-a-flow")).toEqual([]);
     });
   });
 });

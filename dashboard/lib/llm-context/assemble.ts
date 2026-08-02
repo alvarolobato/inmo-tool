@@ -41,7 +41,7 @@ import type { FlowVars } from "./types";
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
-export type { FlowVars, HistoryMessage };
+export type { HistoryMessage };
 
 export interface AssembleResult {
   text: string;
@@ -73,9 +73,9 @@ export interface AssembleExecutionOpts {
 /**
  * Assemble and execute an LLM request for a named flow.
  *
- * @param flow           - Flow name: "generate" | "modify" | "analyze" | "suggest" |
- *                         "gap" | "chat" | "summary" | string
- * @param vars           - Per-flow input variables (currentSpec, serializedData, etc.)
+ * @param flow           - Flow name: "occupancy" | "condition" | "redflags" |
+ *                         "extract" | "compare" | "chat" (see LLM_FLOWS)
+ * @param vars           - Per-flow input variables (listing, candidates, etc.)
  * @param conversationId - Conversation ID for history loading (null → no history)
  * @param userMessage    - The user message to append to history
  * @param opts           - Execution options (ctx, temperature, tokens, streaming)
@@ -113,7 +113,8 @@ export async function assembleRequest(
   }));
 
   // 4. Resolve tools + the exact system prompt that will be sent. Single-shot
-  // flows (suggest/gap/summary/title) return [] from toolsForFlow and
+  // assessment flows (occupancy/condition/redflags/extract/compare) return []
+  // from toolsForFlow and
   // must stay on the llmComplete path to preserve strict JSON-only outputs.
   const tools = toolsForFlow(flow);
   const fullSystemPrompt = volatile ? `${stable}\n\n${volatile}` : stable;
