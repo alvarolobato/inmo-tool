@@ -298,6 +298,47 @@ CREATE TABLE IF NOT EXISTS property_merge_log (
 CREATE INDEX IF NOT EXISTS idx_property_merge_log_property_id
     ON property_merge_log (property_id);
 
+-- ============================================================
+-- Connector observability (Phase 1.3, issue #11)
+-- ============================================================
+--
+-- These are a fresh pair of tables, not a reuse of the source project's
+-- etl_sync_runs/etl_sync_run_tables (kept below, still present but now
+-- orphaned — nothing writes to them since Phase 1.1 deleted the table-sync
+-- modules that populated them; left alone as a Phase-1.1/1.3 cleanup gap
+-- rather than dropped speculatively here, since a later phase's dashboard
+-- reuse might still want the etl_manual_trigger UI-trigger mechanism they
+-- sit alongside). connector_runs/connector_run_results track the new
+-- per-connector discover+fetch+normalize+store cycle instead of the old
+-- per-table watermark-delta sync.
+
+CREATE TABLE IF NOT EXISTS connector_runs (
+    id                 BIGSERIAL    PRIMARY KEY,
+    trigger            TEXT         NOT NULL,
+    started_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    finished_at        TIMESTAMPTZ,
+    duration_ms        INTEGER,
+    status             TEXT         NOT NULL DEFAULT 'running' CHECK (status IN ('running','success','partial','failed')),
+    connectors_ok      INTEGER,
+    connectors_failed  INTEGER,
+    total_connectors   INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS connector_run_results (
+    id               BIGSERIAL    PRIMARY KEY,
+    run_id           BIGINT       NOT NULL REFERENCES connector_runs(id) ON DELETE CASCADE,
+    connector_name   TEXT         NOT NULL,
+    started_at       TIMESTAMPTZ,
+    finished_at      TIMESTAMPTZ,
+    status           TEXT         NOT NULL DEFAULT 'ok' CHECK (status IN ('ok','failed','circuit_open')),
+    discovered_count INTEGER      NOT NULL DEFAULT 0,
+    fetched_count    INTEGER      NOT NULL DEFAULT 0,
+    error_count      INTEGER      NOT NULL DEFAULT 0,
+    error_msg        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_connector_run_results_run_id ON connector_run_results (run_id);
+
 
 -- ============================================================
 -- Dashboard App
