@@ -74,6 +74,11 @@ export function MapView({ profileId }: { profileId: number }) {
   }
 
   return (
-    <CandidateMap candidates={data.items} unplottableCount={data.unplottableCount} truncated={data.truncated} />
+    <CandidateMap
+      candidates={data.items}
+      unplottableCount={data.unplottableCount}
+      truncated={data.truncated}
+      profileId={profileId}
+    />
   );
 }

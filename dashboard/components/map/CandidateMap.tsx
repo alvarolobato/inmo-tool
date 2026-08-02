@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { MapContainer, TileLayer, Marker, Popup, useMap, useMapEvents } from "react-leaflet";
+import Link from "next/link";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import type { MapCandidateRow } from "@/lib/map-candidates";
@@ -191,7 +192,7 @@ function FitToCandidates({ candidates }: { candidates: MapCandidateRow[] }) {
  * between points, so zoomend is the only map event that needs to trigger a
  * recompute) and whenever the candidate set changes (stage filter).
  */
-function ClusteredMarkers({ candidates }: { candidates: MapCandidateRow[] }) {
+function ClusteredMarkers({ candidates, profileId }: { candidates: MapCandidateRow[]; profileId: number }) {
   const map = useMap();
   const [clusters, setClusters] = useState<Cluster[]>([]);
 
@@ -217,7 +218,7 @@ function ClusteredMarkers({ candidates }: { candidates: MapCandidateRow[] }) {
             icon={singleMarkerIcon(cluster.candidates[0].property_id)}
           >
             <Popup>
-              <CandidatePopupContent candidate={cluster.candidates[0]} />
+              <CandidatePopupContent candidate={cluster.candidates[0]} profileId={profileId} />
             </Popup>
           </Marker>
         ) : (
@@ -233,12 +234,16 @@ function ClusteredMarkers({ candidates }: { candidates: MapCandidateRow[] }) {
                 </p>
                 <ul style={{ margin: 0, padding: 0, listStyle: "none" }}>
                   {cluster.candidates.map((c) => (
-                    <li
-                      key={c.property_id}
-                      style={{ padding: "3px 0", borderTop: "1px solid var(--border)", color: "var(--fg-muted, #666)" }}
-                    >
-                      {c.min_price !== null ? fmtEUR0(c.min_price) : "Precio no disponible"}
-                      {c.address ? ` · ${c.address}` : ""}
+                    <li key={c.property_id} style={{ padding: "3px 0", borderTop: "1px solid var(--border)" }}>
+                      <Link
+                        href={`/profiles/${profileId}/properties/${c.property_id}`}
+                        data-testid="map-cluster-item-link"
+                        data-property-id={c.property_id}
+                        style={{ color: "var(--fg-muted, #666)" }}
+                      >
+                        {c.min_price !== null ? fmtEUR0(c.min_price) : "Precio no disponible"}
+                        {c.address ? ` · ${c.address}` : ""}
+                      </Link>
                     </li>
                   ))}
                 </ul>
@@ -287,7 +292,7 @@ function stageLabel(stage: string): string {
     : stage;
 }
 
-function CandidatePopupContent({ candidate }: { candidate: MapCandidateRow }) {
+function CandidatePopupContent({ candidate, profileId }: { candidate: MapCandidateRow; profileId: number }) {
   const sources = [...new Set(candidate.listings.map((l) => l.source))].sort();
   const typeLabel = propertyTypeLabel(candidate.property_type);
   return (
@@ -308,22 +313,13 @@ function CandidatePopupContent({ candidate }: { candidate: MapCandidateRow }) {
       <p style={{ margin: "0 0 6px", fontSize: 11, color: "var(--fg-muted, #666)" }}>
         Fuentes: {sources.join(" + ")}
       </p>
-      {/*
-        No link to a property detail page yet: task 2.8 (#44, property
-        detail page) doesn't exist in this stack yet — same gap
-        CandidateCard (task 2.5) documented and deferred for the same
-        reason. Issue #43's EC-3 asks for "a working link to that
-        property's detail page"; since that page is real-but-not-built-yet
-        rather than never-planned, showing a disabled affordance here
-        (rather than a link that would 404) documents the intent honestly
-        without shipping a broken link. Wire this up once #44 lands.
-      */}
-      <p
-        data-testid="map-popup-detail-link-pending"
-        style={{ margin: 0, fontSize: 11, color: "var(--fg-muted, #999)", fontStyle: "italic" }}
+      <Link
+        href={`/profiles/${profileId}/properties/${candidate.property_id}`}
+        data-testid="map-popup-detail-link"
+        style={{ margin: 0, fontSize: 12, color: "var(--accent, #4f46e5)" }}
       >
-        Ficha de propiedad — próximamente (#44)
-      </p>
+        Ver ficha de la propiedad →
+      </Link>
     </div>
   );
 }
@@ -332,10 +328,12 @@ export function CandidateMap({
   candidates,
   unplottableCount,
   truncated,
+  profileId,
 }: {
   candidates: MapCandidateRow[];
   unplottableCount: number;
   truncated: boolean;
+  profileId: number;
 }) {
   const [stageFilter, setStageFilter] = useState<string>("all");
 
@@ -409,7 +407,7 @@ export function CandidateMap({
               attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
             />
             <FitToCandidates candidates={filtered} />
-            <ClusteredMarkers candidates={filtered} />
+            <ClusteredMarkers candidates={filtered} profileId={profileId} />
           </MapContainer>
         </div>
       )}
