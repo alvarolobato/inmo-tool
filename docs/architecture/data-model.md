@@ -49,6 +49,32 @@ Best-effort seller/agent identity, used as a deduplication signal (phone number 
 ### `search_profile`
 A named investment thesis/mandate — "high-yield low-cost rental," "commercial units," etc. `scope` (geography/type/price/size filters) and `thesis_params` (yield targets, financing assumptions) are `jsonb`, validated at the application layer rather than via Postgres `CHECK` constraints, because their shape will grow across phases (Phase 2 adds scope filtering, Phase 5 adds financing params) and a rigid DB-level schema would mean a migration for every new filter type.
 
+**`scope` shape (defined and validated in task 2.3, `dashboard/lib/db/profiles.ts`'s `ScopeSchema`)** — this is the exact shape task 2.4's hard-filter engine consumes:
+
+```ts
+{
+  geography: { type: "radius", center: [lat, lon], radius_km: number },
+  property_types: ("piso" | "chalet" | "atico" | "local_comercial"
+                    | "nave_industrial" | "garaje" | "terreno"
+                    | "edificio_completo")[],   // at least one required
+  price_min?: number, price_max?: number,        // price_min <= price_max enforced
+  size_min?: number,  size_max?: number,          // size_min <= size_max enforced
+  hard_exclusions?: { requires_elevator?: boolean, min_floor?: number,
+                       excludes_ground_floor?: boolean },
+}
+```
+
+Geography is radius-from-a-geocoded-point only for now — task 2.3's scope note defers full polygon map-drawing as a later UI enhancement, not required for the MVP filtering need. This is the same open decision line 89 (below) already flagged for whoever implements task 2.4's actual radius query (earthdistance/cube vs. PostGIS) — task 2.3 only stores and validates the shape, it does not query by it.
+
+**`thesis_params` shape** (fields used starting Phase 3/5, persisted from day one, validated only for type shape):
+
+```ts
+{
+  target_yield_pct?: number,
+  financing?: { down_payment_pct: number, rate_pct: number, term_years: number },
+}
+```
+
 ### `profile_listing_state` — the load-bearing table for correct deduplication
 
 ```sql
@@ -87,4 +113,4 @@ This task only creates the table. The matching engine that writes to it is Phase
 ## Deliberately deferred
 
 - **Geo query support** (radius/polygon search for a profile's scope filter): `property.lat`/`lon` are plain `NUMERIC(9,6)` columns for now — enough to *store* coordinates. Whether filtering needs PostgreSQL's `earthdistance`/`cube` extensions or full PostGIS is a decision for whoever implements the actual radius/polygon filtering in Phase 2 (issue #18), not this task.
-- **`search_profile.scope`/`thesis_params` internal shape**: intentionally `jsonb` with no fixed schema yet. The shape gets defined incrementally as each phase's filters/parameters land, not speculatively here.
+- **`search_profile.scope`/`thesis_params` internal shape**: defined in task 2.3 (see the `search_profile` entity above) — `jsonb` with an application-layer (Zod) schema rather than a DB-level one, since the shape still grows across phases (Phase 5 adds financing params usage, Phase 2.4 is the first real consumer of `scope`).

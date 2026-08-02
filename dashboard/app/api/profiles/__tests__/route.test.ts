@@ -1,0 +1,232 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+const mockQuery = vi.fn();
+const mockEnd = vi.fn().mockResolvedValue(undefined);
+
+vi.mock("pg", () => {
+  return {
+    Pool: class MockPool {
+      query = mockQuery;
+      end = mockEnd;
+    },
+  };
+});
+
+import { GET, POST } from "../route";
+import { DELETE, PATCH } from "../[id]/route";
+import { POST as CLONE } from "../[id]/clone/route";
+import { resetPool } from "@/lib/db-write";
+import { NextRequest } from "next/server";
+
+function makeRequest(url: string, method: string, body?: unknown): NextRequest {
+  return new NextRequest(url, {
+    method,
+    ...(body !== undefined
+      ? { body: JSON.stringify(body), headers: { "Content-Type": "application/json" } }
+      : {}),
+  });
+}
+
+const VALID_SCOPE = {
+  geography: { type: "radius", center: [40.4168, -3.7038], radius_km: 5 },
+  property_types: ["piso"],
+};
+
+function dbRow(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: 1,
+    name: "Alquiler alto rendimiento",
+    scope: VALID_SCOPE,
+    thesis_params: {},
+    archived_at: null,
+    created_at: "2026-08-02T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+beforeEach(async () => {
+  mockQuery.mockReset();
+  mockEnd.mockClear();
+  await resetPool();
+});
+
+describe("GET /api/profiles", () => {
+  it("returns empty array when no profiles exist", async () => {
+    mockQuery.mockResolvedValue({ rows: [] });
+    const res = await GET();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([]);
+  });
+
+  it("returns parsed profiles", async () => {
+    mockQuery.mockResolvedValue({ rows: [dbRow()] });
+    const res = await GET();
+    const json = await res.json();
+    expect(res.status).toBe(200);
+    expect(json).toHaveLength(1);
+    expect(json[0].name).toBe("Alquiler alto rendimiento");
+  });
+});
+
+describe("POST /api/profiles", () => {
+  it("EC-1: creates a profile with valid name/scope and persists it", async () => {
+    mockQuery.mockResolvedValue({ rows: [dbRow()] });
+    const res = await POST(
+      makeRequest("http://localhost:4000/api/profiles", "POST", {
+        name: "Alquiler alto rendimiento",
+        scope: VALID_SCOPE,
+      }),
+    );
+    expect(res.status).toBe(201);
+    const json = await res.json();
+    expect(json.name).toBe("Alquiler alto rendimiento");
+    expect(mockQuery).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO search_profile"),
+      expect.any(Array),
+    );
+  });
+
+  it("EC-2: rejects invalid scope (price_min > price_max) with 400", async () => {
+    const res = await POST(
+      makeRequest("http://localhost:4000/api/profiles", "POST", {
+        name: "X",
+        scope: { ...VALID_SCOPE, price_min: 500000, price_max: 100000 },
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("EC-2: rejects a negative radius with 400", async () => {
+    const res = await POST(
+      makeRequest("http://localhost:4000/api/profiles", "POST", {
+        name: "X",
+        scope: {
+          ...VALID_SCOPE,
+          geography: { type: "radius", center: [40.4, -3.7], radius_km: -5 },
+        },
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing name with 400", async () => {
+    const res = await POST(
+      makeRequest("http://localhost:4000/api/profiles", "POST", { scope: VALID_SCOPE }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects an empty property_types array with 400", async () => {
+    const res = await POST(
+      makeRequest("http://localhost:4000/api/profiles", "POST", {
+        name: "X",
+        scope: { ...VALID_SCOPE, property_types: [] },
+      }),
+    );
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("DELETE /api/profiles/[id] (archive)", () => {
+  it("EC-3: archives a profile (soft delete, sets archived_at)", async () => {
+    mockQuery.mockResolvedValue({ rows: [dbRow({ archived_at: "2026-08-02T01:00:00.000Z" })] });
+    const res = await DELETE(makeRequest("http://localhost:4000/api/profiles/1", "DELETE"), {
+      params: Promise.resolve({ id: "1" }),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.archived_at).not.toBeNull();
+    expect(mockQuery).toHaveBeenCalledWith(
+      expect.stringContaining("archived_at IS NULL"),
+      [1],
+    );
+  });
+
+  it("returns 404 when the profile does not exist or is already archived", async () => {
+    mockQuery.mockResolvedValue({ rows: [] });
+    const res = await DELETE(makeRequest("http://localhost:4000/api/profiles/999", "DELETE"), {
+      params: Promise.resolve({ id: "999" }),
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("EC-3: archiving hides from list but preserves data reachable by id", () => {
+  it("GET /api/profiles excludes archived rows (query filters WHERE archived_at IS NULL)", async () => {
+    mockQuery.mockResolvedValue({ rows: [] });
+    await GET();
+    expect(String(mockQuery.mock.calls[0][0])).toContain("WHERE archived_at IS NULL");
+  });
+
+  it("GET /api/profiles/[id] still returns an archived profile directly by id", async () => {
+    const { GET: GET_BY_ID } = await import("../[id]/route");
+    mockQuery.mockResolvedValue({ rows: [dbRow({ archived_at: "2026-08-02T01:00:00.000Z" })] });
+    const res = await GET_BY_ID(makeRequest("http://localhost:4000/api/profiles/1", "GET"), {
+      params: Promise.resolve({ id: "1" }),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.archived_at).not.toBeNull();
+  });
+});
+
+describe("POST /api/profiles/[id]/clone", () => {
+  it("EC-4: clones scope/thesis_params into a new profile, not the feedback history", async () => {
+    // First call: SELECT the source profile. Second call: INSERT the clone.
+    mockQuery
+      .mockResolvedValueOnce({ rows: [dbRow({ id: 1, name: "Original" })] })
+      .mockResolvedValueOnce({ rows: [dbRow({ id: 2, name: "Original (copia)" })] });
+
+    const res = await CLONE(makeRequest("http://localhost:4000/api/profiles/1/clone", "POST"), {
+      params: Promise.resolve({ id: "1" }),
+    });
+    expect(res.status).toBe(201);
+    const json = await res.json();
+    expect(json.id).toBe(2);
+    expect(json.name).toBe("Original (copia)");
+    // ScopeSchema fills in the hard_exclusions default on parse — expected.
+    expect(json.scope).toEqual({ ...VALID_SCOPE, hard_exclusions: {} });
+    // Cloning never touches feedback_event/profile_listing_state — only two
+    // queries run (select source, insert clone), neither references them.
+    expect(mockQuery).toHaveBeenCalledTimes(2);
+    for (const call of mockQuery.mock.calls) {
+      expect(String(call[0])).not.toMatch(/feedback_event|profile_listing_state/);
+    }
+  });
+
+  it("returns 404 when the source profile does not exist", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await CLONE(makeRequest("http://localhost:4000/api/profiles/999/clone", "POST"), {
+      params: Promise.resolve({ id: "999" }),
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("PATCH /api/profiles/[id]", () => {
+  it("updates scope and persists the change", async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [dbRow()] }) // getProfileById inside updateProfile
+      .mockResolvedValueOnce({ rows: [dbRow({ name: "Renombrado" })] }); // UPDATE ... RETURNING
+
+    const res = await PATCH(
+      makeRequest("http://localhost:4000/api/profiles/1", "PATCH", { name: "Renombrado" }),
+      { params: Promise.resolve({ id: "1" }) },
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).name).toBe("Renombrado");
+  });
+
+  it("rejects an invalid scope patch with 400", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [dbRow()] });
+    const res = await PATCH(
+      makeRequest("http://localhost:4000/api/profiles/1", "PATCH", {
+        scope: { ...VALID_SCOPE, property_types: ["not_a_real_type"] },
+      }),
+      { params: Promise.resolve({ id: "1" }) },
+    );
+    expect(res.status).toBe(400);
+  });
+});
