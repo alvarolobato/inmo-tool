@@ -71,6 +71,9 @@ export async function listCandidates(
   const limit = Math.min(Math.max(Math.trunc(opts.limit ?? DEFAULT_LIMIT), 1), MAX_LIMIT);
   const cursor = opts.cursor ?? null;
 
+  // Fetch one extra row so we can tell whether a next page truly exists
+  // instead of assuming it does whenever a page is exactly full (that
+  // false-positive was showing a dead "Cargar más" on the last page).
   const rows = await sql<RawCandidateRow>(
     `SELECT
        p.id AS property_id,
@@ -97,7 +100,7 @@ export async function listCandidates(
                    ORDER BY l.source
                  )
             FROM listing l
-           WHERE l.property_id = p.id),
+           WHERE l.property_id = p.id AND l.status = 'active'),
          '[]'
        ) AS listings
      FROM profile_listing_state pls
@@ -107,11 +110,18 @@ export async function listCandidates(
        AND ($2::bigint IS NULL OR p.id < $2::bigint)
      ORDER BY p.id DESC
      LIMIT $3`,
-    [profileId, cursor, limit],
+    [profileId, cursor, limit + 1],
   );
 
-  const items: CandidateRow[] = rows.map((r) => ({
-    property_id: r.property_id,
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+
+  const items: CandidateRow[] = pageRows.map((r) => ({
+    // pg returns bigint columns as strings; property_id needs to be a real
+    // JSON number (Phase 3's scoring/ranking will compare/sort on it) —
+    // unlike lat/lon/m2_built this one was missed and shipped as a string
+    // ("179" not 179) in the live API response.
+    property_id: Number(r.property_id),
     address: r.address,
     lat: r.lat !== null ? Number(r.lat) : null,
     lon: r.lon !== null ? Number(r.lon) : null,
@@ -123,7 +133,7 @@ export async function listCandidates(
     listings: r.listings,
   }));
 
-  const nextCursor = items.length === limit ? items[items.length - 1].property_id : null;
+  const nextCursor = hasMore ? items[items.length - 1].property_id : null;
 
   return { items, nextCursor };
 }

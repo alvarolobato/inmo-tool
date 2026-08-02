@@ -16,7 +16,7 @@
  * fixture philosophy (etl/tests/conftest.py): skip gracefully rather than
  * hard-fail when no database is available, but run for real whenever one is.
  */
-import { describe, it, expect, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, afterAll, beforeEach, afterEach } from "vitest";
 import { Pool } from "pg";
 import { buildPgPoolConfig } from "@/lib/db-shared";
 import { resetPool } from "@/lib/db-write";
@@ -68,6 +68,46 @@ describe.runIf(dbAvailable)("materializeProfile — real Postgres", () => {
     await resetPool();
   });
 
+  // Exact IDs this test created, cleaned up by id in afterEach — never a
+  // broad table-wide scan. The previous `DELETE FROM property WHERE id NOT
+  // IN (SELECT property_id FROM listing)` in beforeEach was scoped to
+  // nothing (any orphaned property, anywhere), which raced with
+  // candidates.integration.test.ts's own test data when vitest ran both
+  // files concurrently (its default file-level parallelism) — reproduced
+  // directly as an intermittent cross-file foreign-key violation. Fixed
+  // there with the same pattern; fixing it here too since one file's broad
+  // scan can still hit the other's rows regardless of which file "owns"
+  // the bug.
+  let createdPropertyIds: number[] = [];
+  let createdProfileIds: number[] = [];
+
+  beforeEach(() => {
+    createdPropertyIds = [];
+    createdProfileIds = [];
+  });
+
+  afterEach(async () => {
+    await withRealDb(async (pool) => {
+      if (createdProfileIds.length > 0) {
+        await pool.query("DELETE FROM profile_listing_state WHERE profile_id = ANY($1::bigint[])", [
+          createdProfileIds,
+        ]);
+      }
+      if (createdPropertyIds.length > 0) {
+        await pool.query("DELETE FROM profile_listing_state WHERE property_id = ANY($1::bigint[])", [
+          createdPropertyIds,
+        ]);
+        await pool.query("DELETE FROM listing WHERE property_id = ANY($1::bigint[])", [createdPropertyIds]);
+      }
+      if (createdProfileIds.length > 0) {
+        await pool.query("DELETE FROM search_profile WHERE id = ANY($1::bigint[])", [createdProfileIds]);
+      }
+      if (createdPropertyIds.length > 0) {
+        await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [createdPropertyIds]);
+      }
+    });
+  });
+
   async function insertProperty(
     pool: Pool,
     overrides: Partial<{
@@ -89,7 +129,9 @@ describe.runIf(dbAvailable)("materializeProfile — real Postgres", () => {
        VALUES ($1, $2, $3, $4) RETURNING id`,
       [row.lat, row.lon, row.property_type, row.m2_built],
     );
-    return result.rows[0].id;
+    const id = result.rows[0].id;
+    createdPropertyIds.push(id);
+    return id;
   }
 
   async function insertListing(
@@ -119,6 +161,7 @@ describe.runIf(dbAvailable)("materializeProfile — real Postgres", () => {
 
   async function makeProfile(scope: Scope): Promise<number> {
     const profile = await createProfile(`integration-test-${Date.now()}-${Math.random()}`, scope, {});
+    createdProfileIds.push(profile.id);
     return profile.id;
   }
 
@@ -129,22 +172,6 @@ describe.runIf(dbAvailable)("materializeProfile — real Postgres", () => {
     );
     return rows;
   }
-
-  // Clean slate per test: these tests write real rows and must not see
-  // leftovers from a previous run or from manual local testing.
-  beforeEach(async () => {
-    await withRealDb(async (pool) => {
-      await pool.query(
-        "DELETE FROM profile_listing_state WHERE profile_id IN " +
-          "(SELECT id FROM search_profile WHERE name LIKE 'integration-test-%')",
-      );
-      await pool.query("DELETE FROM search_profile WHERE name LIKE 'integration-test-%'");
-      await pool.query("DELETE FROM listing WHERE external_id LIKE 'int-test-%'");
-      await pool.query(
-        "DELETE FROM property WHERE id NOT IN (SELECT property_id FROM listing)",
-      );
-    });
-  });
 
   it("radius boundary: a property just inside matches, just outside does not", async () => {
     await withRealDb(async (pool) => {

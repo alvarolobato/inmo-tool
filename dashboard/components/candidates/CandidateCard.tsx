@@ -31,6 +31,8 @@ export function CandidateCard({ candidate }: { candidate: CandidateRow }) {
 
   return (
     <div
+      data-testid="candidate-card"
+      data-property-id={candidate.property_id}
       style={{
         padding: 14,
         border: "1px solid var(--border)",

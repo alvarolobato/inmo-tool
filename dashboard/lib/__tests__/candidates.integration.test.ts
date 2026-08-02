@@ -9,8 +9,17 @@
  * duplicate rows, which is exactly the bug class issue #19 exists to avoid
  * ("never one card per listing"). Same gating pattern as
  * lib/filtering/__tests__/materialize.integration.test.ts.
+ *
+ * Cleanup is scoped to exact IDs this file creates (tracked per test),
+ * never a broad "delete any orphaned property"/name-prefix scan — vitest
+ * runs test files in separate workers by default, all against the same
+ * live Postgres, so a broad scan here can race with (and destructively
+ * collide with) unrelated data another integration test file is using at
+ * the same wall-clock moment. Reproduced directly: running this file
+ * together with materialize.integration.test.ts intermittently violated
+ * a foreign key on a property this file never touched.
  */
-import { describe, it, expect, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, afterAll, beforeEach, afterEach } from "vitest";
 import { Pool } from "pg";
 import { buildPgPoolConfig } from "@/lib/db-shared";
 import { resetPool } from "@/lib/db-write";
@@ -18,7 +27,16 @@ import { createProfile } from "@/lib/db/profiles";
 import { listCandidates } from "../candidates";
 import type { Scope } from "@/lib/profiles-schema";
 
-const MADRID_SOL: [number, number] = [40.4168, -3.7038];
+// Deliberately NOT Sol/Atocha (the coordinates materialize.integration.test.ts
+// uses) and far enough away (~17km, well outside any radius_km used by
+// either file's tests) that materialize.integration.test.ts's real
+// materializeProfile() — which does a genuine broad geographic scan, by
+// design — can never pick up this file's test properties when both files
+// run concurrently (vitest's default file-level parallelism). Reproduced
+// directly: sharing MADRID_SOL caused an intermittent cross-file FK
+// violation as materialize's own production-code scan linked a fresh
+// profile_listing_state row to a property this file was mid-cleanup on.
+const TEST_COORDS: [number, number] = [40.5668, -3.7038];
 
 async function withRealDb(fn: (pool: Pool) => Promise<void>) {
   const pool = new Pool(buildPgPoolConfig({ max: 2 }));
@@ -51,13 +69,51 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
     await resetPool();
   });
 
+  // Exact IDs this test created, cleaned up by id in afterEach — never a
+  // broad table-wide scan (see file header for why).
+  let createdPropertyIds: number[] = [];
+  let createdProfileIds: number[] = [];
+
+  beforeEach(() => {
+    createdPropertyIds = [];
+    createdProfileIds = [];
+  });
+
+  afterEach(async () => {
+    await withRealDb(async (pool) => {
+      if (createdProfileIds.length > 0) {
+        await pool.query("DELETE FROM profile_listing_state WHERE profile_id = ANY($1::bigint[])", [
+          createdProfileIds,
+        ]);
+      }
+      if (createdPropertyIds.length > 0) {
+        await pool.query("DELETE FROM profile_listing_state WHERE property_id = ANY($1::bigint[])", [
+          createdPropertyIds,
+        ]);
+        await pool.query("DELETE FROM listing WHERE property_id = ANY($1::bigint[])", [createdPropertyIds]);
+      }
+      if (createdProfileIds.length > 0) {
+        await pool.query("DELETE FROM search_profile WHERE id = ANY($1::bigint[])", [createdProfileIds]);
+      }
+      if (createdPropertyIds.length > 0) {
+        await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [createdPropertyIds]);
+      }
+    });
+  });
+
   async function insertProperty(pool: Pool): Promise<number> {
     const result = await pool.query<{ id: number }>(
       `INSERT INTO property (lat, lon, property_type, m2_built, address)
        VALUES ($1, $2, 'piso', 70, 'Calle Trafalgar, Chamberí, Madrid') RETURNING id`,
-      [MADRID_SOL[0], MADRID_SOL[1]],
+      [TEST_COORDS[0], TEST_COORDS[1]],
     );
-    return result.rows[0].id;
+    // pg returns bigint columns as strings — this helper's own return value
+    // needs the same coercion as lib/candidates.ts now applies, or
+    // comparisons against listCandidates()'s (correctly numeric) output
+    // fail on type alone even when the underlying ids match.
+    const id = Number(result.rows[0].id);
+    createdPropertyIds.push(id);
+    return id;
   }
 
   async function insertListing(
@@ -81,6 +137,7 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
 
   async function makeProfile(scope: Scope): Promise<number> {
     const profile = await createProfile(`candidates-int-test-${Date.now()}-${Math.random()}`, scope, {});
+    createdProfileIds.push(profile.id);
     return profile.id;
   }
 
@@ -93,20 +150,8 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
     );
   }
 
-  beforeEach(async () => {
-    await withRealDb(async (pool) => {
-      await pool.query(
-        "DELETE FROM profile_listing_state WHERE profile_id IN " +
-          "(SELECT id FROM search_profile WHERE name LIKE 'candidates-int-test-%')",
-      );
-      await pool.query("DELETE FROM search_profile WHERE name LIKE 'candidates-int-test-%'");
-      await pool.query("DELETE FROM listing WHERE external_id LIKE 'int-test-%'");
-      await pool.query("DELETE FROM property WHERE id NOT IN (SELECT property_id FROM listing)");
-    });
-  });
-
   const SCOPE: Scope = {
-    geography: { type: "radius", center: MADRID_SOL, radius_km: 5 },
+    geography: { type: "radius", center: TEST_COORDS, radius_km: 5 },
     property_types: ["piso"],
     hard_exclusions: {},
   };
@@ -128,6 +173,26 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
       // MIN(current_price) across active listings — same convention as
       // task 2.4's price-band filter, documented in data-model.md.
       expect(page.items[0].min_price).toBe(279000);
+    });
+  });
+
+  it("returns property_id as a real number and excludes withdrawn listings from the source badges", async () => {
+    await withRealDb(async (pool) => {
+      const propertyId = await insertProperty(pool);
+      await insertListing(pool, propertyId, { source: "fotocasa", status: "active", current_price: 285000 });
+      await insertListing(pool, propertyId, { source: "habitaclia", status: "withdrawn", current_price: 50000 });
+      const profileId = await makeProfile(SCOPE);
+      await markMatched(pool, profileId, propertyId);
+
+      const page = await listCandidates(profileId);
+
+      expect(page.items).toHaveLength(1);
+      // pg returns bigint columns as strings — must be coerced to a real
+      // JSON number, not left as "179" (Phase 3's scoring/ranking sorts on it).
+      expect(typeof page.items[0].property_id).toBe("number");
+      // A withdrawn listing must not render as a live source badge, and
+      // (already covered by min_price above) must not enter the MIN either.
+      expect(page.items[0].listings.map((l) => l.source)).toEqual(["fotocasa"]);
     });
   });
 
@@ -166,8 +231,31 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
       expect(secondPage.items).toHaveLength(1);
       expect(secondPage.nextCursor).toBeNull();
 
-      const seen = [...firstPage.items, ...secondPage.items].map((i) => i.property_id).sort();
+      // Default Array.sort() compares as strings ("10" < "8" < "9"
+      // lexicographically) — this only ever matched propertyIds' numeric
+      // sort by accident, back when property_id was itself (incorrectly)
+      // a string. Needs the same explicit numeric comparator on both sides.
+      const seen = [...firstPage.items, ...secondPage.items].map((i) => i.property_id).sort((a, b) => a - b);
       expect(seen).toEqual([...propertyIds].sort((a, b) => a - b));
+    });
+  });
+
+  it("does not claim a next page exists when the result set is exactly one page long", async () => {
+    // Regression: nextCursor used to be inferred from "page came back full",
+    // so an exactly-full last page (e.g. exactly 2 matches with limit=2)
+    // wrongly reported a next page — the UI's "Cargar más" button appeared
+    // and, when clicked, fetched nothing.
+    await withRealDb(async (pool) => {
+      const profileId = await makeProfile(SCOPE);
+      for (let i = 0; i < 2; i++) {
+        const id = await insertProperty(pool);
+        await insertListing(pool, id);
+        await markMatched(pool, profileId, id);
+      }
+
+      const page = await listCandidates(profileId, { limit: 2 });
+      expect(page.items).toHaveLength(2);
+      expect(page.nextCursor).toBeNull();
     });
   });
 });

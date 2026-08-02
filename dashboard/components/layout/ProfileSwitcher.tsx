@@ -38,6 +38,13 @@ export function ProfileSwitcher({ currentId }: { currentId: number }) {
     return null;
   }
 
+  // A native <select> whose `value` doesn't match any <option> silently
+  // falls back to displaying the *first* option — so navigating to an
+  // unknown/deleted profile id was showing a real (wrong) profile's name
+  // instead of indicating "not found". Prepend an explicit placeholder for
+  // that case rather than let the browser pick one for us.
+  const currentExists = profiles.some((p) => p.id === currentId);
+
   return (
     <select
       value={currentId}
@@ -52,6 +59,11 @@ export function ProfileSwitcher({ currentId }: { currentId: number }) {
       }}
       aria-label="Cambiar de perfil de búsqueda"
     >
+      {!currentExists && (
+        <option value={currentId} disabled>
+          Perfil no encontrado
+        </option>
+      )}
       {profiles.map((p) => (
         <option key={p.id} value={p.id}>
           {p.name}

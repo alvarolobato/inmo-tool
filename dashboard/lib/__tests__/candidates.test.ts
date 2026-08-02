@@ -30,37 +30,70 @@ describe("listCandidates", () => {
     expect(sql).toContain("JOIN property p ON p.id = pls.property_id");
     expect(sql).toContain("pls.matched = true");
     expect(sql).toContain("pls.profile_id = $1");
-    expect(params).toEqual([7, null, 30]);
+    // Fetches one extra row (limit+1) so nextCursor reflects whether a next
+    // page truly exists rather than assuming it does whenever the page
+    // happens to be exactly full — see the nextCursor tests below.
+    expect(params).toEqual([7, null, 31]);
   });
 
-  it("passes the cursor and clamps limit to [1, 100]", async () => {
+  it("passes the cursor and clamps limit to [1, 100] (querying limit+1 rows)", async () => {
     mockPoolQuery.mockResolvedValue({ rows: [] });
 
     await listCandidates(7, { cursor: 42, limit: 500 });
-    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, 42, 100]);
+    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, 42, 101]);
 
     mockPoolQuery.mockClear();
     await listCandidates(7, { limit: 0 });
-    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, null, 1]);
+    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, null, 2]);
   });
 
-  it("sets nextCursor to the last item's property_id only when a full page was returned", async () => {
-    mockPoolQuery.mockResolvedValueOnce({
-      rows: [
-        { property_id: 3, address: null, lat: null, lon: null, property_type: null, m2_built: null, rooms: null, min_price: null, first_seen_at: null, listings: [] },
-        { property_id: 2, address: null, lat: null, lon: null, property_type: null, m2_built: null, rooms: null, min_price: null, first_seen_at: null, listings: [] },
-      ],
-    });
-    const fullPage = await listCandidates(1, { limit: 2 });
-    expect(fullPage.nextCursor).toBe(2);
+  const stubRow = (id: number) => ({
+    property_id: id,
+    address: null,
+    lat: null,
+    lon: null,
+    property_type: null,
+    m2_built: null,
+    rooms: null,
+    min_price: null,
+    first_seen_at: null,
+    listings: [],
+  });
 
-    mockPoolQuery.mockResolvedValueOnce({
-      rows: [
-        { property_id: 3, address: null, lat: null, lon: null, property_type: null, m2_built: null, rooms: null, min_price: null, first_seen_at: null, listings: [] },
-      ],
-    });
+  it("sets nextCursor only when a real next page exists (extra row is fetched and trimmed, not inferred from a full page)", async () => {
+    // limit=2, DB returns 3 rows (limit+1) => a real next page exists.
+    mockPoolQuery.mockResolvedValueOnce({ rows: [stubRow(3), stubRow(2), stubRow(1)] });
+    const withMore = await listCandidates(1, { limit: 2 });
+    expect(withMore.items).toHaveLength(2);
+    expect(withMore.items.map((i) => i.property_id)).toEqual([3, 2]);
+    expect(withMore.nextCursor).toBe(2);
+
+    // limit=2, DB returns exactly 2 rows (no extra row) => this genuinely is
+    // the last page, even though it's "full" — the bug this test guards
+    // against previously showed a dead "Cargar más" here.
+    mockPoolQuery.mockResolvedValueOnce({ rows: [stubRow(3), stubRow(2)] });
+    const exactlyFull = await listCandidates(1, { limit: 2 });
+    expect(exactlyFull.items).toHaveLength(2);
+    expect(exactlyFull.nextCursor).toBeNull();
+
+    // limit=2, DB returns 1 row => partial page, no next page.
+    mockPoolQuery.mockResolvedValueOnce({ rows: [stubRow(3)] });
     const partialPage = await listCandidates(1, { limit: 2 });
+    expect(partialPage.items).toHaveLength(1);
     expect(partialPage.nextCursor).toBeNull();
+  });
+
+  it("coerces property_id (a pg bigint, returned as a string) to a JSON number", async () => {
+    // pg returns bigint columns as JS strings, not numbers — property_id
+    // was previously shipped as-is ("179" not 179) while every other
+    // numeric column here already got a Number(...) conversion. Harmless
+    // today, but Phase 3's scoring/ranking will compare/sort on this field.
+    mockPoolQuery.mockResolvedValueOnce({
+      rows: [{ ...stubRow(0), property_id: "179" as unknown as number }],
+    });
+    const page = await listCandidates(1);
+    expect(page.items[0].property_id).toBe(179);
+    expect(typeof page.items[0].property_id).toBe("number");
   });
 
   it("groups a property's multiple listings under one row (one card per property, not per listing)", async () => {
