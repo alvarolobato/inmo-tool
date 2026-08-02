@@ -16,16 +16,22 @@
  * so a table-wide delete here can race with unrelated integration files.
  * (Same rationale as candidates.integration.test.ts — see its header.)
  */
-import { describe, it, expect, afterAll, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, afterAll, beforeEach, afterEach, vi } from "vitest";
 import { Pool } from "pg";
 import { buildPgPoolConfig } from "@/lib/db-shared";
 import { resetPool } from "@/lib/db-write";
+import { resetDashboardLlmConfigCache } from "@/lib/llm-provider/config";
 import {
   loadPropertyListings,
   saveOccupancyAssessment,
   getOccupancyAssessment,
   parseOccupancyResult,
+  assessPropertyOccupancy,
+  NoListingsError,
   OCCUPANCY_PROMPT_VERSION,
+  OCCUPANCY_STATUSES,
+  TRANSACTION_KINDS,
+  OWNERSHIP_EXTENTS,
 } from "../occupancy";
 
 async function withRealDb(fn: (pool: Pool) => Promise<void>) {
@@ -234,6 +240,98 @@ describe.runIf(dbAvailable)("occupancy persistence — real Postgres", () => {
     await withRealDb(async (pool) => {
       const propertyId = await seedMergedProperty(pool);
       expect(await getOccupancyAssessment(propertyId)).toBeNull();
+    });
+  });
+
+  /**
+   * The whole chain, with nothing in the middle stubbed: real Postgres →
+   * loadPropertyListings → assessOccupancy → the REAL llm-context assembly →
+   * the mock LLM provider → parseOccupancyResult → real Postgres.
+   *
+   * `llm-context` is deliberately NOT mocked. Mocking it would delete the two
+   * seams this is here to protect, both of which every other test in the repo
+   * is blind to:
+   *
+   *  1. `detectMockFlow()` recognises the occupancy flow by matching a literal
+   *     Spanish task heading against the assembled system prompt. Reword that
+   *     heading in system-prompt.ts and the mock silently falls through to the
+   *     `chat` script — which returns prose, not JSON. Only a run that builds
+   *     the real prompt and feeds it to the real provider notices.
+   *  2. The mock's canned verdict and `parseOccupancyResult` are otherwise
+   *     asserted only against hand-written fixtures on each side — the mock
+   *     with a raw `JSON.parse`, the parser with its own literals. Nothing
+   *     connected the two, so the mock could keep emitting the pre-#145 flat
+   *     `{status, confidence}` shape and every unit test would stay green
+   *     while every e2e verdict silently degraded to `unknown`.
+   */
+  describe("full chain through the mock provider", () => {
+    beforeEach(() => {
+      // env > config.yaml > default, so this beats a developer's local
+      // config.yaml. The cache reset matters because loadDashboardLlmConfig()
+      // memoises the provider: without it this inherits whichever provider an
+      // earlier test resolved, and a stale `cli` would spawn a real `claude`.
+      vi.stubEnv("DASHBOARD_LLM_PROVIDER", "mock");
+      resetDashboardLlmConfigCache();
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      resetDashboardLlmConfigCache();
+    });
+
+    it("produces a persisted three-axis verdict with no LLM stubbing", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await seedMergedProperty(pool);
+
+        const result = await assessPropertyOccupancy(propertyId);
+
+        // Structured three-axis shape — this is the assertion that fails loudly
+        // if the mock regresses to the flat pre-#145 `result.status`.
+        expect(OCCUPANCY_STATUSES).toContain(result.occupancy.value);
+        expect(TRANSACTION_KINDS).toContain(result.transaction.value);
+        expect(OWNERSHIP_EXTENTS).toContain(result.ownership.value);
+
+        // A `chat`-script fallthrough returns prose, which parseOccupancyResult
+        // would either throw on or degrade to unknown/0. Pinning the mock's
+        // actual verdict catches the silent-degradation direction too.
+        expect(result.occupancy.value).toBe("vacant");
+        expect(result.occupancy.confidence).toBeGreaterThan(0);
+        expect(result.occupancy.evidence_source).toBe("fotocasa");
+
+        // Derived in code from the axes, never model-authored: a clean property
+        // carries no badge.
+        expect(result.caveats).toEqual([]);
+
+        // And it reached the database through the real writer.
+        const cached = await getOccupancyAssessment(propertyId);
+        expect(cached).not.toBeNull();
+        expect(cached!.result).toEqual(result);
+
+        const { rows } = await pool.query<{ n: string }>(
+          `SELECT COUNT(*) AS n FROM ai_assessment
+            WHERE property_id = $1 AND assessment_type = 'occupancy'`,
+          [propertyId],
+        );
+        expect(Number(rows[0].n)).toBe(1);
+      });
+    });
+
+    it("refuses to record a verdict for a property with nothing to read", async () => {
+      await withRealDb(async (pool) => {
+        const { rows } = await pool.query<{ id: number }>(
+          `INSERT INTO property (address, property_type)
+           VALUES ('Calle Sin Anuncios 3', 'piso') RETURNING id`,
+        );
+        const propertyId = Number(rows[0].id);
+        createdPropertyIds.push(propertyId);
+
+        // "We never looked" must not be written as "we looked and could not
+        // tell" — an `unknown` row here would be indistinguishable downstream.
+        await expect(assessPropertyOccupancy(propertyId)).rejects.toThrow(
+          NoListingsError,
+        );
+        expect(await getOccupancyAssessment(propertyId)).toBeNull();
+      });
     });
   });
 });
