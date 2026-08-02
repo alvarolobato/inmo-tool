@@ -34,6 +34,7 @@ export function TopBar({
   const navLinks = [
     { href: "/inicio", label: "Inicio" },
     { href: "/paneles", label: "Paneles" },
+    { href: "/profiles", label: "Perfiles" },
     { href: "/conversations", label: "Conversaciones" },
     { href: "/review", label: "Revisión" },
     { href: wrenPublicUrl, label: "Wren", external: true },
