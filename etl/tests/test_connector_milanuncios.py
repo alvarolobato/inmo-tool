@@ -15,6 +15,7 @@ import pytest
 
 from etl.connectors.base import ConnectorError, ConnectorScope
 from etl.connectors.milanuncios import MilanunciosConnector
+from etl.connectors.milanuncios_mapping import extra_features, infer_operation
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -163,6 +164,25 @@ class TestNormalize:
         assert len(canonical.photo_urls) == 2
         assert canonical.photo_urls[0].startswith("https://")
         assert canonical.raw_extra["origin"]["provider"] == "fotocasa_pro"
+        # issue #78 retrofit: city/province promoted to real columns
+        # (previously only flattened into `address`); energyCertificate
+        # surfaced (a real attribute the original Phase 2.1 spike's
+        # smaller sample missed); heating/hotWater surfaced into
+        # `features` since they aren't first-class columns; operation
+        # derived from category.slug, not hardcoded.
+        assert canonical.city == "Madrid"
+        assert canonical.province == "Madrid"
+        assert canonical.postal_code is None
+        assert canonical.energy_rating == "E"
+        assert canonical.has_elevator is None
+        assert canonical.year_built is None
+        assert canonical.m2_plot is None
+        assert canonical.operation == "sale"
+        assert "calefaccion: gas natural" in canonical.features
+        assert "agua caliente: gas natural" in canonical.features
+        # attributes already mapped to first-class columns must not also
+        # appear in `features` (would duplicate bedrooms/bathrooms/etc.)
+        assert not any(f.startswith("dormitorios:") for f in canonical.features)
 
     def test_normalize_infers_particular_from_explicit_boolean(self):
         """Unlike Fotocasa, Milanuncios publishes sellerType.isPrivate directly
@@ -237,3 +257,92 @@ class TestPriceChangeHistory:
         assert price_before == Decimal(1683000)
         assert price_after == Decimal(1650000)
         assert price_before != price_after
+
+
+class TestInferOperation:
+    """Issue #78: derive sale-vs-rent from each listing's own category.slug,
+    not a blanket hardcode from the discovery URL alone (Milanuncios is a
+    general classifieds site, not a dedicated real-estate portal — a stray
+    miscategorized listing is a real, if rare, possibility)."""
+
+    def test_venta_prefix_is_sale(self):
+        assert infer_operation("venta-de-pisos") == "sale"
+        assert infer_operation("venta-de-terrenos") == "sale"
+
+    def test_alquiler_prefix_is_rent(self):
+        assert infer_operation("alquiler-de-pisos") == "rent"
+
+    def test_unrecognized_or_missing_slug_is_none(self):
+        assert infer_operation("garajes") is None
+        assert infer_operation(None) is None
+        assert infer_operation("") is None
+
+
+class TestExtraFeatures:
+    """Issue #78 / #76: surface attributes not already mapped to a
+    first-class column into `property.features`, mirroring
+    property_web_scraper's features-array concept."""
+
+    def test_maps_unmapped_attributes_to_human_readable_strings(self):
+        attributes = [
+            {
+                "type": "heating",
+                "fieldFormatted": "calefaccion",
+                "value": "natural_gas",
+                "valueFormatted": "gas natural",
+            },
+            {
+                "type": "hotWater",
+                "fieldFormatted": "agua caliente",
+                "value": "natural_gas",
+                "valueFormatted": "gas natural",
+            },
+        ]
+        assert extra_features(attributes) == (
+            "calefaccion: gas natural",
+            "agua caliente: gas natural",
+        )
+
+    def test_excludes_attributes_already_mapped_to_columns(self):
+        attributes = [
+            {
+                "type": "bedrooms",
+                "fieldFormatted": "dormitorios",
+                "value": "2",
+                "valueFormatted": "2",
+            },
+            {
+                "type": "energyCertificate",
+                "fieldFormatted": "certificado",
+                "value": "e",
+                "valueFormatted": "E",
+            },
+            {
+                "type": "heating",
+                "fieldFormatted": "calefaccion",
+                "value": "gas",
+                "valueFormatted": "gas",
+            },
+        ]
+        assert extra_features(attributes) == ("calefaccion: gas",)
+
+    def test_empty_or_malformed_attributes_yield_empty_tuple(self):
+        assert extra_features([]) == ()
+        assert extra_features([{"type": "heating"}]) == ()  # no formatted value
+        assert extra_features([{"not_a_type_key": "x"}]) == ()
+
+
+class TestNormalizeWithoutEnergyCertificate:
+    def test_energy_rating_is_none_when_attribute_absent(self):
+        """Not every real listing carries energyCertificate (1 of 3 sampled
+        during the issue #78 spike didn't) — must degrade to None cleanly,
+        not raise."""
+        html = _read_fixture("milanuncios_sample_detail_private_with_phone.html")
+        connector = MilanunciosConnector()
+        with patch(
+            "etl.connectors.milanuncios.requests.get", return_value=_mock_response(html)
+        ):
+            raw = connector.fetch_detail("700000099", throttle=lambda: None)
+        canonical = connector.normalize(raw)
+        assert canonical.energy_rating is None
+        assert canonical.features == ()

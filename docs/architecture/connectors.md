@@ -82,7 +82,7 @@ git clone https://github.com/etewiah/property_web_scraper.git
 
 1. `flightDataPath` — Next.js RSC/flight data (not currently relevant to any Spanish site inmo-tool targets)
 2. `jsonLdPath` — `<script type="application/ld+json">` schema.org structured data (stable across redesigns — the most standardized fallback source when present)
-3. `scriptJsonVar`/`scriptJsonPath` — a named JS variable holding embedded JSON (`window.__INITIAL_PROPS__`, `__NEXT_DATA__`, etc.) — Fotocasa's *primary* strategy (issue #77), Milanuncios' only strategy as of this writing (issue #78 not yet done)
+3. `scriptJsonVar`/`scriptJsonPath` — a named JS variable holding embedded JSON (`window.__INITIAL_PROPS__`, `__NEXT_DATA__`, etc.) — the *primary* strategy for both Fotocasa (issue #77) and Milanuncios (issue #78). Milanuncios live-checked JSON-LD (step 2 above) as a genuine second source per its own attributes-array data (issue #78) and confirmed it exists but carries only a `BreadcrumbList` nav schema, no property data — so unlike Fotocasa (which does have a real CSS-selector fallback, step 6), Milanuncios' fallback chain for most fields is currently a single-getter chain (still wrapped in `first_present` for the exception-safety/observability benefit, ready to extend if a real second source is ever found).
 4. `scriptRegEx` — regex over raw `<script>` contents
 5. `urlPathPart` — a path segment of the listing URL itself (e.g. sale-vs-rent detection)
 6. `cssLocator` — a CSS selector against rendered HTML (least stable — the first thing a redesign breaks, but often the only thing available when nothing above exists)

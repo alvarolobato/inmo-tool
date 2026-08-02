@@ -29,6 +29,21 @@ transport shape — `window.__INITIAL_PROPS__ = JSON.parse("...")` where the
 argument is a *JSON-encoded string of JSON* (the whole payload is escaped
 once more than Fotocasa's raw `<script type="application/json">` tag), so
 extraction needs an extra `json.loads` pass — see `_extract_initial_props`.
+
+Issue #78 retrofit spike (2026-08, 3 fresh real listings beyond the
+original Phase 2.1 sample): confirmed Milanuncios detail pages embed a
+`<script type="application/ld+json">` block, but it's a `BreadcrumbList`
+navigation schema only — no `Accommodation`/`Apartment` schema.org data,
+so it's not a usable fallback source for rooms/bathrooms/m²/price/etc.
+Also confirmed the site renders its visible "N hab · N baños · N m²"
+stats client-side from this same JSON (not present in the raw server
+HTML at all), so — unlike Fotocasa — there's no CSS-selector fallback
+available either; `ad.attributes`' embedded JSON remains the sole real
+source for those fields. What the retrofit *did* find real, previously-
+unmined data for: an `energyCertificate` attribute (missed by the
+original spike's smaller sample — present on 2 of 3 fresh listings) and
+`heating`/`hotWater` attributes, now surfacing into `energy_rating` and
+`features` respectively.
 """
 
 from __future__ import annotations
@@ -48,11 +63,14 @@ from etl.connectors.base import (
     RawListing,
     Throttle,
 )
+from etl.connectors.extraction import first_present
 from etl.connectors.geography import nearest_city
 from etl.connectors.milanuncios_mapping import (
     attribute_numeric_value,
     attribute_value,
+    extra_features,
     infer_listing_kind,
+    infer_operation,
     map_property_type,
 )
 
@@ -313,13 +331,43 @@ class MilanunciosConnector(Connector):
             floor=attribute_value(attributes, "floor"),  # human-readable
             # (valueFormatted, e.g. "bajo") via attribute_value's own
             # valueFormatted-first lookup — see milanuncios_mapping.py.
-            has_elevator=None,  # no elevator attribute observed on sampled
-            # listings during the spike — left None rather than guessed;
-            # revisit if a future listing/category shows one.
+            has_elevator=None,  # no elevator attribute observed across the
+            # combined sample (17 listings, Phase 2.1 spike + 3 more,
+            # issue #78) — left None rather than guessed; revisit if a
+            # future listing/category shows one.
             year_built=None,  # no construction-year attribute observed
-            energy_rating=None,  # no energy-certificate attribute observed
-            # on sampled listings — Milanuncios may simply not require/show
-            # this for private-seller listings; revisit with more data.
+            # across the same combined sample — same reasoning as
+            # has_elevator.
+            energy_rating=first_present(
+                lambda: attribute_value(attributes, "energyCertificate"),
+                field="energy_rating",
+            ),
+            # A real `energyCertificate` attribute (2/3 fresh sampled
+            # listings, issue #78) — missed by the original Phase 2.1
+            # spike's smaller sample, not actually absent from the site.
+            # JSON-LD was live-checked as a second source (issue #78's
+            # own acceptance criterion) and confirmed to carry only a
+            # `BreadcrumbList` nav schema, no `Accommodation`/`Apartment`
+            # schema.org data — not a usable fallback source for this or
+            # any other field, so `attribute_value` is the sole getter for
+            # now. Wrapped in `first_present` anyway (not just called
+            # directly) so a second real source, if one is ever found,
+            # slots in as an added getter rather than a rewrite.
+            city=(location.get("city") or {}).get("name"),
+            province=(location.get("province") or {}).get("name"),
+            postal_code=None,  # no postal/zip field observed anywhere in
+            # `ad.location` across the sample (issue #78) — Milanuncios
+            # only ever publishes city/province granularity, unlike
+            # Fotocasa's `zipCode`. Confirmed absent, not unmapped.
+            m2_plot=None,  # no plot/land-area attribute observed for the
+            # `venta-de-pisos` (flat/apartment) category this connector's
+            # discover() is scoped to — `venta-de-terrenos`/`venta-de-
+            # fincas` (land/rural-estate categories, already present in
+            # CATEGORY_SLUG_MAP for future use) are the categories where
+            # a plot size would actually apply; out of scope until
+            # discover() covers those categories too.
+            features=extra_features(attributes),
+            operation=infer_operation(category.get("slug")),
             raw_extra={
                 "category_slug": category.get("slug"),
                 "seller_type_raw": ad.get("sellerType"),
