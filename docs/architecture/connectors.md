@@ -69,10 +69,28 @@ Only one filter dimension is confirmed real and wired in — the rest are docume
 | Fotocasa | price range, property type | **Unconfirmed — needs its own feasibility spike** | Both are visibly present in the site's own sidebar UI ("Precio", "Tipo de vivienda"), but no URL/query mechanism was observable via static fetch — likely applied client-side after a JS interaction. Do not assume from this table; verify with the same rigor as task 1.4/2.1 before relying on it. |
 | Milanuncios | rooms/bathrooms | **Inconclusive — treat as unverified** | An SEO-styled URL pattern (`/inmobiliaria/pisos-y-casas-en-venta-de-4-habitaciones-2-banos-{geography}.htm`) looked plausible, but comparing its listing count against the connector's real per-city page gave a *higher* count for the supposedly-narrower filter, and the URL shape doesn't match the connector's actual `venta-de-pisos-en-{geography}-{geography}/` slug pattern. Needs a dedicated spike composed against the connector's real geography slug before use. |
 | Idealista | any | **Moot** | `etl/connectors/idealista.py` is capture-only by design (#75) — `discover()`/`fetch_detail()` raise if ever called, `scope_key()` always returns `None`. There is no live query to filter. |
+| Solvia | geography (provincia/municipio) | **Confirmed, wired in** | robots.txt disallows only `/api/` and `/ajax/`; the SSR search tree `/es/comprar/viviendas/{provincia}/{municipio}` is allowed and narrows genuinely (Torrevieja reported 61 homes vs. 6,375 nationally). Pagination is **not** available: `?pagina=2`/`?page=2` return byte-identical results to page 1 because real pagination goes through the disallowed `/api/`, so a sweep sees at most the 20 server-rendered links per geography — hence `discovers_full_inventory = False`. Geography is therefore the only partitioning axis. |
 
 `connector_config.filters` stays a flexible JSONB bag rather than a fixed column per site-per-filter precisely because most of the above is still unconfirmed — adding a real column for every future finding would mean a schema migration each time, when most "findings" so far have been negative or inconclusive.
 
 **Point-to-slug translation lives in each connector, not in a shared registry.** `etl/connectors/geography.py` provides `nearest_city(center) -> str | None` — a small, site-agnostic nearest-known-city-centroid lookup (a city's coordinates don't depend on which site you're scraping). What a resolved city name turns *into* — Fotocasa's `"madrid-capital"` hyphenated slug vs. Milanuncios's `"madrid-madrid"` doubled path segment — is each connector's own `_resolve_geography()` + `_CITY_SLUGS` table, deliberately not centralized: different sites encode geography in unrelated ways, and a shared slug registry would need editing every time a new site connector is added. A profile whose center resolves to no known city (or a connector's `_CITY_SLUGS` table doesn't yet cover it) is simply skipped for that connector's `discover()` — logged loudly via a raised `ConnectorError`, not silently defaulted to Madrid.
+
+### Servicer portals publish fields consumer portals don't
+
+Solvia (#116) established a pattern worth checking on every bank/servicer
+portal in batch #132, because it holds for a structural reason: a servicer
+*owns* the asset, so it has registry and cost data a portal merely
+re-listing someone else's property never sees.
+
+| Field | Why it matters | Where it lands |
+|---|---|---|
+| `caracteristicas.refCatastral` | The cadastral reference — the dedup engine's **highest-confidence** signal (#1 §6 signal 1), where a match is definitive rather than probabilistic. Issue #42 (a Catastro *lookup* connector) was cancelled on the sound reasoning that consumer portals withhold the address precision needed to derive one; servicers simply publish it. | `raw_extra["cadastral_ref"]` today. `property.cadastral_ref` is what `dedup/signals/cadastral.py` actually reads, so wiring the column through is a follow-up — until then the signal still cannot fire. |
+| `importeIbi`, `importeGastosComunidad` | Annual property tax and monthly community fees — the carrying costs Phase 5's net-yield maths (#33) would otherwise have to assume. | `raw_extra` |
+| `reformar`, `estado` | Structured condition flags, a real input for the condition assessment flow (#26) instead of inferring from prose. | `raw_extra` |
+
+Solvia also publishes **no coordinates at all** (verified across five live
+listings), so `address_coords` dedup cannot fire for it — which is exactly
+why the cadastral reference is load-bearing here rather than a bonus.
 
 `ConnectorScope.geography` (the original free-text field) still exists as an explicit escape hatch for tests/manual construction that want to bypass point-based resolution entirely — connector-level unit tests (`test_connector_fotocasa.py`/`test_connector_milanuncios.py`) use it directly rather than going through a seeded search profile, since they're testing `discover()` in isolation from the profile-derivation machinery.
 
