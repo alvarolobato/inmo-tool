@@ -106,7 +106,11 @@ def main() -> None:
             orchestrator.run_all_connectors(
                 conn_pg, trigger="cli", connector_name=args.connector
             )
-        except ValueError as exc:
+        except orchestrator.UnknownConnectorError as exc:
+            # Caught specifically, not bare ValueError — an unrelated
+            # ValueError from somewhere inside a connector's own code
+            # should surface as a real crash/traceback, not get silently
+            # treated as if it were an operator's connector-name typo.
             logger.error("%s", exc)
             sys.exit(1)
         finally:

@@ -165,7 +165,9 @@ class TestConnectorNameFilter:
                 cur.execute("SELECT count(*) FROM connector_runs")
                 (before,) = cur.fetchone()
 
-            with pytest.raises(ValueError, match="Unknown connector"):
+            with pytest.raises(
+                orchestrator.UnknownConnectorError, match="Unknown connector"
+            ):
                 orchestrator.run_all_connectors(
                     pg_conn, trigger="test", connector_name="does-not-exist"
                 )

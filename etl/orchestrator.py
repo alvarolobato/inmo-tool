@@ -23,6 +23,17 @@ from etl.connectors.rate_limit import RateLimiter
 
 logger = logging.getLogger("etl.orchestrator")
 
+
+class UnknownConnectorError(ValueError):
+    """Raised by run_all_connectors(connector_name=...) for an unrecognized name.
+
+    A dedicated type (task 1.5, #13 review) rather than a bare ValueError —
+    main.py's CLI error handling catches this specifically to print a clean
+    operator-facing message and exit 1, without also silently swallowing
+    some unrelated ValueError as if it were a connector-name typo.
+    """
+
+
 # Registered connectors. Empty until task 1.4 adds the first real one —
 # `python -m etl.main --once` must still run cleanly against this (EC-4),
 # since Phase 1.3 ships before any connector exists.
@@ -506,7 +517,9 @@ def run_all_connectors(
         matching = [c for c in CONNECTORS if c.name == connector_name]
         if not matching:
             known = ", ".join(c.name for c in CONNECTORS) or "(none registered)"
-            raise ValueError(f"Unknown connector {connector_name!r} — known: {known}")
+            raise UnknownConnectorError(
+                f"Unknown connector {connector_name!r} — known: {known}"
+            )
         connectors_to_run = matching
     else:
         connectors_to_run = CONNECTORS
