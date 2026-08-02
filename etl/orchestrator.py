@@ -64,18 +64,22 @@ def _update_existing_listing(
 ) -> None:
     """Update an existing listing/property in place; append history on real changes.
 
-    Every column update is COALESCE-guarded (new value, else keep the old
-    one) rather than a blind overwrite. Two reasons this matters, not just
-    for `property`: (1) once Phase 2's dedup engine (#16) reassigns a
-    listing's property_id onto a property shared with another listing,
-    every re-visit of *either* listing must not erase what the other
-    contributed just because this particular fetch happened not to surface
-    a field; (2) even before dedup, a single listing's own detail page can
-    temporarily fail to render a field (rate limiting, a partial page load)
-    — a None from `normalize()` should never be trusted as "this field is
-    now empty", only as "we don't know this time". `status`/`current_price`
-    still update normally on a real change because a real change is a
-    non-None value, which COALESCE always prefers over the old one.
+    Every column update preserves the old value when the new fetch doesn't
+    supply one, rather than blindly overwriting — most via plain
+    COALESCE(new, old), `features` via a CASE WHEN (COALESCE doesn't
+    distinguish "no features published" from "an empty array", so an empty
+    tuple needs its own explicit "did this fetch even try" flag rather than
+    relying on NULL-ness). Two reasons this matters, not just for
+    `property`: (1) once Phase 2's dedup engine (#16) reassigns a listing's
+    property_id onto a property shared with another listing, every re-visit
+    of *either* listing must not erase what the other contributed just
+    because this particular fetch happened not to surface a field; (2) even
+    before dedup, a single listing's own detail page can temporarily fail to
+    render a field (rate limiting, a partial page load) — a None from
+    `normalize()` should never be trusted as "this field is now empty", only
+    as "we don't know this time". `status`/`current_price` still update
+    normally on a real change because a real change is a non-None value,
+    which COALESCE always prefers over the old one.
     """
     cur.execute(
         """
@@ -229,7 +233,8 @@ def _upsert_canonical_listing(conn, canonical: CanonicalListingVersion) -> None:
                     (property_id, source, external_id, url, listing_kind, status,
                      first_seen_at, last_seen_at, current_price, description,
                      photo_urls, contact_raw, raw_extra, operation)
-                VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW(), %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW(), %s, %s, %s, %s, %s,
+                        COALESCE(%s, 'sale'))
                 RETURNING id
                 """,
                 (

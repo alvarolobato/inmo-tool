@@ -370,3 +370,26 @@ class TestEnumLikeColumnsConstrained:
                 )
                 cur.execute("DELETE FROM property WHERE id = %s", (property_id,))
             pg_conn.commit()
+
+    def test_listing_operation_rejects_invalid_value(self, pg_conn):
+        _apply_schema(pg_conn)
+        property_id = _insert_property(pg_conn)
+        pg_conn.commit()
+        try:
+            with (
+                pytest.raises(psycopg2.errors.CheckViolation),
+                pg_conn.cursor() as cur,
+            ):
+                cur.execute(
+                    "INSERT INTO listing (property_id, source, external_id, operation) "
+                    "VALUES (%s, %s, %s, 'alquiler')",
+                    (property_id, "idealista", "bad-operation"),
+                )
+        finally:
+            pg_conn.rollback()
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM listing WHERE property_id = %s", (property_id,)
+                )
+                cur.execute("DELETE FROM property WHERE id = %s", (property_id,))
+            pg_conn.commit()

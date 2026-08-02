@@ -128,8 +128,17 @@ ALTER TABLE listing ADD COLUMN IF NOT EXISTS missed_discovery_count SMALLINT NOT
 ALTER TABLE property ADD COLUMN IF NOT EXISTS city         TEXT;
 ALTER TABLE property ADD COLUMN IF NOT EXISTS province     TEXT;
 ALTER TABLE property ADD COLUMN IF NOT EXISTS postal_code  TEXT;
-ALTER TABLE property ADD COLUMN IF NOT EXISTS m2_plot      NUMERIC(8,2);
+-- NUMERIC(12,2), not (8,2): Milanuncios already maps a venta-de-fincas
+-- (rural land/estate) category, and (8,2) tops out around 100 hectares —
+-- a real rural finca listing above that would raise a numeric field
+-- overflow and abort ingestion outright.
+ALTER TABLE property ADD COLUMN IF NOT EXISTS m2_plot      NUMERIC(12,2);
 ALTER TABLE property ADD COLUMN IF NOT EXISTS features     TEXT[] NOT NULL DEFAULT '{}';
+
+-- Added now, ahead of #77/#78 actually populating `features`: cheap to add
+-- alongside the column, easy to forget once hard-filtering starts querying
+-- against it.
+CREATE INDEX IF NOT EXISTS idx_property_features ON property USING GIN (features);
 
 -- Sale vs. rent (issue #76's one field needing a product decision, not a
 -- blind column add). Both live connectors only ever discover sale listings

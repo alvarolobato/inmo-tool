@@ -15,7 +15,9 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
+
+_VALID_OPERATIONS = ("sale", "rent")
 
 # Passed to discover()/fetch_detail() so a connector that makes more than one
 # real network request per call (e.g. paginating inside discover()) can
@@ -120,10 +122,20 @@ class CanonicalListingVersion:
     m2_plot: Decimal | None = None
     features: tuple[str, ...] = field(default_factory=tuple)
     # 'sale' | 'rent' — listing-level, not property-level (see
-    # etl/schema/init.sql's `listing.operation`). Both live connectors only
-    # ever discover sale listings today; defaulted to match the schema
-    # column's own default rather than forcing every call site to specify it.
-    operation: str = "sale"
+    # etl/schema/init.sql's `listing.operation`). None (not defaulted to
+    # 'sale') so the orchestrator's UPDATE-path COALESCE can tell "connector
+    # didn't say" apart from "connector said sale" and fall through to the
+    # existing DB value on re-visit instead of overwriting a real 'rent' back
+    # to 'sale' every time a connector that doesn't set this re-fetches a
+    # listing. INSERT path defaults an unset value to 'sale' explicitly.
+    operation: Literal["sale", "rent"] | None = None
+
+    def __post_init__(self) -> None:
+        if self.operation is not None and self.operation not in _VALID_OPERATIONS:
+            raise ValueError(
+                f"CanonicalListingVersion.operation must be one of "
+                f"{_VALID_OPERATIONS} or None, got {self.operation!r}"
+            )
 
 
 class ConnectorError(Exception):
