@@ -9,7 +9,7 @@
  * the bundle-break this guards against).
  */
 
-import { sql } from "@/lib/db-write";
+import { sql, withTransaction } from "@/lib/db-write";
 
 /** The subset of feedback_type values that participate in the derived "current state" toggle. */
 export const STATE_FEEDBACK_TYPES = ["accept", "reject", "star"] as const;
@@ -30,7 +30,7 @@ export interface FeedbackEventRow {
 }
 
 interface RawFeedbackEventRow {
-  id: number;
+  id: string;
   profile_id: string;
   property_id: string;
   listing_id: string | null;
@@ -42,7 +42,7 @@ interface RawFeedbackEventRow {
 
 function toFeedbackEventRow(r: RawFeedbackEventRow): FeedbackEventRow {
   return {
-    id: r.id,
+    id: Number(r.id),
     profile_id: Number(r.profile_id),
     property_id: Number(r.property_id),
     listing_id: r.listing_id !== null ? Number(r.listing_id) : null,
@@ -95,6 +95,54 @@ export async function recordFeedback(opts: {
     ],
   );
   return toFeedbackEventRow(rows[0]);
+}
+
+/**
+ * Atomically record a state-toggle event (accept/reject/star), no-opping if
+ * the current state already matches. Uses a Postgres advisory transaction
+ * lock keyed on (profileId, propertyId) rather than a plain check-then-insert
+ * in application code — a real double-click was verified (PR #89 review) to
+ * insert two rows for the same feedback_type ~1.7ms apart under the
+ * non-atomic version, which would double-weight that one user action once
+ * Phase 3's scoring model consumes these events. The lock serializes any two
+ * concurrent requests for the same candidate so the "is this a real change"
+ * check and the insert can't interleave, and it's released automatically at
+ * transaction end regardless of commit or rollback.
+ */
+export async function recordStateFeedbackIfChanged(opts: {
+  profileId: number;
+  propertyId: number;
+  listingId?: number | null;
+  feedbackType: StateFeedbackType;
+}): Promise<{ event: FeedbackEventRow | null; currentState: StateFeedbackType | null; noop: boolean }> {
+  return withTransaction(async (client) => {
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+      `feedback:${opts.profileId}:${opts.propertyId}`,
+    ]);
+
+    const currentResult = await client.query<{ feedback_type: StateFeedbackType }>(
+      `SELECT feedback_type
+         FROM feedback_event
+        WHERE profile_id = $1 AND property_id = $2
+          AND feedback_type = ANY($3::text[])
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1`,
+      [opts.profileId, opts.propertyId, STATE_FEEDBACK_TYPES],
+    );
+    const current = currentResult.rows[0]?.feedback_type ?? null;
+    if (current === opts.feedbackType) {
+      return { event: null, currentState: current, noop: true };
+    }
+
+    const insertResult = await client.query<RawFeedbackEventRow>(
+      `INSERT INTO feedback_event (profile_id, property_id, listing_id, feedback_type, note, value)
+       VALUES ($1, $2, $3, $4, NULL, NULL)
+       RETURNING id, profile_id, property_id, listing_id, feedback_type, value, note, created_at`,
+      [opts.profileId, opts.propertyId, opts.listingId ?? null, opts.feedbackType],
+    );
+    const event = toFeedbackEventRow(insertResult.rows[0]);
+    return { event, currentState: opts.feedbackType, noop: false };
+  });
 }
 
 /**

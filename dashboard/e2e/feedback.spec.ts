@@ -130,7 +130,12 @@ test("submitting a note does not change the accept/reject/star toggle state", as
   await page.goto(`/profiles/${profileId}`);
   await assertNoErrorSurface(page);
 
+  // Set the toggle state within this test rather than relying on a prior
+  // test's leftover state (each test should be independently seedable —
+  // Playwright doesn't guarantee execution order or isolation between
+  // files/workers).
   const card = page.locator(`[data-testid="candidate-card"][data-property-id="${propertyId}"]`);
+  await card.getByTestId("feedback-reject").click();
   await expect(card.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "true");
 
   await card.getByTestId("feedback-note-toggle").click();
@@ -139,4 +144,33 @@ test("submitting a note does not change the accept/reject/star toggle state", as
 
   await expect(card.getByText(/guardada/i)).toBeVisible();
   await expect(card.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "true");
+});
+
+test("accept -> star -> reject transitions replace the active toggle each time", async ({ page }) => {
+  skipIfNoDb(test);
+
+  await page.goto(`/profiles/${profileId}`);
+  await assertNoErrorSurface(page);
+
+  const card = page.locator(`[data-testid="candidate-card"][data-property-id="${propertyId}"]`);
+
+  await card.getByTestId("feedback-accept").click();
+  await expect(card.getByTestId("feedback-accept")).toHaveAttribute("aria-pressed", "true");
+  await expect(card.getByTestId("feedback-star")).toHaveAttribute("aria-pressed", "false");
+  await expect(card.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "false");
+
+  await card.getByTestId("feedback-star").click();
+  await expect(card.getByTestId("feedback-star")).toHaveAttribute("aria-pressed", "true");
+  await expect(card.getByTestId("feedback-accept")).toHaveAttribute("aria-pressed", "false");
+
+  await card.getByTestId("feedback-reject").click();
+  await expect(card.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "true");
+  await expect(card.getByTestId("feedback-star")).toHaveAttribute("aria-pressed", "false");
+
+  // Survives a reload as the latest of the three transitions, not an
+  // earlier one — proves "current state" really reads the most recent event.
+  await page.reload();
+  await assertNoErrorSurface(page);
+  const cardAfterReload = page.locator(`[data-testid="candidate-card"][data-property-id="${propertyId}"]`);
+  await expect(cardAfterReload.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "true");
 });

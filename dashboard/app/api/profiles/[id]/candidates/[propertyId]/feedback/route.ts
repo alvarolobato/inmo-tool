@@ -28,6 +28,7 @@ import {
   getFeedbackHistory,
   listingBelongsToProperty,
   recordFeedback,
+  recordStateFeedbackIfChanged,
 } from "@/lib/db/feedback";
 import { isPropertyMatchedForProfile } from "@/lib/property-detail";
 import { getProfileById } from "@/lib/db/profiles";
@@ -190,12 +191,27 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
     // no-op rather than logging a redundant event. There's no dedicated
     // "clear" feedback_type in the schema's CHECK constraint; clicking an
     // already-active toggle is deliberately inert rather than adding one.
+    // The check-and-insert is atomic (recordStateFeedbackIfChanged, backed by
+    // a Postgres advisory lock) — a plain check-then-insert here previously
+    // let two rapid clicks both insert (verified live in PR #89's review).
     if (STATE_FEEDBACK_TYPES.includes(body.feedbackType as (typeof STATE_FEEDBACK_TYPES)[number])) {
-      const current = await getCurrentState(profileId, propertyId);
-      if (current === body.feedbackType) {
+      const result = await recordStateFeedbackIfChanged({
+        profileId,
+        propertyId,
+        listingId: body.listingId ?? null,
+        feedbackType: body.feedbackType as (typeof STATE_FEEDBACK_TYPES)[number],
+      });
+
+      if (result.noop) {
         const history = await getFeedbackHistory(profileId, propertyId);
-        return NextResponse.json({ currentState: current, history, noop: true });
+        return NextResponse.json({ currentState: result.currentState, history, noop: true });
       }
+
+      const history = await getFeedbackHistory(profileId, propertyId);
+      return NextResponse.json(
+        { event: result.event, currentState: result.currentState, history },
+        { status: 201 },
+      );
     }
 
     const event = await recordFeedback({

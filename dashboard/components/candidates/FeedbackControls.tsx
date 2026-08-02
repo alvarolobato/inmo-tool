@@ -56,12 +56,13 @@ export function FeedbackControls({
   const submit = async (feedbackType: StateFeedbackType | "note") => {
     setError(null);
     const previous = state;
-    if (feedbackType !== "note") {
-      // Toggle off locally when re-clicking the active state — the API
-      // no-ops this server-side (no dedicated "clear" event type), but the
-      // button should still visually deselect so the control feels like a
-      // real toggle rather than a one-way switch.
-      setState((prev) => (prev === feedbackType ? null : feedbackType));
+    // Re-clicking the already-active state is a real no-op server-side (no
+    // dedicated "clear" event type in the schema) — don't optimistically
+    // toggle it off locally either, since that used to show a deselect that
+    // immediately snapped back to selected once the (unchanged) server
+    // response arrived. Clicking a *different* state still updates instantly.
+    if (feedbackType !== "note" && feedbackType !== previous) {
+      setState(feedbackType);
     }
     try {
       const res = await fetch(`/api/profiles/${profileId}/candidates/${propertyId}/feedback`, {
