@@ -9,6 +9,7 @@ empty registry is a supported, tested no-op (EC-4).
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from datetime import datetime, timezone
@@ -368,18 +369,21 @@ def _create_connector_run(conn, trigger: str) -> int:
     return run_id
 
 
-def _finish_connector_run(conn, run_id: int, ok: int, failed: int) -> None:
+def _finish_connector_run(
+    conn, run_id: int, ok: int, failed: int, skipped: int = 0
+) -> None:
     status = "success" if failed == 0 else ("partial" if ok > 0 else "failed")
     with conn.cursor() as cur:
         cur.execute(
             """
             UPDATE connector_runs
                SET finished_at = NOW(), status = %s, connectors_ok = %s,
-                   connectors_failed = %s, total_connectors = %s,
+                   connectors_failed = %s, connectors_skipped = %s,
+                   total_connectors = %s,
                    duration_ms = (EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000)::INTEGER
              WHERE id = %s
             """,
-            (status, ok, failed, ok + failed, run_id),
+            (status, ok, failed, skipped, ok + failed + skipped, run_id),
         )
     conn.commit()
 
@@ -448,6 +452,32 @@ def _reconcile_stale_runs(conn) -> None:
         )
 
 
+def _warn_unrecognized_connector_config_names(conn) -> None:
+    """Warn (once per run) about any connector_config row whose connector_name
+    doesn't match a currently-registered connector.
+
+    Issue #99 hardening: today this table is edited by hand or a script; the
+    upcoming connector-management UI (#100) will let an operator type or pick
+    a connector name directly. A typo there currently just silently does
+    nothing — `_scopes_for_connector` looks up by exact name and gets no
+    row, indistinguishable from "never configured". Surfacing this at
+    run-start, rather than only at debugging time, is what makes a typo
+    visible instead of a quiet no-op an operator has no way to notice.
+    """
+    known = {c.name for c in CONNECTORS}
+    with conn.cursor() as cur:
+        cur.execute("SELECT connector_name FROM connector_config")
+        configured = [row[0] for row in cur.fetchall()]
+    for name in configured:
+        if name not in known:
+            logger.warning(
+                "connector_config has a row for %r, which doesn't match any "
+                "registered connector (known: %s) — this row has no effect",
+                name,
+                ", ".join(sorted(known)) or "(none registered)",
+            )
+
+
 def run_connector(
     conn,
     connector: Connector,
@@ -477,14 +507,31 @@ def run_connector(
     """
     limiter.acquire()
     external_ids = connector.discover(scope, throttle=limiter.acquire)
-    if not connector.discovers_full_inventory:
+    # Issue #99 hardening: a scope carrying a narrowing filter (e.g.
+    # `rooms`) means discover()'s absence of a listing can mean "doesn't
+    # match this run's filter" just as easily as "genuinely gone" — the
+    # same false-positive-withdrawal risk `discovers_full_inventory=False`
+    # already exists to prevent, but triggered by filtering rather than
+    # partial site coverage. A connector can genuinely enumerate its whole
+    # unfiltered inventory (discovers_full_inventory=True) and still not be
+    # a safe reconciliation source the moment a filter narrows what this
+    # particular scope's discover() call actually returns.
+    scope_is_filtered = scope.rooms is not None
+    if not connector.discovers_full_inventory or scope_is_filtered:
         # A partial-coverage connector's discover() results say nothing
         # about whether an absent listing is actually gone (see
         # Connector.discovers_full_inventory's docstring — Phase 1
         # phase-level review found this would otherwise false-positive
         # real inventory into 'withdrawn'). Skip reconciliation entirely
         # rather than accumulate a miss-count that means nothing.
-        pass
+        if scope_is_filtered and connector.discovers_full_inventory:
+            logger.info(
+                "Connector %s: scope=%r carries a narrowing filter — "
+                "skipping withdrawal reconciliation for this scope even "
+                "though the connector otherwise discovers full inventory",
+                connector.name,
+                scope,
+            )
     elif external_ids:
         _reconcile_missed_discoveries(conn, connector.name, set(external_ids))
     else:
@@ -596,17 +643,167 @@ def _active_profile_scopes(conn) -> list[ConnectorScope]:
             )
             continue
 
-        lat, lon = float(center[0]), float(center[1])
+        try:
+            lat, lon, radius = float(center[0]), float(center[1]), float(radius_km)
+        except (TypeError, ValueError):
+            # center/radius_km passed the isinstance/len checks above (e.g.
+            # center=["abc", "def"] is a 2-element list) but isn't actually
+            # numeric. Same "one bad row must not take down the whole run"
+            # invariant as the isinstance checks above and as
+            # _scopes_for_connector's mirror of this same guard — skip only
+            # this profile's scope, not the run.
+            logger.warning(
+                "search_profile id=%s: scope.geography.center/radius_km "
+                "not numeric (got center=%r, radius_km=%r) — skipping for "
+                "connector discovery",
+                profile_id,
+                center,
+                radius_km,
+            )
+            continue
+
         dedup_key = (
             round(lat, _SCOPE_DEDUP_DECIMALS),
             round(lon, _SCOPE_DEDUP_DECIMALS),
-            round(float(radius_km), 1),
+            round(radius, 1),
         )
-        seen.setdefault(
-            dedup_key, ConnectorScope(center=(lat, lon), radius_km=float(radius_km))
-        )
+        seen.setdefault(dedup_key, ConnectorScope(center=(lat, lon), radius_km=radius))
 
     return list(seen.values())
+
+
+def _scopes_for_connector(
+    conn, connector_name: str, profile_scopes: list[ConnectorScope]
+) -> tuple[list[ConnectorScope], bool]:
+    """Resolve one connector's actual scopes for this run, per issue #99's
+    hybrid model: an explicit `connector_config` row overrides the shared
+    `_active_profile_scopes` default; a connector with no row (the common
+    case — this table starts empty) keeps issue #71's behavior unchanged.
+
+    Returns (scopes, enabled). `enabled=False` means the caller must skip
+    this connector entirely — before ever deriving a scope or calling
+    discover(). It still gets a `connector_run_results` row (status=
+    'skipped', counted separately from ok/failed) so a disabled connector
+    is visible in run history rather than silently absent — an operator
+    turning a connector off is not a failure, and shouldn't add 'failed'/
+    'ok' noise, but it also shouldn't look identical to "everything ran
+    fine and there was simply nothing to do". This is a different, more
+    absolute case than `enabled=True, scopes=[]` (nothing to do this run
+    because there's no override and no active profile reaches this
+    connector's coverage — issue #71's existing, already-normal no-op
+    path, which still gets no result row since nothing was ever skipped by
+    operator choice).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT enabled, geography_override, filters "
+            "FROM connector_config WHERE connector_name = %s",
+            (connector_name,),
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        # No config row at all: issue #71's default, unmodified.
+        return profile_scopes, True
+
+    enabled, geography_override, filters = row
+    if not enabled:
+        return [], False
+
+    # geography_override/filters are JSONB — the column type guarantees
+    # valid JSON, but says nothing about *shape*. A string or list value
+    # (e.g. an operator/future-UI bug that stores "madrid" instead of
+    # {"center": [...], ...}) is not a dict, and calling .get() on it
+    # raises AttributeError — which, uncaught here, would previously abort
+    # this connector's resolution entirely and propagate up through the
+    # per-connector loop in run_all_connectors, killing the WHOLE run for
+    # every connector, not just this one misconfigured row. Every branch
+    # below is guarded with isinstance(..., dict) before any .get() call,
+    # specifically so a malformed row can only ever fall back to the
+    # profile-derived default — it must never be able to take down a run.
+    if isinstance(geography_override, dict) and geography_override:
+        center = geography_override.get("center")
+        radius_km = geography_override.get("radius_km")
+        if (
+            isinstance(center, list)
+            and len(center) == 2
+            and not isinstance(radius_km, bool)
+            and isinstance(radius_km, (int, float))
+        ):
+            try:
+                lat, lon, radius = (
+                    float(center[0]),
+                    float(center[1]),
+                    float(radius_km),
+                )
+            except (TypeError, ValueError):
+                logger.warning(
+                    "connector_config for %s: geography_override has "
+                    "non-numeric center/radius_km (got %r) — falling back "
+                    "to profile-derived scope",
+                    connector_name,
+                    geography_override,
+                )
+                base_scopes = profile_scopes
+            else:
+                base_scopes = [ConnectorScope(center=(lat, lon), radius_km=radius)]
+        else:
+            # Malformed override shouldn't silently disable the connector
+            # or crash the run — fall back to the profile-derived default,
+            # same "don't let one bad row block everything else" posture
+            # _active_profile_scopes already takes for a malformed profile.
+            logger.warning(
+                "connector_config for %s: geography_override malformed "
+                "(expected {center: [lat, lon], radius_km: n}, got %r) — "
+                "falling back to profile-derived scope",
+                connector_name,
+                geography_override,
+            )
+            base_scopes = profile_scopes
+    elif geography_override:
+        # Present, truthy, but not a dict at all (a bare string/list/number)
+        # — same fallback, distinct log wording from "genuinely absent"
+        # below so an operator can tell "you configured something, but it
+        # was unusable" apart from "you never configured anything".
+        logger.warning(
+            "connector_config for %s: geography_override is not an object "
+            "(expected {center: [lat, lon], radius_km: n}, got %r) — "
+            "falling back to profile-derived scope",
+            connector_name,
+            geography_override,
+        )
+        base_scopes = profile_scopes
+    else:
+        # Genuinely absent/empty (None, {}, "", 0) — no override was ever
+        # configured for this connector, not "one was configured but is
+        # unusable". Distinguishing these two is why this isn't a single
+        # `if geography_override:` branch.
+        base_scopes = profile_scopes
+
+    rooms: int | None = None
+    if isinstance(filters, dict):
+        rooms_raw = filters.get("rooms")
+        if rooms_raw is not None and not isinstance(rooms_raw, bool):
+            try:
+                rooms = int(rooms_raw)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "connector_config for %s: filters.rooms=%r is not a "
+                    "valid integer — ignoring",
+                    connector_name,
+                    rooms_raw,
+                )
+    elif filters:
+        logger.warning(
+            "connector_config for %s: filters is not an object (got %r) — ignoring",
+            connector_name,
+            filters,
+        )
+
+    if rooms is not None:
+        base_scopes = [dataclasses.replace(s, rooms=rooms) for s in base_scopes]
+
+    return base_scopes, True
 
 
 def run_all_connectors(
@@ -616,6 +813,14 @@ def run_all_connectors(
 
     Safe to call with an empty CONNECTORS registry (EC-4) — records a run
     with total_connectors=0 and returns immediately.
+
+    Scope resolution per connector (issue #99, evolving #71): a
+    `connector_config` row, when present, can disable a connector outright
+    or override its scope with an explicit geography + native filters,
+    independent of what search profiles exist. A connector with no config
+    row falls back to issue #71's original default — scope derived from
+    the union of every active search_profile's geography. See
+    `_scopes_for_connector`.
 
     `connector_name`, when given, restricts the run to that one connector
     (task 1.5, #13 — backs `ps connector run <name>`). Unknown names raise
@@ -635,29 +840,69 @@ def run_all_connectors(
         connectors_to_run = CONNECTORS
 
     _reconcile_stale_runs(conn)
+    _warn_unrecognized_connector_config_names(conn)
     run_id = _create_connector_run(conn, trigger)
     ok = 0
     failed = 0
+    skipped = 0
 
-    scopes = _active_profile_scopes(conn)
-    if not scopes:
-        # Issue #71: no active search profiles means nothing to discover —
-        # NOT a fallback to some hardcoded geography. This isn't an error
-        # (a fresh install with zero profiles yet is entirely normal), but
-        # it's WARNING rather than INFO: the resulting run record
-        # (total_connectors=len(CONNECTORS), zero scopes attempted) is
-        # otherwise indistinguishable in the logs from an empty CONNECTORS
-        # registry doing nothing for a completely different reason — this
-        # line is what tells an operator which situation they're actually
-        # looking at.
-        logger.warning(
-            "run_all_connectors: no active search profiles — skipping "
-            "connector discovery entirely (nothing to derive scope from)"
-        )
-        _finish_connector_run(conn, run_id, ok, failed)
-        return run_id
+    # Issue #99: this is now only the shared *default* input, not the final
+    # word — each connector below resolves its own actual scopes via
+    # _scopes_for_connector, which may override it entirely (explicit
+    # geography_override) or ignore it (disabled). No blanket early-return
+    # here anymore: a connector-level override can still have real work to
+    # do even with zero active search profiles, so "no profiles" can no
+    # longer mean "skip literally everything" at the whole-run level — it's
+    # now evaluated per connector, same place enabled/disabled is.
+    profile_scopes = _active_profile_scopes(conn)
 
     for connector in connectors_to_run:
+        scopes, enabled = _scopes_for_connector(conn, connector.name, profile_scopes)
+        if not enabled:
+            # Issue #99 hardening: an operator explicitly turned this
+            # connector off — real and worth a visible trace, not a silent
+            # no-op. A run where every connector happens to be disabled
+            # used to look byte-identical to a healthy, fully-successful
+            # empty run; recording a 'skipped' result row (and counting it
+            # separately from ok/failed) is what makes "nothing ran because
+            # I told it not to" distinguishable from "nothing ran and I
+            # have no idea why". WARNING, not INFO, to match the severity
+            # this project already uses for "no scopes to discover" below —
+            # an operator forgetting they disabled a connector is exactly
+            # the kind of thing that should be noisy, not buried in INFO.
+            logger.warning(
+                "Connector %s: disabled via connector_config — skipping "
+                "entirely this run",
+                connector.name,
+            )
+            now = datetime.now(timezone.utc)
+            _record_connector_result(
+                conn,
+                run_id,
+                connector.name,
+                status="skipped",
+                discovered_count=0,
+                fetched_count=0,
+                error_count=0,
+                error_msg="disabled via connector_config",
+                started_at=now,
+                finished_at=now,
+            )
+            skipped += 1
+            continue
+        if not scopes:
+            # Same posture issue #71 established for "no active profiles":
+            # not an error, nothing to record — just genuinely nothing for
+            # this connector to do this run (no override, and no active
+            # profile's geography resolves to its coverage).
+            logger.warning(
+                "Connector %s: no scopes to discover this run (no "
+                "connector_config override and no active search profile "
+                "reaches its coverage) — skipping",
+                connector.name,
+            )
+            continue
+
         started_at = datetime.now(timezone.utc)
         discovered_total = 0
         fetched_total = 0
@@ -811,7 +1056,7 @@ def run_all_connectors(
             finished_at=datetime.now(timezone.utc),
         )
 
-    _finish_connector_run(conn, run_id, ok, failed)
+    _finish_connector_run(conn, run_id, ok, failed, skipped)
     return run_id
 
 

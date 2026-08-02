@@ -57,6 +57,21 @@ class ConnectorScope:
     center: tuple[float, float] | None = None  # (lat, lon)
     radius_km: float | None = None
     property_types: tuple[str, ...] = field(default_factory=tuple)
+    # Issue #99: the one native site filter confirmed real via live
+    # verification (Fotocasa's rooms-count URL path segment genuinely
+    # narrows results, not just an SEO alias — see
+    # docs/architecture/connectors.md). Named `rooms`, not `min_rooms`:
+    # live verification (a real fetch of `.../2-habitaciones/l`, 31
+    # results) showed every result had exactly 2 rooms, none 3+ — this is
+    # an EXACT-match filter on Fotocasa's side, not a minimum, and calling
+    # it `min_rooms` would actively mislead a caller into expecting 2+.
+    # Carried on the scope itself, not a separate parameter, so it flows
+    # through the same discover()/scope_key() path as center/radius_km. A
+    # connector that doesn't support filtering by room count simply
+    # ignores this field — it is not part of this class's identity
+    # contract the way center/radius_km are (issue #96/#71's
+    # coverage-resolution logic never looks at it).
+    rooms: int | None = None
 
 
 @dataclass(frozen=True)

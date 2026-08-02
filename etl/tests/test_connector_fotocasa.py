@@ -93,6 +93,78 @@ class TestDiscover:
                 ConnectorScope(geography="madrid-capital"), throttle=lambda: None
             )
 
+    def test_rooms_filter_is_appended_to_the_request_url(self):
+        """Issue #99: rooms-count filtering via URL path segment was
+        confirmed live to genuinely narrow Fotocasa's results (an EXACT
+        match — every result in the live sample had exactly N rooms, none
+        more — hence `rooms`, not `min_rooms`), not just an SEO alias — a
+        scope carrying `rooms` must produce a request URL with that
+        segment, and a scope without it must not."""
+        html = _read_fixture("fotocasa_sample_search.html")
+        with patch(
+            "etl.connectors.fotocasa.requests.get", return_value=_mock_response(html)
+        ) as mock_get:
+            FotocasaConnector().discover(
+                ConnectorScope(geography="madrid-capital", rooms=2),
+                throttle=lambda: None,
+            )
+        requested_url = mock_get.call_args.args[0]
+        assert "/2-habitaciones/" in requested_url
+
+        with patch(
+            "etl.connectors.fotocasa.requests.get", return_value=_mock_response(html)
+        ) as mock_get_no_filter:
+            FotocasaConnector().discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+        unfiltered_url = mock_get_no_filter.call_args.args[0]
+        assert "habitaciones" not in unfiltered_url
+
+    def test_rooms_filter_discovers_a_genuinely_different_listing_set(self):
+        """Stronger than the URL-shape assertion above: a real filtered
+        response must parse into a different set of listing IDs than the
+        unfiltered response, not just hit a URL with the right substring.
+        Uses a dedicated fixture with non-overlapping IDs specifically so
+        this can't pass by coincidence (e.g. a connector bug that ignores
+        `rooms` entirely and always parses the same fixture-shaped page
+        would still pass a URL-only assertion, but would fail this one)."""
+        unfiltered_html = _read_fixture("fotocasa_sample_search.html")
+        filtered_html = _read_fixture("fotocasa_sample_search_2_habitaciones.html")
+
+        with patch(
+            "etl.connectors.fotocasa.requests.get",
+            return_value=_mock_response(filtered_html),
+        ):
+            filtered_ids = FotocasaConnector().discover(
+                ConnectorScope(geography="madrid-capital", rooms=2),
+                throttle=lambda: None,
+            )
+        with patch(
+            "etl.connectors.fotocasa.requests.get",
+            return_value=_mock_response(unfiltered_html),
+        ):
+            unfiltered_ids = FotocasaConnector().discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+
+        assert sorted(filtered_ids) == ["290044444", "290055555"]
+        assert sorted(unfiltered_ids) == ["190011971", "190022222", "190033333"]
+        assert set(filtered_ids).isdisjoint(unfiltered_ids)
+
+    def test_scope_key_distinguishes_rooms_from_unfiltered(self):
+        """Two scopes with the same geography but a different `rooms`
+        filter must not be treated as the same crawl target by the
+        orchestrator's seen_scope_keys dedup — they hit different URLs."""
+        connector = FotocasaConnector()
+        unfiltered = connector.scope_key(ConnectorScope(geography="madrid-capital"))
+        filtered = connector.scope_key(
+            ConnectorScope(geography="madrid-capital", rooms=2)
+        )
+        assert unfiltered != filtered
+        assert unfiltered == connector.scope_key(
+            ConnectorScope(geography="madrid-capital")
+        )
+
     def test_discover_rejects_robots_txt_disallowed_bare_geography(self):
         """robots.txt disallows the literal "/madrid/" path segment (not the
         hyphenated "madrid-capital" this connector's default uses) — a

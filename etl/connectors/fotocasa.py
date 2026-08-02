@@ -285,8 +285,20 @@ class FotocasaConnector(Connector):
     def scope_key(self, scope: ConnectorScope) -> str | None:
         """Delegate to `_resolve_geography` — the actual slug this scope
         resolves to (or None if unresolvable) IS the right dedup/coverage
-        key: two scopes resolving to the same slug hit the identical URL."""
-        return _resolve_geography(scope)
+        key: two scopes resolving to the same slug hit the identical URL.
+
+        `rooms` is folded into the key (issue #99): two scopes with the
+        same geography but different room-count filters hit genuinely
+        different URLs (confirmed live — see docs/architecture/connectors.md),
+        so they must not be deduplicated against each other in
+        etl.orchestrator.run_all_connectors's seen_scope_keys tracking.
+        """
+        geography = _resolve_geography(scope)
+        if geography is None:
+            return None
+        if scope.rooms is not None:
+            return f"{geography}:rooms={scope.rooms}"
+        return geography
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         geography = _resolve_geography(scope)
@@ -310,7 +322,21 @@ class FotocasaConnector(Connector):
                 f"robots.txt (bare city-name path) — use a hyphenated slug "
                 f"like '{geography}-capital' instead"
             )
-        url = f"{_BASE_URL}/es/comprar/viviendas/{geography}/todas-las-zonas/l"
+        # Room-count filtering (issue #99): confirmed live that
+        # ".../todas-las-zonas/2-habitaciones/l" returns a genuinely
+        # narrower result set with its own heading ("... con 2
+        # habitaciones"), not an SEO-alias page identical to the
+        # unfiltered URL — see docs/architecture/connectors.md for the
+        # verification. This is an EXACT-match filter, not "N or more"
+        # (every result in the live sample had exactly N rooms) — hence
+        # `ConnectorScope.rooms`, not `min_rooms`. Price-range/property-type
+        # filters are visibly present in the site's own UI but their URL
+        # mechanism wasn't observable via static fetch — not wired in here,
+        # needs its own feasibility spike first (issue #99).
+        rooms_segment = (
+            f"{scope.rooms}-habitaciones/" if scope.rooms is not None else ""
+        )
+        url = f"{_BASE_URL}/es/comprar/viviendas/{geography}/todas-las-zonas/{rooms_segment}l"
         throttle()
         try:
             response = requests.get(
