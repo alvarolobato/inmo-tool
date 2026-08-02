@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -63,13 +62,12 @@ _BASE_URL = "https://www.milanuncios.com"
 _REQUEST_TIMEOUT_SECONDS = 15
 _INITIAL_PROPS_MARKER = 'window.__INITIAL_PROPS__ = JSON.parse("'
 
-# Phone number embedded in free-text description — Spanish mobile/landline,
-# optionally spaced/dotted/hyphenated. Used only for the feasibility-spike
-# validation (see module docstring); task 2.2 owns the real extraction
-# signal, this connector does not extract phone numbers itself, it just
-# needs to make sure `description` is captured in full so 2.2 has something
-# to extract from (see normalize()).
-_PHONE_SPOT_CHECK_RE = re.compile(r"(\+34[\s.-]?)?[679]\d{2}[\s.-]?\d{3}[\s.-]?\d{3}")
+# Note: the feasibility spike (module docstring) confirmed real phone numbers
+# turn up in Milanuncios free-text descriptions, using an ad-hoc regex check
+# that never became part of this connector. Task 2.2 owns the real
+# phone-extraction signal; this connector's only job is to make sure
+# `description` is captured in full so 2.2 has something to extract from
+# (see normalize()).
 
 
 def _extract_initial_props(html: str) -> dict[str, Any]:
@@ -170,7 +168,9 @@ class MilanunciosConnector(Connector):
             ) from exc
 
         props = _extract_initial_props(response.text)
-        ads = (props.get("adListPagination") or {}).get("adList", {}).get("ads") or []
+        ad_list_pagination = props.get("adListPagination") or {}
+        ad_list = ad_list_pagination.get("adList") or {}
+        ads = ad_list.get("ads") or []
         external_ids = sorted(
             {str(ad["id"]) for ad in ads if isinstance(ad, dict) and ad.get("id")}
         )
@@ -221,8 +221,8 @@ class MilanunciosConnector(Connector):
         images = ad.get("images") or []
 
         address_parts = [
-            location.get("city", {}).get("name"),
-            location.get("province", {}).get("name"),
+            (location.get("city") or {}).get("name"),
+            (location.get("province") or {}).get("name"),
         ]
         # Only the city/province level is ever published — Milanuncios (like
         # Fotocasa) doesn't expose a street address on the public listing.
@@ -232,10 +232,15 @@ class MilanunciosConnector(Connector):
         # "images-re.milanuncios.com/images/ads/<uuid>") — confirmed live;
         # normalize to an https:// URL rather than storing an unusable
         # schemeless fragment.
+        def _to_photo_url(img: str) -> str:
+            if img.startswith(("http://", "https://")):
+                return img
+            if img.startswith("//"):
+                return f"https:{img}"
+            return f"https://{img}"
+
         photo_urls = tuple(
-            img if img.startswith("http") else f"https://{img}"
-            for img in images
-            if isinstance(img, str) and img
+            _to_photo_url(img) for img in images if isinstance(img, str) and img
         )
 
         return CanonicalListingVersion(
@@ -273,7 +278,12 @@ class MilanunciosConnector(Connector):
                 "seller_type_raw": ad.get("sellerType"),
                 "origin": ad.get("origin"),  # see module docstring —
                 # some listings carry origin.provider="fotocasa_pro"
-                "contact_methods": ad.get("contactMethods"),
-                "author_id": author.get("id"),
+                # Deliberately NOT retained: ad["contactMethods"] and
+                # author["id"] — persistent personal identifiers for private
+                # sellers with no current consumer (task 2.2's dedup engine
+                # extracts phone numbers from free-text `description`, not
+                # from a structured contact field). Per issue #1 §15's
+                # minimization stance, don't accumulate identifiers nothing
+                # reads yet.
             },
         )

@@ -64,8 +64,63 @@ class TestDiscover:
                 ConnectorScope(geography="madrid"), throttle=lambda: None
             )
 
+    def test_discover_handles_present_but_null_adlist_without_crashing(self):
+        """Regression: `.get("adList", {})` only supplies the default when the
+        key is absent, not when it's present with a null value — a real,
+        reproduced AttributeError (Opus review of PR #54), not theoretical."""
+        html = _read_fixture("milanuncios_sample_search_null_adlist.html")
+        connector = MilanunciosConnector()
+        with patch(
+            "etl.connectors.milanuncios.requests.get", return_value=_mock_response(html)
+        ):
+            ids = connector.discover(
+                ConnectorScope(geography="madrid"), throttle=lambda: None
+            )
+        assert ids == []
+
+
+class TestFetchDetail:
+    def test_fetch_detail_raises_on_removed_ad_page(self):
+        """A removed/expired ad page is, today, indistinguishable from a
+        soft-block on the marker check alone — both raise ConnectorError
+        rather than silently producing an empty/wrong listing. Whether a
+        detected removal should instead map to listing_status_event
+        'withdrawn' is left as a documented follow-up (see
+        docs/architecture/connectors.md) rather than guessed here: nothing
+        in the current page content actually distinguishes "blocked" from
+        "genuinely gone" without a live sample of each to compare."""
+        html = _read_fixture("milanuncios_sample_block_page.html")
+        connector = MilanunciosConnector()
+        with (
+            patch(
+                "etl.connectors.milanuncios.requests.get",
+                return_value=_mock_response(html),
+            ),
+            pytest.raises(ConnectorError, match="__INITIAL_PROPS__"),
+        ):
+            connector.fetch_detail("700000001", throttle=lambda: None)
+
 
 class TestNormalize:
+    def test_normalize_handles_present_but_null_location_without_crashing(self):
+        """Regression: `.get("city", {}).get("name")` only supplies the
+        default when the key is absent, not when it's present with a null
+        value — a real, reproduced AttributeError (Opus review of PR #54),
+        not theoretical. Listings pending geocoding legitimately have
+        location.city/province/geolocation as null, not missing."""
+        html = _read_fixture("milanuncios_sample_detail_null_location.html")
+        connector = MilanunciosConnector()
+        with patch(
+            "etl.connectors.milanuncios.requests.get", return_value=_mock_response(html)
+        ):
+            raw = connector.fetch_detail("700000004", throttle=lambda: None)
+        canonical = connector.normalize(raw)
+
+        assert canonical.address is None
+        assert canonical.lat is None
+        assert canonical.lon is None
+        assert canonical.listing_kind == "particular"
+
     def test_normalize_matches_expected_fixture(self):
         """EC-1: fetch_detail + normalize on a saved fixture produce the exact expected output."""
         html = _read_fixture("milanuncios_sample_detail.html")

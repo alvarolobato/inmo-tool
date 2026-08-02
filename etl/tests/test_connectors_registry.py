@@ -26,10 +26,13 @@ class TestRegisterAll:
         _reset_connectors()
         try:
             register_all()
-            names = {c.name for c in CONNECTORS}
+            names = [c.name for c in CONNECTORS]
+            # Superset + no-duplicates rather than an exact count: this test
+            # shouldn't need editing every time a future task adds another
+            # connector (2.2 onward will).
             assert FotocasaConnector.name in names
             assert MilanunciosConnector.name in names
-            assert len(CONNECTORS) == 2
+            assert len(names) == len(set(names)), f"duplicate registrations: {names}"
         finally:
             _reset_connectors()
 
@@ -37,9 +40,10 @@ class TestRegisterAll:
         _reset_connectors()
         try:
             register_all()
+            count_after_first = len(CONNECTORS)
             register_all()
             names = [c.name for c in CONNECTORS]
             assert len(names) == len(set(names)), f"duplicate registrations: {names}"
-            assert len(CONNECTORS) == 2
+            assert len(CONNECTORS) == count_after_first
         finally:
             _reset_connectors()

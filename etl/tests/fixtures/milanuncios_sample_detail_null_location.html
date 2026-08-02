@@ -1,0 +1,11 @@
+<!--
+Regression fixture for a real crash found in Opus review of PR #54:
+location.city / location.province present-but-null (not absent) used to
+raise AttributeError via `.get("city", {}).get(...)` — the {} default only
+applies when the key is *missing*, not when it's present with a null value.
+Milanuncios listings without a resolved city (broader "provincia" ads, or a
+listing pending geocoding) hit this in practice, not just in theory.
+-->
+<html><head><title>Milanuncios</title></head><body>
+<script>window.__INITIAL_PROPS__ = JSON.parse("{\"ad\": {\"id\": \"700000004\", \"title\": \"Piso en venta\", \"description\": \"Piso sin ciudad resuelta todavia.\", \"category\": {\"id\": 131, \"name\": \"Venta de pisos\", \"slug\": \"venta-de-pisos\"}, \"sellerType\": {\"value\": \"private\", \"isPrivate\": true}, \"price\": {\"cashPrice\": {\"value\": 150000}}, \"location\": {\"province\": null, \"city\": null, \"geolocation\": null}, \"attributes\": [], \"images\": [], \"author\": {\"id\": \"1\", \"userName\": \"Particular\"}, \"origin\": {\"name\": \"inner\", \"provider\": null}, \"contactMethods\": {\"chat\": false, \"phone\": true, \"form\": true}}}");</script>
+</body></html>
