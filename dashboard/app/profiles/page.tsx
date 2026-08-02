@@ -1,0 +1,266 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { ErrorDisplay } from "@/components/ErrorDisplay";
+import { isApiErrorResponse } from "@/lib/errors";
+import type { ApiErrorResponse } from "@/lib/errors";
+import { ProfileForm, type ProfileFormValues } from "@/components/profiles/ProfileForm";
+import type { SearchProfileRow } from "@/lib/profiles-schema";
+
+type Mode = { kind: "none" } | { kind: "create" } | { kind: "edit"; profile: SearchProfileRow };
+
+export default function ProfilesPage() {
+  const [profiles, setProfiles] = useState<SearchProfileRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<ApiErrorResponse | string | null>(null);
+  const [mode, setMode] = useState<Mode>({ kind: "none" });
+  const [busyId, setBusyId] = useState<number | null>(null);
+
+  const fetchProfiles = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/profiles");
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => null);
+        setError(isApiErrorResponse(errBody) ? errBody : "Error al cargar los perfiles de búsqueda");
+        return;
+      }
+      setProfiles(await res.json());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Error al cargar los perfiles de búsqueda");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchProfiles();
+  }, [fetchProfiles]);
+
+  // Materialization (task 2.4, #18) is triggered explicitly from here rather
+  // than server-side inside POST/PATCH /api/profiles — see
+  // lib/filtering/materialize.ts's docstring for why. Best-effort: a
+  // materialize failure shouldn't block the profile save from succeeding or
+  // surface as if the save itself failed — it's logged and swallowed, the
+  // candidate list (task 2.5) will just be stale until the next successful
+  // materialize call.
+  const triggerMaterialize = async (id: number) => {
+    try {
+      const res = await fetch(`/api/profiles/${id}/materialize`, { method: "POST" });
+      if (!res.ok) {
+        // fetch() only rejects on network failure, not on a 4xx/5xx
+        // response — without this check a 500 here was silently treated as
+        // success and never logged (Opus review, PR #57).
+        console.error(
+          "No se pudieron recalcular los candidatos tras guardar el perfil:",
+          res.status,
+          await res.text().catch(() => ""),
+        );
+      }
+    } catch (err) {
+      console.error("No se pudieron recalcular los candidatos tras guardar el perfil:", err);
+    }
+  };
+
+  const handleCreate = async (values: ProfileFormValues) => {
+    const res = await fetch("/api/profiles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(values),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new Error(isApiErrorResponse(body) ? body.error : "No se pudo crear el perfil.");
+    }
+    const created: SearchProfileRow = await res.json();
+    setMode({ kind: "none" });
+    await fetchProfiles();
+    await triggerMaterialize(created.id);
+  };
+
+  const handleUpdate = async (id: number, values: ProfileFormValues) => {
+    const res = await fetch(`/api/profiles/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(values),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new Error(isApiErrorResponse(body) ? body.error : "No se pudo actualizar el perfil.");
+    }
+    setMode({ kind: "none" });
+    await fetchProfiles();
+    await triggerMaterialize(id);
+  };
+
+  const handleArchive = async (id: number) => {
+    setBusyId(id);
+    try {
+      const res = await fetch(`/api/profiles/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setError(isApiErrorResponse(body) ? body : "No se pudo archivar el perfil.");
+        return;
+      }
+      await fetchProfiles();
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleClone = async (id: number) => {
+    setBusyId(id);
+    try {
+      const res = await fetch(`/api/profiles/${id}/clone`, { method: "POST" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setError(isApiErrorResponse(body) ? body : "No se pudo clonar el perfil.");
+        return;
+      }
+      const cloned: SearchProfileRow = await res.json();
+      await fetchProfiles();
+      // Without this, a clone of a profile with real matches ships with an
+      // empty candidate list until the user happens to open "Editar" and
+      // re-save it — clone's scope/thesis_params are identical to the
+      // source, so its candidates should be too (Fable phase-2 review).
+      await triggerMaterialize(cloned.id);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const actionButtonStyle: React.CSSProperties = {
+    padding: "4px 10px",
+    background: "transparent",
+    border: "1px solid var(--border)",
+    borderRadius: 6,
+    fontSize: 12,
+    color: "var(--fg)",
+    cursor: "pointer",
+  };
+
+  return (
+    <main style={{ maxWidth: 720, margin: "0 auto", padding: 24 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <h1 style={{ fontSize: 20, fontWeight: 600, color: "var(--fg)", margin: 0 }}>
+          Perfiles de búsqueda
+        </h1>
+        <button
+          onClick={() => setMode((m) => (m.kind === "create" ? { kind: "none" } : { kind: "create" }))}
+          style={{
+            padding: "7px 14px",
+            background: "var(--accent)",
+            color: "#fff",
+            border: "none",
+            borderRadius: 6,
+            fontSize: 13,
+            fontWeight: 500,
+            cursor: "pointer",
+          }}
+        >
+          {mode.kind === "create" ? "Cerrar" : "Nuevo perfil"}
+        </button>
+      </div>
+
+      {mode.kind === "create" && (
+        <div
+          style={{
+            marginTop: 16,
+            padding: 16,
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            background: "var(--bg-1)",
+          }}
+        >
+          <ProfileForm submitLabel="Crear perfil" onSubmit={handleCreate} onCancel={() => setMode({ kind: "none" })} />
+        </div>
+      )}
+
+      {mode.kind === "edit" && (
+        <div
+          style={{
+            marginTop: 16,
+            padding: 16,
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            background: "var(--bg-1)",
+          }}
+        >
+          <ProfileForm
+            initial={{
+              name: mode.profile.name,
+              scope: mode.profile.scope,
+              thesis_params: mode.profile.thesis_params,
+            }}
+            submitLabel="Guardar cambios"
+            onSubmit={(values) => handleUpdate(mode.profile.id, values)}
+            onCancel={() => setMode({ kind: "none" })}
+          />
+        </div>
+      )}
+
+      {error && <ErrorDisplay error={error} className="mt-4" />}
+
+      {loading ? (
+        <p style={{ marginTop: 16, fontSize: 13, color: "var(--fg-muted)" }}>Cargando…</p>
+      ) : profiles.length === 0 ? (
+        <p style={{ marginTop: 16, fontSize: 13, color: "var(--fg-muted)" }}>
+          No hay perfiles de búsqueda activos. Crea uno para empezar a filtrar candidatos.
+        </p>
+      ) : (
+        <ul style={{ marginTop: 16, listStyle: "none", padding: 0, margin: "16px 0 0" }}>
+          {profiles.map((p) => (
+            <li
+              key={p.id}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "12px 0",
+                borderBottom: "1px solid var(--border)",
+              }}
+            >
+              <div>
+                <p style={{ fontWeight: 500, color: "var(--fg)", margin: 0, fontSize: 14 }}>{p.name}</p>
+                <p style={{ fontSize: 12, color: "var(--fg-subtle)", margin: "2px 0 0" }}>
+                  {p.scope.property_types.join(", ")} · radio {p.scope.geography.radius_km} km
+                </p>
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <Link
+                  href={`/profiles/${p.id}`}
+                  style={{ ...actionButtonStyle, textDecoration: "none", display: "inline-block" }}
+                >
+                  Ver candidatos
+                </Link>
+                <button
+                  onClick={() => setMode({ kind: "edit", profile: p })}
+                  disabled={busyId === p.id}
+                  style={{ ...actionButtonStyle, opacity: busyId === p.id ? 0.5 : 1 }}
+                >
+                  Editar
+                </button>
+                <button
+                  onClick={() => handleClone(p.id)}
+                  disabled={busyId === p.id}
+                  style={{ ...actionButtonStyle, opacity: busyId === p.id ? 0.5 : 1 }}
+                >
+                  Clonar
+                </button>
+                <button
+                  onClick={() => handleArchive(p.id)}
+                  disabled={busyId === p.id}
+                  style={{ ...actionButtonStyle, color: "var(--down)", opacity: busyId === p.id ? 0.5 : 1 }}
+                >
+                  Archivar
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </main>
+  );
+}

@@ -27,8 +27,11 @@ def register_all() -> None:
     site twice per sweep.
     """
     from etl.connectors.fotocasa import FotocasaConnector
+    from etl.connectors.milanuncios import MilanunciosConnector
     from etl.orchestrator import CONNECTORS
 
     registered_names = {c.name for c in CONNECTORS}
     if FotocasaConnector.name not in registered_names:
         CONNECTORS.append(FotocasaConnector())
+    if MilanunciosConnector.name not in registered_names:
+        CONNECTORS.append(MilanunciosConnector())

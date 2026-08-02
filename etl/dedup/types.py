@@ -1,0 +1,45 @@
+"""Shared dataclasses for the dedup engine and its signal modules.
+
+Split out from etl.dedup.engine so signal modules can import ListingRecord
+without a circular import (engine imports every signal module).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from decimal import Decimal
+
+
+@dataclass(frozen=True)
+class ListingRecord:
+    """One listing joined with its (currently singleton-or-merged) property.
+
+    Fetched fresh from the DB by etl.dedup.engine for every dedup run — not
+    the same object as etl.connectors.base.CanonicalListingVersion, which is
+    a connector's *pre-persistence* shape. This is the *post-persistence*
+    shape the dedup engine reasons about, keyed by real DB ids.
+    """
+
+    listing_id: int
+    property_id: int
+    source: str
+    external_id: str
+    listing_kind: str | None  # 'particular' | 'agency' | None (unconfirmed)
+    description: str | None
+    photo_urls: tuple[str, ...]
+    cadastral_ref: str | None
+    address: str | None
+    lat: Decimal | None
+    lon: Decimal | None
+    m2_built: Decimal | None
+    current_price: Decimal | None
+
+
+@dataclass(frozen=True)
+class PairEvaluation:
+    """The result of comparing two ListingRecords — what to do about the pair."""
+
+    basis: str  # matches suggested_merge/property_merge_log match_basis CHECK
+    confidence: Decimal
+    decision: str  # 'merge' | 'suggest'
+    detail: dict | None = None

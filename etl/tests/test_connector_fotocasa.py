@@ -57,6 +57,24 @@ class TestDiscover:
         # with a query string that must NOT match (see fixture comments).
         assert sorted(ids) == ["190011971", "190022222", "190033333"]
 
+    def test_center_based_scope_requests_the_matching_city_slug_not_madrid(self):
+        """Issue #71 review finding: nearest_city() itself was tested, but
+        never end-to-end through a real connector's discover() — the actual
+        request URL a center-based (not geography-string) scope produces
+        was unverified. A Sevilla-centered profile must request Fotocasa's
+        Sevilla slug, not silently default to Madrid."""
+        html = _read_fixture("fotocasa_sample_search.html")
+        with patch(
+            "etl.connectors.fotocasa.requests.get", return_value=_mock_response(html)
+        ) as mock_get:
+            FotocasaConnector().discover(
+                ConnectorScope(center=(37.3891, -5.9845), radius_km=15),
+                throttle=lambda: None,
+            )
+        requested_url = mock_get.call_args.args[0]
+        assert "sevilla-capital" in requested_url
+        assert "madrid" not in requested_url
+
     def test_discover_raises_on_soft_block_page_not_empty_list(self):
         """PR #49 review finding: Fotocasa's interruption page returns HTTP
         200 with no __initial_props__ tag — discover() must raise, not
@@ -149,6 +167,50 @@ class TestNormalize:
         )
         canonical = FotocasaConnector().normalize(raw)
         assert canonical.listing_kind is None
+
+    def test_normalize_excludes_non_image_multimedia_from_photo_urls(self):
+        """Fable phase-2 review finding: a real listing's multimedia array
+        mixes real photos with other asset types (observed live:
+        {"type": "tour-virtual", "src": "https://floorfy.com/..."}) — only
+        type="image" entries belong in photo_urls, otherwise a virtual-tour
+        link renders as a broken <img> on the property detail page and gets
+        fed (uselessly) to the photo-hash dedup signal."""
+        raw = RawListing(
+            external_id="997",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/x",
+                "props": {
+                    "realEstate": {
+                        "price": 100000,
+                        "address": {},
+                        "coordinates": {},
+                        "features": {},
+                        "descriptions": {},
+                        "multimedia": [
+                            {
+                                "type": "tour-virtual",
+                                "src": "https://floorfy.com/tour/abc",
+                            },
+                            {
+                                "type": "image",
+                                "src": "https://static.fotocasa.es/a.jpg",
+                            },
+                            {
+                                "type": "image",
+                                "src": "https://static.fotocasa.es/b.jpg",
+                            },
+                            {"src": "https://static.fotocasa.es/no-type.jpg"},
+                        ],
+                    }
+                },
+            },
+        )
+        canonical = FotocasaConnector().normalize(raw)
+        assert canonical.photo_urls == (
+            "https://static.fotocasa.es/a.jpg",
+            "https://static.fotocasa.es/b.jpg",
+        )
 
     def test_normalize_still_infers_agency_from_client_url(self):
         raw = RawListing(

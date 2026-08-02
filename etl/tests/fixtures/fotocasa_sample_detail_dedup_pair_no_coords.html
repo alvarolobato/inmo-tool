@@ -1,0 +1,21 @@
+<!--
+Synthetic fixture — NOT a real captured listing. Companion to
+fotocasa_sample_detail_dedup_pair.html / milanuncios_sample_detail_dedup_pair.html,
+built to close a gap those two left: they carry identical lat/lon, so the
+dedup engine's address_coords signal (priority 2) auto-merges them before
+phone_extract (priority 3) is ever reached — meaning the phone-corroborated
+auto-merge path was never actually exercised end-to-end through the real
+connectors (Opus review, PR #55).
+
+Same fictional property as the coords pair (Trafalgar/Chamberí, Madrid,
+~70m², same shared phone number, same realistic small cross-site price
+difference) but with `coordinates` omitted entirely — Fotocasa's own JSON
+omits the block when a listing doesn't publish precise geolocation, which
+`real_estate.get("coordinates") or {}` already handles. Without coordinates,
+address_coords can't fire, so this pair should resolve on phone_extract's
+corroborated-and-particular tier instead (price/size proximity stands in for
+the missing coordinate check — see phone_extract.py's module docstring).
+-->
+<html lang="es"><head><title>Piso en venta</title></head><body>
+<script type="application/json" id="__initial_props__">{"realEstate": {"energyCertificate": "E", "address": {"district": "Chamberí", "neighborhood": "Trafalgar", "municipality": "Madrid Capital", "city": "Madrid Capital", "upperLevel": "Trafalgar", "zipCode": "28010"}, "buildingType": "Flat", "buildingSubtype": "Flat", "clientAlias": "Particular", "clientId": null, "clientName": "Particular", "clientUrl": null, "descriptions": {"es-ES": "Piso reformado, exterior y luminoso, muy cerca del metro. Interesados llamar al 622334455, gracias."}, "features": {"rooms": 2, "bathrooms": 1, "surface": 70, "energyCertificate": 5, "conservationState": 0, "antiquity": 5, "floor": 9, "surfaceLand": 0}, "featuresList": [{"label": "floor", "literal": "FEATURES.FLOOR", "value": "3ª planta"}, {"label": "elevator", "literal": "FEATURES.ELEVATOR", "value": "YES"}], "multimedia": [{"src": "https://static.fotocasa.es/images/ads/dedup-pair-photo1-nc?rule=original", "type": "image"}], "price": 285000, "reducedPrice": null, "clientTypeId": 1}}</script>
+</body></html>

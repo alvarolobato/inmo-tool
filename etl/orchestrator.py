@@ -39,10 +39,12 @@ class UnknownConnectorError(ValueError):
 # since Phase 1.3 ships before any connector exists.
 CONNECTORS: list[Connector] = []
 
-# Default scope used until Phase 2's search_profile exists to derive one
-# (issue #11's "Additional Context" — profile-driven scoping is
-# aspirational for this task).
-_DEFAULT_SCOPE = ConnectorScope(geography="")
+# How closely two profiles' geography must agree to count as "the same
+# scope" for dedup purposes (issue #71) — rounding to this many decimal
+# places on lat/lon (~11m at 4dp) and 1dp on radius_km collapses
+# floating-point noise from JSON round-tripping without merging two
+# genuinely different search areas.
+_SCOPE_DEDUP_DECIMALS = 4
 
 # Consecutive discover() sweeps a listing must be absent from before it's
 # marked withdrawn (issue #12 EC-5). Picked to tolerate one-off pagination
@@ -420,21 +422,33 @@ def _reconcile_stale_runs(conn) -> None:
         )
 
 
-def run_connector(conn, connector: Connector, scope: ConnectorScope) -> dict:
-    """Run one connector's discover -> fetch_detail -> normalize -> store cycle.
+def run_connector(
+    conn,
+    connector: Connector,
+    scope: ConnectorScope,
+    limiter: RateLimiter,
+    breaker: CircuitBreaker,
+) -> dict:
+    """Run one connector's discover -> fetch_detail -> normalize -> store cycle
+    for a single scope, against a `limiter`/`breaker` shared across every
+    scope this connector processes in the current orchestrator run.
+
+    Issue #71 hardening: `limiter`/`breaker` used to be constructed fresh
+    per call (i.e. per scope), which meant a circuit trip during one
+    profile-geography's pass did nothing to protect the next one in the
+    same run — with N active profile-geographies, a misbehaving/blocking
+    site got N times the error budget it's supposed to have, and each new
+    scope's first request skipped the rate limiter's minimum-interval wait
+    (a fresh limiter starts with no last-call timestamp). Callers now own
+    constructing these once per connector per run and passing them in, so
+    state — and therefore the breaker's protection and the limiter's
+    pacing — actually carries across scopes.
 
     Returns a summary dict; never raises for per-listing failures (those
     count toward the circuit breaker and get logged) — only raises if
     discover() itself fails, since without a target list there's nothing
     to run.
     """
-    limiter = RateLimiter(connector.rate_limit_per_minute)
-    breaker = CircuitBreaker(
-        connector.circuit_breaker_error_rate,
-        connector.circuit_breaker_min_attempts,
-        window=connector.circuit_breaker_window,
-    )
-
     limiter.acquire()
     external_ids = connector.discover(scope, throttle=limiter.acquire)
     if not connector.discovers_full_inventory:
@@ -507,6 +521,68 @@ def run_connector(conn, connector: Connector, scope: ConnectorScope) -> dict:
     }
 
 
+def _active_profile_scopes(conn) -> list[ConnectorScope]:
+    """Derive discovery scopes from every active search_profile's geography.
+
+    Issue #71: closes the gap ConnectorScope's docstring described as
+    aspirational. Zero active profiles -> an empty list, which
+    `run_all_connectors` treats as "nothing to discover" — not a fallback to
+    any hardcoded geography. Profiles with the same (rounded) center and
+    radius are deduplicated so two profiles targeting the same area don't
+    make a connector crawl it twice in one run.
+
+    `search_profile.scope.geography` is `{"type": "radius", "center":
+    [lat, lon], "radius_km": ...}` (dashboard/lib/profiles-schema.ts). A
+    profile with a missing/malformed geography is skipped with a warning
+    rather than raising — one bad row shouldn't block discovery for every
+    other active profile.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, scope FROM search_profile WHERE archived_at IS NULL")
+        rows = cur.fetchall()
+
+    seen: dict[tuple[float, float, float], ConnectorScope] = {}
+    for profile_id, scope_json in rows:
+        geography = (scope_json or {}).get("geography")
+        if not isinstance(geography, dict) or geography.get("type") != "radius":
+            logger.warning(
+                "search_profile id=%s: scope.geography missing/not type "
+                "'radius' — skipping for connector discovery",
+                profile_id,
+            )
+            continue
+        center = geography.get("center")
+        radius_km = geography.get("radius_km")
+        if (
+            not isinstance(center, list)
+            or len(center) != 2
+            # bool is a subclass of int in Python — isinstance(True, int)
+            # is True, so exclude it explicitly or a malformed
+            # radius_km=true/false would silently pass this check as if it
+            # were a real number.
+            or isinstance(radius_km, bool)
+            or not isinstance(radius_km, (int, float))
+        ):
+            logger.warning(
+                "search_profile id=%s: scope.geography.center/radius_km "
+                "malformed — skipping for connector discovery",
+                profile_id,
+            )
+            continue
+
+        lat, lon = float(center[0]), float(center[1])
+        dedup_key = (
+            round(lat, _SCOPE_DEDUP_DECIMALS),
+            round(lon, _SCOPE_DEDUP_DECIMALS),
+            round(float(radius_km), 1),
+        )
+        seen.setdefault(
+            dedup_key, ConnectorScope(center=(lat, lon), radius_km=float(radius_km))
+        )
+
+    return list(seen.values())
+
+
 def run_all_connectors(
     conn, trigger: str = "scheduler", connector_name: str | None = None
 ) -> int:
@@ -537,30 +613,161 @@ def run_all_connectors(
     ok = 0
     failed = 0
 
+    scopes = _active_profile_scopes(conn)
+    if not scopes:
+        # Issue #71: no active search profiles means nothing to discover —
+        # NOT a fallback to some hardcoded geography. This isn't an error
+        # (a fresh install with zero profiles yet is entirely normal), but
+        # it's WARNING rather than INFO: the resulting run record
+        # (total_connectors=len(CONNECTORS), zero scopes attempted) is
+        # otherwise indistinguishable in the logs from an empty CONNECTORS
+        # registry doing nothing for a completely different reason — this
+        # line is what tells an operator which situation they're actually
+        # looking at.
+        logger.warning(
+            "run_all_connectors: no active search profiles — skipping "
+            "connector discovery entirely (nothing to derive scope from)"
+        )
+        _finish_connector_run(conn, run_id, ok, failed)
+        return run_id
+
     for connector in connectors_to_run:
         started_at = datetime.now(timezone.utc)
-        try:
-            result = run_connector(conn, connector, _DEFAULT_SCOPE)
-        except (
-            Exception
-        ) as exc:  # one connector's discover() failing shouldn't kill the run
-            failed += 1
-            logger.exception("Connector %s: discover() failed", connector.name)
-            _record_connector_result(
-                conn,
-                run_id,
-                connector.name,
-                status="failed",
-                discovered_count=0,
-                fetched_count=0,
-                error_count=0,
-                error_msg=str(exc),
-                started_at=started_at,
-                finished_at=datetime.now(timezone.utc),
-            )
-            continue
+        discovered_total = 0
+        fetched_total = 0
+        error_total = 0
+        any_circuit_open = False
+        any_scope_failed = False
+        scope_summaries: list[str] = []
+        error_msgs: list[str] = []
 
-        status = "circuit_open" if result["circuit_open"] else "ok"
+        # Issue #71 hardening: one limiter/breaker per connector per RUN,
+        # not per scope — shared across every profile-geography this
+        # connector processes below, so a circuit trip (or the rate
+        # limiter's pacing) actually carries over from one scope to the
+        # next instead of resetting and giving a blocking site N times the
+        # error budget it's supposed to have (see run_connector's
+        # docstring).
+        limiter = RateLimiter(connector.rate_limit_per_minute)
+        breaker = CircuitBreaker(
+            connector.circuit_breaker_error_rate,
+            connector.circuit_breaker_min_attempts,
+            window=connector.circuit_breaker_window,
+        )
+        seen_scope_keys: set[str] = set()
+
+        for scope_index, scope in enumerate(scopes):
+            if breaker.tripped:
+                # Already tripped from an earlier scope in this same run —
+                # every remaining scope for this connector gets skipped
+                # outright, not attempted and immediately aborted. This is
+                # what "shared across scopes" actually buys: without it,
+                # each scope got its own fresh, untripped breaker.
+                any_circuit_open = True
+                logger.error(
+                    "Connector %s: circuit breaker already open — skipping "
+                    "remaining scopes this run (%d of %d not attempted)",
+                    connector.name,
+                    len(scopes) - scope_index,
+                    len(scopes),
+                )
+                break
+
+            scope_key = connector.scope_key(scope)
+            if scope_key is None:
+                # Not a failure — this connector has no coverage for
+                # wherever this scope is (e.g. a profile far from every
+                # known city). Skipping it here, before ever calling
+                # discover(), is what stops an unresolvable scope from
+                # permanently marking the connector 'failed' every single
+                # run (issue #71 review finding) — previously this reached
+                # discover(), which raised ConnectorError, which this loop
+                # caught as a genuine scope failure.
+                logger.warning(
+                    "Connector %s: scope=%r has no known coverage — "
+                    "skipping (not a failure)",
+                    connector.name,
+                    scope,
+                )
+                continue
+
+            if scope_key in seen_scope_keys:
+                # Two active profiles resolved to the same real target
+                # (e.g. two different Madrid-area profiles both landing on
+                # "madrid-capital") — crawl it once, not once per profile.
+                logger.info(
+                    "Connector %s: scope=%r resolves to already-crawled "
+                    "key=%r this run — skipping redundant crawl",
+                    connector.name,
+                    scope,
+                    scope_key,
+                )
+                continue
+            seen_scope_keys.add(scope_key)
+
+            try:
+                result = run_connector(conn, connector, scope, limiter, breaker)
+            except (
+                Exception
+            ) as exc:  # one scope's discover() failing shouldn't skip the rest
+                any_scope_failed = True
+                logger.exception(
+                    "Connector %s: discover() failed for scope=%r",
+                    connector.name,
+                    scope,
+                )
+                error_msgs.append(f"{scope}: {exc}")
+                continue
+
+            discovered_total += result["discovered_count"]
+            fetched_total += result["fetched_count"]
+            error_total += result["error_count"]
+            any_circuit_open = any_circuit_open or result["circuit_open"]
+            scope_summaries.append(
+                f"{scope_key}: discovered={result['discovered_count']} "
+                f"fetched={result['fetched_count']} errors={result['error_count']}"
+            )
+
+        # connector_run_results.status CHECK only allows 'ok'/'failed'/
+        # 'circuit_open' — there's no 'partial' value for "some scopes
+        # failed, others didn't" without a schema migration, which is out
+        # of scope for this hardening pass. Precedence, most-to-least
+        # severe:
+        #   1. any_scope_failed -> 'failed', ALWAYS, even if the breaker
+        #      also tripped this run. Issue #71 review finding: the old
+        #      precedence put circuit_open first, which could mask a
+        #      genuine, unrelated scope failure behind "oh, it was just
+        #      the circuit breaker" when both happened in the same run —
+        #      a real failure must never be hidden behind a different,
+        #      less-alarming status.
+        #   2. any_circuit_open (and no explicit failure) -> 'circuit_open'.
+        #   3. otherwise -> 'ok'. This covers both "every attempted scope
+        #      succeeded" AND "zero scopes were attempted because all of
+        #      them were unresolvable/duplicate" — neither is a failure;
+        #      a connector doing nothing because no active profile falls
+        #      in its coverage area is a normal, expected outcome, not an
+        #      error condition (this is what issue #71's review flagged:
+        #      an unresolvable-for-everyone connector must not end up
+        #      permanently 'failed').
+        # `scope_summaries`/`error_msgs` (folded into error_msg below) make
+        # a mixed-outcome run distinguishable from a total failure/total
+        # no-op by inspection, even though `status` itself can only be one
+        # of three values.
+        if any_scope_failed:
+            status = "failed"
+        elif any_circuit_open:
+            status = "circuit_open"
+        else:
+            status = "ok"
+
+        if status != "ok" and scope_summaries:
+            # Only worth stating "these scopes were fine" when the overall
+            # status is NOT a clean 'ok' — this is exactly what makes a
+            # mixed-outcome run ("Madrid succeeded, Sevilla failed")
+            # distinguishable from a total failure at a glance, without
+            # cluttering error_msg on runs that have nothing to explain.
+            error_msgs.append("scopes ok: " + " | ".join(scope_summaries))
+
         if status == "ok":
             ok += 1
         else:
@@ -570,10 +777,10 @@ def run_all_connectors(
             run_id,
             connector.name,
             status=status,
-            discovered_count=result["discovered_count"],
-            fetched_count=result["fetched_count"],
-            error_count=result["error_count"],
-            error_msg=None,
+            discovered_count=discovered_total,
+            fetched_count=fetched_total,
+            error_count=error_total,
+            error_msg="; ".join(error_msgs) or None,
             started_at=started_at,
             finished_at=datetime.now(timezone.utc),
         )

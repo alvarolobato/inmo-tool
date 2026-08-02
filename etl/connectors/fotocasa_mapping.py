@@ -53,17 +53,25 @@ _AGENCY_URL_MARKER = "/inmobiliaria-"
 _AGENCY_NAME_SUFFIXES = (" sl", " s.l.", " slu", " s.l.u.", " sa", " s.a.")
 
 
-def infer_listing_kind(client_url: str | None, client_name: str | None) -> str | None:
-    """Return 'agency' on a positive signal, else None — never a guessed 'particular'.
+def infer_listing_kind(
+    client_url: str | None, client_name: str | None, client_id: object = None
+) -> str | None:
+    """Return 'agency'/'particular' on a positive signal, else None.
 
     Absence of an agency signal is not evidence of a private seller; it
     just means neither of the two agency-indicating patterns matched. An
     earlier version of this function defaulted to 'particular' whenever
     any name/URL was present at all, which was itself an unverified guess
     dressed up as a confident default — exactly what this connector's own
-    design principle (docs/skills/connectors.md) says not to do. Revisit
-    once a real 'particular'-only signal is found and verified (e.g. an
-    absence of `clientId`), rather than inferring it by elimination.
+    design principle (docs/skills/connectors.md) says not to do.
+
+    The verified 'particular'-only signal this docstring used to say was
+    still missing: `clientId is None` *and* the client literally
+    self-labels as "Particular" in `clientName`/`clientAlias` — confirmed
+    against a real listing during Phase 2.2's dedup-engine review (PR #55).
+    Every agency listing sampled so far carries a non-null `clientId`; a
+    bare "Particular" label with no id is Fotocasa's own private-seller
+    marker, not an inference by elimination.
     """
     if client_url and _AGENCY_URL_MARKER in client_url:
         return "agency"
@@ -71,4 +79,6 @@ def infer_listing_kind(client_url: str | None, client_name: str | None) -> str |
         lowered = client_name.strip().lower()
         if lowered.endswith(_AGENCY_NAME_SUFFIXES):
             return "agency"
+        if client_id is None and lowered == "particular":
+            return "particular"
     return None

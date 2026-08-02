@@ -49,6 +49,38 @@ Best-effort seller/agent identity, used as a deduplication signal (phone number 
 ### `search_profile`
 A named investment thesis/mandate — "high-yield low-cost rental," "commercial units," etc. `scope` (geography/type/price/size filters) and `thesis_params` (yield targets, financing assumptions) are `jsonb`, validated at the application layer rather than via Postgres `CHECK` constraints, because their shape will grow across phases (Phase 2 adds scope filtering, Phase 5 adds financing params) and a rigid DB-level schema would mean a migration for every new filter type.
 
+**`scope` shape (defined and validated in `dashboard/lib/profiles-schema.ts`'s `ScopeSchema`, re-exported from `dashboard/lib/db/profiles.ts` for server-side callers)** — this is the exact shape task 2.4's hard-filter engine consumes:
+
+```ts
+{
+  geography: { type: "radius", center: [lat, lon], radius_km: number },
+  property_types: ("piso" | "chalet" | "atico" | "local" | "nave"
+                    | "garaje" | "terreno" | "edificio")[],   // at least one required
+  price_min?: number, price_max?: number,        // price_min <= price_max enforced
+  size_min?: number,  size_max?: number,          // size_min <= size_max enforced
+  hard_exclusions?: { requires_elevator?: boolean, excludes_ground_floor?: boolean },
+}
+```
+
+**`property_types` must exactly match `property.property_type`'s CHECK constraint** (`etl/schema/init.sql`: `'piso','chalet','atico','local','nave','garaje','terreno','edificio'`) — a Zod enum value that isn't in that CHECK can never match a real row, so task 2.4 would silently return zero results for it. An earlier draft of `ScopeSchema` used `local_comercial`/`nave_industrial`/`edificio_completo` (more descriptive but wrong) — caught and fixed during task 2.3's review; if either list changes, update both together.
+
+**`price_min`/`price_max` filter against `MIN(listing.current_price)` across a property's active listings**, not a single `listing.current_price` or a `property`-level column (there isn't one — price lives on `listing`, not `property`, precisely because a deduplicated property can have 2+ active listings at different prices once task 2.2's dedup engine merges cross-site duplicates). Using the minimum is the permissive reading: "could this property be acquired within budget via *some* listing," not a claim that every listing on it is in range. Task 2.4 must join through `listing` and aggregate, not read a price directly off `property`.
+
+**`size_min`/`size_max` filter against `property.m2_built` specifically, not `m2_useful`.** Built area is published far more consistently across connectors than useful area (many sources omit useful area entirely); built area is the more reliable filter target for the MVP.
+
+**No `min_floor` hard exclusion.** `property.floor` is free text (`'bajo'`, `'3º'`, `'3º ext'`, ...), not a number, and no connector normalizes it into an orderable value — a numeric "minimum floor" filter isn't implementable against that column without a floor-parsing layer that doesn't exist yet. `requires_elevator` and `excludes_ground_floor` (both booleans, both directly checkable) cover the MVP need instead.
+
+Geography is radius-from-a-geocoded-point only for now — task 2.3's scope note defers full polygon map-drawing as a later UI enhancement, not required for the MVP filtering need. This is the same open decision line 89 (below) already flagged for whoever implements task 2.4's actual radius query (earthdistance/cube vs. PostGIS) — task 2.3 only stores and validates the shape, it does not query by it.
+
+**`thesis_params` shape** (fields used starting Phase 3/5, persisted from day one, validated only for type shape):
+
+```ts
+{
+  target_yield_pct?: number,
+  financing?: { down_payment_pct: number, rate_pct: number, term_years: number },
+}
+```
+
 ### `profile_listing_state` — the load-bearing table for correct deduplication
 
 ```sql
@@ -64,6 +96,8 @@ Keying on `property_id` instead means: no matter how many site listings a proper
 The corollary this creates for merge-time behavior (Phase 2, issue #16): when dedup reassigns a listing's `property_id` onto an existing property that *already* has its own `profile_listing_state`/`feedback_event` history for some profile, that history has to be reconciled (union feedback, keep the more-advanced pipeline stage, flag genuine conflicts for human review) rather than either side's state being silently dropped or overwritten. That reconciliation logic belongs to issue #16, not this task — this task only guarantees the schema shape makes the *correct* end state representable.
 
 **FK delete behavior, for whoever writes issue #16's merge/revert logic**: `profile_listing_state.property_id`, `feedback_event.property_id`, and `property_merge_log.property_id` are all plain `REFERENCES property(id)` — Postgres's default is `ON DELETE RESTRICT`. This means a `property` row that has ever accumulated state, feedback, or a merge-log entry **cannot be deleted** while those rows exist; it must be updated/merged-away, never hard-deleted. This is almost certainly the right behavior (losing feedback/audit history silently on a delete would be worse), but it means issue #16's merge implementation should never attempt `DELETE FROM property WHERE id = <losing side>` — the losing side's `property` row should simply become unreferenced (no `listing.property_id` points at it anymore) and left in place, not deleted, or the delete will raise `ForeignKeyViolation` the first time that property has any state at all.
+
+**The `matched` column (added by task 2.4, issue #18)**: `profile_listing_state.matched BOOLEAN` records whether a property currently satisfies its profile's hard-filter scope. Every consumer of this table **must filter on `matched = true`** unless it deliberately wants the full history — `false` rows are preserved, not deleted, when a property stops matching (the profile's scope changed, or the property's own data changed since the last materialization run). This is a deliberate design choice: it keeps a re-evaluation record instead of silently losing "this used to be a candidate" history, and it means `ps dedup revert`/the merge-reconciliation logic (issue #16) has to carry `matched` through a merge like any other per-profile state column, not just the score/pipeline-stage fields — see `etl/dedup/reconcile.py`, which combines both sides' `matched` values with `OR` on merge (if either side was a real match against the profile's scope, the merged property should be too).
 
 ### `feedback_event`
 Same keying logic as above: `property_id NOT NULL` is what identifies what the feedback is about. `listing_id` is kept too, but only as an optional "which specific site listing was the user actually looking at" audit/debugging detail — it is never used to determine what the feedback applies to, and a `NULL` there (e.g. feedback given from an aggregate/comparison view rather than a single listing's detail page) is fine.
@@ -87,4 +121,4 @@ This task only creates the table. The matching engine that writes to it is Phase
 ## Deliberately deferred
 
 - **Geo query support** (radius/polygon search for a profile's scope filter): `property.lat`/`lon` are plain `NUMERIC(9,6)` columns for now — enough to *store* coordinates. Whether filtering needs PostgreSQL's `earthdistance`/`cube` extensions or full PostGIS is a decision for whoever implements the actual radius/polygon filtering in Phase 2 (issue #18), not this task.
-- **`search_profile.scope`/`thesis_params` internal shape**: intentionally `jsonb` with no fixed schema yet. The shape gets defined incrementally as each phase's filters/parameters land, not speculatively here.
+- **`search_profile.scope`/`thesis_params` internal shape**: defined in task 2.3 (see the `search_profile` entity above) — `jsonb` with an application-layer (Zod) schema rather than a DB-level one, since the shape still grows across phases (Phase 5 adds financing params usage, Phase 2.4 is the first real consumer of `scope`).
