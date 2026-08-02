@@ -307,17 +307,80 @@ CREATE TABLE IF NOT EXISTS ai_assessment (
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS property_merge_log (
-    id                 BIGSERIAL    PRIMARY KEY,
-    property_id        BIGINT       REFERENCES property(id),
-    merged_listing_ids BIGINT[],
-    match_basis        TEXT         CHECK (match_basis IN ('cadastral','address_coords','phone','photo_hash','fuzzy')),
-    confidence         NUMERIC(4,3),
-    created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    reverted_at        TIMESTAMPTZ
+    id                  BIGSERIAL    PRIMARY KEY,
+    property_id         BIGINT       REFERENCES property(id),
+    merged_listing_ids  BIGINT[],
+    match_basis         TEXT         CHECK (match_basis IN ('cadastral','address_coords','phone','photo_hash','fuzzy')),
+    confidence          NUMERIC(4,3),
+    created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    reverted_at         TIMESTAMPTZ
 );
+
+-- ALTER, not a column in the CREATE TABLE above (same reasoning as
+-- listing.missed_discovery_count in task 1.4): this file must stay safe to
+-- re-run against an already-migrated database.
+--
+-- The "losing" property row from a merge (property_merge_log.property_id
+-- only records the *survivor*) is never deleted — FK RESTRICT from
+-- profile_listing_state/feedback_event/property_merge_log itself means it
+-- couldn't be deleted anyway once it has ever accumulated state, and
+-- etl.dedup.engine.perform_merge only reassigns listing.property_id away
+-- from it, never issues a DELETE. Recording which property_id was the
+-- losing side makes revert (etl.dedup.engine.revert) a simple, exact
+-- pointer restoration — point merged_listing_ids back at
+-- losing_property_id, which still physically exists — rather than having
+-- to reconstruct a plausible-looking property row from scratch.
+ALTER TABLE property_merge_log ADD COLUMN IF NOT EXISTS losing_property_id BIGINT REFERENCES property(id);
+
+-- ALTER, same re-runnable-migration reasoning as losing_property_id above.
+--
+-- Snapshot of what etl.dedup.reconcile.reconcile_merge changed on
+-- profile_listing_state/feedback_event for this merge, so etl.dedup.engine.
+-- revert can restore pre-merge per-profile state (score, pipeline_stage,
+-- which feedback_event rows lived on which side) — not just listing->
+-- property pointers. See reconcile.py's module docstring for the snapshot
+-- shape (a list of per-profile "ops" plus the re-keyed feedback_event ids).
+ALTER TABLE property_merge_log ADD COLUMN IF NOT EXISTS detail JSONB NOT NULL DEFAULT '{}';
 
 CREATE INDEX IF NOT EXISTS idx_property_merge_log_property_id
     ON property_merge_log (property_id);
+
+-- Medium-confidence match candidates for human review (issue #16 signals
+-- 3-5: uncorroborated phone, photo-hash, fuzzy fallback all land here
+-- instead of auto-merging) AND merge-time reconciliation conflicts
+-- (status='conflict' — issue #16 Technical approach item 6/EC-7). Rows are
+-- keyed on the two *listings* that triggered the candidate/conflict, not
+-- properties: for a plain suggestion nothing has merged yet, so there's no
+-- single property_id to key on; for a conflict, the property-level merge
+-- already happened (the identity match itself was confident) but
+-- profile_listing_state's PRIMARY KEY (profile_id, property_id) makes it
+-- impossible to hold two live rows for the same pair to show "both original
+-- states" — so a conflict's `detail` JSON carries both original
+-- pipeline_stage values (and which listing/profile they came from) for a
+-- human to inspect and resolve, rather than the table trying to represent
+-- two rows the schema can't hold at once.
+CREATE TABLE IF NOT EXISTS suggested_merge (
+    id            BIGSERIAL    PRIMARY KEY,
+    listing_id_a  BIGINT       NOT NULL REFERENCES listing(id),
+    listing_id_b  BIGINT       NOT NULL REFERENCES listing(id),
+    match_basis   TEXT         NOT NULL CHECK (match_basis IN ('cadastral','address_coords','phone','photo_hash','fuzzy')),
+    confidence    NUMERIC(4,3),
+    status        TEXT         NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','rejected','conflict')),
+    detail        JSONB        NOT NULL DEFAULT '{}',
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    resolved_at   TIMESTAMPTZ,
+    CHECK (listing_id_a <> listing_id_b)
+);
+
+-- Prevents the engine from re-suggesting the same pair on every run
+-- regardless of which listing was recorded as "a" vs "b" (the engine
+-- always normalizes to the lower id first when inserting, so this
+-- constraint is reachable, not decorative).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_suggested_merge_pair
+    ON suggested_merge (listing_id_a, listing_id_b);
+
+CREATE INDEX IF NOT EXISTS idx_suggested_merge_status
+    ON suggested_merge (status) WHERE status = 'pending';
 
 -- ============================================================
 -- Connector observability (Phase 1.3, issue #11)
@@ -839,3 +902,4 @@ ANALYZE profile_listing_state;
 ANALYZE feedback_event;
 ANALYZE ai_assessment;
 ANALYZE property_merge_log;
+ANALYZE suggested_merge;
