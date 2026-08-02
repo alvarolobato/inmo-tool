@@ -1,8 +1,8 @@
-"""Unified configuration loader for the PowerShop Analytics ETL service.
+"""Unified configuration loader for the inmo-tool ETL service.
 
 Precedence (highest to lowest):
   1. Real environment variables (set before Python starts)
-  2. config.yaml at CONFIG_FILE env var or ~/.config/powershop-analytics/config.yaml
+  2. config.yaml at CONFIG_FILE env var or ~/.config/inmo-tool/config.yaml
   3. Hardcoded defaults from config/schema.yaml
 
 The loader reads config/schema.yaml once (from the repo root, mounted at /app
@@ -54,7 +54,7 @@ class ConfigValue:
 
 _REPO_ROOT = Path(__file__).parent.parent
 _SCHEMA_PATH = _REPO_ROOT / "config" / "schema.yaml"
-_CONFIG_DIR = Path.home() / ".config" / "powershop-analytics"
+_CONFIG_DIR = Path.home() / ".config" / "inmo-tool"
 _DEFAULT_CONFIG_PATH = _CONFIG_DIR / "config.yaml"
 
 
@@ -235,7 +235,7 @@ def write_config(
     merged = {**existing, **values}
 
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%S")
-    header = f"# PowerShop Analytics — config.yaml\n# Last updated: {timestamp}\n"
+    header = f"# inmo-tool — config.yaml\n# Last updated: {timestamp}\n"
     if comment:
         header += f"# {comment}\n"
     header += "# Precedence: env vars > this file > hardcoded defaults.\n"

@@ -4,11 +4,11 @@
  * Precedence (highest → lowest):
  *   1. Real environment variables (process.env)
  *   2. config.yaml — path from CONFIG_FILE env var or /config/config.yaml
- *      (the /config directory is bind-mounted from ~/.config/powershop-analytics)
+ *      (the /config directory is bind-mounted from ~/.config/inmo-tool)
  *   3. Hardcoded defaults from config/schema.yaml
  *
  * In Docker the config dir is mounted at /config.
- * In local dev without Docker it falls back to ~/.config/powershop-analytics.
+ * In local dev without Docker it falls back to ~/.config/inmo-tool.
  *
  * Public API:
  *   getSystemConfig()         — cached; returns the merged config map
@@ -92,7 +92,7 @@ function resolveConfigPath(): string {
   // Docker: /config is the bind-mounted directory
   if (fs.existsSync("/config")) return "/config/config.yaml";
   // Local dev fallback
-  return path.join(os.homedir(), ".config", "powershop-analytics", "config.yaml");
+  return path.join(os.homedir(), ".config", "inmo-tool", "config.yaml");
 }
 
 // ---------------------------------------------------------------------------
@@ -325,7 +325,7 @@ export function writeConfig(
   const timestamp = new Date().toISOString().replace("T", " ").slice(0, 19);
   const comment = opts?.comment ? `# ${opts.comment}\n` : "";
   const header = [
-    "# PowerShop Analytics — config.yaml",
+    "# inmo-tool — config.yaml",
     `# Last updated: ${timestamp}`,
     comment.trim(),
     "# Precedence: env vars > this file > hardcoded defaults.",

@@ -10,7 +10,7 @@ NC='\033[0m'
 
 DC="docker compose -f ${REPO_ROOT}/docker-compose.yml"
 PG_USER="${POSTGRES_USER:-postgres}"
-PG_DB="${POSTGRES_DB:-powershop}"
+PG_DB="${POSTGRES_DB:-inmotool}"
 
 usage() {
     cat <<EOF

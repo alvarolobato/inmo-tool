@@ -38,7 +38,7 @@ EOF
 # Priority (highest wins):
 #   1. Environment variables already set in the shell (always win)
 #   2. local/.env                           (worktree-specific, highest file priority)
-#   3. ~/.config/powershop-analytics/.env  (centralized, lowest file priority)
+#   3. ~/.config/inmo-tool/.env  (centralized, lowest file priority)
 #
 # Load lowest priority first: since load_env_file skips keys already in os.environ,
 # loading local/.env first sets those keys, then centralized only fills in gaps.
@@ -46,4 +46,4 @@ EOF
 _REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 load_env_file "${_REPO_ROOT}/local/.env"
-load_env_file "${HOME}/.config/powershop-analytics/.env"
+load_env_file "${HOME}/.config/inmo-tool/.env"

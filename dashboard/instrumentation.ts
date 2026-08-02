@@ -23,7 +23,7 @@ export async function register() {
         console.info(
           "[config] config.yaml created on first start at",
           process.env.CONFIG_FILE ??
-            `${process.env.HOME ?? "~"}/.config/powershop-analytics/config.yaml`,
+            `${process.env.HOME ?? "~"}/.config/inmo-tool/config.yaml`,
         );
       }
     } catch (err) {

@@ -28,10 +28,7 @@ Subcommands:
   update          Pull latest, rebuild images, restart stack
   status          Show container status
   logs [svc]      Show logs (follow); optional service name
-  open            Open WrenAI UI in browser
   destroy         Stop containers and remove volumes (irreversible)
-  migrate         Migrate named volumes to bind-mount directories (one-time)
-  setup-wren      Auto-configure WrenAI: create PostgreSQL data source and deploy MDL
 EOF
 }
 
@@ -99,12 +96,12 @@ cmd_status() {
     "${DC[@]}" ps --format table
     echo ""
 
-    # Check WrenAI UI
-    local host_port="${HOST_PORT:-3000}"
-    if curl -s --max-time 3 "http://localhost:${host_port}" >/dev/null 2>&1; then
-        echo -e "  ${GREEN}[UP]${NC}   WrenAI UI → http://localhost:${host_port}"
+    # Check Dashboard App
+    local dash_port="${DASHBOARD_PORT:-4000}"
+    if curl -s --max-time 3 "http://localhost:${dash_port}" >/dev/null 2>&1; then
+        echo -e "  ${GREEN}[UP]${NC}   Dashboard App → http://localhost:${dash_port}"
     else
-        echo -e "  ${YELLOW}[DOWN]${NC} WrenAI UI not reachable at http://localhost:${host_port}"
+        echo -e "  ${YELLOW}[DOWN]${NC} Dashboard App not reachable at http://localhost:${dash_port}"
     fi
 }
 
@@ -115,23 +112,6 @@ cmd_logs() {
     else
         "${DC[@]}" logs -f
     fi
-}
-
-cmd_open() {
-    local host_port="${HOST_PORT:-3000}"
-    local url="http://localhost:${host_port}"
-    echo -e "${CYAN}Opening WrenAI UI at ${url}${NC}"
-    case "$(uname -s)" in
-        Darwin)
-            open "$url"
-            ;;
-        Linux)
-            xdg-open "$url" 2>/dev/null || echo "Visit: ${url}"
-            ;;
-        *)
-            echo "Visit: ${url}"
-            ;;
-    esac
 }
 
 cmd_destroy() {
@@ -148,16 +128,6 @@ cmd_destroy() {
     fi
 }
 
-cmd_migrate() {
-    echo -e "${CYAN}Migrating named Docker volumes to bind-mount directories...${NC}"
-    "${REPO_ROOT}/scripts/migrate-volumes.sh"
-}
-
-cmd_setup_wren() {
-    echo -e "${CYAN}Configuring WrenAI data source and deploying MDL...${NC}"
-    "${REPO_ROOT}/scripts/wren-setup.sh" "$@"
-}
-
 SUBCMD="${1:-}"
 if [ -z "$SUBCMD" ] || [ "$SUBCMD" = "-h" ] || [ "$SUBCMD" = "--help" ]; then
     usage
@@ -172,10 +142,7 @@ case "$SUBCMD" in
     update)      cmd_update ;;
     status)      cmd_status ;;
     logs)        cmd_logs "${1:-}" ;;
-    open)        cmd_open ;;
     destroy)     cmd_destroy ;;
-    migrate)     cmd_migrate ;;
-    setup-wren)  cmd_setup_wren "$@" ;;
     *)
         echo -e "${RED}ps stack: unknown subcommand '${SUBCMD}'${NC}" >&2
         usage >&2

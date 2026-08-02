@@ -2,6 +2,8 @@
 
 **Use when**: Adding a new LLM flow, changing how prompts/history/tools are assembled, enforcing the llm-context boundary, or debugging why an LLM call behaves unexpectedly.
 
+> **Status**: this describes the module and code as inherited from the source project (powershop-analytics) — the architecture (single `assembleRequest` entry point, CI-enforced import boundary) is exactly what issue #1 §14 identifies as reusable, and task 1.1 (#9) intentionally leaves this code untouched rather than rewriting it ahead of schedule. The **named flows table below is the old project's BI-dashboard flow catalog** (`generate`/`modify`/`analyze`/`suggest`/`gap`/`weekly`/`chat`/`summary`) and will be replaced by inmo-tool's own flows (`occupancy`/`condition`/`redflags`/`extract`/`chat`/`compare`) in task 4.1 (#24). Everything about *how* a flow is added/assembled below stays accurate until then.
+
 ## Location
 
 ```

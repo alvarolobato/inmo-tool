@@ -14,7 +14,7 @@ export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "PowerShop Dashboard",
-  description: "Cuadros de mando generados con inteligencia artificial para PowerShop Analytics",
+  description: "Cuadros de mando generados con inteligencia artificial para inmo-tool",
 };
 
 // Fonts are self-hosted under public/fonts/ to avoid network fetches at Docker

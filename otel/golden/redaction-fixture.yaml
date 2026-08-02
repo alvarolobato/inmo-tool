@@ -30,8 +30,3 @@ redaction_tests:
       value: "sk-or-v1-test-leak-XYZ-123456789"
     must_not_contain: "sk-or-v1-test-leak-XYZ-123456789"
 
-  - description: "4D database password not leaked"
-    inject_attribute:
-      key: p4d.password
-      value: "4d-source-password-LEAK-TEST"
-    must_not_contain: "4d-source-password-LEAK-TEST"

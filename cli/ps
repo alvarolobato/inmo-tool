@@ -22,7 +22,7 @@ REPO_ROOT=""
 if REPO_ROOT="$(find_project_root)"; then
     exec "$REPO_ROOT/cli/ps.sh" "$@"
 else
-    echo "ps: not inside a powershop-analytics project (no .ps-project or cli/ps.sh found)" >&2
+    echo "ps: not inside an inmo-tool project (no .ps-project or cli/ps.sh found)" >&2
     echo "Run from a project directory." >&2
     exit 1
 fi

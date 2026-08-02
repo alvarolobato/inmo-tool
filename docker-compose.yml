@@ -1,22 +1,28 @@
-# PowerShop Analytics — full stack
-# Services: PostgreSQL mirror + ETL (nightly scheduler) + WrenAI (5 containers) + OTel collector
+# inmo-tool — local stack
+# Services: PostgreSQL mirror + connector sync scheduler + OTel collector + Dashboard App
+#
+# Status: first-pass cleanup (task 1.1, #9) — removed the source project's WrenAI
+# stack (bootstrap/wren-engine/ibis-server/wren-ai-service/wren-ui/qdrant, 6
+# containers) and 4D-specific env vars. Full adaptation (a real connector-runner
+# service, whatever else Phase 1 needs) is task 1.6 (#14) — this pass only
+# removes dead services so `docker compose config` doesn't reference anything
+# that no longer exists in this project.
 #
 # Quick start (symlink to centralized credentials):
-#   ln -sf ~/.config/powershop-analytics/.env .env
+#   ln -sf ~/.config/inmo-tool/.env .env
 #   docker compose up -d
-#   open http://localhost:${HOST_PORT:-3000}
 #
 # Or copy .env.example and fill in manually:
 #   cp .env.example .env && $EDITOR .env
 
 networks:
-  wren:
+  app:
     driver: bridge
 
 services:
 
   # ---------------------------------------------------------------------------
-  # PostgreSQL — mirror of the 4D source data
+  # PostgreSQL — mirror of ingested listing data
   # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16-alpine
@@ -26,15 +32,15 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_in_production}
-      POSTGRES_DB: ${POSTGRES_DB:-powershop}
+      POSTGRES_DB: ${POSTGRES_DB:-inmotool}
     ports:
       - "5432:5432"
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     networks:
-      - wren
+      - app
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-powershop}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-inmotool}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -74,7 +80,7 @@ services:
       - "4318"   # OTLP HTTP
       - "13133"  # health_check extension
     networks:
-      - wren
+      - app
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:13133/ || exit 1"]
       interval: 10s
@@ -83,38 +89,34 @@ services:
       start_period: 15s
 
   # ---------------------------------------------------------------------------
-  # ETL — extracts data from 4D and loads into PostgreSQL
-  # Runs in scheduler mode by default (daily at ETL_CRON_HOUR, default 02:00).
-  # For a one-off sync: docker compose run --rm etl python main.py --once
+  # ETL / connector sync — currently a stub scheduler (task 1.1); real
+  # connector framework lands in task 1.3 (#11), first connector in task 1.4 (#12).
+  # For a one-off sync: docker compose run --rm etl python -m etl.main --once
   # ---------------------------------------------------------------------------
   etl:
     build: ./etl
     restart: unless-stopped
     environment:
-      P4D_HOST: ${P4D_HOST:-}
-      P4D_PORT: ${P4D_PORT:-19812}
-      P4D_USER: ${P4D_USER:-}
-      P4D_PASSWORD: ${P4D_PASSWORD:-}
-      POSTGRES_DSN: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-change_me_in_production}@postgres:5432/${POSTGRES_DB:-powershop}
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-change_me_in_production}@postgres:5432/${POSTGRES_DB:-inmotool}
       ETL_CRON_HOUR: ${ETL_CRON_HOUR:-2}
       # CONFIG_FILE pins the config path to the host-mounted /config directory.
-      # Without it the loader would fall back to ~/.config/powershop-analytics/config.yaml
+      # Without it the loader would fall back to ~/.config/inmo-tool/config.yaml
       # (inside the container) which does not exist.
       CONFIG_FILE: /config/config.yaml
       CONFIG_SCHEMA_PATH: /app/config/schema.yaml
-      # OTel SDK env vars — picked up automatically by opentelemetry-instrument (Phase 2)
-      OTEL_SERVICE_NAME: powershop-etl
+      # OTel SDK env vars — picked up automatically by opentelemetry-instrument
+      OTEL_SERVICE_NAME: inmo-tool-etl
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_always_on}
       OTEL_LOG_LEVEL: ${OTEL_LOG_LEVEL:-info}
       ENVIRONMENT: ${ENVIRONMENT:-development}
     volumes:
       # Mount centralized config directory (read-only; ETL only reads config)
-      - ${POWERSHOP_CONFIG_DIR:-${HOME}/.config/powershop-analytics}:/config:ro
+      - ${INMO_TOOL_CONFIG_DIR:-${HOME}/.config/inmo-tool}:/config:ro
       # Mount schema so the container can validate/read key definitions
       - ./config/schema.yaml:/app/config/schema.yaml:ro
     networks:
-      - wren
+      - app
     depends_on:
       postgres:
         condition: service_healthy
@@ -122,149 +124,9 @@ services:
         condition: service_healthy
 
   # ---------------------------------------------------------------------------
-  # WrenAI — bootstrap (initialises shared data volume)
-  # ---------------------------------------------------------------------------
-  bootstrap:
-    image: ghcr.io/canner/wren-bootstrap:${WREN_BOOTSTRAP_VERSION:-0.1.5}
-    restart: on-failure
-    platform: ${PLATFORM:-linux/amd64}
-    environment:
-      DATA_PATH: /app/data
-    volumes:
-      - ./data/wren:/app/data
-    command: /bin/sh /app/init.sh
-    networks:
-      - wren
-
-  # ---------------------------------------------------------------------------
-  # WrenAI — engine (semantic/query layer)
-  # ---------------------------------------------------------------------------
-  wren-engine:
-    image: ghcr.io/canner/wren-engine:${WREN_ENGINE_VERSION:-0.22.0}
-    restart: on-failure
-    platform: ${PLATFORM:-linux/amd64}
-    expose:
-      - ${WREN_ENGINE_PORT:-8080}
-      - ${WREN_ENGINE_SQL_PORT:-7432}
-    volumes:
-      - ./data/wren:/usr/src/app/etc
-    networks:
-      - wren
-    depends_on:
-      - bootstrap
-
-  # ---------------------------------------------------------------------------
-  # WrenAI — ibis server (data source connectivity, incl. PostgreSQL)
-  # ---------------------------------------------------------------------------
-  ibis-server:
-    image: ghcr.io/canner/wren-engine-ibis:${IBIS_SERVER_VERSION:-0.22.0}
-    restart: on-failure
-    platform: ${PLATFORM:-linux/amd64}
-    expose:
-      - ${IBIS_SERVER_PORT:-8000}
-    environment:
-      WREN_ENGINE_ENDPOINT: http://wren-engine:${WREN_ENGINE_PORT:-8080}
-    networks:
-      - wren
-    depends_on:
-      - wren-engine
-
-  # ---------------------------------------------------------------------------
-  # WrenAI — AI service (LLM orchestration via OpenRouter)
-  # ---------------------------------------------------------------------------
-  wren-ai-service:
-    image: ghcr.io/canner/wren-ai-service:${WREN_AI_SERVICE_VERSION:-0.29.0}
-    restart: on-failure
-    platform: ${PLATFORM:-linux/amd64}
-    expose:
-      - ${WREN_AI_SERVICE_PORT:-5555}
-    ports:
-      - "${AI_SERVICE_FORWARD_PORT:-5555}:${WREN_AI_SERVICE_PORT:-5555}"
-    environment:
-      PYTHONUNBUFFERED: 1
-      CONFIG_PATH: /app/config.yaml
-      # OpenRouter credentials
-      OPENAI_API_BASE: https://openrouter.ai/api/v1
-      OPENAI_API_KEY: ${OPENROUTER_API_KEY:-}
-      LITELLM_API_BASE: https://openrouter.ai/api/v1
-      LITELLM_API_KEY: ${OPENROUTER_API_KEY:-}
-      # litellm openrouter/ provider reads this specific var (not OPENAI_API_KEY)
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      # Qdrant
-      QDRANT_HOST: qdrant
-      # SHOULD_FORCE_DEPLOY removed — the entrypoint tries to connect to wren-ui
-      # which times out and crashes the container in a restart loop. We deploy via
-      # scripts/wren-push-metadata.py instead.
-      # Port — required by entrypoint.sh for uvicorn --port $WREN_AI_SERVICE_PORT
-      WREN_AI_SERVICE_PORT: ${WREN_AI_SERVICE_PORT:-5555}
-      # LLM model — required for ${WREN_LLM_MODEL:-...} substitution in wren-config.yaml
-      WREN_LLM_MODEL: ${WREN_LLM_MODEL:-openrouter/anthropic/claude-sonnet-4-20250514}
-      # Telemetry
-      WREN_AI_SERVICE_VERSION: ${WREN_AI_SERVICE_VERSION:-0.29.0}
-    volumes:
-      - ./wren-config.yaml:/app/config.yaml:ro
-      - ./data/wren:/app/data:ro
-    networks:
-      - wren
-    depends_on:
-      - qdrant
-      - wren-engine
-
-  # ---------------------------------------------------------------------------
-  # WrenAI — UI (web interface, port 3000)
-  # ---------------------------------------------------------------------------
-  wren-ui:
-    image: ghcr.io/canner/wren-ui:${WREN_UI_VERSION:-0.32.2}
-    restart: on-failure
-    platform: ${PLATFORM:-linux/amd64}
-    environment:
-      DB_TYPE: sqlite
-      SQLITE_FILE: /app/data/db.sqlite3
-      WREN_ENGINE_ENDPOINT: http://wren-engine:${WREN_ENGINE_PORT:-8080}
-      WREN_AI_ENDPOINT: http://wren-ai-service:${WREN_AI_SERVICE_PORT:-5555}
-      IBIS_SERVER_ENDPOINT: http://ibis-server:${IBIS_SERVER_PORT:-8000}
-      GENERATION_MODEL: ${WREN_LLM_MODEL:-anthropic/claude-sonnet-4-20250514}
-      # Telemetry
-      WREN_ENGINE_PORT: ${WREN_ENGINE_PORT:-8080}
-      WREN_AI_SERVICE_VERSION: ${WREN_AI_SERVICE_VERSION:-0.29.0}
-      WREN_UI_VERSION: ${WREN_UI_VERSION:-0.32.2}
-      WREN_ENGINE_VERSION: ${WREN_ENGINE_VERSION:-0.22.0}
-      WREN_PRODUCT_VERSION: ${WREN_PRODUCT_VERSION:-0.29.1}
-      USER_UUID: ${USER_UUID:-}
-      POSTHOG_API_KEY: ${POSTHOG_API_KEY:-phc_nhF32aj4xHXOZb0oqr2cn4Oy9uiWzz6CCP4KZmRq9aE}
-      POSTHOG_HOST: ${POSTHOG_HOST:-https://app.posthog.com}
-      TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-true}
-      NEXT_PUBLIC_USER_UUID: ${USER_UUID:-}
-      NEXT_PUBLIC_POSTHOG_API_KEY: ${POSTHOG_API_KEY:-phc_nhF32aj4xHXOZb0oqr2cn4Oy9uiWzz6CCP4KZmRq9aE}
-      NEXT_PUBLIC_POSTHOG_HOST: ${POSTHOG_HOST:-https://app.posthog.com}
-      NEXT_PUBLIC_TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-true}
-      EXPERIMENTAL_ENGINE_RUST_VERSION: ${EXPERIMENTAL_ENGINE_RUST_VERSION:-false}
-    ports:
-      - "${HOST_PORT:-3000}:3000"
-    volumes:
-      - ./data/wren:/app/data
-    networks:
-      - wren
-    depends_on:
-      - wren-ai-service
-      - wren-engine
-
-  # ---------------------------------------------------------------------------
-  # Qdrant — vector store for WrenAI embeddings
-  # ---------------------------------------------------------------------------
-  qdrant:
-    image: qdrant/qdrant:v1.11.0
-    restart: on-failure
-    expose:
-      - 6333
-      - 6334
-    volumes:
-      - ./data/qdrant:/qdrant/storage
-    networks:
-      - wren
-
-  # ---------------------------------------------------------------------------
-  # Dashboard App — AI-generated dashboards (Next.js + Tremor, port 4000)
+  # Dashboard App — AI-driven UI (Next.js + Tremor, port 4000). UI content is
+  # the source project's old BI-dashboard-generation flows, untouched by task
+  # 1.1 by design — Phase 2/4 tasks replace it. The shell/LLM plumbing is reused.
   # ---------------------------------------------------------------------------
   dashboard:
     build:
@@ -276,33 +138,32 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_in_production}
-      POSTGRES_DB: ${POSTGRES_DB:-powershop}
+      POSTGRES_DB: ${POSTGRES_DB:-inmotool}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       ADMIN_API_KEY: ${ADMIN_API_KEY:-}
       ADMIN_COOKIE_SECURE: ${ADMIN_COOKIE_SECURE:-}
       # CONFIG_FILE pins the config path to the host-mounted /config directory.
-      # Without it the loader would fall back to ~/.config/powershop-analytics/config.yaml
+      # Without it the loader would fall back to ~/.config/inmo-tool/config.yaml
       # (inside the container) which does not exist.
       CONFIG_FILE: /config/config.yaml
       CONFIG_SCHEMA_PATH: /app/config/schema.yaml
       # DASHBOARD_LLM_PROVIDER / DASHBOARD_LLM_MODEL_* / DASHBOARD_LLM_CLI_*
       # intentionally NOT set here — the values come from config.yaml
-      # (D-023 precedence: env > config.yaml > default). Setting a default
-      # here would silently override the operator's config.yaml choice and
-      # block editing from the admin /config UI (env-sourced keys are
-      # surfaced as read-only). Set them on the host shell only if you
-      # genuinely want a hard override.
+      # (env > config.yaml > default precedence). Setting a default here would
+      # silently override the operator's config.yaml choice and block editing
+      # from the admin /config UI (env-sourced keys are surfaced as read-only).
+      # Set them on the host shell only if you genuinely want a hard override.
       # Claude Code CLI credentials for DASHBOARD_LLM_PROVIDER=cli.
       # Run `claude /install-github-app` once to generate a 1-year OAuth token.
       # Copy the full contents of ~/.claude/.credentials.json into your
-      # ~/.config/powershop-analytics/.env as CLAUDE_CODE_OAUTH_TOKEN='<json>'.
-      # The CLI reads this env var directly — no file mount needed (D-025 updated).
+      # ~/.config/inmo-tool/.env as CLAUDE_CODE_OAUTH_TOKEN='<json>'.
+      # The CLI reads this env var directly — no file mount needed.
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       HOME: /home/nextjs
-      # OTel SDK env vars — picked up automatically by the Node SDK (Phase 3)
-      OTEL_SERVICE_NAME: powershop-dashboard
+      # OTel SDK env vars — picked up automatically by the Node SDK
+      OTEL_SERVICE_NAME: inmo-tool-dashboard
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_always_on}
       OTEL_LOG_LEVEL: ${OTEL_LOG_LEVEL:-info}
@@ -315,7 +176,7 @@ services:
       DASHBOARD_CONTEXT_DIR: /app/data/conversations
     volumes:
       # Mount centralized config directory (read-write; dashboard writes config.yaml)
-      - ${POWERSHOP_CONFIG_DIR:-${HOME}/.config/powershop-analytics}:/config:rw
+      - ${INMO_TOOL_CONFIG_DIR:-${HOME}/.config/inmo-tool}:/config:rw
       # Mount schema so the container can validate/read key definitions
       - ./config/schema.yaml:/app/config/schema.yaml:ro
       # Mount the canonical PostgreSQL DDL so the dashboard's Next.js
@@ -323,13 +184,13 @@ services:
       # (idempotent — CREATE TABLE IF NOT EXISTS). Both ETL and Dashboard
       # apply the same file; init.sql is the single source of schema truth.
       - ./etl/schema/init.sql:/app/schema/init.sql:ro
-      # Per-turn conversation context logs (D-002 bind mount; survives restarts).
+      # Per-turn conversation context logs (bind mount; survives restarts).
       - ./data/dashboard/conversations:/app/data/conversations:rw
       # Note: CLAUDE_CODE_OAUTH_TOKEN is passed via env (above). No file mount needed.
     ports:
       - "${DASHBOARD_PORT:-4000}:4000"
     networks:
-      - wren
+      - app
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4000/api/health | grep -qF '\"status\":\"ok\"' || exit 1"]
       interval: 15s

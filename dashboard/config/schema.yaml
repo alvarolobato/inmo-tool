@@ -1,4 +1,4 @@
-# PowerShop Analytics — Dashboard configuration schema
+# inmo-tool — Dashboard configuration schema
 # Each entry defines a config key, its env-var mapping, type, default, and metadata.
 # The loader (lib/system-config/loader.ts) reads this file at runtime.
 # Precedence: env vars > config.yaml > defaults defined here.
@@ -29,14 +29,6 @@
   description: "URL pública del Dashboard App (usada en enlaces externos y reverse-proxy)."
   requires_restart: []
 
-- key: dashboard.wren_public_url
-  env: WREN_PUBLIC_URL
-  type: string
-  sensitive: false
-  default: "http://localhost:3000"
-  section: URLs
-  description: "URL pública de WrenAI (enlace 'Wren' del menú principal)."
-  requires_restart: []
 
 # -----------------------------------------------------------------------------
 # Dashboard LLM — proveedor y modelos

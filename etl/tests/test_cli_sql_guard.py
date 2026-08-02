@@ -1,9 +1,11 @@
-"""Tests for cli/lib/sql_guard.py — the `ps sql query` read-only allowlist.
+"""Tests for cli/lib/sql_guard.py — a generic read-only SQL allowlist.
 
 Lives under etl/tests/ (not scripts/tests/ or a cli test dir) because the CI
-`test` job only runs `pytest etl/tests/` and these assertions MUST run on
-every PR: the guard is the documented safety net between agents/operators and
-the vendor-managed production 4D ERP (AGENTS.md "Read-only policy", #832).
+`test` job only runs `pytest etl/tests/`. The `ps sql query` command that
+originally consumed this guard was removed in task 1.1 (#9) along with the
+rest of the 4D-specific CLI, but the guard utility itself is kept for reuse
+by any future read-only DB inspection command (task 1.5, #13) — these tests
+stay meaningful regardless of which command ends up calling it.
 """
 
 from __future__ import annotations

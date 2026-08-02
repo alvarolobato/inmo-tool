@@ -1,4 +1,4 @@
-# PowerShop Analytics — unified configuration schema
+# inmo-tool — unified configuration schema
 # Each entry defines one configuration key with its env-var mapping, type,
 # section, sensitivity, default value, description, restart requirements,
 # and which component(s) consume it.
@@ -16,50 +16,15 @@
 #   components   list of systems that read this key: dashboard | etl | cli | docker
 
 # -----------------------------------------------------------------------------
-# 4D Database (source ERP — read-only access)
+# Connector sources (source-site credentials/config) — placeholder
 # -----------------------------------------------------------------------------
-- key: fourd.host
-  env: P4D_HOST
-  type: string
-  sensitive: false
-  default: null
-  section: "4D"
-  description: "Hostname o IP del servidor 4D (puerto SQL 19812)."
-  requires_restart: [etl]
-  components: [etl, cli]
-
-- key: fourd.port
-  env: P4D_PORT
-  type: int
-  sensitive: false
-  default: 19812
-  section: "4D"
-  description: "Puerto TCP del servidor SQL 4D."
-  requires_restart: [etl]
-  components: [etl, cli]
-
-- key: fourd.user
-  env: P4D_USER
-  type: string
-  sensitive: false
-  default: null
-  section: "4D"
-  description: "Usuario SQL del servidor 4D."
-  requires_restart: [etl]
-  components: [etl, cli]
-
-- key: fourd.password
-  env: P4D_PASSWORD
-  type: string
-  sensitive: true
-  default: null
-  section: "4D"
-  description: "Contraseña SQL del servidor 4D."
-  requires_restart: [etl]
-  components: [etl, cli]
+# The 4D-specific keys that lived here (fourd.host/port/user/password) were
+# removed in task 1.1 (#9) — this repo has no 4D source anymore. Real keys for
+# whichever listing-site connectors land in tasks 1.4/2.1 (#12/#15) belong
+# here once they exist; don't pre-guess their shape now.
 
 # -----------------------------------------------------------------------------
-# PostgreSQL (local mirror — destination for ETL)
+# PostgreSQL (local mirror — destination for connector sync)
 # -----------------------------------------------------------------------------
 - key: postgres.user
   env: POSTGRES_USER
@@ -85,7 +50,7 @@
   env: POSTGRES_DB
   type: string
   sensitive: false
-  default: "powershop"
+  default: "inmotool"
   section: "PostgreSQL"
   description: "Nombre de la base de datos PostgreSQL."
   requires_restart: [etl, dashboard]
@@ -133,16 +98,6 @@
   description: "Clave API de OpenRouter para LLM y embeddings."
   requires_restart: []
   components: [dashboard, docker]
-
-- key: wren.llm_model
-  env: WREN_LLM_MODEL
-  type: string
-  sensitive: false
-  default: "anthropic/claude-sonnet-4"
-  section: "WrenAI"
-  description: "Modelo LLM para WrenAI text-to-SQL (identificador OpenRouter)."
-  requires_restart: [wren-ai-service, wren-ui]
-  components: [docker]
 
 # -----------------------------------------------------------------------------
 # Dashboard LLM
@@ -355,16 +310,6 @@
   requires_restart: []
   components: [dashboard]
 
-- key: dashboard.wren_public_url
-  env: WREN_PUBLIC_URL
-  type: string
-  sensitive: false
-  default: "http://localhost:3000"
-  section: "Dashboard App"
-  description: "URL pública de WrenAI (enlace 'Wren' del menú principal). Ej: https://wren.example.com"
-  requires_restart: []
-  components: [dashboard]
-
 - key: dashboard.port
   env: DASHBOARD_PORT
   type: int
@@ -424,7 +369,7 @@
   sensitive: false
   default: 2
   section: "ETL"
-  description: "Hora UTC a la que se ejecuta la sincronización completa nocturna (truncate + insert; refleja borrados duros del 4D). Solo env var; los cambios en config.yaml se ignoran (etl/main.py lee únicamente ETL_CRON_HOUR del entorno). Requiere reiniciar el contenedor ETL."
+  description: "Hora UTC a la que se ejecuta la sincronización completa (truncate + insert; refleja bajas en el origen). Solo env var; los cambios en config.yaml se ignoran (etl/main.py lee únicamente ETL_CRON_HOUR del entorno). Requiere reiniciar el contenedor ETL."
   requires_restart: [etl]
   components: [etl, docker]
 
@@ -438,15 +383,11 @@
   requires_restart: [etl]
   components: [etl, docker]
 
-- key: etl.delta_lookback_days
-  env: ETL_DELTA_LOOKBACK_DAYS
-  type: int
-  sensitive: false
-  default: 1
-  section: "ETL"
-  description: "Días de solapamiento que aplica la sincronización delta: en lugar de consultar desde el watermark exacto, consulta desde watermark - N días. Protege contra el retraso de replicación H3 (filas presentes en 4D pero no visibles al driver p4d cuando arranca el sync nocturno). El upsert es idempotente; re-obtener los últimos N días solo añade UPDATEs para filas sin cambios. 0 deshabilita el solapamiento. Solo env var. Requiere reiniciar el contenedor ETL (se lee una vez al arrancar)."
-  requires_restart: [etl]
-  components: [etl, docker]
+
+# etl.delta_lookback_days removed in task 1.1 (#9) — its rationale (4D/p4d
+# replication-delay compensation) is source-specific and won't transfer to
+# whatever consistency model real connectors need. Re-add if a connector
+# genuinely needs an equivalent overlap window.
 
 # -----------------------------------------------------------------------------
 # Infra / Docker Hub

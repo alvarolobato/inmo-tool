@@ -3,7 +3,7 @@
 # ~/.claude/.credentials.json so the dashboard container can read it.
 #
 # This is THE refresher entrypoint, run on a schedule by the launchd agent
-# (~/Library/LaunchAgents/com.powershop.claude-token-sync.plist). Despite the
+# (~/Library/LaunchAgents/com.inmotool.claude-token-sync.plist). Despite the
 # name, it does NOT attempt to refresh the OAuth token itself — that endpoint
 # at claude.ai is protected by Cloudflare and direct curl POSTs return an
 # anti-bot challenge page (issue #419, D-024). The host claude CLI handles

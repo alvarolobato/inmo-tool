@@ -6,33 +6,33 @@ One-page reference for contributors and agents. Read this before changing any ar
 
 ## Test Tiers
 
-### Tier A — Pure unit (mocked DB / 4D)
-Fast, no external dependencies. All ETL sync logic, all Dashboard lib functions, API route handlers with mocked `query` / `validateReadOnly`.
+### Tier A — Pure unit (mocked DB / external sources)
+Fast, no external dependencies. All connector/dedup/scoring logic, all Dashboard lib functions, API route handlers with mocked `query` / `validateReadOnly`.
 
 - **When to run**: every commit, in CI
 - **Requirements**: no live DB, no network
 
-### Tier B — Contract tests (SQL shape)
-Validate that SQL in SQL pairs and fixtures conforms to expected schema shapes. No live DB required.
+### Tier B — Contract tests (schema/SQL shape)
+Validate that SQL and fixtures conform to expected schema shapes. No live DB required.
 
 - **When to run**: every PR, in CI
 - **Requirements**: no live DB
 
 ### Tier C — Integration (optional, local only)
-Dashboard API routes against a real local Postgres. Documents real behaviour that Tier A/B cannot catch.
+Dashboard/connector code against a real local Postgres. Documents real behaviour that Tier A/B cannot catch.
 
 - **When to run**: locally before merging risky changes
 - **Requirements**: `POSTGRES_DSN` set, local stack running (`ps stack up`)
-- **Never run in CI** — requires secrets
+- **Never run in CI** — requires secrets/live network for connectors
 
 ---
 
 ## Commands
 
-### ETL (Python / pytest)
+### ETL / connectors (Python / pytest)
 
 ```bash
-# Run all ETL tests (fast, Tier A + B)
+# Run all tests (fast, Tier A + B)
 docker compose run --rm etl python -m pytest etl/tests/ -x -q
 
 # With coverage report
@@ -53,60 +53,22 @@ cd dashboard && npm run test:coverage
 
 ```bash
 # Requires local stack running and POSTGRES_DSN set
-# Runs the full test suite — integration tests activate when POSTGRES_DSN is set; unit tests still pass with mocks
 cd dashboard && POSTGRES_DSN=postgresql://... npm test
 ```
 
 ---
 
-## Coverage Thresholds
+## Coverage thresholds — reset, not yet re-established
 
-Thresholds are enforced locally by vitest (`npm run test:coverage` fails if below floor). In CI they will be **non-blocking** (`continue-on-error: true`) once the workflow patch is applied (pending permissions approval). The goal is to establish a ratchet: raise thresholds as coverage improves, never lower them.
-
-### Dashboard (Vitest / v8)
-
-Configured in `dashboard/vitest.config.ts` under `coverage.thresholds`.
-
-| Metric | Baseline (2026-04-18) | Floor (−5%) |
-|--------|----------------------|-------------|
-| Statements | 78% | **73%** |
-| Branches | 67% | **62%** |
-| Functions | 79% | **74%** |
-| Lines | 80% | **75%** |
-
-### ETL (pytest-cov)
-
-**Planned**: will be configured via `--cov-fail-under=43` in CI once the workflow patch is applied (see PR body for the pending diff).
-
-| Metric | Baseline (2026-04-18) | Floor (−5%) |
-|--------|----------------------|-------------|
-| Total lines | 48% | **43%** |
-
-> **Note**: ETL baseline is low because integration tests skip when `P4D_HOST` and `POSTGRES_DSN` are not set. The 43% floor reflects unit-only coverage. Raise after adding Tier A tests for low-coverage modules (`compras`, `maestros`, `mayorista`).
-
-### Policy for raising thresholds
-
-1. After 2–3 CI cycles where measured coverage consistently exceeds the floor, raise the floor by 5%.
-2. Update both the config file and the table above in the same PR.
-3. Never lower a threshold; if tests delete coverage, add replacements first.
+This repo was bootstrapped from powershop-analytics, whose coverage baselines/floors were tied to modules deleted in task 1.1 (issue #9) — carrying those numbers forward would be meaningless. `dashboard/vitest.config.ts`'s `coverage.thresholds` and any ETL `--cov-fail-under` value should be re-baselined once there's real connector/schema code to measure (Phase 1 tasks 1.2–1.6), not before. Policy once re-established: after 2–3 CI cycles consistently exceeding the floor, raise it 5%; never lower a threshold without adding replacement coverage first.
 
 ---
 
 ## Must Cover Before Risky Change
 
-If you are changing any of the following, write or update tests **first** (TDD):
+Reset for the same reason as the coverage thresholds above — the old list named files that no longer exist. Re-populate this table as Phase 1+ tasks land real code; the rule of thumb stays the same:
 
-| File | Why it matters |
-|------|---------------|
-| `etl/main.py` | Pipeline orchestration, sync dispatch, error handling — a bug here breaks all nightly loads |
-| `etl/sync/ventas.py` | Delta upsert for both `ps_ventas` (911K rows) and `ps_lineas_ventas` (1.7M rows, via `sync_lineas_ventas()`) — wrong watermark = data loss or duplicates |
-| `dashboard/lib/date-params.ts` | Date substitution for every widget SQL — already covered, keep it that way |
-| `dashboard/lib/db.ts` | `validateReadOnly` blocks writes; `query` is the single DB gateway — both must stay tested |
-| `dashboard/app/api/anomaly-check/route.ts` | Anomaly detection — already covered, do not regress |
-| `dashboard/app/api/etl/runs/route.ts` | ETL monitoring handler — surfaced in the dashboard; failure silences alerts |
-| `dashboard/app/api/etl/stats/route.ts` | ETL stats handler — same as above |
-
-**Rule of thumb**: if a bug here would break a nightly load or silently corrupt the dashboard, it belongs on this list.
+**Rule of thumb**: if a bug here would break a scheduled connector run, corrupt the dedup/scoring pipeline, or silently break the dashboard, it belongs on this list. Candidates to add as they're built: the connector orchestrator (task 1.3, #11), the dedup engine (task 2.2, #16 — a bad merge or a bad auto-merge threshold has real data-quality consequences), and `profile_listing_state` read/write paths (keyed on `property_id`, not `listing_id` — see issue #1's "Review addressed" notes for why this matters).
 
 ---
 

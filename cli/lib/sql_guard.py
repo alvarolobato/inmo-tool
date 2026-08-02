@@ -1,15 +1,16 @@
-"""Read-only guard for ad-hoc SQL sent to the production 4D ERP.
+"""Read-only guard for ad-hoc SQL sent to an external data source.
 
-Single source of truth for the `ps sql query` safety check (AGENTS.md
-"Read-only policy", issue #832). The previous guard was a `startswith`
-keyword check, trivially bypassed by a leading comment (`/* x */ DELETE …`),
-a line comment, or a second statement chained after a SELECT.
+Generic allowlist-based read-only SQL check, kept from the source project
+(where it guarded `ps sql query` against the vendor-managed 4D ERP) even
+though that specific command was removed in task 1.1 (#9) — the underlying
+utility is domain-agnostic and worth reusing for any future read-only DB
+inspection command (e.g. task 1.5, #13). A `startswith` keyword check is
+trivially bypassed by a leading comment (`/* x */ DELETE …`), a line
+comment, or a second statement chained after a SELECT.
 
 Strategy: scan the statement once, blanking string literals and removing
 comments (so neither can hide or fake syntax), then enforce an ALLOWLIST —
-exactly one statement, and it must start with SELECT. Allowlisting is the
-only safe shape for this check: the 4D server is vendor-managed production
-and we only ever read from it (decision D-001).
+exactly one statement, and it must start with SELECT.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ def _normalize(sql: str) -> str | None:
     comment is left unterminated (malformed input — reject upstream).
 
     Handles:
-      - single-quoted strings with '' escapes (SQL standard, 4D included)
+      - single-quoted strings with '' escapes (standard SQL)
       - double-quoted identifiers
       - `--` line comments
       - `/* … */` block comments (non-nested, per SQL standard)
