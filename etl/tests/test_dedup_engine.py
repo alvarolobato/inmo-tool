@@ -865,3 +865,287 @@ class TestReconciliation:
                 "rejected",
                 "offer_made",
             }
+
+
+class TestSuggestionResolution:
+    """Issue #60: the suggestion queue used to be write-only.
+
+    `run` filed medium-confidence pairs for review, but nothing could ever
+    act on that review — `_pair_already_recorded` skipped any pair with a
+    suggestion row forever, so approving one had literally no effect.
+    """
+
+    def _file_one_suggestion(self, conn) -> tuple[int, int, int, int, int]:
+        """Create a pair that lands as a *suggestion* (not an auto-merge).
+
+        A shared reference_code with no corroboration is suggestion-only by
+        design (issue #72's collision-risk rule), which makes it the natural
+        fixture for exercising the confirm/reject path.
+        """
+        listing_a, prop_a, listing_b, prop_b = _insert_pair(
+            conn,
+            "idealista",
+            "fotocasa",
+            "confirm-flow",
+            reference_code_a="NS-4471",
+            reference_code_b="NS-4471",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(180),
+            current_price_a=Decimal(200000),
+            current_price_b=Decimal(600000),
+        )
+        result = engine.run(conn)
+        assert result.suggested == 1, "fixture should file exactly one suggestion"
+        assert result.merged == 0
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM suggested_merge")
+            (suggestion_id,) = cur.fetchone()
+        return suggestion_id, listing_a, prop_a, listing_b, prop_b
+
+    def test_confirm_merges_the_pair_and_logs_it(self, dedup_db):
+        suggestion_id, listing_a, prop_a, listing_b, prop_b = self._file_one_suggestion(
+            dedup_db
+        )
+
+        survivor_id, losing_id, _ = engine.confirm_suggestion(dedup_db, suggestion_id)
+        assert {survivor_id, losing_id} == {prop_a, prop_b}
+        assert survivor_id == min(prop_a, prop_b)
+
+        with dedup_db.cursor() as cur:
+            # Both listings now point at the survivor — a real merge, not
+            # just a status flip on the suggestion row.
+            cur.execute(
+                "SELECT DISTINCT property_id FROM listing WHERE id IN (%s, %s)",
+                (listing_a, listing_b),
+            )
+            assert [r[0] for r in cur.fetchall()] == [survivor_id]
+
+            # Recorded in property_merge_log identically to an auto-merge,
+            # carrying the *original* basis rather than a synthetic one.
+            cur.execute(
+                "SELECT match_basis, losing_property_id "
+                "FROM property_merge_log WHERE property_id = %s",
+                (survivor_id,),
+            )
+            basis, logged_losing = cur.fetchone()
+            assert basis == "reference_code"
+            assert logged_losing == losing_id
+
+            # Provenance lives on the suggestion, not in the merge log's
+            # detail column — that one is reconcile_merge's revert snapshot
+            # and is read structurally by `revert`.
+            cur.execute(
+                "SELECT status, resolved_at, detail FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            status, resolved_at, detail = cur.fetchone()
+            assert status == "confirmed"
+            assert resolved_at is not None
+            assert detail["confirmed_merge"] == {
+                "survivor_property_id": survivor_id,
+                "losing_property_id": losing_id,
+                "had_conflict": False,
+            }
+
+    def test_confirmed_pair_no_longer_appears_in_the_review_queue(self, dedup_db):
+        """AC: 'a confirmed-then-merged pair no longer appears in suggestions'.
+
+        `ps dedup suggestions` lists status IN ('pending','conflict'), so a
+        confirmed row drops out of it.
+        """
+        suggestion_id, *_ = self._file_one_suggestion(dedup_db)
+        engine.confirm_suggestion(dedup_db, suggestion_id)
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM suggested_merge "
+                "WHERE status IN ('pending','conflict')"
+            )
+            assert cur.fetchone()[0] == 0
+
+    def test_confirmed_merge_is_revertable_like_any_other(self, dedup_db):
+        """A human-confirmed merge goes through perform_merge, so `revert`
+        works on it unchanged — that reuse is the reason to route through
+        perform_merge rather than hand-rolling the confirm path."""
+        suggestion_id, listing_a, prop_a, listing_b, prop_b = self._file_one_suggestion(
+            dedup_db
+        )
+        engine.confirm_suggestion(dedup_db, suggestion_id)
+
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT id FROM property_merge_log")
+            (merge_log_id,) = cur.fetchone()
+        engine.revert(dedup_db, merge_log_id)
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT id, property_id FROM listing WHERE id IN (%s, %s) ORDER BY id",
+                (listing_a, listing_b),
+            )
+            restored = dict(cur.fetchall())
+        assert restored[listing_a] == prop_a
+        assert restored[listing_b] == prop_b
+
+    def test_rerunning_after_confirm_does_not_refile_the_pair(self, dedup_db):
+        """The confirmed pair is excluded from the skip set so it *can* be
+        re-evaluated — but post-merge both listings share a property, so the
+        run short-circuits before ever reaching the suggestion path."""
+        suggestion_id, *_ = self._file_one_suggestion(dedup_db)
+        engine.confirm_suggestion(dedup_db, suggestion_id)
+
+        result = engine.run(dedup_db)
+        assert result.suggested == 0
+        assert result.merged == 0
+
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM suggested_merge")
+            assert cur.fetchone()[0] == 1  # still just the confirmed one
+
+    def test_pending_suggestion_is_not_refiled_on_the_next_run(self, dedup_db):
+        """The skip set still does its original job for un-reviewed rows —
+        the batching change (#61) must not regress this."""
+        self._file_one_suggestion(dedup_db)
+        result = engine.run(dedup_db)
+        assert result.suggested == 0
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM suggested_merge")
+            assert cur.fetchone()[0] == 1
+
+    def test_reject_keeps_the_pair_out_of_future_runs(self, dedup_db):
+        suggestion_id, *_ = self._file_one_suggestion(dedup_db)
+        engine.reject_suggestion(dedup_db, suggestion_id)
+
+        result = engine.run(dedup_db)
+        assert result.suggested == 0
+        assert result.merged == 0
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status, resolved_at FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            status, resolved_at = cur.fetchone()
+            assert status == "rejected"
+            assert resolved_at is not None
+
+    def test_confirming_an_already_confirmed_suggestion_is_refused(self, dedup_db):
+        suggestion_id, *_ = self._file_one_suggestion(dedup_db)
+        engine.confirm_suggestion(dedup_db, suggestion_id)
+        with pytest.raises(ValueError, match="already confirmed"):
+            engine.confirm_suggestion(dedup_db, suggestion_id)
+
+    def test_confirming_a_conflict_row_points_at_resolve_conflict(self, dedup_db):
+        """A 'conflict' row means a merge already happened and left clashing
+        per-profile state — merging again is not the right action, so confirm
+        refuses and names the command that is."""
+        _listing_a, prop_a, _listing_b, prop_b = _insert_pair(
+            dedup_db,
+            "idealista",
+            "fotocasa",
+            "conflict-confirm",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            listing_kind_a="particular",
+            listing_kind_b="particular",
+            description_a="Piso reformado, tel 644556677",
+            description_b="Piso reformado, tel 644556677",
+            current_price_a=Decimal(310000),
+            current_price_b=Decimal(305000),
+        )
+        profile_id = _insert_profile(dedup_db)
+        _set_pls(dedup_db, profile_id, prop_a, "rejected")
+        _set_pls(dedup_db, profile_id, prop_b, "offer_made")
+        assert engine.run(dedup_db).conflicts == 1
+
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT id FROM suggested_merge WHERE status = 'conflict'")
+            (conflict_id,) = cur.fetchone()
+
+        with pytest.raises(ValueError, match="resolve-conflict"):
+            engine.confirm_suggestion(dedup_db, conflict_id)
+
+        engine.resolve_conflict(dedup_db, conflict_id)
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status, resolved_at FROM suggested_merge WHERE id = %s",
+                (conflict_id,),
+            )
+            status, resolved_at = cur.fetchone()
+            assert status == "rejected"
+            assert resolved_at is not None
+
+        # And it's out of the review queue for good.
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM suggested_merge "
+                "WHERE status IN ('pending','conflict')"
+            )
+            assert cur.fetchone()[0] == 0
+
+    def test_resolve_conflict_refuses_a_non_conflict_row(self, dedup_db):
+        suggestion_id, *_ = self._file_one_suggestion(dedup_db)
+        with pytest.raises(ValueError, match="not 'conflict'"):
+            engine.resolve_conflict(dedup_db, suggestion_id)
+
+    def test_unknown_suggestion_id_is_refused(self, dedup_db):
+        with pytest.raises(ValueError, match="No suggested_merge row"):
+            engine.confirm_suggestion(dedup_db, 999999)
+
+
+class TestRecordedPairBatching:
+    """Issue #61b: the skip check was one query per candidate pair."""
+
+    def test_skip_check_costs_one_query_per_run_not_one_per_pair(self, dedup_db):
+        """At 60 listings the old code issued 1770 SELECTs (60*59/2) just to
+        ask 'have I seen this pair?'. Count them for real by wrapping the
+        cursor, rather than asserting the code merely *looks* batched.
+        """
+        n = 60
+        for i in range(n):
+            prop = _insert_property(dedup_db, address=f"Calle Batch {i}")
+            _insert_listing(dedup_db, prop, "idealista", f"batch-{i}")
+        dedup_db.commit()
+
+        suggested_merge_selects = []
+
+        class _CountingCursor:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def execute(self, sql, params=None):
+                if "FROM suggested_merge" in sql and sql.lstrip().upper().startswith(
+                    "SELECT"
+                ):
+                    suggested_merge_selects.append(sql)
+                return self._inner.execute(sql, params)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            def __enter__(self):
+                self._inner.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self._inner.__exit__(*exc)
+
+        class _CountingConnection:
+            """psycopg2 connections don't allow attribute assignment, so wrap
+            rather than monkeypatch `.cursor` onto the real connection."""
+
+            def __init__(self, inner):
+                self._inner = inner
+
+            def cursor(self, *args, **kwargs):
+                return _CountingCursor(self._inner.cursor(*args, **kwargs))
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        result = engine.run(_CountingConnection(dedup_db))
+
+        assert result.pairs_compared == n * (n - 1) // 2 == 1770
+        assert len(suggested_merge_selects) == 1, (
+            f"expected a single preload query, got {len(suggested_merge_selects)} "
+            "— the per-pair skip check is back"
+        )

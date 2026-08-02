@@ -16,9 +16,17 @@ usage() {
 Usage: ps dedup <subcommand> [args]
 
 Subcommands:
-  run              Run the dedup engine once (compare listings, merge/suggest)
-  revert <id>      Undo one auto-merge by its property_merge_log id
-  suggestions      List pending suggested_merge rows for human review
+  run                     Run the dedup engine once (compare listings, merge/suggest)
+  revert <id>             Undo one auto-merge by its property_merge_log id
+  suggestions             List pending suggested_merge rows for human review
+  confirm <id>            Merge the pair behind a suggested_merge row
+  reject <id>             Mark a suggestion as not-the-same-property
+  resolve-conflict <id>   Clear a merge-time state conflict flag
+
+  Review workflow: 'suggestions' lists what needs a human decision, then
+  'confirm' or 'reject' each by its id. A row listed with status 'conflict'
+  is a merge that already happened but left clashing per-profile state —
+  inspect it, then 'resolve-conflict' to clear the flag.
 EOF
 }
 
@@ -56,6 +64,19 @@ cmd_suggestions() {
         -c "SELECT id, listing_id_a, listing_id_b, match_basis, confidence, status, detail, created_at FROM suggested_merge WHERE status IN ('pending','conflict') ORDER BY created_at DESC"
 }
 
+# confirm/reject/resolve-conflict all take a single suggested_merge id and
+# differ only in which engine entry point they call, so they share one body.
+_cmd_with_suggestion_id() {
+    local subcmd="$1"
+    local id="${2:-}"
+    if [ -z "$id" ]; then
+        echo -e "${RED}ps dedup ${subcmd}: missing <id>${NC}" >&2
+        usage >&2
+        exit 1
+    fi
+    _run_in_etl python -m etl.dedup.cli "$subcmd" "$id"
+}
+
 SUBCMD="${1:-}"
 if [ -z "$SUBCMD" ] || [ "$SUBCMD" = "-h" ] || [ "$SUBCMD" = "--help" ]; then
     usage
@@ -64,9 +85,12 @@ fi
 shift
 
 case "$SUBCMD" in
-    run)         cmd_run ;;
-    revert)      cmd_revert "$@" ;;
-    suggestions) cmd_suggestions ;;
+    run)              cmd_run ;;
+    revert)           cmd_revert "$@" ;;
+    suggestions)      cmd_suggestions ;;
+    confirm)          _cmd_with_suggestion_id confirm "$@" ;;
+    reject)           _cmd_with_suggestion_id reject "$@" ;;
+    resolve-conflict) _cmd_with_suggestion_id resolve-conflict "$@" ;;
     *)
         echo -e "${RED}ps dedup: unknown subcommand '${SUBCMD}'${NC}" >&2
         usage >&2
