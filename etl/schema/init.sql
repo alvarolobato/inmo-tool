@@ -334,10 +334,17 @@ CREATE TABLE IF NOT EXISTS connector_run_results (
     discovered_count INTEGER      NOT NULL DEFAULT 0,
     fetched_count    INTEGER      NOT NULL DEFAULT 0,
     error_count      INTEGER      NOT NULL DEFAULT 0,
-    error_msg        TEXT
+    error_msg        TEXT,
+    -- One row per connector per run — a connector never runs twice within
+    -- the same connector_runs row, so this pairing is a real 1:1.
+    UNIQUE (run_id, connector_name)
 );
 
 CREATE INDEX IF NOT EXISTS idx_connector_run_results_run_id ON connector_run_results (run_id);
+-- Recent-runs lookups (dashboards, `ps etl status`-style queries) filter/sort
+-- on started_at; unindexed, that's a seq scan once this table has any real
+-- history.
+CREATE INDEX IF NOT EXISTS idx_connector_runs_started_at ON connector_runs (started_at DESC);
 
 
 -- ============================================================

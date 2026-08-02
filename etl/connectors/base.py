@@ -12,9 +12,17 @@ module intentionally has zero network code and zero real-site knowledge.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
+
+# Passed to discover()/fetch_detail() so a connector that makes more than one
+# real network request per call (e.g. paginating inside discover()) can
+# throttle each individual request, not just the one acquire() the
+# orchestrator does around the whole call. Calling this blocks until the
+# framework's rate limiter says it's safe to make one more request.
+Throttle = Callable[[], None]
 
 
 @dataclass(frozen=True)
@@ -102,24 +110,51 @@ class Connector(ABC):
     limiter/circuit breaker the orchestrator wraps around every connector
     — a connector never rate-limits or trips its own breaker, that's the
     framework's job (issue #11), so every connector gets it for free.
+
+    There is deliberately no `max_concurrency`-style knob here: the
+    orchestrator runs connectors sequentially, one at a time, in Phase 1 —
+    an attribute implying concurrent execution exists would be a knob that
+    does nothing. Add it back, wired to a real concurrent runner, if/when a
+    later phase actually needs to fetch multiple listings in parallel.
     """
 
     name: str
     rate_limit_per_minute: int = 30
-    max_concurrency: int = 1
-    # Circuit breaker: abort the run if this fraction of attempts fail,
-    # once at least this many attempts have happened (avoids tripping on
-    # e.g. 1 failure out of 2 early attempts).
+    # Circuit breaker: abort the run if this fraction of the *most recent*
+    # `circuit_breaker_window` attempts fail, once at least
+    # `circuit_breaker_min_attempts` attempts have happened (avoids tripping
+    # on e.g. 1 failure out of 2 early attempts). See
+    # docs/architecture/connectors.md for why the window is rolling, not
+    # cumulative-since-run-start.
     circuit_breaker_error_rate: float = 0.30
     circuit_breaker_min_attempts: int = 10
+    circuit_breaker_window: int = 20
 
     @abstractmethod
-    def discover(self, scope: ConnectorScope) -> list[str]:
-        """Return external_ids that exist for this scope. Cheap; no full fetch."""
+    def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
+        """Return external_ids that exist for this scope. Cheap; no full fetch.
+
+        Call `throttle()` before each real network request this method
+        makes. The orchestrator also calls it once before invoking
+        `discover` at all, which is sufficient for a connector that issues
+        a single request here — a connector that paginates internally
+        (multiple requests within one `discover` call) must call `throttle`
+        again before each of those, since the orchestrator has no visibility
+        inside this method to do it for you.
+        """
 
     @abstractmethod
-    def fetch_detail(self, external_id: str) -> RawListing:
-        """Fetch and return the full raw listing for one external_id."""
+    def fetch_detail(self, external_id: str, throttle: Throttle) -> RawListing:
+        """Fetch and return the full raw listing for one external_id.
+
+        Call `throttle()` before the request if this method's own single
+        request isn't already covered by the orchestrator's per-call
+        acquire — see `discover`'s docstring for the same reasoning. For a
+        connector that makes exactly one request per `fetch_detail` call,
+        the orchestrator's own acquire is enough and calling `throttle`
+        again here is harmless (rate limiting an already-throttled call
+        just costs a possible tiny extra wait, never incorrectness).
+        """
 
     @abstractmethod
     def normalize(self, raw: RawListing) -> CanonicalListingVersion:

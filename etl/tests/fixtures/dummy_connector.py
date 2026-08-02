@@ -14,6 +14,7 @@ from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
     RawListing,
+    Throttle,
 )
 
 
@@ -23,6 +24,7 @@ class DummyConnector(Connector):
         name: str = "dummy",
         external_ids: tuple[str, ...] = ("dummy-1", "dummy-2", "dummy-3"),
         failing_ids: frozenset[str] = frozenset(),
+        db_error_ids: frozenset[str] = frozenset(),
         rate_limit_per_minute: int = 6000,  # fast for tests — not what's under test here
         circuit_breaker_error_rate: float = 0.30,
         circuit_breaker_min_attempts: int = 2,
@@ -33,11 +35,17 @@ class DummyConnector(Connector):
         self.circuit_breaker_min_attempts = circuit_breaker_min_attempts
         self._external_ids = external_ids
         self._failing_ids = failing_ids
+        # IDs that fetch/normalize fine but fail at persist time — simulates
+        # a mid-transaction DB error (as opposed to `failing_ids`, which
+        # simulates a connector-side failure before persistence is ever
+        # attempted). Encoded as an invalid `property_type` so it trips
+        # the real `property_type` CHECK constraint in etl/schema/init.sql.
+        self._db_error_ids = db_error_ids
 
-    def discover(self, scope: ConnectorScope) -> list[str]:
+    def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         return list(self._external_ids)
 
-    def fetch_detail(self, external_id: str) -> RawListing:
+    def fetch_detail(self, external_id: str, throttle: Throttle) -> RawListing:
         if external_id in self._failing_ids:
             raise ConnectorError(f"simulated fetch failure for {external_id}")
         return RawListing(
@@ -47,6 +55,7 @@ class DummyConnector(Connector):
         )
 
     def normalize(self, raw: RawListing) -> CanonicalListingVersion:
+        is_db_error_id = raw.external_id in self._db_error_ids
         return CanonicalListingVersion(
             external_id=raw.external_id,
             source=raw.source,
@@ -60,7 +69,9 @@ class DummyConnector(Connector):
             address=raw.raw["address"],
             lat=None,
             lon=None,
-            property_type="piso",
+            # Not a real value in the property_type CHECK constraint —
+            # deliberately invalid so persistence fails mid-transaction.
+            property_type="not-a-real-property-type" if is_db_error_id else "piso",
             m2_built=None,
             m2_useful=None,
             rooms=None,
@@ -78,11 +89,11 @@ class DiscoverFailsConnector(Connector):
     name = "broken-discover"
     rate_limit_per_minute = 6000
 
-    def discover(self, scope: ConnectorScope) -> list[str]:
+    def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         raise ConnectorError("discover() is broken")
 
     def fetch_detail(
-        self, external_id: str
+        self, external_id: str, throttle: Throttle
     ) -> RawListing:  # pragma: no cover — unreachable
         raise NotImplementedError
 
