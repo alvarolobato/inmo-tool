@@ -7,7 +7,11 @@ structure, not field semantics. See docs/skills/connectors.md.
 
 from __future__ import annotations
 
+import logging
+import re
 from typing import Any
+
+logger = logging.getLogger("etl.connectors.milanuncios_mapping")
 
 # ad['category']['slug'] -> property.property_type (schema CHECK constraint:
 # 'piso','chalet','atico','local','nave','garaje','terreno','edificio').
@@ -99,36 +103,69 @@ def infer_operation(category_slug: str | None) -> str | None:
         return "sale"
     if category_slug.startswith("alquiler-"):
         return "rent"
+    # Non-empty but unrecognized -- the exact miscategorization case this
+    # per-listing derivation exists to catch (as opposed to blanket-
+    # labeling everything "sale"). The orchestrator's INSERT path still
+    # COALESCEs a None operation to 'sale' at the DB layer (a schema-level
+    # safe default shared by every connector), so without this log a
+    # miscategorized listing would silently end up labeled 'sale' anyway
+    # with zero trace of the uncertainty (Opus review, PR #85).
+    logger.warning(
+        "milanuncios: unrecognized category slug %r -- operation left "
+        "unknown rather than defaulted to sale/rent",
+        category_slug,
+    )
     return None
 
 
 # Attribute `type` values already surfaced as first-class CanonicalListingVersion
 # columns — excluded from `extra_features` so nothing is duplicated between a
-# real column and the free-text `features` array.
+# real column and the free-text `features` array. `squareMeterPrice` was
+# wrongly included here (Opus review, PR #85): no `price_per_m2`-style column
+# exists anywhere in base.py/init.sql, so it was being silently dropped from
+# *both* a column and `features` for no reason — removed from this set so it
+# now flows into `features` like any other unmapped attribute.
 _ATTRIBUTES_MAPPED_TO_COLUMNS = frozenset(
     {
         "bedrooms",
         "bathrooms",
         "squareMeters",
-        "squareMeterPrice",
         "floor",
         "energyCertificate",
     }
 )
 
 
+def _slugify(text: str) -> str:
+    """Lowercase ascii snake_case token: camelCase word boundaries and
+    non-alnum runs both become a single underscore, stripped at the edges.
+    `"hotWater"` -> `"hot_water"`; `"natural_gas"` stays `"natural_gas"`;
+    `"Aire acondicionado"` -> `"aire_acondicionado"` — without the
+    camelCase split, Milanuncios' own camelCase attribute-type names
+    (`hotWater`, `squareMeterPrice`) would collapse into unreadable
+    unbroken runs (`hotwater`, `squaremeterprice`)."""
+    text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", text)
+    return re.sub(r"[^a-z0-9]+", "_", text.strip().lower()).strip("_")
+
+
 def extra_features(attributes: list[Any]) -> tuple[str, ...]:
     """Surface any `ad.attributes` entry not already mapped to a first-class
-    column as a human-readable `"<field>: <value>"` string (issue #78,
-    issue #76's `property.features` column) — mirrors
-    `property_web_scraper`'s `features` array concept, not their code.
+    column as a short `"<type>_<value>"` slug token (issue #78, issue #76's
+    `property.features` column) — mirrors `property_web_scraper`'s
+    `features` array concept, not their code.
+
+    Emits slug tokens (e.g. `"heating_natural_gas"`), not the original
+    `"<label>: <value>"` human-readable strings — `property.features` is
+    documented in data-model.md and indexed with a GIN index specifically
+    for containment queries (`features @> ARRAY[...]`) once hard-filtering
+    uses it; a full sentence-like string can't be matched that way (Opus
+    review, PR #85).
 
     Confirmed live (2026-08 spike, 3 real listings): `heating`/`hotWater`
-    ("calefaccion: gas natural", "agua caliente: gas natural") are the
-    attribute types this actually captures today; the list isn't
+    are the attribute types this actually captures today; the list isn't
     hardcoded to those two so any other attribute type Milanuncios adds
     later is picked up automatically without a code change, as long as it
-    carries both `fieldFormatted` and a formatted/raw value.
+    carries a `type` and a raw `value`.
     """
     features: list[str] = []
     for item in attributes:
@@ -137,11 +174,34 @@ def extra_features(attributes: list[Any]) -> tuple[str, ...]:
         attr_type = item.get("type")
         if not attr_type or attr_type in _ATTRIBUTES_MAPPED_TO_COLUMNS:
             continue
-        label = item.get("fieldFormatted")
-        value = item.get("valueFormatted") or item.get("value")
-        if label and value:
-            features.append(f"{label}: {value}")
+        raw_value = item.get("value")
+        if not raw_value:
+            continue
+        token = f"{_slugify(str(attr_type))}_{_slugify(str(raw_value))}"
+        if token:
+            features.append(token)
     return tuple(features)
+
+
+def energy_rating_value(attributes: list[Any]) -> str | None:
+    """Look up the energy-certificate rating, preferring a bare A-G letter
+    over Milanuncios' human-readable formatting.
+
+    Milanuncios' `valueFormatted` for this attribute is usually a bare
+    letter too ("E"), but can also be a non-letter state like "En trámite"
+    (pending) or "Exento" (exempt) — neither of which is a real A-G rating.
+    Preferring the raw `value` uppercased when it genuinely is a single
+    A-G letter keeps this column's format consistent with Fotocasa's
+    (which stores bare letters), while still preserving the informative
+    non-letter states via `valueFormatted` rather than forcing them into a
+    letter they aren't (Opus review, PR #85)."""
+    for item in attributes:
+        if isinstance(item, dict) and item.get("type") == "energyCertificate":
+            raw = item.get("value")
+            if isinstance(raw, str) and re.fullmatch(r"[a-gA-G]", raw.strip()):
+                return raw.strip().upper()
+            return item.get("valueFormatted") or (raw if isinstance(raw, str) else None)
+    return None
 
 
 def infer_listing_kind(seller_type: dict[str, Any] | None) -> str | None:

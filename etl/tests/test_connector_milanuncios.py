@@ -14,8 +14,15 @@ from unittest.mock import Mock, patch
 import pytest
 
 from etl.connectors.base import ConnectorError, ConnectorScope
-from etl.connectors.milanuncios import MilanunciosConnector
-from etl.connectors.milanuncios_mapping import extra_features, infer_operation
+from etl.connectors.milanuncios import (
+    MilanunciosConnector,
+    _has_usable_jsonld_property_schema,
+)
+from etl.connectors.milanuncios_mapping import (
+    energy_rating_value,
+    extra_features,
+    infer_operation,
+)
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -178,11 +185,18 @@ class TestNormalize:
         assert canonical.year_built is None
         assert canonical.m2_plot is None
         assert canonical.operation == "sale"
-        assert "calefaccion: gas natural" in canonical.features
-        assert "agua caliente: gas natural" in canonical.features
+        # features are short slug tokens ("<type>_<value>"), not
+        # "<label>: <value>" strings — data-model.md documents `features`
+        # for containment queries (`features @> ARRAY[...]`), which a
+        # sentence-like string can't satisfy (Opus review, PR #85).
+        assert "heating_natural_gas" in canonical.features
+        assert "hot_water_natural_gas" in canonical.features
+        # squareMeterPrice is real data that was wrongly excluded from both
+        # a column and `features` (Opus review, PR #85) — now flows through.
+        assert "square_meter_price_4768" in canonical.features
         # attributes already mapped to first-class columns must not also
         # appear in `features` (would duplicate bedrooms/bathrooms/etc.)
-        assert not any(f.startswith("dormitorios:") for f in canonical.features)
+        assert not any(f.startswith("bedrooms_") for f in canonical.features)
 
     def test_normalize_infers_particular_from_explicit_boolean(self):
         """Unlike Fotocasa, Milanuncios publishes sellerType.isPrivate directly
@@ -277,13 +291,56 @@ class TestInferOperation:
         assert infer_operation(None) is None
         assert infer_operation("") is None
 
+    def test_unrecognized_nonempty_slug_logs_a_warning(self, caplog):
+        """Opus review, PR #85, must-fix: the orchestrator's INSERT path
+        COALESCEs a None operation to 'sale' with zero indication anything
+        was uncertain — so a genuinely unrecognized (non-empty) category
+        must at least be visible in logs, distinguishing "we don't
+        understand this category" from every other unhandled case that
+        also ends up as the same default."""
+        with caplog.at_level("WARNING", logger="etl.connectors.milanuncios_mapping"):
+            result = infer_operation("traspasos-de-negocios")
+        assert result is None
+        assert any(
+            "traspasos-de-negocios" in record.message for record in caplog.records
+        )
+
+    def test_missing_or_empty_slug_does_not_warn(self, caplog):
+        """A missing/empty slug is a normal, expected case (e.g. a
+        malformed listing) — only a genuinely unrecognized *non-empty*
+        slug is the miscategorization signal worth a warning."""
+        with caplog.at_level("WARNING", logger="etl.connectors.milanuncios_mapping"):
+            infer_operation(None)
+            infer_operation("")
+        assert caplog.records == []
+
+    def test_end_to_end_unrecognized_category_yields_none_not_silent_sale(self):
+        """End-to-end at the connector boundary (not just the mapping
+        function in isolation): a listing whose category can't be mapped
+        to sale/rent produces `canonical.operation is None`, not a
+        silently-defaulted 'sale' — the orchestrator's own COALESCE-to-
+        'sale' default is a separate, shared, schema-level concern (issue
+        #76) this connector doesn't need to (and shouldn't) pre-empt."""
+        html = _read_fixture("milanuncios_sample_detail_unrecognized_category.html")
+        connector = MilanunciosConnector()
+        with patch(
+            "etl.connectors.milanuncios.requests.get", return_value=_mock_response(html)
+        ):
+            raw = connector.fetch_detail("700000003", throttle=lambda: None)
+        canonical = connector.normalize(raw)
+        assert canonical.operation is None
+
 
 class TestExtraFeatures:
     """Issue #78 / #76: surface attributes not already mapped to a
-    first-class column into `property.features`, mirroring
-    property_web_scraper's features-array concept."""
+    first-class column into `property.features` as short slug tokens
+    (`"<type>_<value>"`), mirroring property_web_scraper's features-array
+    concept — not their code, and not the original "<label>: <value>"
+    human-readable strings (Opus review, PR #85: `data-model.md` documents
+    `features` for containment queries `features @> ARRAY[...]`, which a
+    sentence-like string can't satisfy)."""
 
-    def test_maps_unmapped_attributes_to_human_readable_strings(self):
+    def test_maps_unmapped_attributes_to_slug_tokens(self):
         attributes = [
             {
                 "type": "heating",
@@ -299,8 +356,8 @@ class TestExtraFeatures:
             },
         ]
         assert extra_features(attributes) == (
-            "calefaccion: gas natural",
-            "agua caliente: gas natural",
+            "heating_natural_gas",
+            "hot_water_natural_gas",
         )
 
     def test_excludes_attributes_already_mapped_to_columns(self):
@@ -324,12 +381,95 @@ class TestExtraFeatures:
                 "valueFormatted": "gas",
             },
         ]
-        assert extra_features(attributes) == ("calefaccion: gas",)
+        assert extra_features(attributes) == ("heating_gas",)
+
+    def test_square_meter_price_is_no_longer_excluded(self):
+        """Opus review, PR #85, must-fix: squareMeterPrice was wrongly
+        listed as "already surfaced as a first-class column" — no such
+        column exists anywhere in base.py/init.sql, so real data was being
+        silently dropped from both a column and `features` for no reason."""
+        attributes = [
+            {
+                "type": "squareMeterPrice",
+                "fieldFormatted": "precio por metro cuadrado",
+                "value": "4768",
+                "valueFormatted": "4.768 €/m2",
+            }
+        ]
+        assert extra_features(attributes) == ("square_meter_price_4768",)
 
     def test_empty_or_malformed_attributes_yield_empty_tuple(self):
         assert extra_features([]) == ()
-        assert extra_features([{"type": "heating"}]) == ()  # no formatted value
+        assert extra_features([{"type": "heating"}]) == ()  # no raw value
         assert extra_features([{"not_a_type_key": "x"}]) == ()
+
+
+class TestEnergyRatingValue:
+    """Opus review, PR #85, nice-to-have: prefer a bare A-G letter (for
+    consistency with Fotocasa's energy_rating format) over Milanuncios'
+    own non-letter formatted states ("En trámite"/"Exento")."""
+
+    def test_bare_letter_value_is_uppercased(self):
+        attributes = [
+            {"type": "energyCertificate", "value": "e", "valueFormatted": "E"}
+        ]
+        assert energy_rating_value(attributes) == "E"
+
+    def test_non_letter_state_falls_back_to_formatted_text(self):
+        attributes = [
+            {
+                "type": "energyCertificate",
+                "value": "pending",
+                "valueFormatted": "En trámite",
+            }
+        ]
+        assert energy_rating_value(attributes) == "En trámite"
+
+    def test_absent_attribute_is_none(self):
+        assert energy_rating_value([]) is None
+
+
+class TestDescriptionStatFallback:
+    """Issue #78 must-fix (Opus review, PR #85): rooms/bathrooms/m2_built
+    must recover from the free-text description when `ad.attributes`
+    doesn't carry them — proven end-to-end, not just that the fallback
+    getters exist as dead code."""
+
+    def test_fallback_recovers_stats_when_attributes_are_missing(self):
+        html = _read_fixture("milanuncios_sample_detail_stats_from_description.html")
+        connector = MilanunciosConnector()
+        with patch(
+            "etl.connectors.milanuncios.requests.get", return_value=_mock_response(html)
+        ):
+            raw = connector.fetch_detail("700000002", throttle=lambda: None)
+        canonical = connector.normalize(raw)
+        # None of these are in this fixture's `ad.attributes` — every one
+        # must come from regex-parsing "92,5 m2 construidos ... 3
+        # habitaciones y 2 banios" in the description.
+        assert canonical.rooms == 3
+        assert canonical.bathrooms == 2
+        assert canonical.m2_built == Decimal(92)
+
+
+class TestJsonLdIsNotAUsableSource:
+    """Codifies issue #78's live finding (JSON-LD on real Milanuncios pages
+    is BreadcrumbList-only) as an executable check, not a comment-only
+    claim (Opus review, PR #85)."""
+
+    def test_breadcrumb_only_jsonld_is_not_usable(self):
+        html = _read_fixture("milanuncios_sample_detail.html")
+        assert _has_usable_jsonld_property_schema(html) is False
+
+    def test_a_real_property_schema_would_be_recognized(self):
+        html = (
+            '<html><head><script type="application/ld+json">'
+            '{"@context":"https://schema.org","@type":"Apartment","name":"x"}'
+            "</script></head><body></body></html>"
+        )
+        assert _has_usable_jsonld_property_schema(html) is True
+
+    def test_no_jsonld_at_all_is_not_usable(self):
+        assert _has_usable_jsonld_property_schema("<html><body></body></html>") is False
 
 
 class TestNormalizeWithoutEnergyCertificate:

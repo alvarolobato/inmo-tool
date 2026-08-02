@@ -1,0 +1,12 @@
+<!--
+Synthetic fixture for issue #78's must-fix (Opus review, PR #85): an
+unrecognized (non-venta-/alquiler-) category slug, proving
+infer_operation logs a warning and returns None rather than silently
+guessing. Milanuncios is a general classifieds site, not a dedicated
+real-estate portal -- a stray listing whose category isn't a recognized
+sale/rental real-estate slug is a real (if rare) possibility, not a
+hypothetical (see infer_operation's docstring).
+-->
+<html><head><title>Milanuncios</title></head><body>
+<script>window.__INITIAL_PROPS__ = JSON.parse("{\"ad\": {\"id\": \"700000003\", \"title\": \"Traspaso local\", \"description\": \"Traspaso de negocio en pleno centro.\", \"category\": {\"id\": 200, \"name\": \"Traspasos\", \"slug\": \"traspasos-de-negocios\"}, \"sellerType\": {\"value\": \"private\", \"isPrivate\": true}, \"price\": {\"cashPrice\": {\"value\": 50000}}, \"location\": {\"province\": {\"id\": 28, \"name\": \"Madrid\", \"slug\": \"madrid\"}, \"city\": {\"id\": 44, \"name\": \"Madrid\", \"slug\": \"madrid\"}, \"geolocation\": {\"latitude\": 40.4, \"longitude\": -3.7}}, \"attributes\": [], \"images\": [], \"author\": {\"id\": \"2\", \"userName\": \"Particular\"}, \"origin\": {\"name\": \"inner\"}, \"contactMethods\": {\"chat\": false, \"phone\": false, \"form\": true}}}");</script>
+</body></html>

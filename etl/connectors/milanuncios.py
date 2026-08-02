@@ -33,23 +33,33 @@ extraction needs an extra `json.loads` pass — see `_extract_initial_props`.
 Issue #78 retrofit spike (2026-08, 3 fresh real listings beyond the
 original Phase 2.1 sample): confirmed Milanuncios detail pages embed a
 `<script type="application/ld+json">` block, but it's a `BreadcrumbList`
-navigation schema only — no `Accommodation`/`Apartment` schema.org data,
-so it's not a usable fallback source for rooms/bathrooms/m²/price/etc.
-Also confirmed the site renders its visible "N hab · N baños · N m²"
-stats client-side from this same JSON (not present in the raw server
-HTML at all), so — unlike Fotocasa — there's no CSS-selector fallback
-available either; `ad.attributes`' embedded JSON remains the sole real
-source for those fields. What the retrofit *did* find real, previously-
-unmined data for: an `energyCertificate` attribute (missed by the
-original spike's smaller sample — present on 2 of 3 fresh listings) and
-`heating`/`hotWater` attributes, now surfacing into `energy_rating` and
-`features` respectively.
+navigation schema only — no `Accommodation`/`Apartment` schema.org data
+(`_has_usable_jsonld_property_schema` below codifies this as an executable
+check, not just a comment claim — if a future site update adds real
+JSON-LD listing data, that function starts returning True and the
+fallback chains below should gain a JSON-LD getter). Also confirmed the
+site renders its visible "N hab · N baños · N m²" stats client-side from
+this same JSON (not present in the raw server HTML at all), so — unlike
+Fotocasa — there's no CSS-selector fallback available for those stats.
+
+What the retrofit *does* use as a fallback (Opus review, PR #85, must-fix:
+the original retrofit had zero fallback for rooms/bathrooms/m2_built):
+Milanuncios' free-text `ad.description` routinely spells the same stats
+out in prose (e.g. "353 m2 construidos distribuidos en 4 habitaciones y 3
+banios", confirmed in the committed fixture) — `_description_stat` below
+regex-extracts these as a second source if the primary `ad.attributes`
+JSON shape is ever renamed. Also found real, previously-unmined data for:
+an `energyCertificate` attribute (missed by the original spike's smaller
+sample — present on 2 of 3 fresh listings) and `heating`/`hotWater`
+attributes, now surfacing into `energy_rating` and `features`
+respectively.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -63,11 +73,12 @@ from etl.connectors.base import (
     RawListing,
     Throttle,
 )
-from etl.connectors.extraction import first_present
+from etl.connectors.extraction import first_present, text_to_int
 from etl.connectors.geography import nearest_city
 from etl.connectors.milanuncios_mapping import (
     attribute_numeric_value,
     attribute_value,
+    energy_rating_value,
     extra_features,
     infer_listing_kind,
     infer_operation,
@@ -175,6 +186,11 @@ def _to_decimal(value: Any) -> Decimal | None:
     try:
         return Decimal(str(value))
     except (InvalidOperation, ValueError):
+        # `value` was genuinely present but not parseable -- worth a log,
+        # unlike the `value is None` case above which is normal/expected
+        # for an unset attribute (Opus review, PR #85, mirroring #77's
+        # extraction.first_present logging discipline).
+        logger.warning("milanuncios: could not parse %r as Decimal", value)
         return None
 
 
@@ -184,7 +200,71 @@ def _to_int(value: Any) -> int | None:
     try:
         return int(value)
     except (TypeError, ValueError):
+        logger.warning("milanuncios: could not parse %r as int", value)
         return None
+
+
+# Fallback source for rooms/bathrooms/m2_built when `ad.attributes` doesn't
+# carry them (issue #78 must-fix) -- Milanuncios' free-text description
+# routinely spells these stats out in prose, e.g. "353 m2 construidos
+# distribuidos en 4 habitaciones y 3 banios".
+_ROOMS_DESC_RE = re.compile(r"(\d+)\s*habitaci(?:o|ó)n", re.IGNORECASE)
+# Handles every real spelling variant seen across this codebase's fixtures
+# and real Spanish text: "baño"/"baños" (proper), "bano"/"banos" (accent
+# stripped), "banio"/"banios" (this project's own fixtures' transliteration,
+# e.g. milanuncios_sample_detail.html's attribute fieldFormatted="banios").
+_BATHROOMS_DESC_RE = re.compile(r"(\d+)\s*ba[ñn]?i?os?\b", re.IGNORECASE)
+_M2_DESC_RE = re.compile(r"(\d[\d.,]*)\s*m(?:2|²)\b", re.IGNORECASE)
+
+# Deliberately no price-from-description fallback: unlike a room/bathroom/m2
+# count, a price mentioned in free text is often negotiable/approximate
+# ("negociable", a previous price being referenced, a monthly-installment
+# figure) rather than the actual listing price, and misreading one would
+# feed a wrong number straight into an investment decision. The JSON price
+# field is also core to the site's own display, making it a much lower-risk
+# field to rename than a descriptive attribute -- revisit if it ever proves
+# to actually go missing in practice.
+
+
+def _description_stat(pattern: re.Pattern[str], description: str | None) -> str | None:
+    """Regex-extract a stat from the free-text description (fallback source
+    when `ad.attributes` is renamed/restructured)."""
+    if not description:
+        return None
+    match = pattern.search(description)
+    return match.group(1) if match else None
+
+
+_JSONLD_RE = re.compile(
+    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _has_usable_jsonld_property_schema(html: str) -> bool:
+    """Check whether the page's JSON-LD carries schema.org property/listing
+    data, not just a `BreadcrumbList` navigation schema.
+
+    Confirmed False on real Milanuncios pages during issue #78's retrofit
+    spike (3 fresh listings, 2026-08) -- this makes that a real, executable
+    check instead of a comment-only claim (Opus review, PR #85). If a
+    future site update adds real listing data here, this starts returning
+    True and the fallback chains in `normalize()` should gain a JSON-LD
+    getter ahead of the description-text fallback.
+    """
+    for block in _JSONLD_RE.findall(html):
+        try:
+            data = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        entries = data if isinstance(data, list) else [data]
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("@type") not in (
+                None,
+                "BreadcrumbList",
+            ):
+                return True
+    return False
 
 
 class MilanunciosConnector(Connector):
@@ -308,6 +388,36 @@ class MilanunciosConnector(Connector):
             _to_photo_url(img) for img in images if isinstance(img, str) and img
         )
 
+        description = ad.get("description")
+
+        # Fallback chain (issue #78 must-fix): `ad.attributes`' embedded
+        # JSON is the primary source; the free-text description (see
+        # `_description_stat`) recovers the value if that JSON structure is
+        # ever renamed. No CSS-selector fallback exists here, unlike
+        # Fotocasa -- confirmed live these stats render client-side from
+        # this same JSON, not present in the raw server HTML at all.
+        rooms = _to_int(
+            first_present(
+                lambda: attribute_numeric_value(attributes, "bedrooms"),
+                lambda: text_to_int(_description_stat(_ROOMS_DESC_RE, description)),
+                field="rooms",
+            )
+        )
+        bathrooms = _to_int(
+            first_present(
+                lambda: attribute_numeric_value(attributes, "bathrooms"),
+                lambda: text_to_int(_description_stat(_BATHROOMS_DESC_RE, description)),
+                field="bathrooms",
+            )
+        )
+        m2_built = _to_decimal(
+            first_present(
+                lambda: attribute_numeric_value(attributes, "squareMeters"),
+                lambda: text_to_int(_description_stat(_M2_DESC_RE, description)),
+                field="m2_built",
+            )
+        )
+
         return CanonicalListingVersion(
             external_id=raw.external_id,
             source=raw.source,
@@ -315,19 +425,19 @@ class MilanunciosConnector(Connector):
             listing_kind=infer_listing_kind(ad.get("sellerType")),
             status="active",
             current_price=_to_decimal(cash_price.get("value")),
-            description=ad.get("description"),
+            description=description,
             photo_urls=photo_urls,
             contact_raw=author.get("userName"),
             address=address,
             lat=_to_decimal(geolocation.get("latitude")),
             lon=_to_decimal(geolocation.get("longitude")),
             property_type=map_property_type(category.get("slug")),
-            m2_built=_to_decimal(attribute_numeric_value(attributes, "squareMeters")),
+            m2_built=m2_built,
             m2_useful=None,  # not distinguished from squareMeters in the
             # attributes observed during the feasibility spike — revisit if
             # a sampled listing shows both built and useful area separately.
-            rooms=_to_int(attribute_numeric_value(attributes, "bedrooms")),
-            bathrooms=_to_int(attribute_numeric_value(attributes, "bathrooms")),
+            rooms=rooms,
+            bathrooms=bathrooms,
             floor=attribute_value(attributes, "floor"),  # human-readable
             # (valueFormatted, e.g. "bajo") via attribute_value's own
             # valueFormatted-first lookup — see milanuncios_mapping.py.
@@ -339,18 +449,20 @@ class MilanunciosConnector(Connector):
             # across the same combined sample — same reasoning as
             # has_elevator.
             energy_rating=first_present(
-                lambda: attribute_value(attributes, "energyCertificate"),
+                lambda: energy_rating_value(attributes),
                 field="energy_rating",
             ),
             # A real `energyCertificate` attribute (2/3 fresh sampled
             # listings, issue #78) — missed by the original Phase 2.1
             # spike's smaller sample, not actually absent from the site.
-            # JSON-LD was live-checked as a second source (issue #78's
-            # own acceptance criterion) and confirmed to carry only a
-            # `BreadcrumbList` nav schema, no `Accommodation`/`Apartment`
-            # schema.org data — not a usable fallback source for this or
-            # any other field, so `attribute_value` is the sole getter for
-            # now. Wrapped in `first_present` anyway (not just called
+            # `energy_rating_value` prefers a bare A-G letter over
+            # Milanuncios' own formatting, which can be a non-letter state
+            # like "En trámite"/"Exento" — see milanuncios_mapping.py.
+            # JSON-LD was live-checked as a second source (issue #78's own
+            # acceptance criterion) and confirmed to carry only a
+            # `BreadcrumbList` nav schema (`_has_usable_jsonld_property_
+            # schema` codifies this check) — not usable for this or any
+            # other field. Wrapped in `first_present` anyway (not called
             # directly) so a second real source, if one is ever found,
             # slots in as an added getter rather than a rewrite.
             city=(location.get("city") or {}).get("name"),
@@ -368,6 +480,15 @@ class MilanunciosConnector(Connector):
             # discover() covers those categories too.
             features=extra_features(attributes),
             operation=infer_operation(category.get("slug")),
+            # Not cross-checked against raw.raw["url"] (Opus review, PR #85,
+            # considered and rejected): fetch_detail()'s request URL is the
+            # fully generic "/x/x-<id>.htm" (the title/category slug is a
+            # literal placeholder, confirmed by fetch_detail's own docstring
+            # -- "No redirect needed... this URL shape returns the real ad's
+            # HTML directly"), so raw.raw["url"] never carries real category
+            # info to cross-check against, unlike Fotocasa's canonical-slug
+            # redirect. category.slug (already used above) remains the only
+            # real source for this.
             raw_extra={
                 "category_slug": category.get("slug"),
                 "seller_type_raw": ad.get("sellerType"),
