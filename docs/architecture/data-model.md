@@ -49,20 +49,26 @@ Best-effort seller/agent identity, used as a deduplication signal (phone number 
 ### `search_profile`
 A named investment thesis/mandate — "high-yield low-cost rental," "commercial units," etc. `scope` (geography/type/price/size filters) and `thesis_params` (yield targets, financing assumptions) are `jsonb`, validated at the application layer rather than via Postgres `CHECK` constraints, because their shape will grow across phases (Phase 2 adds scope filtering, Phase 5 adds financing params) and a rigid DB-level schema would mean a migration for every new filter type.
 
-**`scope` shape (defined and validated in task 2.3, `dashboard/lib/db/profiles.ts`'s `ScopeSchema`)** — this is the exact shape task 2.4's hard-filter engine consumes:
+**`scope` shape (defined and validated in `dashboard/lib/profiles-schema.ts`'s `ScopeSchema`, re-exported from `dashboard/lib/db/profiles.ts` for server-side callers)** — this is the exact shape task 2.4's hard-filter engine consumes:
 
 ```ts
 {
   geography: { type: "radius", center: [lat, lon], radius_km: number },
-  property_types: ("piso" | "chalet" | "atico" | "local_comercial"
-                    | "nave_industrial" | "garaje" | "terreno"
-                    | "edificio_completo")[],   // at least one required
+  property_types: ("piso" | "chalet" | "atico" | "local" | "nave"
+                    | "garaje" | "terreno" | "edificio")[],   // at least one required
   price_min?: number, price_max?: number,        // price_min <= price_max enforced
   size_min?: number,  size_max?: number,          // size_min <= size_max enforced
-  hard_exclusions?: { requires_elevator?: boolean, min_floor?: number,
-                       excludes_ground_floor?: boolean },
+  hard_exclusions?: { requires_elevator?: boolean, excludes_ground_floor?: boolean },
 }
 ```
+
+**`property_types` must exactly match `property.property_type`'s CHECK constraint** (`etl/schema/init.sql`: `'piso','chalet','atico','local','nave','garaje','terreno','edificio'`) — a Zod enum value that isn't in that CHECK can never match a real row, so task 2.4 would silently return zero results for it. An earlier draft of `ScopeSchema` used `local_comercial`/`nave_industrial`/`edificio_completo` (more descriptive but wrong) — caught and fixed during task 2.3's review; if either list changes, update both together.
+
+**`price_min`/`price_max` filter against `MIN(listing.current_price)` across a property's active listings**, not a single `listing.current_price` or a `property`-level column (there isn't one — price lives on `listing`, not `property`, precisely because a deduplicated property can have 2+ active listings at different prices once task 2.2's dedup engine merges cross-site duplicates). Using the minimum is the permissive reading: "could this property be acquired within budget via *some* listing," not a claim that every listing on it is in range. Task 2.4 must join through `listing` and aggregate, not read a price directly off `property`.
+
+**`size_min`/`size_max` filter against `property.m2_built` specifically, not `m2_useful`.** Built area is published far more consistently across connectors than useful area (many sources omit useful area entirely); built area is the more reliable filter target for the MVP.
+
+**No `min_floor` hard exclusion.** `property.floor` is free text (`'bajo'`, `'3º'`, `'3º ext'`, ...), not a number, and no connector normalizes it into an orderable value — a numeric "minimum floor" filter isn't implementable against that column without a floor-parsing layer that doesn't exist yet. `requires_elevator` and `excludes_ground_floor` (both booleans, both directly checkable) cover the MVP need instead.
 
 Geography is radius-from-a-geocoded-point only for now — task 2.3's scope note defers full polygon map-drawing as a later UI enhancement, not required for the MVP filtering need. This is the same open decision line 89 (below) already flagged for whoever implements task 2.4's actual radius query (earthdistance/cube vs. PostGIS) — task 2.3 only stores and validates the shape, it does not query by it.
 

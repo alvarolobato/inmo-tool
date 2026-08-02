@@ -66,6 +66,22 @@ describe("GET /api/profiles", () => {
     expect(json).toHaveLength(1);
     expect(json[0].name).toBe("Alquiler alto rendimiento");
   });
+
+  it("skips a row with a malformed/empty scope instead of 500ing the whole list", async () => {
+    // Regression: search_profile.scope's DB-level default is '{}', which
+    // fails ScopeSchema's required geography/property_types fields. A
+    // strict .parse() on every row in the list used to make one bad row
+    // 500 the entire response for every other, valid profile.
+    mockQuery.mockResolvedValue({
+      rows: [dbRow({ id: 1, scope: {} }), dbRow({ id: 2, name: "Válido" })],
+    });
+    const res = await GET();
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toHaveLength(1);
+    expect(json[0].id).toBe(2);
+    expect(json[0].name).toBe("Válido");
+  });
 });
 
 describe("POST /api/profiles", () => {
@@ -123,6 +139,62 @@ describe("POST /api/profiles", () => {
       makeRequest("http://localhost:4000/api/profiles", "POST", {
         name: "X",
         scope: { ...VALID_SCOPE, property_types: [] },
+      }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects size_min > size_max with 400", async () => {
+    const res = await POST(
+      makeRequest("http://localhost:4000/api/profiles", "POST", {
+        name: "X",
+        scope: { ...VALID_SCOPE, size_min: 120, size_max: 60 },
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing geography with 400", async () => {
+    const { geography: _drop, ...scopeWithoutGeography } = VALID_SCOPE as Record<string, unknown>;
+    const res = await POST(
+      makeRequest("http://localhost:4000/api/profiles", "POST", {
+        name: "X",
+        scope: scopeWithoutGeography,
+      }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects a malformed geography (missing center) with 400", async () => {
+    const res = await POST(
+      makeRequest("http://localhost:4000/api/profiles", "POST", {
+        name: "X",
+        scope: { ...VALID_SCOPE, geography: { type: "radius", radius_km: 5 } },
+      }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects an unknown top-level scope key with 400 (strict schema)", async () => {
+    const res = await POST(
+      makeRequest("http://localhost:4000/api/profiles", "POST", {
+        name: "X",
+        scope: { ...VALID_SCOPE, unexpected_field: "nope" },
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("rejects a property_type not in the DB CHECK vocabulary with 400", async () => {
+    // Regression: an earlier version of this enum included local_comercial/
+    // nave_industrial/edificio_completo, none of which exist in
+    // etl/schema/init.sql's property.property_type CHECK constraint.
+    const res = await POST(
+      makeRequest("http://localhost:4000/api/profiles", "POST", {
+        name: "X",
+        scope: { ...VALID_SCOPE, property_types: ["local_comercial"] },
       }),
     );
     expect(res.status).toBe(400);
@@ -228,5 +300,38 @@ describe("PATCH /api/profiles/[id]", () => {
       { params: Promise.resolve({ id: "1" }) },
     );
     expect(res.status).toBe(400);
+  });
+
+  it("returns 404 (not found or archived) when patching an archived profile", async () => {
+    // getProfileById inside updateProfile finds the row, but it's archived —
+    // updateProfile must refuse the edit rather than silently un-freezing it.
+    mockQuery.mockResolvedValueOnce({
+      rows: [dbRow({ archived_at: "2026-08-02T01:00:00.000Z" })],
+    });
+    const res = await PATCH(
+      makeRequest("http://localhost:4000/api/profiles/1", "PATCH", { name: "Intento" }),
+      { params: Promise.resolve({ id: "1" }) },
+    );
+    expect(res.status).toBe(404);
+    // Only the getProfileById lookup ran — no UPDATE was attempted.
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns 400 for a non-numeric id rather than a raw DB error", async () => {
+    const res = await PATCH(
+      makeRequest("http://localhost:4000/api/profiles/not-a-number", "PATCH", { name: "X" }),
+      { params: Promise.resolve({ id: "not-a-number" }) },
+    );
+    expect(res.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 for a well-formed but non-existent id", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // getProfileById finds nothing
+    const res = await PATCH(
+      makeRequest("http://localhost:4000/api/profiles/999999", "PATCH", { name: "X" }),
+      { params: Promise.resolve({ id: "999999" }) },
+    );
+    expect(res.status).toBe(404);
   });
 });

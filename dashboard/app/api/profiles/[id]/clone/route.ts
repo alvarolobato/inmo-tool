@@ -52,7 +52,7 @@ export async function POST(
     const clone = await cloneProfile(id, newName);
     if (!clone) {
       return NextResponse.json(
-        formatApiError("Perfil de búsqueda no encontrado.", "VALIDATION", undefined, requestId),
+        formatApiError("Perfil de búsqueda no encontrado.", "NOT_FOUND", undefined, requestId),
         { status: 404 },
       );
     }

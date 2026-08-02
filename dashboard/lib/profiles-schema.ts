@@ -30,22 +30,30 @@ const GeographySchema = z.object({
   radius_km: z.number().positive().max(200),
 });
 
+// Must match etl/schema/init.sql's `property.property_type` CHECK constraint
+// exactly — a value here that isn't in that CHECK can never match a real row,
+// and task 2.4's hard-filter engine would silently return zero results for
+// it. See docs/architecture/data-model.md's cross-reference note.
 export const PROPERTY_TYPES = [
   "piso",
   "chalet",
   "atico",
-  "local_comercial",
-  "nave_industrial",
+  "local",
+  "nave",
   "garaje",
   "terreno",
-  "edificio_completo",
+  "edificio",
 ] as const;
 
 const HardExclusionsSchema = z
   .object({
     requires_elevator: z.boolean().optional(),
-    min_floor: z.number().int().optional(),
     excludes_ground_floor: z.boolean().optional(),
+    // No min_floor filter: property.floor is free-text (e.g. "bajo", "3º",
+    // "3º ext"), not a number, and connectors don't normalize it into an
+    // orderable value. A numeric "minimum floor" filter isn't implementable
+    // against that column without a floor-parsing layer that doesn't exist
+    // yet — dropped rather than shipped as a filter task 2.4 can't honor.
   })
   .strict()
   .default({});
@@ -54,10 +62,19 @@ export const ScopeSchema = z
   .object({
     geography: GeographySchema,
     property_types: z.array(z.enum(PROPERTY_TYPES)).min(1),
-    price_min: z.number().nonnegative().optional(),
-    price_max: z.number().positive().optional(),
+    // Filters against property.m2_built specifically (not m2_useful) — built
+    // area is published far more consistently across sources than useful
+    // area, so it's the more reliable filter target. See data-model.md.
     size_min: z.number().nonnegative().optional(),
     size_max: z.number().positive().optional(),
+    // Filters against MIN(listing.current_price) across a property's active
+    // listings. A deduplicated property (task 2.2) can have 2+ active
+    // listings at different prices (sites lag each other); using the lowest
+    // is the permissive reading — "could I get this within budget on *some*
+    // listing" — not a claim that every listing is in range. See
+    // data-model.md for the full rationale and the task 2.4 contract.
+    price_min: z.number().nonnegative().optional(),
+    price_max: z.number().positive().optional(),
     hard_exclusions: HardExclusionsSchema.optional(),
   })
   .strict()

@@ -1,13 +1,16 @@
 /**
  * GET    /api/profiles/[id] — Fetch a single search profile (active or archived).
- * PATCH  /api/profiles/[id] — Update name/scope/thesis_params.
+ * PATCH  /api/profiles/[id] — Update name/scope/thesis_params. Blocked on
+ *                              archived profiles (404) — there's no unarchive
+ *                              path, so an archived row must stay frozen;
+ *                              clone it to get an editable copy instead.
  * DELETE /api/profiles/[id] — Archive (soft delete — sets archived_at, never
  *                              hard-deletes; profile_listing_state/feedback_event
  *                              reference this row and must survive).
  *
  * Error codes:
  *   400 — Invalid id, body, or scope/thesis_params validation failure
- *   404 — Profile not found
+ *   404 — Profile not found (GET/DELETE), or not found/archived (PATCH)
  *   500 — Unexpected error
  */
 
@@ -47,7 +50,7 @@ export async function GET(
     const profile = await getProfileById(id);
     if (!profile) {
       return NextResponse.json(
-        formatApiError("Perfil de búsqueda no encontrado.", "VALIDATION", undefined, requestId),
+        formatApiError("Perfil de búsqueda no encontrado.", "NOT_FOUND", undefined, requestId),
         { status: 404 },
       );
     }
@@ -118,8 +121,17 @@ export async function PATCH(
 
     const updated = await updateProfile(id, patch);
     if (!updated) {
+      // updateProfile returns null both when the id doesn't exist and when
+      // the profile is archived (edits are blocked on archived profiles —
+      // see the docstring on updateProfile). Same 404 either way, matching
+      // DELETE's existing "not found or already archived" convention below.
       return NextResponse.json(
-        formatApiError("Perfil de búsqueda no encontrado.", "VALIDATION", undefined, requestId),
+        formatApiError(
+          "Perfil de búsqueda no encontrado o archivado.",
+          "NOT_FOUND",
+          undefined,
+          requestId,
+        ),
         { status: 404 },
       );
     }
@@ -169,7 +181,7 @@ export async function DELETE(
       return NextResponse.json(
         formatApiError(
           "Perfil de búsqueda no encontrado o ya archivado.",
-          "VALIDATION",
+          "NOT_FOUND",
           undefined,
           requestId,
         ),

@@ -39,9 +39,41 @@ function toSearchProfileRow(raw: SearchProfileRawRow): SearchProfileRow {
     name: raw.name,
     // Data already validated at write time; parse defensively on read too
     // (schema module may evolve — a row written under an older shape should
-    // fail loudly here rather than silently reach the UI malformed).
+    // fail loudly here rather than silently reach the UI malformed). Used
+    // only for single-row reads (get/create/update/archive/clone), where a
+    // parse failure means *this specific write* is broken and should throw
+    // loudly — see toSearchProfileRowSafe for the list path, where one bad
+    // row must not break every other profile in the response.
     scope: ScopeSchema.parse(raw.scope),
     thesis_params: ThesisParamsSchema.parse(raw.thesis_params ?? {}),
+    archived_at: raw.archived_at,
+    created_at: raw.created_at,
+  };
+}
+
+/**
+ * Like toSearchProfileRow, but never throws: a malformed `scope` (e.g. the
+ * column's own DB-level default of '{}', which fails ScopeSchema's required
+ * `geography`/`property_types` fields — reachable via a manual SQL insert, a
+ * seed script, or a future schema-shape migration) is logged and skipped
+ * rather than 500ing the entire list for every other, valid profile.
+ */
+function toSearchProfileRowSafe(raw: SearchProfileRawRow): SearchProfileRow | null {
+  const scopeResult = ScopeSchema.safeParse(raw.scope);
+  const thesisResult = ThesisParamsSchema.safeParse(raw.thesis_params ?? {});
+  if (!scopeResult.success || !thesisResult.success) {
+    console.warn(
+      `[db/profiles] Skipping search_profile id=${raw.id} from list: invalid stored scope/thesis_params`,
+      !scopeResult.success ? scopeResult.error.issues : undefined,
+      !thesisResult.success ? thesisResult.error.issues : undefined,
+    );
+    return null;
+  }
+  return {
+    id: raw.id,
+    name: raw.name,
+    scope: scopeResult.data,
+    thesis_params: thesisResult.data,
     archived_at: raw.archived_at,
     created_at: raw.created_at,
   };
@@ -58,7 +90,7 @@ export async function listActiveProfiles(): Promise<SearchProfileRow[]> {
      WHERE archived_at IS NULL
      ORDER BY created_at DESC`,
   );
-  return rows.map(toSearchProfileRow);
+  return rows.map(toSearchProfileRowSafe).filter((r): r is SearchProfileRow => r !== null);
 }
 
 export async function getProfileById(id: number): Promise<SearchProfileRow | null> {
@@ -85,12 +117,19 @@ export async function createProfile(
   return toSearchProfileRow(rows[0]);
 }
 
+/**
+ * Archived profiles cannot be edited — there is no unarchive path (issue #17
+ * doesn't require one), so allowing edits on an archived row would leave it
+ * in a confusing "archived but silently still changing" state. A caller
+ * wanting to revive a profile's configuration should clone it instead
+ * (cloneProfile), which explicitly creates a fresh active row.
+ */
 export async function updateProfile(
   id: number,
   patch: { name?: string; scope?: Scope; thesis_params?: ThesisParams },
 ): Promise<SearchProfileRow | null> {
   const existing = await getProfileById(id);
-  if (!existing) return null;
+  if (!existing || existing.archived_at !== null) return null;
 
   const name = patch.name ?? existing.name;
   const scope = patch.scope ?? existing.scope;
@@ -99,7 +138,7 @@ export async function updateProfile(
   const rows = await sql<SearchProfileRawRow>(
     `UPDATE search_profile
      SET name = $2, scope = $3::jsonb, thesis_params = $4::jsonb
-     WHERE id = $1
+     WHERE id = $1 AND archived_at IS NULL
      RETURNING id, name, scope, thesis_params, archived_at, created_at`,
     [id, name, JSON.stringify(scope), JSON.stringify(thesisParams)],
   );
