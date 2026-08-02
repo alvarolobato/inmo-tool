@@ -1,0 +1,11 @@
+<!--
+Trimmed synthetic fixture based on a real observed pattern from the
+Phase 2.1 feasibility spike (2026-08-02): private-seller listings on
+Milanuncios commonly embed a real Spanish mobile number directly in the
+free-text description (4 of 17 sampled private listings had one).
+This fixture proves normalize() captures description in full --
+task 2.2's future phone-extraction dedup signal depends on that.
+-->
+<html><head><title>Milanuncios</title></head><body>
+<script>window.__INITIAL_PROPS__ = JSON.parse("{\"ad\": {\"id\": \"700000099\", \"title\": \"Piso en venta particular\", \"description\": \"Vendo piso reformado en el centro, 2 habitaciones, buena luz. Interesados llamar al 685451010, solo particulares por favor.\", \"category\": {\"id\": 131, \"name\": \"Venta de pisos\", \"slug\": \"venta-de-pisos\"}, \"sellerType\": {\"value\": \"private\", \"isPrivate\": true}, \"price\": {\"cashPrice\": {\"value\": 195000}}, \"location\": {\"province\": {\"id\": 28, \"name\": \"Madrid\", \"slug\": \"madrid\"}, \"city\": {\"id\": 44, \"name\": \"Madrid\", \"slug\": \"madrid\"}, \"geolocation\": {\"latitude\": 40.4168, \"longitude\": -3.7038}}, \"attributes\": [{\"type\": \"bedrooms\", \"fieldFormatted\": \"dormitorios\", \"value\": \"2\", \"valueFormatted\": \"2\"}, {\"type\": \"bathrooms\", \"fieldFormatted\": \"banios\", \"value\": \"1\", \"valueFormatted\": \"1\"}, {\"type\": \"squareMeters\", \"fieldFormatted\": \"metros cuadrados\", \"value\": \"65\", \"valueFormatted\": \"65 m2\"}], \"images\": [\"images-re.milanuncios.com/images/ads/private-seller-photo1\"], \"author\": {\"id\": \"999888777\", \"userName\": \"Usuario\"}, \"origin\": {\"name\": \"milanuncios\", \"provider\": null}, \"contactMethods\": {\"chat\": true, \"phone\": true, \"form\": true}}}");</script>
+</body></html>

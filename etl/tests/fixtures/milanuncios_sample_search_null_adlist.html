@@ -1,0 +1,10 @@
+<!--
+Regression fixture for a real crash found in Opus review of PR #54:
+adListPagination.adList present-but-null used to raise AttributeError via
+`.get("adList", {}).get("ads")` — the {} default only applies when the key
+is *missing*, not when it's present with a null value. An empty/zero-result
+search page is a normal (if rare) real response, not a hypothetical.
+-->
+<html><head><title>Milanuncios</title></head><body>
+<script>window.__INITIAL_PROPS__ = JSON.parse("{\"adListPagination\": {\"adList\": null}}");</script>
+</body></html>

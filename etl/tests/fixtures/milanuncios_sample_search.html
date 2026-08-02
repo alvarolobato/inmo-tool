@@ -1,0 +1,12 @@
+<!--
+Trimmed synthetic fixture, structurally accurate to a real Milanuncios
+search-results page fetched during the Phase 2.1 feasibility spike
+(2026-08-02) for https://www.milanuncios.com/venta-de-pisos-en-madrid-madrid/
+— not a verbatim copy of the full ~1.5MB real page. Only the
+adListPagination.adList.ads[].id field discover() actually reads is
+preserved; the escaping matches the real double-JSON-encoded transport
+exactly (a JSON.parse call on a JSON-string-encoded JSON payload).
+-->
+<html><head><title>Milanuncios</title></head><body>
+<script>window.__INITIAL_PROPS__ = JSON.parse("{\"adListPagination\": {\"adList\": {\"ads\": [{\"id\": \"700000001\", \"category\": {\"id\": 131, \"name\": \"Venta de pisos\", \"slug\": \"venta-de-pisos\"}, \"sellerType\": \"professional\", \"origin\": {\"name\": \"inner\", \"provider\": \"fotocasa_pro\"}}, {\"id\": \"700000002\", \"category\": {\"id\": 131, \"name\": \"Venta de pisos\", \"slug\": \"venta-de-pisos\"}, \"sellerType\": \"private\", \"origin\": {\"name\": \"milanuncios\", \"provider\": null}}, {\"id\": \"700000003\", \"category\": {\"id\": 131, \"name\": \"Venta de pisos\", \"slug\": \"venta-de-pisos\"}, \"sellerType\": \"private\", \"origin\": {\"name\": \"milanuncios\", \"provider\": null}}]}}}");</script>
+</body></html>
