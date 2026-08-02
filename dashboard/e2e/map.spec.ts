@@ -31,9 +31,11 @@ function buildPool(): Pool {
 
 const MADRID_SOL: [number, number] = [40.4168, -3.7038];
 // Far enough from MADRID_SOL (and from each other) to land in distinct
-// cluster grid cells (CLUSTER_GRID_SIZE = 0.01 degrees, ~1km) — this suite
-// asserts individual markers, not clustering behavior, so each seeded
-// property must resolve to its own marker.
+// on-screen clusters at whatever zoom the map's fitBounds settles on for
+// this spread-out set — this suite asserts individual markers, not
+// clustering behavior, so each seeded property must resolve to its own
+// marker. (Clustering itself is asserted separately, below, with points
+// deliberately meters apart instead of kilometers.)
 const PLOTTABLE_POINTS: [number, number][] = [
   [40.4168, -3.7038],
   [40.45, -3.68],
@@ -47,6 +49,54 @@ let profileId: number;
 let plottablePropertyIds: number[] = [];
 let unplottablePropertyId: number;
 let interestedPropertyId: number;
+
+async function insertProperty(
+  address: string,
+  coords: [number, number] | null,
+  m2Built: number,
+): Promise<number> {
+  const result = await pool.query<{ id: string }>(
+    `INSERT INTO property (lat, lon, property_type, m2_built, address)
+     VALUES ($1, $2, 'piso', $3, $4) RETURNING id`,
+    [coords?.[0] ?? null, coords?.[1] ?? null, m2Built, address],
+  );
+  // `id` is a bigint column — node-postgres returns bigint as a string, not
+  // a number, regardless of what a hopeful type annotation claims. The
+  // exact bug class task 2.5 shipped once already (property_id-as-string).
+  return Number(result.rows[0].id);
+}
+
+async function insertListing(propertyId: number, source: string, price: number): Promise<void> {
+  await pool.query(
+    `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at)
+     VALUES ($1, $2, $3, 'active', $4, NOW())`,
+    [propertyId, source, `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`, price],
+  );
+}
+
+async function insertProfile(center: [number, number]): Promise<number> {
+  const result = await pool.query<{ id: string }>(
+    `INSERT INTO search_profile (name, scope, thesis_params)
+     VALUES ($1, $2::jsonb, '{}'::jsonb) RETURNING id`,
+    [
+      `${NAME_PREFIX}${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      JSON.stringify({
+        geography: { type: "radius", center, radius_km: 15 },
+        property_types: ["piso"],
+        hard_exclusions: {},
+      }),
+    ],
+  );
+  return Number(result.rows[0].id);
+}
+
+async function markMatched(matchProfileId: number, propertyId: number, stage = "new"): Promise<void> {
+  await pool.query(
+    `INSERT INTO profile_listing_state (profile_id, property_id, matched, pipeline_stage)
+     VALUES ($1, $2, true, $3)`,
+    [matchProfileId, propertyId, stage],
+  );
+}
 
 test.beforeAll(async () => {
   pool = buildPool();
@@ -62,54 +112,14 @@ test.beforeAll(async () => {
     return;
   }
 
-  const profileResult = await pool.query<{ id: number }>(
-    `INSERT INTO search_profile (name, scope, thesis_params)
-     VALUES ($1, $2::jsonb, '{}'::jsonb) RETURNING id`,
-    [
-      `${NAME_PREFIX}${Date.now()}`,
-      JSON.stringify({
-        geography: { type: "radius", center: MADRID_SOL, radius_km: 15 },
-        property_types: ["piso"],
-        hard_exclusions: {},
-      }),
-    ],
-  );
-  profileId = profileResult.rows[0].id;
+  profileId = await insertProfile(MADRID_SOL);
 
-  async function insertProperty(
-    address: string,
-    coords: [number, number] | null,
-    m2Built: number,
-  ): Promise<number> {
-    const result = await pool.query<{ id: number }>(
-      `INSERT INTO property (lat, lon, property_type, m2_built, address)
-       VALUES ($1, $2, 'piso', $3, $4) RETURNING id`,
-      [coords?.[0] ?? null, coords?.[1] ?? null, m2Built, address],
-    );
-    return result.rows[0].id;
-  }
-
-  async function insertListing(propertyId: number, source: string, price: number): Promise<void> {
-    await pool.query(
-      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at)
-       VALUES ($1, $2, $3, 'active', $4, NOW())`,
-      [propertyId, source, `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`, price],
-    );
-  }
-
-  async function markMatched(propertyId: number, stage = "new"): Promise<void> {
-    await pool.query(
-      `INSERT INTO profile_listing_state (profile_id, property_id, matched, pipeline_stage)
-       VALUES ($1, $2, true, $3)`,
-      [profileId, propertyId, stage],
-    );
-  }
-
-  // Three plottable candidates, each in a distinct cluster cell.
+  // Three plottable candidates, each far enough apart to render as
+  // separate markers.
   for (let i = 0; i < PLOTTABLE_POINTS.length; i++) {
     const id = await insertProperty(`${NAME_PREFIX}Calle ${i}, Madrid`, PLOTTABLE_POINTS[i], 60 + i * 5);
     await insertListing(id, "fotocasa", 300000 + i * 10000);
-    await markMatched(id, i === 0 ? "interested" : "new");
+    await markMatched(profileId, id, i === 0 ? "interested" : "new");
     plottablePropertyIds.push(id);
     if (i === 0) interestedPropertyId = id;
   }
@@ -117,7 +127,7 @@ test.beforeAll(async () => {
   // One matched candidate with no usable coordinates (EC-2).
   unplottablePropertyId = await insertProperty(`${NAME_PREFIX}Sin coordenadas, Madrid`, null, 55);
   await insertListing(unplottablePropertyId, "milanuncios", 250000);
-  await markMatched(unplottablePropertyId);
+  await markMatched(profileId, unplottablePropertyId);
 });
 
 test.afterAll(async () => {
@@ -144,15 +154,24 @@ async function assertNoErrorSurface(page: Page) {
   await expect(page.getByText(/error|hubo un problema|there is no parameter|http 500/i)).toHaveCount(0);
 }
 
-test("renders pins for candidates with coordinates", async ({ page }) => {
+test("renders pins for candidates with coordinates at their correct identity", async ({ page }) => {
   skipIfNoDb(test);
 
   await page.goto(`/profiles/${profileId}/map`);
+
+  // Wait for the dynamically-imported (ssr:false) map to mount before
+  // asserting no error surface — asserting immediately after goto races
+  // the dynamic import and can pass even when it would otherwise fail.
+  await expect(page.locator(".leaflet-container")).toBeVisible();
   await assertNoErrorSurface(page);
 
-  // Wait for the dynamically-imported (ssr:false) map to mount.
-  await expect(page.locator(".leaflet-container")).toBeVisible();
-  await expect(page.locator('[data-testid="map-marker"]')).toHaveCount(PLOTTABLE_POINTS.length);
+  const markers = page.locator('[data-testid="map-marker"]');
+  await expect(markers).toHaveCount(PLOTTABLE_POINTS.length);
+
+  const renderedIds = (await markers.evaluateAll((els) => els.map((el) => el.getAttribute("data-property-id"))))
+    .map(Number)
+    .sort((a, b) => a - b);
+  expect(renderedIds).toEqual([...plottablePropertyIds].sort((a, b) => a - b));
 });
 
 test("shows count of unplottable candidates", async ({ page }) => {
@@ -186,7 +205,7 @@ test("pin click opens popover with correct data and detail-link affordance", asy
   await expect(popup.locator('[data-testid="map-popup-detail-link-pending"]')).toBeVisible();
 });
 
-test("stage filter narrows the visible pins", async ({ page }) => {
+test("stage filter narrows the visible pins to the correct candidate", async ({ page }) => {
   skipIfNoDb(test);
 
   await page.goto(`/profiles/${profileId}/map`);
@@ -194,7 +213,9 @@ test("stage filter narrows the visible pins", async ({ page }) => {
   await expect(page.locator('[data-testid="map-marker"]')).toHaveCount(PLOTTABLE_POINTS.length);
 
   await page.locator('[data-testid="map-stage-filter"]').selectOption("interested");
-  await expect(page.locator('[data-testid="map-marker"]')).toHaveCount(1);
+  const remaining = page.locator('[data-testid="map-marker"]');
+  await expect(remaining).toHaveCount(1);
+  await expect(remaining.first()).toHaveAttribute("data-property-id", String(interestedPropertyId));
 });
 
 test("no error surface on map view", async ({ page }) => {
@@ -203,4 +224,35 @@ test("no error surface on map view", async ({ page }) => {
   await page.goto(`/profiles/${profileId}/map`);
   await expect(page.locator(".leaflet-container")).toBeVisible();
   await assertNoErrorSurface(page);
+});
+
+test.describe("clustering", () => {
+  let clusterProfileId: number;
+  const CLOSE_TOGETHER: [number, number][] = [
+    [40.1, -3.9],
+    [40.10003, -3.90004],
+  ];
+
+  test.beforeAll(async () => {
+    if (!dbAvailable) return;
+    clusterProfileId = await insertProfile(CLOSE_TOGETHER[0]);
+    for (let i = 0; i < CLOSE_TOGETHER.length; i++) {
+      const id = await insertProperty(`${NAME_PREFIX}Cluster ${i}, Madrid`, CLOSE_TOGETHER[i], 65);
+      await insertListing(id, "fotocasa", 280000 + i * 1000);
+      await markMatched(clusterProfileId, id);
+    }
+  });
+
+  test("two candidates meters apart render as a single cluster, not two markers", async ({ page }) => {
+    skipIfNoDb(test);
+
+    await page.goto(`/profiles/${clusterProfileId}/map`);
+    await expect(page.locator(".leaflet-container")).toBeVisible();
+    await assertNoErrorSurface(page);
+
+    await expect(page.locator('[data-testid="map-marker"]')).toHaveCount(0);
+    const cluster = page.locator('[data-testid="map-cluster"]');
+    await expect(cluster).toHaveCount(1);
+    await expect(cluster).toHaveText("2");
+  });
 });

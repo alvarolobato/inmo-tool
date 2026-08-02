@@ -142,6 +142,7 @@ describe.runIf(dbAvailable)("listMapCandidates — real Postgres", () => {
       const result = await listMapCandidates(profileId);
       expect(result.items.map((i) => i.property_id)).toEqual([plottableId]);
       expect(result.unplottableCount).toBe(1);
+      expect(result.truncated).toBe(false);
     });
   });
 
@@ -177,6 +178,36 @@ describe.runIf(dbAvailable)("listMapCandidates — real Postgres", () => {
       const [item] = result.items;
       expect(item.listings).toHaveLength(2);
       expect(item.min_price).toBe(295000);
+    });
+  });
+
+  it("never lets unplottable rows crowd out plottable ones regardless of insertion order (regression)", async () => {
+    // A prior version applied `LIMIT` before excluding null-coordinate rows
+    // in application code, ordered by `p.id DESC` — so unplottable rows
+    // inserted *after* a plottable one (higher id, sorted first) could
+    // occupy the LIMIT budget and silently drop real plottable candidates.
+    // The fix moved the lat/lon-not-null check into the SQL WHERE clause,
+    // which is a structural guarantee independent of row counts — this test
+    // proves the invariant at a small, fast scale, not by reproducing the
+    // full MAX_MAP_CANDIDATES threshold.
+    await withRealDb(async (pool) => {
+      const profileId = await makeProfile(SCOPE);
+
+      const plottableId = await insertProperty(pool, TEST_COORDS);
+      await insertListing(pool, plottableId);
+      await markMatched(pool, profileId, plottableId);
+
+      // Inserted after the plottable row, so each has a higher id and
+      // sorts first under `ORDER BY p.id DESC`.
+      for (let i = 0; i < 10; i++) {
+        const unplottableId = await insertProperty(pool, null);
+        await insertListing(pool, unplottableId);
+        await markMatched(pool, profileId, unplottableId);
+      }
+
+      const result = await listMapCandidates(profileId);
+      expect(result.items.map((i) => i.property_id)).toEqual([plottableId]);
+      expect(result.unplottableCount).toBe(10);
     });
   });
 

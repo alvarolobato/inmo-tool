@@ -22,6 +22,7 @@ const CandidateMap = dynamic(
 interface MapCandidatesResponse {
   items: MapCandidateRow[];
   unplottableCount: number;
+  truncated: boolean;
 }
 
 export function MapView({ profileId }: { profileId: number }) {
@@ -72,5 +73,7 @@ export function MapView({ profileId }: { profileId: number }) {
     );
   }
 
-  return <CandidateMap candidates={data.items} unplottableCount={data.unplottableCount} />;
+  return (
+    <CandidateMap candidates={data.items} unplottableCount={data.unplottableCount} truncated={data.truncated} />
+  );
 }
