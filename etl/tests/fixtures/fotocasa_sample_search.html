@@ -9,8 +9,15 @@ linked twice (main card + a "similar listings" widget) to exercise
 discover()'s dedup. A gallery-thumbnail href with a query string is
 included to confirm it's correctly excluded (matches only the bare
 `.../<id>/d"` pattern, not `.../<id>/d?multimedia=...`).
+
+The __initial_props__ tag's presence (content irrelevant to discover(),
+which parses hrefs, not this JSON) is what discover() uses to distinguish
+a real search-results page from Fotocasa's soft-block/interruption page,
+which has no such tag (see fotocasa_sample_block_page.html and PR #49
+review) — a real search page always has one, so this fixture does too.
 -->
 <html lang="es"><head><title>Comprar viviendas</title></head><body>
+<script type="application/json" id="__initial_props__">{"counters": {"realEstates": 3}}</script>
 <div class="re-SearchResult">
   <a href="/es/comprar/vivienda/madrid-capital/calefaccion-ascensor-no-amueblado/190011971/d" class="re-Card-link">Piso en Santa Eugenia</a>
   <a href="/es/comprar/vivienda/madrid-capital/atico-terraza/190022222/d" class="re-Card-link">Ático en Retiro</a>

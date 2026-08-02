@@ -54,12 +54,21 @@ _AGENCY_NAME_SUFFIXES = (" sl", " s.l.", " slu", " s.l.u.", " sa", " s.a.")
 
 
 def infer_listing_kind(client_url: str | None, client_name: str | None) -> str | None:
+    """Return 'agency' on a positive signal, else None — never a guessed 'particular'.
+
+    Absence of an agency signal is not evidence of a private seller; it
+    just means neither of the two agency-indicating patterns matched. An
+    earlier version of this function defaulted to 'particular' whenever
+    any name/URL was present at all, which was itself an unverified guess
+    dressed up as a confident default — exactly what this connector's own
+    design principle (docs/skills/connectors.md) says not to do. Revisit
+    once a real 'particular'-only signal is found and verified (e.g. an
+    absence of `clientId`), rather than inferring it by elimination.
+    """
     if client_url and _AGENCY_URL_MARKER in client_url:
         return "agency"
     if client_name:
         lowered = client_name.strip().lower()
         if lowered.endswith(_AGENCY_NAME_SUFFIXES):
             return "agency"
-    if client_name or client_url:
-        return "particular"
     return None

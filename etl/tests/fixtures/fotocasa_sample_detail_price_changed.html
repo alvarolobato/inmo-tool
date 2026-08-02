@@ -2,13 +2,23 @@
 Trimmed synthetic fixture, structurally accurate to a real Fotocasa listing
 detail page fetched during the Phase 1.4 feasibility spike (2026-08-02) —
 external_id 190011971, the same real listing used to validate field
-coverage (price, address, coords, rooms, bathrooms, surface, floor, energy
+coverage (price, address, coords, rooms, bathrooms, surface, energy
 rating, description, photos, client/agency name all confirmed reachable
 via this JSON shape). Not a verbatim copy of the full ~580KB real page —
 only the __initial_props__ JSON blob normalize() actually reads is
 preserved, with irrelevant keys (breadcrumb, seo, __IMAGES_TO_PRELOAD__)
 trimmed for legibility.
+
+`featuresList` was NOT captured from this specific listing during the
+original spike — it's merged in from a second real listing (190235067,
+fetched during PR #49 review) that was, verifying the real shape:
+{label, literal, value} entries with human-readable values (e.g.
+floor="2ª planta", elevator="YES"), unlike the coded `features.floor`
+integer. Fixing PR #49 review's finding that the original fixture's
+`features.floor: 3` was invented to match the code's (wrong) assumption
+that the coded value was a literal storey number, rather than derived
+from a real observation — see docs/skills/connectors.md.
 -->
 <html lang="es"><head><title>Piso en venta</title></head><body>
-<script type="application/json" id="__initial_props__">{"realEstate": {"energyCertificate": "G", "address": {"district": "Villa de Vallecas", "neighborhood": "Santa Eugenia", "municipality": " Madrid Capital", "city": " Madrid Capital", "upperLevel": "Santa Eugenia", "zipCode": "28031"}, "buildingType": "Flat", "buildingSubtype": "GroundFloorWithGarden", "clientAlias": "VOhome Santa Eugenia", "clientId": 9202769992099, "clientName": "ESTUDIO SANTA EUGENIA 2010 SL", "clientUrl": "/es/inmobiliaria-vohome-santa-eugenia/comprar/inmuebles/espana/todas-las-zonas/l?clientId=9202769992099", "coordinates": {"latitude": 40.382233, "longitude": -3.6102757, "accuracy": 0}, "descriptions": {"es-ES": "Piso para reformar en Venta en Calle Puentelarra - Santa Eugenia. 3 dormitorios, cocina independiente y bano completo."}, "features": {"rooms": 3, "bathrooms": 1, "surface": 74, "energyCertificate": 7, "conservationState": 0, "antiquity": 7, "floor": 3, "surfaceLand": 0}, "multimedia": [{"src": "https://static.fotocasa.es/images/ads/dc2aaefc-c8a2-4319-a806-8f705fb97c90?rule=original", "type": "image"}, {"src": "https://static.fotocasa.es/images/ads/31acf601-fbc2-4c8e-82e1-69f392f9b311?rule=original", "type": "image"}], "price": 195000, "reducedPrice": null, "clientTypeId": 3}}</script>
+<script type="application/json" id="__initial_props__">{"realEstate": {"energyCertificate": "G", "address": {"district": "Villa de Vallecas", "neighborhood": "Santa Eugenia", "municipality": " Madrid Capital", "city": " Madrid Capital", "upperLevel": "Santa Eugenia", "zipCode": "28031"}, "buildingType": "Flat", "buildingSubtype": "GroundFloorWithGarden", "clientAlias": "VOhome Santa Eugenia", "clientId": 9202769992099, "clientName": "ESTUDIO SANTA EUGENIA 2010 SL", "clientUrl": "/es/inmobiliaria-vohome-santa-eugenia/comprar/inmuebles/espana/todas-las-zonas/l?clientId=9202769992099", "coordinates": {"latitude": 40.382233, "longitude": -3.6102757, "accuracy": 0}, "descriptions": {"es-ES": "Piso para reformar en Venta en Calle Puentelarra - Santa Eugenia. 3 dormitorios, cocina independiente y bano completo."}, "features": {"rooms": 3, "bathrooms": 1, "surface": 74, "energyCertificate": 7, "conservationState": 0, "antiquity": 7, "floor": 3, "surfaceLand": 0}, "featuresList": [{"label": "typology", "literal": "FEATURES.TYPOLOGY", "value": "flat"}, {"label": "conservationState", "literal": "FEATURES.CONSERVATIONSTATE", "value": "Bien"}, {"label": "antiquity", "literal": "FEATURES.ANTIQUITY", "value": "20 a 30 anios"}, {"label": "floor", "literal": "FEATURES.FLOOR", "value": "2ª planta"}, {"label": "elevator", "literal": "FEATURES.ELEVATOR", "value": "YES"}], "multimedia": [{"src": "https://static.fotocasa.es/images/ads/dc2aaefc-c8a2-4319-a806-8f705fb97c90?rule=original", "type": "image"}, {"src": "https://static.fotocasa.es/images/ads/31acf601-fbc2-4c8e-82e1-69f392f9b311?rule=original", "type": "image"}], "price": 195000, "reducedPrice": null, "clientTypeId": 3}}</script>
 </body></html>

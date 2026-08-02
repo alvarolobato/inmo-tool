@@ -1,0 +1,22 @@
+<!--
+Real Fotocasa soft-block/interruption page, byte-for-byte the opening
+structure observed live during PR #49 review — returned with HTTP 200
+(not an error status), no __initial_props__ tag anywhere. This is why
+discover()/fetch_detail() must check for the tag's presence rather than
+trust a 200 status code alone, and why an empty discover() result must
+never be trusted enough to drive withdrawal reconciliation (see
+etl.orchestrator.run_connector and fotocasa.py's discover()).
+-->
+<!DOCTYPE html>
+<html>
+    <head>
+        <noscript>
+            <title>SENTIMOS LA INTERRUPCIÓN</title>
+        </noscript>
+        <meta name="viewport" content="width=1000">
+        <meta http-equiv="cache-control" content="no-cache, no-store">
+    </head>
+    <body>
+        <p>Please enable JS and disable any ad blocker</p>
+    </body>
+</html>

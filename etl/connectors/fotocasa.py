@@ -13,8 +13,13 @@ with full server-rendered content — no JS execution needed.
 
 Data source: Fotocasa server-renders a JSON blob into every page in
 `<script type="application/json" id="__initial_props__">` — plain HTML
-string-extraction + json.loads gets structured data directly, no HTML
-scraping/CSS-selector fragility involved.
+string-extraction + json.loads gets structured data directly, no
+CSS-selector fragility, for fetch_detail()/normalize(). discover() is the
+exception: it still extracts listing hrefs via regex over raw HTML rather
+than parsing the search page's own __initial_props__ blob, since the ids
+needed are readily available as plain anchor hrefs — a reasonable
+follow-up for task 2.1 to reconsider once a second connector's discover()
+is being built, not a design principle this connector fully achieves today.
 
 robots.txt constraint that shapes discover(): pagination paths
 (`/*/l/2*` through `/*/l/39*`) are disallowed, and bare `/madrid/`,
@@ -55,27 +60,40 @@ _REQUEST_TIMEOUT_SECONDS = 15
 
 # .../vivienda/<geography-slug>/<feature-slug>/<external_id>/d
 _DETAIL_HREF_RE = re.compile(r'"(/es/comprar/vivienda/[a-z0-9-]+/[a-z0-9-]+/(\d+)/d)"')
-_INITIAL_PROPS_MARKER = 'id="__initial_props__">'
+_INITIAL_PROPS_MARKER = 'id="__initial_props__"'
+
+# robots.txt disallows the literal path substring "/madrid/", "/barcelona/",
+# "/valencia/" (bare city name as its own path segment) — not the hyphenated
+# slugs (e.g. "madrid-capital") this connector actually uses. See discover().
+_ROBOTS_DISALLOWED_BARE_GEOGRAPHIES = frozenset({"madrid", "barcelona", "valencia"})
 
 
 def _extract_initial_props(html: str) -> dict[str, Any]:
     """Pull the server-rendered JSON blob out of a Fotocasa page.
 
-    Not a regex over the whole tag (attribute order isn't guaranteed) —
-    find the id marker, then take everything up to the next `</script>`.
-    Raises ConnectorError if the page structure doesn't match what this
-    connector expects, so a site redesign fails loudly (counted by the
-    circuit breaker) instead of silently producing an empty/wrong listing.
+    Not a regex over the whole tag: real pages have been observed with
+    `type="application/json" id="__initial_props__"` (type before id), so
+    this only assumes `id="__initial_props__"` appears somewhere in the
+    opening `<script ...>` tag, then finds the tag's closing `>` after that
+    (handling any attributes before or after `id=...`, in either order),
+    then takes everything up to the next `</script>`. Raises ConnectorError
+    if the page structure doesn't match what this connector expects, so a
+    site redesign — or a soft-block/interruption page lacking this tag
+    entirely — fails loudly (counted by the circuit breaker) instead of
+    silently producing an empty/wrong listing.
     """
     import json
 
-    start_marker_idx = html.find(_INITIAL_PROPS_MARKER)
-    if start_marker_idx == -1:
+    marker_idx = html.find(_INITIAL_PROPS_MARKER)
+    if marker_idx == -1:
         raise ConnectorError(
             "fotocasa: __initial_props__ script tag not found — page structure "
-            "may have changed"
+            "may have changed, or this is a soft-block/interruption page"
         )
-    start = start_marker_idx + len(_INITIAL_PROPS_MARKER)
+    tag_close_idx = html.find(">", marker_idx)
+    if tag_close_idx == -1:
+        raise ConnectorError("fotocasa: unterminated __initial_props__ script tag")
+    start = tag_close_idx + 1
     end = html.find("</script>", start)
     if end == -1:
         raise ConnectorError("fotocasa: unterminated __initial_props__ script tag")
@@ -105,6 +123,32 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
+def _features_list_value(features_list: list[Any], label: str) -> Any:
+    """Look up a value by label in Fotocasa's `featuresList` array.
+
+    `realEstate.features` (a flat dict) has coded/enum values that don't
+    map cleanly to canonical fields — e.g. `features.floor` is an integer
+    code, not a literal storey (a real listing had `features.floor == 7`
+    while its own human-readable label read "2ª planta"). `featuresList`
+    (a list of `{label, literal, value}` dicts) carries the human-readable
+    value instead — confirmed live during PR #49 review. Prefer this over
+    `features` for anything where a coded value would misrepresent
+    precision the site doesn't actually have.
+    """
+    for item in features_list:
+        if isinstance(item, dict) and item.get("label") == label:
+            return item.get("value")
+    return None
+
+
+def _to_has_elevator(elevator_value: Any) -> bool | None:
+    if elevator_value == "YES":
+        return True
+    if elevator_value == "NO":
+        return False
+    return None
+
+
 class FotocasaConnector(Connector):
     name = "fotocasa"
     # Conservative default — issue #1 §15's "good-neighbor crawling" applies
@@ -115,6 +159,19 @@ class FotocasaConnector(Connector):
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         geography = scope.geography or "madrid-capital"
+        if geography in _ROBOTS_DISALLOWED_BARE_GEOGRAPHIES:
+            # robots.txt disallows the literal substring "/madrid/" (and
+            # "/barcelona/", "/valencia/") as a path segment — but NOT
+            # hyphenated slugs like "madrid-capital" (no "/madrid/"
+            # substring in "/madrid-capital/"). Only the exact bare names
+            # are blocked; this isn't a general robots.txt parser, just a
+            # guard against the specific disallowed values this connector
+            # could otherwise be told to fetch.
+            raise ConnectorError(
+                f"fotocasa discover: geography={geography!r} is disallowed by "
+                f"robots.txt (bare city-name path) — use a hyphenated slug "
+                f"like '{geography}-capital' instead"
+            )
         url = f"{_BASE_URL}/es/comprar/viviendas/{geography}/todas-las-zonas/l"
         throttle()
         try:
@@ -128,6 +185,22 @@ class FotocasaConnector(Connector):
             raise ConnectorError(
                 f"fotocasa discover: request failed for {url}: {exc}"
             ) from exc
+
+        if _INITIAL_PROPS_MARKER not in response.text:
+            # A real search-results page always embeds __initial_props__
+            # (fetch_detail relies on the same invariant). Its absence means
+            # this is Fotocasa's own soft-block/interruption page (observed
+            # live during PR #49 review: HTTP 200, no error status, just no
+            # listing data) — NOT "zero listings for this geography". Raising
+            # here, rather than returning an empty list, is what stops an
+            # empty discover() result from being misread by
+            # _reconcile_missed_discoveries as "every active listing just
+            # vanished" (see orchestrator.py — a discover() failure here
+            # short-circuits before reconciliation ever runs).
+            raise ConnectorError(
+                "fotocasa discover: response has no __initial_props__ — likely "
+                "a soft-block/interruption page, not a real search results page"
+            )
 
         external_ids = sorted(
             {m.group(2) for m in _DETAIL_HREF_RE.finditer(response.text)}
@@ -169,6 +242,7 @@ class FotocasaConnector(Connector):
         props = raw.raw["props"]
         real_estate = props.get("realEstate") or {}
         features = real_estate.get("features") or {}
+        features_list = real_estate.get("featuresList") or []
         address_block = real_estate.get("address") or {}
         coords = real_estate.get("coordinates") or {}
         descriptions = real_estate.get("descriptions") or {}
@@ -212,15 +286,15 @@ class FotocasaConnector(Connector):
             # feasibility spike — revisit if a sampled listing shows both.
             rooms=_to_int(features.get("rooms")),
             bathrooms=_to_int(features.get("bathrooms")),
-            floor=(
-                str(features.get("floor"))
-                if features.get("floor") is not None
-                else None
+            floor=_features_list_value(features_list, "floor"),  # human-readable
+            # (e.g. "2ª planta"), not `features.floor`'s integer code — see
+            # _features_list_value's docstring for why the coded value would
+            # be fabricated precision (verified live during PR #49 review:
+            # a real listing had features.floor=7 but featuresList said
+            # "2ª planta").
+            has_elevator=_to_has_elevator(
+                _features_list_value(features_list, "elevator")
             ),
-            has_elevator=None,  # not present in `features` on the sampled
-            # listing; Fotocasa exposes amenities as a separate features
-            # list on some listings — not implemented in this first pass,
-            # tracked in raw_extra for now.
             year_built=None,  # `features.antiquity` is a coded bucket
             # (e.g. "more than N years"), not a literal year — mapping it
             # to `year_built` would fabricate false precision. Kept raw.
@@ -234,5 +308,6 @@ class FotocasaConnector(Connector):
                 "antiquity": features.get("antiquity"),
                 "surfaceLand": features.get("surfaceLand"),
                 "zipCode": address_block.get("zipCode"),
+                "floor_code_raw": features.get("floor"),
             },
         )

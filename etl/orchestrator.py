@@ -100,7 +100,7 @@ def _update_existing_listing(
                current_price = COALESCE(%s, current_price),
                description = COALESCE(%s, description),
                photo_urls = %s, contact_raw = COALESCE(%s, contact_raw),
-               raw_extra = %s
+               raw_extra = %s, missed_discovery_count = 0
          WHERE id = %s
         """,
         (
@@ -426,7 +426,21 @@ def run_connector(conn, connector: Connector, scope: ConnectorScope) -> dict:
 
     limiter.acquire()
     external_ids = connector.discover(scope, throttle=limiter.acquire)
-    _reconcile_missed_discoveries(conn, connector.name, set(external_ids))
+    if external_ids:
+        _reconcile_missed_discoveries(conn, connector.name, set(external_ids))
+    else:
+        # An empty discover() result is never trusted enough to bump every
+        # active listing's miss-counter — a well-behaved connector should
+        # already raise ConnectorError on a soft-block/interruption page
+        # rather than return an empty list (see fotocasa.py's
+        # _INITIAL_PROPS_MARKER check), but this is a second line of
+        # defense: even a connector bug that returns [] instead of raising
+        # must not be able to mass-withdraw a source's entire inventory.
+        logger.warning(
+            "Connector %s: discover() returned zero external_ids — skipping "
+            "withdrawal reconciliation this run (see run_connector docstring)",
+            connector.name,
+        )
 
     fetched = 0
     errors = 0

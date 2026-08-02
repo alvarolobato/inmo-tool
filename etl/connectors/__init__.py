@@ -20,7 +20,15 @@ from __future__ import annotations
 
 
 def register_all() -> None:
+    """Idempotent — safe to call more than once (e.g. a test importing
+    etl.main twice, or a future entry point calling it defensively). Skips
+    a connector whose `name` is already registered rather than appending a
+    duplicate, which would otherwise make the orchestrator run the same
+    site twice per sweep.
+    """
     from etl.connectors.fotocasa import FotocasaConnector
     from etl.orchestrator import CONNECTORS
 
-    CONNECTORS.append(FotocasaConnector())
+    registered_names = {c.name for c in CONNECTORS}
+    if FotocasaConnector.name not in registered_names:
+        CONNECTORS.append(FotocasaConnector())

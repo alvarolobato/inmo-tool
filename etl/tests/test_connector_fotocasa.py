@@ -13,7 +13,9 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from etl.connectors.base import ConnectorScope, RawListing
+import pytest
+
+from etl.connectors.base import ConnectorError, ConnectorScope, RawListing
 from etl.connectors.fotocasa import FotocasaConnector
 
 _FIXTURES = Path(__file__).parent / "fixtures"
@@ -46,6 +48,33 @@ class TestDiscover:
         # with a query string that must NOT match (see fixture comments).
         assert sorted(ids) == ["190011971", "190022222", "190033333"]
 
+    def test_discover_raises_on_soft_block_page_not_empty_list(self):
+        """PR #49 review finding: Fotocasa's interruption page returns HTTP
+        200 with no __initial_props__ tag — discover() must raise, not
+        return []. An empty list would be misread by the orchestrator's
+        withdrawal reconciliation as "every listing just disappeared"."""
+        html = _read_fixture("fotocasa_sample_block_page.html")
+        connector = FotocasaConnector()
+        with patch(
+            "etl.connectors.fotocasa.requests.get", return_value=_mock_response(html)
+        ), pytest.raises(ConnectorError, match="__initial_props__"):
+            connector.discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+
+    def test_discover_rejects_robots_txt_disallowed_bare_geography(self):
+        """robots.txt disallows the literal "/madrid/" path segment (not the
+        hyphenated "madrid-capital" this connector's default uses) — a
+        caller passing the bare city name must be rejected before any
+        request is made, not silently sent."""
+        connector = FotocasaConnector()
+        with (
+            patch("etl.connectors.fotocasa.requests.get") as mock_get,
+            pytest.raises(ConnectorError, match="robots.txt"),
+        ):
+            connector.discover(ConnectorScope(geography="madrid"), throttle=lambda: None)
+        mock_get.assert_not_called()
+
 
 class TestNormalize:
     def test_normalize_matches_expected_fixture(self):
@@ -65,8 +94,13 @@ class TestNormalize:
         assert canonical.rooms == 3
         assert canonical.bathrooms == 1
         assert canonical.m2_built == Decimal(74)
-        assert canonical.floor == "3"
+        # Human-readable value from featuresList, NOT the coded
+        # features.floor=3 integer (that would be fabricated precision —
+        # see docs/skills/connectors.md and the fixture's own comment).
+        assert canonical.floor == "2ª planta"
+        assert canonical.has_elevator is True
         assert canonical.energy_rating == "G"
+        assert canonical.raw_extra["floor_code_raw"] == 3
         assert canonical.lat == Decimal("40.382233")
         assert canonical.lon == Decimal("-3.6102757")
         assert canonical.listing_kind == "agency"  # clientUrl contains /inmobiliaria-
@@ -74,7 +108,11 @@ class TestNormalize:
         assert len(canonical.photo_urls) == 2
         assert canonical.raw_extra["buildingType_raw"] == "Flat"
 
-    def test_normalize_infers_particular_when_no_agency_signal(self):
+    def test_normalize_leaves_listing_kind_none_without_a_positive_agency_signal(self):
+        """PR #49 review finding: defaulting to 'particular' whenever a name/
+        URL exists at all (but neither agency signal matched) was itself an
+        unverified guess. Absence of an agency signal must yield None, not
+        an inferred 'particular'."""
         raw = RawListing(
             external_id="999",
             source="fotocasa",
@@ -95,7 +133,53 @@ class TestNormalize:
             },
         )
         canonical = FotocasaConnector().normalize(raw)
-        assert canonical.listing_kind == "particular"
+        assert canonical.listing_kind is None
+
+    def test_normalize_still_infers_agency_from_client_url(self):
+        raw = RawListing(
+            external_id="998",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/x",
+                "props": {
+                    "realEstate": {
+                        "clientName": "Some Agency SL",
+                        "clientUrl": "/es/inmobiliaria-some-agency/comprar/l",
+                        "price": 100000,
+                        "address": {},
+                        "coordinates": {},
+                        "features": {},
+                        "descriptions": {},
+                        "multimedia": [],
+                    }
+                },
+            },
+        )
+        canonical = FotocasaConnector().normalize(raw)
+        assert canonical.listing_kind == "agency"
+
+    def test_normalize_has_elevator_none_when_featuresList_lacks_the_label(self):
+        raw = RawListing(
+            external_id="997",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/x",
+                "props": {
+                    "realEstate": {
+                        "price": 100000,
+                        "address": {},
+                        "coordinates": {},
+                        "features": {},
+                        "featuresList": [{"label": "floor", "value": "Bajo"}],
+                        "descriptions": {},
+                        "multimedia": [],
+                    }
+                },
+            },
+        )
+        canonical = FotocasaConnector().normalize(raw)
+        assert canonical.has_elevator is None
+        assert canonical.floor == "Bajo"
 
     def test_normalize_does_not_fabricate_year_built_from_antiquity_bucket(self):
         """antiquity is a coded bucket, not a literal year — must stay None, not guessed."""
