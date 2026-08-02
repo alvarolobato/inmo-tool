@@ -2,46 +2,14 @@
 # Consumed by:
 #   - .github/actions/load-knowledge/extract.py
 #   - dashboard/scripts/build-knowledge.ts
-#   - scripts/wren-push-metadata.py
 #
-# Adding a new source: add one entry here; all three consumers pick it up automatically.
+# Adding a new source: add one entry here; both consumers pick it up automatically.
 # slice: short key used by extract.py's INPUT_SLICES input.
 # path:  repo-root-relative path to the source MD.
 # markers: LLM:* section types expected in this file (informational — not enforced).
-sources:
-  - slice: data-decisions
-    path: docs/data-decisions.md
-    markers: [rules]
-  - slice: etl-sync-strategy
-    path: docs/etl-sync-strategy.md
-    markers: [rules]
-  - slice: architecture-sales
-    path: docs/architecture/sales.md
-    markers: [tables, relationships]
-  - slice: architecture-wholesale
-    path: docs/architecture/wholesale.md
-    markers: [tables, relationships]
-  - slice: architecture-stock
-    path: docs/architecture/stock-logistics.md
-    markers: [tables, relationships]
-  - slice: architecture-purchasing
-    path: docs/architecture/purchasing.md
-    markers: [tables, relationships]
-  - slice: architecture-products
-    path: docs/architecture/products.md
-    markers: [tables, relationships]
-  - slice: architecture-customers
-    path: docs/architecture/customers.md
-    markers: [tables]
-  - slice: architecture-stores
-    path: docs/architecture/stores-hr.md
-    markers: [tables]
-  - slice: 4d-sql-dialect
-    path: docs/skills/4d-sql-dialect.md
-    markers: [rules]
-  - slice: data-access
-    path: docs/skills/data-access.md
-    markers: [rules]
-  - slice: sql-pairs
-    path: docs/dashboard/sql-pairs.md
-    markers: [sql-pairs]
+#
+# Empty as of task 1.1 (#9): every source MD here was PowerShop/4D-specific
+# domain content and was deleted along with it. Phase 4 (AI layer, issue #5)
+# adds real inmo-tool knowledge sources (occupancy/condition/red-flag
+# instructions, SQL-pair examples) as that work lands.
+sources: []

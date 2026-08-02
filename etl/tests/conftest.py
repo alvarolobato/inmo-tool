@@ -11,8 +11,8 @@ def _postgres_available() -> bool:
     """Return True if PostgreSQL appears to be configured in the environment.
 
     Tests are skipped only when no PostgreSQL configuration is present.
-    Misconfigured variables (e.g., invalid P4D_PORT) are allowed to fail the
-    test rather than silently skip it.
+    Misconfigured variables (e.g., an invalid POSTGRES_DSN) are allowed to
+    fail the test rather than silently skip it.
 
     Aligns with etl.config._get_postgres_dsn() DSN resolution rules:
     - POSTGRES_DSN takes precedence.

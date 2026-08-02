@@ -68,35 +68,6 @@ def _loader_get(key: str, default: str | int | None = None) -> str | int | None:
 # ---------------------------------------------------------------------------
 
 
-def _get_p4d_port() -> int:
-    """Return the P4D port from the central loader (schema key: fourd.port).
-
-    Falls back to the P4D_PORT env var and finally 19812.
-    Raises a clear ValueError if the resolved value is not a valid integer.
-    """
-    value = _loader_get("fourd.port", default=None)
-    if value is not None:
-        try:
-            return int(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"Invalid value for fourd.port / P4D_PORT: {value!r}. "
-                "It must be a valid integer TCP port number."
-            ) from exc
-
-    # Explicit env var fallback (e.g., in tests that bypass the loader)
-    raw = os.environ.get("P4D_PORT")
-    if not raw:
-        return 19812
-    try:
-        return int(raw)
-    except ValueError as exc:
-        raise ValueError(
-            f"Invalid value for P4D_PORT environment variable: {raw!r}. "
-            "It must be a valid integer TCP port number."
-        ) from exc
-
-
 def _get_postgres_dsn() -> str:
     """Return the PostgreSQL DSN from the central loader or assembled from parts.
 
@@ -145,23 +116,6 @@ def _get_postgres_dsn() -> str:
 
 @dataclass
 class Config:
-    p4d_host: str = field(
-        default_factory=lambda: str(
-            _loader_get("fourd.host", default=None) or os.environ.get("P4D_HOST", "")
-        )
-    )
-    p4d_port: int = field(default_factory=_get_p4d_port)
-    p4d_user: str = field(
-        default_factory=lambda: str(
-            _loader_get("fourd.user", default=None) or os.environ.get("P4D_USER", "")
-        )
-    )
-    p4d_password: str = field(
-        default_factory=lambda: str(
-            _loader_get("fourd.password", default=None)
-            or os.environ.get("P4D_PASSWORD", "")
-        )
-    )
     postgres_dsn: str = field(default_factory=_get_postgres_dsn)
 
     def __post_init__(self) -> None:
