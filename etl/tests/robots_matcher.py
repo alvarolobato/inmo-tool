@@ -42,7 +42,19 @@ def load_star_block_rules(robots_txt: str) -> list[tuple[str, str]]:
     governs it.
     """
     rules: list[tuple[str, str]] = []
-    in_star_block = False
+    # RFC 9309 §2.2.1: *consecutive* user-agent lines form a single group that
+    # shares the rules following them. So in
+    #     User-agent: *
+    #     User-agent: Scrapy
+    #     Disallow: /
+    # the `Disallow: /` binds to BOTH agents. Tracking only "was the last
+    # user-agent line `*`?" silently dropped the `*` rules whenever a named
+    # agent was declared after it — reading a site as more permissive than it
+    # is, which is the dangerous direction for a compliance assertion. This
+    # matters beyond Fotocasa now: PR #141 (Servihabitat) relies on this same
+    # matcher, and that site's robots.txt does declare a named Scrapy group.
+    star_in_current_group = False
+    previous_field_was_user_agent = False
     for raw_line in robots_txt.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or ":" not in line:
@@ -51,9 +63,18 @@ def load_star_block_rules(robots_txt: str) -> list[tuple[str, str]]:
         field = field.strip().lower()
         value = value.strip()
         if field == "user-agent":
-            in_star_block = value == "*"
-        elif field in ("disallow", "allow") and in_star_block:
-            rules.append((field, value))
+            if not previous_field_was_user_agent:
+                # A user-agent line following a rule line starts a new group.
+                star_in_current_group = False
+            star_in_current_group = star_in_current_group or value == "*"
+            previous_field_was_user_agent = True
+        elif field in ("disallow", "allow"):
+            if star_in_current_group:
+                rules.append((field, value))
+            previous_field_was_user_agent = False
+        else:
+            # Sitemap / Crawl-delay etc. don't close a user-agent run.
+            continue
     return rules
 
 

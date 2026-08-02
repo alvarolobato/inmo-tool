@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -92,12 +93,38 @@ _INITIAL_PROPS_MARKER = 'id="__initial_props__"'
 # `_zone_href_re` so a Madrid page can't leak a Barcelona zone slug into a
 # Madrid sweep (the city page does link some cross-city pages). See
 # `_discover_zone_slugs` for why these are scraped rather than hardcoded.
-_ZONE_HREF_TEMPLATE = r'"/es/comprar/viviendas/{geography}/([a-z0-9-]+)/l"'
+#
+# The optional `<N>-habitaciones/` segment matters: on a rooms-filtered base
+# page (scope.rooms set) Fotocasa's own zone links carry the filter forward
+# as `.../<zone>/2-habitaciones/l`. Without this branch the pattern matched
+# nothing on those pages, so every rooms-filtered scope silently collapsed
+# to the single unfiltered-page behaviour this whole change exists to
+# replace — invisible, because a zero-slug sweep looked identical to a
+# successful one (both bugs found together in PR #142 review).
+_ZONE_HREF_TEMPLATE = (
+    r'"/es/comprar/viviendas/{geography}/([a-z0-9-]+)/(?:\d+-habitaciones/)?l"'
+)
 
 # Not a real neighbourhood: the unfiltered "all zones" slice the city page
 # itself represents. Included in a sweep it would just re-fetch the page we
 # already have.
 _ZONE_SLUG_ALL = "todas-las-zonas"
+
+# Stop a sweep after this many zones in a row come back with no payload.
+# Fotocasa's soft-block persists for minutes once triggered, so continuing
+# spends the rest of a ~54min sweep hammering a site that is actively
+# refusing us, for zero additional listings. 3 tolerates an isolated
+# transient blip (or two) without tolerating a sustained block.
+_MAX_CONSECUTIVE_ZONE_FAILURES = 3
+
+# Alarm thresholds, deliberately asymmetric because the two signals mean
+# different things. A *failed* zone (no payload) is the positive soft-block
+# signature, so a low bar is right — a fifth of a sweep failing already
+# warrants attention. An *empty* zone (well-formed page, zero listings) is
+# normal in small neighbourhoods, so only a large majority is suspicious,
+# and it indicates a parse regression rather than blocking.
+_ZONE_FAILURE_ALARM_RATIO = 0.2
+_ZONE_EMPTY_ALARM_RATIO = 0.8
 
 # robots.txt disallows the literal path substring "/madrid/", "/barcelona/",
 # "/valencia/" (bare city name as its own path segment) — not the hyphenated
@@ -348,11 +375,18 @@ class FotocasaConnector(Connector):
     # an operator choice, and `discovers_full_inventory=False` already tells
     # the orchestrator not to infer withdrawal from absence. Set this when
     # the ~54min full sweep does not fit the schedule.
+    #
+    # NOTE: this is a class attribute, not a `connector_config` field — it
+    # is not settable from the connector-management UI (#100) today, so the
+    # log messages below must not tell an operator to "set" it as though it
+    # were. Making it genuinely configurable belongs with #143's fetch-budget
+    # work, which is where the scheduling tradeoff actually gets decided.
     max_zones_per_sweep: int | None = None
     # Still False after zone partitioning (issue #65), but for a weaker
     # reason than before. Coverage went from ~30 of madrid-capital's 11,361
-    # listings (<0.3%) to a few thousand (~30-40%) by sweeping the ~161
-    # robots.txt-allowed neighbourhood slices. That is a 100x+ improvement,
+    # listings (<0.3%) to a measured floor of ~1,500 (~13%) by sweeping the
+    # ~161 robots.txt-allowed neighbourhood slices. That is a ~50x
+    # improvement,
     # but it is not complete: any zone with more than ~30 active listings
     # still yields only its first ~30, because reaching the rest needs the
     # disallowed pagination path. A listing in a busy zone can therefore
@@ -435,11 +469,47 @@ class FotocasaConnector(Connector):
         baseline_count = len(external_ids)
 
         zone_slugs = _discover_zone_slugs(base_html, geography)
-        if self.max_zones_per_sweep is not None:
-            zone_slugs = zone_slugs[: self.max_zones_per_sweep]
+        if not zone_slugs:
+            # Zero zones means this sweep just silently reverted to the
+            # pre-#65 single-page behaviour — the exact regression this
+            # change exists to prevent, and the one failure mode that
+            # otherwise looks *identical* to a healthy sweep (a normal
+            # 200, a plausible ~30 listings, no exception). Two known
+            # causes: Fotocasa changed its zone-link markup, or the
+            # geography genuinely has no neighbourhood breakdown. Both
+            # warrant a human looking, so this is ERROR, not a debug note.
+            logger.error(
+                "fotocasa discover: no zone slugs found on the %s base page "
+                "— zone link markup may have changed; coverage has silently "
+                "fallen back to the unfiltered page only (%d listings). "
+                "Sweep aborted early: without zones there is nothing to sweep.",
+                geography,
+                baseline_count,
+            )
+            return sorted(external_ids)
+
+        if self.max_zones_per_sweep is not None and self.max_zones_per_sweep < len(
+            zone_slugs
+        ):
+            # Rotate the window rather than always taking the alphabetical
+            # head: a fixed prefix means the tail of the city is NEVER swept,
+            # so those listings would be permanently invisible instead of
+            # merely delayed. Offset by day-of-year so consecutive days cover
+            # different slices and the whole city is reached over time.
+            # Deterministic within a day, so retries of the same run stay
+            # consistent rather than re-fetching an arbitrary new slice.
+            offset = (
+                datetime.now(timezone.utc).timetuple().tm_yday * self.max_zones_per_sweep
+            ) % len(zone_slugs)
+            rotated = zone_slugs[offset:] + zone_slugs[:offset]
+            zone_slugs = rotated[: self.max_zones_per_sweep]
         zones_failed = 0
         zones_empty = 0
+        zones_attempted = 0
+        consecutive_failures = 0
+        aborted_early = False
         for slug in zone_slugs:
+            zones_attempted += 1
             url = self._search_url(geography, slug, rooms_segment)
             throttle()
             # strict=False: one zone 404ing, timing out, or serving a
@@ -450,57 +520,92 @@ class FotocasaConnector(Connector):
             zone_html = self._fetch_search_page(url, strict=False)
             if zone_html is None:
                 zones_failed += 1
+                consecutive_failures += 1
+                if consecutive_failures >= _MAX_CONSECUTIVE_ZONE_FAILURES:
+                    # Fotocasa's soft-block persists for minutes once
+                    # triggered, so continuing would spend the rest of a
+                    # ~54min sweep hammering a site actively refusing us —
+                    # gaining nothing and being a bad citizen. Stop and
+                    # surface it; the partial result is still returned
+                    # (discovers_full_inventory=False means a short sweep
+                    # can't be misread as evidence of withdrawal).
+                    aborted_early = True
+                    logger.error(
+                        "fotocasa discover: aborting %s sweep after %d "
+                        "consecutive zone failures — the site is likely "
+                        "soft-blocking (it serves 200s with no payload once "
+                        "rate-limited). Attempted %d of %d zones; returning "
+                        "the partial result rather than continuing to hammer it.",
+                        geography,
+                        consecutive_failures,
+                        zones_attempted,
+                        len(zone_slugs),
+                    )
+                    break
                 continue
+            consecutive_failures = 0
             zone_ids = self._parse_external_ids(zone_html)
             if not zone_ids:
                 # A valid-looking page (it had __initial_props__) that still
-                # parsed to zero listings. Usually a genuinely empty
-                # neighbourhood, but it is also the shape a throttled
-                # response can take — so it is counted and reported rather
-                # than treated as an unremarkable zero.
+                # parsed to zero listings. Unlike a *failed* zone this is NOT
+                # the throttle signature — a soft-blocked response lacks the
+                # payload entirely and lands in zones_failed. So this is
+                # usually a genuinely small/empty neighbourhood, and is
+                # reported separately rather than folded into the block alarm.
                 zones_empty += 1
             external_ids |= zone_ids
 
         logger.info(
             "fotocasa discover: geography=%s found %d external_ids "
-            "(%d from the unfiltered page + %d zones swept, "
-            "%d zones failed, %d zones empty)",
+            "(%d from the unfiltered page + %d of %d zones attempted, "
+            "%d zones failed, %d zones empty%s)",
             geography,
             len(external_ids),
             baseline_count,
+            zones_attempted,
             len(zone_slugs),
             zones_failed,
             zones_empty,
+            ", sweep aborted early" if aborted_early else "",
         )
-        # Both degenerate outcomes below leave the sweep looking "successful"
-        # while returning roughly the pre-#65 baseline, so they are logged at
-        # ERROR rather than left for someone to notice in a listing count.
-        if zone_slugs and zones_failed == len(zone_slugs):
+
+        # These two conditions are deliberately NOT combined into one
+        # failed-or-empty ratio. Throttling is *positively* identifiable:
+        # a soft-blocked response has no __initial_props__ payload at all,
+        # so it raises and lands in zones_failed. A genuinely small
+        # neighbourhood returns a well-formed page with zero listings and
+        # lands in zones_empty. Folding them together (as this did before
+        # PR #142's review) made a sparse geography — or, before the regex
+        # fix above, any rooms-filtered scope — trigger an alarm that
+        # asserted "likely rate-induced soft-blocking" about a site behaving
+        # perfectly well.
+        if zones_attempted and zones_failed > zones_attempted * _ZONE_FAILURE_ALARM_RATIO:
             logger.error(
-                "fotocasa discover: all %d zone requests failed for "
-                "geography=%s — zone URL shape may have changed, or the site "
-                "is serving soft-block pages; coverage has fallen back to "
-                "the unfiltered page only",
-                len(zone_slugs),
-                geography,
-            )
-        elif zone_slugs and (zones_failed + zones_empty) > len(zone_slugs) * 0.8:
-            # Real neighbourhoods reliably return ~30 listings each, so a
-            # sweep where >80% of zones come back failed-or-empty is the
-            # signature of rate-induced soft-blocking (measured: at 20 req/min
-            # Fotocasa starts serving 200s with no payload after ~4 requests),
-            # not of Madrid suddenly having 130 empty neighbourhoods.
-            logger.error(
-                "fotocasa discover: %d/%d zones for geography=%s returned no "
-                "listings (%d failed, %d empty) — likely rate-induced "
-                "soft-blocking; consider lowering rate_limit_per_minute "
-                "(currently %d) or setting max_zones_per_sweep",
-                zones_failed + zones_empty,
-                len(zone_slugs),
-                geography,
+                "fotocasa discover: %d/%d attempted zones for geography=%s "
+                "failed to return a payload — this is the soft-block "
+                "signature (measured: at 20 req/min Fotocasa starts serving "
+                "200s with no payload after ~4 requests). rate_limit_per_minute "
+                "is currently %d; lowering it requires a code change, as does "
+                "bounding the sweep via max_zones_per_sweep (neither is "
+                "operator-settable today — see #143).",
                 zones_failed,
-                zones_empty,
+                zones_attempted,
+                geography,
                 self.rate_limit_per_minute,
+            )
+        elif zones_attempted and zones_empty > zones_attempted * _ZONE_EMPTY_ALARM_RATIO:
+            # Not a throttle signal — these pages parsed fine and simply had
+            # no listings. En masse that points at a parse regression (the
+            # listing-link markup changed) rather than at the site blocking
+            # us, so it gets its own message and its own remedy.
+            logger.error(
+                "fotocasa discover: %d/%d attempted zones for geography=%s "
+                "returned well-formed pages with zero listings — real "
+                "neighbourhoods reliably carry ~30, so this points at a "
+                "listing-link parse regression rather than soft-blocking.",
+                zones_empty,
+                zones_attempted,
+                geography,
             )
         return sorted(external_ids)
 

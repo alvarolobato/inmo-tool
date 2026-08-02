@@ -387,10 +387,14 @@ class TestSweepPacingAndBounds:
         assert sorted(ids) == ["190011971", "190022222"]
         assert mock_error.called, "a fully-soft-blocked sweep must log an error"
 
-    def test_mostly_empty_sweep_warns_about_probable_throttling(self):
-        """Real neighbourhoods return ~30 listings each, so a sweep where
-        almost every zone yields nothing is the signature of throttling, not
-        of a city full of empty neighbourhoods."""
+    def test_mostly_empty_sweep_reports_a_parse_regression_not_throttling(self):
+        """An *empty* zone is a well-formed page with zero listings — which
+        is NOT the throttle signature (a throttled response has no payload
+        at all and is counted as failed). Before PR #142's review these were
+        folded into one failed-or-empty ratio, so a sweep of well-behaved
+        pages produced an error asserting 'likely rate-induced
+        soft-blocking' about a site that was serving us perfectly. The two
+        signals must stay distinct, and point at different remedies."""
         base = _read_fixture("fotocasa_sample_search_zones.html")
 
         def empty_zone_get(url, **_kwargs):
@@ -407,7 +411,112 @@ class TestSweepPacingAndBounds:
                 ConnectorScope(geography="madrid-capital"), throttle=lambda: None
             )
         assert mock_error.called
-        assert "soft-blocking" in str(mock_error.call_args)
+        message = str(mock_error.call_args)
+        assert "parse regression" in message
+        # The message may *mention* soft-blocking to rule it out, but it must
+        # not send the operator chasing the rate limit — that's the remedy for
+        # the failure alarm, and it isn't what's wrong here.
+        assert "rate_limit_per_minute" not in message, (
+            "an all-empty sweep is not evidence of soft-blocking — pointing "
+            "the operator at the rate limit sends them after the wrong cause"
+        )
+
+
+class TestSilentFailureGuards:
+    """PR #142 review: the sweep's most dangerous failure mode is the one
+    that looks *identical to success* — a normal 200, a plausible ~30
+    listings, no exception, but silently back to pre-#65 coverage."""
+
+    def test_zero_discovered_zones_logs_an_error_instead_of_passing_quietly(self):
+        """If Fotocasa changes its zone-link markup the regex matches
+        nothing, the sweep quietly reverts to one page, and every signal a
+        human would look at (no exception, no failed zones, a normal-looking
+        listing count) says the run was fine. That must be loud."""
+        # A base page with listings but no zone links at all.
+        page = (
+            '<script id="__initial_props__">{}</script>'
+            '<a href="/es/comprar/vivienda/madrid-capital/x/190011971/d">a</a>'
+        )
+        with (
+            patch(
+                "etl.connectors.fotocasa.requests.get",
+                side_effect=lambda url, **_k: _mock_response(page, url=url),
+            ) as mock_get,
+            patch.object(fotocasa_module.logger, "error") as mock_error,
+        ):
+            ids = FotocasaConnector().discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+        assert ids == ["190011971"]  # baseline still returned, not lost
+        assert len(mock_get.call_args_list) == 1  # nothing to sweep
+        assert mock_error.called, (
+            "a zone-markup break silently halves coverage — it must not be "
+            "indistinguishable from a healthy sweep"
+        )
+        assert "no zone slugs" in str(mock_error.call_args)
+
+    def test_rooms_filtered_base_page_still_yields_zone_slugs(self):
+        """On a rooms-filtered scope Fotocasa's own zone links carry the
+        filter forward (`.../chamberi/2-habitaciones/l`). The original
+        pattern required `<geo>/<slug>/l` and so matched *nothing* on those
+        pages — every rooms-filtered scope silently collapsed to a single
+        request. The pre-existing rooms test missed this because its fixture
+        served UNFILTERED hrefs regardless of the scope."""
+        base = (
+            '<script id="__initial_props__">{}</script>'
+            '<a href="/es/comprar/viviendas/madrid-capital/chamberi/2-habitaciones/l">c</a>'
+            '<a href="/es/comprar/viviendas/madrid-capital/salamanca/2-habitaciones/l">s</a>'
+        )
+        zone = (
+            '<script id="__initial_props__">{}</script>'
+            '<a href="/es/comprar/vivienda/madrid-capital/x/190044444/d">z</a>'
+        )
+
+        def fake_get(url, **_kwargs):
+            return _mock_response(base if "/todas-las-zonas/" in url else zone, url=url)
+
+        with patch(
+            "etl.connectors.fotocasa.requests.get", side_effect=fake_get
+        ) as mock_get:
+            FotocasaConnector().discover(
+                ConnectorScope(geography="madrid-capital", rooms=2),
+                throttle=lambda: None,
+            )
+        requested = [call.args[0] for call in mock_get.call_args_list]
+        assert len(requested) == 3, (
+            f"expected base + 2 zones, got {len(requested)}: "
+            "a rooms-filtered sweep discovered no zones"
+        )
+        assert all(url.endswith("/2-habitaciones/l") for url in requested)
+
+    def test_sweep_aborts_after_consecutive_failures_instead_of_hammering(self):
+        """Fotocasa's soft-block persists for minutes once triggered, so
+        continuing spends the rest of a ~54min sweep making requests a site
+        is actively refusing — no extra listings, plenty of extra load."""
+        base = _read_fixture("fotocasa_sample_search_zones.html")
+
+        def blocked_get(url, **_kwargs):
+            if "/todas-las-zonas/" in url:
+                return _mock_response(base, url=url)
+            return _mock_response("<html>no payload</html>", url=url)
+
+        with (
+            patch(
+                "etl.connectors.fotocasa.requests.get", side_effect=blocked_get
+            ) as mock_get,
+            patch.object(fotocasa_module.logger, "error") as mock_error,
+        ):
+            ids = FotocasaConnector().discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+        zone_requests = len(mock_get.call_args_list) - 1
+        assert zone_requests == fotocasa_module._MAX_CONSECUTIVE_ZONE_FAILURES, (
+            f"expected to stop after "
+            f"{fotocasa_module._MAX_CONSECUTIVE_ZONE_FAILURES} consecutive "
+            f"failures, made {zone_requests} zone requests"
+        )
+        assert sorted(ids) == ["190011971", "190022222"]  # partial result kept
+        assert "aborting" in str(mock_error.call_args_list)
 
 
 class TestRobotsCompliance:
@@ -465,6 +574,33 @@ class TestRobotsCompliance:
         for url in must_be_disallowed:
             allowed, _ = is_allowed(rules, url)
             assert not allowed, f"matcher wrongly allowed {url}"
+
+    def test_matcher_honours_consecutive_user_agent_groups(self):
+        """RFC 9309 §2.2.1: consecutive user-agent lines form ONE group
+        sharing the rules that follow. Tracking only the last-seen agent
+        dropped the `*` rules whenever a named agent was declared after it —
+        reading a site as MORE permissive than it is, which is the dangerous
+        direction for a compliance claim. This matcher is now also the
+        reference for PR #141 (Servihabitat), whose robots.txt does declare
+        a named Scrapy group."""
+        star_then_named = "User-agent: *\nUser-agent: Scrapy\nDisallow: /private"
+        named_then_star = "User-agent: Scrapy\nUser-agent: *\nDisallow: /private"
+        for label, text in (
+            ("star first", star_then_named),
+            ("star last", named_then_star),
+        ):
+            allowed, why = is_allowed(
+                load_star_block_rules(text), "https://x.test/private"
+            )
+            assert not allowed, f"{label}: shared group rule was dropped ({why})"
+
+        # ...but a rule belonging ONLY to a named group must not leak into `*`.
+        separate = "User-agent: Scrapy\nDisallow: /\nUser-agent: *\nDisallow: /admin"
+        rules = load_star_block_rules(separate)
+        assert is_allowed(rules, "https://x.test/anything")[0], (
+            "Scrapy's blanket Disallow leaked into the * group"
+        )
+        assert not is_allowed(rules, "https://x.test/admin")[0]
 
     def test_matcher_allows_the_zone_shape_the_connector_relies_on(self):
         """The other half of guarding the guard — a matcher that rejected
