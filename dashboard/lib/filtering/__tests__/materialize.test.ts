@@ -19,6 +19,21 @@ vi.mock("pg", () => ({
   },
 }));
 
+// Task 3.4 (#23): materializeProfile now calls scoreNewCandidates after its
+// own transaction commits. This file's mocks only simulate the match/unmatch
+// upsert's own query sequence — the scoring pipeline (and whichever extra
+// pool.query() calls it would make) has its own dedicated tests
+// (pipeline.test.ts) and a real-Postgres integration test proving the actual
+// wiring; stub it out here so this file keeps testing exactly what it always
+// tested, not scoring internals it isn't about. vi.hoisted() (not a plain
+// `const mock... = vi.fn()`) is required here — vitest's automatic
+// mock-prefixed-variable hoisting didn't pick up a chained
+// `.mockResolvedValue(...)` initializer, only a bare `vi.fn()`, and left the
+// variable in the TDZ when the hoisted vi.mock factory below tried to close
+// over it.
+const { mockScoreNewCandidates } = vi.hoisted(() => ({ mockScoreNewCandidates: vi.fn().mockResolvedValue(null) }));
+vi.mock("@/lib/scoring/pipeline", () => ({ scoreNewCandidates: mockScoreNewCandidates }));
+
 import { materializeProfile, materializeAllProfiles } from "../materialize";
 import { resetPool } from "@/lib/db-write";
 
@@ -100,6 +115,37 @@ describe("materializeProfile", () => {
     const countCall = mockClientQuery.mock.calls[4];
     expect(countCall[0]).toContain("SELECT COUNT(*) FROM profile_listing_state");
     expect(countCall[1]).toEqual([1]);
+  });
+
+  it("still returns a successful result when scoreNewCandidates throws (Fable phase-3 review)", async () => {
+    mockPoolQuery.mockResolvedValueOnce({ rows: [profileRow()] }); // getProfileById
+
+    mockClientQuery
+      .mockResolvedValueOnce(undefined) // BEGIN
+      .mockResolvedValueOnce({ rows: [{ id: 10 }, { id: 11 }] }) // SELECT property.id WHERE ...
+      .mockResolvedValueOnce({ rowCount: 2 }) // INSERT ... ON CONFLICT DO UPDATE
+      .mockResolvedValueOnce({ rowCount: 1 }) // UPDATE ... matched = false
+      .mockResolvedValueOnce({ rows: [{ count: "1" }] }) // SELECT COUNT(*) ... matched = false
+      .mockResolvedValueOnce(undefined); // COMMIT
+
+    mockScoreNewCandidates.mockRejectedValueOnce(new Error("boom: scoring exploded"));
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // The match/unmatch transaction already committed successfully — a
+    // scoring failure afterward must not surface as a thrown error, which
+    // would previously propagate straight out of materializeProfile into
+    // the single-profile route's generic catch as a false 500, and into
+    // materializeAllProfiles's per-profile catch as a misreported "error"
+    // outcome for a materialization that actually succeeded.
+    await expect(materializeProfile(1)).resolves.toEqual({
+      profileId: 1,
+      matchedCount: 2,
+      unmatchedCount: 1,
+    });
+
+    expect(mockScoreNewCandidates).toHaveBeenCalledWith(1, [10, 11]);
+    expect(consoleErrorSpy).toHaveBeenCalled();
+    consoleErrorSpy.mockRestore();
   });
 
   it("unmatches every previously-matched row when the new matching set is empty, without an INSERT (EC-2 edge case)", async () => {

@@ -150,6 +150,13 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
     );
   }
 
+  async function setScore(pool: Pool, profileId: number, propertyId: number, score: number | null) {
+    await pool.query(
+      `UPDATE profile_listing_state SET score = $3 WHERE profile_id = $1 AND property_id = $2`,
+      [profileId, propertyId, score],
+    );
+  }
+
   const SCOPE: Scope = {
     geography: { type: "radius", center: TEST_COORDS, radius_km: 5 },
     property_types: ["piso"],
@@ -237,6 +244,51 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
       // a string. Needs the same explicit numeric comparator on both sides.
       const seen = [...firstPage.items, ...secondPage.items].map((i) => i.property_id).sort((a, b) => a - b);
       expect(seen).toEqual([...propertyIds].sort((a, b) => a - b));
+    });
+  });
+
+  it("orders globally by score across pages, not just within a page, with no gaps or duplicates (Fable review, PR #93)", async () => {
+    // The bug this guards against only manifests with real, differing score
+    // values and more than one page's worth of results — a prior version's
+    // client-side per-page sort (and its corrupted-cursor derivation from
+    // that sort) was invisible to the existing keyset test above because
+    // every property there has score=null, making score-sort a no-op.
+    await withRealDb(async (pool) => {
+      const profileId = await makeProfile(SCOPE);
+      // Deliberately inserted (and thus id-ordered) worst-score-first, so a
+      // correct global-score-DESC ordering can only come from real sorting
+      // by score, not from happening to agree with id DESC.
+      const scores = [0.1, 0.9, 0.3, 0.7, 0.5];
+      const propertyIds: number[] = [];
+      for (const score of scores) {
+        const id = await insertProperty(pool);
+        await insertListing(pool, id);
+        await markMatched(pool, profileId, id);
+        await setScore(pool, profileId, id, score);
+        propertyIds.push(id);
+      }
+      const byScoreDesc = propertyIds
+        .map((id, i) => ({ id, score: scores[i] }))
+        .sort((a, b) => b.score - a.score)
+        .map((r) => r.id);
+
+      const firstPage = await listCandidates(profileId, { limit: 2 });
+      const secondPage = await listCandidates(profileId, {
+        cursor: firstPage.nextCursor,
+        limit: 2,
+      });
+      const thirdPage = await listCandidates(profileId, { cursor: secondPage.nextCursor, limit: 2 });
+
+      expect(firstPage.items.map((i) => i.property_id)).toEqual(byScoreDesc.slice(0, 2));
+      expect(secondPage.items.map((i) => i.property_id)).toEqual(byScoreDesc.slice(2, 4));
+      expect(thirdPage.items.map((i) => i.property_id)).toEqual(byScoreDesc.slice(4, 5));
+      expect(thirdPage.nextCursor).toBeNull();
+
+      // Every property appears exactly once across all pages combined.
+      const seenAcrossPages = [...firstPage.items, ...secondPage.items, ...thirdPage.items].map(
+        (i) => i.property_id,
+      );
+      expect(seenAcrossPages.sort((a, b) => a - b)).toEqual([...propertyIds].sort((a, b) => a - b));
     });
   });
 

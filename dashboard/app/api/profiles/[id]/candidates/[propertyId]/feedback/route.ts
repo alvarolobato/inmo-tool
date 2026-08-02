@@ -12,6 +12,18 @@
  * viewing either of a deduplicated property's linked listings lands on the
  * same state (EC-5).
  *
+ * A real (non-no-op) accept/reject/star event also retrains and rescores
+ * this profile's model (task 3.2, #21) before the response returns — awaited
+ * synchronously, not fire-and-forget, so a client reading candidate scores
+ * immediately after this POST sees the update (issue #21's EC-3). A retrain
+ * failure is logged and swallowed rather than failing the request: the
+ * feedback itself already recorded successfully by that point, and issue
+ * #21's own design means retraining can legitimately no-op (e.g. only one
+ * feedback class exists so far) without that being an error condition.
+ * `note`/`correction` don't trigger a retrain — neither ever changes a
+ * training label (issue #21's Technical approach #1), so retraining after
+ * one would just reproduce the same model.
+ *
  * Error codes:
  *   400 — Invalid ids, body, or feedback_type
  *   404 — Profile not found/archived, property not a matched candidate for
@@ -31,6 +43,7 @@ import {
   recordStateFeedbackIfChanged,
 } from "@/lib/db/feedback";
 import { isPropertyMatchedForProfile } from "@/lib/property-detail";
+import { retrainAndRescoreProfile } from "@/lib/scoring/retrain";
 import { getProfileById } from "@/lib/db/profiles";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
@@ -205,6 +218,12 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
       if (result.noop) {
         const history = await getFeedbackHistory(profileId, propertyId);
         return NextResponse.json({ currentState: result.currentState, history, noop: true });
+      }
+
+      try {
+        await retrainAndRescoreProfile(profileId);
+      } catch (err) {
+        console.error(`[${requestId}] No se pudo reentrenar el modelo de puntuación tras el feedback:`, err);
       }
 
       const history = await getFeedbackHistory(profileId, propertyId);

@@ -320,6 +320,18 @@ ALTER TABLE profile_listing_state ADD COLUMN IF NOT EXISTS matched BOOLEAN NOT N
 CREATE INDEX IF NOT EXISTS idx_profile_listing_state_profile_matched
     ON profile_listing_state (profile_id, matched);
 
+-- Task 3.4 (#23) wrap-up (Fable review of PR #93): distinguishes a real
+-- trained-model score from a deterministic cold-start heuristic score.
+-- Before this column existed, the only way to tell them apart was
+-- string-equality against explain.ts's COLD_START_EXPLANATION text (used
+-- this way in a test) — fragile, since that's UI copy that could change for
+-- cosmetic reasons alone. NULL means "never scored", matching `score`'s own
+-- nullability rather than a third scoring state to keep in sync. ALTER, not
+-- part of CREATE TABLE above, for the same already-migrated-database reason
+-- as `matched`.
+ALTER TABLE profile_listing_state ADD COLUMN IF NOT EXISTS score_kind TEXT
+    CHECK (score_kind IN ('cold_start', 'trained'));
+
 -- feedback_event.property_id (not listing_id) is what the feedback's
 -- identity is keyed on, matching profile_listing_state above. listing_id
 -- is kept only as an optional "which site listing was the user actually
@@ -341,6 +353,23 @@ CREATE INDEX IF NOT EXISTS idx_feedback_event_profile_property
 
 CREATE INDEX IF NOT EXISTS idx_feedback_event_listing_id
     ON feedback_event (listing_id) WHERE listing_id IS NOT NULL;
+
+-- Task 3.2 (#21): one trained model per profile. `coefficients` carries the
+-- whole model (weights, bias, feature names, and the z-score normalization
+-- stats used to standardize a candidate's raw features before scoring) as a
+-- single JSONB blob rather than one column per field — the exact shape is
+-- expected to evolve as later tasks add features (Phase 4's AI-derived
+-- inputs, Phase 5's yield/days-on-market), and a JSONB blob absorbs that
+-- without a migration each time. `search_profile(id)` FK, not
+-- `profile_listing_state`, because a model exists per profile independent of
+-- any single candidate — deleting a profile should delete its model
+-- (ON DELETE CASCADE), not leave an orphaned row.
+CREATE TABLE IF NOT EXISTS profile_scoring_model (
+    profile_id             BIGINT       PRIMARY KEY REFERENCES search_profile(id) ON DELETE CASCADE,
+    coefficients           JSONB        NOT NULL,
+    trained_at             TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    training_example_count INTEGER      NOT NULL
+);
 
 -- ============================================================
 -- AI assessments (Phase 4 generates these; this task only creates
@@ -1033,6 +1062,7 @@ ANALYZE listing_owner_identity;
 ANALYZE search_profile;
 ANALYZE profile_listing_state;
 ANALYZE feedback_event;
+ANALYZE profile_scoring_model;
 ANALYZE ai_assessment;
 ANALYZE property_merge_log;
 ANALYZE suggested_merge;

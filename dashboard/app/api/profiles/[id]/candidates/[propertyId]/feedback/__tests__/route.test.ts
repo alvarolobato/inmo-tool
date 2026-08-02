@@ -19,7 +19,8 @@ import { buildPgPoolConfig } from "@/lib/db-shared";
 import { resetPool } from "@/lib/db-write";
 import { createProfile } from "@/lib/db/profiles";
 import type { Scope } from "@/lib/profiles-schema";
-import { GET, POST } from "../[id]/candidates/[propertyId]/feedback/route";
+import { COLD_START_EXPLANATION } from "@/lib/scoring/explain";
+import { GET, POST } from "../route";
 
 // Far from candidates.integration.test.ts's and materialize.integration.test.ts's
 // coordinates (~17km+) so this file's profiles/properties can never overlap
@@ -146,6 +147,45 @@ describe.runIf(dbAvailable)("feedback event API — real Postgres", () => {
     );
   }
 
+  /**
+   * Task 3.4 (#23) introduced MIN_TRAINING_EXAMPLES (4x the 8-feature model
+   * = 32) — below it, retrain.ts now stays in cold-start mode even with
+   * both classes present, which is new, correct behavior these
+   * pre-existing tests didn't originally have to account for (they were
+   * written when 1 accept + 1 reject was already enough to train). Pads a
+   * profile's training set with generic, uncontested filler examples via
+   * the real feedback route (not a direct DB write) so a real retrain
+   * actually fires, without disturbing whichever specific property/label
+   * pair the calling test cares about.
+   */
+  async function fillPastTrainingThreshold(pool: Pool, profileId: number, pairs = 18) {
+    for (let i = 0; i < pairs; i++) {
+      const acceptId = await insertProperty(pool);
+      const rejectId = await insertProperty(pool);
+      await markMatched(pool, profileId, acceptId);
+      await markMatched(pool, profileId, rejectId);
+      await POST(makeRequest({ feedbackType: "accept" }), ctx(profileId, acceptId));
+      await POST(makeRequest({ feedbackType: "reject" }), ctx(profileId, rejectId));
+    }
+  }
+
+  /**
+   * Single-class variant for the "going one-sided" test below: that test's
+   * whole premise is that the negative class disappears entirely when its
+   * one real reject gets flipped to accept — balanced accept/reject filler
+   * (the helper above) would leave permanent filler rejects behind and
+   * silently defeat that premise. Pads with `count` accept-only filler
+   * examples instead, so the real reject stays the *only* negative example
+   * in the pool until the test itself removes it.
+   */
+  async function fillPastTrainingThresholdSingleClass(pool: Pool, profileId: number, count = 36) {
+    for (let i = 0; i < count; i++) {
+      const id = await insertProperty(pool);
+      await markMatched(pool, profileId, id);
+      await POST(makeRequest({ feedbackType: "accept" }), ctx(profileId, id));
+    }
+  }
+
   it("note does not affect accept/reject state", async () => {
     await withRealDb(async (pool) => {
       const propertyId = await insertProperty(pool);
@@ -242,6 +282,38 @@ describe.runIf(dbAvailable)("feedback event API — real Postgres", () => {
     });
   });
 
+  it("two near-simultaneous requests for the same new state record exactly one event (no race)", async () => {
+    // Regression test for PR #89's review: a plain check-then-insert let a
+    // real double-click insert two 'reject' rows ~1.7ms apart. The fix
+    // (recordStateFeedbackIfChanged's advisory-lock-guarded transaction)
+    // should serialize these two concurrent POSTs so only one actually
+    // records a new event; the other observes the now-current state and
+    // no-ops.
+    await withRealDb(async (pool) => {
+      const propertyId = await insertProperty(pool);
+      const profileId = await makeProfile();
+      await markMatched(pool, profileId, propertyId);
+
+      const [resA, resB] = await Promise.all([
+        POST(makeRequest({ feedbackType: "reject" }), ctx(profileId, propertyId)),
+        POST(makeRequest({ feedbackType: "reject" }), ctx(profileId, propertyId)),
+      ]);
+      const [bodyA, bodyB] = await Promise.all([resA.json(), resB.json()]);
+
+      // Exactly one of the two requests actually inserted; the other no-op'd.
+      const noopFlags = [bodyA.noop === true, bodyB.noop === true];
+      expect(noopFlags).toContain(true);
+      expect(noopFlags).toContain(false);
+
+      const finalHistory = await pool.query(
+        "SELECT feedback_type FROM feedback_event WHERE profile_id = $1 AND property_id = $2",
+        [profileId, propertyId],
+      );
+      expect(finalHistory.rows).toHaveLength(1);
+      expect(finalHistory.rows[0].feedback_type).toBe("reject");
+    });
+  });
+
   it("returns 404 when the property is not a matched candidate for this profile", async () => {
     await withRealDb(async (pool) => {
       const propertyId = await insertProperty(pool);
@@ -261,6 +333,305 @@ describe.runIf(dbAvailable)("feedback event API — real Postgres", () => {
 
       const res = await POST(makeRequest({ feedbackType: "love-it" }), ctx(profileId, propertyId));
       expect(res.status).toBe(400);
+    });
+  });
+
+  it("feedback submission triggers rescoring (EC-3, issue #21)", async () => {
+    await withRealDb(async (pool) => {
+      const cheapPropertyId = await insertProperty(pool);
+      const priceyPropertyId = await insertProperty(pool);
+
+      // Scope's price band gives price_per_m2_relative a real signal to
+      // learn from: 200k is at the band midpoint (relative ~1.0), 400k is
+      // double it (relative ~2.0) — clearly separable, so training actually
+      // succeeds with just these two labeled examples.
+      const scope: Scope = {
+        geography: { type: "radius", center: TEST_COORDS, radius_km: 5 },
+        property_types: ["piso"],
+        price_min: 150000,
+        price_max: 250000,
+        hard_exclusions: {},
+      };
+      const profile = await createProfile(`feedback-int-test-scoring-${Date.now()}`, scope, {});
+      createdProfileIds.push(profile.id);
+      const profileId = profile.id;
+
+      await insertListing(pool, cheapPropertyId, "fotocasa");
+      await pool.query("UPDATE listing SET current_price = 200000 WHERE property_id = $1", [cheapPropertyId]);
+      await insertListing(pool, priceyPropertyId, "fotocasa");
+      await pool.query("UPDATE listing SET current_price = 400000 WHERE property_id = $1", [priceyPropertyId]);
+
+      await markMatched(pool, profileId, cheapPropertyId);
+      await markMatched(pool, profileId, priceyPropertyId);
+
+      // Before any feedback: scores are null (never scored).
+      const before = await pool.query<{ score: string | null }>(
+        "SELECT score FROM profile_listing_state WHERE profile_id = $1 AND property_id = ANY($2::bigint[])",
+        [profileId, [cheapPropertyId, priceyPropertyId]],
+      );
+      expect(before.rows.every((r) => r.score === null)).toBe(true);
+
+      // Only one class so far (accept) — retrain should decline to *train*
+      // (needs both classes), but per task 3.4 (#23) EC-1 it must still
+      // write a real, deterministic cold-start score (price-per-m²
+      // ascending) rather than leaving score at NULL — a fresh profile with
+      // sparse feedback must show a sensibly-ordered list, not a blank one.
+      // rank_explanation stays the honest "not personalized yet" message
+      // (issue #22, task 3.3) even though score itself is now non-null.
+      await POST(makeRequest({ feedbackType: "accept" }), ctx(profileId, cheapPropertyId));
+      const afterFirstOnly = await pool.query<{ score: string | null; rank_explanation: string | null }>(
+        "SELECT score, rank_explanation FROM profile_listing_state WHERE profile_id = $1 AND property_id = ANY($2::bigint[])",
+        [profileId, [cheapPropertyId, priceyPropertyId]],
+      );
+      expect(afterFirstOnly.rows.every((r) => r.score !== null)).toBe(true);
+      expect(afterFirstOnly.rows.every((r) => r.rank_explanation === COLD_START_EXPLANATION)).toBe(true);
+
+      // Task 3.4 (#23): both classes existing isn't enough on its own
+      // anymore — MIN_TRAINING_EXAMPLES (32, at the current 8-feature
+      // model) also has to be cleared. Pad past it with neutral filler
+      // (no listing/price, so it contributes zero signal to
+      // price_per_m2_relative's weight specifically — see the helper's own
+      // comment) before the real second class arrives, so this test keeps
+      // exercising "does a real retrain fire and learn the right
+      // direction", not "does the threshold gate correctly" (that's
+      // pipeline.test.ts's job).
+      await fillPastTrainingThreshold(pool, profileId);
+
+      // Now both classes exist and the threshold is cleared — this POST
+      // should trigger a real retrain + rescore of the whole matched pool
+      // before the response returns.
+      const res = await POST(makeRequest({ feedbackType: "reject" }), ctx(profileId, priceyPropertyId));
+      expect(res.status).toBe(201);
+
+      const after = await pool.query<{ property_id: number; score: string | null; rank_explanation: string | null }>(
+        "SELECT property_id, score, rank_explanation FROM profile_listing_state WHERE profile_id = $1 AND property_id = ANY($2::bigint[])",
+        [profileId, [cheapPropertyId, priceyPropertyId]],
+      );
+      expect(after.rows.every((r) => r.score !== null)).toBe(true);
+      // A real, model-grounded explanation now replaces the cold-start
+      // message (task 3.3, #22) — and each candidate's own explanation
+      // differs, since it's computed per-candidate from that candidate's own
+      // feature vector, not one shared template string.
+      expect(after.rows.every((r) => r.rank_explanation !== null)).toBe(true);
+      expect(after.rows.every((r) => r.rank_explanation !== COLD_START_EXPLANATION)).toBe(true);
+      const explanations = new Set(after.rows.map((r) => r.rank_explanation));
+      expect(explanations.size).toBe(2);
+
+      const model = await pool.query<{ training_example_count: number }>(
+        "SELECT training_example_count FROM profile_scoring_model WHERE profile_id = $1",
+        [profileId],
+      );
+      expect(model.rows).toHaveLength(1);
+      // 1 (cheap, accept) + 36 (18 filler pairs) + 1 (pricey, reject) — see
+      // fillPastTrainingThreshold; exact count isn't the point of this test,
+      // just that a real training run happened at all.
+      expect(model.rows[0].training_example_count).toBe(38);
+
+      // The accepted (cheap) property should score higher than the
+      // rejected (pricey) one — the model actually learned the direction,
+      // not just "some non-null number appeared".
+      const cheapScore = Number(after.rows.find((r) => Number(r.property_id) === cheapPropertyId)!.score);
+      const priceyScore = Number(after.rows.find((r) => Number(r.property_id) === priceyPropertyId)!.score);
+      expect(cheapScore).toBeGreaterThan(priceyScore);
+    });
+  });
+
+  it("starring an accepted property keeps it a positive training example (Opus review of PR #91, item 2)", async () => {
+    await withRealDb(async (pool) => {
+      const acceptedThenStarredId = await insertProperty(pool);
+      const rejectedId = await insertProperty(pool);
+
+      const scope: Scope = {
+        geography: { type: "radius", center: TEST_COORDS, radius_km: 5 },
+        property_types: ["piso"],
+        price_min: 150000,
+        price_max: 250000,
+        hard_exclusions: {},
+      };
+      const profile = await createProfile(`feedback-int-test-star-${Date.now()}`, scope, {});
+      createdProfileIds.push(profile.id);
+      const profileId = profile.id;
+
+      await insertListing(pool, acceptedThenStarredId, "fotocasa");
+      await pool.query("UPDATE listing SET current_price = 200000 WHERE property_id = $1", [acceptedThenStarredId]);
+      await insertListing(pool, rejectedId, "fotocasa");
+      await pool.query("UPDATE listing SET current_price = 400000 WHERE property_id = $1", [rejectedId]);
+
+      await markMatched(pool, profileId, acceptedThenStarredId);
+      await markMatched(pool, profileId, rejectedId);
+
+      // Task 3.4 (#23): clear MIN_TRAINING_EXAMPLES first — see the EC-3
+      // test above for why this is now necessary.
+      await fillPastTrainingThreshold(pool, profileId);
+
+      // accept + reject: both classes present, threshold cleared, training
+      // succeeds (mirrors the EC-3 test above).
+      await POST(makeRequest({ feedbackType: "accept" }), ctx(profileId, acceptedThenStarredId));
+      await POST(makeRequest({ feedbackType: "reject" }), ctx(profileId, rejectedId));
+
+      const afterAccept = await pool.query<{ training_example_count: number }>(
+        "SELECT training_example_count FROM profile_scoring_model WHERE profile_id = $1",
+        [profileId],
+      );
+      expect(afterAccept.rows[0].training_example_count).toBe(38);
+
+      // Star the same property task 3.1 says this *replaces* the accept as
+      // its current state. If star weren't treated as a positive label,
+      // positiveCount would drop to 0 here ("needs_both_classes"), and the
+      // model would silently stop retraining for this profile forever.
+      const res = await POST(makeRequest({ feedbackType: "star" }), ctx(profileId, acceptedThenStarredId));
+      expect(res.status).toBe(201);
+
+      const afterStar = await pool.query<{ training_example_count: number }>(
+        "SELECT training_example_count FROM profile_scoring_model WHERE profile_id = $1",
+        [profileId],
+      );
+      expect(afterStar.rows[0].training_example_count).toBe(38);
+
+      const scores = await pool.query<{ property_id: number; score: string | null }>(
+        "SELECT property_id, score FROM profile_listing_state WHERE profile_id = $1 AND property_id = ANY($2::bigint[])",
+        [profileId, [acceptedThenStarredId, rejectedId]],
+      );
+      expect(scores.rows.every((r) => r.score !== null)).toBe(true);
+      const starredScore = Number(scores.rows.find((r) => Number(r.property_id) === acceptedThenStarredId)!.score);
+      const rejectedScore = Number(scores.rows.find((r) => Number(r.property_id) === rejectedId)!.score);
+      expect(starredScore).toBeGreaterThan(rejectedScore);
+    });
+  });
+
+  it("normalizes against the whole matched pool, not just the labeled subset (Opus review of PR #91, item 1)", async () => {
+    await withRealDb(async (pool) => {
+      const cheapPropertyId = await insertProperty(pool);
+      const priceyPropertyId = await insertProperty(pool);
+      // Unlabeled candidates spanning a much wider price range than the two
+      // labeled examples (200k/400k). If normalization were still computed
+      // from only the labeled pair (the bug this test guards against),
+      // these far-outside-that-range candidates would be z-scored against a
+      // mean/std that has no idea they exist, pushing them into a saturated
+      // region of the sigmoid — every unlabeled candidate would collapse to
+      // a score indistinguishable from 0 or 1 regardless of its real price.
+      const unlabeledIds = await Promise.all([insertProperty(pool), insertProperty(pool), insertProperty(pool)]);
+      const unlabeledPrices = [50000, 800000, 1500000];
+
+      const scope: Scope = {
+        geography: { type: "radius", center: TEST_COORDS, radius_km: 5 },
+        property_types: ["piso"],
+        price_min: 150000,
+        price_max: 250000,
+        hard_exclusions: {},
+      };
+      const profile = await createProfile(`feedback-int-test-norm-${Date.now()}`, scope, {});
+      createdProfileIds.push(profile.id);
+      const profileId = profile.id;
+
+      await insertListing(pool, cheapPropertyId, "fotocasa");
+      await pool.query("UPDATE listing SET current_price = 200000 WHERE property_id = $1", [cheapPropertyId]);
+      await insertListing(pool, priceyPropertyId, "fotocasa");
+      await pool.query("UPDATE listing SET current_price = 400000 WHERE property_id = $1", [priceyPropertyId]);
+      await markMatched(pool, profileId, cheapPropertyId);
+      await markMatched(pool, profileId, priceyPropertyId);
+
+      for (const [i, id] of unlabeledIds.entries()) {
+        await insertListing(pool, id, "fotocasa");
+        await pool.query("UPDATE listing SET current_price = $2 WHERE property_id = $1", [id, unlabeledPrices[i]]);
+        await markMatched(pool, profileId, id);
+      }
+
+      await POST(makeRequest({ feedbackType: "accept" }), ctx(profileId, cheapPropertyId));
+      const res = await POST(makeRequest({ feedbackType: "reject" }), ctx(profileId, priceyPropertyId));
+      expect(res.status).toBe(201);
+
+      const scored = await pool.query<{ property_id: number; score: string }>(
+        "SELECT property_id, score FROM profile_listing_state WHERE profile_id = $1 AND property_id = ANY($2::bigint[]) AND score IS NOT NULL",
+        [profileId, unlabeledIds],
+      );
+      expect(scored.rows).toHaveLength(3);
+
+      // Not a rigid numeric assertion on the exact score (that's the
+      // hand-rolled model's business, tested in model.test.ts) — the
+      // property-under-test here is that pool-wide normalization actually
+      // ran: every unlabeled candidate must land at a real, distinct,
+      // finite probability, not collapsed to the saturated extremes a
+      // labeled-subset-only normalization would produce.
+      for (const row of scored.rows) {
+        const score = Number(row.score);
+        expect(Number.isFinite(score)).toBe(true);
+        expect(score).toBeGreaterThan(0.001);
+        expect(score).toBeLessThan(0.999);
+      }
+      const distinctScores = new Set(scored.rows.map((r) => r.score));
+      expect(distinctScores.size).toBeGreaterThan(1);
+    });
+  });
+
+  it("going one-sided after a successful training run does not clobber the prior real score/explanation (Opus review of PR #92, item 3)", async () => {
+    await withRealDb(async (pool) => {
+      const acceptedId = await insertProperty(pool);
+      const rejectedThenAcceptedId = await insertProperty(pool);
+
+      const scope: Scope = {
+        geography: { type: "radius", center: TEST_COORDS, radius_km: 5 },
+        property_types: ["piso"],
+        price_min: 150000,
+        price_max: 250000,
+        hard_exclusions: {},
+      };
+      const profile = await createProfile(`feedback-int-test-noclobber-${Date.now()}`, scope, {});
+      createdProfileIds.push(profile.id);
+      const profileId = profile.id;
+
+      await insertListing(pool, acceptedId, "fotocasa");
+      await pool.query("UPDATE listing SET current_price = 200000 WHERE property_id = $1", [acceptedId]);
+      await insertListing(pool, rejectedThenAcceptedId, "fotocasa");
+      await pool.query("UPDATE listing SET current_price = 240000 WHERE property_id = $1", [rejectedThenAcceptedId]);
+      await markMatched(pool, profileId, acceptedId);
+      await markMatched(pool, profileId, rejectedThenAcceptedId);
+
+      // Task 3.4 (#23): clear MIN_TRAINING_EXAMPLES first — see the EC-3
+      // test above for why this is now necessary. Single-class (accept-only)
+      // filler, not the balanced pair helper: this test's whole point is
+      // that the negative class disappears entirely later on, which balanced
+      // filler would permanently prevent (see that helper's own comment).
+      await fillPastTrainingThresholdSingleClass(pool, profileId);
+
+      // Both classes present, threshold cleared: training succeeds, real
+      // score + explanation land. rejectedThenAcceptedId is the *only*
+      // negative example in the whole pool at this point.
+      await POST(makeRequest({ feedbackType: "accept" }), ctx(profileId, acceptedId));
+      await POST(makeRequest({ feedbackType: "reject" }), ctx(profileId, rejectedThenAcceptedId));
+
+      const trained = await pool.query<{ score: string; rank_explanation: string }>(
+        "SELECT score, rank_explanation FROM profile_listing_state WHERE profile_id = $1 AND property_id = $2",
+        [profileId, acceptedId],
+      );
+      expect(trained.rows[0].score).not.toBeNull();
+      expect(trained.rows[0].rank_explanation).not.toBe(COLD_START_EXPLANATION);
+      const priorScore = trained.rows[0].score;
+      const priorExplanation = trained.rows[0].rank_explanation;
+
+      // Go one-sided: accept the previously-rejected property too, leaving
+      // only positive examples. This hits "needs_both_classes" and writes
+      // the cold-start message — but only to rows that are still unscored,
+      // per the score IS NULL scoping fix. `acceptedId`'s prior real
+      // score/explanation from the successful run above must survive
+      // untouched, not get blindly overwritten for the whole matched pool.
+      const res = await POST(makeRequest({ feedbackType: "accept" }), ctx(profileId, rejectedThenAcceptedId));
+      expect(res.status).toBe(201);
+
+      const afterOneSided = await pool.query<{ property_id: number; score: string; rank_explanation: string }>(
+        "SELECT property_id, score, rank_explanation FROM profile_listing_state WHERE profile_id = $1 AND property_id = ANY($2::bigint[])",
+        [profileId, [acceptedId, rejectedThenAcceptedId]],
+      );
+      const acceptedRow = afterOneSided.rows.find((r) => Number(r.property_id) === acceptedId)!;
+      expect(acceptedRow.score).toBe(priorScore);
+      expect(acceptedRow.rank_explanation).toBe(priorExplanation);
+
+      // The newly-flipped property was already scored in the prior training
+      // run too (it was part of the same matched pool), so it also keeps its
+      // real score/explanation rather than being reset to the cold-start
+      // message — the fix is scoped to score IS NULL, and neither row is null.
+      const flippedRow = afterOneSided.rows.find((r) => Number(r.property_id) === rejectedThenAcceptedId)!;
+      expect(flippedRow.rank_explanation).not.toBe(COLD_START_EXPLANATION);
     });
   });
 });
