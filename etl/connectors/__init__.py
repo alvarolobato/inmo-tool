@@ -29,6 +29,7 @@ def register_all() -> None:
     from etl.connectors.fotocasa import FotocasaConnector
     from etl.connectors.idealista import IdealistaConnector
     from etl.connectors.milanuncios import MilanunciosConnector
+    from etl.connectors.vivantial import VivantialConnector
     from etl.orchestrator import CONNECTORS
 
     registered_names = {c.name for c in CONNECTORS}
@@ -36,6 +37,8 @@ def register_all() -> None:
         CONNECTORS.append(FotocasaConnector())
     if MilanunciosConnector.name not in registered_names:
         CONNECTORS.append(MilanunciosConnector())
+    if VivantialConnector.name not in registered_names:
+        CONNECTORS.append(VivantialConnector())
     if IdealistaConnector.name not in registered_names:
         # scope_key() always returns None (issue #75 — capture-only, never
         # crawls) — registering it here is self-documenting (CONNECTORS is
