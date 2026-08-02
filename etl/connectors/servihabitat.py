@@ -49,6 +49,19 @@ of which a minority are residential — the portfolio is dominated by
 garages, commercial premises and land (Madrid: 178 of 360 are garages).
 `discover()` filters to residential segments for that reason.
 
+Worth stating plainly, because the batch tracking issue (#132) implied the
+opposite: Servihabitat is **portfolio-rich but portal-poor**. It services
+Sareb, CaixaBank and some Kutxabank stock, which is why it was expected to
+be the batch's richest target -- but that is portfolio *value*, not public
+listing count. 59 residential listings in Madrid is thin beside Solvia's
+6,375 nationally (#116).
+
+Of the four provinces sampled, only three are reachable today: a scope is
+resolved through `etl.connectors.geography.nearest_city`, whose
+`CITY_CENTROIDS` currently holds only Madrid, Sevilla, Barcelona and
+Valencia. The Alicante figures above are therefore informational, not
+reachable, until that table grows.
+
 Fields NOT available, checked explicitly against the batch checklist in
 issue #132 and confirmed absent on a real listing page:
   - **No `referencia catastral`.** Unlike Solvia (#116), which publishes
@@ -87,6 +100,7 @@ from etl.connectors.base import (
 )
 from etl.connectors.extraction import (
     first_present,
+    scoped_text,
     strip_price_punctuation,
     text_to_int,
 )
@@ -100,13 +114,27 @@ from etl.connectors.servihabitat_mapping import (
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://www.servihabitat.com"
-_SITEMAP_INDEX_URL = f"{_BASE_URL}/es/sitemap-es.xml"
 _REQUEST_TIMEOUT_SECONDS = 30
 _USER_AGENT = (
     "inmo-tool/0.1 (personal real-estate research tool; "
     "contact via github.com/alvarolobato/inmo-tool)"
 )
 _SITEMAP_NS = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
+
+# The subject property's own characteristics block.
+_SUBJECT_FEATURES_SELECTOR = "#product_features"
+
+# "Inmuebles similares" carousel subtrees. Their cards render their own
+# price/m2/rooms/baths into page text, so any unscoped scan can attribute a
+# neighbour's figures to the subject property. See
+# `etl.connectors.extraction.scoped_text` for the full writeup and the three
+# connectors that independently hit this.
+_SIMILAR_LISTING_SELECTORS = (
+    ".container-similares",
+    ".marco-InmueblesSimilares",
+    ".similar-destacato",
+    ".caja-destacado",
+)
 
 # city (etl.connectors.geography.CITY_CENTROIDS key) -> province sitemap slug.
 # Live-verified: each of these returns HTTP 200 with real <loc> entries.
@@ -272,17 +300,16 @@ class ServihabitatConnector(Connector):
         soup = BeautifulSoup(html, "html.parser")
         json_ld = _extract_product_json_ld(html)
 
-        # Strip the "inmuebles similares" carousel BEFORE any text scan.
-        # Non-optional: those cards render their own price/m²/rooms/baths
-        # in the same page text, so an unscoped regex silently reads a
-        # *neighbouring* property's figures. Confirmed live on
+        # Both text views go through the shared `scoped_text`, which drops
+        # the "inmuebles similares" carousel before flattening. Non-optional:
+        # those cards render their own price/m²/rooms/baths into the same
+        # page text, so an unscoped regex silently reads a *neighbouring*
+        # property's figures. Confirmed live on
         # /es/venta/vivienda/madrid-.../60645658, whose page text contains
-        # "48m 2 2 hab. 1 baño ... 190.000 €" from a nearby listing while
-        # the subject property is 80 m² at a different price. This is the
-        # same class of bug the Vivantial connector hit (PR #139).
-        _strip_similar_listings(soup)
-
-        features_section = soup.find(id="product_features")
+        # "48m 2 2 hab. 1 baño ... 190.000 €" from a nearby listing while the
+        # subject is 80 m² at 230.000 €. Same class of bug as PR #139
+        # (Vivantial) and PR #138 (Solvia) — hence the shared helper.
+        features_section = soup.select_one(_SUBJECT_FEATURES_SELECTOR)
 
         return RawListing(
             external_id=external_id,
@@ -294,16 +321,22 @@ class ServihabitatConnector(Connector):
                 "path_parts": parse_listing_path(external_id),
                 "og": _open_graph(soup),
                 "referencia": _referencia_attr(soup),
-                # Subject-property characteristics only.
-                "features_text": (
-                    features_section.get_text(" ", strip=True)
-                    if features_section
-                    else None
+                # Subject-property characteristics only. None when the page
+                # has no such container (some `promociones` layouts), which
+                # lets normalize()'s first_present chains fall through to the
+                # whole-page view rather than seeing an empty string.
+                "features_text": scoped_text(
+                    soup,
+                    keep=_SUBJECT_FEATURES_SELECTOR,
+                    drop=_SIMILAR_LISTING_SELECTORS,
                 ),
+                # Reads <li> elements inside the features block, which the
+                # carousel never contaminates — so it takes the element
+                # directly rather than a flattened string.
                 "equipamiento": _equipamiento(features_section),
-                # Carousel-stripped, so safe(r) — but still only used as a
-                # last-resort fallback behind the scoped sources above.
-                "text": soup.get_text(" ", strip=True),
+                # Carousel-dropped, so safe(r) — but still only a last-resort
+                # fallback behind the scoped sources above.
+                "text": scoped_text(soup, drop=_SIMILAR_LISTING_SELECTORS),
             },
         )
 
@@ -470,19 +503,15 @@ def _surface_text(text: str) -> str | None:
 
 
 def _strip_similar_listings(soup: BeautifulSoup) -> None:
-    """Remove the related-listings carousel in place.
+    """Remove the related-listings carousel from `soup`, in place.
 
-    Those cards carry their own price/m²/rooms/baths in page text; leaving
-    them in means an unscoped scan can attribute a neighbour's figures to
-    the subject property (confirmed live — see fetch_detail).
+    Retained for tests that assert directly on a stripped tree. Production
+    extraction goes through `scoped_text(..., drop=...)` instead, which is
+    non-mutating — a shared helper that silently `decompose()`d the caller's
+    soup would be a trap for the next connector to reach for it.
     """
-    for selector in (
-        {"class": "container-similares"},
-        {"class": "marco-InmueblesSimilares"},
-        {"class": "similar-destacato"},
-        {"class": "caja-destacado"},
-    ):
-        for node in soup.find_all(attrs=selector):
+    for selector in _SIMILAR_LISTING_SELECTORS:
+        for node in soup.select(selector):
             node.decompose()
 
 

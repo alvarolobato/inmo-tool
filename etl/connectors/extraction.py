@@ -14,9 +14,10 @@ of Python callables is the right size (issue #77).
 
 from __future__ import annotations
 
+import copy
 import logging
-from collections.abc import Callable
-from typing import TypeVar
+from collections.abc import Callable, Sequence
+from typing import Any, TypeVar
 
 logger = logging.getLogger("etl.connectors.extraction")
 
@@ -56,6 +57,59 @@ def first_present(*getters: Callable[[], T | None], field: str) -> T | None:
         if value is not None and value != "":
             return value
     return None
+
+
+def scoped_text(
+    node: Any,
+    *,
+    keep: str | None = None,
+    drop: Sequence[str] = (),
+    separator: str = " ",
+) -> str | None:
+    """Flatten an element's text after scoping to `keep` and removing `drop`.
+
+    Exists because three separate connectors independently hit the same bug:
+    a listing page renders a "similar properties" carousel whose cards carry
+    their *own* price/m2/room figures in the same page text, so an unscoped
+    regex over `soup.get_text()` can silently attribute a neighbouring
+    property's numbers to the subject. Vivantial read 310.000 EUR off a
+    neighbour instead of the subject's 288.000 EUR (PR #139); Solvia's price
+    fallback had the same latent exposure (PR #138); Servihabitat hit it live
+    on ref 60645658, an 80 m2 / 230.000 EUR listing whose page text also
+    contains a neighbour's "48m 2 2 hab. 1 bano ... 190.000 EUR" (PR #141).
+
+    Each connector fixed it by hand. Promoting it here so connector #6 gets
+    the defence for free instead of rediscovering the bug a fourth time, and
+    so the *reason* travels with the code (Opus review, PR #141).
+
+    Two independent defences, usable together:
+      `keep` -- CSS selector for the subject-property container, so only its
+                text is considered at all. The stronger option where the page
+                has such a container. Returns None when it does not match,
+                which lets a `first_present` chain fall through to a
+                whole-page attempt rather than silently yielding "".
+      `drop` -- CSS selectors for known-contaminating subtrees (carousels,
+                related-listing rails), removed before flattening. The
+                fallback for pages with no clean subject container.
+
+    Never mutates the caller's tree: `drop` operates on a copy, because a
+    shared helper that silently `decompose()`d the caller's soup would be a
+    trap for the next connector to reach for it. The copy costs one deep-copy
+    per listing fetch, negligible against the HTTP request that produced it.
+    """
+    if node is None:
+        return None
+    scope = node
+    if keep is not None:
+        scope = node.select_one(keep)
+        if scope is None:
+            return None
+    if drop:
+        scope = copy.copy(scope)
+        for selector in drop:
+            for contaminant in scope.select(selector):
+                contaminant.decompose()
+    return scope.get_text(separator, strip=True) or None
 
 
 def _strip_es_number_punctuation(text: str) -> str | None:

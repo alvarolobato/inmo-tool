@@ -15,7 +15,9 @@ import pytest
 from bs4 import BeautifulSoup
 
 from etl.connectors.base import ConnectorError, ConnectorScope, RawListing
+from etl.connectors.extraction import scoped_text
 from etl.connectors.servihabitat import (
+    _SIMILAR_LISTING_SELECTORS,
     ServihabitatConnector,
     _equipamiento,
     _extract_product_json_ld,
@@ -29,8 +31,18 @@ from etl.connectors.servihabitat_mapping import (
     map_property_type,
     parse_location_slug,
 )
+from etl.orchestrator import _upsert_canonical_listing
 
 FIXTURES = Path(__file__).parent / "fixtures"
+_SCHEMA_SQL = Path(__file__).parent.parent / "schema" / "init.sql"
+
+
+def _apply_schema(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(_SCHEMA_SQL.read_text(encoding="utf-8"))
+    conn.commit()
+
+
 SUBJECT_ID = (
     "es/venta/vivienda/madrid-areametropolitanamadrid-madtetuan_cuatrocaminos/60645658"
 )
@@ -97,6 +109,34 @@ class TestNormalize:
         n = _normalize_fixture(_read("servihabitat_sample_detail.html"))
         assert n.features == ("alarma",)
 
+    def test_subject_characteristics_are_read_from_the_features_block(self):
+        """Positive cases for the three fields the scoping exists to protect.
+
+        The neighbour card deliberately carries *different* values (3 hab.,
+        2 banos, energy A) so this fails if scoping ever regresses to a
+        whole-page scan that happens to hit the carousel first.
+        """
+        n = _normalize_fixture(_read("servihabitat_sample_detail.html"))
+        assert n.rooms == 2
+        assert n.bathrooms == 1
+        assert n.energy_rating == "E"
+
+    def test_features_text_excludes_the_neighbour_cards_values(self):
+        """Asserts the mechanism, not just the outcome.
+
+        Value assertions alone can pass by accident when the subject happens
+        to appear first in document order; this checks the scoped text
+        genuinely does not contain the neighbour's figures at all.
+        """
+        html = _read("servihabitat_sample_detail.html")
+        soup = BeautifulSoup(html, "html.parser")
+        features = scoped_text(
+            soup, keep="#product_features", drop=_SIMILAR_LISTING_SELECTORS
+        )
+        assert features is not None
+        for neighbour_value in ("190.000", "48m", "3 hab", "2 baños"):
+            assert neighbour_value not in features
+
     def test_fields_this_site_does_not_publish_stay_none(self):
         """Asserted rather than left silent (issue #132 checklist): if the
         site ever starts publishing these, this test fails and prompts a
@@ -157,12 +197,14 @@ class TestFallbackChain:
             flags=re.DOTALL,
         )
         assert _extract_product_json_ld(without_ld) is None
-        # Page text still carries the subject price in the og/description and
-        # body, so the text fallback should recover a value.
         n = _normalize_fixture(without_ld)
         assert n.m2_built == Decimal(80)
-        # And crucially, the fallback must still not pick up the neighbour.
-        assert n.current_price != Decimal(190000)
+        # Positive assertion, not `!= 190000`. The old form passed vacuously:
+        # the fallback actually returned None (no subject price existed in the
+        # page body at all), and None != 190000 is trivially true, so a dead
+        # fallback looked healthy (Opus review, PR #141). The fixture now
+        # carries the subject's own "230.000 €" inside #product_features.
+        assert n.current_price == Decimal(230000)
 
 
 class TestDiscover:
@@ -259,3 +301,74 @@ class TestMapping:
         assert parts["type_segment"] == "vivienda"
         assert parts["listing_id"] == "06110749"
         assert parts["is_promocion"] == "true"
+
+
+class TestDatabaseRoundTrip:
+    """Drives the real persistence path against real PostgreSQL.
+
+    `normalize()` returns a well-formed dataclass whether or not its values
+    actually satisfy the schema — `property.property_type`'s CHECK, foreign
+    keys, uniqueness. PR #138 shipped a Solvia mapping that emitted
+    "Apartamento" (not in the CHECK vocabulary): 19 normalize()-only tests
+    passed while 100% of real ingests would have failed with CheckViolation.
+    Servihabitat's vocabulary is correct, but only a round-trip can prove it,
+    so this closes the same gap rather than trusting the mapping by eye.
+    """
+
+    def _insert(self, pg_conn, external_id=SUBJECT_ID):
+        _apply_schema(pg_conn)
+        canonical = _normalize_fixture(
+            _read("servihabitat_sample_detail.html"), external_id=external_id
+        )
+        _upsert_canonical_listing(pg_conn, canonical)
+        pg_conn.commit()
+        return canonical
+
+    def test_normalized_listing_survives_the_schema(self, pg_conn):
+        self._insert(pg_conn)
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT p.property_type, p.city, p.province, p.m2_built,
+                       p.rooms, p.bathrooms, l.current_price, l.source,
+                       l.listing_kind, l.reference_code
+                  FROM listing l JOIN property p ON p.id = l.property_id
+                 WHERE l.source = 'servihabitat'
+                """
+            )
+            row = cur.fetchone()
+        assert row is not None, "nothing persisted"
+        (
+            property_type,
+            city,
+            province,
+            m2_built,
+            rooms,
+            bathrooms,
+            price,
+            source,
+            listing_kind,
+            reference_code,
+        ) = row
+        # The value that would have raised CheckViolation if mis-mapped.
+        assert property_type == "piso"
+        assert city == "madtetuan_cuatrocaminos"
+        assert province == "madrid"
+        assert m2_built == Decimal(80)
+        assert rooms == 2
+        assert bathrooms == 1
+        assert price == Decimal(230000)
+        assert source == "servihabitat"
+        assert listing_kind == "agency"
+        assert reference_code == "60645658"
+
+    def test_reingest_updates_in_place_rather_than_duplicating(self, pg_conn):
+        """external_id is the URL path and is stable across runs, so a second
+        sweep must update the same row, not create a second listing."""
+        self._insert(pg_conn)
+        canonical = _normalize_fixture(_read("servihabitat_sample_detail.html"))
+        _upsert_canonical_listing(pg_conn, canonical)
+        pg_conn.commit()
+        with pg_conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM listing WHERE source='servihabitat'")
+            assert cur.fetchone()[0] == 1
