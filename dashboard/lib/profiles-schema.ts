@@ -45,6 +45,20 @@ export const PROPERTY_TYPES = [
   "edificio",
 ] as const;
 
+// Single source of truth for the human-readable label of each property
+// type — shared by ProfileForm (the scope-editing UI) and CandidateCard
+// (the candidate feed, task 2.5) so the two never drift apart.
+export const PROPERTY_TYPE_LABELS: Record<(typeof PROPERTY_TYPES)[number], string> = {
+  piso: "Piso",
+  chalet: "Chalet",
+  atico: "Ático",
+  local: "Local comercial",
+  nave: "Nave industrial",
+  garaje: "Garaje",
+  terreno: "Terreno",
+  edificio: "Edificio completo",
+};
+
 const HardExclusionsSchema = z
   .object({
     requires_elevator: z.boolean().optional(),

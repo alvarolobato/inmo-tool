@@ -23,23 +23,19 @@ Three separate problems in one file:
           POSTGRES_DSN: ""
 ```
 
-```yaml
-# jobs.dashboard-e2e — DISABLE the whole job (add `if: false` or comment it
-# out) rather than patch it. Every spec file it runs
-# (conversation-engine/home/dashboards/chat-dashboard/conversations-screen)
-# was deleted along with dashboard/e2e/fixtures/. Re-enable once inmo-tool
-# has its own e2e fixtures and specs — Phase 2's candidate-list UI (#19) is
-# the earliest that would need one, and D-041-equivalent in the new
-# DECISIONS.md still requires e2e coverage for user-facing dashboard
-# surfaces once there is a dashboard surface to cover.
-  dashboard-e2e:
-    if: false
-    runs-on: ubuntu-latest
-    # ... (leave the rest of the job body as-is under `if: false` so the
-    # historical shape is preserved for reference until it's rewritten)
-```
+**`jobs.dashboard-e2e` — superseded, see [`phase-2-5.md`](phase-2-5.md).** This
+section originally said to disable the whole job (`if: false`) since every spec
+it ran was deleted along with `dashboard/e2e/fixtures/`. Task 2.5 (#19) has since
+written a real spec (`dashboard/e2e/candidates.spec.ts`) — `phase-2-5.md` has the
+current proposed YAML for this job. Left the historical reasoning above for
+context; don't apply the `if: false` version, apply `phase-2-5.md`'s instead.
 
-The `dashboard-test` job (typecheck/unit tests/knowledge-drift-guard) and `docker-build` job need no changes — verified the knowledge-drift-guard step passes as committed (`docs/knowledge-sources.yml` and `dashboard/lib/knowledge.ts` are consistent at an empty state), and `docker-build` only builds `./etl/Dockerfile`, unaffected by any of this task's deletions.
+The `dashboard-test` job's typecheck/unit-test/knowledge-drift-guard steps need
+no changes (verified passing as committed), but **task 2.5 (#19) added
+real-Postgres integration tests to this job that currently skip in CI for lack
+of a database — see [`phase-2-5.md`](phase-2-5.md)** for the required service
+block. `docker-build` needs no changes — it only builds `./etl/Dockerfile`,
+unaffected by any of this task's deletions.
 
 ## Remove entirely
 
