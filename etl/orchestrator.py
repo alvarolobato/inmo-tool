@@ -23,6 +23,17 @@ from etl.connectors.rate_limit import RateLimiter
 
 logger = logging.getLogger("etl.orchestrator")
 
+
+class UnknownConnectorError(ValueError):
+    """Raised by run_all_connectors(connector_name=...) for an unrecognized name.
+
+    A dedicated type (task 1.5, #13 review) rather than a bare ValueError —
+    main.py's CLI error handling catches this specifically to print a clean
+    operator-facing message and exit 1, without also silently swallowing
+    some unrelated ValueError as if it were a connector-name typo.
+    """
+
+
 # Registered connectors. Empty until task 1.4 adds the first real one —
 # `python -m etl.main --once` must still run cleanly against this (EC-4),
 # since Phase 1.3 ships before any connector exists.
@@ -488,18 +499,37 @@ def run_connector(conn, connector: Connector, scope: ConnectorScope) -> dict:
     }
 
 
-def run_all_connectors(conn, trigger: str = "scheduler") -> int:
+def run_all_connectors(
+    conn, trigger: str = "scheduler", connector_name: str | None = None
+) -> int:
     """Run every registered connector once, recording a connector_runs row.
 
     Safe to call with an empty CONNECTORS registry (EC-4) — records a run
     with total_connectors=0 and returns immediately.
+
+    `connector_name`, when given, restricts the run to that one connector
+    (task 1.5, #13 — backs `ps connector run <name>`). Unknown names raise
+    ValueError immediately, before creating a connector_runs row — an
+    operator typo shouldn't leave a phantom "ran zero connectors" record
+    behind.
     """
+    if connector_name is not None:
+        matching = [c for c in CONNECTORS if c.name == connector_name]
+        if not matching:
+            known = ", ".join(c.name for c in CONNECTORS) or "(none registered)"
+            raise UnknownConnectorError(
+                f"Unknown connector {connector_name!r} — known: {known}"
+            )
+        connectors_to_run = matching
+    else:
+        connectors_to_run = CONNECTORS
+
     _reconcile_stale_runs(conn)
     run_id = _create_connector_run(conn, trigger)
     ok = 0
     failed = 0
 
-    for connector in CONNECTORS:
+    for connector in connectors_to_run:
         started_at = datetime.now(timezone.utc)
         try:
             result = run_connector(conn, connector, _DEFAULT_SCOPE)

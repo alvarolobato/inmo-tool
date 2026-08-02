@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from etl import orchestrator
 from etl.tests.fixtures.dummy_connector import DiscoverFailsConnector, DummyConnector
 
@@ -111,6 +113,71 @@ class TestOrchestratorEndToEnd:
             with pg_conn.cursor() as cur:
                 cur.execute("DELETE FROM connector_runs WHERE id = %s", (run_id,))
             pg_conn.commit()
+
+
+class TestConnectorNameFilter:
+    """Backs `ps connector run <name>` (task 1.5, #13)."""
+
+    def test_connector_name_restricts_run_to_one_connector(self, pg_conn):
+        _apply_schema(pg_conn)
+        connector_a = DummyConnector(name="filter-test-a", external_ids=("a-1",))
+        connector_b = DummyConnector(name="filter-test-b", external_ids=("b-1",))
+        orchestrator.CONNECTORS[:] = [connector_a, connector_b]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(
+                pg_conn, trigger="test", connector_name="filter-test-a"
+            )
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT total_connectors FROM connector_runs WHERE id = %s",
+                    (run_id,),
+                )
+                (total,) = cur.fetchone()
+            assert total == 1, "only the named connector should count toward this run"
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT connector_name FROM connector_run_results WHERE run_id = %s",
+                    (run_id,),
+                )
+                names = [row[0] for row in cur.fetchall()]
+            assert names == ["filter-test-a"]
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM listing WHERE source = %s", ("filter-test-b",)
+                )
+                (count,) = cur.fetchone()
+            assert count == 0, "the non-named connector must not have run at all"
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector_a.name, run_id)
+            _cleanup(pg_conn, connector_b.name, None)
+
+    def test_unknown_connector_name_raises_before_creating_a_run(self, pg_conn):
+        _apply_schema(pg_conn)
+        connector = DummyConnector(name="filter-test-known")
+        orchestrator.CONNECTORS[:] = [connector]
+        try:
+            with pg_conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM connector_runs")
+                (before,) = cur.fetchone()
+
+            with pytest.raises(
+                orchestrator.UnknownConnectorError, match="Unknown connector"
+            ):
+                orchestrator.run_all_connectors(
+                    pg_conn, trigger="test", connector_name="does-not-exist"
+                )
+
+            with pg_conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM connector_runs")
+                (after,) = cur.fetchone()
+            assert after == before, "an unknown name must not leave a phantom run row"
+        finally:
+            orchestrator.CONNECTORS.clear()
 
 
 class TestCircuitBreakerIntegration:

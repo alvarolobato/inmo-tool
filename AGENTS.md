@@ -20,7 +20,7 @@ This is a **public repository** — no credentials, scraped personal data (owner
 |------|---------|
 | `dashboard/` | Dashboard App — Next.js + Tremor. LLM plumbing (`lib/llm-context/`, `lib/llm-tools/`) and shell are reused from the source project; UI content is being replaced phase by phase (Phase 2+). |
 | `cli/` | Unified CLI (`ps`) — dispatcher pattern (`cli/ps` stub → `cli/ps.sh` → `cli/commands/<group>.sh`), reused as-is. |
-| `cli/commands/` | Command implementations. `sql.sh`/`wren.sh`/`prod.sh` (4D/WrenAI/old-prod-specific) were removed in task 1.1 — real connector/dedup ops commands land in task 1.5 (#13). |
+| `cli/commands/` | Command implementations. `sql.sh`/`wren.sh`/`prod.sh` (4D/WrenAI/old-prod-specific) were removed in task 1.1. `connector.sh`/`db.sh`/`dedup.sh` (task 1.5, #13) replaced the placeholder `etl.sh` — see `docs/skills/cli.md`. |
 | `etl/` | Python sync service — will house the connector framework (task 1.3, #11) and per-site connectors (task 1.4+, #12/#15). Domain-specific PowerShop sync modules were removed in task 1.1. |
 | `scripts/` | Operational scripts. Claude OAuth token launchd sync (macOS) is kept as-is — generic mechanism, not PowerShop-specific. |
 | `docs/` | Documentation. |
@@ -42,11 +42,13 @@ Single entry point for all operations. **Usage:** `ps <group> [subcommand] [opti
 **Groups today:**
 - `setup` — first-time setup + prerequisite checks
 - `stack` — start/stop/restart/status/logs for the local Docker Compose stack
-- `etl` — connector sync operations (stubs until tasks 1.3–1.5 land real behavior)
+- `connector` — list/run/status/logs for registered site connectors (`ps connector run [name]`)
+- `db` — inspect the Postgres mirror (`tables`/`describe`/`query`)
+- `dedup` — deduplication engine (`run` — stub until task 2.2, #16, lands the real matching logic)
 - `dashboard` — open/logs/restart/status for the Dashboard container
 - `config` — show loaded configuration
 
-No `sql`/`wren`/`prod` groups — those were the source project's 4D-query, WrenAI-knowledge, and old-prod-deployment commands, all removed as dead weight in task 1.1. New groups get added as the tasks that need them land (e.g. a `dedup` group alongside task 2.2, #16).
+No `sql`/`wren`/`prod` groups — those were the source project's 4D-query, WrenAI-knowledge, and old-prod-deployment commands, all removed as dead weight in task 1.1. New groups get added as the tasks that need them land.
 
 ### CLI-first principle
 

@@ -362,9 +362,9 @@ CREATE TABLE IF NOT EXISTS connector_run_results (
 );
 
 CREATE INDEX IF NOT EXISTS idx_connector_run_results_run_id ON connector_run_results (run_id);
--- Recent-runs lookups (dashboards, `ps etl status`-style queries) filter/sort
--- on started_at; unindexed, that's a seq scan once this table has any real
--- history.
+-- Recent-runs lookups (dashboards, `ps connector status`-style queries)
+-- filter/sort on started_at; unindexed, that's a seq scan once this table
+-- has any real history.
 CREATE INDEX IF NOT EXISTS idx_connector_runs_started_at ON connector_runs (started_at DESC);
 
 
