@@ -165,6 +165,33 @@ test("run detail shows the per-connector funnel and the two new statuses", async
   await expect(page.getByTestId("error-display")).toHaveCount(0);
 });
 
+test("a run where every connector was skipped is not badged as a success", async ({
+  page,
+}) => {
+  // The orchestrator records status='success' whenever failed==0, so an
+  // all-skipped run (the default state since #106 made connectors
+  // disabled-by-default) would otherwise show a green "Completado" — the
+  // badge operators scan first — while nothing actually ran.
+  const r = await pool.query<{ id: number }>(
+    `INSERT INTO connector_runs
+        (trigger, started_at, finished_at, duration_ms, status,
+         connectors_ok, connectors_failed, connectors_skipped, total_connectors)
+     VALUES ($1, NOW() - INTERVAL '3 minutes', NOW() - INTERVAL '3 minutes',
+             900, 'success', 0, 0, 3, 3)
+     RETURNING id`,
+    [TRIGGER],
+  );
+  const skippedRunId = r.rows[0].id;
+
+  await page.goto("/etl");
+  await expect(page.getByTestId(`run-connectors-${skippedRunId}`)).toContainText(
+    "0 / 0 / 3",
+  );
+  await expect(
+    page.locator(`a[href="/etl/${skippedRunId}"]`).first(),
+  ).toContainText("Sin actividad");
+});
+
 test("no dead manual-trigger buttons remain", async ({ page }) => {
   // Both previously POSTed /api/etl/run, which returns a hard 501 because
   // the connector orchestrator has no manual-trigger polling.

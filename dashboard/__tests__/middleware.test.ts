@@ -102,8 +102,12 @@ describe("middleware — admin UI gating", () => {
       expect(res.status).toBe(401);
     });
 
-    it("returns 401 JSON for /api/etl/run POST without cookie or header", async () => {
-      const res = middleware(makeRequest("/api/etl/run", { method: "POST" }));
+    it("returns 401 JSON for a mutating /api/etl/* route without cookie or header", async () => {
+      // PATCH /api/etl/connectors/[name] (#100) is the mutating ETL route;
+      // the old /api/etl/run this used to assert on was deleted in #104.
+      const res = middleware(
+        makeRequest("/api/etl/connectors/fotocasa", { method: "PATCH" }),
+      );
       expect(res.status).toBe(401);
     });
 

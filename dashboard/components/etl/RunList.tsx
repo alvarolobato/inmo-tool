@@ -26,8 +26,25 @@ export interface ConnectorRun {
 
 type BadgeColor = "emerald" | "amber" | "red" | "blue" | "gray";
 
-function statusBadgeColor(status: string): BadgeColor {
-  switch (status) {
+/**
+ * A run where every connector was skipped is recorded as `status='success'`
+ * by the orchestrator (it only downgrades on failures), so it would otherwise
+ * render as a green "Completado" — the badge operators scan first. Since #106
+ * made connectors disabled-by-default, that is exactly what a fresh install
+ * produces: nothing ran, yet the list looks healthy. Treat it as its own
+ * neutral state rather than a success.
+ */
+function isNoActivityRun(run: ConnectorRun): boolean {
+  return (
+    (run.connectors_skipped ?? 0) > 0 &&
+    (run.connectors_ok ?? 0) === 0 &&
+    (run.connectors_failed ?? 0) === 0
+  );
+}
+
+function statusBadgeColor(run: ConnectorRun): BadgeColor {
+  if (isNoActivityRun(run)) return "gray";
+  switch (run.status) {
     case "success": return "emerald";
     case "partial": return "amber";
     case "failed": return "red";
@@ -36,13 +53,14 @@ function statusBadgeColor(status: string): BadgeColor {
   }
 }
 
-function statusLabel(status: string): string {
-  switch (status) {
+function statusLabel(run: ConnectorRun): string {
+  if (isNoActivityRun(run)) return "Sin actividad";
+  switch (run.status) {
     case "success": return "Completado";
     case "partial": return "Parcial";
     case "failed": return "Error";
     case "running": return "En curso";
-    default: return status;
+    default: return run.status;
   }
 }
 
@@ -168,8 +186,8 @@ export function RunList({ runs, total, page, perPage, loading, onPageChange }: R
                     className="flex items-center"
                     aria-label={`Ver ejecución ${run.id}`}
                   >
-                    <Badge color={statusBadgeColor(run.status)} size="xs">
-                      {statusLabel(run.status)}
+                    <Badge color={statusBadgeColor(run)} size="xs">
+                      {statusLabel(run)}
                     </Badge>
                   </Link>
                 </td>

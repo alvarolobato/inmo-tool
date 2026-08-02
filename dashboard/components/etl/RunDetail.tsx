@@ -161,11 +161,15 @@ function DurationChart({ connectors }: DurationChartProps) {
     );
   }
 
+  // Every status a row can carry must appear here, or a row with a real
+  // duration renders as an empty bar (a skipped connector can still record
+  // one — #99).
   const chartData = sorted.map((c) => ({
     name: c.connector_name,
     OK: c.status === "ok" ? (c.duration_ms ?? 0) : 0,
     Error: c.status === "failed" ? (c.duration_ms ?? 0) : 0,
     "Circuito abierto": c.status === "circuit_open" ? (c.duration_ms ?? 0) : 0,
+    Omitido: c.status === "skipped" ? (c.duration_ms ?? 0) : 0,
   }));
 
   return (
@@ -176,8 +180,8 @@ function DurationChart({ connectors }: DurationChartProps) {
       <BarChart
         data={chartData}
         index="name"
-        categories={["OK", "Error", "Circuito abierto"]}
-        colors={["emerald", "red", "amber"]}
+        categories={["OK", "Error", "Circuito abierto", "Omitido"]}
+        colors={["emerald", "red", "amber", "gray"]}
         valueFormatter={(v: number) => formatDuration(v)}
         stack={true}
         showLegend={true}
