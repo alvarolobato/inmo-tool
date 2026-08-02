@@ -363,26 +363,18 @@
 # -----------------------------------------------------------------------------
 # ETL
 # -----------------------------------------------------------------------------
-- key: etl.cron_hour
-  env: ETL_CRON_HOUR
-  type: int
-  sensitive: false
-  default: 2
-  section: "ETL"
-  description: "Hora UTC a la que se ejecuta la sincronización completa (truncate + insert; refleja bajas en el origen). Solo env var; los cambios en config.yaml se ignoran (etl/main.py lee únicamente ETL_CRON_HOUR del entorno). Requiere reiniciar el contenedor ETL."
-  requires_restart: [etl]
-  components: [etl, docker]
 
-- key: etl.delta_cron_minute
-  env: ETL_DELTA_CRON_MINUTE
-  type: int
-  sensitive: false
-  default: 0
-  section: "ETL"
-  description: "Minuto de cada hora en que arranca la sincronización delta (0-59). La completa nocturna también arranca a este minuto en la hora ETL_CRON_HOUR; el firing de delta a esa hora se salta automáticamente al detectar que ya hay run activa. Solo env var. Requiere reiniciar el contenedor ETL."
-  requires_restart: [etl]
-  components: [etl, docker]
-
+# etl.cron_hour / etl.delta_cron_minute removed in task 1.6 (#14) — both
+# described the source project's nightly-full + hourly-delta cron model
+# (a specific full-sync hour, a delta-sync minute-of-hour that skips itself
+# when a full run is already active). The connector orchestrator's actual
+# scheduler (etl/orchestrator.py run_scheduler_loop) has no such split: it
+# runs every registered connector immediately on startup, then on a flat
+# hourly interval (_RUN_INTERVAL_SECONDS) — ETL_CRON_HOUR was never read by
+# any code in this repo, silently dead since task 1.1. Removed from
+# docker-compose.yml/.env.example alongside this. Re-add an equivalent if
+# a later phase needs connectors on different schedules (e.g. a slow
+# comp-data source that shouldn't run hourly).
 
 # etl.delta_lookback_days removed in task 1.1 (#9) — its rationale (4D/p4d
 # replication-delay compensation) is source-specific and won't transfer to

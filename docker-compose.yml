@@ -53,9 +53,11 @@ services:
 
   # ---------------------------------------------------------------------------
   # OTel Collector — EDOT collector (Elastic Agent in OTel collector mode)
-  # Receives OTLP traces/metrics/logs from ETL + Dashboard, applies redaction
-  # and tail-sampling, exports to Elastic Cloud (when ELASTIC_OTLP_ENDPOINT is
-  # set) or falls back to a local JSONL file under ./otel/local/.
+  # Receives OTLP traces/metrics/logs from ETL + Dashboard, applies redaction,
+  # exports to Elastic Cloud (when ELASTIC_OTLP_ENDPOINT is set) or falls back
+  # to a local JSONL file under ./otel/local/. No trace sampling currently —
+  # see otel/otelcol-config.yaml for why (task 1.6, #14) and issue #52 for
+  # restoring it.
   # ---------------------------------------------------------------------------
   otel-collector:
     image: docker.elastic.co/elastic-agent/elastic-agent:8.16.0
@@ -94,16 +96,17 @@ services:
       start_period: 15s
 
   # ---------------------------------------------------------------------------
-  # ETL / connector sync — currently a stub scheduler (task 1.1); real
-  # connector framework lands in task 1.3 (#11), first connector in task 1.4 (#12).
-  # For a one-off sync: docker compose run --rm etl python -m etl.main --once
+  # ETL / connector sync — runs every registered connector (etl/connectors/,
+  # currently just Fotocasa, task 1.4) immediately on startup, then hourly.
+  # For a one-off sync of a single connector: ps connector run <name>
+  # (task 1.5, #13) — or directly: docker compose run --rm etl python -m
+  # etl.main --once [--connector <name>]
   # ---------------------------------------------------------------------------
   etl:
     build: ./etl
     restart: unless-stopped
     environment:
       POSTGRES_DSN: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-change_me_in_production}@postgres:5432/${POSTGRES_DB:-inmotool}
-      ETL_CRON_HOUR: ${ETL_CRON_HOUR:-2}
       # CONFIG_FILE pins the config path to the host-mounted /config directory.
       # Without it the loader would fall back to ~/.config/inmo-tool/config.yaml
       # (inside the container) which does not exist.
@@ -127,6 +130,19 @@ services:
         condition: service_healthy
       otel-collector:
         condition: service_healthy
+    healthcheck:
+      # Process-liveness only (task 1.6, #14 review — this service had no
+      # healthcheck at all before, unlike the other 3): confirms the
+      # scheduler process hasn't crashed/exited, not that a sweep is
+      # succeeding — a wedged-but-alive loop still reports healthy. A real
+      # progress-based check (e.g. a heartbeat file touched each cycle)
+      # is a reasonable follow-up once there's more than one connector's
+      # worth of real-world runtime behavior to design it against.
+      test: ["CMD-SHELL", "pgrep -f 'etl.main' > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   # ---------------------------------------------------------------------------
   # Dashboard App — AI-driven UI (Next.js + Tremor, port 4000). UI content is

@@ -94,12 +94,21 @@ processors:
   # (same "unknown type" failure as zpages above — confirmed live) and,
   # unlike zpages, this one is referenced inside a pipeline, not just
   # `service.extensions`, so it silently prevented the collector from
-  # starting at all rather than just disabling a feature. The original
-  # design intent is preserved in the traces pipeline's comment below —
-  # re-add with the `elastictrace`/whatever processor this image's actual
-  # valid-processors list (logged on failed startup) offers as the
-  # equivalent, rather than assuming `tail_sampling` will exist again on a
-  # future image pin.
+  # starting at all rather than just disabling a feature.
+  #
+  # This is a real, not-yet-restored regression, not just a config
+  # simplification: every trace is now exported (see `traces_sampler:
+  # parentbased_always_on` in docker-compose.yml's etl/dashboard env), with
+  # no way to reproduce the old "keep 100% of errors and slow (>5s) traces,
+  # sample only 10% of normal ones" behavior — head sampling (the only kind
+  # this image's valid-processors list supports; `elastictrace` is an APM
+  # span-enrichment processor, not a sampler, so it's not a substitute)
+  # can't inspect a trace's outcome/duration before deciding to keep it.
+  # Harmless for Phase 1's local-dev/file-sink usage, but worth fixing
+  # properly (either a different collector image, or accepting head
+  # sampling via OTEL_TRACES_SAMPLER=parentbased_traceidratio +
+  # OTEL_TRACES_SAMPLER_ARG=0.1) before any real production/cost-sensitive
+  # deployment — see issue #52 for options.
 
 exporters:
   # File exporter — always-on local sink. In production this writes a rolling
