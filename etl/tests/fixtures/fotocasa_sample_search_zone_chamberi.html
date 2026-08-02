@@ -1,0 +1,30 @@
+<!--
+Trimmed synthetic fixture for a single Fotocasa ZONE search page
+(/es/comprar/viviendas/madrid-capital/chamberi/l), issue #65.
+
+Listings here (190044444, 190055555) deliberately do NOT overlap with the
+unfiltered city page fixture (190011971, 190022222). That mirrors the real
+live finding: Chamberí's slice had 0% overlap with the unfiltered
+todas-las-zonas page, which is exactly why zone partitioning multiplies
+coverage rather than re-returning the same listings.
+
+Includes its own zone nav (as real zone pages do). discover() must not
+recurse into it — zone slugs are read once, from the base city page only.
+-->
+<!DOCTYPE html>
+<html lang="es">
+<head><title>Viviendas en venta en Chamberí, Madrid Capital</title></head>
+<body>
+<script type="application/json" id="__initial_props__">{"trimmed":"see fixture header"}</script>
+
+<section class="re-SearchResult">
+  <article><a href="/es/comprar/vivienda/madrid-capital/ascensor/190044444/d">Piso en Chamberí</a></article>
+  <article><a href="/es/comprar/vivienda/madrid-capital/reformado/190055555/d">Ático en Chamberí</a></article>
+</section>
+
+<nav class="re-Breadcrumb-zones" aria-label="Zonas de Madrid Capital">
+  <a href="/es/comprar/viviendas/madrid-capital/todas-las-zonas/l">Todas las zonas</a>
+  <a href="/es/comprar/viviendas/madrid-capital/almagro/l">Almagro</a>
+</nav>
+</body>
+</html>

@@ -683,7 +683,14 @@ def run_connector(
             )
             break
 
-        limiter.acquire()
+        # No limiter.acquire() here: `throttle` IS the pacing mechanism, and
+        # every connector calls it as fetch_detail's first action. Acquiring
+        # again at the call site made each listing wait two full intervals —
+        # at Fotocasa's 3/min that is 40s per listing rather than 20s, which
+        # silently doubled the projected sweep cost in issue #143 (~16h vs
+        # ~8h for ~1,500 ids). The parameter, not the call site, is the right
+        # place for this: connectors that make several requests per listing
+        # need to pace each one, which only they can do (issue #99).
         try:
             raw = connector.fetch_detail(external_id, throttle=limiter.acquire)
             canonical = connector.normalize(raw)

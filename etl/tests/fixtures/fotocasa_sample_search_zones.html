@@ -1,0 +1,47 @@
+<!--
+Trimmed synthetic fixture, structurally accurate to a real Fotocasa
+madrid-capital search page fetched during the issue #65 zone-partitioning
+work (2026-08-02). Not a verbatim copy of the ~1.1MB real page — only the
+two href patterns discover() actually parses are preserved:
+
+  1. Listing detail hrefs (.../vivienda/<geo>/<feature>/<id>/d)
+  2. Zone search hrefs   (.../viviendas/<geo>/<zone>/l)
+
+Zone links present for madrid-capital: chamberi, barrio-de-salamanca,
+carabanchel, arganzuela (4 real slugs taken from the live page's own link
+set), plus todas-las-zonas which _discover_zone_slugs must EXCLUDE (it is
+the unfiltered page we already fetched, not a neighbourhood).
+
+Also included deliberately, to prove the geography scoping in
+_discover_zone_slugs: a barcelona-capital zone link (eixample). A sweep of
+madrid-capital must NOT pick it up — an unscoped regex would, and each such
+URL would 200 with real listings from the wrong city, quietly polluting the
+geography the operator asked for.
+
+Baseline listings on this page: 190011971, 190022222.
+-->
+<!DOCTYPE html>
+<html lang="es">
+<head><title>Viviendas en venta en Madrid Capital</title></head>
+<body>
+<script type="application/json" id="__initial_props__">{"trimmed":"see fixture header"}</script>
+
+<section class="re-SearchResult">
+  <article><a href="/es/comprar/vivienda/madrid-capital/aire-acondicionado/190011971/d">Piso en Chamberí</a></article>
+  <article><a href="/es/comprar/vivienda/madrid-capital/terraza/190022222/d">Piso en Arganzuela</a></article>
+</section>
+
+<nav class="re-Breadcrumb-zones" aria-label="Zonas de Madrid Capital">
+  <a href="/es/comprar/viviendas/madrid-capital/todas-las-zonas/l">Todas las zonas</a>
+  <a href="/es/comprar/viviendas/madrid-capital/chamberi/l">Chamberí</a>
+  <a href="/es/comprar/viviendas/madrid-capital/barrio-de-salamanca/l">Barrio de Salamanca</a>
+  <a href="/es/comprar/viviendas/madrid-capital/carabanchel/l">Carabanchel</a>
+  <a href="/es/comprar/viviendas/madrid-capital/arganzuela/l">Arganzuela</a>
+  <a href="/es/comprar/viviendas/madrid-capital/chamberi/l">Chamberí (repeated link, must dedup)</a>
+</nav>
+
+<nav class="re-Footer-otherCities" aria-label="Otras ciudades">
+  <a href="/es/comprar/viviendas/barcelona-capital/eixample/l">Eixample (Barcelona)</a>
+</nav>
+</body>
+</html>
