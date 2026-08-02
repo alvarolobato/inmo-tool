@@ -1,10 +1,16 @@
 """Fixture-based tests for the Vivantial connector (issue #120).
 
-Fixtures are trimmed from real pages fetched during the 2026-08-02
-feasibility spike, keeping the markup that matters (meta description, the
-two `precio` divs, the reference element, a CDN photo) plus a real
-"similar properties" card — that card is load-bearing for the
-regression test below, not decoration.
+Fixtures are **complete, unmodified pages** captured live from
+vivantial.es. PR #139's review replaced the earlier hand-trimmed 917-byte
+fixture: trimming had dropped the hidden coordinate spans and the entire
+"Características" block, which is precisely why the original spike
+concluded (wrongly, and asserted in a test) that the site publishes no
+coordinates. A real page can't silently omit markup the parser should
+have been reading.
+
+Includes a real-Postgres round-trip test, because a `normalize()`-only
+assertion can't catch a value that violates a schema CHECK — PR #138 had
+every Solvia ingest fail that way while its unit tests were green.
 """
 
 from __future__ import annotations
@@ -21,9 +27,14 @@ from etl.connectors.vivantial_mapping import (
     external_id_from_url,
     extract_bathrooms,
     extract_city_province,
+    extract_coordinates,
+    extract_description,
+    extract_features,
+    extract_has_elevator,
     extract_m2_built,
     extract_photo_urls,
     extract_price,
+    extract_property_type,
     extract_reference_code,
     extract_rooms,
 )
@@ -61,14 +72,44 @@ class TestFieldExtraction:
         assert extract_bathrooms(page) == 1
         assert extract_reference_code(page) == "VIVANTIAL-5336"
 
-    def test_price_ignores_the_similar_properties_card(self):
-        """Regression: the body renders neighbouring listings with their own
-        prices. An earlier version fell through to a page-wide euro-amount
-        search and reported this fixture's neighbour (310.000 €) as the
-        listing's own price (288.000 €). The similar-properties card in the
-        fixture is what makes this test meaningful."""
+    def test_coordinates_are_extracted_from_the_hidden_spans(self):
+        """The original spike concluded "no coordinates anywhere" and
+        asserted it as a permanent source limitation. They are in fact
+        published as `<span id="latitude" class="hide">40,399</span>` —
+        hidden, with comma decimals, which is how a visual sweep missed
+        them (PR #139 review). Real per-listing values, not a centroid:
+        two different cities must not resolve to the same point."""
+        madrid = extract_coordinates(_fixture("vivantial_sample_detail.html"))
+        murcia = extract_coordinates(_fixture("vivantial_sample_detail_murcia.html"))
+        assert madrid == (Decimal("40.399"), Decimal("-3.698"))
+        assert murcia == (Decimal("37.977"), Decimal("-1.131"))
+        assert madrid != murcia
+
+    def test_no_coordinates_yields_none_not_zero(self):
+        assert extract_coordinates("<html><body>nothing</body></html>") == (
+            None,
+            None,
+        )
+
+    def test_description_is_the_real_copy_not_the_h1_boilerplate(self):
+        """The <h1> is "Piso en venta en Madrid, Madrid" — no signal. The
+        <p class="descripcion"> carries the occupancy disclosure issue #25
+        depends on."""
+        desc = extract_description(_fixture("vivantial_sample_detail.html"))
+        assert desc is not None
+        assert "OCUPADO POR PERSONA SIN JUSTO TÍTULO" in desc
+        assert "NO ADMITE VISITAS" in desc
+        assert not desc.startswith("Piso en venta en")
+
+    def test_price_ignores_the_struck_through_previous_price(self):
+        """Regression: the page renders a `<del>310.000 €</del>` previous
+        price directly above the current one inside the same `precio`
+        container. An earlier version fell through to a page-wide
+        euro-amount search and reported 310.000 € as the asking price
+        instead of 288.000 €. The `<del>` in the fixture is what makes
+        this test meaningful."""
         page = _fixture("vivantial_sample_detail.html")
-        assert "310.000" in page, "fixture must retain the neighbour card"
+        assert "310.000" in page, "fixture must retain the struck-through price"
         assert extract_price(page) == Decimal(288000)
 
     def test_price_falls_back_to_precio_rojo_when_meta_is_absent(self):
@@ -89,15 +130,28 @@ class TestFieldExtraction:
         assert all(u.startswith("https://cdn.vivantial.es/") for u in urls)
         assert not any("logoHead" in u or "favicon" in u for u in urls)
 
-    def test_optional_fields_are_none_not_zero_when_absent(self):
-        """Some listings genuinely publish no room/bath count; the meta
-        description renders an empty slot ("... con  por 12.000 €")."""
+    def test_rooms_fall_back_to_the_caracteristicas_block(self):
+        """The meta description is the primary source, but the
+        "Características" block is a real second getter — label-anchored,
+        so unlike a page-wide `\\d+ hab` regex it can't pick up a
+        neighbouring card's count. Removing the meta slot must still yield
+        the listing's own values."""
         page = _fixture("vivantial_sample_detail.html").replace(
             "con 4 hab. y 1 ba&#241;o por", "con  por"
         )
+        assert "N&#186; habitaciones: 4" in page or "habitaciones: 4" in page
+        assert extract_rooms(page) == 4
+        assert extract_bathrooms(page) == 1
+        assert extract_price(page) == Decimal(288000)
+
+    def test_optional_fields_are_none_not_zero_when_absent(self):
+        """A listing that publishes neither a meta slot nor a
+        Características block yields None, not 0 — absence of evidence."""
+        page = _fixture("vivantial_sample_detail_no_meta.html")
         assert extract_rooms(page) is None
         assert extract_bathrooms(page) is None
-        assert extract_price(page) == Decimal(288000)
+        assert extract_features(page) == ()
+        assert extract_has_elevator(page) is None
 
 
 class TestUrlParsing:
@@ -208,13 +262,78 @@ class TestFetchDetailAndNormalize:
         assert listing.operation == "sale"
         assert listing.listing_kind == "agency"
         assert listing.status == "active"
-        # The site publishes no coordinates at all — a permanent limitation
-        # that excludes Vivantial from the address_coords dedup signal.
-        assert listing.lat is None
-        assert listing.lon is None
+
+        # Coordinates ARE published, in hidden spans with comma decimals.
+        # The original spike recorded "no coordinates anywhere" as a
+        # permanent source limitation and asserted it here; PR #139's
+        # review proved that wrong against the live site.
+        assert listing.lat == Decimal("40.399")
+        assert listing.lon == Decimal("-3.698")
+
+        # Structured "Características" block — previously ignored entirely.
+        assert listing.property_type == "piso"
+        assert listing.bathrooms == 1
+        assert listing.floor == "4 planta"
+        assert listing.year_built == 1930  # published as "Antigüedad: 96 años"
+        assert listing.has_elevator is True
+        assert listing.features == (
+            "ascensor",
+            "parque_a_menos_de_500_metros",
+            "zonas_verdes",
+            "portero_automático",
+        )
+
+        # The substantive <p class="descripcion"> copy, not the <h1>
+        # boilerplate. Occupancy status lives here, which is what issue
+        # #25's assessment reads.
+        assert listing.description is not None
+        assert "OCUPADO POR PERSONA SIN JUSTO TÍTULO" in listing.description
+        assert "Piso en venta en" not in listing.description
+
+    def test_property_type_is_read_not_hardcoded(self):
+        """Regression: property_type was hardcoded to "piso", mistyping the
+        ~5% of the live sitemap that is parking/local/trastero/oficina/
+        edificio. Every value must also be one the schema CHECK allows."""
+        page = _fixture("vivantial_sample_detail.html")
+        allowed = {
+            "piso",
+            "chalet",
+            "atico",
+            "local",
+            "nave",
+            "garaje",
+            "terreno",
+            "edificio",
+        }
+        assert extract_property_type(page, MADRID_URL) == "piso"
+        # Slug fallback carries the type when the block is absent.
+        garaje_url = (
+            "https://www.vivantial.es/Inmuebles/garaje_en_venta_en_madrid_en_madrid_1"
+        )
+        assert extract_property_type("<html></html>", garaje_url) == "garaje"
+        # An unrecognised type degrades to None, never a guess — passing a
+        # site's raw label straight through is what made every Solvia
+        # ingest fail on a CheckViolation (PR #138).
+        weird = (
+            "https://www.vivantial.es/Inmuebles/zeppelin_en_venta_en_madrid_en_madrid_1"
+        )
+        assert extract_property_type("<html></html>", weird) is None
+        for url in (MADRID_URL, garaje_url):
+            value = extract_property_type(page, url)
+            assert value is None or value in allowed
+
+    def test_fetch_detail_without_a_cached_url_raises_rather_than_guessing(self):
+        """The slug carries city/province, so an id alone can't build a
+        valid URL. An earlier version returned `/Inmuebles/<id>`, a
+        guaranteed 404 that surfaced as a confusing fetch error instead of
+        the cache miss it actually is."""
+        connector = VivantialConnector()
+        with pytest.raises(ConnectorError, match="no cached detail URL"):
+            connector.fetch_detail("5336", throttle=lambda: None)
 
     def test_a_page_without_the_reference_marker_raises(self):
         connector = VivantialConnector()
+        connector._url_cache["5336"] = MADRID_URL
         with (
             patch(
                 "etl.connectors.vivantial.requests.get",
@@ -223,6 +342,95 @@ class TestFetchDetailAndNormalize:
             pytest.raises(ConnectorError, match="no reference marker"),
         ):
             connector.fetch_detail("5336", throttle=lambda: None)
+
+
+class TestPersistsToRealPostgres:
+    """A `normalize()`-only assertion cannot catch a value the schema
+    rejects. PR #138 shipped a connector whose `property_type` violated
+    `property`'s CHECK constraint — every ingest would have failed, while
+    370 unit tests stayed green, because none of them ever inserted a row.
+    """
+
+    def test_normalized_listing_round_trips_through_the_real_schema(self, pg_conn):
+        from etl import orchestrator
+
+        sql = (Path(__file__).parent.parent / "schema" / "init.sql").read_text(
+            encoding="utf-8"
+        )
+        with pg_conn.cursor() as cur:
+            cur.execute(sql)
+        pg_conn.commit()
+
+        connector = VivantialConnector()
+        connector._url_cache["5336"] = MADRID_URL
+        with patch(
+            "etl.connectors.vivantial.requests.get",
+            return_value=_mock_response(_fixture("vivantial_sample_detail.html")),
+        ):
+            raw = connector.fetch_detail("5336", throttle=lambda: None)
+        canonical = connector.normalize(raw)
+
+        try:
+            # The assertion that matters: this must not raise
+            # CheckViolation on property_type, or any other constraint.
+            orchestrator._upsert_canonical_listing(pg_conn, canonical)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT p.property_type, p.lat, p.lon, p.city, p.rooms, "
+                    "       p.has_elevator, p.year_built, p.features, "
+                    "       l.reference_code, l.description "
+                    "  FROM listing l JOIN property p ON p.id = l.property_id "
+                    " WHERE l.source = %s AND l.external_id = %s",
+                    ("vivantial", "5336"),
+                )
+                row = cur.fetchone()
+
+            assert row is not None, "listing did not persist"
+            (
+                property_type,
+                lat,
+                lon,
+                city,
+                rooms,
+                has_elevator,
+                year_built,
+                features,
+                reference_code,
+                description,
+            ) = row
+            assert property_type == "piso"
+            assert lat == Decimal("40.399000")
+            assert lon == Decimal("-3.698000")
+            assert city == "Madrid"
+            assert rooms == 4
+            assert has_elevator is True
+            assert year_built == 1930
+            assert "ascensor" in features
+            assert reference_code == "VIVANTIAL-5336"
+            assert "OCUPADO POR PERSONA SIN JUSTO TÍTULO" in description
+        finally:
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM listing_status_event WHERE listing_id IN "
+                    "(SELECT id FROM listing WHERE source = 'vivantial')"
+                )
+                cur.execute(
+                    "DELETE FROM listing_price_history WHERE listing_id IN "
+                    "(SELECT id FROM listing WHERE source = 'vivantial')"
+                )
+                # listing before property — listing.property_id is a NOT
+                # NULL FK, so the property can't go first.
+                cur.execute(
+                    "CREATE TEMP TABLE _viv_props ON COMMIT DROP AS "
+                    "SELECT property_id FROM listing WHERE source = 'vivantial'"
+                )
+                cur.execute("DELETE FROM listing WHERE source = 'vivantial'")
+                cur.execute(
+                    "DELETE FROM property WHERE id IN "
+                    "(SELECT property_id FROM _viv_props)"
+                )
+            pg_conn.commit()
 
 
 class TestRegistration:

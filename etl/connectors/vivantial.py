@@ -7,25 +7,33 @@ never name a legal entity. OKUANT buys distressed real-estate portfolios
 *from* banks and developers and resells them directly — so this is a
 fund-owned REO seller, not a bank-owned one. Worth stating plainly: it
 belongs in the bank/fund batch (#132) on the strength of the inventory,
-but it is not "a bank's portal" the way Servihabitat or Diglo are.
+but it is not "a bank's portal" the way Servihabitat (CaixaBank) is.
 
 Feasibility spike (2026-08-02), all live-verified:
 
 - `robots.txt` disallows exactly one path (`/Contacto/`) and publishes a
   sitemap. Nothing this connector touches is disallowed.
-- **The sitemap is the whole inventory**: 1,833 URLs, of which 1,825 are
-  `/Inmuebles/<slug>_<id>` detail pages. This is the important structural
-  win — there is no pagination to defeat, so unlike Fotocasa (page-1 only,
-  ~30 of 11,000+, permanently capped by its own robots.txt — issue #65)
-  this connector genuinely sees everything the site publishes.
+- **The sitemap is the whole inventory**: 1,833 `<loc>` entries, of which
+  **1,210 are `/Inmuebles/<slug>_<id>` detail pages** (the remaining 615
+  are `/Resultados/` search pages, which this connector ignores). An
+  earlier draft of this docstring claimed 1,825 detail pages by counting
+  every `<loc>` — corrected in PR #139's review. This is still the
+  important structural win: there is no pagination to defeat, so unlike
+  Fotocasa (page-1 only, ~30 of 11,000+, capped by its own robots.txt —
+  issue #65) this connector genuinely sees everything the site publishes.
 - Detail pages are plain server-rendered HTML (no JS execution needed, no
   JSON payload) at ~25KB. 4 listings sampled across Madrid, Murcia, Lugo
   and Valencia all parsed consistently.
 - Observed asking prices spanned 12.000 € - 288.000 €, i.e. genuinely
   distressed/low-ticket stock, which is squarely the low-cost/high-yield
   inventory issue #1 §3 describes as a target thesis.
-- No coordinates are published anywhere (see `vivantial_mapping`'s
-  docstring for the dedup consequence).
+- Per-listing coordinates **are** published, in hidden spans inside the
+  map container — an earlier draft of this docstring claimed they weren't,
+  corrected in PR #139's review. They're real values, but at 3 decimal
+  places (~±60 m) against `address_coords._MAX_DISTANCE_METERS = 15.0`,
+  so they still can't drive dedup; the connector keeps leaning on
+  `reference_code` (#72) for that. They're captured anyway because the map
+  view (#43) wants them. See `vivantial_mapping`'s docstring.
 
 Scope handling: the sitemap is national, and the city/province live in each
 URL slug, so `discover()` fetches the sitemap once and filters by the
@@ -57,12 +65,18 @@ from etl.connectors.vivantial_mapping import (
     extract_address,
     extract_bathrooms,
     extract_city_province,
+    extract_coordinates,
+    extract_description,
+    extract_features,
+    extract_floor,
+    extract_has_elevator,
     extract_m2_built,
     extract_photo_urls,
     extract_price,
+    extract_property_type,
     extract_reference_code,
     extract_rooms,
-    extract_title,
+    extract_year_built,
 )
 
 logger = logging.getLogger(__name__)
@@ -115,14 +129,22 @@ def _resolve_geography(scope: ConnectorScope) -> str | None:
 def _detail_url_for(
     external_id: str, sitemap_urls: dict[str, str] | None = None
 ) -> str:
-    """Best-known detail URL for an id.
+    """Detail URL for an id, from the cache `discover()` populated.
 
-    The slug carries city/province, so it can't be reconstructed from the id
-    alone — `discover()` caches the mapping and `fetch_detail` reuses it.
+    The slug carries city/province and can't be reconstructed from the id
+    alone, so there is no valid fallback: an earlier version returned
+    `/Inmuebles/<id>` without a slug, which is a guaranteed 404 that would
+    surface as a confusing fetch error rather than as the cache miss it
+    actually is. Raising names the real problem (PR #139 review).
     """
     if sitemap_urls and external_id in sitemap_urls:
         return sitemap_urls[external_id]
-    return f"{_BASE_URL}/Inmuebles/{external_id}"
+    raise ConnectorError(
+        f"vivantial: no cached detail URL for external_id={external_id!r} — "
+        "fetch_detail must be preceded by a discover() that saw this id "
+        "(the URL slug carries city/province and can't be derived from the "
+        "id alone)"
+    )
 
 
 class VivantialConnector(Connector):
@@ -137,6 +159,12 @@ class VivantialConnector(Connector):
     discovers_full_inventory = True
 
     supports_discovery = True
+
+    # Matches Fotocasa/Milanuncios rather than inheriting base's 30 — the
+    # conservative default is the deliberate house position (issue #1 §15),
+    # and this connector's discovery is a single sitemap request but its
+    # detail sweep is per-listing like any other.
+    rate_limit_per_minute = 20
 
     def __init__(self) -> None:
         # external_id -> full detail URL, populated by discover() so
@@ -234,6 +262,7 @@ class VivantialConnector(Connector):
         city, province = extract_city_province(url)
 
         m2_built: Decimal | None = extract_m2_built(page)
+        lat, lon = extract_coordinates(page)
 
         return CanonicalListingVersion(
             external_id=raw.external_id,
@@ -249,29 +278,34 @@ class VivantialConnector(Connector):
             listing_kind="agency",
             status="active",
             current_price=extract_price(page),
-            description=extract_title(page),
+            # The substantive <p class="descripcion"> copy, not the <h1>
+            # boilerplate. This is where occupancy status is disclosed
+            # ("PISO OCUPADO POR PERSONA SIN JUSTO TÍTULO", standing rental
+            # contracts), which issue #25's occupancy assessment reads.
+            description=extract_description(page),
             photo_urls=extract_photo_urls(page),
             contact_raw=None,
             address=extract_address(page),
-            # No coordinates published anywhere on the site — see the
-            # mapping module docstring. This permanently excludes Vivantial
-            # listings from issue #16's address_coords dedup signal.
-            lat=None,
-            lon=None,
-            property_type="piso",
+            # Real per-listing coordinates, from hidden spans in the map
+            # container. ~±60 m precision vs address_coords' 15 m
+            # threshold, so this still won't drive dedup — see the mapping
+            # module docstring.
+            lat=lat,
+            lon=lon,
+            property_type=extract_property_type(page, url),
             m2_built=m2_built,
             m2_useful=None,
             rooms=extract_rooms(page),
             bathrooms=extract_bathrooms(page),
-            floor=None,
-            has_elevator=None,
-            year_built=None,
+            floor=extract_floor(page),
+            has_elevator=extract_has_elevator(page),
+            year_built=extract_year_built(page),
             energy_rating=None,
             city=city,
             province=province,
             postal_code=None,
             m2_plot=None,
-            features=(),
+            features=extract_features(page),
             # The sitemap and every sampled page are sale listings; the site
             # has no rental section.
             operation="sale",
