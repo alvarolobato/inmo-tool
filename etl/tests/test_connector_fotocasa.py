@@ -168,6 +168,50 @@ class TestNormalize:
         canonical = FotocasaConnector().normalize(raw)
         assert canonical.listing_kind is None
 
+    def test_normalize_excludes_non_image_multimedia_from_photo_urls(self):
+        """Fable phase-2 review finding: a real listing's multimedia array
+        mixes real photos with other asset types (observed live:
+        {"type": "tour-virtual", "src": "https://floorfy.com/..."}) — only
+        type="image" entries belong in photo_urls, otherwise a virtual-tour
+        link renders as a broken <img> on the property detail page and gets
+        fed (uselessly) to the photo-hash dedup signal."""
+        raw = RawListing(
+            external_id="997",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/x",
+                "props": {
+                    "realEstate": {
+                        "price": 100000,
+                        "address": {},
+                        "coordinates": {},
+                        "features": {},
+                        "descriptions": {},
+                        "multimedia": [
+                            {
+                                "type": "tour-virtual",
+                                "src": "https://floorfy.com/tour/abc",
+                            },
+                            {
+                                "type": "image",
+                                "src": "https://static.fotocasa.es/a.jpg",
+                            },
+                            {
+                                "type": "image",
+                                "src": "https://static.fotocasa.es/b.jpg",
+                            },
+                            {"src": "https://static.fotocasa.es/no-type.jpg"},
+                        ],
+                    }
+                },
+            },
+        )
+        canonical = FotocasaConnector().normalize(raw)
+        assert canonical.photo_urls == (
+            "https://static.fotocasa.es/a.jpg",
+            "https://static.fotocasa.es/b.jpg",
+        )
+
     def test_normalize_still_infers_agency_from_client_url(self):
         raw = RawListing(
             external_id="998",

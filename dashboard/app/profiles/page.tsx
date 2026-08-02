@@ -119,7 +119,13 @@ export default function ProfilesPage() {
         setError(isApiErrorResponse(body) ? body : "No se pudo clonar el perfil.");
         return;
       }
+      const cloned: SearchProfileRow = await res.json();
       await fetchProfiles();
+      // Without this, a clone of a profile with real matches ships with an
+      // empty candidate list until the user happens to open "Editar" and
+      // re-save it — clone's scope/thesis_params are identical to the
+      // source, so its candidates should be too (Fable phase-2 review).
+      await triggerMaterialize(cloned.id);
     } finally {
       setBusyId(null);
     }

@@ -59,3 +59,34 @@ Each registered connector runs once per distinct profile-derived scope, and resu
 This was found live during Phase 1's phase-level review: Fotocasa's `discover()` only reads page 1 of search results (robots.txt disallows pagination — see the connectors skill), against a real inventory of 11,000+ listings for a single geography, sorted by relevance. Treating a Fotocasa listing's absence from 3 sweeps as "withdrawn" would have been wrong far more often than right — corrupting exactly the signal issue #1 §10 calls out as a first-class value-add (real withdrawals, relistings-at-a-lower-price).
 
 `Connector.discovers_full_inventory` (`etl/connectors/base.py`, default `True`) gates this: when a connector sets it to `False`, `run_connector` skips `_reconcile_missed_discoveries` entirely for that connector — not just a raised threshold, since even accumulating a miss-count that never triggers anything would still be tracking a meaningless number. Fotocasa sets `discovers_full_inventory = False`. A connector should only claim `True` when its `discover()` genuinely enumerates (or very nearly enumerates) everything active in its scope — pagination through the full result set, an API that returns a complete listing, etc. Until a connector can honestly claim full coverage, its listings simply never auto-transition to `withdrawn` from absence alone (a human/future mechanism would need to confirm removal some other way).
+
+## Reusing `property_web_scraper` — the reference project for this domain
+
+[`RealEstateWebTools/property_web_scraper`](https://github.com/etewiah/property_web_scraper) is a mature, MIT-licensed open-source real-estate scraper covering 100+ portals across dozens of countries, including four Spanish sites (Idealista, Fotocasa, pisos.com, Habitaclia). It is **not vendored into this repo** — different language (Ruby/TypeScript vs. this project's Python), different license terms to keep separate, and it targets a completely different scale (110 site mappings vs. inmo-tool's 2-4). It's a reference to *read*, not a dependency to import. When doing connector work, clone it locally as a sibling checkout (e.g. `../property_web_scraper` next to this repo, or anywhere convenient — it's not part of this repo's build):
+
+```bash
+git clone https://github.com/etewiah/property_web_scraper.git
+```
+
+**What's worth reading there, and why:**
+
+| Path | What it is | Why it matters here |
+|---|---|---|
+| `config/scraper_mappings/*.json` | Per-site field-extraction config (110 sites) | Field locations/structure reference for a new connector — see the caution below |
+| `app/models/property_web_scraper/listing.rb` | Their canonical ~70-field schema | Cross-check against `etl/schema/init.sql`'s `property`/`listing` columns when a connector surfaces a field inmo-tool doesn't have a slot for yet (see issue #76) |
+| `astro-app/src/lib/extractor/strategies.ts`, `html-extractor.ts` | Their current (TypeScript) extraction engine | **The pattern to adopt** — see below |
+| `chrome-extensions/property-scraper/` | Their Manifest V3 browser extension for bot-protected sites | Forked as-is for inmo-tool's own Idealista capture path (issue #75) — this one *is* worth reusing close to verbatim, unlike the mapping files |
+| `astro-app/src/lib/extractor/quality-scorer.ts` | Weighted per-listing extraction-completeness scoring | Concept reference for issue #80 (not the code — different runtime) |
+
+**The pattern to adopt: fallback-chain extraction, not literal file copying.** Their extraction engine tries a primary strategy per field, then falls through an ordered list of fallbacks until one returns a non-empty result. Priority order (highest first), per `strategies.ts`'s `retrieveTargetTextSingle`:
+
+1. `flightDataPath` — Next.js RSC/flight data (not currently relevant to any Spanish site inmo-tool targets)
+2. `jsonLdPath` — `<script type="application/ld+json">` schema.org structured data (stable across redesigns — the most standardized fallback source when present)
+3. `scriptJsonVar`/`scriptJsonPath` — a named JS variable holding embedded JSON (`window.__INITIAL_PROPS__`, `__NEXT_DATA__`, etc.) — inmo-tool's Fotocasa/Milanuncios connectors already use this as their *only* strategy today
+4. `scriptRegEx` — regex over raw `<script>` contents
+5. `urlPathPart` — a path segment of the listing URL itself (e.g. sale-vs-rent detection)
+6. `cssLocator` — a CSS selector against rendered HTML (least stable — the first thing a redesign breaks, but often the only thing available when nothing above exists)
+
+**inmo-tool's own connectors currently implement only step 3, with no fallback at all** — if the embedded-JSON key a connector reads gets renamed, that field silently goes `None`/`0`/`False` with no recovery path, even though the page may still carry the same fact somewhere else (JSON-LD, a CSS-visible label, a URL segment). Issues #77 and #78 retrofit Fotocasa and Milanuncios with this fallback-chain discipline. **Do not port their JSON-mapping-file DSL wholesale** — a 110-site project needs a declarative config format editable without touching code; a 2-4-connector project doesn't. The adaptation is a small shared Python helper (`etl/connectors/extraction.py`, introduced by issue #77) that tries an ordered list of getters and returns the first non-empty result — same priority-order thinking, sized for this project.
+
+**When starting a new connector** (see issue #79 for pisos.com/Habitaclia), check the matching `config/scraper_mappings/<locale>_<site>.json` file first for field locations — but verify every selector/regex/JSON-path against a real, live page before trusting it. Their own `expectedExtractionRate` field is a useful signal of how much to trust a given mapping (Idealista 0.75, Fotocasa 0.70, Habitaclia 0.60, pisos.com 0.45 — the lower end reads as thin/speculative, not battle-tested) — but even a high rate doesn't excuse skipping this project's own feasibility-spike discipline (robots.txt check + live sample requests, documented in the implementing PR) established by the Fotocasa/Milanuncios tasks (#12/#15).
