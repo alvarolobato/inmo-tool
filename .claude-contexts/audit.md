@@ -4,7 +4,7 @@
 
 You are running an audit or discovery pass over the repo (bug-hunter, feature-ideas, dashboard-audit, etl-health, project-summary, sql-validator, smoke test, weekly business review). The output is **a GitHub issue or comment**, not a code change.
 
-> **Note on automation:** the AI-factory workflows this file was originally written for are **not committed in this repo** (see D-004). There is no label-driven worker, no `ai-work`/`ai-blocked` triggering, and no weekly business-review automation. Audits run under direct owner instruction, and the issues they file sit in the backlog until the owner picks them up.
+> **Note on automation:** the AI-factory workflows this file was originally written for are **not committed in this repo** (see D-004). There is no label-driven worker, no `ai-work`/`ai-blocked` triggering, and no weekly business-review automation. Audits run under direct owner instruction, and the issues they file sit in the backlog until the owner picks them up. The prompt/config content under `.github/ai-factory/` **is** present in the repo — it's only the `.github/workflows/*.yml` files that would trigger it that are missing, so treat this guidance as manually-dispatched, not absent.
 
 ## Binding rules
 

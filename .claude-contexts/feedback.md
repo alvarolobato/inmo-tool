@@ -4,7 +4,7 @@
 
 You are addressing review feedback on a pull request. This context replaces the full CLAUDE.md to keep boot lean. Read `AGENTS.md` or domain skills on demand.
 
-> **Note on automation:** the AI-factory workflows this file was originally written for are **not committed in this repo** (see D-004). There is no `ai-pr-review.yml` and no label-driven review triggering — review passes are dispatched under direct owner instruction. Ignore any label-transition mechanics you may recall from the source project.
+> **Note on automation:** the AI-factory workflows this file was originally written for are **not committed in this repo** (see D-004). There is no `ai-pr-review.yml` and no label-driven review triggering — review passes are dispatched under direct owner instruction. Ignore any label-transition mechanics you may recall from the source project. The prompt/config content under `.github/ai-factory/` **is** present in the repo — it's only the `.github/workflows/*.yml` files that would trigger it that are missing, so treat this guidance as manually-dispatched, not absent.
 
 ## Binding rules
 

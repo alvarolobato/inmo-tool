@@ -4,7 +4,7 @@
 
 You are labeling and routing an issue (ai-issue-triage) or sweeping stale items (ai-stale-manager). Output is **labels and comments**, never code.
 
-> **Note on automation:** the AI-factory workflows this file was originally written for are **not committed in this repo** (see D-004). No label triggers a worker, nothing auto-closes on a schedule, and there is no weekly business-review flow. Triage here is pure categorization to keep the backlog readable for the owner.
+> **Note on automation:** the AI-factory workflows this file was originally written for are **not committed in this repo** (see D-004). No label triggers a worker, nothing auto-closes on a schedule, and there is no weekly business-review flow. Triage here is pure categorization to keep the backlog readable for the owner. The prompt/config content under `.github/ai-factory/` **is** present in the repo — it's only the `.github/workflows/*.yml` files that would trigger it that are missing, so treat this guidance as manually-dispatched, not absent.
 
 ## Binding rules
 

@@ -14,7 +14,7 @@ Architecture diagrams remain available via the Read tool: ARCHITECTURE.md and
 docs/architecture/*.md.
 -->
 
-> **Note on automation:** `ai-worker.yml` is **not committed in this repo** (see D-004). Implementation runs under direct owner instruction; no label triggers or gates it. The single-track structure below is still the project's working convention — ignore only the label/workflow mechanics.
+> **Note on automation:** `ai-worker.yml` is **not committed in this repo** (see D-004). Implementation runs under direct owner instruction; no label triggers or gates it. The single-track structure below is still the project's working convention — ignore only the label/workflow mechanics. The prompt/config content under `.github/ai-factory/` **is** present in the repo — it's only the `.github/workflows/*.yml` files that would trigger it that are missing, so treat this guidance as manually-dispatched, not absent.
 
 ## Implementer behaviour — single-track model
 

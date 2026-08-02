@@ -41,7 +41,7 @@ const ACTION_INSTRUCTIONS: Record<AnalyzeAction, string> = {
   resumen_ejecutivo:
     "Genera un resumen ejecutivo conciso (máximo 200 palabras) para presentar a dirección. Incluye: situación actual, logros, riesgos, y siguiente paso recomendado.",
   buenas_practicas:
-    "Basándote en los números reales del dashboard, sugiere buenas prácticas específicas de retail/mayorista de moda que apliquen a esta situación.",
+    "Basándote en los números reales del dashboard, sugiere buenas prácticas específicas de inversión inmobiliaria que apliquen a esta situación.",
 };
 
 // ─── Business knowledge summary ───────────────────────────────────────────────

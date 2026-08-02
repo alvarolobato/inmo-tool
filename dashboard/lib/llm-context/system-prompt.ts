@@ -273,6 +273,19 @@ const SQL_RULES = `
 
 All SQL must be valid PostgreSQL executed against the "public" schema.
 
+> **Scope note — read before applying rules 1-9 and 19.** Those rules, and the
+> widget examples further below, describe \`ps_*\` retail/wholesale tables
+> (\`ps_ventas\`, \`ps_lineas_ventas\`, columns like \`total_si\`, \`tienda\`,
+> \`ccrefejofacm\`) inherited from the product this codebase was forked from.
+> **Those tables do not exist in this database.** This project's real schema is
+> real-estate: \`property\`, \`listing\`, \`listing_price_history\`,
+> \`search_profile\`, \`profile_listing_state\`, and related tables — use the
+> schema/table information supplied elsewhere in this prompt as the source of
+> truth, never the \`ps_*\` names below. The rules that remain generally valid
+> are the PostgreSQL-mechanics ones (10-18: widget shapes, NULLIF, date
+> arithmetic, COALESCE typing). This whole block is pending replacement by the
+> domain-appropriate flow catalog (issue #24).
+
 1. ALWAYS use total_si (sin IVA) for revenue analysis — NEVER use total
 2. ALWAYS use ccrefejofacm for article display (show as "Referencia")
 3. ALWAYS use fecha_creacion for date filtering (fecha_documento is NULL)
@@ -328,7 +341,7 @@ const ACTION_INSTRUCTIONS: Record<AnalyzeAction, string> = {
   resumen_ejecutivo:
     "Genera un resumen ejecutivo conciso (máximo 200 palabras) para presentar a dirección. Incluye: situación actual, logros, riesgos, y siguiente paso recomendado.",
   buenas_practicas:
-    "Basándote en los números reales del dashboard, sugiere buenas prácticas específicas de retail/mayorista de moda que apliquen a esta situación.",
+    "Basándote en los números reales del dashboard, sugiere buenas prácticas específicas de inversión inmobiliaria que apliquen a esta situación.",
 };
 
 function formatAnalyzeBusinessRules(): string {
