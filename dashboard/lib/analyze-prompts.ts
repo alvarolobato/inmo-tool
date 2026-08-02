@@ -41,7 +41,7 @@ const ACTION_INSTRUCTIONS: Record<AnalyzeAction, string> = {
   resumen_ejecutivo:
     "Genera un resumen ejecutivo conciso (máximo 200 palabras) para presentar a dirección. Incluye: situación actual, logros, riesgos, y siguiente paso recomendado.",
   buenas_practicas:
-    "Basándote en los números reales del dashboard, sugiere buenas prácticas específicas de retail/mayorista de moda que apliquen a esta situación.",
+    "Basándote en los números reales del dashboard, sugiere buenas prácticas específicas de inversión inmobiliaria que apliquen a esta situación.",
 };
 
 // ─── Business knowledge summary ───────────────────────────────────────────────
@@ -83,7 +83,7 @@ export function buildAnalyzePrompt(
   const sections: string[] = [
     "# Rol",
     "",
-    "Eres un analista de datos experto para un negocio de moda retail y mayorista (PowerShop).",
+    "Eres un analista de datos experto para una herramienta de búsqueda de inversión inmobiliaria (Inmo-Tool).",
     "Tu tarea es analizar los datos del dashboard y responder en español con análisis precisos y útiles.",
     "",
     "# Reglas de respuesta",

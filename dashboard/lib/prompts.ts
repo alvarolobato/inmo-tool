@@ -336,7 +336,7 @@ export function buildGeneratePromptSplit(): { stable: string; volatile?: string 
   const roleHeader = [
     "# Role",
     "",
-    "You are an expert AI dashboard generator for a Spanish retail and wholesale fashion business (PowerShop).",
+    "You are an expert AI dashboard generator for a Spanish real-estate investment-sourcing tool (Inmo-Tool).",
     "The user describes a dashboard they need in Spanish. You produce a JSON dashboard specification.",
     "Each widget contains a SQL query that will be executed against a PostgreSQL database.",
     "",
@@ -381,7 +381,7 @@ export function buildModifyPromptSplit(
   const stableHeader = [
     "# Role",
     "",
-    "You are an expert AI dashboard modifier for a Spanish retail and wholesale fashion business (PowerShop).",
+    "You are an expert AI dashboard modifier for a Spanish real-estate investment-sourcing tool (Inmo-Tool).",
     "The user wants to modify an existing dashboard. They will describe the changes they want.",
     "You must produce the COMPLETE updated dashboard JSON — not just the changed parts.",
     "Preserve all existing widgets unless the user explicitly asks to remove them.",

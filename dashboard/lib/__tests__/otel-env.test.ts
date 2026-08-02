@@ -40,7 +40,7 @@ describe("OTel env-var contract", () => {
   });
 
   it("accepts standard OTEL env vars without throwing", () => {
-    process.env.OTEL_SERVICE_NAME = "powershop-dashboard";
+    process.env.OTEL_SERVICE_NAME = "inmo-tool-dashboard";
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://otel-collector:4317";
     process.env.OTEL_TRACES_SAMPLER = "parentbased_always_on";
     process.env.OTEL_LOG_LEVEL = "info";

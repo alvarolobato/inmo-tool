@@ -24,10 +24,10 @@ function toolResult(content: string): ChatCompletionMessageParam {
 // the round-1 scripting in modify/analyze is exercised end to end.
 const CHAT_SYS = "Eres un asistente analítico de inmo-tool.";
 const MODIFY_SYS =
-  "You are an expert AI dashboard modifier for PowerShop. Call apply_dashboard_modification with the validated spec.";
+  "You are an expert AI dashboard modifier for Inmo-Tool. Call apply_dashboard_modification with the validated spec.";
 const ANALYZE_SYS =
-  "Eres un analista de datos experto para PowerShop. Llama a submit_dashboard_analysis.";
-const GENERATE_SYS = "You are an expert AI dashboard generator for PowerShop.";
+  "Eres un analista de datos experto para Inmo-Tool. Llama a submit_dashboard_analysis.";
+const GENERATE_SYS = "You are an expert AI dashboard generator for Inmo-Tool.";
 
 beforeEach(() => __resetMockCallId());
 

@@ -273,6 +273,19 @@ const SQL_RULES = `
 
 All SQL must be valid PostgreSQL executed against the "public" schema.
 
+> **Scope note — read before applying rules 1-9 and 19.** Those rules, and the
+> widget examples further below, describe \`ps_*\` retail/wholesale tables
+> (\`ps_ventas\`, \`ps_lineas_ventas\`, columns like \`total_si\`, \`tienda\`,
+> \`ccrefejofacm\`) inherited from the product this codebase was forked from.
+> **Those tables do not exist in this database.** This project's real schema is
+> real-estate: \`property\`, \`listing\`, \`listing_price_history\`,
+> \`search_profile\`, \`profile_listing_state\`, and related tables — use the
+> schema/table information supplied elsewhere in this prompt as the source of
+> truth, never the \`ps_*\` names below. The rules that remain generally valid
+> are the PostgreSQL-mechanics ones (10-18: widget shapes, NULLIF, date
+> arithmetic, COALESCE typing). This whole block is pending replacement by the
+> domain-appropriate flow catalog (issue #24).
+
 1. ALWAYS use total_si (sin IVA) for revenue analysis — NEVER use total
 2. ALWAYS use ccrefejofacm for article display (show as "Referencia")
 3. ALWAYS use fecha_creacion for date filtering (fecha_documento is NULL)
@@ -328,7 +341,7 @@ const ACTION_INSTRUCTIONS: Record<AnalyzeAction, string> = {
   resumen_ejecutivo:
     "Genera un resumen ejecutivo conciso (máximo 200 palabras) para presentar a dirección. Incluye: situación actual, logros, riesgos, y siguiente paso recomendado.",
   buenas_practicas:
-    "Basándote en los números reales del dashboard, sugiere buenas prácticas específicas de retail/mayorista de moda que apliquen a esta situación.",
+    "Basándote en los números reales del dashboard, sugiere buenas prácticas específicas de inversión inmobiliaria que apliquen a esta situación.",
 };
 
 function formatAnalyzeBusinessRules(): string {
@@ -381,7 +394,7 @@ export function buildGeneratePromptSplit(): { stable: string; volatile?: string 
   const roleHeader = [
     "# Role",
     "",
-    "You are an expert AI dashboard generator for a Spanish retail and wholesale fashion business (PowerShop).",
+    "You are an expert AI dashboard generator for a Spanish real-estate investment-sourcing tool (Inmo-Tool).",
     "The user describes a dashboard they need in Spanish. You produce a JSON dashboard specification.",
     "Each widget contains a SQL query that will be executed against a PostgreSQL database.",
     "",
@@ -420,7 +433,7 @@ export function buildModifyPromptSplit(
   const stableHeader = [
     "# Role",
     "",
-    "You are an expert AI dashboard modifier for a Spanish retail and wholesale fashion business (PowerShop).",
+    "You are an expert AI dashboard modifier for a Spanish real-estate investment-sourcing tool (Inmo-Tool).",
     "The user wants to modify an existing dashboard. They will describe the changes they want.",
     "You must produce the COMPLETE updated dashboard JSON — not just the changed parts.",
     "Preserve all existing widgets unless the user explicitly asks to remove them.",
@@ -466,7 +479,7 @@ export function buildAnalyzePrompt(
   const sections: string[] = [
     "# Rol",
     "",
-    "Eres un analista de datos experto para un negocio de moda retail y mayorista (PowerShop).",
+    "Eres un analista de datos experto para una herramienta de búsqueda de inversión inmobiliaria (Inmo-Tool).",
     "Tu tarea es analizar los datos del dashboard y responder en español con análisis precisos y útiles.",
     "",
     "# Reglas de respuesta",
@@ -570,7 +583,7 @@ export function buildSuggestPrompt(
   return [
     "# Role",
     "",
-    "You are an expert analytics advisor for a Spanish retail and wholesale fashion business (PowerShop).",
+    "You are an expert analytics advisor for a Spanish real-estate investment-sourcing tool (Inmo-Tool).",
     `You are helping a user with the role: **${role}**.`,
     "Suggest 3-4 dashboard ideas that are most useful for this role.",
     "",
@@ -636,7 +649,7 @@ export function buildGapAnalysisPrompt(
   return [
     "# Role",
     "",
-    "You are an expert analytics advisor for a Spanish retail and wholesale fashion business (PowerShop).",
+    "You are an expert analytics advisor for a Spanish real-estate investment-sourcing tool (Inmo-Tool).",
     "Analyze the existing dashboards and identify important business areas that are NOT yet covered.",
     "",
     "# Output Format",
