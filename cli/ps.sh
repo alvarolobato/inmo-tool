@@ -20,7 +20,9 @@ Usage: ps <command> [options] [args]
 Available commands:
   setup        First-time setup and prerequisites check
   stack        Docker Compose stack management (up/down/update/status/logs/destroy)
-  etl          Connector/sync operations (run/status/tables/logs) — commands are stubs until Phase 1.3-1.5 land
+  connector    Run/inspect site connectors (list/run/status/logs)
+  db           Inspect the Postgres mirror (tables/describe/query)
+  dedup        Deduplication engine (run — stub until task 2.2, #16)
   dashboard    Dashboard App management (open/logs/restart/status)
   config       Show current configuration
 
@@ -39,7 +41,12 @@ Examples:
   ps stack update          Pull latest, rebuild images, restart stack
   ps stack status          Show container status
   ps stack logs [svc]      Tail logs
-  ps etl run               Run connector sync once (once implemented, task 1.5 / #13)
+  ps connector list        Show registered connectors
+  ps connector run         Run all connectors once (or `run <name>` for one)
+  ps connector status      Show the most recent run per connector
+  ps db tables             List tables with row counts
+  ps db query "<SQL>"      Run a read-only query
+  ps dedup run             Run the dedup engine (stub — see #16)
   ps dashboard open        Open Dashboard App in browser
   ps dashboard status      Show dashboard container status
   ps config                Show loaded configuration

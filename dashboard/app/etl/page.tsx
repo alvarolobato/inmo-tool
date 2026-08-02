@@ -226,7 +226,11 @@ export default function EtlMonitorPage() {
         const res = await fetch("/api/etl/run", init);
         if (res.status === 409) {
           // already running — let polling pick it up
-        } else if (res.status === 400) {
+        } else if (res.status === 400 || res.status === 501) {
+          // 400: invalid body. 501: manual trigger is disabled (task 1.6/#14
+          // Phase 1 review — the connector orchestrator doesn't poll for a
+          // manual trigger). Both routes give a real, actionable `detail`
+          // string worth showing instead of the generic fallback message.
           const body = await res.json().catch(() => null);
           setTriggerError(
             typeof body?.detail === "string"

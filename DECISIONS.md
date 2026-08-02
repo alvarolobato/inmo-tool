@@ -19,7 +19,11 @@
 
 ## Data / connectors
 
-*(none yet — Phase 1 tasks 1.2–1.4 will add the canonical schema and connector-framework decisions here as they're made)*
+| ID | Binding rule |
+|----|--------------|
+| [D-005](docs/decisions/D-005-numeric-vs-uuid-keys.md) | Real-estate schema tables use `BIGSERIAL` integer PKs, not `NUMERIC` (no source-system precision constraint like the archived project had) or UUIDs (no distributed-write requirement). |
+
+*(Phase 1 tasks 1.3–1.4 will add connector-framework decisions here as they're made)*
 
 ## Product
 

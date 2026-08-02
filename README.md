@@ -17,6 +17,11 @@ ps setup check           # verify Docker, .env, Postgres reachability
 # Start the local stack
 ps stack up
 ps stack status
+
+# Try it: run the first connector and inspect what it found
+ps connector run fotocasa
+ps connector status
+ps db tables
 ```
 
 No production deployment exists yet — this is local-dev only until there's a real target. `docs/decisions/` (index: [DECISIONS.md](DECISIONS.md)) records the binding technical decisions as they're made; `docs/decisions/archive/` holds the source project's decision history for context on where the AI-factory tooling and Docker/CI conventions came from.

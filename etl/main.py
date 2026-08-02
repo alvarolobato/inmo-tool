@@ -1,14 +1,16 @@
-"""ETL main entrypoint — placeholder orchestrator.
+"""ETL main entrypoint — connector orchestrator.
 
-The real connector framework and per-site orchestration land in Phase 1.3
-(issue #11) and Phase 1.4 (issue #12). This module intentionally does no
-sync work yet: it only proves the container starts, connects to Postgres,
-and applies the schema — so `docker compose up` and `ps etl run` don't
-crash-loop while later Phase 1 tasks build the real pipeline on top of this.
+Connects to Postgres, applies the schema, then runs every registered
+connector once (--once) or on a recurring interval (long-running container
+mode). The connector framework lands in Phase 1.3 (issue #11); no real
+connector is registered yet (etl.orchestrator.CONNECTORS is empty until
+Phase 1.4, issue #12) — that's a supported, tested state, not a stub: this
+process still connects, applies schema, and runs a (currently empty)
+connector sweep cleanly.
 
 Usage:
-    python -m etl.main --once       # connect, init schema, log, exit
-    python -m etl.main              # connect, init schema, then idle-loop
+    python -m etl.main --once       # connect, init schema, run once, exit
+    python -m etl.main              # connect, init schema, then loop hourly
 """
 
 from __future__ import annotations
@@ -16,7 +18,6 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-import time
 from pathlib import Path
 
 logging.basicConfig(
@@ -27,23 +28,17 @@ logging.basicConfig(
 logger = logging.getLogger("etl")
 
 _SCHEMA_SQL_PATH = Path(__file__).parent / "schema" / "init.sql"
-_IDLE_LOOP_SECONDS = 3600
-
-_NOT_YET_IMPLEMENTED = (
-    "No connectors implemented yet — see Phase 1.3 (issue #11, connector "
-    "framework) and Phase 1.4 (issue #12, first connector). This process "
-    "will connect to Postgres and keep the schema current, but performs no "
-    "ingestion until those land."
-)
+_RUN_INTERVAL_SECONDS = 3600
 
 
 def _init_schema(conn_pg) -> None:
     """Execute etl/schema/init.sql against PostgreSQL (idempotent — IF NOT EXISTS).
 
-    init.sql is still the inherited PowerShop schema (ps_* tables) at this
-    point in the stack — it creates tables this project doesn't use. Schema
-    replacement with the real property/listing/profile model is Phase 1.2
-    (issue #10), not this task's job.
+    init.sql now defines the real property/listing/profile model (Phase 1.2,
+    issue #10) alongside the pre-existing dashboard/LLM/ETL-observability
+    infrastructure tables inherited from the source project (dashboards,
+    conversations, llm_*, etl_sync_runs, etc.) — those are left untouched
+    here since later phases still depend on them as-is.
     """
     sql = _SCHEMA_SQL_PATH.read_text(encoding="utf-8")
     with conn_pg.cursor() as cur:
@@ -57,8 +52,16 @@ def main() -> None:
     parser.add_argument(
         "--once",
         action="store_true",
-        help="Connect, init schema, log the not-yet-implemented notice, and exit "
-        "(default: idle-loop indefinitely, for the long-running container)",
+        help="Connect, init schema, run every registered connector once, and exit "
+        "(default: loop hourly, for the long-running container)",
+    )
+    parser.add_argument(
+        "--connector",
+        metavar="NAME",
+        default=None,
+        help="Restrict --once to a single registered connector by name "
+        "(task 1.5, #13 — backs `ps connector run <name>`). Ignored in "
+        "long-running loop mode: the scheduler always runs every connector.",
     )
     args = parser.parse_args()
 
@@ -86,20 +89,42 @@ def main() -> None:
         logger.exception("Schema initialisation failed")
         conn_pg.close()
         sys.exit(1)
-    finally:
-        conn_pg.close()
 
-    logger.warning(_NOT_YET_IMPLEMENTED)
+    import etl.connectors
+    from etl import orchestrator
+
+    etl.connectors.register_all()  # registers real connectors (task 1.4) — see module docstring for why this is a deferred call, not an import-time side effect
+
+    if not orchestrator.CONNECTORS:
+        logger.warning(
+            "No connectors registered yet — see Phase 1.4 (issue #12). "
+            "Running an empty sweep (proves the loop itself works)."
+        )
 
     if args.once:
+        try:
+            orchestrator.run_all_connectors(
+                conn_pg, trigger="cli", connector_name=args.connector
+            )
+        except orchestrator.UnknownConnectorError as exc:
+            # Caught specifically, not bare ValueError — an unrelated
+            # ValueError from somewhere inside a connector's own code
+            # should surface as a real crash/traceback, not get silently
+            # treated as if it were an operator's connector-name typo.
+            logger.error("%s", exc)
+            sys.exit(1)
+        finally:
+            conn_pg.close()
         return
 
-    # Long-running container mode (docker-compose CMD): idle rather than
-    # exit, so the service shows healthy/up instead of crash-looping while
-    # there's nothing to schedule yet.
-    while True:
-        time.sleep(_IDLE_LOOP_SECONDS)
-        logger.info("Idle — %s", _NOT_YET_IMPLEMENTED)
+    conn_pg.close()
+
+    # Long-running container mode (docker-compose CMD): a fresh connection
+    # per cycle, same pattern the source project used, so a dropped
+    # connection between runs doesn't wedge the whole process.
+    orchestrator.run_scheduler_loop(
+        lambda: postgres.get_connection(config), interval_seconds=_RUN_INTERVAL_SECONDS
+    )
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ psycopg2-binary
 python-dotenv
 PyYAML>=6.0
 schedule
+requests>=2.31.0
 # OpenTelemetry — SDK + OTLP exporter + auto-instrumentors
 opentelemetry-distro>=0.49b0
 opentelemetry-exporter-otlp-proto-grpc>=1.28.0
