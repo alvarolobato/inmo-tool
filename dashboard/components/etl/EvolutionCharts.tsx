@@ -10,20 +10,21 @@ export interface DurationTrendPoint {
   status: string;
 }
 
-export interface RowsTrendPoint {
+export interface ListingsTrendPoint {
   started_at: string;
-  total_rows_synced: number | null;
+  discovered: number | null;
+  fetched: number | null;
 }
 
-export interface TableDuration {
-  table_name: string;
+export interface ConnectorDuration {
+  connector_name: string;
   avg_duration_ms: number;
   last_duration_ms: number | null;
 }
 
-export interface TableRows {
-  table_name: string;
-  rows_synced: number;
+export interface ConnectorListings {
+  connector_name: string;
+  fetched_count: number;
 }
 
 export interface SuccessRate {
@@ -36,28 +37,24 @@ export interface SuccessRate {
 export interface LastRunSummary {
   run_id: number | null;
   duration_ms: number | null;
-  total_rows_synced: number | null;
-  throughput_rows_per_sec: number | null;
-}
-
-export interface WatermarkInfo {
-  max_age_seconds: number | null;
-  table_name: string | null;
+  total_discovered: number | null;
+  total_fetched: number | null;
+  /** fetched / discovered, 0–1. NULL when nothing was discovered. */
+  fetch_rate: number | null;
 }
 
 export interface Errors24h {
   runs_failed: number;
-  tables_failed: number;
+  connectors_failed: number;
 }
 
 export interface EtlStatsData {
   duration_trend: DurationTrendPoint[];
-  rows_trend: RowsTrendPoint[];
-  table_durations: TableDuration[];
-  top_tables_by_rows: TableRows[];
+  listings_trend: ListingsTrendPoint[];
+  connector_durations: ConnectorDuration[];
+  top_connectors_by_listings: ConnectorListings[];
   success_rate: SuccessRate;
   last_run: LastRunSummary;
-  watermarks: WatermarkInfo;
   errors_24h: Errors24h;
 }
 
@@ -104,29 +101,33 @@ export function EvolutionCharts({ stats }: EvolutionChartsProps) {
       "Duración (min)": Math.round((p.duration_ms ?? 0) / 60000),
     }));
 
-  // 2. Rows synced per run
-  const rowsData = stats.rows_trend
-    .filter((p) => p.total_rows_synced !== null)
+  // 2. Ingestion funnel per run — two series, not one. Plotting discovered
+  // alongside fetched is the point: a widening gap is the early warning
+  // that a site changed its markup or started soft-blocking, visible well
+  // before a run's status turns red.
+  const listingsData = stats.listings_trend
+    .filter((p) => p.discovered !== null || p.fetched !== null)
     .map((p) => ({
       Fecha: formatShortDate(p.started_at),
-      Filas: p.total_rows_synced as number,
+      Encontrados: p.discovered ?? 0,
+      Guardados: p.fetched ?? 0,
     }));
 
-  // 3. Top 10 slowest tables by avg duration
-  const topTables = [...stats.table_durations]
+  // 3. Top 10 slowest connectors by avg duration
+  const topConnectors = [...stats.connector_durations]
     .sort((a, b) => b.avg_duration_ms - a.avg_duration_ms)
     .slice(0, 10)
-    .map((t) => ({
-      Tabla: t.table_name.replace(/^ps_/, ""),
-      "Duración media (seg)": Math.round(t.avg_duration_ms / 1000),
+    .map((c) => ({
+      Conector: c.connector_name,
+      "Duración media (seg)": Math.round(c.avg_duration_ms / 1000),
     }));
 
-  // 4. Top tables by rows (latest run) — strips ps_ prefix for readability.
-  const topByRows = [...stats.top_tables_by_rows]
-    .sort((a, b) => b.rows_synced - a.rows_synced)
-    .map((t) => ({
-      Tabla: t.table_name.replace(/^ps_/, ""),
-      Filas: t.rows_synced,
+  // 4. Listings stored per connector in the latest finished run.
+  const topByListings = [...stats.top_connectors_by_listings]
+    .sort((a, b) => b.fetched_count - a.fetched_count)
+    .map((c) => ({
+      Conector: c.connector_name,
+      Guardados: c.fetched_count,
     }));
 
   // 5. Run outcomes donut
@@ -161,37 +162,37 @@ export function EvolutionCharts({ stats }: EvolutionChartsProps) {
         </Card>
       )}
 
-      {/* Chart 2: Rows synced per run */}
-      {rowsData.length === 0 ? (
-        <EmptyChart title="Filas sincronizadas por ejecución" />
+      {/* Chart 2: ingestion funnel per run (discovered vs. stored) */}
+      {listingsData.length === 0 ? (
+        <EmptyChart title="Anuncios por ejecución (encontrados vs. guardados)" />
       ) : (
-        <Card className="p-4">
+        <Card className="p-4" data-testid="listings-funnel-chart">
           <h3 className="mb-4 text-sm font-medium text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis">
-            Filas sincronizadas por ejecución
+            Anuncios por ejecución (encontrados vs. guardados)
           </h3>
           <AreaChart
-            data={rowsData}
+            data={listingsData}
             index="Fecha"
-            categories={["Filas"]}
-            colors={["cyan"]}
+            categories={["Encontrados", "Guardados"]}
+            colors={["slate", "cyan"]}
             valueFormatter={(v: number) => v.toLocaleString("es-ES")}
             yAxisWidth={65}
-            showLegend={false}
+            showLegend={true}
           />
         </Card>
       )}
 
-      {/* Chart 3: Top 10 slowest tables */}
-      {topTables.length === 0 ? (
-        <EmptyChart title="Top 10 tablas más lentas (duración media)" />
+      {/* Chart 3: Top 10 slowest connectors */}
+      {topConnectors.length === 0 ? (
+        <EmptyChart title="Conectores más lentos (duración media)" />
       ) : (
         <Card className="p-4">
           <h3 className="mb-4 text-sm font-medium text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis">
-            Top 10 tablas más lentas (duración media)
+            Conectores más lentos (duración media)
           </h3>
           <BarChart
-            data={topTables}
-            index="Tabla"
+            data={topConnectors}
+            index="Conector"
             categories={["Duración media (seg)"]}
             colors={["amber"]}
             valueFormatter={(v: number) => v + "s"}
@@ -201,18 +202,18 @@ export function EvolutionCharts({ stats }: EvolutionChartsProps) {
         </Card>
       )}
 
-      {/* Chart 4: Top tables by rows synced */}
-      {topByRows.length === 0 ? (
-        <EmptyChart title="Top tablas por filas (última sincronización)" />
+      {/* Chart 4: listings stored per connector, latest finished run */}
+      {topByListings.length === 0 ? (
+        <EmptyChart title="Anuncios guardados por conector (última ejecución)" />
       ) : (
-        <Card className="p-4" data-testid="top-tables-by-rows">
+        <Card className="p-4" data-testid="top-connectors-by-listings">
           <h3 className="mb-4 text-sm font-medium text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis">
-            Top tablas por filas (última sincronización)
+            Anuncios guardados por conector (última ejecución)
           </h3>
           <BarChart
-            data={topByRows}
-            index="Tabla"
-            categories={["Filas"]}
+            data={topByListings}
+            index="Conector"
+            categories={["Guardados"]}
             colors={["cyan"]}
             valueFormatter={(v: number) => v.toLocaleString("es-ES")}
             yAxisWidth={70}

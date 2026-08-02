@@ -30,20 +30,21 @@ const successRun = {
   finished_at: "2026-04-15T03:23:45Z",
   duration_ms: 5025000,
   status: "success" as const,
-  total_tables: 22,
-  tables_ok: 22,
-  tables_failed: 0,
-  total_rows_synced: 18500000,
-  trigger: "scheduled" as const,
-  kind: "full" as const,
+  total_connectors: 2,
+  connectors_ok: 2,
+  connectors_failed: 0,
+  connectors_skipped: 0,
+  total_discovered: 72,
+  total_fetched: 45,
+  trigger: "scheduled",
 };
 
 const failedRun = {
   ...successRun,
   id: 2,
   status: "partial" as const,
-  tables_ok: 20,
-  tables_failed: 2,
+  connectors_ok: 1,
+  connectors_failed: 1,
 };
 
 const runningRun = {
@@ -52,51 +53,82 @@ const runningRun = {
   status: "running" as const,
   finished_at: null,
   duration_ms: null,
-  trigger: "manual" as const,
+  trigger: "manual",
 };
 
-const sampleTables = [
+/** A run where the operator disabled a connector (issue #99). */
+const skippedRun = {
+  ...successRun,
+  id: 4,
+  connectors_ok: 1,
+  connectors_failed: 0,
+  connectors_skipped: 1,
+};
+
+const sampleConnectors = [
   {
     id: 1,
-    table_name: "ps_ventas",
+    connector_name: "fotocasa",
     started_at: "2026-04-15T02:00:00Z",
     finished_at: "2026-04-15T02:15:00Z",
     duration_ms: 900000,
-    status: "success" as const,
-    rows_synced: 911000,
-    rows_total_after: 911000,
-    sync_method: "upsert_delta" as const,
-    watermark_from: "2026-04-14T00:00:00Z",
-    watermark_to: "2026-04-15T00:00:00Z",
+    status: "ok" as const,
+    discovered_count: 31,
+    fetched_count: 28,
+    error_count: 3,
     error_msg: null,
   },
   {
     id: 2,
-    table_name: "ps_articulos",
+    connector_name: "milanuncios",
     started_at: "2026-04-15T02:15:00Z",
     finished_at: "2026-04-15T02:20:00Z",
     duration_ms: 300000,
-    status: "success" as const,
-    rows_synced: 45000,
-    rows_total_after: 45000,
-    sync_method: "full_refresh" as const,
-    watermark_from: null,
-    watermark_to: null,
+    status: "ok" as const,
+    discovered_count: 41,
+    fetched_count: 17,
+    error_count: 0,
     error_msg: null,
   },
   {
     id: 3,
-    table_name: "ps_clientes",
+    connector_name: "idealista",
     started_at: "2026-04-15T02:20:00Z",
     finished_at: "2026-04-15T02:21:00Z",
     duration_ms: 60000,
     status: "failed" as const,
-    rows_synced: null,
-    rows_total_after: null,
-    sync_method: "full_refresh" as const,
-    watermark_from: null,
-    watermark_to: null,
+    discovered_count: 0,
+    fetched_count: 0,
+    error_count: 1,
     error_msg: "Connection timeout after 60s: could not connect to server",
+  },
+];
+
+/** circuit_open + skipped — the two states the old per-table UI had no concept of. */
+const newStatusConnectors = [
+  {
+    id: 10,
+    connector_name: "fotocasa",
+    started_at: "2026-04-15T02:00:00Z",
+    finished_at: "2026-04-15T02:05:00Z",
+    duration_ms: 300000,
+    status: "circuit_open" as const,
+    discovered_count: 31,
+    fetched_count: 4,
+    error_count: 8,
+    error_msg: "circuit breaker open after 8/10 errors",
+  },
+  {
+    id: 11,
+    connector_name: "milanuncios",
+    started_at: "2026-04-15T02:05:00Z",
+    finished_at: "2026-04-15T02:05:00Z",
+    duration_ms: 0,
+    status: "skipped" as const,
+    discovered_count: 0,
+    fetched_count: 0,
+    error_count: 0,
+    error_msg: "disabled via connector_config",
   },
 ];
 
@@ -151,7 +183,7 @@ describe("RunDetail component", () => {
   it("renders run detail with KPI row after success fetch", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: () => Promise.resolve({ run: successRun, tables: sampleTables }),
+      json: () => Promise.resolve({ run: successRun, connectors: sampleConnectors }),
     });
     render(<RunDetail runId="1" />);
     await waitFor(() => { expect(screen.getByTestId("run-detail")).toBeInTheDocument(); });
@@ -159,48 +191,48 @@ describe("RunDetail component", () => {
     expect(screen.getByTestId("kpi-row")).toBeInTheDocument();
   });
 
-  it("KPI shows correct duration, tables count, and trigger", async () => {
+  it("KPI shows correct duration, connector count, and trigger", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: () => Promise.resolve({ run: successRun, tables: [] }),
+      json: () => Promise.resolve({ run: successRun, connectors: [] }),
     });
     render(<RunDetail runId="1" />);
     await waitFor(() => { expect(screen.getByTestId("kpi-row")).toBeInTheDocument(); });
     expect(screen.getByText("1h 23m 45s")).toBeInTheDocument();
-    expect(screen.getByText("22 / 0")).toBeInTheDocument();
+    expect(screen.getByText("2 / 0")).toBeInTheDocument();
     expect(screen.getByText("Programado")).toBeInTheDocument();
   });
 
-  it("shows per-table stats table with correct rows", async () => {
+  it("shows per-connector stats table with correct rows", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: () => Promise.resolve({ run: successRun, tables: sampleTables }),
+      json: () => Promise.resolve({ run: successRun, connectors: sampleConnectors }),
     });
     render(<RunDetail runId="1" />);
-    await waitFor(() => { expect(screen.getByTestId("table-stats")).toBeInTheDocument(); });
-    expect(screen.getByTestId("table-row-ps_ventas")).toBeInTheDocument();
-    expect(screen.getByTestId("table-row-ps_articulos")).toBeInTheDocument();
-    expect(screen.getByTestId("table-row-ps_clientes")).toBeInTheDocument();
+    await waitFor(() => { expect(screen.getByTestId("connector-stats")).toBeInTheDocument(); });
+    expect(screen.getByTestId("connector-row-fotocasa")).toBeInTheDocument();
+    expect(screen.getByTestId("connector-row-milanuncios")).toBeInTheDocument();
+    expect(screen.getByTestId("connector-row-idealista")).toBeInTheDocument();
   });
 
-  it("shows error message in red for failed tables", async () => {
+  it("shows error message in red for failed connectors", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: () => Promise.resolve({ run: failedRun, tables: sampleTables }),
+      json: () => Promise.resolve({ run: failedRun, connectors: sampleConnectors }),
     });
     render(<RunDetail runId="2" />);
-    await waitFor(() => { expect(screen.getByTestId("table-stats")).toBeInTheDocument(); });
-    const errorRow = screen.getByTestId("table-row-ps_clientes-error");
+    await waitFor(() => { expect(screen.getByTestId("connector-stats")).toBeInTheDocument(); });
+    const errorRow = screen.getByTestId("connector-row-idealista-error");
     expect(errorRow).toBeInTheDocument();
     const errorBtn = errorRow.querySelector("button");
     expect(errorBtn).toHaveClass("text-red-500");
     expect(errorBtn?.textContent).toContain("Connection timeout");
   });
 
-  it("shows bar chart when tables have duration data", async () => {
+  it("shows bar chart when connectors have duration data", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: () => Promise.resolve({ run: successRun, tables: sampleTables }),
+      json: () => Promise.resolve({ run: successRun, connectors: sampleConnectors }),
     });
     render(<RunDetail runId="1" />);
     await waitFor(() => { expect(screen.getByTestId("bar-chart")).toBeInTheDocument(); });
@@ -209,7 +241,7 @@ describe("RunDetail component", () => {
   it("shows in-progress badge for running run", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: () => Promise.resolve({ run: runningRun, tables: [] }),
+      json: () => Promise.resolve({ run: runningRun, connectors: [] }),
     });
     render(<RunDetail runId="3" />);
     await waitFor(() => { expect(screen.getByTestId("run-detail")).toBeInTheDocument(); });
@@ -217,16 +249,79 @@ describe("RunDetail component", () => {
     expect(screen.getByText(/Manual/)).toBeInTheDocument();
   });
 
-  it("shows empty state when tables array is empty", async () => {
+  it("shows empty state when connectors array is empty", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: () => Promise.resolve({ run: successRun, tables: [] }),
+      json: () => Promise.resolve({ run: successRun, connectors: [] }),
     });
     render(<RunDetail runId="1" />);
     await waitFor(() => { expect(screen.getByTestId("run-detail")).toBeInTheDocument(); });
-    expect(screen.getByText(/Sin estadísticas de tablas disponibles/)).toBeInTheDocument();
-    expect(screen.queryByTestId("table-stats")).not.toBeInTheDocument();
+    expect(screen.getByText(/Sin resultados de conectores/)).toBeInTheDocument();
+    expect(screen.queryByTestId("connector-stats")).not.toBeInTheDocument();
     expect(screen.queryByTestId("bar-chart")).not.toBeInTheDocument();
+  });
+
+  it("renders the discovered→fetched→errors funnel per connector", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ run: successRun, connectors: sampleConnectors }),
+    });
+    render(<RunDetail runId="1" />);
+    await waitFor(() => { expect(screen.getByTestId("connector-stats")).toBeInTheDocument(); });
+    const row = screen.getByTestId("connector-row-fotocasa");
+    // 31 discovered → 28 stored → 3 errored. The gap is the signal.
+    expect(row.textContent).toContain("31");
+    expect(row.textContent).toContain("28");
+    expect(row.textContent).toContain("3");
+  });
+
+  it("renders circuit_open and skipped as distinct states", async () => {
+    // Neither existed in the per-table model this UI was inherited from —
+    // a tripped breaker used to be invisible, and a disabled connector was
+    // indistinguishable from one that simply had nothing to do.
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ run: skippedRun, connectors: newStatusConnectors }),
+    });
+    render(<RunDetail runId="4" />);
+    await waitFor(() => { expect(screen.getByTestId("connector-stats")).toBeInTheDocument(); });
+    expect(screen.getByText("Circuito abierto")).toBeInTheDocument();
+    expect(screen.getByText("Omitido")).toBeInTheDocument();
+  });
+
+  it("does not render a skipped connector's reason as an error", async () => {
+    // "disabled via connector_config" is informational — rendering it in
+    // alarm-red would tell an operator their own deliberate setting is a
+    // fault.
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ run: skippedRun, connectors: newStatusConnectors }),
+    });
+    render(<RunDetail runId="4" />);
+    await waitFor(() => { expect(screen.getByTestId("connector-stats")).toBeInTheDocument(); });
+
+    const skippedBtn = screen
+      .getByTestId("connector-row-milanuncios-error")
+      .querySelector("button");
+    expect(skippedBtn?.textContent).toContain("disabled via connector_config");
+    expect(skippedBtn).not.toHaveClass("text-red-500");
+
+    // ...while a real fault still is red.
+    const brokenBtn = screen
+      .getByTestId("connector-row-fotocasa-error")
+      .querySelector("button");
+    expect(brokenBtn).toHaveClass("text-red-500");
+  });
+
+  it("KPI surfaces the skipped count alongside ok/failed", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ run: skippedRun, connectors: newStatusConnectors }),
+    });
+    render(<RunDetail runId="4" />);
+    await waitFor(() => { expect(screen.getByTestId("kpi-row")).toBeInTheDocument(); });
+    expect(screen.getByText("1 / 0 / 1")).toBeInTheDocument();
+    expect(screen.getByText(/1 omitido/)).toBeInTheDocument();
   });
 
   it("sets up auto-refresh for running run", async () => {
@@ -234,7 +329,7 @@ describe("RunDetail component", () => {
     let fetchCount = 0;
     globalThis.fetch = vi.fn().mockImplementation(() => {
       fetchCount++;
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ run: runningRun, tables: [] }) });
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ run: runningRun, connectors: [] }) });
     });
     render(<RunDetail runId="3" />);
     await waitFor(() => { expect(screen.getByTestId("run-detail")).toBeInTheDocument(); });
@@ -251,7 +346,7 @@ describe("RunDetail component", () => {
     let fetchCount = 0;
     globalThis.fetch = vi.fn().mockImplementation(() => {
       fetchCount++;
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ run: successRun, tables: [] }) });
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ run: successRun, connectors: [] }) });
     });
     render(<RunDetail runId="1" />);
     await waitFor(() => { expect(screen.getByTestId("run-detail")).toBeInTheDocument(); });
