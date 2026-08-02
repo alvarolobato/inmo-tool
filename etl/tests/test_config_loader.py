@@ -43,7 +43,7 @@ def _write_yaml(path: Path, data: dict) -> None:
 class TestLoadSchema:
     def test_schema_file_exists(self) -> None:
         schema = load_schema(_schema_path())
-        assert len(schema) >= 40
+        assert len(schema) >= 35  # 2 dead ETL-cron keys removed in task 1.6, #14
 
     def test_schema_has_required_fields(self) -> None:
         schema = load_schema(_schema_path())
@@ -419,7 +419,7 @@ class TestRealSchema:
             schema_path=_schema_path(),
             config_path=missing,
         )
-        assert len(config) >= 40
+        assert len(config) >= 35  # 2 dead ETL-cron keys removed in task 1.6, #14
         # Every value is a ConfigValue
         for cv in config.values():
             assert isinstance(cv, ConfigValue)
@@ -442,6 +442,6 @@ class TestGetEffectiveConfig:
             config_path=tmp_path / "missing.yaml",
         )
         assert isinstance(cfg, dict)
-        assert len(cfg) >= 40
+        assert len(cfg) >= 35  # 2 dead ETL-cron keys removed in task 1.6, #14
         for cv in cfg.values():
             assert isinstance(cv, ConfigValue)
