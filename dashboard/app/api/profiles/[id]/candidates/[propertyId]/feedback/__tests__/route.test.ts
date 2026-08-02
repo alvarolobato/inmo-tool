@@ -19,6 +19,7 @@ import { buildPgPoolConfig } from "@/lib/db-shared";
 import { resetPool } from "@/lib/db-write";
 import { createProfile } from "@/lib/db/profiles";
 import type { Scope } from "@/lib/profiles-schema";
+import { COLD_START_EXPLANATION } from "@/lib/scoring/explain";
 import { GET, POST } from "../route";
 
 // Far from candidates.integration.test.ts's and materialize.integration.test.ts's
@@ -332,24 +333,36 @@ describe.runIf(dbAvailable)("feedback event API — real Postgres", () => {
       expect(before.rows.every((r) => r.score === null)).toBe(true);
 
       // Only one class so far (accept) — retrain should decline to train
-      // (needs both classes), so scores stay null after this alone.
+      // (needs both classes), so scores stay null after this alone. Per
+      // issue #22 (task 3.3), rank_explanation should still be set to the
+      // honest cold-start message — the candidate list shouldn't show a
+      // blank explanation just because no model exists yet.
       await POST(makeRequest({ feedbackType: "accept" }), ctx(profileId, cheapPropertyId));
-      const afterFirstOnly = await pool.query<{ score: string | null }>(
-        "SELECT score FROM profile_listing_state WHERE profile_id = $1 AND property_id = ANY($2::bigint[])",
+      const afterFirstOnly = await pool.query<{ score: string | null; rank_explanation: string | null }>(
+        "SELECT score, rank_explanation FROM profile_listing_state WHERE profile_id = $1 AND property_id = ANY($2::bigint[])",
         [profileId, [cheapPropertyId, priceyPropertyId]],
       );
       expect(afterFirstOnly.rows.every((r) => r.score === null)).toBe(true);
+      expect(afterFirstOnly.rows.every((r) => r.rank_explanation === COLD_START_EXPLANATION)).toBe(true);
 
       // Now both classes exist — this POST should trigger a real retrain +
       // rescore of the whole matched pool before the response returns.
       const res = await POST(makeRequest({ feedbackType: "reject" }), ctx(profileId, priceyPropertyId));
       expect(res.status).toBe(201);
 
-      const after = await pool.query<{ property_id: number; score: string | null }>(
-        "SELECT property_id, score FROM profile_listing_state WHERE profile_id = $1 AND property_id = ANY($2::bigint[])",
+      const after = await pool.query<{ property_id: number; score: string | null; rank_explanation: string | null }>(
+        "SELECT property_id, score, rank_explanation FROM profile_listing_state WHERE profile_id = $1 AND property_id = ANY($2::bigint[])",
         [profileId, [cheapPropertyId, priceyPropertyId]],
       );
       expect(after.rows.every((r) => r.score !== null)).toBe(true);
+      // A real, model-grounded explanation now replaces the cold-start
+      // message (task 3.3, #22) — and each candidate's own explanation
+      // differs, since it's computed per-candidate from that candidate's own
+      // feature vector, not one shared template string.
+      expect(after.rows.every((r) => r.rank_explanation !== null)).toBe(true);
+      expect(after.rows.every((r) => r.rank_explanation !== COLD_START_EXPLANATION)).toBe(true);
+      const explanations = new Set(after.rows.map((r) => r.rank_explanation));
+      expect(explanations.size).toBe(2);
 
       const model = await pool.query<{ training_example_count: number }>(
         "SELECT training_example_count FROM profile_scoring_model WHERE profile_id = $1",
@@ -488,6 +501,68 @@ describe.runIf(dbAvailable)("feedback event API — real Postgres", () => {
       }
       const distinctScores = new Set(scored.rows.map((r) => r.score));
       expect(distinctScores.size).toBeGreaterThan(1);
+    });
+  });
+
+  it("going one-sided after a successful training run does not clobber the prior real score/explanation (Opus review of PR #92, item 3)", async () => {
+    await withRealDb(async (pool) => {
+      const acceptedId = await insertProperty(pool);
+      const rejectedThenAcceptedId = await insertProperty(pool);
+
+      const scope: Scope = {
+        geography: { type: "radius", center: TEST_COORDS, radius_km: 5 },
+        property_types: ["piso"],
+        price_min: 150000,
+        price_max: 250000,
+        hard_exclusions: {},
+      };
+      const profile = await createProfile(`feedback-int-test-noclobber-${Date.now()}`, scope, {});
+      createdProfileIds.push(profile.id);
+      const profileId = profile.id;
+
+      await insertListing(pool, acceptedId, "fotocasa");
+      await pool.query("UPDATE listing SET current_price = 200000 WHERE property_id = $1", [acceptedId]);
+      await insertListing(pool, rejectedThenAcceptedId, "fotocasa");
+      await pool.query("UPDATE listing SET current_price = 240000 WHERE property_id = $1", [rejectedThenAcceptedId]);
+      await markMatched(pool, profileId, acceptedId);
+      await markMatched(pool, profileId, rejectedThenAcceptedId);
+
+      // Both classes present: training succeeds, real score + explanation land.
+      await POST(makeRequest({ feedbackType: "accept" }), ctx(profileId, acceptedId));
+      await POST(makeRequest({ feedbackType: "reject" }), ctx(profileId, rejectedThenAcceptedId));
+
+      const trained = await pool.query<{ score: string; rank_explanation: string }>(
+        "SELECT score, rank_explanation FROM profile_listing_state WHERE profile_id = $1 AND property_id = $2",
+        [profileId, acceptedId],
+      );
+      expect(trained.rows[0].score).not.toBeNull();
+      expect(trained.rows[0].rank_explanation).not.toBe(COLD_START_EXPLANATION);
+      const priorScore = trained.rows[0].score;
+      const priorExplanation = trained.rows[0].rank_explanation;
+
+      // Go one-sided: accept the previously-rejected property too, leaving
+      // only positive examples. This hits "needs_both_classes" and writes
+      // the cold-start message — but only to rows that are still unscored,
+      // per the score IS NULL scoping fix. `acceptedId`'s prior real
+      // score/explanation from the successful run above must survive
+      // untouched, not get blindly overwritten for the whole matched pool.
+      const res = await POST(makeRequest({ feedbackType: "accept" }), ctx(profileId, rejectedThenAcceptedId));
+      expect(res.status).toBe(201);
+
+      const afterOneSided = await pool.query<{ property_id: number; score: string; rank_explanation: string }>(
+        "SELECT property_id, score, rank_explanation FROM profile_listing_state WHERE profile_id = $1 AND property_id = ANY($2::bigint[])",
+        [profileId, [acceptedId, rejectedThenAcceptedId]],
+      );
+      const acceptedRow = afterOneSided.rows.find((r) => Number(r.property_id) === acceptedId)!;
+      expect(acceptedRow.score).toBe(priorScore);
+      expect(acceptedRow.rank_explanation).toBe(priorExplanation);
+
+      // The newly-flipped property was already scored in the prior training
+      // run too (it was part of the same matched pool), so it also keeps its
+      // real score/explanation rather than being reset to the cold-start
+      // message — the fix is scoped to score IS NULL, and neither row is null.
+      const flippedRow = afterOneSided.rows.find((r) => Number(r.property_id) === rejectedThenAcceptedId)!;
+      expect(flippedRow.rank_explanation).not.toBe(COLD_START_EXPLANATION);
     });
   });
 });

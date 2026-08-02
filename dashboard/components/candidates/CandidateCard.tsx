@@ -89,6 +89,15 @@ export function CandidateCard({ candidate, profileId }: { candidate: CandidateRo
         {firstSeen !== null && (
           <p style={{ margin: 0, fontSize: 11, color: "var(--fg-subtle)" }}>Visto por primera vez: {firstSeen}</p>
         )}
+
+        {candidate.rank_explanation !== null && (
+          <p
+            data-testid="rank-explanation"
+            style={{ margin: 0, fontSize: 12, color: "var(--fg-muted)", fontStyle: "italic" }}
+          >
+            {candidate.rank_explanation}
+          </p>
+        )}
       </Link>
 
       <div style={{ borderTop: "1px solid var(--border)" }}>

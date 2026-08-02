@@ -17,6 +17,8 @@ function candidate(overrides: Partial<CandidateRow> = {}): CandidateRow {
     min_price: 279000,
     first_seen_at: "2026-07-01T00:00:00.000Z",
     listings: [{ id: 10, source: "fotocasa", url: "https://x", current_price: 285000 }],
+    score: null,
+    rank_explanation: null,
     ...overrides,
   };
 }
@@ -68,5 +70,15 @@ describe("CandidateCard", () => {
     expect(screen.getByText("Dirección no disponible")).toBeInTheDocument();
     expect(screen.getByText("Precio no disponible")).toBeInTheDocument();
     expect(screen.getByText("Tipo no disponible")).toBeInTheDocument();
+  });
+
+  it("renders rank_explanation when present, and renders nothing for it when null", () => {
+    const { rerender } = render(
+      <CandidateCard candidate={candidate({ rank_explanation: "Encaja bien con tu perfil: precio un 8% por debajo de tu banda de precio." })} profileId={5} />,
+    );
+    expect(screen.getByTestId("rank-explanation")).toHaveTextContent("Encaja bien con tu perfil: precio un 8% por debajo de tu banda de precio.");
+
+    rerender(<CandidateCard candidate={candidate({ rank_explanation: null })} profileId={5} />);
+    expect(screen.queryByTestId("rank-explanation")).not.toBeInTheDocument();
   });
 });
