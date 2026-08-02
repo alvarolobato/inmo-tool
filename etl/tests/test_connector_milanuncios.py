@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from etl.connectors.base import ConnectorError, ConnectorScope, RawListing
+from etl.connectors.base import ConnectorError, ConnectorScope
 from etl.connectors.milanuncios import MilanunciosConnector
 
 _FIXTURES = Path(__file__).parent / "fixtures"
@@ -53,13 +53,16 @@ class TestDiscover:
     def test_discover_raises_on_soft_block_page_not_empty_list(self):
         html = _read_fixture("milanuncios_sample_block_page.html")
         connector = MilanunciosConnector()
-        with patch(
-            "etl.connectors.milanuncios.requests.get", return_value=_mock_response(html)
+        with (
+            patch(
+                "etl.connectors.milanuncios.requests.get",
+                return_value=_mock_response(html),
+            ),
+            pytest.raises(ConnectorError, match="__INITIAL_PROPS__"),
         ):
-            with pytest.raises(ConnectorError, match="__INITIAL_PROPS__"):
-                connector.discover(
-                    ConnectorScope(geography="madrid"), throttle=lambda: None
-                )
+            connector.discover(
+                ConnectorScope(geography="madrid"), throttle=lambda: None
+            )
 
 
 class TestNormalize:

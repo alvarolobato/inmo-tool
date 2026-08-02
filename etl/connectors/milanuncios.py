@@ -61,7 +61,7 @@ logger = logging.getLogger("etl.connectors.milanuncios")
 _USER_AGENT = "Mozilla/5.0 (compatible; inmo-tool/0.1; +https://github.com/alvarolobato/inmo-tool)"
 _BASE_URL = "https://www.milanuncios.com"
 _REQUEST_TIMEOUT_SECONDS = 15
-_INITIAL_PROPS_MARKER = "window.__INITIAL_PROPS__ = JSON.parse(\""
+_INITIAL_PROPS_MARKER = 'window.__INITIAL_PROPS__ = JSON.parse("'
 
 # Phone number embedded in free-text description — Spanish mobile/landline,
 # optionally spaced/dotted/hyphenated. Used only for the feasibility-spike
@@ -101,7 +101,9 @@ def _extract_initial_props(html: str) -> dict[str, Any]:
             break
         i += 1
     else:
-        raise ConnectorError("milanuncios: unterminated __INITIAL_PROPS__ string literal")
+        raise ConnectorError(
+            "milanuncios: unterminated __INITIAL_PROPS__ string literal"
+        )
 
     raw_escaped = html[start + len(_INITIAL_PROPS_MARKER) : i]
     try:
@@ -111,7 +113,9 @@ def _extract_initial_props(html: str) -> dict[str, Any]:
         inner_json_text = json.loads('"' + raw_escaped + '"')
         return json.loads(inner_json_text)
     except json.JSONDecodeError as exc:
-        raise ConnectorError(f"milanuncios: __INITIAL_PROPS__ is not valid JSON: {exc}") from exc
+        raise ConnectorError(
+            f"milanuncios: __INITIAL_PROPS__ is not valid JSON: {exc}"
+        ) from exc
 
 
 def _to_decimal(value: Any) -> Decimal | None:
@@ -155,15 +159,21 @@ class MilanunciosConnector(Connector):
         throttle()
         try:
             response = requests.get(
-                url, headers={"User-Agent": _USER_AGENT}, timeout=_REQUEST_TIMEOUT_SECONDS
+                url,
+                headers={"User-Agent": _USER_AGENT},
+                timeout=_REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
         except requests.RequestException as exc:
-            raise ConnectorError(f"milanuncios discover: request failed for {url}: {exc}") from exc
+            raise ConnectorError(
+                f"milanuncios discover: request failed for {url}: {exc}"
+            ) from exc
 
         props = _extract_initial_props(response.text)
         ads = (props.get("adListPagination") or {}).get("adList", {}).get("ads") or []
-        external_ids = sorted({str(ad["id"]) for ad in ads if isinstance(ad, dict) and ad.get("id")})
+        external_ids = sorted(
+            {str(ad["id"]) for ad in ads if isinstance(ad, dict) and ad.get("id")}
+        )
         logger.info(
             "milanuncios discover: geography=%s found %d external_ids on page 1",
             geography,
@@ -181,7 +191,9 @@ class MilanunciosConnector(Connector):
         throttle()
         try:
             response = requests.get(
-                url, headers={"User-Agent": _USER_AGENT}, timeout=_REQUEST_TIMEOUT_SECONDS
+                url,
+                headers={"User-Agent": _USER_AGENT},
+                timeout=_REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
         except requests.RequestException as exc:
