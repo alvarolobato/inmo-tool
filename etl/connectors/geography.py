@@ -28,7 +28,12 @@ CITY_CENTROIDS: dict[str, tuple[float, float]] = {
 
 # A profile centered farther than this from every known city isn't
 # confidently "about" any of them — better to skip a connector for that
-# scope than guess wrong and silently crawl the wrong city.
+# scope than guess wrong and silently crawl the wrong city. This is a
+# ceiling, not a target: a profile's own (typically much smaller) radius_km
+# further tightens the match (see nearest_city) so e.g. a 13km-radius
+# Getafe profile doesn't get silently matched to Madrid just because
+# Getafe is within 40km of it — Getafe's own radius says it isn't asking
+# about Madrid at all.
 _MAX_MATCH_DISTANCE_KM = 40.0
 
 
@@ -44,12 +49,28 @@ def _haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
     return 2 * 6371.0 * math.asin(math.sqrt(h))
 
 
-def nearest_city(center: tuple[float, float]) -> str | None:
+def nearest_city(
+    center: tuple[float, float], radius_km: float | None = None
+) -> str | None:
     """Return the nearest known city name for `center`, or None if too far.
 
-    "Too far" means farther than `_MAX_MATCH_DISTANCE_KM` from every known
-    centroid — a profile scoped somewhere this connector has no coverage for
-    should be skipped, not silently mapped to a random nearest city.
+    "Too far" means farther than `min(_MAX_MATCH_DISTANCE_KM, radius_km)`
+    from every known centroid — a profile scoped somewhere this connector
+    has no coverage for should be skipped, not silently mapped to a random
+    nearest city.
+
+    `radius_km` (a profile's own search radius, when given) tightens the
+    global `_MAX_MATCH_DISTANCE_KM` ceiling rather than replacing it: a
+    profile centered on a small town near a known city (e.g. Getafe, ~13km
+    from Madrid's centroid) with a *tight* search radius (say 10km) is
+    explicitly saying "I mean this town, not the wider metro area" — it
+    must NOT silently resolve to Madrid just because Madrid happens to be
+    within the fixed 40km ceiling. A profile with a *wide* radius that
+    genuinely reaches a known city's centroid (e.g. 20km, which does reach
+    Getafe->Madrid's 13km) is treated as intentionally covering it.
+    `radius_km=None` (or non-positive) falls back to the ceiling alone,
+    matching pre-issue-#71-hardening behavior for callers that don't have a
+    real profile radius to hand.
     """
     best_name: str | None = None
     best_distance = math.inf
@@ -58,6 +79,11 @@ def nearest_city(center: tuple[float, float]) -> str | None:
         if distance < best_distance:
             best_distance = distance
             best_name = name
-    if best_name is None or best_distance > _MAX_MATCH_DISTANCE_KM:
+
+    max_distance = _MAX_MATCH_DISTANCE_KM
+    if radius_km is not None and radius_km > 0:
+        max_distance = min(max_distance, radius_km)
+
+    if best_name is None or best_distance > max_distance:
         return None
     return best_name

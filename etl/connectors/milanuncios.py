@@ -91,7 +91,7 @@ def _resolve_geography(scope: ConnectorScope) -> str | None:
         return scope.geography
     if scope.center is None:
         return None
-    city = nearest_city(scope.center)
+    city = nearest_city(scope.center, scope.radius_km)
     if city is None:
         return None
     return _CITY_SLUGS.get(city)
@@ -180,6 +180,11 @@ class MilanunciosConnector(Connector):
     # re-derived per connector; inherited by default until a connector can
     # honestly claim full coverage.
     discovers_full_inventory = False
+
+    def scope_key(self, scope: ConnectorScope) -> str | None:
+        """Delegate to `_resolve_geography` — see FotocasaConnector.scope_key
+        for why the resolved slug itself is the right dedup/coverage key."""
+        return _resolve_geography(scope)
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         geography = _resolve_geography(scope)

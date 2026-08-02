@@ -95,7 +95,7 @@ def _resolve_geography(scope: ConnectorScope) -> str | None:
         return scope.geography
     if scope.center is None:
         return None
-    city = nearest_city(scope.center)
+    city = nearest_city(scope.center, scope.radius_km)
     if city is None:
         return None
     return _CITY_SLUGS.get(city)
@@ -200,6 +200,12 @@ class FotocasaConnector(Connector):
     # Connector.discovers_full_inventory's docstring for what this
     # disables (the orchestrator's withdrawal auto-transition).
     discovers_full_inventory = False
+
+    def scope_key(self, scope: ConnectorScope) -> str | None:
+        """Delegate to `_resolve_geography` — the actual slug this scope
+        resolves to (or None if unresolvable) IS the right dedup/coverage
+        key: two scopes resolving to the same slug hit the identical URL."""
+        return _resolve_geography(scope)
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         geography = _resolve_geography(scope)

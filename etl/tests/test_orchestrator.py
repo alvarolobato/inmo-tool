@@ -708,3 +708,137 @@ class TestProfileDrivenScope:
                     (_TEST_PROFILE_NAME,),
                 )
             pg_conn.commit()
+
+    def test_two_scopes_resolving_to_the_same_target_are_not_crawled_twice(
+        self, pg_conn
+    ):
+        """Issue #71 review finding: two active profiles with different exact
+        centers/radii can still resolve to the identical real-world crawl
+        target (e.g. both land on Madrid). Before this fix, each got its
+        own full run_connector() pass — double the real traffic against the
+        target site for zero benefit, a direct regression of issue #1
+        §15's good-neighbor crawling discipline. A connector whose
+        `scope_key()` collapses both scopes to the same key must only be
+        crawled once."""
+
+        class _FixedKeyConnector(DummyConnector):
+            """Every scope resolves to the same real-world target, however
+            different the raw (center, radius_km) values look — simulates
+            two profiles that are geographically distinct but both land on
+            the same city per a real connector's own resolution logic."""
+
+            def scope_key(self, scope):
+                return "same-target-regardless-of-raw-scope"
+
+        _apply_schema(pg_conn)
+        # Deliberately far enough apart in raw terms to survive
+        # _active_profile_scopes' own raw-coordinate-rounding dedup (which
+        # only catches near-identical centers) — this profile must reach
+        # the per-connector loop as a genuinely distinct scope, so the
+        # resolved-key dedup being tested here is the thing actually
+        # doing the work, not the earlier raw-level pass.
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO search_profile (name, scope) VALUES (%s, %s) RETURNING id",
+                (
+                    "second-profile-same-resolved-target",
+                    (
+                        '{"geography": {"type": "radius", '
+                        '"center": [41.0, -4.0], "radius_km": 25}}'
+                    ),
+                ),
+            )
+            (second_profile_id,) = cur.fetchone()
+        pg_conn.commit()
+
+        connector = _FixedKeyConnector(name="fixed-key-dummy")
+        orchestrator.CONNECTORS[:] = [connector]
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            # Two active profiles, both resolving to the same key -> only
+            # the first should have actually reached discover().
+            assert len(connector.scopes_seen) == 1
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT discovered_count, fetched_count FROM "
+                    "connector_run_results WHERE run_id = %s AND connector_name = %s",
+                    (run_id, connector.name),
+                )
+                discovered, fetched = cur.fetchone()
+            # 3 dummy listings from exactly one discover() call, not 6 from two.
+            assert discovered == 3
+            assert fetched == 3
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM search_profile WHERE id = %s", (second_profile_id,)
+                )
+            pg_conn.commit()
+
+    def test_circuit_trip_during_one_scope_stops_remaining_scopes_this_run(
+        self, pg_conn
+    ):
+        """Issue #71 review finding: the limiter/breaker used to be built
+        fresh per scope, so a circuit trip while processing one
+        profile-geography did nothing to protect the next one in the same
+        run — a blocking/misbehaving site got N times the intended error
+        budget. With a breaker shared across scopes for one connector's
+        run, a trip during the first scope must skip the second entirely
+        (never even call discover() for it), not just aggressively fail
+        fast within the scope that actually tripped it."""
+        _apply_schema(pg_conn)
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO search_profile (name, scope) VALUES (%s, %s) RETURNING id",
+                (
+                    "second-profile-should-never-be-reached",
+                    (
+                        '{"geography": {"type": "radius", '
+                        '"center": [41.3851, 2.1734], "radius_km": 10}}'
+                    ),
+                ),
+            )
+            (second_profile_id,) = cur.fetchone()
+        pg_conn.commit()
+
+        # 10 ids, 5 failing (50% > default 30% threshold), min_attempts=2 —
+        # trips well within the first scope's own fetch loop, before the
+        # second scope (Barcelona, above) is ever reached.
+        external_ids = tuple(f"dummy-{i}" for i in range(10))
+        failing = frozenset(external_ids[1::2])
+        connector = DummyConnector(
+            name="test-cross-scope-breaker-connector",
+            external_ids=external_ids,
+            failing_ids=failing,
+            circuit_breaker_min_attempts=2,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            # Exactly one discover() call — the Madrid fixture profile's
+            # scope. The Barcelona scope must never have reached discover()
+            # at all, since the breaker was already open by the time the
+            # per-connector loop got to it.
+            assert len(connector.scopes_seen) == 1
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM connector_run_results "
+                    "WHERE run_id = %s AND connector_name = %s",
+                    (run_id, connector.name),
+                )
+                (status,) = cur.fetchone()
+            assert status == "circuit_open"
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM search_profile WHERE id = %s", (second_profile_id,)
+                )
+            pg_conn.commit()

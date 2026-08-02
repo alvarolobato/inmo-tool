@@ -432,8 +432,14 @@ CREATE TABLE IF NOT EXISTS connector_run_results (
     fetched_count    INTEGER      NOT NULL DEFAULT 0,
     error_count      INTEGER      NOT NULL DEFAULT 0,
     error_msg        TEXT,
-    -- One row per connector per run — a connector never runs twice within
-    -- the same connector_runs row, so this pairing is a real 1:1.
+    -- One row per connector per run — still a real 1:1 pairing after issue
+    -- #71 (profile-driven scope), but don't read "one row" as "discover()/
+    -- fetch_detail() ran once": a connector now processes one scope per
+    -- active search-profile geography within a single run, and this row's
+    -- discovered_count/fetched_count/error_count are the SUM across all of
+    -- them, with per-scope detail folded into error_msg on anything but a
+    -- clean 'ok' (see etl.orchestrator.run_all_connectors). What stays
+    -- 1:1 is "one connector, one run, one result row" — not "one scope".
     UNIQUE (run_id, connector_name)
 );
 

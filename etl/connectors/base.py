@@ -164,6 +164,32 @@ class Connector(ABC):
     # auto-transition to withdrawn from absence alone.
     discovers_full_inventory: bool = True
 
+    def scope_key(self, scope: ConnectorScope) -> str | None:
+        """Return a string identifying what this scope actually resolves to.
+
+        The orchestrator uses this to dedupe crawling within one run: two
+        scopes that resolve to the same key hit the identical target, so
+        the second is skipped rather than redundantly re-crawled (issue
+        #71 — two active search profiles with different exact centers can
+        easily resolve to the same city). It's also used to detect a scope
+        this connector has no coverage for at all: return `None` for a
+        scope that can't be resolved to anything real, and the orchestrator
+        skips it as unresolvable (logged, not treated as a failure) rather
+        than calling `discover()` and making the connector raise for a
+        target it was never going to be able to look at.
+
+        Default: no site-specific geography resolution, so every distinct
+        `(geography, center, radius_km)` combination is its own key and
+        `None` is never returned — every scope is treated as both unique
+        and resolvable. Override when a connector translates `scope.center`
+        into a site-specific geography (see fotocasa.py/milanuncios.py's
+        `_resolve_geography`, which their `scope_key` override delegates
+        to directly).
+        """
+        if scope.geography:
+            return f"geography:{scope.geography}"
+        return f"raw:{scope.center}:{scope.radius_km}"
+
     @abstractmethod
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         """Return external_ids that exist for this scope. Cheap; no full fetch.
