@@ -66,7 +66,7 @@ describe("TopBar", () => {
     const nav = screen.getByRole("navigation");
     const links = Array.from(nav.querySelectorAll("a"));
     const labels = links.map((l) => l.textContent?.trim());
-    expect(labels).toEqual(["Inicio", "Paneles", "Conversaciones", "Revisión", "Wren"]);
+    expect(labels).toEqual(["Inicio", "Paneles", "Conversaciones", "Revisión"]);
   });
 
   it("includes 'Conversaciones' link pointing to /conversations after Paneles", () => {
