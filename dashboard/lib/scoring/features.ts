@@ -101,23 +101,45 @@ export async function fetchScoringInputs(profileId: number): Promise<ScoringInpu
 }
 
 /**
+ * Sentinel for "ático" (top-floor/penthouse) labels, which have no numeric
+ * floor of their own in the source data. Chosen well above any real Spanish
+ * building's floor count so it orders as "highest", not to imply an actual
+ * story count (task 3.2 review: Opus review of PR #91, item 3 — silently
+ * dropping ático to `null` discarded a real, common, high-value signal).
+ */
+const ATICO_SENTINEL = 50;
+
+/**
  * Best-effort parse of Spanish floor labels into a numeric ordering.
  * Returns `null` (missing, not zero) for anything unrecognized — this is a
  * soft scoring feature, not the hard `min_floor` filter that issue #17
  * explicitly dropped as unimplementable against this same free-text column;
  * a soft feature can tolerate "sometimes unknown" in a way a hard filter
  * can't.
+ *
+ * Patterns are checked against real label strings pulled from this
+ * project's own fixtures (`Bajos`, `Planta baja`, `Ático`, `Entreplanta`,
+ * `Semi-sótano`), not synthesized ones — see PR #91's review round for the
+ * concrete failures this was fixed against.
  */
 export function parseFloorNumeric(floor: string | null): number | null {
   if (!floor) return null;
   const normalized = floor
     .toLowerCase()
     .normalize("NFD")
-    .replace(/[̀-ͯ]/g, ""); // strip accents: "ático" -> "atico", "bajo" unaffected
+    .replace(/[̀-ͯ]/g, ""); // strip accents: "ático" -> "atico", "sótano" -> "sotano"
 
-  if (/\bbajo\b/.test(normalized) || /\bentresuelo\b/.test(normalized)) return 0;
-  if (/\bsemisotano\b/.test(normalized)) return -0.5;
+  // "bajo"/"baja"/"bajos"/"bajas" as a standalone word also matches inside
+  // "planta baja" (feminine agreement with "planta"), so one pattern covers
+  // both the bare and "planta baja" forms.
+  if (/\bbaj[oa]s?\b/.test(normalized) || /\bentresuelo\b/.test(normalized)) return 0;
+  if (/\bentreplanta\b/.test(normalized)) return 0.5;
+  // Must be checked before the plain "sotano" pattern below: a hyphenated
+  // or spaced "semi-sótano"/"semi sótano" contains "sotano" as its own
+  // standalone word and would otherwise fall through to the -1 branch.
+  if (/\bsemi[-\s]?sotano\b/.test(normalized)) return -0.5;
   if (/\bsotano\b/.test(normalized)) return -1;
+  if (/\batico\b/.test(normalized)) return ATICO_SENTINEL;
 
   const match = normalized.match(/(\d+)/);
   if (match) return Number(match[1]);
