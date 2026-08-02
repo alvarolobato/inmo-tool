@@ -118,6 +118,40 @@ CREATE INDEX IF NOT EXISTS idx_listing_last_seen_at ON listing (last_seen_at);
 -- not just a fresh one.
 ALTER TABLE listing ADD COLUMN IF NOT EXISTS missed_discovery_count SMALLINT NOT NULL DEFAULT 0;
 
+-- Schema superset vs. RealEstateWebTools/property_web_scraper's field model
+-- (issue #76). city/province/postal_code/m2_plot/features are additive
+-- columns for data both live connectors already parse and currently
+-- discard when flattening into `property.address` (see issue #76's
+-- Context for the exact discarded fields per connector) — populating them
+-- from real connector data is the Fotocasa/Milanuncios retrofit issues'
+-- job (#77/#78), not this one; this issue only adds the columns.
+ALTER TABLE property ADD COLUMN IF NOT EXISTS city         TEXT;
+ALTER TABLE property ADD COLUMN IF NOT EXISTS province     TEXT;
+ALTER TABLE property ADD COLUMN IF NOT EXISTS postal_code  TEXT;
+-- NUMERIC(12,2), not (8,2): Milanuncios already maps a venta-de-fincas
+-- (rural land/estate) category, and (8,2) tops out around 100 hectares —
+-- a real rural finca listing above that would raise a numeric field
+-- overflow and abort ingestion outright.
+ALTER TABLE property ADD COLUMN IF NOT EXISTS m2_plot      NUMERIC(12,2);
+ALTER TABLE property ADD COLUMN IF NOT EXISTS features     TEXT[] NOT NULL DEFAULT '{}';
+
+-- Added now, ahead of #77/#78 actually populating `features`: cheap to add
+-- alongside the column, easy to forget once hard-filtering starts querying
+-- against it.
+CREATE INDEX IF NOT EXISTS idx_property_features ON property USING GIN (features);
+
+-- Sale vs. rent (issue #76's one field needing a product decision, not a
+-- blind column add). Both live connectors only ever discover sale listings
+-- today (Fotocasa's URL is /comprar/..., Milanuncios's is
+-- venta-de-pisos-en-...), so this has been invisible so far — it stops
+-- being invisible the moment a rental-comp connector (issue #31) lands.
+-- Decision: add now, defaulted to 'sale', while the backfill is trivial
+-- (every existing/future row from the current two connectors is
+-- unambiguously a sale) rather than as an emergency migration once #31
+-- needs to distinguish rentals. Issue #31's implementer should confirm
+-- this representation still fits before ingesting rental data.
+ALTER TABLE listing ADD COLUMN IF NOT EXISTS operation TEXT NOT NULL DEFAULT 'sale' CHECK (operation IN ('sale', 'rent'));
+
 -- ============================================================
 -- Change tracking (append-only)
 -- ============================================================

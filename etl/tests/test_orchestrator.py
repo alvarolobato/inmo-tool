@@ -8,11 +8,13 @@ nothing meaningful.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from etl import orchestrator
+from etl.connectors.base import CanonicalListingVersion
 from etl.tests.fixtures.dummy_connector import DiscoverFailsConnector, DummyConnector
 
 _SCHEMA_SQL = Path(__file__).parent.parent / "schema" / "init.sql"
@@ -842,3 +844,124 @@ class TestProfileDrivenScope:
                     "DELETE FROM search_profile WHERE id = %s", (second_profile_id,)
                 )
             pg_conn.commit()
+
+
+def _minimal_canonical(
+    external_id: str, source: str, **overrides
+) -> CanonicalListingVersion:
+    """A CanonicalListingVersion with every required field filled and every
+    schema-superset field (issue #76) left at its dataclass default, so a
+    test only has to name the fields it actually cares about."""
+    defaults: dict = {
+        "external_id": external_id,
+        "source": source,
+        "url": f"https://example.test/{external_id}",
+        "listing_kind": "particular",
+        "status": "active",
+        "current_price": Decimal(200000),
+        "description": "test listing",
+        "photo_urls": (),
+        "contact_raw": None,
+        "address": "Calle Falsa 123",
+        "lat": None,
+        "lon": None,
+        "property_type": "piso",
+        "m2_built": None,
+        "m2_useful": None,
+        "rooms": None,
+        "bathrooms": None,
+        "floor": None,
+        "has_elevator": None,
+        "year_built": None,
+        "energy_rating": None,
+    }
+    defaults.update(overrides)
+    return CanonicalListingVersion(**defaults)
+
+
+class TestSchemaSupersetFieldsPersistAcrossRevisit:
+    """Issue #76's schema-superset fields (city/province/postal_code/m2_plot/
+    features/operation) must survive a re-visit where the connector doesn't
+    set them — the same COALESCE-preserves-prior-value discipline every
+    other optional field in this table already gets. `operation` is the one
+    Opus's review of PR #83 found actually broken: its dataclass default of
+    'sale' (not None) meant COALESCE never saw a real NULL to fall through
+    on, so a real 'rent' value silently reverted to 'sale' on every revisit.
+    """
+
+    def test_fields_set_on_insert_survive_a_revisit_that_omits_them(self, pg_conn):
+        _apply_schema(pg_conn)
+        source = "schema-superset-revisit-test"
+        try:
+            first = _minimal_canonical(
+                "ss-1",
+                source,
+                city="Sevilla",
+                province="Sevilla",
+                postal_code="41001",
+                m2_plot=Decimal("850.00"),
+                features=("terraza", "trastero"),
+                operation="rent",
+            )
+            orchestrator._upsert_canonical_listing(pg_conn, first)
+
+            # Re-visit: a connector that doesn't (re-)report these fields —
+            # exactly what every real connector does today, since none of
+            # them populate city/province/postal_code/m2_plot/features yet
+            # (#77/#78's job), and a connector simply not re-asserting
+            # `operation` on a subsequent fetch is the realistic case this
+            # bug actually hit.
+            second = _minimal_canonical(
+                "ss-1",
+                source,
+                current_price=Decimal(205000),  # a real, unrelated change
+            )
+            orchestrator._upsert_canonical_listing(pg_conn, second)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT p.city, p.province, p.postal_code, p.m2_plot, p.features,
+                           l.operation, l.current_price
+                    FROM listing l JOIN property p ON p.id = l.property_id
+                    WHERE l.source = %s AND l.external_id = %s
+                    """,
+                    (source, "ss-1"),
+                )
+                row = cur.fetchone()
+
+            assert row is not None
+            city, province, postal_code, m2_plot, features, operation, price = row
+            assert city == "Sevilla"
+            assert province == "Sevilla"
+            assert postal_code == "41001"
+            assert m2_plot == Decimal("850.00")
+            assert set(features) == {"terraza", "trastero"}
+            assert operation == "rent", (
+                "operation must survive a revisit that doesn't re-set it — "
+                "this is the exact bug Opus's review of PR #83 found"
+            )
+            assert price == Decimal(205000), (
+                "a real change on revisit must still take effect"
+            )
+        finally:
+            _cleanup(pg_conn, source)
+
+    def test_operation_defaults_to_sale_when_never_set(self, pg_conn):
+        _apply_schema(pg_conn)
+        source = "schema-superset-default-operation-test"
+        try:
+            canonical = _minimal_canonical(
+                "ss-2", source
+            )  # operation left unset (None)
+            orchestrator._upsert_canonical_listing(pg_conn, canonical)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT operation FROM listing WHERE source = %s AND external_id = %s",
+                    (source, "ss-2"),
+                )
+                (operation,) = cur.fetchone()
+            assert operation == "sale"
+        finally:
+            _cleanup(pg_conn, source)
