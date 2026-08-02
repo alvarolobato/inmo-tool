@@ -33,6 +33,9 @@ class ListingRecord:
     lon: Decimal | None
     m2_built: Decimal | None
     current_price: Decimal | None
+    contact_raw: str | None  # seller/agency display name, used by
+    # reference_code.py's agency-match corroboration (issue #72)
+    reference_code: str | None  # seller/agency reference code (issue #72)
 
 
 @dataclass(frozen=True)

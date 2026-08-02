@@ -93,6 +93,23 @@ CREATE TABLE IF NOT EXISTS listing (
     UNIQUE (source, external_id)
 );
 
+-- ALTER, not a column in the CREATE TABLE above (same reasoning as
+-- listing.missed_discovery_count/operation elsewhere in this file): this
+-- file must stay safe to re-run against an already-migrated database, and
+-- `reference_code` was added after `listing`'s original CREATE TABLE.
+--
+-- Seller/agency-assigned reference code (e.g. Fotocasa's "Referencia:
+-- NS603") — a dedicated column, not raw_extra, because the dedup engine
+-- (etl/dedup/signals/reference_code.py, issue #72) needs to compare it
+-- across every listing pair; NOT globally unique (two different
+-- agencies can coincidentally use the same code) so it carries no
+-- UNIQUE constraint — see that signal module for the corroboration
+-- discipline this requires.
+ALTER TABLE listing ADD COLUMN IF NOT EXISTS reference_code TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_listing_reference_code ON listing (reference_code)
+    WHERE reference_code IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_listing_property_id  ON listing (property_id);
 -- Both of these are kept, not redundant: a b-tree composite index on
 -- (source, status) only serves queries that filter on `source` (alone, or
@@ -357,11 +374,20 @@ CREATE TABLE IF NOT EXISTS property_merge_log (
     id                  BIGSERIAL    PRIMARY KEY,
     property_id         BIGINT       REFERENCES property(id),
     merged_listing_ids  BIGINT[],
-    match_basis         TEXT         CHECK (match_basis IN ('cadastral','address_coords','phone','photo_hash','fuzzy')),
+    match_basis         TEXT         CHECK (match_basis IN ('cadastral','address_coords','phone','reference_code','photo_hash','fuzzy')),
     confidence          NUMERIC(4,3),
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     reverted_at         TIMESTAMPTZ
 );
+
+-- 'reference_code' (issue #72) was added to the CHECK list above after
+-- this table's original CREATE TABLE — inert against an already-migrated
+-- database (CREATE TABLE IF NOT EXISTS is a no-op there), so the live
+-- constraint needs its own migration or a pre-#72 database would reject
+-- every real 'reference_code' insert at runtime.
+ALTER TABLE property_merge_log DROP CONSTRAINT IF EXISTS property_merge_log_match_basis_check;
+ALTER TABLE property_merge_log ADD CONSTRAINT property_merge_log_match_basis_check
+    CHECK (match_basis IN ('cadastral','address_coords','phone','reference_code','photo_hash','fuzzy'));
 
 -- ALTER, not a column in the CREATE TABLE above (same reasoning as
 -- listing.missed_discovery_count in task 1.4): this file must stay safe to
@@ -410,7 +436,7 @@ CREATE TABLE IF NOT EXISTS suggested_merge (
     id            BIGSERIAL    PRIMARY KEY,
     listing_id_a  BIGINT       NOT NULL REFERENCES listing(id),
     listing_id_b  BIGINT       NOT NULL REFERENCES listing(id),
-    match_basis   TEXT         NOT NULL CHECK (match_basis IN ('cadastral','address_coords','phone','photo_hash','fuzzy')),
+    match_basis   TEXT         NOT NULL CHECK (match_basis IN ('cadastral','address_coords','phone','reference_code','photo_hash','fuzzy')),
     confidence    NUMERIC(4,3),
     status        TEXT         NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','rejected','conflict')),
     detail        JSONB        NOT NULL DEFAULT '{}',
@@ -418,6 +444,13 @@ CREATE TABLE IF NOT EXISTS suggested_merge (
     resolved_at   TIMESTAMPTZ,
     CHECK (listing_id_a <> listing_id_b)
 );
+
+-- 'reference_code' (issue #72) was added to the CHECK list above after
+-- this table's original CREATE TABLE — same inert-on-existing-DB issue as
+-- property_merge_log's identical constraint above; migrate it too.
+ALTER TABLE suggested_merge DROP CONSTRAINT IF EXISTS suggested_merge_match_basis_check;
+ALTER TABLE suggested_merge ADD CONSTRAINT suggested_merge_match_basis_check
+    CHECK (match_basis IN ('cadastral','address_coords','phone','reference_code','photo_hash','fuzzy'));
 
 -- Prevents the engine from re-suggesting the same pair on every run
 -- regardless of which listing was recorded as "a" vs "b" (the engine

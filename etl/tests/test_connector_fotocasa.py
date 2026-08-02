@@ -299,6 +299,10 @@ class TestFallbackChain:
         assert canonical.bathrooms == 2
         assert canonical.m2_built == Decimal(60)
         assert canonical.current_price == Decimal(379000)
+        # reference_code (issue #72): absent from this fixture's JSON
+        # (no "reference" key in realEstate), recovered from the
+        # ".re-FormContactDetail-referenceAlias" CSS fallback.
+        assert canonical.reference_code == "XY789"
 
     def test_json_path_wins_over_css_when_both_are_present(self):
         """The fallback chain must not override a perfectly good JSON
@@ -372,6 +376,60 @@ class TestFallbackChain:
         assert canonical.bathrooms is None
         assert canonical.m2_built is None
         assert canonical.current_price is None
+
+
+class TestReferenceCode:
+    """Issue #72: seller/agency reference code — e.g. "Referencia: NS603"
+    live-verified (2026-08-02) against the real Sevilla listing cited in
+    that issue (`realEstate.reference` matches the rendered
+    ".re-FormContactDetail-referenceAlias" text exactly on that listing).
+    The CSS-fallback path is covered by
+    TestFallbackChain.test_falls_back_to_css_when_json_fields_are_null.
+    """
+
+    def test_extracts_reference_from_json_primary_path(self):
+        raw = RawListing(
+            external_id="992",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/x",
+                "props": {
+                    "realEstate": {
+                        "price": 100000,
+                        "reference": "NS603",
+                        "address": {},
+                        "coordinates": {},
+                        "features": {},
+                        "descriptions": {},
+                        "multimedia": [],
+                    }
+                },
+            },
+        )
+        canonical = FotocasaConnector().normalize(raw)
+        assert canonical.reference_code == "NS603"
+
+    def test_missing_reference_yields_none_not_empty_string(self):
+        raw = RawListing(
+            external_id="991",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/x",
+                "props": {
+                    "realEstate": {
+                        "price": 100000,
+                        "address": {},
+                        "coordinates": {},
+                        "features": {},
+                        "descriptions": {},
+                        "multimedia": [],
+                    }
+                },
+                "html": "<html><body>no reference markup here</body></html>",
+            },
+        )
+        canonical = FotocasaConnector().normalize(raw)
+        assert canonical.reference_code is None
 
 
 class TestSchemaSupersetFields:
