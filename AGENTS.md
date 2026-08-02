@@ -78,8 +78,9 @@ Priority (highest to lowest):
 |----------|---------|
 | `POSTGRES_DSN` / `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | PostgreSQL connection (connector sync target) |
 | `OPENROUTER_API_KEY` | OpenRouter API key for the Dashboard App's LLM |
-| `ETL_CRON_HOUR` | Hour to run the daily connector sync (semantics finalized in task 1.3) |
 | `DASHBOARD_LLM_PROVIDER` / `DASHBOARD_LLM_MODEL_*` | Dashboard LLM backend selection (kept from source project, see [D-019 archive](docs/decisions/archive/D-019-pluggable-llm-providers.md)) |
+
+Note: no `ETL_CRON_HOUR`-style variable — the connector orchestrator (`etl/orchestrator.py run_scheduler_loop`, task 1.3) runs every registered connector immediately on startup, then on a flat hourly interval. `ETL_CRON_HOUR` existed in `docker-compose.yml`/`.env.example` through task 1.5 but was never read by any code (dead since task 1.1); removed in task 1.6 (#14).
 
 Full reference: `.env.example` (kept up to date as tasks land — no separate `docs/cli-reference.md`-style env doc yet).
 

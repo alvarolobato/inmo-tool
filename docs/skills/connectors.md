@@ -32,6 +32,10 @@ If a site gives you a coded bucket (Fotocasa's `antiquity` field is "more than N
 
 A listing missing from one `discover()` sweep isn't necessarily gone — pagination noise, a transient site hiccup, or (for a connector that only reads page 1, like Fotocasa's) simply falling off the front page as newer listings push it down are all normal. `etl.orchestrator._reconcile_missed_discoveries` tracks a `missed_discovery_count` per listing and only marks `withdrawn` (with a `listing_status_event`) after `_WITHDRAWAL_THRESHOLD` (currently 3) consecutive misses. This is generic, connector-agnostic infrastructure — a new connector gets it for free by virtue of `run_connector` calling it right after `discover()` returns; there's nothing to implement per-connector.
 
+## Every container start/restart is a live scrape, not just the hourly schedule
+
+`etl/orchestrator.py run_scheduler_loop` runs every registered connector immediately on startup, before the first hourly sleep (task 1.6, #14 review flagged this) — combined with `restart: unless-stopped` in `docker-compose.yml`, that means every `docker compose up`, every crash-restart, and every `docker compose restart etl` sends real requests to every connector's live site right away, not just once an hour. This is fine for a personal tool at Fotocasa's current scale, but be deliberate about it: don't add a connector with an aggressive rate limit or a fragile source and then restart the container repeatedly while debugging something unrelated — that's exactly the kind of unintentional request burst issue #1 §15's good-neighbor crawling principle exists to avoid.
+
 ## Registration
 
 Add your connector class to `etl/connectors/__init__.py`'s `register_all()` function — a single `.append(...)` line. Don't register at import time (a module-level `CONNECTORS.append(...)` in `etl/connectors/__init__.py`) — see that file's docstring for why that creates a circular import with `etl.orchestrator`. `register_all()` is called once, explicitly, from `etl/main.py`, after `etl.orchestrator` is already fully imported.
