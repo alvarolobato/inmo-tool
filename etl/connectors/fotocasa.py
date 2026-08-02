@@ -200,6 +200,9 @@ def _to_has_elevator(elevator_value: Any) -> bool | None:
 # classes, which should be materially more redesign-resistant since
 # icon-name attributes tend to be tied to a component's *meaning*, not its
 # current visual styling.
+_STAT_NUMBER_RE = re.compile(r"\d[\d.,]*")
+
+
 def _icon_stat_text(soup: BeautifulSoup, icon_title: str) -> str | None:
     """Find the numeric stat next to a named stat-row icon.
 
@@ -209,6 +212,14 @@ def _icon_stat_text(soup: BeautifulSoup, icon_title: str) -> str | None:
     `<ul aria-label="Características principales">` block. Verified live
     (2026-08-02) against a real listing (id 189316512: rooms=2, bathrooms=2,
     surface=60, all matching the same listing's embedded-JSON values).
+
+    Locates the right `<li>` via `data-title` (an icon-name attribute tied
+    to the row's *meaning*, not its current visual styling) but then reads
+    the number via a regex over the `<li>`'s own text rather than a
+    `.font-bold` CSS class — depending on a specific Tailwind utility class
+    surviving the next redesign would undercut the whole point of this
+    fallback, which exists precisely because property_web_scraper's own
+    class-based selectors already broke once (Opus review, PR #84).
     """
     svg = soup.select_one(f'svg[data-title="{icon_title}"]')
     if svg is None:
@@ -216,10 +227,8 @@ def _icon_stat_text(soup: BeautifulSoup, icon_title: str) -> str | None:
     li = svg.find_parent("li")
     if li is None:
         return None
-    value_span = li.select_one(".font-bold")
-    if value_span is None:
-        return None
-    return value_span.get_text(strip=True)
+    match = _STAT_NUMBER_RE.search(li.get_text())
+    return match.group(0) if match else None
 
 
 def _price_fallback_text(soup: BeautifulSoup) -> str | None:
@@ -402,20 +411,24 @@ class FotocasaConnector(Connector):
         rooms = first_present(
             lambda: _to_int(features.get("rooms")),
             lambda: text_to_int(_icon_stat_text(soup(), "double_bed")),
+            field="rooms",
         )
         bathrooms = first_present(
             lambda: _to_int(features.get("bathrooms")),
             lambda: text_to_int(_icon_stat_text(soup(), "bathroom_tub")),
+            field="bathrooms",
         )
         m2_built = first_present(
             lambda: _to_decimal(features.get("surface")),
             lambda: _to_decimal(
                 text_to_int(_icon_stat_text(soup(), "dimensions_block"))
             ),
+            field="m2_built",
         )
         current_price = first_present(
             lambda: _to_decimal(real_estate.get("price")),
             lambda: _to_decimal(strip_price_punctuation(_price_fallback_text(soup()))),
+            field="current_price",
         )
 
         return CanonicalListingVersion(
@@ -461,7 +474,11 @@ class FotocasaConnector(Connector):
             city=(address_block.get("city") or "").strip() or None,
             province=(address_block.get("province") or "").strip() or None,
             postal_code=(address_block.get("zipCode") or "").strip() or None,
-            m2_plot=_to_decimal(features.get("surfaceLand")),
+            # `0` from `features.surfaceLand` means "not a plot-having
+            # property type" / unknown, not "a plot of zero square meters" —
+            # treated as absent so it doesn't get COALESCE-persisted as a
+            # real measurement on every revisit (Opus review, PR #84).
+            m2_plot=_to_decimal(features.get("surfaceLand")) or None,
             # `features` (TEXT[] amenity slugs, e.g. terraza/trastero) is
             # deliberately left empty here — issue #77's acceptance
             # criteria only requires city/province/postal_code/m2_plot;
@@ -470,11 +487,17 @@ class FotocasaConnector(Connector):
             # mapping assumes, and mapping it correctly needs its own
             # investigation (left for a follow-up, not silently invented
             # here from an unverified guess).
-            operation="sale",  # This connector's discover()/fetch_detail()
-            # only ever request Fotocasa's /comprar/ (buy) URLs — it has no
-            # code path that could produce a rental listing today. Not a
-            # default masking missing data: it's what this connector
-            # structurally is until a rental-aware discover() exists.
+            operation="sale",  # This connector's discover() only ever
+            # requests Fotocasa's /comprar/ (buy) search URLs, and no
+            # transaction-type key was found in `realEstate`'s embedded
+            # JSON during this connector's feasibility spike to derive this
+            # from real data instead. Caveat (Opus review, PR #84):
+            # fetch_detail()'s own URL is a placeholder slug that Fotocasa's
+            # routing ignores except for the trailing id — so this rests on
+            # discover() never having handed this connector a rental
+            # listing's id, not on anything fetch_detail() itself can
+            # verify per-listing. Revisit if a rental-aware discover() or a
+            # real operation-indicating JSON key is ever found.
             raw_extra={
                 "clientTypeId": real_estate.get("clientTypeId"),
                 "clientId": real_estate.get("clientId"),

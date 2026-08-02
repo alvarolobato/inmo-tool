@@ -302,17 +302,44 @@ class TestFallbackChain:
 
     def test_json_path_wins_over_css_when_both_are_present(self):
         """The fallback chain must not override a perfectly good JSON
-        value just because HTML markup also happens to be present."""
-        html = _read_fixture("fotocasa_sample_detail.html")
-        connector = FotocasaConnector()
-        with patch(
-            "etl.connectors.fotocasa.requests.get", return_value=_mock_response(html)
-        ):
-            raw = connector.fetch_detail("190011971", throttle=lambda: None)
-        canonical = connector.normalize(raw)
-        # This fixture's own HTML body has no icon-stat markup at all (it's
-        # a script-only trimmed fixture) — if the fallback silently won,
-        # these would be None instead of the JSON's real values.
+        value just because HTML markup also happens to be present.
+
+        Uses genuinely different, non-empty values on both paths (JSON:
+        3/1/74/205000; HTML: 9/9/999/999000) — a version of this test that
+        only has real markup on the JSON side can't distinguish "JSON wins
+        because it's tried first" from "JSON is the only side with a
+        value" (Opus review, PR #84: the prior fixture had no icon markup
+        at all).
+        """
+        raw = RawListing(
+            external_id="993",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/x",
+                "props": {
+                    "realEstate": {
+                        "price": 205000,
+                        "address": {},
+                        "coordinates": {},
+                        "features": {"rooms": 3, "bathrooms": 1, "surface": 74},
+                        "descriptions": {},
+                        "multimedia": [],
+                    }
+                },
+                "html": (
+                    '<div aria-label="Precio del inmueble"><span>999.000 €</span></div>'
+                    '<ul aria-label="Características principales">'
+                    '<li><svg data-title="double_bed"></svg>'
+                    '<span class="text-body-1"><span class="font-bold">9</span> habs.</span></li>'
+                    '<li><svg data-title="bathroom_tub"></svg>'
+                    '<span class="text-body-1"><span class="font-bold">9</span> baños</span></li>'
+                    '<li><svg data-title="dimensions_block"></svg>'
+                    '<span class="text-body-1"><span class="font-bold">999</span> m²</span></li>'
+                    "</ul>"
+                ),
+            },
+        )
+        canonical = FotocasaConnector().normalize(raw)
         assert canonical.rooms == 3
         assert canonical.bathrooms == 1
         assert canonical.m2_built == Decimal(74)
@@ -363,7 +390,33 @@ class TestSchemaSupersetFields:
         assert canonical.city == "Madrid Capital"
         assert canonical.province == "Madrid"
         assert canonical.postal_code == "28031"
-        assert canonical.m2_plot == Decimal(0)
+        # This fixture's surfaceLand is 0, which means "not a plot-having
+        # property type", not "a real zero-m² plot" — treated as absent
+        # (Opus review, PR #84; see the dedicated m2_plot test below for a
+        # real non-zero value).
+        assert canonical.m2_plot is None
+
+    def test_m2_plot_nonzero_surface_land_is_preserved(self):
+        raw = RawListing(
+            external_id="994",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/x",
+                "props": {
+                    "realEstate": {
+                        "price": 500000,
+                        "address": {},
+                        "coordinates": {},
+                        "features": {"surfaceLand": 850},
+                        "descriptions": {},
+                        "multimedia": [],
+                    }
+                },
+                "html": "<html><body></body></html>",
+            },
+        )
+        canonical = FotocasaConnector().normalize(raw)
+        assert canonical.m2_plot == Decimal(850)
 
     def test_operation_is_always_sale_for_this_connector(self):
         """This connector only ever requests Fotocasa's /comprar/ URLs —
