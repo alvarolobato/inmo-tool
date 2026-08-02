@@ -3,31 +3,38 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { RunList } from "../RunList";
-import type { EtlSyncRun } from "../RunList";
+import type { ConnectorRun } from "../RunList";
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
-function makeRun(overrides: Partial<EtlSyncRun> = {}): EtlSyncRun {
+function makeRun(overrides: Partial<ConnectorRun> = {}): ConnectorRun {
   return {
     id: 1,
     started_at: "2026-04-10T02:00:00Z",
     finished_at: "2026-04-10T03:00:00Z",
     duration_ms: 3600000,
     status: "success",
-    total_tables: 22,
-    tables_ok: 22,
-    tables_failed: 0,
-    total_rows_synced: 45000,
+    total_connectors: 2,
+    connectors_ok: 2,
+    connectors_failed: 0,
+    connectors_skipped: 0,
+    total_discovered: 72,
+    total_fetched: 45,
     trigger: "scheduled",
-    kind: "full",
     ...overrides,
   };
 }
 
-const RUNS: EtlSyncRun[] = [
+const RUNS: ConnectorRun[] = [
   makeRun({ id: 1, status: "success" }),
-  makeRun({ id: 2, status: "partial", tables_failed: 2, tables_ok: 20 }),
-  makeRun({ id: 3, status: "failed", duration_ms: null, total_rows_synced: null }),
+  makeRun({ id: 2, status: "partial", connectors_failed: 1, connectors_ok: 1 }),
+  makeRun({
+    id: 3,
+    status: "failed",
+    duration_ms: null,
+    total_discovered: null,
+    total_fetched: null,
+  }),
   makeRun({ id: 4, status: "running", finished_at: null, duration_ms: null }),
 ];
 
@@ -122,15 +129,53 @@ describe("RunList", () => {
     expect(row.textContent).toContain("—");
   });
 
-  it("shows tables ratio", () => {
+  it("shows connector ok/failed ratio", () => {
     render(
       <RunList
-        runs={[makeRun({ id: 6, tables_ok: 20, tables_failed: 2 })]}
+        runs={[makeRun({ id: 6, connectors_ok: 2, connectors_failed: 1 })]}
         total={1} page={1} perPage={20} loading={false} onPageChange={() => {}}
       />
     );
-    const row = screen.getByTestId("run-row-6");
-    expect(row.textContent).toContain("20 / 2");
+    expect(screen.getByTestId("run-connectors-6").textContent).toContain("2 / 1");
+  });
+
+  it("appends the skipped count only when a connector was actually skipped", () => {
+    // The whole point of #99's counter: "I disabled something" must not be
+    // indistinguishable from a healthy run — but a normal run shouldn't
+    // carry a noisy trailing "/ 0" either.
+    render(
+      <RunList
+        runs={[
+          makeRun({ id: 7, connectors_ok: 1, connectors_failed: 0, connectors_skipped: 1 }),
+          makeRun({ id: 8, connectors_ok: 2, connectors_failed: 0, connectors_skipped: 0 }),
+        ]}
+        total={2} page={1} perPage={20} loading={false} onPageChange={() => {}}
+      />
+    );
+    expect(screen.getByTestId("run-connectors-7").textContent).toContain("1 / 0 / 1");
+    expect(screen.getByTestId("run-connectors-8").textContent?.trim()).toBe("2 / 0");
+  });
+
+  it("renders the discovered→fetched funnel counts", () => {
+    render(
+      <RunList
+        runs={[makeRun({ id: 9, total_discovered: 72, total_fetched: 45 })]}
+        total={1} page={1} perPage={20} loading={false} onPageChange={() => {}}
+      />
+    );
+    const row = screen.getByTestId("run-row-9");
+    expect(row.textContent).toContain("72");
+    expect(row.textContent).toContain("45");
+  });
+
+  it("falls back to — when connectors_ok is null (pre-#99 rows)", () => {
+    render(
+      <RunList
+        runs={[makeRun({ id: 10, connectors_ok: null, connectors_failed: null, connectors_skipped: null })]}
+        total={1} page={1} perPage={20} loading={false} onPageChange={() => {}}
+      />
+    );
+    expect(screen.getByTestId("run-connectors-10").textContent).toContain("—");
   });
 
   it("each row contains a link to /etl/[id]", () => {
