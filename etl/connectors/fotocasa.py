@@ -499,7 +499,8 @@ class FotocasaConnector(Connector):
             # Deterministic within a day, so retries of the same run stay
             # consistent rather than re-fetching an arbitrary new slice.
             offset = (
-                datetime.now(timezone.utc).timetuple().tm_yday * self.max_zones_per_sweep
+                datetime.now(timezone.utc).timetuple().tm_yday
+                * self.max_zones_per_sweep
             ) % len(zone_slugs)
             rotated = zone_slugs[offset:] + zone_slugs[:offset]
             zone_slugs = rotated[: self.max_zones_per_sweep]
@@ -579,7 +580,10 @@ class FotocasaConnector(Connector):
         # fix above, any rooms-filtered scope — trigger an alarm that
         # asserted "likely rate-induced soft-blocking" about a site behaving
         # perfectly well.
-        if zones_attempted and zones_failed > zones_attempted * _ZONE_FAILURE_ALARM_RATIO:
+        if (
+            zones_attempted
+            and zones_failed > zones_attempted * _ZONE_FAILURE_ALARM_RATIO
+        ):
             logger.error(
                 "fotocasa discover: %d/%d attempted zones for geography=%s "
                 "failed to return a payload — this is the soft-block "
@@ -593,7 +597,9 @@ class FotocasaConnector(Connector):
                 geography,
                 self.rate_limit_per_minute,
             )
-        elif zones_attempted and zones_empty > zones_attempted * _ZONE_EMPTY_ALARM_RATIO:
+        elif (
+            zones_attempted and zones_empty > zones_attempted * _ZONE_EMPTY_ALARM_RATIO
+        ):
             # Not a throttle signal — these pages parsed fine and simply had
             # no listings. En masse that points at a parse regression (the
             # listing-link markup changed) rather than at the site blocking
