@@ -235,25 +235,54 @@ class TestConnectorConfig:
             self._cleanup_config(pg_conn, connector.name)
             _cleanup(pg_conn, connector.name, run_id)
 
+    @pytest.mark.parametrize(
+        ("case_name", "geography_override_json", "filters_json"),
+        [
+            (
+                "string-override-array-filters",
+                '"not-an-object"',
+                "[1, 2, 3]",
+            ),
+            (
+                "array-override",
+                "[1, 2, 3]",
+                "{}",
+            ),
+            (
+                "dict-override-non-numeric-coords",
+                '{"center": ["abc", "def"], "radius_km": 5}',
+                "{}",
+            ),
+            (
+                "array-filters-only",
+                None,
+                "[1, 2, 3]",
+            ),
+        ],
+    )
     def test_malformed_geography_override_falls_back_without_crashing_the_run(
-        self, pg_conn
+        self, pg_conn, case_name, geography_override_json, filters_json
     ):
         """Issue #99 hardening: geography_override/filters are JSONB, so a hand-edited
-        or buggily-written row can hold a JSON string/list/int instead of an object.
-        Before the isinstance(..., dict) guards, `.get()` on a non-dict raised an
-        uncaught AttributeError that aborted the entire run — not just this
-        connector — for every connector in the registry. This proves a malformed
-        row degrades to the profile-derived default instead."""
+        or buggily-written row can hold a JSON string/list/int instead of an object,
+        or a well-shaped dict with non-numeric values inside it. Before the
+        isinstance(..., dict) guards and the try/except around the float()
+        conversions, any of these raised uncaught (AttributeError or ValueError)
+        and aborted the entire run — not just this connector — for every
+        connector in the registry. Parametrized (issue #99 review, round 2) to
+        cover all four malformed shapes verified to actually reach this code
+        path, since a future connector-management UI (#100) can produce any of
+        them from a human's typo, not just the one shape the first pass tested."""
         _apply_schema(pg_conn)
-        malformed = DummyConnector(name="test-malformed-override")
-        healthy = DummyConnector(name="test-malformed-sibling")
+        malformed = DummyConnector(name=f"test-malformed-override-{case_name}")
+        healthy = DummyConnector(name=f"test-malformed-sibling-{case_name}")
         orchestrator.CONNECTORS[:] = [malformed, healthy]
         run_id = None
         with pg_conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO connector_config "
                 "(connector_name, geography_override, filters) VALUES (%s, %s, %s)",
-                (malformed.name, '"not-an-object"', "[1, 2, 3]"),
+                (malformed.name, geography_override_json, filters_json),
             )
         pg_conn.commit()
         try:
@@ -282,6 +311,68 @@ class TestConnectorConfig:
             self._cleanup_config(pg_conn, malformed.name, healthy.name)
             _cleanup(pg_conn, malformed.name, run_id)
             _cleanup(pg_conn, healthy.name)
+
+    def test_malformed_profile_coordinates_fall_back_without_crashing_the_run(
+        self, pg_conn
+    ):
+        """Issue #99 review, round 2: _active_profile_scopes had the identical
+        unguarded float() conversion as _scopes_for_connector's
+        geography_override handling, one call earlier in the same run path.
+        A search_profile with a 2-element center list of non-numeric strings
+        passes the isinstance(list)/len==2 guard, then raised an uncaught
+        ValueError on float(center[0]) — aborting the run for every
+        connector, not just skipping that one profile's contribution. This
+        proves the malformed profile is skipped with a warning while a
+        sibling valid profile's scope still reaches the connector."""
+        _apply_schema(pg_conn)
+        malformed_profile_name = "orchestrator-test-malformed-coords-profile"
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO search_profile (name, scope) VALUES (%s, %s)",
+                (
+                    malformed_profile_name,
+                    (
+                        '{"geography": {"type": "radius", '
+                        '"center": ["abc", "def"], "radius_km": 10}}'
+                    ),
+                ),
+            )
+        pg_conn.commit()
+        connector = DummyConnector(name="test-malformed-profile-coords")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            # Must not raise — this is the crash this test exists to rule out.
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, connectors_ok, connectors_failed, total_connectors "
+                    "FROM connector_runs WHERE id = %s",
+                    (run_id,),
+                )
+                status, ok, failed, total = cur.fetchone()
+            assert status == "success"
+            assert total == 1
+            assert failed == 0
+            assert ok == 1
+
+            # Exactly one scope reached the connector: the valid Madrid
+            # fixture profile from _apply_schema. The malformed profile's
+            # scope was skipped, not substituted with garbage and not
+            # allowed to abort discovery for the valid profile alongside it.
+            assert connector.scopes_seen == [
+                orchestrator.ConnectorScope(center=(40.4168, -3.7038), radius_km=10.0)
+            ]
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM search_profile WHERE name = %s",
+                    (malformed_profile_name,),
+                )
+            pg_conn.commit()
 
     def test_override_on_one_connector_does_not_affect_another(self, pg_conn):
         _apply_schema(pg_conn)
@@ -454,6 +545,37 @@ class TestConnectorConfig:
             self._cleanup_config(pg_conn, disabled.name)
             _cleanup(pg_conn, disabled.name, run_id)
             _cleanup(pg_conn, default_connector.name, run_id)
+
+    def test_unrecognized_connector_config_name_logs_a_warning(self, pg_conn, caplog):
+        """Issue #99 review, round 2: a connector_config row naming a
+        connector that isn't registered currently just silently does
+        nothing — _scopes_for_connector looks it up by exact name and finds
+        no row, indistinguishable from "never configured". Once #100's
+        connector-management UI lets an operator type/pick a name directly,
+        a typo needs to be visible, not a quiet no-op."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(name="test-name-filter-known")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO connector_config (connector_name) VALUES (%s)",
+                ("test-name-filter-typo",),
+            )
+        pg_conn.commit()
+        try:
+            with caplog.at_level("WARNING", logger="etl.orchestrator"):
+                run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            assert any(
+                "test-name-filter-typo" in record.message for record in caplog.records
+            ), "an unrecognized connector_config row must be logged, not silent"
+            # The typo'd row has no effect on the actually-registered connector.
+            assert len(connector.scopes_seen) == 1
+        finally:
+            orchestrator.CONNECTORS.clear()
+            self._cleanup_config(pg_conn, "test-name-filter-typo")
+            _cleanup(pg_conn, connector.name, run_id)
 
 
 class TestConnectorNameFilter:
@@ -787,6 +909,84 @@ class TestCircuitBreakerIntegration:
             run_ids = []
         finally:
             orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            for r in run_ids:
+                with pg_conn.cursor() as cur:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+                pg_conn.commit()
+
+    def test_rooms_filtered_scope_never_marks_withdrawn(self, pg_conn):
+        """Issue #99 review, round 2: the same false-positive-withdrawal risk
+        `discovers_full_inventory=False` guards against also applies when a
+        connector that DOES discover its full unfiltered inventory has a
+        `rooms` filter applied via connector_config — the filter narrows
+        what THIS run's discover() call returns, so an absence means "didn't
+        match the filter" just as easily as "genuinely gone". A listing that
+        stops matching a newly-applied filter must never be auto-withdrawn,
+        and the miss-counter itself must not even accumulate (matching the
+        partial-inventory guarantee immediately above)."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="rooms-filtered-test",
+            external_ids=("r-1", "r-2"),
+            discovers_full_inventory=True,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM listing WHERE source = %s AND external_id = %s",
+                    (connector.name, "r-2"),
+                )
+                assert cur.fetchone()[0] == "active"
+
+            # A rooms filter narrows this connector's scope from here on —
+            # r-2 stops matching (or the connector simply stops returning
+            # it, indistinguishable from the connector's own perspective).
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO connector_config (connector_name, filters) "
+                    "VALUES (%s, %s)",
+                    (connector.name, '{"rooms": 2}'),
+                )
+            pg_conn.commit()
+            connector.external_ids = ("r-1",)
+
+            for _ in range(orchestrator._WITHDRAWAL_THRESHOLD + 5):
+                run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, missed_discovery_count FROM listing "
+                    "WHERE source = %s AND external_id = %s",
+                    (connector.name, "r-2"),
+                )
+                status, missed = cur.fetchone()
+            assert status == "active", (
+                "a rooms-filtered scope must never auto-withdraw a listing "
+                "that simply no longer matches the filter"
+            )
+            assert missed == 0, (
+                "miss-counting itself must be skipped for a filtered scope, "
+                "not just the withdrawal threshold"
+            )
+
+            for r in run_ids:
+                with pg_conn.cursor() as cur:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+            run_ids = []
+        finally:
+            orchestrator.CONNECTORS.clear()
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM connector_config WHERE connector_name = %s",
+                    (connector.name,),
+                )
+            pg_conn.commit()
             _cleanup(pg_conn, connector.name, None)
             for r in run_ids:
                 with pg_conn.cursor() as cur:

@@ -523,6 +523,11 @@ CREATE TABLE IF NOT EXISTS connector_run_results (
     connector_name   TEXT         NOT NULL,
     started_at       TIMESTAMPTZ,
     finished_at      TIMESTAMPTZ,
+    -- This inline CHECK is the original (3-value) definition, kept as-is
+    -- for a correct history on a fresh install — it's superseded below by
+    -- an ALTER adding 'skipped' (issue #99). Reading this line alone gives
+    -- a stale picture of what's actually allowed on a real database; see
+    -- the ALTER a few lines down for the current 4-value constraint.
     status           TEXT         NOT NULL DEFAULT 'ok' CHECK (status IN ('ok','failed','circuit_open')),
     discovered_count INTEGER      NOT NULL DEFAULT 0,
     fetched_count    INTEGER      NOT NULL DEFAULT 0,

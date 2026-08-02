@@ -643,15 +643,31 @@ def _active_profile_scopes(conn) -> list[ConnectorScope]:
             )
             continue
 
-        lat, lon = float(center[0]), float(center[1])
+        try:
+            lat, lon, radius = float(center[0]), float(center[1]), float(radius_km)
+        except (TypeError, ValueError):
+            # center/radius_km passed the isinstance/len checks above (e.g.
+            # center=["abc", "def"] is a 2-element list) but isn't actually
+            # numeric. Same "one bad row must not take down the whole run"
+            # invariant as the isinstance checks above and as
+            # _scopes_for_connector's mirror of this same guard — skip only
+            # this profile's scope, not the run.
+            logger.warning(
+                "search_profile id=%s: scope.geography.center/radius_km "
+                "not numeric (got center=%r, radius_km=%r) — skipping for "
+                "connector discovery",
+                profile_id,
+                center,
+                radius_km,
+            )
+            continue
+
         dedup_key = (
             round(lat, _SCOPE_DEDUP_DECIMALS),
             round(lon, _SCOPE_DEDUP_DECIMALS),
-            round(float(radius_km), 1),
+            round(radius, 1),
         )
-        seen.setdefault(
-            dedup_key, ConnectorScope(center=(lat, lon), radius_km=float(radius_km))
-        )
+        seen.setdefault(dedup_key, ConnectorScope(center=(lat, lon), radius_km=radius))
 
     return list(seen.values())
 
