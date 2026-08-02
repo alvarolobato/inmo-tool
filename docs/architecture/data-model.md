@@ -34,7 +34,7 @@ The physical real-world asset — one row per real-world unit, once deduplicated
 ### `listing`
 One row per (source site, external listing ID) — a specific site's advertisement of a property. Carries everything that's specific to *this listing* rather than the underlying property: source, external ID, URL, listing kind (particular/agency), status, price, description, photos, raw contact info, and `raw_extra jsonb` for anything a connector captures that doesn't have a first-class column yet (so normalization gaps don't silently drop data — see issue #12).
 
-`UNIQUE (source, external_id)` is the natural key a connector's `discover`/`fetch_detail` cycle upserts against.
+`UNIQUE (source, external_id)` is the natural key a connector's `discover`/`fetch_detail` cycle upserts against. See [`connectors.md`](connectors.md) for the connector contract, rate limiting, circuit breaking, and how the orchestrator persists into this table.
 
 ### `listing_price_history` / `listing_status_event`
 Append-only event logs. Every observed price is a new row (not an overwrite) so a chart of "price over time" and a "days since last price drop" computation are both just a `SELECT ... ORDER BY observed_at`, no reconstruction from diffs needed. Same for status transitions (active → reserved/sold/withdrawn/expired, and relistings) — issue #1 §10's "withdrawn and relisted at a lower price" pattern is a query over this table, not a bespoke tracked flag.
