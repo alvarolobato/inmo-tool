@@ -55,8 +55,8 @@ export interface AssembleExecutionOpts {
   priorMessages?: HistoryMessage[];
   /**
    * Mutable agentic context. Tool handlers write side-channel results back to
-   * ctx (ctx.modifyResult, ctx.analyzeResult, ctx.reviewResult). The caller
-   * reads these AFTER assembleRequest() returns.
+   * ctx (ctx.modifyResult, ctx.analyzeResult). The caller reads these AFTER
+   * assembleRequest() returns.
    * When omitted a minimal context is constructed from requestId + endpoint.
    */
   ctx?: LlmAgenticContext;

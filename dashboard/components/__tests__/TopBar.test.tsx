@@ -53,12 +53,12 @@ describe("TopBar", () => {
     expect(inicioLink).toHaveAttribute("href", "/inicio");
   });
 
-  it("'Inicio' is the first navigation link (before Paneles)", () => {
+  it("'Inicio' is the first navigation link (before Perfiles)", () => {
     render(<TopBar />);
     const nav = screen.getByRole("navigation");
     const links = nav.querySelectorAll("a");
     expect(links[0]).toHaveTextContent("Inicio");
-    expect(links[1]).toHaveTextContent("Paneles");
+    expect(links[1]).toHaveTextContent("Perfiles");
   });
 
   it("includes all expected navigation links in order", () => {
@@ -66,20 +66,14 @@ describe("TopBar", () => {
     const nav = screen.getByRole("navigation");
     const links = Array.from(nav.querySelectorAll("a"));
     const labels = links.map((l) => l.textContent?.trim());
-    expect(labels).toEqual(["Inicio", "Paneles", "Perfiles", "Conversaciones", "Revisión"]);
+    expect(labels).toEqual(["Inicio", "Perfiles", "Conversaciones"]);
   });
 
-  it("includes 'Conversaciones' link pointing to /conversations after Paneles", () => {
+  it("includes 'Conversaciones' link pointing to /conversations", () => {
     render(<TopBar />);
     const conversacionesLink = screen.getByRole("link", { name: "Conversaciones" });
     expect(conversacionesLink).toBeInTheDocument();
     expect(conversacionesLink).toHaveAttribute("href", "/conversations");
-  });
-
-  it("Paneles link points to /paneles", () => {
-    render(<TopBar />);
-    const panelesLink = screen.getByRole("link", { name: "Paneles" });
-    expect(panelesLink).toHaveAttribute("href", "/paneles");
   });
 
   it("marks '/inicio' link as active when on the inicio page", () => {

@@ -4,10 +4,9 @@
  *
  * Background:
  *   The agentic tool handlers (submit_dashboard_analysis,
- *   apply_dashboard_modification, submit_weekly_review — see
- *   lib/llm-tools/handlers/dashboards.ts) stage their result on the
- *   ctx object: `ctx.analyzeResult = ...`, `ctx.modifyResult = ...`,
- *   `ctx.reviewResult = ...`. The API routes read these fields AFTER
+ *   apply_dashboard_modification — see lib/llm-tools/handlers/dashboards.ts)
+ *   stage their result on the ctx object: `ctx.analyzeResult = ...`,
+ *   `ctx.modifyResult = ...`. The API routes read these fields AFTER
  *   the agentic run completes (e.g. analyzeCtx.analyzeResult).
  *
  *   If ctx is shallow-cloned instead of mutated in place, the handlers
@@ -20,8 +19,7 @@
  *
  * Contract: assembleRequest MUST pass ctx by reference to runAgenticChat
  * and not clone it. Tool handlers mutate ctx in place; the caller reads
- * side-channel results (analyzeResult, modifyResult, reviewResult) after
- * the call returns.
+ * side-channel results (analyzeResult, modifyResult) after the call returns.
  *
  * Note: This test mocks assembleRequest at the llm-context level to simulate
  * the in-place mutation contract. The implementation is verified by the

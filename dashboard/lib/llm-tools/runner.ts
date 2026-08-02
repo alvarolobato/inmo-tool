@@ -35,9 +35,7 @@ import {
   handleValidateDashboardSpec,
   handleApplyDashboardModification,
   handleSubmitDashboardAnalysis,
-  handleSubmitWeeklyReview,
 } from "./handlers/dashboards";
-import { handleStartDashboardGeneration } from "./handlers/start-dashboard-generation";
 import type { AgenticModelAdapter, AgenticRunStepInput } from "./runner-types";
 import { CliRunnerError } from "@/lib/llm-client";
 import { sanitize } from "@/lib/llm-provider/sanitize";
@@ -130,7 +128,7 @@ export interface AgenticRunParams {
    * Explicit tool catalog for this run. When omitted, defaults to
    * DASHBOARD_AGENTIC_TOOLS (full catalog, backwards-compatible).
    * Use FREE_CHAT_TOOLS for free-chat flows that should only expose
-   * inspection + start_dashboard_generation.
+   * inspection + set_title.
    */
   tools?: ChatCompletionTool[];
 }
@@ -195,10 +193,6 @@ async function dispatchTool(
       return handleApplyDashboardModification(rawArgs, ctx);
     case "submit_dashboard_analysis":
       return handleSubmitDashboardAnalysis(rawArgs, ctx);
-    case "submit_weekly_review":
-      return handleSubmitWeeklyReview(rawArgs, ctx);
-    case "start_dashboard_generation":
-      return handleStartDashboardGeneration(rawArgs, ctx);
     case "set_title": {
       if (!ctx.conversationId) {
         return toolError("SET_TITLE_NO_CONV", "set_title requires a conversation context", ctx);

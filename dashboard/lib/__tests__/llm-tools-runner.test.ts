@@ -84,12 +84,6 @@ vi.mock("@/lib/llm-tools/handlers/dashboards", () => ({
   handleGetDashboardAllWidgetStatus: vi.fn().mockResolvedValue(ok({ widgets: [] })),
 }));
 
-vi.mock("@/lib/llm-tools/handlers/start-dashboard-generation", () => ({
-  handleStartDashboardGeneration: vi.fn().mockResolvedValue(
-    ok({ dashboard_id: "1", redirect_url: "/dashboards/1?tab=modify", summary: "Created" }),
-  ),
-}));
-
 const mockSetConversationTitleOnce = vi.fn().mockResolvedValue(undefined);
 vi.mock("@/lib/conversations", () => ({
   setConversationTitleOnce: (...a: unknown[]) => mockSetConversationTitleOnce(...a),

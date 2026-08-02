@@ -4,7 +4,6 @@ import {
   handleValidateDashboardSpec,
   handleApplyDashboardModification,
   handleSubmitDashboardAnalysis,
-  handleSubmitWeeklyReview,
 } from "@/lib/llm-tools/handlers/dashboards";
 import { validateReadOnly, SqlValidationError } from "@/lib/db";
 import type { DashboardSpec } from "@/lib/schema";
@@ -275,68 +274,6 @@ describe("handleSubmitDashboardAnalysis", () => {
   it("returns INVALID_ARGS when brief_summary is missing", async () => {
     const out = await handleSubmitDashboardAnalysis(
       JSON.stringify({ analysis_markdown: "# Análisis" }),
-      ctx,
-    );
-    expect(out.ok).toBe(false);
-    if (!out.ok) expect(out.code).toBe("INVALID_ARGS");
-  });
-});
-
-// ─── handleSubmitWeeklyReview ─────────────────────────────────────────────────
-
-// Minimal valid review that passes ReviewLlmOutputSchema
-const validReviewPayload = {
-  executive_summary: ["Ventas +12%", "Stock OK", "Tres pedidos"],
-  sections: [
-    { key: "ventas_retail", title: "Ventas Retail", narrative: "Texto.", kpis: ["KPI 1"], evidence_queries: ["ventas_semana_cerrada"], dashboard_key: "ventas_retail" },
-    { key: "canal_mayorista", title: "Mayorista", narrative: "Texto.", kpis: ["KPI 1"], evidence_queries: ["facturacion_mayorista_semana_cerrada"], dashboard_key: "canal_mayorista" },
-    { key: "stock", title: "Stock", narrative: "Texto.", kpis: ["KPI 1"], evidence_queries: ["stock_total_unidades"], dashboard_key: "stock" },
-    { key: "compras", title: "Compras", narrative: "Texto.", kpis: ["KPI 1"], evidence_queries: ["compras_semana_cerrada"], dashboard_key: "compras" },
-  ],
-  action_items: [
-    { action_key: "revisar_stock", priority: "alta", owner_role: "Logística", due_date: "2026-05-10", action: "Revisar stock.", expected_impact: "Menos roturas.", evidence_queries: ["articulos_stock_critico"], dashboard_key: "stock" },
-    { action_key: "contactar_clientes", priority: "media", owner_role: "Ventas", due_date: "2026-05-10", action: "Contactar clientes.", expected_impact: "Mejor cobro.", evidence_queries: ["top3_clientes_mayorista_semana_cerrada"], dashboard_key: "canal_mayorista" },
-    { action_key: "planificar_traspasos", priority: "baja", owner_role: "Tiendas", due_date: "2026-05-15", action: "Planificar traspasos.", expected_impact: "Mejor distribución.", evidence_queries: ["traspasos_semana_cerrada"], dashboard_key: "stock" },
-  ],
-  data_quality_notes: [],
-  generated_at: "2026-05-01T00:00:00.000Z",
-};
-
-describe("handleSubmitWeeklyReview", () => {
-  it("stages ctx.reviewResult and returns ok=true for valid args", async () => {
-    const mutableCtx: LlmAgenticContext = { ...ctx };
-    const out = await handleSubmitWeeklyReview(
-      JSON.stringify({ review: validReviewPayload, brief_summary: "Buena semana." }),
-      mutableCtx,
-    );
-    expect(out.ok).toBe(true);
-    if (out.ok) {
-      const d = out.data as { ok: boolean; applied: boolean };
-      expect(d.ok).toBe(true);
-      expect(d.applied).toBe(true);
-    }
-    expect(mutableCtx.reviewResult?.content.executive_summary[0]).toBe("Ventas +12%");
-    expect(mutableCtx.reviewResult?.summary).toBe("Buena semana.");
-  });
-
-  it("returns toolOk({ ok: false }) when review JSON is malformed", async () => {
-    const mutableCtx: LlmAgenticContext = { ...ctx };
-    const out = await handleSubmitWeeklyReview(
-      JSON.stringify({ review: { bad: "structure" }, brief_summary: "Resumen." }),
-      mutableCtx,
-    );
-    expect(out.ok).toBe(true);
-    if (out.ok) {
-      const d = out.data as { ok: boolean; errors: string[] };
-      expect(d.ok).toBe(false);
-      expect(d.errors.length).toBeGreaterThan(0);
-    }
-    expect(mutableCtx.reviewResult).toBeUndefined();
-  });
-
-  it("returns INVALID_ARGS when brief_summary is missing", async () => {
-    const out = await handleSubmitWeeklyReview(
-      JSON.stringify({ review: validReviewPayload }),
       ctx,
     );
     expect(out.ok).toBe(false);

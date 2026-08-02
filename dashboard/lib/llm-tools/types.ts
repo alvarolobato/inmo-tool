@@ -4,7 +4,6 @@
 
 import type { DashboardCliDriverId, DashboardLlmProviderId } from "@/lib/llm-provider/types";
 import type { DashboardSpec } from "@/lib/schema";
-import type { ReviewLlmOutput } from "@/lib/review-schema";
 
 /** High-level events from the tool loop (UI streaming + server logs). */
 export type AgenticProgressEvent =
@@ -71,7 +70,7 @@ export interface LlmAgenticContext {
   endpoint: string;
   /** Optional saved dashboard id (analyze flow) for dashboard-scoped tools. */
   dashboardId?: number;
-  /** Optional conversation id (free-chat flow) for the start_dashboard_generation tool. */
+  /** Optional conversation id (free-chat flow) for the set_title tool. */
   conversationId?: string;
   /** Optional hook for NDJSON streaming UI and diagnostics. */
   onAgenticProgress?: (event: AgenticProgressEvent) => void;
@@ -103,12 +102,6 @@ export interface LlmAgenticContext {
    * Set by `handleSubmitDashboardAnalysis`; read by the analyze route.
    */
   analyzeResult?: { markdown: string; summary: string } | null;
-
-  /**
-   * Staged result for the `submit_weekly_review` tool.
-   * Set by `handleSubmitWeeklyReview`; read by the review/generate route.
-   */
-  reviewResult?: { content: ReviewLlmOutput; summary: string } | null;
 
   /**
    * Tool calls captured during the agentic run, in execution order. Populated

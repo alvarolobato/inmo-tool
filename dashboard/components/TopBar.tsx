@@ -31,17 +31,16 @@ export function TopBar({
   const freshnessTooltip = propFreshnessTooltip ?? ctx.freshnessTooltip;
 
   // Wren nav link removed: WrenAI doesn't exist in this project (removed in
-  // task 1.1). Paneles/Conversaciones/Revisión are left in place — audited
-  // in #63's fix and confirmed they don't hard-crash on load like Inicio
-  // did, though their content is still PowerShop-era and slated for
-  // replacement by later phases (candidate list #19, map #43, property
-  // detail #44, deal workspace #36-38).
+  // task 1.1). Paneles + Revisión removed (#101): both were the inherited
+  // PowerShop generic dashboard-builder / weekly-business-review generator,
+  // with no product fit for a real-estate investment-sourcing tool.
+  // Conversaciones (free chat) stays — Phase 4 plans its own chat flow, and
+  // the raw chat UI has reuse value independent of the dashboard-builder it
+  // was originally paired with.
   const navLinks = [
     { href: "/inicio", label: "Inicio" },
-    { href: "/paneles", label: "Paneles" },
     { href: "/profiles", label: "Perfiles" },
     { href: "/conversations", label: "Conversaciones" },
-    { href: "/review", label: "Revisión" },
   ] as const;
 
   return (

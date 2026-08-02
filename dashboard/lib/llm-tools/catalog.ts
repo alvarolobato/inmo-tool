@@ -2,15 +2,23 @@
  * OpenAI-format tool definitions for OpenRouter chat.completions.
  *
  * Named catalogs:
- *   FREE_CHAT_TOOLS         — data inspection + dashboard generation trigger (free-chat flow)
- *   DASHBOARD_AGENTIC_TOOLS — full catalog (generate / modify / analyze / review flows)
+ *   FREE_CHAT_TOOLS         — data + dashboard inspection only (free-chat flow)
+ *   DASHBOARD_AGENTIC_TOOLS — inspection + modify/analyze (generate/modify/analyze flows,
+ *                             which still serve historical dashboard-attached conversations
+ *                             viewed via /k/[id] — see #101)
  *
  * Structure:
  *   DATA_INSPECTION_TOOLS (private) — read-only SQL + dashboard inspect tools
- *   FREE_CHAT_TOOLS = DATA_INSPECTION_TOOLS + start_dashboard_generation
+ *   FREE_CHAT_TOOLS = DATA_INSPECTION_TOOLS + set_title
  *   DASHBOARD_AGENTIC_TOOLS = DATA_INSPECTION_TOOLS + validate_dashboard_spec
  *                             + apply_dashboard_modification + submit_dashboard_analysis
- *                             + submit_weekly_review
+ *
+ * #101 removed start_dashboard_generation (chat → new-dashboard handoff) and
+ * submit_weekly_review — both exclusively served /paneles and /review, which
+ * no longer exist in this product. The remaining inspection/modify/analyze
+ * tools were deliberately left in place: they back /k/[id]'s viewing/editing
+ * of dashboards that already exist in the `dashboards` table, a decision
+ * scoped separately from #101 (see that issue for the full reasoning).
  */
 
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
@@ -248,54 +256,6 @@ export const DASHBOARD_AGENTIC_TOOLS: ChatCompletionTool[] = [
       },
     },
   },
-  {
-    type: "function",
-    function: {
-      name: "submit_weekly_review",
-      description:
-        "Call this tool EXACTLY ONCE at the end of a weekly review generation task. " +
-        "Pass the complete review JSON object (matching ReviewLlmOutputSchema) and a brief_summary (≤ 500 chars, Spanish). " +
-        "The tool validates the review, stages it in a request-scoped side-channel, and the route persists it. " +
-        "After this tool returns { ok: true, applied: true }, write your final assistant message as a friendly Spanish reply to the user (≤ 4 sentences) describing the key conclusions. " +
-        "NEVER emit the review JSON as your final answer — it MUST go through this tool.",
-      parameters: {
-        type: "object",
-        properties: {
-          review: {
-            type: "object",
-            description: "The complete weekly review JSON object matching the ReviewLlmOutputSchema.",
-            additionalProperties: true,
-          },
-          brief_summary: {
-            type: "string",
-            description: "1–2 sentences in Spanish summarising the key conclusions. Max 500 characters.",
-          },
-        },
-        required: ["review", "brief_summary"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "start_dashboard_generation",
-      description:
-        "Generate a new dashboard from a natural-language prompt and hand off the current conversation to it. " +
-        "Call this when the user asks to create a new dashboard. " +
-        "The tool creates the dashboard, saves it, and returns a redirect URL that takes the user to the new dashboard with the current conversation continued in the Modify tab. " +
-        "Returns { dashboard_id, redirect_url, summary } on success.",
-      parameters: {
-        type: "object",
-        properties: {
-          prompt: {
-            type: "string",
-            description: "Natural-language description of the dashboard to generate (Spanish).",
-          },
-        },
-        required: ["prompt"],
-      },
-    },
-  },
 ];
 
 // ── Inspection tools (no side-effects, read-only) ─────────────────────────────
@@ -333,20 +293,22 @@ const SET_TITLE_TOOL: ChatCompletionTool = {
 };
 
 /**
- * Tools available in the free-chat flow: 10 inspection tools + start_dashboard_generation + set_title = 12 tools.
- * Does NOT include modification/analysis/review publish tools.
+ * Tools available in the free-chat flow: 10 inspection tools + set_title = 11 tools.
+ * Does NOT include modification/analysis/review-publish/dashboard-generation tools.
+ * (start_dashboard_generation and submit_weekly_review were removed by #101 —
+ * both were the inherited PowerShop dashboard-builder/weekly-review generator,
+ * with no product fit here and no page left to hand off to.)
  */
 export const FREE_CHAT_TOOLS: ChatCompletionTool[] = [
   ...DASHBOARD_AGENTIC_TOOLS.filter(
     (t): t is Extract<ChatCompletionTool, { type: "function" }> =>
-      t.type === "function" &&
-      (INSPECTION_TOOL_NAMES.has(t.function.name) || t.function.name === "start_dashboard_generation"),
+      t.type === "function" && INSPECTION_TOOL_NAMES.has(t.function.name),
   ),
   SET_TITLE_TOOL,
 ];
 
 /**
- * All tools, including modification, analysis, review, and generation tools.
- * Use for flows that need full access or for future catalog expansion.
+ * All tools, including modification and analysis. Use for flows that need
+ * full access or for future catalog expansion.
  */
 export const FULL_DASHBOARD_TOOLS: ChatCompletionTool[] = DASHBOARD_AGENTIC_TOOLS;

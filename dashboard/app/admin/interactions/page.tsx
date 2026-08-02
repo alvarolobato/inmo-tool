@@ -1,6 +1,5 @@
 import Link from "next/link";
-import { sql } from "@/lib/db-write";
-import type { InteractionRow } from "@/app/api/dashboard/[id]/interactions/route";
+import { sql, type InteractionRow } from "@/lib/db-write";
 
 export const metadata = {
   title: "Interacciones LLM — Admin",

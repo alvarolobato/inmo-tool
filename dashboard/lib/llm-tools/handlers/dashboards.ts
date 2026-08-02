@@ -13,7 +13,6 @@ import { extractDashboardSqlRefs } from "../dashboard-query-extractor";
 import type { LlmAgenticContext } from "../types";
 import { toolError, toolOk, type ToolResponseBody } from "../tool-payload";
 import { getAgenticConfig } from "../config";
-import { ReviewLlmOutputSchema } from "@/lib/review-schema";
 import { sanitize } from "@/lib/llm-provider/sanitize";
 
 const LimitSchema = z.object({
@@ -510,73 +509,6 @@ export async function handleSubmitDashboardAnalysis(
   const sanitizedSummary = sanitize(args.brief_summary.trim());
 
   ctx.analyzeResult = { markdown: args.analysis_markdown.trim(), summary: sanitizedSummary };
-
-  return toolOk({ ok: true, applied: true });
-}
-
-/**
- * `submit_weekly_review` — validate review JSON + stage review result.
- *
- * The model calls this once at the end of a weekly review task with the full
- * review JSON object and a brief_summary. Validates against ReviewLlmOutputSchema,
- * then stages in ctx.reviewResult.
- */
-export async function handleSubmitWeeklyReview(
-  rawArgs: string,
-  ctx: LlmAgenticContext,
-): Promise<ToolResponseBody> {
-  let args: { review?: unknown; brief_summary?: unknown };
-  try {
-    args = JSON.parse(rawArgs || "{}");
-  } catch {
-    return toolError(
-      "INVALID_ARGS",
-      "submit_weekly_review: arguments must be a JSON object.",
-      ctx,
-    );
-  }
-
-  if (typeof args.review !== "object" || args.review === null || Array.isArray(args.review)) {
-    return toolError(
-      "INVALID_ARGS",
-      "submit_weekly_review: 'review' must be a JSON object.",
-      ctx,
-    );
-  }
-
-  if (typeof args.brief_summary !== "string" || args.brief_summary.trim().length === 0) {
-    return toolError(
-      "INVALID_ARGS",
-      "submit_weekly_review: 'brief_summary' must be a non-empty string.",
-      ctx,
-    );
-  }
-
-  if (args.brief_summary.length > BRIEF_SUMMARY_MAX) {
-    return toolError(
-      "INVALID_ARGS",
-      `submit_weekly_review: 'brief_summary' must be ≤ ${BRIEF_SUMMARY_MAX} characters.`,
-      ctx,
-    );
-  }
-
-  // Validate review against ReviewLlmOutputSchema.
-  const parsed = ReviewLlmOutputSchema.safeParse(args.review);
-  if (!parsed.success) {
-    const errors = parsed.error.issues.map((issue) => {
-      const path = issue.path.length > 0 ? issue.path.join(".") : "(root)";
-      return `${path}: ${issue.message}`;
-    });
-    return toolOk({
-      ok: false,
-      errors,
-      hint: "Fix the validation errors above and call submit_weekly_review again with the corrected review JSON.",
-    });
-  }
-
-  const sanitizedSummary = sanitize(args.brief_summary.trim());
-
-  ctx.reviewResult = { content: parsed.data, summary: sanitizedSummary };
 
   return toolOk({ ok: true, applied: true });
 }

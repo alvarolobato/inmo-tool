@@ -7,16 +7,22 @@
  * and the source SQL, then finding the best match by Jaccard similarity.
  *
  * Priority order:
- *   1. dashboard/lib/templates/*.ts  (template widget SQL)
- *   2. Saved dashboards from the database (widget SQL in the spec JSON)
- *   3. dashboard/lib/review-queries.ts (REVIEW_QUERIES array)
- *   4. dashboard/lib/knowledge.ts     (SQL_PAIRS — typed copy of wren SQL pairs)
+ *   1. Saved dashboards from the database (widget SQL in the spec JSON)
+ *   2. dashboard/lib/knowledge.ts     (SQL_PAIRS — typed copy of wren SQL pairs)
+ *
+ * The `dashboard/lib/templates/*.ts` and `dashboard/lib/review-queries.ts`
+ * static sources were removed by #101 (the templates only ever served the
+ * now-removed /dashboard/new picker; REVIEW_QUERIES only ever served the
+ * now-removed /review generator). Also note: `extractSqlFingerprint` still
+ * matches `ps_*` tokens — the PowerShop-era table prefix task 1.2 already
+ * replaced with this project's real `property`/`listing` schema, so this
+ * whole matcher has effectively been dead/non-functional against the current
+ * schema since Phase 1, independent of this change. Out of scope for #101;
+ * flagged, not fixed here.
  *
  * Returns null when no source reaches the minimum similarity threshold.
  */
 
-import { TEMPLATES } from "@/lib/templates";
-import { REVIEW_QUERIES } from "@/lib/review-queries";
 import { SQL_PAIRS } from "@/lib/knowledge";
 import type { DashboardSpec } from "@/lib/schema";
 
@@ -73,61 +79,13 @@ interface Candidate {
 }
 
 /**
- * Lazily-built candidate list from static sources (templates + review queries +
- * knowledge SQL pairs).  Built once and cached at module scope — these never
- * change at runtime.
+ * Lazily-built candidate list from static sources (knowledge SQL pairs).
+ * Built once and cached at module scope — these never change at runtime.
  */
 let _staticCandidates: Candidate[] | null = null;
 
 function buildStaticCandidates(): Candidate[] {
   const results: Candidate[] = [];
-
-  // ── Templates ──────────────────────────────────────────────────────────────
-  for (const tmpl of TEMPLATES) {
-    const spec = tmpl.spec;
-    const locationHint = `dashboard/lib/templates/${tmpl.slug}.ts`;
-    for (const widget of spec.widgets) {
-      const sqls: string[] = [];
-      if ("sql" in widget && typeof widget.sql === "string") {
-        sqls.push(widget.sql);
-      }
-      if ("items" in widget && Array.isArray(widget.items)) {
-        for (const item of widget.items) {
-          if (item && typeof item === "object" && "sql" in item && typeof item.sql === "string") {
-            sqls.push(item.sql);
-          }
-        }
-      }
-      for (const sql of sqls) {
-        const fp = extractSqlFingerprint(sql);
-        if (fp.length > 0) {
-          const widgetLabel =
-            "title" in widget && widget.title
-              ? String(widget.title)
-              : "items" in widget
-              ? "kpi_row"
-              : widget.type ?? "widget";
-          results.push({
-            source: `Template: ${tmpl.name} > ${widgetLabel}`,
-            locationHint,
-            fingerprint: fp,
-          });
-        }
-      }
-    }
-  }
-
-  // ── Review queries ─────────────────────────────────────────────────────────
-  for (const q of REVIEW_QUERIES) {
-    const fp = extractSqlFingerprint(q.sql);
-    if (fp.length > 0) {
-      results.push({
-        source: `Review: ${q.name} (${q.domain})`,
-        locationHint: "dashboard/lib/review-queries.ts",
-        fingerprint: fp,
-      });
-    }
-  }
 
   // ── Knowledge SQL pairs (typed copy of wren-push-metadata.py SQL_PAIRS) ───
   for (const pair of SQL_PAIRS) {
