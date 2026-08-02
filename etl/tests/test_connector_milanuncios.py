@@ -50,6 +50,23 @@ class TestDiscover:
             )
         assert sorted(ids) == ["700000001", "700000002", "700000003"]
 
+    def test_center_based_scope_requests_the_matching_city_not_madrid(self):
+        """Issue #71 review finding: the actual request URL a center-based
+        (not geography-string) scope produces was never verified end-to-end
+        through a real connector — only nearest_city() itself was tested.
+        A Sevilla-centered profile must request Sevilla, not Madrid."""
+        html = _read_fixture("milanuncios_sample_search.html")
+        with patch(
+            "etl.connectors.milanuncios.requests.get", return_value=_mock_response(html)
+        ) as mock_get:
+            MilanunciosConnector().discover(
+                ConnectorScope(center=(37.3891, -5.9845), radius_km=15),
+                throttle=lambda: None,
+            )
+        requested_url = mock_get.call_args.args[0]
+        assert "sevilla" in requested_url
+        assert "madrid" not in requested_url
+
     def test_discover_raises_on_soft_block_page_not_empty_list(self):
         html = _read_fixture("milanuncios_sample_block_page.html")
         connector = MilanunciosConnector()

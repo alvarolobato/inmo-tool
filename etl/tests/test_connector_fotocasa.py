@@ -57,6 +57,24 @@ class TestDiscover:
         # with a query string that must NOT match (see fixture comments).
         assert sorted(ids) == ["190011971", "190022222", "190033333"]
 
+    def test_center_based_scope_requests_the_matching_city_slug_not_madrid(self):
+        """Issue #71 review finding: nearest_city() itself was tested, but
+        never end-to-end through a real connector's discover() — the actual
+        request URL a center-based (not geography-string) scope produces
+        was unverified. A Sevilla-centered profile must request Fotocasa's
+        Sevilla slug, not silently default to Madrid."""
+        html = _read_fixture("fotocasa_sample_search.html")
+        with patch(
+            "etl.connectors.fotocasa.requests.get", return_value=_mock_response(html)
+        ) as mock_get:
+            FotocasaConnector().discover(
+                ConnectorScope(center=(37.3891, -5.9845), radius_km=15),
+                throttle=lambda: None,
+            )
+        requested_url = mock_get.call_args.args[0]
+        assert "sevilla-capital" in requested_url
+        assert "madrid" not in requested_url
+
     def test_discover_raises_on_soft_block_page_not_empty_list(self):
         """PR #49 review finding: Fotocasa's interruption page returns HTTP
         200 with no __initial_props__ tag — discover() must raise, not

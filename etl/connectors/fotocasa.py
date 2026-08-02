@@ -51,6 +51,7 @@ from etl.connectors.base import (
     Throttle,
 )
 from etl.connectors.fotocasa_mapping import infer_listing_kind, map_property_type
+from etl.connectors.geography import nearest_city
 
 logger = logging.getLogger("etl.connectors.fotocasa")
 
@@ -66,6 +67,38 @@ _INITIAL_PROPS_MARKER = 'id="__initial_props__"'
 # "/valencia/" (bare city name as its own path segment) — not the hyphenated
 # slugs (e.g. "madrid-capital") this connector actually uses. See discover().
 _ROBOTS_DISALLOWED_BARE_GEOGRAPHIES = frozenset({"madrid", "barcelona", "valencia"})
+
+# City name (etl.connectors.geography.CITY_CENTROIDS keys) -> this site's own
+# URL slug. Live-verified during issue #71 (real HTTP 200 + real
+# __initial_props__ listing data, not just a non-error status) for every
+# entry here. Extend alongside etl.connectors.geography.CITY_CENTROIDS when
+# a profile's geography resolves to a city not yet listed.
+_CITY_SLUGS: dict[str, str] = {
+    "madrid": "madrid-capital",
+    "sevilla": "sevilla-capital",
+    "barcelona": "barcelona-capital",
+    "valencia": "valencia-capital",
+}
+
+
+def _resolve_geography(scope: ConnectorScope) -> str | None:
+    """Turn a ConnectorScope into this site's URL slug, or None if it can't be.
+
+    `scope.geography` (a free-text escape hatch, see ConnectorScope's
+    docstring) wins when set, for tests/manual construction. Otherwise
+    resolve `scope.center` to the nearest known city and look up its
+    Fotocasa slug. No hardcoded default (issue #71) — a scope this connector
+    can't resolve means "nothing to discover for this scope", not "assume
+    Madrid".
+    """
+    if scope.geography:
+        return scope.geography
+    if scope.center is None:
+        return None
+    city = nearest_city(scope.center, scope.radius_km)
+    if city is None:
+        return None
+    return _CITY_SLUGS.get(city)
 
 
 def _extract_initial_props(html: str) -> dict[str, Any]:
@@ -168,8 +201,21 @@ class FotocasaConnector(Connector):
     # disables (the orchestrator's withdrawal auto-transition).
     discovers_full_inventory = False
 
+    def scope_key(self, scope: ConnectorScope) -> str | None:
+        """Delegate to `_resolve_geography` — the actual slug this scope
+        resolves to (or None if unresolvable) IS the right dedup/coverage
+        key: two scopes resolving to the same slug hit the identical URL."""
+        return _resolve_geography(scope)
+
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
-        geography = scope.geography or "madrid-capital"
+        geography = _resolve_geography(scope)
+        if geography is None:
+            raise ConnectorError(
+                "fotocasa discover: scope has neither a resolvable center "
+                "(nearest known city too far away) nor an explicit geography "
+                "string — nothing to discover, not defaulting to a hardcoded "
+                "city (see issue #71)"
+            )
         if geography in _ROBOTS_DISALLOWED_BARE_GEOGRAPHIES:
             # robots.txt disallows the literal substring "/madrid/" (and
             # "/barcelona/", "/valencia/") as a path segment — but NOT

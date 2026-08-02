@@ -50,8 +50,14 @@ class DummyConnector(Connector):
         # attempted). Encoded as an invalid `property_type` so it trips
         # the real `property_type` CHECK constraint in etl/schema/init.sql.
         self._db_error_ids = db_error_ids
+        # Issue #71: lets orchestrator tests assert on exactly which
+        # ConnectorScope(s) run_all_connectors actually called discover()
+        # with (e.g. "was this the Sevilla-derived scope, not Madrid"),
+        # without this connector caring about scope content itself.
+        self.scopes_seen: list[ConnectorScope] = []
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
+        self.scopes_seen.append(scope)
         return list(self.external_ids)
 
     def fetch_detail(self, external_id: str, throttle: Throttle) -> RawListing:
