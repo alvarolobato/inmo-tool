@@ -22,7 +22,7 @@ $$;
 -- See docs/architecture/data-model.md for the full ER description and
 -- design rationale (especially the property_id-vs-listing_id keying
 -- decision in profile_listing_state/feedback_event) and
--- docs/decisions/D-002-numeric-vs-uuid-keys.md for the PK strategy.
+-- docs/decisions/D-005-numeric-vs-uuid-keys.md for the PK strategy.
 --
 -- Run once to create tables; safe to re-run (IF NOT EXISTS).
 
@@ -50,6 +50,24 @@ CREATE TABLE IF NOT EXISTS property (
 );
 
 CREATE INDEX IF NOT EXISTS idx_property_lat_lon ON property (lat, lon);
+
+-- Keeps property.updated_at accurate without every writer having to
+-- remember to set it (e.g. task 2.2's dedup merges, task 4.x's AI fields
+-- landing on property later). Defined once, generic enough to reuse on
+-- other tables in later phases if they need the same guarantee.
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_property_set_updated_at ON property;
+CREATE TRIGGER trg_property_set_updated_at
+    BEFORE UPDATE ON property
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
 
 -- listing.property_id is NOT NULL by design: every listing gets its own
 -- singleton `property` row created at ingest time, never a deferred-null
@@ -97,7 +115,7 @@ CREATE TABLE IF NOT EXISTS listing_status_event (
     id           BIGSERIAL    PRIMARY KEY,
     listing_id   BIGINT       NOT NULL REFERENCES listing(id) ON DELETE CASCADE,
     observed_at  TIMESTAMPTZ  NOT NULL,
-    status       TEXT         NOT NULL
+    status       TEXT         NOT NULL CHECK (status IN ('active','reserved','sold','withdrawn','expired'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_listing_status_event_listing_observed
@@ -125,25 +143,48 @@ CREATE TABLE IF NOT EXISTS listing_owner_identity (
 CREATE INDEX IF NOT EXISTS idx_listing_owner_identity_owner
     ON listing_owner_identity (owner_identity_id);
 
+CREATE INDEX IF NOT EXISTS idx_owner_identity_last_linked_active_at
+    ON owner_identity (last_linked_active_at);
+
+CREATE INDEX IF NOT EXISTS idx_owner_identity_phone
+    ON owner_identity (phone) WHERE phone IS NOT NULL;
+
 -- Retention default (issue #1 §17, owner-overridable): an owner_identity
 -- row is retained only while linked to at least one active listing. Once
--- last_linked_active_at falls outside the retention window with no active
--- listing referencing it, a scheduled job (owned by Phase 1.3's
--- orchestrator, not this task) should purge/anonymize the row via this
--- query shape:
+-- it falls outside the retention window with no active listing
+-- referencing it, this function purges (anonymizes) the row. Shipped as a
+-- real function rather than a comment-only query so there is exactly one
+-- copy of this logic (tests call it too — see test_schema.py) instead of
+-- letting a copy-pasted query drift from what's actually run. Phase 1.3's
+-- orchestrator owns *scheduling* the call (e.g. `SELECT
+-- purge_stale_owner_identities();` once per sync run); this task only
+-- ships the mechanism.
 --
---   UPDATE owner_identity
---   SET phone = NULL, name_normalized = NULL, agency_name = NULL
---   WHERE last_linked_active_at < NOW() - INTERVAL '90 days'
---     AND id NOT IN (
---       SELECT loi.owner_identity_id
---       FROM listing_owner_identity loi
---       JOIN listing l ON l.id = loi.listing_id
---       WHERE l.status = 'active'
---     );
---
--- 90 days is a default, not hardcoded elsewhere — the scheduler task
--- should make the window configurable.
+-- COALESCE(last_linked_active_at, created_at): a row that was never linked
+-- to an active listing at all (last_linked_active_at IS NULL) must still
+-- age out eventually — falling back to created_at closes that gap rather
+-- than retaining such rows forever.
+CREATE OR REPLACE FUNCTION purge_stale_owner_identities(retention_days INT DEFAULT 90)
+RETURNS INT AS $$
+DECLARE
+    purged_count INT;
+BEGIN
+    WITH purged AS (
+        UPDATE owner_identity
+        SET phone = NULL, name_normalized = NULL, agency_name = NULL
+        WHERE COALESCE(last_linked_active_at, created_at) < NOW() - make_interval(days => retention_days)
+          AND id NOT IN (
+              SELECT loi.owner_identity_id
+              FROM listing_owner_identity loi
+              JOIN listing l ON l.id = loi.listing_id
+              WHERE l.status = 'active'
+          )
+        RETURNING id
+    )
+    SELECT count(*)::INT INTO purged_count FROM purged;
+    RETURN purged_count;
+END;
+$$ LANGUAGE plpgsql;
 
 -- ============================================================
 -- Search profiles (independent scoring "mandates" over shared data)
@@ -167,12 +208,22 @@ CREATE TABLE IF NOT EXISTS search_profile (
 -- profile (e.g. rejected via its Idealista listing while its Fotocasa
 -- listing of the same property sits un-rejected) — silently defeating
 -- the entire point of deduplication. See docs/architecture/data-model.md.
+-- pipeline_stage vocabulary and ordering (must match issue #16's dedup
+-- merge-reconciliation logic, which keeps the more-advanced stage when two
+-- properties with state for the same profile get merged):
+--   new < reviewing < interested < contacted < visited < offer_made < closed/rejected
+-- 'new' is the pre-pipeline default (not part of issue #1 §13's named
+-- pipeline, which starts at 'interested') — a row exists here as soon as a
+-- profile's hard filters match a property, before any human action.
+-- 'closed' and 'rejected' are both terminal and treated as equally
+-- "most advanced" for reconciliation purposes.
 CREATE TABLE IF NOT EXISTS profile_listing_state (
     profile_id       BIGINT       NOT NULL REFERENCES search_profile(id),
     property_id      BIGINT       NOT NULL REFERENCES property(id),
     score            NUMERIC(6,3),
     rank_explanation TEXT,
-    pipeline_stage   TEXT         NOT NULL DEFAULT 'new',
+    pipeline_stage   TEXT         NOT NULL DEFAULT 'new'
+                     CHECK (pipeline_stage IN ('new','reviewing','interested','contacted','visited','offer_made','closed','rejected')),
     notes            TEXT,
     last_scored_at   TIMESTAMPTZ,
     PRIMARY KEY (profile_id, property_id)
@@ -180,6 +231,9 @@ CREATE TABLE IF NOT EXISTS profile_listing_state (
 
 CREATE INDEX IF NOT EXISTS idx_profile_listing_state_property
     ON profile_listing_state (property_id);
+
+CREATE INDEX IF NOT EXISTS idx_profile_listing_state_profile_score
+    ON profile_listing_state (profile_id, score DESC);
 
 -- feedback_event.property_id (not listing_id) is what the feedback's
 -- identity is keyed on, matching profile_listing_state above. listing_id
@@ -200,6 +254,9 @@ CREATE TABLE IF NOT EXISTS feedback_event (
 CREATE INDEX IF NOT EXISTS idx_feedback_event_profile_property
     ON feedback_event (profile_id, property_id);
 
+CREATE INDEX IF NOT EXISTS idx_feedback_event_listing_id
+    ON feedback_event (listing_id) WHERE listing_id IS NOT NULL;
+
 -- ============================================================
 -- AI assessments (Phase 4 generates these; this task only creates
 -- the table). listing_id is NOT NULL — an assessment is always about
@@ -216,7 +273,12 @@ CREATE TABLE IF NOT EXISTS ai_assessment (
     model           TEXT,
     prompt_version  TEXT,
     generated_at    TIMESTAMPTZ,
-    UNIQUE (listing_id, assessment_type, prompt_version)
+    -- NULLS NOT DISTINCT (PG15+): without it, Postgres treats every NULL
+    -- prompt_version as distinct, so this constraint would silently allow
+    -- unlimited duplicate (listing_id, assessment_type, NULL) rows —
+    -- defeating the point of the uniqueness check for any assessment
+    -- generated before prompt_version tracking existed for that flow.
+    UNIQUE NULLS NOT DISTINCT (listing_id, assessment_type, prompt_version)
 );
 
 -- ============================================================
@@ -232,6 +294,9 @@ CREATE TABLE IF NOT EXISTS property_merge_log (
     created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     reverted_at        TIMESTAMPTZ
 );
+
+CREATE INDEX IF NOT EXISTS idx_property_merge_log_property_id
+    ON property_merge_log (property_id);
 
 
 -- ============================================================

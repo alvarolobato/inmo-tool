@@ -12,8 +12,10 @@ property ──1───N── listing ──1───N── listing_price_h
    │                  └──N───N── owner_identity   (via listing_owner_identity)
    │
    ├──N───N── search_profile   (via profile_listing_state)
+   │              │
+   │              └──1───N── feedback_event   (profile_id, nullable)
    │
-   ├──1───N── feedback_event
+   ├──1───N── feedback_event   (property_id, required)
    │
    └──1───N── property_merge_log
 
@@ -40,7 +42,7 @@ Append-only event logs. Every observed price is a new row (not an overwrite) so 
 ### `owner_identity` / `listing_owner_identity`
 Best-effort seller/agent identity, used as a deduplication signal (phone number extracted from free-text descriptions, agency name) and kept many-to-many with `listing` because the same identity can appear on listings that haven't been matched to the same property yet (that's exactly what the dedup engine uses it to detect).
 
-**Retention default** (resolves the open question in issue #1 §17): an `owner_identity` row is retained only while linked to at least one `listing` with `status = 'active'`. Once `last_linked_active_at` falls outside a 90-day window with no active listing referencing it, a scheduled job should purge/anonymize the row (null out `phone`/`name_normalized`/`agency_name`, keep the opaque `id` so historical `property_merge_log` rows referencing it don't dangle). The purge query is documented as a comment directly above the table in `etl/schema/init.sql`; the job that runs it on a schedule is Phase 1.3's responsibility (issue #11), not this task's — this task only guarantees the schema and query shape exist. 90 days is a default the owner can override; it is not hardcoded anywhere else.
+**Retention default** (resolves the open question in issue #1 §17): an `owner_identity` row is retained only while linked to at least one `listing` with `status = 'active'`. Once it falls outside a 90-day window with no active listing referencing it (falling back to `created_at` for a row that was never linked to an active listing at all — `last_linked_active_at IS NULL` doesn't mean "never expires"), the `purge_stale_owner_identities(retention_days INT DEFAULT 90)` SQL function (in `etl/schema/init.sql`) anonymizes it: nulls `phone`/`name_normalized`/`agency_name`, keeps the opaque `id` so nothing referencing it by ID breaks. It's a callable function rather than a comment-only query specifically so there's one copy of this logic — tests call the same function that a future scheduler will — instead of a copy-pasted query drifting from what's actually run. The job that *calls* it on a schedule is Phase 1.3's responsibility (issue #11), not this task's. 90 days is a default the owner can override via the function's argument; it is not hardcoded anywhere else. (Correction: an earlier draft of this doc claimed the opaque `id` was kept for "historical `property_merge_log` references" — `property_merge_log` has no FK to `owner_identity` at all, so that reasoning was wrong. The real reason to keep the row rather than delete it outright is simpler: a deleted row could get re-created with a new `id` on next sight of the same phone number, losing any accumulated `listing_owner_identity` link history for no benefit over just nulling the PII fields in place.)
 
 ## Search profiles and scoring
 
@@ -60,6 +62,8 @@ An earlier draft of this table (and of `feedback_event`) keyed scoring/feedback/
 Keying on `property_id` instead means: no matter how many site listings a property accumulates, or in what order dedup discovers they're the same thing, there is exactly one score, one pipeline stage, one feedback history, per `(profile, property)` pair — enforced by the primary key itself, not by application discipline that could drift.
 
 The corollary this creates for merge-time behavior (Phase 2, issue #16): when dedup reassigns a listing's `property_id` onto an existing property that *already* has its own `profile_listing_state`/`feedback_event` history for some profile, that history has to be reconciled (union feedback, keep the more-advanced pipeline stage, flag genuine conflicts for human review) rather than either side's state being silently dropped or overwritten. That reconciliation logic belongs to issue #16, not this task — this task only guarantees the schema shape makes the *correct* end state representable.
+
+**FK delete behavior, for whoever writes issue #16's merge/revert logic**: `profile_listing_state.property_id`, `feedback_event.property_id`, and `property_merge_log.property_id` are all plain `REFERENCES property(id)` — Postgres's default is `ON DELETE RESTRICT`. This means a `property` row that has ever accumulated state, feedback, or a merge-log entry **cannot be deleted** while those rows exist; it must be updated/merged-away, never hard-deleted. This is almost certainly the right behavior (losing feedback/audit history silently on a delete would be worse), but it means issue #16's merge implementation should never attempt `DELETE FROM property WHERE id = <losing side>` — the losing side's `property` row should simply become unreferenced (no `listing.property_id` points at it anymore) and left in place, not deleted, or the delete will raise `ForeignKeyViolation` the first time that property has any state at all.
 
 ### `feedback_event`
 Same keying logic as above: `property_id NOT NULL` is what identifies what the feedback is about. `listing_id` is kept too, but only as an optional "which specific site listing was the user actually looking at" audit/debugging detail — it is never used to determine what the feedback applies to, and a `NULL` there (e.g. feedback given from an aggregate/comparison view rather than a single listing's detail page) is fine.

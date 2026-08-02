@@ -188,16 +188,18 @@ class TestProfileListingStateKeying:
             pg_conn.commit()
 
 
-class TestOwnerIdentityRetentionQuery:
-    def test_owner_identity_retention_query(self, pg_conn):
-        """Proves the retention query documented in init.sql (above the
-        owner_identity table) correctly identifies rows to purge: linked
-        only to inactive/no listings and past the retention window, while
-        sparing rows still linked to an active listing.
+class TestOwnerIdentityRetention:
+    def test_purge_stale_owner_identities(self, pg_conn):
+        """purge_stale_owner_identities() must anonymize owner_identity rows
+        past the retention window with no active listing — including rows
+        that were NEVER linked to an active listing at all (last_linked_active_at
+        IS NULL), via the created_at fallback — while sparing rows still
+        linked to an active listing regardless of age.
         """
         _apply_schema(pg_conn)
         stale_cutoff = datetime.now(timezone.utc) - timedelta(days=91)
         recent = datetime.now(timezone.utc) - timedelta(days=1)
+        stale_id = fresh_id = never_linked_stale_id = property_id = None
 
         try:
             with pg_conn.cursor() as cur:
@@ -211,6 +213,15 @@ class TestOwnerIdentityRetentionQuery:
                     ("+34600222222", recent),
                 )
                 fresh_id = cur.fetchone()[0]
+                # Never linked to anything (last_linked_active_at IS NULL) but
+                # created long ago -- must still age out via the COALESCE
+                # fallback to created_at, not be retained forever.
+                cur.execute(
+                    "INSERT INTO owner_identity (phone, last_linked_active_at, created_at) "
+                    "VALUES (%s, NULL, %s) RETURNING id",
+                    ("+34600333333", stale_cutoff),
+                )
+                never_linked_stale_id = cur.fetchone()[0]
             pg_conn.commit()
 
             property_id = _insert_property(pg_conn)
@@ -228,35 +239,134 @@ class TestOwnerIdentityRetentionQuery:
                 )
             pg_conn.commit()
 
-            retention_query = """
-                SELECT id FROM owner_identity
-                WHERE last_linked_active_at < NOW() - INTERVAL '90 days'
-                  AND id NOT IN (
-                    SELECT loi.owner_identity_id
-                    FROM listing_owner_identity loi
-                    JOIN listing l ON l.id = loi.listing_id
-                    WHERE l.status = 'active'
-                  )
-            """
             with pg_conn.cursor() as cur:
-                cur.execute(retention_query)
-                purge_candidates = {row[0] for row in cur.fetchall()}
+                cur.execute("SELECT purge_stale_owner_identities(90)")
+                purged_count = cur.fetchone()[0]
+            pg_conn.commit()
 
-            assert stale_id in purge_candidates
-            assert fresh_id not in purge_candidates
+            assert purged_count == 2  # stale_id + never_linked_stale_id
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, phone FROM owner_identity WHERE id IN (%s, %s, %s)",
+                    (stale_id, fresh_id, never_linked_stale_id),
+                )
+                phones = dict(cur.fetchall())
+            assert phones[stale_id] is None
+            assert phones[never_linked_stale_id] is None
+            assert phones[fresh_id] == "+34600222222"
         finally:
             pg_conn.rollback()
             with pg_conn.cursor() as cur:
+                if fresh_id is not None:
+                    cur.execute(
+                        "DELETE FROM listing_owner_identity WHERE owner_identity_id IN (%s, %s, %s)",
+                        (stale_id, fresh_id, never_linked_stale_id),
+                    )
+                if property_id is not None:
+                    cur.execute(
+                        "DELETE FROM listing WHERE property_id = %s", (property_id,)
+                    )
+                    cur.execute("DELETE FROM property WHERE id = %s", (property_id,))
+                if stale_id is not None:
+                    cur.execute(
+                        "DELETE FROM owner_identity WHERE id IN (%s, %s, %s)",
+                        (stale_id, fresh_id, never_linked_stale_id),
+                    )
+            pg_conn.commit()
+
+
+class TestAiAssessmentUniqueness:
+    def test_null_prompt_version_is_not_distinct(self, pg_conn):
+        """UNIQUE NULLS NOT DISTINCT: two assessments for the same listing +
+        type with prompt_version left NULL must collide, not silently
+        duplicate (the bug: default UNIQUE treats every NULL as distinct).
+        """
+        _apply_schema(pg_conn)
+        property_id = _insert_property(pg_conn)
+        pg_conn.commit()
+        try:
+            listing_id = _insert_listing(pg_conn, property_id, "idealista", "ai-dup")
+            pg_conn.commit()
+            with pg_conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM listing_owner_identity WHERE owner_identity_id IN (%s, %s)",
-                    (stale_id, fresh_id),
+                    "INSERT INTO ai_assessment (listing_id, assessment_type, result) "
+                    "VALUES (%s, 'occupancy', '{}'::jsonb)",
+                    (listing_id,),
+                )
+            pg_conn.commit()
+            with (
+                pytest.raises(psycopg2.errors.UniqueViolation),
+                pg_conn.cursor() as cur,
+            ):
+                cur.execute(
+                    "INSERT INTO ai_assessment (listing_id, assessment_type, result) "
+                    "VALUES (%s, 'occupancy', '{}'::jsonb)",
+                    (listing_id,),
+                )
+        finally:
+            pg_conn.rollback()
+            with pg_conn.cursor() as cur:
+                # ai_assessment.listing_id has no ON DELETE CASCADE (deliberate
+                # — see data-model.md), so it must be cleared before listing.
+                cur.execute(
+                    "DELETE FROM ai_assessment WHERE listing_id IN "
+                    "(SELECT id FROM listing WHERE property_id = %s)",
+                    (property_id,),
                 )
                 cur.execute(
                     "DELETE FROM listing WHERE property_id = %s", (property_id,)
                 )
                 cur.execute("DELETE FROM property WHERE id = %s", (property_id,))
+            pg_conn.commit()
+
+
+class TestEnumLikeColumnsConstrained:
+    def test_pipeline_stage_rejects_invalid_value(self, pg_conn):
+        _apply_schema(pg_conn)
+        property_id = _insert_property(pg_conn)
+        profile_id = _insert_profile(pg_conn)
+        pg_conn.commit()
+        try:
+            with (
+                pytest.raises(psycopg2.errors.CheckViolation),
+                pg_conn.cursor() as cur,
+            ):
                 cur.execute(
-                    "DELETE FROM owner_identity WHERE id IN (%s, %s)",
-                    (stale_id, fresh_id),
+                    "INSERT INTO profile_listing_state (profile_id, property_id, pipeline_stage) "
+                    "VALUES (%s, %s, 'not-a-real-stage')",
+                    (profile_id, property_id),
                 )
+        finally:
+            pg_conn.rollback()
+            with pg_conn.cursor() as cur:
+                cur.execute("DELETE FROM search_profile WHERE id = %s", (profile_id,))
+                cur.execute("DELETE FROM property WHERE id = %s", (property_id,))
+            pg_conn.commit()
+
+    def test_listing_status_event_rejects_invalid_status(self, pg_conn):
+        _apply_schema(pg_conn)
+        property_id = _insert_property(pg_conn)
+        pg_conn.commit()
+        try:
+            listing_id = _insert_listing(
+                pg_conn, property_id, "idealista", "bad-status-evt"
+            )
+            pg_conn.commit()
+            with (
+                pytest.raises(psycopg2.errors.CheckViolation),
+                pg_conn.cursor() as cur,
+            ):
+                cur.execute(
+                    "INSERT INTO listing_status_event (listing_id, observed_at, status) "
+                    "VALUES (%s, NOW(), 'not-a-real-status')",
+                    (listing_id,),
+                )
+        finally:
+            pg_conn.rollback()
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM listing WHERE property_id = %s", (property_id,)
+                )
+                cur.execute("DELETE FROM property WHERE id = %s", (property_id,))
             pg_conn.commit()
