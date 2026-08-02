@@ -24,7 +24,7 @@
 ## Conventions
 
 - All scripts use `set -e`
-- Python scripts use the venv at `${REPO_ROOT}/.venv/bin/python3`
-- SQL operations must be read-only (reject modification keywords)
+- Python one-liners run inside the `etl` service/image via `docker compose exec`/`run` (see `cli/commands/connector.sh`'s `_run_etl_python` helper), not a local venv — this only requires Docker, matching `ps stack`'s own requirement, and guarantees the same Python environment the real connectors run in. (Task 1.5, #13 — the source project's `sql.sh` used a local `${REPO_ROOT}/.venv/bin/python3`, which this project doesn't rely on for CLI commands.)
+- No SQL modification-keyword rejection: the source project's `sql.sh` rejected INSERT/UPDATE/DELETE/etc. because it queried a vendor-managed ERP (4D) that must never be written to from an analytics path. This project's database is our own Postgres mirror — `ps db query` runs inside a read-only *transaction* as a safety habit against fat-fingered SQL (see `cli/commands/db.sh`), not because a hard block is a project requirement.
 - Colors: RED for errors, CYAN for headings, GREEN for success, YELLOW for warnings
-- Tab-separated output for machine-parseable results
+- Tab-separated output for machine-parseable results (e.g. `ps connector list`)

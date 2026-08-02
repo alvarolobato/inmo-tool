@@ -55,9 +55,13 @@ class TestDiscover:
         withdrawal reconciliation as "every listing just disappeared"."""
         html = _read_fixture("fotocasa_sample_block_page.html")
         connector = FotocasaConnector()
-        with patch(
-            "etl.connectors.fotocasa.requests.get", return_value=_mock_response(html)
-        ), pytest.raises(ConnectorError, match="__initial_props__"):
+        with (
+            patch(
+                "etl.connectors.fotocasa.requests.get",
+                return_value=_mock_response(html),
+            ),
+            pytest.raises(ConnectorError, match="__initial_props__"),
+        ):
             connector.discover(
                 ConnectorScope(geography="madrid-capital"), throttle=lambda: None
             )
@@ -72,7 +76,9 @@ class TestDiscover:
             patch("etl.connectors.fotocasa.requests.get") as mock_get,
             pytest.raises(ConnectorError, match="robots.txt"),
         ):
-            connector.discover(ConnectorScope(geography="madrid"), throttle=lambda: None)
+            connector.discover(
+                ConnectorScope(geography="madrid"), throttle=lambda: None
+            )
         mock_get.assert_not_called()
 
 

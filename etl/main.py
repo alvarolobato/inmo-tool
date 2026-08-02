@@ -55,6 +55,14 @@ def main() -> None:
         help="Connect, init schema, run every registered connector once, and exit "
         "(default: loop hourly, for the long-running container)",
     )
+    parser.add_argument(
+        "--connector",
+        metavar="NAME",
+        default=None,
+        help="Restrict --once to a single registered connector by name "
+        "(task 1.5, #13 — backs `ps connector run <name>`). Ignored in "
+        "long-running loop mode: the scheduler always runs every connector.",
+    )
     args = parser.parse_args()
 
     from etl.config import Config
@@ -95,7 +103,12 @@ def main() -> None:
 
     if args.once:
         try:
-            orchestrator.run_all_connectors(conn_pg, trigger="cli")
+            orchestrator.run_all_connectors(
+                conn_pg, trigger="cli", connector_name=args.connector
+            )
+        except ValueError as exc:
+            logger.error("%s", exc)
+            sys.exit(1)
         finally:
             conn_pg.close()
         return

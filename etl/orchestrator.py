@@ -488,18 +488,35 @@ def run_connector(conn, connector: Connector, scope: ConnectorScope) -> dict:
     }
 
 
-def run_all_connectors(conn, trigger: str = "scheduler") -> int:
+def run_all_connectors(
+    conn, trigger: str = "scheduler", connector_name: str | None = None
+) -> int:
     """Run every registered connector once, recording a connector_runs row.
 
     Safe to call with an empty CONNECTORS registry (EC-4) — records a run
     with total_connectors=0 and returns immediately.
+
+    `connector_name`, when given, restricts the run to that one connector
+    (task 1.5, #13 — backs `ps connector run <name>`). Unknown names raise
+    ValueError immediately, before creating a connector_runs row — an
+    operator typo shouldn't leave a phantom "ran zero connectors" record
+    behind.
     """
+    if connector_name is not None:
+        matching = [c for c in CONNECTORS if c.name == connector_name]
+        if not matching:
+            known = ", ".join(c.name for c in CONNECTORS) or "(none registered)"
+            raise ValueError(f"Unknown connector {connector_name!r} — known: {known}")
+        connectors_to_run = matching
+    else:
+        connectors_to_run = CONNECTORS
+
     _reconcile_stale_runs(conn)
     run_id = _create_connector_run(conn, trigger)
     ok = 0
     failed = 0
 
-    for connector in CONNECTORS:
+    for connector in connectors_to_run:
         started_at = datetime.now(timezone.utc)
         try:
             result = run_connector(conn, connector, _DEFAULT_SCOPE)
