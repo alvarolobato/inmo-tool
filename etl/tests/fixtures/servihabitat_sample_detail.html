@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<!-- Trimmed from a real Servihabitat page (ref 60645658, Madrid, 2026-08-02).
+
+     Two things here are load-bearing; do not "tidy" either away.
+
+     1. The "similar listings" neighbour card is retained on purpose, and
+        every figure on it differs from the subject's: 48 m2 / 3 hab. /
+        2 banos / 190.000 EUR / energy A, against the subject's 80 m2 /
+        2 hab. / 1 bano / 230.000 EUR / energy E. An unscoped text scan
+        reads the neighbour's values instead, so removing this card would
+        silently retire that regression.
+
+     2. #product_features carries the subject's own price, rooms, baths and
+        energy letter. The price there is what makes the JSON-LD fallback
+        test real: strip the JSON-LD and the price must still resolve to
+        230.000 from this block. Before it existed the page body held no
+        subject price at all, so the fallback returned None and the test's
+        `!= 190000` assertion passed vacuously (Opus review, PR #141). -->
+<html><head>
+<script type="application/ld+json">
+        {
+        	"@context": "http://schema.org/",
+        	"@type": "Product",
+        	"name": "Vivienda en venta en C. Jose Calvo, 9,Mad-Tetuan: Cuatro Caminos,Madrid",
+        	"image": "https://imagenes.servihabitat.com/sdi/slir/w1024-h/current/images_1/imagen_292801.jpg",
+        	"description": "Vivienda en venta en Mad-Tetuan: Cuatro Caminos (Madrid)",
+        	"offers": {
+        		"@type": "Offer",
+        		"priceCurrency": "EUR",
+        		"price": "230000",
+        		"availableAtOrFrom": {
+        			"@type": "Place",
+        			"address":{
+        				"@type": "PostalAddress",
+        				"streetAddress": "C. Jose Calvo, 9",
+        				"addressLocality":"Mad-Tetuan: Cuatro Caminos",
+        				"addressRegion":"Madrid",
+        				"postalCode":"28039"
+        			}
+        		},
+        		"seller": {
+        			"@type": "RealEstateAgent",
+        			"name": "Servihabitat",
+        			"image":"https://www.servihabitat.com/image/layout_set_logo?img_id=1093339&t=1642034324299"
+        		}
+        	}
+        }
+    </script>
+<meta property="og:description" content="Vivienda de 80 m2 en venta"/>
+<meta property="og:image" content="https://static.servihabitat.com/60645658.jpg"/>
+</head><body>
+<div referencia="60645658"></div>
+<section id="product_features" class="props_features">
+  <div class="row">
+    <div class="col"><h2 class="section-title-detail">Características</h2>
+      <ul>
+        <li><span>80</span> m <sup>2</sup> superficie</li>
+        <li><span>2</span> hab.</li>
+        <li><span>1</span> baño</li>
+      </ul>
+      <div class="precio-detalle">230.000 €</div>
+    </div>
+    <div class="equipamiento col-md-4 pt-4"><h2 class="section-title-detail">Equipamiento</h2>
+      <ul><li><span>Alarma</span></li></ul></div>
+    <div class="col-md-4 pt-4">Certificado Energético Consumo: 255 kW/m <sup>2</sup> Año
+      Calificación energética: E</div>
+  </div>
+</section>
+<div class="container container-similares"><div class="row ml-0">
+  <a class="marco-InmueblesSimilares"><div class="caja-destacado">
+    <div class="similar-destacato">Piso en venta en Leganes, Madrid 48m <sup>2</sup> 3 hab. 2 baños Cerca de la zona 190.000 € Calificación energética: A</div>
+  </div></a>
+</div></div>
+</body></html>

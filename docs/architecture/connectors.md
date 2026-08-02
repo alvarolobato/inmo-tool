@@ -131,6 +131,21 @@ git clone https://github.com/etewiah/property_web_scraper.git
 
 `etl/connectors/extraction.py` (introduced by issue #77) is the shared Python helper — `first_present(*getters)` tries an ordered list of callables and returns the first non-empty result. **Do not port their JSON-mapping-file DSL wholesale** — a 110-site project needs a declarative config format editable without touching code; a 2-4-connector project doesn't. `etl/connectors/fotocasa.py`'s `_icon_stat_text`/`_price_fallback_text` are the worked example of step 6 (`cssLocator`) as a real fallback getter, not just a design note: rooms/bathrooms/surface/price each try their embedded-JSON path first, then fall through to a live-verified CSS selector if that path comes back empty. One concrete lesson already learned doing this: property_web_scraper's own selectors for this exact site (`.re-DetailHeader-*`, last checked by them 2026-02-20) no longer match anything on the live page as of Fotocasa's own retrofit — the site migrated to a Tailwind-utility design system with no semantic classes left. **A reference mapping's selectors are a starting hypothesis, not a fact — verify against a real live page before trusting them**, same as this project's existing feasibility-spike discipline for discover()/fetch_detail() itself.
 
+**The second shared defence: `scoped_text(node, keep=..., drop=...)`.** Three connectors independently hit the same bug before it was promoted into the shared helper (issue #141): a listing page renders a *"similar properties"* carousel whose cards carry their **own** price/m²/room figures in the same page text, so any unscoped regex over `soup.get_text()` can silently attribute a neighbouring property's numbers to the subject. Vivantial read `310.000 €` off a neighbour instead of the subject's `288.000 €` (PR #139); Solvia's price fallback had the same latent exposure (PR #138); Servihabitat hit it live on ref `60645658`, an 80 m² / 230.000 € listing whose page text also contains a neighbour's `48m 2 ... 190.000 €` (PR #141).
+
+Two independent defences, usable together:
+
+- `keep="#some-container"` — scope to the subject-property container so nothing else is even considered. The stronger option where such a container exists. Returns `None` when the selector misses, so a `first_present` chain falls through to a whole-page attempt rather than silently yielding `""`.
+- `drop=(".carousel", ".related-rail")` — remove known-contaminating subtrees before flattening. The fallback for pages with no clean subject container.
+
+It never mutates the caller's tree (`drop` works on a copy), because a shared helper that silently `decompose()`d the caller's soup would be a trap for the next connector.
+
+**Two testing lessons that came with it**, both worth copying:
+
+1. *Give the neighbour card different values from the subject, in every field you extract.* Servihabitat's fixture deliberately carries 48 m² / 3 hab. / 2 baños / 190.000 € / energy A against the subject's 80 m² / 2 hab. / 1 baño / 230.000 € / energy E. Identical values make the regression untestable.
+2. *Assert the mechanism, not only the outcome.* A value assertion can pass by accident when the subject simply appears first in document order. Also assert that the scoped text does **not** contain the neighbour's figures at all.
+
+
 **When starting a new connector** (see issue #79 for pisos.com/Habitaclia), check the matching `config/scraper_mappings/<locale>_<site>.json` file first for field locations — but verify every selector/regex/JSON-path against a real, live page before trusting it. Their own `expectedExtractionRate` field is a useful signal of how much to trust a given mapping (Idealista 0.75, Fotocasa 0.70, Habitaclia 0.60, pisos.com 0.45 — the lower end reads as thin/speculative, not battle-tested) — but even a high rate doesn't excuse skipping this project's own feasibility-spike discipline (robots.txt check + live sample requests, documented in the implementing PR) established by the Fotocasa/Milanuncios tasks (#12/#15).
 
 ## Idealista: a capture-only connector (issue #75)

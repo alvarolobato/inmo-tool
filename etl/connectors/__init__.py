@@ -29,6 +29,7 @@ def register_all() -> None:
     from etl.connectors.fotocasa import FotocasaConnector
     from etl.connectors.idealista import IdealistaConnector
     from etl.connectors.milanuncios import MilanunciosConnector
+    from etl.connectors.servihabitat import ServihabitatConnector
     from etl.connectors.solvia import SolviaConnector
     from etl.connectors.vivantial import VivantialConnector
     from etl.orchestrator import CONNECTORS
@@ -38,6 +39,8 @@ def register_all() -> None:
         CONNECTORS.append(FotocasaConnector())
     if MilanunciosConnector.name not in registered_names:
         CONNECTORS.append(MilanunciosConnector())
+    if ServihabitatConnector.name not in registered_names:
+        CONNECTORS.append(ServihabitatConnector())
     if SolviaConnector.name not in registered_names:
         CONNECTORS.append(SolviaConnector())
     if VivantialConnector.name not in registered_names:
