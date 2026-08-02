@@ -22,6 +22,7 @@ import { buildPgPoolConfig } from "@/lib/db-shared";
 import { resetPool } from "@/lib/db-write";
 import { createProfile } from "@/lib/db/profiles";
 import { materializeProfile } from "../materialize";
+import { COLD_START_EXPLANATION } from "@/lib/scoring/explain";
 import type { Scope } from "@/lib/profiles-schema";
 
 const MADRID_SOL: [number, number] = [40.4168, -3.7038];
@@ -89,6 +90,14 @@ describe.runIf(dbAvailable)("materializeProfile — real Postgres", () => {
   afterEach(async () => {
     await withRealDb(async (pool) => {
       if (createdProfileIds.length > 0) {
+        // feedback_event and profile_scoring_model reference search_profile
+        // directly — task 3.4 (#23)'s new tests insert feedback_event rows
+        // and train real models, which earlier tests in this file never
+        // did, so those two deletes weren't needed here until now.
+        await pool.query("DELETE FROM feedback_event WHERE profile_id = ANY($1::bigint[])", [createdProfileIds]);
+        await pool.query("DELETE FROM profile_scoring_model WHERE profile_id = ANY($1::bigint[])", [
+          createdProfileIds,
+        ]);
         await pool.query("DELETE FROM profile_listing_state WHERE profile_id = ANY($1::bigint[])", [
           createdProfileIds,
         ]);
@@ -278,4 +287,89 @@ describe.runIf(dbAvailable)("materializeProfile — real Postgres", () => {
       expect(matches).not.toContain(propertyId);
     });
   });
+
+  it("task 3.4 (#23): a newly-materialized candidate gets an immediate cold-start score, not score=NULL", async () => {
+    // Closes the gap retrain.ts's own docstring names: a candidate that
+    // arrives after a profile's last feedback-triggered retrain used to sit
+    // at score=NULL indefinitely until the *next* feedback event. This
+    // profile has zero feedback at all (nothing has ever retrained it), so
+    // if materialize.ts's scoreNewCandidates hook weren't wired in, score
+    // would stay NULL forever, not just "until next feedback".
+    await withRealDb(async (pool) => {
+      const propertyId = await insertProperty(pool);
+      await insertListing(pool, propertyId, { current_price: 200000 });
+
+      const profileId = await makeProfile({
+        geography: { type: "radius", center: MADRID_SOL, radius_km: 5 },
+        property_types: ["piso"],
+        price_min: 150000,
+        price_max: 250000,
+        hard_exclusions: {},
+      });
+
+      await materializeProfile(profileId);
+
+      const { rows } = await pool.query<{ score: string | null; rank_explanation: string | null }>(
+        "SELECT score, rank_explanation FROM profile_listing_state WHERE profile_id = $1 AND property_id = $2",
+        [profileId, propertyId],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].score).not.toBeNull();
+      expect(rows[0].rank_explanation).not.toBeNull();
+    });
+  });
+
+  it("task 3.4 (#23): re-materializing after a profile already has a trained model scores new candidates with it, not cold-start", async () => {
+    await withRealDb(async (pool) => {
+      // Real 8-feature model needs MIN_TRAINING_EXAMPLES (32) to actually
+      // train — pad past it with generic filler (no listing/price, so it
+      // contributes zero signal to price_per_m2_relative specifically, same
+      // reasoning as the feedback route's own integration tests) before
+      // introducing the property this test actually cares about.
+      const fillerScope: Scope = {
+        geography: { type: "radius", center: MADRID_SOL, radius_km: 5 },
+        property_types: ["piso"],
+        hard_exclusions: {},
+      };
+      const profileId = await makeProfile(fillerScope);
+
+      for (let i = 0; i < 16; i++) {
+        const acceptId = await insertProperty(pool);
+        const rejectId = await insertProperty(pool);
+        // The hard-filter engine requires an active listing to match at all
+        // (PR #57's fix) — a property with none never becomes a candidate,
+        // never enters fetchScoringInputs, and silently never counts toward
+        // the training set. Reproduced directly while building this test.
+        await insertListing(pool, acceptId);
+        await insertListing(pool, rejectId);
+        await materializeProfile(profileId);
+        await pool.query(
+          `INSERT INTO feedback_event (profile_id, property_id, feedback_type) VALUES ($1, $2, 'accept'), ($1, $3, 'reject')`,
+          [profileId, acceptId, rejectId],
+        );
+      }
+
+      const { retrainAndRescoreProfile } = await import("@/lib/scoring/retrain");
+      const trainResult = await retrainAndRescoreProfile(profileId);
+      expect(trainResult.trained).toBe(true);
+
+      // Now, with a real trained model already in place, materialize a
+      // brand-new candidate this profile has never seen before.
+      const newPropertyId = await insertProperty(pool);
+      await insertListing(pool, newPropertyId);
+      await materializeProfile(profileId);
+
+      const { rows } = await pool.query<{ score: string | null; rank_explanation: string | null }>(
+        "SELECT score, rank_explanation FROM profile_listing_state WHERE profile_id = $1 AND property_id = $2",
+        [profileId, newPropertyId],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].score).not.toBeNull();
+      // Grounded in the real model, not the fixed cold-start message —
+      // proves scoreNewCandidates picked up the existing trained model
+      // rather than falling back to cold-start ordering for a candidate
+      // that arrived after training.
+      expect(rows[0].rank_explanation).not.toBe(COLD_START_EXPLANATION);
+    });
+  }, 20000);
 });

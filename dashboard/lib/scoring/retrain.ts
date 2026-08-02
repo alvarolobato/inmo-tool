@@ -28,6 +28,7 @@ import { getProfileById } from "@/lib/db/profiles";
 import { COLD_START_EXPLANATION, explainScore } from "./explain";
 import { extractRaw, fetchScoringInputs, FEATURE_NAMES } from "./features";
 import { computeNormalization, normalizeVector, scoreNormalized, trainLogisticRegression } from "./model";
+import { computeColdStartScore, MIN_TRAINING_EXAMPLES } from "./pipeline";
 
 export interface RetrainResult {
   profileId: number;
@@ -110,33 +111,52 @@ export async function retrainAndRescoreProfile(profileId: number): Promise<Retra
   const positiveCount = trainingPropertyIds.filter((id) => labelByProperty.get(id) === 1).length;
   const negativeCount = trainingPropertyIds.length - positiveCount;
 
-  if (positiveCount === 0 || negativeCount === 0) {
-    // No trained model yet, but the candidate list (task 2.5) still needs
-    // something honest to show rather than a blank explanation field —
-    // issue #22's EC-2: state plainly that scoring isn't personalized yet,
-    // don't fabricate a feature-based sentence from coefficients that don't
-    // exist. `score` itself is left untouched (still NULL, or whatever a
-    // prior successful training run set it to — going one-sided on feedback
-    // later shouldn't erase a still-valid previous model's scores).
-    // Scoped to score IS NULL (matching candidates.ts's documented
-    // convention: the cold-start message corresponds to an unscored row, not
-    // "no personalization has ever happened for this profile") — a profile
-    // that trained once and later goes one-sided must not have this write
-    // clobber a still-valid score/explanation pair from that prior run
-    // (Opus review of PR #92, item 3).
-    await sql(
-      `UPDATE profile_listing_state
-          SET rank_explanation = $2
-        WHERE profile_id = $1 AND matched = true AND score IS NULL`,
-      [profileId, COLD_START_EXPLANATION],
-    );
+  // Task 3.4 (#23): below-threshold is its own cold-start reason, distinct
+  // from one-sided (0 of one class). Both classes can be present — e.g. one
+  // accept, one reject — and still be far too little signal to fit 8
+  // features against; L2 regularization keeps that fit non-degenerate (no
+  // coefficient blowup) but doesn't make 2 points a *good* fit. See
+  // pipeline.ts's MIN_TRAINING_EXAMPLES for the threshold derivation.
+  const belowThreshold = trainingPropertyIds.length < MIN_TRAINING_EXAMPLES;
+
+  if (positiveCount === 0 || negativeCount === 0 || belowThreshold) {
+    // No usable trained model yet. Rather than leave every unscored
+    // candidate at score=NULL (issue #23's EC-1: a fresh profile must show
+    // a non-empty, sensibly-ordered list, not a blank one), compute a
+    // deterministic cold-start score (price-per-m² ascending, see
+    // pipeline.ts's computeColdStartScore) for the whole matched pool and
+    // write it alongside the honest "not personalized yet" explanation.
+    // `score` is only ever set here for rows that are still NULL — a
+    // profile that trained once and later goes one-sided (or drops below
+    // threshold some other way, e.g. a rejected acceptance being reverted)
+    // must not have this write clobber a still-valid score/explanation pair
+    // from that prior successful run (Opus review of PR #92, item 3).
+    const coldStartScored = inputs.map((row) => ({
+      propertyId: row.property_id,
+      score: computeColdStartScore(rawByProperty.get(row.property_id)!),
+    }));
+
+    await withTransaction(async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`scoring_retrain:${profileId}`]);
+      const ids = coldStartScored.map((s) => s.propertyId);
+      const scores = coldStartScored.map((s) => s.score);
+      await client.query(
+        `UPDATE profile_listing_state AS pls
+           SET score = data.score, rank_explanation = $2, last_scored_at = NOW()
+          FROM (SELECT unnest($3::bigint[]) AS property_id,
+                       unnest($4::numeric[]) AS score) AS data
+         WHERE pls.profile_id = $1 AND pls.property_id = data.property_id
+           AND pls.matched = true AND pls.score IS NULL`,
+        [profileId, COLD_START_EXPLANATION, ids, scores],
+      );
+    });
 
     return {
       profileId,
       trained: false,
       trainingExampleCount: trainingPropertyIds.length,
       rescoredCount: 0,
-      reason: "needs_both_classes",
+      reason: belowThreshold && positiveCount > 0 && negativeCount > 0 ? "below_training_threshold" : "needs_both_classes",
     };
   }
 

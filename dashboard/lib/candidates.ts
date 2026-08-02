@@ -124,6 +124,24 @@ export async function listCandidates(
   const hasMore = rows.length > limit;
   const pageRows = hasMore ? rows.slice(0, limit) : rows;
 
+  // Task 3.4 (#23), EC-1: a candidate list must be "sensibly ordered" by
+  // score, not just by insertion order. Sorted here, client-side within the
+  // already-fetched page, rather than in the SQL `ORDER BY` above —
+  // switching the primary sort key from `p.id` to `score` would mean the
+  // keyset cursor (`p.id < $2`) needs to become a compound (score, id)
+  // cursor to stay correct across pages, which is a bigger pagination-
+  // contract change than this task's scope. Documented limitation: results
+  // are score-sorted *within* each page, not globally across pages — a
+  // profile with more matched candidates than one page's `limit` won't see
+  // a single, page-spanning best-to-worst ordering. Acceptable for a v1
+  // whose typical pool size (tens of candidates) rarely exceeds one page;
+  // revisit with a compound cursor if/when that stops being true.
+  pageRows.sort((a, b) => {
+    const scoreA = a.score !== null ? Number(a.score) : -Infinity;
+    const scoreB = b.score !== null ? Number(b.score) : -Infinity;
+    return scoreB - scoreA;
+  });
+
   const items: CandidateRow[] = pageRows.map((r) => ({
     // pg returns bigint columns as strings; property_id needs to be a real
     // JSON number (Phase 3's scoring/ranking will compare/sort on it) —
