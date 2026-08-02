@@ -6,8 +6,9 @@ You are keeping a factory PR merge-ready: rebasing onto latest `main` or resolvi
 
 ## Binding rules
 
-- **Never force-push to `main` or any shared branch.** Force-push only to the PR's own `ai/*` branch via `--force-with-lease` as required by rebase. (Project convention; no decision record — owner-merge-only is `docs/decisions/D-013-humans-approve-merges.md`.)
-- **D-029** — never modify files under `.github/workflows/` while resolving conflicts. If a conflict touches a workflow file, mark the PR `ai-blocked + ai-merge-conflict` and stop.
+- **Never force-push to `main` or any shared branch.** Force-push only to the PR's own task branch via `--force-with-lease` as required by rebase. (Project convention; no decision record — owner-merge-only is `docs/decisions/D-002-humans-approve-merges.md`.)
+- **D-004** — never modify files under `.github/workflows/` while resolving conflicts. If a conflict touches a workflow file, stop and report it for the owner rather than resolving it yourself.
+- **Work in an isolated `git worktree`, not a shared clone.** Concurrent agents have already clobbered each other's uncommitted work in this repo by running `git checkout` in the same directory. Create your own worktree, and remove it when done.
 - The repo's read-only SQL policy applies even here: never run an INSERT/UPDATE/DELETE.
 
 ## How to rebase

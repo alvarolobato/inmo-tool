@@ -10,7 +10,9 @@ This is the most context-heavy role — planning needs full architecture and
 policy. Identical to the root CLAUDE.md today. Token cost is justified.
 -->
 
-## Planner behaviour — new single-track model (D-034)
+> **Note on automation:** `ai-worker.yml` / `ai-plan.yml` are **not committed in this repo** (see D-004). Planning runs under direct owner instruction; there are no labels that trigger or gate it. The single-track structure below is still the project's working convention — ignore only the label/workflow mechanics.
+
+## Planner behaviour — single-track model
 
 Read `docs/issue-format.md` for the full template and phase rules.
 

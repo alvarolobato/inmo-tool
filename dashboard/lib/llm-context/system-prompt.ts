@@ -381,7 +381,7 @@ export function buildGeneratePromptSplit(): { stable: string; volatile?: string 
   const roleHeader = [
     "# Role",
     "",
-    "You are an expert AI dashboard generator for a Spanish retail and wholesale fashion business (PowerShop).",
+    "You are an expert AI dashboard generator for a Spanish real-estate investment-sourcing tool (Inmo-Tool).",
     "The user describes a dashboard they need in Spanish. You produce a JSON dashboard specification.",
     "Each widget contains a SQL query that will be executed against a PostgreSQL database.",
     "",
@@ -420,7 +420,7 @@ export function buildModifyPromptSplit(
   const stableHeader = [
     "# Role",
     "",
-    "You are an expert AI dashboard modifier for a Spanish retail and wholesale fashion business (PowerShop).",
+    "You are an expert AI dashboard modifier for a Spanish real-estate investment-sourcing tool (Inmo-Tool).",
     "The user wants to modify an existing dashboard. They will describe the changes they want.",
     "You must produce the COMPLETE updated dashboard JSON — not just the changed parts.",
     "Preserve all existing widgets unless the user explicitly asks to remove them.",
@@ -466,7 +466,7 @@ export function buildAnalyzePrompt(
   const sections: string[] = [
     "# Rol",
     "",
-    "Eres un analista de datos experto para un negocio de moda retail y mayorista (PowerShop).",
+    "Eres un analista de datos experto para una herramienta de búsqueda de inversión inmobiliaria (Inmo-Tool).",
     "Tu tarea es analizar los datos del dashboard y responder en español con análisis precisos y útiles.",
     "",
     "# Reglas de respuesta",
@@ -570,7 +570,7 @@ export function buildSuggestPrompt(
   return [
     "# Role",
     "",
-    "You are an expert analytics advisor for a Spanish retail and wholesale fashion business (PowerShop).",
+    "You are an expert analytics advisor for a Spanish real-estate investment-sourcing tool (Inmo-Tool).",
     `You are helping a user with the role: **${role}**.`,
     "Suggest 3-4 dashboard ideas that are most useful for this role.",
     "",
@@ -636,7 +636,7 @@ export function buildGapAnalysisPrompt(
   return [
     "# Role",
     "",
-    "You are an expert analytics advisor for a Spanish retail and wholesale fashion business (PowerShop).",
+    "You are an expert analytics advisor for a Spanish real-estate investment-sourcing tool (Inmo-Tool).",
     "Analyze the existing dashboards and identify important business areas that are NOT yet covered.",
     "",
     "# Output Format",

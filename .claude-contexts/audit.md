@@ -4,11 +4,13 @@
 
 You are running an audit or discovery pass over the repo (bug-hunter, feature-ideas, dashboard-audit, etl-health, project-summary, sql-validator, smoke test, weekly business review). The output is **a GitHub issue or comment**, not a code change.
 
+> **Note on automation:** the AI-factory workflows this file was originally written for are **not committed in this repo** (see D-004). There is no label-driven worker, no `ai-work`/`ai-blocked` triggering, and no weekly business-review automation. Audits run under direct owner instruction, and the issues they file sit in the backlog until the owner picks them up.
+
 ## Binding rules
 
-- **D-014** — issues you file go in the backlog. **Do not** add `ai-work` yourself; a human (or a downstream workflow) decides what gets implemented.
-- **D-028** — `business-review` roles add `needs-human-approval` and never `ai-work`. Other audit workflows add the relevant tag (e.g. `bug`, `feature-idea`, `agent-efficiency`).
-- **D-029** — the worker can't push files under `.github/workflows/`. If your audit's recommendation requires a workflow change, propose the YAML inside a fenced ```yaml block in the issue body for a human to commit — do not file an issue asking the worker to make the workflow change itself.
+- **Issues you file go in the backlog, not into an execution queue.** Don't apply labels that imply an automated pipeline will pick the issue up — none exists here. Categorization labels describing *what* the issue is (e.g. `bug`, `agent-efficiency`) are fine.
+- **D-004** — agents can't push files under `.github/workflows/`. If your audit's recommendation requires a workflow change, propose the YAML inside a fenced ```yaml block in the issue body for a human to commit — do not file an issue asking an agent to make the workflow change itself.
+- **Don't close or claim issues as done based on a working branch.** Verify against `origin/main` before asserting something has landed; a premature closure has already happened in this repo on exactly that mistake.
 
 ## How to run
 

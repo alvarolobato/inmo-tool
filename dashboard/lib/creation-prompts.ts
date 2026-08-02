@@ -48,7 +48,7 @@ export function buildSuggestPrompt(
   return [
     "# Role",
     "",
-    "You are an expert analytics advisor for a Spanish retail and wholesale fashion business (PowerShop).",
+    "You are an expert analytics advisor for a Spanish real-estate investment-sourcing tool (Inmo-Tool).",
     `You are helping a user with the role: **${role}**.`,
     "Suggest 3-4 dashboard ideas that are most useful for this role.",
     "",
@@ -122,7 +122,7 @@ export function buildGapAnalysisPrompt(
   return [
     "# Role",
     "",
-    "You are an expert analytics advisor for a Spanish retail and wholesale fashion business (PowerShop).",
+    "You are an expert analytics advisor for a Spanish real-estate investment-sourcing tool (Inmo-Tool).",
     "Analyze the existing dashboards and identify important business areas that are NOT yet covered.",
     "",
     "# Output Format",
