@@ -312,10 +312,18 @@ class FotocasaConnector(Connector):
         ]
         address = ", ".join(p.strip() for p in address_parts if p and p.strip()) or None
 
+        # multimedia mixes real photos with other asset types — a live
+        # listing showed {"type": "tour-virtual", "src": "https://floorfy.com/..."}
+        # alongside {"type": "image", ...} entries. Without this filter the
+        # virtual-tour link lands in photo_urls, renders as a broken <img> on
+        # the property detail page, and gets fed to the photo-hash dedup
+        # signal, which fails to decode it (Fable phase-2 review).
         photo_urls = tuple(
             item["src"]
             for item in multimedia
-            if isinstance(item, dict) and item.get("src")
+            if isinstance(item, dict)
+            and item.get("type") == "image"
+            and item.get("src")
         )
 
         client_name = real_estate.get("clientName") or real_estate.get("clientAlias")
