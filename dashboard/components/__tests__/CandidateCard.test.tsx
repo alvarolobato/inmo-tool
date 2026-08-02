@@ -32,7 +32,7 @@ describe("CandidateCard", () => {
 
   it("links to the property detail page for this profile", () => {
     render(<CandidateCard candidate={candidate({ property_id: 42 })} profileId={5} />);
-    expect(screen.getByTestId("candidate-card")).toHaveAttribute("href", "/profiles/5/properties/42");
+    expect(screen.getByRole("link")).toHaveAttribute("href", "/profiles/5/properties/42");
   });
 
   it("shows one badge per distinct source for a deduplicated property with multiple listings", () => {
