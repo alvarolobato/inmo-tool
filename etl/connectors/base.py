@@ -150,6 +150,15 @@ class CanonicalListingVersion:
     # reason as the other superset fields above: existing connectors/tests
     # don't need updating for this dataclass shape to gain the field.
     reference_code: str | None = None
+    # Spanish cadastral reference (`referencia catastral`) — property-level,
+    # unlike reference_code above, and the dedup engine's *definitive*
+    # signal rather than a probabilistic one (issue #1 §6 signal 1). Only
+    # servicer/REO portals tend to publish it: they hold the asset and so
+    # have the registry data, whereas a consumer portal re-listing someone
+    # else's property does not. Solvia publishes it on every listing;
+    # Vivantial and Servihabitat were both checked and do not (issue #140).
+    # Not unique in the schema — see init.sql's column comment for why.
+    cadastral_ref: str | None = None
 
     def __post_init__(self) -> None:
         if self.operation is not None and self.operation not in _VALID_OPERATIONS:

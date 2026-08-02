@@ -55,6 +55,25 @@ _SCOPE_DEDUP_DECIMALS = 4
 # sweep-to-sweep variance is observed in practice.
 _WITHDRAWAL_THRESHOLD = 3
 
+# Postgres' auto-generated name for listing's UNIQUE (source, external_id)
+# — the one unique violation `_upsert_canonical_listing` knows how to
+# recover from (a concurrent run won the insert race). See the narrowed
+# handler there for why any other violation must propagate instead.
+_LISTING_SOURCE_EXTERNAL_ID_CONSTRAINT = "listing_source_external_id_key"
+
+
+def _constraint_name(exc: Exception) -> str | None:
+    """Constraint name from a psycopg2 IntegrityError, or None if unavailable.
+
+    `exc.diag.constraint_name` is populated by the server for constraint
+    violations, but `diag` itself can be absent on a synthesised/wrapped
+    exception (notably in tests that raise UniqueViolation directly), so
+    this degrades to None rather than raising a second error while handling
+    the first.
+    """
+    diag = getattr(exc, "diag", None)
+    return getattr(diag, "constraint_name", None) if diag is not None else None
+
 
 def _update_existing_listing(
     cur,
@@ -95,6 +114,7 @@ def _update_existing_listing(
                energy_rating = COALESCE(%s, energy_rating),
                city = COALESCE(%s, city), province = COALESCE(%s, province),
                postal_code = COALESCE(%s, postal_code), m2_plot = COALESCE(%s, m2_plot),
+               cadastral_ref = COALESCE(%s, cadastral_ref),
                features = CASE WHEN %s THEN %s ELSE features END
          WHERE id = %s
         """,
@@ -115,6 +135,7 @@ def _update_existing_listing(
             canonical.province,
             canonical.postal_code,
             canonical.m2_plot,
+            canonical.cadastral_ref,
             bool(canonical.features),
             list(canonical.features),
             property_id,
@@ -205,8 +226,9 @@ def _upsert_canonical_listing(conn, canonical: CanonicalListingVersion) -> None:
                 INSERT INTO property
                     (address, lat, lon, property_type, m2_built, m2_useful,
                      rooms, bathrooms, floor, has_elevator, year_built, energy_rating,
-                     city, province, postal_code, m2_plot, features)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     city, province, postal_code, m2_plot, features, cadastral_ref)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s)
                 RETURNING id
                 """,
                 (
@@ -227,6 +249,7 @@ def _upsert_canonical_listing(conn, canonical: CanonicalListingVersion) -> None:
                     canonical.postal_code,
                     canonical.m2_plot,
                     list(canonical.features),
+                    canonical.cadastral_ref,
                 ),
             )
             property_id = cur.fetchone()[0]
@@ -258,7 +281,19 @@ def _upsert_canonical_listing(conn, canonical: CanonicalListingVersion) -> None:
                 ),
             )
             listing_id = cur.fetchone()[0]
-        except UniqueViolation:
+        except UniqueViolation as exc:
+            # Only the listing-level (source, external_id) collision is
+            # recoverable here — that's a concurrent run having won the race
+            # to insert the same listing, and the fix is to update its row
+            # instead. Any *other* unique violation (a property-level
+            # constraint, say) is a different failure whose recovery path
+            # this is not: the re-fetch below looks the listing up by
+            # (source, external_id), finds nothing, and dies on tuple-unpack
+            # with a TypeError that hides the real constraint name. Narrowed
+            # by constraint name so unrelated violations propagate honestly
+            # (issue #140).
+            if _constraint_name(exc) != _LISTING_SOURCE_EXTERNAL_ID_CONSTRAINT:
+                raise
             # Rolls back the whole uncommitted transaction, including the
             # `property` row this attempt just created — it was never
             # committed, so there's nothing orphaned to clean up. Re-fetch

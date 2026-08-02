@@ -1677,6 +1677,154 @@ class TestSchemaSupersetFieldsPersistAcrossRevisit:
             _cleanup(pg_conn, source)
 
 
+class TestUniqueViolationHandling:
+    """Issue #140 narrowed the UniqueViolation handler by constraint name.
+
+    The listing-level recovery it guards had no test at all before that
+    change, so a regression in the one path that *should* recover would
+    have been silent. These cover both directions: the recoverable
+    collision still recovers, and anything else propagates honestly instead
+    of dying on a tuple-unpack TypeError inside the wrong handler.
+    """
+
+    def test_listing_collision_still_recovers_by_updating_in_place(self, pg_conn):
+        """Simulates the concurrent-run race the handler exists for.
+
+        A competing run inserts the same (source, external_id) between our
+        SELECT and our INSERT. Reproduced by blinding the initial lookup so
+        the code takes the INSERT path against a row that already exists.
+        """
+        _apply_schema(pg_conn)
+        source = "unique-violation-recovery-test"
+        try:
+            orchestrator._upsert_canonical_listing(
+                pg_conn,
+                _minimal_canonical("race-1", source, current_price=Decimal(100000)),
+            )
+
+            class _BlindFirstLookup:
+                """Returns None once, so the caller believes the row is new."""
+
+                def __init__(self, conn):
+                    self._conn = conn
+                    self._blinded = False
+
+                def cursor(self):
+                    inner = self._conn.cursor()
+                    outer = self
+
+                    class _Cur:
+                        def __enter__(self_inner):
+                            inner.__enter__()
+                            return self_inner
+
+                        def __exit__(self_inner, *exc):
+                            return inner.__exit__(*exc)
+
+                        def execute(self_inner, *a, **kw):
+                            return inner.execute(*a, **kw)
+
+                        def fetchone(self_inner):
+                            row = inner.fetchone()
+                            if not outer._blinded:
+                                outer._blinded = True
+                                return None
+                            return row
+
+                        def __getattr__(self_inner, name):
+                            return getattr(inner, name)
+
+                    return _Cur()
+
+                def __getattr__(self, name):
+                    return getattr(self._conn, name)
+
+            orchestrator._upsert_canonical_listing(
+                _BlindFirstLookup(pg_conn),
+                _minimal_canonical("race-1", source, current_price=Decimal(175000)),
+            )
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*), MAX(current_price) FROM listing "
+                    "WHERE source = %s AND external_id = %s",
+                    (source, "race-1"),
+                )
+                count, price = cur.fetchone()
+            assert count == 1, "the race must update in place, not duplicate"
+            assert price == Decimal(175000), "the losing run's data must still land"
+        finally:
+            _cleanup(pg_conn, source)
+
+    def test_constraint_name_degrades_to_none_without_diag(self):
+        """A synthesised exception must not crash the handler while handling."""
+        assert orchestrator._constraint_name(ValueError("no diag here")) is None
+
+
+class TestCadastralRefPersistence:
+    """Issue #140: the dedup engine's definitive signal needs the column written."""
+
+    def test_cadastral_ref_persists_and_survives_a_revisit_that_omits_it(self, pg_conn):
+        _apply_schema(pg_conn)
+        source = "cadastral-persistence-test"
+        try:
+            first = _minimal_canonical(
+                "cad-1", source, cadastral_ref="9872023VH5797S0001WX"
+            )
+            orchestrator._upsert_canonical_listing(pg_conn, first)
+
+            # A source that doesn't publish the reference must not blank it —
+            # matters once dedup points two listings at one property row.
+            second = _minimal_canonical("cad-1", source)
+            orchestrator._upsert_canonical_listing(pg_conn, second)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT p.cadastral_ref FROM listing l "
+                    "JOIN property p ON p.id = l.property_id "
+                    "WHERE l.source = %s AND l.external_id = %s",
+                    (source, "cad-1"),
+                )
+                (cadastral_ref,) = cur.fetchone()
+            assert cadastral_ref == "9872023VH5797S0001WX"
+        finally:
+            _cleanup(pg_conn, source)
+
+    def test_two_sources_may_persist_the_same_cadastral_ref(self, pg_conn):
+        """The UNIQUE constraint that made signal 1 unreachable is gone.
+
+        Before #140 the second ingest raised a property-level
+        UniqueViolation, which the listing-level handler then mis-attributed
+        and turned into a confusing TypeError.
+        """
+        _apply_schema(pg_conn)
+        source_a = "cadastral-shared-a"
+        source_b = "cadastral-shared-b"
+        ref = "1234567AB1234C0001AB"
+        try:
+            orchestrator._upsert_canonical_listing(
+                pg_conn, _minimal_canonical("shared-1", source_a, cadastral_ref=ref)
+            )
+            orchestrator._upsert_canonical_listing(
+                pg_conn, _minimal_canonical("shared-1", source_b, cadastral_ref=ref)
+            )
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(DISTINCT p.id) FROM listing l "
+                    "JOIN property p ON p.id = l.property_id "
+                    "WHERE p.cadastral_ref = %s",
+                    (ref,),
+                )
+                assert cur.fetchone()[0] == 2, (
+                    "two distinct property rows must be able to share a "
+                    "cadastral_ref — that state is what signal 1 detects"
+                )
+        finally:
+            _cleanup(pg_conn, source_a)
+            _cleanup(pg_conn, source_b)
+
+
 class TestMaterializeAllNotification:
     """Issue #94: a completed connector run must trigger materialization +
     scoring in the dashboard, instead of leaving fresh listings unscored

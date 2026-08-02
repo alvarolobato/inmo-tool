@@ -1,12 +1,22 @@
-"""Signal 1: cadastral reference exact match — opportunistic only.
+"""Signal 1: cadastral reference exact match — definitive, and now live.
 
-No connector or lookup service in this project resolves `property.cadastral_ref`
-(a dedicated Catastro lookup connector was scoped and then cancelled — see
-issue #42, closed as not planned, and issue #16's Context note). This signal
-exists purely for the case where `cadastral_ref` happens to be populated by
-some other means later (a future connector, manual entry) — expect it to
-fire rarely to never against this project's actual data. Signals 2-5 in the
-sibling modules are the real workhorses.
+A cadastral reference identifies exactly one real property, so a match here
+is conclusive rather than probabilistic like signals 2-5 — hence confidence
+1.000 and an unconditional merge.
+
+This signal was dormant by construction until issue #140. No connector
+populated `property.cadastral_ref` (issue #42, a dedicated Catastro lookup
+connector, was cancelled on the correct reasoning that deriving a reference
+needs street-number-precise addresses consumer portals withhold), *and*
+the column carried a UNIQUE constraint that made two property rows sharing
+a reference — the exact state this signal detects — impossible to represent.
+
+Both are resolved. Servicer/REO portals publish the reference directly,
+because they hold the asset and therefore the registry data: Solvia does on
+every listing. Consumer portals still generally don't, and Vivantial and
+Servihabitat were both checked and don't either, so expect this to fire on
+servicer-sourced pairs and stay quiet elsewhere. Signals 2-5 remain the
+workhorses by volume; this one is the tiebreaker that is never wrong.
 """
 
 from __future__ import annotations
