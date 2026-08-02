@@ -18,444 +18,221 @@ EXCEPTION WHEN OTHERS THEN
 END
 $$;
 
--- PostgreSQL DDL for the PowerShop Analytics mirror schema.
--- All tables use the ps_ prefix.
--- Run once to create tables; safe to re-run (IF NOT EXISTS).
+-- PostgreSQL DDL for the inmo-tool canonical real-estate data model.
+-- See docs/architecture/data-model.md for the full ER description and
+-- design rationale (especially the property_id-vs-listing_id keying
+-- decision in profile_listing_state/feedback_event) and
+-- docs/decisions/D-002-numeric-vs-uuid-keys.md for the PK strategy.
 --
--- Type conventions:
---   4D REAL PKs  → NUMERIC(20,3)  (3 decimal places — some PKs like RegCliente and
---                  RegVentas have 3-decimal-place values (e.g. 4.152, 4.153).
---                  Using scale 2 would round them and cause duplicate-key collisions.
---                  NOT float8 — avoids binary-float precision artifacts.
---                  ETL must insert PK values as Python Decimal (not float) to prevent
---                  precision loss before the value reaches PostgreSQL.
---   4D REAL FKs  → NUMERIC(20,3)  (same precision as the referenced PK)
---   Dates        → DATE
---   Times        → TIME
---   Text         → TEXT
---   Amounts      → NUMERIC(15,2)
---   Boolean      → BOOLEAN
---   Integer counts → INTEGER
+-- Run once to create tables; safe to re-run (IF NOT EXISTS).
 
 -- ============================================================
--- Catalog
+-- Core entities
 -- ============================================================
 
-CREATE TABLE IF NOT EXISTS ps_articulos (
-    reg_articulo     NUMERIC(20,3) PRIMARY KEY,
-    codigo           TEXT,
-    ccrefejofacm     TEXT,         -- "Referencia" — primary business identifier (e.g. "V26212484")
-    descripcion      TEXT,
-    codigo_barra     TEXT,
-    num_familia      NUMERIC(20,3),
-    num_departament  NUMERIC(20,3),
-    num_color        NUMERIC(20,3),
-    num_temporada    NUMERIC(20,3),
-    num_marca        NUMERIC(20,3),
-    num_proveedor    NUMERIC(20,3),
-    precio_coste     NUMERIC(15,2),
-    precio1          NUMERIC(15,2),  -- PVP tarifa 1 (4D Articulos.Precio1)
-    pr_coste_ne      NUMERIC(15,2),
-    p_iva            NUMERIC(5,2),
-    anulado          BOOLEAN,
-    fecha_creacion   DATE,
-    fecha_modifica   DATE,
-    color            TEXT,
-    clave_temporada  TEXT,
-    modelo           TEXT,
-    sexo             TEXT
+CREATE TABLE IF NOT EXISTS property (
+    id             BIGSERIAL    PRIMARY KEY,
+    cadastral_ref  TEXT         UNIQUE,
+    address        TEXT,
+    lat            NUMERIC(9,6),
+    lon            NUMERIC(9,6),
+    property_type  TEXT         CHECK (property_type IN ('piso','chalet','atico','local','nave','garaje','terreno','edificio')),
+    m2_built       NUMERIC(8,2),
+    m2_useful      NUMERIC(8,2),
+    rooms          SMALLINT,
+    bathrooms      SMALLINT,
+    floor          TEXT,
+    has_elevator   BOOLEAN,
+    year_built     SMALLINT,
+    energy_rating  TEXT,
+    created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
--- Mirrors created before precio1 existed: CREATE TABLE IF NOT EXISTS does not add columns.
-ALTER TABLE ps_articulos ADD COLUMN IF NOT EXISTS precio1 NUMERIC(15, 2);
+CREATE INDEX IF NOT EXISTS idx_property_lat_lon ON property (lat, lon);
 
-CREATE TABLE IF NOT EXISTS ps_familias (
-    reg_familia      NUMERIC(20,3) PRIMARY KEY,
-    clave            TEXT,
-    fami_grup_marc   TEXT,
-    coeficiente1     NUMERIC(8,4),
-    coeficiente2     NUMERIC(8,4),
-    cuenta_ventas    TEXT,
-    presupuesto      NUMERIC(15,2),
-    anulado          BOOLEAN,
-    serie_tallas     TEXT,
-    clave_seccion    TEXT
+-- listing.property_id is NOT NULL by design: every listing gets its own
+-- singleton `property` row created at ingest time, never a deferred-null
+-- FK. Dedup (Phase 2 task 2.2, issue #16) reassigns/unions property_id
+-- onto an existing property when it matches two listings, rather than
+-- filling in a previously-empty reference. See
+-- docs/architecture/data-model.md.
+CREATE TABLE IF NOT EXISTS listing (
+    id             BIGSERIAL    PRIMARY KEY,
+    property_id    BIGINT       NOT NULL REFERENCES property(id),
+    source         TEXT         NOT NULL,
+    external_id    TEXT         NOT NULL,
+    url            TEXT,
+    listing_kind   TEXT         CHECK (listing_kind IN ('particular','agency')),
+    status         TEXT         NOT NULL DEFAULT 'active' CHECK (status IN ('active','reserved','sold','withdrawn','expired')),
+    first_seen_at  TIMESTAMPTZ,
+    last_seen_at   TIMESTAMPTZ,
+    current_price  NUMERIC(12,2),
+    description    TEXT,
+    photo_urls     TEXT[],
+    contact_raw    TEXT,
+    raw_extra      JSONB        NOT NULL DEFAULT '{}',
+    UNIQUE (source, external_id)
 );
 
-CREATE TABLE IF NOT EXISTS ps_departamentos (
-    reg_departament  NUMERIC(20,3) PRIMARY KEY,
-    clave            TEXT,
-    depa_secc_fabr   TEXT,
-    jo_iva           NUMERIC(5,2),
-    presupuesto      NUMERIC(15,2),
-    anulado          BOOLEAN
-);
-
-CREATE TABLE IF NOT EXISTS ps_colores (
-    reg_color  NUMERIC(20,3) PRIMARY KEY,
-    clave      TEXT,
-    color      TEXT
-);
-
-CREATE TABLE IF NOT EXISTS ps_temporadas (
-    reg_temporada    NUMERIC(20,3) PRIMARY KEY,
-    clave            TEXT,
-    temporada_tipo   TEXT,
-    temporada_activ  BOOLEAN,
-    inicio_ventas    DATE,
-    fin_ventas       DATE,
-    inicio_rebajas   DATE,
-    fin_rebajas      DATE
-);
-
-CREATE TABLE IF NOT EXISTS ps_marcas (
-    reg_marca          NUMERIC(20,3) PRIMARY KEY,
-    clave              TEXT,
-    marca_tratamien    TEXT,
-    presupuesto        NUMERIC(15,2),
-    descuento_compra   NUMERIC(5,2)
-);
+CREATE INDEX IF NOT EXISTS idx_listing_property_id  ON listing (property_id);
+CREATE INDEX IF NOT EXISTS idx_listing_status       ON listing (status);
+CREATE INDEX IF NOT EXISTS idx_listing_last_seen_at ON listing (last_seen_at);
 
 -- ============================================================
--- Masters / dimensions
+-- Change tracking (append-only)
 -- ============================================================
 
-CREATE TABLE IF NOT EXISTS ps_clientes (
-    reg_cliente      NUMERIC(20,3) PRIMARY KEY,
-    num_cliente      NUMERIC(20,3),
-    nombre           TEXT,
-    nif              TEXT,
-    email            TEXT,
-    codigo_postal    TEXT,
-    poblacion        TEXT,
-    pais             TEXT,
-    fecha_creacion   DATE,
-    fecha_modifica   DATE,
-    ultima_compra_f  DATE
+CREATE TABLE IF NOT EXISTS listing_price_history (
+    id           BIGSERIAL     PRIMARY KEY,
+    listing_id   BIGINT        NOT NULL REFERENCES listing(id) ON DELETE CASCADE,
+    observed_at  TIMESTAMPTZ   NOT NULL,
+    price        NUMERIC(12,2) NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS ps_tiendas (
-    reg_tienda     NUMERIC(20,3) PRIMARY KEY,
-    codigo         TEXT,
-    -- 4D Tiendas.IdentificadorTienda — human-readable label shown in the
-    -- 4D POS form ("Lojas / Armazém") above the address block, e.g.
-    -- "Factory Rio Mo", "Valencia Alcantara". May be empty for some
-    -- stores; consumers fall back to poblacion, then "Tienda <codigo>".
-    identificador  TEXT,
-    poblacion      TEXT,
-    fecha_modifica DATE
+CREATE INDEX IF NOT EXISTS idx_listing_price_history_listing_observed
+    ON listing_price_history (listing_id, observed_at);
+
+CREATE TABLE IF NOT EXISTS listing_status_event (
+    id           BIGSERIAL    PRIMARY KEY,
+    listing_id   BIGINT       NOT NULL REFERENCES listing(id) ON DELETE CASCADE,
+    observed_at  TIMESTAMPTZ  NOT NULL,
+    status       TEXT         NOT NULL
 );
 
--- Idempotent migration for existing deployments where ps_tiendas was
--- created before the identificador / poblacion columns existed.
-ALTER TABLE ps_tiendas ADD COLUMN IF NOT EXISTS identificador TEXT;
-ALTER TABLE ps_tiendas ADD COLUMN IF NOT EXISTS poblacion TEXT;
-
-CREATE TABLE IF NOT EXISTS ps_proveedores (
-    reg_proveedor  NUMERIC(20,3) PRIMARY KEY,
-    nombre         TEXT,   -- 4D Proveedores.Proveedor (the actual name field; NombreComercial is empty)
-    nif            TEXT,
-    pais           TEXT,
-    f_modifica     DATE
-);
-
-CREATE TABLE IF NOT EXISTS ps_gc_comerciales (
-    reg_comercial   NUMERIC(20,3) PRIMARY KEY,
-    comercial       TEXT,
-    cif             TEXT,
-    zona_comercial  TEXT,
-    comision1       NUMERIC(5,2),
-    comision2       NUMERIC(5,2),
-    email           TEXT,
-    movil           TEXT
-);
+CREATE INDEX IF NOT EXISTS idx_listing_status_event_listing_observed
+    ON listing_status_event (listing_id, observed_at);
 
 -- ============================================================
--- Retail sales (Ventas domain)
--- All three tables require UPSERT — 19–21% of records are
--- modified after creation (returns, TBAI corrections, etc.).
+-- Owner identity (dedup signal input + GDPR-minimized retention)
 -- ============================================================
 
-CREATE TABLE IF NOT EXISTS ps_ventas (
-    reg_ventas       NUMERIC(20,3) PRIMARY KEY,
-    n_documento      NUMERIC(20,3),
-    serie_v          INTEGER,
-    tienda           TEXT,
-    fecha_creacion   DATE,
-    fecha_modifica   DATE,
-    -- 4D Ventas.Hora — time-of-day component, used by the home hero to
-    -- render a real intraday curve. NULL on rows synced before this
-    -- column existed; refilled on the next delta upsert per row.
-    hora_creacion    TIME,
-    total_si         NUMERIC(15,2),  -- VAT-exclusive total (use for analytics)
-    total            NUMERIC(15,2),  -- VAT-inclusive total (do not use for revenue)
-    num_cliente      NUMERIC(20,3),
-    codigo_cajero    TEXT,
-    cajero_nombre    TEXT,
-    tipo_venta       TEXT,
-    tipo_documento   TEXT,
-    forma            TEXT,
-    entrada          BOOLEAN,
-    pendiente        BOOLEAN,
-    pedido_web       TEXT
+CREATE TABLE IF NOT EXISTS owner_identity (
+    id                     BIGSERIAL    PRIMARY KEY,
+    phone                  TEXT,
+    name_normalized        TEXT,
+    agency_name            TEXT,
+    created_at             TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    last_linked_active_at  TIMESTAMPTZ
 );
 
--- Idempotent migration for existing deployments where ps_ventas
--- was created before the hora_creacion column existed.
-ALTER TABLE ps_ventas ADD COLUMN IF NOT EXISTS hora_creacion TIME;
-
-CREATE TABLE IF NOT EXISTS ps_lineas_ventas (
-    reg_lineas          NUMERIC(20,3) PRIMARY KEY,
-    num_ventas          NUMERIC(20,3),
-    n_documento         NUMERIC(20,3),
-    mes                 INTEGER,
-    tienda              TEXT,
-    codigo              TEXT,
-    descripcion         TEXT,
-    unidades            NUMERIC(10,2),
-    precio_neto_si      NUMERIC(15,2),  -- VAT-exclusive unit price
-    total_si            NUMERIC(15,2),  -- VAT-exclusive line total
-    precio_coste_ci     NUMERIC(15,2),
-    total_coste_si      NUMERIC(15,2),
-    fecha_creacion      DATE,
-    fecha_modifica      DATE
+CREATE TABLE IF NOT EXISTS listing_owner_identity (
+    listing_id        BIGINT NOT NULL REFERENCES listing(id) ON DELETE CASCADE,
+    owner_identity_id BIGINT NOT NULL REFERENCES owner_identity(id) ON DELETE CASCADE,
+    PRIMARY KEY (listing_id, owner_identity_id)
 );
 
-CREATE TABLE IF NOT EXISTS ps_pagos_ventas (
-    reg_pagos       NUMERIC(20,3) PRIMARY KEY,
-    num_ventas      NUMERIC(20,3),
-    forma           TEXT,
-    codigo_forma    TEXT,
-    importe_cob     NUMERIC(15,2),  -- "Importe Cobrado" — actual charged amount (use this)
-    fecha_creacion  DATE,
-    fecha_modifica  DATE,
-    tienda          TEXT,
-    entrada         BOOLEAN
+CREATE INDEX IF NOT EXISTS idx_listing_owner_identity_owner
+    ON listing_owner_identity (owner_identity_id);
+
+-- Retention default (issue #1 §17, owner-overridable): an owner_identity
+-- row is retained only while linked to at least one active listing. Once
+-- last_linked_active_at falls outside the retention window with no active
+-- listing referencing it, a scheduled job (owned by Phase 1.3's
+-- orchestrator, not this task) should purge/anonymize the row via this
+-- query shape:
+--
+--   UPDATE owner_identity
+--   SET phone = NULL, name_normalized = NULL, agency_name = NULL
+--   WHERE last_linked_active_at < NOW() - INTERVAL '90 days'
+--     AND id NOT IN (
+--       SELECT loi.owner_identity_id
+--       FROM listing_owner_identity loi
+--       JOIN listing l ON l.id = loi.listing_id
+--       WHERE l.status = 'active'
+--     );
+--
+-- 90 days is a default, not hardcoded elsewhere — the scheduler task
+-- should make the window configurable.
+
+-- ============================================================
+-- Search profiles (independent scoring "mandates" over shared data)
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS search_profile (
+    id             BIGSERIAL    PRIMARY KEY,
+    name           TEXT         NOT NULL,
+    scope          JSONB        NOT NULL DEFAULT '{}',
+    thesis_params  JSONB        NOT NULL DEFAULT '{}',
+    archived_at    TIMESTAMPTZ,
+    created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- profile_listing_state is keyed on (profile_id, property_id), NOT
+-- listing_id. This is load-bearing: once dedup (task 2.2) unions two
+-- listings from different sites into one property, this table must still
+-- carry exactly one score/feedback/pipeline-stage row per profile for
+-- that property. Keying on listing_id would let one deduplicated
+-- property carry two independent, possibly contradictory states per
+-- profile (e.g. rejected via its Idealista listing while its Fotocasa
+-- listing of the same property sits un-rejected) — silently defeating
+-- the entire point of deduplication. See docs/architecture/data-model.md.
+CREATE TABLE IF NOT EXISTS profile_listing_state (
+    profile_id       BIGINT       NOT NULL REFERENCES search_profile(id),
+    property_id      BIGINT       NOT NULL REFERENCES property(id),
+    score            NUMERIC(6,3),
+    rank_explanation TEXT,
+    pipeline_stage   TEXT         NOT NULL DEFAULT 'new',
+    notes            TEXT,
+    last_scored_at   TIMESTAMPTZ,
+    PRIMARY KEY (profile_id, property_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_profile_listing_state_property
+    ON profile_listing_state (property_id);
+
+-- feedback_event.property_id (not listing_id) is what the feedback's
+-- identity is keyed on, matching profile_listing_state above. listing_id
+-- is kept only as an optional "which site listing was the user actually
+-- looking at" audit detail — never used to identify what the feedback
+-- applies to.
+CREATE TABLE IF NOT EXISTS feedback_event (
+    id             BIGSERIAL    PRIMARY KEY,
+    profile_id     BIGINT       REFERENCES search_profile(id),
+    property_id    BIGINT       NOT NULL REFERENCES property(id),
+    listing_id     BIGINT       REFERENCES listing(id),
+    feedback_type  TEXT         NOT NULL CHECK (feedback_type IN ('accept','reject','star','note','correction')),
+    value          JSONB,
+    note           TEXT,
+    created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_event_profile_property
+    ON feedback_event (profile_id, property_id);
+
+-- ============================================================
+-- AI assessments (Phase 4 generates these; this task only creates
+-- the table). listing_id is NOT NULL — an assessment is always about
+-- a specific listing's published content (description/photos), even
+-- though scoring/feedback elsewhere key on property_id.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS ai_assessment (
+    id              BIGSERIAL    PRIMARY KEY,
+    listing_id      BIGINT       NOT NULL REFERENCES listing(id),
+    assessment_type TEXT         NOT NULL CHECK (assessment_type IN ('occupancy','condition','redflags','extract')),
+    result          JSONB        NOT NULL,
+    confidence      NUMERIC(4,3),
+    model           TEXT,
+    prompt_version  TEXT,
+    generated_at    TIMESTAMPTZ,
+    UNIQUE (listing_id, assessment_type, prompt_version)
 );
 
 -- ============================================================
--- Stock
+-- Deduplication audit trail (Phase 2 task 2.2, issue #16, writes here)
 -- ============================================================
 
--- Normalised per-(article, store, size) stock.
--- Source: Exportaciones wide-format table (Talla1..Talla34 × Stock1..Stock34).
--- Compound PK because TiendaCodigo has format "store/article" (e.g. "104/169").
-CREATE TABLE IF NOT EXISTS ps_stock_tienda (
-    codigo          TEXT            NOT NULL,
-    tienda_codigo   TEXT            NOT NULL,  -- format: "store_code/article_code"
-    tienda          TEXT,
-    talla           TEXT            NOT NULL,
-    stock           INTEGER,
-    cc_stock        NUMERIC(15,2),
-    st_stock        NUMERIC(15,2),
-    fecha_modifica  DATE,
-    PRIMARY KEY (codigo, tienda_codigo, talla)
+CREATE TABLE IF NOT EXISTS property_merge_log (
+    id                 BIGSERIAL    PRIMARY KEY,
+    property_id        BIGINT       REFERENCES property(id),
+    merged_listing_ids BIGINT[],
+    match_basis        TEXT         CHECK (match_basis IN ('cadastral','address_coords','phone','photo_hash','fuzzy')),
+    confidence         NUMERIC(4,3),
+    created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    reverted_at        TIMESTAMPTZ
 );
 
--- Central-warehouse stock per article (source: CCStock 4D table).
--- One row per article (num_articulo PK). stock = SUM(Stock1..Stock34) decoded
--- from signed-int16 WORD fields (same Data_Type=3, Data_Length=2 as
--- Exportaciones.StockN — see D-017 and sync/ccstock.py). Full-refresh nightly.
-CREATE TABLE IF NOT EXISTS ps_stock_central (
-    num_articulo    NUMERIC(20,3) PRIMARY KEY,  -- 4D CCStock.NumArticulo (Real PK, .99 suffix)
-    stock           INTEGER,                     -- SUM of decoded Stock1..Stock34
-    fecha_modifica  DATE                         -- 4D CCStock.FechaModifica
-);
-
--- Transfer movements between stores (append-only by fecha_s).
-CREATE TABLE IF NOT EXISTS ps_traspasos (
-    reg_traspaso    NUMERIC(20,3) PRIMARY KEY,
-    codigo          TEXT,
-    descripcion     TEXT,
-    talla           TEXT,
-    unidades_s      NUMERIC(10,2),
-    unidades_e      NUMERIC(10,2),
-    tienda_salida   TEXT,
-    tienda_entrada  TEXT,
-    fecha_s         DATE,
-    fecha_e         DATE,
-    tipo            TEXT,
-    concepto        TEXT,
-    entrada         BOOLEAN
-);
-
--- ============================================================
--- Wholesale (Gestión Comercial — GC* tables)
--- ============================================================
-
--- GCLinAlbarane and GCLinFacturas have no modification timestamp.
--- Delta is derived from the parent header's Modifica field.
-
-CREATE TABLE IF NOT EXISTS ps_gc_albaranes (
-    reg_albaran     NUMERIC(20,3) PRIMARY KEY,
-    n_albaran       NUMERIC(20,3),
-    num_cliente     NUMERIC(20,3),
-    fecha_envio     DATE,
-    fecha_valor     DATE,
-    modifica        DATE,
-    base1           NUMERIC(15,2),
-    base2           NUMERIC(15,2),
-    base3           NUMERIC(15,2),
-    entregadas      NUMERIC(10,2),
-    transportista   TEXT,
-    num_comercial   NUMERIC(20,3),
-    temporada       TEXT,
-    abono           BOOLEAN
-);
-
-CREATE TABLE IF NOT EXISTS ps_gc_lin_albarane (
-    reg_linea        NUMERIC(20,3) PRIMARY KEY,
-    n_albaran        NUMERIC(20,3),   -- visible albarán number (NOT unique; do not use for line→header joins)
-    num_albaran      NUMERIC(20,3),   -- FK → ps_gc_albaranes.reg_albaran (4D record ID, despite the "num_" name)
-    codigo           TEXT,
-    articulo         TEXT,
-    descripcion      TEXT,
-    color            TEXT,
-    fecha_albaran    DATE,
-    unidades         NUMERIC(10,2),
-    precio_neto      NUMERIC(15,2),
-    total            NUMERIC(15,2),
-    num_cliente      NUMERIC(20,3),
-    num_familia      NUMERIC(20,3),
-    num_departament  NUMERIC(20,3),
-    num_temporada    NUMERIC(20,3),
-    num_marca        NUMERIC(20,3),
-    num_color        NUMERIC(20,3),
-    num_comercial    NUMERIC(20,3),
-    mes              INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS ps_gc_facturas (
-    reg_factura     NUMERIC(20,3) PRIMARY KEY,
-    n_factura       NUMERIC(20,3),
-    fecha_factura   DATE,
-    modifica        DATE,
-    base1           NUMERIC(15,2),
-    base2           NUMERIC(15,2),
-    base3           NUMERIC(15,2),
-    num_cliente     NUMERIC(20,3),
-    num_comercial   NUMERIC(20,3),
-    abono           BOOLEAN,
-    total_factura   NUMERIC(15,2)
-);
-
-CREATE TABLE IF NOT EXISTS ps_gc_lin_facturas (
-    reg_linea        NUMERIC(20,3) PRIMARY KEY,
-    num_factura      NUMERIC(20,3),   -- FK → ps_gc_facturas.reg_factura (4D record ID, despite the "num_" name)
-    codigo           TEXT,
-    descripcion      TEXT,
-    unidades         NUMERIC(10,2),
-    precio_neto      NUMERIC(15,2),
-    total            NUMERIC(15,2),
-    total_coste      NUMERIC(15,2),
-    p_iva            NUMERIC(5,2),
-    fecha_factura    DATE,
-    num_cliente      NUMERIC(20,3),
-    num_familia      NUMERIC(20,3),
-    num_departament  NUMERIC(20,3),
-    num_marca        NUMERIC(20,3),
-    num_color        NUMERIC(20,3),
-    num_comercial    NUMERIC(20,3),
-    mes              INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS ps_gc_pedidos (
-    reg_pedido       NUMERIC(20,3) PRIMARY KEY,
-    n_pedido         NUMERIC(20,3),
-    fecha_pedido     DATE,
-    modifica         DATE,
-    num_cliente      NUMERIC(20,3),
-    comercial        TEXT,
-    total_pedido     NUMERIC(15,2),
-    unidades         NUMERIC(10,2),
-    entregadas       NUMERIC(10,2),
-    pendientes       NUMERIC(10,2),
-    temporada        TEXT,
-    pedido_cerrado   BOOLEAN,
-    abono            BOOLEAN
-);
-
-CREATE TABLE IF NOT EXISTS ps_gc_lin_pedidos (
-    reg_linea      NUMERIC(20,3) PRIMARY KEY,
-    num_pedido     NUMERIC(20,3),
-    codigo         TEXT,
-    descripcion    TEXT,
-    unidades       NUMERIC(10,2),
-    entregadas     NUMERIC(10,2),
-    precio_neto    NUMERIC(15,2),
-    total          NUMERIC(15,2),
-    fecha_pedido   DATE
-);
-
--- ============================================================
--- Purchasing & invoicing
--- Note: "LineasCompras" does not exist — the correct table is
--- CCLineasCompr, mapped here as ps_lineas_compras.
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS ps_compras (
-    reg_pedido       NUMERIC(20,3) PRIMARY KEY,
-    fecha_pedido     DATE,
-    fecha_recibido   DATE,
-    modificada       DATE,
-    num_proveedor    NUMERIC
-);
-
--- CCLineasCompr in 4D (NOT LineasCompras — that table does not exist).
--- Links to Compras via NumPedido, and to Tiendas via NumTienda.
--- Fields unidades, precio_coste, precio_neto_si, total_si, num_proveedor confirmed
--- present in 4D CCLineasCompr via _USER_COLUMNS (DATA_TYPE=6, Real), 2026-05-01.
-CREATE TABLE IF NOT EXISTS ps_lineas_compras (
-    reg_linea_compra  NUMERIC(20,3) PRIMARY KEY,
-    num_pedido        NUMERIC(20,3),
-    num_tienda        NUMERIC(20,3),
-    fecha             DATE,
-    num_articulo      NUMERIC,
-    unidades          NUMERIC(15,2),   -- CCLineasCompr.Unidades (Real)
-    precio_coste      NUMERIC(15,2),   -- CCLineasCompr.PrecioCoste (Real)
-    precio_neto_si    NUMERIC(15,2),   -- CCLineasCompr.PrecioNetoSI (Real)
-    total_si          NUMERIC(15,2),   -- CCLineasCompr.TotalSI (Real)
-    num_proveedor     NUMERIC(20,3)    -- CCLineasCompr.NumProveedor (Real FK)
-);
-
--- Migration: add new columns to existing installs that have the old schema.
-ALTER TABLE ps_lineas_compras ADD COLUMN IF NOT EXISTS unidades       NUMERIC(15,2);
-ALTER TABLE ps_lineas_compras ADD COLUMN IF NOT EXISTS precio_coste   NUMERIC(15,2);
-ALTER TABLE ps_lineas_compras ADD COLUMN IF NOT EXISTS precio_neto_si NUMERIC(15,2);
-ALTER TABLE ps_lineas_compras ADD COLUMN IF NOT EXISTS total_si       NUMERIC(15,2);
-ALTER TABLE ps_lineas_compras ADD COLUMN IF NOT EXISTS num_proveedor  NUMERIC(20,3);
-
-CREATE TABLE IF NOT EXISTS ps_facturas (
-    reg_factura     NUMERIC(20,3) PRIMARY KEY,
-    fecha_factura   DATE,
-    fecha_modifica  DATE
-);
-
--- Albaranes: delivery notes from suppliers.
--- NPedido FK to Compras and NumProveedor FK confirmed in 4D via _USER_COLUMNS
--- (DATA_TYPE=6, Real), 2026-05-01.
-CREATE TABLE IF NOT EXISTS ps_albaranes (
-    reg_albaran    NUMERIC(20,3) PRIMARY KEY,
-    fecha_recibido DATE,
-    modificada     DATE,
-    num_pedido     NUMERIC(20,3),   -- Albaranes.NPedido → Compras.RegPedido
-    num_proveedor  NUMERIC(20,3),   -- Albaranes.NumProveedor → Proveedores.RegProveedor
-    proveedor      TEXT             -- Albaranes.Proveedor (denormalised name)
-);
-
--- Migration: add new columns to existing installs that have the old schema.
-ALTER TABLE ps_albaranes ADD COLUMN IF NOT EXISTS num_pedido    NUMERIC(20,3);
-ALTER TABLE ps_albaranes ADD COLUMN IF NOT EXISTS num_proveedor NUMERIC(20,3);
-ALTER TABLE ps_albaranes ADD COLUMN IF NOT EXISTS proveedor     TEXT;
-
--- ps_facturas_compra: no reg_* PK found in 4D; strategy is full-refresh only
--- (TRUNCATE ... RESTART IDENTITY + INSERT).  The surrogate key is for internal
--- reference only and is reset on each load — never used as a join key.
-CREATE TABLE IF NOT EXISTS ps_facturas_compra (
-    id             INTEGER  GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    fecha_factura  DATE,
-    fecha_valor    DATE
-);
 
 -- ============================================================
 -- Dashboard App
@@ -882,136 +659,14 @@ CREATE TABLE IF NOT EXISTS turn_events (
 CREATE INDEX IF NOT EXISTS idx_turn_events_turn_seq
     ON turn_events (turn_id, seq);
 
--- ============================================================
--- Indexes on visible document numbers (n_albaran / n_factura)
--- These accelerate lookups by the human-visible document number.
--- They are NOT used for line→header joins: line-level FKs target the
--- 4D record ID (reg_albaran / reg_factura), see ps_gc_lin_albarane and
--- ps_gc_lin_facturas above.
--- ============================================================
-
--- n_albaran and n_factura are NOT unique (multiple albaranes/facturas can share
--- the same document number across different series or corrections), so they
--- cannot serve as FK targets.
-CREATE INDEX IF NOT EXISTS idx_alb_nalbaran ON ps_gc_albaranes(n_albaran);
-CREATE INDEX IF NOT EXISTS idx_fac_nfactura  ON ps_gc_facturas(n_factura);
 
 -- ============================================================
 -- Indexes
 -- ============================================================
 
--- FK indexes (JOIN acceleration)
-CREATE INDEX IF NOT EXISTS idx_lv_num_ventas   ON ps_lineas_ventas(num_ventas);
-CREATE INDEX IF NOT EXISTS idx_pv_num_ventas   ON ps_pagos_ventas(num_ventas);
-CREATE INDEX IF NOT EXISTS idx_lv_codigo       ON ps_lineas_ventas(codigo);
-
--- Date indexes (delta queries, time filters).
--- fecha_modifica drives the ETL delta `WHERE FechaModifica > since`.
--- fecha_creacion drives every dashboard query that filters on the
--- business day (hero, periods, daily trend, top-stores, ops). Without
--- the fecha_creacion index, /api/home falls back to ~22 parallel seq
--- scans of ~924k rows each (~12 s wall time). With it, the same page
--- responds in ~0.9 s.
-CREATE INDEX IF NOT EXISTS idx_ventas_fecha_mod      ON ps_ventas(fecha_modifica);
-CREATE INDEX IF NOT EXISTS idx_lv_fecha_mod          ON ps_lineas_ventas(fecha_modifica);
-CREATE INDEX IF NOT EXISTS idx_ventas_fecha_creacion ON ps_ventas(fecha_creacion);
-CREATE INDEX IF NOT EXISTS idx_lv_fecha_creacion     ON ps_lineas_ventas(fecha_creacion);
-CREATE INDEX IF NOT EXISTS idx_lv_mes                ON ps_lineas_ventas(mes);
-
--- Store indexes (per-store analytics)
-CREATE INDEX IF NOT EXISTS idx_ventas_tienda ON ps_ventas(tienda);
-CREATE INDEX IF NOT EXISTS idx_lv_tienda     ON ps_lineas_ventas(tienda);
-
--- Stock indexes
-CREATE INDEX IF NOT EXISTS idx_stock_codigo ON ps_stock_tienda(codigo);
-CREATE INDEX IF NOT EXISTS idx_stock_tienda ON ps_stock_tienda(tienda);
-
--- Purchasing enrichment indexes
-CREATE INDEX IF NOT EXISTS idx_lc_num_proveedor ON ps_lineas_compras(num_proveedor);
-CREATE INDEX IF NOT EXISTS idx_alb_num_pedido    ON ps_albaranes(num_pedido);
-CREATE INDEX IF NOT EXISTS idx_alb_num_proveedor ON ps_albaranes(num_proveedor);
-
 -- Dashboard indexes
 CREATE INDEX IF NOT EXISTS idx_dashboard_versions_dashboard_id ON dashboard_versions(dashboard_id);
 CREATE INDEX IF NOT EXISTS idx_dashboards_updated_at ON dashboards(updated_at);
-
--- Wholesale line-table indexes
--- idx_gla_nalbaran indexes the visible albarán number on the line table for
--- lookups by document number.  Line→header joins use num_albaran → reg_albaran.
-CREATE INDEX IF NOT EXISTS idx_gla_nalbaran   ON ps_gc_lin_albarane(n_albaran);
-CREATE INDEX IF NOT EXISTS idx_gla_codigo     ON ps_gc_lin_albarane(codigo);
--- idx_glf_numfactura accelerates the line→header join: num_factura points to
--- ps_gc_facturas.reg_factura (4D record ID), not n_factura.
-CREATE INDEX IF NOT EXISTS idx_glf_numfactura ON ps_gc_lin_facturas(num_factura);
-CREATE INDEX IF NOT EXISTS idx_glf_codigo     ON ps_gc_lin_facturas(codigo);
-
--- ============================================================
--- Foreign key constraints (idempotent, NOT VALID DEFERRABLE)
--- NOT VALID: skips validation of existing rows (safe for pre-loaded data).
--- DEFERRABLE INITIALLY DEFERRED: checked at transaction end, not per-statement.
--- ============================================================
-
-DO $$
-BEGIN
-  -- Retail sales FK constraints intentionally omitted.
-  -- lineas_ventas/pagos_ventas → ps_ventas FKs cause sync failures on timing
-  -- races: a new Venta created between the ventas sync and the lineas_ventas sync
-  -- is not yet in ps_ventas when lineas_ventas commits, triggering a violation.
-  -- This is an analytics read-only mirror; FK integrity is enforced by the source
-  -- (4D). The next ventas delta sync will pick up any temporarily-orphaned rows.
-  -- Drop existing constraints if present (migration).
-  IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_lv_ventas') THEN
-    ALTER TABLE ps_lineas_ventas DROP CONSTRAINT fk_lv_ventas;
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_pv_ventas') THEN
-    ALTER TABLE ps_pagos_ventas DROP CONSTRAINT fk_pv_ventas;
-  END IF;
-
-  -- Product hierarchy
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_art_familia') THEN
-    ALTER TABLE ps_articulos ADD CONSTRAINT fk_art_familia
-      FOREIGN KEY (num_familia) REFERENCES ps_familias(reg_familia)
-      NOT VALID DEFERRABLE INITIALLY DEFERRED;
-  END IF;
-
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_art_depto') THEN
-    ALTER TABLE ps_articulos ADD CONSTRAINT fk_art_depto
-      FOREIGN KEY (num_departament) REFERENCES ps_departamentos(reg_departament)
-      NOT VALID DEFERRABLE INITIALLY DEFERRED;
-  END IF;
-
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_art_color') THEN
-    ALTER TABLE ps_articulos ADD CONSTRAINT fk_art_color
-      FOREIGN KEY (num_color) REFERENCES ps_colores(reg_color)
-      NOT VALID DEFERRABLE INITIALLY DEFERRED;
-  END IF;
-
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_art_temp') THEN
-    ALTER TABLE ps_articulos ADD CONSTRAINT fk_art_temp
-      FOREIGN KEY (num_temporada) REFERENCES ps_temporadas(reg_temporada)
-      NOT VALID DEFERRABLE INITIALLY DEFERRED;
-  END IF;
-
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_art_marca') THEN
-    ALTER TABLE ps_articulos ADD CONSTRAINT fk_art_marca
-      FOREIGN KEY (num_marca) REFERENCES ps_marcas(reg_marca)
-      NOT VALID DEFERRABLE INITIALLY DEFERRED;
-  END IF;
-
-  -- Wholesale: line→header relations exist (lin_albarane.num_albaran →
-  -- albaranes.reg_albaran, lin_facturas.num_factura → facturas.reg_factura),
-  -- but explicit FK constraints are intentionally omitted — same timing-race
-  -- rationale as retail sales above (header may sync after first line batch).
-  -- The visible-number indexes (idx_alb_nalbaran, idx_fac_nfactura) accelerate
-  -- queries by document number; n_albaran / n_factura are NOT join targets.
-
-  -- Purchasing
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_lc_compras') THEN
-    ALTER TABLE ps_lineas_compras ADD CONSTRAINT fk_lc_compras
-      FOREIGN KEY (num_pedido) REFERENCES ps_compras(reg_pedido)
-      NOT VALID DEFERRABLE INITIALLY DEFERRED;
-  END IF;
-END $$;
 
 -- (Backfill migration removed — chat_messages_* columns dropped above.
 --  Conversation history lives exclusively in conversation_messages.)
@@ -1026,56 +681,10 @@ CREATE TABLE IF NOT EXISTS etl_one_time_migrations (
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- One-time migration: re-key ps_traspasos after the scale-2 → scale-3 PK
--- quantization fix (issue #827). The pre-fix ETL rounded RegTraspaso to 2
--- decimals: 3-decimal source PKs collided (one row lost per collision via
--- ON CONFLICT DO NOTHING) and the survivors sit under wrong keys — which the
--- fixed ETL would duplicate when it re-inserts them under their correct keys
--- (ps_traspasos is append-only, never truncated). Wipe the table and clear
--- its watermark so the next sync re-pulls everything with correct keys.
--- Remove this block once it has run on production (follow-up PR, per AGENTS.md).
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM etl_one_time_migrations WHERE id = 'm827-traspasos-rekey'
-  ) THEN
-    TRUNCATE ps_traspasos;
-    DELETE FROM etl_watermarks WHERE table_name = 'traspasos';
-    INSERT INTO etl_one_time_migrations (id) VALUES ('m827-traspasos-rekey');
-  END IF;
-END $$;
-
 -- ============================================================
 -- ANALYZE (update planner statistics after initial load)
 -- ============================================================
 
-ANALYZE ps_articulos;
-ANALYZE ps_familias;
-ANALYZE ps_departamentos;
-ANALYZE ps_colores;
-ANALYZE ps_temporadas;
-ANALYZE ps_marcas;
-ANALYZE ps_clientes;
-ANALYZE ps_tiendas;
-ANALYZE ps_proveedores;
-ANALYZE ps_gc_comerciales;
-ANALYZE ps_ventas;
-ANALYZE ps_lineas_ventas;
-ANALYZE ps_pagos_ventas;
-ANALYZE ps_stock_tienda;
-ANALYZE ps_stock_central;
-ANALYZE ps_traspasos;
-ANALYZE ps_gc_albaranes;
-ANALYZE ps_gc_lin_albarane;
-ANALYZE ps_gc_facturas;
-ANALYZE ps_gc_lin_facturas;
-ANALYZE ps_gc_pedidos;
-ANALYZE ps_gc_lin_pedidos;
-ANALYZE ps_compras;
-ANALYZE ps_lineas_compras;
-ANALYZE ps_facturas;
-ANALYZE ps_albaranes;
-ANALYZE ps_facturas_compra;
 ANALYZE etl_watermarks;
 ANALYZE dashboards;
 ANALYZE dashboard_versions;
@@ -1085,3 +694,14 @@ ANALYZE etl_sync_run_tables;
 ANALYZE etl_manual_trigger;
 ANALYZE conversations;
 ANALYZE conversation_messages;
+ANALYZE property;
+ANALYZE listing;
+ANALYZE listing_price_history;
+ANALYZE listing_status_event;
+ANALYZE owner_identity;
+ANALYZE listing_owner_identity;
+ANALYZE search_profile;
+ANALYZE profile_listing_state;
+ANALYZE feedback_event;
+ANALYZE ai_assessment;
+ANALYZE property_merge_log;
