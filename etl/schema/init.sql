@@ -538,7 +538,12 @@ CREATE INDEX IF NOT EXISTS idx_connector_runs_started_at ON connector_runs (star
 CREATE TABLE IF NOT EXISTS extension_capture (
     id               BIGSERIAL    PRIMARY KEY,
     url              TEXT         NOT NULL,
-    html             TEXT         NOT NULL,
+    -- Nullable, not NOT NULL: nulled out once a capture reaches 'done' —
+    -- the raw HTML is only useful transiently, for debugging a failed
+    -- parse; keeping every full page capture forever is unbounded storage
+    -- growth for data with no ongoing value (Opus review, PR #87). A
+    -- 'failed' row keeps its html for debugging.
+    html             TEXT,
     connector_name   TEXT,
     status           TEXT         NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','done','failed')),
     error_msg        TEXT,

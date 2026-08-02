@@ -13,9 +13,10 @@
  * here), not automatically on new listing ingestion.
  */
 
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db-write";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
+import { adminApiKeyValid, adminUnauthorized } from "@/lib/admin-api-auth";
 
 interface CaptureRow {
   status: "pending" | "done" | "failed";
@@ -32,10 +33,15 @@ interface MatchedProfileRow {
 }
 
 export async function GET(
-  _request: Request,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<NextResponse> {
   const requestId = generateRequestId();
+  // Sequential integer IDs are otherwise enumerable, leaking capture
+  // titles/prices to anyone who can reach the dashboard (Opus review, PR #87).
+  if (!adminApiKeyValid(request)) {
+    return adminUnauthorized();
+  }
   const { id } = await params;
   const captureId = Number(id);
   if (!Number.isInteger(captureId) || captureId <= 0) {

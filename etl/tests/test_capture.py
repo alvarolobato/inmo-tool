@@ -121,8 +121,81 @@ class TestProcessPendingCaptures:
             assert listing_row[4] == property_id
             assert listing_row[5] == 273  # m2_built
             assert listing_row[6] == 4  # rooms
+
+            # Real coordinates from the embedded staticmap `center` param —
+            # an earlier version of this connector incorrectly concluded no
+            # coordinates exist anywhere on an Idealista page (Opus review,
+            # PR #87); confirm the fix actually reaches the persisted row,
+            # not just the connector's own unit tests.
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT lat, lon FROM property WHERE id = %s", (property_id,)
+                )
+                lat, lon = cur.fetchone()
+            assert lat is not None and lon is not None
+
+            # Retention: the raw captured HTML is only useful transiently
+            # (debugging a failed parse) — a 'done' row must not keep it
+            # forever (Opus review, PR #87).
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT html FROM extension_capture WHERE id = %s", (capture_id,)
+                )
+                (stored_html,) = cur.fetchone()
+            assert stored_html is None
         finally:
             _cleanup(pg_conn)
+
+    def test_failed_capture_keeps_html_for_debugging(self, pg_conn):
+        """Unlike a 'done' row, a 'failed' row's html is NOT nulled — it's
+        the only diagnostic available for why parsing failed."""
+        _apply_schema(pg_conn)
+        url = "https://www.some-unsupported-portal.example/listing/1"
+        with pg_conn.cursor() as cur:
+            cur.execute("DELETE FROM extension_capture WHERE url = %s", (url,))
+        pg_conn.commit()
+        try:
+            capture_id = _insert_pending(pg_conn, url, "<html>diagnostic</html>")
+            capture.process_pending_captures(pg_conn)
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, html FROM extension_capture WHERE id = %s",
+                    (capture_id,),
+                )
+                status, html = cur.fetchone()
+            assert status == "failed"
+            assert html == "<html>diagnostic</html>"
+        finally:
+            with pg_conn.cursor() as cur:
+                cur.execute("DELETE FROM extension_capture WHERE url = %s", (url,))
+            pg_conn.commit()
+
+    def test_javascript_scheme_url_rejected_defense_in_depth(self, pg_conn):
+        """The dashboard's capture route already rejects a non-http(s)
+        scheme at submission time, but etl/capture.py must not trust that
+        it always will — a `javascript:` URL with a legitimate-looking
+        hostname was verified end-to-end exploitable via a stored-XSS path
+        if it ever reached `listing.url` (Opus review, PR #87)."""
+        _apply_schema(pg_conn)
+        url = "javascript://idealista.com/inmueble/1/%0aalert(1)"
+        with pg_conn.cursor() as cur:
+            cur.execute("DELETE FROM extension_capture WHERE url = %s", (url,))
+        pg_conn.commit()
+        try:
+            capture_id = _insert_pending(pg_conn, url, "<html></html>")
+            capture.process_pending_captures(pg_conn)
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, error_msg FROM extension_capture WHERE id = %s",
+                    (capture_id,),
+                )
+                status, error_msg = cur.fetchone()
+            assert status == "failed"
+            assert error_msg is not None
+        finally:
+            with pg_conn.cursor() as cur:
+                cur.execute("DELETE FROM extension_capture WHERE url = %s", (url,))
+            pg_conn.commit()
 
     def test_unrecognized_url_marks_failed_not_crashed(self, pg_conn):
         _apply_schema(pg_conn)

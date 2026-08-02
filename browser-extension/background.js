@@ -76,9 +76,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 });
 
-async function getApiUrl() {
-  const config = await chrome.storage.sync.get(['apiUrl']);
-  return (config.apiUrl || 'http://localhost:4000').replace(/\/+$/, '');
+async function getApiConfig() {
+  const config = await chrome.storage.sync.get(['apiUrl', 'apiKey']);
+  return {
+    apiUrl: (config.apiUrl || 'http://localhost:4000').replace(/\/+$/, ''),
+    apiKey: config.apiKey || '',
+  };
 }
 
 /**
@@ -89,11 +92,11 @@ async function getApiUrl() {
  * (popup.js) polls CHECK_CAPTURE_STATUS with that id for the real result.
  */
 async function handleExtraction({ url, html }) {
-  const apiUrl = await getApiUrl();
+  const { apiUrl, apiKey } = await getApiConfig();
 
   const response = await fetch(`${apiUrl}/api/extension/capture`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-admin-key': apiKey },
     body: JSON.stringify({ url, html }),
   });
 
@@ -106,9 +109,11 @@ async function handleExtraction({ url, html }) {
 }
 
 async function handleCheckStatus(captureId) {
-  const apiUrl = await getApiUrl();
+  const { apiUrl, apiKey } = await getApiConfig();
 
-  const response = await fetch(`${apiUrl}/api/extension/capture/${captureId}`);
+  const response = await fetch(`${apiUrl}/api/extension/capture/${captureId}`, {
+    headers: { 'x-admin-key': apiKey },
+  });
 
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));

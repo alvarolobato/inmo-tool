@@ -98,12 +98,16 @@ class TestNormalize:
             "https://img4.idealista.com/blur/WEB_DETAIL/0/id.pro.es.image.master/c0/ac/cc/1382500227.jpg",
         )
         assert canonical.raw_extra["title"] == "Duplex for sale in Calle de Alcalá"
+        # Real coordinates from the embedded Google Static Maps `center`
+        # param (see _coordinates_from_staticmap) — an earlier version of
+        # this connector incorrectly concluded no coordinates exist
+        # anywhere in Idealista's page structure (Opus review, PR #87).
+        assert canonical.lat == Decimal("40.42569080")
+        assert canonical.lon == Decimal("-3.67632170")
         # Investigated-and-inconclusive fields (see idealista.py's inline
         # comments) — asserting None here is the point: a future change
         # that starts guessing these without real evidence should fail
         # this test, forcing a deliberate decision, not a silent drift.
-        assert canonical.lat is None
-        assert canonical.lon is None
         assert canonical.energy_rating is None
         assert canonical.listing_kind is None
 
@@ -174,3 +178,68 @@ class TestNormalize:
         assert canonical.rooms is None
         assert canonical.reference_code is None
         assert canonical.photo_urls == ()
+        assert canonical.lat is None
+        assert canonical.lon is None
+
+    def test_normalize_extracts_coordinates_from_staticmap_center_param(self):
+        """Real Google Static Maps `center` param, url-encoded comma
+        (%2C) — the exact format Idealista's page actually embeds it in
+        (see module docstring/_STATICMAP_CENTER_RE). An earlier version of
+        this connector was built against a fixture with this region
+        trimmed out and incorrectly concluded no coordinates exist
+        anywhere on the page (Opus review, PR #87)."""
+        html = (
+            "<html><body>"
+            '<input type="hidden" name="adId" value="1">'
+            '<script>var config = {map:{"src":"https://maps.googleapis.com/'
+            "maps/api/staticmap?size=720x492&center=40.12345000%2C-3.98765000"
+            '&zoom=16"}};</script>'
+            "</body></html>"
+        )
+        raw = RawListing(
+            external_id="1",
+            source="idealista",
+            raw={"url": "https://www.idealista.com/inmueble/1/", "html": html},
+        )
+        canonical = IdealistaConnector().normalize(raw)
+        assert canonical.lat == Decimal("40.12345000")
+        assert canonical.lon == Decimal("-3.98765000")
+
+    def test_normalize_area_with_decimal_comma_does_not_10x(self):
+        """Regression: reusing a digit-only parser for area (correct for
+        whole-euro prices) would turn "114,6 m²" into 1146 — a real 10x
+        error (Opus review, PR #87), the same bug class already fixed for
+        Fotocasa/Milanuncios but for a different reason (this connector
+        can't assume es-ES locale — see _area_with_decimal's docstring)."""
+        html = """
+        <div class="details-property_features">
+          <ul><li>114,6 m² built</li></ul>
+        </div>
+        <input type="hidden" name="adId" value="1">
+        """
+        raw = RawListing(
+            external_id="1",
+            source="idealista",
+            raw={"url": "https://www.idealista.com/inmueble/1/", "html": html},
+        )
+        canonical = IdealistaConnector().normalize(raw)
+        assert canonical.m2_built == Decimal("114.6")
+
+    def test_normalize_area_thousands_separator_without_decimal(self):
+        """A whole-number area with a thousands separator (implausibly
+        large for a flat, but the parser must not misfire and treat the
+        separator as a decimal point either) is preserved as a true
+        thousands separator, not a false-positive decimal."""
+        html = """
+        <div class="details-property_features">
+          <ul><li>1.234 m² built</li></ul>
+        </div>
+        <input type="hidden" name="adId" value="1">
+        """
+        raw = RawListing(
+            external_id="1",
+            source="idealista",
+            raw={"url": "https://www.idealista.com/inmueble/1/", "html": html},
+        )
+        canonical = IdealistaConnector().normalize(raw)
+        assert canonical.m2_built == Decimal(1234)

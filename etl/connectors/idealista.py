@@ -64,6 +64,17 @@ _REFERENCE_INPUT_RE = re.compile(
     r'<input[^>]+name=["\']adId["\'][^>]+value=["\'](\d+)["\']', re.IGNORECASE
 )
 _PROPERTY_ID_FALLBACK_RE = re.compile(r"propertyId:\s*(\d+)")
+# Idealista embeds a Google Static Maps URL (config.multimediaCarrousel.map.src
+# in the real page's inline <script>) carrying the listing's coordinates in
+# its `center` query param — e.g. "center=40.42569080%2C-3.67632170". An
+# earlier version of this connector was built against a fixture that had
+# this region trimmed out, and incorrectly concluded no coordinates exist
+# anywhere in Idealista's page structure (Opus review, PR #87). The URL
+# itself sits inside a JS object literal, not a DOM attribute — matched
+# directly against the raw HTML rather than via BeautifulSoup.
+_STATICMAP_CENTER_RE = re.compile(
+    r"staticmap\?[^\"'\s]*[?&]center=(-?\d+\.\d+)%2C(-?\d+\.\d+)"
+)
 
 
 def _to_decimal(value: Any) -> Decimal | None:
@@ -214,6 +225,9 @@ class IdealistaConnector(Connector):
         main_image = _og_meta(soup, "og:image")
         photo_urls = (main_image,) if main_image else ()
 
+        coordinates = _coordinates_from_staticmap(html)
+        lat, lon = coordinates if coordinates is not None else (None, None)
+
         return CanonicalListingVersion(
             external_id=raw.external_id,
             source=raw.source,
@@ -234,17 +248,16 @@ class IdealistaConnector(Connector):
             # page structure this connector was built against.
             reference_code=reference_code,
             address=address,
-            lat=None,  # No coordinates found anywhere in the sample page —
-            # unlike Fotocasa/Milanuncios, which expose real
-            # realEstate.coordinates/ad.location JSON. This is a real
-            # limitation, not an oversight: it means a captured Idealista
-            # property can't use the dedup engine's address_coords signal
-            # (etl/dedup/signals/address_coords.py) at all, only
-            # reference_code/phone-in-description/photo-hash/fuzzy. Worth a
-            # follow-up if geocoding the address string client-side (in the
-            # extension, before capture) or server-side ever becomes worth
-            # the added complexity.
-            lon=None,
+            lat=lat,  # From the embedded Google Static Maps `center` param
+            # (see _coordinates_from_staticmap) — real per-listing
+            # coordinates, contrary to an earlier version of this
+            # connector's incorrect "no coordinates anywhere" conclusion
+            # (Opus review, PR #87). None only if a given capture's page
+            # genuinely lacks the map block (e.g. the owner hid the map, or
+            # a future Idealista redesign moves it) — the dedup engine's
+            # address_coords signal degrades gracefully to skipping this
+            # property when that happens, same as any other connector.
+            lon=lon,
             property_type=map_property_type(title),
             m2_built=m2_built,
             m2_useful=None,  # No separate built-vs-useful distinction found.
@@ -297,6 +310,48 @@ def _og_meta(soup: BeautifulSoup, property_name: str) -> str | None:
     return content.strip() if isinstance(content, str) and content.strip() else None
 
 
+def _coordinates_from_staticmap(html: str) -> tuple[Decimal, Decimal] | None:
+    """(lat, lon) from the embedded Google Static Maps `center` param, or
+    None if the page doesn't carry one (see _STATICMAP_CENTER_RE)."""
+    match = _STATICMAP_CENTER_RE.search(html)
+    if not match:
+        return None
+    lat, lon = _to_decimal(match.group(1)), _to_decimal(match.group(2))
+    if lat is None or lon is None:
+        return None
+    return lat, lon
+
+
+def _area_with_decimal(text: str) -> Decimal | None:
+    """Parse a listing area figure, preserving a genuine decimal separator.
+
+    Unlike price (`_strip_thousands_separators` — real-estate prices don't
+    carry meaningful cents either way), area figures do carry meaningful
+    decimals (e.g. "114,6 m²"), and this connector can't assume which
+    locale a capture renders in (see _strip_thousands_separators'
+    docstring). Naively stripping every `.`/`,` would turn "114,6" into
+    1146 — a real 10x error (Opus review, PR #87), the same bug class
+    already fixed for Fotocasa/Milanuncios in etl/connectors/extraction.py,
+    but that helper is es-ES-specific and wrong for Idealista's ambiguous
+    locale. Heuristic: exactly one separator, followed by 1-2 digits at the
+    end of the number, is treated as a decimal point; anything else
+    (multiple separators, or 3+ trailing digits) is a thousands separator
+    and stripped entirely — real areas never have 3-digit decimal
+    fractions, so this can't misfire on a genuine "3.600.000"-style
+    thousands-separated whole number.
+    """
+    positions = [i for i, ch in enumerate(text) if ch in ".,"]
+    if len(positions) == 1:
+        sep = positions[0]
+        decimals = text[sep + 1 :]
+        if 1 <= len(decimals) <= 2 and decimals.isdigit():
+            integer_part = re.sub(r"[^\d]", "", text[:sep])
+            if integer_part:
+                return _to_decimal(f"{integer_part}.{decimals}")
+    digits = re.sub(r"[^\d]", "", text)
+    return _to_decimal(digits) if digits else None
+
+
 def _reference_from_input(html: str) -> str | None:
     match = _REFERENCE_INPUT_RE.search(html)
     return match.group(1) if match else None
@@ -342,5 +397,5 @@ def _area_from_features_li(soup: BeautifulSoup) -> Decimal | None:
         if "m²" in text or "m2" in text.lower():
             match = re.match(r"[\d.,]+", text)
             if match:
-                return _to_decimal(_strip_thousands_separators(match.group(0)))
+                return _area_with_decimal(match.group(0))
     return None

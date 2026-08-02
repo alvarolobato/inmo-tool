@@ -25,8 +25,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db-write";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
+import { adminApiKeyValid, adminUnauthorized } from "@/lib/admin-api-auth";
 
 const MAX_HTML_BYTES = 10 * 1024 * 1024; // 10MB — a full rendered page is a few hundred KB; generous headroom without accepting an unbounded payload.
+
+// Only http(s) accepted — a `javascript:`/`data:` URL with a legitimate-
+// looking hostname (e.g. `javascript://idealista.com/inmueble/1/%0aalert(1)`)
+// would otherwise pass etl/capture.py's hostname allowlist unchanged, get
+// stored verbatim as `listing.url`, and execute when rendered as an <a href>
+// on the property detail page (Opus review, PR #87 — verified end-to-end).
+const ALLOWED_URL_SCHEMES = new Set(["http:", "https:"]);
 
 interface CaptureBody {
   url?: string;
@@ -35,6 +43,13 @@ interface CaptureBody {
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const requestId = generateRequestId();
+  // This endpoint is reachable by anything that can talk to the dashboard
+  // (the browser extension, but also anyone else on the same network) and
+  // writes directly into the ingestion pipeline — same admin-key gate as
+  // every other write-capable API route (Opus review, PR #87).
+  if (!adminApiKeyValid(request)) {
+    return adminUnauthorized();
+  }
   let body: CaptureBody;
   try {
     body = await request.json();
@@ -58,11 +73,23 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
+  let parsedUrl: URL;
   try {
-    new URL(url);
+    parsedUrl = new URL(url);
   } catch {
     return NextResponse.json(
       formatApiError("'url' no es una URL válida.", "VALIDATION", undefined, requestId),
+      { status: 400 },
+    );
+  }
+  if (!ALLOWED_URL_SCHEMES.has(parsedUrl.protocol)) {
+    return NextResponse.json(
+      formatApiError(
+        "'url' debe usar http o https.",
+        "VALIDATION",
+        undefined,
+        requestId,
+      ),
       { status: 400 },
     );
   }

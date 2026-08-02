@@ -137,8 +137,15 @@
         <input type="text" id="api-url" placeholder="http://localhost:4000" />
         <p class="hint">
           La dirección donde corre tu dashboard de Inmo-Tool (local o en tu red). Si no es
-          localhost, recuerda también añadir esa dirección a "host_permissions" en
-          <code>manifest.json</code> y recargar la extensión.
+          localhost, el navegador te pedirá permiso para esa dirección al guardar.
+        </p>
+      </div>
+      <div class="field">
+        <label for="api-key">Clave de administrador</label>
+        <input type="text" id="api-key" placeholder="ADMIN_API_KEY" />
+        <p class="hint">
+          La misma clave configurada como <code>ADMIN_API_KEY</code> en tu instancia de
+          Inmo-Tool — sin ella, las capturas se rechazan.
         </p>
       </div>
     </div>

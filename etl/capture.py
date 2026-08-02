@@ -37,11 +37,21 @@ _BATCH_LIMIT = 10
 
 def _connector_for_url(url: str) -> tuple[object, str] | None:
     """Return (connector, external_id) for a captured URL, or None if no
-    registered capture connector's hostname matches."""
+    registered capture connector's hostname matches.
+
+    Only http(s) is accepted. Defense in depth against a `javascript:`/
+    `data:` URL with a legitimate-looking hostname (e.g.
+    `javascript://idealista.com/inmueble/1/%0aalert(1)`) — the dashboard's
+    capture route already rejects this at submission time, but this
+    connector must not trust that it always will (Opus review, PR #87).
+    """
     try:
-        hostname = (urlparse(url).hostname or "").removeprefix("www.")
+        parsed = urlparse(url)
     except ValueError:
         return None
+    if parsed.scheme not in ("http", "https"):
+        return None
+    hostname = (parsed.hostname or "").removeprefix("www.")
     for suffix, (connector, connector_cls) in _CAPTURE_CONNECTORS.items():
         if hostname == suffix or hostname.endswith("." + suffix):
             external_id = connector_cls.external_id_from_url(url)
@@ -158,7 +168,8 @@ def _process_one(conn, capture_id: int, url: str, html: str) -> None:
             UPDATE extension_capture
             SET status = 'done', connector_name = %s, property_id = %s,
                 listing_id = %s, fields_extracted = %s, fields_available = %s,
-                title = %s, price_display = %s, processed_at = NOW()
+                title = %s, price_display = %s, processed_at = NOW(),
+                html = NULL
             WHERE id = %s
             """,
             (

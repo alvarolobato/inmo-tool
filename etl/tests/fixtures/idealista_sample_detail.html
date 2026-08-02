@@ -6,6 +6,12 @@
   for attribution. Real field values, not fabricated: reference 106387165,
   "Duplex for sale in Calle de Alcalá", Goya/Madrid, 3,600,000 EUR, 273 m²,
   4 bedrooms, 5 bathrooms, 5th floor with lift, built in 1889.
+
+  center=40.42569080,-3.67632170 in the second <script> block is the real
+  Google Static Maps `center` param from that same source page's embedded
+  `config.multimediaCarrousel.map.src` — real coordinates for this listing,
+  not fabricated. An earlier pass trimmed this region out and incorrectly
+  concluded Idealista exposes no coordinates at all (Opus review, PR #87).
 -->
 <html lang="en">
 <head>
@@ -68,6 +74,12 @@ This unique and unique home has 14 balconies facing the street.
         operation: 'sale',
         title: 'Duplex for sale in Calle de Alcalá',
         price: 3600000.0,
+    };
+</script>
+
+<script>
+    var config = {
+        multimediaCarrousel: {"map":{"src":"https://maps.googleapis.com/maps/api/staticmap?size=720x492&center=40.42569080%2C-3.67632170&maptype=roadmap&channel=map_detail&scale=1&zoom=16&key=AIzaSyAnYQ7HhFNWVPzGf_zFf4nFyuxKE1Al7s0&signature=HZQWd-jVvyvMTJ-QtUirXTIO-oU=","title":"Map of the area","addressVisibility":"HIDDEN","width":720,"height":492}},
     };
 </script>
 
