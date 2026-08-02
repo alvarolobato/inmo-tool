@@ -253,3 +253,64 @@ class TestProcessPendingCaptures:
         pg_conn.commit()
         processed = capture.process_pending_captures(pg_conn)
         assert processed == 0
+
+    def test_disabled_connector_does_not_process_its_captures(self, pg_conn):
+        """Issue #100 review: capture is Idealista's ONLY ingestion path — it
+        has no discover() for the orchestrator's enabled-check to gate. Before
+        this, disabling it in the management UI changed nothing at all while
+        the UI claimed "un conector desactivado no se ejecuta en absoluto".
+        """
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        capture_id = _insert_pending(pg_conn, _FIXTURE_URL, _FIXTURE_HTML)
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO connector_config (connector_name, enabled) "
+                "VALUES ('idealista', false) "
+                "ON CONFLICT (connector_name) DO UPDATE SET enabled = false"
+            )
+        pg_conn.commit()
+        try:
+            processed = capture.process_pending_captures(pg_conn)
+            assert processed == 0
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM extension_capture WHERE id = %s", (capture_id,)
+                )
+                assert cur.fetchone()[0] == "pending", (
+                    "a disabled connector's capture must stay queued, not be "
+                    "consumed or failed — re-enabling should process the backlog"
+                )
+                cur.execute(
+                    "SELECT count(*) FROM listing WHERE source = 'idealista' "
+                    "AND external_id = '106387165'"
+                )
+                assert cur.fetchone()[0] == 0, "nothing may be ingested while disabled"
+
+            # Re-enabling drains the same still-pending row.
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE connector_config SET enabled = true "
+                    "WHERE connector_name = 'idealista'"
+                )
+            pg_conn.commit()
+
+            assert capture.process_pending_captures(pg_conn) == 1
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM extension_capture WHERE id = %s", (capture_id,)
+                )
+                assert cur.fetchone()[0] == "done"
+                cur.execute(
+                    "SELECT count(*) FROM listing WHERE source = 'idealista' "
+                    "AND external_id = '106387165'"
+                )
+                assert cur.fetchone()[0] == 1
+        finally:
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM connector_config WHERE connector_name = 'idealista'"
+                )
+            pg_conn.commit()
+            _cleanup(pg_conn)

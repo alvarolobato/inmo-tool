@@ -66,6 +66,9 @@ def _cleanup(conn, names: list[str]) -> None:
         cur.execute(
             "DELETE FROM connector_registry WHERE connector_name = ANY(%s)", (names,)
         )
+        cur.execute(
+            "DELETE FROM connector_config WHERE connector_name = ANY(%s)", (names,)
+        )
     conn.commit()
 
 
@@ -150,6 +153,61 @@ class TestSyncConnectorRegistry:
         finally:
             orchestrator.CONNECTORS[:] = original
             _cleanup(pg_conn, names)
+
+    def test_new_connector_is_seeded_disabled_and_ingests_nothing(self, pg_conn):
+        """Issue #100 review: a brand-new connector must be born DISABLED.
+
+        Before this, the very first startup that published a connector to the
+        management UI was also the run that downloaded a whole city, because
+        `_scopes_for_connector` treats a missing connector_config row as
+        enabled (issue #71's default). The owner's requirement is the
+        opposite: "todos desactivados hasta que defina los filtros".
+        """
+        _apply_schema(pg_conn)
+        connector = DummyConnector(name="test-registry-born-disabled")
+        original = list(orchestrator.CONNECTORS)
+        try:
+            orchestrator.CONNECTORS[:] = [connector]
+            orchestrator.sync_connector_registry(pg_conn)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT enabled FROM connector_config WHERE connector_name = %s",
+                    (connector.name,),
+                )
+                row = cur.fetchone()
+            assert row is not None, "sync must seed an explicit config row"
+            assert row[0] is False, "a newly discovered connector must start disabled"
+
+            # And it genuinely doesn't run: the scope resolver reports it
+            # disabled, which is what makes run_all_connectors skip it.
+            scopes, enabled = orchestrator._scopes_for_connector(
+                pg_conn,
+                connector.name,
+                [ConnectorScope(center=(40.4168, -3.7038), radius_km=10)],
+            )
+            assert enabled is False
+            assert scopes == []
+
+            # An operator's later choice is never clobbered by a restart.
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE connector_config SET enabled = true WHERE connector_name = %s",
+                    (connector.name,),
+                )
+            pg_conn.commit()
+            orchestrator.sync_connector_registry(pg_conn)
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT enabled FROM connector_config WHERE connector_name = %s",
+                    (connector.name,),
+                )
+                assert cur.fetchone()[0] is True, (
+                    "ON CONFLICT DO NOTHING must preserve an operator's choice"
+                )
+        finally:
+            orchestrator.CONNECTORS[:] = original
+            _cleanup(pg_conn, [connector.name])
 
     def test_empty_registry_deregisters_everything(self, pg_conn):
         _apply_schema(pg_conn)

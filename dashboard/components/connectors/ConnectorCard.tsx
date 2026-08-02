@@ -141,8 +141,26 @@ export function ConnectorCard({
     }
   };
 
+  // Mirrors ConnectorFiltersSchema's write-side bounds so invalid input is
+  // reported rather than silently discarded (a non-numeric value used to
+  // coerce to NaN and clear the filter outright — issue #100 review).
+  const roomsError: string | null = (() => {
+    const trimmed = roomsText.trim();
+    if (trimmed === "") return null; // empty = "no filter", a valid choice
+    const n = Number(trimmed);
+    if (!Number.isFinite(n)) return "Introduce un número.";
+    if (!Number.isInteger(n)) return "Debe ser un número entero.";
+    if (n < 1 || n > 20) return "Debe estar entre 1 y 20.";
+    return null;
+  })();
+
   const supportsRooms = connector.supported_filters.includes("rooms");
-  const configurable = connector.supports_discovery;
+  // A deregistered connector can never run again, so every control on it
+  // would write config that takes effect nowhere. The API rejects such
+  // writes with 409; the UI shouldn't offer them in the first place
+  // (issue #100 review).
+  const locked = !connector.registered;
+  const configurable = connector.supports_discovery && !locked;
 
   return (
     <div style={cardStyle} data-testid={`connector-${connector.name}`}>
@@ -163,13 +181,33 @@ export function ConnectorCard({
         <button
           type="button"
           onClick={() => run({ enabled: !connector.enabled })}
-          disabled={busy}
-          style={{ ...buttonStyle, marginLeft: "auto", opacity: busy ? 0.6 : 1 }}
+          disabled={busy || locked}
+          title={
+            locked
+              ? "Este conector ya no está registrado en el ETL: su configuración no tendría ningún efecto."
+              : undefined
+          }
+          style={{
+            ...buttonStyle,
+            marginLeft: "auto",
+            opacity: busy || locked ? 0.6 : 1,
+            cursor: locked ? "not-allowed" : buttonStyle.cursor,
+          }}
           data-testid={`toggle-${connector.name}`}
         >
           {connector.enabled ? "Desactivar" : "Activar"}
         </button>
       </div>
+
+      {locked && (
+        <p
+          style={{ fontSize: 12, color: "var(--fg-muted)", margin: "8px 0 0" }}
+          data-testid={`unregistered-note-${connector.name}`}
+        >
+          Ya no está registrado en el ETL, así que no volverá a ejecutarse. Se
+          conserva sólo para que su historial de ejecuciones siga siendo legible.
+        </p>
+      )}
 
       <p style={{ fontSize: 12, color: "var(--fg-muted)", margin: "8px 0 0" }}>
         {connector.rate_limit_per_minute ?? "—"} peticiones/min ·{" "}
@@ -287,27 +325,39 @@ export function ConnectorCard({
             <button
               type="button"
               style={buttonStyle}
-              disabled={busy}
+              disabled={busy || roomsError !== null}
               data-testid={`save-rooms-${connector.name}`}
               onClick={() => {
                 const trimmed = roomsText.trim();
                 // Empty clears the filter entirely rather than sending 0 —
                 // `Number("") === 0` would otherwise persist a nonsense
                 // "exactly zero rooms" filter (same coercion bug fixed in
-                // the location picker, PR #103).
-                const parsed = trimmed === "" ? undefined : Number(trimmed);
-                run({
-                  filters:
-                    parsed !== undefined && Number.isFinite(parsed) ? { rooms: parsed } : {},
-                });
+                // the location picker, PR #103). Anything non-empty is
+                // already known-valid here: `roomsError` gates the button,
+                // so garbage can no longer silently clear the filter
+                // instead of reporting itself (issue #100 review).
+                if (trimmed === "") {
+                  run({ filters: {} });
+                  return;
+                }
+                run({ filters: { rooms: Number(trimmed) } });
               }}
             >
               Guardar
             </button>
           </div>
+          {roomsError !== null && (
+            <p
+              style={{ fontSize: 11, color: "var(--danger, #d33)", margin: "4px 0 0" }}
+              data-testid={`rooms-error-${connector.name}`}
+            >
+              {roomsError}
+            </p>
+          )}
           <p style={{ fontSize: 11, color: "var(--fg-muted)", margin: "4px 0 0" }}>
             Filtro nativo del portal: devuelve solo anuncios con exactamente ese
-            número de habitaciones (no &ldquo;o más&rdquo;).
+            número de habitaciones (no &ldquo;o más&rdquo;). Déjalo vacío para no
+            filtrar por habitaciones.
           </p>
         </div>
       )}

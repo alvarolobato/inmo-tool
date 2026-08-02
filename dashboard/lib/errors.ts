@@ -34,6 +34,10 @@ export type ErrorCode =
   | "TURN_IN_PROGRESS"
   | "SQL_LINT"
   | "NOT_FOUND"
+  // The request is well-formed but conflicts with the resource's current
+  // state — e.g. configuring a connector that is no longer registered in
+  // the ETL, where the write would be a silent no-op (issue #100).
+  | "CONFLICT"
   | "TIMEOUT"
   | "COST_LIMIT"
   | "REVIEW_EXISTS"

@@ -15,11 +15,15 @@ import { z } from "zod";
  * Geography override shape. Intentionally identical to a search profile's
  * `scope.geography` radius shape (`lib/profiles-schema.ts`) — the ETL's
  * `_scopes_for_connector` parses both with the same expectations, and the
- * UI reuses the same `LocationPicker` for both.
+ * UI reuses the same `LocationPicker` for both. That includes the 200 km
+ * cap: it was 500 here while profiles capped at 200, despite this comment
+ * claiming they matched (issue #100 review). The ETL enforces no upper
+ * bound at all, so this is purely a write-side sanity limit, and there is
+ * no reason for the two surfaces to disagree about it.
  */
 export const GeographyOverrideSchema = z.object({
   center: z.tuple([z.number().min(-90).max(90), z.number().min(-180).max(180)]),
-  radius_km: z.number().positive().max(500),
+  radius_km: z.number().positive().max(200),
 });
 
 export type GeographyOverride = z.infer<typeof GeographyOverrideSchema>;

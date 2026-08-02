@@ -79,7 +79,7 @@ describe("GET /api/etl/connectors", () => {
           {
             id: "7",
             name: "Madrid centro",
-            scope: { geography: { center: [40.4168, -3.7038], radius_km: 5 } },
+            scope: { geography: { type: "radius", center: [40.4168, -3.7038], radius_km: 5 } },
           },
         ],
       });
@@ -112,7 +112,7 @@ describe("GET /api/etl/connectors", () => {
           {
             id: 1,
             name: "Madrid",
-            scope: { geography: { center: [40.4168, -3.7038], radius_km: 5 } },
+            scope: { geography: { type: "radius", center: [40.4168, -3.7038], radius_km: 5 } },
           },
         ],
       });
@@ -140,6 +140,54 @@ describe("GET /api/etl/connectors", () => {
     expect(c.scopeSource).toBe("none");
   });
 
+  it("reads back a stored override whose numbers are strings, as the ETL does", async () => {
+    // The ETL coerces center elements with float(), so {center: ["40.4",
+    // "-3.7"]} is a genuinely live override there. Reading it back as "not
+    // configured" would be the UI lying in the opposite direction from the
+    // malformed case above (issue #100 review).
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [
+          registryRow({
+            has_config: true,
+            enabled: true,
+            geography_override: { center: ["37.3891", "-5.9845"], radius_km: 12 },
+            filters: { rooms: "3" },
+          }),
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const c = (await (await GET()).json()).connectors[0];
+    expect(c.geography_override).toEqual({ center: [37.3891, -5.9845], radius_km: 12 });
+    expect(c.scopeSource).toBe("override");
+    // int("3") === 3 in the ETL, so the filter really is applied.
+    expect(c.filters).toEqual({ rooms: 3 });
+  });
+
+  it("ignores a profile whose geography isn't type=radius, as the ETL does", async () => {
+    // _active_profile_scopes requires type === "radius"; without the same
+    // check the UI listed a profile as a live ingestion source that the ETL
+    // silently skipped (issue #100 review).
+    mockQuery
+      .mockResolvedValueOnce({ rows: [registryRow({ enabled: true, has_config: true })] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 1,
+            name: "Polígono dibujado",
+            scope: { geography: { type: "polygon", center: [40.4, -3.7], radius_km: 5 } },
+          },
+        ],
+      });
+
+    const c = (await (await GET()).json()).connectors[0];
+    expect(c.derivedFrom).toEqual([]);
+    expect(c.scopeSource).toBe("none");
+  });
+
   it("a capture-only connector reports scopeSource=capture-only", async () => {
     mockQuery
       .mockResolvedValueOnce({
@@ -154,7 +202,7 @@ describe("GET /api/etl/connectors", () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [
-          { id: 1, name: "Madrid", scope: { geography: { center: [40.4, -3.7], radius_km: 5 } } },
+          { id: 1, name: "Madrid", scope: { geography: { type: "radius", center: [40.4, -3.7], radius_km: 5 } } },
         ],
       });
 
@@ -176,7 +224,7 @@ describe("PATCH /api/etl/connectors/:name", () => {
     mockQuery
       // registry lookup
       .mockResolvedValueOnce({
-        rows: [{ connector_name: "fotocasa", supports_discovery: true, supported_filters: ["rooms"] }],
+        rows: [{ connector_name: "fotocasa", registered: true, supports_discovery: true, supported_filters: ["rooms"] }],
       })
       // upsert
       .mockResolvedValueOnce({ rows: [] });
@@ -203,9 +251,29 @@ describe("PATCH /api/etl/connectors/:name", () => {
     expect((await res.json()).code).toBe("NOT_FOUND");
   });
 
+  it("409s for a connector that left the Python registry", async () => {
+    // registered=false means it can never run again, so any config write
+    // would be a silent no-op the operator has no way to notice.
+    mockQuery.mockResolvedValueOnce({
+      rows: [
+        {
+          connector_name: "retired",
+          registered: false,
+          supports_discovery: true,
+          supported_filters: [],
+        },
+      ],
+    });
+    const res = await PATCH(makeRequest({ enabled: true }), { params: { name: "retired" } });
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("CONFLICT");
+    // Nothing written.
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects a filter the connector does not declare support for", async () => {
     mockQuery.mockResolvedValueOnce({
-      rows: [{ connector_name: "milanuncios", supports_discovery: true, supported_filters: [] }],
+      rows: [{ connector_name: "milanuncios", registered: true, supports_discovery: true, supported_filters: [] }],
     });
     const res = await PATCH(makeRequest({ filters: { rooms: 3 } }), {
       params: { name: "milanuncios" },
@@ -218,7 +286,7 @@ describe("PATCH /api/etl/connectors/:name", () => {
 
   it("rejects a geography override on a capture-only connector", async () => {
     mockQuery.mockResolvedValueOnce({
-      rows: [{ connector_name: "idealista", supports_discovery: false, supported_filters: [] }],
+      rows: [{ connector_name: "idealista", registered: true, supports_discovery: false, supported_filters: [] }],
     });
     const res = await PATCH(
       makeRequest({ geography_override: { center: [40.4, -3.7], radius_km: 5 } }),
@@ -232,7 +300,7 @@ describe("PATCH /api/etl/connectors/:name", () => {
   it("accepts an explicit null override as 'clear it'", async () => {
     mockQuery
       .mockResolvedValueOnce({
-        rows: [{ connector_name: "fotocasa", supports_discovery: true, supported_filters: ["rooms"] }],
+        rows: [{ connector_name: "fotocasa", registered: true, supports_discovery: true, supported_filters: ["rooms"] }],
       })
       .mockResolvedValueOnce({ rows: [] });
 

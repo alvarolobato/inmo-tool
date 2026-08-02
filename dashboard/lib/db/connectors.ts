@@ -6,8 +6,6 @@
 
 import { sql } from "@/lib/db-write";
 import {
-  ConnectorFiltersSchema,
-  GeographyOverrideSchema,
   type ConnectorConfigPatch,
   type ConnectorFilters,
   type ConnectorLastRun,
@@ -59,20 +57,73 @@ function num(value: number | string | null | undefined): number {
   return typeof value === "number" ? value : Number(value);
 }
 
+/**
+ * `null` unless `value` is a real finite number or a string Python's
+ * `float()` would accept. The ETL coerces stored JSON with `float()`/
+ * `int()`, so a value stored as `"40.4"` is genuinely live there; reading
+ * it back as "not configured" here would be the UI lying in the opposite
+ * direction from the malformed case (issue #100 review).
+ */
+function coerceFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string" && value.trim() !== "") {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/**
+ * Read-side parsing of a stored `geography_override`.
+ *
+ * Deliberately NOT `GeographyOverrideSchema` (that stays the strict
+ * *write*-side contract for the PATCH route — what a new override is
+ * allowed to be). Reading has to answer a different question: what will
+ * the ETL actually do with the row that is already stored? So this mirrors
+ * `etl/orchestrator.py::_scopes_for_connector`'s real tolerance —
+ * `float()`-coercible center elements, any positive radius (the ETL
+ * enforces no upper bound) — and returns `null` only where the ETL itself
+ * would fall back to the profile-derived scope.
+ */
 function parseGeographyOverride(raw: unknown): GeographyOverride | null {
-  if (raw === null || raw === undefined) return null;
-  const parsed = GeographyOverrideSchema.safeParse(raw);
   // A malformed stored override is shown as "no override" rather than
   // throwing: the ETL already treats a malformed row as fall-back-to-
   // profile-scope (etl/orchestrator.py `_scopes_for_connector`), so the UI
   // must not claim an override is in effect when the ETL will ignore it.
-  return parsed.success ? parsed.data : null;
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) return null;
+  const center = (raw as { center?: unknown }).center;
+  const radiusRaw = (raw as { radius_km?: unknown }).radius_km;
+  if (!Array.isArray(center) || center.length !== 2) return null;
+  // The ETL requires radius_km to already be a non-boolean number before
+  // it will call float() on it — a stored string radius really is ignored
+  // there, so it must read as "no override" here too.
+  if (typeof radiusRaw !== "number" || !Number.isFinite(radiusRaw)) return null;
+  if (radiusRaw <= 0) return null;
+  const lat = coerceFiniteNumber(center[0]);
+  const lon = coerceFiniteNumber(center[1]);
+  if (lat === null || lon === null) return null;
+  return { center: [lat, lon], radius_km: radiusRaw };
 }
 
+/**
+ * Read-side parsing of stored `filters`, matching the ETL's `int()`
+ * coercion (so a `rooms` stored as `"3"` reads as the live filter it
+ * actually is). `ConnectorFiltersSchema` remains the strict write-side
+ * contract.
+ */
 function parseFilters(raw: unknown): ConnectorFilters {
   if (raw === null || raw === undefined) return {};
-  const parsed = ConnectorFiltersSchema.safeParse(raw);
-  return parsed.success ? parsed.data : {};
+  if (typeof raw !== "object" || Array.isArray(raw)) return {};
+  const roomsRaw = (raw as { rooms?: unknown }).rooms;
+  if (roomsRaw === undefined || roomsRaw === null) return {};
+  if (typeof roomsRaw === "boolean") return {};
+  const rooms = coerceFiniteNumber(roomsRaw);
+  // int() truncates rather than rounding, and rejects a non-integral
+  // string like "3.5" outright — mirror both.
+  if (rooms === null) return {};
+  if (typeof roomsRaw === "string" && !Number.isInteger(rooms)) return {};
+  return { rooms: Math.trunc(rooms) };
 }
 
 function parseSupportedFilters(raw: unknown): string[] {
@@ -107,14 +158,26 @@ async function fetchDerivedScopeSources(): Promise<DerivedScopeSource[]> {
     if (typeof scope !== "object" || scope === null) continue;
     const geography = (scope as { geography?: unknown }).geography;
     if (typeof geography !== "object" || geography === null) continue;
+    // The ETL requires `type === "radius"` before it will derive a scope
+    // from a profile (`_active_profile_scopes`). Without this same check,
+    // a profile with some other geography shape was listed here as a live
+    // contributing source while the ETL silently skipped it — the UI
+    // claiming an ingestion input that does not exist (issue #100 review).
+    if ((geography as { type?: unknown }).type !== "radius") continue;
     const center = (geography as { center?: unknown }).center;
     const radiusKm = (geography as { radius_km?: unknown }).radius_km;
+    // Tolerance deliberately mirrors the ETL's, which coerces each center
+    // element with float() (so numeric strings pass) but requires
+    // radius_km to already be a real, non-boolean number.
+    const lat = coerceFiniteNumber(Array.isArray(center) ? center[0] : undefined);
+    const lon = coerceFiniteNumber(Array.isArray(center) ? center[1] : undefined);
     if (
       !Array.isArray(center) ||
       center.length !== 2 ||
-      typeof center[0] !== "number" ||
-      typeof center[1] !== "number" ||
-      typeof radiusKm !== "number"
+      lat === null ||
+      lon === null ||
+      typeof radiusKm !== "number" ||
+      !Number.isFinite(radiusKm)
     ) {
       // Same posture as the ETL: skip a malformed profile rather than
       // failing the whole listing.
@@ -123,7 +186,7 @@ async function fetchDerivedScopeSources(): Promise<DerivedScopeSource[]> {
     sources.push({
       profile_id: num(row.id),
       profile_name: row.name,
-      center: [center[0], center[1]],
+      center: [lat, lon],
       radius_km: radiusKm,
     });
   }
@@ -231,20 +294,29 @@ export async function listConnectors(): Promise<ConnectorView[]> {
 
 export interface ConnectorRegistryInfo {
   name: string;
+  registered: boolean;
   supports_discovery: boolean;
   supported_filters: string[];
 }
 
-/** Registry metadata for one connector, or null if it isn't registered. */
+/**
+ * Registry metadata for one connector, or null if the name has never been
+ * published at all. `registered === false` is a distinct, real state: the
+ * connector existed once (so its historical run rows still resolve to a
+ * name) but is no longer in the Python registry, and therefore can never
+ * run again until it comes back. Callers must not treat it as writable —
+ * see the PATCH route.
+ */
 export async function getConnectorRegistryInfo(
   name: string,
 ): Promise<ConnectorRegistryInfo | null> {
   const rows = await sql<{
     connector_name: string;
+    registered: boolean;
     supports_discovery: boolean;
     supported_filters: unknown;
   }>(
-    `SELECT connector_name, supports_discovery, supported_filters
+    `SELECT connector_name, registered, supports_discovery, supported_filters
        FROM connector_registry
       WHERE connector_name = $1`,
     [name],
@@ -252,6 +324,7 @@ export async function getConnectorRegistryInfo(
   if (rows.length === 0) return null;
   return {
     name: rows[0].connector_name,
+    registered: rows[0].registered,
     supports_discovery: rows[0].supports_discovery,
     supported_filters: parseSupportedFilters(rows[0].supported_filters),
   };

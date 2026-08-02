@@ -85,7 +85,9 @@ export default function ConnectorsPage() {
 
       <p style={{ fontSize: 13, color: "var(--fg-muted)", marginTop: 8 }}>
         Activa o desactiva cada conector y define qué descarga. Un conector
-        desactivado no se ejecuta en absoluto: ni descubre ni descarga nada.
+        desactivado no se ejecuta en absoluto: ni descubre ni descarga nada, y
+        tampoco procesa capturas de la extensión. Los conectores nuevos nacen
+        desactivados: no se descarga nada hasta que lo actives aquí.
       </p>
 
       {error && (

@@ -84,11 +84,41 @@ def _field_completeness(canonical: CanonicalListingVersion) -> tuple[int, int]:
     return extracted, available
 
 
+def _connector_enabled(conn, connector_name: str) -> bool:
+    """Whether `connector_name` is enabled in connector_config.
+
+    A missing row means enabled, matching `etl.orchestrator.
+    _scopes_for_connector`'s treatment of the same absence (issue #71's
+    default). In practice `sync_connector_registry` seeds an explicit
+    `enabled = false` row for every registered connector on first publish
+    (issue #100 review), so the missing-row case only arises for a
+    connector that has never been through a registry sync at all.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT enabled FROM connector_config WHERE connector_name = %s",
+            (connector_name,),
+        )
+        row = cur.fetchone()
+    return True if row is None else bool(row[0])
+
+
 def process_pending_captures(conn) -> int:
     """Process every pending extension_capture row. Returns the count
     processed (done + failed). Each row is its own try/except — one bad
     capture (a connector bug, a genuinely malformed HTML blob) must not
-    block the rest of the batch or wedge this poll loop."""
+    block the rest of the batch or wedge this poll loop.
+
+    Captures whose connector is disabled in `connector_config` are left
+    `pending` and are NOT counted as processed (issue #100 review). The
+    connector-management UI states that "un conector desactivado no se
+    ejecuta en absoluto"; before this check, disabling Idealista changed
+    nothing at all, because capture is its *only* ingestion path — it has
+    no discover() for the orchestrator's enabled-check to gate. Leaving the
+    row pending rather than failing it means re-enabling the connector
+    processes the backlog instead of discarding it: the operator paused
+    ingestion, they didn't reject these captures.
+    """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, url, html FROM extension_capture "
@@ -97,9 +127,27 @@ def process_pending_captures(conn) -> int:
         )
         pending = cur.fetchall()
 
+    # Cached per batch: every capture in a batch typically resolves to the
+    # same connector, and this is a poll loop running every few seconds.
+    enabled_cache: dict[str, bool] = {}
     processed = 0
+    skipped_disabled = 0
     for capture_id, url, html in pending:
         try:
+            resolved = _connector_for_url(url)
+            if resolved is not None:
+                connector_name = resolved[0].name
+                if connector_name not in enabled_cache:
+                    enabled_cache[connector_name] = _connector_enabled(
+                        conn, connector_name
+                    )
+                if not enabled_cache[connector_name]:
+                    skipped_disabled += 1
+                    continue
+            # An unresolvable URL falls through to _process_one, which
+            # marks it failed with the "no capture-capable connector"
+            # message — unchanged behaviour, and not something a disabled
+            # connector should silently swallow.
             _process_one(conn, capture_id, url, html)
         except Exception:
             logger.exception(
@@ -108,6 +156,17 @@ def process_pending_captures(conn) -> int:
             )
             _mark_failed(conn, capture_id, "Unexpected internal error")
         processed += 1
+
+    if skipped_disabled:
+        # One line per batch, not per row: this poll loop runs every few
+        # seconds and a disabled connector's backlog would otherwise flood
+        # the log with identical warnings forever.
+        logger.info(
+            "%d pending capture(s) left unprocessed: their connector is "
+            "disabled in connector_config. They stay pending and will be "
+            "processed if it is re-enabled.",
+            skipped_disabled,
+        )
     return processed
 
 

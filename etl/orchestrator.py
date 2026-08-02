@@ -476,6 +476,23 @@ def sync_connector_registry(conn) -> None:
     flipped to false in the same pass, which is what makes a *rename*
     (old name retired, new name added) show up correctly rather than
     leaving two rows both claiming to be live.
+
+    Also seeds a `connector_config` row with `enabled = false` for any
+    connector that doesn't have one yet (issue #100 review). A newly
+    discovered connector must be born DISABLED: the owner's requirement is
+    "todos desactivados hasta que defina los filtros de búsqueda — no
+    quiero que se cargue tooodo el sitio", and without this the very first
+    startup that publishes a connector to the UI is also the run that
+    downloads an entire city, because `_scopes_for_connector` treats a
+    missing row as enabled (issue #71's original default). `ON CONFLICT DO
+    NOTHING` means an operator's existing choice — enabled or disabled — is
+    never overwritten on a later restart; only genuinely new connectors get
+    the disabled seed.
+
+    Ordering matters and is enforced by the caller: etl/main.py must not
+    attempt a sweep if this function raised, or connectors whose rows were
+    never created would fall through to the enabled-by-default path and
+    ingest anyway. See the `registry_synced` guard there.
     """
     with conn.cursor() as cur:
         for connector in CONNECTORS:
@@ -502,6 +519,14 @@ def sync_connector_registry(conn) -> None:
                     connector.supports_discovery,
                     json.dumps(list(connector.supported_filters)),
                 ),
+            )
+            cur.execute(
+                """
+                INSERT INTO connector_config (connector_name, enabled)
+                VALUES (%s, false)
+                ON CONFLICT (connector_name) DO NOTHING
+                """,
+                (connector.name,),
             )
 
         known = [c.name for c in CONNECTORS]

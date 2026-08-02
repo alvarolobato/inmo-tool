@@ -70,6 +70,23 @@ export async function PATCH(
       );
     }
 
+    // A connector no longer in the Python registry can never run again, so
+    // every config change is a no-op the operator has no way to notice —
+    // the same "control that looks like it works but doesn't" failure the
+    // capability checks below exist to prevent (issue #100 review). 409:
+    // the request is well-formed, it conflicts with the resource's state.
+    if (!registry.registered) {
+      return NextResponse.json(
+        formatApiError(
+          `El conector "${name}" ya no está registrado en el ETL, así que su configuración no tendría ningún efecto.`,
+          "CONFLICT",
+          "Solo se conserva para que su historial de ejecuciones siga siendo legible.",
+          requestId,
+        ),
+        { status: 409 },
+      );
+    }
+
     // A connector that never runs discover() (Idealista — capture-only,
     // issue #75) has no scope to override and no filters to apply. Accepting
     // either would store config that can never take effect, which is exactly
