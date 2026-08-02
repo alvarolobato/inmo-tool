@@ -342,6 +342,23 @@ CREATE INDEX IF NOT EXISTS idx_feedback_event_profile_property
 CREATE INDEX IF NOT EXISTS idx_feedback_event_listing_id
     ON feedback_event (listing_id) WHERE listing_id IS NOT NULL;
 
+-- Task 3.2 (#21): one trained model per profile. `coefficients` carries the
+-- whole model (weights, bias, feature names, and the z-score normalization
+-- stats used to standardize a candidate's raw features before scoring) as a
+-- single JSONB blob rather than one column per field — the exact shape is
+-- expected to evolve as later tasks add features (Phase 4's AI-derived
+-- inputs, Phase 5's yield/days-on-market), and a JSONB blob absorbs that
+-- without a migration each time. `search_profile(id)` FK, not
+-- `profile_listing_state`, because a model exists per profile independent of
+-- any single candidate — deleting a profile should delete its model
+-- (ON DELETE CASCADE), not leave an orphaned row.
+CREATE TABLE IF NOT EXISTS profile_scoring_model (
+    profile_id             BIGINT       PRIMARY KEY REFERENCES search_profile(id) ON DELETE CASCADE,
+    coefficients           JSONB        NOT NULL,
+    trained_at             TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    training_example_count INTEGER      NOT NULL
+);
+
 -- ============================================================
 -- AI assessments (Phase 4 generates these; this task only creates
 -- the table). listing_id is NOT NULL — an assessment is always about
@@ -1033,6 +1050,7 @@ ANALYZE listing_owner_identity;
 ANALYZE search_profile;
 ANALYZE profile_listing_state;
 ANALYZE feedback_event;
+ANALYZE profile_scoring_model;
 ANALYZE ai_assessment;
 ANALYZE property_merge_log;
 ANALYZE suggested_merge;
