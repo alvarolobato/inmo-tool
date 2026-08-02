@@ -516,6 +516,48 @@ CREATE INDEX IF NOT EXISTS idx_connector_run_results_run_id ON connector_run_res
 -- has any real history.
 CREATE INDEX IF NOT EXISTS idx_connector_runs_started_at ON connector_runs (started_at DESC);
 
+-- Browser-extension listing capture (issue #75): a queue table, not a
+-- synchronous request/response — the dashboard (Node/TypeScript) and the
+-- ETL orchestrator (Python, where the Idealista connector's normalize()
+-- and the shared extraction.py fallback-chain helper live) run in
+-- separate containers with no shared filesystem or RPC channel. This
+-- mirrors the same "signal via a Postgres row" pattern this project
+-- already uses for etl_manual_trigger (force-resync) rather than
+-- inventing cross-container HTTP or duplicating the Idealista field
+-- mapping in TypeScript (which issue #75 explicitly wants to avoid — a
+-- future automated Idealista connector, if one ever becomes viable, must
+-- share one source of truth with this capture path, not a second,
+-- drifting implementation).
+--
+-- Flow: POST /api/extension/capture inserts a 'pending' row and returns
+-- immediately; etl/capture.py's background poll (started alongside the
+-- connector scheduler loop, etl/main.py) picks it up, runs the matching
+-- connector's normalize() + the same _upsert_canonical_listing() the
+-- automated sweep uses, and marks the row 'done'/'failed'. The dashboard
+-- polls GET /api/extension/capture/[id] for the result.
+CREATE TABLE IF NOT EXISTS extension_capture (
+    id               BIGSERIAL    PRIMARY KEY,
+    url              TEXT         NOT NULL,
+    html             TEXT         NOT NULL,
+    connector_name   TEXT,
+    status           TEXT         NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','done','failed')),
+    error_msg        TEXT,
+    property_id      BIGINT       REFERENCES property(id),
+    listing_id       BIGINT       REFERENCES listing(id),
+    fields_extracted INTEGER,
+    fields_available INTEGER,
+    title            TEXT,
+    price_display    TEXT,
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    processed_at     TIMESTAMPTZ
+);
+
+-- The poll query is `WHERE status = 'pending' ORDER BY created_at`; a
+-- partial index keeps this cheap forever regardless of how many
+-- done/failed rows accumulate (they're never re-scanned by the poll).
+CREATE INDEX IF NOT EXISTS idx_extension_capture_pending
+    ON extension_capture (created_at) WHERE status = 'pending';
+
 
 -- ============================================================
 -- Dashboard App
@@ -989,3 +1031,4 @@ ANALYZE feedback_event;
 ANALYZE ai_assessment;
 ANALYZE property_merge_log;
 ANALYZE suggested_merge;
+ANALYZE extension_capture;
