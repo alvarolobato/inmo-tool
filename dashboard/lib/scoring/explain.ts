@@ -11,6 +11,14 @@
  * concatenation of raw feature names — issue #1 §7's example register
  * ("ranked high: 6.2% gross yield vs 4.1% area average...") is natural
  * language, not a debug dump of z-scores.
+ *
+ * Cold-start states this module produces a message for: no trained model
+ * yet, and a model that's trained but currently one-sided
+ * ("needs_both_classes", see retrain.ts). A third null-score state —  a
+ * candidate materialized after a profile's last retrain — is a known,
+ * documented gap (retrain.ts's module docstring, issue #21 §4) with no write
+ * at all yet; `candidates.ts` degrades this to rendering nothing rather than
+ * a broken UI, which is an acceptable interim state, not a fix.
  */
 
 import { FEATURE_NAMES, type FeatureName, type RawFeatureVector } from "./features";
@@ -81,25 +89,37 @@ function floorLabel(v: number): string {
 type PhraseFn = (rawValue: number, positive: boolean) => string;
 
 const FEATURE_LABELS: Record<FeatureName, PhraseFn> = {
-  price_per_m2_relative: (v, positive) =>
-    positive
-      ? `precio un ${pct(1 - v)} por debajo de lo habitual en este perfil`
-      : `precio un ${pct(v - 1)} por encima de lo habitual en este perfil`,
+  // Direction ("por debajo"/"por encima") is derived from the raw value `v`
+  // itself (v<1 means below the profile's price band, v>=1 means at/above
+  // it) — NOT from `positive` (the contribution's sign). Those are different
+  // claims: `positive` says whether this feature is helping or hurting the
+  // score under this profile's *learned* weight, which can be positive (a
+  // user whose accept/reject pattern favors pricier properties). Keying the
+  // price direction off `positive` would then describe an above-band price
+  // as "below" — confirmed reachable, not hypothetical (Opus review of PR
+  // #92, item 1). `positive` still drives the separate "coincide/no coincide
+  // con tus preferencias" framing, which correctly is about the model, not
+  // the raw price.
+  price_per_m2_relative: (v, positive) => {
+    const direction = v < 1 ? `un ${pct(1 - v)} por debajo` : `un ${pct(v - 1)} por encima`;
+    const fit = positive ? "coincide con tus preferencias" : "no coincide con tus preferencias";
+    return `precio ${direction} de tu banda de precio (${fit})`;
+  },
   m2_built: (v, positive) =>
     positive
       ? `tamaño (${Math.round(v)} m²) dentro de lo que este perfil suele aceptar`
       : `tamaño (${Math.round(v)} m²) fuera de lo que este perfil suele aceptar`,
   rooms: (v, positive) =>
     positive
-      ? `${v} habitaciones, coincide con tus aceptaciones habituales`
-      : `${v} habitaciones, no es lo habitual en lo que aceptas`,
+      ? `${Math.round(v)} habitaciones, coincide con tus aceptaciones habituales`
+      : `${Math.round(v)} habitaciones, no es lo habitual en lo que aceptas`,
   floor_numeric: (v, positive) => {
     const label = floorLabel(v);
     return positive ? `planta ${label}, como en tus aceptaciones` : `planta ${label}, normalmente la rechazas`;
   },
   has_elevator: (v, positive) => {
     const hasElevator = v === 1;
-    if (hasElevator) return positive ? "tiene ascensor, como sueles preferir" : "tiene ascensor, pero no suele bastar";
+    if (hasElevator) return positive ? "tiene ascensor, como sueles preferir" : "tiene ascensor, pero no coincide con tus preferencias habituales";
     return positive ? "sin ascensor, como en aceptaciones anteriores" : "sin ascensor (normalmente lo rechazas)";
   },
   year_built: (v, positive) =>
@@ -140,8 +160,13 @@ export function explainScore(
   // could have its top individual factor be a small positive while smaller,
   // less-prominent negatives outweigh it in total; the "ranked high/low"
   // framing should match the actual score, not just the loudest input.
+  // "Encaja bien/mal", not "Ranking alto/bajo": candidates.ts orders this
+  // profile's list by property id, not by score, so there is no actual rank
+  // to report — an absolute sigmoid-0.5 cutoff would otherwise mislabel the
+  // best-scoring candidate in a mostly-rejected, early-life profile as
+  // "Ranking bajo" (Opus review of PR #92, item 2).
   const total = contributions.reduce((sum, c) => sum + c.contribution, 0) + model.bias;
-  const prefix = total >= 0 ? "Ranking alto: " : "Ranking bajo: ";
+  const prefix = total >= 0 ? "Encaja bien con tu perfil: " : "Encaja mal con tu perfil: ";
 
   const phrases = top.map((c) => FEATURE_LABELS[c.name](c.rawValue, c.contribution > 0));
   return prefix + phrases.join("; ") + ".";

@@ -112,7 +112,7 @@ describe("listCandidates", () => {
           min_price: "279000.00",
           first_seen_at: "2026-07-01T00:00:00.000Z",
           score: "0.732",
-          rank_explanation: "Ranking alto: precio un 8% por debajo de lo habitual en este perfil.",
+          rank_explanation: "Encaja bien con tu perfil: precio un 8% por debajo de tu banda de precio.",
           listings: [
             { id: 10, source: "fotocasa", url: "https://fotocasa.example/10", current_price: 285000 },
             { id: 11, source: "milanuncios", url: "https://milanuncios.example/11", current_price: 279000 },

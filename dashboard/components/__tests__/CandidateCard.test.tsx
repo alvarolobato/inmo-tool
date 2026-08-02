@@ -74,9 +74,9 @@ describe("CandidateCard", () => {
 
   it("renders rank_explanation when present, and renders nothing for it when null", () => {
     const { rerender } = render(
-      <CandidateCard candidate={candidate({ rank_explanation: "Ranking alto: precio un 8% por debajo." })} profileId={5} />,
+      <CandidateCard candidate={candidate({ rank_explanation: "Encaja bien con tu perfil: precio un 8% por debajo de tu banda de precio." })} profileId={5} />,
     );
-    expect(screen.getByTestId("rank-explanation")).toHaveTextContent("Ranking alto: precio un 8% por debajo.");
+    expect(screen.getByTestId("rank-explanation")).toHaveTextContent("Encaja bien con tu perfil: precio un 8% por debajo de tu banda de precio.");
 
     rerender(<CandidateCard candidate={candidate({ rank_explanation: null })} profileId={5} />);
     expect(screen.queryByTestId("rank-explanation")).not.toBeInTheDocument();

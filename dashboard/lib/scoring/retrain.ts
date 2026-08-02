@@ -118,10 +118,16 @@ export async function retrainAndRescoreProfile(profileId: number): Promise<Retra
     // exist. `score` itself is left untouched (still NULL, or whatever a
     // prior successful training run set it to — going one-sided on feedback
     // later shouldn't erase a still-valid previous model's scores).
+    // Scoped to score IS NULL (matching candidates.ts's documented
+    // convention: the cold-start message corresponds to an unscored row, not
+    // "no personalization has ever happened for this profile") — a profile
+    // that trained once and later goes one-sided must not have this write
+    // clobber a still-valid score/explanation pair from that prior run
+    // (Opus review of PR #92, item 3).
     await sql(
       `UPDATE profile_listing_state
           SET rank_explanation = $2
-        WHERE profile_id = $1 AND matched = true`,
+        WHERE profile_id = $1 AND matched = true AND score IS NULL`,
       [profileId, COLD_START_EXPLANATION],
     );
 
