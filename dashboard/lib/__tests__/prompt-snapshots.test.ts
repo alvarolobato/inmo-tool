@@ -1,5 +1,5 @@
 /**
- * Snapshot tests for all 7 LLM prompt flows.
+ * Snapshot tests for all 6 LLM prompt flows.
  *
  * This is the BASELINE captured before any refactoring — imports come from
  * the original source locations, not from llm-context/. Do NOT change these
@@ -14,7 +14,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { buildGeneratePromptSplit, buildModifyPromptSplit } from "../prompts";
 import { buildAnalyzePrompt } from "../analyze-prompts";
 import { buildFreeChatContext } from "../conversation-context";
-import { buildReviewPrompt } from "../review-prompts";
 import { buildSuggestPrompt, buildGapAnalysisPrompt } from "../creation-prompts";
 
 describe("prompt-snapshots (baseline)", () => {
@@ -57,16 +56,6 @@ describe("prompt-snapshots (baseline)", () => {
   it("free-chat context is stable", () => {
     const ctx = buildFreeChatContext();
     expect(ctx.systemPrompt.stable).toMatchSnapshot();
-  });
-
-  it("weekly-review prompt is stable", () => {
-    const prompt = buildReviewPrompt(
-      "results: {}",
-      "Semana 2026-01-01 a 2026-01-07",
-      "initial",
-      true,
-    );
-    expect(prompt).toMatchSnapshot();
   });
 
   it("suggest prompt is stable", () => {

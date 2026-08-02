@@ -1,8 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { sql } from "@/lib/db-write";
-import type { InteractionRow } from "@/app/api/dashboard/[id]/interactions/route";
-import type { InteractionLine } from "@/lib/db-write";
+import { sql, type InteractionRow, type InteractionLine } from "@/lib/db-write";
 import { interactionLineClass } from "@/lib/interaction-line-class";
 
 export const dynamic = "force-dynamic";

@@ -12,7 +12,6 @@
  *  - Re-exports consumed by routes and turn-background
  */
 
-import { ReviewLlmOutputSchema, type ReviewLlmOutput } from "./review-schema";
 import { checkDailyBudget } from "./llm-usage";
 import { AgenticRunnerError } from "./llm-tools/runner";
 import { resetClient } from "./llm-client";
@@ -223,114 +222,6 @@ export async function analyzeDashboard(
   );
 
   return result.text;
-}
-
-/**
- * Generate a weekly business review with optional agentic progress callbacks.
- */
-export async function generateReviewWithProgress(
-  vars: { queryResults: string; reviewedWeekDescription: string; generationMode: "initial" | "refresh_data" | "alternate_angle" },
-  opts?: { requestId?: string; onAgenticProgress?: (ev: AgenticProgressEvent) => void },
-): Promise<{ content: ReviewLlmOutput; message: string }> {
-  const requestId = opts?.requestId ?? "req_local";
-
-  await checkDailyBudget();
-
-  // Agentic path: always use assembleRequest which dispatches to runAgenticChat
-  // when isAgenticToolsEnabled() is true.
-  const ctx: LlmAgenticContext = {
-    requestId,
-    endpoint: "generateReview",
-    onAgenticProgress: opts?.onAgenticProgress,
-    reviewResult: null,
-  };
-
-  const result = await assembleRequest(
-    "weekly",
-    vars,
-    null,
-    "Genera la revisión semanal ahora.",
-    {
-      ctx,
-      requestId,
-      endpoint: "generateReview",
-      temperature: 0.2,
-      maxOutputTokens: 4096,
-    },
-  );
-
-  // Agentic path: reviewResult was staged by submit_weekly_review tool
-  if (ctx.reviewResult) {
-    return { content: ctx.reviewResult.content, message: result.text };
-  }
-
-  // Non-agentic path: parse JSON from result.text
-  const rawContent = result.text;
-  const fenced = rawContent.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
-  const jsonStr = fenced ? fenced[1].trim() : rawContent.trim();
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonStr);
-  } catch {
-    throw new Error(
-      `LLM returned invalid JSON for review. Raw response: ${rawContent.slice(0, 500)}`,
-    );
-  }
-
-  const z = ReviewLlmOutputSchema.safeParse(parsed);
-  if (!z.success) {
-    throw new Error(
-      `LLM returned JSON that does not match ReviewLlmOutputSchema: ${z.error.message}`,
-    );
-  }
-  return { content: z.data, message: "" };
-}
-
-/**
- * Generate a weekly business review from query results (in Spanish).
- */
-export async function generateReview(
-  vars: { queryResults: string; reviewedWeekDescription: string; generationMode: "initial" | "refresh_data" | "alternate_angle" },
-  opts?: { requestId?: string },
-): Promise<{ content: ReviewLlmOutput; message: string }> {
-  const requestId = opts?.requestId ?? "req_local";
-
-  await checkDailyBudget();
-
-  const result = await assembleRequest(
-    "weekly",
-    vars,
-    null,
-    "Genera la revisión semanal ahora.",
-    {
-      requestId,
-      endpoint: "generateReview",
-      temperature: 0.2,
-      maxOutputTokens: 4096,
-    },
-  );
-
-  const rawContent = result.text;
-  const fenced = rawContent.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
-  const jsonStr = fenced ? fenced[1].trim() : rawContent.trim();
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonStr);
-  } catch {
-    throw new Error(
-      `LLM returned invalid JSON for review. Raw response: ${rawContent.slice(0, 500)}`,
-    );
-  }
-
-  const z = ReviewLlmOutputSchema.safeParse(parsed);
-  if (!z.success) {
-    throw new Error(
-      `LLM returned JSON that does not match ReviewLlmOutputSchema: ${z.error.message}`,
-    );
-  }
-  return { content: z.data, message: "" };
 }
 
 /**

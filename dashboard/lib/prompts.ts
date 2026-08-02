@@ -421,9 +421,9 @@ export function buildModifyPromptSplit(
  * Instructions appended when the dashboard LLM runs in agentic (tool) mode.
  *
  * NOTE: for generate (create-from-scratch) the old contract still applies —
- * emit the final raw JSON after validate_dashboard_spec passes. The modify,
- * analyze, and review flows now use publish tools (apply_dashboard_modification,
- * submit_dashboard_analysis, submit_weekly_review). See the per-flow prompts.
+ * emit the final raw JSON after validate_dashboard_spec passes. The modify
+ * and analyze flows now use publish tools (apply_dashboard_modification,
+ * submit_dashboard_analysis). See the per-flow prompts.
  */
 export function buildAgenticToolPreamble(): string {
   return [

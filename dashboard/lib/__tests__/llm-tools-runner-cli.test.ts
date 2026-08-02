@@ -24,13 +24,6 @@ vi.mock("@/lib/llm-tools/handlers/dashboards", () => ({
   handleGetDashboardAllWidgetStatus: vi.fn(),
 }));
 
-vi.mock("@/lib/llm-tools/handlers/start-dashboard-generation", () => ({
-  handleStartDashboardGeneration: vi.fn().mockResolvedValue({
-    ok: true as const,
-    data: { dashboard_id: "1", redirect_url: "/dashboards/1?tab=modify", summary: "Created" },
-  }),
-}));
-
 vi.mock("@/lib/llm-provider/cli/claude-code", () => ({
   claudeCliAgenticStep: mockClaudeStep,
 }));

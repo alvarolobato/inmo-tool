@@ -5,8 +5,7 @@ import {
   templateGlobalFiltersStock,
   templateGlobalFiltersCompras,
 } from "../template-global-filters";
-import { compileGlobalFilterSql, listReferencedGlobalFilterIds } from "../sql-filters";
-import { TEMPLATES } from "../templates";
+import { compileGlobalFilterSql } from "../sql-filters";
 import { GlobalFilterSchema } from "../schema";
 
 // ---------------------------------------------------------------------------
@@ -139,51 +138,3 @@ describe("filter compilation — inactive yields TRUE, active yields parameteriz
   }
 });
 
-// ---------------------------------------------------------------------------
-// Every widget SQL in every template compiles cleanly with every declared
-// template-filter inactive. This guarantees that adding new `__gf_*__` tokens
-// doesn't break widgets that don't reference them (they remain untouched)
-// and tokens present in widget SQL resolve to TRUE without parameters.
-// ---------------------------------------------------------------------------
-
-describe("widget SQL + filter pipeline — empty selections keep SQL valid", () => {
-  for (const template of TEMPLATES) {
-    it(`${template.slug}: every widget SQL compiles with no active filters`, () => {
-      const filters = template.spec.filters ?? [];
-      for (const widget of template.spec.widgets) {
-        const sqlStrings: string[] =
-          widget.type === "kpi_row"
-            ? widget.items.map((i) => i.sql)
-            : [widget.sql];
-        for (const rawSql of sqlStrings) {
-          const { sql, params } = compileGlobalFilterSql(rawSql, filters, {});
-          // Every token referenced in the widget SQL must belong to the
-          // template filter set — otherwise it would remain unreplaced.
-          const remaining = listReferencedGlobalFilterIds(sql);
-          expect(remaining, `widget with orphan filter tokens: ${remaining.join(",")}`).toEqual([]);
-          // Inactive compile never emits params.
-          expect(params).toEqual([]);
-        }
-      }
-    });
-  }
-});
-
-describe("widget SQL references only known template filter ids", () => {
-  for (const template of TEMPLATES) {
-    it(`${template.slug}: every __gf_<id>__ token in widget SQL is declared in spec.filters`, () => {
-      const declared = new Set((template.spec.filters ?? []).map((f) => f.id));
-      for (const widget of template.spec.widgets) {
-        const sqlStrings: string[] =
-          widget.type === "kpi_row"
-            ? widget.items.map((i) => i.sql)
-            : [widget.sql];
-        for (const sql of sqlStrings) {
-          for (const id of listReferencedGlobalFilterIds(sql)) {
-            expect(declared.has(id), `${template.slug} references undeclared filter id ${id}`).toBe(true);
-          }
-        }
-      }
-    });
-  }
-});

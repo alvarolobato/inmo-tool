@@ -26,6 +26,22 @@ export interface InteractionLine {
 
 export type InteractionEndpoint = "generate" | "modify" | "analyze";
 
+/** A row from `llm_interactions`, as read back by the admin monitoring routes. */
+export interface InteractionRow {
+  id: string;
+  request_id: string;
+  endpoint: InteractionEndpoint;
+  dashboard_id: number | null;
+  prompt: string;
+  final_output: string | null;
+  lines: InteractionLine[];
+  llm_provider: string | null;
+  llm_driver: string | null;
+  started_at: string;
+  finished_at: string | null;
+  status: "running" | "completed" | "error";
+}
+
 // ─── OTel trace context ──────────────────────────────────────────────────────
 
 /** W3C trace-context IDs written to PG rows for click-through to Kibana APM. */

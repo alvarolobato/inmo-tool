@@ -7,8 +7,8 @@ import {
 
 describe("llm-tools catalog", () => {
   describe("FREE_CHAT_TOOLS", () => {
-    it("contains exactly 12 tools (10 inspection + start_dashboard_generation + set_title)", () => {
-      expect(FREE_CHAT_TOOLS).toHaveLength(12);
+    it("contains exactly 11 tools (10 inspection + set_title)", () => {
+      expect(FREE_CHAT_TOOLS).toHaveLength(11);
     });
 
     it("includes all 10 inspection tools", () => {
@@ -25,14 +25,14 @@ describe("llm-tools catalog", () => {
       expect(names).toContain("get_dashboard_all_widget_status");
     });
 
-    it("includes start_dashboard_generation", () => {
-      const names = FREE_CHAT_TOOLS.map((t) => t.function.name);
-      expect(names).toContain("start_dashboard_generation");
-    });
-
     it("includes set_title", () => {
       const names = FREE_CHAT_TOOLS.map((t) => t.function.name);
       expect(names).toContain("set_title");
+    });
+
+    it("does NOT include start_dashboard_generation", () => {
+      const names = FREE_CHAT_TOOLS.map((t) => t.function.name);
+      expect(names).not.toContain("start_dashboard_generation");
     });
 
     it("does NOT include apply_dashboard_modification", () => {
@@ -79,19 +79,20 @@ describe("llm-tools catalog", () => {
       expect(FULL_DASHBOARD_TOOLS).toBe(DASHBOARD_AGENTIC_TOOLS);
     });
 
-    it("contains start_dashboard_generation", () => {
+    it("does NOT contain start_dashboard_generation", () => {
       const names = FULL_DASHBOARD_TOOLS.map((t) => t.function.name);
-      expect(names).toContain("start_dashboard_generation");
+      expect(names).not.toContain("start_dashboard_generation");
     });
   });
 
-  describe("DASHBOARD_AGENTIC_TOOLS (backwards compat)", () => {
-    it("contains start_dashboard_generation", () => {
+  describe("DASHBOARD_AGENTIC_TOOLS", () => {
+    it("does NOT contain start_dashboard_generation or submit_weekly_review", () => {
       const names = DASHBOARD_AGENTIC_TOOLS.map((t) => t.function.name);
-      expect(names).toContain("start_dashboard_generation");
+      expect(names).not.toContain("start_dashboard_generation");
+      expect(names).not.toContain("submit_weekly_review");
     });
 
-    it("still contains all original tools", () => {
+    it("still contains all remaining original tools", () => {
       const names = DASHBOARD_AGENTIC_TOOLS.map((t) => t.function.name);
       expect(names).toContain("validate_query");
       expect(names).toContain("execute_query");
@@ -106,28 +107,6 @@ describe("llm-tools catalog", () => {
       expect(names).toContain("validate_dashboard_spec");
       expect(names).toContain("apply_dashboard_modification");
       expect(names).toContain("submit_dashboard_analysis");
-      expect(names).toContain("submit_weekly_review");
-    });
-  });
-
-  describe("start_dashboard_generation tool definition", () => {
-    const tool = DASHBOARD_AGENTIC_TOOLS.find(
-      (t) => t.function.name === "start_dashboard_generation",
-    );
-
-    it("exists in DASHBOARD_AGENTIC_TOOLS", () => {
-      expect(tool).toBeDefined();
-    });
-
-    it("has required 'prompt' parameter", () => {
-      const required = tool?.function.parameters?.required as string[] | undefined;
-      expect(required).toContain("prompt");
-    });
-
-    it("only exposes 'prompt' in parameters (template was removed)", () => {
-      const props = tool?.function.parameters?.properties as Record<string, unknown> | undefined;
-      expect(props).toHaveProperty("prompt");
-      expect(props).not.toHaveProperty("template");
     });
   });
 });

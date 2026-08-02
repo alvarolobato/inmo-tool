@@ -37,7 +37,7 @@ const optStr = z.string().min(1).optional();
  * executes saved widget SQL after inlining the :curr_ and :comp_ date tokens
  * and __gf_<id>__ filter tokens — it never binds positional params, so a
  * leftover `$1` reaches Postgres unbound and fails with "there is no parameter
- * $1" (the review-semanal dashboards shipped this bug — see review-dashboard-seed).
+ * $1" (the weekly-review dashboards shipped this bug in production — see D-041).
  * Reject it at the spec boundary so it can never be saved or seeded again.
  */
 const POSITIONAL_PARAM_MSG =

@@ -15,8 +15,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { adminApiKeyValid, adminUnauthorized } from "@/lib/admin-api-auth";
-import { sql } from "@/lib/db-write";
-import type { InteractionRow } from "@/app/api/dashboard/[id]/interactions/route";
+import { sql, type InteractionRow } from "@/lib/db-write";
 import { formatApiError, generateRequestId } from "@/lib/errors";
 
 const VALID_ENDPOINTS = ["generate", "modify", "analyze"] as const;

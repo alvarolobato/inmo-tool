@@ -21,7 +21,6 @@ export {
   buildSuggestionPrompt,
   buildSuggestPrompt,
   buildGapAnalysisPrompt,
-  buildReviewPrompt,
   buildFreeChatContext,
   buildAgenticToolPreamble,
   type FreeChatContext,

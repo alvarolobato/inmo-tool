@@ -13,9 +13,9 @@ const SINGLE_SHOT_FLOWS = new Set(["suggest", "gap", "summary", "title"]);
 /**
  * Return the tool catalog for a given LLM flow.
  *
- * - "chat"                          → FREE_CHAT_TOOLS (data inspection + start_dashboard_generation + set_title)
+ * - "chat"                          → FREE_CHAT_TOOLS (data inspection + set_title)
  * - "suggest" | "gap" | "summary" | "title" → [] (single-shot, no tools)
- * - all other flows                 → DASHBOARD_AGENTIC_TOOLS (full catalog, includes weekly)
+ * - all other flows                 → DASHBOARD_AGENTIC_TOOLS (full catalog)
  */
 export function toolsForFlow(flow: string): ChatCompletionTool[] {
   if (SINGLE_SHOT_FLOWS.has(flow)) return [];

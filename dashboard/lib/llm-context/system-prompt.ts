@@ -6,7 +6,7 @@
  * source modules (which re-export from here in the deprecated shim layer).
  *
  * Agentic tool preamble injection happens here so callers never have to think
- * about it: for generate / modify / analyze / weekly flows the preamble is
+ * about it: for generate / modify / analyze flows the preamble is
  * appended to `stable` when `isAgenticToolsEnabled()` is true.
  */
 
@@ -20,7 +20,6 @@ import {
   type TableSchema,
   type Relationship,
 } from "@/lib/knowledge";
-import { REVIEW_QUERIES } from "@/lib/review-queries";
 import { isAgenticToolsEnabled } from "@/lib/llm-tools/config";
 import type { FlowVars } from "./types";
 import {
@@ -337,16 +336,11 @@ function formatAnalyzeBusinessRules(): string {
   return `## Reglas de negocio clave\n\n${lines.join("\n")}`;
 }
 
-function formatReviewInstructions(instructions: Instruction[]): string {
-  return instructions.map((ins) => `- ${ins.instruction}`).join("\n");
-}
-
 // ── Free-chat constants ───────────────────────────────────────────────────────
 
 const FREE_CHAT_PREAMBLE =
   "Eres un asistente analítico de inmo-tool. " +
   "Tienes acceso a herramientas para inspeccionar el modelo de datos, ejecutar consultas de solo lectura y explorar dashboards guardados. " +
-  "Cuando el usuario pida crear un dashboard, usa la herramienta `start_dashboard_generation`. " +
   "En tu primera respuesta de cada conversación nueva, llama a la herramienta `set_title` con un título conciso de 5-7 palabras en español que resuma el tema.\n\n";
 
 // ── Public prompt builders ────────────────────────────────────────────────────
@@ -678,128 +672,6 @@ export function buildGapAnalysisPrompt(
   ].join("\n");
 }
 
-export function buildReviewPrompt(
-  queryResults: string,
-  reviewedWeekDescription: string,
-  generationMode: "initial" | "refresh_data" | "alternate_angle" = "initial",
-  agenticMode = true,
-): string {
-  const instructionsText = formatReviewInstructions(INSTRUCTIONS);
-  const QUERY_NAMES_LIST = REVIEW_QUERIES.map((q) => q.name).join(", ");
-
-  const modeHint =
-    generationMode === "alternate_angle"
-      ? "Enfoque alternativo: prioriza riesgos, cuellos de botella y decisiones pendientes; evita repetir la misma redacción de una revisión anterior."
-      : "Enfoque estándar: equilibrio entre diagnóstico y oportunidades.";
-
-  return `Eres un analista de negocio experto en retail y moda que prepara la revisión semanal del negocio para DIRECCIÓN.
-
-Tu misión: analizar los datos y devolver una revisión accionable en español, con evidencia explícita (nombres de consultas) y prioridades claras.
-
-**Ventana temporal:** ${reviewedWeekDescription}
-
-**Modo de generación:** ${generationMode}. ${modeHint}
-
-No asumas datos de la semana en curso si no aparecen en las consultas.
-
-## Reglas de negocio
-
-${instructionsText}
-
-## Consultas permitidas para evidencia
-
-Solo puedes referenciar estos nombres exactos en los arrays evidence_queries:
-${QUERY_NAMES_LIST}
-
-## Formato de la revisión (v2)
-
-**Resumen Ejecutivo:** corresponde al campo JSON \`executive_summary\` (array de 3 a 5 bullets en español).
-
-El objeto JSON de la revisión debe tener esta forma:
-
-{
-  "executive_summary": ["bullet 1", "bullet 2", "bullet 3"],
-  "sections": [
-    {
-      "key": "ventas_retail",
-      "title": "Ventas Retail",
-      "narrative": "2-4 párrafos separados por \\n\\n",
-      "kpis": ["KPI breve 1", "KPI breve 2"],
-      "evidence_queries": ["ventas_semana_cerrada", "ventas_semana_previa"],
-      "dashboard_key": "ventas_retail"
-    },
-    {
-      "key": "canal_mayorista",
-      "title": "Canal Mayorista",
-      "narrative": "...",
-      "kpis": ["...", "..."],
-      "evidence_queries": ["facturacion_mayorista_semana_cerrada"],
-      "dashboard_key": "canal_mayorista"
-    },
-    {
-      "key": "stock",
-      "title": "Stock y Logística",
-      "narrative": "...",
-      "kpis": ["...", "..."],
-      "evidence_queries": ["stock_total_unidades", "articulos_stock_critico"],
-      "dashboard_key": "stock"
-    },
-    {
-      "key": "compras",
-      "title": "Compras",
-      "narrative": "...",
-      "kpis": ["...", "..."],
-      "evidence_queries": ["compras_semana_cerrada", "compras_semana_previa"],
-      "dashboard_key": "compras"
-    }
-  ],
-  "action_items": [
-    {
-      "action_key": "revisar_stock_critico_top",
-      "priority": "alta",
-      "owner_role": "Dirección de tiendas",
-      "due_date": "YYYY-MM-DD",
-      "action": "Texto accionable concreto",
-      "expected_impact": "Impacto esperado cuantificado o cualificado",
-      "evidence_queries": ["articulos_stock_critico"],
-      "dashboard_key": "stock"
-    }
-  ],
-  "data_quality_notes": [],
-  "generated_at": "<ISO 8601>"
-}
-
-Restricciones:
-- sections debe tener exactamente 4 entradas y las claves key deben ser ventas_retail, canal_mayorista, stock, compras (una cada una).
-- executive_summary: 3 a 5 strings.
-- action_items: mínimo 3, máximo 8; cada action_key en snake_case único dentro del JSON.
-- priority solo: alta | media | baja.
-- due_date siempre YYYY-MM-DD (fecha objetivo de seguimiento).
-- evidence_queries nunca vacío; solo nombres de la lista permitida.
-- data_quality_notes incluye avisos si faltan datos o una consulta falló (según el bloque de resultados).
-
-${
-  agenticMode
-    ? `## Flujo requerido (OBLIGATORIO)
-
-1. Analiza los datos y construye el objeto JSON de la revisión siguiendo el formato anterior.
-2. Llama a la herramienta \`submit_weekly_review\` con:
-   - \`review\`: el objeto JSON completo de la revisión.
-   - \`brief_summary\`: 1–2 frases en español que resumen las conclusiones principales.
-3. Después de que \`submit_weekly_review\` devuelva \`{ ok: true, applied: true }\`,
-   escribe tu mensaje final como una respuesta amistosa en español al usuario (≤ 4 frases)
-   describiendo las conclusiones clave de la semana.
-
-**Nunca emitas el JSON de la revisión como tu respuesta final.** El JSON DEBE ir a través de
-\`submit_weekly_review\`. Si emites el JSON directamente como texto, el sistema fallará con un error.`
-    : `Devuelve ÚNICAMENTE un objeto JSON válido (sin markdown, sin texto extra) con la forma descrita arriba.`
-}
-
-## Datos analizados
-
-${queryResults}`;
-}
-
 export interface FreeChatContext {
   systemPrompt: { stable: string };
   tools: import("openai/resources/chat/completions").ChatCompletionTool[];
@@ -825,7 +697,7 @@ export function buildFreeChatContext(): FreeChatContext {
  * per-request context (e.g. the current dashboard spec for modify).
  *
  * When `isAgenticToolsEnabled()` is true the agentic tool preamble is appended
- * to the stable part for generate / modify / analyze / weekly flows.
+ * to the stable part for generate / modify / analyze flows.
  */
 export function buildSystemPrompt(
   flow: string,
@@ -877,16 +749,6 @@ export function buildSystemPrompt(
           })),
         ),
       };
-    }
-
-    case "weekly": {
-      const prompt = buildReviewPrompt(
-        vars.queryResults ?? "",
-        vars.reviewedWeekDescription ?? "",
-        vars.generationMode ?? "initial",
-        agenticEnabled,
-      );
-      return { stable: prompt + preamble };
     }
 
     case "chat": {
