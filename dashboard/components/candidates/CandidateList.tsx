@@ -78,7 +78,13 @@ export function CandidateList({ profileId }: { profileId: number }) {
   // unpersonalized profile, so it belongs to the *profile*, not to any card
   // (#152). Shown once below the grid; disappears on its own as soon as the
   // profile has a trained model and the per-property explanations take over.
-  const coldStart = items.some((c) => c.rank_explanation === COLD_START_EXPLANATION);
+  //
+  // Detected via the durable `score_kind` marker, not by comparing
+  // `rank_explanation` against the constant string (#152 review): that
+  // string is *persisted* on `profile_listing_state` at scoring time, so a
+  // purely cosmetic copy edit to COLD_START_EXPLANATION would silently stop
+  // matching every already-written row and un-suppress the old sentence.
+  const coldStart = items.some((c) => c.score_kind === "cold_start");
 
   return (
     <div style={{ marginTop: 16 }}>

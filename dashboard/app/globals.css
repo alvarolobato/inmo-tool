@@ -232,9 +232,14 @@ body {
   transform: translateY(0);
 }
 
-/* Touch and other hover-incapable pointers: no hover to rely on, so the
-   bar is permanently visible. Sits below the photo's price gradient rather
-   than over it to stay legible without the hover backdrop. */
+/* Touch and other hover-incapable pointers: no hover to rely on, so the bar
+   is permanently visible. It stays top-right, over the photo — same
+   position as the hover case (see .candidate-card-actions above) — with its
+   own semi-opaque backdrop (rgba(0,0,0,0.55) + blur) keeping the glyphs
+   legible against the photo without needing the price gradient underneath.
+   (Verified on iPhone 13 emulation, 2026-08 — #152 review flagged an earlier
+   version of this comment that wrongly claimed the bar moved below the
+   gradient; it never did, and doesn't need to.) */
 @media (hover: none) {
   .candidate-card-actions {
     opacity: 1;

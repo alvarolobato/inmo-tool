@@ -24,6 +24,7 @@ function candidate(overrides: Partial<CandidateRow> = {}): CandidateRow {
     listings: [{ id: 10, source: "fotocasa", url: "https://x", current_price: 285000 }],
     score: null,
     rank_explanation: null,
+    score_kind: null,
     ...overrides,
   };
 }
@@ -137,8 +138,40 @@ describe("CandidateCard", () => {
   });
 
   it("#152: suppresses the cold-start explanation on the card — CandidateList shows it once for the whole profile", () => {
-    render(<CandidateCard candidate={candidate({ rank_explanation: COLD_START_EXPLANATION })} profileId={5} />);
+    render(
+      <CandidateCard
+        candidate={candidate({ rank_explanation: COLD_START_EXPLANATION, score_kind: "cold_start" })}
+        profileId={5}
+      />,
+    );
     expect(screen.queryByTestId("rank-explanation")).not.toBeInTheDocument();
+  });
+
+  it("#152 review: suppression is driven by score_kind, not by string-matching rank_explanation against the constant", () => {
+    // Same guarding value the cold-start writer actually uses, but tagged
+    // with a *different* score_kind than the writer would ever pair it
+    // with — proves the card reads the durable marker, not the string.
+    render(
+      <CandidateCard
+        candidate={candidate({ rank_explanation: "cualquier texto, aunque no coincida con la constante", score_kind: "cold_start" })}
+        profileId={5}
+      />,
+    );
+    expect(screen.queryByTestId("rank-explanation")).not.toBeInTheDocument();
+  });
+
+  it("#152 review: a real explanation still renders even if its text happens to equal the cold-start sentence, as long as score_kind is 'trained'", () => {
+    // Regression guard: comparing rank_explanation against
+    // COLD_START_EXPLANATION by string equality would wrongly suppress this
+    // — a purely cosmetic edit to the constant could otherwise silently
+    // un-suppress every already-written cold-start row (#152 review).
+    render(
+      <CandidateCard
+        candidate={candidate({ rank_explanation: COLD_START_EXPLANATION, score_kind: "trained" })}
+        profileId={5}
+      />,
+    );
+    expect(screen.getByTestId("rank-explanation")).toHaveTextContent(COLD_START_EXPLANATION);
   });
 
   it("#152: keeps the feedback controls outside the detail <Link> so acting on a card can't navigate", () => {

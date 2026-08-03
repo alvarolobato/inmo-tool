@@ -2,7 +2,6 @@ import Link from "next/link";
 import type { CandidateRow } from "@/lib/candidates";
 import { PROPERTY_TYPE_LABELS, type PROPERTY_TYPES } from "@/lib/profiles-schema";
 import { fmtEUR0, fmtInt } from "@/components/widgets/format";
-import { COLD_START_EXPLANATION } from "@/lib/scoring/cold-start";
 import { FeedbackControls } from "./FeedbackControls";
 
 /**
@@ -54,8 +53,14 @@ export function CandidateCard({ candidate, profileId }: { candidate: CandidateRo
   // profile, so repeating it per card was pure noise (#152) — CandidateList
   // renders it once as a page-level footer instead. A *real*, model-grounded
   // explanation differs per property and stays on the card.
+  //
+  // Detected via `score_kind`, the durable marker `profile_listing_state`
+  // carries (task 3.4, #23) — not by comparing `rank_explanation` against
+  // the cold-start constant (#152 review): that string is persisted at
+  // scoring time, so a copy edit to the constant would silently stop
+  // recognising every already-written cold-start row.
   const explanation =
-    candidate.rank_explanation !== null && candidate.rank_explanation !== COLD_START_EXPLANATION
+    candidate.rank_explanation !== null && candidate.score_kind !== "cold_start"
       ? candidate.rank_explanation
       : null;
 
@@ -234,7 +239,7 @@ export function CandidateCard({ candidate, profileId }: { candidate: CandidateRo
         keyboard users via :focus-within.
       */}
       <div className="candidate-card-actions" data-testid="candidate-card-actions">
-        <FeedbackControls profileId={profileId} propertyId={candidate.property_id} compact />
+        <FeedbackControls profileId={profileId} propertyId={candidate.property_id} />
       </div>
     </div>
   );

@@ -62,6 +62,17 @@ export interface CandidateRow {
   score: number | null;
   /** Task 3.3 (#22): human-readable, model-grounded explanation of `score` — a cold-start message when `score` is null because no model exists yet, not because this specific property hasn't been rescored. */
   rank_explanation: string | null;
+  /**
+   * Durable marker for whether `score`/`rank_explanation` came from the
+   * cold-start heuristic or a real trained model (task 3.4, #23) — null
+   * until the property has been scored at all. The client should switch on
+   * this, not on comparing `rank_explanation` against the cold-start
+   * sentence: that string is *persisted* at scoring time
+   * (lib/scoring/cold-start.ts), so a purely cosmetic copy edit to the
+   * constant would silently stop matching every already-written row and
+   * un-suppress the old sentence on every card (#152 review).
+   */
+  score_kind: "cold_start" | "trained" | null;
 }
 
 export interface CandidatePage {
@@ -135,42 +146,58 @@ interface RawCandidateRow {
   listings: CandidateListingSummary[];
   score: string | null;
   rank_explanation: string | null;
+  score_kind: "cold_start" | "trained" | null;
 }
 
 /**
- * Maps an `ai_assessment` row to the badges the card shows.
+ * Maps a property's `ai_assessment` rows to the badges the card shows.
  *
- * Only surfaces verdicts that change the investment decision — a `vacant`
- * property or a `full` sale is the unremarkable default and gets no badge,
- * because a badge on every card carries no information.
+ * Only surfaces verdicts that change the investment decision — a standard
+ * "compraventa" of "pleno dominio" on a vacant property is the unremarkable
+ * default and gets no badge, because a badge on every card carries no
+ * information. Unrecognised codes are dropped rather than rendered as raw
+ * text (#152 review, must-fix 3): both vocabularies below are closed
+ * enumerations validated where the row is written (see `deriveCaveats` in
+ * `lib/ai-assessment/occupancy.ts` and, once #26 lands, its condition
+ * equivalent), so anything not in the label maps is either the standard
+ * "nothing to report" value or evidence of drift between this file and the
+ * writer's vocabulary — never scraped free text that could grow the card.
  *
- * De-duplicated by `kind`: a property with two linked listings can carry two
- * assessments agreeing that it's occupied, and "Ocupado Ocupado" on the card
- * would be a dedup bug made visible.
+ * Exported for direct unit testing: this is the pure function findings #1
+ * and #3 in the #152 review trace back to, and it is cheap to test in
+ * isolation without a mocked `pg` pool.
+ *
+ * De-duplicated by `kind` as a second line of defence — the real fix for
+ * "two verdicts on one axis" is `loadFlags`'s `DISTINCT ON`, which ensures
+ * `rows` here holds at most one row per `assessment_type` per property. This
+ * dedup keeps `flagsFromAssessments` safe to call with un-deduplicated input
+ * too (e.g. from a future caller), rather than depending on that invariant.
  */
-function flagsFromAssessments(rows: RawAssessmentRow[]): CandidateFlag[] {
+export function flagsFromAssessments(rows: RawAssessmentRow[]): CandidateFlag[] {
   const flags: CandidateFlag[] = [];
   for (const row of rows) {
     const result = row.result ?? {};
-    const occupancy = typeof result.occupancy === "string" ? result.occupancy : null;
-    const saleType = typeof result.sale_type === "string" ? result.sale_type : null;
-    const condition = typeof result.condition === "string" ? result.condition : null;
 
-    if (occupancy !== null && occupancy !== "vacant" && occupancy !== "unknown") {
-      flags.push({
-        kind: `occupancy:${occupancy}`,
-        label: OCCUPANCY_LABELS[occupancy] ?? occupancy,
-        tone: "warn",
-      });
+    // #156's three-axis occupancy assessment (occupancy/transaction/
+    // ownership verdicts) derives `caveats` once, server-side, from those
+    // three verdicts — see `deriveCaveats` in lib/ai-assessment/occupancy.ts.
+    // Reading it here instead of re-parsing the raw verdict objects keeps
+    // this file and that one from ever disagreeing about which combinations
+    // are noteworthy (the same "single computation" rule explainScore()
+    // follows for rank_explanation).
+    const caveats = Array.isArray(result.caveats) ? result.caveats : [];
+    for (const code of caveats) {
+      if (typeof code !== "string") continue;
+      const label = CAVEAT_LABELS[code];
+      if (label !== undefined) flags.push({ kind: `caveat:${code}`, label, tone: "warn" });
     }
-    if (saleType !== null && saleType !== "full" && saleType !== "unknown") {
-      flags.push({
-        kind: `sale_type:${saleType}`,
-        label: SALE_TYPE_LABELS[saleType] ?? saleType,
-        tone: "warn",
-      });
-    }
-    if (condition !== null && condition !== "unknown") {
+
+    // Condition (#26) is not implemented yet — no writer produces
+    // assessment_type='condition' rows today — but the CHECK constraint and
+    // this read path are already in place so a future flow needs no changes
+    // here beyond adding to CONDITION_LABELS.
+    const condition = typeof result.condition === "string" ? result.condition : null;
+    if (condition !== null) {
       const label = CONDITION_LABELS[condition];
       if (label !== undefined) flags.push({ kind: `condition:${condition}`, label, tone: "neutral" });
     }
@@ -183,23 +210,20 @@ function flagsFromAssessments(rows: RawAssessmentRow[]): CandidateFlag[] {
 }
 
 /**
- * Vocabularies mirror #24's enum-language convention: Spanish for market
- * terms of art that lose meaning in translation (`nuda propiedad`,
- * `a reformar`), English for generic system state (`vacant`, `full`).
- * Unknown values fall through to the raw string rather than being dropped,
- * so a vocabulary added by #25 still renders something useful here.
+ * Every non-default value of `OccupancyResult.caveats` (#25 + #145) worth a
+ * badge — see `CAVEAT_CODES` in lib/ai-assessment/occupancy.ts for the
+ * closed vocabulary this mirrors. Spanish for market terms of art that lose
+ * meaning in translation (`nuda propiedad`), English for generic system
+ * state where no better Spanish term reads as naturally short.
  */
-const OCCUPANCY_LABELS: Record<string, string> = {
+const CAVEAT_LABELS: Record<string, string> = {
   tenanted: "Alquilado",
-  squatted: "Ocupado",
-  occupied: "Ocupado",
-};
-
-const SALE_TYPE_LABELS: Record<string, string> = {
-  debt: "Venta de deuda",
-  partial: "Venta parcial",
+  occupied_illegally: "Ocupado",
+  venta_deuda: "Venta de deuda",
   nuda_propiedad: "Nuda propiedad",
+  usufructo: "Usufructo",
   proindiviso: "Proindiviso",
+  derecho_superficie: "Derecho de superficie",
 };
 
 const CONDITION_LABELS: Record<string, string> = {
@@ -208,83 +232,43 @@ const CONDITION_LABELS: Record<string, string> = {
   obra_nueva: "Obra nueva",
 };
 
-interface RawAssessmentRow {
+export interface RawAssessmentRow {
   property_id: number;
   result: Record<string, unknown> | null;
-}
-
-type AssessmentKey = "property_id" | "listing_id" | null;
-let assessmentKeyPromise: Promise<AssessmentKey> | null = null;
-
-/**
- * Which column `ai_assessment` is keyed on, probed once per process.
- *
- * #25 (occupancy) is in flight and re-keys this table from `listing_id` to
- * `property_id`. Both shapes are live at once across branches, and simply
- * assuming the new one would mean the badges never render (and every list
- * request logs a caught DB error) until that lands. Probing lets the same
- * code read either shape correctly instead of degrading to "no flags".
- *
- * A failed probe is not cached — a transient DB blip would otherwise
- * disable flags for the lifetime of the process.
- */
-function assessmentKeyColumn(): Promise<AssessmentKey> {
-  if (assessmentKeyPromise === null) {
-    assessmentKeyPromise = sql<{ column_name: string }>(
-      `SELECT column_name
-         FROM information_schema.columns
-        WHERE table_name = 'ai_assessment'
-          AND column_name IN ('property_id', 'listing_id')`,
-    )
-      .then((rows) => {
-        const columns = new Set(rows.map((r) => r.column_name));
-        // property_id wins when both exist: that's #25 mid-migration, and the
-        // new key is the authoritative one (an assessment belongs to the
-        // deduplicated property, not to whichever site's listing produced it).
-        if (columns.has("property_id")) return "property_id" as const;
-        if (columns.has("listing_id")) return "listing_id" as const;
-        return null;
-      })
-      .catch((err) => {
-        console.warn("[candidates] could not probe ai_assessment shape:", err);
-        assessmentKeyPromise = null;
-        return null;
-      });
-  }
-  return assessmentKeyPromise;
 }
 
 /**
  * Best-effort: returns no flags rather than propagating if `ai_assessment`
  * can't be read. The badges are an enhancement — not something worth
  * failing the whole candidate feed over.
+ *
+ * `ai_assessment` allows multiple rows per `(property_id, assessment_type)`
+ * — one per `prompt_version` (see the `ai_assessment_property_key` unique
+ * constraint in etl/schema/init.sql) — so a prompt-version bump leaves the
+ * *old* verdict's row in place alongside the new one. `DISTINCT ON
+ * (property_id, assessment_type)`, ordered by `generated_at DESC` (most
+ * recent first), picks exactly the current verdict per axis; without it,
+ * `flagsFromAssessments`'s dedup-by-`kind` cannot help, because two
+ * different verdicts on the same axis produce two different `kind` strings
+ * (e.g. `occupancy:tenanted` and `occupancy:occupied_illegally` reported
+ * simultaneously) — the exact bug the #152 review reproduced (#152 review,
+ * must-fix 1).
  */
 async function loadFlags(propertyIds: number[]): Promise<Map<number, CandidateFlag[]>> {
   const byProperty = new Map<number, CandidateFlag[]>();
   if (propertyIds.length === 0) return byProperty;
 
-  const key = await assessmentKeyColumn();
-  if (key === null) return byProperty;
-
   let rows: RawAssessmentRow[];
   try {
-    rows =
-      key === "property_id"
-        ? await sql<RawAssessmentRow>(
-            `SELECT property_id, result
-               FROM ai_assessment
-              WHERE property_id = ANY($1::bigint[])`,
-            [propertyIds],
-          )
-        : await sql<RawAssessmentRow>(
-            // Pre-#25 shape: assessments hang off a listing, so a deduplicated
-            // property collects the assessments of every listing linked to it.
-            `SELECT l.property_id, a.result
-               FROM ai_assessment a
-               JOIN listing l ON l.id = a.listing_id
-              WHERE l.property_id = ANY($1::bigint[])`,
-            [propertyIds],
-          );
+    rows = await sql<RawAssessmentRow>(
+      `SELECT DISTINCT ON (property_id, assessment_type)
+              property_id, result
+         FROM ai_assessment
+        WHERE property_id = ANY($1::bigint[])
+          AND assessment_type IN ('occupancy', 'condition')
+        ORDER BY property_id, assessment_type, generated_at DESC NULLS LAST, id DESC`,
+      [propertyIds],
+    );
   } catch (err) {
     console.warn("[candidates] ai_assessment unavailable, rendering without flags:", err);
     return byProperty;
@@ -371,6 +355,7 @@ export async function listCandidates(
          WHERE l3.property_id = p.id) AS first_seen_at,
        pls.score,
        pls.rank_explanation,
+       pls.score_kind,
        COALESCE(
          (SELECT json_agg(
                    json_build_object(
@@ -425,6 +410,7 @@ export async function listCandidates(
     listings: r.listings,
     score: r.score !== null ? Number(r.score) : null,
     rank_explanation: r.rank_explanation,
+    score_kind: r.score_kind ?? null,
   }));
 
   // Cursor is derived from the *last row of the SQL result*, which is

@@ -10,7 +10,13 @@ vi.mock("pg", () => ({
   },
 }));
 
-import { decodeCursor, listCandidates } from "../candidates";
+import {
+  decodeCursor,
+  flagsFromAssessments,
+  getAdjacentCandidates,
+  listCandidates,
+  type RawAssessmentRow,
+} from "../candidates";
 import { resetPool } from "@/lib/db-write";
 
 /** Builds a cursor the same way `listCandidates` does internally, purely for test setup — tests otherwise treat cursors as opaque and decode `nextCursor` to assert on it. */
@@ -18,12 +24,32 @@ function testCursor(score: number | null, id: number): string {
   return Buffer.from(JSON.stringify([score ?? -1, id])).toString("base64url");
 }
 
-describe("listCandidates", () => {
-  beforeEach(async () => {
-    mockPoolQuery.mockReset();
-    await resetPool();
-  });
+// File-scoped (not nested in one describe) so every describe block below
+// gets a freshly-reset mock and pool — the loadFlags/getAdjacentCandidates
+// suites added for the #152 review need this exactly as much as
+// listCandidates's own tests do; nesting it inside `describe("listCandidates"`
+// only would leave sibling describes sharing mock state across tests.
+beforeEach(async () => {
+  mockPoolQuery.mockReset();
+  await resetPool();
+});
 
+const stubRow = (id: number) => ({
+  property_id: id,
+  address: null,
+  lat: null,
+  lon: null,
+  property_type: null,
+  m2_built: null,
+  rooms: null,
+  min_price: null,
+  first_seen_at: null,
+  listings: [],
+  score: null,
+  rank_explanation: null,
+});
+
+describe("listCandidates", () => {
   it("queries profile_listing_state joined to property, filtered on matched=true", async () => {
     mockPoolQuery.mockResolvedValue({ rows: [] });
 
@@ -59,21 +85,6 @@ describe("listCandidates", () => {
       "Cursor no válido.",
     );
     expect(mockPoolQuery).not.toHaveBeenCalled();
-  });
-
-  const stubRow = (id: number) => ({
-    property_id: id,
-    address: null,
-    lat: null,
-    lon: null,
-    property_type: null,
-    m2_built: null,
-    rooms: null,
-    min_price: null,
-    first_seen_at: null,
-    listings: [],
-    score: null,
-    rank_explanation: null,
   });
 
   it("sets nextCursor only when a real next page exists (extra row is fetched and trimmed, not inferred from a full page)", async () => {
@@ -190,5 +201,211 @@ describe("listCandidates", () => {
     // row in this already-sorted result — not after whichever id happened
     // to sort last in some separate re-sort.
     expect(decodeCursor(page.nextCursor!)).toEqual({ score: 0.5, id: 9 });
+  });
+
+  it("coerces score_kind through, and defaults to null when the DB returns it undefined (older mocked rows)", async () => {
+    mockPoolQuery.mockResolvedValueOnce({
+      rows: [{ ...stubRow(1), score_kind: "trained" }, { ...stubRow(2), score_kind: null }, stubRow(3)],
+    });
+    const page = await listCandidates(1);
+    expect(page.items.map((i) => i.score_kind)).toEqual(["trained", null, null]);
+  });
+
+  it("passes thumbnail_url through untouched, including null (no linked listing has a photo)", async () => {
+    mockPoolQuery.mockResolvedValueOnce({
+      rows: [
+        { ...stubRow(1), thumbnail_url: "https://img.example/a.jpg" },
+        { ...stubRow(2), thumbnail_url: null },
+      ],
+    });
+    const page = await listCandidates(1);
+    expect(page.items.map((i) => i.thumbnail_url)).toEqual(["https://img.example/a.jpg", null]);
+  });
+});
+
+describe("flagsFromAssessments (#152 review, must-fix 1 and 3)", () => {
+  function assessmentRow(propertyId: number, result: Record<string, unknown> | null): RawAssessmentRow {
+    return { property_id: propertyId, result };
+  }
+
+  it("returns no flags when a row has no caveats and no condition", () => {
+    expect(flagsFromAssessments([assessmentRow(1, { caveats: [] })])).toEqual([]);
+    expect(flagsFromAssessments([assessmentRow(1, {})])).toEqual([]);
+    expect(flagsFromAssessments([assessmentRow(1, null)])).toEqual([]);
+  });
+
+  it("maps every recognised caveat code to its warn-toned Spanish label", () => {
+    const flags = flagsFromAssessments([
+      assessmentRow(1, { caveats: ["tenanted", "venta_deuda", "proindiviso"] }),
+    ]);
+    expect(flags).toEqual([
+      { kind: "caveat:tenanted", label: "Alquilado", tone: "warn" },
+      { kind: "caveat:venta_deuda", label: "Venta de deuda", tone: "warn" },
+      { kind: "caveat:proindiviso", label: "Proindiviso", tone: "warn" },
+    ]);
+  });
+
+  it("must-fix 3: drops an unrecognised caveat code rather than rendering it as raw text", () => {
+    // Simulates a vocabulary drift between the writer (occupancy.ts's
+    // CAVEAT_CODES) and this file's CAVEAT_LABELS — e.g. a future axis value
+    // this file hasn't been taught to label yet. Must be dropped, not shown
+    // verbatim: unlike the old occupancy/sale_type fallback (`?? occupancy`),
+    // a badge must never surface an unbounded string.
+    const flags = flagsFromAssessments([
+      assessmentRow(1, { caveats: ["some_future_unmapped_code", "tenanted"] }),
+    ]);
+    expect(flags).toEqual([{ kind: "caveat:tenanted", label: "Alquilado", tone: "warn" }]);
+  });
+
+  it("must-fix 3: drops an unrecognised condition value the same way condition already handled unknowns", () => {
+    expect(flagsFromAssessments([assessmentRow(1, { condition: "unknown" })])).toEqual([]);
+    expect(flagsFromAssessments([assessmentRow(1, { condition: "some_new_value" })])).toEqual([]);
+  });
+
+  it("maps a recognised condition value to a neutral-toned label", () => {
+    expect(flagsFromAssessments([assessmentRow(1, { condition: "a_reformar" })])).toEqual([
+      { kind: "condition:a_reformar", label: "A reformar", tone: "neutral" },
+    ]);
+  });
+
+  it("ignores non-array/non-string caveats defensively rather than throwing", () => {
+    expect(flagsFromAssessments([assessmentRow(1, { caveats: "not-an-array" })])).toEqual([]);
+    expect(flagsFromAssessments([assessmentRow(1, { caveats: [42, null, "tenanted"] })])).toEqual([
+      { kind: "caveat:tenanted", label: "Alquilado", tone: "warn" },
+    ]);
+  });
+
+  it("de-dups by kind when given multiple rows that both produce the same flag (defence in depth on top of loadFlags's DISTINCT ON)", () => {
+    const flags = flagsFromAssessments([
+      assessmentRow(1, { caveats: ["tenanted"] }),
+      assessmentRow(1, { caveats: ["tenanted"] }),
+    ]);
+    expect(flags).toHaveLength(1);
+  });
+
+  it("does NOT collapse two different verdicts on the same axis — different caveat codes stay distinct flags (this is exactly what loadFlags's SQL, not this function, is responsible for preventing)", () => {
+    // Mirrors the #152 review's reproduction: "Alquilado" and "Ocupado"
+    // simultaneously. flagsFromAssessments alone cannot fix this — it only
+    // dedups identical `kind`s — which is precisely why the real fix has to
+    // be loadFlags's `DISTINCT ON (property_id, assessment_type)` selecting
+    // a single row per axis *before* this function ever sees the data.
+    const flags = flagsFromAssessments([
+      assessmentRow(1, { caveats: ["tenanted"] }),
+      assessmentRow(1, { caveats: ["occupied_illegally"] }),
+    ]);
+    expect(flags.map((f) => f.kind).sort()).toEqual(["caveat:occupied_illegally", "caveat:tenanted"]);
+  });
+});
+
+describe("loadFlags SQL shape (#152 review, must-fix 1 and 2)", () => {
+  it("selects the latest row per (property_id, assessment_type) via DISTINCT ON, ordered by generated_at DESC", async () => {
+    // Triggered indirectly through listCandidates: the first mocked call
+    // answers the main candidate query, the second answers loadFlags's own
+    // query for the returned property id.
+    mockPoolQuery.mockResolvedValueOnce({
+      rows: [{ ...stubRow(7) }],
+    });
+    mockPoolQuery.mockResolvedValueOnce({ rows: [] });
+
+    await listCandidates(1);
+
+    expect(mockPoolQuery).toHaveBeenCalledTimes(2);
+    const [flagsSql, flagsParams] = mockPoolQuery.mock.calls[1];
+    expect(flagsSql).toContain("DISTINCT ON (property_id, assessment_type)");
+    expect(flagsSql).toContain("FROM ai_assessment");
+    expect(flagsSql).toContain("WHERE property_id = ANY($1::bigint[])");
+    expect(flagsSql).toContain("ORDER BY property_id, assessment_type, generated_at DESC");
+    expect(flagsParams).toEqual([[7]]);
+  });
+
+  it("reads property_id directly — no listing_id probe query against information_schema (must-fix 2: the dual-shape probe was removed, not patched)", async () => {
+    mockPoolQuery.mockResolvedValueOnce({ rows: [{ ...stubRow(3) }] });
+    mockPoolQuery.mockResolvedValueOnce({ rows: [] });
+
+    await listCandidates(1);
+
+    for (const [calledSql] of mockPoolQuery.mock.calls) {
+      expect(calledSql).not.toContain("information_schema");
+      expect(calledSql).not.toContain("listing_id");
+    }
+  });
+
+  it("skips the ai_assessment query entirely when the page has no rows (nothing to flag)", async () => {
+    mockPoolQuery.mockResolvedValueOnce({ rows: [] });
+    await listCandidates(1);
+    expect(mockPoolQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it("degrades to no flags (not a thrown error) when ai_assessment is unreadable", async () => {
+    mockPoolQuery.mockResolvedValueOnce({ rows: [{ ...stubRow(7) }] });
+    mockPoolQuery.mockRejectedValueOnce(new Error("relation \"ai_assessment\" does not exist"));
+
+    const page = await listCandidates(1);
+    expect(page.items[0].flags).toEqual([]);
+  });
+});
+
+describe("getAdjacentCandidates", () => {
+  it("returns null/null when the anchor property isn't a matched candidate for this profile", async () => {
+    mockPoolQuery.mockResolvedValueOnce({ rows: [] });
+    const result = await getAdjacentCandidates(1, 999);
+    expect(result).toEqual({ prevPropertyId: null, nextPropertyId: null });
+    // Only the anchor lookup should run — no point querying neighbours of a
+    // property that isn't in this profile's candidate set.
+    expect(mockPoolQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a NULL anchor score as NO_SCORE_SENTINEL when comparing neighbours", async () => {
+    mockPoolQuery.mockResolvedValueOnce({ rows: [{ score: null }] });
+    mockPoolQuery.mockResolvedValueOnce({ rows: [] }); // next
+    mockPoolQuery.mockResolvedValueOnce({ rows: [] }); // prev
+
+    await getAdjacentCandidates(1, 5);
+
+    const nextParams = mockPoolQuery.mock.calls[1][1];
+    const prevParams = mockPoolQuery.mock.calls[2][1];
+    // anchorScore param (index 1) must be the -1 sentinel, not null/NaN —
+    // otherwise the `< $2::double precision` comparison is unusable SQL-side.
+    expect(nextParams[1]).toBe(-1);
+    expect(prevParams[1]).toBe(-1);
+  });
+
+  it("returns null for a side with no neighbour (top/bottom of the ranking) while still returning the other side", async () => {
+    mockPoolQuery.mockResolvedValueOnce({ rows: [{ score: "0.91" }] }); // anchor
+    mockPoolQuery.mockResolvedValueOnce({ rows: [] }); // no next (top of ranking)
+    mockPoolQuery.mockResolvedValueOnce({ rows: [{ property_id: 3 }] }); // prev exists
+
+    const result = await getAdjacentCandidates(1, 5);
+    expect(result.nextPropertyId).toBeNull();
+    expect(result.prevPropertyId).toBe(3);
+  });
+
+  it("coerces neighbour property_id (pg bigint-as-string) to a real number", async () => {
+    mockPoolQuery.mockResolvedValueOnce({ rows: [{ score: "0.5" }] });
+    mockPoolQuery.mockResolvedValueOnce({ rows: [{ property_id: "42" as unknown as number }] });
+    mockPoolQuery.mockResolvedValueOnce({ rows: [{ property_id: "7" as unknown as number }] });
+
+    const result = await getAdjacentCandidates(1, 5);
+    expect(result.nextPropertyId).toBe(42);
+    expect(typeof result.nextPropertyId).toBe("number");
+    expect(result.prevPropertyId).toBe(7);
+  });
+
+  it("reuses listCandidates's exact keyset ordering/comparison — same NO_SCORE_SENTINEL, same (score, id) compound tiebreak direction", async () => {
+    mockPoolQuery.mockResolvedValueOnce({ rows: [{ score: "0.5" }] });
+    mockPoolQuery.mockResolvedValueOnce({ rows: [] });
+    mockPoolQuery.mockResolvedValueOnce({ rows: [] });
+
+    await getAdjacentCandidates(1, 5);
+
+    const [nextSql] = mockPoolQuery.mock.calls[1];
+    const [prevSql] = mockPoolQuery.mock.calls[2];
+    // "next" (ranked worse) sorts DESC and compares strictly-less-than the
+    // anchor, mirroring listCandidates's page-forward direction.
+    expect(nextSql).toContain("ORDER BY COALESCE(pls.score, -1) DESC, pls.property_id DESC");
+    expect(nextSql).toContain("< $2::double precision");
+    // "prev" (ranked better) reverses both the sort and the comparison.
+    expect(prevSql).toContain("ORDER BY COALESCE(pls.score, -1) ASC, pls.property_id ASC");
+    expect(prevSql).toContain("> $2::double precision");
   });
 });

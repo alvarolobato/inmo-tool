@@ -162,6 +162,42 @@ test("cards render photo-first with price, facts and no per-card cold-start nois
   await expect(page.getByTestId("cold-start-footer")).toHaveCount(0);
 });
 
+// Latent ordering hazard (#152 review — left as a comment per the review's
+// request, not fixed here): this test's `feedback-accept` click POSTs to the
+// feedback route, which `await`s `retrainAndRescoreProfile` before
+// responding — a real retrain against this profile's seeded rows, not a
+// stub. The "detail page walks the ranking with prev/next" test below
+// assumes topId/middleId/bottomId keep the score ordering `beforeAll` seeded
+// them with (0.91/0.55/0.21). Playwright runs this file's tests sequentially
+// (`fullyParallel: false`, `workers: 1` in playwright.config.ts), so that
+// retrain genuinely completes before the prev/next test reads the ranking —
+// this isn't hypothetical, it really executes.
+//
+// Two independent guards keep it a no-op today, and either one alone would
+// suffice:
+//
+//   1. Only 3 properties are seeded in this file, permanently below
+//      `MIN_TRAINING_EXAMPLES` (32 = 4x the 8-feature model, pipeline.ts) —
+//      so `retrainAndRescoreProfile` can never reach the unconditional
+//      "trained" branch (`retrain.ts`'s final UPDATE, no score filter) no
+//      matter what feedback sequence runs against these 3 properties. It
+//      always falls into the "needs_both_classes"/"below_training_threshold"
+//      branch instead.
+//   2. That branch only writes cold-start scores to rows that are still
+//      unscored — `retrain.ts`'s `... AND pls.matched = true AND
+//      pls.score IS NULL` (same guard the "going one-sided" test in
+//      feedback/__tests__/route.test.ts exercises). All three rows here
+//      already carry real, distinct `beforeAll`-written scores, so that
+//      predicate matches nothing.
+//
+// Guard 1 is the one to watch: it depends on this file's candidate count
+// staying well under 32. A future change that seeds many more candidates
+// here (e.g. to test list pagination inside this same spec) would put real
+// training back in reach, and a real training run's UPDATE has no `score IS
+// NULL` restriction — it silently rewrites every matched row's score for
+// this profile, which would then race the prev/next test below. Keep
+// deliberate multi-class/high-volume feedback scenarios in a separate spec
+// file (e.g. feedback.spec.ts) rather than adding them here.
 test("the action bar is reachable on hover and acting on it does not navigate", async ({ page }) => {
 
   await page.goto(`/profiles/${profileId}`);

@@ -24,22 +24,27 @@ interface FeedbackResponse {
  * (new files only) instead of reshaping lib/candidates.ts's response, at
  * the cost of one extra request per visible card. Fine at today's list
  * sizes; worth batching later if it becomes a real cost.
+ *
+ * Icon-only buttons sized for the card's photo overlay (#152), with the note
+ * editor as a popover instead of an inline expander — an inline textarea
+ * would resize the card and reflow the grid around it. Labels move to
+ * `aria-label`/`title`, so the controls stay identifiable to screen readers
+ * and on hover despite showing only a glyph.
+ *
+ * This used to also render a non-compact, inline (non-overlay) variant behind
+ * a `compact` prop, but CandidateCard is its only call site and always passed
+ * `compact` — the alternate branch was dead code, and it had drifted enough
+ * to ship a real bug (the star button's compact/non-compact label ternary
+ * had been dropped, so it silently always rendered the bare glyph). Deleted
+ * per this project's "no dual code paths" default (#152 review) rather than
+ * fixed in place, since nothing exercises it.
  */
 export function FeedbackControls({
   profileId,
   propertyId,
-  compact = false,
 }: {
   profileId: number;
   propertyId: number;
-  /**
-   * Icon-only buttons sized for the card's photo overlay (#152), with the
-   * note editor as a popover instead of an inline expander — an inline
-   * textarea would resize the card and reflow the grid around it.
-   * Labels move to `aria-label`/`title`, so the controls stay identifiable
-   * to screen readers and on hover despite showing only a glyph.
-   */
-  compact?: boolean;
 }) {
   const [state, setState] = useState<StateFeedbackType | null>(null);
   const [noteOpen, setNoteOpen] = useState(false);
@@ -100,32 +105,21 @@ export function FeedbackControls({
     }
   };
 
-  const toggleButtonStyle = (active: boolean): React.CSSProperties =>
-    compact
-      ? {
-          width: 26,
-          height: 26,
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          padding: 0,
-          borderRadius: 5,
-          fontSize: 13,
-          lineHeight: 1,
-          cursor: "pointer",
-          border: active ? "1px solid var(--accent)" : "1px solid rgba(255,255,255,0.25)",
-          background: active ? "var(--accent)" : "rgba(0,0,0,0.35)",
-          color: active ? "var(--accent-fg, #fff)" : "#fff",
-        }
-      : {
-          padding: "4px 10px",
-          borderRadius: 6,
-          fontSize: 13,
-          cursor: "pointer",
-          border: active ? "1px solid var(--accent)" : "1px solid var(--border)",
-          background: active ? "var(--accent)" : "transparent",
-          color: active ? "var(--accent-fg, #fff)" : "var(--fg-muted)",
-        };
+  const toggleButtonStyle = (active: boolean): React.CSSProperties => ({
+    width: 26,
+    height: 26,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 0,
+    borderRadius: 5,
+    fontSize: 13,
+    lineHeight: 1,
+    cursor: "pointer",
+    border: active ? "1px solid var(--accent)" : "1px solid rgba(255,255,255,0.25)",
+    background: active ? "var(--accent)" : "rgba(0,0,0,0.35)",
+    color: active ? "var(--accent-fg, #fff)" : "#fff",
+  });
 
   return (
     <div
@@ -133,13 +127,9 @@ export function FeedbackControls({
       // component is ever nested inside one in the future — defense in
       // depth on top of the sibling-not-child layout described above.
       onClick={(e) => e.stopPropagation()}
-      style={
-        compact
-          ? { position: "relative", display: "flex", gap: 3, padding: 3 }
-          : { display: "flex", flexDirection: "column", gap: 6, padding: "8px 14px 12px" }
-      }
+      style={{ position: "relative", display: "flex", gap: 3, padding: 3 }}
     >
-      <div style={{ display: "flex", gap: compact ? 3 : 6, width: compact ? undefined : "100%" }}>
+      <div style={{ display: "flex", gap: 3 }}>
         <button
           type="button"
           data-testid="feedback-accept"
@@ -149,7 +139,7 @@ export function FeedbackControls({
           style={toggleButtonStyle(state === "accept")}
           onClick={() => submit("accept")}
         >
-          {compact ? "✓" : "✓ Aceptar"}
+          ✓
         </button>
         <button
           type="button"
@@ -160,7 +150,7 @@ export function FeedbackControls({
           style={toggleButtonStyle(state === "reject")}
           onClick={() => submit("reject")}
         >
-          {compact ? "✗" : "✗ Rechazar"}
+          ✗
         </button>
         <button
           type="button"
@@ -179,44 +169,40 @@ export function FeedbackControls({
           aria-label={noteOpen ? "Cerrar nota" : "Añadir nota"}
           aria-expanded={noteOpen}
           title={noteOpen ? "Cerrar nota" : "Añadir nota"}
-          style={{ ...toggleButtonStyle(false), marginLeft: compact ? 0 : "auto" }}
+          style={toggleButtonStyle(false)}
           onClick={() => setNoteOpen((v) => !v)}
         >
-          {compact ? "✎" : noteOpen ? "Cerrar nota" : "+ Nota"}
+          ✎
         </button>
       </div>
 
       {noteOpen && (
         <div
           data-testid="feedback-note-popover"
-          style={
-            compact
-              ? {
-                  // Popover rather than an inline expander: growing the card
-                  // in place would reflow the whole candidate grid (#150).
-                  position: "absolute",
-                  top: "calc(100% + 4px)",
-                  right: 0,
-                  zIndex: 3,
-                  width: 220,
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 6,
-                  padding: 8,
-                  borderRadius: 6,
-                  border: "1px solid var(--border)",
-                  background: "var(--bg-1)",
-                  boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
-                }
-              : { display: "flex", gap: 6 }
-          }
+          style={{
+            // Popover rather than an inline expander: growing the card
+            // in place would reflow the whole candidate grid (#150).
+            position: "absolute",
+            top: "calc(100% + 4px)",
+            right: 0,
+            zIndex: 3,
+            width: 220,
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
+            padding: 8,
+            borderRadius: 6,
+            border: "1px solid var(--border)",
+            background: "var(--bg-1)",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+          }}
         >
           <textarea
             data-testid="feedback-note-input"
             value={noteText}
             onChange={(e) => setNoteText(e.target.value)}
             placeholder="Añade una nota…"
-            rows={compact ? 3 : 2}
+            rows={3}
             style={{
               flex: 1,
               fontSize: 13,
@@ -242,7 +228,7 @@ export function FeedbackControls({
               background: "transparent",
               color: "var(--fg-muted)",
               opacity: noteText.trim().length === 0 ? 0.5 : 1,
-              alignSelf: compact ? "flex-end" : "flex-start",
+              alignSelf: "flex-end",
             }}
           >
             {noteStatus === "saved" ? "Guardada ✓" : "Guardar"}
@@ -250,17 +236,32 @@ export function FeedbackControls({
         </div>
       )}
 
-      {error && !compact && (
-        <p style={{ margin: 0, fontSize: 12, color: "var(--danger, #d33)" }}>{error}</p>
-      )}
-      {error && compact && (
-        <span
+      {error && (
+        // The bare "!" this used to render put the actual message only in
+        // `title`, which a touch user has no way to reach (no hover) — the
+        // message is now real, visible text (#152 review). Positioned like
+        // the note popover so it doesn't reflow the card/grid, and kept
+        // small enough to fit the photo-overlay context it lives in.
+        <div
           role="alert"
-          title={error}
-          style={{ alignSelf: "center", fontSize: 12, color: "var(--danger, #ff9b9b)" }}
+          data-testid="feedback-error"
+          style={{
+            position: "absolute",
+            top: "calc(100% + 4px)",
+            left: 0,
+            zIndex: 3,
+            maxWidth: 200,
+            padding: "4px 8px",
+            borderRadius: 6,
+            border: "1px solid var(--danger, #d33)",
+            background: "var(--bg-1)",
+            fontSize: 11,
+            lineHeight: 1.3,
+            color: "var(--danger, #ff9b9b)",
+          }}
         >
-          !
-        </span>
+          {error}
+        </div>
       )}
     </div>
   );
