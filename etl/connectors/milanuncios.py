@@ -53,6 +53,57 @@ an `energyCertificate` attribute (missed by the original spike's smaller
 sample — present on 2 of 3 fresh listings) and `heating`/`hotWater`
 attributes, now surfacing into `energy_rating` and `features`
 respectively.
+
+Issue #179 rate measurement (live, 2026-08-03): production was tripping
+the circuit breaker every run at `rate_limit_per_minute = 20` (5
+successes then a permanent block within ~15s — the comment this replaced
+called 20 "the same conservative default as Fotocasa", which stopped
+being true when Fotocasa dropped to 3, #65). Measured directly rather than
+copied by analogy:
+
+  20/min (3s apart)  -> matches production: ~5 fetch_detail successes,
+                        then every subsequent request returns HTTP 200
+                        with __INITIAL_PROPS__ missing, permanently for
+                        the rest of the run.
+   6/min (10s apart) -> IDENTICAL signature: 5 successes, then blocked.
+                        A 3.3x slower pace made no difference at all —
+                        this rules out the entire 6-20/min range and
+                        disproves "just ease off a bit" as a fix.
+
+Both failures are the exact same real page: a GeeTest CAPTCHA challenge
+("Pardon Our Interruption" / `noindex, nofollow` / `#captcha-box`,
+captured live and trimmed into milanuncios_sample_soft_block_page.html —
+see MilanunciosSoftBlockError below), served with HTTP 200 and no
+Set-Cookie header at all (checked directly — there is no session-cookie
+escape hatch a persistent `requests.Session()` could exploit; this is a
+server-side block, not a client-side JS challenge with a bypassable
+exemption cookie). Once tripped it did not clear for over 60 minutes of
+continuous observation (vs. Fotocasa's documented "persists for minutes")
+— dramatically more punishing than Fotocasa's equivalent wall, which is
+why this connector's final rate is set BELOW Fotocasa's 3, not equal to
+it. `discover()`'s search-page endpoint stayed fully open the entire time
+fetch_detail() was blocked — the wall is scoped to (at least primarily)
+the detail-page path, not the whole site.
+
+**What was NOT established, and why**: whether a pace slower than 10s
+(e.g. 20-60s) raises the ~5-request trip threshold at all, or whether the
+block is a fixed per-session request count largely independent of pace in
+that range. Both live-measured data points (3s and 10s) show identical
+behaviour, which is consistent with a count-based trigger rather than a
+rate-based one — but a genuinely slower cadence remains untested, because
+each additional live test costs another 60+-minute lockout on the
+owner's real home connection (Telefónica, issue #179's own considerateness
+requirement), and this investigation had already spent over an hour
+confirming the block does not self-clear on its own within a session that
+kept checking it (which may itself have kept resetting any decay timer —
+a methodological lesson for whoever runs the follow-up measurement:
+stop probing entirely and check back once, after a long gap, rather than
+polling). `rate_limit_per_minute = 2` below is therefore a conservative,
+evidence-informed value — genuinely below the two rates proven to fail,
+not copied from Fotocasa by analogy — but it is NOT proven to sustain a
+full 41-listing run the way Fotocasa's 3/min was proven to sustain a
+161-request sweep. Revisit with a slower-cadence live test once enough
+time has passed for the current lockout to be confirmed clear.
 """
 
 from __future__ import annotations
@@ -309,7 +360,19 @@ def _has_usable_jsonld_property_schema(html: str) -> bool:
 
 class MilanunciosConnector(Connector):
     name = "milanuncios"
-    rate_limit_per_minute = 20  # same conservative default as Fotocasa — issue #1 §15
+    # Measured live, 2026-08-03 (issue #179) — see the module docstring for
+    # the full write-up. 20/min and 6/min both failed identically (~5
+    # fetch_detail successes then a soft-block lasting 60+ minutes), which
+    # rules out the entire 6-20/min range but does not pin the exact safe
+    # floor — a slower cadence remains untested (each test costs another
+    # long lockout on the owner's real connection). Set below Fotocasa's
+    # independently-measured 3/min (#65) rather than equal to it, because
+    # Milanuncios showed an equal-or-worse block at a pace Fotocasa
+    # actually survives (10s here vs. Fotocasa's proven-safe 20s). This is
+    # a conservative, evidence-informed value, not a fully validated
+    # sustained-safe rate — flagged for a follow-up slower-pace
+    # measurement once the current lockout is confirmed clear.
+    rate_limit_per_minute = 2
     # False: like Fotocasa, discover() only reads page 1 of one sale category
     # (robots.txt disallows pagination params here too), against inventory
     # that's realistically in the thousands for a whole province. Same

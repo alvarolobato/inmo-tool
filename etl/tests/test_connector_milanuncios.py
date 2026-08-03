@@ -48,6 +48,33 @@ def test_milanuncios_does_not_claim_full_inventory_coverage():
     assert MilanunciosConnector.discovers_full_inventory is False
 
 
+class TestRateLimitMeasurement:
+    """Issue #179 live measurement, 2026-08-03: production was tripping the
+    circuit breaker every run at rate_limit_per_minute=20 (5 successes then
+    a permanent soft-block). Measured 6/min directly: identical failure
+    signature, ruling out the entire 6-20/min range. See the module
+    docstring and rate_limit_per_minute's own comment for the full
+    write-up, including what remains unvalidated (the exact safe floor —
+    only bounded from above by two real, live-measured failures)."""
+
+    def test_rate_limit_is_well_below_both_measured_failure_points(self):
+        """A regression here wouldn't fail loudly — it would silently trip
+        the circuit breaker every run again, exactly the production
+        symptom this issue exists to fix."""
+        assert MilanunciosConnector.rate_limit_per_minute <= 2
+
+    def test_rate_limit_is_stricter_than_fotocasa(self):
+        """Deliberately not raised to match Fotocasa's 3/min: Milanuncios
+        showed an equal-or-worse block at a pace (10s) Fotocasa's own
+        measurement proved safe (20s) — see the module docstring."""
+        from etl.connectors.fotocasa import FotocasaConnector
+
+        assert (
+            MilanunciosConnector.rate_limit_per_minute
+            < FotocasaConnector.rate_limit_per_minute
+        )
+
+
 class TestDiscover:
     def test_discover_finds_external_ids_from_search_page(self):
         html = _read_fixture("milanuncios_sample_search.html")

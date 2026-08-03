@@ -133,6 +133,26 @@ The failure mode is why this matters: sweeping too fast does not raise an error 
 
 **When adding this to another connector**: verify the allowed/disallowed split against that site's own robots.txt (don't assume Fotocasa's shape), confirm slices genuinely differ rather than being SEO aliases of the same result set, and characterise the site's rate tolerance *before* setting `rate_limit_per_minute` — the sustainable rate for a 160-request sweep is unlikely to be the one that worked for a single request.
 
+### Milanuncios: a worked example of "measure, don't copy" going wrong first, then right (issue #179)
+
+`rate_limit_per_minute` shipped at 20 with the comment "same conservative default as Fotocasa" — a value chosen by analogy, never independently measured. That stopped being defensible the moment Fotocasa's own rate dropped to 3 (#65 above): the comment kept citing a default that no longer existed. In production this tripped the circuit breaker on *every single run* — `discovered=41 fetched=5 errors=5` — because Milanuncios exhibits the identical soft-block signature as Fotocasa (a GeeTest CAPTCHA challenge served as HTTP 200 with the `__INITIAL_PROPS__` payload missing), just on a different corporate cousin site (Milanuncios and Fotocasa are both Adevinta-group, per `milanuncios.py`'s own module docstring).
+
+Measured live, 2026-08-03 (issue #179), rather than assuming the fix was "drop to 3 like Fotocasa":
+
+| Rate | Behaviour |
+|---|---|
+| 20/min (3s apart) | Matches production exactly: ~5 `fetch_detail` successes, then every subsequent request is HTTP 200 with the marker missing — permanently, for the rest of the run. |
+| 6/min (10s apart) | **Identical failure signature** — 5 successes, then blocked. A 3.3x slower pace changed nothing, ruling out the entire 6-20/min range. |
+
+Two findings that don't hold for Fotocasa's version of this wall:
+
+- **No Set-Cookie header on the block page at all** — checked directly. There is no session-cookie exemption a persistent `requests.Session()` could exploit; this is a server-side decision (`server: bon`, behind CloudFront), not a client-side JS challenge with a bypassable allow-cookie.
+- **The lockout, once tripped, did not clear after 60+ minutes of continued observation** — dramatically longer than Fotocasa's documented "persists for minutes." Repeatedly checking whether it had cleared may itself have been counterproductive (each check is itself a request to the same site, and there's no way to distinguish "still in the original lockout" from "the checking reset a decay timer" without a session that stops probing entirely and waits).
+
+**The honest limitation this leaves**: both live-measured data points (3s and 10s) show the identical trip point, which is consistent with a fixed per-session request-count trigger rather than a rate-based one — but nothing slower than 10s was tested, because each failed attempt costs another 60+-minute lockout on the owner's real home connection (issue #1 §15's good-neighbour constraint applies with real teeth here). `rate_limit_per_minute` shipped at **2** (below Fotocasa's 3, not equal to it — Milanuncios showed an equal-or-worse block at a pace, 10s, that Fotocasa's own measurement proved safe at 20s) as a conservative, evidence-informed value. It is NOT proven to sustain a full 41-listing run the way Fotocasa's 3/min was proven to sustain a 161-request sweep — that requires a follow-up measurement at a slower cadence (20-60s+) once the lockout is confirmed clear, ideally checked once after a long gap rather than polled.
+
+**Distinguishing soft-block from structure-change (issue #66's adjacent case)**: the real captured block page (`milanuncios_sample_soft_block_page.html`) carries a stable, checkable signature — `"Pardon Our Interruption"`, `noindex, nofollow`, `#captcha-box` — that a genuine site redesign wouldn't produce. `MilanunciosSoftBlockError` (a `ConnectorError` subclass, so the circuit breaker counts it identically) now fires specifically when that signature is present; anything else missing the `__INITIAL_PROPS__` marker still raises the generic `ConnectorError`, unresolved, same as before. This does not resolve #66's adjacent "removed ad vs. blocked" ambiguity — that still needs its own real captured sample.
+
 ### Solvia: the partition list doesn't need reverse-engineering — the site publishes it (issue #190)
 
 Fotocasa's zone slugs come from parsing neighbourhood links off the city page itself, because nothing else exposes them. Solvia's `robots.txt` disallows only `/api/` and `/ajax/`, and its `Sitemap:` line points at `https://www.solvia.es/sitemap.xml` — a sitemap index whose `sitemap_comprar_viviendas.xml` child lists one `<loc>` per municipality search page (`.../es/comprar/viviendas/{provincia}/{municipio}`): 1,737 entries nationally, live-verified 2026-08-03 — 43 under `sevilla`, 44 under `malaga`. Same manoeuvre as Fotocasa's zone partitioning, but the subdivision list is handed to you instead of scraped off a page.
