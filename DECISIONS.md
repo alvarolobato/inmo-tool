@@ -35,4 +35,7 @@
 
 ## Product
 
-*(none yet — see issue #1 for the functional spec this project is implementing; decisions get added here as design questions are actually resolved during implementation, not speculatively)*
+| ID | Binding rule |
+|----|--------------|
+| [D-008](docs/decisions/D-008-rent-assumption-until-comparables.md) | Rent estimate is an explicit per-profile `€/m²/month` assumption (`thesis_params.rent_assumption`) until #31 ships real comparables. Never fabricate a rent figure; gate yield on the assumption being set. |
+| [D-009](docs/decisions/D-009-acquisition-cost-model.md) | ITP by CCAA is general/base rate only (no brackets/reductions, no new-build path). Actual IBI/community fee from `raw_extra` REPLACES (not blends with) the assumed operating-cost %. |

@@ -110,8 +110,12 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
   };
 
   const financing = values.thesis_params.financing;
+  const rentAssumption = values.thesis_params.rent_assumption;
 
-  const setFinancingField = (field: "down_payment_pct" | "rate_pct" | "term_years", raw: string) => {
+  const setFinancingField = (
+    field: "down_payment_pct" | "rate_pct" | "term_years" | "operating_cost_pct",
+    raw: string,
+  ) => {
     setValues((v) => {
       const num = raw === "" ? undefined : Number(raw);
       const base = v.thesis_params.financing ?? {
@@ -123,13 +127,39 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
       // #1 §11's financing assumptions are used together for a cash-on-cash
       // estimate in Phase 5) — an incomplete triple isn't a valid partial,
       // so a blanked field falls back to the last-known/default value rather
-      // than producing an invalid shape.
+      // than producing an invalid shape. `operating_cost_pct` (issue #151/
+      // #33) is the one field in this object that's genuinely optional even
+      // once the rest is set — yield.ts falls back to its own documented
+      // default (25%) when it's undefined, so blanking it here is a valid
+      // "use the system default" state, not an invalid partial.
       return {
         ...v,
         thesis_params: {
           ...v.thesis_params,
-          financing: { ...base, [field]: num ?? base[field] },
+          financing: {
+            ...base,
+            [field]: field === "operating_cost_pct" ? num : (num ?? base[field]),
+          },
         },
+      };
+    });
+  };
+
+  // rent_assumption (issue #151): deliberately a SEPARATE, independently
+  // settable field from `financing` — see rent-estimate.ts's module
+  // docstring for why a rent figure must be an explicit, visible user
+  // assumption rather than folded into the financing block or defaulted by
+  // the system. Blank means "no rent assumption" (yield.ts gates on this,
+  // it does not invent a figure).
+  const setRentAssumption = (raw: string) => {
+    setValues((v) => {
+      if (raw === "") {
+        const { rent_assumption: _drop, ...rest } = v.thesis_params;
+        return { ...v, thesis_params: rest };
+      }
+      return {
+        ...v,
+        thesis_params: { ...v.thesis_params, rent_assumption: { eur_per_m2_month: Number(raw) } },
       };
     });
   };
@@ -368,6 +398,25 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
             />
           </div>
         </div>
+        <div style={{ marginTop: 10 }}>
+          <label style={labelStyle}>
+            Gastos de operación (% del alquiler bruto — IBI, comunidad, mantenimiento, vacío)
+          </label>
+          <input
+            type="number"
+            min={0}
+            max={100}
+            step="1"
+            placeholder="25 (valor por defecto si se deja en blanco)"
+            value={financing?.operating_cost_pct ?? ""}
+            onChange={(e) => setFinancingField("operating_cost_pct", e.target.value)}
+            style={inputStyle}
+          />
+          <p style={{ margin: "4px 0 0", fontSize: 11, color: "var(--fg-subtle)" }}>
+            Se ignora para propiedades cuyos anuncios publiquen IBI/comunidad reales — en ese caso se
+            usan esos datos en vez de este porcentaje (issue #151).
+          </p>
+        </div>
         {financing && (
           <button
             type="button"
@@ -391,6 +440,25 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
             Quitar datos de financiación
           </button>
         )}
+
+        <div style={{ marginTop: 14, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+          <label style={labelStyle}>Asunción de alquiler (€/m²/mes)</label>
+          <input
+            type="number"
+            min={0}
+            step="0.1"
+            placeholder="p. ej. 12,5"
+            value={rentAssumption?.eur_per_m2_month ?? ""}
+            onChange={(e) => setRentAssumption(e.target.value)}
+            style={inputStyle}
+          />
+          <p style={{ margin: "4px 0 0", fontSize: 11, color: "var(--fg-subtle)" }}>
+            Issue #151: inmo-tool no ingiere todavía datos reales de alquileres comparables (#31), así
+            que el yield de una propiedad se calcula únicamente si defines aquí tu propia estimación de
+            alquiler por m² para la zona de este perfil. Sin esta asunción, no se muestra ningún yield
+            (ni se inventa una cifra).
+          </p>
+        </div>
       </fieldset>
 
       <div style={{ display: "flex", gap: 8 }}>
