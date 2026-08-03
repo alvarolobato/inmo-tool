@@ -9,13 +9,18 @@ from __future__ import annotations
 import argparse
 import sys
 
+from etl import orchestrator
 from etl.config import Config
 from etl.db.postgres import get_connection
 from etl.dedup import engine
 
 
 def _cmd_run(conn) -> int:
-    result = engine.run(conn)
+    # Goes through orchestrator.run_dedup, not etl.dedup.engine.run()
+    # directly (issue #185), so a manual `ps dedup run` records a
+    # `dedup_runs` row exactly like the automatic post-connector-sweep pass
+    # does — one observability path, not two divergent ones.
+    result = orchestrator.run_dedup(conn, trigger="cli-manual")
     print(
         f"Compared {result.pairs_compared} pair(s): "
         f"{result.merged} merged, {result.suggested} suggested for review, "

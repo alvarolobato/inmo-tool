@@ -11,6 +11,24 @@ bucket before comparing, an index-backed candidate-generation step) is a
 real piece of engineering that isn't worth building against a database with
 a few dozen listings from two connectors. Revisit once real connector
 volume makes a full pairwise scan slow.
+
+Measured (issue #185, pure in-memory `evaluate_pair` cost across the first
+four signals + fuzzy, `photo_urls=()` so `photo_hash.fetch_hashes` never
+does real network I/O — i.e. a lower bound, real runs with photos will be
+slower): ~13.3us/pair, consistent from n=419 (0.42M pairs -> ~1.1s) through
+n=5,000 (12.5M pairs -> ~168s). At n=10,000 (~50M pairs) that extrapolates
+to ~11 minutes of pure CPU time, growing quadratically — before #185, this
+only ran when an operator remembered to type `ps dedup run`; now it runs
+automatically after every connector sweep (`etl.orchestrator.run_dedup`,
+default hourly), so a multi-minute run is no longer a curiosity, it's
+recurring cost on every cycle. `photo_hash.fetch_hashes` is only reached
+per *listing* (memoized by `_PhotoHashCache`, not per pair — see that
+class), so its network cost stays O(n), not O(n^2); but with real photos
+that O(n) cost is still real (every listing not resolved by a cheaper
+signal against *any* other listing ends up fetched) and unbounded by a
+timeout budget at the run level. Blocking/bucketing (by geography + price
+band, say) should land before real listing volume approaches ~15-20k, per
+this measurement — not yet built, deliberately, per the note above.
 """
 
 from __future__ import annotations
