@@ -88,7 +88,19 @@ describe("CandidateCard", () => {
     fireEvent.click(screen.getByTestId("candidate-photo-prev"));
     expect(img()).toHaveAttribute("src", "https://img.example/3.jpg");
 
-    // The whole point: cycling photos must never navigate away from the list.
+    // Only proves the ticker's index state doesn't leak into mutating the
+    // link's own target — NOT that clicking the ticker "never navigates".
+    // jsdom's <a> elements don't perform real navigation on click at all
+    // (there is nothing here for a click to navigate away FROM), and
+    // fireEvent.click bypasses the actual DOM event dispatch/propagation path
+    // a real browser click takes, so this assertion would pass identically
+    // even if the ticker buttons were (incorrectly) nested inside the
+    // <Link>. "Never navigates" is actually proven two other ways: the
+    // sibling-not-child DOM structure test right below (a click physically
+    // can't reach an ancestor <a> it isn't inside), and
+    // e2e/card-detail-ux.spec.ts's real-browser test ("the whole point:
+    // flicking through photos must never leave the list"), which asserts
+    // the page's actual URL after real clicks in real Chromium.
     expect(screen.getByRole("link")).toHaveAttribute("href", "/profiles/5/properties/1");
   });
 

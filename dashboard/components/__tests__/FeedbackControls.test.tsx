@@ -2,7 +2,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
+import { readFileSync } from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { FeedbackControls } from "../candidates/FeedbackControls";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
  * Unit coverage for FeedbackControls (#152 review, "also fix" list):
@@ -161,7 +166,22 @@ describe("FeedbackControls", () => {
       }
     });
 
-    it("gives the active button a distinct, semantically-coloured fill — not the muted fill a visible-but-inactive button uses (touch has no opacity signal to fall back on)", async () => {
+    // #167 review "also fix": this test (and the e2e assertions it mirrors at
+    // card-detail-ux.spec.ts:280/:449) only proves the component *selects*
+    // the right CSS custom-property *name* for each state — it does NOT and
+    // CANNOT prove that name resolves to a real, visible colour. jsdom
+    // doesn't run a layout/cascade engine, so `.style.background` here is
+    // just the literal string the component wrote; if `--up`/`--down`/
+    // `--warn` were deleted from globals.css entirely, every assertion in
+    // this file would still pass unchanged (a real browser would compute
+    // `background-color` from an undefined var() as fully transparent, but
+    // jsdom never gets that far). The companion test right below
+    // ("the --up/--down/--warn tokens...") closes that specific gap the only
+    // way jsdom can: by asserting the tokens are actually *defined* in the
+    // stylesheet, as text — not by asserting a resolved colour, which is
+    // what card-detail-ux.spec.ts's real-Chromium `getComputedStyle` checks
+    // are for.
+    it("gives the active button a distinct, semantically-coloured fill token — not the muted fill a visible-but-inactive button uses (touch has no opacity signal to fall back on)", async () => {
       vi.stubGlobal(
         "fetch",
         vi.fn().mockResolvedValueOnce({ ok: true, json: async () => ({ currentState: "accept" }) }),
@@ -206,6 +226,27 @@ describe("FeedbackControls", () => {
       expect(reject).toBe("var(--down)");
       expect(star).toBe("var(--warn)");
       expect(new Set([accept, reject, star]).size).toBe(3);
+    });
+
+    // Closes the gap the two tests above cannot: jsdom can't resolve var(),
+    // so it can't prove --up/--down/--warn actually resolve to a real
+    // colour. What it CAN prove, as plain text, is that those custom
+    // properties are still defined in the stylesheet at all — a deleted
+    // token would leave every assertion above passing (a literal
+    // "var(--up)" string is still written, resolved or not) while silently
+    // making every active button transparent in a real browser. The
+    // resolved-colour check itself lives in card-detail-ux.spec.ts (real
+    // Chromium, real getComputedStyle).
+    it("the --up/--down/--warn tokens the fills above rely on are actually defined in globals.css, in both themes", () => {
+      const css = readFileSync(path.join(__dirname, "../../app/globals.css"), "utf8");
+      for (const token of ["--up", "--down", "--warn"]) {
+        const matches = css.match(new RegExp(`${token}:\\s*#[0-9a-fA-F]{3,8}`, "g")) ?? [];
+        // Defined at least twice: this project's light and dark theme blocks
+        // each set their own value (globals.css's `:root`/dark-theme
+        // selectors) — one definition alone would mean one theme silently
+        // has no fill at all.
+        expect(matches.length).toBeGreaterThanOrEqual(2);
+      }
     });
   });
 });

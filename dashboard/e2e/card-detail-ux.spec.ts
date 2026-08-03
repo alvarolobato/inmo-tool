@@ -106,7 +106,15 @@ test.beforeAll(async () => {
     `https://example.com/${NAME_PREFIX}3.jpg`,
   ]);
   middleId = await insertCandidate(`${NAME_PREFIX}Calle Goya, Madrid`, 0.55, "Precio en línea con tu banda objetivo.", []);
-  bottomId = await insertCandidate(`${NAME_PREFIX}Calle Alcalá, Madrid`, 0.21, "Superficie por debajo de lo que sueles aceptar.", []);
+  // Exactly one photo (not zero) — the other real boundary case #167's
+  // ticker gating needs covering: a lone photo still shows as the lead
+  // image, but must not grow ticker controls (only 2+ photos do). Doesn't
+  // disturb bottomId's other use (the "stays visible without hovering" test
+  // below, which doesn't touch photos) or its ranking position (only the
+  // score matters there, not the photo count).
+  bottomId = await insertCandidate(`${NAME_PREFIX}Calle Alcalá, Madrid`, 0.21, "Superficie por debajo de lo que sueles aceptar.", [
+    `https://example.com/${NAME_PREFIX}bottom1.jpg`,
+  ]);
 });
 
 test.afterAll(async () => {
@@ -277,9 +285,14 @@ test("#167: the button matching the property's current feedback state stays visi
   // Distinguishable from a hover-revealed unset button, not just "visible":
   // the active button gets a solid, semantically-coloured fill (--warn for
   // star) rather than the muted rgba(0,0,0,0.35) every hover-revealed
-  // inactive button uses.
+  // inactive button uses. Both checks are required — "not muted" alone
+  // passed even for a deleted --warn token (an undefined var() resolves to
+  // fully transparent, rgba(0, 0, 0, 0), which is also "not the muted
+  // fill" without being a real colour at all) until this second assertion
+  // was added.
   const starBg = await star.evaluate((el) => getComputedStyle(el).backgroundColor);
   expect(starBg).not.toBe("rgba(0, 0, 0, 0.35)");
+  expect(starBg).not.toBe("rgba(0, 0, 0, 0)");
 });
 
 test("lightbox walks the photo union with buttons and arrow keys", async ({ page }) => {
@@ -364,6 +377,17 @@ test("#167: a property with zero or one photo shows no ticker controls", async (
   // ticker (an empty photo array is not the same as "one photo").
   await expect(card(page, middleId).getByTestId("candidate-photo-placeholder")).toBeVisible();
   await expect(card(page, middleId).getByTestId("candidate-photo-ticker")).toHaveCount(0);
+
+  // bottomId was seeded with exactly ONE photo — the test's title claimed
+  // this case but nothing here actually exercised it until now (the seed
+  // had no 1-photo property). This is the more interesting boundary: unlike
+  // zero photos, a lone photo still renders as the real lead image (not the
+  // placeholder), but must still grow no ticker (`hasTicker = photos.length
+  // > 1` in CandidatePhotoTicker.tsx).
+  const bottom = card(page, bottomId);
+  await expect(bottom.getByTestId("candidate-photo-img")).toHaveAttribute("src", /bottom1\.jpg$/);
+  await expect(bottom.getByTestId("candidate-photo-placeholder")).toHaveCount(0);
+  await expect(bottom.getByTestId("candidate-photo-ticker")).toHaveCount(0);
 });
 
 test("detail page walks the ranking with prev/next, disabled at the ends", async ({ page }) => {
@@ -458,6 +482,12 @@ test.describe("#167: touch/coarse-pointer behaviour (iPhone 13 emulation)", () =
     // visible-but-inactive button (reject, unchanged before/after) keeps.
     expect(acceptBg).not.toBe(rejectBgAfter);
     expect(rejectBgAfter).toBe(rejectBgBefore);
+    // "Distinct from reject" alone passed even for a deleted --up token: an
+    // undefined var() resolves to fully transparent (rgba(0, 0, 0, 0)),
+    // which is trivially "not equal" to reject's opaque muted fill without
+    // acceptBg being a real colour at all. Assert it resolves to something
+    // real too.
+    expect(acceptBg).not.toBe("rgba(0, 0, 0, 0)");
   });
 
   test("a property with zero photos shows the placeholder, not a ticker, on touch too", async ({ page }) => {

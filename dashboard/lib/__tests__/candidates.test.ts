@@ -245,8 +245,16 @@ describe("listCandidates", () => {
     // "queries profile_listing_state..." test above) — the photo union lives
     // inside that one query's SELECT list, not a second round trip.
     expect(sql).toContain("AS photos");
-    expect(sql).toContain("CROSS JOIN LATERAL unnest(l4.photo_urls)");
-    expect(sql).toContain("DISTINCT ON (u.photo_url)");
+    expect(sql).toContain("DISTINCT ON (photo_url)");
+    // #167 review must-fix 2: the per-listing LATERAL LIMITs to
+    // MAX_CARD_PHOTOS with no ORDER BY inside it (relying on unnest WITH
+    // ORDINALITY's guaranteed already-ordered output) — this is what bounds
+    // cost per listing instead of unnesting every photo of every active
+    // listing before capping. Assert the shape structurally rather than the
+    // full SQL text so the query can still be reformatted freely.
+    expect(sql).toContain("unnest(array_remove(l4.photo_urls, NULL))");
+    expect(sql).toContain("WITH ORDINALITY AS uu(photo_url, ord)");
+    expect(sql).toMatch(/WITH ORDINALITY AS uu\(photo_url, ord\)\s*\n\s*LIMIT/);
     expect(mockPoolQuery).toHaveBeenCalledTimes(1);
   });
 });
