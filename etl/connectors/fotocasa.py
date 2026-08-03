@@ -324,31 +324,6 @@ def _price_fallback_text(soup: BeautifulSoup) -> str | None:
 
 _REFERENCE_FALLBACK_RE = re.compile(r"Referencia:\s*(\S+)")
 
-# "Similar properties" carousel containers. Their cards carry a neighbouring
-# property's own figures, so any document-order selector can attribute them to
-# the subject (issue #149; see `extraction.scoped_text`'s docstring for the
-# three connectors that hit this before). Matched on substrings rather than
-# exact class names because Fotocasa composes these with varying suffixes.
-_SIMILAR_CAROUSEL_SELECTORS = (
-    '[class*="Carousel-similar"]',
-    '[class*="CardSimilar"]',
-    '[class*="re-RelatedProperties"]',
-)
-
-
-def _without_similar_carousels(soup: BeautifulSoup) -> BeautifulSoup:
-    """Return a copy of `soup` with neighbouring-property carousels removed.
-
-    Copies rather than mutating: callers pass a memoised soup shared across
-    every fallback getter in `normalize`, so decomposing in place would
-    silently strip markup out from under the other extractors.
-    """
-    clone = BeautifulSoup(str(soup), "html.parser")
-    for selector in _SIMILAR_CAROUSEL_SELECTORS:
-        for node in clone.select(selector):
-            node.decompose()
-    return clone
-
 
 def _reference_fallback_text(soup: BeautifulSoup) -> str | None:
     """The agent-contact reference line: `<ul
@@ -363,21 +338,32 @@ def _reference_fallback_text(soup: BeautifulSoup) -> str | None:
     forever) keeps this consistent with `_icon_stat_text`'s more defensive
     approach.
 
-    Carousel-scoped (issue #149). `select_one` returns the *first* match in
-    document order, so if a "similar properties" card renders the same
-    component the neighbour's code wins — reproduced in
-    TestReferenceCode.test_neighbour_carousel_reference_does_not_win_over_the_subject,
-    which failed with 'NEIGHBOUR999' before this drop was added. That is the
-    fourth instance of the carousel bug class `extraction.scoped_text`
-    exists for (Vivantial price PR #139, Solvia latent PR #138,
-    Servihabitat m2 PR #141), and the worst-behaved of them: a reference is
-    a short opaque token with no self-evidently-wrong value, so a
-    neighbour's is silently plausible — and it feeds
-    etl/dedup/signals/reference_code.py, where a *wrong* code is worse than
-    a missing one because it can corroborate a false merge.
+    Deliberately NOT carousel-scoped, unlike Vivantial (price, PR #139),
+    Servihabitat (m2, PR #141) and Solvia (latent, PR #138). PR #153 first
+    added a `drop=` for "similar properties" carousels here by analogy with
+    those three, on the assumption the same contamination applied. Review
+    caught that the assumption was untested — the selectors matched nothing
+    but the test's own hand-authored markup — so it was checked against two
+    real pages of different property types (the issue #149 trastero
+    190239270, and Madrid/Chamberi vivienda 189882136), captured as
+    `fotocasa_sample_detail_reference.html`:
+
+        "Referencia:"                        x1
+        ".re-FormContactDetail-referenceAlias" x1
+
+    The reference renders exactly once. "inmuebles similares" / "anuncios
+    similares" do appear, but as i18n translation *values* inside the
+    embedded JSON (saved-search alert copy), not as rendered neighbour cards
+    carrying reference codes. Fotocasa's related-property rails are
+    client-hydrated and absent from the server HTML this connector parses.
+
+    So there is no neighbour reference on the page for `select_one` to
+    prefer, and a `drop=` here would be dead code implying coverage it does
+    not have. If Fotocasa ever server-renders such a rail, `scoped_node(...,
+    drop=...)` is the one-line fix — and the fixture above is what would
+    show it changed.
     """
-    scoped = _without_similar_carousels(soup)
-    el = scoped.select_one(".re-FormContactDetail-referenceAlias li")
+    el = soup.select_one(".re-FormContactDetail-referenceAlias li")
     if el is None:
         return None
     match = _REFERENCE_FALLBACK_RE.search(el.get_text())

@@ -15,6 +15,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import requests
+from bs4 import BeautifulSoup
 
 from etl.connectors import fotocasa as fotocasa_module
 from etl.connectors.base import ConnectorError, ConnectorScope, RawListing
@@ -950,30 +951,43 @@ class TestReferenceCode:
         canonical = FotocasaConnector().normalize(raw)
         assert canonical.reference_code is None
 
-    def test_neighbour_carousel_reference_does_not_win_over_the_subject(self):
-        """A "similar properties" carousel card carrying its own reference must
-        not be attributed to the subject listing.
+    def test_css_fallback_reads_the_reference_from_real_captured_markup(self):
+        """The CSS fallback must work against markup a real page actually
+        serves — not against markup written to match the selector.
 
-        This is the bug class `extraction.scoped_text` exists for — it bit
-        Vivantial (price), Solvia (latent) and Servihabitat (m2). A reference
-        code is a short opaque string with no self-evidently-wrong value, so a
-        neighbour's would be silently accepted and then fed to the dedup
-        signal (etl/dedup/signals/reference_code.py), where a wrong code is
-        worse than a missing one: it can corroborate a false merge.
+        PR #153 originally proved this fallback with a hand-authored page
+        containing a "similar properties" carousel, on the assumption that
+        Fotocasa contaminates this field the way it contaminated Vivantial
+        (price), Servihabitat (m2) and Solvia (latent). Review caught the
+        circularity: the carousel selectors matched nothing except the test's
+        own markup, so the test proved "decompose removes nodes matching my
+        selectors", not that a real neighbour rail exists.
 
-        The subject's reference lives in the contact-detail component; the
-        neighbour's is inside a carousel card. Asserting the subject wins
-        pins the ordering, so a future refactor that broadens the selector
-        (or switches to an unscoped page-text regex) fails here.
+        This uses `fotocasa_sample_detail_reference.html`, trimmed from a real
+        fetch of the issue #149 listing, whose header records the counts
+        measured on two real pages of different property types: the reference
+        renders exactly once, and the "similares" strings present are i18n
+        translation values inside the embedded JSON, not neighbour cards.
+        Hence no `drop=` in `_reference_fallback_text`.
         """
+        html = _read_fixture("fotocasa_sample_detail_reference.html")
+        # The one thing that would invalidate the no-drop decision: if a real
+        # page ever grows a second reference, this fails and prompts a rethink.
+        # Counted over *rendered* text, not the raw source — the fixture's
+        # header comment quotes the label while documenting the measurement,
+        # and a raw substring count would score its own provenance note.
+        fixture_soup = BeautifulSoup(html, "html.parser")
+        assert fixture_soup.get_text(" ", strip=True).count("Referencia:") == 1
+        assert len(fixture_soup.select(".re-FormContactDetail-referenceAlias")) == 1
         raw = RawListing(
             external_id="190239270",
             source="fotocasa",
             raw={
                 "url": "https://www.fotocasa.es/es/comprar/vivienda/sevilla-capital/trastero/190239270/d",
+                # JSON path deliberately absent so the CSS fallback is what runs.
                 "props": {
                     "realEstate": {
-                        "price": 100000,
+                        "price": 14000,
                         "address": {},
                         "coordinates": {},
                         "features": {},
@@ -981,22 +995,7 @@ class TestReferenceCode:
                         "multimedia": [],
                     }
                 },
-                "html": (
-                    "<html><body>"
-                    '<section class="re-Carousel-similar">'
-                    '  <article class="re-CardSimilar">'
-                    '    <ul class="re-FormContactDetail-referenceAlias">'
-                    "      <li>Referencia: NEIGHBOUR999</li>"
-                    "    </ul>"
-                    "  </article>"
-                    "</section>"
-                    '<div class="re-DetailContact">'
-                    '  <ul class="re-FormContactDetail-referenceAlias">'
-                    "    <li>Referencia: LCSE43927</li>"
-                    "  </ul>"
-                    "</div>"
-                    "</body></html>"
-                ),
+                "html": html,
             },
         )
         canonical = FotocasaConnector().normalize(raw)

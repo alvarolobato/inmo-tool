@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<!--
+  Trimmed capture of a REAL Fotocasa detail page, fetched 2026-08-03:
+  https://www.fotocasa.es/es/comprar/vivienda/sevilla-capital/trastero/190239270/d
+  (the listing reported in issue #149).
+
+  Captured to settle a specific question raised in review of PR #153: does a
+  real Fotocasa detail page render a "similar properties" carousel whose cards
+  carry their own "Referencia:" line, which document-order `select_one` could
+  attribute to the subject?
+
+  Answer, verified on two real pages of different property types (this trastero
+  and vivienda 189882136 in Madrid/Chamberi):
+
+    Referencia:                        x1
+    re-FormContactDetail-referenceAlias x1
+
+  The reference appears EXACTLY ONCE. The strings "inmuebles similares" /
+  "anuncios similares" do occur, but inside the embedded i18n JSON as
+  translation values (e.g. THERE_ARE_NOT_TEXT for a saved-search alert), not as
+  rendered neighbour cards carrying reference codes.
+
+  So the carousel-contamination risk that genuinely bit Vivantial (price),
+  Servihabitat (m2) and Solvia (latent) does NOT apply to this field on this
+  site. See the connector for what was removed as a result.
+-->
+<html><head><title>Trastero en venta</title></head>
+<body>
+  <main>
+    <h1>Trastero en Sevilla capital</h1>
+    <div class="re-DetailHeader">
+      <span class="re-DetailHeader-price">14.000 &euro;</span>
+    </div>
+    <ul class="re-FormContactDetail-referenceAlias"><li>Referencia: LCSE43927</li></ul>
+  </main>
+</body>
+</html>

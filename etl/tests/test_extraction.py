@@ -14,9 +14,12 @@ import logging
 from decimal import Decimal
 
 import pytest
+from bs4 import BeautifulSoup
 
 from etl.connectors.extraction import (
     first_present,
+    scoped_node,
+    scoped_text,
     strip_price_punctuation,
     text_to_int,
 )
@@ -122,3 +125,60 @@ class TestStripPricePunctuation:
 
     def test_no_digits_returns_none(self):
         assert strip_price_punctuation("Consultar precio") is None
+
+
+class TestScopedNodeAndText:
+    """`drop` must apply BEFORE `keep`.
+
+    `keep` resolves via `select_one`, which takes the first match in document
+    order. If a contaminating subtree renders earlier AND contains an element
+    matching `keep`, keeping first selects the *neighbour's* container and the
+    subsequent drop is a no-op on the wrong subtree. This ordering was the
+    reason PR #153 forked the helper instead of reusing it; fixing it here so
+    the two options compose correctly for every caller (Opus review, PR #153).
+    """
+
+    CONTAMINATED = """
+      <html><body>
+        <section class="carousel">
+          <div class="stats"><span>NEIGHBOUR999</span></div>
+        </section>
+        <main>
+          <div class="stats"><span>SUBJECT111</span></div>
+        </main>
+      </body></html>
+    """
+
+    def test_drop_applies_before_keep_so_the_subject_wins(self):
+        soup = BeautifulSoup(self.CONTAMINATED, "html.parser")
+        assert scoped_text(soup, keep=".stats", drop=(".carousel",)) == "SUBJECT111"
+
+    def test_keep_first_would_have_returned_the_neighbour(self):
+        """Pins the bug rather than just the fix: this is what the old
+        keep-then-drop order produced, so if the ordering is ever reverted the
+        test above fails with exactly this value."""
+        soup = BeautifulSoup(self.CONTAMINATED, "html.parser")
+        assert soup.select_one(".stats").get_text(strip=True) == "NEIGHBOUR999"
+
+    def test_scoped_node_returns_an_element_not_text(self):
+        soup = BeautifulSoup(self.CONTAMINATED, "html.parser")
+        node = scoped_node(soup, keep=".stats", drop=(".carousel",))
+        assert node is not None
+        assert node.name == "div"
+        assert node.select_one("span").get_text(strip=True) == "SUBJECT111"
+
+    def test_does_not_mutate_the_callers_tree(self):
+        """Connectors memoise one soup across every fallback getter, so an
+        in-place decompose would strip markup out from under the others."""
+        soup = BeautifulSoup(self.CONTAMINATED, "html.parser")
+        scoped_text(soup, drop=(".carousel",))
+        assert soup.select_one(".carousel") is not None
+
+    def test_keep_miss_returns_none_so_a_chain_can_fall_through(self):
+        soup = BeautifulSoup(self.CONTAMINATED, "html.parser")
+        assert scoped_text(soup, keep="#absent") is None
+        assert scoped_node(soup, keep="#absent") is None
+
+    def test_none_input_returns_none(self):
+        assert scoped_text(None) is None
+        assert scoped_node(None) is None
