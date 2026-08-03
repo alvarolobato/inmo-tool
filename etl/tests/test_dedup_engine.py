@@ -13,6 +13,9 @@ from pathlib import Path
 
 import pytest
 
+from etl import orchestrator
+from etl.connectors import base
+from etl.connectors.base import CanonicalListingVersion
 from etl.dedup import engine
 from etl.dedup.engine import _PhotoHashCache
 from etl.dedup.types import ListingRecord
@@ -241,6 +244,102 @@ class TestCadastralExactMatch:
                 "WHERE source IN ('solvia', 'servihabitat')"
             )
             assert cur.fetchone()[0] == 1
+
+    @pytest.mark.parametrize(
+        "placeholder",
+        [
+            "N/A",
+            "-",
+            "00000000000000000000",
+            "AAAAAAAAAAAAAAAAAAAA",
+            "sin referencia",
+            "  ",
+        ],
+    )
+    def test_placeholder_refs_ingested_for_real_do_not_merge(
+        self, dedup_db, placeholder
+    ):
+        """The counterweight to the test above (#154 review, finding 3).
+
+        Signal 1 merges at confidence 1.000 — the one level that bypasses
+        every corroboration rule the weaker signals have. #140 dropped the
+        UNIQUE on `property.cadastral_ref`, and with it the accident that
+        made mass-collision impossible, so a portal publishing the same
+        placeholder on every listing would union its entire inventory into
+        one property.
+
+        Deliberately ingested through `_upsert_canonical_listing` rather
+        than `_insert_pair`: the guard lives in
+        `CanonicalListingVersion.__post_init__`, so seeding the rows
+        directly would bypass the very thing under test and pass whether
+        or not it works. `00000000000000000000` and the all-A variant are
+        the interesting cases — both are twenty alphanumeric characters, so
+        a length-and-charset check alone passes them. The first version of
+        this fix did exactly that, and this test is what caught it.
+        """
+        for i, source in enumerate(("solvia", "servihabitat")):
+            orchestrator._upsert_canonical_listing(
+                dedup_db,
+                CanonicalListingVersion(
+                    external_id=f"placeholder-{i}",
+                    source=source,
+                    url=f"https://example.test/placeholder-{i}",
+                    listing_kind="particular",
+                    status="active",
+                    current_price=Decimal(200000 + i * 45000),
+                    description=f"listing {i}",
+                    photo_urls=(),
+                    contact_raw=None,
+                    address=f"Calle Distinta {i}",
+                    lat=None,
+                    lon=None,
+                    property_type="piso",
+                    m2_built=Decimal(70 + i * 30),
+                    m2_useful=None,
+                    rooms=None,
+                    bathrooms=None,
+                    floor=None,
+                    has_elevator=None,
+                    year_built=None,
+                    energy_rating=None,
+                    cadastral_ref=placeholder,
+                ),
+            )
+
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM property WHERE cadastral_ref IS NOT NULL")
+            assert cur.fetchone()[0] == 0, (
+                f"{placeholder!r} must be rejected to NULL before it is stored"
+            )
+
+        result = engine.run(dedup_db)
+
+        assert result.merged == 0
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM property_merge_log")
+            assert cur.fetchone()[0] == 0
+            cur.execute(
+                "SELECT COUNT(DISTINCT property_id) FROM listing "
+                "WHERE source IN ('solvia', 'servihabitat')"
+            )
+            assert cur.fetchone()[0] == 2, "unrelated properties must stay separate"
+
+    def test_a_genuine_ref_still_survives_normalization(self):
+        """Guards the other direction: the check must not eat real data.
+
+        Lower case and stray whitespace are how a real reference arrives
+        from a portal that pretty-prints it; rejecting those would silently
+        disable signal 1 for the servicer batch (#132) — the failure mode
+        that is invisible because it looks exactly like "no duplicates".
+        """
+        assert (
+            base.normalize_cadastral_ref("  9872023vh5797s0001wx  ")
+            == "9872023VH5797S0001WX"
+        )
+        assert base.normalize_cadastral_ref("9872023 VH5797 S0001 WX") == (
+            "9872023VH5797S0001WX"
+        )
+        assert base.normalize_cadastral_ref(None) is None
 
 
 class TestPhoneSignal:

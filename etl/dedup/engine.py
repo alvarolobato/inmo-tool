@@ -203,6 +203,17 @@ def perform_merge(
             "UPDATE listing SET property_id = %s WHERE property_id = %s",
             (survivor_id, losing_id),
         )
+        # Deliberately not copying the loser's cadastral_ref onto the
+        # survivor here. If the merge fired on `cadastral` the two already
+        # match, so there is nothing to copy; if it fired on another signal
+        # and only the loser carried a reference, the next sweep's
+        # COALESCE(new, old) in _upsert_canonical_listing writes it onto the
+        # survivor when that listing is re-fetched — the listing now points
+        # at survivor_id, so it lands in the right place. Adding a copy here
+        # would need its own conflict rule for the case where both sides
+        # carry *different* references (a signal that the merge was wrong,
+        # not something to silently overwrite), so leave the self-healing
+        # path to do it.
 
     had_conflict, snapshot = reconcile.reconcile_merge(
         conn,

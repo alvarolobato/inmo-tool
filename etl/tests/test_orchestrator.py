@@ -1756,6 +1756,65 @@ class TestUniqueViolationHandling:
         finally:
             _cleanup(pg_conn, source)
 
+    def test_property_level_violation_propagates_instead_of_being_swallowed(
+        self, pg_conn
+    ):
+        """The narrowing itself: a *non*-listing violation must escape.
+
+        `property` has no unique constraint of its own in the shipped
+        schema (#140 dropped the one on `cadastral_ref`), so one is added
+        for the duration of this test — the point is the handler's
+        behaviour on any constraint that isn't
+        `listing_source_external_id_key`, not this particular column.
+
+        Without the narrowing the handler swallows this, re-queries
+        `listing` by (source, external_id), finds nothing because the
+        listing INSERT was never reached, and dies unpacking `None` into
+        four names — a TypeError naming neither the constraint nor the
+        column. Asserting on the constraint name is what makes this test
+        fail if the narrowing is removed; asserting merely "it raises"
+        would pass either way, since the TypeError is also a raise.
+        """
+        # Lazy, like orchestrator.py's own import: psycopg2 is an optional
+        # dependency and a module-level import here would break collection
+        # for anyone running the non-DB tests without it.
+        from psycopg2.errors import UniqueViolation
+
+        _apply_schema(pg_conn)
+        source = "property-level-violation-test"
+        shared_address = "Calle Colisión 1"
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "ALTER TABLE property ADD CONSTRAINT tmp_property_address_key "
+                "UNIQUE (address)"
+            )
+        pg_conn.commit()
+        try:
+            orchestrator._upsert_canonical_listing(
+                pg_conn, _minimal_canonical("prop-1", source, address=shared_address)
+            )
+
+            # Different listing, same address: the listing INSERT is fine,
+            # the property INSERT that precedes it inside the same try is not.
+            with pytest.raises(UniqueViolation) as excinfo:
+                orchestrator._upsert_canonical_listing(
+                    pg_conn,
+                    _minimal_canonical("prop-2", source, address=shared_address),
+                )
+            assert excinfo.value.diag.constraint_name == "tmp_property_address_key", (
+                "the real constraint must reach the caller, not be recast as "
+                "a listing-race recovery"
+            )
+        finally:
+            pg_conn.rollback()  # the failed INSERT aborted the transaction
+            _cleanup(pg_conn, source)
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "ALTER TABLE property DROP CONSTRAINT IF EXISTS "
+                    "tmp_property_address_key"
+                )
+            pg_conn.commit()
+
     def test_constraint_name_degrades_to_none_without_diag(self):
         """A synthesised exception must not crash the handler while handling."""
         assert orchestrator._constraint_name(ValueError("no diag here")) is None

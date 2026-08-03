@@ -67,13 +67,23 @@ CREATE INDEX IF NOT EXISTS idx_property_lat_lon ON property (lat, lon);
 -- second ingest raised a property-level UniqueViolation that the
 -- listing-level handler in orchestrator.py mis-attributed.
 --
--- Dropped in favour of a plain index (issue #140). The index still serves
--- the dedup engine's lookups; deduplication is the engine's job, enforced
--- by merging rows, not by rejecting inserts. DROP/CREATE rather than
--- editing the CREATE TABLE above, which is a no-op on an already-migrated
--- database — same reasoning as the other post-hoc migrations in this file.
+-- UNIQUE dropped in favour of a plain index (issue #140): it made signal 1
+-- structurally unreachable, since two property rows sharing a reference —
+-- the exact state the signal detects and merges — could never exist.
+-- Deduplication is the engine's job, enforced by merging rows, not by
+-- rejecting inserts. DROP/CREATE rather than editing the CREATE TABLE
+-- above, which is a no-op on an already-migrated database — same reasoning
+-- as the other post-hoc migrations in this file.
+--
+-- The index is *not* read by the dedup engine: fetch_listing_records()
+-- full-scans the candidate set with no predicate on this column. It exists
+-- for operator lookups ("which property is 9872023VH5797S0001WX?") and for
+-- any future targeted query. Partial to match idx_listing_reference_code
+-- and because the column is NULL for every consumer-portal listing —
+-- only servicer/REO portals publish a reference at all.
 ALTER TABLE property DROP CONSTRAINT IF EXISTS property_cadastral_ref_key;
-CREATE INDEX IF NOT EXISTS idx_property_cadastral_ref ON property (cadastral_ref);
+CREATE INDEX IF NOT EXISTS idx_property_cadastral_ref ON property (cadastral_ref)
+    WHERE cadastral_ref IS NOT NULL;
 
 -- Keeps property.updated_at accurate without every writer having to
 -- remember to set it (e.g. task 2.2's dedup merges, task 4.x's AI fields

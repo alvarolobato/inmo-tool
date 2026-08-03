@@ -265,6 +265,14 @@ def extract_cadastral_ref(detail: dict[str, Any]) -> str | None:
     to end, so the value now flows into `CanonicalListingVersion.cadastral_ref`
     → `property.cadastral_ref` → the dedup engine, rather than dead-ending
     in `raw_extra` as it did when this connector first shipped.
+
+    Only extraction happens here — the `.strip()` below is not the
+    validation. Format normalisation and the plausibility check that keeps
+    a placeholder ("N/A", "-", a dummy repeated on every listing) from
+    merging unrelated properties at confidence 1.000 live centrally in
+    `normalize_cadastral_ref()` / `CanonicalListingVersion.__post_init__`
+    (`etl/connectors/base.py`), so every connector in the #132 servicer
+    batch inherits them without each having to remember.
     """
     caracteristicas = detail.get("caracteristicas")
     if isinstance(caracteristicas, dict):
