@@ -48,6 +48,7 @@ from etl.dedup.signals import (
     photo_hash,
     reference_code,
 )
+from etl.dedup.signals.floor import floors_conflict
 from etl.dedup.types import ListingRecord, PairEvaluation
 
 logger = logging.getLogger("etl.dedup.engine")
@@ -59,6 +60,23 @@ class DedupRunResult:
     merged: int = 0
     suggested: int = 0
     conflicts: int = 0
+    # Issue #197: candidate pairs skipped at pair-generation because both
+    # listings share a `source` — never handed to evaluate_pair at all, so
+    # this is *not* counted in pairs_compared above. "Same-source" pairs
+    # would be "really strange" per the owner (a re-listed expired advert
+    # is the plausible case), so this is a visibility counter, not silence:
+    # a nonzero value here is exactly the operator-facing signal issue
+    # #197's acceptance criteria ask for ("counted/logged somewhere an
+    # operator can find"). See run()'s docstring for why persisting it into
+    # the `dedup_runs` table itself is a follow-up, not done here.
+    same_source_skipped: int = 0
+    # Sub-count of the above: same-source pairs that additionally share a
+    # non-null cadastral_ref. Issue #197 calls this out specifically — two
+    # listings on *one* portal claiming the same land-registry reference is
+    # a data-quality problem worth an operator's attention (a scraping bug,
+    # a portal listing the same unit twice), not something to silently
+    # drop just because same-source pairs are never merged.
+    same_source_cadastral_collisions: int = 0
 
 
 def fetch_listing_records(conn) -> list[ListingRecord]:
@@ -75,7 +93,7 @@ def fetch_listing_records(conn) -> list[ListingRecord]:
             SELECT l.id, l.property_id, l.source, l.external_id, l.listing_kind,
                    l.description, l.photo_urls,
                    p.cadastral_ref, p.address, p.lat, p.lon, p.m2_built,
-                   l.current_price, l.contact_raw, l.reference_code
+                   l.current_price, l.contact_raw, l.reference_code, p.floor
               FROM listing l
               JOIN property p ON p.id = l.property_id
             """
@@ -98,6 +116,7 @@ def fetch_listing_records(conn) -> list[ListingRecord]:
             current_price=row[12],
             contact_raw=row[13],
             reference_code=row[14],
+            floor=row[15],
         )
         for row in rows
     ]
@@ -142,11 +161,52 @@ def evaluate_pair(
     hashes_b = hash_cache.get(b)
     ratio = photo_hash.match_ratio(hashes_a, hashes_b)
     if ratio is not None and Decimal(str(ratio)) >= photo_hash.MIN_MATCH_RATIO:
+        detail: dict = {"match_ratio": round(ratio, 3)}
+        # Issue #186: a floor present on both sides that disagrees is
+        # direct evidence of "different unit, same building" — the owner's
+        # own example (suggestion 197: floors "10º" vs "A partir de la 15ª
+        # planta", identical photos and price, 6m² apart) came through this
+        # exact signal. Computed once, used two ways below: it vetoes the
+        # issue #188 auto-merge outright, and — even when it doesn't (ratio
+        # < 1.0, or size/price don't corroborate) — it's still surfaced in
+        # `detail` so a human reviewing the suggestion sees the
+        # discriminating data point rather than an unexplained
+        # perfect-looking match.
+        floor_conflict = floors_conflict(a.floor, b.floor)
+        if floor_conflict:
+            detail["floor_conflict"] = True
+
+        # Issue #188 (approved once #197 removed same-source pairing — see
+        # photo_hash.PHOTO_MERGE_SIZE_RATIO's module-level comment for the
+        # full reasoning and the measured tolerances): a *full* photo
+        # overlap between two different sources (guaranteed here — #197
+        # never hands evaluate_pair a same-source pair in the first place),
+        # corroborated by size/price proximity and not vetoed by a
+        # conflicting floor, auto-merges rather than sitting in the review
+        # queue as a suggestion.
+        exact_match = Decimal(str(round(ratio, 3))) == Decimal("1.000")
+        if (
+            exact_match
+            and not floor_conflict
+            and address_coords.sizes_close(
+                a.m2_built, b.m2_built, photo_hash.PHOTO_MERGE_SIZE_RATIO
+            )
+            and address_coords.prices_close(
+                a.current_price, b.current_price, photo_hash.PHOTO_MERGE_PRICE_RATIO
+            )
+        ):
+            return PairEvaluation(
+                basis="photo_hash",
+                confidence=photo_hash.PHOTO_MERGE_CONFIDENCE,
+                decision="merge",
+                detail=detail,
+            )
+
         return PairEvaluation(
             basis="photo_hash",
             confidence=photo_hash.confidence_for_ratio(ratio),
             decision="suggest",
-            detail={"match_ratio": round(ratio, 3)},
+            detail=detail,
         )
 
     return fuzzy.evaluate(a, b)
@@ -270,6 +330,34 @@ def run(conn) -> DedupRunResult:
     re-fetched from the DB) so that a third listing sharing a property with
     either side of an earlier merge in the *same run* is correctly treated
     as already-unified in later iterations, without a full re-query.
+
+    Issue #197 — same-source pairs are never generated at all: "in the same
+    connector they wouldn't be duplicates, only if they come from different
+    connectors ... a duplicate in the same connector would be really
+    strange" (owner). Measured against the live corpus, 456 of 585 (78%)
+    pending suggestions were same-source — the `fuzzy` signal (90% of the
+    queue's volume) was 81% same-source noise. The skip happens *before*
+    `evaluate_pair` (i.e. before scoring, not filtered out of the
+    suggestions afterward): it's the actual per-pair CPU cost this loop
+    exists to bound (see this module's own docstring on the ~13.3us/pair
+    measurement and why blocking/bucketing will eventually be needed), so
+    filtering post-hoc would keep paying that cost for nothing. This is
+    also why `same_source_skipped`/`same_source_cadastral_collisions` are
+    *not* persisted into the `dedup_runs` table here: doing so needs a
+    schema change (new columns) plus a couple-line change in
+    orchestrator.py's `_finish_dedup_run`/`run_dedup`, both outside
+    etl/dedup/**'s surface for this change — see the PR description for the
+    exact diff to land in a follow-up. For now the counts are logged
+    (operator-visible via container/CLI logs) and returned on
+    `DedupRunResult` (surfaced by `ps dedup run`'s own print).
+
+    "Really strange" is not "impossible" (owner's own wording) — a
+    re-listed expired advert on the same portal is the plausible real case
+    — so this never silently drops a same-source cadastral_ref collision
+    specifically: that's a data-quality signal (two rows on one portal
+    claiming the same land-registry parcel) worth an operator's attention
+    regardless of the no-merge rule, so it's counted and logged separately
+    even though it's still never merged or suggested.
     """
     listings = fetch_listing_records(conn)
     hash_cache = _PhotoHashCache()
@@ -281,6 +369,23 @@ def run(conn) -> DedupRunResult:
             for j in range(i + 1, len(listings)):
                 a, b = listings[i], listings[j]
                 if a.property_id == b.property_id:
+                    continue
+                if a.source == b.source:
+                    result.same_source_skipped += 1
+                    if a.cadastral_ref and a.cadastral_ref == b.cadastral_ref:
+                        result.same_source_cadastral_collisions += 1
+                        logger.warning(
+                            "dedup: same-source cadastral collision — "
+                            "listings %s/%s (source=%s) share cadastral_ref "
+                            "%s but will never be paired for merge/"
+                            "suggestion (issue #197); a data-quality issue "
+                            "worth checking on that portal, not a dedup "
+                            "target",
+                            a.listing_id,
+                            b.listing_id,
+                            a.source,
+                            a.cadastral_ref,
+                        )
                     continue
                 if tuple(sorted((a.listing_id, b.listing_id))) in recorded_pairs:
                     continue
@@ -307,7 +412,56 @@ def run(conn) -> DedupRunResult:
                     file_suggestion(conn, a, b, evaluation)
                     result.suggested += 1
 
+    if result.same_source_skipped:
+        logger.info(
+            "dedup: skipped %d same-source pair(s) at pair-generation "
+            "(issue #197 — duplicates within one connector are not paired "
+            "for merge/suggestion); %d of those shared a cadastral_ref "
+            "(data-quality flag, not auto-merged)",
+            result.same_source_skipped,
+            result.same_source_cadastral_collisions,
+        )
+
     return result
+
+
+def purge_same_source_pending(conn) -> int:
+    """One-off migration (issue #197): delete existing `pending`
+    `suggested_merge` rows whose two listings share a `source`.
+
+    Issue #197 measured 456 of 585 pending suggestions (78%) as same-source
+    on the live corpus before this filter existed. Those rows were filed by
+    runs that predate the pair-generation filter in `run()` above and will
+    never be re-created by a future run (the filter stops them at
+    generation), but existing rows need an explicit purge — `run()` itself
+    deliberately does not delete pre-existing suggestions on every pass
+    (that would be a surprising, unrequested side effect of an unrelated
+    code path), so this is exposed as its own callable/CLI subcommand
+    (`ps dedup purge-same-source`) to run once after deploying this change.
+
+    Scoped to `status = 'pending'` only, matching `_load_recorded_pairs`'s
+    own reasoning: a 'confirmed' same-source suggestion already went
+    through a human decision and its merge (if any) is a real
+    `property_merge_log` row now, not something this purge should touch;
+    'rejected'/'conflict' rows are already-resolved history. Only 'pending'
+    rows are the ones issue #197 says should never have been filed at all.
+
+    Returns the number of rows deleted.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM suggested_merge sm
+                  USING listing la, listing lb
+                  WHERE sm.listing_id_a = la.id
+                    AND sm.listing_id_b = lb.id
+                    AND la.source = lb.source
+                    AND sm.status = 'pending'
+            """
+        )
+        deleted = cur.rowcount
+    conn.commit()
+    return deleted
 
 
 def _fetch_listing_record(conn, listing_id: int) -> ListingRecord | None:

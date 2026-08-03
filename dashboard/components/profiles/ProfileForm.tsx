@@ -22,7 +22,12 @@ interface ProfileFormProps {
   onCancel?: () => void;
 }
 
-const DEFAULT_VALUES: ProfileFormValues = {
+// Exported so callers repairing a malformed-scope profile (issue #113) can
+// seed the form with a valid scope skeleton — that profile's OLD scope is
+// unparseable by definition, so there is nothing to pre-fill it with; the
+// least-surprising starting point is the same default a brand-new profile
+// gets, with just the (valid) existing name carried over.
+export const DEFAULT_VALUES: ProfileFormValues = {
   name: "",
   scope: {
     geography: { type: "radius", center: [40.4168, -3.7038], radius_km: 5 },

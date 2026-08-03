@@ -14,6 +14,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from etl.connectors.base import ConnectorError, ConnectorScope
+from etl.connectors.geography import UnresolvableGeographyError
 from etl.connectors.milanuncios import (
     MilanunciosConnector,
     MilanunciosSoftBlockError,
@@ -103,6 +104,29 @@ class TestDiscover:
         requested_url = mock_get.call_args.args[0]
         assert "sevilla" in requested_url
         assert "madrid" not in requested_url
+
+    def test_unresolvable_center_raises_rather_than_silently_resolving(self):
+        """Issue #169: a real center point that matches no known place in
+        the shared gazetteer at all must raise — never silently return an
+        empty discover() result."""
+        connector = MilanunciosConnector()
+        far = ConnectorScope(center=(38.7223, -9.1393), radius_km=5)  # Lisbon
+        with (
+            patch("etl.connectors.milanuncios.requests.get") as mock_get,
+            pytest.raises(UnresolvableGeographyError),
+        ):
+            connector.discover(far, throttle=lambda: None)
+        mock_get.assert_not_called()
+
+    def test_scope_key_never_raises_and_uses_a_sentinel_for_unresolvable(self):
+        """scope_key() must never raise itself (the orchestrator calls it
+        with no try/except) — the unresolvable case above must still
+        surface as a distinct, non-None key."""
+        connector = MilanunciosConnector()
+        far = ConnectorScope(center=(38.7223, -9.1393), radius_km=5)  # Lisbon
+        key = connector.scope_key(far)
+        assert key is not None
+        assert key.startswith("unresolvable-geography:")
 
     def test_discover_raises_on_soft_block_page_not_empty_list(self):
         html = _read_fixture("milanuncios_sample_block_page.html")

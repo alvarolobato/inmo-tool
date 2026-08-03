@@ -28,7 +28,8 @@ import pytest
 
 from etl.connectors import solvia
 from etl.connectors.base import ConnectorError, ConnectorScope
-from etl.connectors.solvia import SolviaConnector
+from etl.connectors.geography import UnresolvableGeographyError
+from etl.connectors.solvia import SolviaConnector, _resolve_geography
 from etl.connectors.solvia_mapping import map_property_type
 from etl.orchestrator import _upsert_canonical_listing
 
@@ -104,13 +105,75 @@ class TestScopeResolution:
         )
         assert key == "madrid"
 
-    def test_unknown_geography_returns_none_so_orchestrator_skips_it(self):
+    @pytest.mark.parametrize(
+        ("center", "expected_key"),
+        [
+            # Costa del Sol (issue #169 course-correction v1 market) —
+            # independently-sourced landmark coordinates (issue #177, M2:
+            # not copied from the gazetteer's own row for each municipality
+            # — see test_geography.py's TestNearestPlaceReturnsProvince
+            # docstring for why that distinction matters), tight radius so a
+            # match can only come from that municipality's own province.
+            ((36.7211, -4.4220), "malaga"),  # Plaza de la Constitución (Malaga)
+            ((36.51667, -4.88333), "malaga"),  # Wikipedia infobox (Marbella)
+            ((36.42643, -5.1465), "malaga"),  # Plaza San Francisco (Estepona)
+            # Greater Sevilla (owner's other stated v1 market) — the
+            # task/PR reviewer's own measured Dos Hermanas centroid, also
+            # the exact point of the Dos Hermanas regression case (see
+            # test_geography.py's TestDosHermanasRegression).
+            ((37.283689, -5.9226718), "sevilla"),  # Dos Hermanas
+        ],
+    )
+    def test_v1_market_towns_resolve_to_their_own_provincia(self, center, expected_key):
+        """Issue #190: these must resolve to a bare PROVINCIA key, not a
+        (provincia, municipio) pair — discover() sweeps every municipio the
+        sitemap lists for the resolved provincia, so Marbella/Estepona/Dos
+        Hermanas all collapse to their province's key rather than getting
+        their own distinct one. This is a deliberate coarsening from issue
+        #177's per-municipio `_CITY_SLUGS` resolution (still used by other
+        connectors, e.g. milanuncios.py, that don't sweep a full province):
+        for Solvia specifically, the sitemap sweep makes municipio-level
+        `scope_key()` granularity pointless — two scopes naming different
+        towns in the same provincia cover the identical set of pages, so
+        they must dedupe to the same key (see
+        test_two_scopes_in_the_same_provincia_share_one_key below)."""
         connector = SolviaConnector()
-        # Lisbon — outside every known centroid, must not silently pick one.
-        assert (
-            connector.scope_key(ConnectorScope(center=(38.7223, -9.1393), radius_km=10))
-            is None
-        )
+        key = connector.scope_key(ConnectorScope(center=center, radius_km=10))
+        assert key == expected_key
+
+    def test_unresolvable_center_raises_rather_than_silently_resolving(self):
+        """Issue #169: Lisbon is a real center point but matches no known
+        place in the shared gazetteer at all — this must raise, not
+        silently return None (which used to read as "no coverage",
+        identical to "zero listings found")."""
+        far = ConnectorScope(center=(38.7223, -9.1393), radius_km=10)
+        with pytest.raises(UnresolvableGeographyError):
+            _resolve_geography(far)
+
+    def test_scope_key_never_raises_and_uses_a_sentinel_for_unresolvable(self):
+        """scope_key() must never raise itself (the orchestrator calls it
+        with no try/except) — the unresolvable case above must still
+        surface as a distinct, non-None key so discover() gets called and
+        raises there, landing as a real connector_run_results failure."""
+        connector = SolviaConnector()
+        far = ConnectorScope(center=(38.7223, -9.1393), radius_km=10)
+        key = connector.scope_key(far)
+        assert key is not None
+        assert key.startswith("unresolvable-geography:")
+
+    def test_a_known_municipality_this_connector_doesnt_cover_returns_none(self):
+        """Distinct from the unresolvable case above: a scope that DOES
+        resolve to a real, known municipality (via the shared gazetteer)
+        whose *province* Solvia's own `_PROVINCE_SLUGS` table simply
+        doesn't have an entry for is a legitimate, non-failure coverage gap
+        — scope_key() still returns None for this, and the orchestrator
+        skips it without recording a failure (issue #99, unchanged by
+        issue #169/#190)."""
+        connector = SolviaConnector()
+        # A real Spanish municipality in Cantabria, deliberately not in
+        # Solvia's province table.
+        scope = ConnectorScope(center=(43.463, -3.8044), radius_km=5)  # Santander
+        assert connector.scope_key(scope) is None
 
     def test_free_text_geography_is_provincia_only_now(self):
         """Issue #190: a scope resolves to a PROVINCIA, not a specific
@@ -422,11 +485,32 @@ class TestDiscoverProvinciaSweep:
                 ConnectorScope(geography="testprov"), throttle=_noop_throttle
             )
 
-    def test_unresolvable_provincia_raises_before_any_sitemap_fetch(self):
+    def test_unresolvable_center_raises_uncaught_before_any_sitemap_fetch(self):
+        """A center matching no place in the gazetteer at all (issue #169)
+        must propagate `UnresolvableGeographyError` straight out of
+        `discover()`, uncaught — this is the genuinely-unresolvable case,
+        distinct from a resolved-but-uncovered province below."""
+        connector = SolviaConnector()
+        with (
+            patch("etl.connectors.solvia.requests.get") as mock_get,
+            pytest.raises(UnresolvableGeographyError),
+        ):
+            connector.discover(
+                ConnectorScope(center=(38.7223, -9.1393), radius_km=10),  # Lisbon
+                throttle=_noop_throttle,
+            )
+        mock_get.assert_not_called()
+
+    def test_known_municipality_uncovered_province_raises_no_known_solvia(self):
+        """A center that DOES resolve to a real gazetteer place (issue
+        #169) whose province simply isn't in `_PROVINCE_SLUGS` reaches
+        discover()'s own guard clause — reachable only when discover() is
+        invoked directly, bypassing scope_key()'s None-skip gate (see
+        fotocasa.py's discover() docstring for why that's the contract)."""
         connector = SolviaConnector()
         with pytest.raises(ConnectorError, match="no known Solvia"):
             connector.discover(
-                ConnectorScope(center=(38.7223, -9.1393), radius_km=10),
+                ConnectorScope(center=(43.463, -3.8044), radius_km=5),  # Santander
                 throttle=_noop_throttle,
             )
 

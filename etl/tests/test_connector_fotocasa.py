@@ -20,6 +20,7 @@ from bs4 import BeautifulSoup
 from etl.connectors import fotocasa as fotocasa_module
 from etl.connectors.base import ConnectorError, ConnectorScope, RawListing
 from etl.connectors.fotocasa import FotocasaConnector
+from etl.connectors.geography import UnresolvableGeographyError
 from etl.orchestrator import _upsert_canonical_listing
 from etl.tests.robots_matcher import is_allowed, load_star_block_rules
 
@@ -187,6 +188,31 @@ class TestDiscover:
         assert unfiltered == connector.scope_key(
             ConnectorScope(geography="madrid-capital")
         )
+
+    def test_unresolvable_center_raises_rather_than_silently_resolving(self):
+        """Issue #169: a real center point that matches no known place in
+        the shared gazetteer at all must raise — never silently return an
+        empty discover() result, which used to read identically to "no
+        listings found here"."""
+        connector = FotocasaConnector()
+        far = ConnectorScope(center=(38.7223, -9.1393), radius_km=5)  # Lisbon
+        with (
+            patch("etl.connectors.fotocasa.requests.get") as mock_get,
+            pytest.raises(UnresolvableGeographyError),
+        ):
+            connector.discover(far, throttle=lambda: None)
+        mock_get.assert_not_called()
+
+    def test_scope_key_never_raises_and_uses_a_sentinel_for_unresolvable(self):
+        """scope_key() must never raise itself (the orchestrator calls it
+        with no try/except) — the unresolvable case above must still
+        surface as a distinct, non-None key so discover() gets called and
+        raises there, landing as a real connector_run_results failure."""
+        connector = FotocasaConnector()
+        far = ConnectorScope(center=(38.7223, -9.1393), radius_km=5)  # Lisbon
+        key = connector.scope_key(far)
+        assert key is not None
+        assert key.startswith("unresolvable-geography:")
 
     def test_discover_rejects_robots_txt_disallowed_bare_geography(self):
         """robots.txt disallows the literal "/madrid/" path segment (not the
@@ -778,24 +804,54 @@ class TestRobotsCompliance:
                 allowed, reason = is_allowed(rules, url)
                 assert allowed, f"{url} is robots.txt-disallowed: {reason}"
 
-    def test_the_matcher_actually_rejects_the_disallowed_patterns(self):
+    @pytest.mark.parametrize(
+        "url",
+        [
+            pytest.param(
+                "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital"
+                "/todas-las-zonas/l/2",
+                id="pagination",
+            ),
+            pytest.param(
+                "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital"
+                "/todas-las-zonas/l?minPrice=100000",
+                id="minPrice-filter",
+            ),
+            pytest.param(
+                "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital"
+                "/todas-las-zonas/l?maxPrice=200000",
+                id="maxPrice-filter",
+            ),
+            pytest.param(
+                "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital"
+                "/todas-las-zonas/l?minRooms=2",
+                id="minRooms-filter",
+            ),
+            pytest.param(
+                "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital"
+                "/todas-las-zonas/l?propertySubtypeIds=1",
+                id="propertySubtypeIds-filter",
+            ),
+            pytest.param(
+                "https://www.fotocasa.es/es/comprar/viviendas/madrid/todas-las-zonas/l",
+                id="bare-city-name-segment",
+            ),
+        ],
+    )
+    def test_the_matcher_actually_rejects_the_disallowed_patterns(self, url):
         """Guards the guard: if the matcher said yes to everything, the test
         above would pass no matter what the connector did. These are the
         real disallowed shapes from Fotocasa's robots.txt (pagination, the
-        query-string filters, and the bare city-name segment)."""
+        query-string filters, and the bare city-name segment).
+
+        PR #177 round 3, N7: parametrized (was a single test with an
+        internal for-loop over 6 unrelated URLs) so a regression on any one
+        pattern is reported as its own named failure instead of aborting
+        the loop on the first mismatch and hiding whether the rest still
+        passed."""
         rules = self._rules()
-        base = "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital"
-        must_be_disallowed = [
-            f"{base}/todas-las-zonas/l/2",
-            f"{base}/todas-las-zonas/l?minPrice=100000",
-            f"{base}/todas-las-zonas/l?maxPrice=200000",
-            f"{base}/todas-las-zonas/l?minRooms=2",
-            f"{base}/todas-las-zonas/l?propertySubtypeIds=1",
-            "https://www.fotocasa.es/es/comprar/viviendas/madrid/todas-las-zonas/l",
-        ]
-        for url in must_be_disallowed:
-            allowed, _ = is_allowed(rules, url)
-            assert not allowed, f"matcher wrongly allowed {url}"
+        allowed, _ = is_allowed(rules, url)
+        assert not allowed, f"matcher wrongly allowed {url}"
 
     def test_matcher_honours_consecutive_user_agent_groups(self):
         """RFC 9309 §2.2.1: consecutive user-agent lines form ONE group

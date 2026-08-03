@@ -54,6 +54,7 @@ import { extractRedFlags } from "@/lib/llm";
 import type { LlmAgenticContext } from "@/lib/llm-tools/types";
 import { NoListingsError, loadPropertyListings, clamp01, stripCodeFence } from "./shared";
 import { getOrCompute, getLatestAssessment, logCacheOutcome, type CachedAssessment } from "./cache";
+import { buildAreaPriceSignal } from "./price-signal";
 
 export { NoListingsError, loadPropertyListings };
 
@@ -61,8 +62,14 @@ export { NoListingsError, loadPropertyListings };
  * Prompt version. Bump when the redflags prompt changes in a way that could
  * change what gets flagged, so `ai_assessment`'s unique key treats the new
  * output as a distinct row rather than colliding with the old prompt's.
+ *
+ * Bumped to v2 for #184: the stable prompt text gained the "Contexto de
+ * precio de zona" rules block (system-prompt.ts's `AREA_PRICE_SIGNAL_RULES`)
+ * and the volatile payload can now carry a derived price-comparison line —
+ * both change what the model reads, so a v1 cache row must not silently pass
+ * as current.
  */
-export const REDFLAGS_PROMPT_VERSION = "redflags/v1";
+export const REDFLAGS_PROMPT_VERSION = "redflags/v2";
 
 /**
  * Closed type vocabulary (issue #27 technical approach #1). `other` is the
@@ -220,6 +227,13 @@ export async function getRedFlagsAssessment(
  * is nothing to read, and an empty `flags: []` written from that state would
  * be indistinguishable from "we read it and it's clean", which is a
  * materially different (and false) claim.
+ *
+ * #184: computes the bucketed zone-price signal ONCE (`buildAreaPriceSignal`,
+ * price-signal.ts) and threads the exact same string into both the LLM call
+ * (`extractRedFlags`'s `opts.areaPriceSignal` → rendered into the prompt) and
+ * `getOrCompute`'s `extraHashInput` (→ folded into the cache's invalidation
+ * key). Same variable, same call — the agreement the issue requires can't
+ * drift apart because there is only one place either value comes from.
  */
 export async function assessPropertyRedFlags(
   propertyId: number,
@@ -228,16 +242,19 @@ export async function assessPropertyRedFlags(
   const listings = await loadPropertyListings(propertyId);
   if (listings.length === 0) throw new NoListingsError(propertyId);
 
+  const areaPriceSignal = await buildAreaPriceSignal(propertyId);
+
   const { result, fromCache } = await getOrCompute<RedFlagsResult>(
     propertyId,
     "redflags",
     REDFLAGS_PROMPT_VERSION,
     listings,
     async () => {
-      const { text, model } = await extractRedFlags(listings, opts);
+      const { text, model } = await extractRedFlags(listings, { ...opts, areaPriceSignal });
       return { result: parseRedFlagsResult(text), model };
     },
     saveRedFlagsAssessment,
+    areaPriceSignal,
   );
   logCacheOutcome("redflags", propertyId, fromCache);
   return result;

@@ -78,6 +78,21 @@
  * `buildOccupancyPrompt` for the same reason: instructing the model to weigh
  * a field it is no longer shown would be actively misleading.
  *
+ * ## Addendum (#184, D-010): the signal comes back, derived and bucketed
+ *
+ * The above is still true of the RAW `price` field — it is never rendered
+ * and never hashed. What changed in #184 is that `getOrCompute` gained an
+ * optional `extraHashInput` parameter (and `computeAssessmentContentHash`
+ * an optional `extra` parameter) so occupancy/redflags can hash a DERIVED,
+ * non-listing signal alongside the listings: a bucketed zone-median price
+ * comparison from `lib/analytics/area-price.ts` (#32), computed by
+ * `lib/ai-assessment/price-signal.ts`. That module renders and hashes the
+ * exact same string from the exact same call site, so the invalidation key
+ * and the prompt can never disagree — see its doc and D-010 for the full
+ * design (bucketing, silence rules, why only two flows). `condition`/
+ * `extract` never pass `extraHashInput`, so their hashes are computed
+ * exactly as before this parameter existed — see `extra`'s doc below.
+ *
  * ## `prompt_version` (the versioning question)
  *
  * A prompt/schema change bumps the flow's `*_PROMPT_VERSION` constant, which
@@ -129,12 +144,35 @@ export type AssessmentType = "occupancy" | "condition" | "redflags" | "extract";
  * (newest-first) order `loadPropertyListings` returns rows in — that order
  * matters to the model (recency as a tie-break signal) but must NOT matter to
  * whether two reads of the same underlying set hash identically.
+ *
+ * ## `extra` — derived, non-listing prompt content (#184)
+ *
+ * Optional second input, folded into the hash material alongside `listings`
+ * when given. This exists for exactly one purpose: some flows (currently
+ * occupancy/redflags — see `lib/ai-assessment/price-signal.ts`) render a
+ * derived string into the prompt that is NOT computed from any one listing's
+ * fields (a bucketed zone-median price comparison, `lib/analytics/
+ * area-price.ts` via #32). Requirement 1 of #184 is that the invalidation
+ * key and the rendered prompt must always agree — the mismatch #180 fixed
+ * for price, generalised — so any such content must be hashed too, not just
+ * `listings`.
+ *
+ * Deliberately backward-compatible when `extra` is omitted: the hash for a
+ * two-argument call is bit-for-bit identical to before this parameter
+ * existed (`extra === undefined` hashes the bare `material` array, not a
+ * wrapper object), so condition/extract — which never pass `extra` — see NO
+ * hash-format churn from this change, and every pre-#184 stored
+ * `content_hash` for those two assessment types remains valid.
  */
-export function computeAssessmentContentHash(listings: ListingSnapshot[]): string {
+export function computeAssessmentContentHash(
+  listings: ListingSnapshot[],
+  extra?: string,
+): string {
   const material = listings
     .map((l) => ({ id: l.listingId ?? null, d: (l.description ?? "").trim() }))
     .sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
-  return createHash("sha256").update(JSON.stringify(material)).digest("hex");
+  const payload: unknown = extra === undefined ? material : { material, extra };
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 }
 
 /** Raw row shape as `ai_assessment` actually stores it. */
@@ -268,6 +306,13 @@ export function logCacheOutcome(
  * on `(propertyId, assessmentType)`, so two concurrent calls for the same key
  * can't both observe a miss and both call the LLM (#30 review, confirmed
  * empirically) — the second blocks until the first has saved, then hits.
+ *
+ * `extraHashInput` (#184, optional): forwarded verbatim to
+ * `computeAssessmentContentHash`'s `extra` parameter — see that function's
+ * doc. Callers that render a derived, non-listing string into the prompt
+ * (occupancy/redflags's bucketed area-price signal) MUST pass the exact same
+ * string here that they passed into `FlowVars.areaPriceSignal`, from the
+ * same call site, so the hash can never disagree with what the model saw.
  */
 export async function getOrCompute<T>(
   propertyId: number,
@@ -281,8 +326,9 @@ export async function getOrCompute<T>(
     model: string | null,
     contentHash: string,
   ) => Promise<void>,
+  extraHashInput?: string,
 ): Promise<{ result: T; model: string | null; fromCache: boolean }> {
-  const contentHash = computeAssessmentContentHash(listings);
+  const contentHash = computeAssessmentContentHash(listings, extraHashInput);
   const lockKey = `ai_assessment:${propertyId}:${assessmentType}`;
 
   return withAdvisoryLock(lockKey, async () => {

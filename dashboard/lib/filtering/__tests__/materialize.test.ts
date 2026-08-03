@@ -54,6 +54,8 @@ function profileRow(overrides: Partial<Record<string, unknown>> = {}) {
     thesis_params: {},
     archived_at: null,
     created_at: "2026-08-02T00:00:00.000Z",
+    last_materialized_at: null,
+    last_viewed_at: null,
     ...overrides,
   };
 }
@@ -92,6 +94,7 @@ describe("materializeProfile", () => {
       .mockResolvedValueOnce({ rowCount: 2 }) // INSERT ... ON CONFLICT DO UPDATE
       .mockResolvedValueOnce({ rowCount: 1 }) // UPDATE ... matched = false
       .mockResolvedValueOnce({ rows: [{ count: 1 }] }) // SELECT COUNT(*) ... matched = false
+      .mockResolvedValueOnce(undefined) // UPDATE search_profile SET last_materialized_at (#191)
       .mockResolvedValueOnce(undefined); // COMMIT
 
     const result = await materializeProfile(1);
@@ -159,6 +162,7 @@ describe("materializeProfile", () => {
       .mockResolvedValueOnce({ rows: [] }) // SELECT -> zero matches
       .mockResolvedValueOnce({ rowCount: 3 }) // UPDATE ... matched = false (all previously matched)
       .mockResolvedValueOnce({ rows: [{ count: 3 }] }) // SELECT COUNT(*) ... matched = false
+      .mockResolvedValueOnce(undefined) // UPDATE search_profile SET last_materialized_at (#191)
       .mockResolvedValueOnce(undefined); // COMMIT
 
     const result = await materializeProfile(1);
@@ -180,6 +184,7 @@ describe("materializeProfile", () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rowCount: 0 })
       .mockResolvedValueOnce({ rows: [{ count: 0 }] })
+      .mockResolvedValueOnce(undefined) // UPDATE search_profile SET last_materialized_at (#191)
       .mockResolvedValueOnce(undefined);
 
     await materializeProfile(1);

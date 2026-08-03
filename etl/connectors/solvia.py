@@ -41,19 +41,28 @@ disallows only `/api/` and `/ajax/`, and its own `Sitemap:` line points at
 municipality search page: `.../es/comprar/viviendas/<provincia>/<municipio>`.
 Live-verified 2026-08-03: 1,737 municipality entries nationally, **43** under
 `sevilla` and **44** under `malaga` (both v1 markets), including
-`sevilla/dos-hermanas` as its own entry — previously unreachable, because
-this connector's `_resolve_geography` only ever pins the ONE municipality a
-scope's centroid maps to (`_PROVINCE_SLUGS`/`nearest_city` knows about four
-provincial capitals, nothing finer). `discover()` now resolves a scope down
-to a **provincia** only, then sweeps every municipality page the sitemap
-lists for that provincia — a center-based Sevilla scope reaches
-`dos-hermanas` (and every other Sevilla town) the same way a
-`geography="sevilla/dos-hermanas"` free-text pin used to reach only
-`sevilla` itself. This sidesteps needing a real per-municipality gazetteer
-(`resolve_place`/`Place`, in-flight on PR #177 and not on `main` yet;
-`etl.connectors.geography` is off-limits while that PR is mid-rebase) —
-province-level resolution from the existing `nearest_city` is all this
-needs, because the sitemap itself supplies every municipality within it.
+`sevilla/dos-hermanas` as its own entry. `discover()` now resolves a scope
+down to a **provincia** only, then sweeps every municipality page the
+sitemap lists for that provincia — a center-based Sevilla scope reaches
+`dos-hermanas` (and every other Sevilla town) in one sweep, without the
+profile needing to name it.
+
+This is complementary to, not a replacement for, issue #177's gazetteer
+(`resolve_place`/`Place`, merged to `main` after this branch was cut, and
+now the geography this module depends on — see `_PROVINCE_SLUGS` below):
+the gazetteer alone already lets a scope centered exactly on Dos Hermanas
+resolve there directly (0.18km, see `test_geography.py`'s
+`TestDosHermanasRegression`), and per-municipality resolution is real and
+useful when a profile's center happens to name a town precisely. What the
+gazetteer cannot do is help a scope that *doesn't* center on the specific
+town Solvia happens to have inventory in — a Sevilla-area profile has no
+way to know in advance that Dos Hermanas (not, say, Alcalá de Guadaíra) is
+where the 20-per-page cap actually bites. The sitemap sweep solves that
+different problem: once a scope resolves to a **provincia**, every
+municipality Solvia publishes for it is covered in one sweep, independent
+of which one point a profile's centroid happens to land nearest to. The
+two fixes stack: gazetteer resolution answers "what provincia is this
+scope even about," the sitemap sweep answers "what's everywhere in it."
 
 Live-verified derived URLs actually return listings, not just a 200 with an
 empty shell (the property_web_scraper lesson: selectors that only match
@@ -111,6 +120,7 @@ from typing import Any
 from xml.etree import ElementTree
 
 import requests
+from bs4 import BeautifulSoup
 
 from etl.connectors.base import (
     CanonicalListingVersion,
@@ -120,8 +130,12 @@ from etl.connectors.base import (
     RawListing,
     Throttle,
 )
-from etl.connectors.extraction import first_present
-from etl.connectors.geography import nearest_city
+from etl.connectors.extraction import first_present, scoped_text
+from etl.connectors.geography import (
+    UnresolvableGeographyError,
+    resolve_place,
+    unresolvable_scope_key,
+)
 from etl.connectors.solvia_mapping import (
     _named,
     _to_decimal,
@@ -179,24 +193,39 @@ _DETAIL_HREF_RE = re.compile(
 # Any non-empty slug works; "x" mirrors Fotocasa's placeholder convention.
 _DETAIL_PATH_TEMPLATE = "/es/propiedades/comprar/x-{external_id}"
 
-# provincia sitemap slug per known city centroid. An explicit table, not a
-# slugify() of the centroid name: Solvia's provincia slugs are not always
-# the city name (e.g. Palma sits under `balears-illes`), so guessing would
-# produce 404s that look like empty results. Verified against live hrefs on
-# the national search page at spike time.
+# provincia sitemap slug per `Place.province` (etl.connectors.geography,
+# issue #177's gazetteer). An explicit table, not a slugify() of the
+# province name: Solvia's provincia URL slug is not always a simple
+# slugify of the province's own name (Illes Balears sits under
+# `balears-illes`, not `illes-balears`), so guessing would produce 404s
+# that look like empty results. Verified against live hrefs on the
+# national search page (issue #71's original four) and against the
+# sitemap partition itself (issue #190's live sevilla/malaga counts, see
+# module docstring).
 #
-# Issue #190: this used to map to a (provincia, municipio) PAIR — the one
-# municipality a scope's centroid resolves to. Now it's provincia-only:
-# discover() sweeps every municipality the sitemap lists for that provincia
-# (see module docstring), so the specific municipio a centroid nearest-city
-# match happens to name no longer matters — a Sevilla-centered scope reaches
-# `dos-hermanas` by sweeping the whole province, not by resolving to it
-# directly (which nearest_city's 4-city table can't do anyway).
+# Issue #190 course-correction: this used to be keyed by *municipality*
+# name (`Place.name`) and map to a (provincia, municipio) PAIR — the one
+# municipality a scope's centroid resolves to (this is how `main` grew
+# estepona/marbella/dos hermanas as individual entries after issue #169's
+# gazetteer landed, in parallel with this branch). Now it's keyed by
+# `Place.province` and maps to the provincia slug ALONE: discover() sweeps
+# every municipality the sitemap lists for that provincia (see module
+# docstring), so a specific municipio a centroid happens to name no longer
+# determines reachability — a Sevilla-centered scope reaches
+# `dos-hermanas` (and every other Sevilla town) by sweeping the whole
+# province, regardless of whether Dos Hermanas itself has its own table
+# entry. Malaga is kept here, not dropped back to the original four:
+# `main`'s per-municipio table already proved live coverage of Malaga
+# province (estepona/marbella/malaga capital, issue #169), and the
+# sitemap's own 44-municipio count under `malaga` (module docstring)
+# reconfirms it independently — omitting it here would be a real
+# regression, not a simplification.
 _PROVINCE_SLUGS: dict[str, str] = {
-    "madrid": "madrid",
-    "sevilla": "sevilla",
-    "barcelona": "barcelona",
-    "valencia": "valencia",
+    "Madrid": "madrid",
+    "Sevilla": "sevilla",
+    "Barcelona": "barcelona",
+    "Valencia": "valencia",
+    "Malaga": "malaga",
 }
 
 _SITEMAP_INDEX_URL = f"{_BASE_URL}/sitemap.xml"
@@ -328,26 +357,31 @@ def _municipios_for_provincia(provincia: str, throttle: Throttle) -> list[str]:
 def _resolve_geography(scope: ConnectorScope) -> str | None:
     """Translate a profile's (center, radius_km) into a Solvia provincia slug.
 
-    Returns None when the scope resolves to no provincia this connector
-    knows — the orchestrator then skips it as a coverage gap rather than
-    treating it as a failure (issue #99).
+    Returns None when the scope resolves to no provincia this connector's
+    own table knows — the orchestrator then skips it as a coverage gap
+    rather than treating it as a failure (issue #99).
 
     `scope.geography`'s free-text escape hatch still accepts the old
     "provincia/municipio" shape (for existing callers/tests) but only the
     provincia segment is used now — see the module docstring for why a
     specific municipio pin is no longer meaningful once discover() sweeps
     every municipio in the resolved provincia anyway. A bare "provincia"
-    string works too.
+    string works too. This never goes through gazetteer resolution at all,
+    so a malformed/empty geography string correctly returns None here
+    rather than raising.
+
+    Can raise `UnresolvableGeographyError` (from `resolve_place`) when
+    `scope.center` matches nothing in the shared gazetteer at all (issue
+    #169/#177) — deliberately left to propagate; see fotocasa.py's
+    `_resolve_geography` docstring for the full reasoning.
     """
     if scope.geography:
         parts = [p for p in scope.geography.strip("/").split("/") if p]
         return parts[0] if parts else None
-    if scope.center is None:
+    place = resolve_place(scope)
+    if place is None:
         return None
-    city = nearest_city(scope.center, scope.radius_km)
-    if city is None:
-        return None
-    return _PROVINCE_SLUGS.get(city)
+    return _PROVINCE_SLUGS.get(place.province)
 
 
 def _parse_ng_state(html: str, *, context: str) -> dict[str, Any]:
@@ -424,12 +458,25 @@ class SolviaConnector(Connector):
         """The resolved provincia IS the coverage key (issue #190): two
         scopes resolving to the same provincia now sweep the identical set
         of municipality pages, so they must dedupe against each other the
-        same way Fotocasa/Servihabitat's province-level keys already do."""
-        return _resolve_geography(scope)
+        same way Fotocasa/Servihabitat's province-level keys already do.
+
+        `UnresolvableGeographyError` (issue #169/#177) must become a
+        sentinel key here rather than `None` — this method must never raise
+        itself, see fotocasa.py's `scope_key` docstring for the full
+        reasoning."""
+        try:
+            return _resolve_geography(scope)
+        except UnresolvableGeographyError:
+            return unresolvable_scope_key(scope)
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
+        # _resolve_geography can raise UnresolvableGeographyError, left to
+        # propagate uncaught (issue #169/#177) — see fotocasa.py's
+        # discover() for the full reasoning.
         provincia = _resolve_geography(scope)
         if provincia is None:
+            # Reachable only if discover() is invoked directly, bypassing
+            # scope_key()'s gate — see fotocasa.py's discover() docstring.
             raise ConnectorError(
                 f"solvia discover: scope {scope!r} resolves to no known Solvia "
                 f"provincia — this should have been skipped via scope_key()"
@@ -585,27 +632,38 @@ class SolviaConnector(Connector):
         def _price_from_markup() -> Any:
             if str(detail.get("mostrarPrecio", "S")).upper() == "N":
                 return None
-            # `data-price` is an explicit attribute, safe to search document-
-            # wide. The bare "123.456 €" pattern is NOT: a detail page also
-            # renders "similar properties" cards, and an unscoped search
-            # happily returns a neighbour's price. The Vivantial connector
-            # (#139) shipped exactly that bug — 310.000 € read off an
-            # adjacent card instead of the listing's real 288.000 € — so
-            # restrict the text pattern to the main price container.
+            # `data-price` is an explicit attribute, kept as the first check
+            # (unverified against the current live site during issue #144 —
+            # a real fetch found no `data-price` attribute anywhere on a
+            # current detail page, so this may be dead code from an earlier
+            # template; left as a harmless no-op check rather than removed
+            # on an unverified assumption, since #144 is scoped to the
+            # neighbour-contamination fallback below, not a full price
+            # re-verification).
             match = re.search(r'data-price="([0-9]+(?:\.[0-9]+)?)"', html)
-            if match is None:
-                price_block = re.search(
-                    r'<[^>]+class="[^"]*\b(?:price|precio)\b[^"]*"[^>]*>(.{0,400}?)</',
-                    html,
-                    re.DOTALL | re.IGNORECASE,
-                )
-                if price_block is not None:
-                    match = re.search(
-                        r"([0-9]{1,3}(?:\.[0-9]{3})+)\s*€", price_block.group(1)
-                    )
-            if match is None:
+            if match is not None:
+                return _to_decimal(match.group(1))
+            # Fallback: the price-classed element's own scoped text, via the
+            # shared `scoped_text` helper (issue #144) rather than a
+            # hand-rolled regex bounded to 400 characters after the first
+            # `class="...price|precio..."` match. NOT a "drop a
+            # similar-listings carousel" migration — issue #169's research
+            # (same PR) found Solvia's real, live detail pages render no
+            # server-side "similar properties" markup at all; the
+            # `similarProperties` class only appears inside Angular's
+            # compiled component stylesheet (a `<style>` block), never as an
+            # actual element in the HTML this connector's plain HTTP fetch
+            # sees — the same client-hydrated-and-therefore-absent shape
+            # Fotocasa's PR #153 review already documented, checked fresh
+            # here rather than assumed. `keep=` scopes to the real, single,
+            # server-rendered price element instead; there being nothing
+            # real to `drop=` is exactly why this migration doesn't use it.
+            soup = BeautifulSoup(html, "html.parser")
+            text = scoped_text(soup, keep='[class~="price"], [class~="precio"]')
+            if text is None:
                 return None
-            return _to_decimal(match.group(1).replace(".", ""))
+            euro = re.search(r"([0-9]{1,3}(?:\.[0-9]{3})+)\s*€", text)
+            return _to_decimal(euro.group(1).replace(".", "")) if euro else None
 
         current_price = first_present(
             _price_from_state, _price_from_markup, field="current_price"

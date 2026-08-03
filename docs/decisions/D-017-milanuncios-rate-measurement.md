@@ -1,10 +1,10 @@
 ---
-id: D-010
+id: D-017
 title: Milanuncios rate_limit_per_minute measured at 2, below Fotocasa's 3, not equal to it
 date: 2026-08-03
 ---
 
-# D-010: Milanuncios rate_limit_per_minute measured at 2, below Fotocasa's 3, not equal to it
+# D-017: Milanuncios rate_limit_per_minute measured at 2, below Fotocasa's 3, not equal to it
 
 *Decided: 2026-08-03*
 
@@ -78,4 +78,4 @@ slower-cadence measurement (20-60s+) is the natural next step once the
 current lockout is confirmed clear — check back once after a long gap,
 don't poll.
 
-**See**: [issue #179](https://github.com/alvarolobato/inmo-tool/issues/179), `etl/connectors/milanuncios.py`, `etl/tests/test_connector_milanuncios.py` (`TestRateLimitMeasurement`, `TestSoftBlockSignature`), `docs/architecture/connectors.md`'s "Milanuncios: a worked example of measure, don't copy" section, [D-011](D-011-solvia-sitemap-partitioning.md) (the companion #190 change in the same PR).
+**See**: [issue #179](https://github.com/alvarolobato/inmo-tool/issues/179), `etl/connectors/milanuncios.py`, `etl/tests/test_connector_milanuncios.py` (`TestRateLimitMeasurement`, `TestSoftBlockSignature`), `docs/architecture/connectors.md`'s "Milanuncios: a worked example of measure, don't copy" section, [D-018](D-018-solvia-sitemap-partitioning.md) (the companion #190 change in the same PR).

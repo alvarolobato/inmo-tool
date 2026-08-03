@@ -50,7 +50,12 @@ from __future__ import annotations
 import re
 from decimal import Decimal
 
-from etl.dedup.signals.address_coords import coords_close, prices_close, sizes_close
+from etl.dedup.signals.address_coords import (
+    coords_close,
+    floors_conflict,
+    prices_close,
+    sizes_close,
+)
 from etl.dedup.types import ListingRecord, PairEvaluation
 
 _UNCORROBORATED_CONFIDENCE = Decimal("0.500")
@@ -127,8 +132,16 @@ def _proximity_corroborated(a: ListingRecord, b: ListingRecord) -> bool:
     """Address/coordinates/size proximity — independent of agency identity.
 
     Sufficient for a merge decision on its own; mirrors
-    phone_extract._corroborated's coords+size / size+price fallback shape.
+    phone_extract._corroborated's coords+size / size+price fallback shape,
+    including the issue #186 floor veto below.
     """
+    # Issue #186: floor as an additional required corroborating condition —
+    # a floor present on both sides that disagrees vetoes proximity
+    # corroboration regardless of which path below would otherwise
+    # succeed. Missing floor on either side is permissive (see
+    # etl.dedup.signals.floor).
+    if floors_conflict(a.floor, b.floor):
+        return False
     if coords_close(a.lat, a.lon, b.lat, b.lon) and sizes_close(
         a.m2_built, b.m2_built, Decimal("0.05")
     ):

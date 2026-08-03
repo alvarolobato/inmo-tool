@@ -341,6 +341,35 @@ CREATE TABLE IF NOT EXISTS search_profile (
     created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
+-- Issue #113: `scope`'s own DB-level default of '{}' is guaranteed to fail
+-- ScopeSchema (geography/property_types are both required, non-optional
+-- fields) -- there is no schema-valid "empty" scope to default to instead
+-- (property_types requires >=1 element). Every real write path
+-- (createProfile) already supplies an explicit, validated scope, so the
+-- column default was never anything but a trap reachable only via a manual
+-- SQL insert, a seed script, or a future migration that forgets to set it --
+-- dropping it forces exactly that mistake to surface immediately as a NOT
+-- NULL violation at INSERT time, instead of silently persisting a row that
+-- toSearchProfileRowSafe (lib/db/profiles.ts) can only detect after the fact.
+-- See docs/decisions/D-010-search-profile-scope-no-default.md.
+ALTER TABLE search_profile ALTER COLUMN scope DROP DEFAULT;
+
+-- Issue #191 (design: docs comment on #176 §1/§4). Two facts the redesigned
+-- Perfiles page needs that are structurally unrepresentable without a
+-- timestamp:
+--   - last_materialized_at: distinguishes "this profile has never been
+--     materialized" from "materialized, and matched zero properties" -- both
+--     look identical as zero rows in profile_listing_state without this.
+--     Set (to NOW()) at the end of every materializeProfile run, including
+--     the zero-matches case (lib/filtering/materialize.ts).
+--   - last_viewed_at: "new since I last looked" needs a per-profile visit
+--     timestamp, which doesn't otherwise exist anywhere. Set best-effort
+--     (never blocks/fails the page) whenever GET /api/profiles/[id] is read.
+-- Both nullable, no backfill -- NULL is a real, meaningful "never" state for
+-- each existing row.
+ALTER TABLE search_profile ADD COLUMN IF NOT EXISTS last_materialized_at TIMESTAMPTZ;
+ALTER TABLE search_profile ADD COLUMN IF NOT EXISTS last_viewed_at TIMESTAMPTZ;
+
 -- profile_listing_state is keyed on (profile_id, property_id), NOT
 -- listing_id. This is load-bearing: once dedup (task 2.2) unions two
 -- listings from different sites into one property, this table must still

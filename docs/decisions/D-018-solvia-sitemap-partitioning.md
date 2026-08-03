@@ -1,10 +1,10 @@
 ---
-id: D-011
+id: D-018
 title: Solvia discover() partitions by municipality via the site's own sitemap
 date: 2026-08-03
 ---
 
-# D-011: Solvia discover() partitions by municipality via the site's own sitemap
+# D-018: Solvia discover() partitions by municipality via the site's own sitemap
 
 *Decided: 2026-08-03*
 
@@ -12,12 +12,28 @@ date: 2026-08-03
 links server-side per municipality, with no working query-string
 pagination (`?pagina=2`/`?page=2` return byte-identical page-1 results;
 real pagination goes through the robots-disallowed `/api/`). Before this
-change, `discover()` resolved a scope to the ONE municipality its
-centroid's nearest known city named (`_PROVINCE_SLUGS`/`nearest_city`
-covers only Madrid/Sevilla/Barcelona/Valencia), so a sweep saw at most 20
-listings total — and a town like Dos Hermanas, 12km from Sevilla's
-centroid but never itself a resolvable geography, was unreachable no
-matter how a profile was configured.
+change, `discover()` resolved a scope to the ONE municipality its centroid
+was nearest to, so a sweep saw at most 20 listings total — and a town like
+Dos Hermanas, 12km from Sevilla's centroid, needed its own table entry to
+be reachable at all, no matter how a profile was configured.
+
+This work was cut from `main` (`c3a1263`) before issue #177 merged the
+real 8,124-municipality gazetteer (`resolve_place`/`Place`, replacing the
+old 4-entry `CITY_CENTROIDS`/`nearest_city`). By the time this PR (#205)
+merged, #177 was already on `main`, having independently added Dos
+Hermanas/Estepona/Marbella as their own per-municipality entries in
+Solvia's `_CITY_SLUGS` table (keyed by `Place.name`) — meaning the
+gazetteer alone *can* now resolve a Dos-Hermanas-centered scope directly,
+to within 0.18km (`test_geography.py::TestDosHermanasRegression`). That
+doesn't make this sitemap-sweep decision moot: the gazetteer only helps a
+profile whose centroid happens to land near a town *already in* Solvia's
+own per-municipio table. The sitemap sweep below solves the general case —
+any provincia's full municipality list, regardless of which single point a
+profile's radius happens to center on — so the merged design keeps both:
+`resolve_place` answers "what provincia is this scope about" (see
+`_PROVINCE_SLUGS`, now keyed by `Place.province` rather than `Place.name`
+since only the provincia matters once the sweep covers every municipio in
+it), and this sitemap sweep answers "what's everywhere in it."
 
 `robots.txt` disallows only `/api/` and `/ajax/`, and publishes
 `Sitemap: https://www.solvia.es/sitemap.xml`. Its `sitemap_comprar_
@@ -58,14 +74,17 @@ roughly 2-2.5 minutes per province, stated here rather than silently
 absorbed.
 
 **Alternatives rejected**:
-- Depending on `etl.connectors.geography.resolve_place`/`Place` (a real
-  per-municipality gazetteer) to resolve a scope directly to
-  `dos-hermanas`: not available — that API is mid-rebase on PR #177, not
-  on `main`, and `geography.py` is off-limits while that PR is in flight.
-  Provincia-level resolution from the existing `nearest_city` turns out to
-  be sufficient, because the sitemap itself supplies every municipality
-  within the resolved provincia — no per-town gazetteer is needed for this
-  fix specifically.
+- Relying on `etl.connectors.geography.resolve_place`/`Place` (issue #177's
+  gazetteer) alone, without the sitemap sweep, on the theory that adding
+  enough individual municipio entries to `_CITY_SLUGS` (the way #177 itself
+  did for Dos Hermanas/Estepona/Marbella) would eventually cover every town
+  worth reaching: rejected because it doesn't scale past however many towns
+  someone thinks to add by hand — the acceptance criterion (a
+  Sevilla-area profile reaches Dos Hermanas even though nobody named it) is
+  exactly the case a per-town table structurally cannot solve, no matter
+  how comprehensive the underlying gazetteer gets. The sitemap sweep
+  reaches every one of a provincia's 43-44 municipios without a human
+  ever adding a row for each.
 - Keeping the free-text `geography="provincia/municipio"` escape hatch
   pinned to a single municipio (its pre-#190 behaviour): rejected because
   it would leave the free-text path and the real center-based path with

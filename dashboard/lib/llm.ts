@@ -54,6 +54,17 @@ export { resetClient };
 export interface AssessmentOpts {
   requestId?: string | null;
   ctx?: LlmAgenticContext;
+  /**
+   * Derived (non-listing) zone-median price comparison — #184. Only
+   * `assessOccupancy` and `extractRedFlags` read this; `assessCondition`/
+   * `extractStructuredFields` accept the same `AssessmentOpts` shape but
+   * never forward it into `assembleRequest`'s vars (see
+   * `runPropertyAssessment`'s `extraVars` param), so passing it there is a
+   * silent no-op rather than a type error — harmless, but callers should
+   * only set it for the two flows that render it. See
+   * `lib/ai-assessment/price-signal.ts` for why.
+   */
+  areaPriceSignal?: string;
 }
 
 /**
@@ -63,22 +74,34 @@ export interface AssessmentOpts {
  * Returns the model that produced the answer alongside the text, so the
  * caller can record which model a stored verdict came from (mirrors
  * `assessOccupancy`).
+ *
+ * `extraVars` (#184): merged into the vars object passed to
+ * `assembleRequest`, on top of `{ listings }`. Exists so `extractRedFlags`
+ * can forward `areaPriceSignal` without condition/extract's calls (which
+ * omit it) changing shape at all.
  */
 async function runPropertyAssessment(
   flow: "condition" | "redflags" | "extract",
   listings: ListingSnapshot[],
   instruction: string,
   opts?: AssessmentOpts,
+  extraVars?: Partial<FlowVars>,
 ): Promise<{ text: string; model: string }> {
   await checkDailyBudget();
 
-  const result = await assembleRequest(flow, { listings }, null, instruction, {
-    ctx: opts?.ctx,
-    requestId: opts?.requestId ?? null,
-    endpoint: flow,
-    temperature: 0,
-    maxOutputTokens: 2048,
-  });
+  const result = await assembleRequest(
+    flow,
+    { listings, ...extraVars },
+    null,
+    instruction,
+    {
+      ctx: opts?.ctx,
+      requestId: opts?.requestId ?? null,
+      endpoint: flow,
+      temperature: 0,
+      maxOutputTokens: 2048,
+    },
+  );
 
   if (!result.text) {
     throw new Error(`LLM returned an empty response for flow "${flow}"`);
@@ -95,6 +118,11 @@ async function runPropertyAssessment(
  * evidence than reading one (a portal that says nothing gets rescued by a
  * sibling that says "se vende con inquilino"). See lib/ai-assessment/occupancy.ts.
  *
+ * `opts.areaPriceSignal` (#184): a bucketed zone-median price comparison,
+ * when the caller (`lib/ai-assessment/occupancy.ts`) has one — see
+ * `lib/ai-assessment/price-signal.ts` for why occupancy is one of the two
+ * flows that receives this and how it's bucketed for cache stability.
+ *
  * Returns the raw JSON text plus the model that produced it, so the caller can
  * record which model a stored verdict came from.
  */
@@ -106,7 +134,7 @@ export async function assessOccupancy(
 
   const result = await assembleRequest(
     "occupancy",
-    { listings },
+    { listings, areaPriceSignal: opts?.areaPriceSignal },
     null,
     "Evalúa los tres ejes del inmueble según las instrucciones (occupancy): " +
       "ocupación, qué se transmite (compraventa o venta de deuda) y cuánto " +
@@ -134,6 +162,13 @@ export async function assessOccupancy(
  * mentioning "a reformar" while another stays silent is resolved the same way
  * occupancy resolves a silent portal — by reading them together.
  *
+ * Deliberately does NOT receive `opts.areaPriceSignal` (#184): price-per-m²
+ * correlating with condition is a real but weak, confounded signal (location,
+ * floor, orientation and size all move price/m² at least as much as
+ * renovation state does), and condition is read directly off what the ad
+ * text says about the flat, not inferred from price — see
+ * `lib/ai-assessment/price-signal.ts`'s module doc for the full reasoning.
+ *
  * Returns the raw JSON text plus the model that produced it.
  */
 export function assessCondition(
@@ -155,6 +190,12 @@ export function assessCondition(
  * `assessCondition` above: a disclosure like "pendiente de embargo" made on
  * one portal must not be missed because a sibling advert omits it.
  *
+ * `opts.areaPriceSignal` (#184): a bucketed zone-median price comparison,
+ * when the caller (`lib/ai-assessment/redflags.ts`) has one. Redflags is the
+ * clearest beneficiary of the two flows that receive it: "priced far below
+ * the zone" is a canonical distress-sale tell (embargo, debt sale,
+ * partial-title transfer) — see `lib/ai-assessment/price-signal.ts`.
+ *
  * Returns the raw JSON text plus the model that produced it. An empty
  * `flags` array is a normal result.
  */
@@ -167,6 +208,7 @@ export function extractRedFlags(
     listings,
     "Extrae señales de alerta legales y financieras del inmueble según las instrucciones (redflags).",
     opts,
+    { areaPriceSignal: opts?.areaPriceSignal },
   );
 }
 
@@ -180,6 +222,12 @@ export function extractRedFlags(
  * disclosure in one portal's text must not be missed because a sibling
  * listing's (shorter, vaguer) text is what got read — same reasoning as
  * `assessCondition`/`extractRedFlags`.
+ *
+ * Deliberately does NOT receive `opts.areaPriceSignal` (#184): extract pulls
+ * objective structured fields straight out of the ad text, and per its own
+ * EC-2 ("no inventes, no redondees, no completes") must never let an
+ * external signal nudge a field away from exactly what's written — see
+ * `lib/ai-assessment/price-signal.ts`'s module doc.
  *
  * Returns the raw JSON text plus the model that produced it.
  */

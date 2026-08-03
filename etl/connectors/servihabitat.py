@@ -57,10 +57,15 @@ listing count. 59 residential listings in Madrid is thin beside Solvia's
 6,375 nationally (#116).
 
 Of the four provinces sampled, only three are reachable today: a scope is
-resolved through `etl.connectors.geography.nearest_city`, whose
-`CITY_CENTROIDS` currently holds only Madrid, Sevilla, Barcelona and
-Valencia. The Alicante figures above are therefore informational, not
-reachable, until that table grows.
+resolved through `etl.connectors.geography.resolve_place` against the full
+~8,124-municipality gazetteer (issue #169), so geography resolution itself
+is no longer the limit — the gap is this connector's own
+`_PROVINCE_SITEMAP_SLUGS` table below, which doesn't have an Alicante entry
+yet (only Madrid/Sevilla/Barcelona/Valencia/Malaga are mapped to a sitemap
+slug). The Alicante figures above are therefore informational, not
+reachable, until that table grows — a deliberate per-connector coverage
+gap (issue #169's "known municipality this connector doesn't cover" case),
+not a geography-resolution failure.
 
 Fields NOT available, checked explicitly against the batch checklist in
 issue #132 and confirmed absent on a real listing page:
@@ -104,7 +109,11 @@ from etl.connectors.extraction import (
     strip_price_punctuation,
     text_to_int,
 )
-from etl.connectors.geography import nearest_city
+from etl.connectors.geography import (
+    UnresolvableGeographyError,
+    resolve_place,
+    unresolvable_scope_key,
+)
 from etl.connectors.servihabitat_mapping import (
     is_residential,
     map_property_type,
@@ -136,13 +145,29 @@ _SIMILAR_LISTING_SELECTORS = (
     ".caja-destacado",
 )
 
-# city (etl.connectors.geography.CITY_CENTROIDS key) -> province sitemap slug.
-# Live-verified: each of these returns HTTP 200 with real <loc> entries.
+# province name (etl.connectors.geography.Place.province values) -> this
+# site's own per-province sitemap slug. Live-verified: each of these returns
+# HTTP 200 with real <loc> entries.
+#
+# Issue #169 fix, not just an extension: this table used to be keyed by
+# *city* name (coincidentally identical to province name for the original
+# four, since Madrid/Sevilla/Barcelona/Valencia are all provincial capitals
+# sharing their province's name) even though Servihabitat's sitemap is
+# organised by *province*, not municipality. That coincidence hid a real
+# bug — a scope centered on any non-capital town (Estepona, in Malaga
+# province) would resolve to a city name ("estepona") this dict had no key
+# for, permanently reading as "no coverage" even though Servihabitat's
+# Malaga *province* sitemap does cover Estepona. Now keyed by
+# `Place.province` so every municipality in a covered province resolves
+# correctly, not just the province's own namesake capital.
 _PROVINCE_SITEMAP_SLUGS: dict[str, str] = {
-    "madrid": "madrid",
-    "sevilla": "sevilla",
-    "barcelona": "barcelona",
-    "valencia": "valencia",
+    "Madrid": "madrid",
+    "Sevilla": "sevilla",
+    "Barcelona": "barcelona",
+    "Valencia": "valencia",
+    # Costa del Sol (issue #169 course-correction v1 market) — confirmed
+    # HTTP 200 with real <loc> entries covering Mijas/Alora/Manilva etc.
+    "Malaga": "malaga",
 }
 
 
@@ -150,18 +175,22 @@ def _resolve_geography(scope: ConnectorScope) -> str | None:
     """Turn a ConnectorScope into this site's province sitemap slug, or None.
 
     `scope.geography` (the free-text escape hatch) wins when set, for tests
-    and manual construction. Otherwise resolve `scope.center` to the nearest
-    known city. No hardcoded default (issue #71): an unresolvable scope means
-    "nothing to discover here", not "assume Madrid".
+    and manual construction. Otherwise resolve `scope.center` via the shared
+    gazetteer (issue #169) and look up its *province* (not municipality —
+    see `_PROVINCE_SITEMAP_SLUGS`'s docstring for why that distinction is
+    the actual fix, not just a rename). No hardcoded default (issue #71): a
+    province this connector's own table doesn't cover means "nothing to
+    discover here", not "assume Madrid".
+
+    Can raise `UnresolvableGeographyError` (from `resolve_place`) — see
+    fotocasa.py's `_resolve_geography` docstring for why that's deliberate.
     """
     if scope.geography:
         return scope.geography
-    if scope.center is None:
+    place = resolve_place(scope)
+    if place is None:
         return None
-    city = nearest_city(scope.center, scope.radius_km)
-    if city is None:
-        return None
-    return _PROVINCE_SITEMAP_SLUGS.get(city)
+    return _PROVINCE_SITEMAP_SLUGS.get(place.province)
 
 
 def _get(url: str, throttle: Throttle) -> requests.Response:
@@ -242,17 +271,30 @@ class ServihabitatConnector(Connector):
 
     def scope_key(self, scope: ConnectorScope) -> str | None:
         """The resolved province slug IS the coverage key: two scopes
-        resolving to the same province fetch the identical sitemap."""
-        return _resolve_geography(scope)
+        resolving to the same province fetch the identical sitemap.
+
+        `UnresolvableGeographyError` (issue #169) must become a sentinel key
+        here rather than `None` — this method must never raise itself, see
+        fotocasa.py's `scope_key` docstring for the full reasoning."""
+        try:
+            return _resolve_geography(scope)
+        except UnresolvableGeographyError:
+            return unresolvable_scope_key(scope)
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
+        # _resolve_geography can raise UnresolvableGeographyError, left to
+        # propagate uncaught (issue #169) — see fotocasa.py's discover() for
+        # the full reasoning.
         province = _resolve_geography(scope)
         if province is None:
+            # Reachable only if discover() is invoked directly, bypassing
+            # scope_key()'s gate — see fotocasa.py's discover() docstring.
             raise ConnectorError(
-                "servihabitat discover: scope has neither a resolvable center "
-                "(nearest known city too far away) nor an explicit geography "
-                "string — nothing to discover, and not defaulting to a "
-                "hardcoded province (issue #71)"
+                "servihabitat discover: scope has neither a resolvable "
+                "center nor an explicit geography string, or resolves to a "
+                "province this connector's _PROVINCE_SITEMAP_SLUGS table "
+                "doesn't cover — nothing to discover, and not defaulting to "
+                "a hardcoded province (issue #71)"
             )
 
         url = f"{_BASE_URL}/es/sitemap-es-{province}.xml"

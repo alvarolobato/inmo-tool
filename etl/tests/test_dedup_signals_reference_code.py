@@ -29,6 +29,7 @@ def _record(**overrides) -> ListingRecord:
         "current_price": None,
         "contact_raw": None,
         "reference_code": None,
+        "floor": None,
     }
     defaults.update(overrides)
     return ListingRecord(**defaults)

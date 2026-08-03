@@ -140,16 +140,60 @@ def _looks_like_photo_url(url: str) -> bool:
 # raising the threshold far enough to catch watermarked duplicates
 # re-admits exactly the false positives this change was made to remove.
 #
-# That trade is taken deliberately in the false-negative direction, because
-# this signal only ever files a *suggestion* (capped at
-# _MAX_SUGGESTION_CONFIDENCE; the engine never treats photo_hash as an
-# auto-merge basis). A miss costs one suggestion nobody sees; a false
-# positive costs a human reviewing — or confirming — a bogus pair.
+# That trade was originally taken entirely in the false-negative direction,
+# because this signal used to only ever file a *suggestion* (capped at
+# _MAX_SUGGESTION_CONFIDENCE) — a miss cost one suggestion nobody saw; a
+# false positive cost a human reviewing/confirming a bogus pair. Issue #188
+# (approved once #197 removed same-source pairing — see
+# PHOTO_MERGE_SIZE_RATIO below) now lets a *full* match_ratio == 1.0, below
+# this threshold, auto-merge when corroborated by size/price proximity, so
+# get the threshold right: raising the Hamming cutoff too far would start
+# admitting genuinely different photos into that ratio == 1.0 bucket, which
+# is no longer purely a "human reviews a suggestion" safety net for the
+# exact-match case.
 # See TestWatermarkLimitation in etl/tests/test_dedup_signals_photo_hash.py,
 # which pins this so a future retune has to revisit it consciously.
 _HASH_HAMMING_THRESHOLD = 10  # imagehash default hash_size=8 -> 64-bit hash
 MIN_MATCH_RATIO = Decimal("0.60")
 _MAX_SUGGESTION_CONFIDENCE = Decimal("0.800")
+
+# Issue #188 — approved once issue #197 removed same-source pairing. Before
+# #197, a bank/developer listing several units of one block on *one* portal
+# with one shared photoset could hit match_ratio == 1.0 against a genuinely
+# different flat, which is why photo_hash previously never auto-merged at
+# all. That same-building-different-unit case is a same-source pattern by
+# construction (one portal, one agency's photoset) — #197 stops same-source
+# pairs from ever reaching this signal, so what's left at match_ratio == 1.0
+# between two *different* sources is corroborated by size/price proximity
+# below (and by the issue #186 floor veto in etl.dedup.engine.evaluate_pair)
+# rather than by photos alone.
+#
+# The merge decision is keyed on match_ratio itself (== 1.0 exactly), not
+# the scaled `confidence_for_ratio` value: the live suggestion queue's
+# match_ratio distribution had nothing between 0.80 and 0.93, so ratio ==
+# 1.0 is a clean, non-borderline cut — no calibration needed between
+# "clearly a suggestion" and "clearly a merge".
+#
+# Tolerances measured against the 16 cross-source match_ratio == 1.0 pairs
+# in the live suggestion queue: 13 of 16 already agree exactly on size and
+# price; the 3 that don't (suggestions 197, 235, 412) are the classic
+# built-vs-useful m² discrepancy between portals (6m² apart on ~140-150m²
+# flats -> 6/145=4.14% and 6/154=3.90% of the larger side) and one portal a
+# day stale on price (1.000€ apart on a 170.000€ flat -> 1000/170000=0.59%)
+# — evidence of cross-portal measurement/staleness noise, not different
+# units. 5% size mirrors _MAX_SIZE_RATIO/_CORROBORATION_SIZE_RATIO, the
+# same figure this codebase already uses for the identical "different unit"
+# discriminator in address_coords.py/phone_extract.py/reference_code.py —
+# comfortably above the largest measured gap (4.14%) without loosening past
+# a figure already vetted elsewhere for the same purpose. 2% price is
+# tighter than those signals' 10% fallback (which corroborates in the
+# *absence* of coordinate/photo evidence, a weaker starting point than a
+# full match_ratio == 1.0) — 2% clears the largest measured staleness gap
+# (0.59%) with >3x margin while still rejecting a materially different
+# asking price.
+PHOTO_MERGE_SIZE_RATIO = Decimal("0.05")
+PHOTO_MERGE_PRICE_RATIO = Decimal("0.02")
+PHOTO_MERGE_CONFIDENCE = Decimal("0.900")
 
 
 def fetch_hashes(photo_urls: tuple[str, ...]) -> list[imagehash.ImageHash]:

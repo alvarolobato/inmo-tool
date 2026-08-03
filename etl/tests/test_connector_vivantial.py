@@ -22,6 +22,7 @@ from unittest.mock import patch
 import pytest
 
 from etl.connectors.base import ConnectorError, ConnectorScope
+from etl.connectors.geography import UnresolvableGeographyError
 from etl.connectors.vivantial import VivantialConnector, _resolve_geography
 from etl.connectors.vivantial_mapping import (
     external_id_from_url,
@@ -106,18 +107,54 @@ class TestFieldExtraction:
         price directly above the current one inside the same `precio`
         container. An earlier version fell through to a page-wide
         euro-amount search and reported 310.000 € as the asking price
-        instead of 288.000 €. The `<del>` in the fixture is what makes
-        this test meaningful."""
+        instead of 288.000 €.
+
+        Issue #177 (N2) correction: this fixture HAS a `<meta
+        name="description">`, so `extract_price`'s primary path
+        (`from_meta`, a plain regex over the meta description's "por
+        <price> €" text) wins via `first_present` before `from_precio_rojo`
+        ever runs — the `<del>` sibling is never actually visited by THIS
+        test. The `<del>` here only proves the meta-description path
+        doesn't get confused by it (it can't: `from_meta` never touches the
+        DOM at all). The fallback's own `<del>`-scoping — the thing
+        `scoped_text(keep=".precio-rojo")` actually has to get right — is
+        covered by `test_price_falls_back_to_precio_rojo_when_meta_is_absent`
+        below, not here."""
         page = _fixture("vivantial_sample_detail.html")
         assert "310.000" in page, "fixture must retain the struck-through price"
         assert extract_price(page) == Decimal(288000)
 
     def test_price_falls_back_to_precio_rojo_when_meta_is_absent(self):
         """EC: a field with a working fallback chain, proven with the primary
-        path removed. The fallback must still avoid the neighbour's price."""
+        path removed. The fallback must still read the `.precio-rojo`
+        element specifically, not the sibling `precio` div — which (issue
+        #177, N2) now carries a REAL `<del>310.000 €</del>` struck-through
+        previous price, matching real captured Vivantial markup, not an
+        empty placeholder div. Before this fix, this fixture's sibling
+        `precio` div was empty, so nothing here ever exercised
+        `from_precio_rojo`'s actual `<del>`-avoidance — the ONLY test that
+        mentioned `<del>` at all (the one above) exercises the unrelated
+        `from_meta` path instead, since that fixture has a meta
+        description. This is the real regression `scoped_text(keep=
+        ".precio-rojo")` (or the regex it replaced) has to guard against:
+        reading 310.000 (the struck-through previous price) instead of
+        288.000 (the current one) when the fallback path is the one
+        actually in play.
+
+        This fixture used to also embed a fabricated `<section
+        class="similares">` decoy carrying a "310.000 €" figure, framed as
+        proof the fallback "avoids the neighbour's price" — removed during
+        issue #144: it never exercised anything real. Both the current
+        `scoped_text(keep=".precio-rojo")` implementation and the regex it
+        replaced select the `.precio-rojo` element directly, so neither
+        would ever have read a page-wide, unscoped match in the first
+        place — the decoy was inert theatre, not a regression test, and (per
+        issue #169's research on this same PR) Vivantial's real pages don't
+        render a server-side "similar properties" section at all.
+        """
         page = _fixture("vivantial_sample_detail_no_meta.html")
         assert 'name="description"' not in page
-        assert "310.000" in page
+        assert "310.000" in page, "fixture must retain the struck-through price"
         assert extract_price(page) == Decimal(288000)
 
     def test_photo_urls_are_absolute_and_exclude_site_chrome(self):
@@ -195,11 +232,61 @@ class TestGeographyResolution:
         scope = ConnectorScope(center=(40.4168, -3.7038), radius_km=10.0)
         assert _resolve_geography(scope) == "madrid"
 
-    def test_unresolvable_scope_returns_none_not_a_default(self):
-        """Issue #71: never silently fall back to a hardcoded city."""
+    @pytest.mark.parametrize(
+        ("center", "expected_slug"),
+        [
+            # Costa del Sol (issue #169 course-correction v1 market) —
+            # independently-sourced landmark coordinates (issue #177, M2:
+            # these used to be copied from the gazetteer's own row for each
+            # town, which can only prove nearest_place agrees with itself —
+            # see etl/tests/test_geography.py's TestNearestPlaceReturnsProvince
+            # docstring for the full reasoning and the exact "mijas"
+            # regression this caught), tight radius so the match can only
+            # come from that municipality's own _CITY_SLUGS entry (Marbella
+            # is deliberately absent from the table — the live sitemap has
+            # no entries there — so it isn't included here).
+            ((36.7211, -4.4220), "malaga"),  # Plaza de la Constitución
+            ((36.42643, -5.1465), "estepona"),  # Plaza San Francisco
+            ((36.58975, -4.54213), "benalmadena"),  # general municipality area
+            ((36.59556, -4.63722), "mijas"),  # Mijas PUEBLO, not the gazetteer point
+        ],
+    )
+    def test_costa_del_sol_v1_market_towns_resolve_to_their_own_slug(
+        self, center, expected_slug
+    ):
+        """These must resolve to their OWN municipality slug, not collapse
+        to a province-level fallback — the granularity a coastal-town
+        search actually needs."""
+        scope = ConnectorScope(center=center, radius_km=10.0)
+        assert _resolve_geography(scope) == expected_slug
+
+    def test_no_geography_at_all_returns_none_not_a_default(self):
+        """Issue #71: never silently fall back to a hardcoded city. A scope
+        with no center and no geography string has nothing to resolve at
+        all — a legitimate no-op, distinct from the unresolvable-center
+        case below (issue #169)."""
         assert _resolve_geography(ConnectorScope()) is None
+
+    def test_unresolvable_center_raises_not_returns_none(self):
+        """Issue #169: a scope WITH a real center that matches no known
+        place must raise, not silently return None — a None here used to
+        read as "zero listings found" all the way up, identical to a
+        genuinely empty result set."""
         far = ConnectorScope(center=(38.7223, -9.1393), radius_km=5.0)  # Lisbon
-        assert _resolve_geography(far) is None
+        with pytest.raises(UnresolvableGeographyError):
+            _resolve_geography(far)
+
+    def test_scope_key_never_raises_and_uses_a_sentinel_for_unresolvable(self):
+        """scope_key() must never raise (the orchestrator calls it with no
+        try/except) — an unresolvable center must still surface as a
+        distinct, non-None key so the orchestrator calls discover(), whose
+        own _resolve_geography() call raises there and gets recorded as a
+        real connector_run_results failure (issue #169)."""
+        connector = VivantialConnector()
+        far = ConnectorScope(center=(38.7223, -9.1393), radius_km=5.0)  # Lisbon
+        key = connector.scope_key(far)
+        assert key is not None
+        assert key.startswith("unresolvable-geography:")
 
 
 class TestDiscover:
