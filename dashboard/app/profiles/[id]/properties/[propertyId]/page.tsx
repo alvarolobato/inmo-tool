@@ -13,11 +13,57 @@ import { LinkedListings } from "@/components/property/LinkedListings";
 import { PriceHistoryChart } from "@/components/property/PriceHistoryChart";
 import { DetailSections, type DetailSection } from "@/components/property/DetailSections";
 
+interface Adjacent {
+  prevPropertyId: number | null;
+  nextPropertyId: number | null;
+}
+
 function parseId(raw: string | string[] | undefined): number | null {
   const value = Array.isArray(raw) ? raw[0] : raw;
   if (value === undefined) return null;
   const id = Number(value);
   return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+const adjacentStyle: React.CSSProperties = {
+  padding: "4px 10px",
+  borderRadius: 6,
+  border: "1px solid var(--border)",
+  fontSize: 12,
+  textDecoration: "none",
+};
+
+function AdjacentLink({
+  profileId,
+  propertyId,
+  testId,
+  label,
+}: {
+  profileId: number;
+  propertyId: number | null;
+  testId: string;
+  label: string;
+}) {
+  if (propertyId === null) {
+    return (
+      <span
+        data-testid={testId}
+        aria-disabled="true"
+        style={{ ...adjacentStyle, color: "var(--fg-subtle)", opacity: 0.5 }}
+      >
+        {label}
+      </span>
+    );
+  }
+  return (
+    <Link
+      data-testid={testId}
+      href={`/profiles/${profileId}/properties/${propertyId}`}
+      style={{ ...adjacentStyle, color: "var(--fg)" }}
+    >
+      {label}
+    </Link>
+  );
 }
 
 export default function PropertyDetailPage() {
@@ -28,6 +74,7 @@ export default function PropertyDetailPage() {
   const [property, setProperty] = useState<PropertyDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<ApiErrorResponse | string | null>(null);
+  const [adjacent, setAdjacent] = useState<Adjacent>({ prevPropertyId: null, nextPropertyId: null });
 
   useEffect(() => {
     if (profileId === null || propertyId === null) return;
@@ -50,6 +97,27 @@ export default function PropertyDetailPage() {
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [profileId, propertyId]);
+
+  // Separate, non-blocking request (#152): the property renders as soon as
+  // it's loaded and the prev/next controls fill in behind it. Best-effort —
+  // failing to resolve neighbours must not surface an error on a page whose
+  // actual content loaded fine.
+  useEffect(() => {
+    if (profileId === null || propertyId === null) return;
+    let cancelled = false;
+    setAdjacent({ prevPropertyId: null, nextPropertyId: null });
+    fetch(`/api/profiles/${profileId}/properties/${propertyId}/adjacent`)
+      .then((res) => (res.ok ? (res.json() as Promise<Adjacent>) : null))
+      .then((data) => {
+        if (!cancelled && data) setAdjacent(data);
+      })
+      .catch(() => {
+        /* best-effort — leave the controls disabled */
       });
     return () => {
       cancelled = true;
@@ -87,9 +155,40 @@ export default function PropertyDetailPage() {
 
   return (
     <main style={{ maxWidth: 900, margin: "0 auto", padding: 24 }} data-testid="property-detail-page">
-      <Link href={`/profiles/${profileId}`} style={{ fontSize: 12, color: "var(--fg-muted)" }}>
-        ← Volver al perfil
-      </Link>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+          flexWrap: "wrap",
+        }}
+      >
+        <Link href={`/profiles/${profileId}`} style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+          ← Volver al perfil
+        </Link>
+
+        {/*
+          Prev/next through the profile's ranking (#152) so a review session
+          doesn't bounce back to the list between every property. Rendered as
+          disabled <span>s at the ends rather than hidden, so the controls
+          don't jump position as you move through the queue.
+        */}
+        <nav aria-label="Navegación entre candidatos" style={{ display: "flex", gap: 8 }}>
+          <AdjacentLink
+            profileId={profileId}
+            propertyId={adjacent.prevPropertyId}
+            testId="candidate-prev"
+            label="← Anterior"
+          />
+          <AdjacentLink
+            profileId={profileId}
+            propertyId={adjacent.nextPropertyId}
+            testId="candidate-next"
+            label="Siguiente →"
+          />
+        </nav>
+      </div>
 
       {loading && (
         <p style={{ marginTop: 16, fontSize: 13, color: "var(--fg-muted)" }}>Cargando propiedad…</p>

@@ -5,6 +5,7 @@ import { ErrorDisplay } from "@/components/ErrorDisplay";
 import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
 import type { CandidateRow } from "@/lib/candidates";
+import { COLD_START_EXPLANATION } from "@/lib/scoring/cold-start";
 import { CandidateCard } from "./CandidateCard";
 
 /**
@@ -73,6 +74,18 @@ export function CandidateList({ profileId }: { profileId: number }) {
     );
   }
 
+  // The cold-start explanation is the same sentence on every candidate of an
+  // unpersonalized profile, so it belongs to the *profile*, not to any card
+  // (#152). Shown once below the grid; disappears on its own as soon as the
+  // profile has a trained model and the per-property explanations take over.
+  //
+  // Detected via the durable `score_kind` marker, not by comparing
+  // `rank_explanation` against the constant string (#152 review): that
+  // string is *persisted* on `profile_listing_state` at scoring time, so a
+  // purely cosmetic copy edit to COLD_START_EXPLANATION would silently stop
+  // matching every already-written row and un-suppress the old sentence.
+  const coldStart = items.some((c) => c.score_kind === "cold_start");
+
   return (
     <div style={{ marginTop: 16 }}>
       <div
@@ -105,6 +118,23 @@ export function CandidateList({ profileId }: { profileId: number }) {
         >
           {loadingMore ? "Cargando…" : "Cargar más"}
         </button>
+      )}
+
+      {coldStart && (
+        <p
+          data-testid="cold-start-footer"
+          style={{
+            marginTop: 16,
+            padding: "8px 10px",
+            borderRadius: 6,
+            border: "1px solid var(--border)",
+            background: "var(--bg-1)",
+            fontSize: 12,
+            color: "var(--fg-muted)",
+          }}
+        >
+          {COLD_START_EXPLANATION}
+        </p>
       )}
     </div>
   );

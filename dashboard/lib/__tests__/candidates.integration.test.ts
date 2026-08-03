@@ -24,7 +24,7 @@ import { Pool } from "pg";
 import { buildPgPoolConfig } from "@/lib/db-shared";
 import { resetPool } from "@/lib/db-write";
 import { createProfile } from "@/lib/db/profiles";
-import { listCandidates } from "../candidates";
+import { getAdjacentCandidates, listCandidates } from "../candidates";
 import type { Scope } from "@/lib/profiles-schema";
 
 // Deliberately NOT Sol/Atocha (the coordinates materialize.integration.test.ts
@@ -81,6 +81,14 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
 
   afterEach(async () => {
     await withRealDb(async (pool) => {
+      if (createdPropertyIds.length > 0) {
+        // ai_assessment has no FK dependents of its own, but must be cleared
+        // before `property` (it FKs to property.id) — same ordering
+        // constraint as listing/profile_listing_state below.
+        await pool.query("DELETE FROM ai_assessment WHERE property_id = ANY($1::bigint[])", [
+          createdPropertyIds,
+        ]);
+      }
       if (createdProfileIds.length > 0) {
         await pool.query("DELETE FROM profile_listing_state WHERE profile_id = ANY($1::bigint[])", [
           createdProfileIds,
@@ -154,6 +162,36 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
     await pool.query(
       `UPDATE profile_listing_state SET score = $3 WHERE profile_id = $1 AND property_id = $2`,
       [profileId, propertyId, score],
+    );
+  }
+
+  async function setScoreKind(pool: Pool, profileId: number, propertyId: number, scoreKind: "cold_start" | "trained") {
+    await pool.query(
+      `UPDATE profile_listing_state SET score_kind = $3 WHERE profile_id = $1 AND property_id = $2`,
+      [profileId, propertyId, scoreKind],
+    );
+  }
+
+  async function insertAssessment(
+    pool: Pool,
+    propertyId: number,
+    opts: {
+      assessmentType?: string;
+      result: Record<string, unknown>;
+      promptVersion: string;
+      generatedAt: Date;
+    },
+  ): Promise<void> {
+    await pool.query(
+      `INSERT INTO ai_assessment (property_id, assessment_type, result, prompt_version, generated_at)
+       VALUES ($1, $2, $3::jsonb, $4, $5)`,
+      [
+        propertyId,
+        opts.assessmentType ?? "occupancy",
+        JSON.stringify(opts.result),
+        opts.promptVersion,
+        opts.generatedAt.toISOString(),
+      ],
     );
   }
 
@@ -308,6 +346,349 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
       const page = await listCandidates(profileId, { limit: 2 });
       expect(page.items).toHaveLength(2);
       expect(page.nextCursor).toBeNull();
+    });
+  });
+
+  describe("AI flags — real Postgres (#152 review, must-fix 1)", () => {
+    it("must-fix 1: shows only the latest prompt_version's verdict, not both, when a prompt bump leaves the old row in place", async () => {
+      // Reproduces the review's exact repro: a property assessed under an
+      // older prompt_version as "tenanted" (badge: Alquilado), then
+      // re-assessed under a newer prompt_version as "occupied_illegally"
+      // (badge: Ocupado). Without loadFlags's `DISTINCT ON
+      // (property_id, assessment_type)`, both rows exist simultaneously
+      // (ai_assessment_property_key is UNIQUE per prompt_version, not just
+      // per assessment_type) and the card would render both badges at once.
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        await insertListing(pool, propertyId);
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        await insertAssessment(pool, propertyId, {
+          result: { caveats: ["tenanted"] },
+          promptVersion: "occupancy/v1",
+          generatedAt: new Date("2026-01-01T00:00:00Z"),
+        });
+        await insertAssessment(pool, propertyId, {
+          result: { caveats: ["occupied_illegally"] },
+          promptVersion: "occupancy/v2",
+          generatedAt: new Date("2026-06-01T00:00:00Z"),
+        });
+
+        const page = await listCandidates(profileId);
+        expect(page.items).toHaveLength(1);
+        const flags = page.items[0].flags;
+        expect(flags).toEqual([{ kind: "caveat:occupied_illegally", label: "Ocupado", tone: "warn" }]);
+        // The must-fix reproduction, stated directly: never both at once.
+        expect(flags.some((f) => f.kind === "caveat:tenanted")).toBe(false);
+      });
+    });
+
+    it("shows the newest verdict regardless of insertion order (ordered by generated_at, not by insert/id order)", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        await insertListing(pool, propertyId);
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        // Newer row inserted FIRST (lower id, later generated_at) — proves
+        // the ordering is genuinely by generated_at, not an accident of
+        // insertion/id order that DISTINCT ON's implicit tie-break could mask.
+        await insertAssessment(pool, propertyId, {
+          result: { caveats: ["venta_deuda"] },
+          promptVersion: "occupancy/v2",
+          generatedAt: new Date("2026-06-01T00:00:00Z"),
+        });
+        await insertAssessment(pool, propertyId, {
+          result: { caveats: ["tenanted"] },
+          promptVersion: "occupancy/v1",
+          generatedAt: new Date("2026-01-01T00:00:00Z"),
+        });
+
+        const page = await listCandidates(profileId);
+        expect(page.items[0].flags).toEqual([
+          { kind: "caveat:venta_deuda", label: "Venta de deuda", tone: "warn" },
+        ]);
+      });
+    });
+
+    it("combines a current occupancy verdict with a separate condition assessment on the same property", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        await insertListing(pool, propertyId);
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        await insertAssessment(pool, propertyId, {
+          assessmentType: "occupancy",
+          result: { caveats: ["proindiviso"] },
+          promptVersion: "occupancy/v1",
+          generatedAt: new Date("2026-01-01T00:00:00Z"),
+        });
+        await insertAssessment(pool, propertyId, {
+          assessmentType: "condition",
+          result: { condition: "a_reformar" },
+          promptVersion: "condition/v1",
+          generatedAt: new Date("2026-01-01T00:00:00Z"),
+        });
+
+        const page = await listCandidates(profileId);
+        const kinds = page.items[0].flags.map((f) => f.kind).sort();
+        expect(kinds).toEqual(["caveat:proindiviso", "condition:a_reformar"]);
+      });
+    });
+
+    it("renders no badge for a standard, unremarkable verdict (empty caveats)", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        await insertListing(pool, propertyId);
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        await insertAssessment(pool, propertyId, {
+          result: { caveats: [] },
+          promptVersion: "occupancy/v1",
+          generatedAt: new Date(),
+        });
+
+        const page = await listCandidates(profileId);
+        expect(page.items[0].flags).toEqual([]);
+      });
+    });
+
+    it("keeps flags scoped per property — one property's assessment never leaks onto another's card", async () => {
+      await withRealDb(async (pool) => {
+        const flaggedId = await insertProperty(pool);
+        await insertListing(pool, flaggedId);
+        const cleanId = await insertProperty(pool);
+        await insertListing(pool, cleanId);
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, flaggedId);
+        await markMatched(pool, profileId, cleanId);
+
+        await insertAssessment(pool, flaggedId, {
+          result: { caveats: ["usufructo"] },
+          promptVersion: "occupancy/v1",
+          generatedAt: new Date(),
+        });
+
+        const page = await listCandidates(profileId);
+        const flaggedItem = page.items.find((i) => i.property_id === flaggedId)!;
+        const cleanItem = page.items.find((i) => i.property_id === cleanId)!;
+        expect(flaggedItem.flags).toEqual([{ kind: "caveat:usufructo", label: "Usufructo", tone: "warn" }]);
+        expect(cleanItem.flags).toEqual([]);
+      });
+    });
+  });
+
+  describe("score_kind — real Postgres", () => {
+    it("surfaces score_kind alongside score/rank_explanation", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        await insertListing(pool, propertyId);
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+        await setScore(pool, profileId, propertyId, 0.42);
+        await setScoreKind(pool, profileId, propertyId, "trained");
+
+        const page = await listCandidates(profileId);
+        expect(page.items[0].score_kind).toBe("trained");
+      });
+    });
+
+    it("is null until the property has been scored at all", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        await insertListing(pool, propertyId);
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        const page = await listCandidates(profileId);
+        expect(page.items[0].score_kind).toBeNull();
+      });
+    });
+  });
+});
+
+describe.runIf(dbAvailable)("getAdjacentCandidates — real Postgres", () => {
+  afterAll(async () => {
+    await resetPool();
+  });
+
+  let createdPropertyIds: number[] = [];
+  let createdProfileIds: number[] = [];
+
+  beforeEach(() => {
+    createdPropertyIds = [];
+    createdProfileIds = [];
+  });
+
+  afterEach(async () => {
+    await withRealDb(async (pool) => {
+      if (createdProfileIds.length > 0) {
+        await pool.query("DELETE FROM profile_listing_state WHERE profile_id = ANY($1::bigint[])", [
+          createdProfileIds,
+        ]);
+      }
+      if (createdPropertyIds.length > 0) {
+        await pool.query("DELETE FROM profile_listing_state WHERE property_id = ANY($1::bigint[])", [
+          createdPropertyIds,
+        ]);
+        await pool.query("DELETE FROM listing WHERE property_id = ANY($1::bigint[])", [createdPropertyIds]);
+      }
+      if (createdProfileIds.length > 0) {
+        await pool.query("DELETE FROM search_profile WHERE id = ANY($1::bigint[])", [createdProfileIds]);
+      }
+      if (createdPropertyIds.length > 0) {
+        await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [createdPropertyIds]);
+      }
+    });
+  });
+
+  async function insertProperty(pool: Pool): Promise<number> {
+    const result = await pool.query<{ id: number }>(
+      `INSERT INTO property (lat, lon, property_type, m2_built, address)
+       VALUES ($1, $2, 'piso', 70, 'Calle de prueba, adjacent-int-test') RETURNING id`,
+      [TEST_COORDS[0], TEST_COORDS[1]],
+    );
+    const id = Number(result.rows[0].id);
+    createdPropertyIds.push(id);
+    return id;
+  }
+
+  async function makeProfile(): Promise<number> {
+    const scope: Scope = {
+      geography: { type: "radius", center: TEST_COORDS, radius_km: 5 },
+      property_types: ["piso"],
+      hard_exclusions: {},
+    };
+    const profile = await createProfile(`adjacent-int-test-${Date.now()}-${Math.random()}`, scope, {});
+    createdProfileIds.push(profile.id);
+    return profile.id;
+  }
+
+  async function seedRanked(pool: Pool, profileId: number, scores: (number | null)[]): Promise<number[]> {
+    const ids: number[] = [];
+    for (const score of scores) {
+      const propertyId = await insertProperty(pool);
+      await pool.query(
+        `INSERT INTO profile_listing_state (profile_id, property_id, matched, score)
+         VALUES ($1, $2, true, $3)`,
+        [profileId, propertyId, score],
+      );
+      ids.push(propertyId);
+    }
+    return ids;
+  }
+
+  it("returns the correct prev/next for a candidate in the middle of the ranking", async () => {
+    await withRealDb(async (pool) => {
+      const profileId = await makeProfile();
+      const [top, middle, bottom] = await seedRanked(pool, profileId, [0.9, 0.5, 0.1]);
+
+      const result = await getAdjacentCandidates(profileId, middle);
+      expect(result.prevPropertyId).toBe(top);
+      expect(result.nextPropertyId).toBe(bottom);
+    });
+  });
+
+  it("returns null for prev at the top of the ranking, and null for next at the bottom", async () => {
+    await withRealDb(async (pool) => {
+      const profileId = await makeProfile();
+      const [top, , bottom] = await seedRanked(pool, profileId, [0.9, 0.5, 0.1]);
+
+      const topResult = await getAdjacentCandidates(profileId, top);
+      expect(topResult.prevPropertyId).toBeNull();
+      expect(topResult.nextPropertyId).not.toBeNull();
+
+      const bottomResult = await getAdjacentCandidates(profileId, bottom);
+      expect(bottomResult.nextPropertyId).toBeNull();
+      expect(bottomResult.prevPropertyId).not.toBeNull();
+    });
+  });
+
+  it("breaks a tied score by property_id DESC, matching listCandidates's own tiebreak", async () => {
+    await withRealDb(async (pool) => {
+      const profileId = await makeProfile();
+      const a = await insertProperty(pool);
+      const b = await insertProperty(pool);
+      const [lo, hi] = [a, b].sort((x, y) => x - y);
+      for (const id of [a, b]) {
+        await pool.query(
+          `INSERT INTO profile_listing_state (profile_id, property_id, matched, score) VALUES ($1, $2, true, 0.5)`,
+          [profileId, id],
+        );
+      }
+
+      // listCandidates orders ties by id DESC — the higher id ranks first.
+      const page = await listCandidates(profileId);
+      expect(page.items.map((i) => i.property_id)).toEqual([hi, lo]);
+
+      // getAdjacentCandidates must agree: the higher id's "next" is the lower id.
+      const hiResult = await getAdjacentCandidates(profileId, hi);
+      expect(hiResult.nextPropertyId).toBe(lo);
+      expect(hiResult.prevPropertyId).toBeNull();
+
+      const loResult = await getAdjacentCandidates(profileId, lo);
+      expect(loResult.prevPropertyId).toBe(hi);
+      expect(loResult.nextPropertyId).toBeNull();
+    });
+  });
+
+  it("treats a NULL score as ranked last, consistent with listCandidates's NO_SCORE_SENTINEL", async () => {
+    await withRealDb(async (pool) => {
+      const profileId = await makeProfile();
+      const [scored, unscored] = await seedRanked(pool, profileId, [0.5, null]);
+
+      const scoredResult = await getAdjacentCandidates(profileId, scored);
+      expect(scoredResult.nextPropertyId).toBe(unscored);
+
+      const unscoredResult = await getAdjacentCandidates(profileId, unscored);
+      expect(unscoredResult.prevPropertyId).toBe(scored);
+      expect(unscoredResult.nextPropertyId).toBeNull();
+    });
+  });
+
+  it("returns null/null for a property that isn't matched for this profile", async () => {
+    await withRealDb(async (pool) => {
+      const profileId = await makeProfile();
+      const propertyId = await insertProperty(pool);
+      // Deliberately not inserted into profile_listing_state at all.
+
+      const result = await getAdjacentCandidates(profileId, propertyId);
+      expect(result).toEqual({ prevPropertyId: null, nextPropertyId: null });
+    });
+  });
+
+  it("returns null/null for a property marked matched=false", async () => {
+    await withRealDb(async (pool) => {
+      const profileId = await makeProfile();
+      const propertyId = await insertProperty(pool);
+      await pool.query(
+        `INSERT INTO profile_listing_state (profile_id, property_id, matched, score) VALUES ($1, $2, false, 0.5)`,
+        [profileId, propertyId],
+      );
+
+      const result = await getAdjacentCandidates(profileId, propertyId);
+      expect(result).toEqual({ prevPropertyId: null, nextPropertyId: null });
+    });
+  });
+
+  it("scopes neighbours to this profile — a higher/lower-scored candidate in another profile is never returned", async () => {
+    await withRealDb(async (pool) => {
+      const profileA = await makeProfile();
+      const profileB = await makeProfile();
+      const [aOnly] = await seedRanked(pool, profileA, [0.5]);
+      // A property scored much higher, but matched only for profile B —
+      // must never appear as profile A's neighbour of aOnly.
+      const outsider = await insertProperty(pool);
+      await pool.query(
+        `INSERT INTO profile_listing_state (profile_id, property_id, matched, score) VALUES ($1, $2, true, 0.99)`,
+        [profileB, outsider],
+      );
+
+      const result = await getAdjacentCandidates(profileA, aOnly);
+      expect(result).toEqual({ prevPropertyId: null, nextPropertyId: null });
     });
   });
 });

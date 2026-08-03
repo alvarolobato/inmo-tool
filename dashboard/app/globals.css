@@ -195,3 +195,62 @@ body {
     margin-right: 0 !important;
   }
 }
+
+/* ============================================================
+   Candidate card action overlay (#152)
+
+   The accept/reject/star bar sits over the card's photo so it costs no
+   vertical space. Three ways it becomes visible, because hover alone
+   strands two real groups of users:
+
+     1. :hover            — pointer devices, the intended default
+     2. :focus-within     — keyboard users tabbing to the buttons
+     3. @media (hover:none) — touch devices, where :hover either never
+                              fires or sticks after a tap; always visible
+
+   Kept in the DOM and hit-testable at all times (opacity, not display) so
+   the controls stay reachable programmatically and by assistive tech, and
+   so Playwright's auto-hover-before-click works without special handling.
+   ============================================================ */
+
+.candidate-card-actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity 120ms ease, transform 120ms ease;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+}
+
+.candidate-card:hover .candidate-card-actions,
+.candidate-card:focus-within .candidate-card-actions {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Touch and other hover-incapable pointers: no hover to rely on, so the bar
+   is permanently visible. It stays top-right, over the photo — same
+   position as the hover case (see .candidate-card-actions above) — with its
+   own semi-opaque backdrop (rgba(0,0,0,0.55) + blur) keeping the glyphs
+   legible against the photo without needing the price gradient underneath.
+   (Verified on iPhone 13 emulation, 2026-08 — #152 review flagged an earlier
+   version of this comment that wrongly claimed the bar moved below the
+   gradient; it never did, and doesn't need to.) */
+@media (hover: none) {
+  .candidate-card-actions {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Users who ask for reduced motion get the visibility change without the
+   slide/fade. */
+@media (prefers-reduced-motion: reduce) {
+  .candidate-card-actions {
+    transition: none;
+  }
+}

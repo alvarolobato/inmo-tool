@@ -4,6 +4,7 @@ import { render, screen } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { CandidateCard } from "@/components/candidates/CandidateCard";
 import type { CandidateRow } from "@/lib/candidates";
+import { COLD_START_EXPLANATION } from "@/lib/scoring/cold-start";
 
 function candidate(overrides: Partial<CandidateRow> = {}): CandidateRow {
   return {
@@ -14,22 +15,51 @@ function candidate(overrides: Partial<CandidateRow> = {}): CandidateRow {
     property_type: "piso",
     m2_built: 70,
     rooms: 2,
+    bathrooms: 1,
+    floor: "3",
+    thumbnail_url: "https://img.example/1.jpg",
+    flags: [],
     min_price: 279000,
     first_seen_at: "2026-07-01T00:00:00.000Z",
     listings: [{ id: 10, source: "fotocasa", url: "https://x", current_price: 285000 }],
     score: null,
     rank_explanation: null,
+    score_kind: null,
     ...overrides,
   };
 }
 
 describe("CandidateCard", () => {
-  it("renders address, price, type/size/rooms, and a single source badge", () => {
+  it("renders address, price, the full fact line, and a single source badge", () => {
     render(<CandidateCard candidate={candidate()} profileId={5} />);
     expect(screen.getByText("Calle Trafalgar, Chamberí, Madrid")).toBeInTheDocument();
     expect(screen.getByText("279.000 €")).toBeInTheDocument();
-    expect(screen.getByText(/Piso.*70 m².*2 hab\./)).toBeInTheDocument();
+    expect(screen.getByText(/Piso.*70 m².*2 hab\..*1 baño.*Planta 3/)).toBeInTheDocument();
     expect(screen.getByText("fotocasa")).toBeInTheDocument();
+  });
+
+  it("leads with the listing photo, falling back to a placeholder when the property has none", () => {
+    const { rerender } = render(<CandidateCard candidate={candidate()} profileId={5} />);
+    expect(screen.getByTestId("candidate-photo-img")).toHaveAttribute("src", "https://img.example/1.jpg");
+
+    rerender(<CandidateCard candidate={candidate({ thumbnail_url: null })} profileId={5} />);
+    expect(screen.getByTestId("candidate-photo-placeholder")).toBeInTheDocument();
+  });
+
+  it("renders one badge per AI flag, colouring only the ones that change what you're buying", () => {
+    render(
+      <CandidateCard
+        candidate={candidate({
+          flags: [
+            { kind: "occupancy", label: "Ocupado", tone: "warn" },
+            { kind: "condition", label: "A reformar", tone: "neutral" },
+          ],
+        })}
+        profileId={5}
+      />,
+    );
+    const flags = screen.getAllByTestId("candidate-flag");
+    expect(flags.map((f) => f.textContent)).toEqual(["Ocupado", "A reformar"]);
   });
 
   it("links to the property detail page for this profile", () => {
@@ -61,6 +91,8 @@ describe("CandidateCard", () => {
           property_type: null,
           m2_built: null,
           rooms: null,
+          bathrooms: null,
+          floor: null,
           min_price: null,
           first_seen_at: null,
         })}
@@ -69,7 +101,30 @@ describe("CandidateCard", () => {
     );
     expect(screen.getByText("Dirección no disponible")).toBeInTheDocument();
     expect(screen.getByText("Precio no disponible")).toBeInTheDocument();
-    expect(screen.getByText("Tipo no disponible")).toBeInTheDocument();
+    expect(screen.getByText("Sin datos estructurados")).toBeInTheDocument();
+  });
+
+  it("omits unknown facts rather than padding the line with 'no disponible' placeholders", () => {
+    render(<CandidateCard candidate={candidate({ bathrooms: null, floor: null })} profileId={5} />);
+    const facts = screen.getByTestId("candidate-facts").textContent ?? "";
+    expect(facts).toContain("70 m²");
+    expect(facts).not.toContain("baños");
+    expect(facts).not.toContain("Planta");
+  });
+
+  it("pluralises baños and only prefixes 'Planta' when the floor is a bare number", () => {
+    const { rerender } = render(
+      <CandidateCard candidate={candidate({ bathrooms: 2, floor: "Bajo" })} profileId={5} />,
+    );
+    let facts = screen.getByTestId("candidate-facts").textContent ?? "";
+    expect(facts).toContain("2 baños");
+    expect(facts).toContain("Bajo");
+    expect(facts).not.toContain("Planta Bajo");
+
+    rerender(<CandidateCard candidate={candidate({ bathrooms: 1, floor: "3" })} profileId={5} />);
+    facts = screen.getByTestId("candidate-facts").textContent ?? "";
+    expect(facts).toContain("1 baño ");
+    expect(facts).toContain("Planta 3");
   });
 
   it("renders rank_explanation when present, and renders nothing for it when null", () => {
@@ -80,5 +135,49 @@ describe("CandidateCard", () => {
 
     rerender(<CandidateCard candidate={candidate({ rank_explanation: null })} profileId={5} />);
     expect(screen.queryByTestId("rank-explanation")).not.toBeInTheDocument();
+  });
+
+  it("#152: suppresses the cold-start explanation on the card — CandidateList shows it once for the whole profile", () => {
+    render(
+      <CandidateCard
+        candidate={candidate({ rank_explanation: COLD_START_EXPLANATION, score_kind: "cold_start" })}
+        profileId={5}
+      />,
+    );
+    expect(screen.queryByTestId("rank-explanation")).not.toBeInTheDocument();
+  });
+
+  it("#152 review: suppression is driven by score_kind, not by string-matching rank_explanation against the constant", () => {
+    // Same guarding value the cold-start writer actually uses, but tagged
+    // with a *different* score_kind than the writer would ever pair it
+    // with — proves the card reads the durable marker, not the string.
+    render(
+      <CandidateCard
+        candidate={candidate({ rank_explanation: "cualquier texto, aunque no coincida con la constante", score_kind: "cold_start" })}
+        profileId={5}
+      />,
+    );
+    expect(screen.queryByTestId("rank-explanation")).not.toBeInTheDocument();
+  });
+
+  it("#152 review: a real explanation still renders even if its text happens to equal the cold-start sentence, as long as score_kind is 'trained'", () => {
+    // Regression guard: comparing rank_explanation against
+    // COLD_START_EXPLANATION by string equality would wrongly suppress this
+    // — a purely cosmetic edit to the constant could otherwise silently
+    // un-suppress every already-written cold-start row (#152 review).
+    render(
+      <CandidateCard
+        candidate={candidate({ rank_explanation: COLD_START_EXPLANATION, score_kind: "trained" })}
+        profileId={5}
+      />,
+    );
+    expect(screen.getByTestId("rank-explanation")).toHaveTextContent(COLD_START_EXPLANATION);
+  });
+
+  it("#152: keeps the feedback controls outside the detail <Link> so acting on a card can't navigate", () => {
+    render(<CandidateCard candidate={candidate()} profileId={5} />);
+    const link = screen.getByRole("link");
+    const actions = screen.getByTestId("candidate-card-actions");
+    expect(link.contains(actions)).toBe(false);
   });
 });

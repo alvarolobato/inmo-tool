@@ -8,6 +8,7 @@
  */
 import { test, expect, type Page } from "@playwright/test";
 import { Pool } from "pg";
+import { adminKey, seedAdminSession } from "./helpers/admin-session";
 
 function buildPool(): Pool {
   const dsn = process.env.POSTGRES_DSN;
@@ -90,6 +91,12 @@ test.afterAll(async () => {
 function skipIfNoDb(test_: typeof test) {
   test_.skip(!dbAvailable, "no reachable Postgres");
 }
+
+// Every UI page is admin-gated (middleware.ts) — see e2e/helpers/admin-session.ts.
+test.beforeEach(async ({ page, baseURL }) => {
+  test.skip(!adminKey, "ADMIN_API_KEY not set for the server under test");
+  await seedAdminSession(page, baseURL);
+});
 
 async function assertNoErrorSurface(page: Page) {
   await expect(page.getByText(/error|hubo un problema|there is no parameter|http 500/i)).toHaveCount(0);

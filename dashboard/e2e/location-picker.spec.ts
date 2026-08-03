@@ -17,6 +17,7 @@
  */
 import { test, expect } from "@playwright/test";
 import { Pool } from "pg";
+import { adminKey, seedAdminSession } from "./helpers/admin-session";
 
 function buildPool(): Pool {
   const dsn = process.env.POSTGRES_DSN;
@@ -55,6 +56,12 @@ test.afterAll(async () => {
     await pool.query("DELETE FROM search_profile WHERE name LIKE $1", [`${NAME_PREFIX}%`]);
   }
   await pool?.end();
+});
+
+// Every UI page is admin-gated (middleware.ts) — see e2e/helpers/admin-session.ts.
+test.beforeEach(async ({ page, baseURL }) => {
+  test.skip(!adminKey, "ADMIN_API_KEY not set for the server under test");
+  await seedAdminSession(page, baseURL);
 });
 
 test("searching a place and selecting it sets the profile's coordinates", async ({ page }) => {
