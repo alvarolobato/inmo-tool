@@ -5,13 +5,94 @@ import Link from "next/link";
 import { ErrorDisplay } from "@/components/ErrorDisplay";
 import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
-import { ProfileForm, type ProfileFormValues } from "@/components/profiles/ProfileForm";
+import { ProfileForm, DEFAULT_VALUES, type ProfileFormValues } from "@/components/profiles/ProfileForm";
+import { ProfileOverviewRow } from "@/components/profiles/ProfileOverviewRow";
 import type { SearchProfileRow } from "@/lib/profiles-schema";
+import type { ProfileOverviewEntry } from "@/lib/profile-overview-types";
 
-type Mode = { kind: "none" } | { kind: "create" } | { kind: "edit"; profile: SearchProfileRow };
+type Mode =
+  | { kind: "none" }
+  | { kind: "create" }
+  | { kind: "edit"; profile: SearchProfileRow }
+  // Issue #113/#193: a malformed-scope profile's OLD scope can't be
+  // recovered (it never parsed), so "repair" seeds only the (valid) name
+  // and a fresh default scope skeleton — the user re-enters the geography/
+  // type from scratch, then PATCH overwrites the broken row in place.
+  | { kind: "repair"; id: number; name: string };
+
+/**
+ * Skeleton row (issue #193's loading state) — fixed height matching the
+ * real row so the page doesn't jump-shift once data arrives.
+ */
+function SkeletonRow() {
+  return (
+    <div
+      data-testid="profile-row-skeleton"
+      style={{
+        height: 84,
+        borderRadius: 8,
+        border: "1px solid var(--border)",
+        background: "var(--bg-1)",
+        marginBottom: 10,
+        opacity: 0.5,
+      }}
+    />
+  );
+}
+
+/**
+ * Fallback row rendered only when the aggregate overview query fails but
+ * the plain profile list still loads (issue #193's partial-failure
+ * degradation: "the profiles list itself... should still attempt to render
+ * from the cheap plain list if the heavier aggregate 500s").
+ */
+function DegradedProfileRow({ profile }: { profile: SearchProfileRow }) {
+  return (
+    <div
+      data-testid="profile-row-degraded"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        padding: "14px 12px",
+        borderRadius: 8,
+        border: "1px solid var(--border)",
+        background: "var(--bg-1)",
+        marginBottom: 10,
+        gap: 12,
+      }}
+    >
+      <div>
+        <p style={{ fontWeight: 500, color: "var(--fg)", margin: 0, fontSize: 14 }}>{profile.name}</p>
+        <p style={{ fontSize: 12, color: "var(--fg-subtle)", margin: "2px 0 0" }}>
+          {profile.scope.property_types.join(", ")} · radio {profile.scope.geography.radius_km} km
+        </p>
+        <p data-testid="profile-degraded-note" style={{ fontSize: 11, color: "var(--warn)", margin: "4px 0 0" }}>
+          No se pudieron cargar las métricas.
+        </p>
+      </div>
+      <Link
+        href={`/profiles/${profile.id}`}
+        style={{
+          padding: "7px 14px",
+          background: "var(--accent)",
+          color: "#fff",
+          borderRadius: 6,
+          fontSize: 13,
+          fontWeight: 500,
+          textDecoration: "none",
+          whiteSpace: "nowrap",
+        }}
+      >
+        Entrar →
+      </Link>
+    </div>
+  );
+}
 
 export default function ProfilesPage() {
-  const [profiles, setProfiles] = useState<SearchProfileRow[]>([]);
+  const [overviews, setOverviews] = useState<ProfileOverviewEntry[] | null>(null);
+  const [degradedProfiles, setDegradedProfiles] = useState<SearchProfileRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<ApiErrorResponse | string | null>(null);
   const [mode, setMode] = useState<Mode>({ kind: "none" });
@@ -20,14 +101,24 @@ export default function ProfilesPage() {
   const fetchProfiles = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setDegradedProfiles(null);
     try {
-      const res = await fetch("/api/profiles");
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => null);
-        setError(isApiErrorResponse(errBody) ? errBody : "Error al cargar los perfiles de búsqueda");
+      const res = await fetch("/api/profiles/overview");
+      if (res.ok) {
+        setOverviews(await res.json());
         return;
       }
-      setProfiles(await res.json());
+      // Degraded fallback (issue #193): the heavier aggregate failed — try
+      // the cheap plain list (names/scope only) instead of blocking the
+      // whole page behind ErrorDisplay.
+      const plainRes = await fetch("/api/profiles");
+      if (plainRes.ok) {
+        setOverviews(null);
+        setDegradedProfiles(await plainRes.json());
+        return;
+      }
+      const errBody = await res.json().catch(() => null);
+      setError(isApiErrorResponse(errBody) ? errBody : "Error al cargar los perfiles de búsqueda");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error al cargar los perfiles de búsqueda");
     } finally {
@@ -50,9 +141,6 @@ export default function ProfilesPage() {
     try {
       const res = await fetch(`/api/profiles/${id}/materialize`, { method: "POST" });
       if (!res.ok) {
-        // fetch() only rejects on network failure, not on a 4xx/5xx
-        // response — without this check a 500 here was silently treated as
-        // success and never logged (Opus review, PR #57).
         console.error(
           "No se pudieron recalcular los candidatos tras guardar el perfil:",
           res.status,
@@ -131,15 +219,7 @@ export default function ProfilesPage() {
     }
   };
 
-  const actionButtonStyle: React.CSSProperties = {
-    padding: "4px 10px",
-    background: "transparent",
-    border: "1px solid var(--border)",
-    borderRadius: 6,
-    fontSize: 12,
-    color: "var(--fg)",
-    cursor: "pointer",
-  };
+  const hasAnyProfiles = (overviews?.length ?? 0) > 0 || (degradedProfiles?.length ?? 0) > 0;
 
   return (
     <main style={{ maxWidth: 720, margin: "0 auto", padding: 24 }}>
@@ -201,65 +281,60 @@ export default function ProfilesPage() {
         </div>
       )}
 
+      {mode.kind === "repair" && (
+        <div
+          style={{
+            marginTop: 16,
+            padding: 16,
+            border: "1px solid var(--down)",
+            borderRadius: 8,
+            background: "var(--bg-1)",
+          }}
+        >
+          <p style={{ margin: "0 0 12px", fontSize: 12, color: "var(--fg-muted)" }}>
+            Este perfil tenía una configuración inválida y no se pudo recuperar su ámbito (scope) original —
+            defínelo de nuevo desde cero.
+          </p>
+          <ProfileForm
+            initial={{ ...DEFAULT_VALUES, name: mode.name }}
+            submitLabel="Guardar y reparar"
+            onSubmit={(values) => handleUpdate(mode.id, values)}
+            onCancel={() => setMode({ kind: "none" })}
+          />
+        </div>
+      )}
+
       {error && <ErrorDisplay error={error} className="mt-4" />}
 
       {loading ? (
-        <p style={{ marginTop: 16, fontSize: 13, color: "var(--fg-muted)" }}>Cargando…</p>
-      ) : profiles.length === 0 ? (
+        <div style={{ marginTop: 16 }}>
+          <SkeletonRow />
+          <SkeletonRow />
+          <SkeletonRow />
+        </div>
+      ) : !error && !hasAnyProfiles ? (
         <p style={{ marginTop: 16, fontSize: 13, color: "var(--fg-muted)" }}>
           No hay perfiles de búsqueda activos. Crea uno para empezar a filtrar candidatos.
         </p>
       ) : (
-        <ul style={{ marginTop: 16, listStyle: "none", padding: 0, margin: "16px 0 0" }}>
-          {profiles.map((p) => (
-            <li
-              key={p.id}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                padding: "12px 0",
-                borderBottom: "1px solid var(--border)",
-              }}
-            >
-              <div>
-                <p style={{ fontWeight: 500, color: "var(--fg)", margin: 0, fontSize: 14 }}>{p.name}</p>
-                <p style={{ fontSize: 12, color: "var(--fg-subtle)", margin: "2px 0 0" }}>
-                  {p.scope.property_types.join(", ")} · radio {p.scope.geography.radius_km} km
-                </p>
-              </div>
-              <div style={{ display: "flex", gap: 6 }}>
-                <Link
-                  href={`/profiles/${p.id}`}
-                  style={{ ...actionButtonStyle, textDecoration: "none", display: "inline-block" }}
-                >
-                  Ver candidatos
-                </Link>
-                <button
-                  onClick={() => setMode({ kind: "edit", profile: p })}
-                  disabled={busyId === p.id}
-                  style={{ ...actionButtonStyle, opacity: busyId === p.id ? 0.5 : 1 }}
-                >
-                  Editar
-                </button>
-                <button
-                  onClick={() => handleClone(p.id)}
-                  disabled={busyId === p.id}
-                  style={{ ...actionButtonStyle, opacity: busyId === p.id ? 0.5 : 1 }}
-                >
-                  Clonar
-                </button>
-                <button
-                  onClick={() => handleArchive(p.id)}
-                  disabled={busyId === p.id}
-                  style={{ ...actionButtonStyle, color: "var(--down)", opacity: busyId === p.id ? 0.5 : 1 }}
-                >
-                  Archivar
-                </button>
-              </div>
-            </li>
-          ))}
-        </ul>
+        <div style={{ marginTop: 16 }}>
+          {overviews !== null &&
+            overviews.map((entry) => (
+              <ProfileOverviewRow
+                key={entry.ok ? entry.profile.id : entry.id}
+                entry={entry}
+                busy={busyId === (entry.ok ? entry.profile.id : entry.id)}
+                onEdit={() =>
+                  entry.ok
+                    ? setMode({ kind: "edit", profile: entry.profile })
+                    : setMode({ kind: "repair", id: entry.id, name: entry.name })
+                }
+                onClone={() => entry.ok && handleClone(entry.profile.id)}
+                onArchive={() => handleArchive(entry.ok ? entry.profile.id : entry.id)}
+              />
+            ))}
+          {degradedProfiles !== null && degradedProfiles.map((p) => <DegradedProfileRow key={p.id} profile={p} />)}
+        </div>
       )}
     </main>
   );

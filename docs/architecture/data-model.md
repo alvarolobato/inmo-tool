@@ -59,6 +59,10 @@ Best-effort seller/agent identity, used as a deduplication signal (phone number 
 ### `search_profile`
 A named investment thesis/mandate — "high-yield low-cost rental," "commercial units," etc. `scope` (geography/type/price/size filters) and `thesis_params` (yield targets, financing assumptions) are `jsonb`, validated at the application layer rather than via Postgres `CHECK` constraints, because their shape will grow across phases (Phase 2 adds scope filtering, Phase 5 adds financing params) and a rigid DB-level schema would mean a migration for every new filter type.
 
+**`scope` has no DB-level default (D-010, issue #113).** It originally defaulted to `'{}'`, which fails `ScopeSchema`'s required `geography`/`property_types` fields — a row that ever relied on that default landed already-broken, and `toSearchProfileRowSafe` (the old read path) silently dropped it from every list with zero operator-visible signal. `lib/db/profiles.ts` now exposes a discriminated `ProfileListEntry` (`{ok: true, profile}` / `{ok: false, id, name, issues}`) so a malformed row is surfaced, not hidden — consumed by the Perfiles overview query (issue #192) and rendered as a visibly-broken row (issue #193).
+
+**`last_materialized_at` / `last_viewed_at` (issue #191, both nullable `TIMESTAMPTZ`, no backfill).** `last_materialized_at` is set unconditionally at the end of every `materializeProfile` run (including the zero-matches case) — it's the only way to distinguish "this profile has never been materialized" from "materialized, and matched zero properties," both of which look identical as zero rows in `profile_listing_state`. `last_viewed_at` is set best-effort whenever `GET /api/profiles/[id]` is read, powering the "new since your last visit" aggregate. Both feed the zero-candidate diagnostic (issue #194).
+
 **`scope` shape (defined and validated in `dashboard/lib/profiles-schema.ts`'s `ScopeSchema`, re-exported from `dashboard/lib/db/profiles.ts` for server-side callers)** — this is the exact shape task 2.4's hard-filter engine consumes:
 
 ```ts

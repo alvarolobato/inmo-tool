@@ -7,6 +7,7 @@ import type { ApiErrorResponse } from "@/lib/errors";
 import type { CandidateRow } from "@/lib/candidates";
 import { COLD_START_EXPLANATION } from "@/lib/scoring/cold-start";
 import { CandidateCard } from "./CandidateCard";
+import { ZeroCandidatesDiagnostic } from "@/components/profiles/ZeroCandidatesDiagnostic";
 
 /**
  * Candidate feed for one profile (task 2.5, #19) — one card per property,
@@ -66,11 +67,15 @@ export function CandidateList({ profileId }: { profileId: number }) {
   }
 
   if (items.length === 0) {
+    // Issue #194: the shared diagnostic replaces this generic, cause-free
+    // message — it tells the operator WHICH of never-materialized/
+    // geography/type/price/exclusion/stale-materialization is actually true,
+    // rather than "prueba a ampliar los filtros" for every possible cause.
     return (
-      <p style={{ marginTop: 16, fontSize: 13, color: "var(--fg-muted)" }}>
-        Este perfil no tiene candidatos todavía. Prueba a ampliar los filtros o espera a que se ingieran más
-        anuncios.
-      </p>
+      <div style={{ marginTop: 16 }}>
+        <p style={{ fontSize: 13, color: "var(--fg-muted)", margin: 0 }}>Este perfil no tiene candidatos.</p>
+        <ZeroCandidatesDiagnostic profileId={profileId} />
+      </div>
     );
   }
 
