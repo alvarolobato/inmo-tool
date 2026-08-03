@@ -1,10 +1,18 @@
-"""Solvia connector tests (issue #116).
+"""Solvia connector tests (issue #116; provincia-wide sitemap sweep #190).
 
-Fixtures are trimmed from real pages fetched during the feasibility spike
-(2026-08-02) — `solvia_sample_detail.html` carries the genuine
-`propertyBasicDetail` payload of a real Torrevieja apartment, and
-`solvia_sample_search.html` the genuine detail hrefs from that
-municipality's search page. No network access is needed to run these.
+Fixtures are trimmed from real pages/sitemaps fetched live —
+`solvia_sample_detail.html` carries the genuine `propertyBasicDetail`
+payload of a real Torrevieja apartment, `solvia_sample_search.html` the
+genuine detail hrefs from that municipality's search page,
+`solvia_sample_search_dos_hermanas.html` the genuine 9 detail hrefs from
+`/es/comprar/viviendas/sevilla/dos-hermanas` (2026-08-03, live),
+`solvia_sample_search_empty_town.html` the genuine (empty but well-formed)
+`/es/comprar/viviendas/sevilla/san-nicolas-del-puerto` page, and
+`solvia_sitemap_index.xml`/`solvia_sitemap_comprar_viviendas.xml` a trimmed
+real pull of Solvia's own published sitemap (2026-08-03) — 43 Sevilla + 44
+Málaga municipality entries kept verbatim, plus a handful from other
+provinces to prove the parser doesn't only work for the two named markets.
+No network access is needed to run these.
 """
 
 from __future__ import annotations
@@ -18,6 +26,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from etl.connectors import solvia
 from etl.connectors.base import ConnectorError, ConnectorScope
 from etl.connectors.solvia import SolviaConnector
 from etl.connectors.solvia_mapping import map_property_type
@@ -56,14 +65,44 @@ def _detail_state(html: str) -> dict:
     return json.loads(match.group(1))["propertyBasicDetail"]
 
 
+@pytest.fixture(autouse=True)
+def _reset_sitemap_cache():
+    """The sitemap cache is module-level state (issue #190) — shared across
+    every SolviaConnector instance by design (one national document, no
+    reason to fetch it per scope). That means it would leak between test
+    functions unless reset; production never needs this (the TTL is the
+    only real eviction path there)."""
+    solvia._reset_sitemap_cache()
+    yield
+    solvia._reset_sitemap_cache()
+
+
+def _fake_get(responses: dict[str, str], calls: list[str] | None = None):
+    """A `requests.get` stand-in keyed by exact URL, recording call order.
+
+    Real discover() now issues several distinct requests per sweep (sitemap
+    index, child sitemap, then one per municipio) — a single `return_value`
+    mock can no longer stand in for all of them.
+    """
+
+    def _get(url, headers=None, timeout=None):
+        if calls is not None:
+            calls.append(url)
+        if url not in responses:
+            raise AssertionError(f"unexpected request: {url}")
+        return _mock_response(responses[url])
+
+    return _get
+
+
 class TestScopeResolution:
-    def test_known_centroid_resolves_to_provincia_municipio(self):
+    def test_known_centroid_resolves_to_provincia(self):
         connector = SolviaConnector()
         # Madrid city centre.
         key = connector.scope_key(
             ConnectorScope(center=(40.4168, -3.7038), radius_km=10)
         )
-        assert key == "madrid/madrid"
+        assert key == "madrid"
 
     def test_unknown_geography_returns_none_so_orchestrator_skips_it(self):
         connector = SolviaConnector()
@@ -73,46 +112,342 @@ class TestScopeResolution:
             is None
         )
 
-    def test_free_text_geography_escape_hatch(self):
+    def test_free_text_geography_is_provincia_only_now(self):
+        """Issue #190: a scope resolves to a PROVINCIA, not a specific
+        municipio — discover() sweeps every municipio the sitemap lists for
+        it, so the old "provincia/municipio" pin no longer carries a
+        distinct municipio through. Only the first segment matters."""
         connector = SolviaConnector()
         assert connector.scope_key(ConnectorScope(geography="alicante/torrevieja")) == (
-            "alicante/torrevieja"
+            "alicante"
         )
 
+    def test_bare_provincia_free_text_also_works(self):
+        connector = SolviaConnector()
+        assert connector.scope_key(ConnectorScope(geography="sevilla")) == "sevilla"
 
-class TestDiscover:
-    def test_extracts_detail_paths_from_real_search_markup(self):
+    def test_two_scopes_in_the_same_provincia_share_one_key(self):
+        """The coverage-dedup consequence of provincia-only keys (issue
+        #190): two profiles naming different municipios in the same
+        provincia now sweep the identical set of pages, so the orchestrator
+        must treat them as the same target, not two independent crawls."""
+        connector = SolviaConnector()
+        key_a = connector.scope_key(ConnectorScope(geography="sevilla/sevilla"))
+        key_b = connector.scope_key(ConnectorScope(geography="sevilla/dos-hermanas"))
+        assert key_a == key_b == "sevilla"
+
+
+class TestSitemapCache:
+    def test_first_discover_fetches_sitemap_index_and_child(self):
+        calls: list[str] = []
+        responses = {
+            "https://www.solvia.es/sitemap.xml": _read("solvia_sitemap_index.xml"),
+            "https://www.solvia.es/sitemap_comprar_viviendas.xml": _read(
+                "solvia_sitemap_comprar_viviendas.xml"
+            ),
+            "https://www.solvia.es/es/comprar/viviendas/sevilla/dos-hermanas": _read(
+                "solvia_sample_search_dos_hermanas.html"
+            ),
+        }
+        # Stub every other Sevilla municipio with the empty-town fixture so
+        # the sweep completes without needing all 43 real pages.
+        for municipio in solvia._parse_municipio_locs(
+            solvia._sitemap_locs(
+                _read("solvia_sitemap_comprar_viviendas.xml"), context="test"
+            )
+        ).get("sevilla", []):
+            url = f"https://www.solvia.es/es/comprar/viviendas/sevilla/{municipio}"
+            responses.setdefault(url, _read("solvia_sample_search_empty_town.html"))
+
         connector = SolviaConnector()
         with patch(
             "etl.connectors.solvia.requests.get",
-            return_value=_mock_response(_read("solvia_sample_search.html")),
+            side_effect=_fake_get(responses, calls),
         ):
-            ids = connector.discover(
-                ConnectorScope(geography="alicante/torrevieja"), throttle=_noop_throttle
+            connector.discover(
+                ConnectorScope(geography="sevilla"), throttle=_noop_throttle
             )
-        assert len(ids) == 3
-        # The stable "<idPromocion>-<idVivienda>" pair, NOT the descriptive
-        # slug: the slug changes when the title does, which would make a
-        # retitled listing look like a new property (#138 review).
-        assert ids == ["220640-267805", "222830-270617", "224346-272477"]
 
-    def test_page_without_ng_state_raises_rather_than_reporting_zero_listings(self):
-        """A soft-block/structural change must not look like an empty geography.
+        assert "https://www.solvia.es/sitemap.xml" in calls
+        assert "https://www.solvia.es/sitemap_comprar_viviendas.xml" in calls
 
-        Returning [] here would let _reconcile_missed_discoveries treat real
-        inventory as vanished — the failure mode Connector.discovers_full_inventory
-        exists to guard against.
-        """
+    def test_second_discover_within_ttl_does_not_refetch_sitemap(self):
+        calls: list[str] = []
+        responses = {
+            "https://www.solvia.es/sitemap.xml": _read("solvia_sitemap_index.xml"),
+            "https://www.solvia.es/sitemap_comprar_viviendas.xml": _read(
+                "solvia_sitemap_comprar_viviendas.xml"
+            ),
+        }
+        for municipio in solvia._parse_municipio_locs(
+            solvia._sitemap_locs(
+                _read("solvia_sitemap_comprar_viviendas.xml"), context="test"
+            )
+        ).get("sevilla", []):
+            url = f"https://www.solvia.es/es/comprar/viviendas/sevilla/{municipio}"
+            responses[url] = _read("solvia_sample_search_empty_town.html")
+
+        connector = SolviaConnector()
+        with patch(
+            "etl.connectors.solvia.requests.get",
+            side_effect=_fake_get(responses, calls),
+        ):
+            connector.discover(
+                ConnectorScope(geography="sevilla"), throttle=_noop_throttle
+            )
+            sitemap_calls_after_first = calls.count("https://www.solvia.es/sitemap.xml")
+            connector.discover(
+                ConnectorScope(geography="sevilla"), throttle=_noop_throttle
+            )
+            sitemap_calls_after_second = calls.count(
+                "https://www.solvia.es/sitemap.xml"
+            )
+
+        assert sitemap_calls_after_first == 1
+        assert sitemap_calls_after_second == 1, (
+            "second discover() within the TTL window must reuse the cached "
+            "sitemap, not refetch 1,737 URLs' worth of XML per scope"
+        )
+
+    def test_stale_cache_past_ttl_refetches(self, monkeypatch):
+        responses = {
+            "https://www.solvia.es/sitemap.xml": _read("solvia_sitemap_index.xml"),
+            "https://www.solvia.es/sitemap_comprar_viviendas.xml": _read(
+                "solvia_sitemap_comprar_viviendas.xml"
+            ),
+        }
+        for municipio in solvia._parse_municipio_locs(
+            solvia._sitemap_locs(
+                _read("solvia_sitemap_comprar_viviendas.xml"), context="test"
+            )
+        ).get("sevilla", []):
+            url = f"https://www.solvia.es/es/comprar/viviendas/sevilla/{municipio}"
+            responses[url] = _read("solvia_sample_search_empty_town.html")
+
+        connector = SolviaConnector()
+        with patch(
+            "etl.connectors.solvia.requests.get", side_effect=_fake_get(responses)
+        ):
+            connector.discover(
+                ConnectorScope(geography="sevilla"), throttle=_noop_throttle
+            )
+            fetched_at = solvia._sitemap_cache["fetched_at"]
+
+            # Simulate the TTL having elapsed without waiting real time.
+            monkeypatch.setattr(
+                solvia.time,
+                "time",
+                lambda: fetched_at + solvia._SITEMAP_CACHE_TTL_SECONDS + 1,
+            )
+            calls: list[str] = []
+            with patch(
+                "etl.connectors.solvia.requests.get",
+                side_effect=_fake_get(responses, calls),
+            ):
+                connector.discover(
+                    ConnectorScope(geography="sevilla"), throttle=_noop_throttle
+                )
+            assert "https://www.solvia.es/sitemap.xml" in calls
+
+    def test_sitemap_parses_real_sevilla_and_malaga_counts(self):
+        """The headline evidence from issue #190's own live spike, pinned
+        as a regression test: 43 Sevilla + 44 Málaga municipality entries,
+        including dos-hermanas as its own entry."""
+        by_province = solvia._parse_municipio_locs(
+            solvia._sitemap_locs(
+                _read("solvia_sitemap_comprar_viviendas.xml"), context="test"
+            )
+        )
+        assert len(by_province["sevilla"]) == 43
+        assert len(by_province["malaga"]) == 44
+        assert "dos-hermanas" in by_province["sevilla"]
+        assert "mijas" in by_province["malaga"]
+
+    def test_missing_child_sitemap_raises(self):
+        index_without_viviendas = (
+            '<?xml version="1.0"?>'
+            '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            "<sitemap><loc>https://www.solvia.es/sitemap_comprar_trasteros.xml</loc>"
+            "</sitemap></sitemapindex>"
+        )
+        responses = {"https://www.solvia.es/sitemap.xml": index_without_viviendas}
         connector = SolviaConnector()
         with (
             patch(
-                "etl.connectors.solvia.requests.get",
-                return_value=_mock_response("<html><body>blocked</body></html>"),
+                "etl.connectors.solvia.requests.get", side_effect=_fake_get(responses)
             ),
-            pytest.raises(ConnectorError, match="ng-state"),
+            pytest.raises(ConnectorError, match="no child sitemap"),
         ):
             connector.discover(
-                ConnectorScope(geography="alicante/torrevieja"), throttle=_noop_throttle
+                ConnectorScope(geography="sevilla"), throttle=_noop_throttle
+            )
+
+
+class TestDiscoverProvinciaSweep:
+    """Issue #190: discover() now sweeps every municipio the sitemap lists
+    for the resolved provincia, not just the one a scope's centroid names."""
+
+    def _small_province_sitemap(self) -> str:
+        """A hand-scoped 3-municipio sitemap for a synthetic 'testprov'
+        provincia, built from the real `_MUNICIPIO_LOC_RE` shape — kept
+        separate from the real Sevilla/Málaga fixture so this test's
+        assertions don't depend on 43/44 real pages existing."""
+        locs = [
+            "https://www.solvia.es/es/comprar/viviendas/testprov/alpha",
+            "https://www.solvia.es/es/comprar/viviendas/testprov/beta",
+            "https://www.solvia.es/es/comprar/viviendas/testprov/gamma",
+        ]
+        body = "".join(f"<url><loc>{loc}</loc></url>" for loc in locs)
+        return (
+            '<?xml version="1.0"?>'
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            f"{body}</urlset>"
+        )
+
+    def _index_pointing_at(self, child_url: str) -> str:
+        return (
+            '<?xml version="1.0"?>'
+            '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            f"<sitemap><loc>{child_url}</loc></sitemap></sitemapindex>"
+        )
+
+    def test_ids_are_unioned_across_every_municipio_in_the_provincia(self):
+        child_url = "https://www.solvia.es/sitemap_comprar_viviendas.xml"
+        responses = {
+            "https://www.solvia.es/sitemap.xml": self._index_pointing_at(child_url),
+            child_url: self._small_province_sitemap(),
+            "https://www.solvia.es/es/comprar/viviendas/testprov/alpha": _read(
+                "solvia_sample_search.html"
+            ),
+            "https://www.solvia.es/es/comprar/viviendas/testprov/beta": _read(
+                "solvia_sample_search_dos_hermanas.html"
+            ),
+            "https://www.solvia.es/es/comprar/viviendas/testprov/gamma": _read(
+                "solvia_sample_search_empty_town.html"
+            ),
+        }
+        connector = SolviaConnector()
+        with patch(
+            "etl.connectors.solvia.requests.get", side_effect=_fake_get(responses)
+        ):
+            ids = connector.discover(
+                ConnectorScope(geography="testprov"), throttle=_noop_throttle
+            )
+        # 3 from alpha (Torrevieja fixture) + 9 from beta (Dos Hermanas
+        # fixture) + 0 from gamma (empty town) = 12, deduplicated/sorted.
+        assert len(ids) == 12
+        assert "220640-267805" in ids  # from alpha
+        assert "150714-187731" in ids  # from beta
+
+    def test_a_dos_hermanas_centred_profile_reaches_dos_hermanas(self):
+        """Acceptance criterion (#190): sweeping the whole provincia, not
+        just the one municipio a centroid resolves to, is what makes a
+        Sevilla-area profile see Dos Hermanas' own inventory at all."""
+        child_url = "https://www.solvia.es/sitemap_comprar_viviendas.xml"
+        sitemap_xml = _read("solvia_sitemap_comprar_viviendas.xml")
+        responses = {
+            "https://www.solvia.es/sitemap.xml": self._index_pointing_at(child_url),
+            child_url: sitemap_xml,
+        }
+        for municipio in solvia._parse_municipio_locs(
+            solvia._sitemap_locs(sitemap_xml, context="test")
+        ).get("sevilla", []):
+            url = f"https://www.solvia.es/es/comprar/viviendas/sevilla/{municipio}"
+            responses[url] = (
+                _read("solvia_sample_search_dos_hermanas.html")
+                if municipio == "dos-hermanas"
+                else _read("solvia_sample_search_empty_town.html")
+            )
+
+        connector = SolviaConnector()
+        # geography="sevilla" mirrors what a Sevilla-centroid-resolved,
+        # center-based profile produces via _resolve_geography — the
+        # connector never learns "dos-hermanas" by name, only "sevilla".
+        with patch(
+            "etl.connectors.solvia.requests.get", side_effect=_fake_get(responses)
+        ):
+            ids = connector.discover(
+                ConnectorScope(geography="sevilla"), throttle=_noop_throttle
+            )
+        assert "150714-187731" in ids  # a real Dos Hermanas listing
+        assert len(ids) == 9  # only Dos Hermanas' page had any listings
+
+    def test_a_few_bad_municipio_pages_dont_abort_the_whole_sweep(self):
+        child_url = "https://www.solvia.es/sitemap_comprar_viviendas.xml"
+        responses = {
+            "https://www.solvia.es/sitemap.xml": self._index_pointing_at(child_url),
+            child_url: self._small_province_sitemap(),
+            "https://www.solvia.es/es/comprar/viviendas/testprov/alpha": (
+                "<html><body>blocked, no ng-state here</body></html>"
+            ),
+            "https://www.solvia.es/es/comprar/viviendas/testprov/beta": _read(
+                "solvia_sample_search_dos_hermanas.html"
+            ),
+            "https://www.solvia.es/es/comprar/viviendas/testprov/gamma": _read(
+                "solvia_sample_search_empty_town.html"
+            ),
+        }
+        connector = SolviaConnector()
+        with patch(
+            "etl.connectors.solvia.requests.get", side_effect=_fake_get(responses)
+        ):
+            ids = connector.discover(
+                ConnectorScope(geography="testprov"), throttle=_noop_throttle
+            )
+        # alpha failed but beta/gamma still contributed — one bad page must
+        # not zero out an otherwise-successful province sweep.
+        assert len(ids) == 9
+
+    def test_every_municipio_failing_raises_rather_than_returning_empty(self):
+        """The provincia-level equivalent of the old single-page contract:
+        a soft-block covering the whole sweep must not look like a
+        provincia with zero listings."""
+        child_url = "https://www.solvia.es/sitemap_comprar_viviendas.xml"
+        blocked = "<html><body>Pardon Our Interruption</body></html>"
+        responses = {
+            "https://www.solvia.es/sitemap.xml": self._index_pointing_at(child_url),
+            child_url: self._small_province_sitemap(),
+            "https://www.solvia.es/es/comprar/viviendas/testprov/alpha": blocked,
+            "https://www.solvia.es/es/comprar/viviendas/testprov/beta": blocked,
+            "https://www.solvia.es/es/comprar/viviendas/testprov/gamma": blocked,
+        }
+        connector = SolviaConnector()
+        with (
+            patch(
+                "etl.connectors.solvia.requests.get", side_effect=_fake_get(responses)
+            ),
+            pytest.raises(ConnectorError, match="all 3 municipio"),
+        ):
+            connector.discover(
+                ConnectorScope(geography="testprov"), throttle=_noop_throttle
+            )
+
+    def test_unresolvable_provincia_raises_before_any_sitemap_fetch(self):
+        connector = SolviaConnector()
+        with pytest.raises(ConnectorError, match="no known Solvia"):
+            connector.discover(
+                ConnectorScope(center=(38.7223, -9.1393), radius_km=10),
+                throttle=_noop_throttle,
+            )
+
+    def test_provincia_absent_from_sitemap_raises(self):
+        """A resolved provincia (from _PROVINCE_SLUGS) that the live sitemap
+        doesn't actually list would be a real, worth-surfacing surprise —
+        not a silent empty result."""
+        child_url = "https://www.solvia.es/sitemap_comprar_viviendas.xml"
+        responses = {
+            "https://www.solvia.es/sitemap.xml": self._index_pointing_at(child_url),
+            child_url: self._small_province_sitemap(),  # only "testprov"
+        }
+        connector = SolviaConnector()
+        with (
+            patch(
+                "etl.connectors.solvia.requests.get", side_effect=_fake_get(responses)
+            ),
+            pytest.raises(ConnectorError, match="no municipality pages"),
+        ):
+            connector.discover(
+                ConnectorScope(geography="sevilla"), throttle=_noop_throttle
             )
 
 
@@ -280,7 +615,7 @@ class TestRegistration:
         assert len(names) == len(set(names)), f"duplicate registrations: {names}"
 
         connector = next(c for c in CONNECTORS if c.name == "solvia")
-        # 20 of a geography's listings per sweep — absence proves nothing.
+        # 20 of a municipio's listings per sweep — absence proves nothing.
         assert connector.discovers_full_inventory is False
 
 

@@ -92,6 +92,39 @@ _BASE_URL = "https://www.milanuncios.com"
 _REQUEST_TIMEOUT_SECONDS = 15
 _INITIAL_PROPS_MARKER = 'window.__INITIAL_PROPS__ = JSON.parse("'
 
+# Issue #179: literal strings from a REAL captured soft-block/interruption
+# page (milanuncios_sample_soft_block_page.html — fetched live 2026-08-03
+# while measuring this connector's safe rate; see rate_limit_per_minute's
+# own comment for the full measurement). Any one of these appearing means
+# "Milanuncios' own bot-mitigation wall (a GeeTest CAPTCHA challenge, HTTP
+# 200 with ~95KB of static challenge markup)", not "the site redesigned
+# this page" or "this specific ad was removed" — two failures that used to
+# produce an identical, undifferentiated ConnectorError. Distinguishing
+# them matters because they call for opposite responses (module docstring,
+# issue #66): a soft block means back off further; anything else missing
+# the marker is a genuine parsing/structure problem worth a human looking
+# at. This does NOT resolve #66 itself (a removed-ad page still isn't
+# distinguishable from "some other reason the marker is missing" without
+# its own real captured sample) — it only carves the one signature that
+# is now positively confirmed out of the generic bucket.
+_SOFT_BLOCK_MARKERS = (
+    "Pardon Our Interruption",
+    "Tu visita a Milanuncios se ha interrumpido",
+    'id="captcha-box"',
+)
+
+
+class MilanunciosSoftBlockError(ConnectorError):
+    """__INITIAL_PROPS__ was missing AND the page carries Milanuncios' own
+    confirmed bot-mitigation signature. Subclasses ConnectorError so the
+    orchestrator's circuit breaker keeps counting it exactly as before —
+    this is a narrower diagnosis, not a different failure category."""
+
+
+def _has_soft_block_signature(html: str) -> bool:
+    return any(marker in html for marker in _SOFT_BLOCK_MARKERS)
+
+
 # City name (etl.connectors.geography.CITY_CENTROIDS keys) -> this site's own
 # geography path segment. Milanuncios's URL just repeats the city name
 # itself (see discover()), so this is currently an identity mapping — kept
@@ -149,6 +182,13 @@ def _extract_initial_props(html: str) -> dict[str, Any]:
     """
     start = html.find(_INITIAL_PROPS_MARKER)
     if start == -1:
+        if _has_soft_block_signature(html):
+            raise MilanunciosSoftBlockError(
+                "milanuncios: soft-block/interruption page detected (GeeTest "
+                "CAPTCHA challenge signature present) — this is rate-induced "
+                "throttling, not a page-structure change; back off rather "
+                "than treat this as a parsing bug"
+            )
         raise ConnectorError(
             "milanuncios: __INITIAL_PROPS__ marker not found — page structure "
             "may have changed, or this is a soft-block/interruption page"
