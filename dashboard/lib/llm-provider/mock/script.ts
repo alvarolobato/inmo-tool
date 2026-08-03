@@ -104,18 +104,23 @@ function mockAssessmentJson(flow: Exclude<MockFlow, "chat">): string {
         reasoning: "El anuncio no menciona ninguna señal de alerta (mock e2e).",
       });
     case "extract":
+      // Schema per #28's real prompt (system-prompt.ts's buildExtractPrompt):
+      // per-field confidence, not one scalar — see that file's doc for why.
       return JSON.stringify({
-        rooms: 3,
-        bathrooms: 2,
         m2_built: 90,
         m2_useful: null,
-        m2_plot: null,
+        rooms: 3,
+        bathrooms: 2,
         floor: "3",
         has_elevator: true,
-        year_built: null,
-        energy_rating: null,
-        features: ["terraza"],
-        confidence: 0.75,
+        confidence_per_field: {
+          m2_built: 0.85,
+          rooms: 0.9,
+          bathrooms: 0.9,
+          floor: 0.7,
+          has_elevator: 0.8,
+        },
+        reasoning: "El anuncio da metros, habitaciones, baños, planta y ascensor (mock e2e).",
       });
     case "compare":
       return JSON.stringify({

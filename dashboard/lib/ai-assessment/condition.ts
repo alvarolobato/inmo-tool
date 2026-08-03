@@ -38,6 +38,7 @@ import {
   parseVerdict,
   stripCodeFence,
 } from "./shared";
+import { getOrCompute, getLatestAssessment, type CachedAssessment } from "./cache";
 
 export { NoListingsError, loadPropertyListings };
 
@@ -137,20 +138,26 @@ export function parseConditionResult(raw: string): ConditionResult {
   };
 }
 
-/** Persist a verdict, replacing any prior one for the same prompt version. */
+/**
+ * Persist a verdict, replacing any prior one for the same prompt version.
+ * `contentHash` (#30) defaults to NULL for direct callers that don't compute
+ * one — see occupancy.ts's `saveOccupancyAssessment` doc for the same note.
+ */
 export async function saveConditionAssessment(
   propertyId: number,
   result: ConditionResult,
   model: string | null,
+  contentHash: string | null = null,
 ): Promise<void> {
   await sql(
     `INSERT INTO ai_assessment
-        (property_id, assessment_type, result, confidence, model, prompt_version, generated_at)
-     VALUES ($1, 'condition', $2::jsonb, $3, $4, $5, NOW())
+        (property_id, assessment_type, result, confidence, model, prompt_version, content_hash, generated_at)
+     VALUES ($1, 'condition', $2::jsonb, $3, $4, $5, $6, NOW())
      ON CONFLICT ON CONSTRAINT ai_assessment_property_key
      DO UPDATE SET result = EXCLUDED.result,
                    confidence = EXCLUDED.confidence,
                    model = EXCLUDED.model,
+                   content_hash = EXCLUDED.content_hash,
                    generated_at = EXCLUDED.generated_at`,
     [
       propertyId,
@@ -158,32 +165,29 @@ export async function saveConditionAssessment(
       result.confidence,
       model,
       CONDITION_PROMPT_VERSION,
+      contentHash,
     ],
   );
 }
 
-/** Read the cached verdict for a property, if one exists. */
+/**
+ * Read the cached verdict for a property, if one exists.
+ * #30: latest row regardless of prompt_version, with `stale` — see
+ * occupancy.ts's `getOccupancyAssessment` doc for the full rationale.
+ */
 export async function getConditionAssessment(
   propertyId: number,
-): Promise<{ result: ConditionResult; model: string | null; generated_at: string | null } | null> {
-  const rows = await sql<{
-    result: ConditionResult;
-    model: string | null;
-    generated_at: string | null;
-  }>(
-    `SELECT result, model, generated_at
-       FROM ai_assessment
-      WHERE property_id = $1
-        AND assessment_type = 'condition'
-        AND prompt_version = $2`,
-    [propertyId, CONDITION_PROMPT_VERSION],
+): Promise<CachedAssessment<ConditionResult> | null> {
+  return getLatestAssessment<ConditionResult>(
+    propertyId,
+    "condition",
+    CONDITION_PROMPT_VERSION,
   );
-  return rows[0] ?? null;
 }
 
 /**
- * Assess one property end-to-end: load its merged listings, ask the model,
- * validate, persist.
+ * Assess one property end-to-end: load its merged listings, ask the model
+ * (unless an unchanged verdict is already cached — #30), validate, persist.
  *
  * Throws `NoListingsError` when the property has no live listings, OR when
  * every live listing has no description (see `loadPropertyListings`) — in
@@ -198,8 +202,16 @@ export async function assessPropertyCondition(
   const listings = await loadPropertyListings(propertyId);
   if (listings.length === 0) throw new NoListingsError(propertyId);
 
-  const { text, model } = await assessCondition(listings, opts);
-  const result = parseConditionResult(text);
-  await saveConditionAssessment(propertyId, result, model);
+  const { result } = await getOrCompute<ConditionResult>(
+    propertyId,
+    "condition",
+    CONDITION_PROMPT_VERSION,
+    listings,
+    async () => {
+      const { text, model } = await assessCondition(listings, opts);
+      return { result: parseConditionResult(text), model };
+    },
+    saveConditionAssessment,
+  );
   return result;
 }

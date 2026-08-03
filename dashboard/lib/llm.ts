@@ -18,13 +18,23 @@
  * raw text; parsing and persisting the JSON belongs to the flow's own task
  * (#25–#30), which knows the shape it asked for.
  *
- * occupancy/condition/redflags (#25/#26/#27) all run at property level — every
- * live listing of ONE deduplicated property, read together — because the fact
- * each looks for (occupied, needs reform, embargo pending) is a property of
- * the physical flat, not of any one advert, and "one portal omits what
- * another discloses" applies equally to all three. extract (#28) stays at
- * listing level: it recovers *per-advert* structured fields (each portal's
- * own structured-data completeness varies), not a shared physical fact.
+ * occupancy/condition/redflags/extract (#25/#26/#27/#28) ALL run at property
+ * level — every live listing of ONE deduplicated property, read together —
+ * because the fact each looks for (occupied, needs reform, embargo pending,
+ * missing m²/rooms/floor/elevator) is a property of the physical flat, not of
+ * any one advert, and "one portal omits what another discloses" applies
+ * equally to all four. This updates an earlier version of this note, written
+ * when #24 landed extract's plumbing ahead of #28's real prompt: it argued
+ * extract should stay listing-level because "each portal's own structured-
+ * data completeness varies" — true, but irrelevant, because the fields
+ * extract fills (`m2_built`, `m2_useful`, `rooms`, `bathrooms`, `floor`,
+ * `has_elevator`) are columns on `property`, not `listing` (see
+ * `etl/schema/init.sql`). The dedup pipeline already reconciles per-listing
+ * facts onto that one property row, so extraction has to read every live
+ * listing's description together for the same reason occupancy does: an
+ * `m2_built` disclosed only in one portal's text must not be missed because a
+ * sibling listing (which happened to have shorter or vaguer text) is the one
+ * that got read. See `lib/ai-assessment/extract.ts`.
  */
 
 import { checkDailyBudget } from "./llm-usage";
@@ -47,47 +57,15 @@ export interface AssessmentOpts {
 }
 
 /**
- * Run a single-shot assessment flow over one listing (#28 extract only — see
- * the module-level note on why condition/redflags moved off this path).
- * Temperature is pinned low — this is an extraction task, not a creative one.
- */
-async function runListingAssessment(
-  flow: "extract",
-  listing: ListingSnapshot,
-  opts?: AssessmentOpts,
-): Promise<string> {
-  await checkDailyBudget();
-
-  const vars: FlowVars = { listing };
-  const result = await assembleRequest(
-    flow,
-    vars,
-    null,
-    `Evalúa el anuncio según las instrucciones (${flow}).`,
-    {
-      ctx: opts?.ctx,
-      requestId: opts?.requestId ?? null,
-      endpoint: flow,
-      temperature: 0,
-      maxOutputTokens: 2048,
-    },
-  );
-
-  if (!result.text) {
-    throw new Error(`LLM returned an empty response for flow "${flow}"`);
-  }
-  return result.text;
-}
-
-/**
  * Run a single-shot assessment flow over EVERY live listing of one
  * deduplicated property at once (#25 occupancy's pattern, followed by #26
- * condition and #27 redflags — see the module-level note). Returns the model
- * that produced the answer alongside the text, so the caller can record which
- * model a stored verdict came from (mirrors `assessOccupancy`).
+ * condition, #27 redflags, and #28 extract — see the module-level note).
+ * Returns the model that produced the answer alongside the text, so the
+ * caller can record which model a stored verdict came from (mirrors
+ * `assessOccupancy`).
  */
 async function runPropertyAssessment(
-  flow: "condition" | "redflags",
+  flow: "condition" | "redflags" | "extract",
   listings: ListingSnapshot[],
   instruction: string,
   opts?: AssessmentOpts,
@@ -193,16 +171,28 @@ export function extractRedFlags(
 }
 
 /**
- * #28 — Recover structured fields from a free-text description, so listings
- * whose portal published no structured data are not unfairly excluded by the
- * hard filters.
- * Returns the model's raw JSON text.
+ * #28 — Recover structured fields (m², rooms, bathrooms, floor, elevator)
+ * from free-text description(s), so listings whose portal published no
+ * structured data are not unfairly excluded by the hard filters.
+ *
+ * Takes EVERY live listing of one deduplicated property (see the module-level
+ * note): the fields this recovers live on `property`, not `listing`, so a
+ * disclosure in one portal's text must not be missed because a sibling
+ * listing's (shorter, vaguer) text is what got read — same reasoning as
+ * `assessCondition`/`extractRedFlags`.
+ *
+ * Returns the raw JSON text plus the model that produced it.
  */
 export function extractStructuredFields(
-  listing: ListingSnapshot,
+  listings: ListingSnapshot[],
   opts?: AssessmentOpts,
-): Promise<string> {
-  return runListingAssessment("extract", listing, opts);
+): Promise<{ text: string; model: string }> {
+  return runPropertyAssessment(
+    "extract",
+    listings,
+    "Extrae los campos estructurados del inmueble según las instrucciones (extract).",
+    opts,
+  );
 }
 
 /**

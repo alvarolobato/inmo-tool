@@ -20,6 +20,12 @@
  * Gated by the admin credential like every route under /api/* — POST spends
  * real LLM budget (lib/api-auth-policy.ts).
  *
+ * #30: GET returns the LATEST verdict regardless of prompt version, plus
+ * `stale: true` when it was generated under a version that is no longer
+ * current — see `lib/ai-assessment/cache.ts`'s `CachedAssessment` doc and
+ * occupancy's route (which documents the skew this fixes) for the full
+ * rationale.
+ *
  * IMPORTANT: this is NOT legal advice. `flags[]` surfaces mentions worth an
  * independent check, never a confirmed legal fact — see the flow's prompt in
  * lib/llm-context/system-prompt.ts.
@@ -81,8 +87,12 @@ export async function GET(
     }
     return NextResponse.json({
       property_id: propertyId,
-      prompt_version: REDFLAGS_PROMPT_VERSION,
-      ...cached,
+      current_prompt_version: REDFLAGS_PROMPT_VERSION,
+      prompt_version: cached.prompt_version,
+      stale: cached.stale,
+      result: cached.result,
+      model: cached.model,
+      generated_at: cached.generated_at,
     });
   } catch (err) {
     console.error(`[${requestId}] GET redflags assessment failed:`, err);

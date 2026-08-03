@@ -581,7 +581,34 @@ Una lista vacía es un resultado correcto y frecuente — NO fuerces hallazgos.`
   return { stable, volatile: propertyVolatile(vars) };
 }
 
-/** #28 — extract: unstructured description → structured fields. */
+/**
+ * #28 — extract: unstructured description → structured fields, per
+ * deduplicated property.
+ *
+ * Property-level, not listing-level, DESPITE issue #28's own wording
+ * ("per-advert structured fields") and `lib/llm.ts`'s original module doc
+ * (written when #24 landed, before #28 itself did) — both predate the
+ * observation that settled it: `rooms`/`bathrooms`/`m2_built`/`m2_useful`/
+ * `floor`/`has_elevator` are all columns on `property`, not `listing` (see
+ * `etl/schema/init.sql`). The dedup pipeline already reconciles per-listing
+ * facts onto one property row; extraction fills gaps in THAT row, so it must
+ * read the same "every live listing at once" evidence occupancy/condition/
+ * redflags do — a private-seller advert stating "85m², 3 habitaciones" must
+ * not be missed because the property's other listing (say, an agency's
+ * shorter blurb) is what happened to get read. Using `propertyVolatile()`
+ * (not `listingVolatile()`) keeps this flow on the same shared plumbing and
+ * cache-key shape (`property_id`, #30) as its three siblings, instead of
+ * needing its own listing-keyed storage path.
+ *
+ * Output schema is deliberately narrower than the placeholder this replaces
+ * (which also asked for `year_built`/`energy_rating`/`features`/`m2_plot`):
+ * issue #28's technical approach names exactly `m2_built`, `m2_useful`,
+ * `rooms`, `bathrooms`, `floor`, `has_elevator` — the fields the hard-filter
+ * engine (task 2.4) actually needs a fallback for. `confidence_per_field`
+ * (not one scalar `confidence`) lets a consumer trust a high-confidence
+ * `rooms` extraction while discounting a shakier `floor` guess from the same
+ * response, per the issue's own reasoning.
+ */
 export function buildExtractPrompt(vars: FlowVars): {
   stable: string;
   volatile?: string;
@@ -594,27 +621,61 @@ Muchos anuncios de particulares no traen campos estructurados: todo está en el
 texto libre. Extrae lo que el portal no nos dio, para que ese anuncio no quede
 injustamente fuera de los filtros del usuario por falta de datos.
 
-Devuelve \`null\` en cada campo que el texto no indique explícitamente. No
-deduzcas, no redondees, no "completes" a partir de lo que sería habitual.
+Campos a extraer (todos opcionales):
+- \`m2_built\` — metros cuadrados construidos.
+- \`m2_useful\` — metros cuadrados útiles, SOLO si el texto los distingue
+  explícitamente de los construidos.
+- \`rooms\` — número de habitaciones o dormitorios.
+- \`bathrooms\` — número de baños.
+- \`floor\` — planta, como texto ("bajo", "3º", "ático", "2ºB"…).
+- \`has_elevator\` — \`true\`/\`false\` solo si el texto lo menciona
+  explícitamente ("con ascensor", "sin ascensor", "edificio sin ascensor").
+
+Por cada campo que rellenes con un valor (no \`null\`), añade su confianza en
+\`confidence_per_field\` bajo la misma clave (0.0-1.0). NO añadas una entrada en
+\`confidence_per_field\` para un campo que dejaste en \`null\` — un campo ausente
+no tiene una confianza que reportar.
+
+### No inventes, no redondees, no "completes" (EC-2)
+
+Si el texto no menciona un dato, ese campo es \`null\`. NO lo deduzcas a partir
+de lo que sería típico para ese tipo de inmueble o esa zona (p. ej. no asumas
+\`has_elevator: false\` solo porque el edificio parece antiguo, ni redondees
+"unos 90 metros" a un número si el texto ya da un valor exacto en otra
+frase — usa el valor exacto cuando exista). Convertir el silencio en un valor
+concreto, aunque sea con confianza baja, es exactamente el fallo que este
+flujo existe para evitar: un dato inventado es peor que un campo vacío para un
+filtro que hará comparaciones numéricas con él.
+
+### Varios anuncios del mismo inmueble
+
+Puede que te dé varios anuncios del mismo inmueble físico en portales
+distintos. Combínalos: si solo uno de ellos da un dato concreto (metros,
+habitaciones, planta…), extráelo igualmente — que otro anuncio no lo mencione
+no invalida el que sí lo hace.
 
 ${ASSESSMENT_RULES}
 
+**Nota sobre la regla 2 anterior:** aquí "no lo sé" para un campo individual se
+expresa dejando ese campo en \`null\`, NUNCA con la cadena \`"unknown"\` — estos
+campos son numéricos, de texto libre corto o booleanos, y \`"unknown"\` rompería
+el tipo esperado (un \`rooms: "unknown"\` no es un número válido). Deja el campo
+en \`null\` y no le añadas entrada en \`confidence_per_field\`; no escribas la
+palabra "unknown" en ningún campo de este formato.
+
 Formato de salida:
 {
-  "rooms": number | null,
-  "bathrooms": number | null,
   "m2_built": number | null,
   "m2_useful": number | null,
-  "m2_plot": number | null,
+  "rooms": number | null,
+  "bathrooms": number | null,
   "floor": string | null,
   "has_elevator": boolean | null,
-  "year_built": number | null,
-  "energy_rating": string | null,
-  "features": ["terraza", "garaje", "trastero", …],
-  "confidence": 0.0-1.0
+  "confidence_per_field": { "<nombre_de_campo>": 0.0-1.0, ... },
+  "reasoning": "una frase en español"
 }`;
 
-  return { stable, volatile: listingVolatile(vars) };
+  return { stable, volatile: propertyVolatile(vars) };
 }
 
 /** #38 — compare: structured side-by-side of N candidates. */

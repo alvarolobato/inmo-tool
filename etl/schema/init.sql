@@ -530,6 +530,26 @@ $$;
 -- rather than leaving dead weight behind.
 DROP INDEX IF EXISTS idx_ai_assessment_property_type;
 
+-- Phase 4.7 (#30): content-hash cache invalidation. `content_hash` is a
+-- SHA-256 of the exact `(listing_id, description)` pairs a property-level
+-- assessment flow's prompt reads (see dashboard/lib/ai-assessment/cache.ts's
+-- `computeAssessmentContentHash`) — recomputed fresh on every read and
+-- compared to what is stored here, so a description change (or a listing
+-- joining/leaving the property, which is what a dedup merge IS) invalidates
+-- automatically without any hook into the ETL orchestrator or connectors.
+-- NULL for rows written before this migration (and for direct
+-- save*Assessment() callers that don't pass one, e.g. tests) — cache.ts's
+-- `getOrCompute` always treats a NULL content_hash as a miss, which is the
+-- correct conservative behaviour: a pre-existing row's hash is unknowable,
+-- not "matches by default".
+--
+-- ADD COLUMN IF NOT EXISTS, not a column in the CREATE TABLE above: this file
+-- must stay safe to re-run against an already-migrated database (same
+-- reasoning as `reference_code`/`missed_discovery_count` elsewhere in this
+-- file) — a column added inside `CREATE TABLE IF NOT EXISTS` is a no-op
+-- against a table that already exists.
+ALTER TABLE ai_assessment ADD COLUMN IF NOT EXISTS content_hash TEXT;
+
 -- ============================================================
 -- Deduplication audit trail (Phase 2 task 2.2, issue #16, writes here)
 -- ============================================================
