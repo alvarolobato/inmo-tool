@@ -61,9 +61,15 @@ const ZERO_PERIOD: PeriodStats = {
 function rowToStats(row: Record<string, unknown> | undefined): PeriodStats {
   if (!row) return ZERO_PERIOD;
   return {
-    prompt_tokens: Number(row.prompt_tokens) || 0,
-    completion_tokens: Number(row.completion_tokens) || 0,
-    total_tokens: Number(row.total_tokens) || 0,
+    // prompt_tokens/completion_tokens/total_tokens here come from
+    // SUM(<integer column>) with no explicit cast — Postgres widens that to
+    // bigint, which arrives as a real JS number via the driver-level int8
+    // type parser (db-shared.ts, #155); no per-site Number() needed.
+    // estimated_cost_usd is NUMERIC — a different OID with a genuine
+    // precision rationale — that coercion stays.
+    prompt_tokens: (row.prompt_tokens as number | null) ?? 0,
+    completion_tokens: (row.completion_tokens as number | null) ?? 0,
+    total_tokens: (row.total_tokens as number | null) ?? 0,
     estimated_cost_usd: (Number(row.estimated_cost_usd) || 0).toFixed(6),
   };
 }
@@ -152,9 +158,14 @@ export async function getLlmUsageAggregates(): Promise<LlmUsageAggregates> {
     });
 
     const by_provider: ProviderStats[] = providerRows.map((row) => {
-      const cacheCreation = row.cache_creation_sum != null ? Number(row.cache_creation_sum) : null;
-      const cacheRead = row.cache_read_sum != null ? Number(row.cache_read_sum) : null;
-      const promptSum = Number(row.prompt_tokens_sum) || 0;
+      // cache_creation_sum/cache_read_sum/prompt_tokens_sum are SUM(...)::bigint
+      // (explicit cast in the query above) — real JS numbers via the
+      // driver-level int8 type parser (db-shared.ts, #155). calls/total_tokens
+      // below are cast ::integer/::float8, not bigint — those Number() calls
+      // are unrelated to #155 and stay.
+      const cacheCreation = (row.cache_creation_sum as number | null) ?? null;
+      const cacheRead = (row.cache_read_sum as number | null) ?? null;
+      const promptSum = (row.prompt_tokens_sum as number | null) ?? 0;
       // Cache hit rate = cache_read / (non-cached prompt + cache_creation + cache_read) * 100
       const hitDenominator = promptSum + (cacheCreation ?? 0) + (cacheRead ?? 0);
       const cacheHitRatePct =

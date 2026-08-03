@@ -71,11 +71,15 @@ export async function fetchSlowQueries(): Promise<SlowQueriesResponse> {
         findQueryOrigin(rawQuery, { savedDashboardCandidateList: dbCandidates }) ?? undefined;
       return {
         query: rawQuery,
-        calls: Number(row[1]),
+        // calls/rows (pg_stat_statements bigint columns) arrive as real JS
+        // numbers via the driver-level int8 type parser (db-shared.ts,
+        // #155). mean/max/total_exec_time are float8 (already numbers by
+        // default) and cache_hit_ratio is NUMERIC — those coercions stay.
+        calls: row[1] as number,
         mean_exec_time_ms: Number(row[2]),
         max_exec_time_ms: Number(row[3]),
         total_exec_time_ms: Number(row[4]),
-        rows: Number(row[5]),
+        rows: row[5] as number,
         cache_hit_ratio: row[6] != null ? Number(row[6]) : null,
         ...(origin ? { origin } : {}),
       };

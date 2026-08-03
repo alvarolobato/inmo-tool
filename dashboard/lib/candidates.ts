@@ -276,7 +276,7 @@ async function loadFlags(propertyIds: number[]): Promise<Map<number, CandidateFl
 
   const grouped = new Map<number, RawAssessmentRow[]>();
   for (const row of rows) {
-    const id = Number(row.property_id);
+    const id = row.property_id;
     const list = grouped.get(id) ?? [];
     list.push(row);
     grouped.set(id, list);
@@ -387,14 +387,14 @@ export async function listCandidates(
   const hasMore = rows.length > limit;
   const pageRows = hasMore ? rows.slice(0, limit) : rows;
 
-  const flagsByProperty = await loadFlags(pageRows.map((r) => Number(r.property_id)));
+  const flagsByProperty = await loadFlags(pageRows.map((r) => r.property_id));
 
   const items: CandidateRow[] = pageRows.map((r) => ({
-    // pg returns bigint columns as strings; property_id needs to be a real
-    // JSON number (Phase 3's scoring/ranking will compare/sort on it) —
-    // unlike lat/lon/m2_built this one was missed and shipped as a string
-    // ("179" not 179) in the live API response.
-    property_id: Number(r.property_id),
+    // property_id (bigint) arrives as a real JS number via the driver-level
+    // int8 type parser (db-shared.ts, #155) — no per-site Number() needed.
+    // lat/lon/m2_built/min_price/score below are NUMERIC, a different OID
+    // with a genuine precision rationale — those coercions stay.
+    property_id: r.property_id,
     address: r.address,
     lat: r.lat !== null ? Number(r.lat) : null,
     lon: r.lon !== null ? Number(r.lon) : null,
@@ -404,7 +404,7 @@ export async function listCandidates(
     bathrooms: r.bathrooms,
     floor: r.floor,
     thumbnail_url: r.thumbnail_url,
-    flags: flagsByProperty.get(Number(r.property_id)) ?? [],
+    flags: flagsByProperty.get(r.property_id) ?? [],
     min_price: r.min_price !== null ? Number(r.min_price) : null,
     first_seen_at: r.first_seen_at,
     listings: r.listings,
@@ -421,7 +421,7 @@ export async function listCandidates(
   // the id-ordered fetch, corrupting the keyset scan).
   const lastRow = pageRows[pageRows.length - 1];
   const nextCursor = hasMore
-    ? encodeCursor(lastRow.score !== null ? Number(lastRow.score) : null, Number(lastRow.property_id))
+    ? encodeCursor(lastRow.score !== null ? Number(lastRow.score) : null, lastRow.property_id)
     : null;
 
   return { items, nextCursor };
@@ -504,7 +504,7 @@ export async function getAdjacentCandidates(
   ]);
 
   return {
-    nextPropertyId: nextRows.length > 0 ? Number(nextRows[0].property_id) : null,
-    prevPropertyId: prevRows.length > 0 ? Number(prevRows[0].property_id) : null,
+    nextPropertyId: nextRows.length > 0 ? nextRows[0].property_id : null,
+    prevPropertyId: prevRows.length > 0 ? prevRows[0].property_id : null,
   };
 }

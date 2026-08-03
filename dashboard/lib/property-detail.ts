@@ -165,7 +165,11 @@ export async function getPropertyDetail(propertyId: number): Promise<PropertyDet
   }
 
   return {
-    id: Number(propertyRow.id),
+    // Bigint columns (id, listing_id) arrive as real JS numbers via the
+    // driver-level int8 type parser (db-shared.ts, #155). lat/lon/m2_built/
+    // m2_useful/current_price/price below are NUMERIC — a different OID
+    // with a genuine precision rationale — those coercions stay.
+    id: propertyRow.id,
     address: propertyRow.address,
     lat: propertyRow.lat !== null ? Number(propertyRow.lat) : null,
     lon: propertyRow.lon !== null ? Number(propertyRow.lon) : null,
@@ -180,7 +184,7 @@ export async function getPropertyDetail(propertyId: number): Promise<PropertyDet
     energy_rating: propertyRow.energy_rating,
     photo_urls: photoUrls,
     listings: listingRows.map((l) => ({
-      id: Number(l.id),
+      id: l.id,
       source: l.source,
       url: l.url,
       listing_kind: l.listing_kind,
@@ -191,13 +195,13 @@ export async function getPropertyDetail(propertyId: number): Promise<PropertyDet
       last_seen_at: l.last_seen_at,
     })),
     price_history: priceRows.map((h) => ({
-      listing_id: Number(h.listing_id),
+      listing_id: h.listing_id,
       source: h.source,
       observed_at: h.observed_at,
       price: Number(h.price),
     })),
     status_events: statusRows.map((e) => ({
-      listing_id: Number(e.listing_id),
+      listing_id: e.listing_id,
       source: e.source,
       observed_at: e.observed_at,
       status: e.status,

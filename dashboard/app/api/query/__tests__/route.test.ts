@@ -10,6 +10,9 @@ vi.mock("pg", () => {
       query = mockQuery;
       end = mockEnd;
     },
+    // db-shared.ts (#155) registers the int8 type parser at module load —
+    // the mock needs a minimal stand-in so that import doesn't throw.
+    types: { setTypeParser: vi.fn(), builtins: { INT8: 20 } },
   };
 });
 

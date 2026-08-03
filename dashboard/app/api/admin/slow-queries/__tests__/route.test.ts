@@ -9,6 +9,9 @@ vi.mock("pg", () => ({
     query = mockQuery;
     end = mockEnd;
   },
+  // db-shared.ts (#155) registers the int8 type parser at module load —
+  // the mock needs a minimal stand-in so that import doesn't throw.
+  types: { setTypeParser: vi.fn(), builtins: { INT8: 20 } },
 }));
 
 import { GET } from "../route";
@@ -49,14 +52,17 @@ describe("GET /api/admin/slow-queries", () => {
         { name: "rows" },
         { name: "cache_hit_ratio" },
       ],
+      // calls/rows are pg_stat_statements bigint columns — real JS numbers
+      // via the driver-level int8 type parser (db-shared.ts, #155), not
+      // strings. cache_hit_ratio is NUMERIC and genuinely still a string.
       rows: [
         [
           "SELECT * FROM ps_ventas WHERE fecha_creacion > $1",
-          "42",
+          42,
           1.5,
           8.2,
           63.0,
-          "1000",
+          1000,
           "99.5",
         ],
       ],
@@ -111,7 +117,7 @@ describe("GET /api/admin/slow-queries", () => {
         { name: "rows" },
         { name: "cache_hit_ratio" },
       ],
-      rows: [["SELECT 1", "1", 0.1, 0.1, 0.1, "0", null]],
+      rows: [["SELECT 1", 1, 0.1, 0.1, 0.1, 0, null]],
     });
 
     const res = await GET(adminRequest());
@@ -157,8 +163,8 @@ describe("GET /api/admin/slow-queries", () => {
         { name: "cache_hit_ratio" },
       ],
       rows: [
-        ["SELECT * FROM ps_stock_tienda", "5", 2500.0, 3000.0, 12500.0, "500", "85.0"],
-        ["SELECT * FROM ps_ventas", "100", 50.0, 200.0, 5000.0, "1000", "99.9"],
+        ["SELECT * FROM ps_stock_tienda", 5, 2500.0, 3000.0, 12500.0, 500, "85.0"],
+        ["SELECT * FROM ps_ventas", 100, 50.0, 200.0, 5000.0, 1000, "99.9"],
       ],
     });
 

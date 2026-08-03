@@ -1,5 +1,5 @@
 # Python
-.venv/
+.venv
 __pycache__/
 *.pyc
 *.pyo
@@ -30,10 +30,10 @@ docs/reports/*.json
 docs/sample-data/
 
 # Persistent bind-mount data (Docker volumes — never commit)
-data/
+data
 
 # Dashboard App
-dashboard/node_modules/
+dashboard/node_modules
 dashboard/.next/
 dashboard/tsconfig.tsbuildinfo
 
@@ -57,4 +57,4 @@ otel/local/*.json
 # Playwright e2e output (local runs; CI uploads these as workflow artifacts)
 dashboard/test-results/
 dashboard/playwright-report/
-node_modules/
+node_modules

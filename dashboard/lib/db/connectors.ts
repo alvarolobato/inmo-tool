@@ -29,28 +29,32 @@ interface RegistryRow {
 
 interface LastRunRow {
   connector_name: string;
-  run_id: number | string;
+  // run_id is BIGINT (connector_run_results.run_id) — arrives as a real JS
+  // number via the driver-level int8 type parser (db-shared.ts, #155).
+  run_id: number;
   status: string;
   started_at: string | null;
   finished_at: string | null;
-  discovered_count: number | string;
-  fetched_count: number | string;
-  error_count: number | string;
+  // discovered_count/fetched_count/error_count are plain INTEGER, not
+  // BIGINT — pg has always returned these as numbers.
+  discovered_count: number;
+  fetched_count: number;
+  error_count: number;
   error_msg: string | null;
 }
 
 interface ProfileScopeRow {
-  id: number | string;
+  // search_profile.id is BIGSERIAL — see LastRunRow.run_id above.
+  id: number;
   name: string;
   scope: unknown;
 }
 
 /**
- * `pg` returns BIGINT/BIGSERIAL columns as strings (JS numbers can't hold
- * the full int64 range), and INTEGER columns as numbers. Normalising here
- * keeps a string id from leaking through a `number`-typed field into the
- * API response — the exact bug class this project has now hit three times
- * (property_id in task 2.5, feedback id in task 3.1, a test helper in 2.7).
+ * `rate_limit_per_minute` (connector_registry) is a plain INTEGER, so this
+ * only exists to normalise the occasional string-typed value in a query
+ * result shape shared across a couple of call sites — not a BIGINT/int8
+ * concern (see #155: those are handled at the driver level, not here).
  */
 function num(value: number | string | null | undefined): number {
   if (value === null || value === undefined) return 0;
@@ -184,7 +188,7 @@ async function fetchDerivedScopeSources(): Promise<DerivedScopeSource[]> {
       continue;
     }
     sources.push({
-      profile_id: num(row.id),
+      profile_id: row.id,
       profile_name: row.name,
       center: [lat, lon],
       radius_km: radiusKm,
@@ -213,13 +217,13 @@ async function fetchLastRuns(): Promise<Map<string, ConnectorLastRun>> {
   const byName = new Map<string, ConnectorLastRun>();
   for (const row of rows) {
     byName.set(row.connector_name, {
-      run_id: num(row.run_id),
+      run_id: row.run_id,
       status: row.status,
       started_at: row.started_at,
       finished_at: row.finished_at,
-      discovered_count: num(row.discovered_count),
-      fetched_count: num(row.fetched_count),
-      error_count: num(row.error_count),
+      discovered_count: row.discovered_count,
+      fetched_count: row.fetched_count,
+      error_count: row.error_count,
       error_msg: row.error_msg,
     });
   }

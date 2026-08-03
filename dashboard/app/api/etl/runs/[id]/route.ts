@@ -91,9 +91,14 @@ export async function GET(
       );
     }
 
+    // r.id (bigserial) and agg.total_discovered/total_fetched (implicit
+    // SUM(integer) => bigint) arrive as real JS numbers via the
+    // driver-level int8 type parser (db-shared.ts, #155). duration_ms/
+    // total_connectors/connectors_ok/connectors_failed/connectors_skipped
+    // are plain INTEGER — those Number() calls are unrelated and stay.
     const r = runResult.rows[0];
     const run: ConnectorRun = {
-      id: Number(r[0]),
+      id: r[0] as number,
       started_at: toIsoOrNull(r[1]) ?? "",
       finished_at: toIsoOrNull(r[2]),
       duration_ms: r[3] != null ? Number(r[3]) : null,
@@ -103,8 +108,8 @@ export async function GET(
       connectors_failed: r[7] != null ? Number(r[7]) : null,
       connectors_skipped: r[8] != null ? Number(r[8]) : null,
       trigger: String(r[9]),
-      total_discovered: r[10] != null ? Number(r[10]) : null,
-      total_fetched: r[11] != null ? Number(r[11]) : null,
+      total_discovered: r[10] != null ? (r[10] as number) : null,
+      total_fetched: r[11] != null ? (r[11] as number) : null,
     };
 
     // duration_ms is derived here: connector_run_results stores start/finish
@@ -122,8 +127,12 @@ export async function GET(
       [id],
     );
 
+    // id (bigserial) and duration_ms (explicit ::bigint cast above) arrive
+    // as real JS numbers via the driver-level int8 type parser
+    // (db-shared.ts, #155). discovered_count/fetched_count/error_count are
+    // plain INTEGER — those Number() calls are unrelated and stay.
     const connectors: ConnectorRunResult[] = resultsResult.rows.map((row) => ({
-      id: Number(row[0]),
+      id: row[0] as number,
       connector_name: String(row[1]),
       started_at: toIsoOrNull(row[2]) ?? "",
       finished_at: toIsoOrNull(row[3]),
@@ -132,7 +141,7 @@ export async function GET(
       fetched_count: row[6] != null ? Number(row[6]) : 0,
       error_count: row[7] != null ? Number(row[7]) : 0,
       error_msg: row[8] != null ? String(row[8]) : null,
-      duration_ms: row[9] != null ? Number(row[9]) : null,
+      duration_ms: row[9] != null ? (row[9] as number) : null,
     }));
 
     const response: EtlRunDetailResponse = { run, connectors };

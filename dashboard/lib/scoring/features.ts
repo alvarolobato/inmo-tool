@@ -84,12 +84,12 @@ export async function fetchScoringInputs(profileId: number): Promise<ScoringInpu
     [profileId],
   );
 
-  // pg returns NUMERIC columns as strings — same bigint/numeric-as-string
-  // class of bug lib/candidates.ts hit before (task 2.5's property_id
-  // incident); convert explicitly rather than let a "179" leak downstream
-  // into arithmetic, where it would silently coerce instead of throwing.
+  // property_id (bigint) arrives as a real JS number via the driver-level
+  // int8 type parser (db-shared.ts, #155). m2_built/min_price are NUMERIC —
+  // pg still returns those as strings (a different OID, genuine precision
+  // rationale — see #155), so those coercions stay.
   return rows.map((r) => ({
-    property_id: Number(r.property_id),
+    property_id: r.property_id,
     m2_built: r.m2_built !== null ? Number(r.m2_built) : null,
     rooms: r.rooms,
     floor: r.floor,

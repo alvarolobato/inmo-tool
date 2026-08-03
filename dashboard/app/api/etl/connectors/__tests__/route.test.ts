@@ -9,6 +9,9 @@ vi.mock("pg", () => {
       query = mockQuery;
       end = mockEnd;
     },
+    // db-shared.ts (#155) registers the int8 type parser at module load —
+    // the mock needs a minimal stand-in so that import doesn't throw.
+    types: { setTypeParser: vi.fn(), builtins: { INT8: 20 } },
   };
 });
 
@@ -77,7 +80,11 @@ describe("GET /api/etl/connectors", () => {
       .mockResolvedValueOnce({
         rows: [
           {
-            id: "7",
+            // search_profile.id (BIGSERIAL) arrives as a real JS number via
+            // the driver-level int8 type parser (db-shared.ts, #155) — this
+            // mock stands in for what `sql()` actually returns post-parser,
+            // not the raw pre-#155 string.
+            id: 7,
             name: "Madrid centro",
             scope: { geography: { type: "radius", center: [40.4168, -3.7038], radius_km: 5 } },
           },
@@ -90,8 +97,9 @@ describe("GET /api/etl/connectors", () => {
     expect(c.derivedFrom).toEqual([
       { profile_id: 7, profile_name: "Madrid centro", center: [40.4168, -3.7038], radius_km: 5 },
     ]);
-    // BIGSERIAL comes back from pg as a string — it must not leak through
-    // a number-typed field (the recurring bigint-serialization bug class).
+    // BIGSERIAL must not leak through a number-typed field as a string (the
+    // recurring bigint-serialization bug class) — now guaranteed by the
+    // driver-level parser rather than a per-site coercion.
     expect(typeof c.derivedFrom[0].profile_id).toBe("number");
   });
 

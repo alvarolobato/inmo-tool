@@ -8,6 +8,9 @@ vi.mock("pg", () => ({
     query = mockPoolQuery;
     end = mockEnd;
   },
+  // db-shared.ts (#155) registers the int8 type parser at module load —
+  // the mock needs a minimal stand-in so that import doesn't throw.
+  types: { setTypeParser: vi.fn(), builtins: { INT8: 20 } },
 }));
 
 import {
@@ -112,13 +115,19 @@ describe("listCandidates", () => {
     expect(partialPage.nextCursor).toBeNull();
   });
 
-  it("coerces property_id (a pg bigint, returned as a string) to a JSON number", async () => {
-    // pg returns bigint columns as JS strings, not numbers — property_id
-    // was previously shipped as-is ("179" not 179) while every other
-    // numeric column here already got a Number(...) conversion. Harmless
-    // today, but Phase 3's scoring/ranking will compare/sort on this field.
+  it("property_id (a pg bigint) reaches the API response as a real JSON number", async () => {
+    // property_id used to be shipped as a raw pg bigint string ("179" not
+    // 179) unless every call site remembered its own Number(...)
+    // conversion — the exact bug class #155 retired by registering a
+    // driver-level int8 type parser (db-shared.ts) instead. This unit test
+    // mocks the `pg` module directly (see the vi.mock("pg", ...) above),
+    // which bypasses that parser entirely, so the mock here supplies
+    // property_id as the number the real driver now guarantees — this test
+    // is a pass-through/shape guard on candidates.ts, not a test of the
+    // coercion itself (that's covered by a real-Postgres test, see
+    // lib/__tests__/db.test.ts).
     mockPoolQuery.mockResolvedValueOnce({
-      rows: [{ ...stubRow(0), property_id: "179" as unknown as number }],
+      rows: [{ ...stubRow(0), property_id: 179 }],
     });
     const page = await listCandidates(1);
     expect(page.items[0].property_id).toBe(179);
@@ -380,10 +389,15 @@ describe("getAdjacentCandidates", () => {
     expect(result.prevPropertyId).toBe(3);
   });
 
-  it("coerces neighbour property_id (pg bigint-as-string) to a real number", async () => {
+  it("neighbour property_id (a pg bigint) reaches the caller as a real number", async () => {
+    // See the "property_id ... real JSON number" test above: the mocked
+    // `pg` module bypasses the driver-level int8 type parser (db-shared.ts,
+    // #155) that now guarantees this in production, so the mock supplies
+    // the already-parsed number directly — this is a pass-through guard on
+    // getAdjacentCandidates, not a test of the coercion itself.
     mockPoolQuery.mockResolvedValueOnce({ rows: [{ score: "0.5" }] });
-    mockPoolQuery.mockResolvedValueOnce({ rows: [{ property_id: "42" as unknown as number }] });
-    mockPoolQuery.mockResolvedValueOnce({ rows: [{ property_id: "7" as unknown as number }] });
+    mockPoolQuery.mockResolvedValueOnce({ rows: [{ property_id: 42 }] });
+    mockPoolQuery.mockResolvedValueOnce({ rows: [{ property_id: 7 }] });
 
     const result = await getAdjacentCandidates(1, 5);
     expect(result.nextPropertyId).toBe(42);

@@ -55,20 +55,21 @@ interface LatestStateRow {
  * property at a time — same reasoning as `fetchScoringInputs`).
  */
 async function fetchLatestStates(profileId: number): Promise<LatestStateRow[]> {
-  // `property_id` is BIGINT — pg returns it as a string, same class of bug
-  // this project has hit repeatedly (task 2.5's property_id incident).
-  // Converting here, not just trusting the (wrong) `number` type below, is
-  // load-bearing: without it, `labelByProperty` (string keys) would never
-  // match `rawByProperty` (Number-keyed, from fetchScoringInputs) and every
-  // profile would silently look like it has zero training examples.
-  const rows = await sql<{ property_id: string; feedback_type: LatestStateRow["feedback_type"] }>(
+  // `property_id` is BIGINT — arrives as a real JS number via the
+  // driver-level int8 type parser (db-shared.ts, #155), which is
+  // load-bearing here: without it, `labelByProperty` (string keys) would
+  // never match `rawByProperty` (Number-keyed, from fetchScoringInputs) and
+  // every profile would silently look like it has zero training examples —
+  // this project has hit that exact class of bug repeatedly (task 2.5's
+  // property_id incident among others).
+  const rows = await sql<LatestStateRow>(
     `SELECT DISTINCT ON (property_id) property_id, feedback_type
        FROM feedback_event
       WHERE profile_id = $1 AND feedback_type = ANY($2::text[])
       ORDER BY property_id, created_at DESC, id DESC`,
     [profileId, ["accept", "reject", "star"]],
   );
-  return rows.map((r) => ({ property_id: Number(r.property_id), feedback_type: r.feedback_type }));
+  return rows;
 }
 
 /**

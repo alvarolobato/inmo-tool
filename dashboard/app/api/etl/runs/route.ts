@@ -102,9 +102,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const offset = (page - 1) * perPage;
 
   try {
-    // Get total count
+    // Get total count. COUNT(*) is bigint — arrives as a real JS number via
+    // the driver-level int8 type parser (db-shared.ts, #155).
     const countResult = await query("SELECT COUNT(*) FROM connector_runs");
-    const total = Number(countResult.rows[0][0]);
+    const total = countResult.rows[0][0] as number;
 
     // Get paginated rows. The LEFT JOIN LATERAL folds the funnel totals into
     // the same round-trip; LEFT (not INNER) so a run with no result rows yet
@@ -127,8 +128,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       [perPage, offset],
     );
 
+    // r.id (bigserial) and agg.total_discovered/total_fetched (implicit
+    // SUM(integer) => bigint) arrive as real JS numbers via the
+    // driver-level int8 type parser (db-shared.ts, #155). duration_ms/
+    // total_connectors/connectors_ok/connectors_failed/connectors_skipped
+    // are plain INTEGER — those Number() calls are unrelated and stay.
     const runs: ConnectorRun[] = runsResult.rows.map((row) => ({
-      id: Number(row[0]),
+      id: row[0] as number,
       started_at: toIsoOrNull(row[1]) ?? "",
       finished_at: toIsoOrNull(row[2]),
       duration_ms: row[3] != null ? Number(row[3]) : null,
@@ -138,8 +144,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       connectors_failed: row[7] != null ? Number(row[7]) : null,
       connectors_skipped: row[8] != null ? Number(row[8]) : null,
       trigger: String(row[9]),
-      total_discovered: row[10] != null ? Number(row[10]) : null,
-      total_fetched: row[11] != null ? Number(row[11]) : null,
+      total_discovered: row[10] != null ? (row[10] as number) : null,
+      total_fetched: row[11] != null ? (row[11] as number) : null,
     }));
 
     const response: EtlRunsResponse = { runs, total, page, per_page: perPage };

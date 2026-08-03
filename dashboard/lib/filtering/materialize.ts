@@ -59,20 +59,17 @@ export async function materializeProfile(profileId: number): Promise<Materialize
   const { whereSql, params } = buildScopeWhereClause(profile.scope);
 
   const result = await withTransaction(async (client: PoolClient) => {
-    const matchedRows = await client.query<{ id: string }>(
+    const matchedRows = await client.query<{ id: number }>(
       `SELECT property.id FROM property WHERE ${whereSql}`,
       params,
     );
-    // `property.id` is BIGSERIAL — pg returns bigint columns as strings at
-    // runtime regardless of what a query's generic type parameter claims.
-    // This was previously harmless (matchedIds only ever fed back into
-    // `unnest($n::bigint[])`, which accepts stringified bigints fine), but
-    // task 3.4 (#23) added a real in-memory Number-keyed lookup consumer
-    // (scoreNewCandidates) that a silent string/number mismatch defeats
-    // entirely — reproduced directly while building that wiring, not
-    // hypothetical. Convert at the source rather than rely on every
-    // consumer to remember to normalize.
-    const matchedIds = matchedRows.rows.map((r) => Number(r.id));
+    // `property.id` is BIGSERIAL — arrives as a real JS number via the
+    // driver-level int8 type parser (db-shared.ts, #155). Task 3.4 (#23)
+    // added a real in-memory Number-keyed lookup consumer (scoreNewCandidates)
+    // that a silent string/number mismatch defeats entirely — reproduced
+    // directly while building that wiring, not hypothetical — which is why
+    // this is asserted as `number` here rather than re-coerced ad hoc.
+    const matchedIds = matchedRows.rows.map((r) => r.id);
 
     if (matchedIds.length > 0) {
       await client.query(
@@ -102,7 +99,7 @@ export async function materializeProfile(profileId: number): Promise<Materialize
     // run, not just the ones this run just flipped (Opus review, PR #57 —
     // the original version mixed a total with a this-run delta in the same
     // response shape under confusingly similar field names).
-    const unmatchedTotal = await client.query<{ count: string }>(
+    const unmatchedTotal = await client.query<{ count: number }>(
       `SELECT COUNT(*) FROM profile_listing_state WHERE profile_id = $1 AND matched = false`,
       [profileId],
     );
@@ -110,7 +107,7 @@ export async function materializeProfile(profileId: number): Promise<Materialize
     return {
       profileId,
       matchedCount: matchedIds.length,
-      unmatchedCount: Number(unmatchedTotal.rows[0].count),
+      unmatchedCount: unmatchedTotal.rows[0].count,
       matchedIds,
     };
   });

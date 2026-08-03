@@ -15,9 +15,9 @@
     "lint:conversation-dedup": "bash scripts/lint-conversation-dedup.sh",
     "lint:llm-context": "bash scripts/check-llm-context.sh",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
-    "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
-    "test:watch": "vitest",
+    "test": "tsx scripts/test-with-isolated-db.ts run",
+    "test:coverage": "tsx scripts/test-with-isolated-db.ts run --coverage",
+    "test:watch": "tsx scripts/test-with-isolated-db.ts",
     "test:e2e": "playwright test"
   },
   "dependencies": {

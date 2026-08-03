@@ -66,8 +66,8 @@ interface RawMapRow {
 }
 
 interface RawCountRow {
-  plottable_count: string;
-  unplottable_count: string;
+  plottable_count: number;
+  unplottable_count: number;
 }
 
 export async function listMapCandidates(profileId: number): Promise<MapCandidates> {
@@ -122,7 +122,10 @@ export async function listMapCandidates(profileId: number): Promise<MapCandidate
   ]);
 
   const items: MapCandidateRow[] = rows.map((r) => ({
-    property_id: Number(r.property_id),
+    // property_id/plottable_count/unplottable_count (bigint) arrive as real
+    // JS numbers via the driver-level int8 type parser (db-shared.ts, #155).
+    // lat/lon/m2_built/min_price below are NUMERIC — those coercions stay.
+    property_id: r.property_id,
     address: r.address,
     lat: Number(r.lat),
     lon: Number(r.lon),
@@ -134,8 +137,8 @@ export async function listMapCandidates(profileId: number): Promise<MapCandidate
     listings: r.listings,
   }));
 
-  const plottableCount = counts.length > 0 ? Number(counts[0].plottable_count) : 0;
-  const unplottableCount = counts.length > 0 ? Number(counts[0].unplottable_count) : 0;
+  const plottableCount = counts.length > 0 ? counts[0].plottable_count : 0;
+  const unplottableCount = counts.length > 0 ? counts[0].unplottable_count : 0;
 
   return { items, unplottableCount, truncated: plottableCount > MAX_MAP_CANDIDATES };
 }
