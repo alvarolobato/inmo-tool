@@ -106,7 +106,22 @@ export function parseConditionResult(raw: string): ConditionResult {
   // No silenceDefault: unlike occupancy's ejes 2/3, there is no market
   // convention that silence about condition means "reformado" — silence
   // degrades straight to `unclear` with zero confidence via `known === false`.
-  const verdict = parseVerdict(o, "condition", CONDITION_CATEGORIES, "unclear");
+  const rawVerdict = parseVerdict(o, "condition", CONDITION_CATEGORIES, "unclear");
+
+  // Code-side "no citation, no assertion" backstop (#168 review, also-fix).
+  // Condition was the only one of the three #25/#26/#27 flows without one:
+  // redflags drops an uncited flag outright (redflags.ts), and occupancy's
+  // ejes 2/3 only assert from silence via a deliberate, confidence-capped
+  // exception (parseVerdict's `silenceDefault`). Condition has no legitimate
+  // silence-implied default at all, so ANY non-`unclear` value with no
+  // evidence is not "we looked and it's fine" — it's exactly what
+  // ASSESSMENT_RULES rule 3 forbids ("si no puedes citar nada, no afirmes
+  // nada"). This matters more here than for redflags: condition drives a
+  // visible card badge, which uncited red flags never do.
+  const verdict =
+    rawVerdict.value !== "unclear" && rawVerdict.evidence.trim() === ""
+      ? { ...rawVerdict, value: "unclear" as const, confidence: 0 }
+      : rawVerdict;
 
   const issues = Array.isArray(o.issues)
     ? o.issues.filter((x): x is string => typeof x === "string" && x.trim() !== "")

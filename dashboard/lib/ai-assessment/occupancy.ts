@@ -183,6 +183,21 @@ export function parseOccupancyResult(raw: string): OccupancyResult {
 
   // No silenceDefault for occupancy: per the eje-1 prompt rule, silence
   // forces `unknown`, not a clamped `vacant` — there is nothing to cap.
+  //
+  // KNOWN GAP (#168 review, noted rather than fixed here): eje 1 has the same
+  // missing "no citation, no assertion" backstop that condition.ts had before
+  // #168 — a model could report `{status: "tenanted", confidence: 0.9,
+  // evidence: ""}` and it would write through unchanged, same as condition's
+  // must-fix. Deliberately NOT applying condition's fix here in this pass:
+  // several existing tests (occupancy.test.ts's `parseOccupancyResult`/
+  // `summaryConfidence` suites) construct axis-1 verdicts with an omitted
+  // `evidence` field expecting them to pass through, and eje 1 additionally
+  // has no single "default" value to fall back to the way condition falls
+  // back to `unclear` (`unknown` already means "no signal at all", which is
+  // a different claim than "a signal existed but wasn't quoted"). Fixing
+  // this properly means auditing/updating those tests and deciding what an
+  // uncited `tenanted`/`occupied_illegally` degrades to — worth its own pass
+  // rather than folding into #26's fix. Filed against issue #25/#145.
   const occupancy = parseVerdict(o.occupancy, "status", OCCUPANCY_STATUSES);
   const transaction = parseVerdict(
     o.transaction,

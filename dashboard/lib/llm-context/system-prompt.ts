@@ -398,6 +398,30 @@ defecto — nunca omitas una clave):
  * there is no market convention under which a seller who doesn't mention
  * condition therefore has a renovated flat. Silence stays `unclear` — the
  * same rule as occupancy's eje 1.
+ *
+ * ## `reformado`'s boundary, tightened (#168 review, judgement call)
+ *
+ * The reviewer found the original wording ("reformado recientemente…listo
+ * para entrar sin obra") didn't partition the real cases: a habitable,
+ * unremarkable, not-recently-renovated flat ("piso en buen estado, listo
+ * para entrar") satisfies the second half and fails the first — and that's
+ * arguably the single most common state in the Spanish market. Under the old
+ * wording the model had to guess between `reformado` and `unclear`
+ * non-deterministically for that population.
+ *
+ * Decision: keep the 4-value enum (the issue specifies exactly these four —
+ * not something to change unilaterally in a review-fix pass), but redefine
+ * `reformado`'s boundary so it partitions cleanly: the axis that matters for
+ * an investor is "does this need money spent on it before it can be used or
+ * rented", not "when was it last renovated". So `reformado` now means "no
+ * reform needed", covering BOTH an explicit recent renovation AND a merely
+ * well-kept older flat with no reform pending. That collapses two states an
+ * investor treats identically (zero capex) into one category, and leaves
+ * `unclear` meaning what it should: "the text doesn't say enough to tell
+ * whether it needs work or not" — not "it's fine but I can't prove when it
+ * was fixed up". A finer split (recently-renovated-with-premium-finishes vs.
+ * generic-move-in-ready) would need a 5th value; noted on issue #26 for the
+ * owner if that granularity turns out to matter for scoring later.
  */
 export function buildConditionPrompt(vars: FlowVars): {
   stable: string;
@@ -411,19 +435,29 @@ Clasifica el estado del inmueble para estimar si necesita reforma. Un inversor
 de "comprar y reformar" busca precisamente los que están mal; uno de "comprar
 y alquilar ya" busca lo contrario.
 
-Categorías (\`condition\`):
+Categorías (\`condition\`) — el eje que decide la categoría es **"¿hay que
+meter dinero en obra antes de poder usarlo o alquilarlo?"**, no "¿cuándo se
+reformó por última vez?":
 - \`obra_nueva\` — promoción nueva, a estrenar, sin usar.
-- \`reformado\` — reformado recientemente ("reformado en 2023", "a estrenar
-  tras reforma integral", "calidades de lujo"), listo para entrar sin obra.
+- \`reformado\` — **no necesita obra**: se puede entrar a vivir o alquilar tal
+  cual. Incluye tanto una reforma reciente explícita ("reformado en 2023", "a
+  estrenar tras reforma integral", "calidades de lujo") COMO un piso
+  simplemente en buen estado que nadie describe como "reformado" pero que
+  tampoco necesita nada ("piso en buen estado, listo para entrar",
+  "conservado", "para entrar a vivir ya"). Este segundo caso es el más
+  habitual del mercado español — no lo empujes a \`unclear\` solo porque el
+  anuncio no usa la palabra "reformado": lo que importa es la ausencia de obra
+  pendiente, no la fecha de la última reforma.
 - \`a_reformar\` — necesita reforma, de cualquier calibre, para ser habitable
   o competitivo: instalaciones antiguas, baño/cocina a renovar, humedades,
   reforma integral o estructural. No distingas cosmético de estructural en la
   categoría — usa \`issues\` para eso.
-- \`unclear\` — el anuncio no da información suficiente para decidir.
+- \`unclear\` — el anuncio no da información suficiente para decidir si
+  necesita obra o no (ni lo dice ni da pistas indirectas de un lado u otro).
 
 **El silencio NO es prueba de \`reformado\`.** Que un anuncio no mencione el
 estado es lo más habitual del mundo, y no hay ninguna convención de mercado
-por la que el silencio implique que el inmueble está reformado. Sin señal,
+por la que el silencio implique que el inmueble no necesita obra. Sin señal,
 \`unclear\`.
 
 Ojo con el lenguaje comercial: "con encanto", "para actualizar", "con
@@ -442,6 +476,12 @@ debe decir de qué portal salió esa cita, para que el inversor pueda ir a
 comprobarlo.
 
 ${ASSESSMENT_RULES}
+
+**Nota sobre la regla 2 anterior:** en esta tarea, "no lo sé" se expresa con
+\`unclear\`, no con \`unknown\` — \`unknown\` no es un valor válido de
+\`condition\` y rompería el formato de salida. Usa \`unclear\` con una
+\`confidence\` baja cuando el anuncio no dé información suficiente, tal y como
+se explicó arriba.
 
 Formato de salida:
 {
@@ -516,6 +556,10 @@ fuente de evidencia: basta que UN anuncio mencione un riesgo para incluirlo.
 debe decir de qué portal sale esa cita.
 
 ${ASSESSMENT_RULES}
+
+**Nota sobre la regla 2 anterior:** aquí no hay un campo de estado individual
+que pueda valer \`unknown\` — la ausencia de hallazgos se expresa devolviendo
+\`flags: []\` (ver más abajo), no con un valor "no lo sé" por hallazgo.
 
 Formato de salida:
 {

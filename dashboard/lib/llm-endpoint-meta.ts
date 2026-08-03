@@ -51,6 +51,31 @@ const MAP: Record<string, LlmEndpointMetaEs> = {
     detail:
       "Propone preguntas cortas de seguimiento en el chat de análisis del dashboard, a partir del último intercambio.",
   },
+  occupancy: {
+    label: "Ocupación y titularidad",
+    detail:
+      "Evalúa si el inmueble se entrega libre, alquilado u ocupado, y qué se transmite realmente (compraventa, venta de deuda, nuda propiedad, proindiviso…).",
+  },
+  condition: {
+    label: "Estado de conservación",
+    detail:
+      "Clasifica si el inmueble está reformado, a reformar o es obra nueva, a partir del texto del anuncio.",
+  },
+  redflags: {
+    label: "Señales de alerta legales",
+    detail:
+      "Extrae menciones de embargos, herencias yacentes, deudas de comunidad u otros riesgos que conviene revisar con un abogado.",
+  },
+  extract: {
+    label: "Extracción de campos",
+    detail:
+      "Recupera campos estructurados (habitaciones, m2, planta…) del texto libre de un anuncio que no los trae ya estructurados.",
+  },
+  compare: {
+    label: "Comparar candidatos",
+    detail:
+      "Compara varios inmuebles candidatos entre sí según la tesis de inversión del usuario.",
+  },
 };
 
 export function getLlmEndpointMetaEs(endpoint: string): LlmEndpointMetaEs {

@@ -134,8 +134,22 @@ export function parseRedFlagsResult(raw: string): RedFlagsResult {
   }
 
   const o = parsed as Record<string, unknown>;
-  const rawFlags = Array.isArray(o.flags) ? o.flags : [];
-  const flags = rawFlags
+  // A missing or non-array `flags` is NOT "nothing to flag" — it's a
+  // malformed/off-schema response (truncation, a refusal wrapped in JSON,
+  // prompt drift to a differently-named field like `red_flags`/`findings`).
+  // Silently coercing it to [] used to carry the model's stated confidence
+  // through unchanged, so e.g. `{"flags":"ninguna","confidence":0.9}` became
+  // `{flags: [], confidence: 0.9}` — shape-identical to a genuine clean read
+  // (#168 review, must-fix 1). Same treatment as non-JSON output above: throw
+  // so the caller re-runs rather than persists a false "legally clean"
+  // verdict. This is the parse-path counterpart of the guard `assessProperty
+  // RedFlags` already has on the load path (module doc, above).
+  if (!Array.isArray(o.flags)) {
+    throw new Error(
+      `Redflags flow returned a non-array 'flags': ${raw.slice(0, 200)}`,
+    );
+  }
+  const flags = o.flags
     .map(parseFlag)
     .filter((f): f is RedFlag => f !== null);
 

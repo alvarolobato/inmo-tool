@@ -60,6 +60,36 @@ describe("condition prompt — evidence union across merged listings", () => {
   });
 });
 
+describe("condition prompt — `unclear` override survives ASSESSMENT_RULES (#168 review, must-fix 2)", () => {
+  // ASSESSMENT_RULES (shared by every flow) tells the model to answer
+  // insufficient info with `"unknown"` — a value outside CONDITION_CATEGORIES.
+  // A model resolving the conflict by recency (the last instruction it reads
+  // wins) would emit `unknown`, which `parseVerdict` then degrades to
+  // `unclear` at FORCED zero confidence (via `known === false`) regardless of
+  // what confidence the model actually reported — turning a deliberate
+  // low-confidence "I don't know" into something indistinguishable from
+  // garbage. Occupancy's ejes-2/3 exception already established the fix:
+  // restate the flow-specific rule AFTER ASSESSMENT_RULES so it's the last
+  // thing the model reads (occupancy.test.ts, "survives ASSESSMENT_RULES").
+  it("restates the `unclear`-not-`unknown` correction AFTER ASSESSMENT_RULES' generic unknown rule", () => {
+    const text = conditionPromptText([SILENT_ADVERT]);
+
+    const genericUnknownRuleIdx = text.indexOf('`"unknown"` y una `confidence` baja');
+    const correctionIdx = text.indexOf("Nota sobre la regla 2 anterior");
+
+    expect(genericUnknownRuleIdx).toBeGreaterThan(-1);
+    expect(correctionIdx).toBeGreaterThan(-1);
+    // The correction must come LAST: it is what a model resolving a conflict
+    // by recency will actually obey.
+    expect(correctionIdx).toBeGreaterThan(genericUnknownRuleIdx);
+  });
+
+  it("explicitly tells the model `unknown` is not a valid `condition` value", () => {
+    const text = conditionPromptText([SILENT_ADVERT]);
+    expect(text).toContain("`unknown` no es un valor válido de");
+  });
+});
+
 describe("parseConditionResult", () => {
   it("EC-1: 'a reformar, necesita actualización de instalaciones y baño' produces a_reformar with issues", () => {
     const raw = JSON.stringify({
@@ -98,7 +128,14 @@ describe("parseConditionResult", () => {
   });
 
   it("tolerates a ```json code fence", () => {
-    const raw = "```json\n" + JSON.stringify({ condition: "obra_nueva", confidence: 0.7 }) + "\n```";
+    const raw =
+      "```json\n" +
+      JSON.stringify({
+        condition: "obra_nueva",
+        confidence: 0.7,
+        evidence: "promoción de obra nueva a estrenar",
+      }) +
+      "\n```";
     expect(parseConditionResult(raw).condition).toBe("obra_nueva");
   });
 
@@ -122,7 +159,11 @@ describe("parseConditionResult", () => {
 
   it("clamps a confidence the model reports outside 0..1", () => {
     const r = parseConditionResult(
-      JSON.stringify({ condition: "reformado", confidence: 3.7 }),
+      JSON.stringify({
+        condition: "reformado",
+        confidence: 3.7,
+        evidence: "reformado integral en 2022",
+      }),
     );
     expect(r.confidence).toBe(1);
   });
@@ -140,6 +181,34 @@ describe("parseConditionResult", () => {
 
   it("throws on non-JSON output instead of silently returning unclear", () => {
     expect(() => parseConditionResult("lo siento, no puedo")).toThrow(/non-JSON/);
+  });
+
+  it("degrades a non-`unclear` verdict with no evidence citation to `unclear` at zero confidence (#168 review, also-fix)", () => {
+    // Condition was the only one of the three flows (#25/#26/#27) with no
+    // code-side "no citation, no assertion" backstop. Redflags drops an
+    // uncited flag (redflags.ts); occupancy's ejes 2/3 only assert from
+    // silence via a deliberate, capped exception. Condition had nothing:
+    // `{"condition":"a_reformar","confidence":0.95,"evidence":""}` used to
+    // write through unchanged — and condition drives a visible card badge,
+    // which uncited red flags never do.
+    const r = parseConditionResult(
+      JSON.stringify({ condition: "a_reformar", confidence: 0.95, evidence: "" }),
+    );
+    expect(r.condition).toBe("unclear");
+    expect(r.confidence).toBe(0);
+  });
+
+  it("still accepts a non-`unclear` verdict when evidence IS cited", () => {
+    // Guards against an overzealous fix that forces everything to `unclear`.
+    const r = parseConditionResult(
+      JSON.stringify({
+        condition: "a_reformar",
+        confidence: 0.8,
+        evidence: "necesita reforma integral",
+      }),
+    );
+    expect(r.condition).toBe("a_reformar");
+    expect(r.confidence).toBe(0.8);
   });
 });
 

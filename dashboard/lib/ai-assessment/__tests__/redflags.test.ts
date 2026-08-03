@@ -134,9 +134,25 @@ describe("parseRedFlagsResult", () => {
     expect(REDFLAG_TYPES).toContain(r.flags[0].type);
   });
 
-  it("degrades a missing flags array to an empty list rather than throwing", () => {
-    const r = parseRedFlagsResult(JSON.stringify({ reasoning: "no dice nada" }));
-    expect(r.flags).toEqual([]);
+  it("throws when 'flags' is missing rather than degrading to a confident empty list (#168 review, must-fix 1)", () => {
+    // A missing `flags` used to silently become `[]` while carrying the
+    // model's stated confidence through unchanged — persisting
+    // `{flags: [], confidence: 0.9}`, shape-identical to a genuine clean
+    // read. That is worse than throwing: a re-run costs an LLM call, a
+    // false "legally clean" verdict costs an investor a bad decision.
+    expect(() =>
+      parseRedFlagsResult(JSON.stringify({ reasoning: "no dice nada" })),
+    ).toThrow(/flags/i);
+  });
+
+  it("throws when 'flags' is present but not an array, even if confidence looks high", () => {
+    // Verified live against a real model: a policy refusal or prompt drift
+    // can put a string (e.g. "ninguna") where the array belongs, alongside
+    // an otherwise well-formed confidence — exactly the shape that used to
+    // sail through as a confident clean read.
+    expect(() =>
+      parseRedFlagsResult(JSON.stringify({ flags: "ninguna", confidence: 0.9 })),
+    ).toThrow(/flags/i);
   });
 
   it("ignores non-object entries in flags defensively", () => {
