@@ -104,6 +104,33 @@ def test_property_count(pg_conn):
     assert count >= 0
 ```
 
+### Gotcha: exact-count assertions on shared test coordinates flake under concurrent files (found while building #32's area-price tests)
+
+Issue #159 isolates each `npm test` invocation to its own throwaway
+database, but vitest still runs test *files* concurrently by default
+against that one shared database. Several existing integration test files
+(`materialize.integration.test.ts`, `candidates.integration.test.ts`,
+`property-detail.integration.test.ts`) all seed synthetic properties at the
+same real-world point (`MADRID_SOL`, `[40.4168, -3.7038]`) — this is safe
+for them because every assertion checks *containment* of specific IDs
+(`expect(matches).toContain(insideId)`), never a total count.
+
+A new test that asserts an **exact count** within a radius (e.g.
+`lib/analytics/__tests__/area-price.test.ts`'s `sample_size`) is NOT safe at
+that same point: another file's concurrently-running fixture can land
+inside the query's radius and inflate the count, producing an intermittent
+failure that has nothing to do with the code under test — reproduced
+directly: a full `npm test` run failed 2 of `area-price.test.ts`'s tests
+one run and passed cleanly the next, while running that file alone was
+always green.
+
+**Rule**: if your test asserts an exact count (not just presence/absence of
+specific rows) over a geographic radius or any other "everything nearby"
+query, seed your fixtures at a coordinate no other test file uses — don't
+reuse `MADRID_SOL`/`ATOCHA`. Pick something clearly dedicated and far
+outside every other file's query radius (`area-price.test.ts` uses Gijón,
+`[43.3619, -5.8494]`, with a one-line comment explaining why).
+
 ### Test structure (Python)
 
 ```python

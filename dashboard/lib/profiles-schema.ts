@@ -113,9 +113,64 @@ export const ThesisParamsSchema = z
     target_yield_pct: z.number().nonnegative().optional(),
     financing: z
       .object({
-        down_payment_pct: z.number().min(0).max(100),
-        rate_pct: z.number().nonnegative(),
-        term_years: z.number().int().positive(),
+        // Each field is independently optional (NOT the "all-or-nothing
+        // triple" this schema originally required) — an Opus review found
+        // that requiring all three meant ProfileForm had to silently
+        // synthesize rate_pct/term_years defaults the instant a user typed
+        // only a down payment, and yield.ts's old single
+        // `financing_is_default` flag then reported those silently-filled
+        // values as "user-set" (see yield.ts's per-field
+        // `*_is_default` flags, which depend on each field being
+        // independently undefined-able here to mean anything).
+        down_payment_pct: z.number().min(0).max(100).optional(),
+        rate_pct: z.number().nonnegative().optional(),
+        term_years: z.number().int().positive().optional(),
+        // Task 5.3 (#33), issue #151 tie-in: percentage of GROSS annual rent
+        // assumed to go to community fees/IBI/maintenance/vacancy when
+        // NEITHER actual IBI nor community fee is known. Optional
+        // per-profile override of yield.ts's DEFAULT_OPERATING_COST_PCT —
+        // left inside `financing` rather than a new top-level key because
+        // ProfileForm already treats this triple as "the investment-maths
+        // assumptions block" and #33's Context explicitly says not to invent
+        // a second configuration mechanism alongside it.
+        operating_cost_pct: z.number().min(0).max(100).optional(),
+        // Issue #151 (Opus review revision): percentage of GROSS annual
+        // rent assumed for maintenance + vacancy ONLY, applied on top of
+        // actual IBI/community-fee figures whenever at least one is known
+        // (see yield.ts's DEFAULT_MAINTENANCE_VACANCY_PCT docstring for the
+        // full "additive, not a full replacement" rationale).
+        maintenance_vacancy_pct: z.number().min(0).max(100).optional(),
+      })
+      .strict()
+      .optional(),
+    // Issue #151's rent-estimation decision (see PR body / rent-estimate.ts
+    // module docstring): #31 (comparable-rental ingestion) is not built and
+    // is out of this PR's scope (etl/connectors is owned by other in-flight
+    // work), so there is no comparable signal to derive a rent estimate
+    // from. Rather than inventing one, this ships a per-profile ASSUMPTION
+    // the user states explicitly — an investment thesis's own €/m²/month
+    // rent expectation for its target zone — which yield.ts consumes and
+    // labels as an assumption, never as a measurement. Unset means "no rent
+    // assumption yet": yield.ts returns an explicit no-estimate result
+    // rather than fabricating a number.
+    rent_assumption: z
+      .object({
+        eur_per_m2_month: z.number().positive(),
+      })
+      .strict()
+      .optional(),
+    // Issue #151: acquisition-cost overrides. Defaults (ITP by comunidad
+    // autónoma, notary/registry/gestoría) live in
+    // lib/analytics/acquisition-costs.ts's reviewable tables — these fields
+    // let a specific profile override any of them (e.g. a buyer circumstance
+    // the flat regional table doesn't model, such as a reduced-rate young-
+    // buyer ITP). All optional; unset means "use the documented default".
+    acquisition_costs: z
+      .object({
+        itp_pct_override: z.number().min(0).max(100).optional(),
+        notary_pct: z.number().nonnegative().optional(),
+        registry_pct: z.number().nonnegative().optional(),
+        gestoria_eur: z.number().nonnegative().optional(),
       })
       .strict()
       .optional(),

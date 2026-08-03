@@ -7,10 +7,12 @@ import { ErrorDisplay } from "@/components/ErrorDisplay";
 import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
 import type { PropertyDetail } from "@/lib/property-detail";
+import type { InvestmentMetrics } from "@/lib/investment-metrics";
 import { PropertyHeader } from "@/components/property/PropertyHeader";
 import { PhotoGallery } from "@/components/property/PhotoGallery";
 import { LinkedListings } from "@/components/property/LinkedListings";
 import { PriceHistoryChart } from "@/components/property/PriceHistoryChart";
+import { YieldSection } from "@/components/property/sections/YieldSection";
 import { DetailSections, type DetailSection } from "@/components/property/DetailSections";
 
 interface Adjacent {
@@ -75,6 +77,7 @@ export default function PropertyDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<ApiErrorResponse | string | null>(null);
   const [adjacent, setAdjacent] = useState<Adjacent>({ prevPropertyId: null, nextPropertyId: null });
+  const [investmentMetrics, setInvestmentMetrics] = useState<InvestmentMetrics | null>(null);
 
   useEffect(() => {
     if (profileId === null || propertyId === null) return;
@@ -124,6 +127,29 @@ export default function PropertyDetailPage() {
     };
   }, [profileId, propertyId]);
 
+  // Separate, non-blocking request (task 5.3, #33 — same pattern as
+  // `adjacent` above): this is a heavier, multi-query computation (area
+  // price median, acquisition costs, amortization) that must not delay the
+  // core property content, and a failure here (e.g. no DB reachable for
+  // this specific query) must not surface an error banner on an otherwise
+  // fine page — the section simply doesn't render.
+  useEffect(() => {
+    if (profileId === null || propertyId === null) return;
+    let cancelled = false;
+    setInvestmentMetrics(null);
+    fetch(`/api/profiles/${profileId}/properties/${propertyId}/investment`)
+      .then((res) => (res.ok ? (res.json() as Promise<InvestmentMetrics>) : null))
+      .then((data) => {
+        if (!cancelled && data) setInvestmentMetrics(data);
+      })
+      .catch(() => {
+        /* best-effort — section stays absent */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [profileId, propertyId]);
+
   if (profileId === null || propertyId === null) {
     return (
       <main style={{ maxWidth: 900, margin: "0 auto", padding: 24 }}>
@@ -150,6 +176,20 @@ export default function PropertyDetailPage() {
             <PriceHistoryChart priceHistory={property.price_history} statusEvents={property.status_events} />
           ),
         },
+        // Investment metrics (task 5.3, #33 — reserved order 40). Only
+        // added once loaded, same "absent rather than a placeholder" rule
+        // CandidateCard's `flags` field follows — a slow/failed fetch means
+        // no section, never a skeleton competing with the rest of the page.
+        ...(investmentMetrics !== null
+          ? [
+              {
+                id: "investment",
+                title: "Métricas de inversión",
+                order: 40,
+                content: <YieldSection metrics={investmentMetrics} />,
+              },
+            ]
+          : []),
       ]
     : [];
 
