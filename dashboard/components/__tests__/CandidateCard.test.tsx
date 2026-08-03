@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { CandidateCard } from "@/components/candidates/CandidateCard";
 import type { CandidateRow } from "@/lib/candidates";
@@ -17,7 +17,7 @@ function candidate(overrides: Partial<CandidateRow> = {}): CandidateRow {
     rooms: 2,
     bathrooms: 1,
     floor: "3",
-    thumbnail_url: "https://img.example/1.jpg",
+    photos: ["https://img.example/1.jpg"],
     flags: [],
     min_price: 279000,
     first_seen_at: "2026-07-01T00:00:00.000Z",
@@ -38,12 +38,81 @@ describe("CandidateCard", () => {
     expect(screen.getByText("fotocasa")).toBeInTheDocument();
   });
 
-  it("leads with the listing photo, falling back to a placeholder when the property has none", () => {
+  it("leads with the first photo, falling back to a placeholder when the property has none", () => {
     const { rerender } = render(<CandidateCard candidate={candidate()} profileId={5} />);
     expect(screen.getByTestId("candidate-photo-img")).toHaveAttribute("src", "https://img.example/1.jpg");
 
-    rerender(<CandidateCard candidate={candidate({ thumbnail_url: null })} profileId={5} />);
+    rerender(<CandidateCard candidate={candidate({ photos: [] })} profileId={5} />);
     expect(screen.getByTestId("candidate-photo-placeholder")).toBeInTheDocument();
+  });
+
+  it("#167: renders no ticker for zero or one photo — only 2+ photos get prev/next controls", () => {
+    const { rerender } = render(<CandidateCard candidate={candidate({ photos: [] })} profileId={5} />);
+    expect(screen.queryByTestId("candidate-photo-ticker")).not.toBeInTheDocument();
+
+    rerender(<CandidateCard candidate={candidate({ photos: ["https://img.example/1.jpg"] })} profileId={5} />);
+    expect(screen.queryByTestId("candidate-photo-ticker")).not.toBeInTheDocument();
+
+    rerender(
+      <CandidateCard
+        candidate={candidate({ photos: ["https://img.example/1.jpg", "https://img.example/2.jpg"] })}
+        profileId={5}
+      />,
+    );
+    expect(screen.getByTestId("candidate-photo-ticker")).toBeInTheDocument();
+  });
+
+  it("#167: ticker prev/next cycle the displayed photo and wrap at both ends, without navigating", () => {
+    render(
+      <CandidateCard
+        candidate={candidate({
+          photos: ["https://img.example/1.jpg", "https://img.example/2.jpg", "https://img.example/3.jpg"],
+        })}
+        profileId={5}
+      />,
+    );
+    const img = () => screen.getByTestId("candidate-photo-img");
+    expect(img()).toHaveAttribute("src", "https://img.example/1.jpg");
+
+    fireEvent.click(screen.getByTestId("candidate-photo-next"));
+    expect(img()).toHaveAttribute("src", "https://img.example/2.jpg");
+
+    fireEvent.click(screen.getByTestId("candidate-photo-next"));
+    expect(img()).toHaveAttribute("src", "https://img.example/3.jpg");
+
+    // Wraps forward past the last photo back to the first.
+    fireEvent.click(screen.getByTestId("candidate-photo-next"));
+    expect(img()).toHaveAttribute("src", "https://img.example/1.jpg");
+
+    // Wraps backward past the first photo to the last.
+    fireEvent.click(screen.getByTestId("candidate-photo-prev"));
+    expect(img()).toHaveAttribute("src", "https://img.example/3.jpg");
+
+    // The whole point: cycling photos must never navigate away from the list.
+    expect(screen.getByRole("link")).toHaveAttribute("href", "/profiles/5/properties/1");
+  });
+
+  it("#167: the ticker controls are outside the detail <Link>, mirroring the feedback bar's sibling-not-child layout", () => {
+    render(
+      <CandidateCard
+        candidate={candidate({ photos: ["https://img.example/1.jpg", "https://img.example/2.jpg"] })}
+        profileId={5}
+      />,
+    );
+    const link = screen.getByRole("link");
+    const ticker = screen.getByTestId("candidate-photo-ticker");
+    expect(link.contains(ticker)).toBe(false);
+  });
+
+  it("#167: ticker buttons have accessible labels", () => {
+    render(
+      <CandidateCard
+        candidate={candidate({ photos: ["https://img.example/1.jpg", "https://img.example/2.jpg"] })}
+        profileId={5}
+      />,
+    );
+    expect(screen.getByTestId("candidate-photo-prev")).toHaveAttribute("aria-label", "Foto anterior");
+    expect(screen.getByTestId("candidate-photo-next")).toHaveAttribute("aria-label", "Foto siguiente");
   });
 
   it("renders one badge per AI flag, colouring only the ones that change what you're buying", () => {

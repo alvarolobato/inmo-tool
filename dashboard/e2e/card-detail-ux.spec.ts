@@ -16,7 +16,7 @@
  * every navigation 307s to the login page and the assertions below would fail
  * on a page that is actually healthy.
  */
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, devices, type Page } from "@playwright/test";
 import { Pool } from "pg";
 import { adminKey, seedAdminSession } from "./helpers/admin-session";
 
@@ -205,17 +205,81 @@ test("the action bar is reachable on hover and acting on it does not navigate", 
   await expect(target).toBeVisible();
 
   const actions = target.getByTestId("candidate-card-actions");
-  // Baseline: hidden (opacity 0) until the card is hovered.
-  await expect(actions).toHaveCSS("opacity", "0");
+  // #167: visibility moved from the wrapper (.candidate-card-actions) down
+  // to each button (.feedback-toggle) so a marked property's active button
+  // can stay visible without hover while its unmarked siblings still don't —
+  // see globals.css's "Candidate card action overlay" comment for why a
+  // parent's opacity can't be selectively overridden by a child. Baseline:
+  // an unmarked property's reject button is hidden (opacity 0) until the
+  // card is hovered.
+  const reject = actions.getByTestId("feedback-reject");
+  await expect(reject).toHaveCSS("opacity", "0");
 
   await target.hover();
-  await expect(actions).toHaveCSS("opacity", "1");
+  await expect(reject).toHaveCSS("opacity", "1");
 
   await actions.getByTestId("feedback-accept").click();
   await expect(actions.getByTestId("feedback-accept")).toHaveAttribute("aria-pressed", "true");
   // The whole point of keeping the controls a sibling of the <Link>.
   await expect(page).toHaveURL(new RegExp(`/profiles/${profileId}$`));
   await assertNoErrorSurface(page);
+});
+
+// #167: the currently-active status button must stay visible without hover
+// — a marked property should read as marked while scanning the list — while
+// every other (unmarked) button on the same card keeps the original
+// hover-only behaviour. Separate test from the one above because that one
+// hovers before clicking, which never exercises the no-hover case this
+// feature exists for.
+test("#167: the button matching the property's current feedback state stays visible without hovering, unlike the rest of the row", async ({
+  page,
+}) => {
+  await page.goto(`/profiles/${profileId}`);
+  const target = card(page, bottomId);
+  await expect(target).toBeVisible();
+
+  const actions = target.getByTestId("candidate-card-actions");
+  const star = actions.getByTestId("feedback-star");
+  const reject = actions.getByTestId("feedback-reject");
+
+  // Unmarked: both hidden without hover (baseline, unchanged by #167).
+  await expect(star).toHaveCSS("opacity", "0");
+  await expect(reject).toHaveCSS("opacity", "0");
+
+  // Mark it, then move the mouse fully away so no hover/focus-within path
+  // is active — this is the state the feature is actually for.
+  await target.hover();
+  await star.click();
+  await expect(star).toHaveAttribute("aria-pressed", "true");
+  // Move the mouse fully away AND blur the just-clicked button — a real
+  // click leaves it focused, and :focus-within would otherwise reveal the
+  // whole row exactly like :hover does, masking the thing this test exists
+  // to prove. Neither hover nor focus-within may be active for this
+  // assertion to mean anything.
+  await page.mouse.move(0, 0);
+  await star.evaluate((el) => (el as HTMLElement).blur());
+  // globals.css transitions .feedback-toggle's opacity over 120ms — reading
+  // it immediately after the hover/focus state clears can catch a transient,
+  // still-decaying value (e.g. still "1" a few ms into an animation *toward*
+  // 0), which would make `toHaveCSS("opacity", "1")` pass on a technicality
+  // even for a genuinely broken always-visible feature (caught by #167's
+  // required mutation test: asserting right after the move/blur passed even
+  // with data-active hardcoded to false, because the transition hadn't
+  // settled to 0 yet). Wait past the transition so the assertion reads the
+  // final, settled value.
+  await page.waitForTimeout(200);
+
+  await expect(star).toHaveCSS("opacity", "1");
+  // The un-marked reject button on the SAME card stays hover-only — this is
+  // "only that one button", not "the whole row once anything is marked".
+  await expect(reject).toHaveCSS("opacity", "0");
+
+  // Distinguishable from a hover-revealed unset button, not just "visible":
+  // the active button gets a solid, semantically-coloured fill (--warn for
+  // star) rather than the muted rgba(0,0,0,0.35) every hover-revealed
+  // inactive button uses.
+  const starBg = await star.evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(starBg).not.toBe("rgba(0, 0, 0, 0.35)");
 });
 
 test("lightbox walks the photo union with buttons and arrow keys", async ({ page }) => {
@@ -239,6 +303,67 @@ test("lightbox walks the photo union with buttons and arrow keys", async ({ page
 
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("photo-gallery-lightbox")).toHaveCount(0);
+});
+
+test("#167: the list-card photo ticker cycles the property's photos in place, wraps at both ends, and never navigates", async ({
+  page,
+}) => {
+  await page.goto(`/profiles/${profileId}`);
+  const target = card(page, topId);
+  await expect(target).toBeVisible();
+
+  const img = target.getByTestId("candidate-photo-img");
+  const ticker = target.getByTestId("candidate-photo-ticker");
+  const next = ticker.getByTestId("candidate-photo-next");
+  const prev = ticker.getByTestId("candidate-photo-prev");
+
+  await expect(img).toHaveAttribute("src", /1\.jpg$/);
+  // Hidden until hover, same three-path rule as the action bar.
+  await expect(next).toHaveCSS("opacity", "0");
+
+  await target.hover();
+  await expect(next).toHaveCSS("opacity", "1");
+
+  await next.click();
+  await expect(img).toHaveAttribute("src", /2\.jpg$/);
+  await next.click();
+  await expect(img).toHaveAttribute("src", /3\.jpg$/);
+  // Wraps forward past the last photo back to the first.
+  await next.click();
+  await expect(img).toHaveAttribute("src", /1\.jpg$/);
+  // Wraps backward past the first photo to the last.
+  await prev.click();
+  await expect(img).toHaveAttribute("src", /3\.jpg$/);
+
+  // The whole point: flicking through photos must never leave the list.
+  await expect(page).toHaveURL(new RegExp(`/profiles/${profileId}$`));
+  await assertNoErrorSurface(page);
+});
+
+test("#167: locally-scoped arrow keys cycle the focused card's ticker without a document-level listener", async ({
+  page,
+}) => {
+  await page.goto(`/profiles/${profileId}`);
+  const target = card(page, topId);
+  const img = target.getByTestId("candidate-photo-img");
+  const next = target.getByTestId("candidate-photo-ticker").getByTestId("candidate-photo-next");
+
+  await next.focus();
+  await expect(img).toHaveAttribute("src", /1\.jpg$/);
+
+  await page.keyboard.press("ArrowRight");
+  await expect(img).toHaveAttribute("src", /2\.jpg$/);
+  await page.keyboard.press("ArrowLeft");
+  await expect(img).toHaveAttribute("src", /1\.jpg$/);
+});
+
+test("#167: a property with zero or one photo shows no ticker controls", async ({ page }) => {
+  await page.goto(`/profiles/${profileId}`);
+
+  // middleId was seeded with photoUrls: [] — the existing placeholder, no
+  // ticker (an empty photo array is not the same as "one photo").
+  await expect(card(page, middleId).getByTestId("candidate-photo-placeholder")).toBeVisible();
+  await expect(card(page, middleId).getByTestId("candidate-photo-ticker")).toHaveCount(0);
 });
 
 test("detail page walks the ranking with prev/next, disabled at the ends", async ({ page }) => {
@@ -271,4 +396,74 @@ test("detail page walks the ranking with prev/next, disabled at the ends", async
     "href",
     `/profiles/${profileId}/properties/${middleId}`,
   );
+});
+
+// #167 requires two things to hold specifically on touch, where nothing is
+// hover-revealed and everything the desktop CSS rules gate on :hover is
+// permanently visible instead (@media (hover: none) in globals.css):
+//   1. the action bar and photo ticker must actually be reachable — measured
+//      via real device emulation, not inferred from reading the CSS (a
+//      prior review explicitly asked for computed-style verification here);
+//   2. because "visible" carries no signal at all once everything is always
+//      visible, the active status button must be distinguishable by its own
+//      fill colour, not by whether it's shown.
+test.describe("#167: touch/coarse-pointer behaviour (iPhone 13 emulation)", () => {
+  // Destructure out `defaultBrowserType` (webkit) — this project's single
+  // Playwright project is chromium (playwright.config.ts), and Playwright
+  // refuses `defaultBrowserType` inside a describe block because switching
+  // browser engines requires a new worker, not just new context options.
+  // Chromium's mobile emulation (viewport/isMobile/hasTouch below) is what
+  // actually flips `@media (hover: none)`, independent of engine choice.
+  const { defaultBrowserType: _defaultBrowserType, ...iPhone13 } = devices["iPhone 13"];
+  test.use({ ...iPhone13 });
+
+  test("action bar and photo ticker are permanently visible without hover on a touch device, and the active status button is visually distinct from a merely-visible one", async ({
+    page,
+  }) => {
+    await page.goto(`/profiles/${profileId}`);
+    const target = card(page, topId);
+    await expect(target).toBeVisible();
+
+    const actions = target.getByTestId("candidate-card-actions");
+    const reject = actions.getByTestId("feedback-reject");
+    const accept = actions.getByTestId("feedback-accept");
+    // No hover event exists on this device — @media (hover: none) makes the
+    // whole row visible unconditionally, unlike the desktop baseline above.
+    await expect(reject).toHaveCSS("opacity", "1");
+    await expect(accept).toHaveCSS("opacity", "1");
+
+    const ticker = target.getByTestId("candidate-photo-ticker");
+    const tickerNext = ticker.getByTestId("candidate-photo-next");
+    await expect(tickerNext).toHaveCSS("opacity", "1");
+
+    const img = target.getByTestId("candidate-photo-img");
+    await expect(img).toHaveAttribute("src", /1\.jpg$/);
+    await tickerNext.tap();
+    await expect(img).toHaveAttribute("src", /2\.jpg$/);
+    // Tapping the ticker on a touch device must not navigate either.
+    await expect(page).toHaveURL(new RegExp(`/profiles/${profileId}$`));
+
+    // Mark this card, then prove the active button reads as active even
+    // though every button here was already opacity: 1 before the tap —
+    // "visible" alone can't be the signal on this device.
+    const rejectBgBefore = await reject.evaluate((el) => getComputedStyle(el).backgroundColor);
+    await accept.tap();
+    await expect(accept).toHaveAttribute("aria-pressed", "true");
+    await expect(accept).toHaveCSS("opacity", "1");
+
+    const acceptBg = await accept.evaluate((el) => getComputedStyle(el).backgroundColor);
+    const rejectBgAfter = await reject.evaluate((el) => getComputedStyle(el).backgroundColor);
+    // The now-active accept button gets a distinct, semantically-coloured
+    // fill (--up, green) — not the muted rgba(0,0,0,0.35) every
+    // visible-but-inactive button (reject, unchanged before/after) keeps.
+    expect(acceptBg).not.toBe(rejectBgAfter);
+    expect(rejectBgAfter).toBe(rejectBgBefore);
+  });
+
+  test("a property with zero photos shows the placeholder, not a ticker, on touch too", async ({ page }) => {
+    await page.goto(`/profiles/${profileId}`);
+    const target = card(page, middleId);
+    await expect(target.getByTestId("candidate-photo-placeholder")).toBeVisible();
+    await expect(target.getByTestId("candidate-photo-ticker")).toHaveCount(0);
+  });
 });

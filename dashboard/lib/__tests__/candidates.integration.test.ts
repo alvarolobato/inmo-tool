@@ -137,18 +137,31 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
   async function insertListing(
     pool: Pool,
     propertyId: number,
-    overrides: Partial<{ source: string; status: string; current_price: number }> = {},
+    overrides: Partial<{
+      source: string;
+      status: string;
+      current_price: number;
+      photo_urls: string[] | null;
+    }> = {},
   ): Promise<number> {
     const row = {
       source: "fotocasa",
       status: "active",
       current_price: 285000,
+      photo_urls: null as string[] | null,
       ...overrides,
     };
     const result = await pool.query<{ id: number }>(
-      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at)
-       VALUES ($1, $2, $3, $4, $5, NOW()) RETURNING id`,
-      [propertyId, row.source, `int-test-${Math.random().toString(36).slice(2)}`, row.status, row.current_price],
+      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, photo_urls)
+       VALUES ($1, $2, $3, $4, $5, NOW(), $6) RETURNING id`,
+      [
+        propertyId,
+        row.source,
+        `int-test-${Math.random().toString(36).slice(2)}`,
+        row.status,
+        row.current_price,
+        row.photo_urls,
+      ],
     );
     return result.rows[0].id;
   }
@@ -356,6 +369,78 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
       const page = await listCandidates(profileId, { limit: 2 });
       expect(page.items).toHaveLength(2);
       expect(page.nextCursor).toBeNull();
+    });
+  });
+
+  describe("photos — real Postgres (#167)", () => {
+    it("unions photo_urls across active listings, de-duplicated by URL, in visual (listing, then position) order", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        // Second listing repeats the first listing's second photo — must
+        // appear once in the result, keeping its FIRST (this listing's)
+        // position, not the second listing's.
+        await insertListing(pool, propertyId, {
+          source: "fotocasa",
+          photo_urls: ["https://a/1.jpg", "https://a/2.jpg"],
+        });
+        await insertListing(pool, propertyId, {
+          source: "milanuncios",
+          photo_urls: ["https://a/2.jpg", "https://b/3.jpg"],
+        });
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        const page = await listCandidates(profileId);
+
+        expect(page.items).toHaveLength(1);
+        expect(page.items[0].photos).toEqual(["https://a/1.jpg", "https://a/2.jpg", "https://b/3.jpg"]);
+      });
+    });
+
+    it("caps the photo array at MAX_CARD_PHOTOS (8) rather than returning every photo of a heavily-photographed listing", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        const manyPhotos = Array.from({ length: 12 }, (_, i) => `https://a/${i + 1}.jpg`);
+        await insertListing(pool, propertyId, { photo_urls: manyPhotos });
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        const page = await listCandidates(profileId);
+
+        expect(page.items[0].photos).toHaveLength(8);
+        expect(page.items[0].photos).toEqual(manyPhotos.slice(0, 8));
+      });
+    });
+
+    it("returns an empty array (not null, not an error) when no linked listing has photos", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        await insertListing(pool, propertyId, { photo_urls: null });
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        const page = await listCandidates(profileId);
+
+        expect(page.items[0].photos).toEqual([]);
+      });
+    });
+
+    it("excludes photos from a withdrawn listing, matching how min_price/source badges already exclude non-active listings", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        await insertListing(pool, propertyId, { source: "fotocasa", photo_urls: ["https://a/1.jpg"] });
+        await insertListing(pool, propertyId, {
+          source: "habitaclia",
+          status: "withdrawn",
+          photo_urls: ["https://withdrawn/1.jpg"],
+        });
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        const page = await listCandidates(profileId);
+
+        expect(page.items[0].photos).toEqual(["https://a/1.jpg"]);
+      });
     });
   });
 

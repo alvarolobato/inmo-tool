@@ -105,4 +105,107 @@ describe("FeedbackControls", () => {
     await screen.findByRole("alert");
     expect(screen.getByTestId("feedback-accept")).toHaveAttribute("aria-pressed", "false");
   });
+
+  describe("#167: always-visible active state", () => {
+    it("marks only the button matching the fetched current state as data-active, so it stays visible without hover (globals.css .feedback-toggle[data-active])", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValueOnce({ ok: true, json: async () => ({ currentState: "star" }) }),
+      );
+      render(<FeedbackControls profileId={1} propertyId={2} />);
+
+      await waitFor(() => expect(screen.getByTestId("feedback-star")).toHaveAttribute("data-active", "true"));
+      expect(screen.getByTestId("feedback-accept")).toHaveAttribute("data-active", "false");
+      expect(screen.getByTestId("feedback-reject")).toHaveAttribute("data-active", "false");
+      // The note toggle isn't a state button — it never carries data-active,
+      // so it can never accidentally read as "this property's status".
+      expect(screen.getByTestId("feedback-note-toggle")).not.toHaveAttribute("data-active");
+    });
+
+    it("no button is data-active when the property has no recorded state yet", async () => {
+      mockGetThenFetch(async () => ({ ok: true, json: async () => ({ currentState: null }) }));
+      render(<FeedbackControls profileId={1} propertyId={2} />);
+
+      await waitFor(() => expect(screen.getByTestId("feedback-accept")).toBeInTheDocument());
+      expect(screen.getByTestId("feedback-accept")).toHaveAttribute("data-active", "false");
+      expect(screen.getByTestId("feedback-reject")).toHaveAttribute("data-active", "false");
+      expect(screen.getByTestId("feedback-star")).toHaveAttribute("data-active", "false");
+    });
+
+    it("moves data-active to the newly-clicked button once the server confirms the switch (accept -> star)", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValueOnce({ ok: true, json: async () => ({ currentState: "accept" }) })
+          .mockResolvedValueOnce({ ok: true, json: async () => ({ currentState: "star" }) }),
+      );
+      render(<FeedbackControls profileId={1} propertyId={2} />);
+      await waitFor(() => expect(screen.getByTestId("feedback-accept")).toHaveAttribute("data-active", "true"));
+
+      fireEvent.click(screen.getByTestId("feedback-star"));
+
+      await waitFor(() => expect(screen.getByTestId("feedback-star")).toHaveAttribute("data-active", "true"));
+      // Same mutual-exclusivity getCurrentState (lib/db/feedback.ts) derives
+      // server-side: starring replaces accepted, never adds to it.
+      expect(screen.getByTestId("feedback-accept")).toHaveAttribute("data-active", "false");
+    });
+
+    it("every toggle carries the feedback-toggle class the CSS visibility rules key on", async () => {
+      mockGetThenFetch(async () => ({ ok: true, json: async () => ({ currentState: null }) }));
+      render(<FeedbackControls profileId={1} propertyId={2} />);
+      await waitFor(() => expect(screen.getByTestId("feedback-accept")).toBeInTheDocument());
+
+      for (const testId of ["feedback-accept", "feedback-reject", "feedback-star", "feedback-note-toggle"]) {
+        expect(screen.getByTestId(testId)).toHaveClass("feedback-toggle");
+      }
+    });
+
+    it("gives the active button a distinct, semantically-coloured fill — not the muted fill a visible-but-inactive button uses (touch has no opacity signal to fall back on)", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValueOnce({ ok: true, json: async () => ({ currentState: "accept" }) }),
+      );
+      render(<FeedbackControls profileId={1} propertyId={2} />);
+      await waitFor(() => expect(screen.getByTestId("feedback-accept")).toHaveAttribute("data-active", "true"));
+
+      const accept = screen.getByTestId("feedback-accept");
+      const reject = screen.getByTestId("feedback-reject");
+      // jsdom normalizes rgba() spacing on read-back, even though the
+      // source style string has none.
+      const INACTIVE_FILL = "rgba(0, 0, 0, 0.35)";
+
+      expect(accept.style.background).not.toBe(INACTIVE_FILL);
+      expect(accept.style.background).toBe("var(--up)");
+      // The inactive sibling on the same row keeps the muted fill — this is
+      // what "visually distinct" is measured against, on both touch (always
+      // visible) and desktop (hover-revealed unset button).
+      expect(reject.style.background).toBe(INACTIVE_FILL);
+    });
+
+    it("each state type gets its own colour token — accept/reject/star don't collapse to one generic 'active' colour", async () => {
+      const colorFor = async (currentState: "accept" | "reject" | "star") => {
+        vi.stubGlobal(
+          "fetch",
+          vi.fn().mockResolvedValueOnce({ ok: true, json: async () => ({ currentState }) }),
+        );
+        const { unmount } = render(<FeedbackControls profileId={1} propertyId={2} />);
+        await waitFor(() =>
+          expect(screen.getByTestId(`feedback-${currentState}`)).toHaveAttribute("data-active", "true"),
+        );
+        const color = screen.getByTestId(`feedback-${currentState}`).style.background;
+        unmount();
+        return color;
+      };
+
+      const accept = await colorFor("accept");
+      const reject = await colorFor("reject");
+      const star = await colorFor("star");
+
+      expect(accept).toBe("var(--up)");
+      expect(reject).toBe("var(--down)");
+      expect(star).toBe("var(--warn)");
+      expect(new Set([accept, reject, star]).size).toBe(3);
+    });
+  });
 });
