@@ -12,7 +12,7 @@ import sys
 from etl import orchestrator
 from etl.config import Config
 from etl.db.postgres import get_connection
-from etl.dedup import engine
+from etl.dedup import actions, engine
 
 
 def _cmd_run(conn) -> int:
@@ -70,6 +70,20 @@ def _cmd_reject(conn, suggestion_id: int) -> int:
     return 0
 
 
+def _cmd_process_actions(conn) -> int:
+    """Drain every pending `suggested_merge_action` row once and exit.
+
+    The long-running container runs this on a poll loop
+    (`actions.run_action_poll_loop`, started in etl/main.py) — this
+    subcommand is the one-shot equivalent, for manual operation (`ps dedup
+    process-actions`) and for tests that need a deterministic single tick
+    instead of waiting on the background thread's interval.
+    """
+    count = actions.process_pending_actions(conn)
+    print(f"Processed {count} pending dedup review-queue action(s).")
+    return 0
+
+
 def _cmd_resolve_conflict(conn, suggestion_id: int) -> int:
     try:
         engine.resolve_conflict(conn, suggestion_id)
@@ -98,6 +112,10 @@ def main(argv: list[str] | None = None) -> int:
         "resolve-conflict", help="Clear a merge-time state conflict flag"
     )
     resolve_parser.add_argument("suggestion_id", type=int)
+    subparsers.add_parser(
+        "process-actions",
+        help="Drain pending dashboard review-queue confirm/reject requests once",
+    )
 
     args = parser.parse_args(argv)
 
@@ -112,6 +130,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_confirm(conn, args.suggestion_id)
         if args.subcommand == "reject":
             return _cmd_reject(conn, args.suggestion_id)
+        if args.subcommand == "process-actions":
+            return _cmd_process_actions(conn)
         return _cmd_resolve_conflict(conn, args.suggestion_id)
     finally:
         conn.close()

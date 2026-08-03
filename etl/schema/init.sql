@@ -682,6 +682,47 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_suggested_merge_pair
 CREATE INDEX IF NOT EXISTS idx_suggested_merge_status
     ON suggested_merge (status) WHERE status = 'pending';
 
+-- Dashboard-originated confirm/reject requests for the review-queue UI
+-- (the "missing half" of the dedup workflow: `confirm_suggestion()`/
+-- `reject_suggestion()` existed and were CLI-callable, but nothing in the
+-- dashboard could reach them, so the 585 suggestions a real run filed sat
+-- unreachable). A queue table, not a synchronous HTTP call from the
+-- dashboard straight into the ETL container — same reasoning as
+-- `extension_capture` above: the dashboard (Node/TypeScript) and the dedup
+-- engine (Python, etl/dedup/engine.py's `confirm_suggestion`/
+-- `reject_suggestion`) run in separate containers with no shared
+-- filesystem or RPC channel, and issue #185's own review made clear this
+-- project's answer to "Node needs Python's business logic" is a queue
+-- table polled by the ETL container, not a second, drifting TypeScript
+-- reimplementation of `perform_merge`/`reconcile_merge`. See
+-- etl/dedup/actions.py's module docstring for the poll loop
+-- (`run_action_poll_loop`, started in etl/main.py alongside the
+-- extension-capture poll thread) and dashboard/lib/dedup.ts for the
+-- enqueue/poll-for-result side.
+CREATE TABLE IF NOT EXISTS suggested_merge_action (
+    id             BIGSERIAL    PRIMARY KEY,
+    suggestion_id  BIGINT       NOT NULL REFERENCES suggested_merge(id) ON DELETE CASCADE,
+    action         TEXT         NOT NULL CHECK (action IN ('confirm','reject')),
+    status         TEXT         NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','done','failed')),
+    error_msg      TEXT,
+    -- Populated on a successful 'confirm' with the same shape
+    -- engine.confirm_suggestion() returns (survivor/losing property ids,
+    -- had_conflict) — lets the dashboard's poll response tell the operator
+    -- which property survived without a second query.
+    result         JSONB        NOT NULL DEFAULT '{}',
+    created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    processed_at   TIMESTAMPTZ
+);
+
+-- Same reasoning as idx_extension_capture_pending: the poll query is
+-- `WHERE status = 'pending' ORDER BY created_at`, so a partial index keeps
+-- it cheap regardless of how many done/failed rows accumulate.
+CREATE INDEX IF NOT EXISTS idx_suggested_merge_action_pending
+    ON suggested_merge_action (created_at) WHERE status = 'pending';
+
+CREATE INDEX IF NOT EXISTS idx_suggested_merge_action_suggestion_id
+    ON suggested_merge_action (suggestion_id);
+
 -- ============================================================
 -- Connector observability (Phase 1.3, issue #11)
 -- ============================================================

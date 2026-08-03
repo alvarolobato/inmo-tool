@@ -131,6 +131,12 @@ def _set_pls(
 
 def _cleanup(conn) -> None:
     with conn.cursor() as cur:
+        # suggested_merge_action FKs to suggested_merge ON DELETE CASCADE,
+        # so this explicit delete isn't strictly required for the DELETE
+        # below to succeed — but test_dedup_actions.py's tests leave 'done'/
+        # 'failed' rows behind, and clearing them here keeps every test in
+        # this shared, per-session database starting from a clean queue.
+        cur.execute("DELETE FROM suggested_merge_action")
         cur.execute("DELETE FROM suggested_merge")
         cur.execute("DELETE FROM property_merge_log")
         cur.execute("DELETE FROM feedback_event")

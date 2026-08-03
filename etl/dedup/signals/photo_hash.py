@@ -10,7 +10,9 @@ access to exercise the matching logic.
 from __future__ import annotations
 
 import logging
+import posixpath
 from decimal import Decimal
+from urllib.parse import urlparse
 
 import imagehash
 import requests
@@ -19,6 +21,96 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT_SECONDS = 10
+
+# `listing.photo_urls` is populated by each connector from whatever a
+# listing's media gallery links to — not always a static photo. A real
+# production run (issue: live corpus, see PR description) logged repeated
+# failures like:
+#
+#   photo_hash: failed to fetch/hash https://www.youtube.com/watch?v=...: cannot identify image file
+#   photo_hash: failed to fetch/hash https://vimeo.com/...: cannot identify image file
+#   photo_hash: failed to fetch/hash https://floorfy.com/tour/...?play=no: cannot identify image file
+#
+# Every one of those is a real network round trip that was always going to
+# fail (PIL can't decode an HTML page as an image) — wasted cost on every
+# dedup run. Worse than wasted: an unfetchable URL that fails silently
+# widens both `hashes_a`/`hashes_b` denominators' *intended* photo counts
+# without ever contributing a hash, so a listing with 3 real photos + 2
+# video/tour links can never reach match_ratio 1.0 even when all 3 real
+# photos match perfectly — the video links dilute the ratio purely by
+# being present in `photo_urls`, not by being visually dissimilar.
+#
+# Fixed here (in the hasher), not at connector ingest time: ingest-time
+# filtering would need touching etl/connectors/**, which has wider blast
+# radius (shared with the connector framework/every site parser) and is
+# out of this change's scope; filtering in fetch_hashes is local to the
+# one signal that actually cares whether a URL is a decodable image, is
+# trivially unit-testable without a connector fixture, and is the only
+# place that ever calls PIL.Image.open on these URLs in the first place.
+_IMAGE_EXTENSIONS = frozenset(
+    {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".gif",
+        ".bmp",
+        ".tiff",
+        ".tif",
+        ".avif",
+        ".heic",
+    }
+)
+
+# Hostnames known to serve video / 360°-tour pages rather than static images.
+# Matched host-suffix (e.g. "my.matterport.com" matches "matterport.com")
+# so a subdomain doesn't slip past the check.
+_NON_IMAGE_HOSTS = frozenset(
+    {
+        "youtube.com",
+        "youtu.be",
+        "vimeo.com",
+        "vimeocdn.com",
+        "floorfy.com",
+        "matterport.com",
+        "kuula.co",
+        "3dvista.com",
+        "cupix.com",
+        "istaging.com",
+    }
+)
+
+
+def _looks_like_photo_url(url: str) -> bool:
+    """Best-effort, no-network guess at whether *url* points at a static
+    image rather than a video/virtual-tour page.
+
+    1. A recognized image extension (query string ignored) -> always kept,
+       regardless of host — some of the hosts above can still legitimately
+       serve a thumbnail image at a `.jpg` path, and there's no reason to
+       reject that.
+    2. No recognized extension, but a known non-image host -> filtered out.
+    3. Anything else (no extension, unknown host — e.g. a portal's own CDN
+       serving photos from an extensionless path) -> kept. This is a
+       strict improvement over fetching everything unconditionally, never
+       a stricter filter than the pre-existing per-URL try/except in
+       `fetch_hashes` already tolerates.
+    """
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return True  # let fetch_hashes' own try/except handle the fallout
+
+    ext = posixpath.splitext(parsed.path)[1].lower()
+    if ext in _IMAGE_EXTENSIONS:
+        return True
+
+    host = (parsed.hostname or "").removeprefix("www.")
+    return not (
+        host in _NON_IMAGE_HOSTS
+        or any(host.endswith("." + suffix) for suffix in _NON_IMAGE_HOSTS)
+    )
+
 
 # phash (DCT-based), not average_hash — issue #61.
 #
@@ -65,9 +157,17 @@ def fetch_hashes(photo_urls: tuple[str, ...]) -> list[imagehash.ImageHash]:
 
     A single broken/expired photo URL shouldn't sink the whole comparison —
     this is a best-effort signal, not a required one.
+
+    URLs that don't look like a static image (a YouTube/Vimeo walkthrough, a
+    Floorfy/Matterport virtual tour, ...) are skipped before the network
+    call — see `_looks_like_photo_url` above for why this matters beyond
+    just saving a doomed request.
     """
     hashes: list[imagehash.ImageHash] = []
     for url in photo_urls:
+        if not _looks_like_photo_url(url):
+            logger.debug("photo_hash: skipping non-image URL %s", url)
+            continue
         try:
             with requests.get(
                 url, timeout=_REQUEST_TIMEOUT_SECONDS, stream=True
