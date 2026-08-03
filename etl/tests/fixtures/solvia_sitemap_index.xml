@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap>
+    <loc>https://www.solvia.es/sitemap_inmuebles.xml</loc>
+  </sitemap>
+  <sitemap>
+    <loc>https://www.solvia.es/sitemap_comprar_viviendas.xml</loc>
+  </sitemap>
+  <sitemap>
+    <loc>https://www.solvia.es/sitemap_comprar_trasteros.xml</loc>
+  </sitemap>
+  <sitemap>
+    <loc>https://www.solvia.es/sitemap_comprar_suelos.xml</loc>
+  </sitemap>
+  <sitemap>
+    <loc>https://www.solvia.es/sitemap_alquiler_viviendas.xml</loc>
+  </sitemap>
+</sitemapindex>

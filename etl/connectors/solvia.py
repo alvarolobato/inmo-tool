@@ -24,7 +24,7 @@ ships a complete `<script id="ng-state" type="application/json">` payload
 containing a 75-field `propertyBasicDetail` object — richer, and far more
 stable, than scraping rendered markup.
 
-Coverage reality, which is why `discovers_full_inventory = False`:
+Coverage reality:
   * 6,375 homes listed for sale nationally at spike time.
   * A search page renders exactly 20 detail links server-side.
   * Query-param pagination does not work on the SSR path: `?pagina=2` and
@@ -32,9 +32,71 @@ Coverage reality, which is why `discovers_full_inventory = False`:
     (verified). Real pagination goes through the robots-disallowed `/api/`.
   * Geography narrows genuinely — `/viviendas/alicante/torrevieja` reported
     61 homes vs. 6,375 nationally — but still renders only its first 20.
-So a sweep sees at most 20 listings per configured geography. Withdrawal
-detection must stay off (a listing absent from a 20-of-61 slice tells you
-nothing), exactly the Fotocasa lesson in Connector.discovers_full_inventory.
+So a single municipality page sees at most 20 listings.
+
+Issue #190 (partition by municipality via the sitemap): `robots.txt`
+disallows only `/api/` and `/ajax/`, and its own `Sitemap:` line points at
+`https://www.solvia.es/sitemap.xml` — a sitemap INDEX whose
+`sitemap_comprar_viviendas.xml` child contains one `<loc>` per
+municipality search page: `.../es/comprar/viviendas/<provincia>/<municipio>`.
+Live-verified 2026-08-03: 1,737 municipality entries nationally, **43** under
+`sevilla` and **44** under `malaga` (both v1 markets), including
+`sevilla/dos-hermanas` as its own entry. `discover()` now resolves a scope
+down to a **provincia** only, then sweeps every municipality page the
+sitemap lists for that provincia — a center-based Sevilla scope reaches
+`dos-hermanas` (and every other Sevilla town) in one sweep, without the
+profile needing to name it.
+
+This is complementary to, not a replacement for, issue #177's gazetteer
+(`resolve_place`/`Place`, merged to `main` after this branch was cut, and
+now the geography this module depends on — see `_PROVINCE_SLUGS` below):
+the gazetteer alone already lets a scope centered exactly on Dos Hermanas
+resolve there directly (0.18km, see `test_geography.py`'s
+`TestDosHermanasRegression`), and per-municipality resolution is real and
+useful when a profile's center happens to name a town precisely. What the
+gazetteer cannot do is help a scope that *doesn't* center on the specific
+town Solvia happens to have inventory in — a Sevilla-area profile has no
+way to know in advance that Dos Hermanas (not, say, Alcalá de Guadaíra) is
+where the 20-per-page cap actually bites. The sitemap sweep solves that
+different problem: once a scope resolves to a **provincia**, every
+municipality Solvia publishes for it is covered in one sweep, independent
+of which one point a profile's centroid happens to land nearest to. The
+two fixes stack: gazetteer resolution answers "what provincia is this
+scope even about," the sitemap sweep answers "what's everywhere in it."
+
+Live-verified derived URLs actually return listings, not just a 200 with an
+empty shell (the property_web_scraper lesson: selectors that only match
+hand-authored fixtures) — real fetches, 2026-08-03:
+  * `sevilla/dos-hermanas`: 9 real detail links (own inventory, distinct
+    from `sevilla/sevilla`).
+  * `malaga/mijas`: 20 (the per-page cap, same as any other municipality).
+  * `sevilla/san-nicolas-del-puerto` (a ~250-inhabitant village): 0 —
+    genuinely empty, still a well-formed `ng-state` page. Proves the sitemap
+    isn't padded with municipalities that have no stock, and that a
+    municipality page is capable of validly reporting zero.
+
+Sweep cost: one province sweep is now `len(municipios)` requests instead of
+1 — 43 for Sevilla, 44 for Málaga — at the existing `rate_limit_per_minute`
+(unchanged; see the class attribute below for why). The sitemap itself
+(index + one child) is fetched at most once per `_SITEMAP_CACHE_TTL_SECONDS`
+and shared across every scope/provincia in a sweep, not refetched per scope
+— see `_municipios_for_provincia`.
+
+`discovers_full_inventory` stays `False`. It is tempting to read this as
+"upgraded" now that whole provinces are swept, but the per-municipality cap
+is still exactly 20 and nothing on the page states a total: `ng-state` on a
+real municipality page carries no result-count key (checked directly,
+2026-08-03 — only `config`/`provincesResponse`/`seoProvinciasResponse`/
+`homeDataResponse`, none of which carry a per-municipality total), and
+no `resultados`/`total` string appears in the rendered markup either. Per
+municipality, 20 may be the *entire* stock for a small town (San Nicolás
+del Puerto, above) or a truncated slice for a busy one (Mijas, above) — and
+there's no signal on the page to tell those apart. Claiming full coverage
+without a reliable total is exactly the mistake `discovers_full_inventory`
+exists to prevent (the Fotocasa lesson) — a real total would have to appear
+somewhere reliable before this changes.
+Withdrawal detection must therefore stay off — a listing absent from a
+20-of-N slice tells you nothing about whether it's still active.
 
 What Solvia publishes that the consumer portals generally do not:
   * `caracteristicas.refCatastral` — the cadastral reference, on all five
@@ -53,7 +115,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any
+from xml.etree import ElementTree
 
 import requests
 from bs4 import BeautifulSoup
@@ -129,52 +193,195 @@ _DETAIL_HREF_RE = re.compile(
 # Any non-empty slug works; "x" mirrors Fotocasa's placeholder convention.
 _DETAIL_PATH_TEMPLATE = "/es/propiedades/comprar/x-{external_id}"
 
-# (provincia, municipio) path segments per known municipality. An explicit
-# table, not a slugify() of the resolved name: Solvia's provincia slugs are
-# not always the province name (e.g. Palma sits under `balears-illes`), so
-# guessing would produce 404s that look like empty results. Live-verified
-# against real hrefs (real listing detail links, not just HTTP 200) during
-# issue #71 for the original four and during issue #169 for the Costa del
-# Sol / greater Sevilla entries below.
-_CITY_SLUGS: dict[str, tuple[str, str]] = {
-    "madrid": ("madrid", "madrid"),
-    "sevilla": ("sevilla", "sevilla"),
-    "barcelona": ("barcelona", "barcelona"),
-    "valencia": ("valencia", "valencia"),
-    # Costa del Sol (issue #169 course-correction v1 market)
-    "malaga": ("malaga", "malaga"),
-    "estepona": ("malaga", "estepona"),
-    "marbella": ("malaga", "marbella"),
-    # Greater Sevilla (owner's other stated v1 market)
-    "dos hermanas": ("sevilla", "dos-hermanas"),
+# provincia sitemap slug per `Place.province` (etl.connectors.geography,
+# issue #177's gazetteer). An explicit table, not a slugify() of the
+# province name: Solvia's provincia URL slug is not always a simple
+# slugify of the province's own name (Illes Balears sits under
+# `balears-illes`, not `illes-balears`), so guessing would produce 404s
+# that look like empty results. Verified against live hrefs on the
+# national search page (issue #71's original four) and against the
+# sitemap partition itself (issue #190's live sevilla/malaga counts, see
+# module docstring).
+#
+# Issue #190 course-correction: this used to be keyed by *municipality*
+# name (`Place.name`) and map to a (provincia, municipio) PAIR — the one
+# municipality a scope's centroid resolves to (this is how `main` grew
+# estepona/marbella/dos hermanas as individual entries after issue #169's
+# gazetteer landed, in parallel with this branch). Now it's keyed by
+# `Place.province` and maps to the provincia slug ALONE: discover() sweeps
+# every municipality the sitemap lists for that provincia (see module
+# docstring), so a specific municipio a centroid happens to name no longer
+# determines reachability — a Sevilla-centered scope reaches
+# `dos-hermanas` (and every other Sevilla town) by sweeping the whole
+# province, regardless of whether Dos Hermanas itself has its own table
+# entry. Malaga is kept here, not dropped back to the original four:
+# `main`'s per-municipio table already proved live coverage of Malaga
+# province (estepona/marbella/malaga capital, issue #169), and the
+# sitemap's own 44-municipio count under `malaga` (module docstring)
+# reconfirms it independently — omitting it here would be a real
+# regression, not a simplification.
+_PROVINCE_SLUGS: dict[str, str] = {
+    "Madrid": "madrid",
+    "Sevilla": "sevilla",
+    "Barcelona": "barcelona",
+    "Valencia": "valencia",
+    "Malaga": "malaga",
 }
 
+_SITEMAP_INDEX_URL = f"{_BASE_URL}/sitemap.xml"
+# The child sitemap's name is matched by substring, not hardcoded as the
+# whole index-relative URL: robust to the index changing every other
+# child's name/order, since only this one keyword actually matters here.
+_MUNICIPIO_SITEMAP_KEYWORD = "comprar_viviendas"
+_SITEMAP_NS = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
+# Real page path only — excludes tracking-URL copies and anything with an
+# extra segment (query string, trailing slash variant).
+_MUNICIPIO_LOC_RE = re.compile(
+    r"^https://www\.solvia\.es/es/comprar/viviendas/([a-z0-9-]+)/([a-z0-9-]+)$"
+)
+# Same threshold and reasoning as Fotocasa's _MAX_CONSECUTIVE_ZONE_FAILURES
+# (#65): a persistent soft-block doesn't clear mid-sweep, so a fixed run of
+# consecutive failures is a more honest stop condition than a ratio, which
+# would need the whole sweep to finish before it could fire at all.
+_MAX_CONSECUTIVE_MUNICIPIO_FAILURES = 3
 
-def _resolve_geography(scope: ConnectorScope) -> tuple[str, str] | None:
-    """Translate a profile's (center, radius_km) into Solvia path segments.
+# Sitemap changes rarely (issue #190's own spike: every real <lastmod> in a
+# live pull was the same stale date, "2022-07-08", despite <changefreq>
+# claiming daily) — refetching it every sweep would be 1,737 URLs' worth of
+# XML for data that is for all practical purposes static. 24h mirrors
+# Fotocasa's own min_refetch_interval_seconds precedent (issue #143) for
+# "this doesn't need to be checked more than once a day."
+_SITEMAP_CACHE_TTL_SECONDS = 24 * 60 * 60
 
-    Returns None when the scope resolves to no municipality this
-    connector's own table knows — the orchestrator then skips it as a
-    coverage gap rather than treating it as a failure (issue #99).
+# Module-level, not per-instance: the sitemap is one shared national
+# document, identical for every SolviaConnector instance and every
+# provincia — there is exactly one cache to keep, not one per scope. Reset
+# via `_reset_sitemap_cache` (tests only; production never needs to clear
+# it mid-process).
+_sitemap_cache: dict[str, Any] = {"fetched_at": 0.0, "by_province": {}}
+
+
+def _reset_sitemap_cache() -> None:
+    """Test-only: force the next `_municipios_for_provincia` call to refetch.
+
+    Production code never calls this — the TTL above is the only eviction
+    path there. Tests need it because `_sitemap_cache` is module-level state
+    that would otherwise leak between test functions.
+    """
+    _sitemap_cache["fetched_at"] = 0.0
+    _sitemap_cache["by_province"] = {}
+
+
+def _sitemap_locs(xml_text: str, *, context: str) -> list[str]:
+    """Extract every <loc> from a sitemap or sitemap index."""
+    try:
+        root = ElementTree.fromstring(xml_text)
+    except ElementTree.ParseError as exc:
+        raise ConnectorError(
+            f"solvia {context}: sitemap is not valid XML: {exc}"
+        ) from exc
+    return [
+        el.text.strip()
+        for el in root.iter(f"{_SITEMAP_NS}loc")
+        if el.text and el.text.strip()
+    ]
+
+
+def _parse_municipio_locs(locs: list[str]) -> dict[str, list[str]]:
+    """Group municipality search-page URLs by provincia slug.
+
+    Only URLs matching the exact `/es/comprar/viviendas/<provincia>/
+    <municipio>` shape are kept — the child sitemap this is fed from is
+    scoped to that one URL family already (see `_MUNICIPIO_SITEMAP_KEYWORD`),
+    but being defensive here means a future sitemap that mixes in other
+    shapes (a province-overview URL with no municipio segment, a tracking
+    param) degrades to "fewer municipios found" rather than a KeyError.
+    """
+    by_province: dict[str, list[str]] = {}
+    for loc in locs:
+        match = _MUNICIPIO_LOC_RE.match(loc)
+        if match is None:
+            continue
+        provincia, municipio = match.group(1), match.group(2)
+        by_province.setdefault(provincia, []).append(municipio)
+    return {
+        provincia: sorted(set(municipios))
+        for provincia, municipios in by_province.items()
+    }
+
+
+def _refresh_sitemap_cache(throttle: Throttle) -> None:
+    index_xml = _get(_SITEMAP_INDEX_URL, throttle, context="sitemap index")
+    index_locs = _sitemap_locs(index_xml, context="sitemap index")
+    child_url = next(
+        (loc for loc in index_locs if _MUNICIPIO_SITEMAP_KEYWORD in loc), None
+    )
+    if child_url is None:
+        raise ConnectorError(
+            f"solvia sitemap: no child sitemap containing "
+            f"{_MUNICIPIO_SITEMAP_KEYWORD!r} found in the index — the "
+            f"sitemap's own structure may have changed"
+        )
+    child_xml = _get(child_url, throttle, context="municipio sitemap")
+    by_province = _parse_municipio_locs(
+        _sitemap_locs(child_xml, context="municipio sitemap")
+    )
+    _sitemap_cache["by_province"] = by_province
+    _sitemap_cache["fetched_at"] = time.time()
+    logger.info(
+        "solvia sitemap: refreshed from %s — %d provincias, %d municipality "
+        "pages total",
+        child_url,
+        len(by_province),
+        sum(len(v) for v in by_province.values()),
+    )
+
+
+def _municipios_for_provincia(provincia: str, throttle: Throttle) -> list[str]:
+    """Every municipality slug the sitemap lists for `provincia`, cached.
+
+    Refetches (index + child sitemap — two requests total, shared across
+    every provincia/scope) only when the cache is empty or older than
+    `_SITEMAP_CACHE_TTL_SECONDS`. This is what makes a province sweep NOT
+    cost 1,737 extra requests per scope (issue #190's own explicit
+    requirement) — only the first `discover()` call after a cold start or a
+    stale cache pays for the sitemap; every subsequent scope in the same
+    sweep, and every sweep within the TTL window, reads the in-memory dict.
+    """
+    age = time.time() - _sitemap_cache["fetched_at"]
+    if not _sitemap_cache["by_province"] or age > _SITEMAP_CACHE_TTL_SECONDS:
+        _refresh_sitemap_cache(throttle)
+    return list(_sitemap_cache["by_province"].get(provincia, []))
+
+
+def _resolve_geography(scope: ConnectorScope) -> str | None:
+    """Translate a profile's (center, radius_km) into a Solvia provincia slug.
+
+    Returns None when the scope resolves to no provincia this connector's
+    own table knows — the orchestrator then skips it as a coverage gap
+    rather than treating it as a failure (issue #99).
+
+    `scope.geography`'s free-text escape hatch still accepts the old
+    "provincia/municipio" shape (for existing callers/tests) but only the
+    provincia segment is used now — see the module docstring for why a
+    specific municipio pin is no longer meaningful once discover() sweeps
+    every municipio in the resolved provincia anyway. A bare "provincia"
+    string works too. This never goes through gazetteer resolution at all,
+    so a malformed/empty geography string correctly returns None here
+    rather than raising.
 
     Can raise `UnresolvableGeographyError` (from `resolve_place`) when
     `scope.center` matches nothing in the shared gazetteer at all (issue
-    #169) — deliberately left to propagate; see fotocasa.py's
-    `_resolve_geography` docstring for the full reasoning. Note this is
-    orthogonal to the malformed-`scope.geography`-string case just below
-    (an explicit-but-wrong-shaped escape-hatch value), which still
-    correctly returns None rather than raising — the free-text escape
-    hatch never goes through gazetteer resolution at all.
+    #169/#177) — deliberately left to propagate; see fotocasa.py's
+    `_resolve_geography` docstring for the full reasoning.
     """
     if scope.geography:
-        parts = scope.geography.strip("/").split("/")
-        if len(parts) == 2 and all(parts):
-            return parts[0], parts[1]
-        return None
+        parts = [p for p in scope.geography.strip("/").split("/") if p]
+        return parts[0] if parts else None
     place = resolve_place(scope)
     if place is None:
         return None
-    return _CITY_SLUGS.get(place.name)
+    return _PROVINCE_SLUGS.get(place.province)
 
 
 def _parse_ng_state(html: str, *, context: str) -> dict[str, Any]:
@@ -229,55 +436,153 @@ class SolviaConnector(Connector):
     # Deliberately below the framework default (30/min): this is a single
     # servicer's site being crawled by a personal tool, and issue #1 §15's
     # good-neighbour stance argues for taking the slower option when the
-    # inventory per geography is only 20 pages deep anyway.
+    # inventory per geography is only 20 pages deep anyway. Issue #190 grew
+    # a sweep from 1 request to len(municipios) (43 for Sevilla, 44 for
+    # Málaga) — a real cost increase, stated here rather than silently
+    # absorbed — but did not change this value: the feasibility spike's "no
+    # bot-hostility, no CAPTCHA, plain HTTP 200s" finding was re-confirmed
+    # live during #190's own verification (real municipio-page fetches at
+    # this same pace, no block encountered), so there is no new evidence
+    # this needs to drop. Unlike Milanuncios (#179), Solvia has shown no
+    # soft-block signature at this rate.
     rate_limit_per_minute = 20
 
-    # See the module docstring's coverage section: a sweep sees at most 20
-    # of a geography's listings (61 in the verified Torrevieja case), so
-    # absence from a sweep proves nothing about withdrawal.
+    # See the module docstring's "discovers_full_inventory stays False"
+    # section — per-municipality 20-cap with no readable total anywhere on
+    # the page, checked directly against ng-state and the rendered markup,
+    # not assumed. Sweeping more municipalities (#190) doesn't change this:
+    # every one of them still has the same unverifiable-total problem.
     discovers_full_inventory = False
 
     def scope_key(self, scope: ConnectorScope) -> str | None:
-        """`UnresolvableGeographyError` (issue #169) must become a sentinel
-        key here rather than `None` — this method must never raise itself,
-        see fotocasa.py's `scope_key` docstring for the full reasoning."""
+        """The resolved provincia IS the coverage key (issue #190): two
+        scopes resolving to the same provincia now sweep the identical set
+        of municipality pages, so they must dedupe against each other the
+        same way Fotocasa/Servihabitat's province-level keys already do.
+
+        `UnresolvableGeographyError` (issue #169/#177) must become a
+        sentinel key here rather than `None` — this method must never raise
+        itself, see fotocasa.py's `scope_key` docstring for the full
+        reasoning."""
         try:
-            resolved = _resolve_geography(scope)
+            return _resolve_geography(scope)
         except UnresolvableGeographyError:
             return unresolvable_scope_key(scope)
-        if resolved is None:
-            return None
-        return f"{resolved[0]}/{resolved[1]}"
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         # _resolve_geography can raise UnresolvableGeographyError, left to
-        # propagate uncaught (issue #169) — see fotocasa.py's discover() for
-        # the full reasoning.
-        resolved = _resolve_geography(scope)
-        if resolved is None:
+        # propagate uncaught (issue #169/#177) — see fotocasa.py's
+        # discover() for the full reasoning.
+        provincia = _resolve_geography(scope)
+        if provincia is None:
             # Reachable only if discover() is invoked directly, bypassing
             # scope_key()'s gate — see fotocasa.py's discover() docstring.
             raise ConnectorError(
                 f"solvia discover: scope {scope!r} resolves to no known Solvia "
-                f"geography — this should have been skipped via scope_key()"
+                f"provincia — this should have been skipped via scope_key()"
             )
-        provincia, municipio = resolved
-        url = f"{_BASE_URL}/es/comprar/viviendas/{provincia}/{municipio}"
-        html = _get(url, throttle, context="discover")
 
-        # Validate the page really is a Solvia SSR page before trusting an
-        # empty result set (same reasoning as _parse_ng_state).
-        _parse_ng_state(html, context="discover")
+        municipios = _municipios_for_provincia(provincia, throttle)
+        if not municipios:
+            raise ConnectorError(
+                f"solvia discover: sitemap has no municipality pages under "
+                f"provincia={provincia!r} — either the sitemap's own "
+                f"structure changed, or this provincia genuinely isn't in "
+                f"Solvia's sitemap (unexpected for a resolved provincia — "
+                f"see _PROVINCE_SLUGS)"
+            )
 
-        external_ids = sorted({m.group(1) for m in _DETAIL_HREF_RE.finditer(html)})
+        external_ids: set[str] = set()
+        municipios_attempted = 0
+        municipios_failed = 0
+        municipios_empty = 0
+        consecutive_failures = 0
+        aborted_early = False
+        for municipio in municipios:
+            municipios_attempted += 1
+            url = f"{_BASE_URL}/es/comprar/viviendas/{provincia}/{municipio}"
+            html = self._fetch_municipio_page(url, throttle)
+            if html is None:
+                municipios_failed += 1
+                consecutive_failures += 1
+                if consecutive_failures >= _MAX_CONSECUTIVE_MUNICIPIO_FAILURES:
+                    # Same reasoning as Fotocasa's zone sweep (#65): a
+                    # persistent soft-block/interruption page won't clear
+                    # mid-sweep, so continuing would spend the rest of the
+                    # sweep hammering a site that's already refusing us.
+                    # Stop and return the partial result (discovers_full_
+                    # inventory=False means a short sweep is never misread
+                    # as evidence of withdrawal).
+                    aborted_early = True
+                    logger.error(
+                        "solvia discover: aborting provincia=%s sweep after "
+                        "%d consecutive municipio failures (attempted %d of "
+                        "%d) — likely a soft-block or structural change; "
+                        "returning the partial result rather than "
+                        "continuing to hammer it",
+                        provincia,
+                        consecutive_failures,
+                        municipios_attempted,
+                        len(municipios),
+                    )
+                    break
+                continue
+            consecutive_failures = 0
+            ids = {m.group(1) for m in _DETAIL_HREF_RE.finditer(html)}
+            if not ids:
+                # A well-formed page (real ng-state) with zero listings —
+                # NOT the failure signature above. San Nicolás del Puerto
+                # (module docstring) proves this is a genuine, expected
+                # state for a small municipality, not a parse regression.
+                municipios_empty += 1
+            external_ids |= ids
+
+        if municipios_attempted and municipios_failed == municipios_attempted:
+            # Every single municipio in this sweep failed — indistinguishable
+            # from "the whole provincia is currently soft-blocked" or "the
+            # sitemap resolved to municipio pages that no longer exist."
+            # Returning [] here would look exactly like an empty provincia
+            # to _reconcile_missed_discoveries, which is the one silent
+            # failure mode this whole change must not introduce.
+            raise ConnectorError(
+                f"solvia discover: all {municipios_attempted} municipio "
+                f"pages attempted for provincia={provincia!r} failed — "
+                f"likely a soft-block/interruption page, or a structural "
+                f"change, not a provincia with zero listings"
+            )
+
         logger.info(
-            "solvia discover: geography=%s/%s found %d external_ids "
-            "(page-1 only, see discovers_full_inventory)",
+            "solvia discover: provincia=%s swept %d/%d municipality pages "
+            "(%d failed, %d empty%s) -> %d external_ids",
             provincia,
-            municipio,
+            municipios_attempted,
+            len(municipios),
+            municipios_failed,
+            municipios_empty,
+            ", aborted early" if aborted_early else "",
             len(external_ids),
         )
-        return external_ids
+        return sorted(external_ids)
+
+    def _fetch_municipio_page(self, url: str, throttle: Throttle) -> str | None:
+        """Fetch one municipality search page; None on any failure.
+
+        Non-strict by design (unlike Fotocasa's base-page fetch): there is
+        no single "baseline" municipio more foundational than another once
+        a provincia is swept as a flat list, so every page gets the same
+        tolerant treatment — a single bad page must not abort a sweep of
+        ~43, but total failure across the sweep still surfaces loudly (see
+        the all-failed check in discover()).
+        """
+        try:
+            html = _get(url, throttle, context="discover")
+        except ConnectorError:
+            return None
+        try:
+            _parse_ng_state(html, context="discover")
+        except ConnectorError:
+            return None
+        return html
 
     def fetch_detail(self, external_id: str, throttle: Throttle) -> RawListing:
         url = f"{_BASE_URL}{_DETAIL_PATH_TEMPLATE.format(external_id=external_id)}"

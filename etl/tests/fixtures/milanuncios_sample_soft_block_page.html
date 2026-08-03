@@ -1,0 +1,44 @@
+<!--
+REAL captured soft-block/interruption page, trimmed (issue #179, live
+2026-08-03): fetched from https://www.milanuncios.com/x/x-<id>.htm after
+the connector's detail-page endpoint tripped its bot-mitigation wall
+during rate measurement. HTTP 200, ~95,989 bytes on the wire (vs.
+~980,000-1,500,000 for a real listing/search page) -- a GeeTest CAPTCHA
+challenge ("Pardon Our Interruption" / "noindex, nofollow"), not a page-
+structure change or a removed ad. Trimmed here to the identifying head
+meta tags and body text; the original also carries a large inline CSS
+block and a base64 PNG logo, neither of which any parsing code reads.
+Distinct from milanuncios_sample_block_page.html (a synthetic "removed ad"
+stand-in) -- this one is the real soft-block signature
+_has_milanuncios_soft_block_signature() matches on.
+-->
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <noscript>
+      <title>Pardon Our Interruption</title>
+    </noscript>
+    <meta name="robots" content="noindex, nofollow" />
+    <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate" />
+  </head>
+  <body>
+    <div class="container">
+      <div class="body">
+        <div class="content">
+          <h1>¡Ups! Algo se detuvo</h1>
+          <h2 id="captcha-msg" style="display: none">
+            Para continuar, completa el captcha:
+          </h2>
+          <p>
+            Tu visita a Milanuncios se ha interrumpido. Esto puede ocurrir por
+            tener <b>desactivadas las cookies</b>, tu sesión haya
+            <b>excedido un límite de tiempo</b> o estés
+            <b>navegando fuera de España</b>.
+          </p>
+        </div>
+        <div id="captcha-box"></div>
+      </div>
+    </div>
+  </body>
+</html>

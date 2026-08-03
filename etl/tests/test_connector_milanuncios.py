@@ -17,6 +17,8 @@ from etl.connectors.base import ConnectorError, ConnectorScope
 from etl.connectors.geography import UnresolvableGeographyError
 from etl.connectors.milanuncios import (
     MilanunciosConnector,
+    MilanunciosSoftBlockError,
+    _has_soft_block_signature,
     _has_usable_jsonld_property_schema,
 )
 from etl.connectors.milanuncios_mapping import (
@@ -45,6 +47,33 @@ def test_milanuncios_does_not_claim_full_inventory_coverage():
     discover() only reads page 1 of one sale category (robots.txt disallows
     pagination here too), against inventory in the thousands."""
     assert MilanunciosConnector.discovers_full_inventory is False
+
+
+class TestRateLimitMeasurement:
+    """Issue #179 live measurement, 2026-08-03: production was tripping the
+    circuit breaker every run at rate_limit_per_minute=20 (5 successes then
+    a permanent soft-block). Measured 6/min directly: identical failure
+    signature, ruling out the entire 6-20/min range. See the module
+    docstring and rate_limit_per_minute's own comment for the full
+    write-up, including what remains unvalidated (the exact safe floor —
+    only bounded from above by two real, live-measured failures)."""
+
+    def test_rate_limit_is_well_below_both_measured_failure_points(self):
+        """A regression here wouldn't fail loudly — it would silently trip
+        the circuit breaker every run again, exactly the production
+        symptom this issue exists to fix."""
+        assert MilanunciosConnector.rate_limit_per_minute <= 2
+
+    def test_rate_limit_is_stricter_than_fotocasa(self):
+        """Deliberately not raised to match Fotocasa's 3/min: Milanuncios
+        showed an equal-or-worse block at a pace (10s) Fotocasa's own
+        measurement proved safe (20s) — see the module docstring."""
+        from etl.connectors.fotocasa import FotocasaConnector
+
+        assert (
+            MilanunciosConnector.rate_limit_per_minute
+            < FotocasaConnector.rate_limit_per_minute
+        )
 
 
 class TestDiscover:
@@ -113,6 +142,31 @@ class TestDiscover:
                 ConnectorScope(geography="madrid"), throttle=lambda: None
             )
 
+    def test_discover_raises_soft_block_error_on_real_captured_challenge_page(self):
+        """Issue #179: a REAL captured soft-block page (GeeTest CAPTCHA
+        challenge, live 2026-08-03 during rate measurement) must raise the
+        narrower MilanunciosSoftBlockError, not just the generic
+        ConnectorError a structure change would also raise — the two call
+        for opposite responses (module docstring)."""
+        html = _read_fixture("milanuncios_sample_soft_block_page.html")
+        connector = MilanunciosConnector()
+        with (
+            patch(
+                "etl.connectors.milanuncios.requests.get",
+                return_value=_mock_response(html),
+            ),
+            pytest.raises(MilanunciosSoftBlockError),
+        ):
+            connector.discover(
+                ConnectorScope(geography="madrid"), throttle=lambda: None
+            )
+
+    def test_soft_block_error_is_still_a_connector_error(self):
+        """The orchestrator's circuit breaker counts ConnectorError (and any
+        exception) toward its error rate without knowing this subclass
+        exists — it must keep working exactly as before."""
+        assert issubclass(MilanunciosSoftBlockError, ConnectorError)
+
     def test_discover_handles_present_but_null_adlist_without_crashing(self):
         """Regression: `.get("adList", {})` only supplies the default when the
         key is absent, not when it's present with a null value — a real,
@@ -148,6 +202,44 @@ class TestFetchDetail:
             pytest.raises(ConnectorError, match="__INITIAL_PROPS__"),
         ):
             connector.fetch_detail("700000001", throttle=lambda: None)
+
+    def test_fetch_detail_raises_soft_block_error_on_real_captured_challenge_page(self):
+        """Same distinction as TestDiscover's equivalent — fetch_detail() is
+        where issue #179's production failure actually happens (discover()
+        itself never showed the block during measurement; only the detail-
+        page endpoint did — see rate_limit_per_minute's comment)."""
+        html = _read_fixture("milanuncios_sample_soft_block_page.html")
+        connector = MilanunciosConnector()
+        with (
+            patch(
+                "etl.connectors.milanuncios.requests.get",
+                return_value=_mock_response(html),
+            ),
+            pytest.raises(MilanunciosSoftBlockError),
+        ):
+            connector.fetch_detail("700000001", throttle=lambda: None)
+
+
+class TestSoftBlockSignature:
+    """Unit coverage for the marker-matching helper itself, independent of
+    discover()/fetch_detail() — issue #179."""
+
+    def test_real_captured_page_matches(self):
+        html = _read_fixture("milanuncios_sample_soft_block_page.html")
+        assert _has_soft_block_signature(html) is True
+
+    def test_synthetic_removed_ad_page_does_not_match(self):
+        """milanuncios_sample_block_page.html is a synthetic stand-in for
+        'any page missing the marker' (its own header comment), not a real
+        block page — it must NOT trip the soft-block signature, or every
+        existing test using it as a generic missing-marker fixture would
+        silently start asserting the wrong exception type."""
+        html = _read_fixture("milanuncios_sample_block_page.html")
+        assert _has_soft_block_signature(html) is False
+
+    def test_a_real_listing_page_does_not_match(self):
+        html = _read_fixture("milanuncios_sample_detail.html")
+        assert _has_soft_block_signature(html) is False
 
 
 class TestNormalize:

@@ -888,7 +888,10 @@ class TestDefaultProfileGeographyResolvesOnEveryConnector:
         assert _vivantial_resolve_geography(self._scope()) == "madrid"
 
     def test_default_geography_resolves_on_solvia(self):
-        assert _solvia_resolve_geography(self._scope()) == ("madrid", "madrid")
+        # Issue #190: Solvia resolves to a bare provincia slug now (it
+        # sweeps every municipio the site's own sitemap lists for that
+        # provincia), not a (provincia, municipio) pair.
+        assert _solvia_resolve_geography(self._scope()) == "madrid"
 
     def test_default_geography_resolves_on_servihabitat(self):
         assert _servihabitat_resolve_geography(self._scope()) == "madrid"
