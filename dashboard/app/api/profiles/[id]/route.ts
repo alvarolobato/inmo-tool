@@ -21,6 +21,7 @@ import {
   ThesisParamsSchema,
   archiveProfile,
   getProfileById,
+  touchProfileViewedAt,
   updateProfile,
 } from "@/lib/db/profiles";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
@@ -53,6 +54,15 @@ export async function GET(
         formatApiError("Perfil de búsqueda no encontrado.", "NOT_FOUND", undefined, requestId),
         { status: 404 },
       );
+    }
+    // Issue #191: best-effort "last viewed" marker for the "new since your
+    // last visit" aggregate. Awaited (it's a single cheap UPDATE) but never
+    // allowed to fail the response — a write failure here must degrade to a
+    // stale "new" count next time, never a page error.
+    try {
+      await touchProfileViewedAt(id);
+    } catch (err) {
+      console.warn(`[${requestId}] No se pudo actualizar last_viewed_at para el perfil ${id}:`, err);
     }
     return NextResponse.json(profile);
   } catch (err) {

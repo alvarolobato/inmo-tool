@@ -77,12 +77,39 @@ function haversineKm(latPlaceholder: string, lonPlaceholder: string): string {
   return parts.join("");
 }
 
-export function buildScopeWhereClause(scope: Scope): ScopeQuery {
+/**
+ * One incremental funnel stage — the cumulative WHERE/params up through
+ * (and including) this stage's own predicate(s). Consumed by the
+ * zero-candidate diagnostic (issue #194), which re-applies each stage in
+ * order against `property` to find which layer of the filter first drops
+ * the count to zero (e.g. "14 pisos in the zone, but none in the price
+ * band" vs. "0 properties in the zone at all").
+ */
+export interface ScopeFunnelStage {
+  key: "geography" | "type" | "price_size" | "exclusions";
+  whereSql: string;
+  params: unknown[];
+}
+
+/**
+ * Builds the scope's WHERE fragment as four cumulative snapshots (geography
+ * -> +type -> +price/size -> +hard exclusions), one per funnel stage.
+ * `buildScopeWhereClause` is a thin wrapper over this (`stages.at(-1)`), so
+ * both share exactly one implementation of the geography/haversine
+ * expression the `ph()` docstring above already warns is easy to get subtly
+ * wrong via hand-written string concatenation.
+ */
+export function buildScopeFunnelStages(scope: Scope): ScopeFunnelStage[] {
+  const stages: ScopeFunnelStage[] = [];
   const conditions: string[] = [];
   const params: unknown[] = [];
 
   // --- Geography (radius-from-point; polygon not yet supported, see
-  // docs/architecture/data-model.md "Deliberately deferred") ---
+  // docs/architecture/data-model.md "Deliberately deferred") + the
+  // unconditional active-listing requirement, as ONE stage: a property with
+  // no currently-active listing must never count as a candidate regardless
+  // of geography alone, so "geography-only" (issue #194 §2a) already means
+  // "geography AND has an active listing", not geography in isolation. ---
   if (scope.geography.type !== "radius") {
     // ScopeSchema only defines "radius" today (z.literal("radius")), so this
     // branch is unreachable through validated input — guarded here anyway so
@@ -103,8 +130,6 @@ export function buildScopeWhereClause(scope: Scope): ScopeQuery {
       " <= " +
       radiusPh,
   );
-
-  // --- Active-listing requirement (unconditional) ---
   // A property with no currently-active listing (sold, withdrawn, expired —
   // or every listing simply removed) must never materialize as a live
   // candidate, independent of whether a price band is set. This used to
@@ -116,12 +141,22 @@ export function buildScopeWhereClause(scope: Scope): ScopeQuery {
   conditions.push(
     "EXISTS (SELECT 1 FROM listing WHERE listing.property_id = property.id AND listing.status = 'active')",
   );
+  stages.push({ key: "geography", whereSql: conditions.join(" AND "), params: [...params] });
 
   // --- Property type(s) ---
   params.push(scope.property_types);
   conditions.push("property.property_type = ANY(" + ph(params.length) + "::text[])");
+  stages.push({ key: "type", whereSql: conditions.join(" AND "), params: [...params] });
 
-  // --- Size band (m2_built specifically, not m2_useful — see data-model.md) ---
+  // --- Size band (m2_built specifically, not m2_useful — see data-model.md)
+  // + price band: MIN(current_price) across the property's *active*
+  // listings (a deduplicated property can have 2+ listings at different
+  // prices — see data-model.md's price_min/price_max note). Expressed as a
+  // scalar subquery rather than a JOIN + GROUP BY/HAVING so this stays a
+  // single composable WHERE fragment (the query-builder's stated contract),
+  // not a query shape materialize.ts has to know about. A property with zero
+  // active listings (e.g. every listing withdrawn) has a NULL subquery
+  // result, which correctly fails any price condition rather than matching.
   if (scope.size_min !== undefined) {
     params.push(scope.size_min);
     conditions.push("property.m2_built >= " + ph(params.length));
@@ -130,15 +165,6 @@ export function buildScopeWhereClause(scope: Scope): ScopeQuery {
     params.push(scope.size_max);
     conditions.push("property.m2_built <= " + ph(params.length));
   }
-
-  // --- Price band: MIN(current_price) across the property's *active*
-  // listings (a deduplicated property can have 2+ listings at different
-  // prices — see data-model.md's price_min/price_max note). Expressed as a
-  // scalar subquery rather than a JOIN + GROUP BY/HAVING so this stays a
-  // single composable WHERE fragment (the query-builder's stated contract),
-  // not a query shape materialize.ts has to know about. A property with zero
-  // active listings (e.g. every listing withdrawn) has a NULL subquery
-  // result, which correctly fails any price condition rather than matching.
   if (scope.price_min !== undefined || scope.price_max !== undefined) {
     const minPriceExpr =
       "(SELECT MIN(listing.current_price) FROM listing WHERE listing.property_id = property.id AND listing.status = 'active')";
@@ -151,6 +177,7 @@ export function buildScopeWhereClause(scope: Scope): ScopeQuery {
       conditions.push(minPriceExpr + " <= " + ph(params.length));
     }
   }
+  stages.push({ key: "price_size", whereSql: conditions.join(" AND "), params: [...params] });
 
   // --- Hard exclusions ---
   const exclusions = scope.hard_exclusions;
@@ -161,6 +188,13 @@ export function buildScopeWhereClause(scope: Scope): ScopeQuery {
     params.push(GROUND_FLOOR_VALUE);
     conditions.push("LOWER(COALESCE(property.floor, '')) <> " + ph(params.length));
   }
+  stages.push({ key: "exclusions", whereSql: conditions.join(" AND "), params: [...params] });
 
-  return { whereSql: conditions.join(" AND "), params };
+  return stages;
+}
+
+export function buildScopeWhereClause(scope: Scope): ScopeQuery {
+  const stages = buildScopeFunnelStages(scope);
+  const last = stages[stages.length - 1];
+  return { whereSql: last.whereSql, params: last.params };
 }

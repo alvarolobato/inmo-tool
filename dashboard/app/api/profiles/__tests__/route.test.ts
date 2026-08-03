@@ -43,6 +43,8 @@ function dbRow(overrides: Partial<Record<string, unknown>> = {}) {
     thesis_params: {},
     archived_at: null,
     created_at: "2026-08-02T00:00:00.000Z",
+    last_materialized_at: null,
+    last_viewed_at: null,
     ...overrides,
   };
 }
@@ -244,6 +246,47 @@ describe("EC-3: archiving hides from list but preserves data reachable by id", (
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.archived_at).not.toBeNull();
+  });
+});
+
+describe("GET /api/profiles/[id] — last_viewed_at touch (issue #191)", () => {
+  it("issues an UPDATE ... SET last_viewed_at = NOW() after a successful fetch", async () => {
+    const { GET: GET_BY_ID } = await import("../[id]/route");
+    mockQuery.mockResolvedValue({ rows: [dbRow()] });
+    const res = await GET_BY_ID(makeRequest("http://localhost:4000/api/profiles/1", "GET"), {
+      params: Promise.resolve({ id: "1" }),
+    });
+    expect(res.status).toBe(200);
+    const touchCall = mockQuery.mock.calls.find((c) => String(c[0]).includes("last_viewed_at = NOW()"));
+    expect(touchCall).toBeDefined();
+    expect(touchCall?.[1]).toEqual([1]);
+  });
+
+  it("still returns 200 with the profile even when the last_viewed_at write fails (best-effort, must never fail the page)", async () => {
+    const { GET: GET_BY_ID } = await import("../[id]/route");
+    mockQuery
+      .mockResolvedValueOnce({ rows: [dbRow()] }) // getProfileById succeeds
+      .mockRejectedValueOnce(new Error("write pool exhausted")); // touchProfileViewedAt fails
+    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const res = await GET_BY_ID(makeRequest("http://localhost:4000/api/profiles/1", "GET"), {
+      params: Promise.resolve({ id: "1" }),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.name).toBe("Alquiler alto rendimiento");
+    expect(consoleWarnSpy).toHaveBeenCalled();
+    consoleWarnSpy.mockRestore();
+  });
+
+  it("does NOT touch last_viewed_at when the profile does not exist (404)", async () => {
+    const { GET: GET_BY_ID } = await import("../[id]/route");
+    mockQuery.mockResolvedValue({ rows: [] });
+    const res = await GET_BY_ID(makeRequest("http://localhost:4000/api/profiles/999", "GET"), {
+      params: Promise.resolve({ id: "999" }),
+    });
+    expect(res.status).toBe(404);
+    const touchCall = mockQuery.mock.calls.find((c) => String(c[0]).includes("last_viewed_at = NOW()"));
+    expect(touchCall).toBeUndefined();
   });
 });
 

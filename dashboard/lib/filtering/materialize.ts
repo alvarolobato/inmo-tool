@@ -104,6 +104,14 @@ export async function materializeProfile(profileId: number): Promise<Materialize
       [profileId],
     );
 
+    // Issue #191: unconditional, including the zero-matches case — this is
+    // exactly what distinguishes "never materialized" from "materialized,
+    // matched nothing" for the zero-candidate diagnostic (issue #194). Inside
+    // the same transaction as the match/unmatch upsert so a rollback (a
+    // failure above) can't leave this timestamp advanced while the actual
+    // state change didn't commit.
+    await client.query(`UPDATE search_profile SET last_materialized_at = NOW() WHERE id = $1`, [profileId]);
+
     return {
       profileId,
       matchedCount: matchedIds.length,

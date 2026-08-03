@@ -187,4 +187,8 @@ export interface SearchProfileRow {
   thesis_params: ThesisParams;
   archived_at: string | null;
   created_at: string;
+  /** Issue #191: NULL means "never materialized" — distinct from "materialized, matched zero". Set by materializeProfile on every run. */
+  last_materialized_at: string | null;
+  /** Issue #191: NULL means "never opened /profiles/[id]". Set best-effort by GET /api/profiles/[id]. */
+  last_viewed_at: string | null;
 }
