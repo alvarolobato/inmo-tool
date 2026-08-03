@@ -148,6 +148,80 @@ describe("occupancy prompt — axis 2/3 silence override survives ASSESSMENT_RUL
   });
 });
 
+describe("occupancy prompt — derived area-price signal (#184)", () => {
+  it("renders the signal, labelled, when FlowVars.areaPriceSignal is set", () => {
+    const { stable, volatile } = buildSystemPrompt("occupancy", {
+      listings: [SILENT_ADVERT],
+      areaPriceSignal:
+        "El precio de este inmueble está aproximadamente un 20-30% por debajo de la mediana de precio/m² de inmuebles comparables en su zona (radio 1km, 10-19 comparables).",
+    });
+    const text = `${stable}\n${volatile ?? ""}`;
+
+    expect(text).toContain("DATO DERIVADO: PRECIO VS. ZONA");
+    expect(text).toContain("20-30% por debajo");
+  });
+
+  it("renders no PER-PROPERTY figure when areaPriceSignal is absent (#184 requirement 2 — no fabricated 'in line with market')", () => {
+    // The general rules block (what to do IF a signal appears) is always in
+    // `stable` — see the next test. What must NOT appear without a real
+    // signal is the labelled per-request block that would carry an actual
+    // number/band; its header is unique to that block.
+    const { volatile } = buildSystemPrompt("occupancy", { listings: [SILENT_ADVERT] });
+    expect(volatile ?? "").not.toContain("DATO DERIVADO: PRECIO VS. ZONA");
+  });
+
+  it("always includes the general rules for how to weigh the signal, whether or not one is present this request (stable, cache-friendly text)", () => {
+    // The RULES text (what to do IF a signal appears) must be part of the
+    // flow's stable prefix regardless of this particular request having a
+    // signal — only the actual figure is per-request/volatile. Otherwise the
+    // stable prefix would vary by request, defeating prompt caching.
+    const withSignal = buildSystemPrompt("occupancy", {
+      listings: [SILENT_ADVERT],
+      areaPriceSignal: "20-30% por debajo",
+    }).stable;
+    const withoutSignal = buildSystemPrompt("occupancy", { listings: [SILENT_ADVERT] }).stable;
+
+    expect(withSignal).toBe(withoutSignal);
+    expect(withSignal).toContain("Contexto de precio de zona");
+  });
+
+  it(
+    "the evidence/no-assertion rules for the derived signal come AFTER ASSESSMENT_RULES in the " +
+      "assembled string (#184 requirement 4 — a rule stated before ASSESSMENT_RULES loses to a " +
+      "contradicting rule inside it; mirrors the ejes-2/3 exception test above)",
+    () => {
+      const text = occupancyPromptText([SILENT_ADVERT]);
+
+      const genericNoCiteRuleIdx = text.indexOf("no afirmes nada");
+      const derivedSignalRuleIdx = text.indexOf("NO la cites como");
+
+      expect(genericNoCiteRuleIdx).toBeGreaterThan(-1);
+      expect(derivedSignalRuleIdx).toBeGreaterThan(-1);
+      expect(derivedSignalRuleIdx).toBeGreaterThan(genericNoCiteRuleIdx);
+    },
+  );
+
+  it("explicitly forbids citing the derived signal as `evidence`", () => {
+    const text = occupancyPromptText([SILENT_ADVERT]);
+    expect(text).toContain("NO la cites como");
+    expect(text.toLowerCase()).toContain("fabricar una cita");
+  });
+
+  it("explicitly forbids treating the derived signal as proof by itself, only as a scrutiny cue", () => {
+    const text = occupancyPromptText([SILENT_ADVERT]);
+    expect(text).toMatch(/NO la uses,? por sí sola/);
+    expect(text.toLowerCase()).toContain("explicaciones inocentes");
+  });
+
+  it("the eje-1 'price is not shown' sentence references the derived-signal exception rather than flatly contradicting it", () => {
+    const text = occupancyPromptText([SILENT_ADVERT]);
+    // Both statements must coexist without the model reading them as opposed:
+    // raw price is still hidden, AND a derived comparison may separately appear.
+    expect(text).toContain("El precio exacto del");
+    expect(text).toContain("Excepción explícita a esto");
+  });
+});
+
 describe("parseOccupancyResult", () => {
   const full = JSON.stringify({
     occupancy: {
@@ -289,8 +363,10 @@ describe("summaryConfidence", () => {
 describe("prompt version", () => {
   it("is pinned, so a prompt change forces a new row rather than overwriting", () => {
     // ai_assessment's unique key includes prompt_version precisely so old and
-    // new outputs stay comparable after a prompt edit.
-    expect(OCCUPANCY_PROMPT_VERSION).toBe("occupancy/v1");
+    // new outputs stay comparable after a prompt edit. Bumped to v2 for #184
+    // (the derived area-price signal changed both the stable rules text and
+    // the volatile payload shape) — see OCCUPANCY_PROMPT_VERSION's doc.
+    expect(OCCUPANCY_PROMPT_VERSION).toBe("occupancy/v2");
   });
 });
 

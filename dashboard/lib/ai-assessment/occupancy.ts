@@ -43,6 +43,7 @@ import {
   type Verdict,
 } from "./shared";
 import { getOrCompute, getLatestAssessment, logCacheOutcome, type CachedAssessment } from "./cache";
+import { buildAreaPriceSignal } from "./price-signal";
 
 // Re-exported so existing imports (`from "../occupancy"`, including this
 // flow's own tests) keep working unchanged now that the property-loading and
@@ -55,8 +56,14 @@ export type { Verdict };
  * change a verdict, so `ai_assessment`'s unique key treats the new output as a
  * distinct row rather than colliding with a verdict the old prompt produced.
  * #30 owns the wider caching/versioning story; this is the hook it will use.
+ *
+ * Bumped to v2 for #184: the stable prompt text gained the "Contexto de
+ * precio de zona" rules block (system-prompt.ts's `AREA_PRICE_SIGNAL_RULES`)
+ * and the volatile payload can now carry a derived price-comparison line —
+ * both change what the model reads, so a v1 cache row must not silently pass
+ * as current.
  */
-export const OCCUPANCY_PROMPT_VERSION = "occupancy/v1";
+export const OCCUPANCY_PROMPT_VERSION = "occupancy/v2";
 
 /** Occupancy status vocabulary — see the enum-language note in system-prompt.ts. */
 export const OCCUPANCY_STATUSES = [
@@ -345,6 +352,13 @@ export async function getOccupancyAssessment(
  * both cases there is nothing to read, and writing a verdict (`unknown` or
  * otherwise) would misrepresent "we never looked" as "we looked and could
  * not tell" or, worse on the #145 axes, as a confident all-clear.
+ *
+ * #184: computes the bucketed zone-price signal ONCE (`buildAreaPriceSignal`,
+ * price-signal.ts) and threads the exact same string into both the LLM call
+ * (`assessOccupancy`'s `opts.areaPriceSignal` → rendered into the prompt) and
+ * `getOrCompute`'s `extraHashInput` (→ folded into the cache's invalidation
+ * key). Same variable, same call — the agreement the issue requires can't
+ * drift apart because there is only one place either value comes from.
  */
 export async function assessPropertyOccupancy(
   propertyId: number,
@@ -353,16 +367,19 @@ export async function assessPropertyOccupancy(
   const listings = await loadPropertyListings(propertyId);
   if (listings.length === 0) throw new NoListingsError(propertyId);
 
+  const areaPriceSignal = await buildAreaPriceSignal(propertyId);
+
   const { result, fromCache } = await getOrCompute<OccupancyResult>(
     propertyId,
     "occupancy",
     OCCUPANCY_PROMPT_VERSION,
     listings,
     async () => {
-      const { text, model } = await assessOccupancy(listings, opts);
+      const { text, model } = await assessOccupancy(listings, { ...opts, areaPriceSignal });
       return { result: parseOccupancyResult(text), model };
     },
     saveOccupancyAssessment,
+    areaPriceSignal,
   );
   logCacheOutcome("occupancy", propertyId, fromCache);
   return result;
