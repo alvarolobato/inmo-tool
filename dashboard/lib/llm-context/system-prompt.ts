@@ -55,10 +55,45 @@ const ASSESSMENT_RULES = `Reglas de evaluación (obligatorias):
 4. Responde SOLO con el objeto JSON pedido: sin texto antes ni después, sin
    bloques de código markdown, sin comentarios.`;
 
-/** Serialise a listing for the volatile part of a prompt. */
-function formatListing(l: ListingSnapshot, label = "ANUNCIO"): string {
+/**
+ * Fields deliberately excluded from `computeAssessmentContentHash`
+ * (`lib/ai-assessment/cache.ts`) — price, built/useful m², rooms, bathrooms,
+ * floor, and photo count. Appended to the volatile payload of every cached,
+ * property-level flow so the model is told explicitly why those facts are
+ * absent, rather than silently missing with no explanation — see
+ * `formatListing`'s `hashCoveredOnly` option and cache.ts's module doc
+ * ("Corrected: what the model is actually shown") for the full rationale.
+ */
+const HASH_SCOPE_NOTE =
+  '\n\n(Nota: precio, m² construidos/útiles, habitaciones, baños, planta y ' +
+  "número de fotos no se incluyen aquí a propósito — esta evaluación se cachea " +
+  "por contenido y esos campos no forman parte de esa clave, así que no los " +
+  "uses como señal ni asumas un valor visto en una consulta anterior.)";
+
+/**
+ * Serialise a listing for the volatile part of a prompt.
+ *
+ * `hashCoveredOnly`, when true, omits every field
+ * `computeAssessmentContentHash` (cache.ts) does NOT cover: price, m²
+ * built/useful, rooms, bathrooms, floor, photo count. Every property-level
+ * cached flow (occupancy/condition/redflags/extract, via `propertyVolatile`)
+ * passes it — a cache-invalidation key that ignores a field must never be
+ * paired with a prompt that shows the model that same field, or a genuine
+ * change becomes invisible to the cache while still changing the model's
+ * answer, freezing a stale verdict indefinitely (#30 review finding). `false`
+ * (the default) is for flows the #30 cache doesn't wrap — currently only
+ * `compare` (#38) — where showing the full listing is correct because there
+ * is no cache key that could go stale against it.
+ */
+function formatListing(
+  l: ListingSnapshot,
+  label = "ANUNCIO",
+  opts: { hashCoveredOnly?: boolean } = {},
+): string {
   const field = (k: string, v: unknown): string | null =>
     v === undefined || v === null || v === "" ? null : `${k}: ${String(v)}`;
+
+  const restricted = opts.hashCoveredOnly ?? false;
 
   const lines = [
     field("id_propiedad", l.propertyId),
@@ -71,18 +106,18 @@ function formatListing(l: ListingSnapshot, label = "ANUNCIO"): string {
     field("operacion", l.operation),
     field("tipo_inmueble", l.propertyType),
     field("titulo", l.title),
-    field("precio_eur", l.price),
-    field("m2_construidos", l.m2Built),
-    field("habitaciones", l.rooms),
-    field("banos", l.bathrooms),
-    field("planta", l.floor),
+    restricted ? null : field("precio_eur", l.price),
+    restricted ? null : field("m2_construidos", l.m2Built),
+    restricted ? null : field("habitaciones", l.rooms),
+    restricted ? null : field("banos", l.bathrooms),
+    restricted ? null : field("planta", l.floor),
     field("direccion", l.address),
     field("ciudad", l.city),
     field("provincia", l.province),
     field("ano_construccion", l.yearBuilt),
     field("certificado_energetico", l.energyRating),
     l.features?.length ? `caracteristicas: ${l.features.join(", ")}` : null,
-    l.photoUrls?.length ? `num_fotos: ${l.photoUrls.length}` : null,
+    restricted ? null : l.photoUrls?.length ? `num_fotos: ${l.photoUrls.length}` : null,
   ].filter((x): x is string => x !== null);
 
   const description = l.description?.trim();
@@ -102,9 +137,16 @@ function resolveDescription(vars: FlowVars): string {
   return (vars.description ?? vars.listing?.description ?? "").trim();
 }
 
-/** Shared volatile payload for the four single-listing assessment flows. */
+/**
+ * Shared volatile payload for the four single-listing, CACHED assessment
+ * flows (occupancy/condition/redflags/extract) — `hashCoveredOnly: true`
+ * because every caller of this function feeds a #30 `getOrCompute()` call.
+ * See `formatListing`'s doc for why that flag exists.
+ */
 function listingVolatile(vars: FlowVars): string | undefined {
-  if (vars.listing) return formatListing(vars.listing);
+  if (vars.listing) {
+    return formatListing(vars.listing, "ANUNCIO", { hashCoveredOnly: true }) + HASH_SCOPE_NOTE;
+  }
   const description = resolveDescription(vars);
   if (description) {
     return `### ANUNCIO\n\nDESCRIPCIÓN:\n"""\n${description}\n"""`;
@@ -119,6 +161,10 @@ function listingVolatile(vars: FlowVars): string | undefined {
  * Falls back to the single-listing payload when the caller passed only
  * `listing`, so flows that have not yet moved to property-level assessment
  * keep working unchanged.
+ *
+ * Every caller of `propertyVolatile` (occupancy/condition/redflags/extract)
+ * is wrapped in the #30 cache, so `formatListing` is always called with
+ * `hashCoveredOnly: true` here — see its doc and `HASH_SCOPE_NOTE`.
  */
 function propertyVolatile(vars: FlowVars): string | undefined {
   const listings = vars.listings ?? [];
@@ -131,14 +177,21 @@ function propertyVolatile(vars: FlowVars): string | undefined {
         `veces y se complementan casi siempre.`
       : `Anuncio único de este inmueble.`;
 
-  return [
-    `### ANUNCIOS DEL INMUEBLE`,
-    header,
-    "",
-    ...listings.map((l, i) =>
-      formatListing(l, `ANUNCIO ${i + 1} DE ${listings.length} — portal: ${l.source ?? "desconocido"}`),
-    ),
-  ].join("\n\n");
+  return (
+    [
+      `### ANUNCIOS DEL INMUEBLE`,
+      header,
+      "",
+      ...listings.map((l, i) =>
+        formatListing(
+          l,
+          `ANUNCIO ${i + 1} DE ${listings.length} — portal: ${l.source ?? "desconocido"}`,
+          { hashCoveredOnly: true },
+        ),
+      ),
+    ].join("\n\n") + HASH_SCOPE_NOTE
+  ); // note: the `listings.length === 0` fallback above already returns
+  // (via listingVolatile) with its own copy of HASH_SCOPE_NOTE appended.
 }
 
 // ── Knowledge context (schema) ────────────────────────────────────────────────
@@ -262,9 +315,12 @@ ilegalmente" es un riesgo legal grave, no una ganga.
   "se vende con ocupantes", "posesión no garantizada").
 - \`unknown\` — el anuncio no lo dice.
 
-Señales que debes tener en cuenta antes de decidir \`vacant\`: fotos con enseres
-personales, muebles y ropa; menciones a "se entrega vacío en la firma"; precio
-muy por debajo de mercado sin explicación.
+Señales que debes tener en cuenta antes de decidir \`vacant\`: menciones a "se
+entrega vacío en la firma", o descripciones textuales de enseres personales,
+muebles o ropa todavía presentes en la vivienda. El precio del anuncio NO se
+te muestra en este flujo (ver nota al final del bloque de anuncios) — no lo
+uses como señal aunque lo hayas visto en una consulta anterior: una rebaja de
+precio no es, por sí sola, evidencia de ocupación.
 
 Ten en cuenta la \`operacion\` del anuncio. En un anuncio de **alquiler**
 ("operacion: rent"), que el inmueble esté actualmente arrendado es lo normal y
@@ -581,7 +637,34 @@ Una lista vacía es un resultado correcto y frecuente — NO fuerces hallazgos.`
   return { stable, volatile: propertyVolatile(vars) };
 }
 
-/** #28 — extract: unstructured description → structured fields. */
+/**
+ * #28 — extract: unstructured description → structured fields, per
+ * deduplicated property.
+ *
+ * Property-level, not listing-level, DESPITE issue #28's own wording
+ * ("per-advert structured fields") and `lib/llm.ts`'s original module doc
+ * (written when #24 landed, before #28 itself did) — both predate the
+ * observation that settled it: `rooms`/`bathrooms`/`m2_built`/`m2_useful`/
+ * `floor`/`has_elevator` are all columns on `property`, not `listing` (see
+ * `etl/schema/init.sql`). The dedup pipeline already reconciles per-listing
+ * facts onto one property row; extraction fills gaps in THAT row, so it must
+ * read the same "every live listing at once" evidence occupancy/condition/
+ * redflags do — a private-seller advert stating "85m², 3 habitaciones" must
+ * not be missed because the property's other listing (say, an agency's
+ * shorter blurb) is what happened to get read. Using `propertyVolatile()`
+ * (not `listingVolatile()`) keeps this flow on the same shared plumbing and
+ * cache-key shape (`property_id`, #30) as its three siblings, instead of
+ * needing its own listing-keyed storage path.
+ *
+ * Output schema is deliberately narrower than the placeholder this replaces
+ * (which also asked for `year_built`/`energy_rating`/`features`/`m2_plot`):
+ * issue #28's technical approach names exactly `m2_built`, `m2_useful`,
+ * `rooms`, `bathrooms`, `floor`, `has_elevator` — the fields the hard-filter
+ * engine (task 2.4) actually needs a fallback for. `confidence_per_field`
+ * (not one scalar `confidence`) lets a consumer trust a high-confidence
+ * `rooms` extraction while discounting a shakier `floor` guess from the same
+ * response, per the issue's own reasoning.
+ */
 export function buildExtractPrompt(vars: FlowVars): {
   stable: string;
   volatile?: string;
@@ -594,27 +677,61 @@ Muchos anuncios de particulares no traen campos estructurados: todo está en el
 texto libre. Extrae lo que el portal no nos dio, para que ese anuncio no quede
 injustamente fuera de los filtros del usuario por falta de datos.
 
-Devuelve \`null\` en cada campo que el texto no indique explícitamente. No
-deduzcas, no redondees, no "completes" a partir de lo que sería habitual.
+Campos a extraer (todos opcionales):
+- \`m2_built\` — metros cuadrados construidos.
+- \`m2_useful\` — metros cuadrados útiles, SOLO si el texto los distingue
+  explícitamente de los construidos.
+- \`rooms\` — número de habitaciones o dormitorios.
+- \`bathrooms\` — número de baños.
+- \`floor\` — planta, como texto ("bajo", "3º", "ático", "2ºB"…).
+- \`has_elevator\` — \`true\`/\`false\` solo si el texto lo menciona
+  explícitamente ("con ascensor", "sin ascensor", "edificio sin ascensor").
+
+Por cada campo que rellenes con un valor (no \`null\`), añade su confianza en
+\`confidence_per_field\` bajo la misma clave (0.0-1.0). NO añadas una entrada en
+\`confidence_per_field\` para un campo que dejaste en \`null\` — un campo ausente
+no tiene una confianza que reportar.
+
+### No inventes, no redondees, no "completes" (EC-2)
+
+Si el texto no menciona un dato, ese campo es \`null\`. NO lo deduzcas a partir
+de lo que sería típico para ese tipo de inmueble o esa zona (p. ej. no asumas
+\`has_elevator: false\` solo porque el edificio parece antiguo, ni redondees
+"unos 90 metros" a un número si el texto ya da un valor exacto en otra
+frase — usa el valor exacto cuando exista). Convertir el silencio en un valor
+concreto, aunque sea con confianza baja, es exactamente el fallo que este
+flujo existe para evitar: un dato inventado es peor que un campo vacío para un
+filtro que hará comparaciones numéricas con él.
+
+### Varios anuncios del mismo inmueble
+
+Puede que te dé varios anuncios del mismo inmueble físico en portales
+distintos. Combínalos: si solo uno de ellos da un dato concreto (metros,
+habitaciones, planta…), extráelo igualmente — que otro anuncio no lo mencione
+no invalida el que sí lo hace.
 
 ${ASSESSMENT_RULES}
 
+**Nota sobre la regla 2 anterior:** aquí "no lo sé" para un campo individual se
+expresa dejando ese campo en \`null\`, NUNCA con la cadena \`"unknown"\` — estos
+campos son numéricos, de texto libre corto o booleanos, y \`"unknown"\` rompería
+el tipo esperado (un \`rooms: "unknown"\` no es un número válido). Deja el campo
+en \`null\` y no le añadas entrada en \`confidence_per_field\`; no escribas la
+palabra "unknown" en ningún campo de este formato.
+
 Formato de salida:
 {
-  "rooms": number | null,
-  "bathrooms": number | null,
   "m2_built": number | null,
   "m2_useful": number | null,
-  "m2_plot": number | null,
+  "rooms": number | null,
+  "bathrooms": number | null,
   "floor": string | null,
   "has_elevator": boolean | null,
-  "year_built": number | null,
-  "energy_rating": string | null,
-  "features": ["terraza", "garaje", "trastero", …],
-  "confidence": 0.0-1.0
+  "confidence_per_field": { "<nombre_de_campo>": 0.0-1.0, ... },
+  "reasoning": "una frase en español"
 }`;
 
-  return { stable, volatile: listingVolatile(vars) };
+  return { stable, volatile: propertyVolatile(vars) };
 }
 
 /** #38 — compare: structured side-by-side of N candidates. */

@@ -293,3 +293,63 @@ describe("prompt version", () => {
     expect(OCCUPANCY_PROMPT_VERSION).toBe("occupancy/v1");
   });
 });
+
+describe("occupancy prompt — hash-scoped fields are genuinely invisible (#30 review, must-fix 1)", () => {
+  /**
+   * The review's own probe: two snapshots differing ONLY in a field
+   * `computeAssessmentContentHash` (cache.ts) excludes must now produce the
+   * IDENTICAL prompt — not just the identical hash, which was already true
+   * and is what made the old "none of those are shown to the model" doc
+   * claim false without a test catching it.
+   */
+  const base: ListingSnapshot = {
+    propertyId: 7,
+    listingId: 101,
+    source: "fotocasa",
+    operation: "sale",
+    description: "Piso de 90 m2 en Chamberí. Tres dormitorios, dos baños. Luminoso.",
+    price: 250000,
+    m2Built: 90,
+    rooms: 3,
+    bathrooms: 2,
+    floor: "3",
+    photoUrls: ["a.jpg", "b.jpg"],
+  };
+
+  it("a price-only change produces an IDENTICAL prompt, not just an identical hash", () => {
+    const cheaper: ListingSnapshot = { ...base, price: 150000 };
+    expect(occupancyPromptText([base])).toBe(occupancyPromptText([cheaper]));
+  });
+
+  it("a photo-count-only change produces an IDENTICAL prompt", () => {
+    const morePhotos: ListingSnapshot = { ...base, photoUrls: ["a.jpg", "b.jpg", "c.jpg", "d.jpg"] };
+    expect(occupancyPromptText([base])).toBe(occupancyPromptText([morePhotos]));
+  });
+
+  it("a rooms/m2Built/floor-only change produces an IDENTICAL prompt", () => {
+    const differentStructured: ListingSnapshot = {
+      ...base,
+      rooms: 5,
+      m2Built: 140,
+      floor: "ático",
+    };
+    expect(occupancyPromptText([base])).toBe(occupancyPromptText([differentStructured]));
+  });
+
+  it("never emits precio_eur, m2_construidos, habitaciones, banos, planta, or num_fotos", () => {
+    const text = occupancyPromptText([base]);
+    expect(text).not.toContain("precio_eur");
+    expect(text).not.toContain("m2_construidos");
+    expect(text).not.toContain("habitaciones:");
+    expect(text).not.toContain("banos:");
+    expect(text).not.toContain("planta:");
+    expect(text).not.toContain("num_fotos");
+    // The description itself (the actual hashed content) must still be there.
+    expect(text).toContain("Chamberí");
+  });
+
+  it("no longer instructs the model to weigh price as an occupancy signal (it can't see price)", () => {
+    const text = occupancyPromptText([base]);
+    expect(text).not.toContain("precio muy por debajo de mercado");
+  });
+});

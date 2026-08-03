@@ -42,6 +42,7 @@ import {
   stripCodeFence,
   type Verdict,
 } from "./shared";
+import { getOrCompute, getLatestAssessment, logCacheOutcome, type CachedAssessment } from "./cache";
 
 // Re-exported so existing imports (`from "../occupancy"`, including this
 // flow's own tests) keep working unchanged now that the property-loading and
@@ -280,20 +281,29 @@ export function summaryConfidence(result: OccupancyResult): number {
   return flagged.length > 0 ? Math.max(...flagged) : result.occupancy.confidence;
 }
 
-/** Persist a verdict, replacing any prior one for the same prompt version. */
+/**
+ * Persist a verdict, replacing any prior one for the same prompt version.
+ *
+ * `contentHash` (#30) is optional — omitted, it is stored as NULL, which
+ * `getOrCompute` (cache.ts) always treats as a miss on the next read. Direct
+ * callers that only care about the row shape (tests, `saveOccupancyAssessment`
+ * used outside `assessPropertyOccupancy`) can keep passing 3 args unchanged.
+ */
 export async function saveOccupancyAssessment(
   propertyId: number,
   result: OccupancyResult,
   model: string | null,
+  contentHash: string | null = null,
 ): Promise<void> {
   await sql(
     `INSERT INTO ai_assessment
-        (property_id, assessment_type, result, confidence, model, prompt_version, generated_at)
-     VALUES ($1, 'occupancy', $2::jsonb, $3, $4, $5, NOW())
+        (property_id, assessment_type, result, confidence, model, prompt_version, content_hash, generated_at)
+     VALUES ($1, 'occupancy', $2::jsonb, $3, $4, $5, $6, NOW())
      ON CONFLICT ON CONSTRAINT ai_assessment_property_key
      DO UPDATE SET result = EXCLUDED.result,
                    confidence = EXCLUDED.confidence,
                    model = EXCLUDED.model,
+                   content_hash = EXCLUDED.content_hash,
                    generated_at = EXCLUDED.generated_at`,
     [
       propertyId,
@@ -301,32 +311,34 @@ export async function saveOccupancyAssessment(
       summaryConfidence(result),
       model,
       OCCUPANCY_PROMPT_VERSION,
+      contentHash,
     ],
   );
 }
 
-/** Read the cached verdict for a property, if one exists. */
+/**
+ * Read the cached verdict for a property, if one exists.
+ *
+ * #30: now selects the LATEST row for (property_id, 'occupancy') regardless
+ * of `prompt_version` (see `getLatestAssessment`'s doc for why — the #156-era
+ * behaviour of filtering strictly by the current version made GET 404 right
+ * after a prompt bump even though `lib/candidates.ts`'s card query would still
+ * show the old verdict). `stale` tells the caller whether the row it got back
+ * was generated under a version that is no longer current.
+ */
 export async function getOccupancyAssessment(
   propertyId: number,
-): Promise<{ result: OccupancyResult; model: string | null; generated_at: string | null } | null> {
-  const rows = await sql<{
-    result: OccupancyResult;
-    model: string | null;
-    generated_at: string | null;
-  }>(
-    `SELECT result, model, generated_at
-       FROM ai_assessment
-      WHERE property_id = $1
-        AND assessment_type = 'occupancy'
-        AND prompt_version = $2`,
-    [propertyId, OCCUPANCY_PROMPT_VERSION],
+): Promise<CachedAssessment<OccupancyResult> | null> {
+  return getLatestAssessment<OccupancyResult>(
+    propertyId,
+    "occupancy",
+    OCCUPANCY_PROMPT_VERSION,
   );
-  return rows[0] ?? null;
 }
 
 /**
- * Assess one property end-to-end: load its merged listings, ask the model,
- * validate, persist.
+ * Assess one property end-to-end: load its merged listings, ask the model
+ * (unless an unchanged verdict is already cached — #30), validate, persist.
  *
  * Throws `NoListingsError` when the property has no live listings, OR when
  * every live listing has no description (see `loadPropertyListings`) — in
@@ -341,8 +353,17 @@ export async function assessPropertyOccupancy(
   const listings = await loadPropertyListings(propertyId);
   if (listings.length === 0) throw new NoListingsError(propertyId);
 
-  const { text, model } = await assessOccupancy(listings, opts);
-  const result = parseOccupancyResult(text);
-  await saveOccupancyAssessment(propertyId, result, model);
+  const { result, fromCache } = await getOrCompute<OccupancyResult>(
+    propertyId,
+    "occupancy",
+    OCCUPANCY_PROMPT_VERSION,
+    listings,
+    async () => {
+      const { text, model } = await assessOccupancy(listings, opts);
+      return { result: parseOccupancyResult(text), model };
+    },
+    saveOccupancyAssessment,
+  );
+  logCacheOutcome("occupancy", propertyId, fromCache);
   return result;
 }

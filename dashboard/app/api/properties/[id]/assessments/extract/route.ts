@@ -1,25 +1,29 @@
 /**
- * Occupancy assessment for one deduplicated property (#25).
+ * Unstructured-to-structured field extraction for one deduplicated property (#28).
  *
- *   GET  — read the cached verdict, or 404 if none has been generated yet.
- *   POST — run (or re-run) the assessment and persist it.
+ *   GET  — read the cached extraction, or 404 if none has been generated yet.
+ *   POST — run (or re-run) the extraction and persist it. May return
+ *          `skipped: true` without ever calling the LLM, when the property
+ *          already has every field this flow can fill (EC-3, cost control) —
+ *          see lib/ai-assessment/extract.ts's `assessPropertyExtract` doc.
  *
- * Keyed on the property, not a listing: see lib/ai-assessment/occupancy.ts for
- * why (one physical flat, one verdict, all merged adverts as evidence).
+ * Keyed on the property, not a listing — same shape as
+ * `/api/properties/[id]/assessments/{occupancy,condition,redflags}`: see
+ * lib/ai-assessment/extract.ts's module doc for why this flow moved to
+ * property-level despite issue #28's own listing-level wording.
  *
  * Gated by the admin credential like every route under /api/* — POST spends
- * real LLM budget, so it is emphatically not public (lib/api-auth-policy.ts).
+ * real LLM budget (lib/api-auth-policy.ts).
  *
- * #30: GET now returns the LATEST verdict regardless of prompt version
- * (mirroring `lib/candidates.ts`'s card query), plus `stale: true` when that
- * row's `prompt_version` isn't `current_prompt_version` — see
- * `lib/ai-assessment/cache.ts`'s `CachedAssessment` doc for the skew this
- * fixes (a v1 badge rendering next to a 404 after a prompt bump). POST always
- * runs against the current prompt/schema, cache-hit or not.
+ * #30: GET returns the LATEST extraction regardless of prompt version, plus
+ * `stale: true` when it was generated under a version that is no longer
+ * current — see `lib/ai-assessment/cache.ts`'s `CachedAssessment` doc and
+ * occupancy's route (which documents the skew this fixes) for the full
+ * rationale.
  *
  * Error codes:
  *   400 — Invalid property id
- *   404 — Property not found, no live listings, or (GET) no cached verdict
+ *   404 — Property not found, no live listings, or (GET) no cached extraction
  *   429 — Daily LLM budget exhausted
  *   503 — LLM circuit breaker open
  *   500 — Unexpected error
@@ -27,11 +31,11 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import {
-  assessPropertyOccupancy,
-  getOccupancyAssessment,
+  assessPropertyExtract,
+  getExtractAssessment,
   NoListingsError,
-  OCCUPANCY_PROMPT_VERSION,
-} from "@/lib/ai-assessment/occupancy";
+  EXTRACT_PROMPT_VERSION,
+} from "@/lib/ai-assessment/extract";
 import { BudgetExceededError, CircuitBreakerOpenError } from "@/lib/llm";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
@@ -60,11 +64,11 @@ export async function GET(
   }
 
   try {
-    const cached = await getOccupancyAssessment(propertyId);
+    const cached = await getExtractAssessment(propertyId);
     if (!cached) {
       return NextResponse.json(
         formatApiError(
-          "Todavía no se ha evaluado la ocupación de esta propiedad.",
+          "Todavía no se han extraído campos estructurados de esta propiedad.",
           "NOT_FOUND",
           undefined,
           requestId,
@@ -74,7 +78,7 @@ export async function GET(
     }
     return NextResponse.json({
       property_id: propertyId,
-      current_prompt_version: OCCUPANCY_PROMPT_VERSION,
+      current_prompt_version: EXTRACT_PROMPT_VERSION,
       prompt_version: cached.prompt_version,
       stale: cached.stale,
       result: cached.result,
@@ -82,7 +86,7 @@ export async function GET(
       generated_at: cached.generated_at,
     });
   } catch (err) {
-    console.error(`[${requestId}] GET occupancy assessment failed:`, err);
+    console.error(`[${requestId}] GET extract assessment failed:`, err);
     return NextResponse.json(
       formatApiError(sanitizeErrorMessage(err), "UNKNOWN", undefined, requestId),
       { status: 500 },
@@ -106,11 +110,23 @@ export async function POST(
   }
 
   try {
-    const result = await assessPropertyOccupancy(propertyId, { requestId });
+    const outcome = await assessPropertyExtract(propertyId, { requestId });
+    if (outcome.skipped) {
+      // Not an error: the property already has every field this flow can
+      // fill, so no LLM call was made (EC-3, cost control) — 200, not 404,
+      // because "nothing to do" is a normal, expected outcome here.
+      return NextResponse.json({
+        property_id: propertyId,
+        prompt_version: EXTRACT_PROMPT_VERSION,
+        skipped: true,
+        reason: outcome.reason,
+      });
+    }
     return NextResponse.json({
       property_id: propertyId,
-      prompt_version: OCCUPANCY_PROMPT_VERSION,
-      result,
+      prompt_version: EXTRACT_PROMPT_VERSION,
+      skipped: false,
+      result: outcome.result,
     });
   } catch (err) {
     if (err instanceof NoListingsError) {
@@ -136,7 +152,7 @@ export async function POST(
         { status: 503 },
       );
     }
-    console.error(`[${requestId}] POST occupancy assessment failed:`, err);
+    console.error(`[${requestId}] POST extract assessment failed:`, err);
     return NextResponse.json(
       formatApiError(sanitizeErrorMessage(err), "UNKNOWN", undefined, requestId),
       { status: 500 },

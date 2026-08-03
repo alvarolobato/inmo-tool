@@ -100,14 +100,17 @@ describe("mockRunStep — assessment flows", () => {
     }
   });
 
-  it("extract returns the structured-field shape with nulls preserved", () => {
+  it("extract returns the structured-field shape with per-field confidence and nulls preserved (#28)", () => {
     const step = mockRunStep([sys(promptFor("extract")), user("evalúa")]);
     expect(step.kind).toBe("final");
     if (step.kind === "final") {
       const parsed = JSON.parse(step.content);
       expect(parsed.rooms).toBe(3);
-      expect(parsed.year_built).toBeNull();
-      expect(Array.isArray(parsed.features)).toBe(true);
+      expect(parsed.m2_useful).toBeNull();
+      expect(typeof parsed.confidence_per_field).toBe("object");
+      expect(parsed.confidence_per_field.rooms).toBeGreaterThan(0);
+      // Nulled field must have no confidence entry (module doc's rule).
+      expect(parsed.confidence_per_field.m2_useful).toBeUndefined();
     }
   });
 

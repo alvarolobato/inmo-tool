@@ -66,7 +66,13 @@ interface RawPropertyRow {
   province: string | null;
 }
 
-const num = (v: string | null): number | null => (v === null ? null : Number(v));
+/**
+ * NUMERIC columns round-trip through `pg` as strings for the same reason
+ * BIGINT does (see RawListingRow's doc above) — exported so callers outside
+ * this module (extract.ts's structured-fields gating query, #28) get the
+ * same coercion instead of reimplementing it.
+ */
+export const num = (v: string | null): number | null => (v === null ? null : Number(v));
 
 /**
  * Load every live listing of a property as assessment input, newest-first.
