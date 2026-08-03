@@ -127,6 +127,7 @@ See [D-004](docs/decisions/D-004-no-worker-workflows.md) — don't push to `.git
 When a task's changes require workflow-file edits that can't be pushed, file the proposed YAML under `docs/pending-workflow-changes/<task-slug>.md` (fenced `yaml` block per affected file) and link it here as it accumulates:
 - [docs/pending-workflow-changes/phase-1-1.md](docs/pending-workflow-changes/phase-1-1.md) — the first example, covering the workflows broken by task 1.1's content removal.
 - [docs/pending-workflow-changes/phase-2-5.md](docs/pending-workflow-changes/phase-2-5.md) — supersedes phase-1-1.md's `dashboard-e2e` section: wires a real Postgres service into `dashboard-test` (task 2.5's integration tests were silently skipping in CI) and re-enables `dashboard-e2e` pointed at the new `candidates.spec.ts`.
+- [docs/pending-workflow-changes/task-4.2-occupancy.md](docs/pending-workflow-changes/task-4.2-occupancy.md) — adds a Postgres service to `jobs.test` (pytest; net new, no prior proposal covered it) so `TestAiAssessmentRekeyMigration` and every other DB-backed pytest test stop silently skipping, and adds a `REQUIRE_DB=1` addendum to both `jobs.test` and `phase-2-5.md`'s still-unapplied `jobs.dashboard-test` proposal so a future regression in either job's Postgres wiring fails CI instead of reverting to silent skip-and-pass. Tracked repo-wide as issue #160.
 
 ### Backwards compatibility — default is to break it
 

@@ -19,7 +19,7 @@ property ──1───N── listing ──1───N── listing_price_h
    │
    └──1───N── property_merge_log
 
-listing ──1───N── ai_assessment
+property ──1───N── ai_assessment   (re-keyed from listing in #25)
 ```
 
 ## Core entities
@@ -160,9 +160,15 @@ Both writers guard their cold-start `UPDATE`s with `score IS NULL` so a profile 
 ## AI assessments
 
 ### `ai_assessment`
-One row per `(listing_id, assessment_type, prompt_version)` — a new prompt or model version produces a *new* row rather than overwriting the old one, so a regression in AI output quality after a prompt change is visible in the data (compare old vs. new assessment for the same listing) rather than silently replacing history. Deliberately keyed on `listing_id`, not `property_id`: an assessment is about a specific listing's *published content* (its particular description text, its particular photos) — two listings of the same deduplicated property can have different descriptions and legitimately different AI reads (one might mention "se vende ocupada," the other might not).
+One row per `(property_id, assessment_type, prompt_version)` — a new prompt or model version produces a *new* row rather than overwriting the old one, so a regression in AI output quality after a prompt change is visible in the data (compare old vs. new assessment for the same property) rather than silently replacing history.
 
-This task only creates the table. Generating assessments is Phase 4 (issues #24–30).
+**Re-keyed from `listing_id` to `property_id` in issue #25.** The original rationale for listing-keying was that an assessment is about a specific listing's *published content*, and two listings of one deduplicated property can have different descriptions and legitimately different AI reads (one mentions "se vende ocupada," the other doesn't). That reasoning was sound about the *inputs* and wrong about the *output*. Occupancy is a fact about the physical dwelling, not about an advert: a flat is either empty, tenanted, or illegally occupied, and it cannot be all three at once because three portals wrote three different descriptions. Listing-keying didn't preserve nuance — it manufactured contradictions, and left the UI with no non-arbitrary way to pick which advert's verdict to show.
+
+The divergent-description problem is real, so it is solved on the input side instead: the assessment reads **every** live listing of the property at once (`loadPropertyListings()`), and the prompt is explicit that the adverts describe one physical property, with conflict-resolution rules (a concrete mention beats silence; the most specific and most recent wins, at lowered confidence). A portal that omits what a sibling discloses is now *rescued* by the sibling rather than producing a separate, weaker verdict. The stored `result` carries `evidence_source` so a verdict can still be traced back to the advert that justified it.
+
+This also honours the ordering constraint the owner set: occupancy is assessed **at the end of the pipeline, after duplicates have been consolidated** — which is only coherent if the verdict attaches to the consolidated thing.
+
+The upgrade path is in `init.sql`: existing rows backfill `property_id` from `listing.property_id`, rows that collapse onto the same property keep the newest, and `listing_id` is dropped. Covered by `TestAiAssessmentRekeyMigration` in `etl/tests/test_schema.py` (fresh installs never execute the migration block, so it is tested by rebuilding the old shape by hand).
 
 ## Deduplication audit trail
 

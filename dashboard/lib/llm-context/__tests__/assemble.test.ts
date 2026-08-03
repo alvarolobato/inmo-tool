@@ -81,7 +81,11 @@ describe("assembleRequest", () => {
     expect(result.text).toBe("mocked response");
     const callArgs = mockLlmComplete.mock.calls[0]?.[0];
     expect(callArgs?.systemPrompt?.stable).toContain("inversión inmobiliaria");
-    expect(callArgs?.systemPrompt?.stable).toContain("Tarea: estado de ocupación");
+    // Heading widened in #145: the flow covers occupancy + venta de deuda +
+    // venta parcial, so it no longer says "estado de ocupación".
+    expect(callArgs?.systemPrompt?.stable).toContain(
+      "Tarea: ¿qué se compra exactamente",
+    );
   });
 
   it("for compare flow: systemPrompt.volatile carries every candidate", async () => {
@@ -206,7 +210,7 @@ describe("assembleRequest", () => {
     const [systemPrompt, tools] = onSystemPromptReady.mock.calls[0];
     // Full prompt = stable (+ volatile) — must match what was sent to the LLM.
     expect(typeof systemPrompt).toBe("string");
-    expect(systemPrompt).toContain("Tarea: estado de ocupación");
+    expect(systemPrompt).toContain("Tarea: ¿qué se compra exactamente");
     const sent = mockLlmComplete.mock.calls[0]?.[0]?.systemPrompt;
     const expectedFull = sent?.volatile
       ? `${sent.stable}\n\n${sent.volatile}`
