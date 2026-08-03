@@ -56,6 +56,15 @@ def test_fotocasa_does_not_claim_full_inventory_coverage():
     assert FotocasaConnector.discovers_full_inventory is False
 
 
+def test_fotocasa_declares_a_24h_fetch_budget_window():
+    """Issue #143's documented freshness window for this connector: a
+    listing already fetched within the last 24h is a skip-if-seen
+    candidate, UNLESS its discovery-time price (see discovered_prices())
+    disagrees with what's stored, or it's never been fetched, or its
+    stored price is missing — see etl.orchestrator._should_skip_fetch."""
+    assert FotocasaConnector.min_refetch_interval_seconds == 24 * 60 * 60
+
+
 class TestDiscover:
     def test_discover_finds_unique_external_ids_from_search_page(self):
         html = _read_fixture("fotocasa_sample_search.html")
@@ -334,6 +343,125 @@ class TestZonePartitioning:
         requested = [call.args[0] for call in mock_get.call_args_list]
         assert len(requested) > 1
         assert all(url.endswith("/2-habitaciones/l") for url in requested)
+
+
+class TestDiscoveryPrices:
+    """Issue #143: Fotocasa's search-results pages embed a real per-listing
+    price (`initialSearch.result.realEstates[].rawPrice`) in the same
+    `__initial_props__` blob discover() already fetches — live-verified
+    2026-08-03 against two real pages (id/rawPrice sets matching discover()'s
+    own href-extracted ids exactly, and a sampled rawPrice matching that
+    listing's independently-fetched detail-page price exactly). See
+    Connector.discovered_prices and fotocasa.py's own docstrings for the
+    full verification writeup."""
+
+    def test_discovered_prices_empty_before_any_discover_call(self):
+        """A fresh connector has never made a request — there is nothing to
+        report a price signal from yet, same as the base class default."""
+        assert FotocasaConnector().discovered_prices() == {}
+
+    def test_discover_populates_discovered_prices_from_the_baseline_page(self):
+        html = _read_fixture("fotocasa_sample_search_with_prices.html")
+        connector = FotocasaConnector()
+        with patch(
+            "etl.connectors.fotocasa.requests.get", return_value=_mock_response(html)
+        ):
+            ids = connector.discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+        # Same ids the plain (no-price) fixture yields — the price signal is
+        # additive, it must not change what discover() itself returns.
+        assert sorted(ids) == ["190011971", "190022222", "190033333"]
+        assert connector.discovered_prices() == {
+            "190011971": Decimal(945000),
+            "190022222": Decimal(620000),
+            "190033333": Decimal(310000),
+        }
+
+    def test_discovered_prices_accumulate_across_baseline_and_zones(self):
+        """Prices from a successfully-fetched zone page must merge with the
+        baseline page's — not overwrite or get dropped — since a real sweep
+        gets its price signal from ~161 pages, not just page 1."""
+        base_html = _read_fixture("fotocasa_sample_search_with_prices_base.html")
+        zone_html = _read_fixture("fotocasa_sample_search_with_prices_zone.html")
+
+        def fake_get(url, **_kwargs):
+            if "/todas-las-zonas/" in url:
+                return _mock_response(base_html, url=url)
+            return _mock_response(zone_html, url=url)
+
+        connector = FotocasaConnector()
+        with patch("etl.connectors.fotocasa.requests.get", side_effect=fake_get):
+            ids = connector.discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+        assert sorted(ids) == ["190011971", "190044444"]
+        assert connector.discovered_prices() == {
+            "190011971": Decimal(945000),
+            "190044444": Decimal(620000),
+        }
+
+    def test_discovered_prices_reset_between_scopes(self):
+        """A connector instance is reused across scopes within one run
+        (issue #71's shared limiter/breaker pattern applies to state on the
+        connector too) — a second discover() call for a DIFFERENT scope
+        must not leak the first scope's prices for ids the second scope
+        never actually discovered."""
+        priced_html = _read_fixture("fotocasa_sample_search_with_prices.html")
+        plain_html = _read_fixture("fotocasa_sample_search.html")
+        connector = FotocasaConnector()
+
+        with patch(
+            "etl.connectors.fotocasa.requests.get",
+            return_value=_mock_response(priced_html),
+        ):
+            connector.discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+        assert connector.discovered_prices() != {}
+
+        with patch(
+            "etl.connectors.fotocasa.requests.get",
+            return_value=_mock_response(plain_html),
+        ):
+            connector.discover(
+                ConnectorScope(geography="sevilla-capital"), throttle=lambda: None
+            )
+        assert connector.discovered_prices() == {}, (
+            "the second scope's fixture has no realEstates price data — "
+            "the first scope's prices must not still be sitting here"
+        )
+
+    def test_extract_search_result_prices_degrades_to_empty_without_raising(self):
+        """The price signal is bonus data, never load-bearing for discover()
+        itself — a page with no realEstates structure (the plain fixture,
+        which predates issue #143) or outright garbage must both degrade to
+        {}, never raise, since that would turn a missing *price* into a
+        broken sweep."""
+        from etl.connectors.fotocasa import _extract_search_result_prices
+
+        plain_html = _read_fixture("fotocasa_sample_search.html")
+        assert _extract_search_result_prices(plain_html) == {}
+
+        garbage_html = (
+            '<script type="application/json" id="__initial_props__">'
+            "{not valid json</script>"
+        )
+        assert _extract_search_result_prices(garbage_html) == {}
+
+    def test_extract_search_result_prices_skips_entries_missing_id_or_price(self):
+        from etl.connectors.fotocasa import _extract_search_result_prices
+
+        html = (
+            '<script type="application/json" id="__initial_props__">'
+            '{"initialSearch": {"result": {"realEstates": ['
+            '{"id": 1, "rawPrice": 100000}, '
+            '{"id": 2}, '
+            '{"rawPrice": 200000}, '
+            '"not-a-dict"'
+            "]}}}</script>"
+        )
+        assert _extract_search_result_prices(html) == {"1": Decimal(100000)}
 
 
 class TestSweepPacingAndBounds:

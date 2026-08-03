@@ -156,6 +156,30 @@ def _get_dashboard_callback_timeout_seconds() -> int:
     return parsed if parsed > 0 else 30
 
 
+def _get_min_restart_sweep_interval_seconds() -> int:
+    """Restart-burst guard threshold, in seconds (issue #172).
+
+    Same env-first-then-loader precedence as the other ETL knobs above.
+    900 (15 min) is a fraction of the hourly `_RUN_INTERVAL_SECONDS`
+    schedule — long enough to absorb a real crash-loop (container restarts
+    every few seconds to a few minutes), short enough that a genuine
+    "the container was actually down for a while" restart still sweeps
+    immediately almost all the time. 0 disables the guard outright.
+    """
+    value: object | None = os.environ.get("ETL_MIN_RESTART_SWEEP_INTERVAL_SECONDS")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = _loader_get("etl.min_restart_sweep_interval_seconds", default=None)
+    if value is None:
+        value = "900"
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 900
+    # A negative threshold has no sane meaning; 0 is the deliberate
+    # "disable the guard" value and must be preserved, not coerced away.
+    return parsed if parsed >= 0 else 900
+
+
 def _get_admin_api_key() -> str:
     """Shared admin key used to authenticate the dashboard callback (issue #94).
 
@@ -175,6 +199,9 @@ class Config:
         default_factory=_get_dashboard_callback_timeout_seconds
     )
     admin_api_key: str = field(default_factory=_get_admin_api_key)
+    min_restart_sweep_interval_seconds: int = field(
+        default_factory=_get_min_restart_sweep_interval_seconds
+    )
 
     def __post_init__(self) -> None:
         self.postgres_dsn = self.postgres_dsn.strip()

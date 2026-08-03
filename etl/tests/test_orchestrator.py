@@ -9,6 +9,7 @@ nothing meaningful.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import ClassVar
@@ -79,6 +80,137 @@ def _cleanup(conn, source: str, run_id: int | None = None) -> None:
         if property_ids:
             cur.execute("DELETE FROM property WHERE id = ANY(%s)", (property_ids,))
     conn.commit()
+
+
+class TestConnectorSkipIfSeenDefaults:
+    """Issue #143: every connector must inherit safe (no-op) defaults for
+    the skip-if-seen machinery unless it explicitly opts in — verified
+    against a real Connector subclass that does neither
+    (DiscoverFailsConnector never overrides min_refetch_interval_seconds
+    or discovered_prices())."""
+
+    def test_min_refetch_interval_seconds_defaults_to_zero(self):
+        assert DiscoverFailsConnector.min_refetch_interval_seconds == 0
+
+    def test_discovered_prices_defaults_to_empty_dict(self):
+        assert DiscoverFailsConnector().discovered_prices() == {}
+
+
+class TestShouldSkipFetch:
+    """Pure-function tests for the skip-if-seen decision (issue #143) — no
+    DB needed, since `_should_skip_fetch` takes every input as a plain
+    argument. `_NOW`/helpers keep each case's intent readable without
+    hand-computing timedeltas everywhere."""
+
+    _NOW = datetime(2026, 8, 3, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _ago(self, seconds: int) -> datetime:
+        return self._NOW - timedelta(seconds=seconds)
+
+    def test_never_fetched_is_never_skipped(self):
+        skip, reason = orchestrator._should_skip_fetch(
+            last_fetched_at=None,
+            stored_price=Decimal(100000),
+            discovery_price=Decimal(100000),
+            min_refetch_interval_seconds=3600,
+            now=self._NOW,
+        )
+        assert skip is False
+        assert "never fetched" in reason
+
+    def test_disabled_for_this_connector_is_never_skipped_even_if_fresh(self):
+        skip, reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(1),  # as fresh as it gets
+            stored_price=Decimal(100000),
+            discovery_price=None,
+            min_refetch_interval_seconds=0,
+            now=self._NOW,
+        )
+        assert skip is False
+        assert "disabled" in reason
+
+    def test_missing_stored_price_is_never_skipped(self):
+        skip, reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(1),
+            stored_price=None,
+            discovery_price=None,
+            min_refetch_interval_seconds=3600,
+            now=self._NOW,
+        )
+        assert skip is False
+        assert "missing" in reason
+
+    def test_discovery_price_delta_forces_a_fetch_despite_freshness(self):
+        """The core guarantee (issue #143's acceptance criteria): a price
+        change detected at discovery time is never silently absorbed by
+        the staleness window, however fresh the listing otherwise is."""
+        skip, reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(1),  # 1 second ago — as fresh as possible
+            stored_price=Decimal(200000),
+            discovery_price=Decimal(190000),  # a real drop just seen at discovery
+            min_refetch_interval_seconds=86400,
+            now=self._NOW,
+        )
+        assert skip is False
+        assert "differs" in reason
+
+    def test_discovery_price_matching_stored_price_is_not_a_reason_to_fetch(self):
+        """The mirror case: a discovery price that agrees with what's
+        stored is NOT itself a signal to skip (that's the age check's job)
+        — it just doesn't force anything."""
+        skip, reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(1),
+            stored_price=Decimal(200000),
+            discovery_price=Decimal(200000),
+            min_refetch_interval_seconds=86400,
+            now=self._NOW,
+        )
+        assert skip is True
+        assert "no discovery-time price delta" in reason
+
+    def test_no_discovery_price_signal_falls_through_to_age(self):
+        skip, _reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(1),
+            stored_price=Decimal(200000),
+            discovery_price=None,
+            min_refetch_interval_seconds=86400,
+            now=self._NOW,
+        )
+        assert skip is True
+
+    def test_stale_listing_is_fetched_not_skipped(self):
+        skip, reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(90000),  # older than the window below
+            stored_price=Decimal(200000),
+            discovery_price=None,
+            min_refetch_interval_seconds=86400,
+            now=self._NOW,
+        )
+        assert skip is False
+        assert "stale" in reason
+
+    def test_exactly_at_the_window_boundary_is_fetched_not_skipped(self):
+        """>= , not >, at the boundary — a listing fetched exactly
+        min_refetch_interval_seconds ago is due, not still fresh."""
+        skip, _reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(3600),
+            stored_price=Decimal(200000),
+            discovery_price=None,
+            min_refetch_interval_seconds=3600,
+            now=self._NOW,
+        )
+        assert skip is False
+
+    def test_fresh_unchanged_listing_is_skipped(self):
+        skip, reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(60),
+            stored_price=Decimal(200000),
+            discovery_price=None,
+            min_refetch_interval_seconds=3600,
+            now=self._NOW,
+        )
+        assert skip is True
+        assert "fetched" in reason
 
 
 class TestOrchestratorEndToEnd:
@@ -1118,6 +1250,377 @@ class TestCircuitBreakerIntegration:
             pg_conn.commit()
 
 
+class TestSkipIfSeenIntegration:
+    """Issue #143: end-to-end orchestrator wiring for the skip-if-seen
+    policy — connector_config override, last_seen_at/last_fetched_at
+    bookkeeping, skipped_count reporting, and the price-change guarantee.
+    `_should_skip_fetch` itself is unit-tested in isolation above
+    (TestShouldSkipFetch); this class proves run_all_connectors actually
+    calls it with the right inputs and acts on the result correctly."""
+
+    def _cleanup_config(self, conn, *names: str) -> None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM connector_config WHERE connector_name = ANY(%s)",
+                (list(names),),
+            )
+        conn.commit()
+
+    def _listing_row(self, conn, source: str, external_id: str):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT current_price, last_seen_at, last_fetched_at "
+                "FROM listing WHERE source = %s AND external_id = %s",
+                (source, external_id),
+            )
+            return cur.fetchone()
+
+    def test_second_run_within_window_skips_the_unchanged_listing(self, pg_conn):
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="skip-seen-unchanged",
+            external_ids=("s-1",),
+            min_refetch_interval_seconds=3600,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["s-1"], "first run: never seen before"
+
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["s-1"], (
+                "second run must NOT call fetch_detail again — fresh, "
+                "unchanged, price present"
+            )
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT skipped_count, fetched_count FROM connector_run_results "
+                    "WHERE run_id = %s AND connector_name = %s",
+                    (run_ids[1], connector.name),
+                )
+                skipped_count, fetched_count = cur.fetchone()
+            assert skipped_count == 1
+            assert fetched_count == 0
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            with pg_conn.cursor() as cur:
+                for r in run_ids:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+
+    def test_discovery_time_price_change_forces_a_refetch_despite_freshness(
+        self, pg_conn
+    ):
+        """The mutation-critical proof: skip-if-seen must not be able to
+        silently stop detecting a real price change. A large
+        min_refetch_interval_seconds (far longer than this test could ever
+        run) proves the price delta — not elapsed time — is what triggers
+        the second fetch."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="skip-seen-price-change",
+            external_ids=("p-1",),
+            price=205000,
+            min_refetch_interval_seconds=24 * 60 * 60,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["p-1"]
+
+            # A real price drop, seen at discovery time (Fotocasa's
+            # rawPrice-equivalent) — the fetched price hasn't changed yet
+            # in the connector's own fetch_detail() response, only the
+            # discovery-time signal has, which is exactly what must be
+            # enough to force the re-fetch.
+            connector.discovery_price_overrides = {"p-1": 195000}
+            connector.price = 195000
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            assert connector.fetch_calls == ["p-1", "p-1"], (
+                "a discovery-time price delta must force a re-fetch even "
+                "though the listing is nowhere near stale"
+            )
+
+            current_price, _last_seen, _last_fetched = self._listing_row(
+                pg_conn, connector.name, "p-1"
+            )
+            assert current_price == Decimal(195000)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT h.price FROM listing_price_history h "
+                    "JOIN listing l ON l.id = h.listing_id "
+                    "WHERE l.source = %s AND l.external_id = %s ORDER BY h.observed_at",
+                    (connector.name, "p-1"),
+                )
+                prices = [row[0] for row in cur.fetchall()]
+            assert prices == [205000, 195000], (
+                "the price-history append behaviour must survive skip-if-seen"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            with pg_conn.cursor() as cur:
+                for r in run_ids:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+
+    def test_stale_listing_is_refetched_after_the_window_elapses(self, pg_conn):
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="skip-seen-stale",
+            external_ids=("st-1",),
+            min_refetch_interval_seconds=3600,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["st-1"]
+
+            # Backdate last_fetched_at past the window — simulates a
+            # genuine gap since the last real fetch without needing the
+            # test to actually sleep an hour.
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE listing SET last_fetched_at = NOW() - INTERVAL '2 hours' "
+                    "WHERE source = %s AND external_id = %s",
+                    (connector.name, "st-1"),
+                )
+            pg_conn.commit()
+
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["st-1", "st-1"], (
+                "a listing older than min_refetch_interval_seconds must be "
+                "re-fetched, not skipped"
+            )
+
+            # The real re-fetch must also bring last_fetched_at back to
+            # "now" — otherwise every subsequent run would see the same
+            # stale timestamp and re-fetch again forever, defeating the
+            # whole point of tracking it.
+            _price, _last_seen, last_fetched = self._listing_row(
+                pg_conn, connector.name, "st-1"
+            )
+            assert last_fetched > datetime.now(timezone.utc) - timedelta(minutes=5), (
+                "a real re-fetch must advance last_fetched_at to now, not "
+                "leave it at the backdated value"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            with pg_conn.cursor() as cur:
+                for r in run_ids:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+
+    def test_last_seen_at_advances_even_when_the_fetch_is_skipped(self, pg_conn):
+        """Acceptance criterion: listing.last_seen_at must stay current for
+        a listing discover() re-confirms but skip-if-seen declines to
+        re-fetch — otherwise "skipped, still there" becomes
+        indistinguishable from "nobody has looked at this in weeks"."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="skip-seen-last-seen-at",
+            external_ids=("ls-1",),
+            min_refetch_interval_seconds=3600,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            _price_1, _last_seen_1, last_fetched_1 = self._listing_row(
+                pg_conn, connector.name, "ls-1"
+            )
+
+            # Force last_seen_at to an unambiguously stale value first —
+            # asserting a strict `>` against a same-millisecond timestamp
+            # from two back-to-back run_all_connectors() calls would be a
+            # flaky, weak proxy for "did this actually get updated". A
+            # backdated value makes the healthy-vs-broken outcomes
+            # unambiguous instead: NOW() during run 2 is always far more
+            # recent than 1 day ago (healthy), or it stays exactly at the
+            # backdated value if nothing touches it this run (broken).
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE listing SET last_seen_at = NOW() - INTERVAL '1 day' "
+                    "WHERE source = %s AND external_id = %s",
+                    (connector.name, "ls-1"),
+                )
+            pg_conn.commit()
+
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["ls-1"], "second run must be skipped"
+
+            _price_2, last_seen_2, last_fetched_2 = self._listing_row(
+                pg_conn, connector.name, "ls-1"
+            )
+            assert last_seen_2 > datetime.now(timezone.utc) - timedelta(hours=1), (
+                "last_seen_at must advance from the discover()-only sighting "
+                "even though fetch_detail() was skipped — it must not still "
+                "be sitting at the artificially backdated value"
+            )
+            assert last_fetched_2 == last_fetched_1, (
+                "last_fetched_at must NOT advance — no real fetch happened "
+                "on the second run"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            with pg_conn.cursor() as cur:
+                for r in run_ids:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+
+    def test_missing_stored_price_backfills_despite_freshness(self, pg_conn):
+        """A listing whose current_price is NULL (e.g. ingested via a path
+        that never captured it) must be re-fetched regardless of how
+        recently it was touched — never left permanently unpopulated
+        behind a staleness window."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="skip-seen-missing-price",
+            external_ids=("mp-1",),
+            min_refetch_interval_seconds=3600,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE listing SET current_price = NULL "
+                    "WHERE source = %s AND external_id = %s",
+                    (connector.name, "mp-1"),
+                )
+            pg_conn.commit()
+
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["mp-1", "mp-1"], (
+                "a missing stored price must force a re-fetch even though "
+                "the listing is fresh by age"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            with pg_conn.cursor() as cur:
+                for r in run_ids:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+
+    def test_new_listing_appearing_mid_window_is_fetched_promptly(self, pg_conn):
+        """Acceptance criterion: newly-appearing listings must not be
+        starved behind a refresh backlog — a brand-new id discovered
+        alongside an already-fresh, skipped one must still be fetched."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="skip-seen-new-listing",
+            external_ids=("nl-1",),
+            min_refetch_interval_seconds=3600,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["nl-1"]
+
+            connector.external_ids = ("nl-1", "nl-2")
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            assert connector.fetch_calls == ["nl-1", "nl-2"], (
+                "nl-1 (fresh, unchanged) must be skipped; nl-2 (brand new) "
+                "must be fetched in the same run"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            with pg_conn.cursor() as cur:
+                for r in run_ids:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+
+    def test_connector_config_override_takes_precedence_over_class_default(
+        self, pg_conn
+    ):
+        """Issue #143: min_refetch_interval_seconds is operator-overridable
+        per connector via connector_config, same override-vs-class-default
+        pattern issue #99 established for filters.rooms."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="skip-seen-config-override",
+            external_ids=("co-1",),
+            min_refetch_interval_seconds=0,  # class default: always fetch
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO connector_config "
+                    "(connector_name, min_refetch_interval_seconds) VALUES (%s, %s)",
+                    (connector.name, 3600),
+                )
+            pg_conn.commit()
+
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["co-1"]
+
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["co-1"], (
+                "the connector_config override (3600s) must win over this "
+                "connector's own class-attribute default (0 = always fetch)"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            self._cleanup_config(pg_conn, connector.name)
+            _cleanup(pg_conn, connector.name, None)
+            with pg_conn.cursor() as cur:
+                for r in run_ids:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+
+    def test_negative_config_override_is_ignored_falls_back_to_class_default(
+        self, pg_conn
+    ):
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="skip-seen-negative-override",
+            external_ids=("neg-1",),
+            min_refetch_interval_seconds=0,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO connector_config "
+                    "(connector_name, min_refetch_interval_seconds) VALUES (%s, %s)",
+                    (connector.name, -5),
+                )
+            pg_conn.commit()
+
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["neg-1", "neg-1"], (
+                "a negative override is nonsensical and must be ignored, "
+                "falling back to this connector's own default (0 = always "
+                "fetch), not silently coerced to 0 or crashing the run"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            self._cleanup_config(pg_conn, connector.name)
+            _cleanup(pg_conn, connector.name, None)
+            with pg_conn.cursor() as cur:
+                for r in run_ids:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+
+
 class TestMultiScopeWithdrawalReconciliation:
     """PR #139 review: reconciliation must run once per connector per run,
     against the UNION of every scope's ids — never once per scope."""
@@ -2063,3 +2566,219 @@ class TestMaterializeAllNotification:
             with pg_conn.cursor() as cur:
                 cur.execute("DELETE FROM connector_runs WHERE id = %s", (run_id,))
             pg_conn.commit()
+
+
+class TestRestartBurstGuard:
+    """Issue #172: a minimum-inter-run-interval guard against restart-
+    triggered scrape bursts. `docs/skills/connectors.md` used to document
+    "every container restart sweeps immediately" as an operator-discipline
+    concern only ("be deliberate about it") — this proves the actual guard
+    that replaces that framing."""
+
+    def _cleanup_runs(self, conn, run_ids: list[int]) -> None:
+        with conn.cursor() as cur:
+            for r in run_ids:
+                cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+        conn.commit()
+
+    def test_no_prior_completed_run_never_skips(self, pg_conn):
+        _apply_schema(pg_conn)
+        with pg_conn.cursor() as cur:
+            cur.execute("DELETE FROM connector_runs")
+        pg_conn.commit()
+
+        skip, last_finished = orchestrator.should_skip_immediate_sweep(
+            pg_conn, min_restart_sweep_interval_seconds=900
+        )
+        assert skip is False
+        assert last_finished is None
+
+    def test_threshold_zero_disables_the_guard_outright(self, pg_conn):
+        """0 is the documented, explicit opt-out — not a special-cased
+        'never happens in practice' value."""
+        _apply_schema(pg_conn)
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO connector_runs (trigger, status, started_at, finished_at) "
+                "VALUES ('test', 'success', NOW(), NOW()) RETURNING id"
+            )
+            run_id = cur.fetchone()[0]
+        pg_conn.commit()
+        try:
+            skip, _last_finished = orchestrator.should_skip_immediate_sweep(
+                pg_conn, min_restart_sweep_interval_seconds=0
+            )
+            assert skip is False
+        finally:
+            self._cleanup_runs(pg_conn, [run_id])
+
+    def test_recently_completed_run_is_skipped(self, pg_conn):
+        _apply_schema(pg_conn)
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO connector_runs (trigger, status, started_at, finished_at) "
+                "VALUES ('test', 'success', NOW(), NOW()) RETURNING id"
+            )
+            run_id = cur.fetchone()[0]
+        pg_conn.commit()
+        try:
+            skip, last_finished = orchestrator.should_skip_immediate_sweep(
+                pg_conn, min_restart_sweep_interval_seconds=900
+            )
+            assert skip is True
+            assert last_finished is not None
+        finally:
+            self._cleanup_runs(pg_conn, [run_id])
+
+    def test_old_completed_run_is_not_skipped(self, pg_conn):
+        """A genuine multi-hour gap must still sweep immediately — the
+        guard's whole point is distinguishing a crash-loop from this."""
+        _apply_schema(pg_conn)
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO connector_runs (trigger, status, started_at, finished_at) "
+                "VALUES ('test', 'success', NOW() - INTERVAL '3 hours', "
+                "NOW() - INTERVAL '3 hours') RETURNING id"
+            )
+            run_id = cur.fetchone()[0]
+        pg_conn.commit()
+        try:
+            skip, _last_finished = orchestrator.should_skip_immediate_sweep(
+                pg_conn, min_restart_sweep_interval_seconds=900
+            )
+            assert skip is False
+        finally:
+            self._cleanup_runs(pg_conn, [run_id])
+
+    def test_a_running_row_is_not_treated_as_a_completion(self, pg_conn):
+        """A still-in-progress run (or one _reconcile_stale_runs hasn't
+        reconciled yet) must not count as "just completed" — only
+        success/partial/failed rows are a real completion signal. Clears
+        the table first for a deterministic "no completed row exists"
+        baseline, independent of what earlier tests in the suite left
+        behind."""
+        _apply_schema(pg_conn)
+        with pg_conn.cursor() as cur:
+            cur.execute("DELETE FROM connector_runs")
+            cur.execute(
+                "INSERT INTO connector_runs (trigger, status, started_at) "
+                "VALUES ('test', 'running', NOW()) RETURNING id"
+            )
+            run_id = cur.fetchone()[0]
+        pg_conn.commit()
+        try:
+            last_finished = orchestrator.last_completed_run_finished_at(pg_conn)
+            assert last_finished is None
+        finally:
+            self._cleanup_runs(pg_conn, [run_id])
+
+    def test_crash_loop_scenario_skips_after_the_first_sweep(self, pg_conn):
+        """Acceptance criterion: a container restarting every few seconds
+        must sweep once, then skip every subsequent attempt until the
+        threshold elapses — not re-sweep every connector's site on every
+        restart."""
+        _apply_schema(pg_conn)
+        with pg_conn.cursor() as cur:
+            # Deterministic "nothing has run yet" baseline — otherwise a
+            # very recently completed row left by an unrelated test could
+            # make run_id_1 itself skip, which isn't what this test means
+            # to exercise.
+            cur.execute("DELETE FROM connector_runs")
+        pg_conn.commit()
+        connector = DummyConnector(name="restart-guard-crash-loop")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            # "Restart" #1: nothing has ever run — sweeps for real.
+            run_id_1 = orchestrator.run_all_connectors_respecting_restart_guard(
+                pg_conn, trigger="scheduler", min_restart_sweep_interval_seconds=900
+            )
+            assert run_id_1 is not None
+            run_ids.append(run_id_1)
+            assert len(connector.scopes_seen) == 1
+
+            # "Restart" #2 and #3, immediately after: this is the crash
+            # loop — each simulates a fresh process attempting its
+            # startup sweep milliseconds after the last one finished.
+            run_id_2 = orchestrator.run_all_connectors_respecting_restart_guard(
+                pg_conn, trigger="scheduler", min_restart_sweep_interval_seconds=900
+            )
+            run_id_3 = orchestrator.run_all_connectors_respecting_restart_guard(
+                pg_conn, trigger="scheduler", min_restart_sweep_interval_seconds=900
+            )
+            assert run_id_2 is None
+            assert run_id_3 is None
+            # No new discover() calls — the connector's own site was never
+            # touched again by either skipped attempt.
+            assert len(connector.scopes_seen) == 1
+
+            with pg_conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM connector_runs")
+                (total_runs,) = cur.fetchone()
+            assert total_runs == 1, (
+                "only the first sweep should have created a connector_runs row"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            self._cleanup_runs(pg_conn, run_ids)
+
+    def test_genuine_gap_after_a_crash_loop_sweeps_again(self, pg_conn):
+        """Once the threshold genuinely elapses (backdated here rather than
+        actually sleeping), the next attempt must sweep — the guard delays,
+        it doesn't permanently wedge ingestion."""
+        _apply_schema(pg_conn)
+        with pg_conn.cursor() as cur:
+            cur.execute("DELETE FROM connector_runs")
+        pg_conn.commit()
+        connector = DummyConnector(name="restart-guard-genuine-gap")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_id_1 = orchestrator.run_all_connectors_respecting_restart_guard(
+                pg_conn, trigger="scheduler", min_restart_sweep_interval_seconds=1
+            )
+            assert run_id_1 is not None
+            run_ids.append(run_id_1)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE connector_runs SET finished_at = NOW() - INTERVAL '10 seconds' "
+                    "WHERE id = %s",
+                    (run_id_1,),
+                )
+            pg_conn.commit()
+
+            run_id_2 = orchestrator.run_all_connectors_respecting_restart_guard(
+                pg_conn, trigger="scheduler", min_restart_sweep_interval_seconds=1
+            )
+            assert run_id_2 is not None
+            run_ids.append(run_id_2)
+            assert len(connector.scopes_seen) == 2
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            self._cleanup_runs(pg_conn, run_ids)
+
+    def test_named_connector_run_is_never_gated_by_the_guard(self, pg_conn):
+        """`ps connector run <name>` is a deliberate, targeted operator
+        action, not the unattended-restart scenario this guard exists for
+        — etl/main.py never routes it through the guard at all, so
+        run_all_connectors (the plain function) stays completely
+        unaffected regardless of how recently a run finished."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(name="restart-guard-named-bypass")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            run_ids.append(
+                orchestrator.run_all_connectors(
+                    pg_conn, trigger="cli", connector_name=connector.name
+                )
+            )
+            assert len(connector.scopes_seen) == 2
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            self._cleanup_runs(pg_conn, run_ids)

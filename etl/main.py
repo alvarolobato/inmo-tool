@@ -128,9 +128,25 @@ def main() -> None:
     if args.once:
         try:
             if registry_synced:
-                orchestrator.run_all_connectors(
-                    conn_pg, trigger="cli", connector_name=args.connector
-                )
+                if args.connector is None:
+                    # Full sweep: the restart-burst guard applies (issue
+                    # #172) — `ps connector run` with no name is exactly
+                    # the command a restart/crash-loop scenario would
+                    # trigger repeatedly.
+                    orchestrator.run_all_connectors_respecting_restart_guard(
+                        conn_pg,
+                        trigger="cli",
+                        min_restart_sweep_interval_seconds=(
+                            config.min_restart_sweep_interval_seconds
+                        ),
+                    )
+                else:
+                    # A named single-connector run is a deliberate,
+                    # targeted operator action, not the unattended-restart
+                    # scenario the guard exists for — never gated.
+                    orchestrator.run_all_connectors(
+                        conn_pg, trigger="cli", connector_name=args.connector
+                    )
             else:
                 logger.error(
                     "Skipping the connector sweep: connector_registry sync "
@@ -185,7 +201,9 @@ def main() -> None:
     # per cycle, same pattern the source project used, so a dropped
     # connection between runs doesn't wedge the whole process.
     orchestrator.run_scheduler_loop(
-        lambda: postgres.get_connection(config), interval_seconds=_RUN_INTERVAL_SECONDS
+        lambda: postgres.get_connection(config),
+        interval_seconds=_RUN_INTERVAL_SECONDS,
+        min_restart_sweep_interval_seconds=config.min_restart_sweep_interval_seconds,
     )
 
 

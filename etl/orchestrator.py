@@ -14,6 +14,7 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from etl.connectors.base import (
     CanonicalListingVersion,
@@ -101,6 +102,15 @@ def _update_existing_listing(
     as "we don't know this time". `status`/`current_price` still update
     normally on a real change because a real change is a non-None value,
     which COALESCE always prefers over the old one.
+
+    `last_fetched_at` (issue #143) is set unconditionally to NOW() here,
+    unlike `last_seen_at` — this function only ever runs after a REAL
+    fetch_detail()+normalize() succeeded, so "last fetched" and "this
+    call happened" are the same moment by construction. It is the
+    staleness signal skip-if-seen actually gates on; `last_seen_at` means
+    something weaker now ("last confirmed present in a discover() sweep",
+    see `etl.orchestrator._update_last_seen_for_discovered`) and is
+    updated even when this function is never called for a given run.
     """
     cur.execute(
         """
@@ -146,6 +156,7 @@ def _update_existing_listing(
         UPDATE listing
            SET url = COALESCE(%s, url), listing_kind = COALESCE(%s, listing_kind),
                status = COALESCE(%s, status), last_seen_at = NOW(),
+               last_fetched_at = NOW(),
                current_price = COALESCE(%s, current_price),
                description = COALESCE(%s, description),
                photo_urls = %s, contact_raw = COALESCE(%s, contact_raw),
@@ -258,10 +269,11 @@ def _upsert_canonical_listing(conn, canonical: CanonicalListingVersion) -> None:
                 """
                 INSERT INTO listing
                     (property_id, source, external_id, url, listing_kind, status,
-                     first_seen_at, last_seen_at, current_price, description,
-                     photo_urls, contact_raw, reference_code, raw_extra, operation)
-                VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW(), %s, %s, %s, %s, %s, %s,
-                        COALESCE(%s, 'sale'))
+                     first_seen_at, last_seen_at, last_fetched_at, current_price,
+                     description, photo_urls, contact_raw, reference_code,
+                     raw_extra, operation)
+                VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW(), NOW(), %s, %s, %s, %s,
+                        %s, %s, COALESCE(%s, 'sale'))
                 RETURNING id
                 """,
                 (
@@ -452,14 +464,24 @@ def _record_connector_result(
     error_msg: str | None,
     started_at: datetime,
     finished_at: datetime,
+    skipped_count: int = 0,
 ) -> None:
+    """`skipped_count` (issue #143) is listings this connector's run left
+    unfetched under the skip-if-seen policy — "known, still there per
+    discover(), deliberately not re-fetched" — distinct from
+    `connector_runs.connectors_skipped` (issue #99), which counts whole
+    *connectors* skipped via `connector_config.enabled = false`. The two
+    are skip in different senses at different granularities; see each
+    column's comment in etl/schema/init.sql.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO connector_run_results
                 (run_id, connector_name, started_at, finished_at, status,
-                 discovered_count, fetched_count, error_count, error_msg)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 discovered_count, fetched_count, error_count, error_msg,
+                 skipped_count)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 run_id,
@@ -471,6 +493,7 @@ def _record_connector_result(
                 fetched_count,
                 error_count,
                 error_msg,
+                skipped_count,
             ),
         )
     conn.commit()
@@ -628,12 +651,157 @@ def _warn_unrecognized_connector_config_names(conn) -> None:
             )
 
 
+def _update_last_seen_for_discovered(
+    conn, source: str, external_ids: list[str]
+) -> None:
+    """Mark every listing this scope's discover() just found as seen now.
+
+    Issue #143: skip-if-seen means fetch_detail() no longer runs for every
+    discovered id on every run, so `listing.last_seen_at` can no longer
+    rely solely on `_update_existing_listing`'s write — that only fires
+    for ids actually fetched this run. Without a separate update here, a
+    listing correctly skipped as unchanged would look increasingly stale
+    by `last_seen_at` even though discover() just re-confirmed it exists,
+    making "skipped, still there" indistinguishable from "nobody has
+    looked at this in weeks" (see the issue's acceptance criteria).
+
+    A plain `WHERE external_id = ANY(...)` update scoped to this one
+    scope's ids has none of `_reconcile_missed_discoveries`' cross-scope
+    hazard — that function's bug (see its docstring) came from sweeping
+    every active row for the *source* with no scope predicate at all; this
+    only ever touches rows this exact scope just discovered, so calling it
+    once per scope (rather than deferred to a run-level union) is safe.
+
+    Runs unconditionally, including for `discovers_full_inventory=False`
+    connectors like Fotocasa — presence tracking for display/staleness
+    purposes is a different concern from withdrawal reconciliation, which
+    stays gated on `discovers_full_inventory` exactly as before.
+    """
+    if not external_ids:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE listing SET last_seen_at = NOW() "
+            "WHERE source = %s AND external_id = ANY(%s)",
+            (source, external_ids),
+        )
+    conn.commit()
+
+
+def _fetch_freshness_map(
+    conn, source: str, external_ids: list[str]
+) -> dict[str, tuple[datetime | None, Decimal | None]]:
+    """Batched (last_fetched_at, current_price) lookup for skip-if-seen.
+
+    One query per (connector, scope) rather than one per listing — issue
+    #143 exists because per-listing framework overhead was already the
+    problem being solved; an N+1 query here would just move the cost
+    instead of removing it, and matters most for exactly the connectors
+    (large bank-portal batches) this policy is meant to help.
+    """
+    if not external_ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT external_id, last_fetched_at, current_price FROM listing "
+            "WHERE source = %s AND external_id = ANY(%s)",
+            (source, external_ids),
+        )
+        return {row[0]: (row[1], row[2]) for row in cur.fetchall()}
+
+
+def _should_skip_fetch(
+    *,
+    last_fetched_at: datetime | None,
+    stored_price: Decimal | None,
+    discovery_price: Decimal | None,
+    min_refetch_interval_seconds: int,
+    now: datetime,
+) -> tuple[bool, str]:
+    """Skip-if-seen policy (issue #143): should fetch_detail() run for this
+    already-known external_id, or is it safe to skip this run?
+
+    Each check below is a reason to force a re-fetch regardless of how
+    "fresh" the listing otherwise looks — staleness age is the last
+    resort, not the primary signal, because the two things skip-if-seen
+    must never silently break (price-drop detection, #34; withdrawal
+    detection, EC-5) are both driven by data this function can see:
+
+    1. Never fetched before -> always fetch. A `listing` row can exist
+       without a real detail fetch ever having happened for it (the
+       browser-extension capture path, issue #75, or a future backfill) —
+       treating that the same as "recently fetched" would leave such a
+       row permanently unpopulated the moment any connector enables a
+       non-zero window.
+    2. `min_refetch_interval_seconds <= 0` -> always fetch. The feature is
+       off for this connector (the default for every connector unless it
+       opts in — see `Connector.min_refetch_interval_seconds`); this is
+       what keeps every existing connector's behaviour byte-identical to
+       before issue #143 unless someone deliberately turns it on.
+    3. Stored `current_price` is NULL -> always fetch. A core field never
+       having been captured is worth paying to backfill rather than
+       leaving silently empty forever behind a staleness window.
+    4. Discovery-time price disagrees with the stored price -> always
+       fetch, however recently it was last fetched. This is the guard
+       against issue #143's central risk: a connector that supplies a
+       discovery-time price (`Connector.discovered_prices`) gets a real
+       price change detected on the very next sweep, not after the
+       staleness window happens to expire.
+    5. Otherwise, skip only once `min_refetch_interval_seconds` has
+       genuinely elapsed since the last real fetch.
+
+    Returns `(skip, reason)` — `reason` is always populated, including
+    when `skip=False`, so the caller can log *why* a fetch happened, not
+    only why one didn't (the issue's "record what it skipped and why"
+    requirement applies just as much to "and why NOT" for an operator
+    trying to understand a run).
+    """
+    if last_fetched_at is None:
+        return False, "never fetched before"
+    if min_refetch_interval_seconds <= 0:
+        return (
+            False,
+            (
+                "skip-if-seen disabled for this connector "
+                "(min_refetch_interval_seconds <= 0)"
+            ),
+        )
+    if stored_price is None:
+        return False, "stored current_price is missing — backfilling"
+    if discovery_price is not None and discovery_price != stored_price:
+        return (
+            False,
+            (
+                f"discovery-time price {discovery_price} differs from stored "
+                f"price {stored_price} — forcing a re-fetch regardless of staleness"
+            ),
+        )
+    age_seconds = (now - last_fetched_at).total_seconds()
+    if age_seconds >= min_refetch_interval_seconds:
+        return (
+            False,
+            (
+                f"stale: last fetched {age_seconds:.0f}s ago "
+                f"(>= {min_refetch_interval_seconds}s window)"
+            ),
+        )
+    return (
+        True,
+        (
+            f"fetched {age_seconds:.0f}s ago (< {min_refetch_interval_seconds}s "
+            f"window), current_price present, no discovery-time price delta"
+        ),
+    )
+
+
 def run_connector(
     conn,
     connector: Connector,
     scope: ConnectorScope,
     limiter: RateLimiter,
     breaker: CircuitBreaker,
+    *,
+    min_refetch_interval_seconds: int = 0,
 ) -> dict:
     """Run one connector's discover -> fetch_detail -> normalize -> store cycle
     for a single scope, against a `limiter`/`breaker` shared across every
@@ -657,6 +825,32 @@ def run_connector(
     """
     limiter.acquire()
     external_ids = connector.discover(scope, throttle=limiter.acquire)
+
+    # Issue #143: presence tracking is unconditional — unlike withdrawal
+    # reconciliation below, it doesn't need full-inventory coverage to be
+    # safe (see _update_last_seen_for_discovered's docstring), and skip-
+    # if-seen means a listing can go a whole run without ever reaching
+    # _upsert_canonical_listing, which is the only other place
+    # last_seen_at gets written.
+    _update_last_seen_for_discovered(conn, connector.name, external_ids)
+
+    # Issue #143: whatever discovery-time price signal this connector can
+    # cheaply supply from the request(s) discover() just made — {} for a
+    # connector that hasn't verified one (the default; see
+    # Connector.discovered_prices). Never allowed to take down the run: a
+    # bug in an override degrades to "no price signal" rather than
+    # aborting a scope that already has real ids to process.
+    try:
+        discovery_prices = connector.discovered_prices()
+    except Exception:
+        logger.warning(
+            "Connector %s: discovered_prices() raised — proceeding with no "
+            "discovery-time price signal for this scope",
+            connector.name,
+            exc_info=True,
+        )
+        discovery_prices = {}
+
     # Issue #99 hardening: a scope carrying a narrowing filter (e.g.
     # `rooms`) means discover()'s absence of a listing can mean "doesn't
     # match this run's filter" just as easily as "genuinely gone" — the
@@ -701,8 +895,19 @@ def run_connector(
         )
 
     fetched = 0
+    skipped = 0
     errors = 0
     circuit_open = False
+
+    # Issue #143: one batched lookup for the whole scope rather than one
+    # query per listing — skipped entirely when the feature is off for this
+    # connector (the common case today), so a connector that hasn't opted
+    # into skip-if-seen doesn't pay even one extra query for it.
+    freshness = (
+        _fetch_freshness_map(conn, connector.name, external_ids)
+        if min_refetch_interval_seconds > 0
+        else {}
+    )
 
     for external_id in external_ids:
         if breaker.tripped:
@@ -713,10 +918,28 @@ def run_connector(
                 connector.name,
                 breaker.errors,
                 breaker.attempts,
-                len(external_ids) - fetched - errors,
+                len(external_ids) - fetched - errors - skipped,
                 len(external_ids),
             )
             break
+
+        last_fetched_at, stored_price = freshness.get(external_id, (None, None))
+        skip, reason = _should_skip_fetch(
+            last_fetched_at=last_fetched_at,
+            stored_price=stored_price,
+            discovery_price=discovery_prices.get(external_id),
+            min_refetch_interval_seconds=min_refetch_interval_seconds,
+            now=datetime.now(timezone.utc),
+        )
+        if skip:
+            skipped += 1
+            logger.info(
+                "Connector %s: skipping fetch_detail for external_id=%s — %s",
+                connector.name,
+                external_id,
+                reason,
+            )
+            continue
 
         # No limiter.acquire() here: `throttle` IS the pacing mechanism, and
         # every connector calls it as fetch_detail's first action. Acquiring
@@ -748,6 +971,7 @@ def run_connector(
     return {
         "discovered_count": len(external_ids),
         "fetched_count": fetched,
+        "skipped_count": skipped,
         "error_count": errors,
         "circuit_open": circuit_open,
         # Returned rather than acted on here: withdrawal reconciliation is
@@ -838,29 +1062,36 @@ def _active_profile_scopes(conn) -> list[ConnectorScope]:
 
 def _scopes_for_connector(
     conn, connector_name: str, profile_scopes: list[ConnectorScope]
-) -> tuple[list[ConnectorScope], bool]:
+) -> tuple[list[ConnectorScope], bool, int | None]:
     """Resolve one connector's actual scopes for this run, per issue #99's
     hybrid model: an explicit `connector_config` row overrides the shared
     `_active_profile_scopes` default; a connector with no row (the common
     case — this table starts empty) keeps issue #71's behavior unchanged.
 
-    Returns (scopes, enabled). `enabled=False` means the caller must skip
-    this connector entirely — before ever deriving a scope or calling
-    discover(). It still gets a `connector_run_results` row (status=
-    'skipped', counted separately from ok/failed) so a disabled connector
-    is visible in run history rather than silently absent — an operator
-    turning a connector off is not a failure, and shouldn't add 'failed'/
-    'ok' noise, but it also shouldn't look identical to "everything ran
-    fine and there was simply nothing to do". This is a different, more
-    absolute case than `enabled=True, scopes=[]` (nothing to do this run
-    because there's no override and no active profile reaches this
-    connector's coverage — issue #71's existing, already-normal no-op
-    path, which still gets no result row since nothing was ever skipped by
-    operator choice).
+    Returns (scopes, enabled, min_refetch_interval_seconds_override).
+    `enabled=False` means the caller must skip this connector entirely —
+    before ever deriving a scope or calling discover(). It still gets a
+    `connector_run_results` row (status='skipped', counted separately from
+    ok/failed) so a disabled connector is visible in run history rather
+    than silently absent — an operator turning a connector off is not a
+    failure, and shouldn't add 'failed'/'ok' noise, but it also shouldn't
+    look identical to "everything ran fine and there was simply nothing to
+    do". This is a different, more absolute case than `enabled=True,
+    scopes=[]` (nothing to do this run because there's no override and no
+    active profile reaches this connector's coverage — issue #71's
+    existing, already-normal no-op path, which still gets no result row
+    since nothing was ever skipped by operator choice).
+
+    `min_refetch_interval_seconds_override` (issue #143) is `None` when no
+    override is configured — the caller falls back to
+    `connector.min_refetch_interval_seconds`, same override-vs-class-
+    attribute-default pattern `filters.rooms` already established for
+    `ConnectorScope.rooms` above.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT enabled, geography_override, filters "
+            "SELECT enabled, geography_override, filters, "
+            "min_refetch_interval_seconds "
             "FROM connector_config WHERE connector_name = %s",
             (connector_name,),
         )
@@ -868,11 +1099,11 @@ def _scopes_for_connector(
 
     if row is None:
         # No config row at all: issue #71's default, unmodified.
-        return profile_scopes, True
+        return profile_scopes, True, None
 
-    enabled, geography_override, filters = row
+    enabled, geography_override, filters, min_refetch_interval_seconds_raw = row
     if not enabled:
-        return [], False
+        return [], False, None
 
     # geography_override/filters are JSONB — the column type guarantees
     # valid JSON, but says nothing about *shape*. A string or list value
@@ -967,7 +1198,38 @@ def _scopes_for_connector(
     if rooms is not None:
         base_scopes = [dataclasses.replace(s, rooms=rooms) for s in base_scopes]
 
-    return base_scopes, True
+    min_refetch_interval_seconds: int | None = None
+    if min_refetch_interval_seconds_raw is not None:
+        if isinstance(min_refetch_interval_seconds_raw, bool):
+            # Same bool-is-a-subclass-of-int trap as radius_km above.
+            logger.warning(
+                "connector_config for %s: min_refetch_interval_seconds=%r "
+                "is a boolean, not an integer — ignoring",
+                connector_name,
+                min_refetch_interval_seconds_raw,
+            )
+        else:
+            try:
+                candidate = int(min_refetch_interval_seconds_raw)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "connector_config for %s: min_refetch_interval_seconds=%r "
+                    "is not a valid integer — ignoring",
+                    connector_name,
+                    min_refetch_interval_seconds_raw,
+                )
+            else:
+                if candidate < 0:
+                    logger.warning(
+                        "connector_config for %s: min_refetch_interval_seconds=%d "
+                        "is negative — ignoring",
+                        connector_name,
+                        candidate,
+                    )
+                else:
+                    min_refetch_interval_seconds = candidate
+
+    return base_scopes, True, min_refetch_interval_seconds
 
 
 def run_all_connectors(
@@ -1021,7 +1283,9 @@ def run_all_connectors(
     profile_scopes = _active_profile_scopes(conn)
 
     for connector in connectors_to_run:
-        scopes, enabled = _scopes_for_connector(conn, connector.name, profile_scopes)
+        scopes, enabled, min_refetch_override = _scopes_for_connector(
+            conn, connector.name, profile_scopes
+        )
         if not enabled:
             # Issue #99 hardening: an operator explicitly turned this
             # connector off — real and worth a visible trace, not a silent
@@ -1067,9 +1331,19 @@ def run_all_connectors(
             )
             continue
 
+        # Issue #143: an explicit connector_config override wins; otherwise
+        # fall back to this connector's own class-attribute default (0 for
+        # every connector that hasn't opted into skip-if-seen).
+        effective_min_refetch_interval_seconds = (
+            min_refetch_override
+            if min_refetch_override is not None
+            else connector.min_refetch_interval_seconds
+        )
+
         started_at = datetime.now(timezone.utc)
         discovered_total = 0
         fetched_total = 0
+        skipped_fetch_total = 0
         error_total = 0
         any_circuit_open = False
         any_scope_failed = False
@@ -1149,7 +1423,14 @@ def run_all_connectors(
             seen_scope_keys.add(scope_key)
 
             try:
-                result = run_connector(conn, connector, scope, limiter, breaker)
+                result = run_connector(
+                    conn,
+                    connector,
+                    scope,
+                    limiter,
+                    breaker,
+                    min_refetch_interval_seconds=effective_min_refetch_interval_seconds,
+                )
             except (
                 Exception
             ) as exc:  # one scope's discover() failing shouldn't skip the rest
@@ -1169,13 +1450,15 @@ def run_all_connectors(
 
             discovered_total += result["discovered_count"]
             fetched_total += result["fetched_count"]
+            skipped_fetch_total += result["skipped_count"]
             error_total += result["error_count"]
             any_circuit_open = any_circuit_open or result["circuit_open"]
             discovered_union |= result["discovered_external_ids"]
             reconcilable_union = reconcilable_union and result["reconcilable"]
             scope_summaries.append(
                 f"{scope_key}: discovered={result['discovered_count']} "
-                f"fetched={result['fetched_count']} errors={result['error_count']}"
+                f"fetched={result['fetched_count']} "
+                f"skipped={result['skipped_count']} errors={result['error_count']}"
             )
 
         # Withdrawal reconciliation: once per connector per run, against
@@ -1246,6 +1529,7 @@ def run_all_connectors(
             status=status,
             discovered_count=discovered_total,
             fetched_count=fetched_total,
+            skipped_count=skipped_fetch_total,
             error_count=error_total,
             error_msg="; ".join(error_msgs) or None,
             started_at=started_at,
@@ -1388,7 +1672,113 @@ def notify_materialize_all(trigger: str = "scheduler") -> bool:
     return True
 
 
-def run_scheduler_loop(conn_factory, interval_seconds: int = 3600) -> None:
+# Runs in these connector_runs.status values are genuinely finished — used
+# by the restart-burst guard (issue #172) to find when ingestion last
+# actually completed. 'running' is deliberately excluded: a still-in-flight
+# (or crashed-and-not-yet-reconciled, see _reconcile_stale_runs) row says
+# nothing about when a sweep last finished, and including it would let an
+# in-progress run make the guard think a completion just happened.
+_COMPLETED_RUN_STATUSES = ("success", "partial", "failed")
+
+
+def last_completed_run_finished_at(conn) -> datetime | None:
+    """Most recent `connector_runs.finished_at` among genuinely completed runs.
+
+    None when no run has ever completed (a fresh install) — the guard
+    below treats that the same as "long enough ago", since there is no
+    prior sweep for a burst of restarts to be re-sweeping too soon after.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT finished_at FROM connector_runs "
+            "WHERE status = ANY(%s) ORDER BY finished_at DESC LIMIT 1",
+            (list(_COMPLETED_RUN_STATUSES),),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def should_skip_immediate_sweep(
+    conn, min_restart_sweep_interval_seconds: int
+) -> tuple[bool, datetime | None]:
+    """Whether a startup/`--once` sweep should be skipped (issue #172).
+
+    Context: `run_scheduler_loop` (and `--once`) sweeps every connector
+    immediately, not just on the hourly schedule — intentional and useful
+    after a genuine gap (the container was down for hours), but combined
+    with `restart: unless-stopped` it means a crash-loop hammers every
+    connector's site again on every restart attempt, with no rate-limiter
+    memory surviving the restart (`RateLimiter`/`CircuitBreaker` are
+    constructed fresh per `run_all_connectors` call — issue #71). Two of
+    the first four spiked bank-portal connectors already sit behind
+    edge-level WAFs; a self-inflicted request burst from a crash loop is
+    exactly the kind of good-neighbor-crawling violation issue #1 §15
+    exists to prevent, and it is nobody's *deliberate* aggressive crawl —
+    that is what makes it dangerous, no human decision point to catch it.
+
+    True only when a completed run (see `last_completed_run_finished_at`)
+    finished more recently than `min_restart_sweep_interval_seconds` ago —
+    the signature of a restart-loop re-attempting within seconds/minutes
+    of the previous attempt, not a genuine gap since the last sweep. A
+    non-positive threshold disables the guard outright (always False) —
+    an explicit operator opt-out, not a special case to code around.
+    """
+    if min_restart_sweep_interval_seconds <= 0:
+        return False, None
+    last_finished = last_completed_run_finished_at(conn)
+    if last_finished is None:
+        return False, None
+    elapsed = (datetime.now(timezone.utc) - last_finished).total_seconds()
+    return elapsed < min_restart_sweep_interval_seconds, last_finished
+
+
+def run_all_connectors_respecting_restart_guard(
+    conn,
+    trigger: str = "scheduler",
+    *,
+    min_restart_sweep_interval_seconds: int = 0,
+) -> int | None:
+    """`run_all_connectors()`, unless the restart-burst guard (issue #172)
+    says this sweep is too soon after the last completed one.
+
+    Returns the new `connector_runs` id, or `None` when skipped — nothing
+    was created this call, so callers (and tests) can tell "ran" from
+    "skipped" without re-deriving it from logs.
+
+    Only ever wired to a *full* sweep (no `connector_name` filter) — see
+    `etl/main.py`'s `--once` handling: an operator explicitly naming one
+    connector via `ps connector run <name>` is a deliberate, targeted
+    action, not the unattended crash-loop scenario this guard exists for.
+    `run_all_connectors` itself is unaffected and untouched — tests and
+    any other direct caller keep today's unconditional-sweep behavior.
+    """
+    skip, last_finished = should_skip_immediate_sweep(
+        conn, min_restart_sweep_interval_seconds
+    )
+    if skip:
+        assert last_finished is not None  # skip=True only when a run was found
+        elapsed = (datetime.now(timezone.utc) - last_finished).total_seconds()
+        logger.warning(
+            "Skipping immediate connector sweep: the last completed run "
+            "finished at %s (%.0fs ago), under the "
+            "min_restart_sweep_interval_seconds=%ds threshold. This reads "
+            "as a rapid restart (crash-loop), not a genuine gap since the "
+            "last sweep — no request is being made to any connector's site "
+            "for this trigger. Waiting for the next scheduled interval "
+            "instead.",
+            last_finished,
+            elapsed,
+            min_restart_sweep_interval_seconds,
+        )
+        return None
+    return run_all_connectors(conn, trigger=trigger)
+
+
+def run_scheduler_loop(
+    conn_factory,
+    interval_seconds: int = 3600,
+    min_restart_sweep_interval_seconds: int = 0,
+) -> None:
     """Run all connectors on a fixed interval, forever. Long-running-container mode.
 
     Each iteration is isolated: a transient failure (DB connection drop,
@@ -1397,11 +1787,24 @@ def run_scheduler_loop(conn_factory, interval_seconds: int = 3600) -> None:
     than propagating and killing the long-running container process. The
     alternative — letting the process die — turns one bad hour into total
     ingestion downtime until something notices the container exited.
+
+    `min_restart_sweep_interval_seconds` (issue #172, default 0 = guard
+    off) is applied on every iteration, not just the first: within one
+    long-running process this can never trigger except by a bug (each
+    iteration is already paced `interval_seconds` apart by the `sleep`
+    below), and applying it unconditionally — rather than special-casing
+    "first iteration" — is what makes the guard's actual target, a fresh
+    process spun up by a container restart, hit the same code path with
+    no extra state to keep in sync.
     """
     while True:
         conn = conn_factory()
         try:
-            run_all_connectors(conn, trigger="scheduler")
+            run_all_connectors_respecting_restart_guard(
+                conn,
+                trigger="scheduler",
+                min_restart_sweep_interval_seconds=min_restart_sweep_interval_seconds,
+            )
         except Exception:
             logger.exception(
                 "run_all_connectors failed for this scheduler iteration — "

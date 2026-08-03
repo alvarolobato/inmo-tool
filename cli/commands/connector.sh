@@ -80,7 +80,7 @@ cmd_status() {
         -U "${PG_USER}" \
         -d "${PG_DB}" \
         -v ON_ERROR_STOP=1 \
-        -c "SELECT r.connector_name, r.status, r.discovered_count, r.fetched_count, r.error_count, to_char(r.finished_at, 'YYYY-MM-DD HH24:MI') AS finished_at FROM connector_run_results r WHERE r.finished_at = (SELECT max(r2.finished_at) FROM connector_run_results r2 WHERE r2.connector_name = r.connector_name) ORDER BY r.connector_name"
+        -c "SELECT r.connector_name, r.status, r.discovered_count, r.fetched_count, r.skipped_count, r.error_count, to_char(r.finished_at, 'YYYY-MM-DD HH24:MI') AS finished_at FROM connector_run_results r WHERE r.finished_at = (SELECT max(r2.finished_at) FROM connector_run_results r2 WHERE r2.connector_name = r.connector_name) ORDER BY r.connector_name"
 }
 
 cmd_logs() {

@@ -30,12 +30,17 @@ class DummyConnector(Connector):
         circuit_breaker_min_attempts: int = 2,
         price: int = 150000,
         discovers_full_inventory: bool = True,
+        min_refetch_interval_seconds: int = 0,
     ) -> None:
         self.name = name
         self.rate_limit_per_minute = rate_limit_per_minute
         self.circuit_breaker_error_rate = circuit_breaker_error_rate
         self.circuit_breaker_min_attempts = circuit_breaker_min_attempts
         self.discovers_full_inventory = discovers_full_inventory
+        # Issue #143: 0 (default) matches every connector's original
+        # behaviour — always fetch — so every pre-#143 test using this
+        # fixture is unaffected unless it explicitly opts in.
+        self.min_refetch_interval_seconds = min_refetch_interval_seconds
         # Mutable on purpose (not frozen at construction like the other
         # params) — task 1.4's withdrawal-detection and price-history tests
         # need a single DummyConnector instance whose discover() result /
@@ -55,12 +60,31 @@ class DummyConnector(Connector):
         # with (e.g. "was this the Sevilla-derived scope, not Madrid"),
         # without this connector caring about scope content itself.
         self.scopes_seen: list[ConnectorScope] = []
+        # Issue #143: lets a test simulate a connector whose discover()
+        # already carries a per-listing price signal (like Fotocasa's real
+        # rawPrice) — {} (default) means "no discovery-time price signal",
+        # same as the base Connector.discovered_prices() default. Mutable
+        # for the same reason `price`/`external_ids` are: a test needs to
+        # change it between successive run_all_connectors() calls.
+        self.discovery_price_overrides: dict[str, int] = {}
+        # Issue #143: every external_id fetch_detail() was actually called
+        # for, in call order — lets a skip-if-seen test assert exactly what
+        # was (not) fetched, independent of what ends up in the database
+        # (which a DB-error id, for instance, would never reach).
+        self.fetch_calls: list[str] = []
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         self.scopes_seen.append(scope)
         return list(self.external_ids)
 
+    def discovered_prices(self) -> dict[str, Decimal]:
+        return {
+            external_id: Decimal(str(price))
+            for external_id, price in self.discovery_price_overrides.items()
+        }
+
     def fetch_detail(self, external_id: str, throttle: Throttle) -> RawListing:
+        self.fetch_calls.append(external_id)
         if external_id in self._failing_ids:
             raise ConnectorError(f"simulated fetch failure for {external_id}")
         return RawListing(

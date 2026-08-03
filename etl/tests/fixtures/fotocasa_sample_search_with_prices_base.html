@@ -1,0 +1,20 @@
+<!--
+Issue #143: base ("todas-las-zonas") page for the "prices accumulate across
+the baseline page AND every successfully-fetched zone" test. Pairs with
+fotocasa_sample_search_with_prices_zone.html. One zone link (chamberi) is
+enough to exercise the accumulation — TestZonePartitioning already covers
+the full zone-discovery mechanics; this pair only needs to prove
+_last_discovery_prices merges across more than one page.
+
+Baseline listing: 190011971 (945000). Zone link: chamberi.
+-->
+<html lang="es"><head><title>Comprar viviendas</title></head><body>
+<script type="application/json" id="__initial_props__">{"initialSearch": {"result": {"realEstates": [{"id": 190011971, "rawPrice": 945000}]}}}</script>
+<div class="re-SearchResult">
+  <a href="/es/comprar/vivienda/madrid-capital/calefaccion-ascensor-no-amueblado/190011971/d" class="re-Card-link">Piso en Santa Eugenia</a>
+</div>
+<nav class="re-Breadcrumb-zones" aria-label="Zonas de Madrid Capital">
+  <a href="/es/comprar/viviendas/madrid-capital/todas-las-zonas/l">Todas las zonas</a>
+  <a href="/es/comprar/viviendas/madrid-capital/chamberi/l">Chamberí</a>
+</nav>
+</body></html>

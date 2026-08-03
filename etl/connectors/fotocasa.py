@@ -234,6 +234,59 @@ def _to_decimal(value: Any) -> Decimal | None:
         return None
 
 
+def _extract_search_result_prices(html: str) -> dict[str, Decimal]:
+    """Best-effort per-listing prices from a Fotocasa search-results page.
+
+    Issue #143: `initialSearch.result.realEstates` is a list of the same
+    result cards `_DETAIL_HREF_RE` finds via anchor hrefs, but with real
+    structured data attached — each entry carries both `id` and a numeric
+    `rawPrice` (e.g. `945000`, not the display string `"945.000 €"`).
+    Live-verified 2026-08-03 against two real pages (the unfiltered
+    madrid-capital city page and a real zone page, /chamberi/l): on both,
+    the full set of `realEstates[].id` values matched the connector's own
+    href-extracted external_id set exactly (0 mismatches), and a sampled
+    listing's search-page `rawPrice` matched that same listing's
+    independently-fetched detail-page price exactly. Not previously
+    documented anywhere in this codebase or in property_web_scraper's
+    reference mapping — this connector's discover() never parsed this
+    JSON at all before (see the module docstring's history), only the
+    raw hrefs.
+
+    Deliberately best-effort, unlike `_extract_initial_props`/discover()'s
+    own use of it: this is a bonus price *signal*, not part of what makes
+    a page usable for finding ids. If Fotocasa ever restructures this path
+    (or a caller hands this something that isn't a real search page at
+    all), every `.get(..., {})`/`.get(..., [])` below degrades to an empty
+    dict rather than raising — a missing price signal just means
+    `Connector.discovered_prices()`'s "no signal" default for whichever
+    ids this call couldn't price, not a broken sweep. The one exception is
+    `_extract_initial_props` itself raising on genuinely malformed JSON,
+    which is caught here and treated the same way (no price data, not a
+    propagated failure) — this function must never be why discover()
+    fails when the id-extraction regex above it worked fine.
+    """
+    try:
+        props = _extract_initial_props(html)
+    except ConnectorError:
+        return {}
+    real_estates = ((props.get("initialSearch") or {}).get("result") or {}).get(
+        "realEstates"
+    )
+    if not isinstance(real_estates, list):
+        return {}
+    prices: dict[str, Decimal] = {}
+    for item in real_estates:
+        if not isinstance(item, dict):
+            continue
+        external_id = item.get("id")
+        if external_id is None:
+            continue
+        price = _to_decimal(item.get("rawPrice"))
+        if price is not None:
+            prices[str(external_id)] = price
+    return prices
+
+
 def _to_int(value: Any) -> int | None:
     if value is None:
         return None
@@ -405,8 +458,12 @@ class FotocasaConnector(Connector):
     # NOTE: this is a class attribute, not a `connector_config` field — it
     # is not settable from the connector-management UI (#100) today, so the
     # log messages below must not tell an operator to "set" it as though it
-    # were. Making it genuinely configurable belongs with #143's fetch-budget
-    # work, which is where the scheduling tradeoff actually gets decided.
+    # were. Issue #143 added `connector_config.min_refetch_interval_seconds`
+    # as the operator-facing fetch-budget lever instead (skip re-fetching
+    # already-known listings, not bounding how many zones a sweep visits) —
+    # deliberately scoped that way rather than also wiring this one up, to
+    # keep that change reviewable. Making *this* knob configurable too is
+    # still open; a small, separate follow-up, not bundled into #143.
     max_zones_per_sweep: int | None = None
     # Still False after zone partitioning (issue #65), but for a weaker
     # reason than before. Coverage went from ~30 of madrid-capital's 11,361
@@ -430,6 +487,42 @@ class FotocasaConnector(Connector):
     # absent here rather than shipped as controls that might silently no-op.
     supported_filters = ("rooms",)
 
+    # Issue #143: this is the connector the fetch-budget problem was written
+    # about (see the issue — a single sweep at 3 req/min was ~8h even before
+    # zone partitioning made discover() itself heavier). 24h is a documented
+    # freshness window, not an arbitrary guess: real-estate list prices and
+    # statuses don't typically move sub-daily, and `discovered_prices()`
+    # below (Fotocasa's search pages embed a real per-listing price already
+    # — see its docstring) forces a re-fetch immediately whenever a price
+    # genuinely changes, regardless of this window — so 24h bounds the
+    # *worst case* for a listing whose price hasn't moved, not the actual
+    # price-change detection latency for the common case. Operator-
+    # overridable via `connector_config.min_refetch_interval_seconds`.
+    min_refetch_interval_seconds = 24 * 60 * 60
+
+    def __init__(self) -> None:
+        # Populated by discover() as a side effect of the same request(s)
+        # it already makes to find external_ids — see discovered_prices()
+        # and _extract_search_result_prices(). Reset at the start of every
+        # discover() call, so a scope that fails partway through never
+        # leaves a previous scope's prices behind for the orchestrator to
+        # misread as this scope's data.
+        self._last_discovery_prices: dict[str, Decimal] = {}
+
+    def discovered_prices(self) -> dict[str, Decimal]:
+        """See Connector.discovered_prices. Fotocasa's search-results pages
+        embed a real per-listing price (`initialSearch.result.realEstates
+        [].rawPrice`) in the same `__initial_props__` JSON blob discover()
+        already fetches — live-verified 2026-08-03 against real pages (see
+        _extract_search_result_prices' docstring for the specifics): the
+        `id`/`rawPrice` set matches the connector's own href-extracted
+        external_ids exactly, on both the unfiltered city page and a real
+        zone page, and `rawPrice` matched the same listing's detail-page
+        price exactly. Populated across the whole sweep (baseline page +
+        every successfully-fetched zone), not just the baseline.
+        """
+        return dict(self._last_discovery_prices)
+
     def scope_key(self, scope: ConnectorScope) -> str | None:
         """Delegate to `_resolve_geography` — the actual slug this scope
         resolves to (or None if unresolvable) IS the right dedup/coverage
@@ -449,6 +542,14 @@ class FotocasaConnector(Connector):
         return geography
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
+        # Issue #143: reset before this scope's own sweep runs, not after —
+        # a scope that raises partway through (bad geography, robots.txt
+        # guard, a strict base-page fetch failure) must not leave a PRIOR
+        # scope's prices sitting here for the orchestrator to read via
+        # discovered_prices() and misattribute to a sweep that never
+        # actually happened.
+        self._last_discovery_prices = {}
+
         geography = _resolve_geography(scope)
         if geography is None:
             raise ConnectorError(
@@ -493,6 +594,9 @@ class FotocasaConnector(Connector):
         base_html = self._fetch_search_page(base_url, strict=True)
         external_ids: set[str] = self._parse_external_ids(base_html)
         baseline_count = len(external_ids)
+        # Issue #143: free — the same request, the same JSON blob, no extra
+        # fetch. See discovered_prices()/_extract_search_result_prices.
+        self._last_discovery_prices.update(_extract_search_result_prices(base_html))
 
         zone_slugs = _discover_zone_slugs(base_html, geography)
         if not zone_slugs:
@@ -572,6 +676,8 @@ class FotocasaConnector(Connector):
                 continue
             consecutive_failures = 0
             zone_ids = self._parse_external_ids(zone_html)
+            # Issue #143: same free extraction as the baseline page, above.
+            self._last_discovery_prices.update(_extract_search_result_prices(zone_html))
             if not zone_ids:
                 # A valid-looking page (it had __initial_props__) that still
                 # parsed to zero listings. Unlike a *failed* zone this is NOT
@@ -617,7 +723,7 @@ class FotocasaConnector(Connector):
                 "200s with no payload after ~4 requests). rate_limit_per_minute "
                 "is currently %d; lowering it requires a code change, as does "
                 "bounding the sweep via max_zones_per_sweep (neither is "
-                "operator-settable today — see #143).",
+                "operator-settable today).",
                 zones_failed,
                 zones_attempted,
                 geography,

@@ -109,6 +109,16 @@
   requires_restart: [etl]
   components: [etl]
 
+- key: etl.min_restart_sweep_interval_seconds
+  env: ETL_MIN_RESTART_SWEEP_INTERVAL_SECONDS
+  type: int
+  sensitive: false
+  default: 900
+  section: "ETL"
+  description: "Intervalo mínimo (segundos) desde el último connector_run completado antes de permitir un nuevo barrido inmediato al arrancar (issue #172). Un reinicio en bucle repetiría el barrido completo de todos los conectores en cada intento; por debajo de este umbral el barrido se salta y se registra en el log, esperando al siguiente ciclo programado. 0 desactiva la protección."
+  requires_restart: [etl]
+  components: [etl]
+
 # -----------------------------------------------------------------------------
 # OpenRouter / LLM
 # -----------------------------------------------------------------------------

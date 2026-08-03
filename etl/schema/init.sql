@@ -169,6 +169,29 @@ CREATE INDEX IF NOT EXISTS idx_listing_last_seen_at ON listing (last_seen_at);
 -- not just a fresh one.
 ALTER TABLE listing ADD COLUMN IF NOT EXISTS missed_discovery_count SMALLINT NOT NULL DEFAULT 0;
 
+-- Issue #143 (fetch-budget / skip-if-seen): separates "last time we saw
+-- this id in a discover() sweep" (last_seen_at, above) from "last time we
+-- actually ran fetch_detail()+normalize() for it" (this column). Before
+-- this issue the two were the same moment by construction — every
+-- discovered id was fetched every run, and last_seen_at was only ever
+-- written from the fetch path. Skip-if-seen breaks that equivalence: a
+-- listing can now be "seen" (last_seen_at bumped from discover() alone,
+-- see etl.orchestrator._update_last_seen_for_discovered) without being
+-- re-fetched, so the staleness decision needs its own, narrower signal —
+-- this column is what etl.orchestrator._should_skip_fetch actually gates
+-- on, never last_seen_at.
+ALTER TABLE listing ADD COLUMN IF NOT EXISTS last_fetched_at TIMESTAMPTZ;
+
+-- One-time migration: every row that predates this column had its
+-- last_seen_at written exclusively from the fetch path (see above), so
+-- for any such row, last_seen_at IS the best available value for "last
+-- fetched". WHERE last_fetched_at IS NULL makes this idempotent —
+-- re-running init.sql after the first backfill touches zero rows.
+UPDATE listing SET last_fetched_at = last_seen_at
+ WHERE last_fetched_at IS NULL AND last_seen_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_listing_last_fetched_at ON listing (last_fetched_at);
+
 -- Schema superset vs. RealEstateWebTools/property_web_scraper's field model
 -- (issue #76). city/province/postal_code/m2_plot/features are additive
 -- columns for data both live connectors already parse and currently
@@ -692,6 +715,15 @@ ALTER TABLE connector_run_results ADD CONSTRAINT connector_run_results_status_ch
     CHECK (status IN ('ok', 'failed', 'circuit_open', 'skipped'));
 ALTER TABLE connector_runs ADD COLUMN IF NOT EXISTS connectors_skipped INTEGER;
 
+-- Issue #143: listings this connector's run left unfetched under the
+-- skip-if-seen policy ("known, still present per discover(), deliberately
+-- not re-fetched this run" — etl.orchestrator._should_skip_fetch). NOT the
+-- same concept as connectors_skipped above, which counts whole *connectors*
+-- skipped via connector_config.enabled=false — this is a listing-level
+-- count, always 0 for a connector that hasn't opted into
+-- min_refetch_interval_seconds > 0 (today's default for every connector).
+ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS skipped_count INTEGER NOT NULL DEFAULT 0;
+
 CREATE INDEX IF NOT EXISTS idx_connector_run_results_run_id ON connector_run_results (run_id);
 -- Recent-runs lookups (dashboards, `ps connector status`-style queries)
 -- filter/sort on started_at; unindexed, that's a seq scan once this table
@@ -737,6 +769,21 @@ CREATE INDEX IF NOT EXISTS idx_connector_runs_started_at ON connector_runs (star
 --                                  A connector that doesn't recognise a
 --                                  key in here ignores it, it doesn't
 --                                  error — see etl/orchestrator.py.
+--   min_refetch_interval_seconds -> issue #143's fetch-budget override: a
+--                                  dedicated column, not folded into
+--                                  `filters`, because it's a
+--                                  framework-level fetch-economics knob
+--                                  (how often to re-fetch an already-known
+--                                  listing), not a native site filter
+--                                  (what discover() asks the site for) —
+--                                  same category as `enabled`, not
+--                                  `filters`. NULL (the default for every
+--                                  row, including ones seeded by
+--                                  sync_connector_registry) means "no
+--                                  override, use this connector's
+--                                  Connector.min_refetch_interval_seconds
+--                                  class attribute" — see
+--                                  etl.orchestrator._scopes_for_connector.
 CREATE TABLE IF NOT EXISTS connector_config (
     connector_name      TEXT         PRIMARY KEY,
     enabled              BOOLEAN      NOT NULL DEFAULT true,
@@ -744,6 +791,8 @@ CREATE TABLE IF NOT EXISTS connector_config (
     filters              JSONB        NOT NULL DEFAULT '{}'::jsonb,
     updated_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE connector_config ADD COLUMN IF NOT EXISTS min_refetch_interval_seconds INTEGER;
 
 -- Issue #100: what connectors *exist*, as opposed to connector_config's
 -- "how is this one configured". The connector management UI has to list
