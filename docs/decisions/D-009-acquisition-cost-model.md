@@ -1,12 +1,24 @@
 ---
 id: D-009
-title: Acquisition-cost model — ITP by CCAA (general rate only), flat notary/registry/gestoría defaults, actual carrying costs replace the assumed percentage when known
+title: Acquisition-cost model — ITP by CCAA (general rate only), flat notary/registry/gestoría defaults, actual carrying costs ADD to (not replace) the assumed maintenance/vacancy line
 date: 2026-08-03
 ---
 
-# D-009: Acquisition-cost model — ITP by CCAA, flat notary/registry/gestoría, actual carrying costs override the assumed percentage
+# D-009: Acquisition-cost model — ITP by CCAA, flat notary/registry/gestoría, actual carrying costs are additive to a separate maintenance/vacancy assumption
 
-*Decided: 2026-08-03*
+*Decided: 2026-08-03, revised 2026-08 (Opus review on PR #181)*
+
+> **Revision (2026-08, Opus review)**: point 4 below ("carrying costs
+> REPLACE the assumed percentage") was the original decision and is now
+> superseded by the additive model described in the revised point 4 and
+> the new "Alternatives rejected" entry below. The review found that full
+> replacement flips the sign of cash-on-cash on real numbers (a Málaga
+> worked example: -0.84% cash-on-cash under the fully-assumed 25% model
+> vs. +3.17% once a listing published only a 55 EUR/month community fee,
+> dropping IBI/maintenance/vacancy entirely) — a systematic bias that
+> always favours whichever portal happens to publish partial cost data.
+> See `dashboard/lib/analytics/yield.ts`'s module docstring for the full
+> analysis and `yield.test.ts`'s Málaga-worked-example test.
 
 **Context**: Issue #151 requires acquisition costs (ITP, notary, registry,
 fees) to be modelled, not left out of the yield calculation — "a yield
@@ -37,16 +49,28 @@ entirely.
    (`DEFAULT_NOTARY_PCT = 0.3`, `DEFAULT_REGISTRY_PCT = 0.2`,
    `DEFAULT_GESTORIA_EUR = 300` flat), all overridable per profile via
    `thesis_params.acquisition_costs`.
-4. **Carrying costs (IBI, community fees) replace, not blend with, the
-   assumed operating-cost percentage** when a property's active listings
-   publish them (Solvia's `raw_extra.ibi_anual_eur` /
-   `raw_extra.gastos_comunidad_eur`) — read literally from issue #151's own
-   wording ("used... rather than estimated"). This is a deliberate
-   divergence from issue #33's original wording, which described ONE
-   bundled `operating_cost_pct` covering community fees + IBI + maintenance
-   + vacancy together; no second configuration mechanism was added
-   (`operating_cost_pct` is unchanged, just only applied when no actual
-   data exists) — checked against #33 first, per #151's own instruction.
+4. **REVISED (2026-08, Opus review): carrying costs (IBI, community fees)
+   replace ONLY their own specific cost category, and a SEPARATE
+   `DEFAULT_MAINTENANCE_VACANCY_PCT` (8%, of gross rent) is always added on
+   top** — whether or not any actual data is known — because no source in
+   this schema publishes maintenance/vacancy figures at all. Only when
+   NEITHER IBI nor community fee is known does the module fall back to the
+   single bundled `operating_cost_pct` (25% default, covering IBI +
+   community + maintenance + vacancy together), to avoid stacking three
+   independent assumptions where one bundled one already existed. Results
+   report `ibi_known`/`community_fee_known` individually (not just a coarse
+   `carrying_costs_source: "actual"|"assumed"`), since "only the community
+   fee is real" and "both are real" are different facts a user should be
+   able to tell apart.
+   The **original decision** (full replacement of the entire assumed
+   percentage the instant ANY actual figure was known) is superseded — see
+   the revision note at the top of this file for why: it created a
+   systematic, directional bias (a Solvia listing publishing only a partial
+   carrying-cost figure always looked better than an otherwise-identical
+   listing with no data at all), which is worse than the "invented
+   sub-split" concern the original decision was trying to avoid, because a
+   directional bias is exploitable in a way undirected estimation noise is
+   not.
 
 **Alternatives rejected**:
 - Modelling full progressive ITP brackets + every buyer-profile reduction —
@@ -54,18 +78,32 @@ entirely.
   decision-support tool (issue #1 §11/§16).
 - Blending actual carrying costs with a prorated share of the assumed
   percentage (e.g. "subtract IBI's typical share of the 25% bundle, keep
-  the rest for maintenance/vacancy") — rejected: inventing that sub-split
-  would itself be exactly the fabricated-precision issue #1 §11 warns
-  against. The chosen replacement approach trades a small amount of
-  precision (actual IBI+community excludes maintenance/vacancy) for
-  transparency; `assumptions_used.carrying_costs_source` always states
-  which mode was used.
+  the rest for maintenance/vacancy") — still rejected under the revised
+  model: inventing what fraction of `operating_cost_pct` is "the
+  maintenance/vacancy part" would be the same fabricated-precision problem
+  issue #1 §11 warns against. `DEFAULT_MAINTENANCE_VACANCY_PCT` avoids this
+  by being its OWN independently-sourced figure (a property-management
+  rule of thumb for maintenance+vacancy alone), not a derived share of the
+  25% bundle.
+- **(Original decision, now rejected) Full replacement** — actual carrying
+  costs zeroing out the ENTIRE assumed operating-cost line the instant any
+  one figure was known. Rejected after an Opus review demonstrated this
+  flips cash-on-cash's sign on real numbers (Málaga worked example:
+  -0.84% fully-assumed vs. +3.17% once only a community fee was known) —
+  a bias that always favours whichever portal publishes partial data,
+  which is a worse fabrication than the sub-split idea above because it
+  has a known, exploitable direction rather than being undirected noise.
 
 **Rationale**: A reviewable, cited table beats inline literals — the owner's
 own framing ("a wrong ITP rate silently skews every yield in a region")
 demands the rate table be auditable at a glance, with its scope
-limitations stated where a reviewer will actually read them.
+limitations stated where a reviewer will actually read them. The revised
+carrying-cost model applies the same standard to itself: additive,
+individually-labelled real data beats a full-replacement shortcut that
+happens to be directionally biased.
 
 **See**: docs/decisions/D-008-rent-assumption-until-comparables.md,
 `dashboard/lib/analytics/acquisition-costs.ts`,
-`dashboard/lib/analytics/yield.ts`, issues #151, #33.
+`dashboard/lib/analytics/yield.ts` (module docstring has the full Málaga
+worked-example trace), `dashboard/lib/analytics/__tests__/yield.test.ts`,
+issues #151, #33.

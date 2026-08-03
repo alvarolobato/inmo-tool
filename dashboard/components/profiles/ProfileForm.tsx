@@ -112,36 +112,46 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
   const financing = values.thesis_params.financing;
   const rentAssumption = values.thesis_params.rent_assumption;
 
+  /**
+   * Parses a number input's raw text, tolerating a comma decimal separator
+   * (Opus review fix: the rent-assumption field's own placeholder read "p.
+   * ej. 12,5", but a native `<input type="number">`'s `.value` is always
+   * period-decimal per the HTML spec — typing a comma either gets rejected
+   * by the browser or (depending on browser/OS locale quirks) survives
+   * into onChange and makes `Number("12,5")` return `NaN`. Replacing a
+   * comma with a period before parsing makes the field behave the way its
+   * own placeholder told the user it would). Returns `undefined` for a
+   * blank/invalid value — NEVER `NaN` or a silent `0`, which would clear an
+   * assumption without the user intending to.
+   */
+  function parseFormNumber(raw: string): number | undefined {
+    if (raw.trim() === "") return undefined;
+    const n = Number(raw.replace(",", "."));
+    return Number.isFinite(n) ? n : undefined;
+  }
+
   const setFinancingField = (
-    field: "down_payment_pct" | "rate_pct" | "term_years" | "operating_cost_pct",
+    field: "down_payment_pct" | "rate_pct" | "term_years" | "operating_cost_pct" | "maintenance_vacancy_pct",
     raw: string,
   ) => {
     setValues((v) => {
-      const num = raw === "" ? undefined : Number(raw);
-      const base = v.thesis_params.financing ?? {
-        down_payment_pct: 20,
-        rate_pct: 3,
-        term_years: 25,
-      };
-      // financing is an all-or-nothing object in ThesisParamsSchema (issue
-      // #1 §11's financing assumptions are used together for a cash-on-cash
-      // estimate in Phase 5) — an incomplete triple isn't a valid partial,
-      // so a blanked field falls back to the last-known/default value rather
-      // than producing an invalid shape. `operating_cost_pct` (issue #151/
-      // #33) is the one field in this object that's genuinely optional even
-      // once the rest is set — yield.ts falls back to its own documented
-      // default (25%) when it's undefined, so blanking it here is a valid
-      // "use the system default" state, not an invalid partial.
-      return {
-        ...v,
-        thesis_params: {
-          ...v.thesis_params,
-          financing: {
-            ...base,
-            [field]: field === "operating_cost_pct" ? num : (num ?? base[field]),
-          },
-        },
-      };
+      const num = parseFormNumber(raw);
+      const base = v.thesis_params.financing ?? {};
+      // Each financing field is independently optional in ThesisParamsSchema
+      // (Opus review fix — this object used to be "all-or-nothing", which
+      // forced this function to silently synthesize rate_pct/term_years
+      // defaults the instant a user touched ONLY down_payment_pct; yield.ts
+      // then reported those silently-filled values as user-chosen, not as
+      // defaults). Blanking any single field now just removes that key —
+      // yield.ts's own per-field `?? DEFAULT_FINANCING.x` fallback (and its
+      // `*_is_default` flags) handles the rest correctly.
+      const updated = { ...base, [field]: num };
+      const hasAnyField = Object.values(updated).some((x) => x !== undefined);
+      if (!hasAnyField) {
+        const { financing: _drop, ...rest } = v.thesis_params;
+        return { ...v, thesis_params: rest };
+      }
+      return { ...v, thesis_params: { ...v.thesis_params, financing: updated } };
     });
   };
 
@@ -149,17 +159,19 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
   // settable field from `financing` — see rent-estimate.ts's module
   // docstring for why a rent figure must be an explicit, visible user
   // assumption rather than folded into the financing block or defaulted by
-  // the system. Blank means "no rent assumption" (yield.ts gates on this,
-  // it does not invent a figure).
+  // the system. Blank (or unparseable) means "no rent assumption" (yield.ts
+  // gates on this, it does not invent a figure) — see parseFormNumber for
+  // why this tolerates a comma decimal and never silently stores NaN/0.
   const setRentAssumption = (raw: string) => {
     setValues((v) => {
-      if (raw === "") {
+      const num = parseFormNumber(raw);
+      if (num === undefined) {
         const { rent_assumption: _drop, ...rest } = v.thesis_params;
         return { ...v, thesis_params: rest };
       }
       return {
         ...v,
-        thesis_params: { ...v.thesis_params, rent_assumption: { eur_per_m2_month: Number(raw) } },
+        thesis_params: { ...v.thesis_params, rent_assumption: { eur_per_m2_month: num } },
       };
     });
   };
@@ -366,8 +378,9 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
         </div>
         <div style={{ ...rowStyle, marginTop: 10 }}>
           <div style={colStyle}>
-            <label style={labelStyle}>Entrada (%)</label>
+            <label style={labelStyle} htmlFor="financing-down-payment-pct">Entrada (%)</label>
             <input
+              id="financing-down-payment-pct"
               type="number"
               min={0}
               max={100}
@@ -413,8 +426,29 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
             style={inputStyle}
           />
           <p style={{ margin: "4px 0 0", fontSize: 11, color: "var(--fg-subtle)" }}>
-            Se ignora para propiedades cuyos anuncios publiquen IBI/comunidad reales — en ese caso se
-            usan esos datos en vez de este porcentaje (issue #151).
+            Se usa solo cuando el anuncio de la propiedad NO publica ni IBI ni gastos de comunidad
+            reales. En cuanto se conoce uno de los dos, este porcentaje se ignora y se usan los datos
+            reales más la asunción de mantenimiento/vacío de abajo (issue #151).
+          </p>
+        </div>
+        <div style={{ marginTop: 10 }}>
+          <label style={labelStyle}>
+            Mantenimiento + vacío (% del alquiler bruto, solo cuando SÍ hay IBI/comunidad reales)
+          </label>
+          <input
+            type="number"
+            min={0}
+            max={100}
+            step="1"
+            placeholder="8 (valor por defecto si se deja en blanco)"
+            value={financing?.maintenance_vacancy_pct ?? ""}
+            onChange={(e) => setFinancingField("maintenance_vacancy_pct", e.target.value)}
+            style={inputStyle}
+          />
+          <p style={{ margin: "4px 0 0", fontSize: 11, color: "var(--fg-subtle)" }}>
+            Ningún anuncio publica mantenimiento o vacío por separado, así que esta asunción SIEMPRE
+            se suma a la cifra real de IBI/comunidad cuando alguna de las dos se conoce — nunca se
+            usa para reemplazar el dato real por completo.
           </p>
         </div>
         {financing && (
@@ -442,11 +476,23 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
         )}
 
         <div style={{ marginTop: 14, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
-          <label style={labelStyle}>Asunción de alquiler (€/m²/mes)</label>
+          <label style={labelStyle} htmlFor="rent-assumption-eur-per-m2">Asunción de alquiler (€/m²/mes)</label>
           <input
-            type="number"
-            min={0}
-            step="0.1"
+            id="rent-assumption-eur-per-m2"
+            // type="text", NOT type="number" (Opus review fix). A native
+            // <input type="number">'s value-sanitization algorithm DISCARDS
+            // any keystroke that doesn't parse as a period-decimal float —
+            // typing a comma (which the field's own placeholder used to
+            // suggest: "p. ej. 12,5") never even reaches this onChange
+            // handler as "12,5"; the browser silently resets .value to "",
+            // so Number(e.target.value) saw an empty string and
+            // parseFormNumber (or the old bare Number()) cleared the
+            // assumption to undefined/0 with no error. inputMode="decimal"
+            // still gives mobile users a numeric keypad; parseFormNumber
+            // normalizes a comma OR a period before parsing, so both the
+            // Spanish-convention "12,5" and the plain "12.5" work.
+            type="text"
+            inputMode="decimal"
             placeholder="p. ej. 12,5"
             value={rentAssumption?.eur_per_m2_month ?? ""}
             onChange={(e) => setRentAssumption(e.target.value)}

@@ -24,16 +24,27 @@ describe("estimateRent", () => {
     expect(result.m2_used).toBeNull();
   });
 
-  it("gates on missing m2_built even when a rent assumption is set — never estimates from an unknown size", () => {
+  // Opus review fix: previously collapsed into "no_rent_assumption", which
+  // told the user to set a rent assumption they had ALREADY set — wrong
+  // instruction, since it's the property's own m2_built that's missing.
+  // "no_property_size" is a distinct method value so the UI can render
+  // correct, non-misleading copy for this case.
+  it("gates on missing m2_built even when a rent assumption is set — returns 'no_property_size', NOT 'no_rent_assumption'", () => {
     const result = estimateRent({ m2_built: null }, { rent_assumption: { eur_per_m2_month: 12.5 } });
-    expect(result.method).toBe("no_rent_assumption");
+    expect(result.method).toBe("no_property_size");
+    expect(result.method).not.toBe("no_rent_assumption");
     expect(result.estimated_monthly_rent).toBeNull();
   });
 
-  it("gates on a zero/negative m2_built (bad data) rather than dividing/multiplying into a nonsensical rent", () => {
+  it("gates on a zero/negative m2_built (bad data) rather than dividing/multiplying into a nonsensical rent — also 'no_property_size'", () => {
     const result = estimateRent({ m2_built: 0 }, { rent_assumption: { eur_per_m2_month: 12.5 } });
-    expect(result.method).toBe("no_rent_assumption");
+    expect(result.method).toBe("no_property_size");
     expect(result.estimated_monthly_rent).toBeNull();
+  });
+
+  it("returns 'no_rent_assumption' (not 'no_property_size') when the assumption itself is unset, even if m2_built is also missing", () => {
+    const result = estimateRent({ m2_built: null }, {});
+    expect(result.method).toBe("no_rent_assumption");
   });
 
   // Mutation-style check: two different assumptions on the same property

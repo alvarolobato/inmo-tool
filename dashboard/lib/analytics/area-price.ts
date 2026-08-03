@@ -24,7 +24,7 @@
  * ## Minimum sample size (issue #32 EC-2)
  *
  * `MIN_SAMPLE_SIZE = 5` — issue #32's own suggested threshold ("e.g. ≥5").
- * Below it, `area_avg_price_per_m2`/`pct_vs_average` come back null (an
+ * Below it, `area_median_price_per_m2`/`pct_vs_average` come back null (an
  * explicit "insufficient data" result, `sample_size` still reported) rather
  * than a noisy comparison from a handful of listings — "a '23% below
  * market' badge computed from three listings is worse than no badge" (PR
@@ -55,7 +55,7 @@ export const MIN_SAMPLE_SIZE = 5;
 
 export interface AreaPriceComparison {
   /** Median price/m² among comparable, deduplicated properties within the radius — null if sample_size < MIN_SAMPLE_SIZE. */
-  area_avg_price_per_m2: number | null;
+  area_median_price_per_m2: number | null;
   /** This property's own MIN(active listing price) / m2_built — null if it has no active priced listing or no m2_built. */
   property_price_per_m2: number | null;
   /** Fraction, not a pre-multiplied percentage (e.g. -0.23 = "23% below average"; matches acquisition-costs.ts's total_pct_of_price convention). Null whenever either input to the ratio is null. */
@@ -88,6 +88,22 @@ export async function computeAreaPriceComparison(
   const rows = await sql<RawComparisonRow>(
     `WITH target AS (
        SELECT id, lat, lon, property_type, m2_built,
+         -- Padded bounding box around the target point, used as a cheap
+         -- pre-filter before the exact (and expensive) Haversine
+         -- computation below. 1 degree of latitude is ~111.0 km
+         -- everywhere; 1 degree of longitude is ~111.320*cos(lat) km, so
+         -- dividing the radius by each gives the half-width of a box that
+         -- exactly bounds the circle at this latitude. *1.15 pads it
+         -- further so floating-point/great-circle-vs-equirectangular
+         -- rounding can never exclude a point the exact Haversine filter
+         -- would have kept — the box is only ever a superset of the
+         -- circle, so results are bit-for-bit identical to the unfiltered
+         -- query, just computed over far fewer candidate rows (Opus
+         -- review measurement: 355ms/1.65M buffer reads -> 7.5ms/27k reads
+         -- on a 203k-property table once idx_property_lat_lon can be used
+         -- to satisfy this range condition instead of a full scan).
+         ($2 / 111.0) * 1.15 AS lat_delta_deg,
+         ($2 / (111.320 * cos(radians(lat)))) * 1.15 AS lon_delta_deg,
          (SELECT MIN(l.current_price) FROM listing l
            WHERE l.property_id = property.id AND l.status = 'active' AND l.operation = 'sale') AS min_price
        FROM property
@@ -101,6 +117,13 @@ export async function computeAreaPriceComparison(
        WHERE p.id <> t.id
          AND p.property_type = t.property_type
          AND p.lat IS NOT NULL AND p.lon IS NOT NULL
+         -- Bounding-box pre-filter: sargable against idx_property_lat_lon
+         -- (btree on (lat, lon)), unlike the Haversine expression below,
+         -- which can't use an index at all. This is what turns a full
+         -- table scan into an index-bounded scan over a small candidate
+         -- set — see the comment on lat_delta_deg/lon_delta_deg above.
+         AND p.lat BETWEEN t.lat - t.lat_delta_deg AND t.lat + t.lat_delta_deg
+         AND p.lon BETWEEN t.lon - t.lon_delta_deg AND t.lon + t.lon_delta_deg
          AND (6371 * acos(least(1, greatest(-1,
                cos(radians(t.lat)) * cos(radians(p.lat)) *
                cos(radians(p.lon) - radians(t.lon)) +
@@ -138,15 +161,15 @@ export async function computeAreaPriceComparison(
       ? targetMinPrice / targetM2Built
       : null;
 
-  const areaAvgPricePerM2 = hasEnoughSample && row.median_price_per_m2 !== null ? Number(row.median_price_per_m2) : null;
+  const areaMedianPricePerM2 = hasEnoughSample && row.median_price_per_m2 !== null ? Number(row.median_price_per_m2) : null;
 
   const pctVsAverage =
-    areaAvgPricePerM2 !== null && propertyPricePerM2 !== null
-      ? (propertyPricePerM2 - areaAvgPricePerM2) / areaAvgPricePerM2
+    areaMedianPricePerM2 !== null && propertyPricePerM2 !== null
+      ? (propertyPricePerM2 - areaMedianPricePerM2) / areaMedianPricePerM2
       : null;
 
   return {
-    area_avg_price_per_m2: areaAvgPricePerM2,
+    area_median_price_per_m2: areaMedianPricePerM2,
     property_price_per_m2: propertyPricePerM2,
     pct_vs_average: pctVsAverage,
     sample_size: sampleSize,

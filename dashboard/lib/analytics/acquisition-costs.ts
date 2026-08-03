@@ -19,15 +19,21 @@
  *   instead of extending this table with a wrong-shaped column.
  * - **General/base rate only**, not the full progressive-bracket or
  *   buyer-profile-reduced schedule. Several regions (Cataluña, Baleares,
- *   Asturias, Castilla y León, C. Valenciana, Extremadura, Aragón) apply a
- *   HIGHER marginal rate above a price threshold (often ~€600k-1M), and
- *   most regions offer REDUCED rates for specific buyer circumstances
- *   (age <35, large family, disability, VPO, primary residence under a
- *   value cap). Modeling every bracket/reduction is real tax-software
- *   scope, not a decision-support estimate (#1 §11/§16) — this table uses
- *   each region's lowest/general band, which is the right default for an
- *   investor buying a normal-priced rental property under standard terms,
- *   and is documented as an approximation, not a personalized quote.
+ *   Asturias, Castilla y León, C. Valenciana, Extremadura, Aragón,
+ *   **Galicia**, **Cantabria**) apply a HIGHER marginal rate above a price
+ *   threshold. That threshold is NOT uniformly "~€600k-1M" — **Galicia's
+ *   8% general band ends at €150,000**, well below a typical target
+ *   price for this tool's investor persona, so "the general band is right
+ *   for a normal-priced property" is the one region-specific claim in this
+ *   docstring that does NOT hold for Galicia; a Galician property above
+ *   €150k pays a higher marginal rate this table does not model. Most
+ *   regions additionally offer REDUCED rates for specific buyer
+ *   circumstances (age <35, large family, disability, VPO, primary
+ *   residence under a value cap). Modeling every bracket/reduction is real
+ *   tax-software scope, not a decision-support estimate (#1 §11/§16) — this
+ *   table uses each region's lowest/general band, documented as an
+ *   approximation, not a personalized quote, and NOT guaranteed accurate
+ *   above each region's own (undocumented-here) bracket threshold.
  * - **Source**: rates cross-checked against two independent sources on
  *   2026-08-03 (this module's last-verified date, bump it when re-checked):
  *     - https://www.rankia.com/blog/mejores-hipotecas/3233016-impuesto-transmisiones-patrimoniales-itp-cada-comunidad-autonoma
@@ -84,8 +90,22 @@ export const ITP_RATE_BY_CCAA: Record<string, number> = {
   "País Vasco": 4,
   "La Rioja": 7,
   "Comunidad Valenciana": 9,
-  "Ceuta": 6,
-  "Melilla": 6,
+  // Ceuta/Melilla are NOT comunidades autónomas — ITP there is set by the
+  // state, not a regional parliament, and art. 57 bis TRLITPAJD grants a
+  // statutory 50% bonificación on the general resale-housing rate. The
+  // pre-bonus general rate is 6% (same nominal rate this table used to
+  // list literally), so the rate actually payable is 3%, not 6% — an
+  // Opus review (2026-08) caught this table applying the pre-bonus rate as
+  // if it were the final one, a 2x overstatement of every Ceuta/Melilla
+  // acquisition-cost figure.
+  "Ceuta": 3,
+  // Melilla: the SAME art. 57 bis bonificación nominally covers both
+  // autonomous cities, so 3% (not 6%) is the same-reasoning value applied
+  // here — but unlike Ceuta, sources are NOT unanimous on whether Melilla's
+  // local tax office actually applies the bonus identically in every case;
+  // treat this figure as lower-confidence than the rest of the table until
+  // independently re-verified against Melilla's own tax office guidance.
+  "Melilla": 3,
 };
 
 /**
@@ -134,9 +154,11 @@ const PROVINCE_TO_CCAA: Record<string, string> = {
   "baleares": "Baleares",
   "illes balears": "Baleares",
   "islas baleares": "Baleares",
+  "mallorca": "Baleares",
   // Canarias
   "las palmas": "Canarias",
   "santa cruz de tenerife": "Canarias",
+  "tenerife": "Canarias",
   // Cantabria
   "cantabria": "Cantabria",
   // Castilla y León
@@ -186,13 +208,24 @@ const PROVINCE_TO_CCAA: Record<string, string> = {
   "guipuzcoa": "País Vasco",
   "bizkaia": "País Vasco",
   "vizcaya": "País Vasco",
+  // Official INE co-official "province/province" slash forms — these
+  // appear verbatim (not split) in some scraped `property.province`
+  // values. Found missing during an Opus review (2026-08): every one of
+  // these silently fell through to NATIONAL_FALLBACK_ITP_PCT before this
+  // fix, even though the province name itself is perfectly recognizable.
+  // normalizeProvince lowercases + strips diacritics but does NOT split on
+  // "/", so each slash form needs its own literal key here.
+  "araba/alava": "País Vasco",
   // La Rioja
   "la rioja": "La Rioja",
   "rioja": "La Rioja",
   // Comunidad Valenciana
   "alicante": "Comunidad Valenciana",
+  "alicante/alacant": "Comunidad Valenciana",
   "castellon": "Comunidad Valenciana",
+  "castellon/castello": "Comunidad Valenciana",
   "valencia": "Comunidad Valenciana",
+  "valencia/valencia": "Comunidad Valenciana", // "Valencia/València" after diacritic-stripping
   // Autonomous cities
   "ceuta": "Ceuta",
   "melilla": "Melilla",

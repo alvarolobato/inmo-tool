@@ -34,6 +34,14 @@ entire output on this: no rent assumption means no yield, cash-on-cash, or
 acquisition-cost breakdown rendered, not a zero or a system-invented
 default.
 
+**Addendum (2026-08, Opus review on PR #181)**: `method` gained a third
+value, `"no_property_size"`, distinct from `"no_rent_assumption"` — a
+profile that HAS set `rent_assumption` but whose property lacks `m2_built`
+was previously indistinguishable from a profile that never set one, and the
+UI told the user to add an assumption they'd already added. The two gates
+(assumption unset vs. property size unknown) are now reported separately so
+the empty-state copy can name the actual missing input.
+
 `RentConfidence` (`"high" | "low" | "assumption" | null`) is typed as a
 superset of #31's planned confidence tiers (`"high"`/`"low"`, tiered by
 comparable count) even though this module only ever produces `"assumption"`

@@ -168,7 +168,7 @@ describe.runIf(dbAvailable)("GET /api/profiles/[id]/properties/[propertyId]/inve
       // real, non-null AreaPriceComparison object with the insufficient-
       // data shape, not null — property itself has lat/lon).
       expect(body.area_price).not.toBeNull();
-      expect(body.area_price.area_avg_price_per_m2).toBeNull();
+      expect(body.area_price.area_median_price_per_m2).toBeNull();
     });
   });
 
@@ -208,7 +208,16 @@ describe.runIf(dbAvailable)("GET /api/profiles/[id]/properties/[propertyId]/inve
       const res = await GET(null as never, ctx(profileId, propertyId));
       const body = await res.json();
       expect(body.yield.assumptions_used.carrying_costs_source).toBe("actual");
-      expect(body.yield.assumptions_used.annual_carrying_costs_eur).toBeCloseTo(500 + 80 * 12, 6);
+      expect(body.yield.assumptions_used.ibi_known).toBe(true);
+      expect(body.yield.assumptions_used.community_fee_known).toBe(true);
+      // 12 EUR/m2/month * 80 m2 = 960 EUR/month rent -> annual gross rent 11,520 EUR.
+      // Actual IBI (500) + actual community (80*12=960) PLUS the default
+      // 8% maintenance/vacancy assumption on top (8% of 11,520 = 921.6) —
+      // NOT the bare 500+960=1,460 a full-replacement model would produce
+      // (Opus review must-fix #1: replacing the whole line, not just the
+      // categories actual data covers, understates carrying costs and can
+      // flip cash-on-cash's sign).
+      expect(body.yield.assumptions_used.annual_carrying_costs_eur).toBeCloseTo(500 + 80 * 12 + 0.08 * 11520, 6);
     });
   });
 });

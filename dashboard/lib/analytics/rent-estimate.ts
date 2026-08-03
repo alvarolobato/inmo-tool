@@ -61,8 +61,16 @@ export interface RentEstimateResult {
   /** Always 0 today — no comparable rental data exists yet (see module docstring). Kept so this shape is a strict superset of #31's eventual touchpoint contract. */
   comparable_count: number;
   confidence: RentConfidence;
-  method: "profile_assumption" | "no_rent_assumption";
-  /** The €/m²/month figure actually applied, echoed back for transparency (issue #151: "show the inputs, not just the output"). Null when method is "no_rent_assumption". */
+  /**
+   * "no_rent_assumption" and "no_property_size" are DISTINCT gates, not one
+   * collapsed "can't compute" bucket (Opus review fix): a profile that HAS
+   * set a rent assumption but whose property lacks `m2_built` was
+   * previously told "this profile has no rent assumption defined" — wrong
+   * copy that points the user at a setting they already made. The UI must
+   * branch on which of the two actually applies.
+   */
+  method: "profile_assumption" | "no_rent_assumption" | "no_property_size";
+  /** The €/m²/month figure actually applied, echoed back for transparency (issue #151: "show the inputs, not just the output"). Null when no estimate was produced. */
   eur_per_m2_month_used: number | null;
   /** The m² figure the assumption was multiplied by. Null when no estimate was produced. */
   m2_used: number | null;
@@ -81,12 +89,27 @@ export function estimateRent(
   const assumption = thesisParams.rent_assumption;
   const m2 = property.m2_built;
 
-  if (assumption === undefined || m2 === null || m2 <= 0) {
+  if (assumption === undefined) {
     return {
       estimated_monthly_rent: null,
       comparable_count: 0,
       confidence: null,
       method: "no_rent_assumption",
+      eur_per_m2_month_used: null,
+      m2_used: null,
+    };
+  }
+
+  if (m2 === null || m2 <= 0) {
+    // The profile DOES have a rent assumption — it's the property's own
+    // m2_built that's missing/invalid. A distinct method value from
+    // "no_rent_assumption" so the UI doesn't tell the user to set
+    // something they already set (Opus review fix).
+    return {
+      estimated_monthly_rent: null,
+      comparable_count: 0,
+      confidence: null,
+      method: "no_property_size",
       eur_per_m2_month_used: null,
       m2_used: null,
     };

@@ -146,7 +146,7 @@ describe.runIf(dbAvailable)("computeAreaPriceComparison — real Postgres", () =
       const result = await computeAreaPriceComparison(targetId);
       expect(result).not.toBeNull();
       expect(result!.sample_size).toBe(5);
-      expect(result!.area_avg_price_per_m2).toBeCloseTo(2400, 6); // median, not the 3500 mean
+      expect(result!.area_median_price_per_m2).toBeCloseTo(2400, 6); // median, not the 3500 mean
       expect(result!.property_price_per_m2).toBeCloseTo(3000, 6);
       // (3000 - 2400) / 2400 = 0.25 -> target is 25% above the area median.
       expect(result!.pct_vs_average).toBeCloseTo(0.25, 6);
@@ -171,7 +171,7 @@ describe.runIf(dbAvailable)("computeAreaPriceComparison — real Postgres", () =
       expect(result).not.toBeNull();
       expect(result!.sample_size).toBe(3);
       // Explicit "insufficient data", not a noisy 3-listing average.
-      expect(result!.area_avg_price_per_m2).toBeNull();
+      expect(result!.area_median_price_per_m2).toBeNull();
       expect(result!.pct_vs_average).toBeNull();
       // The target's own price/m2 is still known and reported — only the
       // comparison is withheld, not everything.
@@ -204,7 +204,7 @@ describe.runIf(dbAvailable)("computeAreaPriceComparison — real Postgres", () =
       // Median uses the deduplicated property's cheaper (240,000 -> 2400/m2)
       // listing, matching the same 5-value median (2000,2200,2400,2600,2800)
       // as the first test.
-      expect(result!.area_avg_price_per_m2).toBeCloseTo(2400, 6);
+      expect(result!.area_median_price_per_m2).toBeCloseTo(2400, 6);
     });
   });
 
@@ -255,7 +255,7 @@ describe.runIf(dbAvailable)("computeAreaPriceComparison — real Postgres", () =
 
       const result = await computeAreaPriceComparison(targetId);
       expect(result!.sample_size).toBe(5);
-      expect(result!.area_avg_price_per_m2).toBeCloseTo(2400, 6);
+      expect(result!.area_median_price_per_m2).toBeCloseTo(2400, 6);
     });
   });
 });

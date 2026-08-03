@@ -11,8 +11,8 @@
  * This is decision support: a number an investor uses to compare deals
  * against each other, not a number a bank uses to underwrite a loan.
  *
- * ## Carrying costs (#151): a deliberate, documented divergence from #33's
- * literal wording
+ * ## Carrying costs (#151): additive, not a full replacement (revised after
+ * Opus review, 2026-08)
  *
  * Issue #33's Technical approach describes ONE configurable
  * `operating_cost_pct` bundling community fees, IBI, maintenance, and a
@@ -23,26 +23,50 @@
  * `raw_extra.gastos_comunidad_eur`, see solvia_mapping.py's
  * `extract_investment_extras`).
  *
- * "Used... rather than estimated" is read literally as a REPLACEMENT, not a
- * blend: when the property has at least one actual carrying-cost figure
- * (from any of its active listings' `raw_extra`), the assumed
- * `operating_cost_pct` is not applied at all — actual costs stand in for
- * the entire operating-cost line. This is simpler and more transparent
- * than trying to invent a sub-split (e.g. "IBI is normally X% of the
- * bundled 25%, so subtract that share and keep the rest") — inventing that
- * split would itself be exactly the kind of fabricated precision issue #1
- * §11 warns against. The tradeoff, stated plainly: actual IBI + community
- * fee doesn't include maintenance/vacancy allowance, so a property with
- * known carrying costs but genuinely high maintenance needs could show a
- * net yield a bit optimistic relative to the assumed-bundle case. Every
- * result echoes `carrying_costs_source` ("actual" | "assumed") in
- * `assumptions_used` specifically so this is visible, not hidden.
+ * **This module's first version read "used... rather than estimated" as a
+ * full REPLACEMENT of the entire `operating_cost_pct` line** (IBI +
+ * community + maintenance + vacancy all zeroed out the moment any one
+ * actual figure was known). An Opus review caught that this inverts the
+ * sign of cash-on-cash on real numbers: Solvia listings that publish only
+ * a community fee (dropping IBI, maintenance, AND vacancy entirely) looked
+ * *better* than equivalent listings that publish nothing at all and fall
+ * back to the full assumed 25% — a systematic, directional bias in favour
+ * of whichever portal happens to publish partial cost data. That is a
+ * worse fabrication than the "invented sub-split" this module originally
+ * tried to avoid, because it has a known, exploitable direction (issue #1
+ * §11's fabricated-precision concern is about UNDIRECTED noise, not a
+ * bias that always points the same way).
+ *
+ * **Revised model**: actual carrying-cost fields REPLACE only the specific
+ * cost category they cover (IBI, community fee), and a SEPARATE,
+ * independently-sourced `DEFAULT_MAINTENANCE_VACANCY_PCT` is always added
+ * on top — whether or not any actual data is known — because no source in
+ * this schema publishes maintenance or vacancy figures, actual or
+ * otherwise. This is NOT the "sub-split the bundled 25%" idea D-009
+ * originally rejected (inventing what fraction of the 25% is
+ * "IBI's share"): `DEFAULT_MAINTENANCE_VACANCY_PCT` is its own
+ * independently-cited rule-of-thumb (property-management guidance
+ * typically budgets 5-10% of gross rent for maintenance + vacancy alone,
+ * independent of a region's actual tax/community-fee costs), applied the
+ * same way regardless of how much of the IBI/community pair is known.
+ * When NEITHER IBI nor community fee is known, the full
+ * `operating_cost_pct` (25% default, already understood to bundle
+ * everything) is used instead of assumed-IBI + assumed-community +
+ * assumed-maintenance/vacancy, to avoid stacking three independent
+ * assumptions where one bundled one already existed.
+ *
+ * Every result reports exactly which of IBI/community were actual via
+ * `ibi_known`/`community_fee_known`, plus `carrying_costs_source`
+ * ("actual" whenever ANY real figure was used, "assumed" only when
+ * neither was) — see must-fix #7 in the same review: `carrying_costs_source`
+ * alone was previously an OR that let "only the community fee is real"
+ * render identically to "both are real," so the UI must read the two
+ * booleans, not just the coarse enum, to label precisely what's known.
  *
  * `operating_cost_pct` itself is unchanged from #33 — no second
- * configuration mechanism was added (checked before diverging, per #151's
- * own instruction to check #33 first): it's still
- * `thesis_params.financing.operating_cost_pct`, just only applied in the
- * assumed-costs branch.
+ * configuration mechanism was added for the no-actual-data branch: it's
+ * still `thesis_params.financing.operating_cost_pct`, just only applied
+ * when neither IBI nor community fee is known.
  */
 
 import type { RentEstimateResult } from "./rent-estimate";
@@ -77,6 +101,21 @@ export const DEFAULT_FINANCING = {
  */
 export const DEFAULT_OPERATING_COST_PCT = 25;
 
+/**
+ * Percentage of GROSS annual rent assumed for maintenance + vacancy ONLY —
+ * applied ON TOP OF actual IBI/community-fee figures whenever at least one
+ * of them is known (see module docstring's "additive, not a full
+ * replacement" revision). No source in this schema publishes maintenance
+ * or vacancy data, actual or estimated, so this line is always an
+ * assumption regardless of how much of the IBI/community pair is real.
+ * 8% is the midpoint of the "5-10% of gross rent for maintenance+vacancy
+ * combined" range commonly cited in property-management guidance — a
+ * SEPARATE, independently-sourced figure, not a derived share of
+ * `DEFAULT_OPERATING_COST_PCT` (D-009 explicitly rejected inventing what
+ * fraction of the bundled 25% is "the maintenance/vacancy part").
+ */
+export const DEFAULT_MAINTENANCE_VACANCY_PCT = 8;
+
 export interface CarryingCostsKnown {
   /** From `listing.raw_extra->>'ibi_anual_eur'` (Solvia today) — annual property tax, euros. Null if not published by any active listing. */
   annual_ibi_eur: number | null;
@@ -97,14 +136,25 @@ export interface YieldPropertyInput {
 
 export interface YieldAssumptionsUsed {
   down_payment_pct: number;
+  down_payment_pct_is_default: boolean;
   rate_pct: number;
+  rate_pct_is_default: boolean;
   term_years: number;
-  financing_is_default: boolean;
+  term_years_is_default: boolean;
   operating_cost_pct: number;
   operating_cost_pct_is_default: boolean;
+  maintenance_vacancy_pct: number;
+  maintenance_vacancy_pct_is_default: boolean;
+  /** "actual" whenever at least one of IBI/community fee is a real published figure; "assumed" only when NEITHER is known (issue #151 must-fix #7: don't collapse "one of two known" and "both known" into one label — see ibi_known/community_fee_known for the precise breakdown). */
   carrying_costs_source: "actual" | "assumed";
+  /** True when `annual_ibi_eur` came from a listing's `raw_extra`, not the assumed bundle. */
+  ibi_known: boolean;
+  /** True when `monthly_community_fee_eur` came from a listing's `raw_extra`, not the assumed bundle. */
+  community_fee_known: boolean;
   annual_carrying_costs_eur: number;
   acquisition_costs: AcquisitionCostBreakdown;
+  /** Denominator convention, since must-fix #6 requires every yield figure to state what it's measured against: gross/net yield divide by purchase_price alone (acquisition costs excluded — standard rental-yield convention); cash-on-cash divides by purchase_price*down_payment_pct + acquisition_costs.total_eur (the actual cash an investor puts in). Echoed here so the UI never has to hardcode this fact in two places. */
+  net_yield_excludes_acquisition_costs: true;
 }
 
 export interface YieldResult {
@@ -167,23 +217,54 @@ export function computeYield(
   }
 
   const financing = thesisParams.financing;
-  const financingIsDefault = financing === undefined;
+  // Per-field default flags, NOT one blanket "financing_is_default" — a
+  // profile that set only `down_payment_pct` (financing object present,
+  // but rate_pct/term_years never touched by the user) must still report
+  // those two fields as system defaults, not as user-chosen values (Opus
+  // review must-fix: "financing_is_default is only true when the whole
+  // object is absent, so setting down_payment_pct alone silently inherits
+  // 3%/25y while the UI reports them as user-set"). Each financing field
+  // in ThesisParamsSchema is independently optional (see profiles-schema.ts)
+  // specifically so this per-field undefined check is meaningful.
+  const downPaymentPctIsDefault = financing?.down_payment_pct === undefined;
+  const ratePctIsDefault = financing?.rate_pct === undefined;
+  const termYearsIsDefault = financing?.term_years === undefined;
   const downPaymentPct = financing?.down_payment_pct ?? DEFAULT_FINANCING.down_payment_pct;
   const ratePct = financing?.rate_pct ?? DEFAULT_FINANCING.rate_pct;
   const termYears = financing?.term_years ?? DEFAULT_FINANCING.term_years;
   const operatingCostPctIsDefault = financing?.operating_cost_pct === undefined;
   const operatingCostPct = financing?.operating_cost_pct ?? DEFAULT_OPERATING_COST_PCT;
+  const maintenanceVacancyPctIsDefault = financing?.maintenance_vacancy_pct === undefined;
+  const maintenanceVacancyPct = financing?.maintenance_vacancy_pct ?? DEFAULT_MAINTENANCE_VACANCY_PCT;
 
   const annualGrossRent = rentEstimate.estimated_monthly_rent * 12;
   const grossYieldPct = (annualGrossRent / property.purchase_price) * 100;
 
-  const hasActualCarrying =
-    carryingCostsKnown.annual_ibi_eur !== null || carryingCostsKnown.monthly_community_fee_eur !== null;
+  // Additive model (revised after Opus review — see module docstring):
+  // actual IBI/community fee replace ONLY their own line; maintenance +
+  // vacancy is always a separate assumption layered on top, because no
+  // source publishes it. Only when NEITHER IBI nor community is known do
+  // we fall back to the single bundled `operatingCostPct` (covers IBI +
+  // community + maintenance + vacancy together) instead of stacking three
+  // independent per-category assumptions on top of each other.
+  const ibiKnown = carryingCostsKnown.annual_ibi_eur !== null;
+  const communityFeeKnown = carryingCostsKnown.monthly_community_fee_eur !== null;
+  const hasActualCarrying = ibiKnown || communityFeeKnown;
   const annualCarryingCosts = hasActualCarrying
-    ? (carryingCostsKnown.annual_ibi_eur ?? 0) + (carryingCostsKnown.monthly_community_fee_eur ?? 0) * 12
+    ? (carryingCostsKnown.annual_ibi_eur ?? 0) +
+      (carryingCostsKnown.monthly_community_fee_eur ?? 0) * 12 +
+      (maintenanceVacancyPct / 100) * annualGrossRent
     : (operatingCostPct / 100) * annualGrossRent;
 
   const annualNetRent = annualGrossRent - annualCarryingCosts;
+  // Net yield, like gross yield, divides by purchase_price alone — the
+  // standard rental-yield convention (acquisition costs are NOT folded in
+  // here; only cash-on-cash below includes them, since cash-on-cash is
+  // specifically "return on cash actually deployed," a different question
+  // than "return on the asset's price"). See
+  // `net_yield_excludes_acquisition_costs` in the result and must-fix #6:
+  // the UI must label this denominator so it never reads as if
+  // acquisition costs were already netted out of it.
   const netYieldPct = (annualNetRent / property.purchase_price) * 100;
 
   const acquisitionOverrides: AcquisitionCostOverrides = thesisParams.acquisition_costs ?? {};
@@ -203,14 +284,21 @@ export function computeYield(
     estimated_monthly_rent: rentEstimate.estimated_monthly_rent,
     assumptions_used: {
       down_payment_pct: downPaymentPct,
+      down_payment_pct_is_default: downPaymentPctIsDefault,
       rate_pct: ratePct,
+      rate_pct_is_default: ratePctIsDefault,
       term_years: termYears,
-      financing_is_default: financingIsDefault,
+      term_years_is_default: termYearsIsDefault,
       operating_cost_pct: operatingCostPct,
       operating_cost_pct_is_default: operatingCostPctIsDefault,
+      maintenance_vacancy_pct: maintenanceVacancyPct,
+      maintenance_vacancy_pct_is_default: maintenanceVacancyPctIsDefault,
       carrying_costs_source: hasActualCarrying ? "actual" : "assumed",
+      ibi_known: ibiKnown,
+      community_fee_known: communityFeeKnown,
       annual_carrying_costs_eur: annualCarryingCosts,
       acquisition_costs: acquisitionCosts,
+      net_yield_excludes_acquisition_costs: true,
     },
   };
 }

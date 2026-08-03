@@ -33,6 +33,23 @@ describe("resolveComunidadAutonoma", () => {
     expect(resolveComunidadAutonoma("")).toBeNull();
     expect(resolveComunidadAutonoma("   ")).toBeNull();
   });
+
+  // Opus review fix: these official INE co-official "province/province"
+  // slash forms appear verbatim in some scraped `property.province` values
+  // and previously fell through to the national fallback despite the
+  // province itself being perfectly recognizable — normalizeProvince
+  // strips diacritics/case but does not split on "/".
+  it("resolves official INE slash forms verbatim (not split)", () => {
+    expect(resolveComunidadAutonoma("Araba/Álava")).toBe("País Vasco");
+    expect(resolveComunidadAutonoma("Alicante/Alacant")).toBe("Comunidad Valenciana");
+    expect(resolveComunidadAutonoma("Castellón/Castelló")).toBe("Comunidad Valenciana");
+    expect(resolveComunidadAutonoma("Valencia/València")).toBe("Comunidad Valenciana");
+  });
+
+  it("resolves Tenerife and Mallorca as bare island names, not just their full province names", () => {
+    expect(resolveComunidadAutonoma("Tenerife")).toBe("Canarias");
+    expect(resolveComunidadAutonoma("Mallorca")).toBe("Baleares");
+  });
 });
 
 describe("ITP_RATE_BY_CCAA table integrity", () => {
@@ -61,6 +78,50 @@ describe("ITP_RATE_BY_CCAA table integrity", () => {
       expect(rate, `${ccaa} rate`).toBeGreaterThan(0);
       expect(rate, `${ccaa} rate`).toBeLessThan(20);
     }
+  });
+
+  // Opus review must-fix #5: 16 of 19 rates had NO test pinning their exact
+  // value — only Andalucía/Cataluña/Madrid were exercised, and the only
+  // other guard (the 0-100 plausibility check above) survives essentially
+  // any plausible typo. Verified BEFORE this test existed: mutating
+  // "Comunidad Valenciana": 9 -> 10 was caught by NEITHER the plausibility
+  // check NOR the Andalucía-vs-Madrid comparison test — 34/34 of the
+  // then-existing suite passed. This test pins every one of the table's 19
+  // entries to its exact, individually-cited value so a single-region
+  // typo/mutation can never pass silently again.
+  it("pins the exact rate for all 19 CCAA/autonomous-city entries (catches any single-region typo)", () => {
+    expect(ITP_RATE_BY_CCAA).toEqual({
+      "Andalucía": 7,
+      "Aragón": 8,
+      "Asturias": 8,
+      "Baleares": 8,
+      "Canarias": 6.5,
+      "Cantabria": 9,
+      "Castilla y León": 8,
+      "Castilla-La Mancha": 9,
+      "Cataluña": 10,
+      "Extremadura": 8,
+      "Galicia": 8,
+      "Madrid": 6,
+      "Murcia": 8,
+      "Navarra": 6,
+      "País Vasco": 4,
+      "La Rioja": 7,
+      "Comunidad Valenciana": 9,
+      "Ceuta": 3,
+      "Melilla": 3,
+    });
+    expect(Object.keys(ITP_RATE_BY_CCAA)).toHaveLength(19);
+  });
+
+  // Opus review "Also fix": Ceuta's rate was 6% — double the actual 3% an
+  // investor pays once art. 57 bis TRLITPAJD's statutory 50% bonificación
+  // is applied. A 2x overstatement of every Ceuta acquisition-cost figure.
+  it("applies Ceuta's post-bonificación 3% rate, not the pre-bonus 6%", () => {
+    expect(ITP_RATE_BY_CCAA["Ceuta"]).toBe(3);
+    const result = computeAcquisitionCosts(200000, "Ceuta");
+    expect(result.itp_pct).toBe(3);
+    expect(result.itp_eur).toBeCloseTo(6000, 6);
   });
 });
 
