@@ -111,6 +111,7 @@ class TestShouldSkipFetch:
         skip, reason = orchestrator._should_skip_fetch(
             last_fetched_at=None,
             stored_price=Decimal(100000),
+            stored_status="active",
             discovery_price=Decimal(100000),
             min_refetch_interval_seconds=3600,
             now=self._NOW,
@@ -122,6 +123,7 @@ class TestShouldSkipFetch:
         skip, reason = orchestrator._should_skip_fetch(
             last_fetched_at=self._ago(1),  # as fresh as it gets
             stored_price=Decimal(100000),
+            stored_status="active",
             discovery_price=None,
             min_refetch_interval_seconds=0,
             now=self._NOW,
@@ -133,6 +135,7 @@ class TestShouldSkipFetch:
         skip, reason = orchestrator._should_skip_fetch(
             last_fetched_at=self._ago(1),
             stored_price=None,
+            stored_status="active",
             discovery_price=None,
             min_refetch_interval_seconds=3600,
             now=self._NOW,
@@ -147,6 +150,7 @@ class TestShouldSkipFetch:
         skip, reason = orchestrator._should_skip_fetch(
             last_fetched_at=self._ago(1),  # 1 second ago — as fresh as possible
             stored_price=Decimal(200000),
+            stored_status="active",
             discovery_price=Decimal(190000),  # a real drop just seen at discovery
             min_refetch_interval_seconds=86400,
             now=self._NOW,
@@ -161,6 +165,7 @@ class TestShouldSkipFetch:
         skip, reason = orchestrator._should_skip_fetch(
             last_fetched_at=self._ago(1),
             stored_price=Decimal(200000),
+            stored_status="active",
             discovery_price=Decimal(200000),
             min_refetch_interval_seconds=86400,
             now=self._NOW,
@@ -172,6 +177,7 @@ class TestShouldSkipFetch:
         skip, _reason = orchestrator._should_skip_fetch(
             last_fetched_at=self._ago(1),
             stored_price=Decimal(200000),
+            stored_status="active",
             discovery_price=None,
             min_refetch_interval_seconds=86400,
             now=self._NOW,
@@ -182,6 +188,7 @@ class TestShouldSkipFetch:
         skip, reason = orchestrator._should_skip_fetch(
             last_fetched_at=self._ago(90000),  # older than the window below
             stored_price=Decimal(200000),
+            stored_status="active",
             discovery_price=None,
             min_refetch_interval_seconds=86400,
             now=self._NOW,
@@ -195,6 +202,7 @@ class TestShouldSkipFetch:
         skip, _reason = orchestrator._should_skip_fetch(
             last_fetched_at=self._ago(3600),
             stored_price=Decimal(200000),
+            stored_status="active",
             discovery_price=None,
             min_refetch_interval_seconds=3600,
             now=self._NOW,
@@ -205,12 +213,66 @@ class TestShouldSkipFetch:
         skip, reason = orchestrator._should_skip_fetch(
             last_fetched_at=self._ago(60),
             stored_price=Decimal(200000),
+            stored_status="active",
             discovery_price=None,
             min_refetch_interval_seconds=3600,
             now=self._NOW,
         )
         assert skip is True
         assert "fetched" in reason
+
+    def test_withdrawn_status_forces_a_fetch_despite_freshness_and_matching_price(
+        self,
+    ):
+        """Must-fix (Opus review, PR #175): a listing stored as anything
+        other than 'active' must always be forced to re-fetch, however
+        fresh it looks and however much its discovery-time price agrees
+        with what's stored — otherwise a withdrawn listing that reappears
+        in discover() at an unchanged price is skipped exactly like a
+        normal active listing, and self-heals only once the staleness
+        window happens to expire (up to 24h for Fotocasa) instead of on
+        the very next sweep."""
+        skip, reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(1),  # as fresh as possible
+            stored_price=Decimal(200000),
+            stored_status="withdrawn",
+            discovery_price=Decimal(200000),  # unchanged — no price signal either
+            min_refetch_interval_seconds=86400,
+            now=self._NOW,
+        )
+        assert skip is False
+        assert "withdrawn" in reason
+        assert "not 'active'" in reason
+
+    def test_active_status_does_not_force_a_fetch_on_its_own(self):
+        """Mirror case: an 'active' stored status is not itself a reason
+        to fetch — it just doesn't block the normal staleness logic from
+        skipping, same as a matching discovery price."""
+        skip, _reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(60),
+            stored_price=Decimal(200000),
+            stored_status="active",
+            discovery_price=None,
+            min_refetch_interval_seconds=3600,
+            now=self._NOW,
+        )
+        assert skip is True
+
+    def test_none_stored_status_does_not_force_a_fetch(self):
+        """A NULL `listing.status` (schema allows it) must not be treated
+        as 'not active' — only an explicit non-'active' value should force
+        a fetch. `last_fetched_at is not None` here means this isn't the
+        'never fetched' branch either, so the status check is what's
+        actually being isolated."""
+        skip, _reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(60),
+            stored_price=Decimal(200000),
+            stored_status=None,
+            discovery_price=None,
+            min_refetch_interval_seconds=3600,
+            now=self._NOW,
+        )
+        assert skip is True
 
 
 class TestOrchestratorEndToEnd:
@@ -1303,6 +1365,94 @@ class TestSkipIfSeenIntegration:
                 skipped_count, fetched_count = cur.fetchone()
             assert skipped_count == 1
             assert fetched_count == 0
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            with pg_conn.cursor() as cur:
+                for r in run_ids:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+
+    def test_a_reappearing_withdrawn_listing_is_refetched_not_skipped(self, pg_conn):
+        """Must-fix (Opus review, PR #175): reproduces the exact bug report
+        end-to-end. A listing forced to status='withdrawn' with
+        missed_discovery_count=3 (as if `_reconcile_missed_discoveries` had
+        genuinely withdrawn it after 3 misses) reappears in discover() at
+        the SAME price, well within the freshness window — before this
+        fix, `_should_skip_fetch` had no way to see `status` at all, so
+        this was treated exactly like a normal fresh/unchanged listing and
+        skipped. That leaves the listing invisible to candidates/scoring
+        (which filter withdrawn listings out), `missed_discovery_count`
+        frozen (`_reconcile_missed_discoveries` only scans `WHERE status =
+        'active'`, so a withdrawn row's own counter can never reset), and
+        `last_seen_at` freshly bumped by `_update_last_seen_for_discovered`
+        regardless of the skip — every staleness signal says "healthy"
+        while the one field that says "we think this is gone" never
+        changes, for up to the full staleness window (24h for Fotocasa).
+
+        With the fix: fetch_detail() runs despite the skip-if-seen
+        conditions otherwise being satisfied, DummyConnector.normalize()
+        always returns status="active" (a real re-fetch confirms the
+        listing IS there), and _update_existing_listing's plain
+        `status = COALESCE(%s, status)` write reverts it — proving the
+        listing self-heals on the very next sweep, not after the window
+        expires.
+        """
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="skip-seen-reappearing-withdrawn",
+            external_ids=("w-1",),
+            price=200000,
+            min_refetch_interval_seconds=24 * 60 * 60,  # Fotocasa's real window
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            # First run: creates the listing, active, price 200000.
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["w-1"]
+
+            # Simulate _reconcile_missed_discoveries having genuinely
+            # withdrawn it after 3 consecutive misses — recent
+            # last_fetched_at (well within the 24h window) so only the
+            # status check, not staleness, can be what forces the next
+            # fetch.
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE listing SET status = 'withdrawn', "
+                    "missed_discovery_count = 3 "
+                    "WHERE source = %s AND external_id = %s",
+                    (connector.name, "w-1"),
+                )
+            pg_conn.commit()
+
+            # Second sweep: discover() finds it again at the SAME price —
+            # no discovery-time price delta, nowhere near stale. Only the
+            # stored status disagreeing with 'active' should force this.
+            connector.discovery_price_overrides = {"w-1": 200000}
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            assert connector.fetch_calls == ["w-1", "w-1"], (
+                "a reappearing withdrawn listing must be re-fetched on the "
+                "very next sweep, not skipped like a normal active listing"
+            )
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, missed_discovery_count FROM listing "
+                    "WHERE source = %s AND external_id = %s",
+                    (connector.name, "w-1"),
+                )
+                status, missed_count = cur.fetchone()
+            assert status == "active", (
+                "the real re-fetch must revert status back to 'active' — "
+                "otherwise the listing stays invisible to candidates/"
+                "scoring even though it was just re-confirmed present"
+            )
+            assert missed_count == 0, (
+                "a real re-fetch resets missed_discovery_count via "
+                "_update_existing_listing, same as any other revisit"
+            )
         finally:
             orchestrator.CONNECTORS.clear()
             _cleanup(pg_conn, connector.name, None)
@@ -2782,3 +2932,147 @@ class TestRestartBurstGuard:
             orchestrator.CONNECTORS.clear()
             _cleanup(pg_conn, connector.name, None)
             self._cleanup_runs(pg_conn, run_ids)
+
+    def test_future_finished_at_clock_skew_does_not_wedge_the_guard(self, pg_conn):
+        """Also-fix (Opus review, PR #175): `elapsed` compares this
+        process' `datetime.now(timezone.utc)` against a `finished_at`
+        written by Postgres' own `NOW()` — two different clocks. If the
+        DB server's clock is ever ahead, `finished_at` lands in this
+        process' future and `elapsed` goes negative, which is always
+        `< min_restart_sweep_interval_seconds` for any non-negative
+        threshold — unclamped, that reads as "a sweep juuust finished"
+        and skips, wedging the guard for the duration of the skew. Must
+        be clamped to "run" instead, the same safe direction as "no prior
+        run"/"guard disabled"."""
+        _apply_schema(pg_conn)
+        with pg_conn.cursor() as cur:
+            cur.execute("DELETE FROM connector_runs")
+            cur.execute(
+                "INSERT INTO connector_runs (trigger, status, started_at, finished_at) "
+                "VALUES ('test', 'success', NOW(), NOW() + INTERVAL '1 hour') "
+                "RETURNING id"
+            )
+            run_id = cur.fetchone()[0]
+        pg_conn.commit()
+        try:
+            skip, last_finished = orchestrator.should_skip_immediate_sweep(
+                pg_conn, min_restart_sweep_interval_seconds=900
+            )
+            assert skip is False
+            assert last_finished is not None
+        finally:
+            self._cleanup_runs(pg_conn, [run_id])
+
+    def test_null_finished_at_on_completed_status_does_not_mask_real_completions(
+        self, pg_conn
+    ):
+        """Also-fix (Opus review, PR #175): Postgres\' default `ORDER BY
+        ... DESC` sorts NULLs FIRST, not last. A completed-status row
+        with a NULL `finished_at` must not outrank a real completion\'s
+        actual timestamp and make `last_completed_run_finished_at` return
+        None forever — which would permanently disable the guard rather
+        than merely miscount one row."""
+        _apply_schema(pg_conn)
+        with pg_conn.cursor() as cur:
+            cur.execute("DELETE FROM connector_runs")
+            cur.execute(
+                "INSERT INTO connector_runs (trigger, status, started_at, finished_at) "
+                "VALUES ('test', 'success', NOW(), NULL) RETURNING id"
+            )
+            null_run_id = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO connector_runs (trigger, status, started_at, finished_at) "
+                "VALUES ('test', 'success', NOW() - INTERVAL '3 hours', "
+                "NOW() - INTERVAL '3 hours') RETURNING id"
+            )
+            real_run_id = cur.fetchone()[0]
+        pg_conn.commit()
+        try:
+            last_finished = orchestrator.last_completed_run_finished_at(pg_conn)
+            assert last_finished is not None, (
+                "a NULL finished_at on a completed-status row must not "
+                "mask every genuinely completed run"
+            )
+        finally:
+            self._cleanup_runs(pg_conn, [null_run_id, real_run_id])
+
+    def test_wedge_threshold_ge_interval_still_sweeps_on_the_second_iteration(
+        self, pg_conn, monkeypatch
+    ):
+        """Must-fix (Opus review, PR #175): threshold >= interval_seconds
+        must not wedge run_scheduler_loop forever. Nothing prevents an
+        operator from setting
+        etl.min_restart_sweep_interval_seconds >= the hard-coded
+        _RUN_INTERVAL_SECONDS=3600 in etl/main.py (config/schema.yaml
+        declares no maximum) — measured scenario: threshold=7200 (2h),
+        last real completion 1800s ago. Before this fix (guard applied
+        every iteration), the first iteration correctly skips, but every
+        iteration afterward ALSO sees "last completed run" under the 2h
+        threshold forever, since each iteration only advances the clock
+        by interval_seconds=1h < 2h — permanently wedging ingestion with
+        one WARNING log per hour, exactly what an operator picking "2h to
+        be extra safe" would not expect.
+
+        Verifies the fix (guard applies to the first iteration only): the
+        first iteration is genuinely skipped, but the second iteration —
+        under the identical threshold/elapsed relationship, if it were
+        re-evaluated — must sweep for real anyway, because the guard is
+        never re-applied past iteration 1. Uses a real second connection
+        (not `pg_conn` itself) since `run_scheduler_loop` closes its
+        connection every iteration; `time.sleep` is mocked to advance
+        exactly two iterations before breaking out via a sentinel
+        exception — no real hour-long wait, no infinite loop in the test.
+        """
+        _apply_schema(pg_conn)
+        with pg_conn.cursor() as cur:
+            cur.execute("DELETE FROM connector_runs")
+            cur.execute(
+                "INSERT INTO connector_runs (trigger, status, started_at, finished_at) "
+                "VALUES ('test', 'success', NOW() - INTERVAL '1800 seconds', "
+                "NOW() - INTERVAL '1800 seconds')"
+            )
+        pg_conn.commit()
+
+        connector = DummyConnector(name="restart-guard-wedge")
+        orchestrator.CONNECTORS[:] = [connector]
+
+        from etl.config import Config
+        from etl.db import postgres
+
+        def _conn_factory():
+            return postgres.get_connection(Config())
+
+        class _StopLoop(Exception):
+            pass
+
+        sleep_calls: list[int] = []
+
+        def fake_sleep(seconds: int) -> None:
+            sleep_calls.append(seconds)
+            if len(sleep_calls) >= 2:
+                raise _StopLoop()
+
+        monkeypatch.setattr(orchestrator.time, "sleep", fake_sleep)
+
+        try:
+            with pytest.raises(_StopLoop):
+                orchestrator.run_scheduler_loop(
+                    _conn_factory,
+                    interval_seconds=3600,
+                    min_restart_sweep_interval_seconds=7200,  # >= interval: the wedge
+                )
+            # Iteration 1: guarded, skipped (elapsed 1800s < 7200s threshold)
+            #   -> zero discover() calls.
+            # Iteration 2: the guard must NOT reapply -> exactly one real
+            #   sweep, proving the loop doesn\'t wedge forever.
+            assert len(connector.scopes_seen) == 1, (
+                "the second iteration must actually run the connector "
+                "sweep — a threshold >= interval_seconds must not wedge "
+                "ingestion for the life of the process"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            with pg_conn.cursor() as cur:
+                cur.execute("DELETE FROM connector_runs")
+            pg_conn.commit()

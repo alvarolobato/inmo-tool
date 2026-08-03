@@ -432,6 +432,77 @@ class TestDiscoveryPrices:
             "the first scope's prices must not still be sitting here"
         )
 
+    def test_low_price_coverage_logs_a_loud_alarm(self):
+        """Also-fix (Opus review, PR #175): if Fotocasa ever restructures
+        `initialSearch.result.realEstates`, `_extract_search_result_prices`
+        correctly degrades to `{}` (never breaks the sweep) — but silently.
+        discover() itself must notice when the resulting price coverage is
+        far below what a healthy sweep produces (live-verified: 0
+        mismatches between the id set and the price set) and log loudly,
+        since this is the price-change safety net for skip-if-seen and
+        nothing else would ever notice it went missing."""
+        base_html = _read_fixture("fotocasa_sample_search_zones.html")
+
+        def no_price_zone_get(url, **_kwargs):
+            if "/todas-las-zonas/" in url:
+                return _mock_response(base_html, url=url)
+            # Valid page shape, listings present, but no realEstates price
+            # data at all — the exact shape a restructured search page
+            # would degrade to via _extract_search_result_prices.
+            return _mock_response('<script id="__initial_props__">{}</script>', url=url)
+
+        with (
+            patch(
+                "etl.connectors.fotocasa.requests.get", side_effect=no_price_zone_get
+            ),
+            patch.object(fotocasa_module.logger, "error") as mock_error,
+        ):
+            connector = FotocasaConnector()
+            ids = connector.discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+        # The baseline fixture itself carries no realEstates price data
+        # either (confirmed elsewhere in this file) — 0% coverage overall.
+        assert connector.discovered_prices() == {}
+        assert ids  # there ARE discovered ids — coverage is 0%, not vacuous
+        coverage_call = next(
+            call
+            for call in mock_error.call_args_list
+            if "discovery-time price signal covers only" in str(call.args[0])
+        )
+        # call.args: (fmt, covered_count, total_count, coverage_pct, geography,
+        # threshold_pct, min_refetch_interval_seconds) — see the logger.error
+        # call in fotocasa.py's discover().
+        assert coverage_call.args[1] == 0  # covered_count
+        assert coverage_call.args[2] == len(ids)  # total discovered ids
+        assert coverage_call.args[3] == 0.0  # coverage_pct
+
+    def test_full_price_coverage_does_not_log_an_alarm(self):
+        """Mirror case: a healthy sweep (every discovered id has a matching
+        discovery-time price, the live-verified normal case) must not
+        trigger the coverage alarm — reuses the same baseline/zone fixture
+        pair as test_discovered_prices_accumulate_across_baseline_and_zones,
+        where both ids returned have a price."""
+        base_html = _read_fixture("fotocasa_sample_search_with_prices_base.html")
+        zone_html = _read_fixture("fotocasa_sample_search_with_prices_zone.html")
+
+        def fake_get(url, **_kwargs):
+            if "/todas-las-zonas/" in url:
+                return _mock_response(base_html, url=url)
+            return _mock_response(zone_html, url=url)
+
+        with (
+            patch("etl.connectors.fotocasa.requests.get", side_effect=fake_get),
+            patch.object(fotocasa_module.logger, "error") as mock_error,
+        ):
+            connector = FotocasaConnector()
+            ids = connector.discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+        assert len(connector.discovered_prices()) == len(ids)  # 100% coverage
+        messages = str(mock_error.call_args_list)
+        assert "discovery-time price signal covers only" not in messages
+
     def test_extract_search_result_prices_degrades_to_empty_without_raising(self):
         """The price signal is bonus data, never load-bearing for discover()
         itself — a page with no realEstates structure (the plain fixture,
@@ -550,12 +621,24 @@ class TestSweepPacingAndBounds:
                 ConnectorScope(geography="madrid-capital"), throttle=lambda: None
             )
         assert mock_error.called
-        message = str(mock_error.call_args)
-        assert "parse regression" in message
+        # call_args_list, not call_args (the last call): issue #175 added a
+        # separate, independent price-coverage alarm that also fires here
+        # (this fixture's baseline page carries no realEstate price data,
+        # so coverage is 0% regardless of the zone-empty scenario under
+        # test) — it is not what this test is about, but it does mean the
+        # "parse regression" message is no longer necessarily the LAST
+        # error logged.
+        all_messages = str(mock_error.call_args_list)
+        assert "parse regression" in all_messages
         # The message may *mention* soft-blocking to rule it out, but it must
         # not send the operator chasing the rate limit — that's the remedy for
         # the failure alarm, and it isn't what's wrong here.
-        assert "rate_limit_per_minute" not in message, (
+        parse_regression_call = next(
+            call
+            for call in mock_error.call_args_list
+            if "parse regression" in str(call)
+        )
+        assert "rate_limit_per_minute" not in str(parse_regression_call), (
             "an all-empty sweep is not evidence of soft-blocking — pointing "
             "the operator at the rate limit sends them after the wrong cause"
         )

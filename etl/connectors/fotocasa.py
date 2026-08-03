@@ -126,6 +126,14 @@ _MAX_CONSECUTIVE_ZONE_FAILURES = 3
 _ZONE_FAILURE_ALARM_RATIO = 0.2
 _ZONE_EMPTY_ALARM_RATIO = 0.8
 
+# Below this fraction of discovered external_ids having a discovery-time
+# price (issue #143's price-change safety net — see discovered_prices()),
+# something is structurally wrong (a JSON-shape restructure), not normal
+# per-listing noise: live verification found the id/rawPrice sets matching
+# exactly (0 mismatches). 0.5 is well under that healthy baseline so it
+# only fires on a real regression, not routine variance.
+_PRICE_COVERAGE_ALARM_RATIO = 0.5
+
 # robots.txt disallows the literal path substring "/madrid/", "/barcelona/",
 # "/valencia/" (bare city name as its own path segment) — not the hyphenated
 # slugs (e.g. "madrid-capital") this connector actually uses. See discover().
@@ -745,6 +753,46 @@ class FotocasaConnector(Connector):
                 zones_attempted,
                 geography,
             )
+
+        # Opus review, PR #175 also-fix: `_extract_search_result_prices`
+        # degrades to `{}` on ANY malformed shape (see its own docstring)
+        # — a silent, correct-by-design fallback for a bonus signal, but
+        # silent is the problem here. `discovered_prices()` is the price-
+        # change safety net that lets skip-if-seen force an immediate
+        # re-fetch instead of waiting out `min_refetch_interval_seconds`
+        # (24h) — if Fotocasa restructures
+        # `initialSearch.result.realEstates` (the same JSON shape this
+        # extraction depends on, distinct from the `_DETAIL_HREF_RE`-based
+        # id extraction above, which would keep working), that safety net
+        # vanishes for every id this sweep just found, with nothing
+        # elsewhere to notice. Verified 2026-08-03: on a healthy page the
+        # id/rawPrice sets match exactly (0 mismatches), so a real
+        # regression here shows up as coverage falling off a cliff, not
+        # gradually — a ratio threshold well below 100% still catches it
+        # promptly without false-alarming on the occasional zone missing a
+        # `rawPrice` for an individual listing.
+        if external_ids:
+            price_coverage = len(self._last_discovery_prices) / len(external_ids)
+            if price_coverage < _PRICE_COVERAGE_ALARM_RATIO:
+                logger.error(
+                    "fotocasa discover: discovery-time price signal covers "
+                    "only %d/%d (%.0f%%) of discovered external_ids for "
+                    "geography=%s — below the %.0f%% alarm threshold. This "
+                    "is the skip-if-seen price-change safety net (issue "
+                    "#143/#175): if Fotocasa restructured "
+                    "initialSearch.result.realEstates, it now silently "
+                    "returns no price signal, and min_refetch_interval_"
+                    "seconds (currently %ds) becomes the ONLY bound on how "
+                    "stale a price can get — exactly the 'market went "
+                    "quiet' failure this connector's fetch-budget policy "
+                    "exists to prevent.",
+                    len(self._last_discovery_prices),
+                    len(external_ids),
+                    price_coverage * 100,
+                    geography,
+                    _PRICE_COVERAGE_ALARM_RATIO * 100,
+                    self.min_refetch_interval_seconds,
+                )
         return sorted(external_ids)
 
     def _search_url(self, geography: str, zone_slug: str, rooms_segment: str) -> str:

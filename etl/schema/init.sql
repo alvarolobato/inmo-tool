@@ -185,10 +185,23 @@ ALTER TABLE listing ADD COLUMN IF NOT EXISTS last_fetched_at TIMESTAMPTZ;
 -- One-time migration: every row that predates this column had its
 -- last_seen_at written exclusively from the fetch path (see above), so
 -- for any such row, last_seen_at IS the best available value for "last
--- fetched". WHERE last_fetched_at IS NULL makes this idempotent —
--- re-running init.sql after the first backfill touches zero rows.
+-- fetched". WHERE last_fetched_at IS NULL alone is NOT sufficient to
+-- keep this idempotent once skip-if-seen (issue #143) is live (Opus
+-- review, PR #175 also-fix): this file is applied on every ETL container
+-- startup (etl/main.py's _init_schema), not once, and last_seen_at no
+-- longer means "last fetched" post-#143 — a row created AFTER this
+-- migration first ran, with last_fetched_at deliberately left NULL
+-- (meaning "never fetched, please fetch" — see _should_skip_fetch reason
+-- #1, and the browser-extension capture / future-backfill paths its
+-- docstring calls out), would otherwise get silently "fetched-washed" by
+-- this exact UPDATE on the next container restart, permanently hiding it
+-- from that force-fetch rule. Scoped to `first_seen_at` predating this
+-- column's introduction (2026-08-03, this same commit) so the backfill
+-- can only ever touch rows that genuinely predate skip-if-seen, no
+-- matter how many times init.sql runs.
 UPDATE listing SET last_fetched_at = last_seen_at
- WHERE last_fetched_at IS NULL AND last_seen_at IS NOT NULL;
+ WHERE last_fetched_at IS NULL AND last_seen_at IS NOT NULL
+   AND first_seen_at < '2026-08-03'::timestamptz;
 
 CREATE INDEX IF NOT EXISTS idx_listing_last_fetched_at ON listing (last_fetched_at);
 

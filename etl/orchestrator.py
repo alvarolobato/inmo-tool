@@ -690,30 +690,36 @@ def _update_last_seen_for_discovered(
 
 def _fetch_freshness_map(
     conn, source: str, external_ids: list[str]
-) -> dict[str, tuple[datetime | None, Decimal | None]]:
-    """Batched (last_fetched_at, current_price) lookup for skip-if-seen.
+) -> dict[str, tuple[datetime | None, Decimal | None, str | None]]:
+    """Batched (last_fetched_at, current_price, status) lookup for skip-if-seen.
 
     One query per (connector, scope) rather than one per listing — issue
     #143 exists because per-listing framework overhead was already the
     problem being solved; an N+1 query here would just move the cost
     instead of removing it, and matters most for exactly the connectors
     (large bank-portal batches) this policy is meant to help.
+
+    `status` (Opus review, PR #175 must-fix) closes the gap that let a
+    `withdrawn` listing reappearing in `discover()` at an unchanged price
+    go un-refetched: see `_should_skip_fetch`'s docstring for why a
+    non-'active' stored status must always force a real fetch.
     """
     if not external_ids:
         return {}
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT external_id, last_fetched_at, current_price FROM listing "
+            "SELECT external_id, last_fetched_at, current_price, status FROM listing "
             "WHERE source = %s AND external_id = ANY(%s)",
             (source, external_ids),
         )
-        return {row[0]: (row[1], row[2]) for row in cur.fetchall()}
+        return {row[0]: (row[1], row[2], row[3]) for row in cur.fetchall()}
 
 
 def _should_skip_fetch(
     *,
     last_fetched_at: datetime | None,
     stored_price: Decimal | None,
+    stored_status: str | None,
     discovery_price: Decimal | None,
     min_refetch_interval_seconds: int,
     now: datetime,
@@ -723,8 +729,8 @@ def _should_skip_fetch(
 
     Each check below is a reason to force a re-fetch regardless of how
     "fresh" the listing otherwise looks — staleness age is the last
-    resort, not the primary signal, because the two things skip-if-seen
-    must never silently break (price-drop detection, #34; withdrawal
+    resort, not the primary signal, because the things skip-if-seen must
+    never silently break (price-drop detection, #34; withdrawal
     detection, EC-5) are both driven by data this function can see:
 
     1. Never fetched before -> always fetch. A `listing` row can exist
@@ -733,21 +739,41 @@ def _should_skip_fetch(
        treating that the same as "recently fetched" would leave such a
        row permanently unpopulated the moment any connector enables a
        non-zero window.
-    2. `min_refetch_interval_seconds <= 0` -> always fetch. The feature is
+    2. Stored status isn't 'active' (e.g. 'withdrawn') -> always fetch.
+       Opus review, PR #175 must-fix: without this, a listing
+       `_reconcile_missed_discoveries` marked withdrawn — because it was
+       genuinely absent from several sweeps — that then *reappears* in
+       `discover()` at an unchanged price was previously treated exactly
+       like a normal active listing: skipped as "fresh, unchanged",
+       leaving `status='withdrawn'` un-reverted (invisible to candidates/
+       scoring, which filter withdrawn listings out),
+       `missed_discovery_count` frozen (`_reconcile_missed_discoveries`
+       only scans `WHERE status = 'active'`, so a withdrawn row can never
+       have its own counter reset back down), and `last_seen_at` freshly
+       bumped by `_update_last_seen_for_discovered` regardless — every
+       staleness signal reports the row as healthy while the one field
+       that actually says "we think this is gone" never changes. It only
+       self-corrected once the staleness window itself expired (up to
+       24h for Fotocasa) — before this policy, a reappearing listing was
+       re-fetched on the very next sweep. Checked before the "disabled"
+       and "missing price" branches below so this reason always wins the
+       moment status disagrees, independent of whether skip-if-seen is
+       even turned on for this connector.
+    3. `min_refetch_interval_seconds <= 0` -> always fetch. The feature is
        off for this connector (the default for every connector unless it
        opts in — see `Connector.min_refetch_interval_seconds`); this is
        what keeps every existing connector's behaviour byte-identical to
        before issue #143 unless someone deliberately turns it on.
-    3. Stored `current_price` is NULL -> always fetch. A core field never
+    4. Stored `current_price` is NULL -> always fetch. A core field never
        having been captured is worth paying to backfill rather than
        leaving silently empty forever behind a staleness window.
-    4. Discovery-time price disagrees with the stored price -> always
+    5. Discovery-time price disagrees with the stored price -> always
        fetch, however recently it was last fetched. This is the guard
        against issue #143's central risk: a connector that supplies a
        discovery-time price (`Connector.discovered_prices`) gets a real
        price change detected on the very next sweep, not after the
        staleness window happens to expire.
-    5. Otherwise, skip only once `min_refetch_interval_seconds` has
+    6. Otherwise, skip only once `min_refetch_interval_seconds` has
        genuinely elapsed since the last real fetch.
 
     Returns `(skip, reason)` — `reason` is always populated, including
@@ -758,6 +784,16 @@ def _should_skip_fetch(
     """
     if last_fetched_at is None:
         return False, "never fetched before"
+    if stored_status is not None and stored_status != "active":
+        return (
+            False,
+            (
+                f"stored status is {stored_status!r} (not 'active') — forcing "
+                "a re-fetch so a reappearing listing can be reconciled back "
+                "to 'active' promptly rather than waiting out the staleness "
+                "window"
+            ),
+        )
     if min_refetch_interval_seconds <= 0:
         return (
             False,
@@ -902,7 +938,13 @@ def run_connector(
     # Issue #143: one batched lookup for the whole scope rather than one
     # query per listing — skipped entirely when the feature is off for this
     # connector (the common case today), so a connector that hasn't opted
-    # into skip-if-seen doesn't pay even one extra query for it.
+    # into skip-if-seen doesn't pay even one extra query for THIS lookup.
+    # Narrow claim, deliberately: `_update_last_seen_for_discovered` above
+    # is a separate UPDATE + COMMIT that runs unconditionally for every
+    # connector and scope regardless of min_refetch_interval_seconds (see
+    # its own docstring for why) — Opus review, PR #175: don't read this
+    # comment as "skip-if-seen has no cost for non-opted-in connectors"
+    # overall, only that this specific freshness lookup is free for them.
     freshness = (
         _fetch_freshness_map(conn, connector.name, external_ids)
         if min_refetch_interval_seconds > 0
@@ -923,10 +965,13 @@ def run_connector(
             )
             break
 
-        last_fetched_at, stored_price = freshness.get(external_id, (None, None))
+        last_fetched_at, stored_price, stored_status = freshness.get(
+            external_id, (None, None, None)
+        )
         skip, reason = _should_skip_fetch(
             last_fetched_at=last_fetched_at,
             stored_price=stored_price,
+            stored_status=stored_status,
             discovery_price=discovery_prices.get(external_id),
             min_refetch_interval_seconds=min_refetch_interval_seconds,
             now=datetime.now(timezone.utc),
@@ -967,6 +1012,23 @@ def run_connector(
 
         fetched += 1
         breaker.record_success()
+
+    if skipped:
+        # Opus review, PR #175: the per-listing INFO line above is up to
+        # one line per discovered id (1,358 for a full Fotocasa sweep) —
+        # not something an operator actually reads line-by-line. This
+        # per-scope aggregate is the number that's actually skimmable in
+        # a log stream; the per-listing lines stay for when someone needs
+        # to grep a specific external_id's reason.
+        logger.info(
+            "Connector %s: skip-if-seen skipped %d/%d discovered listings "
+            "this scope (fetched %d, errors %d)",
+            connector.name,
+            skipped,
+            len(external_ids),
+            fetched,
+            errors,
+        )
 
     return {
         "discovered_count": len(external_ids),
@@ -1687,11 +1749,21 @@ def last_completed_run_finished_at(conn) -> datetime | None:
     None when no run has ever completed (a fresh install) — the guard
     below treats that the same as "long enough ago", since there is no
     prior sweep for a burst of restarts to be re-sweeping too soon after.
+
+    `AND finished_at IS NOT NULL` (Opus review, PR #175 also-fix) matters
+    beyond defensive redundancy: Postgres' default `ORDER BY ... DESC`
+    sorts NULLs *first*, not last, so a single completed-status row with a
+    NULL `finished_at` (a `connector_runs` insert that set `status`
+    without also setting `finished_at` — a bug elsewhere, or a future
+    schema change) would sort ahead of every real completion and make
+    this function return `None` forever, permanently disabling the guard
+    rather than merely miscounting one row.
     """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT finished_at FROM connector_runs "
-            "WHERE status = ANY(%s) ORDER BY finished_at DESC LIMIT 1",
+            "WHERE status = ANY(%s) AND finished_at IS NOT NULL "
+            "ORDER BY finished_at DESC LIMIT 1",
             (list(_COMPLETED_RUN_STATUSES),),
         )
         row = cur.fetchone()
@@ -1722,6 +1794,21 @@ def should_skip_immediate_sweep(
     of the previous attempt, not a genuine gap since the last sweep. A
     non-positive threshold disables the guard outright (always False) —
     an explicit operator opt-out, not a special case to code around.
+
+    Clock skew (Opus review, PR #175 also-fix): `elapsed` compares
+    Python's `datetime.now(timezone.utc)` (this process' clock) against a
+    `finished_at` written by Postgres' own `NOW()` (the DB server's
+    clock) — two different clocks. If the DB server's clock is ever ahead
+    of this process' clock, `finished_at` can land in this process'
+    future, making `elapsed` negative. A negative `elapsed` is always
+    `< min_restart_sweep_interval_seconds` (for any non-negative
+    threshold), so an un-clamped comparison would treat clock skew as "a
+    sweep juuust finished" and skip — and because this guard is
+    re-evaluated, the wedge lasts exactly as long as the skew itself.
+    Clamped to "never skip" instead: a negative elapsed carries no
+    genuine restart-burst signal, only a clock discrepancy, and "run" is
+    the safe direction on the same reasoning `should_skip_immediate_sweep`
+    already uses for "no prior run" and "guard disabled".
     """
     if min_restart_sweep_interval_seconds <= 0:
         return False, None
@@ -1729,6 +1816,8 @@ def should_skip_immediate_sweep(
     if last_finished is None:
         return False, None
     elapsed = (datetime.now(timezone.utc) - last_finished).total_seconds()
+    if elapsed < 0:
+        return False, last_finished
     return elapsed < min_restart_sweep_interval_seconds, last_finished
 
 
@@ -1788,23 +1877,53 @@ def run_scheduler_loop(
     alternative — letting the process die — turns one bad hour into total
     ingestion downtime until something notices the container exited.
 
-    `min_restart_sweep_interval_seconds` (issue #172, default 0 = guard
-    off) is applied on every iteration, not just the first: within one
-    long-running process this can never trigger except by a bug (each
-    iteration is already paced `interval_seconds` apart by the `sleep`
-    below), and applying it unconditionally — rather than special-casing
-    "first iteration" — is what makes the guard's actual target, a fresh
-    process spun up by a container restart, hit the same code path with
-    no extra state to keep in sync.
+    `min_restart_sweep_interval_seconds` (issue #172) is applied on the
+    FIRST iteration only (Opus review, PR #175 must-fix — this used to be
+    applied on every iteration; see below for why that wedged). The
+    restart-burst guard's whole premise is "a fresh process just started
+    — is that because of a genuine gap, or a crash-loop restarting
+    seconds after the last attempt?" That question only makes sense for
+    the process's own first sweep. Every iteration after the first is
+    already paced `interval_seconds` apart by the `sleep` below, within
+    this *same* long-running process — there is no restart to be
+    suspicious of, so nothing here should be able to skip a scheduled
+    sweep.
+
+    The previous unconditional version broke exactly there: it re-ran
+    `should_skip_immediate_sweep` every iteration, comparing "how long
+    since the last completed run" against the *same* threshold every
+    time. That threshold is operator-configured
+    (`etl.min_restart_sweep_interval_seconds` /
+    `ETL_MIN_RESTART_SWEEP_INTERVAL_SECONDS`, config/schema.yaml declares
+    no maximum) completely independently of `interval_seconds` (a
+    hard-coded 3600 in etl/main.py, invisible from the config UI) — so
+    nothing prevented an operator from picking a threshold >=
+    `interval_seconds`. The moment they did (measured: threshold=7200,
+    hourly interval), every iteration's own sweep became the "last
+    completed run" the *next* iteration's guard check saw — always under
+    the threshold, always skipped, forever, one `logger.warning` per
+    hour, with ingestion permanently stopped until the container
+    restarted with a smaller threshold. Restricting the guard to the
+    first iteration removes the possibility structurally: only the very
+    first iteration can ever compare against a *prior* process' last run,
+    so every later iteration always sweeps, regardless of how the
+    threshold compares to the interval.
     """
+    first_iteration = True
     while True:
         conn = conn_factory()
         try:
-            run_all_connectors_respecting_restart_guard(
-                conn,
-                trigger="scheduler",
-                min_restart_sweep_interval_seconds=min_restart_sweep_interval_seconds,
-            )
+            if first_iteration:
+                run_all_connectors_respecting_restart_guard(
+                    conn,
+                    trigger="scheduler",
+                    min_restart_sweep_interval_seconds=min_restart_sweep_interval_seconds,
+                )
+            else:
+                # Not the process' first sweep — paced by this same loop's
+                # own `sleep(interval_seconds)` below, so the restart-burst
+                # guard has nothing to protect against here. See docstring.
+                run_all_connectors(conn, trigger="scheduler")
         except Exception:
             logger.exception(
                 "run_all_connectors failed for this scheduler iteration — "
@@ -1812,4 +1931,5 @@ def run_scheduler_loop(
             )
         finally:
             conn.close()
+        first_iteration = False
         time.sleep(interval_seconds)
