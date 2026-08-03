@@ -279,6 +279,27 @@ class MilanunciosConnector(Connector):
     # honestly claim full coverage.
     discovers_full_inventory = False
 
+    # Issue #143: does NOT override discovered_prices() or set
+    # min_refetch_interval_seconds above 0 (the base default — always
+    # re-fetch). Investigated, not assumed: this connector's discover()
+    # already parses `adListPagination.adList.ads[]` for `id`, and the
+    # trimmed test fixtures (milanuncios_sample_search*.html — trimmed to
+    # only fields the parsing code actually reads, per this project's own
+    # fixture convention) show each `ad` entry carrying `category`,
+    # `sellerType`, `origin`, but no price field. A live re-check to
+    # confirm the *real* site's `ad` shape (attempted 2026-08-03, same
+    # session as Fotocasa's search-page price verification) got a
+    # `noindex`/"Pardon Our Interruption" bot-block page instead of real
+    # search results — a different failure signature from Fotocasa's
+    # silent-200-no-payload block, but a block all the same, and not
+    # retried (issue #1 §15 — don't lean harder on a source that just
+    # pushed back). So there is no live evidence either way for this
+    # connector, unlike Fotocasa's confirmed `rawPrice`. Shipping a guess
+    # here risks exactly the failure mode issue #143 warns about — a
+    # silently-wrong discovery price would make skip-if-seen trust a
+    # signal that isn't real, which is worse than having no signal at
+    # all. Revisit once a real search-page fetch succeeds and its `ad`
+    # shape can be checked directly — see docs/skills/connectors.md.
     def scope_key(self, scope: ConnectorScope) -> str | None:
         """Delegate to `_resolve_geography` — see FotocasaConnector.scope_key
         for why the resolved slug itself is the right dedup/coverage key."""

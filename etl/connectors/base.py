@@ -312,6 +312,59 @@ class Connector(ABC):
     # looks functional but isn't.
     supported_filters: tuple[str, ...] = ()
 
+    # Issue #143 (fetch-budget / skip-if-seen): minimum seconds between two
+    # real fetch_detail() calls for the same already-known external_id.
+    # 0 (default) preserves the original behaviour every connector had
+    # before this — fetch_detail() runs for every discovered id, every run,
+    # unconditionally. Skip-if-seen is opt-in per connector, not a global
+    # switch: a 200k-listing bank-portal connector and a 3-req/min
+    # Fotocasa have completely different fetch economics, and a connector
+    # that hasn't been shown to need it shouldn't take on the staleness
+    # risk for free. Override upward only with a real reason (see
+    # fotocasa.py, the first connector to set this non-zero) — and see
+    # etl.orchestrator._should_skip_fetch for the full policy, which never
+    # skips a listing that has never been fetched, is missing its price,
+    # or whose discovery-time price (see `discovered_prices` below)
+    # disagrees with what's stored, regardless of this window.
+    #
+    # Operator-overridable per connector via `connector_config
+    # .min_refetch_interval_seconds` (NULL = no override, use this
+    # class-attribute default) — see etl.orchestrator._scopes_for_connector.
+    min_refetch_interval_seconds: int = 0
+
+    def discovered_prices(self) -> dict[str, Decimal]:
+        """Prices observed as a side effect of the most recent discover() call.
+
+        Issue #143: skip-if-seen's one hard requirement is that it must not
+        be able to silently stop detecting a real price change (the
+        product's core signal — see issue #1 §10 and docs/skills/
+        connectors.md). Some sites embed each result's price in the very
+        page discover() already fetches to find external_ids (Fotocasa's
+        search-results JSON — confirmed live, see fotocasa.py); reading it
+        there is free (no second request) and lets the orchestrator force
+        a re-fetch the moment a discovered price disagrees with what's
+        stored, even for a listing that would otherwise look "fresh
+        enough" under `min_refetch_interval_seconds`.
+
+        Default: empty dict, meaning "no discovery-time price signal" —
+        NEVER a promise that a listing's price is unchanged. A connector
+        must only override this once it has verified (against a real
+        fetched page, not assumed from a reference mapping or an older
+        connector's shape) that the field it would read here is both
+        present and reliable — see docs/skills/connectors.md for a
+        worked example of a connector that investigated this and could
+        NOT confirm it (Milanuncios), and left this at the default rather
+        than guess.
+
+        Called by the orchestrator immediately after discover() returns,
+        before any fetch_detail() calls for that same scope — a connector
+        that overrides this should stash whatever price data it parsed
+        out of discover()'s own request on `self` during discover(), and
+        return it here. Keyed by the same external_id strings discover()
+        returned.
+        """
+        return {}
+
     def scope_key(self, scope: ConnectorScope) -> str | None:
         """Return a string identifying what this scope actually resolves to.
 

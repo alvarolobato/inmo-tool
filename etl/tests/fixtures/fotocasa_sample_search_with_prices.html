@@ -1,0 +1,31 @@
+<!--
+Trimmed synthetic fixture for issue #143's discovery-time price signal.
+
+Structurally accurate to a real Fotocasa madrid-capital search page,
+live-verified 2026-08-03 (same session, two real pages: the unfiltered
+madrid-capital city page and a real /chamberi/l zone page): both embed
+`initialSearch.result.realEstates`, a list of result-card objects whose
+`id`/`rawPrice` fields exactly match the connector's own href-extracted
+external_id set and, for a sampled listing, its independently-fetched
+detail-page price. `rawPrice` is a bare integer (e.g. 945000), not the
+display string ("945.000 €") `price` carries alongside it.
+
+Same three external_ids as fotocasa_sample_search.html (190011971,
+190022222, 190033333) so discover()'s id-extraction assertions stay
+identical between the two fixtures — only the __initial_props__ payload
+differs, adding the realEstates array this fixture exists to exercise.
+No zone links (no <nav class="re-Breadcrumb-zones">) — this fixture is for
+the baseline-page price signal specifically, not zone partitioning
+(covered separately by fotocasa_sample_search_zones.html); the
+zero-zone-slugs early-return path in discover() still runs the baseline
+price extraction before it returns, so this fixture doubles as a minimal
+repro of that path too.
+-->
+<html lang="es"><head><title>Comprar viviendas</title></head><body>
+<script type="application/json" id="__initial_props__">{"initialSearch": {"result": {"realEstates": [{"id": 190011971, "rawPrice": 945000, "price": "945.000 €"}, {"id": 190022222, "rawPrice": 620000, "price": "620.000 €"}, {"id": 190033333, "rawPrice": 310000, "price": "310.000 €"}]}}}</script>
+<div class="re-SearchResult">
+  <a href="/es/comprar/vivienda/madrid-capital/calefaccion-ascensor-no-amueblado/190011971/d" class="re-Card-link">Piso en Santa Eugenia</a>
+  <a href="/es/comprar/vivienda/madrid-capital/atico-terraza/190022222/d" class="re-Card-link">Ático en Retiro</a>
+  <a href="/es/comprar/vivienda/madrid-capital/duplex-garaje/190033333/d" class="re-Card-link">Dúplex en Chamberí</a>
+</div>
+</body></html>

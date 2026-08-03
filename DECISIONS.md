@@ -16,15 +16,14 @@
 | [D-002](docs/decisions/D-002-humans-approve-merges.md) | Humans approve every merge. No auto-merge, even for low-risk changes, until the owner establishes trust per category. |
 | [D-003](docs/decisions/D-003-review-policy.md) | Each task PR gets one fresh review pass; each phase gets one fresh cross-task review pass. Once per checkpoint — no iterating a round until "no more feedback." |
 | [D-004](docs/decisions/D-004-no-worker-workflows.md) | Don't push to `.github/workflows/` without a credential that has `workflow` OAuth scope. Never bypass via the GitHub API — leave YAML staged for a human to commit. |
+| [D-009](docs/decisions/D-009-restart-burst-guard.md) | A full sweep skips if a completed run finished within `etl.min_restart_sweep_interval_seconds` ago (crash-loop guard). |
 
 ## Data / connectors
 
 | ID | Binding rule |
 |----|--------------|
 | [D-005](docs/decisions/D-005-numeric-vs-uuid-keys.md) | Real-estate schema tables use `BIGSERIAL` integer PKs, not `NUMERIC` (no source-system precision constraint like the archived project had) or UUIDs (no distributed-write requirement). |
-
-
-*(Phase 1 tasks 1.3–1.4 will add connector-framework decisions here as they're made)*
+| [D-008](docs/decisions/D-008-skip-if-seen-opt-in.md) | Skip-if-seen defaults to 0 (always fetch); opt in per connector. Never skip missing/changed discovery price. |
 
 ## AI layer
 

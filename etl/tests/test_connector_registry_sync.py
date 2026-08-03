@@ -181,13 +181,14 @@ class TestSyncConnectorRegistry:
 
             # And it genuinely doesn't run: the scope resolver reports it
             # disabled, which is what makes run_all_connectors skip it.
-            scopes, enabled = orchestrator._scopes_for_connector(
+            scopes, enabled, min_refetch_override = orchestrator._scopes_for_connector(
                 pg_conn,
                 connector.name,
                 [ConnectorScope(center=(40.4168, -3.7038), radius_km=10)],
             )
             assert enabled is False
             assert scopes == []
+            assert min_refetch_override is None
 
             # An operator's later choice is never clobbered by a restart.
             with pg_conn.cursor() as cur:
