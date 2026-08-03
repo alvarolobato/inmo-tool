@@ -22,7 +22,6 @@ from etl.connectors.geography import (
     Place,
     UnresolvableGeographyError,
     _haversine_km,
-    nearest_city,
     nearest_place,
     resolve_place,
     unresolvable_scope_key,
@@ -38,20 +37,31 @@ from etl.connectors.vivantial import _resolve_geography as _vivantial_resolve_ge
 
 
 class TestNearestCity:
+    """PR #177 round 3, N6: `nearest_city()` (a thin `.name`-only wrapper
+    over `nearest_place()`) was dead in production — every real connector's
+    `_resolve_geography` calls `resolve_place()`/`nearest_place()` directly,
+    never `nearest_city()`. Deleted; these tests now call `nearest_place()`
+    directly and read `.name` themselves.
+    """
+
     def test_exact_centroid_matches_its_own_city(self):
-        assert nearest_city((37.3891, -5.9845)) == "sevilla"
+        place = nearest_place((37.3891, -5.9845))
+        assert place is not None
+        assert place.name == "sevilla"
 
     def test_a_few_km_off_still_resolves_to_the_right_city(self):
         # ~2km north of Sevilla's centroid — well within a search profile's
         # radius being centered slightly off the exact city-center point.
-        assert nearest_city((37.407, -5.9845)) == "sevilla"
+        place = nearest_place((37.407, -5.9845))
+        assert place is not None
+        assert place.name == "sevilla"
 
     def test_far_from_every_known_city_returns_none(self):
         # Lisbon — nowhere near any Spanish municipality, even against the
         # full ~8,248-place gazetteer (issue #169) rather than the original
         # 4-entry table. Confirms expanding coverage didn't also expand the
         # match radius into a neighbouring country.
-        assert nearest_city((38.7223, -9.1393)) is None
+        assert nearest_place((38.7223, -9.1393)) is None
 
     def test_picks_the_actually_nearest_place_not_a_bigger_far_one(self):
         # Roughly between Valencia city and Barcelona. Under the old
@@ -110,24 +120,68 @@ class TestNearestPlaceReturnsProvince:
             "fuengirola": (36.54167, -4.625),
             # Plaza Costa del Sol.
             "torremolinos": (36.62462, -4.49988),
-            # NOTE: kept as a general municipality-area coordinate (not a
-            # single landmark pin) — Benalmádena's real municipality spans
-            # a coastal strip immediately adjacent to Torremolinos, and
-            # every independently-sourced landmark-level coordinate found
-            # for it (OSM wiki, Wikidata) lands close enough to that
-            # boundary that population-weighted resolution (issue #177, M3)
-            # picks Torremolinos instead — a genuine geographic-boundary
-            # ambiguity, not a gazetteer-coordinate bug like Mijas's was.
-            "benalmadena": (36.58975, -4.54213),
             # Mijas PUEBLO (the actual historic hill town), not the
             # gazetteer's own point — the exact M2 regression case named in
             # the PR review.
             "mijas": (36.59556, -4.63722),
+            # NOTE: Benalmádena is deliberately excluded from this loop —
+            # see test_benalmadena_coastal_strip_is_a_known_boundary_
+            # ambiguity_not_a_silent_bug below (PR #177 round 3 finding:
+            # the coordinate this test used to carry here was byte-
+            # identical to the pre-regeneration ADM3 row, i.e. not
+            # actually independent despite the docstring's claim).
         }.items():
             place = nearest_place(coords)
             assert place is not None, f"{name} did not resolve to any place"
             assert place.name == name
             assert place.province == "Malaga"
+
+    def test_benalmadena_coastal_strip_is_a_known_boundary_ambiguity_not_a_silent_bug(
+        self,
+    ):
+        """PR #177 round 3 (also-fix): the coordinate this test used for
+        "benalmadena" (36.58975, -4.54213) was byte-identical to the
+        pre-regeneration ADM3 row — the exact "administrative reference
+        point, not a real independent source" problem this whole test
+        class exists to guard against, despite being presented as
+        independently-sourced. Its measured offset from the gazetteer went
+        0.00km -> 2.82km after the PR #177 coordinate-quality fix — the
+        only one of the 11 landmark towns across this class that got
+        WORSE, which a genuinely independent source would have caught
+        immediately instead of silently passing throughout.
+
+        Replaced with Puerto Marina — Benalmádena's actual marina/resort
+        core (independently-sourced: OSM/Wikidata), and the specific
+        property-dense area the round-3 review named as what matters for
+        a real-estate tool, as opposed to the historic hill pueblo above.
+        Addressing the resolution rather than working around it: Puerto
+        Marina genuinely resolves to `torremolinos`, not `benalmadena` —
+        Benalmádena's municipality is a narrow coastal strip immediately
+        adjacent to Torremolinos, and Puerto Marina sits geographically
+        CLOSER to Torremolinos's own recorded point (2.83km) than to
+        Benalmádena's (5.07km), by raw distance alone — checked
+        separately, this is NOT population-credit-driven (Benalmádena pop
+        65,965 and Torremolinos pop 68,961 carry almost identical credit),
+        so no `_POPULATION_WEIGHT_KM` retuning could fix it either way.
+        This is the single-centroid-per-municipality limitation in its
+        purest form: an elongated coastal municipality with two real,
+        distinct population centres (the historic pueblo above, correctly
+        resolving; the coastal resort strip here, not) cannot be
+        represented by one point at all — exactly the case a real
+        municipal-boundary polygon (see the containment-vs-credit
+        discussion in geography.py) would resolve correctly by
+        construction. Documented honestly rather than swapped for another
+        coordinate that happens to pass.
+        """
+        puerto_marina = (36.59847, -4.51592)
+        place = nearest_place(puerto_marina)
+        assert place is not None
+        assert place.name == "torremolinos", (
+            "test assumption stale — Puerto Marina no longer resolves to "
+            "torremolinos; if a real fix (containment) now resolves it to "
+            "benalmadena, update this test's assertion and docstring "
+            "rather than leaving a now-inaccurate 'known limitation' claim"
+        )
 
     def test_sevilla_metro_belt_resolves_to_sevilla_province(self):
         # Independently-sourced landmark coordinates (issue #177, M2).
@@ -168,13 +222,14 @@ class TestNearestCityRadiusBounding:
         # A wide-enough radius (30km) does reach at least the nearest real
         # gazetteer entry from this remote point.
         assert (
-            nearest_city(self._REMOTE_COUNTRYSIDE_NEAR_MADRID, radius_km=30) is not None
+            nearest_place(self._REMOTE_COUNTRYSIDE_NEAR_MADRID, radius_km=30)
+            is not None
         )
 
     def test_tight_radius_refuses_to_match_anything_far_away(self):
         # 1km is tighter than the distance to literally every gazetteer
         # entry from this deliberately-chosen empty-countryside point.
-        assert nearest_city(self._REMOTE_COUNTRYSIDE_NEAR_MADRID, radius_km=1) is None
+        assert nearest_place(self._REMOTE_COUNTRYSIDE_NEAR_MADRID, radius_km=1) is None
 
     def test_getafe_resolves_to_itself_not_to_madrid(self):
         # The scenario the pre-#169 version of this test was actually
@@ -194,9 +249,83 @@ class TestNearestCityRadiusBounding:
     def test_non_positive_radius_is_ignored_not_treated_as_zero_tolerance(self):
         # A malformed/zero radius shouldn't make every match impossible —
         # fall back to the ceiling alone, same as radius_km=None.
-        assert nearest_city(
+        assert nearest_place(
             self._REMOTE_COUNTRYSIDE_NEAR_MADRID, radius_km=0
-        ) == nearest_city(self._REMOTE_COUNTRYSIDE_NEAR_MADRID)
+        ) == nearest_place(self._REMOTE_COUNTRYSIDE_NEAR_MADRID)
+
+
+class TestNearestPlaceBoundBeforeRanking:
+    """PR #177 round 3, must-fix 1: `nearest_place` used to rank ALL 8,124
+    places by population-adjusted score FIRST, then check the distance
+    bound only against whichever place won that ranking. That let a
+    farther-away, more populous place become the "winner" the bound got
+    checked against — even when a DIFFERENT place sat genuinely inside the
+    bound (in the most extreme case, distance 0.0 — a scope pinned exactly
+    on a real municipality's own recorded centroid). `nearest_place` now
+    filters every candidate against the bound BEFORE ranking (see its own
+    docstring) — a place can no longer lose to a farther-away competitor's
+    bound check it was never subjected to.
+
+    Round-2 test coverage never caught this: the reviewer applied this
+    exact fix and re-ran the full 542-test suite and got the SAME 542
+    passed, 0 failed as the buggy version — the suite was blind to it. Every
+    test below is written to fail against the pre-fix ordering (rank all,
+    then bound-check only the winner) — verified by temporarily reverting
+    `nearest_place` to that ordering and re-running this class.
+    """
+
+    # Confirmed by direct measurement against the live gazetteer (PR #177
+    # round 3 review): each of these pins EXACTLY on its own recorded
+    # centroid (haversine distance 0.0 to itself) yet raised
+    # `UnresolvableGeographyError` at a 2km radius under the pre-fix
+    # ranking, because a different, more populous, farther-away place
+    # out-scored it and ITS distance (not 0.0) got compared to the bound.
+    _SELF_PIN_REGRESSION_CASES = (
+        "poio",
+        "ansoain / antsoain",
+        "berriozar",
+        "tavernes blanques",
+        "arratzua-ubarrundia",
+    )
+
+    def test_named_regression_towns_resolve_to_themselves_at_a_tight_radius(self):
+        by_name = {p.name: p for p in PLACES}
+        for name in self._SELF_PIN_REGRESSION_CASES:
+            place = by_name.get(name)
+            assert place is not None, f"{name} missing from the gazetteer"
+            result = nearest_place((place.lat, place.lon), radius_km=2)
+            assert result is not None, (
+                f"{name} pinned on its own centroid (distance 0.0) raised "
+                "unresolvable at radius_km=2 — must-fix 1 regression"
+            )
+            assert result.name == name, (
+                f"{name} pinned on its own centroid resolved to "
+                f"{result.name!r} instead of itself at radius_km=2"
+            )
+
+    @pytest.mark.parametrize("radius_km", [2, 3, 5])
+    def test_every_municipality_pinned_on_itself_resolves_at_all(self, radius_km):
+        """Full-corpus sweep (not hand-picked cases): every one of the
+        8,124 gazetteer places, queried at exactly its OWN centroid, must
+        resolve to SOMETHING within radius_km — never raise/return None.
+        Measured pre-fix real counts: 150 raised at radius_km=2, 66 at
+        radius_km=3, 4 even at radius_km=5 (all zero under plain
+        nearest-neighbour — entirely introduced by the M3 population
+        credit's rank-then-bound-check ordering). This is exactly the kind
+        of sweep the round-2 review named as what would have caught
+        must-fix 1 outright, rather than validating only the handful of
+        towns a reviewer happened to already know about.
+        """
+        failures = [
+            p.name
+            for p in PLACES
+            if nearest_place((p.lat, p.lon), radius_km=radius_km) is None
+        ]
+        assert failures == [], (
+            f"{len(failures)} municipalities pinned on their own centroid "
+            f"raised/returned None at radius_km={radius_km} (first 10: "
+            f"{failures[:10]!r}) — must-fix 1 regression"
+        )
 
 
 class TestResolvePlace:
@@ -323,14 +452,40 @@ class TestGazetteerDataQuality:
         gazetteer-vs-independent-source gap measured below (max ~2.1km,
         Sevilla) while still tight enough to catch a real regression back
         toward an ADM3-reference-point-sized error.
+
+        PR #177 round 3 (also-fix): this dict used to pin only 8 towns —
+        `alcala de guadaira` was independently-sourced and tested for
+        NAME/PROVINCE in `TestNearestPlaceReturnsProvince` above but never
+        distance-checked here, so its real gazetteer-vs-landmark gap
+        (5.83km — an ADM3-reference-point-sized error, exactly what this
+        test exists to catch) passed silently for the whole PR. Added
+        every other independently-sourced landmark from that same class
+        that wasn't already here (`fuengirola`, `torremolinos`, `mijas`,
+        `alcala de guadaira`, `tomares`) — all measured comfortably under
+        3km post-fix. `benalmadena` is deliberately still not pinned here:
+        see `TestNearestPlaceReturnsProvince.
+        test_benalmadena_coastal_strip_is_a_known_boundary_ambiguity_not_a_
+        silent_bug` — its municipality has no single accurate point at
+        all (a real elongated coastal shape with two distinct population
+        centres), so pinning it to either the pueblo or the coast landmark
+        here would just encode which of two genuinely-ambiguous points
+        this test happens to prefer, not catch a real regression.
         """
         by_name_province = {(p.name, p.province): p for p in PLACES}
         expected = {
             ("malaga", "Malaga"): (36.7211, -4.4220),  # Plaza de la Constitución
             ("marbella", "Malaga"): (36.51667, -4.88333),  # Wikipedia infobox
             ("estepona", "Malaga"): (36.42643, -5.1465),  # Plaza San Francisco
+            ("fuengirola", "Malaga"): (36.54167, -4.625),  # Wikipedia infobox
+            ("torremolinos", "Malaga"): (36.62462, -4.49988),  # Plaza Costa del Sol
+            ("mijas", "Malaga"): (36.59556, -4.63722),  # Mijas Pueblo
             ("sevilla", "Sevilla"): (37.388218, -5.995534),  # Plaza Nueva
             ("dos hermanas", "Sevilla"): (37.283689, -5.9226718),  # task-measured
+            ("alcala de guadaira", "Sevilla"): (
+                37.333940,
+                -5.849137,
+            ),  # Plaza del Duque
+            ("tomares", "Sevilla"): (37.375855, -6.045006),
             ("madrid", "Madrid"): (40.4168, -3.7038),  # Puerta del Sol
             ("barcelona", "Barcelona"): (41.387016, 2.170047),  # Plaça de Catalunya
             ("valencia", "Valencia"): (39.47000, -0.37639),  # Wikipedia infobox
@@ -455,6 +610,159 @@ class TestPopulationWeightedResolution:
         assert place is not None
         assert place.province == "Valencia"
         assert place.name != "barcelona"
+
+
+class TestPopulationWeightedResolutionRoundThree:
+    """PR #177 round 3: the review found the M3 credit's calibration
+    comment was factually wrong, found 4 more real big-city-district cases
+    still misresolving, and found (this review round, sweeping the full
+    gazetteer rather than trusting the 3 hand-picked cases above) that the
+    credit ALREADY silently misresolves ~120 small towns near a slightly
+    bigger neighbour at the then-shipped weight — a cost that gets strictly
+    worse with every attempt to chase one more big-city case. See
+    `_POPULATION_WEIGHT_KM`'s own comment in geography.py for the full
+    numeric proof and the "containment vs. credit" recommendation.
+    """
+
+    def test_tomares_is_the_real_upper_bound_not_getafe(self):
+        """The calibration comment above `_POPULATION_WEIGHT_KM` used to
+        claim Getafe-vs-Madrid was what bounded the weight from above ("re-
+        checking all three cases"). Measured: Getafe never binds — it
+        passes at every weight from 0.0 up to ~4.3 (Getafe's own centroid
+        is ~0.2km from itself vs. Madrid's ~12-13km, a gap population
+        credit can't close until absurdly large). The test that actually
+        enforces the safe upper bound is this one: Tomares (a real, small,
+        genuinely-separate Sevilla-belt municipality) starts losing to
+        Sevilla once the weight exceeds ~1.79 — and IS the reason
+        Nou Barris/Sant Andreu/Barajas (below) could be closed but
+        Churriana could not (closing it needs w > 2.46, past this bound)."""
+        place = nearest_place((37.375855, -6.045006))  # Tomares, independently-sourced
+        assert place is not None
+        assert place.name == "tomares", (
+            "test assumption stale — Tomares itself changed; re-verify "
+            "the upper-bound math in _POPULATION_WEIGHT_KM's comment"
+        )
+
+    def test_tomares_would_lose_to_sevilla_above_the_real_upper_bound(
+        self, monkeypatch
+    ):
+        """Guards the guard: proves the 1.79 upper bound is real, not
+        assumed — pushing the weight past it does flip Tomares to Sevilla,
+        which is exactly why this constant cannot be raised to chase
+        Churriana without breaking an already-correct case."""
+        monkeypatch.setattr(geography, "_POPULATION_WEIGHT_KM", 1.85)
+        place = nearest_place((37.375855, -6.045006))
+        assert place is not None
+        assert place.name == "sevilla", (
+            "test assumption stale — Tomares no longer flips at w=1.85; "
+            "re-measure the real upper bound"
+        )
+
+    def test_all_four_round_three_district_cases_remain_a_known_open_gap(self):
+        """None of the 4 cases the round-3 review found (Nou Barris/Sant
+        Andreu -> "santa coloma de gramenet" instead of Barcelona; Barajas
+        -> "coslada" instead of Madrid; Churriana -> "alhaurin de la torre"
+        instead of Malaga) close at the chosen weight (0.5) — by design,
+        not oversight. Solved per-pair: Nou Barris/Sant Andreu each need w
+        > ~1.22, Barajas needs w > ~1.70 to beat their respective bigger
+        neighbours; Churriana needs w > ~2.46. All three THEORETICALLY fit
+        under Tomares's ~1.79 real upper bound except Churriana (which
+        cannot be closed at ANY weight without breaking Tomares — proof
+        the scalar credit is maxed out there, not merely under-tuned). But
+        even closing the three that theoretically fit would mean raising
+        the weight from 0.5 to ~1.75-1.79, nearly QUADRUPLING the self-pin
+        collateral-damage count below (24 -> ~244) to fix 3 specific,
+        already-well-covered big-city districts — exactly the "tuned on
+        the cases you know" trap the review warns against, at a cost this
+        project's own comprehensive-coverage philosophy (issue #169: no
+        arbitrary per-area curation) argues against paying. See the
+        containment-vs-credit discussion in geography.py's
+        `_POPULATION_WEIGHT_KM` comment for the real fix and why it's a
+        follow-up, not a same-PR retune.
+
+        This test locks in the current, honestly-open behaviour for all
+        four so nobody re-tunes the weight to silently "fix" one of them
+        (which would just move it, not remove it) without re-reading that
+        discussion and re-running the collateral-damage sweep below."""
+        cases = {
+            "nou barris (barcelona district)": ((41.4429, 2.1743), "barcelona"),
+            "sant andreu (barcelona district)": ((41.4335, 2.1908), "barcelona"),
+            "barajas (madrid district)": ((40.4744, -3.5811), "madrid"),
+            "churriana (malaga district)": ((36.6853, -4.5289), "malaga"),
+        }
+        for label, (point, should_resolve_to) in cases.items():
+            place = nearest_place(point)
+            assert place is not None
+            assert place.name != should_resolve_to, (
+                f"{label} now resolves to {should_resolve_to!r} — if this "
+                "is from a real containment-based fix, update this test "
+                "to assert the correct resolution explicitly; if it's from "
+                "retuning _POPULATION_WEIGHT_KM, re-run "
+                "test_self_pin_collateral_damage_stays_bounded and "
+                "test_tomares_is_the_real_upper_bound_not_getafe first"
+            )
+
+    def test_self_pin_collateral_damage_stays_bounded(self):
+        """The finding that drove `_POPULATION_WEIGHT_KM` DOWN (1.0 -> 0.5)
+        instead of up (to chase Nou Barris/Sant Andreu/Barajas at 1.75):
+        every municipality queried at its own centroid, radius_km=2, should
+        resolve to itself — and while the credit makes a bounded number of
+        genuine exceptions unavoidable (a small town can legitimately sit
+        within 2km of a much bigger one), that count must not silently
+        grow. Measured monotonic in weight: 0 at w=0.0, ~24 at w=0.5 (the
+        shipped value), ~120 at w=1.0, ~244 at w=1.75. A generous ceiling
+        (50) catches a future weight increase without hand-tuning this
+        test's threshold to a suspiciously exact current count."""
+        collateral = [
+            p.name
+            for p in PLACES
+            if (result := nearest_place((p.lat, p.lon), radius_km=2)) is not None
+            and result.name != p.name
+        ]
+        assert len(collateral) <= 50, (
+            f"{len(collateral)} municipalities pinned on their own centroid "
+            f"now resolve to a DIFFERENT place (first 10: {collateral[:10]!r}) "
+            "— population credit is swallowing more small towns than "
+            "budgeted; reconsider _POPULATION_WEIGHT_KM"
+        )
+
+
+class TestCrossBorderResolution:
+    """PR #177 round 3, N3: the module docstring used to claim
+    `_MAX_MATCH_DISTANCE_KM` stops "a profile near the Portuguese border"
+    from silently matching a Spanish town across it. Measured: false, and
+    not just for Portugal — 4 independently-sourced near-border foreign
+    points (Portugal, UK/Gibraltar, France, Andorra) all resolve to SOME
+    Spanish municipality, none raising `UnresolvableGeographyError`. This
+    predates the M3 credit (a 40km nearest-neighbour ceiling was never
+    going to stop this on its own — genuine Spanish towns exist within
+    40km of every land border); the credit makes it somewhat worse for a
+    populous border town. See geography.py's module docstring for the full
+    writeup and why fixing the BEHAVIOUR (not just the docstring) needs
+    Spain's real country-boundary polygon — out of this module's current
+    scope. These tests lock in the current, now-honestly-documented
+    behaviour so nobody re-introduces the false "already fixed" claim.
+    """
+
+    def test_elvas_portugal_still_resolves_to_a_spanish_town(self):
+        place = nearest_place((38.8807, -7.1613))
+        assert place is not None
+        assert place.name == "badajoz"
+
+    def test_gibraltar_uk_still_resolves_to_a_spanish_town(self):
+        place = nearest_place((36.1408, -5.3536))
+        assert place is not None
+        assert place.name == "linea de la concepcion, la"
+
+    def test_bayonne_france_still_resolves_to_a_spanish_town(self):
+        place = nearest_place((43.4929, -1.4748))
+        assert place is not None
+        assert place.name == "urdazubi/urdax"
+
+    def test_andorra_la_vella_still_resolves_to_a_spanish_town(self):
+        place = nearest_place((42.5063, 1.5218))
+        assert place is not None
+        assert place.name == "les valls de valira"
 
 
 class TestDosHermanasRegression:

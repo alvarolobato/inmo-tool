@@ -25,13 +25,15 @@ at runtime.
 
 ## Coverage
 
-8,248 rows, one per Spanish municipality (a small number of provincial/
+8,124 rows, one per Spanish municipality (a small number of provincial/
 regional capitals — e.g. Sevilla — have no independent GeoNames "ADM3"
 record and are included instead via their admin-capital record; see the
 build script's docstring for the exact feature-code selection and why).
 Every provincial capital and every municipality GeoNames tags as a
 third-order administrative seat is present — this is not a hand-picked
-subset by population threshold.
+subset by population threshold. (Row count dropped from 8,248 in PR #177
+round 3 — see "Existence dedup key" below; every dropped row was a
+duplicate of a still-present municipality, never a real place lost.)
 
 One upstream data-quality fix is applied (not area curation — see the
 build script's `_NAME_OVERRIDES_BY_GEONAMEID`): GeoNames' own ADM3 record
@@ -40,12 +42,12 @@ its name/asciiname, unlike literally every other populous Spanish
 municipality checked (which differ from their asciiname only by accent
 stripping, e.g. "Málaga" -> "Malaga"). Left as-is, this record would not
 have collided with the separate "Sevilla"-named PPLA record for the same
-city in the (name, province) dedup, so the gazetteer would have silently
-carried both "sevilla" and "seville" as distinct entries — and any point
-`nearest_place()` resolved to "seville" would miss every connector's
-`_CITY_SLUGS` table (all keyed on the Spanish "sevilla"), reintroducing
-issue #169's silent-zero-coverage bug for one of the two markets the
-owner named explicitly. Corrected to "sevilla" by geonameid before dedup.
+city, so the gazetteer would have silently carried both "sevilla" and
+"seville" as distinct entries — and any point `nearest_place()` resolved
+to "seville" would miss every connector's `_CITY_SLUGS` table (all keyed
+on the Spanish "sevilla"), reintroducing issue #169's silent-zero-coverage
+bug for one of the two markets the owner named explicitly. Corrected to
+"sevilla" by geonameid before dedup.
 
 Columns: `name` (ascii, lowercased — e.g. `estepona`), `lat`, `lon`,
 `province` (ascii, e.g. `Malaga`), `population`, `feature_code` (the
@@ -53,21 +55,48 @@ GeoNames code the row came from, for traceability), `geonameid` (GeoNames'
 own stable id, for looking a row up on geonames.org if a coordinate looks
 wrong).
 
-**Coordinate preference (PR #177)**: which (name, province) key survives a
-dedup is unchanged (ADM3 first, as above), but the LAT/LON that surviving
-row carries is a separate decision handled by `_pick_coordinate` in the
-build script. GeoNames' plain `ADM3` row is a reference point for the
-*administrative division's boundary*, not necessarily anywhere near where
-the population actually is — measured up to 8.27km off for Madrid, 7.47km
-for Mijas. When a locality-type record (`PPLC`/`PPLA`/`PPLA2`/`PPLA3`/
-`PPLA4`, or a plain `PPL` fallback) exists for the exact same municipality
-(matched by GeoNames' `admin3 code`, Spain's real per-municipio INE code —
-never by name/province text, which can't distinguish two same-named
-villages), its coordinate is used instead — `feature_code`/`geonameid` in
-this file then reflect that locality row, not the ADM3 one, even though
-the municipality's name/province/population still come from ADM3. See
-`_pick_coordinate`'s docstring in `scripts/build-es-gazetteer.py` for the
-full matching logic and the exact measured offsets.
+**Existence dedup key (PR #177 round 3)**: which rows survive as one
+municipality is now keyed by GeoNames' `admin3 code` (Spain's real
+per-municipio INE code), not `(name, province)` text as originally built.
+GeoNames' own `asciiname` column is occasionally internally inconsistent
+for the exact same accented name — e.g. Güevéjar's ADM3 row asciinames
+itself "Gueevejar", its PPLA3 row (identical accented name, same admin3
+code) asciinames itself "Guevejar" — a diaeresis-transliteration glitch,
+not a legitimate alternate name (15 admin3 codes measured in the current
+dump). Keying dedup by `(name, province)` text let one real municipality
+split into two gazetteer rows over this — one of them a name no
+connector's `_CITY_SLUGS`-equivalent table will ever hold, and
+`nearest_place()`'s population credit deterministically picked whichever
+duplicate happened to carry the higher reported population, which was the
+mangled name in every measured case. The surviving row's NAME is now also
+computed by the script itself (`_fold_ascii`, a plain Unicode NFKD
+decompose + combining-mark strip on the accented `name` field) rather than
+trusting GeoNames' own `asciiname` column verbatim, so this can't
+resurface on a future GeoNames refresh either.
+
+**Coordinate preference (PR #177, refined in round 3)**: which (name,
+province) key survives is decided by existence dedup above; the LAT/LON
+that surviving row carries is a separate decision handled by
+`_pick_coordinate` in the build script. GeoNames' plain `ADM3` row is a
+reference point for the *administrative division's boundary*, not
+necessarily anywhere near where the population actually is — measured up
+to 8.27km off for Madrid, 7.47km for Mijas. When a locality-type record
+(`PPLC`/`PPLA`/`PPLA2`/`PPLA3`/`PPLA4`, or a plain `PPL` fallback) exists
+for the exact same municipality (matched by `admin3 code`, never by
+name/province text) AND its name plausibly matches the municipality's own
+(round 3: a rural municipio's admin3 code can carry dozens of
+differently-named hamlets, e.g. Talayuela's also carries "Pueblonuevo de
+Miramontes", a real but different, 20.9km-away settlement — matching by
+admin3 code alone is necessary but not sufficient for a safe coordinate
+override), its coordinate is used instead, picking the closest such
+candidate to the ADM3 reference point when several tie (round 3: this tie
+was previously broken by raw GeoNames dump row order, non-deterministic
+under a dump refresh and responsible for shipped errors up to 158.8km) —
+`feature_code`/`geonameid` in this file then reflect that locality row,
+not the ADM3 one, even though the municipality's name/province/population
+still come from ADM3. See `_pick_coordinate`'s docstring in
+`scripts/build-es-gazetteer.py` for the full matching logic and the exact
+measured offsets.
 
 ## What this file is NOT
 

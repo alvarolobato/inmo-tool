@@ -1340,10 +1340,18 @@ class TestCircuitBreakerIntegration:
         # whose only active profile is genuinely unresolvable — otherwise
         # Fotocasa would also see the fixture's Madrid scope and this run's
         # status would be a mix, not a clean assertion of the failure path.
+        # PR #177 round 3, N8: scoped to `_TEST_PROFILE_NAME` specifically
+        # (not `WHERE archived_at IS NULL`, which archived EVERY active
+        # profile in the shared test DB, including ones seeded by other
+        # test classes in this same module — e.g.
+        # TestMultiScopeWithdrawalReconciliation's "multiscope-*" profiles —
+        # and only ever restored `_TEST_PROFILE_NAME` in `finally`,
+        # permanently archiving those other real fixtures).
         with pg_conn.cursor() as cur:
             cur.execute(
                 "UPDATE search_profile SET archived_at = NOW() "
-                "WHERE archived_at IS NULL"
+                "WHERE name = %s AND archived_at IS NULL",
+                (_TEST_PROFILE_NAME,),
             )
             cur.execute(
                 "INSERT INTO search_profile (name, scope) VALUES (%s, %s) RETURNING id",
@@ -2008,10 +2016,17 @@ class TestUnresolvableScopeReconciliationIsolation:
         independent of Fotocasa's own `discovers_full_inventory=False`
         quirk."""
         _apply_schema(pg_conn)
+        # PR #177 round 3, N8: scoped to `_TEST_PROFILE_NAME` — see the
+        # identical fix (and its rationale) in
+        # test_unresolvable_geography_reaches_connector_run_results_as_failed
+        # above. A blanket `WHERE archived_at IS NULL` here archived every
+        # active profile in the shared test DB, not just the fixture one
+        # this test means to suppress.
         with pg_conn.cursor() as cur:
             cur.execute(
                 "UPDATE search_profile SET archived_at = NOW() "
-                "WHERE archived_at IS NULL"
+                "WHERE name = %s AND archived_at IS NULL",
+                (_TEST_PROFILE_NAME,),
             )
             cur.execute(
                 "INSERT INTO search_profile (name, scope) VALUES (%s, %s) RETURNING id",
@@ -2040,6 +2055,94 @@ class TestUnresolvableScopeReconciliationIsolation:
                 status, error_msg = cur.fetchone()
             assert status == "failed"
             assert error_msg is not None and "unresolvable" in error_msg.lower()
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            with pg_conn.cursor() as cur:
+                cur.execute("DELETE FROM search_profile WHERE id = %s", (profile_id,))
+                cur.execute(
+                    "UPDATE search_profile SET archived_at = NULL WHERE name = %s",
+                    (_TEST_PROFILE_NAME,),
+                )
+            pg_conn.commit()
+
+
+class TestResolvedButUncoveredVisibility:
+    """PR #177 round 3 (also-fix): the "resolved but uncovered" path
+    (`etl/orchestrator.py`'s `run_all_connectors`, the `place is not None`
+    branch right after `scope_key() is None`) had ZERO test coverage before
+    this — `grep -rn "uncovered" etl/tests/` matched nothing. It is a real,
+    useful, distinct signal (a scope centered on a REAL gazetteer
+    municipality this connector's own coverage table just doesn't list —
+    different from "no geography info at all", per that branch's own
+    docstring) that reaches `connector_run_results.error_msg` with a
+    `"resolved but uncovered: "` prefix an operator (or a future alert
+    query) can filter on. But the row's `status` stays `'ok'` — correct
+    semantics (this is explicitly documented as "not a failure"), yet it
+    means the signal is invisible to anyone who only looks at `status`,
+    only surfacing to someone who thinks to read `error_msg` on a green
+    row. Getafe is a real, correct choice for this: an actual gazetteer
+    municipality (used throughout test_geography.py) that is deliberately
+    NOT in Fotocasa's own `_CITY_SLUGS` table.
+    """
+
+    def test_resolved_but_uncovered_scope_stays_ok_with_a_visible_error_msg(
+        self, pg_conn
+    ):
+        _apply_schema(pg_conn)
+        with pg_conn.cursor() as cur:
+            # Scoped to `_TEST_PROFILE_NAME` by name (PR #177 round 3, N8) —
+            # not a blanket `WHERE archived_at IS NULL`, which would archive
+            # every active profile in the shared test DB, not just this
+            # fixture's.
+            cur.execute(
+                "UPDATE search_profile SET archived_at = NOW() "
+                "WHERE name = %s AND archived_at IS NULL",
+                (_TEST_PROFILE_NAME,),
+            )
+            cur.execute(
+                "INSERT INTO search_profile (name, scope) VALUES (%s, %s) RETURNING id",
+                (
+                    "resolved-but-uncovered-test-profile",
+                    (
+                        '{"geography": {"type": "radius", '
+                        '"center": [40.30472, -3.73111], "radius_km": 5}}'
+                    ),
+                ),
+            )
+            (profile_id,) = cur.fetchone()
+        pg_conn.commit()
+
+        connector = FotocasaConnector()
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, discovered_count, error_msg "
+                    "FROM connector_run_results "
+                    "WHERE run_id = %s AND connector_name = %s",
+                    (run_id, connector.name),
+                )
+                row = cur.fetchone()
+            assert row is not None, (
+                "a resolved-but-uncovered-only scope must still produce a "
+                "connector_run_results row"
+            )
+            status, discovered_count, error_msg = row
+            # Not a failure — Getafe resolved fine, this connector just has
+            # no slug for it. Confirms the "ok" contract this whole path is
+            # explicitly designed around.
+            assert status == "ok"
+            assert discovered_count == 0
+            # The actual coverage assertion: the signal must be present and
+            # distinguishable in error_msg, per orchestrator.py's own
+            # `f"resolved but uncovered: {scope} -> {place.name}/..."` — this
+            # is what "zero test coverage" meant nobody had verified.
+            assert error_msg is not None
+            assert "resolved but uncovered" in error_msg.lower()
+            assert "getafe" in error_msg.lower()
         finally:
             orchestrator.CONNECTORS.clear()
             _cleanup(pg_conn, connector.name, run_id)
@@ -2313,11 +2416,21 @@ class TestProfileDrivenScope:
         # Archive (not delete) every active profile, including
         # _apply_schema's fixture one — archived_at IS NOT NULL must be
         # excluded from scope derivation just like a genuinely empty table.
+        # This test's own premise genuinely needs zero active profiles
+        # (unlike the other tests in this module, which only need to
+        # suppress `_TEST_PROFILE_NAME` specifically), so it can't scope the
+        # archive by name the way those do. PR #177 round 3, N8: instead of
+        # assuming only `_TEST_PROFILE_NAME` was active (the bug — any OTHER
+        # profile active in the shared test DB at this moment, e.g. from a
+        # different test class's fixture, got archived here and never
+        # restored), capture exactly which rows this statement archived via
+        # RETURNING and restore precisely those in `finally`.
         with pg_conn.cursor() as cur:
             cur.execute(
                 "UPDATE search_profile SET archived_at = NOW() "
-                "WHERE archived_at IS NULL"
+                "WHERE archived_at IS NULL RETURNING id"
             )
+            archived_ids = [row[0] for row in cur.fetchall()]
         pg_conn.commit()
 
         connector = DummyConnector(name="should-not-run")
@@ -2347,12 +2460,18 @@ class TestProfileDrivenScope:
             orchestrator.CONNECTORS.clear()
             with pg_conn.cursor() as cur:
                 cur.execute("DELETE FROM connector_runs WHERE id = %s", (run_id,))
-                # Restore the fixture profile other tests in this module
-                # depend on _apply_schema having (re-)created as active.
-                cur.execute(
-                    "UPDATE search_profile SET archived_at = NULL WHERE name = %s",
-                    (_TEST_PROFILE_NAME,),
-                )
+                # Restore exactly the rows this test archived (PR #177
+                # round 3, N8) — not just `_TEST_PROFILE_NAME` by name,
+                # which would silently leave any OTHER profile this test
+                # happened to archive (e.g. a different test class's
+                # fixture, still active in the shared test DB when this
+                # test ran) permanently archived.
+                if archived_ids:
+                    cur.execute(
+                        "UPDATE search_profile SET archived_at = NULL "
+                        "WHERE id = ANY(%s)",
+                        (archived_ids,),
+                    )
             pg_conn.commit()
 
     def test_two_scopes_resolving_to_the_same_target_are_not_crawled_twice(

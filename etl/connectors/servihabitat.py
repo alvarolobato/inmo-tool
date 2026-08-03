@@ -57,10 +57,15 @@ listing count. 59 residential listings in Madrid is thin beside Solvia's
 6,375 nationally (#116).
 
 Of the four provinces sampled, only three are reachable today: a scope is
-resolved through `etl.connectors.geography.nearest_city`, whose
-`CITY_CENTROIDS` currently holds only Madrid, Sevilla, Barcelona and
-Valencia. The Alicante figures above are therefore informational, not
-reachable, until that table grows.
+resolved through `etl.connectors.geography.resolve_place` against the full
+~8,124-municipality gazetteer (issue #169), so geography resolution itself
+is no longer the limit — the gap is this connector's own
+`_PROVINCE_SITEMAP_SLUGS` table below, which doesn't have an Alicante entry
+yet (only Madrid/Sevilla/Barcelona/Valencia/Malaga are mapped to a sitemap
+slug). The Alicante figures above are therefore informational, not
+reachable, until that table grows — a deliberate per-connector coverage
+gap (issue #169's "known municipality this connector doesn't cover" case),
+not a geography-resolution failure.
 
 Fields NOT available, checked explicitly against the batch checklist in
 issue #132 and confirmed absent on a real listing page:

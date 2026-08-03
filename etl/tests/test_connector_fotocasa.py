@@ -804,24 +804,54 @@ class TestRobotsCompliance:
                 allowed, reason = is_allowed(rules, url)
                 assert allowed, f"{url} is robots.txt-disallowed: {reason}"
 
-    def test_the_matcher_actually_rejects_the_disallowed_patterns(self):
+    @pytest.mark.parametrize(
+        "url",
+        [
+            pytest.param(
+                "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital"
+                "/todas-las-zonas/l/2",
+                id="pagination",
+            ),
+            pytest.param(
+                "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital"
+                "/todas-las-zonas/l?minPrice=100000",
+                id="minPrice-filter",
+            ),
+            pytest.param(
+                "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital"
+                "/todas-las-zonas/l?maxPrice=200000",
+                id="maxPrice-filter",
+            ),
+            pytest.param(
+                "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital"
+                "/todas-las-zonas/l?minRooms=2",
+                id="minRooms-filter",
+            ),
+            pytest.param(
+                "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital"
+                "/todas-las-zonas/l?propertySubtypeIds=1",
+                id="propertySubtypeIds-filter",
+            ),
+            pytest.param(
+                "https://www.fotocasa.es/es/comprar/viviendas/madrid/todas-las-zonas/l",
+                id="bare-city-name-segment",
+            ),
+        ],
+    )
+    def test_the_matcher_actually_rejects_the_disallowed_patterns(self, url):
         """Guards the guard: if the matcher said yes to everything, the test
         above would pass no matter what the connector did. These are the
         real disallowed shapes from Fotocasa's robots.txt (pagination, the
-        query-string filters, and the bare city-name segment)."""
+        query-string filters, and the bare city-name segment).
+
+        PR #177 round 3, N7: parametrized (was a single test with an
+        internal for-loop over 6 unrelated URLs) so a regression on any one
+        pattern is reported as its own named failure instead of aborting
+        the loop on the first mismatch and hiding whether the rest still
+        passed."""
         rules = self._rules()
-        base = "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital"
-        must_be_disallowed = [
-            f"{base}/todas-las-zonas/l/2",
-            f"{base}/todas-las-zonas/l?minPrice=100000",
-            f"{base}/todas-las-zonas/l?maxPrice=200000",
-            f"{base}/todas-las-zonas/l?minRooms=2",
-            f"{base}/todas-las-zonas/l?propertySubtypeIds=1",
-            "https://www.fotocasa.es/es/comprar/viviendas/madrid/todas-las-zonas/l",
-        ]
-        for url in must_be_disallowed:
-            allowed, _ = is_allowed(rules, url)
-            assert not allowed, f"matcher wrongly allowed {url}"
+        allowed, _ = is_allowed(rules, url)
+        assert not allowed, f"matcher wrongly allowed {url}"
 
     def test_matcher_honours_consecutive_user_agent_groups(self):
         """RFC 9309 §2.2.1: consecutive user-agent lines form ONE group
