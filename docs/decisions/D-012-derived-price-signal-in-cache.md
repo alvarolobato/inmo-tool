@@ -1,10 +1,10 @@
 ---
-id: D-010
+id: D-012
 title: Feed the zone-median price comparison into occupancy/redflags as a bucketed derived input, hashed alongside it
 date: 2026-08-03
 ---
 
-# D-010: Feed the zone-median price comparison into occupancy/redflags as a bucketed derived input, hashed alongside it
+# D-012: Feed the zone-median price comparison into occupancy/redflags as a bucketed derived input, hashed alongside it
 
 *Decided: 2026-08-03*
 

@@ -1,10 +1,10 @@
 ---
-id: D-008
+id: D-010
 title: Rent estimate ships as an explicit per-profile assumption until #31 lands
 date: 2026-08-03
 ---
 
-# D-008: Rent estimate ships as an explicit per-profile assumption until #31 lands
+# D-010: Rent estimate ships as an explicit per-profile assumption until #31 lands
 
 *Decided: 2026-08-03*
 
@@ -65,6 +65,6 @@ this codebase can produce today without misrepresenting its provenance. The
 confidence-tier type superset means #31's eventual landing is a pure
 data-source swap, not a refactor of every consumer.
 
-**See**: docs/decisions/D-009-acquisition-cost-model.md,
+**See**: docs/decisions/D-011-acquisition-cost-model.md,
 `dashboard/lib/analytics/rent-estimate.ts`,
 `dashboard/lib/analytics/yield.ts`, issues #151, #31, #33.
