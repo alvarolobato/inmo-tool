@@ -273,14 +273,11 @@ class SolviaConnector(Connector):
         html = raw.raw.get("html") or ""
 
         raw_extra: dict[str, Any] = extract_investment_extras(detail)
+        # Goes to the canonical `cadastral_ref` field (issue #140), which the
+        # orchestrator writes to property.cadastral_ref and the dedup engine
+        # reads as its definitive signal. Previously stashed in raw_extra
+        # because no canonical column was wired through.
         cadastral_ref = extract_cadastral_ref(detail)
-        if cadastral_ref:
-            # No canonical column for this yet — the dedup engine reads
-            # property.cadastral_ref, so surfacing it here is what makes
-            # wiring that column through a worthwhile follow-up rather than
-            # speculative. Dropping it would lose the single most valuable
-            # field this source offers.
-            raw_extra["cadastral_ref"] = cadastral_ref
         for key in ("idVivienda", "idPromocion", "fichaMacro", "segmento"):
             value = detail.get(key)
             if value not in (None, ""):
@@ -419,4 +416,5 @@ class SolviaConnector(Connector):
             reference_code=(
                 str(detail.get("id")).strip() if detail.get("id") else None
             ),
+            cadastral_ref=cadastral_ref,
         )

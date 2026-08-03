@@ -261,10 +261,18 @@ def extract_cadastral_ref(detail: dict[str, Any]) -> str | None:
     Solvia simply *publishes* it per listing. That makes this connector the
     first real source for the dedup engine's highest-confidence signal
     (`etl/dedup/signals/cadastral.py`, issue #1 §6 signal 1), which until
-    now has had no data to fire on. Stored in `raw_extra` because the
-    canonical dataclass has no dedicated column; the dedup signal reads
-    `property.cadastral_ref`, so wiring that column through is a follow-up,
-    not something this connector can do alone.
+    now has had no data to fire on. Issue #140 wired the column through end
+    to end, so the value now flows into `CanonicalListingVersion.cadastral_ref`
+    → `property.cadastral_ref` → the dedup engine, rather than dead-ending
+    in `raw_extra` as it did when this connector first shipped.
+
+    Only extraction happens here — the `.strip()` below is not the
+    validation. Format normalisation and the plausibility check that keeps
+    a placeholder ("N/A", "-", a dummy repeated on every listing) from
+    merging unrelated properties at confidence 1.000 live centrally in
+    `normalize_cadastral_ref()` / `CanonicalListingVersion.__post_init__`
+    (`etl/connectors/base.py`), so every connector in the #132 servicer
+    batch inherits them without each having to remember.
     """
     caracteristicas = detail.get("caracteristicas")
     if isinstance(caracteristicas, dict):

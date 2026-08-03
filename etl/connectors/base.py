@@ -11,13 +11,73 @@ module intentionally has zero network code and zero real-site knowledge.
 
 from __future__ import annotations
 
+import logging
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Literal
 
+logger = logging.getLogger(__name__)
+
 _VALID_OPERATIONS = ("sale", "rent")
+
+# A Spanish "referencia catastral" is exactly 20 alphanumeric characters.
+# Gating on the real format matters more here than for any other field:
+# issue #140 dropped the UNIQUE constraint on property.cadastral_ref (it
+# made the signal structurally unreachable), and with it went the accident
+# that used to make mass-collision impossible. A portal publishing a
+# placeholder — "N/A", "-", "00000000000000000000", the same dummy string
+# on every listing — would now merge unrelated properties at confidence
+# 1.000, the one confidence level that bypasses every corroboration rule
+# the other signals have. Cheapest place to stop that is before the value
+# is ever stored.
+_CADASTRAL_REF_RE = re.compile(r"^[0-9A-Z]{20}$")
+
+# Length alone is not enough, and the test for this found it out: a portal
+# padding the field with `00000000000000000000` produces twenty
+# alphanumeric characters and sails through the pattern above. Requiring
+# both a digit and a letter is the cheapest rule that separates real
+# references from degenerate padding, and it cannot reject a genuine one:
+# every referencia catastral ends in two control characters that are
+# letters, and every one carries digits in the parcel/municipality portion
+# — for urban and rústica formats alike. A structural position-by-position
+# parse would catch more, but risks rejecting valid input, and a wrongly
+# rejected reference silently disables signal 1 for that portal, which
+# looks exactly like "no duplicates found" and so goes unnoticed.
+_HAS_DIGIT_RE = re.compile(r"[0-9]")
+_HAS_LETTER_RE = re.compile(r"[A-Z]")
+
+
+def normalize_cadastral_ref(value: str | None) -> str | None:
+    """Upper-case and strip a cadastral reference, or return None if implausible.
+
+    Rejects to None rather than raising, deliberately: an unparseable
+    reference is missing enrichment, not a broken listing, and failing the
+    whole ingest over it would lose real data to protect an optional field.
+    Contrast `operation`, which raises — a wrong sale/rent value is worse
+    than no value, because it silently misclassifies the listing.
+    """
+    if value is None:
+        return None
+    normalized = re.sub(r"\s+", "", value).upper()
+    if not normalized:
+        return None
+    if (
+        not _CADASTRAL_REF_RE.match(normalized)
+        or not _HAS_DIGIT_RE.search(normalized)
+        or not _HAS_LETTER_RE.search(normalized)
+    ):
+        logger.warning(
+            "Discarding implausible cadastral_ref %r (expected 20 alphanumeric "
+            "chars with at least one digit and one letter); it would otherwise "
+            "merge unrelated properties at confidence 1.000",
+            value,
+        )
+        return None
+    return normalized
+
 
 # Passed to discover()/fetch_detail() so a connector that makes more than one
 # real network request per call (e.g. paginating inside discover()) can
@@ -150,6 +210,15 @@ class CanonicalListingVersion:
     # reason as the other superset fields above: existing connectors/tests
     # don't need updating for this dataclass shape to gain the field.
     reference_code: str | None = None
+    # Spanish cadastral reference (`referencia catastral`) — property-level,
+    # unlike reference_code above, and the dedup engine's *definitive*
+    # signal rather than a probabilistic one (issue #1 §6 signal 1). Only
+    # servicer/REO portals tend to publish it: they hold the asset and so
+    # have the registry data, whereas a consumer portal re-listing someone
+    # else's property does not. Solvia publishes it on every listing;
+    # Vivantial and Servihabitat were both checked and do not (issue #140).
+    # Not unique in the schema — see init.sql's column comment for why.
+    cadastral_ref: str | None = None
 
     def __post_init__(self) -> None:
         if self.operation is not None and self.operation not in _VALID_OPERATIONS:
@@ -157,6 +226,14 @@ class CanonicalListingVersion:
                 f"CanonicalListingVersion.operation must be one of "
                 f"{_VALID_OPERATIONS} or None, got {self.operation!r}"
             )
+        # Centralised here rather than per-connector so every connector in
+        # the #132 servicer batch inherits the guard automatically — those
+        # are exactly the portals that publish a cadastral reference, and
+        # so exactly the ones that could publish a placeholder instead.
+        # frozen=True, hence object.__setattr__.
+        object.__setattr__(
+            self, "cadastral_ref", normalize_cadastral_ref(self.cadastral_ref)
+        )
 
 
 class ConnectorError(Exception):

@@ -32,7 +32,8 @@ $$;
 
 CREATE TABLE IF NOT EXISTS property (
     id             BIGSERIAL    PRIMARY KEY,
-    cadastral_ref  TEXT         UNIQUE,
+    -- Deliberately NOT UNIQUE — see the ALTER + index below for why.
+    cadastral_ref  TEXT,
     address        TEXT,
     lat            NUMERIC(9,6),
     lon            NUMERIC(9,6),
@@ -50,6 +51,39 @@ CREATE TABLE IF NOT EXISTS property (
 );
 
 CREATE INDEX IF NOT EXISTS idx_property_lat_lon ON property (lat, lon);
+
+-- `cadastral_ref` was originally UNIQUE (task 1.2), on the intuitive
+-- reasoning that a cadastral reference identifies exactly one real
+-- property. That intuition is right about the *world* and wrong about
+-- *this table*: `property` rows are created one-per-listing at ingest
+-- (see docs/architecture/data-model.md), so the same real flat listed on
+-- two portals legitimately produces two `property` rows — and if both
+-- sources publish the reference, both rows carry it.
+--
+-- UNIQUE therefore made the highest-confidence dedup signal
+-- (etl/dedup/signals/cadastral.py, issue #1 §6 signal 1) structurally
+-- unreachable: it exists to detect exactly the two-rows-same-ref state the
+-- constraint forbade, so it could never fire by construction. Worse, the
+-- second ingest raised a property-level UniqueViolation that the
+-- listing-level handler in orchestrator.py mis-attributed.
+--
+-- UNIQUE dropped in favour of a plain index (issue #140): it made signal 1
+-- structurally unreachable, since two property rows sharing a reference —
+-- the exact state the signal detects and merges — could never exist.
+-- Deduplication is the engine's job, enforced by merging rows, not by
+-- rejecting inserts. DROP/CREATE rather than editing the CREATE TABLE
+-- above, which is a no-op on an already-migrated database — same reasoning
+-- as the other post-hoc migrations in this file.
+--
+-- The index is *not* read by the dedup engine: fetch_listing_records()
+-- full-scans the candidate set with no predicate on this column. It exists
+-- for operator lookups ("which property is 9872023VH5797S0001WX?") and for
+-- any future targeted query. Partial to match idx_listing_reference_code
+-- and because the column is NULL for every consumer-portal listing —
+-- only servicer/REO portals publish a reference at all.
+ALTER TABLE property DROP CONSTRAINT IF EXISTS property_cadastral_ref_key;
+CREATE INDEX IF NOT EXISTS idx_property_cadastral_ref ON property (cadastral_ref)
+    WHERE cadastral_ref IS NOT NULL;
 
 -- Keeps property.updated_at accurate without every writer having to
 -- remember to set it (e.g. task 2.2's dedup merges, task 4.x's AI fields

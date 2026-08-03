@@ -9,6 +9,7 @@ municipality's search page. No network access is needed to run these.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import pathlib
 import re
@@ -152,10 +153,15 @@ class TestNormalize:
         """The headline reason this source matters (issue #1 §6 signal 1).
 
         #42 was cancelled assuming no portal would publish this; Solvia does,
-        on every listing spot-checked during the spike.
+        on every listing spot-checked during the spike. Now lands on the
+        canonical field rather than `raw_extra` (issue #140 wired the column
+        through), so it actually reaches the dedup engine.
         """
         c = self._normalized()
-        assert c.raw_extra["cadastral_ref"] == "3061226YH0036S0007SM"
+        assert c.cadastral_ref == "3061226YH0036S0007SM"
+        assert "cadastral_ref" not in c.raw_extra, (
+            "should live on the canonical field now, not duplicated in raw_extra"
+        )
 
     def test_carrying_costs_reach_raw_extra_for_phase_5(self):
         c = self._normalized()
@@ -388,6 +394,58 @@ class TestDatabaseRoundTrip:
         assert source == "solvia"
         assert external_id == "220640-267805"
         assert operation == "sale"
+
+    def test_cadastral_ref_reaches_the_property_column(self, pg_conn):
+        """Issue #140: the value must land in the column the dedup engine reads.
+
+        It previously stopped at `raw_extra` — `CanonicalListingVersion` had
+        no field for it and neither SQL path wrote it — so the highest-
+        confidence dedup signal could never fire no matter what Solvia
+        published. A `normalize()`-only assertion cannot catch that class of
+        break, which is exactly why this is a round-trip.
+        """
+        self._persist(pg_conn)
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "SELECT p.cadastral_ref FROM listing l "
+                "JOIN property p ON p.id = l.property_id WHERE l.source = 'solvia'"
+            )
+            (cadastral_ref,) = cur.fetchone()
+        assert cadastral_ref == "3061226YH0036S0007SM"
+
+    def test_re_ingest_preserves_cadastral_ref(self, pg_conn):
+        """COALESCE discipline: a later fetch that omits it must not blank it.
+
+        Matters once dedup points two listings at one property — a re-visit
+        of the source that doesn't publish a reference must not erase what
+        the other source contributed.
+        """
+        self._persist(pg_conn)
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "SELECT p.id FROM listing l JOIN property p ON p.id = l.property_id "
+                "WHERE l.source = 'solvia'"
+            )
+            (property_id,) = cur.fetchone()
+
+        connector = SolviaConnector()
+        with patch(
+            "etl.connectors.solvia.requests.get",
+            return_value=_mock_response(_read("solvia_sample_detail.html")),
+        ):
+            raw = connector.fetch_detail("220640-267805", throttle=_noop_throttle)
+        canonical = connector.normalize(raw)
+        _upsert_canonical_listing(
+            pg_conn, dataclasses.replace(canonical, cadastral_ref=None)
+        )
+        pg_conn.commit()
+
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "SELECT cadastral_ref FROM property WHERE id = %s", (property_id,)
+            )
+            (cadastral_ref,) = cur.fetchone()
+        assert cadastral_ref == "3061226YH0036S0007SM"
 
     def test_re_ingest_updates_in_place_rather_than_duplicating(self, pg_conn):
         """The stable numeric external_id is what makes this hold.

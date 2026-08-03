@@ -11,9 +11,11 @@ from __future__ import annotations
 from decimal import Decimal
 from pathlib import Path
 
-import psycopg2
 import pytest
 
+from etl import orchestrator
+from etl.connectors import base
+from etl.connectors.base import CanonicalListingVersion
 from etl.dedup import engine
 from etl.dedup.engine import _PhotoHashCache
 from etl.dedup.types import ListingRecord
@@ -169,21 +171,10 @@ def _record(listing_id: int, property_id: int, **overrides) -> ListingRecord:
 
 class TestCadastralExactMatch:
     def test_cadastral_exact_match_merges(self):
-        """EC-2, tested at the signal-dispatch level (in-memory ListingRecords),
-        not as a full DB round-trip.
+        """EC-2 at the signal-dispatch level (in-memory ListingRecords).
 
-        `property.cadastral_ref` is UNIQUE (task 1.2's schema) — correctly,
-        since a cadastral reference is meant to identify exactly one
-        property. That means two *different* property rows can never
-        actually hold the same cadastral_ref in the database at once: the
-        very scenario this signal is meant to detect (two independently-
-        created property rows that turn out to share a cadastral_ref) is
-        schema-unreachable as things stand. Nothing in this project
-        populates cadastral_ref today anyway (see cadastral.py's module
-        docstring and issue #42) — this test proves the signal's own
-        matching logic is correct in isolation; the other EC tests below use
-        phone+corroboration for their real DB-round-trip merge scenarios,
-        since that path is actually reachable with this project's data.
+        Complemented by the DB round-trip below — this one isolates the
+        matching logic itself.
         """
         a = _record(1, 100, cadastral_ref="1234567AB1234C0001AB")
         b = _record(2, 200, cadastral_ref="1234567AB1234C0001AB")
@@ -192,20 +183,163 @@ class TestCadastralExactMatch:
         assert evaluation.confidence == Decimal("1.000")
         assert evaluation.decision == "merge"
 
-    def test_cadastral_ref_unique_constraint_makes_ec2_db_scenario_unreachable(
-        self, dedup_db
-    ):
-        """Pins the claim the docstring above makes: if this UNIQUE constraint
-        is ever dropped from the schema, this test starts failing loudly
-        (a second insert would silently succeed instead of raising), which
-        is the signal that EC-2's real scenario has become reachable again
-        and this whole class's signal-dispatch-only testing approach should
-        be revisited — rather than that gap staying silent forever.
+    def test_two_property_rows_may_share_a_cadastral_ref(self, dedup_db):
+        """The schema must *permit* the state this signal exists to detect.
+
+        Replaces a test that asserted the opposite. `property.cadastral_ref`
+        was UNIQUE (task 1.2), on the intuitive reasoning that a cadastral
+        reference identifies exactly one real property — true of the world,
+        false of this table, because `property` rows are created one per
+        listing at ingest. The same flat on two portals legitimately yields
+        two rows, and if both sources publish the reference, both carry it.
+
+        UNIQUE therefore made signal 1 unreachable by construction: it
+        detects two-rows-same-ref, which the constraint forbade. Issue #140
+        dropped it for a plain index. If someone reintroduces UNIQUE, this
+        test fails loudly rather than the signal silently going dark again.
         """
-        _insert_property(dedup_db, cadastral_ref="1234567AB1234C0001AB")
-        with pytest.raises(psycopg2.errors.UniqueViolation):
-            _insert_property(dedup_db, cadastral_ref="1234567AB1234C0001AB")
-        dedup_db.rollback()
+        first = _insert_property(dedup_db, cadastral_ref="1234567AB1234C0001AB")
+        second = _insert_property(dedup_db, cadastral_ref="1234567AB1234C0001AB")
+        assert first != second
+
+    def test_cross_source_cadastral_match_auto_merges_end_to_end(self, dedup_db):
+        """The acceptance criterion that matters (#140): the signal fires for real.
+
+        Two listings from different sources, no other corroborating signal —
+        different addresses, no coordinates, no shared phone, no shared
+        reference code, materially different sizes and prices. Only the
+        cadastral reference ties them together, so a merge here can only
+        have come from signal 1.
+        """
+        _insert_pair(
+            dedup_db,
+            "solvia",
+            "servihabitat",
+            "cadastral-cross-source",
+            cadastral_ref_a="3061226YH0036S0007SM",
+            cadastral_ref_b="3061226YH0036S0007SM",
+            address_a="Calle Mayor 1",
+            address_b="C/ Mayor nº1, esc. 2",
+            m2_built_a=Decimal(80),
+            m2_built_b=Decimal(95),
+            current_price_a=Decimal(230000),
+            current_price_b=Decimal(219000),
+        )
+
+        result = engine.run(dedup_db)
+
+        assert result.merged == 1
+        assert result.suggested == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT match_basis, confidence FROM property_merge_log "
+                "ORDER BY created_at DESC LIMIT 1"
+            )
+            basis, confidence = cur.fetchone()
+            assert basis == "cadastral"
+            assert confidence == Decimal("1.000")
+            # Both listings now hang off one surviving property row.
+            cur.execute(
+                "SELECT COUNT(DISTINCT property_id) FROM listing "
+                "WHERE source IN ('solvia', 'servihabitat')"
+            )
+            assert cur.fetchone()[0] == 1
+
+    @pytest.mark.parametrize(
+        "placeholder",
+        [
+            "N/A",
+            "-",
+            "00000000000000000000",
+            "AAAAAAAAAAAAAAAAAAAA",
+            "sin referencia",
+            "  ",
+        ],
+    )
+    def test_placeholder_refs_ingested_for_real_do_not_merge(
+        self, dedup_db, placeholder
+    ):
+        """The counterweight to the test above (#154 review, finding 3).
+
+        Signal 1 merges at confidence 1.000 — the one level that bypasses
+        every corroboration rule the weaker signals have. #140 dropped the
+        UNIQUE on `property.cadastral_ref`, and with it the accident that
+        made mass-collision impossible, so a portal publishing the same
+        placeholder on every listing would union its entire inventory into
+        one property.
+
+        Deliberately ingested through `_upsert_canonical_listing` rather
+        than `_insert_pair`: the guard lives in
+        `CanonicalListingVersion.__post_init__`, so seeding the rows
+        directly would bypass the very thing under test and pass whether
+        or not it works. `00000000000000000000` and the all-A variant are
+        the interesting cases — both are twenty alphanumeric characters, so
+        a length-and-charset check alone passes them. The first version of
+        this fix did exactly that, and this test is what caught it.
+        """
+        for i, source in enumerate(("solvia", "servihabitat")):
+            orchestrator._upsert_canonical_listing(
+                dedup_db,
+                CanonicalListingVersion(
+                    external_id=f"placeholder-{i}",
+                    source=source,
+                    url=f"https://example.test/placeholder-{i}",
+                    listing_kind="particular",
+                    status="active",
+                    current_price=Decimal(200000 + i * 45000),
+                    description=f"listing {i}",
+                    photo_urls=(),
+                    contact_raw=None,
+                    address=f"Calle Distinta {i}",
+                    lat=None,
+                    lon=None,
+                    property_type="piso",
+                    m2_built=Decimal(70 + i * 30),
+                    m2_useful=None,
+                    rooms=None,
+                    bathrooms=None,
+                    floor=None,
+                    has_elevator=None,
+                    year_built=None,
+                    energy_rating=None,
+                    cadastral_ref=placeholder,
+                ),
+            )
+
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM property WHERE cadastral_ref IS NOT NULL")
+            assert cur.fetchone()[0] == 0, (
+                f"{placeholder!r} must be rejected to NULL before it is stored"
+            )
+
+        result = engine.run(dedup_db)
+
+        assert result.merged == 0
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM property_merge_log")
+            assert cur.fetchone()[0] == 0
+            cur.execute(
+                "SELECT COUNT(DISTINCT property_id) FROM listing "
+                "WHERE source IN ('solvia', 'servihabitat')"
+            )
+            assert cur.fetchone()[0] == 2, "unrelated properties must stay separate"
+
+    def test_a_genuine_ref_still_survives_normalization(self):
+        """Guards the other direction: the check must not eat real data.
+
+        Lower case and stray whitespace are how a real reference arrives
+        from a portal that pretty-prints it; rejecting those would silently
+        disable signal 1 for the servicer batch (#132) — the failure mode
+        that is invisible because it looks exactly like "no duplicates".
+        """
+        assert (
+            base.normalize_cadastral_ref("  9872023vh5797s0001wx  ")
+            == "9872023VH5797S0001WX"
+        )
+        assert base.normalize_cadastral_ref("9872023 VH5797 S0001 WX") == (
+            "9872023VH5797S0001WX"
+        )
+        assert base.normalize_cadastral_ref(None) is None
 
 
 class TestPhoneSignal:
