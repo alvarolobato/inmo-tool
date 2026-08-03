@@ -2,6 +2,19 @@ import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import path from "path";
 
+// Node 22+ ships an experimental global `localStorage`/`sessionStorage` (flag
+// `--experimental-webstorage`, on by default). It installs a lazy accessor on
+// `globalThis` that jsdom's own `window.localStorage` cannot override, so
+// every jsdom-environment test sees `localStorage === undefined` (with a
+// noisy "--localstorage-file was not provided" warning) instead of jsdom's
+// working in-memory Storage. Disabling the Node feature for the worker
+// processes vitest forks restores jsdom's implementation. Set here (not in
+// package.json's test script) so it applies uniformly regardless of how
+// vitest is invoked (npm test, npx vitest, CI, watch mode).
+process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, "--no-experimental-webstorage"]
+  .filter(Boolean)
+  .join(" ");
+
 export default defineConfig({
   plugins: [react()],
   resolve: {
