@@ -53,7 +53,7 @@ import { sql } from "@/lib/db-write";
 import { extractRedFlags } from "@/lib/llm";
 import type { LlmAgenticContext } from "@/lib/llm-tools/types";
 import { NoListingsError, loadPropertyListings, clamp01, stripCodeFence } from "./shared";
-import { getOrCompute, getLatestAssessment, type CachedAssessment } from "./cache";
+import { getOrCompute, getLatestAssessment, logCacheOutcome, type CachedAssessment } from "./cache";
 
 export { NoListingsError, loadPropertyListings };
 
@@ -228,7 +228,7 @@ export async function assessPropertyRedFlags(
   const listings = await loadPropertyListings(propertyId);
   if (listings.length === 0) throw new NoListingsError(propertyId);
 
-  const { result } = await getOrCompute<RedFlagsResult>(
+  const { result, fromCache } = await getOrCompute<RedFlagsResult>(
     propertyId,
     "redflags",
     REDFLAGS_PROMPT_VERSION,
@@ -239,5 +239,6 @@ export async function assessPropertyRedFlags(
     },
     saveRedFlagsAssessment,
   );
+  logCacheOutcome("redflags", propertyId, fromCache);
   return result;
 }

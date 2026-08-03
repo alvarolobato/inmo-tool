@@ -38,7 +38,7 @@ import {
   parseVerdict,
   stripCodeFence,
 } from "./shared";
-import { getOrCompute, getLatestAssessment, type CachedAssessment } from "./cache";
+import { getOrCompute, getLatestAssessment, logCacheOutcome, type CachedAssessment } from "./cache";
 
 export { NoListingsError, loadPropertyListings };
 
@@ -202,7 +202,7 @@ export async function assessPropertyCondition(
   const listings = await loadPropertyListings(propertyId);
   if (listings.length === 0) throw new NoListingsError(propertyId);
 
-  const { result } = await getOrCompute<ConditionResult>(
+  const { result, fromCache } = await getOrCompute<ConditionResult>(
     propertyId,
     "condition",
     CONDITION_PROMPT_VERSION,
@@ -213,5 +213,6 @@ export async function assessPropertyCondition(
     },
     saveConditionAssessment,
   );
+  logCacheOutcome("condition", propertyId, fromCache);
   return result;
 }

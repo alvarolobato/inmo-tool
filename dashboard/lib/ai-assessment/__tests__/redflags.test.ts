@@ -177,3 +177,24 @@ describe("prompt version", () => {
     expect(REDFLAGS_PROMPT_VERSION).toBe("redflags/v1");
   });
 });
+
+describe("redflags prompt — hash-scoped fields are invisible (#30 review, must-fix 1)", () => {
+  it("never emits precio_eur, m2_construidos, habitaciones, banos, planta, or num_fotos — price is a canonical red-flag signal that must not silently survive a stale cache hit", () => {
+    const withStructuredFields: ListingSnapshot = {
+      ...SILENT_ADVERT,
+      price: 90000,
+      m2Built: 90,
+      rooms: 3,
+      bathrooms: 2,
+      floor: "3",
+      photoUrls: ["a.jpg"],
+    };
+    const text = redflagsPromptText([withStructuredFields]);
+    expect(text).not.toContain("precio_eur");
+    expect(text).not.toContain("m2_construidos");
+    expect(text).not.toContain("habitaciones:");
+    expect(text).not.toContain("banos:");
+    expect(text).not.toContain("planta:");
+    expect(text).not.toContain("num_fotos");
+  });
+});

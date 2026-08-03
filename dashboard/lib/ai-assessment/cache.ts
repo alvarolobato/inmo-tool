@@ -29,8 +29,6 @@
  *   - a listing leaving (withdrawn, re-split)  → the SET changes  → miss
  *   - a price change, a `last_seen_at` bump, a status flip between two
  *     non-`active` states, a photo added        → NOT in the hash → HIT
- *     (deliberately: none of these are read by occupancy/condition/redflags/
- *     extract's prompts, so recomputing on them would only burn budget)
  *
  * This is why there is no hook into `etl/orchestrator.py` here (and #30's own
  * "eager vs. lazy" question is answered as **lazy**, per the issue's own
@@ -40,6 +38,45 @@
  * are explicitly another workstream's surface for this change; a
  * content-hash comparison computed on read sidesteps needing to touch them
  * at all, which is a feature of this design, not a limitation of it.
+ *
+ * ## Corrected: what the model is actually shown (#30 review, must-fix 1)
+ *
+ * An earlier version of this doc justified excluding price/m²/rooms/baths/
+ * floor/photo-count from the hash by claiming "none of those are shown to
+ * the model by `propertyVolatile()`". **That was false** — `formatListing`
+ * (`llm-context/system-prompt.ts`) emitted every one of them, so a price cut,
+ * a photo added, or a connector filling in `rooms` changed what the model
+ * read while leaving the hash — and therefore the cached verdict — untouched.
+ * For occupancy/redflags that meant a stale verdict surviving a price change
+ * that is itself a canonical red-flag signal; for extract it meant an
+ * extraction the flow will now never refresh, because the very fields it
+ * exists to fill are the ones silently excluded from invalidation.
+ *
+ * Issue #30's EC-3 is explicit and binding: "a connector update that only
+ * changes `current_price` does NOT invalidate" — so the *hash exclusion* is
+ * issue-sanctioned, not a bug. The bug was that the code showed the model an
+ * input the invalidation key ignores. Two resolutions were available: (a)
+ * stop showing the model the excluded fields, or (b) extend the hash to
+ * cover them. (b) is foreclosed by EC-3 for price specifically (a real test,
+ * `cache.test.ts`'s `"content-hash invalidation is field-scoped"`, pins price
+ * to NOT invalidate) — so this fix takes (a): `formatListing` now takes a
+ * `hashCoveredOnly` flag, and every property-level (cached) flow's
+ * `propertyVolatile()` passes it. With it set, only fields whose changes
+ * `computeAssessmentContentHash` actually tracks — listing id, portal,
+ * operation, property type, description, plus static location/build fields
+ * that were already visible to `loadPropertyListings` and are not flagged as
+ * connector-mutable — are rendered; price, m² built/useful, rooms,
+ * bathrooms, floor, and photo count are omitted outright. The model
+ * genuinely cannot read what the hash cannot see, so "the hash ignores X" and
+ * "the prompt doesn't show X" are now the same fact instead of one being a
+ * claim about the other. `buildComparePrompt` (#38, never cached) keeps
+ * calling `formatListing` without the flag — full fields, as before — since
+ * nothing there is gated by this cache.
+ *
+ * Occupancy's prompt used to name price explicitly as an occupancy signal
+ * ("precio muy por debajo de mercado sin explicación") — removed from
+ * `buildOccupancyPrompt` for the same reason: instructing the model to weigh
+ * a field it is no longer shown would be actively misleading.
  *
  * ## `prompt_version` (the versioning question)
  *
@@ -51,9 +88,21 @@
  * the old prompt produced. The old row is left in place, not deleted — see
  * `getLatestAssessment`'s doc for what "stays visible, but marked stale" means
  * for a row nobody has refreshed since a version bump.
+ *
+ * ## Stampede guard (#30 review, "also fix")
+ *
+ * Confirmed empirically: two concurrent `getOrCompute` calls for the same
+ * `(propertyId, assessmentType)` both missed and both called the LLM — a
+ * plain read-then-write with no lock in between has no way to notice the
+ * other request is already mid-flight. `getOrCompute` now serializes on a
+ * Postgres session-level advisory lock keyed on exactly that pair (see
+ * `withAdvisoryLock`), held for the FULL duration of the check-compute-save
+ * cycle, so a second caller blocks until the first has both computed AND
+ * persisted, then takes the fast cache-hit path instead of also calling the
+ * LLM. A double-click no longer doubles spend.
  */
 
-import { sql } from "@/lib/db-write";
+import { sql, getPool } from "@/lib/db-write";
 import { createHash } from "node:crypto";
 import type { ListingSnapshot } from "@/lib/llm-context";
 
@@ -66,11 +115,15 @@ export type AssessmentType = "occupancy" | "condition" | "redflags" | "extract";
  * SET of listings is part of the hash, not just their text) and description.
  *
  * Deliberately excludes price, status transitions between non-active states,
- * photo_urls, and every other listing/property column — none of those are
- * shown to the model by `propertyVolatile()` (system-prompt.ts), so including
- * them would invalidate on changes the flows never actually see (issue #30
- * EC-3's explicit "a connector update that only changes `current_price` does
- * NOT invalidate" requirement).
+ * photo_urls, and every other listing/property column — issue #30 EC-3
+ * requires it for price specifically ("a connector update that only changes
+ * `current_price` does NOT invalidate"), generalised here to every field in
+ * that category. This is now true BY CONSTRUCTION, not by claim:
+ * `system-prompt.ts`'s `formatListing(..., { hashCoveredOnly: true })` —
+ * what every cached flow's `propertyVolatile()` renders — omits precisely
+ * these fields, so there is no field left that the model can see and this
+ * hash can't. See this file's module doc, "Corrected: what the model is
+ * actually shown", for the full history of why that wasn't true before.
  *
  * Sorted by listing id before hashing so the hash is independent of the
  * (newest-first) order `loadPropertyListings` returns rows in — that order
@@ -144,6 +197,57 @@ export async function getLatestAssessment<T>(
 }
 
 /**
+ * Serializes concurrent `getOrCompute` calls for the same `key` on a
+ * Postgres session-level advisory lock (#30 review, stampede fix).
+ *
+ * Deliberately `pg_advisory_lock`/`pg_advisory_unlock` on a DEDICATED client
+ * held for the full duration of `fn` — not `pg_advisory_xact_lock` inside a
+ * `BEGIN`/`COMMIT` — because `fn` here spans an LLM network call that can run
+ * many seconds, and holding a transaction open (idle-in-transaction) for
+ * that long risks table/index bloat on `ai_assessment` for every concurrent
+ * caller, which is worse than one held connection doing nothing but holding
+ * a lock. `hashtext()` folds the string key to a 32-bit int; cast to bigint
+ * for the single-argument overload of `pg_advisory_lock`. `hashtext` is a
+ * pure function of its input, so the lock/unlock calls always agree on the
+ * key even though they're computed twice.
+ */
+async function withAdvisoryLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const client = await getPool().connect();
+  try {
+    await client.query("SELECT pg_advisory_lock(hashtext($1)::bigint)", [key]);
+    try {
+      return await fn();
+    } finally {
+      await client.query("SELECT pg_advisory_unlock(hashtext($1)::bigint)", [key]);
+    }
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Cost-visibility log line (#30 review, "also fix": `fromCache` was computed
+ * by `getOrCompute` and then discarded by all four `assessProperty*`
+ * callers — for a cost-control feature, "did this POST spend money" is the
+ * one number worth knowing per call). Every flow's `assessProperty*` calls
+ * this right after `getOrCompute` returns, so grepping `[ai-assessment]` in
+ * the server log gives cache-hit-rate/spend visibility without instrumenting
+ * four call sites by hand or changing any of their return shapes (which
+ * several integration tests destructure directly, e.g.
+ * `result.condition`/`outcome.result.rooms`).
+ */
+export function logCacheOutcome(
+  assessmentType: AssessmentType,
+  propertyId: number,
+  fromCache: boolean,
+): void {
+  // eslint-disable-next-line no-console
+  console.log(
+    `[ai-assessment] property=${propertyId} type=${assessmentType} from_cache=${fromCache}`,
+  );
+}
+
+/**
  * The #30 wrapper: check cache, call the LLM only on a genuine miss.
  *
  * A HIT requires ALL of:
@@ -159,6 +263,11 @@ export async function getLatestAssessment<T>(
  * On a miss, `computeFn` runs (the real LLM call), then `save` persists the
  * result together with the freshly computed hash — so the NEXT call for the
  * same unchanged property is a hit.
+ *
+ * The whole check-compute-save cycle runs inside `withAdvisoryLock`, keyed
+ * on `(propertyId, assessmentType)`, so two concurrent calls for the same key
+ * can't both observe a miss and both call the LLM (#30 review, confirmed
+ * empirically) — the second blocks until the first has saved, then hits.
  */
 export async function getOrCompute<T>(
   propertyId: number,
@@ -174,18 +283,22 @@ export async function getOrCompute<T>(
   ) => Promise<void>,
 ): Promise<{ result: T; model: string | null; fromCache: boolean }> {
   const contentHash = computeAssessmentContentHash(listings);
-  const cached = await getLatestAssessment<T>(propertyId, assessmentType, promptVersion);
+  const lockKey = `ai_assessment:${propertyId}:${assessmentType}`;
 
-  if (
-    cached &&
-    !cached.stale &&
-    cached.content_hash !== null &&
-    cached.content_hash === contentHash
-  ) {
-    return { result: cached.result, model: cached.model, fromCache: true };
-  }
+  return withAdvisoryLock(lockKey, async () => {
+    const cached = await getLatestAssessment<T>(propertyId, assessmentType, promptVersion);
 
-  const { result, model } = await computeFn();
-  await save(propertyId, result, model, contentHash);
-  return { result, model, fromCache: false };
+    if (
+      cached &&
+      !cached.stale &&
+      cached.content_hash !== null &&
+      cached.content_hash === contentHash
+    ) {
+      return { result: cached.result, model: cached.model, fromCache: true };
+    }
+
+    const { result, model } = await computeFn();
+    await save(propertyId, result, model, contentHash);
+    return { result, model, fromCache: false };
+  });
 }

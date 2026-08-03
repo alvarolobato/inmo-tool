@@ -313,4 +313,56 @@ describe.runIf(dbAvailable)("assessment cache — real Postgres round trip", () 
       expect(Number(rows[0].n)).toBe(2);
     });
   });
+
+  it("stampede guard: two concurrent getOrCompute calls for the same key produce exactly ONE LLM call (#30 review, also-fix)", async () => {
+    // This is a real-DB-only claim by nature: the advisory lock IS a Postgres
+    // feature, so cache.test.ts's mocked `sql` cannot exercise it — only this
+    // integration test can prove two truly concurrent calls serialize instead
+    // of both observing a miss (confirmed empirically as broken before this
+    // fix: `getOrCompute` was a plain read-then-write with no lock at all).
+    await withRealDb(async (pool) => {
+      const propertyId = await seedProperty(pool);
+      const listings: ListingSnapshot[] = [
+        { listingId: 1, description: "a reformar, necesita instalaciones" },
+      ];
+      let callCount = 0;
+      const computeFn = vi.fn().mockImplementation(async () => {
+        callCount++;
+        // Simulate LLM latency so both concurrent calls are genuinely
+        // in-flight at once, not accidentally serialized by Node's own
+        // single-threaded event loop finishing the first call instantly.
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        return { result: parseConditionResult(A_REFORMAR), model: "test-model" };
+      });
+
+      const [a, b] = await Promise.all([
+        getOrCompute(
+          propertyId,
+          "condition",
+          CONDITION_PROMPT_VERSION,
+          listings,
+          computeFn,
+          saveConditionAssessment,
+        ),
+        getOrCompute(
+          propertyId,
+          "condition",
+          CONDITION_PROMPT_VERSION,
+          listings,
+          computeFn,
+          saveConditionAssessment,
+        ),
+      ]);
+
+      expect(callCount).toBe(1); // the whole point of the lock
+      expect([a.fromCache, b.fromCache].sort()).toEqual([false, true]);
+
+      const { rows } = await pool.query<{ n: string }>(
+        `SELECT COUNT(*) AS n FROM ai_assessment
+          WHERE property_id = $1 AND assessment_type = 'condition'`,
+        [propertyId],
+      );
+      expect(Number(rows[0].n)).toBe(1);
+    });
+  });
 });

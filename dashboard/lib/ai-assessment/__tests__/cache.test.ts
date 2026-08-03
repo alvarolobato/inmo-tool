@@ -12,8 +12,20 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 const mockSql = vi.fn();
+// getOrCompute now wraps its check-compute-save cycle in a Postgres advisory
+// lock (#30 review, stampede fix) via a DEDICATED client from `getPool()` —
+// separate from `sql()`'s pool.query() path. This module has no real DB, so
+// `getPool().connect()` is mocked to return a stub client whose `query()`
+// (the `pg_advisory_lock`/`_unlock` calls) resolves immediately: these tests
+// are about the cache decision logic, not about the lock itself (that's
+// cache.integration.test.ts's job, since an advisory lock is a genuine
+// Postgres feature no mock can meaningfully fake).
+const mockClientQuery = vi.fn().mockResolvedValue({ rows: [] });
+const mockRelease = vi.fn();
+const mockConnect = vi.fn().mockResolvedValue({ query: mockClientQuery, release: mockRelease });
 vi.mock("@/lib/db-write", () => ({
   sql: (...a: unknown[]) => mockSql(...a),
+  getPool: () => ({ connect: mockConnect }),
 }));
 
 import { getOrCompute, getLatestAssessment, computeAssessmentContentHash } from "../cache";
@@ -32,6 +44,9 @@ function row(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   mockSql.mockReset();
+  mockClientQuery.mockClear();
+  mockRelease.mockClear();
+  mockConnect.mockClear();
 });
 
 describe("computeAssessmentContentHash", () => {
@@ -194,5 +209,25 @@ describe("getOrCompute", () => {
     const result = await getOrCompute(1, "condition", "v1", listings, computeFn, save);
     expect(result.fromCache).toBe(false);
     expect(computeFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("acquires and releases the advisory lock keyed on (propertyId, assessmentType), then releases the client back (#30 review, stampede fix)", async () => {
+    mockSql.mockResolvedValueOnce([]);
+    const computeFn = vi.fn().mockResolvedValue({ result: { v: 1 }, model: "m1" });
+    const save = vi.fn().mockResolvedValue(undefined);
+
+    await getOrCompute(7, "redflags", "v1", listings, computeFn, save);
+
+    expect(mockConnect).toHaveBeenCalledTimes(1);
+    expect(mockClientQuery).toHaveBeenCalledTimes(2); // lock, then unlock
+    const [lockSql, lockParams] = mockClientQuery.mock.calls[0];
+    const [unlockSql, unlockParams] = mockClientQuery.mock.calls[1];
+    expect(lockSql).toContain("pg_advisory_lock");
+    expect(unlockSql).toContain("pg_advisory_unlock");
+    // Same key material passed to both, so lock and unlock hash identically.
+    expect(lockParams).toEqual(unlockParams);
+    expect(lockParams[0]).toContain("7");
+    expect(lockParams[0]).toContain("redflags");
+    expect(mockRelease).toHaveBeenCalledTimes(1);
   });
 });

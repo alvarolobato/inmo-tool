@@ -42,7 +42,7 @@ import {
   stripCodeFence,
   type Verdict,
 } from "./shared";
-import { getOrCompute, getLatestAssessment, type CachedAssessment } from "./cache";
+import { getOrCompute, getLatestAssessment, logCacheOutcome, type CachedAssessment } from "./cache";
 
 // Re-exported so existing imports (`from "../occupancy"`, including this
 // flow's own tests) keep working unchanged now that the property-loading and
@@ -353,7 +353,7 @@ export async function assessPropertyOccupancy(
   const listings = await loadPropertyListings(propertyId);
   if (listings.length === 0) throw new NoListingsError(propertyId);
 
-  const { result } = await getOrCompute<OccupancyResult>(
+  const { result, fromCache } = await getOrCompute<OccupancyResult>(
     propertyId,
     "occupancy",
     OCCUPANCY_PROMPT_VERSION,
@@ -364,5 +364,6 @@ export async function assessPropertyOccupancy(
     },
     saveOccupancyAssessment,
   );
+  logCacheOutcome("occupancy", propertyId, fromCache);
   return result;
 }

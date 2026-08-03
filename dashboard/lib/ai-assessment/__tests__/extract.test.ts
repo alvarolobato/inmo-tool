@@ -15,6 +15,7 @@ import {
   summaryConfidence,
   EXTRACT_PROMPT_VERSION,
   EXTRACT_FIELDS,
+  GATING_FIELDS,
   type PropertyStructuredFields,
 } from "../extract";
 
@@ -39,10 +40,20 @@ function extractPromptText(listings: ListingSnapshot[]): string {
   return `${stable}\n${volatile ?? ""}`;
 }
 
+/**
+ * A property "complete" for the cost-control GATE (#30 review, must-fix 2):
+ * `m2_useful` stays NULL because no reachable code path can ever set it —
+ * every connector hardcodes it to `None` (fotocasa.py:842, idealista.py:269,
+ * milanuncios.py:436, solvia.py:402, vivantial.py:297, servihabitat.py:429)
+ * and this flow never writes back to `property`. Seeding `m2_useful: 80`
+ * here (the pre-fix version of this test did) exercised a state nothing in
+ * production can produce, which is exactly what let `needsExtraction()`
+ * silently return `true` unconditionally without a red test.
+ */
 function completeFields(): PropertyStructuredFields {
   return {
     m2_built: 90,
-    m2_useful: 80,
+    m2_useful: null,
     rooms: 3,
     bathrooms: 2,
     floor: "2",
@@ -70,6 +81,53 @@ describe("extract prompt — property-level evidence union (#28 moved off listin
   it("asks for per-field confidence, not one scalar", () => {
     const text = extractPromptText([FULL_FACTS_ADVERT]);
     expect(text).toContain("confidence_per_field");
+  });
+});
+
+describe("extract prompt — the fields it extracts are never echoed back to it (#30 review, must-fix 1 + also-fix)", () => {
+  /**
+   * Extract's whole job is to recover m2_construidos/habitaciones/banos/
+   * planta from prose. Before this fix, `propertyVolatile` rendered those
+   * SAME fields straight from `property` alongside the description — so
+   * nothing distinguished "the model read it from the text" from "the model
+   * echoed back what we handed it", and a stale `property` value (never
+   * refreshed because it's excluded from the #30 cache hash) would look like
+   * a correct extraction forever. Now the model genuinely cannot see them.
+   */
+  const listingWithStructuredFields: ListingSnapshot = {
+    propertyId: 21,
+    listingId: 401,
+    source: "milanuncios",
+    operation: "sale",
+    description: "Piso luminoso, particular, consultar detalles.",
+    price: 199000,
+    m2Built: 77,
+    rooms: 2,
+    bathrooms: 1,
+    floor: "1",
+    photoUrls: ["a.jpg"],
+  };
+
+  it("never emits precio_eur, m2_construidos, habitaciones, banos, planta, or num_fotos", () => {
+    const text = extractPromptText([listingWithStructuredFields]);
+    expect(text).not.toContain("precio_eur");
+    expect(text).not.toContain("m2_construidos");
+    expect(text).not.toContain("habitaciones:");
+    expect(text).not.toContain("banos:");
+    expect(text).not.toContain("planta:");
+    expect(text).not.toContain("num_fotos");
+  });
+
+  it("a change in ONLY those fields produces an identical prompt", () => {
+    const changed: ListingSnapshot = {
+      ...listingWithStructuredFields,
+      price: 400000,
+      m2Built: 200,
+      rooms: 9,
+      bathrooms: 9,
+      floor: "ático",
+    };
+    expect(extractPromptText([listingWithStructuredFields])).toBe(extractPromptText([changed]));
   });
 });
 
@@ -139,9 +197,15 @@ describe("parseExtractResult", () => {
   });
 
   it("tolerates a ```json code fence", () => {
+    // Every filled field needs a confidence_per_field entry (must-fix 4
+    // below) — `rooms` is filled here, so it needs one too, not just m2_built.
     const raw =
       "```json\n" +
-      JSON.stringify({ m2_built: 100, rooms: 4, confidence_per_field: { m2_built: 0.8 } }) +
+      JSON.stringify({
+        m2_built: 100,
+        rooms: 4,
+        confidence_per_field: { m2_built: 0.8, rooms: 0.8 },
+      }) +
       "\n```";
     const r = parseExtractResult(raw);
     expect(r.m2_built).toBe(100);
@@ -149,7 +213,9 @@ describe("parseExtractResult", () => {
   });
 
   it("coerces a numeric floor to its string form rather than rejecting it", () => {
-    const r = parseExtractResult(JSON.stringify({ floor: 3 }));
+    const r = parseExtractResult(
+      JSON.stringify({ floor: 3, confidence_per_field: { floor: 0.6 } }),
+    );
     expect(r.floor).toBe("3");
   });
 
@@ -189,10 +255,76 @@ describe("parseExtractResult", () => {
     );
     expect(Object.keys(r.confidence_per_field)).toEqual(["rooms"]);
   });
+
+  describe("plausibility bounds (#30 review, also-fix)", () => {
+    it("rejects a negative m2_built rather than parsing it cleanly", () => {
+      expect(() => parseExtractResult(JSON.stringify({ m2_built: -40 }))).toThrow(
+        /implausible 'm2_built'/,
+      );
+    });
+
+    it("rejects rooms: 0 (no livable unit has zero rooms)", () => {
+      expect(() =>
+        parseExtractResult(JSON.stringify({ rooms: 0, confidence_per_field: { rooms: 0.5 } })),
+      ).toThrow(/implausible 'rooms'/);
+    });
+
+    it("rejects an absurd bathroom count", () => {
+      expect(() =>
+        parseExtractResult(
+          JSON.stringify({ bathrooms: 999, confidence_per_field: { bathrooms: 0.5 } }),
+        ),
+      ).toThrow(/implausible 'bathrooms'/);
+    });
+
+    it("rejects a fractional room count", () => {
+      expect(() =>
+        parseExtractResult(JSON.stringify({ rooms: 3.5, confidence_per_field: { rooms: 0.5 } })),
+      ).toThrow(/non-integer 'rooms'/);
+    });
+
+    it("accepts an ordinary in-range value", () => {
+      const r = parseExtractResult(
+        JSON.stringify({ m2_built: 85, confidence_per_field: { m2_built: 0.9 } }),
+      );
+      expect(r.m2_built).toBe(85);
+    });
+  });
+});
+
+describe("confidence_per_field invariants (#30 review, must-fix 4)", () => {
+  it("drops a confidence entry reported for a field the model left null — does NOT let it inflate summaryConfidence", () => {
+    // Exactly the review's repro case: both data fields are null, but the
+    // model still reported confidences for them. Before the fix this yielded
+    // summaryConfidence 0.85 despite nothing having been extracted.
+    const r = parseExtractResult(
+      JSON.stringify({
+        m2_built: null,
+        rooms: null,
+        confidence_per_field: { rooms: 0.9, m2_built: 0.8 },
+      }),
+    );
+    expect(r.confidence_per_field).toEqual({});
+    expect(summaryConfidence(r)).toBe(0);
+  });
+
+  it("throws when a filled field has no confidence_per_field entry at all", () => {
+    expect(() => parseExtractResult(JSON.stringify({ rooms: 3 }))).toThrow(
+      /filled 'rooms' but provided no confidence_per_field entry/,
+    );
+  });
+
+  it("throws when has_elevator is filled but omitted from confidence_per_field", () => {
+    expect(() =>
+      parseExtractResult(
+        JSON.stringify({ has_elevator: true, confidence_per_field: {} }),
+      ),
+    ).toThrow(/filled 'has_elevator' but provided no confidence_per_field entry/);
+  });
 });
 
 describe("needsExtraction — EC-3 cost-control gating", () => {
-  it("skips extraction when structured data already complete", () => {
+  it("skips extraction when structured data already complete (m2_useful excluded from the gate)", () => {
     expect(needsExtraction(completeFields())).toBe(false);
   });
 
@@ -222,6 +354,27 @@ describe("needsExtraction — EC-3 cost-control gating", () => {
       "floor",
       "has_elevator",
     ]);
+  });
+
+  it("GATING_FIELDS excludes m2_useful — no connector or flow ever writes it, so it must not keep the gate permanently open (#30 review, must-fix 2)", () => {
+    expect(GATING_FIELDS).toEqual(["m2_built", "rooms", "bathrooms", "floor", "has_elevator"]);
+    expect(GATING_FIELDS).not.toContain("m2_useful");
+  });
+
+  it("a property with m2_useful NULL and every other field filled is a reachable state the gate must treat as complete", () => {
+    // Every connector hardcodes m2_useful=None (fotocasa.py:842 et al.) and
+    // this flow never back-writes `property` — this IS what "complete" looks
+    // like on a real row, unlike the old test's m2_useful:80.
+    expect(
+      needsExtraction({
+        m2_built: 90,
+        m2_useful: null,
+        rooms: 3,
+        bathrooms: 2,
+        floor: "2",
+        has_elevator: true,
+      }),
+    ).toBe(false);
   });
 });
 

@@ -55,10 +55,45 @@ const ASSESSMENT_RULES = `Reglas de evaluación (obligatorias):
 4. Responde SOLO con el objeto JSON pedido: sin texto antes ni después, sin
    bloques de código markdown, sin comentarios.`;
 
-/** Serialise a listing for the volatile part of a prompt. */
-function formatListing(l: ListingSnapshot, label = "ANUNCIO"): string {
+/**
+ * Fields deliberately excluded from `computeAssessmentContentHash`
+ * (`lib/ai-assessment/cache.ts`) — price, built/useful m², rooms, bathrooms,
+ * floor, and photo count. Appended to the volatile payload of every cached,
+ * property-level flow so the model is told explicitly why those facts are
+ * absent, rather than silently missing with no explanation — see
+ * `formatListing`'s `hashCoveredOnly` option and cache.ts's module doc
+ * ("Corrected: what the model is actually shown") for the full rationale.
+ */
+const HASH_SCOPE_NOTE =
+  '\n\n(Nota: precio, m² construidos/útiles, habitaciones, baños, planta y ' +
+  "número de fotos no se incluyen aquí a propósito — esta evaluación se cachea " +
+  "por contenido y esos campos no forman parte de esa clave, así que no los " +
+  "uses como señal ni asumas un valor visto en una consulta anterior.)";
+
+/**
+ * Serialise a listing for the volatile part of a prompt.
+ *
+ * `hashCoveredOnly`, when true, omits every field
+ * `computeAssessmentContentHash` (cache.ts) does NOT cover: price, m²
+ * built/useful, rooms, bathrooms, floor, photo count. Every property-level
+ * cached flow (occupancy/condition/redflags/extract, via `propertyVolatile`)
+ * passes it — a cache-invalidation key that ignores a field must never be
+ * paired with a prompt that shows the model that same field, or a genuine
+ * change becomes invisible to the cache while still changing the model's
+ * answer, freezing a stale verdict indefinitely (#30 review finding). `false`
+ * (the default) is for flows the #30 cache doesn't wrap — currently only
+ * `compare` (#38) — where showing the full listing is correct because there
+ * is no cache key that could go stale against it.
+ */
+function formatListing(
+  l: ListingSnapshot,
+  label = "ANUNCIO",
+  opts: { hashCoveredOnly?: boolean } = {},
+): string {
   const field = (k: string, v: unknown): string | null =>
     v === undefined || v === null || v === "" ? null : `${k}: ${String(v)}`;
+
+  const restricted = opts.hashCoveredOnly ?? false;
 
   const lines = [
     field("id_propiedad", l.propertyId),
@@ -71,18 +106,18 @@ function formatListing(l: ListingSnapshot, label = "ANUNCIO"): string {
     field("operacion", l.operation),
     field("tipo_inmueble", l.propertyType),
     field("titulo", l.title),
-    field("precio_eur", l.price),
-    field("m2_construidos", l.m2Built),
-    field("habitaciones", l.rooms),
-    field("banos", l.bathrooms),
-    field("planta", l.floor),
+    restricted ? null : field("precio_eur", l.price),
+    restricted ? null : field("m2_construidos", l.m2Built),
+    restricted ? null : field("habitaciones", l.rooms),
+    restricted ? null : field("banos", l.bathrooms),
+    restricted ? null : field("planta", l.floor),
     field("direccion", l.address),
     field("ciudad", l.city),
     field("provincia", l.province),
     field("ano_construccion", l.yearBuilt),
     field("certificado_energetico", l.energyRating),
     l.features?.length ? `caracteristicas: ${l.features.join(", ")}` : null,
-    l.photoUrls?.length ? `num_fotos: ${l.photoUrls.length}` : null,
+    restricted ? null : l.photoUrls?.length ? `num_fotos: ${l.photoUrls.length}` : null,
   ].filter((x): x is string => x !== null);
 
   const description = l.description?.trim();
@@ -102,9 +137,16 @@ function resolveDescription(vars: FlowVars): string {
   return (vars.description ?? vars.listing?.description ?? "").trim();
 }
 
-/** Shared volatile payload for the four single-listing assessment flows. */
+/**
+ * Shared volatile payload for the four single-listing, CACHED assessment
+ * flows (occupancy/condition/redflags/extract) — `hashCoveredOnly: true`
+ * because every caller of this function feeds a #30 `getOrCompute()` call.
+ * See `formatListing`'s doc for why that flag exists.
+ */
 function listingVolatile(vars: FlowVars): string | undefined {
-  if (vars.listing) return formatListing(vars.listing);
+  if (vars.listing) {
+    return formatListing(vars.listing, "ANUNCIO", { hashCoveredOnly: true }) + HASH_SCOPE_NOTE;
+  }
   const description = resolveDescription(vars);
   if (description) {
     return `### ANUNCIO\n\nDESCRIPCIÓN:\n"""\n${description}\n"""`;
@@ -119,6 +161,10 @@ function listingVolatile(vars: FlowVars): string | undefined {
  * Falls back to the single-listing payload when the caller passed only
  * `listing`, so flows that have not yet moved to property-level assessment
  * keep working unchanged.
+ *
+ * Every caller of `propertyVolatile` (occupancy/condition/redflags/extract)
+ * is wrapped in the #30 cache, so `formatListing` is always called with
+ * `hashCoveredOnly: true` here — see its doc and `HASH_SCOPE_NOTE`.
  */
 function propertyVolatile(vars: FlowVars): string | undefined {
   const listings = vars.listings ?? [];
@@ -131,14 +177,21 @@ function propertyVolatile(vars: FlowVars): string | undefined {
         `veces y se complementan casi siempre.`
       : `Anuncio único de este inmueble.`;
 
-  return [
-    `### ANUNCIOS DEL INMUEBLE`,
-    header,
-    "",
-    ...listings.map((l, i) =>
-      formatListing(l, `ANUNCIO ${i + 1} DE ${listings.length} — portal: ${l.source ?? "desconocido"}`),
-    ),
-  ].join("\n\n");
+  return (
+    [
+      `### ANUNCIOS DEL INMUEBLE`,
+      header,
+      "",
+      ...listings.map((l, i) =>
+        formatListing(
+          l,
+          `ANUNCIO ${i + 1} DE ${listings.length} — portal: ${l.source ?? "desconocido"}`,
+          { hashCoveredOnly: true },
+        ),
+      ),
+    ].join("\n\n") + HASH_SCOPE_NOTE
+  ); // note: the `listings.length === 0` fallback above already returns
+  // (via listingVolatile) with its own copy of HASH_SCOPE_NOTE appended.
 }
 
 // ── Knowledge context (schema) ────────────────────────────────────────────────
@@ -262,9 +315,12 @@ ilegalmente" es un riesgo legal grave, no una ganga.
   "se vende con ocupantes", "posesión no garantizada").
 - \`unknown\` — el anuncio no lo dice.
 
-Señales que debes tener en cuenta antes de decidir \`vacant\`: fotos con enseres
-personales, muebles y ropa; menciones a "se entrega vacío en la firma"; precio
-muy por debajo de mercado sin explicación.
+Señales que debes tener en cuenta antes de decidir \`vacant\`: menciones a "se
+entrega vacío en la firma", o descripciones textuales de enseres personales,
+muebles o ropa todavía presentes en la vivienda. El precio del anuncio NO se
+te muestra en este flujo (ver nota al final del bloque de anuncios) — no lo
+uses como señal aunque lo hayas visto en una consulta anterior: una rebaja de
+precio no es, por sí sola, evidencia de ocupación.
 
 Ten en cuenta la \`operacion\` del anuncio. En un anuncio de **alquiler**
 ("operacion: rent"), que el inmueble esté actualmente arrendado es lo normal y

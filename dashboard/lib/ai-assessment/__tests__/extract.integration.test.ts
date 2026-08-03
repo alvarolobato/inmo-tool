@@ -139,11 +139,21 @@ describe.runIf(dbAvailable)("extract persistence — real Postgres", () => {
     return propertyId;
   }
 
-  /** A property whose structured fields are ALREADY fully populated. */
+  /**
+   * A property whose structured fields are ALREADY fully populated — for the
+   * fields the gate actually checks (`GATING_FIELDS`, #30 review must-fix 2).
+   * `m2_useful` is left NULL deliberately: every connector hardcodes it to
+   * `None` (fotocasa.py:842, idealista.py:269, milanuncios.py:436,
+   * solvia.py:402, vivantial.py:297, servihabitat.py:429) and this flow never
+   * writes it back to `property`, so `m2_useful: 80` is a state no real row
+   * can ever reach — seeding it here (as an earlier version of this test
+   * did) exercised something `needsExtraction()` could never see in
+   * production, silently hiding the fact the gate was permanently open.
+   */
   async function seedCompleteProperty(pool: Pool): Promise<number> {
     const { rows } = await pool.query<{ id: number }>(
       `INSERT INTO property (address, property_type, m2_built, m2_useful, rooms, bathrooms, floor, has_elevator)
-       VALUES ('Calle Test Extract Completa 1', 'piso', 90, 80, 3, 2, '2', true) RETURNING id`,
+       VALUES ('Calle Test Extract Completa 1', 'piso', 90, NULL, 3, 2, '2', true) RETURNING id`,
     );
     const propertyId = Number(rows[0].id);
     createdPropertyIds.push(propertyId);
@@ -234,7 +244,7 @@ describe.runIf(dbAvailable)("extract persistence — real Postgres", () => {
       const fields = await loadPropertyStructuredFields(propertyId);
       expect(fields).toEqual({
         m2_built: 90,
-        m2_useful: 80,
+        m2_useful: null,
         rooms: 3,
         bathrooms: 2,
         floor: "2",

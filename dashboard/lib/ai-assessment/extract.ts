@@ -11,6 +11,24 @@
  * are often the most interesting (less competition, more negotiation room) —
  * issue #28's own framing, and issue #5's context.
  *
+ * ## Not yet consumed anywhere (fast-follow, issue #182)
+ *
+ * This flow ONLY writes `ai_assessment.result` — nothing currently reads it.
+ * `lib/filtering/scope-query.ts`'s hard filters (task 2.4, #18, merged before
+ * this task landed) query `property.m2_built`/`property.has_elevator`/
+ * `property.floor` directly, with no fallback to an `extract` row when the
+ * structured column is NULL; `lib/candidates.ts`'s `loadFlags` (the query the
+ * candidate-card badges read) filters `assessment_type IN ('occupancy',
+ * 'condition')`, which doesn't include `'extract'` either. Per #28's own
+ * "Additional Context" ("flag it as a fast-follow issue if task 2.4 has
+ * already merged by the time this task lands" — it had), issue #182 tracks
+ * wiring `scope-query.ts` to `COALESCE(property.<col>, <ai_assessment
+ * fallback>)`. Provenance is preserved either way: this flow never writes
+ * back to `property`/`listing` (see "NOT directly overwriting" above), so a
+ * future consumer reads the connector-parsed value and the LLM-inferred one
+ * from two different places and can tell them apart, rather than this flow
+ * quietly overwriting one with the other.
+ *
  * ## Property-level, not listing-level (a deliberate deviation from issue #28's wording)
  *
  * Issue #28 itself, and `lib/llm.ts`'s original module doc (written when #24
@@ -33,9 +51,22 @@
  *
  * There is no point spending an LLM call extracting `m2_built` from a
  * property that already has it structured. `needsExtraction()` below is the
- * pure gating check: true iff at least one of the six fields this flow can
- * fill is still NULL on `property`. `assessPropertyExtract` runs that check
- * BEFORE loading listings or touching the LLM — see its doc.
+ * pure gating check: true iff at least one of `GATING_FIELDS` is still NULL
+ * on `property`. `assessPropertyExtract` runs that check BEFORE loading
+ * listings or touching the LLM — see its doc.
+ *
+ * `GATING_FIELDS` is `EXTRACT_FIELDS` MINUS `m2_useful` (#30 review finding —
+ * previously the gate was dead code). Every connector hardcodes
+ * `m2_useful=None` (fotocasa.py:842, idealista.py:269, milanuncios.py:436,
+ * solvia.py:402, vivantial.py:297, servihabitat.py:429) and this flow never
+ * writes its own output back onto `property` (see "NOT directly overwriting"
+ * above) — so no code path anywhere can ever make `property.m2_useful`
+ * non-NULL. Leaving it in the gating set made `needsExtraction()` return
+ * `true` unconditionally, for every property, forever, which made the
+ * `{skipped:true}` branch in `assessPropertyExtract`/the POST route
+ * unreachable in production. `m2_useful` stays in `EXTRACT_FIELDS` (the
+ * output schema, and `confidence_per_field`'s vocabulary) — only the gate
+ * excludes it.
  *
  * ## Strict output validation (issue #28 technical approach #3)
  *
@@ -61,7 +92,7 @@ import { sql } from "@/lib/db-write";
 import { extractStructuredFields } from "@/lib/llm";
 import type { LlmAgenticContext } from "@/lib/llm-tools/types";
 import { NoListingsError, loadPropertyListings, clamp01, stripCodeFence, num } from "./shared";
-import { getOrCompute, getLatestAssessment, type CachedAssessment } from "./cache";
+import { getOrCompute, getLatestAssessment, logCacheOutcome, type CachedAssessment } from "./cache";
 
 export { NoListingsError, loadPropertyListings };
 
@@ -96,8 +127,11 @@ export interface ExtractResult {
    * Per-field confidence (issue #28 technical approach #1) — a consumer can
    * trust a high-confidence `rooms` extraction while discounting a shakier
    * `floor` guess from the SAME response, which a single scalar confidence
-   * could never express. Only fields the model actually filled (non-null)
-   * may have an entry — see `parseConfidencePerField`.
+   * could never express. Enforced both ways by `parseConfidencePerField`
+   * (#30 review — previously documented but not checked): a field left
+   * `null` may NEVER have an entry here, and a field the model filled MUST
+   * have one — there is no third state where "no entry" quietly means
+   * "confidence zero" for a field that was actually extracted.
    */
   confidence_per_field: Partial<Record<ExtractField, number>>;
   reasoning: string;
@@ -153,21 +187,64 @@ export async function loadPropertyStructuredFields(
 }
 
 /**
- * EC-3 (issue #28): true iff at least one of the six fields this flow can
- * fill is still NULL on the property — i.e. there is something worth an LLM
- * call to recover. Pure function, no DB access, so it's directly testable
- * without mocking `sql`.
+ * The fields the cost-control gate actually checks — see module doc's "Cost
+ * control" section for why this excludes `m2_useful`.
+ */
+export const GATING_FIELDS = EXTRACT_FIELDS.filter(
+  (f): f is Exclude<ExtractField, "m2_useful"> => f !== "m2_useful",
+);
+
+/**
+ * EC-3 (issue #28): true iff at least one of `GATING_FIELDS` is still NULL on
+ * the property — i.e. there is something worth an LLM call to recover. Pure
+ * function, no DB access, so it's directly testable without mocking `sql`.
  */
 export function needsExtraction(fields: PropertyStructuredFields): boolean {
-  return EXTRACT_FIELDS.some((f) => fields[f] === null);
+  return GATING_FIELDS.some((f) => fields[f] === null);
 }
 
-function parseNumberField(o: Record<string, unknown>, key: string): number | null {
+/**
+ * Plausibility bounds per numeric field (#30 review: "no plausibility
+ * bounds — m2_built:-40, rooms:0, bathrooms:999 all parse cleanly"). The
+ * module's own argument for strict type validation is that a wrong value is
+ * worse than a missing one *because downstream does numeric comparisons*
+ * (task 2.4's hard filters, scope-query.ts) — a negative m² or a 999-bathroom
+ * flat breaks that exactly as badly as a string does, so it gets the same
+ * reject-don't-coerce treatment as a non-numeric value, not a silent pass.
+ * `integer: true` additionally rejects a fractional room/bathroom count,
+ * which is never a real answer to "número de habitaciones".
+ */
+const NUMERIC_FIELD_BOUNDS: Record<
+  "m2_built" | "m2_useful" | "rooms" | "bathrooms",
+  { min: number; max: number; integer?: boolean }
+> = {
+  m2_built: { min: 1, max: 100000 },
+  m2_useful: { min: 1, max: 100000 },
+  rooms: { min: 1, max: 50, integer: true },
+  bathrooms: { min: 0, max: 20, integer: true },
+};
+
+function parseNumberField(
+  o: Record<string, unknown>,
+  key: keyof typeof NUMERIC_FIELD_BOUNDS,
+): number | null {
   const v = o[key];
   if (v === null || v === undefined) return null;
   if (typeof v !== "number" || !Number.isFinite(v)) {
     throw new Error(
       `Extract flow returned a non-numeric '${key}': ${JSON.stringify(v)}`,
+    );
+  }
+  const bounds = NUMERIC_FIELD_BOUNDS[key];
+  if (bounds.integer && !Number.isInteger(v)) {
+    throw new Error(
+      `Extract flow returned a non-integer '${key}': ${JSON.stringify(v)}`,
+    );
+  }
+  if (v < bounds.min || v > bounds.max) {
+    throw new Error(
+      `Extract flow returned an implausible '${key}': ${JSON.stringify(v)} ` +
+        `(expected ${bounds.min}-${bounds.max})`,
     );
   }
   return v;
@@ -201,20 +278,53 @@ function parseBooleanField(o: Record<string, unknown>): boolean | null {
 }
 
 /**
- * Defensive, not strict: an out-of-range or malformed confidence is metadata,
- * not a value downstream code numerically compares listings against, so a bad
- * entry is dropped rather than failing the whole parse (unlike the six data
- * fields above, per module doc's numeric-comparison distinction).
+ * Enforces both directions of the invariant this module's own doc states but
+ * previously didn't check (#30 review finding):
+ *
+ *   1. Only a field the model actually FILLED (non-null in `fieldValues`) may
+ *      carry a `confidence_per_field` entry. A confidence for a field left
+ *      `null` is dropped — silently, the same "metadata, not a compared
+ *      value" treatment an out-of-range confidence already got — rather than
+ *      counted. Before this fix, `{m2_built:null, rooms:null,
+ *      confidence_per_field:{rooms:0.9, m2_built:0.8}}` produced
+ *      `summaryConfidence` 0.85 despite zero fields actually being extracted,
+ *      directly contradicting this file's own "zero fields extracted →
+ *      confidence 0" doc.
+ *   2. Every field the model DID fill must carry one. Per the extract prompt
+ *      itself ("Por cada campo que rellenes con un valor... añade su
+ *      confianza en confidence_per_field"), a filled field with no reported
+ *      confidence is malformed output, not a value to silently average as if
+ *      "no entry" and "confidence 0" were the same thing — so this throws,
+ *      matching the strict, reject-don't-guess treatment the six data fields
+ *      already get above, rather than leaving the ambiguity in place.
+ *
+ * Still defensive about the VALUE once a field is confirmed eligible: an
+ * out-of-range confidence is clamped (`clamp01`), not rejected — the
+ * confidence number itself is metadata, only its presence/absence for the
+ * right field is enforced strictly.
  */
 function parseConfidencePerField(
   o: Record<string, unknown>,
+  fieldValues: Record<ExtractField, unknown>,
 ): Partial<Record<ExtractField, number>> {
   const raw = o.confidence_per_field;
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+  const rawObj =
+    typeof raw === "object" && raw !== null && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)
+      : {};
+
   const out: Partial<Record<ExtractField, number>> = {};
   for (const key of EXTRACT_FIELDS) {
-    const v = (raw as Record<string, unknown>)[key];
-    if (typeof v === "number" && Number.isFinite(v)) out[key] = clamp01(v);
+    const filled = fieldValues[key] !== null;
+    if (!filled) continue; // invariant 1: no entry for a null field, ever.
+
+    const v = rawObj[key];
+    if (typeof v !== "number" || !Number.isFinite(v)) {
+      throw new Error(
+        `Extract flow filled '${key}' but provided no confidence_per_field entry for it.`,
+      );
+    }
+    out[key] = clamp01(v);
   }
   return out;
 }
@@ -232,14 +342,33 @@ export function parseExtractResult(raw: string): ExtractResult {
   }
   const o = parsed as Record<string, unknown>;
 
+  const m2_built = parseNumberField(o, "m2_built");
+  const m2_useful = parseNumberField(o, "m2_useful");
+  const rooms = parseNumberField(o, "rooms");
+  const bathrooms = parseNumberField(o, "bathrooms");
+  const floor = parseFloorField(o);
+  const has_elevator = parseBooleanField(o);
+
+  // Confidence validation runs AFTER all six fields are parsed: it needs to
+  // know which fields actually ended up non-null (see parseConfidencePerField
+  // doc) — the parse order above must not change without keeping this last.
+  const confidence_per_field = parseConfidencePerField(o, {
+    m2_built,
+    m2_useful,
+    rooms,
+    bathrooms,
+    floor,
+    has_elevator,
+  });
+
   return {
-    m2_built: parseNumberField(o, "m2_built"),
-    m2_useful: parseNumberField(o, "m2_useful"),
-    rooms: parseNumberField(o, "rooms"),
-    bathrooms: parseNumberField(o, "bathrooms"),
-    floor: parseFloorField(o),
-    has_elevator: parseBooleanField(o),
-    confidence_per_field: parseConfidencePerField(o),
+    m2_built,
+    m2_useful,
+    rooms,
+    bathrooms,
+    floor,
+    has_elevator,
+    confidence_per_field,
     reasoning: typeof o.reasoning === "string" ? o.reasoning : "",
   };
 }
@@ -250,7 +379,11 @@ export function parseExtractResult(raw: string): ExtractResult {
  * here, unlike occupancy's `summaryConfidence` — every field is equally
  * "the thing we were looking for", there's no clean/caveat distinction to
  * pick the max of). Zero fields extracted → confidence 0 (nothing to be
- * confident about), never NaN.
+ * confident about), never NaN — and, since `parseConfidencePerField` now
+ * enforces that every non-null field has an entry and every null field
+ * doesn't, "0 fields extracted" and "confidence_per_field is empty" are
+ * exactly the same condition (they used to be able to disagree — see that
+ * function's doc).
  */
 export function summaryConfidence(result: ExtractResult): number {
   const values = Object.values(result.confidence_per_field).filter(
@@ -343,7 +476,7 @@ export async function assessPropertyExtract(
   const listings = await loadPropertyListings(propertyId);
   if (listings.length === 0) throw new NoListingsError(propertyId);
 
-  const { result } = await getOrCompute<ExtractResult>(
+  const { result, fromCache } = await getOrCompute<ExtractResult>(
     propertyId,
     "extract",
     EXTRACT_PROMPT_VERSION,
@@ -354,5 +487,6 @@ export async function assessPropertyExtract(
     },
     saveExtractAssessment,
   );
+  logCacheOutcome("extract", propertyId, fromCache);
   return { skipped: false, result };
 }
