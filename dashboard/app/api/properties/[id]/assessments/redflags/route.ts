@@ -1,0 +1,148 @@
+/**
+ * Legal/financial red-flag extraction for one deduplicated property (#27).
+ *
+ *   GET  — read the cached verdict, or 404 if none has been generated yet.
+ *   POST — run (or re-run) the extraction and persist it.
+ *
+ * Keyed on the property, not a listing — mirrors
+ * `/api/properties/[id]/assessments/occupancy` (#25) and
+ * `/api/properties/[id]/assessments/condition` (#26): see
+ * lib/ai-assessment/redflags.ts for why. See that file's module doc also for
+ * why issue #27's `type` vocabulary deliberately keeps `herencia_yacente`
+ * distinct from, but overlapping with, #25's `ownership.proindiviso` — they
+ * answer different questions and neither is redundant.
+ *
+ * Note: issue #27's "Repo touchpoints" named this route
+ * `/api/listings/[id]/assessments/redflags`; this file uses the property-
+ * keyed path #25 established instead, same deviation as #26's route (see its
+ * doc comment).
+ *
+ * Gated by the admin credential like every route under /api/* — POST spends
+ * real LLM budget (lib/api-auth-policy.ts).
+ *
+ * IMPORTANT: this is NOT legal advice. `flags[]` surfaces mentions worth an
+ * independent check, never a confirmed legal fact — see the flow's prompt in
+ * lib/llm-context/system-prompt.ts.
+ *
+ * Error codes:
+ *   400 — Invalid property id
+ *   404 — Property not found, no live listings, or (GET) no cached verdict
+ *   429 — Daily LLM budget exhausted
+ *   503 — LLM circuit breaker open
+ *   500 — Unexpected error
+ */
+
+import { NextRequest, NextResponse } from "next/server";
+import {
+  assessPropertyRedFlags,
+  getRedFlagsAssessment,
+  NoListingsError,
+  REDFLAGS_PROMPT_VERSION,
+} from "@/lib/ai-assessment/redflags";
+import { BudgetExceededError, CircuitBreakerOpenError } from "@/lib/llm";
+import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
+
+type RouteContext = {
+  params: Promise<{ id: string }> | { id: string };
+};
+
+function parsePositiveInt(raw: string): number | null {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+export async function GET(
+  _request: NextRequest,
+  context: RouteContext,
+): Promise<NextResponse> {
+  const requestId = generateRequestId();
+  const { id: rawId } = await context.params;
+  const propertyId = parsePositiveInt(rawId);
+
+  if (propertyId === null) {
+    return NextResponse.json(
+      formatApiError("Id de propiedad no válido.", "VALIDATION", undefined, requestId),
+      { status: 400 },
+    );
+  }
+
+  try {
+    const cached = await getRedFlagsAssessment(propertyId);
+    if (!cached) {
+      return NextResponse.json(
+        formatApiError(
+          "Todavía no se han buscado señales de alerta en esta propiedad.",
+          "NOT_FOUND",
+          undefined,
+          requestId,
+        ),
+        { status: 404 },
+      );
+    }
+    return NextResponse.json({
+      property_id: propertyId,
+      prompt_version: REDFLAGS_PROMPT_VERSION,
+      ...cached,
+    });
+  } catch (err) {
+    console.error(`[${requestId}] GET redflags assessment failed:`, err);
+    return NextResponse.json(
+      formatApiError(sanitizeErrorMessage(err), "UNKNOWN", undefined, requestId),
+      { status: 500 },
+    );
+  }
+}
+
+export async function POST(
+  _request: NextRequest,
+  context: RouteContext,
+): Promise<NextResponse> {
+  const requestId = generateRequestId();
+  const { id: rawId } = await context.params;
+  const propertyId = parsePositiveInt(rawId);
+
+  if (propertyId === null) {
+    return NextResponse.json(
+      formatApiError("Id de propiedad no válido.", "VALIDATION", undefined, requestId),
+      { status: 400 },
+    );
+  }
+
+  try {
+    const result = await assessPropertyRedFlags(propertyId, { requestId });
+    return NextResponse.json({
+      property_id: propertyId,
+      prompt_version: REDFLAGS_PROMPT_VERSION,
+      result,
+    });
+  } catch (err) {
+    if (err instanceof NoListingsError) {
+      return NextResponse.json(
+        formatApiError(
+          "La propiedad no tiene anuncios activos que evaluar.",
+          "NOT_FOUND",
+          undefined,
+          requestId,
+        ),
+        { status: 404 },
+      );
+    }
+    if (err instanceof BudgetExceededError) {
+      return NextResponse.json(
+        formatApiError(sanitizeErrorMessage(err), "LLM_BUDGET_EXCEEDED", undefined, requestId),
+        { status: 429 },
+      );
+    }
+    if (err instanceof CircuitBreakerOpenError) {
+      return NextResponse.json(
+        formatApiError(sanitizeErrorMessage(err), "LLM_CIRCUIT_OPEN", undefined, requestId),
+        { status: 503 },
+      );
+    }
+    console.error(`[${requestId}] POST redflags assessment failed:`, err);
+    return NextResponse.json(
+      formatApiError(sanitizeErrorMessage(err), "UNKNOWN", undefined, requestId),
+      { status: 500 },
+    );
+  }
+}

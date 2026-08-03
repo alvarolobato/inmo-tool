@@ -158,10 +158,11 @@ interface RawCandidateRow {
  * information. Unrecognised codes are dropped rather than rendered as raw
  * text (#152 review, must-fix 3): both vocabularies below are closed
  * enumerations validated where the row is written (see `deriveCaveats` in
- * `lib/ai-assessment/occupancy.ts` and, once #26 lands, its condition
- * equivalent), so anything not in the label maps is either the standard
- * "nothing to report" value or evidence of drift between this file and the
- * writer's vocabulary — never scraped free text that could grow the card.
+ * `lib/ai-assessment/occupancy.ts` and `CONDITION_CATEGORIES` in
+ * `lib/ai-assessment/condition.ts`), so anything not in the label maps is
+ * either the standard "nothing to report" value or evidence of drift between
+ * this file and the writer's vocabulary — never scraped free text that could
+ * grow the card.
  *
  * Exported for direct unit testing: this is the pure function findings #1
  * and #3 in the #152 review trace back to, and it is cheap to test in
@@ -192,10 +193,11 @@ export function flagsFromAssessments(rows: RawAssessmentRow[]): CandidateFlag[] 
       if (label !== undefined) flags.push({ kind: `caveat:${code}`, label, tone: "warn" });
     }
 
-    // Condition (#26) is not implemented yet — no writer produces
-    // assessment_type='condition' rows today — but the CHECK constraint and
-    // this read path are already in place so a future flow needs no changes
-    // here beyond adding to CONDITION_LABELS.
+    // #26's condition assessment (lib/ai-assessment/condition.ts) writes a
+    // flat `result.condition` string (single axis — no nested `verdict`
+    // object like occupancy's three). `reformado`/`unclear` are the
+    // unremarkable/no-info defaults and intentionally have no label below,
+    // same as occupancy's `pleno_dominio` getting no caveat badge.
     const condition = typeof result.condition === "string" ? result.condition : null;
     if (condition !== null) {
       const label = CONDITION_LABELS[condition];
@@ -226,9 +228,14 @@ const CAVEAT_LABELS: Record<string, string> = {
   derecho_superficie: "Derecho de superficie",
 };
 
+/**
+ * Every `ConditionCategory` (#26, `lib/ai-assessment/condition.ts`) worth a
+ * badge. `reformado` (the unremarkable default, like occupancy's
+ * `pleno_dominio`) and `unclear` (no information, not a finding) are
+ * deliberately absent — a badge on every card carries no information.
+ */
 const CONDITION_LABELS: Record<string, string> = {
   a_reformar: "A reformar",
-  a_rehabilitar: "A rehabilitar",
   obra_nueva: "Obra nueva",
 };
 

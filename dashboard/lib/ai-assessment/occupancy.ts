@@ -34,8 +34,20 @@
 
 import { sql } from "@/lib/db-write";
 import { assessOccupancy } from "@/lib/llm";
-import type { ListingSnapshot } from "@/lib/llm-context";
 import type { LlmAgenticContext } from "@/lib/llm-tools/types";
+import {
+  NoListingsError,
+  loadPropertyListings,
+  parseVerdict as parseVerdictBase,
+  stripCodeFence,
+  type Verdict,
+} from "./shared";
+
+// Re-exported so existing imports (`from "../occupancy"`, including this
+// flow's own tests) keep working unchanged now that the property-loading and
+// parsing plumbing is shared with #26/#27.
+export { NoListingsError, loadPropertyListings };
+export type { Verdict };
 
 /**
  * Prompt version. Bump when the occupancy prompt changes in a way that could
@@ -71,16 +83,6 @@ export const OWNERSHIP_EXTENTS = [
 ] as const;
 
 export type OwnershipExtent = (typeof OWNERSHIP_EXTENTS)[number];
-
-/** One axis's verdict: a label, how sure we are, and the quote that proves it. */
-export interface Verdict<T> {
-  value: T;
-  confidence: number;
-  /** Literal quote from one advert, or "" when nothing could be cited. */
-  evidence: string;
-  /** Which portal that quote came from, so the investor can go and check it. */
-  evidence_source: string | null;
-}
 
 /**
  * Every non-standard condition found, as flat codes for cheap filtering and
@@ -124,148 +126,11 @@ export interface OccupancyResult {
   reasoning: string;
 }
 
-export class NoListingsError extends Error {
-  constructor(propertyId: number) {
-    super(`Property ${propertyId} has no live listings to assess.`);
-    this.name = "NoListingsError";
-  }
-}
-
 /**
- * Raw shapes as `pg` actually returns them — NOT as the schema declares them.
- *
- * `id` is BIGSERIAL, and node-postgres hands BIGINT back as a **string**
- * (int8 exceeds JS's safe integer range, so pg-types deliberately refuses to
- * guess). Without an explicit Number() these flow into `ListingSnapshot`
- * typed as `number` while actually holding `"17"`, and every downstream
- * `===` against a real number silently fails. Caught by
- * occupancy.integration.test.ts, which is exactly the bug class a mocked
- * `sql()` cannot see. NUMERIC columns have the same property — that is what
- * `num()` below exists for.
- */
-interface RawListingRow {
-  id: string;
-  source: string;
-  url: string | null;
-  status: string;
-  operation: string | null;
-  current_price: string | null;
-  description: string | null;
-  first_seen_at: string | null;
-}
-
-interface RawPropertyRow {
-  id: string;
-  property_type: string | null;
-  m2_built: string | null;
-  rooms: number | null;
-  bathrooms: number | null;
-  floor: string | null;
-  address: string | null;
-  city: string | null;
-  province: string | null;
-}
-
-const num = (v: string | null): number | null => (v === null ? null : Number(v));
-
-/**
- * Load every live listing of a property as assessment input, newest-first.
- *
- * Newest-first because a withdrawn or stale advert should not outweigh a
- * current one when the model weighs contradictory claims — the ordering is
- * part of the evidence, not cosmetic.
- *
- * Only `active` listings: a description from a listing that has since been
- * sold or withdrawn describes a state of the world that may no longer hold.
- *
- * Returns `[]` — same as "no active listings" — when every active listing's
- * description is null/empty (#156 review, must-fix 2). A listing with no
- * description gives `formatListing` nothing to emit, and the eje-2/eje-3
- * silence rule then hands the model zero text and still expects it to answer
- * `compraventa`/`pleno_dominio` "because nothing contradicts it" — but
- * nothing contradicts it because we gave the model nothing to read, not
- * because the adverts were silent on a topic they otherwise discuss. Treating
- * this identically to "no listings" is deliberate: `assessPropertyOccupancy`
- * already turns an empty array into `NoListingsError` (404, "no live
- * listings to assess"), which is exactly the right framing here too — we
- * never looked at anything, so we must not write a verdict that looks like
- * we did.
- */
-export async function loadPropertyListings(
-  propertyId: number,
-): Promise<ListingSnapshot[]> {
-  const propRows = await sql<RawPropertyRow>(
-    `SELECT id, property_type, m2_built, rooms, bathrooms, floor,
-            address, city, province
-       FROM property WHERE id = $1`,
-    [propertyId],
-  );
-  const prop = propRows[0];
-  if (!prop) return [];
-
-  const rows = await sql<RawListingRow>(
-    `SELECT id, source, url, status, operation, current_price,
-            description, first_seen_at
-       FROM listing
-      WHERE property_id = $1 AND status = 'active'
-      ORDER BY first_seen_at DESC NULLS LAST, id DESC`,
-    [propertyId],
-  );
-
-  const hasDescription = rows.some((l) => (l.description ?? "").trim() !== "");
-  if (!hasDescription) return [];
-
-  return rows.map((l) => ({
-    propertyId: Number(prop.id),
-    listingId: Number(l.id),
-    source: l.source,
-    url: l.url ?? undefined,
-    description: l.description ?? undefined,
-    operation: l.operation,
-    propertyType: prop.property_type,
-    price: num(l.current_price),
-    m2Built: num(prop.m2_built),
-    rooms: prop.rooms,
-    bathrooms: prop.bathrooms,
-    floor: prop.floor,
-    address: prop.address,
-    city: prop.city,
-    province: prop.province,
-  }));
-}
-
-/**
- * Ceiling on the confidence of a verdict reached from silence rather than a
- * citation (#156 review, must-fix 1). The eje-2/eje-3 prompt rule deliberately
- * asks the model for `compraventa`/`pleno_dominio` at "~0.6-0.7" when nothing
- * in the adverts contradicts it — that number only existed in prose, so a
- * model returning 0.95 for an uncited default was written straight through
- * and could clear a `WHERE confidence > 0.7` filter as if it were a cited
- * finding. This is the code-side enforcement of that number: it is a ceiling
- * the model's own confidence is clamped against, not a value we invent when
- * one is missing.
- */
-const SILENCE_CONFIDENCE_CAP = 0.7;
-
-/**
- * Parse one axis out of the model's JSON.
- *
- * Strict about the label because these feed scoring and the deal pipeline: an
- * unrecognised value is degraded to `unknown` with zero confidence rather than
- * written through, so a prompt drift or a hallucinated category can never look
- * like a confident verdict downstream. A missing axis object degrades the same
- * way — silence from the model is "we did not learn anything", never a default
- * "all clear", which on the #145 axes would be an actively dangerous reading.
- *
- * `silenceDefault`, when given, is the value the axis's prompt tells the model
- * to answer *from silence* (e.g. `compraventa` on the transaction axis,
- * `pleno_dominio` on ownership — see the "Cómo tratar el silencio" block in
- * system-prompt.ts). When the parsed value equals it AND no evidence was
- * cited, confidence is capped at `SILENCE_CONFIDENCE_CAP` regardless of what
- * the model reported — a plausibility judgment from absence of contradiction
- * must never read as sure as a verdict backed by a quote. Axes with no
- * silence-default convention (occupancy: silence forces `unknown`, not a
- * clamp) simply omit the argument and are unaffected.
+ * Local wrapper around the shared `parseVerdict`: every occupancy axis
+ * degrades to literal `"unknown"` (not a per-flow fallback), so this pins
+ * that argument rather than repeating it at each of the three call sites
+ * below.
  */
 function parseVerdict<T extends string>(
   node: unknown,
@@ -273,31 +138,7 @@ function parseVerdict<T extends string>(
   allowed: readonly T[],
   silenceDefault?: T,
 ): Verdict<T> {
-  const o = (typeof node === "object" && node !== null ? node : {}) as Record<
-    string,
-    unknown
-  >;
-  const rawValue = typeof o[key] === "string" ? (o[key] as string) : "unknown";
-  const known = (allowed as readonly string[]).includes(rawValue);
-  const value = (known ? rawValue : "unknown") as T;
-
-  const rawConfidence = typeof o.confidence === "number" ? o.confidence : 0;
-  const evidence = typeof o.evidence === "string" ? o.evidence : "";
-
-  let confidence = known ? clamp01(rawConfidence) : 0;
-  if (evidence === "" && silenceDefault !== undefined && value === silenceDefault) {
-    confidence = Math.min(confidence, SILENCE_CONFIDENCE_CAP);
-  }
-
-  return {
-    value,
-    confidence,
-    evidence,
-    evidence_source:
-      typeof o.evidence_source === "string" && o.evidence_source.trim() !== ""
-        ? o.evidence_source
-        : null,
-  };
+  return parseVerdictBase(node, key, allowed, "unknown" as T, silenceDefault);
 }
 
 /**
@@ -342,6 +183,21 @@ export function parseOccupancyResult(raw: string): OccupancyResult {
 
   // No silenceDefault for occupancy: per the eje-1 prompt rule, silence
   // forces `unknown`, not a clamped `vacant` — there is nothing to cap.
+  //
+  // KNOWN GAP (#168 review, noted rather than fixed here): eje 1 has the same
+  // missing "no citation, no assertion" backstop that condition.ts had before
+  // #168 — a model could report `{status: "tenanted", confidence: 0.9,
+  // evidence: ""}` and it would write through unchanged, same as condition's
+  // must-fix. Deliberately NOT applying condition's fix here in this pass:
+  // several existing tests (occupancy.test.ts's `parseOccupancyResult`/
+  // `summaryConfidence` suites) construct axis-1 verdicts with an omitted
+  // `evidence` field expecting them to pass through, and eje 1 additionally
+  // has no single "default" value to fall back to the way condition falls
+  // back to `unclear` (`unknown` already means "no signal at all", which is
+  // a different claim than "a signal existed but wasn't quoted"). Fixing
+  // this properly means auditing/updating those tests and deciding what an
+  // uncited `tenanted`/`occupied_illegally` degrades to — worth its own pass
+  // rather than folding into #26's fix. Filed against issue #25/#145.
   const occupancy = parseVerdict(o.occupancy, "status", OCCUPANCY_STATUSES);
   const transaction = parseVerdict(
     o.transaction,
@@ -389,18 +245,6 @@ function parseSharePct(v: unknown): number | null {
   if (typeof v !== "number" || !Number.isFinite(v)) return null;
   if (v < 1 || v > 100) return null;
   return v;
-}
-
-function clamp01(n: number): number {
-  if (!Number.isFinite(n)) return 0;
-  return Math.min(1, Math.max(0, n));
-}
-
-/** Models sometimes wrap JSON in ```json fences despite being told not to. */
-function stripCodeFence(text: string): string {
-  const trimmed = text.trim();
-  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/.exec(trimmed);
-  return fenced ? fenced[1] : trimmed;
 }
 
 /**

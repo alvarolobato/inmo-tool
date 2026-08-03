@@ -181,32 +181,37 @@ nombres de tablas ni de columnas.`;
 // ai_assessment.result, and to any enum added by #25–#30):
 //
 //   English  — generic system state, the same idea in any market:
-//              occupancy `vacant`/`tenanted`/`unknown`, and in the schema
-//              listing.status, operation, pipeline_stage, score_kind,
-//              feedback_type.
-//   Spanish  — Spanish real-estate market categories, where translating
+//              occupancy `vacant`/`tenanted`/`unknown`, condition `unclear`,
+//              redflags `other`, and in the schema listing.status, operation,
+//              pipeline_stage, score_kind, feedback_type.
+//   Spanish  — Spanish real-estate/legal market categories, where translating
 //              loses a real distinction: condition `obra_nueva` /
-//              `a_reformar` / `a_rehabilitar`, occupancy's transaction
+//              `reformado` / `a_reformar`, occupancy's transaction
 //              (`compraventa`/`venta_deuda`) and ownership
-//              (`pleno_dominio`/`nuda_propiedad`/`proindiviso`/…) axes, and
-//              in the schema property_type (`piso`, `atico`, …) and
-//              listing_kind (`particular`).
+//              (`pleno_dominio`/`nuda_propiedad`/`proindiviso`/…) axes,
+//              redflags' `herencia_yacente`/`deuda_comunidad`/
+//              `construccion_ilegal`, and in the schema property_type
+//              (`piso`, `atico`, …) and listing_kind (`particular`).
 //
 // The #145 axes are Spanish end-to-end because every value on them is a named
 // Spanish legal instrument, not a generic state: `nuda_propiedad` is not
 // "partial ownership" (that would also cover `proindiviso`, a completely
 // different thing — a share of the whole vs. the whole minus the usufruct),
 // and `venta_deuda` is not "debt sale" in any transferable sense — it is a
-// specific conveyance of a creditor position under Spanish law. `unknown`
-// stays English on every axis: it is system state, not a market category.
+// specific conveyance of a creditor position under Spanish law. Likewise
+// redflags' `herencia_yacente` is not "pending inheritance" (a vaguer English
+// phrase that doesn't name the specific Spanish probate state) and
+// `construccion_ilegal` is not "illegal construction" once you need it to
+// also cover "fuera de ordenación" (a distinct planning-law status, not
+// simply "illegal"). `unknown`/`unclear`/`other` stay English on every axis:
+// they are system state ("we don't know" / "doesn't fit a named category"),
+// not a market category.
 //
 // This is the rule the existing schema already follows, not a new one, and
-// it's why occupancy and condition legitimately differ. `a_reformar` vs
-// `a_rehabilitar` is a genuine market distinction (cosmetic refurbishment vs
-// structural rehabilitation) that "needs_renovation" would flatten, exactly
-// as "flat" flattens `piso` vs `atico`. Values stay machine-readable and
-// stable; Spanish *display* labels belong at render time — see
-// lib/listing-status-labels.ts for that pattern.
+// it's why occupancy, condition and redflags all keep their category values
+// in Spanish while the "nothing to report" value stays English. Values stay
+// machine-readable and stable; Spanish *display* labels belong at render
+// time — see lib/listing-status-labels.ts for that pattern.
 
 /**
  * #25 + #145 — what do I actually get if I buy this?
@@ -381,7 +386,43 @@ defecto — nunca omitas una clave):
   return { stable, volatile: propertyVolatile(vars) };
 }
 
-/** #26 — condition: renovation state. */
+/**
+ * #26 — condition: renovation state, per deduplicated property.
+ *
+ * Same property-level pattern as occupancy (#25): every live listing of the
+ * property is read together, because the flat's actual condition doesn't
+ * change per portal, and one advert saying "a reformar" while a sibling stays
+ * silent must not be missed (#156-review carryover, see occupancy.ts).
+ *
+ * Unlike occupancy's ejes 2/3, condition has NO silence-implies-default rule:
+ * there is no market convention under which a seller who doesn't mention
+ * condition therefore has a renovated flat. Silence stays `unclear` — the
+ * same rule as occupancy's eje 1.
+ *
+ * ## `reformado`'s boundary, tightened (#168 review, judgement call)
+ *
+ * The reviewer found the original wording ("reformado recientemente…listo
+ * para entrar sin obra") didn't partition the real cases: a habitable,
+ * unremarkable, not-recently-renovated flat ("piso en buen estado, listo
+ * para entrar") satisfies the second half and fails the first — and that's
+ * arguably the single most common state in the Spanish market. Under the old
+ * wording the model had to guess between `reformado` and `unclear`
+ * non-deterministically for that population.
+ *
+ * Decision: keep the 4-value enum (the issue specifies exactly these four —
+ * not something to change unilaterally in a review-fix pass), but redefine
+ * `reformado`'s boundary so it partitions cleanly: the axis that matters for
+ * an investor is "does this need money spent on it before it can be used or
+ * rented", not "when was it last renovated". So `reformado` now means "no
+ * reform needed", covering BOTH an explicit recent renovation AND a merely
+ * well-kept older flat with no reform pending. That collapses two states an
+ * investor treats identically (zero capex) into one category, and leaves
+ * `unclear` meaning what it should: "the text doesn't say enough to tell
+ * whether it needs work or not" — not "it's fine but I can't prove when it
+ * was fixed up". A finer split (recently-renovated-with-premium-finishes vs.
+ * generic-move-in-ready) would need a 5th value; noted on issue #26 for the
+ * owner if that granularity turns out to matter for scoring later.
+ */
 export function buildConditionPrompt(vars: FlowVars): {
   stable: string;
   volatile?: string;
@@ -390,37 +431,85 @@ export function buildConditionPrompt(vars: FlowVars): {
 
 ## Tarea: estado de conservación
 
-Clasifica el estado del inmueble para estimar si necesita reforma y de qué
-calibre. Un inversor de "comprar y reformar" busca precisamente los que están
-mal; uno de "comprar y alquilar ya" busca lo contrario.
+Clasifica el estado del inmueble para estimar si necesita reforma. Un inversor
+de "comprar y reformar" busca precisamente los que están mal; uno de "comprar
+y alquilar ya" busca lo contrario.
 
-Categorías (\`condition\`):
-- \`obra_nueva\` — promoción nueva o a estrenar.
-- \`reformado\` — reformado recientemente, listo para entrar.
-- \`buen_estado\` — habitable sin reforma, sin ser reforma reciente.
-- \`a_reformar\` — necesita reforma para ser habitable o competitivo.
-- \`a_rehabilitar\` — reforma integral o estructural.
-- \`unknown\` — no hay información suficiente.
+Categorías (\`condition\`) — el eje que decide la categoría es **"¿hay que
+meter dinero en obra antes de poder usarlo o alquilarlo?"**, no "¿cuándo se
+reformó por última vez?":
+- \`obra_nueva\` — promoción nueva, a estrenar, sin usar.
+- \`reformado\` — **no necesita obra**: se puede entrar a vivir o alquilar tal
+  cual. Incluye tanto una reforma reciente explícita ("reformado en 2023", "a
+  estrenar tras reforma integral", "calidades de lujo") COMO un piso
+  simplemente en buen estado que nadie describe como "reformado" pero que
+  tampoco necesita nada ("piso en buen estado, listo para entrar",
+  "conservado", "para entrar a vivir ya"). Este segundo caso es el más
+  habitual del mercado español — no lo empujes a \`unclear\` solo porque el
+  anuncio no usa la palabra "reformado": lo que importa es la ausencia de obra
+  pendiente, no la fecha de la última reforma.
+- \`a_reformar\` — necesita reforma, de cualquier calibre, para ser habitable
+  o competitivo: instalaciones antiguas, baño/cocina a renovar, humedades,
+  reforma integral o estructural. No distingas cosmético de estructural en la
+  categoría — usa \`issues\` para eso.
+- \`unclear\` — el anuncio no da información suficiente para decidir si
+  necesita obra o no (ni lo dice ni da pistas indirectas de un lado u otro).
+
+**El silencio NO es prueba de \`reformado\`.** Que un anuncio no mencione el
+estado es lo más habitual del mundo, y no hay ninguna convención de mercado
+por la que el silencio implique que el inmueble no necesita obra. Sin señal,
+\`unclear\`.
 
 Ojo con el lenguaje comercial: "con encanto", "para actualizar", "con
-posibilidades", "ideal inversores" suelen indicar que hay obra por hacer. Anota
-esa tensión en \`reasoning\` si la detectas.
+posibilidades", "ideal inversores" suelen indicar que hay obra por hacer.
+Anota esa tensión en \`reasoning\` si la detectas.
+
+### Varios anuncios del mismo inmueble
+
+Puede que te dé varios anuncios del mismo inmueble físico en portales
+distintos. No los evalúes por separado: emite UN solo veredicto para el
+inmueble. Una mención concreta de un problema (humedad, instalación antigua)
+gana al silencio de los demás anuncios — que otro portal no lo mencione no es
+prueba de que no exista, es lo habitual cuando un vendedor prefiere no
+destacarlo. \`evidence\` debe citar UN anuncio concreto y \`evidence_source\`
+debe decir de qué portal salió esa cita, para que el inversor pueda ir a
+comprobarlo.
 
 ${ASSESSMENT_RULES}
 
+**Nota sobre la regla 2 anterior:** en esta tarea, "no lo sé" se expresa con
+\`unclear\`, no con \`unknown\` — \`unknown\` no es un valor válido de
+\`condition\` y rompería el formato de salida. Usa \`unclear\` con una
+\`confidence\` baja cuando el anuncio no dé información suficiente, tal y como
+se explicó arriba.
+
 Formato de salida:
 {
-  "condition": "obra_nueva" | "reformado" | "buen_estado" | "a_reformar" | "a_rehabilitar" | "unknown",
+  "condition": "obra_nueva" | "reformado" | "a_reformar" | "unclear",
   "confidence": 0.0-1.0,
-  "issues": ["problemas concretos citados: humedades, instalación antigua, …"],
+  "issues": ["problemas concretos citados: humedades, instalación eléctrica antigua, necesita baño nuevo, …"],
   "evidence": "cita literal del anuncio, o \\"\\" si no hay",
+  "evidence_source": "portal del que sale la cita (p. ej. \\"fotocasa\\"), o null",
   "reasoning": "una o dos frases en español"
 }`;
 
-  return { stable, volatile: listingVolatile(vars) };
+  return { stable, volatile: propertyVolatile(vars) };
 }
 
-/** #27 — redflags: legal / financial risk extraction. */
+/**
+ * #27 — redflags: legal / financial risk extraction, per deduplicated
+ * property.
+ *
+ * Same property-level pattern as occupancy/condition — see their doc
+ * comments. This flow has the highest cost for a false positive of the
+ * three (issue #27, EC-3): a fabricated legal risk erodes trust in the whole
+ * tool. The prompt therefore leans harder on "only what's actually stated",
+ * and `parseRedFlagsResult` (lib/ai-assessment/redflags.ts) backs it up in
+ * code by dropping any flag without a literal citation.
+ *
+ * Deliberate overlap with #25's `ownership.proindiviso` — see
+ * lib/ai-assessment/redflags.ts's module doc for why both flows keep it.
+ */
 export function buildRedflagsPrompt(vars: FlowVars): {
   stable: string;
   volatile?: string;
@@ -430,38 +519,66 @@ export function buildRedflagsPrompt(vars: FlowVars): {
 ## Tarea: señales de alerta legales y financieras
 
 Extrae menciones que un inversor debería revisar con un abogado ANTES de hacer
-una oferta. No estás dando asesoramiento legal: estás señalando qué hay que
-comprobar.
+una oferta. NO estás dando asesoramiento legal ni emitiendo un veredicto legal:
+estás señalando qué hay que comprobar. Cada hallazgo se presentará al usuario
+como "el anuncio menciona X — verifícalo de forma independiente", nunca como
+un hecho legal confirmado.
 
 Tipos (\`type\`):
-- \`embargo\` — embargo, subasta judicial, deuda con garantía.
-- \`herencia\` — herencia yacente, proindiviso, varios propietarios.
-- \`deuda_comunidad\` — derramas pendientes, deudas con la comunidad.
-- \`obra_ilegal\` — ampliación o construcción no legalizada, fuera de ordenación.
-- \`litigio\` — procedimiento judicial en curso.
-- \`arrendamiento\` — contrato de alquiler que limita la posesión.
-- \`urbanistico\` — suelo no urbanizable, sin licencia de primera ocupación.
-- \`otro\` — cualquier otro riesgo relevante citado.
+- \`embargo\` — embargo, subasta judicial, deuda con garantía sobre el inmueble.
+- \`herencia_yacente\` — herencia yacente, herencia pendiente de partición,
+  varios herederos/propietarios sin repartir. (Nota: si lo que se vende es una
+  cuota indivisa ya definida, sin mención de un proceso de herencia sin
+  resolver, es \`ownership.proindiviso\` en el flujo de ocupación — #25 — no
+  esto. Aquí lo que importa es si la titularidad está todavía sin resolver.)
+- \`deuda_comunidad\` — derramas pendientes, deudas con la comunidad de
+  propietarios.
+- \`construccion_ilegal\` — ampliación o construcción no legalizada, fuera de
+  ordenación, sin licencia.
+- \`litigio\` — procedimiento judicial en curso sobre el inmueble.
+- \`other\` — cualquier otro riesgo legal o financiero relevante citado
+  explícitamente, que no encaje en las categorías anteriores.
+
+### Regla central: NO especules a partir del silencio
+
+Marca SOLO lo que el texto dice explícitamente o implica con fuerza. La
+AUSENCIA de una declaración ("libre de cargas") no es prueba de que exista un
+problema — es simplemente que el anuncio no lo menciona, como el 99% de los
+anuncios. Fabricar un hallazgo a partir del silencio es el fallo más caro de
+este flujo: erosiona la confianza en toda la herramienta. Si dudas, no lo
+incluyas.
+
+### Varios anuncios del mismo inmueble
+
+Si te doy varios anuncios del mismo inmueble físico, trátalos como una sola
+fuente de evidencia: basta que UN anuncio mencione un riesgo para incluirlo.
+\`evidence\` debe citar el anuncio concreto donde aparece, y \`evidence_source\`
+debe decir de qué portal sale esa cita.
 
 ${ASSESSMENT_RULES}
+
+**Nota sobre la regla 2 anterior:** aquí no hay un campo de estado individual
+que pueda valer \`unknown\` — la ausencia de hallazgos se expresa devolviendo
+\`flags: []\` (ver más abajo), no con un valor "no lo sé" por hallazgo.
 
 Formato de salida:
 {
   "flags": [
     {
-      "type": "embargo" | "herencia" | "deuda_comunidad" | "obra_ilegal" | "litigio" | "arrendamiento" | "urbanistico" | "otro",
-      "severity": "high" | "medium" | "low",
-      "evidence": "cita literal del anuncio",
-      "note": "qué debería comprobar el inversor, una frase"
+      "type": "embargo" | "herencia_yacente" | "deuda_comunidad" | "construccion_ilegal" | "litigio" | "other",
+      "description": "qué debería comprobar el inversor, una frase",
+      "evidence": "cita literal del anuncio en la que te apoyas",
+      "evidence_source": "portal del que sale la cita, o null"
     }
   ],
-  "confidence": 0.0-1.0
+  "confidence": 0.0-1.0,
+  "reasoning": "una o dos frases en español"
 }
 
-Si no hay ninguna señal, devuelve \`{"flags": [], "confidence": <n>}\`. Una lista
-vacía es un resultado correcto y frecuente — no fuerces hallazgos.`;
+Si no hay ninguna señal, devuelve \`{"flags": [], "confidence": <n>, "reasoning": "..."}\`.
+Una lista vacía es un resultado correcto y frecuente — NO fuerces hallazgos.`;
 
-  return { stable, volatile: listingVolatile(vars) };
+  return { stable, volatile: propertyVolatile(vars) };
 }
 
 /** #28 — extract: unstructured description → structured fields. */

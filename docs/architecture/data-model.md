@@ -170,6 +170,8 @@ This also honours the ordering constraint the owner set: occupancy is assessed *
 
 The upgrade path is in `init.sql`: existing rows backfill `property_id` from `listing.property_id`, rows that collapse onto the same property keep the newest, and `listing_id` is dropped. Covered by `TestAiAssessmentRekeyMigration` in `etl/tests/test_schema.py` (fresh installs never execute the migration block, so it is tested by rebuilding the old shape by hand).
 
+**Condition (#26) and redflags (#27) followed the same property-level pattern from the start** — `assessment_type IN ('condition', 'redflags')` was already in the CHECK constraint (added ahead of time when #24 laid out the flow catalog), so neither task needed a schema migration. Both read every live listing of the property via the same `loadPropertyListings()` (now shared in `dashboard/lib/ai-assessment/shared.ts` rather than duplicated per flow) and store `evidence_source` per finding for the same reason occupancy does. One behavioural difference from occupancy worth noting for future flows: occupancy's transaction/ownership axes treat *silence* as weak evidence of the ordinary case (nobody sells a debt or a bare share without saying so), and clamp confidence accordingly (`SILENCE_CONFIDENCE_CAP`, now in `shared.ts`). Condition and redflags have **no such default** — there is no market convention under which a seller's silence about renovation state or legal risk implies the good outcome — so both degrade straight to `unclear`/an empty `flags[]` on silence, with no confidence clamp to opt into.
+
 ## Deduplication audit trail
 
 ### `property_merge_log`
