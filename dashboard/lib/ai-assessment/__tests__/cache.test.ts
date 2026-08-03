@@ -84,6 +84,44 @@ describe("computeAssessmentContentHash", () => {
     const b: ListingSnapshot[] = [{ listingId: 1, description: "a", price: 999999 }];
     expect(computeAssessmentContentHash(a)).toBe(computeAssessmentContentHash(b));
   });
+
+  // #184: computeAssessmentContentHash grew an optional `extra` second
+  // argument so occupancy/redflags can fold their derived area-price signal
+  // into the invalidation key — see lib/ai-assessment/price-signal.ts and
+  // price-signal-hash-agreement.test.ts for the end-to-end proof against the
+  // real prompt-builder. These four are the unit-level guarantees `extra`
+  // itself must uphold, independent of where the string comes from.
+  describe("`extra` parameter (#184 — derived, non-listing prompt content)", () => {
+    const listings: ListingSnapshot[] = [{ listingId: 1, description: "a" }];
+
+    it("a two-argument call (extra omitted) is bit-for-bit unchanged from before this parameter existed", () => {
+      // condition.ts/extract.ts never pass `extra` — this is what protects
+      // every pre-#184 stored content_hash for those two assessment types
+      // from going stale in one deploy.
+      expect(computeAssessmentContentHash(listings)).toBe(computeAssessmentContentHash(listings));
+      expect(computeAssessmentContentHash(listings, undefined)).toBe(
+        computeAssessmentContentHash(listings),
+      );
+    });
+
+    it("changes when `extra` changes and the listings stay the same", () => {
+      const withA = computeAssessmentContentHash(listings, "20-30% por debajo");
+      const withB = computeAssessmentContentHash(listings, "30-40% por debajo");
+      expect(withA).not.toBe(withB);
+    });
+
+    it("does NOT change when `extra` is identical across two calls", () => {
+      const first = computeAssessmentContentHash(listings, "20-30% por debajo");
+      const second = computeAssessmentContentHash(listings, "20-30% por debajo");
+      expect(first).toBe(second);
+    });
+
+    it("a call WITH extra never collides with the same listings hashed WITHOUT extra", () => {
+      const without = computeAssessmentContentHash(listings);
+      const withExtra = computeAssessmentContentHash(listings, "20-30% por debajo");
+      expect(without).not.toBe(withExtra);
+    });
+  });
 });
 
 describe("getLatestAssessment — stale flag", () => {
@@ -197,6 +235,47 @@ describe("getOrCompute", () => {
     );
     expect(descResult.fromCache).toBe(false);
     expect(computeFnDesc).toHaveBeenCalledTimes(1);
+  });
+
+  it("#184: getOrCompute's extraHashInput param folds into the invalidation key exactly like computeAssessmentContentHash's `extra`", async () => {
+    // Prime the cache with a row hashed against listings + a specific
+    // area-price band.
+    const bandA = "20-30% por debajo (5-9 comparables)";
+    const bandB = "30-40% por debajo (5-9 comparables)";
+    const hashA = computeAssessmentContentHash(listings, bandA);
+
+    mockSql.mockResolvedValueOnce([row({ prompt_version: "v1", content_hash: hashA })]);
+    const computeFnSameBand = vi.fn();
+    const saveSameBand = vi.fn();
+    const hit = await getOrCompute(
+      1,
+      "redflags",
+      "v1",
+      listings,
+      computeFnSameBand,
+      saveSameBand,
+      bandA, // same band as what produced hashA -> HIT
+    );
+    expect(hit.fromCache).toBe(true);
+    expect(computeFnSameBand).not.toHaveBeenCalled();
+
+    // The band crosses into a new 10-point bucket (a real price move, not
+    // noise) -> the invalidation key must disagree with the stored hash.
+    mockSql.mockResolvedValueOnce([row({ prompt_version: "v1", content_hash: hashA })]);
+    const computeFnNewBand = vi.fn().mockResolvedValue({ result: { v: 2 }, model: "m2" });
+    const saveNewBand = vi.fn().mockResolvedValue(undefined);
+    const miss = await getOrCompute(
+      1,
+      "redflags",
+      "v1",
+      listings,
+      computeFnNewBand,
+      saveNewBand,
+      bandB, // different band -> MISS
+    );
+    expect(miss.fromCache).toBe(false);
+    expect(computeFnNewBand).toHaveBeenCalledTimes(1);
+    expect(saveNewBand).toHaveBeenCalledWith(1, { v: 2 }, "m2", computeAssessmentContentHash(listings, bandB));
   });
 
   it("treats a pre-existing row with a NULL content_hash as a miss (cannot know what it was computed from)", async () => {

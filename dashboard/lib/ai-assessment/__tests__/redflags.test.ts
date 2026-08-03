@@ -174,7 +174,10 @@ describe("parseRedFlagsResult", () => {
 
 describe("prompt version", () => {
   it("is pinned, so a prompt change forces a new row rather than overwriting", () => {
-    expect(REDFLAGS_PROMPT_VERSION).toBe("redflags/v1");
+    // Bumped to v2 for #184: the derived area-price signal changed both the
+    // stable rules text and the volatile payload shape — see
+    // REDFLAGS_PROMPT_VERSION's doc.
+    expect(REDFLAGS_PROMPT_VERSION).toBe("redflags/v2");
   });
 });
 
@@ -196,5 +199,62 @@ describe("redflags prompt — hash-scoped fields are invisible (#30 review, must
     expect(text).not.toContain("banos:");
     expect(text).not.toContain("planta:");
     expect(text).not.toContain("num_fotos");
+  });
+});
+
+describe("redflags prompt — derived area-price signal (#184)", () => {
+  it("renders the signal, labelled, when FlowVars.areaPriceSignal is set — this is how #184 gives redflags back its below-market-price cue without reopening EC-3", () => {
+    const { stable, volatile } = buildSystemPrompt("redflags", {
+      listings: [SILENT_ADVERT],
+      areaPriceSignal:
+        "El precio de este inmueble está aproximadamente un 20-30% por debajo de la mediana de precio/m² de inmuebles comparables en su zona (radio 1km, 10-19 comparables).",
+    });
+    const text = `${stable}\n${volatile ?? ""}`;
+
+    expect(text).toContain("DATO DERIVADO: PRECIO VS. ZONA");
+    expect(text).toContain("20-30% por debajo");
+  });
+
+  it("renders no per-property figure when areaPriceSignal is absent (#184 requirement 2)", () => {
+    const { volatile } = buildSystemPrompt("redflags", { listings: [SILENT_ADVERT] });
+    expect(volatile ?? "").not.toContain("DATO DERIVADO: PRECIO VS. ZONA");
+  });
+
+  it("always includes the general rules for how to weigh the signal, whether or not one is present this request (stable, cache-friendly text)", () => {
+    const withSignal = buildSystemPrompt("redflags", {
+      listings: [SILENT_ADVERT],
+      areaPriceSignal: "20-30% por debajo",
+    }).stable;
+    const withoutSignal = buildSystemPrompt("redflags", { listings: [SILENT_ADVERT] }).stable;
+
+    expect(withSignal).toBe(withoutSignal);
+    expect(withSignal).toContain("Contexto de precio de zona");
+  });
+
+  it(
+    "the evidence/no-assertion rules for the derived signal come AFTER ASSESSMENT_RULES in the " +
+      "assembled string (#184 requirement 4)",
+    () => {
+      const text = redflagsPromptText([SILENT_ADVERT]);
+
+      const genericNoCiteRuleIdx = text.indexOf("no afirmes nada");
+      const derivedSignalRuleIdx = text.indexOf("NO la cites como");
+
+      expect(genericNoCiteRuleIdx).toBeGreaterThan(-1);
+      expect(derivedSignalRuleIdx).toBeGreaterThan(-1);
+      expect(derivedSignalRuleIdx).toBeGreaterThan(genericNoCiteRuleIdx);
+    },
+  );
+
+  it("explicitly forbids citing the derived signal as `evidence` — parseFlag drops uncited flags, but the prompt must not tempt the model to fake one", () => {
+    const text = redflagsPromptText([SILENT_ADVERT]);
+    expect(text).toContain("NO la cites como");
+    expect(text.toLowerCase()).toContain("fabricar una cita");
+  });
+
+  it("explicitly forbids treating the derived signal as proof by itself (#184 requirement 5 — below-market is a prompt for scrutiny, not a finding)", () => {
+    const text = redflagsPromptText([SILENT_ADVERT]);
+    expect(text).toMatch(/NO la uses,? por sí sola/);
+    expect(text.toLowerCase()).toContain("explicaciones inocentes");
   });
 });

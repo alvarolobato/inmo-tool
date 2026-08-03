@@ -112,6 +112,26 @@ export interface FlowVars {
    * whole row). Falls back to `listing.description` when omitted.
    */
   description?: string;
+  /**
+   * Derived (non-listing) input: a bucketed zone-median price-per-m²
+   * comparison for this property, e.g. "20-30% por debajo de la mediana de
+   * precio/m² ... (10-19 comparables)". Computed by
+   * `lib/ai-assessment/price-signal.ts` from `lib/analytics/area-price.ts`
+   * (#32), and rendered ONLY by the flows judged to benefit from a
+   * below-market-price cue — currently `occupancy` and `redflags` (#184).
+   * See that module's doc for why condition/extract don't receive it, why
+   * the value is bucketed (cache stability), and why it's undefined rather
+   * than a fabricated "priced normally" when area-price.ts itself has
+   * nothing defensible to say.
+   *
+   * Whatever this string is set to here MUST be the exact same string passed
+   * as `getOrCompute`'s `extraHashInput` (`lib/ai-assessment/cache.ts`) —
+   * that agreement is the entire point of #184 (the mismatch #180 fixed for
+   * price, generalised to this new derived field). occupancy.ts/redflags.ts
+   * enforce this by computing the string once and passing it to both call
+   * sites from the same variable.
+   */
+  areaPriceSignal?: string;
 
   // ── compare ───────────────────────────────────────────────────────────────
   /** Two or more candidates to compare side by side. */

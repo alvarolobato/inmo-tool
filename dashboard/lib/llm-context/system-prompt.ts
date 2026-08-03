@@ -71,6 +71,59 @@ const HASH_SCOPE_NOTE =
   "uses como señal ni asumas un valor visto en una consulta anterior.)";
 
 /**
+ * Instructs the model how to weigh `vars.areaPriceSignal` when present — the
+ * derived, bucketed zone-median price comparison from #32/#184 (see
+ * `lib/ai-assessment/price-signal.ts` for how it's computed, bucketed, and
+ * why only occupancy and redflags receive it). Appended to the STABLE part
+ * of both prompts — identical every request, whether or not this particular
+ * property actually has a signal to show — so this never breaks OpenRouter
+ * prompt caching; only the actual figure (in `volatile`, when present) varies.
+ *
+ * Placed AFTER `${ASSESSMENT_RULES}` in both callers, matching the ordering
+ * rule this file already established for occupancy's ejes-2/3 exception: a
+ * rule stated earlier loses to a contradicting or clarifying rule stated
+ * later when the model resolves the two by recency, so anything that must
+ * win has to be the LAST word in the assembled string, not just present
+ * somewhere in it (see occupancy.test.ts's index-based assertion for the
+ * existing example this follows).
+ *
+ * Two rules the model must not blur, because both are load-bearing for
+ * #184's requirement 5 ("below market is a prompt for scrutiny, not proof"):
+ *
+ *   1. This text is NOT a quote from any advert — it must never be cited as
+ *      `evidence` (which `ASSESSMENT_RULES` rule 3, and redflags.ts's
+ *      `parseFlag`, both define as a literal quote from the ad text). Citing
+ *      it as evidence would fabricate a citation that doesn't exist in the
+ *      source material.
+ *   2. It must never, by itself, justify a finding (a red flag, an
+ *      `occupied_illegally` verdict). It only raises how hard the model
+ *      should look for an actual, citable disclosure in the ad text — a
+ *      below-market price has innocent explanations (a motivated seller, a
+ *      poor floor, a bad orientation) exactly as often as it has concerning
+ *      ones.
+ */
+const AREA_PRICE_SIGNAL_RULES = `
+### Contexto de precio de zona (dato derivado, NO texto del anuncio)
+
+Más abajo puede aparecer una comparación de precio frente a la zona,
+calculada a partir de inmuebles comparables reales (no el precio exacto del
+anuncio, que sigue sin mostrarse — ver nota anterior). No aparece siempre: si
+no hay comparables suficientes en la zona, o si el precio no está claramente
+por debajo de la mediana, simplemente no se te muestra nada al respecto —
+eso NO significa que el precio sea normal, solo que no hay una comparación
+que aportar.
+
+Cuando SÍ aparezca, trátala con dos reglas estrictas:
+1. NO la cites como \`evidence\`. \`evidence\` sigue significando
+   exclusivamente una cita literal del texto del anuncio — citar este dato
+   como si fuera texto del anuncio sería fabricar una cita.
+2. NO la uses, por sí sola, para justificar un hallazgo. Es contexto para
+   decidir cuánto escrutinio aplicar al resto del texto, no una prueba: un
+   precio por debajo de la mediana de la zona tiene explicaciones inocentes
+   (vendedor con prisa, planta baja, mala orientación) tan a menudo como
+   explicaciones de riesgo (embargo, venta de deuda, ocupación).`;
+
+/**
  * Serialise a listing for the volatile part of a prompt.
  *
  * `hashCoveredOnly`, when true, omits every field
@@ -192,6 +245,30 @@ function propertyVolatile(vars: FlowVars): string | undefined {
     ].join("\n\n") + HASH_SCOPE_NOTE
   ); // note: the `listings.length === 0` fallback above already returns
   // (via listingVolatile) with its own copy of HASH_SCOPE_NOTE appended.
+}
+
+/**
+ * Renders `vars.areaPriceSignal` (#184) as its own labelled block, appended
+ * to the volatile payload of the flows that use it. Returns "" when absent —
+ * concatenation-safe, and matches the "say nothing" contract
+ * `buildAreaPriceSignal` (price-signal.ts) itself follows: an absent signal
+ * must never render as a placeholder or a null-shaped sentence.
+ */
+function areaPriceSignalVolatile(vars: FlowVars): string {
+  if (!vars.areaPriceSignal) return "";
+  return `\n\n### DATO DERIVADO: PRECIO VS. ZONA\n${vars.areaPriceSignal}`;
+}
+
+/**
+ * `propertyVolatile(vars)` with `vars.areaPriceSignal` appended, for the two
+ * flows that render it (occupancy, redflags — #184). Every other caller of
+ * `propertyVolatile` (condition, extract) uses that function directly and
+ * never sees this block, by construction — see price-signal.ts's doc for why.
+ */
+function propertyVolatileWithAreaPrice(vars: FlowVars): string | undefined {
+  const base = propertyVolatile(vars);
+  if (base === undefined) return undefined;
+  return base + areaPriceSignalVolatile(vars);
 }
 
 // ── Knowledge context (schema) ────────────────────────────────────────────────
@@ -317,10 +394,14 @@ ilegalmente" es un riesgo legal grave, no una ganga.
 
 Señales que debes tener en cuenta antes de decidir \`vacant\`: menciones a "se
 entrega vacío en la firma", o descripciones textuales de enseres personales,
-muebles o ropa todavía presentes en la vivienda. El precio del anuncio NO se
-te muestra en este flujo (ver nota al final del bloque de anuncios) — no lo
-uses como señal aunque lo hayas visto en una consulta anterior: una rebaja de
-precio no es, por sí sola, evidencia de ocupación.
+muebles o ropa todavía presentes en la vivienda. El precio exacto del
+anuncio NO se te muestra en este flujo (ver nota al final del bloque de
+anuncios) — no lo uses como señal aunque lo hayas visto en una consulta
+anterior: una rebaja de precio no es, por sí sola, evidencia de ocupación.
+(Excepción explícita a esto, ver el bloque "Contexto de precio de zona" al
+final: si se te da una comparación de precio frente a la zona, síguela con
+las reglas que la acompañan — no es el precio del anuncio y no cambia lo
+dicho aquí.)
 
 Ten en cuenta la \`operacion\` del anuncio. En un anuncio de **alquiler**
 ("operacion: rent"), que el inmueble esté actualmente arrendado es lo normal y
@@ -413,6 +494,7 @@ la ausencia de una revelación obligatoria. Aplica esa excepción exactamente
 como se describió: NO respondas \`unknown\` en los ejes 2 o 3 solo porque no hay
 cita que ofrecer. Las reglas 2 y 3 de arriba siguen aplicando SIN excepción al
 eje 1 (ocupación): ahí el silencio sigue obligando a \`unknown\`.
+${AREA_PRICE_SIGNAL_RULES}
 
 Formato de salida (los tres ejes SIEMPRE presentes, aunque sean el caso por
 defecto — nunca omitas una clave):
@@ -439,7 +521,7 @@ defecto — nunca omitas una clave):
   "reasoning": "dos o tres frases en español explicando el conjunto"
 }`;
 
-  return { stable, volatile: propertyVolatile(vars) };
+  return { stable, volatile: propertyVolatileWithAreaPrice(vars) };
 }
 
 /**
@@ -616,6 +698,7 @@ ${ASSESSMENT_RULES}
 **Nota sobre la regla 2 anterior:** aquí no hay un campo de estado individual
 que pueda valer \`unknown\` — la ausencia de hallazgos se expresa devolviendo
 \`flags: []\` (ver más abajo), no con un valor "no lo sé" por hallazgo.
+${AREA_PRICE_SIGNAL_RULES}
 
 Formato de salida:
 {
@@ -634,7 +717,7 @@ Formato de salida:
 Si no hay ninguna señal, devuelve \`{"flags": [], "confidence": <n>, "reasoning": "..."}\`.
 Una lista vacía es un resultado correcto y frecuente — NO fuerces hallazgos.`;
 
-  return { stable, volatile: propertyVolatile(vars) };
+  return { stable, volatile: propertyVolatileWithAreaPrice(vars) };
 }
 
 /**
