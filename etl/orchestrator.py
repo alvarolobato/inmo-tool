@@ -23,6 +23,7 @@ from etl.connectors.base import (
 )
 from etl.connectors.circuit_breaker import CircuitBreaker
 from etl.connectors.rate_limit import RateLimiter
+from etl.dedup import engine as dedup_engine
 
 logger = logging.getLogger("etl.orchestrator")
 
@@ -450,6 +451,104 @@ def _finish_connector_run(
             (status, ok, failed, skipped, ok + failed + skipped, run_id),
         )
     conn.commit()
+
+
+def _create_dedup_run(conn, trigger: str, connector_run_id: int | None) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO dedup_runs (trigger, connector_run_id, status) "
+            "VALUES (%s, %s, 'running') RETURNING id",
+            (trigger, connector_run_id),
+        )
+        run_id: int = cur.fetchone()[0]
+    conn.commit()
+    return run_id
+
+
+def _finish_dedup_run(
+    conn,
+    run_id: int,
+    *,
+    status: str,
+    pairs_compared: int | None = None,
+    merged: int | None = None,
+    suggested: int | None = None,
+    conflicts: int | None = None,
+    error_msg: str | None = None,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE dedup_runs
+               SET finished_at = NOW(), status = %s, pairs_compared = %s,
+                   merged = %s, suggested = %s, conflicts = %s, error_msg = %s,
+                   duration_ms = (EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000)::INTEGER
+             WHERE id = %s
+            """,
+            (status, pairs_compared, merged, suggested, conflicts, error_msg, run_id),
+        )
+    conn.commit()
+
+
+def run_dedup(
+    conn, trigger: str = "scheduler", connector_run_id: int | None = None
+) -> dedup_engine.DedupRunResult:
+    """Run the dedup engine once, recording a `dedup_runs` row (issue #185).
+
+    This is the sole caller-visible entry point orchestrator.py and
+    etl.dedup.cli both go through — previously `ps dedup run` called
+    `etl.dedup.engine.run()` directly and nothing recorded that a dedup
+    pass happened at all, so a silent no-op (nothing to compare) was
+    indistinguishable from "dedup never ran" (which is exactly how issue
+    #185 went unnoticed: property_merge_log and suggested_merge were both
+    empty across the connectors' entire live history).
+
+    Safe to call against a partial ingestion sweep (circuit breaker open,
+    some scopes failed): the engine only ever *merges* or *suggests* based
+    on pairs of listings that already exist in the DB — it never withdraws
+    or otherwise treats a listing's absence as evidence of anything. An
+    incomplete candidate set just means fewer pairs to compare this run;
+    the next run (once the sweep completes) compares whatever's left. This
+    is the same reasoning `_reconcile_missed_discoveries` already applies
+    to withdrawal, applied here to justify why dedup does NOT need the
+    same `reconcilable_union` gating that withdrawal does.
+
+    Exceptions from `engine.run()` are caught, recorded as a 'failed' row
+    (with `error_msg`), and then re-raised — this function itself doesn't
+    decide whether a dedup failure should sink the caller's run. Callers
+    that must stay resilient (`run_all_connectors`, same posture as
+    `notify_materialize_all`) catch around this call so a dedup bug can't
+    turn an otherwise-successful, already-committed connector sweep into a
+    failed run; `ps dedup run` (etl.dedup.cli), by contrast, wants the
+    exception to propagate so a manual invocation reports failure clearly.
+    Any merges/suggestions `engine.run()` already committed before the
+    exception stay committed (each pair commits independently).
+    """
+    run_id = _create_dedup_run(conn, trigger, connector_run_id)
+    try:
+        result = dedup_engine.run(conn)
+    except Exception as exc:
+        logger.exception("Dedup run %s failed", run_id)
+        _finish_dedup_run(conn, run_id, status="failed", error_msg=str(exc))
+        raise
+    _finish_dedup_run(
+        conn,
+        run_id,
+        status="success",
+        pairs_compared=result.pairs_compared,
+        merged=result.merged,
+        suggested=result.suggested,
+        conflicts=result.conflicts,
+    )
+    logger.info(
+        "Dedup run %s: compared=%d merged=%d suggested=%d conflicts=%d",
+        run_id,
+        result.pairs_compared,
+        result.merged,
+        result.suggested,
+        result.conflicts,
+    )
+    return result
 
 
 def _record_connector_result(
@@ -1600,6 +1699,39 @@ def run_all_connectors(
 
     _finish_connector_run(conn, run_id, ok, failed, skipped)
 
+    # Issue #185: run dedup once per connector sweep, unconditionally — not
+    # gated on this run having discovered anything, not gated on every
+    # connector having succeeded. Two reasons this is the right place:
+    #
+    # 1. AFTER every connector's withdrawal reconciliation, never before or
+    #    interleaved: reconciliation (_reconcile_missed_discoveries, inside
+    #    the per-connector loop above) is what's allowed to *withdraw* a
+    #    listing, and issue #25's occupancy assessment depends on duplicates
+    #    already being consolidated by the time it runs. Running dedup here
+    #    — after the whole connector loop, before `notify_materialize_all`
+    #    — guarantees both orderings hold: reconciliation-before-dedup and
+    #    dedup-before-assess.
+    # 2. Dedup itself never withdraws anything — it only merges/suggests
+    #    pairs of listings that already exist in the DB (see run_dedup's
+    #    docstring) — so it's safe to run even when this sweep was partial
+    #    (a circuit breaker tripped, a scope failed): an incomplete
+    #    candidate set just means fewer pairs get compared this pass, never
+    #    a false "these are gone" conclusion the way a partial withdrawal
+    #    reconciliation would be. That asymmetry is why dedup does NOT need
+    #    an equivalent to `reconcilable_union` gating it.
+    #
+    # Wrapped in try/except, same posture as notify_materialize_all just
+    # below: a dedup bug must not retroactively turn an already-committed,
+    # successful connector sweep into a failed run.
+    try:
+        run_dedup(conn, trigger=trigger, connector_run_id=run_id)
+    except Exception:
+        logger.warning(
+            "Dedup run raised unexpectedly — connector sweep is committed "
+            "and the run record is final; continuing",
+            exc_info=True,
+        )
+
     # Issue #94: a completed run used to leave freshly-ingested properties
     # unscored indefinitely — `scoreNewCandidates`/`materializeProfile` were
     # only ever reachable from two dashboard-side API routes, so nothing
@@ -1610,6 +1742,10 @@ def run_all_connectors(
     # own record must already be durable before an outbound HTTP call that
     # can hang or fail. A callback failure must not retroactively make a
     # successful ingest look like a failed run.
+    #
+    # Also deliberately AFTER dedup (issue #25: assess only after duplicates
+    # are consolidated) — materialize is what triggers scoring/assessment,
+    # so it must never run ahead of the dedup pass above.
     #
     # notify_materialize_all() already swallows its own failures, so this
     # guard is belt-and-braces: it keeps an unexpected bug (or a test double)

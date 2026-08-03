@@ -763,6 +763,46 @@ CREATE INDEX IF NOT EXISTS idx_connector_run_results_run_id ON connector_run_res
 -- has any real history.
 CREATE INDEX IF NOT EXISTS idx_connector_runs_started_at ON connector_runs (started_at DESC);
 
+-- ============================================================
+-- Dedup observability (issue #185)
+-- ============================================================
+--
+-- The dedup engine (etl/dedup/engine.py, issue #16) ran only via
+-- `ps dedup run` — nothing in the connector sweep, the scheduler, or
+-- container startup ever called it. Confirmed on the live database:
+-- property_merge_log and suggested_merge were both empty across every run
+-- since the connectors went live. `connector_runs`/`connector_run_results`
+-- gave an operator visibility into ingestion; dedup had no equivalent, so a
+-- run that silently compared nothing looked identical to a run that
+-- silently found nothing — which is exactly how this went unnoticed.
+--
+-- Mirrors the connector_runs/connector_run_results shape rather than
+-- inventing a new pattern. One row per dedup pass (`etl.orchestrator.
+-- run_dedup`), whether triggered automatically after a connector sweep
+-- (trigger derived from the connector run, e.g. 'scheduler'/'cli') or
+-- manually via `ps dedup run` (trigger='cli-manual').
+CREATE TABLE IF NOT EXISTS dedup_runs (
+    id                BIGSERIAL    PRIMARY KEY,
+    trigger           TEXT         NOT NULL,
+    -- Nullable: a manual `ps dedup run` has no connector_runs row to point
+    -- at. Set when this dedup pass was triggered automatically right after
+    -- a connector sweep (etl.orchestrator.run_all_connectors), so an
+    -- operator can join back to exactly which ingestion run preceded it.
+    connector_run_id  BIGINT       REFERENCES connector_runs(id) ON DELETE SET NULL,
+    started_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    finished_at       TIMESTAMPTZ,
+    duration_ms       INTEGER,
+    status            TEXT         NOT NULL DEFAULT 'running' CHECK (status IN ('running','success','failed')),
+    pairs_compared    INTEGER,
+    merged            INTEGER,
+    suggested         INTEGER,
+    conflicts         INTEGER,
+    error_msg         TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_dedup_runs_started_at ON dedup_runs (started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_dedup_runs_connector_run_id ON dedup_runs (connector_run_id);
+
 -- Issue #99: an explicit, operator-visible override on top of issue #71's
 -- union-of-active-profiles scope derivation. A connector with no row here
 -- (the common case — this table starts empty) keeps #71's default

@@ -17,6 +17,7 @@ Usage: ps dedup <subcommand> [args]
 
 Subcommands:
   run                     Run the dedup engine once (compare listings, merge/suggest)
+  status                  Show the most recent dedup_runs rows (issue #185)
   revert <id>             Undo one auto-merge by its property_merge_log id
   suggestions             List pending suggested_merge rows for human review
   confirm <id>            Merge the pair behind a suggested_merge row
@@ -27,6 +28,12 @@ Subcommands:
   'confirm' or 'reject' each by its id. A row listed with status 'conflict'
   is a merge that already happened but left clashing per-profile state —
   inspect it, then 'resolve-conflict' to clear the flag.
+
+  'status' is what makes a dedup pass that ran-and-found-nothing
+  distinguishable from a dedup pass that never ran at all (issue #185's
+  root cause) — every connector sweep now runs dedup automatically
+  afterward (trigger != 'cli-manual'), so this should never show a large
+  gap since the last connector_runs row.
 EOF
 }
 
@@ -54,6 +61,14 @@ cmd_revert() {
         exit 1
     fi
     _run_in_etl python -m etl.dedup.cli revert "$id"
+}
+
+cmd_status() {
+    "${DC[@]}" exec -T postgres psql \
+        -U "${POSTGRES_USER:-postgres}" \
+        -d "${POSTGRES_DB:-inmotool}" \
+        -v ON_ERROR_STOP=1 \
+        -c "SELECT id, trigger, connector_run_id, status, pairs_compared, merged, suggested, conflicts, to_char(started_at, 'YYYY-MM-DD HH24:MI') AS started_at, duration_ms FROM dedup_runs ORDER BY started_at DESC LIMIT 20"
 }
 
 cmd_suggestions() {
@@ -86,6 +101,7 @@ shift
 
 case "$SUBCMD" in
     run)              cmd_run ;;
+    status)           cmd_status ;;
     revert)           cmd_revert "$@" ;;
     suggestions)      cmd_suggestions ;;
     confirm)          _cmd_with_suggestion_id confirm "$@" ;;
