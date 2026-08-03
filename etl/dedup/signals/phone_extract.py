@@ -42,7 +42,12 @@ from __future__ import annotations
 import re
 from decimal import Decimal
 
-from etl.dedup.signals.address_coords import coords_close, prices_close, sizes_close
+from etl.dedup.signals.address_coords import (
+    coords_close,
+    floors_conflict,
+    prices_close,
+    sizes_close,
+)
 from etl.dedup.types import ListingRecord, PairEvaluation
 
 # Spanish mobile/landline: 9 digits starting 6/7/8/9, optional +34 prefix,
@@ -83,6 +88,16 @@ def extract_phones(text: str | None) -> set[str]:
 
 
 def _corroborated(a: ListingRecord, b: ListingRecord) -> bool:
+    # Issue #186: floor as an additional required corroborating condition,
+    # checked before either proximity path below rather than folded into
+    # each — a floor present on both sides that disagrees is direct
+    # evidence of "different unit, same building" and must veto
+    # corroboration regardless of which proximity path would otherwise
+    # succeed. Floor missing on either side is permissive (see
+    # etl.dedup.signals.floor's module docstring): falls through to the
+    # existing coords/price/size checks unaffected.
+    if floors_conflict(a.floor, b.floor):
+        return False
     if coords_close(a.lat, a.lon, b.lat, b.lon) and sizes_close(
         a.m2_built, b.m2_built, Decimal("0.05")
     ):

@@ -14,6 +14,7 @@ from decimal import Decimal
 
 from rapidfuzz import fuzz
 
+from etl.dedup.signals.floor import floors_conflict
 from etl.dedup.types import ListingRecord, PairEvaluation
 
 _MIN_TEXT_SIMILARITY = 0.55  # rapidfuzz score is 0-100; compared as a 0-1 ratio below
@@ -88,9 +89,19 @@ def evaluate(a: ListingRecord, b: ListingRecord) -> PairEvaluation | None:
         return None
 
     confidence = min(Decimal(str(round(similarity, 3))), _MAX_CONFIDENCE)
+    detail: dict = {"address_similarity": round(similarity, 3)}
+    # Issue #186: this signal never auto-merges (always 'suggest', capped
+    # below 0.6), so a floor mismatch doesn't need to veto anything the way
+    # it does for address_coords/phone/reference_code's merge paths — but
+    # it's still the cheapest available discriminator for "same building,
+    # different unit" (the owner's own framing), so surface it in `detail`
+    # for the human reviewing the suggestion rather than leaving the
+    # discriminating data unread, same as photo_hash below.
+    if floors_conflict(a.floor, b.floor):
+        detail["floor_conflict"] = True
     return PairEvaluation(
         basis="fuzzy",
         confidence=confidence,
         decision="suggest",
-        detail={"address_similarity": round(similarity, 3)},
+        detail=detail,
     )
