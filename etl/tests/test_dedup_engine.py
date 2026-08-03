@@ -112,9 +112,14 @@ def _insert_pair(
 
 
 def _insert_profile(conn, name: str = "test profile") -> int:
+    # `scope` is explicitly supplied because D-013 removed its DB-level
+    # `'{}'` default: an INSERT that forgets a scope must fail loudly rather
+    # than quietly creating a profile that matches nothing. These fixtures
+    # don't care what the scope *is*, only that one is present.
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO search_profile (name) VALUES (%s) RETURNING id", (name,)
+            "INSERT INTO search_profile (name, scope) VALUES (%s, %s) RETURNING id",
+            (name, "{}"),
         )
         conn.commit()
         return cur.fetchone()[0]
