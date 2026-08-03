@@ -16,6 +16,7 @@ from bs4 import BeautifulSoup
 
 from etl.connectors.base import ConnectorError, ConnectorScope, RawListing
 from etl.connectors.extraction import scoped_text
+from etl.connectors.geography import UnresolvableGeographyError
 from etl.connectors.servihabitat import (
     _SIMILAR_LISTING_SELECTORS,
     ServihabitatConnector,
@@ -244,6 +245,21 @@ class TestDiscover:
         with pytest.raises(ConnectorError, match="nothing to discover"):
             connector.discover(ConnectorScope(), throttle=lambda: None)
 
+    def test_unresolvable_center_raises_a_distinct_error_not_empty(self):
+        """Issue #169: a real center point that matches no known place in
+        the shared gazetteer at all must raise UnresolvableGeographyError
+        (a ConnectorError subclass) — distinct from the "no geography info
+        at all" case above, and never silently absorbed into an empty
+        discover() result."""
+        connector = ServihabitatConnector()
+        far = ConnectorScope(center=(38.7223, -9.1393), radius_km=5)  # Lisbon
+        with (
+            patch("etl.connectors.servihabitat.requests.get") as mock_get,
+            pytest.raises(UnresolvableGeographyError),
+        ):
+            connector.discover(far, throttle=lambda: None)
+        mock_get.assert_not_called()
+
 
 class TestScopeAndFlags:
     def test_discovers_full_inventory_is_false(self):
@@ -262,6 +278,28 @@ class TestScopeAndFlags:
         connector = ServihabitatConnector()
         assert connector.scope_key(ConnectorScope(geography="madrid")) == "madrid"
         assert connector.scope_key(ConnectorScope()) is None
+
+    def test_scope_key_uses_a_sentinel_for_an_unresolvable_center(self):
+        """scope_key() must never raise itself (the orchestrator calls it
+        with no try/except) — an unresolvable center must still surface as
+        a distinct, non-None key so discover() gets called and raises
+        there (issue #169)."""
+        connector = ServihabitatConnector()
+        far = ConnectorScope(center=(38.7223, -9.1393), radius_km=5)  # Lisbon
+        key = connector.scope_key(far)
+        assert key is not None
+        assert key.startswith("unresolvable-geography:")
+
+    def test_scope_key_uses_province_not_city_for_a_non_capital_town(self):
+        """Issue #169 fix: this table used to be keyed by city name, which
+        coincidentally equalled province name for the original four
+        (Madrid/Sevilla/Barcelona/Valencia are all provincial capitals). A
+        scope centered on a non-capital town in a covered province (e.g.
+        Estepona, Malaga province) must resolve via its PROVINCE, not fail
+        just because "estepona" isn't a dict key."""
+        connector = ServihabitatConnector()
+        estepona = ConnectorScope(center=(36.42764, -5.14589), radius_km=10)
+        assert connector.scope_key(estepona) == "malaga"
 
 
 class TestMapping:

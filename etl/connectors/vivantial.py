@@ -60,7 +60,11 @@ from etl.connectors.base import (
     RawListing,
     Throttle,
 )
-from etl.connectors.geography import nearest_city
+from etl.connectors.geography import (
+    UnresolvableGeographyError,
+    resolve_place,
+    unresolvable_scope_key,
+)
 from etl.connectors.vivantial_mapping import (
     extract_address,
     extract_bathrooms,
@@ -89,16 +93,30 @@ _USER_AGENT = (
     "contact: github.com/alvarolobato/inmo-tool)"
 )
 
-# The slug segment each city appears as in a detail URL. Derived from the
-# live sitemap, not guessed: Vivantial lowercases and strips punctuation,
-# so "Sagunto/Sagunt" becomes "saguntosagunt". Only the four cities
-# `geography.CITY_CENTROIDS` knows about are mapped, matching the other
-# connectors' coverage.
+# The slug segment each municipality appears as in a detail URL. Derived
+# from the live sitemap, not guessed: Vivantial lowercases and strips
+# punctuation, so "Sagunto/Sagunt" becomes "saguntosagunt". Live-verified
+# (real sitemap <loc> entries under this exact slug) during issue #71 for
+# the original four and during issue #169 for the Costa del Sol entries
+# below (Vivantial's national sitemap already carries every municipality —
+# discover() filters it locally by resolved geography, so "is this
+# municipality covered" only ever depends on whether the sitemap actually
+# has listings there, confirmed for each entry present here).
 _CITY_SLUGS: dict[str, str] = {
     "madrid": "madrid",
     "sevilla": "sevilla",
     "barcelona": "barcelona",
     "valencia": "valencia",
+    # Costa del Sol (issue #169 course-correction v1 market) — confirmed
+    # real sitemap entries for malaga, benalmadena, estepona and mijas.
+    # Marbella deliberately NOT included: the live sitemap has zero
+    # `..._en_marbella_en_...` entries at verification time (checked, not
+    # assumed) — Vivantial's inventory for that specific municipality is
+    # empty right now, a legitimate "no coverage" rather than a slug guess.
+    "malaga": "malaga",
+    "estepona": "estepona",
+    "benalmadena": "benalmadena",
+    "mijas": "mijas",
 }
 
 _DETAIL_URL_RE = re.compile(
@@ -112,18 +130,20 @@ def _resolve_geography(scope: ConnectorScope) -> str | None:
 
     Same contract as the Fotocasa/Milanuncios equivalents: the free-text
     `scope.geography` escape hatch wins for tests/manual construction,
-    otherwise resolve `scope.center` to the nearest known city. No
-    hardcoded default — an unresolvable scope means "nothing to discover
-    here", never "assume Madrid" (issue #71).
+    otherwise resolve `scope.center` via the shared gazetteer (issue #169).
+    No hardcoded default — a municipality this connector's own table
+    doesn't cover means "nothing to discover here", never "assume Madrid"
+    (issue #71).
+
+    Can raise `UnresolvableGeographyError` (from `resolve_place`) — see
+    fotocasa.py's `_resolve_geography` docstring for why that's deliberate.
     """
     if scope.geography:
         return scope.geography
-    if scope.center is None:
+    place = resolve_place(scope)
+    if place is None:
         return None
-    city = nearest_city(scope.center, scope.radius_km)
-    if city is None:
-        return None
-    return _CITY_SLUGS.get(city)
+    return _CITY_SLUGS.get(place.name)
 
 
 def _detail_url_for(
@@ -173,8 +193,14 @@ class VivantialConnector(Connector):
 
     def scope_key(self, scope: ConnectorScope) -> str | None:
         """Resolved city slug — see FotocasaConnector.scope_key for why the
-        resolved value (not the raw scope) is the right dedup key."""
-        return _resolve_geography(scope)
+        resolved value (not the raw scope) is the right dedup key, and for
+        why `UnresolvableGeographyError` (issue #169) must become a
+        sentinel key here rather than `None` — this method must never
+        raise itself."""
+        try:
+            return _resolve_geography(scope)
+        except UnresolvableGeographyError:
+            return unresolvable_scope_key(scope)
 
     def _fetch(self, url: str, throttle: Throttle) -> str:
         throttle()
@@ -190,12 +216,18 @@ class VivantialConnector(Connector):
         return response.text
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
+        # _resolve_geography can raise UnresolvableGeographyError, left to
+        # propagate uncaught (issue #169) — see fotocasa.py's discover() for
+        # the full reasoning.
         geography = _resolve_geography(scope)
         if geography is None:
+            # Reachable only if discover() is invoked directly, bypassing
+            # scope_key()'s gate — see fotocasa.py's discover() docstring.
             raise ConnectorError(
                 "vivantial discover: scope has neither a resolvable center "
-                "(nearest known city too far away) nor an explicit geography "
-                "string — nothing to discover, not defaulting to a hardcoded "
+                "nor an explicit geography string, or resolves to a "
+                "municipality this connector's _CITY_SLUGS table doesn't "
+                "cover — nothing to discover, not defaulting to a hardcoded "
                 "city (see issue #71)"
             )
 

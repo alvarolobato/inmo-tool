@@ -22,6 +22,7 @@ from etl.connectors.base import (
     ConnectorScope,
 )
 from etl.connectors.circuit_breaker import CircuitBreaker
+from etl.connectors.geography import UnresolvableGeographyError, resolve_place
 from etl.connectors.rate_limit import RateLimiter
 from etl.dedup import engine as dedup_engine
 
@@ -1508,6 +1509,13 @@ def run_all_connectors(
         error_total = 0
         any_circuit_open = False
         any_scope_failed = False
+        # Issue #177 (M4): tracked separately from any_scope_failed — see
+        # the UnresolvableGeographyError except clause below for why a
+        # scope whose center matches no place in the gazetteer at all must
+        # NOT be treated identically to a real discover() failure (network
+        # error, parse error, etc.) when deciding this connector's overall
+        # status and whether withdrawal reconciliation is safe this run.
+        any_scope_unresolvable = False
         scope_summaries: list[str] = []
         error_msgs: list[str] = []
 
@@ -1561,12 +1569,54 @@ def run_all_connectors(
                 # run (issue #71 review finding) — previously this reached
                 # discover(), which raised ConnectorError, which this loop
                 # caught as a genuine scope failure.
-                logger.warning(
-                    "Connector %s: scope=%r has no known coverage — "
-                    "skipping (not a failure)",
-                    connector.name,
-                    scope,
-                )
+                #
+                # Issue #177 (M3) hardening: `scope_key() is None` covers
+                # two genuinely different situations that used to get the
+                # identical log line — "nothing to resolve at all" (no
+                # center/geography on the scope) and "resolved fine to a
+                # REAL municipality, but this connector's own coverage
+                # table doesn't have a slug for it" (e.g. a point inside a
+                # small town the gazetteer knows but no connector's
+                # `_CITY_SLUGS`-equivalent table lists). The second case is
+                # a genuinely useful "resolved but uncovered" signal an
+                # operator can act on (add the slug once it's live-verified
+                # — see e.g. fotocasa.py's `_CITY_SLUGS` docstring); folding
+                # it into the same message as "no geography info at all"
+                # made it indistinguishable from a total non-event. Best
+                # effort only: resolve_place() itself never raises here in
+                # practice (a scope whose center is genuinely unresolvable
+                # gets the `unresolvable_scope_key` sentinel from
+                # scope_key(), not None — see that function's docstring),
+                # but the guard costs nothing and keeps this path from
+                # itself becoming a new way to blow up the loop.
+                place = None
+                if scope.center is not None:
+                    try:
+                        place = resolve_place(scope)
+                    except UnresolvableGeographyError:
+                        place = None
+                if place is not None:
+                    logger.warning(
+                        "Connector %s: scope=%r resolved to %s/%s but this "
+                        "connector's own coverage table has no entry for "
+                        "it — skipping (resolved, just not covered by this "
+                        "connector; not a failure)",
+                        connector.name,
+                        scope,
+                        place.name,
+                        place.province,
+                    )
+                    error_msgs.append(
+                        f"resolved but uncovered: {scope} -> "
+                        f"{place.name}/{place.province}"
+                    )
+                else:
+                    logger.warning(
+                        "Connector %s: scope=%r has no known coverage — "
+                        "skipping (not a failure)",
+                        connector.name,
+                        scope,
+                    )
                 continue
 
             if scope_key in seen_scope_keys:
@@ -1592,6 +1642,63 @@ def run_all_connectors(
                     breaker,
                     min_refetch_interval_seconds=effective_min_refetch_interval_seconds,
                 )
+            except UnresolvableGeographyError as exc:
+                # Issue #177 (M4): this is the sentinel path
+                # `unresolvable_scope_key()` exists for — scope_key()
+                # deliberately returned a non-None sentinel (instead of
+                # None) so THIS scope reaches discover(), whose
+                # resolve_place() call raises here, for a scope whose
+                # center matches no place in the gazetteer at ALL. That is
+                # a real, visible problem (a profile with a bogus/foreign
+                # center) worth surfacing — but it is NOT the same kind of
+                # failure as `run_connector` raising for any other reason
+                # (network error, parse error, a genuine partial sweep of a
+                # REAL area), and treating it identically double-counted
+                # the damage:
+                #
+                #   1. It set `reconcilable_union = False` for the ENTIRE
+                #      connector run, skipping withdrawal reconciliation
+                #      for every OTHER scope too — even ones that resolved
+                #      and crawled successfully this same run. But an
+                #      unresolvable scope never had any real listings under
+                #      it, in this run or any other, so its absence from
+                #      `discovered_union` is not "a hole we can't account
+                #      for" the way a failed real crawl is — there was
+                #      never anything there to miss. `reconcilable_union`
+                #      is deliberately left untouched here.
+                #   2. It always set `any_scope_failed = True`, which (see
+                #      the status precedence comment below) permanently
+                #      marks the WHOLE connector 'failed' on every run for
+                #      as long as the one bad profile stays active — even
+                #      when every OTHER active profile resolves and crawls
+                #      fine. That directly contradicts this same function's
+                #      documented intent a few lines below ("an
+                #      unresolvable-for-everyone connector must not end up
+                #      permanently 'failed'"). `any_scope_unresolvable` is
+                #      tracked separately: if nothing else succeeds this
+                #      run either, the run is still reported 'failed' (see
+                #      the status computation below) — this one bad scope
+                #      just no longer holds hostage every OTHER scope's
+                #      already-successful result.
+                #
+                # Always logged and always added to `error_msgs`
+                # (unconditionally, not gated on the final status) so this
+                # stays a VISIBLE outcome in connector_run_results.error_msg
+                # even on an otherwise fully 'ok' run — never silently
+                # dropped just because the rest of the connector's scopes
+                # were fine.
+                any_scope_unresolvable = True
+                logger.error(
+                    "Connector %s: scope=%r has an unresolvable geography "
+                    "(matches no known place in the gazetteer at all) — "
+                    "logged as a visible problem, not folded into a "
+                    "generic connector failure: %s",
+                    connector.name,
+                    scope,
+                    exc,
+                )
+                error_msgs.append(f"unresolvable geography {scope}: {exc}")
+                continue
             except (
                 Exception
             ) as exc:  # one scope's discover() failing shouldn't skip the rest
@@ -1652,14 +1759,33 @@ def run_all_connectors(
         #      a real failure must never be hidden behind a different,
         #      less-alarming status.
         #   2. any_circuit_open (and no explicit failure) -> 'circuit_open'.
-        #   3. otherwise -> 'ok'. This covers both "every attempted scope
-        #      succeeded" AND "zero scopes were attempted because all of
-        #      them were unresolvable/duplicate" — neither is a failure;
-        #      a connector doing nothing because no active profile falls
-        #      in its coverage area is a normal, expected outcome, not an
-        #      error condition (this is what issue #71's review flagged:
-        #      an unresolvable-for-everyone connector must not end up
-        #      permanently 'failed').
+        #   3. any_scope_unresolvable (issue #177, M4) AND nothing else
+        #      this run ever reached a successful `run_connector` call
+        #      (`scope_summaries` empty) -> 'failed'. Every active scope
+        #      this connector had was a dead end (either unresolvable-
+        #      geography or some other failure/duplicate/no-coverage), so
+        #      there is genuinely nothing to call 'ok' — this is also what
+        #      keeps `test_unresolvable_geography_reaches_connector_run_
+        #      results_as_failed`'s single-bad-profile scenario failing
+        #      loudly, unchanged from before this fix.
+        #   4. otherwise -> 'ok'. This covers "every attempted scope
+        #      succeeded", "zero scopes were attempted because all of them
+        #      were unresolvable/duplicate" (no `UnresolvableGeographyError`
+        #      involved at all — the plain `scope_key() is None` path), AND
+        #      (issue #177, M4) "at least one scope succeeded even though a
+        #      DIFFERENT scope this run had an unresolvable geography" — a
+        #      connector doing real, successful work for the markets it
+        #      actually covers must not be flipped to 'failed' every single
+        #      night just because one unrelated profile has a bogus/foreign
+        #      center (this is what issue #71's review originally flagged,
+        #      and what the #169 sentinel path had regressed: "an
+        #      unresolvable-for-everyone connector must not end up
+        #      permanently 'failed'" applies just as much to "unresolvable
+        #      for ONE profile out of several" as it does to zero profiles
+        #      at all). The unresolvable scope is still fully visible via
+        #      `error_msgs` below, unconditionally — 'ok' here means "don't
+        #      cry wolf on the connector as a whole", not "hide the
+        #      problem".
         # `scope_summaries`/`error_msgs` (folded into error_msg below) make
         # a mixed-outcome run distinguishable from a total failure/total
         # no-op by inspection, even though `status` itself can only be one
@@ -1668,6 +1794,8 @@ def run_all_connectors(
             status = "failed"
         elif any_circuit_open:
             status = "circuit_open"
+        elif any_scope_unresolvable and not scope_summaries:
+            status = "failed"
         else:
             status = "ok"
 
