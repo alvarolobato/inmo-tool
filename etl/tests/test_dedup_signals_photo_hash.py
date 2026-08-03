@@ -213,6 +213,107 @@ class TestMatchRatioSemantics:
         assert photo_hash.match_ratio(hashes_a, hashes_b) == 0.5
 
 
+class TestNonImageUrlFiltering:
+    """Issue: a live run fed video/virtual-tour URLs from `photo_urls` into
+    `fetch_hashes`, wasting a fetch on every one and diluting `match_ratio`
+    (a listing with 3 real photos + 2 unhashable links could never reach
+    ratio 1.0 even when every real photo matched — see photo_hash.py's
+    module-level comment for the full writeup and the exact log lines from
+    the live corpus this reproduces).
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.youtube.com/watch?v=herOSioqMOc",
+            "https://youtu.be/herOSioqMOc",
+            "https://vimeo.com/1176257186",
+            "https://floorfy.com/tour/2666901?play=no",
+            "https://my.matterport.com/show/?m=abc123",
+            "https://kuula.co/share/abc123",
+        ],
+    )
+    def test_known_non_image_hosts_are_rejected(self, url):
+        assert photo_hash._looks_like_photo_url(url) is False
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://cdn.fotocasa.es/p1.jpg",
+            "https://img.milanuncios.com/p1.JPG",
+            "https://example.com/photos/foo.webp?w=800",
+            # A thumbnail with a recognized extension on an otherwise
+            # video-hosting domain: extension wins (see docstring).
+            "https://vimeo.com/thumbnail.jpg",
+            # No extension, unknown host — the permissive default: real
+            # portal CDNs commonly serve photos from extensionless paths.
+            "https://cdn.example-portal.com/listing/12345/photo",
+        ],
+    )
+    def test_image_urls_and_unknown_hosts_are_kept(self, url):
+        assert photo_hash._looks_like_photo_url(url) is True
+
+    def test_fetch_hashes_never_calls_requests_get_for_a_filtered_url(
+        self, monkeypatch
+    ):
+        calls: list[str] = []
+
+        def _fake_get(url, **kwargs):
+            calls.append(url)
+            raise AssertionError("requests.get must not be called for a filtered URL")
+
+        monkeypatch.setattr(photo_hash.requests, "get", _fake_get)
+        result = photo_hash.fetch_hashes(
+            (
+                "https://www.youtube.com/watch?v=herOSioqMOc",
+                "https://vimeo.com/1176257186",
+                "https://floorfy.com/tour/2666901?play=no",
+            )
+        )
+        assert result == []
+        assert calls == []
+
+    def test_fetch_hashes_still_attempts_real_image_urls(self, monkeypatch):
+        """The filter must not become an accidental block-everything: a
+        genuine image URL alongside filtered ones is still fetched (and, in
+        this fake, successfully hashed)."""
+        room = _synthetic_room(1)
+
+        class _FakeResponse:
+            def __init__(self, image):
+                buffer = io.BytesIO()
+                image.convert("RGB").save(buffer, "JPEG")
+                buffer.seek(0)
+                self.raw = buffer
+                self.raw.decode_content = True
+
+            def raise_for_status(self):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def _fake_get(url, **kwargs):
+            assert url == "https://cdn.example.com/real.jpg"
+            return _FakeResponse(room)
+
+        monkeypatch.setattr(photo_hash.requests, "get", _fake_get)
+        result = photo_hash.fetch_hashes(
+            (
+                "https://vimeo.com/1176257186",
+                "https://cdn.example.com/real.jpg",
+            )
+        )
+        assert len(result) == 1
+        # JPEG re-encoding in the fake response perturbs the hash slightly —
+        # compare by Hamming distance (same tolerance the real signal uses),
+        # not bit-for-bit equality.
+        assert int(result[0] - _hash(room)) <= photo_hash._HASH_HAMMING_THRESHOLD
+
+
 class TestConfidenceScaling:
     def test_floor_ratio_maps_to_the_floor_confidence(self):
         assert (

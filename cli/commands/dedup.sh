@@ -23,6 +23,10 @@ Subcommands:
   confirm <id>            Merge the pair behind a suggested_merge row
   reject <id>             Mark a suggestion as not-the-same-property
   resolve-conflict <id>   Clear a merge-time state conflict flag
+  process-actions         Drain pending dashboard review-queue confirm/reject
+                          requests once (the long-running container drains
+                          these automatically on a 3s poll — this is the
+                          manual/one-shot equivalent)
 
   Review workflow: 'suggestions' lists what needs a human decision, then
   'confirm' or 'reject' each by its id. A row listed with status 'conflict'
@@ -92,6 +96,10 @@ _cmd_with_suggestion_id() {
     _run_in_etl python -m etl.dedup.cli "$subcmd" "$id"
 }
 
+cmd_process_actions() {
+    _run_in_etl python -m etl.dedup.cli process-actions
+}
+
 SUBCMD="${1:-}"
 if [ -z "$SUBCMD" ] || [ "$SUBCMD" = "-h" ] || [ "$SUBCMD" = "--help" ]; then
     usage
@@ -107,6 +115,7 @@ case "$SUBCMD" in
     confirm)          _cmd_with_suggestion_id confirm "$@" ;;
     reject)           _cmd_with_suggestion_id reject "$@" ;;
     resolve-conflict) _cmd_with_suggestion_id resolve-conflict "$@" ;;
+    process-actions)  cmd_process_actions ;;
     *)
         echo -e "${RED}ps dedup: unknown subcommand '${SUBCMD}'${NC}" >&2
         usage >&2

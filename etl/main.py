@@ -159,6 +159,13 @@ def main() -> None:
             from etl import capture
 
             capture.process_pending_captures(conn_pg)
+
+            # Also drain any pending dedup review-queue confirm/reject
+            # requests in --once mode (issue: dedup review-queue UI) — same
+            # reasoning as the capture drain immediately above.
+            from etl.dedup import actions as dedup_actions
+
+            dedup_actions.process_pending_actions(conn_pg)
         except orchestrator.UnknownConnectorError as exc:
             # Caught specifically, not bare ValueError — an unrelated
             # ValueError from somewhere inside a connector's own code
@@ -185,6 +192,21 @@ def main() -> None:
         daemon=True,
     )
     capture_thread.start()
+
+    # Dedup review-queue action polling (dashboard confirm/reject requests
+    # on `suggested_merge`) — same "own short interval, own thread" reasoning
+    # as the capture thread just above: see etl/dedup/actions.py's module
+    # docstring for why the dashboard can only signal a confirm/reject
+    # through this queue table rather than calling confirm_suggestion()/
+    # reject_suggestion() directly (separate containers, no shared process).
+    from etl.dedup import actions as dedup_actions
+
+    dedup_action_thread = threading.Thread(
+        target=dedup_actions.run_action_poll_loop,
+        args=(lambda: postgres.get_connection(config),),
+        daemon=True,
+    )
+    dedup_action_thread.start()
 
     if not registry_synced:
         # Same reasoning as the --once branch: without the seeded rows, every

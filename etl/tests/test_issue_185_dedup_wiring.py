@@ -389,6 +389,27 @@ class TestOwnerReportedPair:
         similarity clears its 0.55 floor by a hair — filing a suggestion,
         which is the correct, designed-for outcome for a pair this weakly
         corroborated.
+
+        CORRECTION (dedup review-queue issue): this test's `photo_urls`
+        (`https://img.milanuncios.com/pN.jpg` / `https://cdn.fotocasa.es/pN.jpg`)
+        point at hosts that don't actually serve those images — every
+        `fetch_hashes` call for both listings fails, so `photo_hash` never
+        gets a chance to fire here, by construction of this fixture, not
+        because it doesn't apply to this pair. A prior agent read this test
+        and concluded "for the owner's real pair, only `fuzzy` fires" —
+        that conclusion does NOT hold against the owner's actual live data:
+        a real dedup run against real listings found `photo_hash` firing at
+        confidence 0.800 (`match_ratio: 1.0`, all 11 photos matched) for
+        this exact reported pair (see docs/decisions/ around the review-queue
+        change and the PR description with the live `suggested_merge` row).
+        This test is still correct and worth keeping (it pins the *other*
+        four signals' priority-order behaviour + wiring), but do not use it
+        as evidence about what fires against real, fetchable photos — it
+        structurally cannot exercise `photo_hash` at all. See
+        etl/tests/test_dedup_signals_photo_hash.py::TestNonImageUrlFiltering
+        for photo_hash's own no-network unit tests, and the dedup engine
+        module docstring for the general "network signals need network to
+        prove anything" caveat.
         """
         conn = dedup_wiring_db
         prop_a, listing_a, prop_b, listing_b = self._seed_pair(conn)

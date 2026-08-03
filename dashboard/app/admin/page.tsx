@@ -11,6 +11,11 @@ const ADMIN_LINKS = [
     description: "Estado de sincronización, ejecuciones recientes y estadísticas del proceso ETL.",
   },
   {
+    href: "/admin/dedup",
+    label: "Revisión de duplicados",
+    description: "Cola de sugerencias de fusión de propiedades pendientes de confirmar o rechazar.",
+  },
+  {
     href: "/admin/slow-queries",
     label: "Consultas lentas",
     description: "Consultas SQL lentas registradas en los últimos días.",
