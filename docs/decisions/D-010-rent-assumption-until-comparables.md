@@ -4,6 +4,17 @@ title: Rent estimate ships as an explicit per-profile assumption until #31 lands
 date: 2026-08-03
 ---
 
+## STATUS: retired (2026-08-03) — superseded by [D-014](D-014-comparable-rent-estimator.md)
+
+Issue #31 has landed: `rent-estimate.ts` now computes a real comparable-rent
+estimate from ingested rental listings when no profile assumption is set,
+with tiered confidence (`"high"`/`"low"`, the superset this file's own
+`RentConfidence` type reserved space for from the start). The profile
+assumption still behaves exactly as this file describes when one IS set
+(never silently overridden — see D-014's precedence rule); everything below
+is kept for git archaeology, not as a currently-binding description of the
+no-assumption path.
+
 # D-010: Rent estimate ships as an explicit per-profile assumption until #31 lands
 
 *Decided: 2026-08-03*

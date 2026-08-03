@@ -80,12 +80,28 @@ class DedupRunResult:
 
 
 def fetch_listing_records(conn) -> list[ListingRecord]:
-    """Fetch every listing joined with its property row.
+    """Fetch every SALE listing joined with its property row.
 
     No status filter — a withdrawn listing on one site duplicating an
     active one on another is still the same property and still worth
     merging (its price/status history has value regardless of its current
     status), so this intentionally doesn't restrict to status='active'.
+
+    `WHERE l.operation = 'sale'` (issue #31): before rental ingestion
+    existed, every row here was implicitly a sale listing (the schema
+    default), so this filter was a no-op and absent. Issue #31's own
+    Context section is explicit that rental listings "does not need
+    property_id/dedup linkage at the same rigor as sale listings — rentals
+    are used in aggregate for comps, not tracked as individual investment
+    candidates": they're read in bulk by rent-estimate.ts's own geography+
+    size query, never resolved to a canonical `property.id` the way two
+    sale listings for the same real unit are. Feeding rent listings into
+    this pairwise matcher would risk a spurious merge across operations
+    (e.g. a for-sale flat and a for-rent flat at the same address/coords
+    getting unioned onto one property_id) purely on a corroborating-signal
+    coincidence that has nothing to do with whether they're the same
+    listing — cadastral_ref/address+coords/phone signals were all designed
+    and tuned against sale-vs-sale duplicates, not sale-vs-rent.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -96,6 +112,7 @@ def fetch_listing_records(conn) -> list[ListingRecord]:
                    l.current_price, l.contact_raw, l.reference_code, p.floor
               FROM listing l
               JOIN property p ON p.id = l.property_id
+             WHERE l.operation = 'sale'
             """
         )
         rows = cur.fetchall()

@@ -151,6 +151,7 @@ describe.runIf(dbAvailable)("materializeProfile — real Postgres", () => {
       external_id: string;
       status: string;
       current_price: number;
+      operation: "sale" | "rent";
     }> = {},
   ): Promise<number> {
     const row = {
@@ -158,12 +159,13 @@ describe.runIf(dbAvailable)("materializeProfile — real Postgres", () => {
       external_id: `int-test-${Math.random().toString(36).slice(2)}`,
       status: "active",
       current_price: 300000,
+      operation: "sale" as const,
       ...overrides,
     };
     const result = await pool.query<{ id: number }>(
-      `INSERT INTO listing (property_id, source, external_id, status, current_price)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-      [propertyId, row.source, row.external_id, row.status, row.current_price],
+      `INSERT INTO listing (property_id, source, external_id, status, current_price, operation)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [propertyId, row.source, row.external_id, row.status, row.current_price, row.operation],
     );
     return result.rows[0].id;
   }
@@ -213,6 +215,39 @@ describe.runIf(dbAvailable)("materializeProfile — real Postgres", () => {
       expect(wideMatches).not.toContain(outsideId);
       expect(narrowMatches).not.toContain(insideId); // 1.67km > 1km radius
       expect(narrowMatches).not.toContain(outsideId);
+    });
+  });
+
+  // Issue #31 regression test: real cross-contamination bug found (and
+  // fixed in scope-query.ts) while building the rental-comps feature —
+  // before the fix, buildScopeWhereClause's active-listing EXISTS/price
+  // subquery had no `operation` filter at all, so a rental-only property
+  // (an active operation='rent' listing, no active operation='sale' one)
+  // would pass the same "has an active listing" gate a sale candidate
+  // does and materialize into profile_listing_state as if it were one —
+  // invisible until #31's connector started producing operation='rent'
+  // rows, since every prior row was implicitly 'sale'.
+  it("a property with only an active RENT listing (no active sale listing) never materializes as a sale candidate", async () => {
+    await withRealDb(async (pool) => {
+      const rentalOnlyId = await insertProperty(pool);
+      await insertListing(pool, rentalOnlyId, { operation: "rent", current_price: 900 });
+
+      // Same coordinates/type as a real sale comparable, so the ONLY thing
+      // that could exclude it is the operation filter, not geography/type.
+      const saleId = await insertProperty(pool);
+      await insertListing(pool, saleId, { operation: "sale", current_price: 250000 });
+
+      const profileId = await makeProfile({
+        geography: { type: "radius", center: MADRID_SOL, radius_km: 2 },
+        property_types: ["piso"],
+        hard_exclusions: {},
+      });
+
+      await materializeProfile(profileId);
+      const matches = (await matchedRows(pool, profileId)).map((r) => r.property_id);
+
+      expect(matches).toContain(saleId);
+      expect(matches).not.toContain(rentalOnlyId);
     });
   });
 

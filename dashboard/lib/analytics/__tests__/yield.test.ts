@@ -15,16 +15,27 @@ function assumptionRent(monthlyRent: number): RentEstimateResult {
     method: "profile_assumption",
     eur_per_m2_month_used: monthlyRent / 80,
     m2_used: 80,
+    market_comparable: null,
+    assumption_monthly_rent: monthlyRent,
+    disagreement_pct: null,
   };
 }
 
+// issue #31: renamed from "no_rent_assumption" — this now covers BOTH "no
+// assumption set" and "not enough market comparables either" (see
+// rent-estimate.ts's module docstring), so the old name (which implied
+// the ONLY reason yield could be gated was a missing assumption) would be
+// actively misleading now that a market-comparable path exists too.
 const NO_ASSUMPTION: RentEstimateResult = {
   estimated_monthly_rent: null,
   comparable_count: 0,
   confidence: null,
-  method: "no_rent_assumption",
+  method: "insufficient_data",
   eur_per_m2_month_used: null,
   m2_used: null,
+  market_comparable: { eur_per_m2_month: null, estimated_monthly_rent: null, comparable_count: 0, confidence: null },
+  assumption_monthly_rent: null,
+  disagreement_pct: null,
 };
 
 describe("computeYield", () => {
@@ -122,16 +133,11 @@ describe("computeYield", () => {
     expect(assumptions.term_years_is_default).toBe(true);
   });
 
-  // Issue #33 EC-4: confidence must propagate through unchanged, including
-  // #31's eventual "high"/"low" comparable-count tiers — not just this
-  // module's own "assumption" value — so yield.ts doesn't need a signature
-  // change once #31 replaces rent-estimate.ts's implementation.
+  // Issue #33 EC-4 / issue #31: confidence must propagate through
+  // unchanged across the full range — "high"/"low" (#31's real
+  // comparable-count tiers, no longer future placeholders) and this
+  // module's own "assumption" value.
   it("propagates rent-estimate confidence into yield output", () => {
-    // "high"/"low" are #31's future comparable-count tiers, not values this
-    // module's own estimateRent() produces today — constructed directly
-    // here to exercise computeYield's propagation mechanism against the
-    // full confidence range issue #33 EC-4 describes, independent of
-    // whether #31 has landed yet.
     const highConfidenceRent: RentEstimateResult = { ...assumptionRent(900), confidence: "high" };
     const lowConfidenceRent: RentEstimateResult = { ...assumptionRent(900), confidence: "low" };
 
@@ -161,7 +167,7 @@ describe("computeYield", () => {
     expect(result.estimated_monthly_rent).toBeNull();
     expect(result.assumptions_used).toBeNull();
     expect(result.rent_confidence).toBeNull();
-    expect(result.rent_method).toBe("no_rent_assumption");
+    expect(result.rent_method).toBe("insufficient_data");
   });
 
   it("gates the entire result when the property has no active-listing price, even with a rent estimate available", () => {

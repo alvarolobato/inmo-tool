@@ -25,6 +25,8 @@
 | [D-005](docs/decisions/D-005-numeric-vs-uuid-keys.md) | Real-estate schema tables use `BIGSERIAL` integer PKs, not `NUMERIC` (no source-system precision constraint like the archived project had) or UUIDs (no distributed-write requirement). |
 | [D-008](docs/decisions/D-008-skip-if-seen-opt-in.md) | Skip-if-seen defaults to 0 (always fetch); opt in per connector. Never skip missing/changed discovery price. |
 | [D-013](docs/decisions/D-013-search-profile-scope-no-default.md) | `search_profile.scope` has no DB-level default — an INSERT must supply an explicit, validated scope; a missing one fails loudly, not silently. |
+| [D-015](docs/decisions/D-015-rental-connector-site-choice.md) | Rental connector targets Milanuncios `alquiler-de-pisos`, as a `MilanunciosConnector` subclass (own file, own rate limit) — never an edit to the sale connector. |
+| [D-016](docs/decisions/D-016-rental-data-reuses-listing-table.md) | Rentals are `listing` rows with `operation='rent'` — no `rental_listing` table. Every sale-candidate query (materialize, dedup) must filter `operation='sale'` explicitly. |
 
 ## AI layer
 
@@ -38,5 +40,5 @@
 
 | ID | Binding rule |
 |----|--------------|
-| [D-010](docs/decisions/D-010-rent-assumption-until-comparables.md) | Rent estimate is an explicit per-profile `€/m²/month` assumption (`thesis_params.rent_assumption`) until #31 ships real comparables. Never fabricate a rent figure; gate yield on the assumption being set. |
 | [D-011](docs/decisions/D-011-acquisition-cost-model.md) | ITP by CCAA is general/base rate only (no brackets/reductions, no new-build path). Actual IBI/community fee from `raw_extra` ADDS to a separate assumed maintenance/vacancy %, never fully replaces it. |
+| [D-014](docs/decisions/D-014-comparable-rent-estimator.md) | Rent estimate: profile's own assumption (if set) is always PRIMARY, never silently replaced; measured comparable is always attached + disagreement surfaced. No assumption → comparable is primary, tiered `high`/`low` by count+dispersion. |
