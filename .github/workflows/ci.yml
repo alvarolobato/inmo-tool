@@ -1,0 +1,220 @@
+name: CI
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Pinned deliberately. There is no ruff config in this repo, so
+      # `ruff check` enforces whatever the installed version's default rule
+      # set happens to be — an unpinned install lets a ruff release turn an
+      # unrelated PR red for something nobody in the diff wrote.
+      - run: pip install ruff==0.16.1
+      - run: ruff check etl/
+      - run: ruff format --check etl/
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: inmotool
+          POSTGRES_PASSWORD: inmotool
+          POSTGRES_DB: inmotool
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r etl/requirements-dev.txt
+      # scripts/tests/ holds the doc-graph, gazetteer and decision-ID checks.
+      # They need no database and had never been wired into CI at all (#203) —
+      # a detector nobody runs is exactly as silent as no detector.
+      - run: pytest etl/tests/ scripts/tests/ -x --tb=short -q --cov=etl --cov-report=term-missing --cov-report=xml
+        env:
+          # This used to be POSTGRES_DSN: "" with the comment "tests that need
+          # live connections will skip gracefully". 41 of 48 orchestrator tests
+          # skipped, including the only regression coverage for a bug that
+          # mass-withdraws live listings, while the job reported green (#160).
+          #
+          # No "Apply schema" step: conftest.py's _isolated_test_database
+          # fixture CREATEs its own throwaway database per session and applies
+          # etl/schema/init.sql to it (#159). The DSN below is only the admin
+          # anchor it bootstraps from.
+          POSTGRES_DSN: postgresql://inmotool:inmotool@localhost:5432/inmotool
+          # Turns a MISSING database into a hard error. Restoring the DSN fixes
+          # today; only this stops a future refactor of the config plumbing
+          # from silently recreating the gap. Local runs still skip.
+          REQUIRE_DB: "1"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: etl-coverage
+          path: coverage.xml
+
+  dashboard-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: inmotool
+          POSTGRES_PASSWORD: inmotool
+          POSTGRES_DB: inmotool
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # This job had no database at all, so every *.integration.test.ts was
+      # skipped by `describe.runIf(dbAvailable)` — which warns and passes
+      # green, indistinguishable from having run (#160).
+      #
+      # These are the admin anchor, not the test database: scripts/test-with-
+      # isolated-db.ts CREATEs a throwaway DB per run so concurrent jobs
+      # cannot interfere (#159).
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: inmotool
+      POSTGRES_PASSWORD: inmotool
+      POSTGRES_DB: inmotool
+      REQUIRE_DB: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+      - name: knowledge.ts drift guard
+        run: npm run build:knowledge && git diff --exit-code lib/knowledge.ts
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:coverage
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dashboard-coverage
+          path: dashboard/coverage/
+
+  dashboard-e2e:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: inmotool
+          POSTGRES_PASSWORD: inmotool
+          POSTGRES_DB: inmotool
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: inmotool
+      POSTGRES_PASSWORD: inmotool
+      POSTGRES_DB: inmotool
+      POSTGRES_DSN: postgresql://inmotool:inmotool@localhost:5432/inmotool
+      DASHBOARD_PORT: "4000"
+      # middleware.ts gates EVERY UI page on the ps_admin cookie, not just
+      # /admin/*. Without this the specs get a 307 to the login screen and
+      # every assertion fails against a page that is in fact healthy — which
+      # is what e2e/helpers/admin-session.ts exists to prevent. It no-ops when
+      # ADMIN_API_KEY is unset, so an unset value here silently guts the suite.
+      ADMIN_API_KEY: ci-e2e-admin-key
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci
+      # e2e/dedup-review.spec.ts shells out to `.venv/bin/python -m
+      # etl.dedup.cli process-actions` to exercise the REAL confirm/reject
+      # merge path rather than mocking it, and `test.skip()`s itself when that
+      # interpreter is absent. Without this step the two tests that verify a
+      # merge actually writes property_merge_log would skip — green, and
+      # meaningless, which is the whole bug #160 is about.
+      - name: Create the .venv the dedup e2e spec shells out to
+        working-directory: .
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -q -r etl/requirements-dev.txt
+      # Unlike the two jobs above, e2e has no per-run isolation: Playwright
+      # drives a real Next.js server that reads POSTGRES_* directly, so the
+      # service database itself needs the schema (#159).
+      - name: Apply schema
+        working-directory: .
+        run: PGPASSWORD=inmotool psql -h localhost -U inmotool -d inmotool -f etl/schema/init.sql
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+      # Specs are listed explicitly rather than globbed, so wiring a new one in
+      # is visible in the diff instead of being picked up silently.
+      - name: Run Playwright e2e tests
+        run: >-
+          npx playwright test
+          e2e/candidates.spec.ts
+          e2e/card-detail-ux.spec.ts
+          e2e/connectors.spec.ts
+          e2e/dedup-review.spec.ts
+          e2e/etl-monitor.spec.ts
+          e2e/feedback.spec.ts
+          e2e/investment-metrics.spec.ts
+          e2e/location-picker.spec.ts
+          e2e/map.spec.ts
+          e2e/profile-switcher.spec.ts
+          e2e/property-detail.spec.ts
+          e2e/scoring.spec.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: dashboard/playwright-report/
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./etl
+          file: ./etl/Dockerfile
+          push: false
+          load: true
+          tags: inmo-etl:ci-test

@@ -11,9 +11,10 @@ surrounding operation that owns the commit/rollback.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from etl.config import Config
@@ -77,7 +78,7 @@ def _validate_rows(rows: list[dict], operation: str) -> list[str]:
     return columns
 
 
-def get_connection(config: "Config"):
+def get_connection(config: Config):
     """Return a psycopg2 connection with autocommit=False."""
     try:
         import psycopg2  # type: ignore[import-untyped]
@@ -415,10 +416,10 @@ def try_acquire_run_lock(conn) -> bool:
             got: bool = bool(cur.fetchone()[0])
         conn.commit()
         return got
-    except Exception:
+    except Exception:  # noqa: BLE001 — must never raise into the scheduler loop
         try:
             conn.rollback()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 — rollback on a dead conn is moot
             pass
         # If we cannot even check the lock, fail closed so we don't run
         # twice in parallel. The next scheduler tick will retry.
@@ -438,10 +439,10 @@ def release_run_lock(conn) -> None:
             cur.execute("SELECT pg_advisory_unlock(%s)", (RUN_ADVISORY_LOCK_ID,))
             cur.fetchone()
         conn.commit()
-    except Exception:
+    except Exception:  # noqa: BLE001 — failing to release is recoverable, see docstring
         try:
             conn.rollback()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 — rollback on a dead conn is moot
             pass
 
 

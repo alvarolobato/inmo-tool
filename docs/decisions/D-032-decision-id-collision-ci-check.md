@@ -1,10 +1,10 @@
 ---
-id: D-023
+id: D-032
 title: Decision-record ID collisions are caught by a pytest check, not prevented by a scheme change
 date: 2026-08-04
 ---
 
-# D-023: Decision-record ID collisions are caught by a pytest check, not prevented by a scheme change
+# D-032: Decision-record ID collisions are caught by a pytest check, not prevented by a scheme change
 
 *Decided: 2026-08-04*
 
@@ -59,7 +59,7 @@ Assessed and rejected for now:
   found from years of ordinary sequential numbering, concentrated in one
   changeset with no incremental way to verify it.
 - **Readability loss is real.** Sequential IDs read as a chronological,
-  countable list ("we're at D-023"); date-based or issue-based IDs don't
+  countable list ("we're at D-032"); date-based or issue-based IDs don't
   sort adjacent to related decisions made close in time and require a
   lookup to know "how many decisions has this project made."
 - **The actual failure mode was detection latency, not collision

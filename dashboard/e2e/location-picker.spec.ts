@@ -150,6 +150,14 @@ test("clicking the map moves the marker and updates the manual coordinate fields
   // real, interactive Leaflet instance, not a static image.
   const mapContainer = page.locator(".leaflet-container");
   await expect(mapContainer).toBeVisible({ timeout: 10_000 });
+  // page.mouse.click takes VIEWPORT coordinates, so the box must be scrolled
+  // into view before it is read. Running alone this test passes either way —
+  // the dialog opens at the top of a short page. In a full-suite run earlier
+  // specs leave more profiles behind, the list is longer, and the map sits
+  // partly below the fold: the click then lands somewhere else entirely and
+  // the coordinate inputs never change. That made this the only spec in the
+  // suite whose result depended on which other specs ran first.
+  await mapContainer.scrollIntoViewIfNeeded();
   const box = await mapContainer.boundingBox();
   if (!box) throw new Error("map container has no bounding box");
   await page.mouse.click(box.x + box.width * 0.2, box.y + box.height * 0.2);

@@ -24,7 +24,6 @@ import pytest
 
 from etl.db import postgres
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -319,6 +318,8 @@ class TestSetWatermarkNaiveDatetime:
     def test_naive_datetime_raises(self, pg_conn):
         """set_watermark must reject a naive datetime to prevent session-TZ ambiguity."""
         conn = pg_conn
-        naive_ts = datetime(2026, 1, 15, 3, 0, 0)  # no tzinfo
+        # DTZ001 is inverted here: the naive value IS the fixture — this
+        # test asserts set_watermark rejects it.
+        naive_ts = datetime(2026, 1, 15, 3, 0, 0)  # noqa: DTZ001 — no tzinfo, deliberately
         with pytest.raises(ValueError, match="timezone-aware"):
             postgres.set_watermark(conn, "_test_naive_ts", naive_ts, rows_synced=0)

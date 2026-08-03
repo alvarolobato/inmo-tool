@@ -25,6 +25,25 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "node",
+    // Test FILES run one at a time. 21 test files open a real `pg` pool, and
+    // #159 gives the whole run ONE isolated database — not one per file — so
+    // any two DB-touching files that overlap in time see each other's rows.
+    //
+    // This was invisible until #160 gave CI a real database: with parallelism
+    // on, `price-signal.integration` (2 tests) and `profiles.integration`
+    // (1 test) fail, and all three pass when run alone. `profiles` asserts a
+    // count over the WHOLE table and saw 166 rows where it expected 0.
+    //
+    // Files previously tried to dodge this by picking non-overlapping map
+    // coordinates (see price-signal.integration's header). That mitigation is
+    // unsound — it cannot help an assertion that counts every row, and it
+    // silently breaks whenever a new file picks a nearby fixture. Serialising
+    // is the only version that stays correct as files are added.
+    //
+    // Cost is small: 185 files / 2262 tests in ~58s serialised, because most
+    // of the parallel run's wall time was jsdom/react environment setup, not
+    // test execution.
+    fileParallelism: false,
     include: ["**/__tests__/**/*.test.{ts,tsx}"],
     coverage: {
       provider: "v8",

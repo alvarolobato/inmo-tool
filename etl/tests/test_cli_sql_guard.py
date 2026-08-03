@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "cli" / "lib"))
 
-from sql_guard import validate_readonly_sql  # noqa: E402
+from sql_guard import validate_readonly_sql
 
 
 class TestAcceptsReadOnly:
