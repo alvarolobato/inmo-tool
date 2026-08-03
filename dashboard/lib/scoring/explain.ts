@@ -30,8 +30,11 @@ const TOP_N = 3;
 // value (imputed to the pool mean, contribution exactly 0) is.
 const NEGLIGIBLE_CONTRIBUTION = 1e-6;
 
-export const COLD_START_EXPLANATION =
-  "Sin personalizar todavía — acepta o rechaza algún candidato en este perfil para que el modelo empiece a aprender tus preferencias.";
+// Re-exported so every existing server-side importer keeps working; the
+// string itself lives in a dependency-free module because client components
+// need it too and this one transitively imports `pg` (see cold-start.ts).
+export { COLD_START_EXPLANATION } from "./cold-start";
+import { COLD_START_EXPLANATION } from "./cold-start";
 
 const NO_SIGNAL_EXPLANATION = "Sin motivos concretos que destacar todavía para este candidato.";
 

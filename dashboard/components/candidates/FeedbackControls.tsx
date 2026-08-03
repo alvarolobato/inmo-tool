@@ -28,9 +28,18 @@ interface FeedbackResponse {
 export function FeedbackControls({
   profileId,
   propertyId,
+  compact = false,
 }: {
   profileId: number;
   propertyId: number;
+  /**
+   * Icon-only buttons sized for the card's photo overlay (#152), with the
+   * note editor as a popover instead of an inline expander — an inline
+   * textarea would resize the card and reflow the grid around it.
+   * Labels move to `aria-label`/`title`, so the controls stay identifiable
+   * to screen readers and on hover despite showing only a glyph.
+   */
+  compact?: boolean;
 }) {
   const [state, setState] = useState<StateFeedbackType | null>(null);
   const [noteOpen, setNoteOpen] = useState(false);
@@ -91,15 +100,32 @@ export function FeedbackControls({
     }
   };
 
-  const toggleButtonStyle = (active: boolean): React.CSSProperties => ({
-    padding: "4px 10px",
-    borderRadius: 6,
-    fontSize: 13,
-    cursor: "pointer",
-    border: active ? "1px solid var(--accent)" : "1px solid var(--border)",
-    background: active ? "var(--accent)" : "transparent",
-    color: active ? "var(--accent-fg, #fff)" : "var(--fg-muted)",
-  });
+  const toggleButtonStyle = (active: boolean): React.CSSProperties =>
+    compact
+      ? {
+          width: 26,
+          height: 26,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: 0,
+          borderRadius: 5,
+          fontSize: 13,
+          lineHeight: 1,
+          cursor: "pointer",
+          border: active ? "1px solid var(--accent)" : "1px solid rgba(255,255,255,0.25)",
+          background: active ? "var(--accent)" : "rgba(0,0,0,0.35)",
+          color: active ? "var(--accent-fg, #fff)" : "#fff",
+        }
+      : {
+          padding: "4px 10px",
+          borderRadius: 6,
+          fontSize: 13,
+          cursor: "pointer",
+          border: active ? "1px solid var(--accent)" : "1px solid var(--border)",
+          background: active ? "var(--accent)" : "transparent",
+          color: active ? "var(--accent-fg, #fff)" : "var(--fg-muted)",
+        };
 
   return (
     <div
@@ -107,54 +133,90 @@ export function FeedbackControls({
       // component is ever nested inside one in the future — defense in
       // depth on top of the sibling-not-child layout described above.
       onClick={(e) => e.stopPropagation()}
-      style={{ display: "flex", flexDirection: "column", gap: 6, padding: "8px 14px 12px" }}
+      style={
+        compact
+          ? { position: "relative", display: "flex", gap: 3, padding: 3 }
+          : { display: "flex", flexDirection: "column", gap: 6, padding: "8px 14px 12px" }
+      }
     >
-      <div style={{ display: "flex", gap: 6 }}>
+      <div style={{ display: "flex", gap: compact ? 3 : 6, width: compact ? undefined : "100%" }}>
         <button
           type="button"
           data-testid="feedback-accept"
           aria-pressed={state === "accept"}
+          aria-label="Aceptar"
+          title="Aceptar"
           style={toggleButtonStyle(state === "accept")}
           onClick={() => submit("accept")}
         >
-          ✓ Aceptar
+          {compact ? "✓" : "✓ Aceptar"}
         </button>
         <button
           type="button"
           data-testid="feedback-reject"
           aria-pressed={state === "reject"}
+          aria-label="Rechazar"
+          title="Rechazar"
           style={toggleButtonStyle(state === "reject")}
           onClick={() => submit("reject")}
         >
-          ✗ Rechazar
+          {compact ? "✗" : "✗ Rechazar"}
         </button>
         <button
           type="button"
           data-testid="feedback-star"
           aria-pressed={state === "star"}
+          aria-label="Destacar"
+          title="Destacar"
           style={toggleButtonStyle(state === "star")}
           onClick={() => submit("star")}
         >
-          ★ Destacar
+          ★
         </button>
         <button
           type="button"
           data-testid="feedback-note-toggle"
-          style={{ ...toggleButtonStyle(false), marginLeft: "auto" }}
+          aria-label={noteOpen ? "Cerrar nota" : "Añadir nota"}
+          aria-expanded={noteOpen}
+          title={noteOpen ? "Cerrar nota" : "Añadir nota"}
+          style={{ ...toggleButtonStyle(false), marginLeft: compact ? 0 : "auto" }}
           onClick={() => setNoteOpen((v) => !v)}
         >
-          {noteOpen ? "Cerrar nota" : "+ Nota"}
+          {compact ? "✎" : noteOpen ? "Cerrar nota" : "+ Nota"}
         </button>
       </div>
 
       {noteOpen && (
-        <div style={{ display: "flex", gap: 6 }}>
+        <div
+          data-testid="feedback-note-popover"
+          style={
+            compact
+              ? {
+                  // Popover rather than an inline expander: growing the card
+                  // in place would reflow the whole candidate grid (#150).
+                  position: "absolute",
+                  top: "calc(100% + 4px)",
+                  right: 0,
+                  zIndex: 3,
+                  width: 220,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 6,
+                  padding: 8,
+                  borderRadius: 6,
+                  border: "1px solid var(--border)",
+                  background: "var(--bg-1)",
+                  boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+                }
+              : { display: "flex", gap: 6 }
+          }
+        >
           <textarea
             data-testid="feedback-note-input"
             value={noteText}
             onChange={(e) => setNoteText(e.target.value)}
             placeholder="Añade una nota…"
-            rows={2}
+            rows={compact ? 3 : 2}
             style={{
               flex: 1,
               fontSize: 13,
@@ -172,9 +234,15 @@ export function FeedbackControls({
             disabled={noteText.trim().length === 0 || noteStatus === "saving"}
             onClick={() => submit("note")}
             style={{
-              ...toggleButtonStyle(false),
+              padding: "4px 10px",
+              borderRadius: 6,
+              fontSize: 13,
+              cursor: "pointer",
+              border: "1px solid var(--border)",
+              background: "transparent",
+              color: "var(--fg-muted)",
               opacity: noteText.trim().length === 0 ? 0.5 : 1,
-              alignSelf: "flex-start",
+              alignSelf: compact ? "flex-end" : "flex-start",
             }}
           >
             {noteStatus === "saved" ? "Guardada ✓" : "Guardar"}
@@ -182,8 +250,17 @@ export function FeedbackControls({
         </div>
       )}
 
-      {error && (
+      {error && !compact && (
         <p style={{ margin: 0, fontSize: 12, color: "var(--danger, #d33)" }}>{error}</p>
+      )}
+      {error && compact && (
+        <span
+          role="alert"
+          title={error}
+          style={{ alignSelf: "center", fontSize: 12, color: "var(--danger, #ff9b9b)" }}
+        >
+          !
+        </span>
       )}
     </div>
   );
