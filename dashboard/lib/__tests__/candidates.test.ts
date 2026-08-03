@@ -220,15 +220,42 @@ describe("listCandidates", () => {
     expect(page.items.map((i) => i.score_kind)).toEqual(["trained", null, null]);
   });
 
-  it("passes thumbnail_url through untouched, including null (no linked listing has a photo)", async () => {
+  it("#167: passes the photos array through, defaulting to [] when the DB returns it undefined (older mocked rows)", async () => {
     mockPoolQuery.mockResolvedValueOnce({
       rows: [
-        { ...stubRow(1), thumbnail_url: "https://img.example/a.jpg" },
-        { ...stubRow(2), thumbnail_url: null },
+        { ...stubRow(1), photos: ["https://img.example/a.jpg", "https://img.example/b.jpg"] },
+        { ...stubRow(2), photos: [] },
+        stubRow(3),
       ],
     });
     const page = await listCandidates(1);
-    expect(page.items.map((i) => i.thumbnail_url)).toEqual(["https://img.example/a.jpg", null]);
+    expect(page.items.map((i) => i.photos)).toEqual([
+      ["https://img.example/a.jpg", "https://img.example/b.jpg"],
+      [],
+      [],
+    ]);
+  });
+
+  it("#167: selects the capped, de-duplicated photo union via a single correlated subquery — no follow-up query per card", async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [] });
+    await listCandidates(7);
+    const [sql] = mockPoolQuery.mock.calls[0];
+    // One query total for the page (asserted structurally: the call count
+    // for the main SELECT is exactly 1, same assertion style as the
+    // "queries profile_listing_state..." test above) — the photo union lives
+    // inside that one query's SELECT list, not a second round trip.
+    expect(sql).toContain("AS photos");
+    expect(sql).toContain("DISTINCT ON (photo_url)");
+    // #167 review must-fix 2: the per-listing LATERAL LIMITs to
+    // MAX_CARD_PHOTOS with no ORDER BY inside it (relying on unnest WITH
+    // ORDINALITY's guaranteed already-ordered output) — this is what bounds
+    // cost per listing instead of unnesting every photo of every active
+    // listing before capping. Assert the shape structurally rather than the
+    // full SQL text so the query can still be reformatted freely.
+    expect(sql).toContain("unnest(array_remove(l4.photo_urls, NULL))");
+    expect(sql).toContain("WITH ORDINALITY AS uu(photo_url, ord)");
+    expect(sql).toMatch(/WITH ORDINALITY AS uu\(photo_url, ord\)\s*\n\s*LIMIT/);
+    expect(mockPoolQuery).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -343,10 +370,15 @@ describe("loadFlags SQL shape (#152 review, must-fix 1 and 2)", () => {
 
     await listCandidates(1);
 
-    for (const [calledSql] of mockPoolQuery.mock.calls) {
-      expect(calledSql).not.toContain("information_schema");
-      expect(calledSql).not.toContain("listing_id");
-    }
+    // Scoped to the ai_assessment/loadFlags query specifically (call index
+    // 1), not every call — #167's photo union legitimately introduces its
+    // own unrelated `listing_id` alias (`l4.id AS listing_id`) in the main
+    // candidates query (call index 0) to reconstruct visual photo order,
+    // which has nothing to do with the stale ai_assessment shape probe this
+    // test guards against.
+    const [flagsSql] = mockPoolQuery.mock.calls[1];
+    expect(flagsSql).not.toContain("information_schema");
+    expect(flagsSql).not.toContain("listing_id");
   });
 
   it("skips the ai_assessment query entirely when the page has no rows (nothing to flag)", async () => {

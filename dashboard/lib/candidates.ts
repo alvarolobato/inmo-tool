@@ -44,8 +44,39 @@ export interface CandidateRow {
   rooms: number | null;
   bathrooms: number | null;
   floor: string | null;
-  /** First photo across the property's active listings — the card's primary visual (#152). Null when no linked listing has photos. */
-  thumbnail_url: string | null;
+  /**
+   * Capped, de-duplicated union of `photo_urls` across the property's
+   * *active* listings, grouped by listing in `source` order (alphabetical),
+   * then by within-listing position — the same status filter and the same
+   * order the detail page's gallery uses (`getPropertyDetail` in
+   * lib/property-detail.ts, which filters to active listings and reads them
+   * `ORDER BY source`), and the same de-dup-by-URL rule (first occurrence in
+   * that order wins). Powers the card's photo-first lead image (#152) and
+   * its in-place photo ticker (#167): `photos[0]` is genuinely the same lead
+   * image the detail page's hero shows, and flicking through the ticker
+   * walks a prefix of the same sequence the lightbox does — not an
+   * independently-ordered subset (a real, reproduced bug prior to #167's
+   * review must-fix 1: this query used to filter `active` but order by
+   * `listing.id`, while the detail page didn't filter status at all and
+   * ordered by `source` — different lead image, different order, different
+   * set, including a withdrawn listing's photos able to lead the detail
+   * gallery). The card's primary visual is `photos[0]`; empty means no
+   * active listing has photos (the card falls back to a placeholder).
+   *
+   * Capped at `MAX_CARD_PHOTOS`, unlike the detail gallery (uncapped by
+   * design — a user who has drilled into one property should see
+   * everything). A list page renders up to `DEFAULT_LIMIT` cards at once;
+   * fetching every photo of every card would make an already-nontrivial
+   * page query far more expensive for a control most users only nudge a
+   * couple of times per card.
+   *
+   * #167 removed the separate `thumbnail_url` field this replaced — it was
+   * always exactly `photos[0] ?? null`, a redundant derived value once the
+   * full array exists (this project's "no dual representations of the same
+   * fact" default; see AGENTS.md's backwards-compatibility policy). Read
+   * `photos[0]` directly.
+   */
+  photos: string[];
   /**
    * AI-derived qualitative flags (#25 occupancy/debt-sale/partial-sale, #26
    * condition). Always present, empty until an assessment exists — the card
@@ -90,6 +121,25 @@ export interface CandidatePage {
 
 const DEFAULT_LIMIT = 30;
 const MAX_LIMIT = 100;
+
+/**
+ * Cap on `CandidateRow.photos` per property (#167). A list page renders up
+ * to `DEFAULT_LIMIT` cards; an uncapped union (the detail gallery's rule)
+ * would let one heavily-photographed property drag the whole page's photo
+ * payload up unpredictably. 8 is comfortably more than the ticker gets
+ * clicked through in practice.
+ *
+ * This constant also bounds the per-*listing* LATERAL LIMIT inside
+ * `listCandidates`'s SQL, not just the final output length — see that
+ * query's comment. (An earlier version of this comment claimed the query
+ * had a cheap per-row LIMIT; it didn't — the cap was only applied *after* a
+ * full unnest + sort of every photo of every active listing, O(total
+ * photos) not O(cap). Re-measured on PG16: +70% latency over the old
+ * single-thumbnail query on a normal page, ~4x on a property with one
+ * heavily-photographed listing. Fixed by #167's review must-fix 2 — see
+ * the PR body for before/after EXPLAIN ANALYZE numbers.)
+ */
+const MAX_CARD_PHOTOS = 8;
 
 /**
  * `score` is a sigmoid output, always in (0, 1) when set (task 3.2) — -1 is
@@ -140,7 +190,7 @@ interface RawCandidateRow {
   rooms: number | null;
   bathrooms: number | null;
   floor: string | null;
-  thumbnail_url: string | null;
+  photos: string[];
   min_price: string | null;
   first_seen_at: string | null;
   listings: CandidateListingSummary[];
@@ -343,17 +393,74 @@ export async function listCandidates(
        p.rooms,
        p.bathrooms,
        p.floor,
-       -- First photo of the first active listing that has any. ORDER BY
-       -- l4.id keeps the choice stable across runs so the card doesn't
-       -- shuffle its thumbnail between loads.
-       (SELECT l4.photo_urls[1]
-          FROM listing l4
-         WHERE l4.property_id = p.id
-           AND l4.status = 'active'
-           AND l4.photo_urls IS NOT NULL
-           AND array_length(l4.photo_urls, 1) > 0
-         ORDER BY l4.id
-         LIMIT 1) AS thumbnail_url,
+       -- Capped, de-duplicated union of photo_urls across this property's
+       -- active listings (#167), ordered to match the detail page's gallery
+       -- exactly (getPropertyDetail in lib/property-detail.ts, which also
+       -- filters to active listings and reads them ORDER BY source): grouped
+       -- by listing in 'source' order, then within-listing position — so
+       -- photos[0] here is genuinely the same lead image the detail page's
+       -- hero uses. See CandidateRow.photos's docstring for the bug this
+       -- alignment fixes (#167 review must-fix 1).
+       --
+       -- Cost is bounded per LISTING, not per photo (must-fix 2): the inner
+       -- LATERAL unnests l4.photo_urls WITH ORDINALITY and LIMITs to
+       -- MAX_CARD_PHOTOS with NO ORDER BY inside that LATERAL. unnest() is
+       -- evaluated lazily (value-per-call) and WITH ORDINALITY is always
+       -- emitted in increasing/array order, so a bare LIMIT stops the
+       -- generator after the first MAX_CARD_PHOTOS elements instead of
+       -- materializing (and sorting) every photo of every active listing
+       -- before truncating — the previous shape, which only capped via the
+       -- outer WHERE rn <= N *after* that full unnest+sort, measured +70%
+       -- over the old single-thumbnail query on a normal page and ~4x on one
+       -- heavily-photographed listing (see PR body for numbers). Adding an
+       -- ORDER BY inside the LATERAL would silently reintroduce that cost —
+       -- Postgres can't avoid materializing a Sort's input just because a
+       -- LIMIT sits above it — so this deliberately leans on unnest's
+       -- already-ordered output instead of re-deriving it.
+       --
+       -- array_remove(l4.photo_urls, NULL) drops NULL array elements before
+       -- unnesting — an unguarded NULL survives into 'photos', is counted by
+       -- the client's 'photos.length > 1' ticker gate, and renders the
+       -- placeholder mid-cycle when the ticker lands on that index.
+       --
+       -- DISTINCT ON (photo_url) dedupes by URL (a listing can repeat a
+       -- photo, and two sources can share one after dedup), keeping each
+       -- photo's first (source, ord) occurrence; row_number() over that same
+       -- (source, ord) order re-establishes visual order (DISTINCT ON's own
+       -- ORDER BY has to sort by photo_url first, which scrambles it); the
+       -- outer WHERE re-caps to MAX_CARD_PHOTOS before json_agg (needed
+       -- because up to listing_count * MAX_CARD_PHOTOS rows can reach this
+       -- point once multiple listings each contribute their own capped
+       -- share), and json_agg's own ORDER BY rn guarantees the final array
+       -- reflects that order (aggregates don't otherwise guarantee input
+       -- order).
+       COALESCE(
+         (SELECT json_agg(photo_url ORDER BY rn)
+            FROM (
+              SELECT photo_url, row_number() OVER (ORDER BY listing_source, ord) AS rn
+                FROM (
+                  SELECT DISTINCT ON (photo_url)
+                         photo_url, listing_source, ord
+                    FROM (
+                      SELECT l4.source AS listing_source, u.photo_url, u.ord
+                        FROM listing l4
+                        CROSS JOIN LATERAL (
+                          SELECT uu.photo_url, uu.ord
+                            FROM unnest(array_remove(l4.photo_urls, NULL))
+                                 WITH ORDINALITY AS uu(photo_url, ord)
+                           LIMIT ${MAX_CARD_PHOTOS}
+                        ) u
+                       WHERE l4.property_id = p.id
+                         AND l4.status = 'active'
+                         AND l4.photo_urls IS NOT NULL
+                    ) per_listing
+                   ORDER BY photo_url, listing_source, ord
+                ) deduped
+            ) numbered
+           WHERE numbered.rn <= ${MAX_CARD_PHOTOS}
+         ),
+         '[]'
+       ) AS photos,
        (SELECT MIN(l2.current_price)
           FROM listing l2
          WHERE l2.property_id = p.id AND l2.status = 'active') AS min_price,
@@ -410,7 +517,7 @@ export async function listCandidates(
     rooms: r.rooms,
     bathrooms: r.bathrooms,
     floor: r.floor,
-    thumbnail_url: r.thumbnail_url,
+    photos: r.photos ?? [],
     flags: flagsByProperty.get(r.property_id) ?? [],
     min_price: r.min_price !== null ? Number(r.min_price) : null,
     first_seen_at: r.first_seen_at,

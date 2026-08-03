@@ -35,6 +35,7 @@ import { buildPgPoolConfig } from "@/lib/db-shared";
 import { resetPool } from "@/lib/db-write";
 import { createProfile } from "@/lib/db/profiles";
 import { getAdjacentCandidates, listCandidates } from "../candidates";
+import { getPropertyDetail } from "../property-detail";
 import type { Scope } from "@/lib/profiles-schema";
 
 // Deliberately NOT Sol/Atocha (the coordinates materialize.integration.test.ts
@@ -137,18 +138,31 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
   async function insertListing(
     pool: Pool,
     propertyId: number,
-    overrides: Partial<{ source: string; status: string; current_price: number }> = {},
+    overrides: Partial<{
+      source: string;
+      status: string;
+      current_price: number;
+      photo_urls: string[] | null;
+    }> = {},
   ): Promise<number> {
     const row = {
       source: "fotocasa",
       status: "active",
       current_price: 285000,
+      photo_urls: null as string[] | null,
       ...overrides,
     };
     const result = await pool.query<{ id: number }>(
-      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at)
-       VALUES ($1, $2, $3, $4, $5, NOW()) RETURNING id`,
-      [propertyId, row.source, `int-test-${Math.random().toString(36).slice(2)}`, row.status, row.current_price],
+      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, photo_urls)
+       VALUES ($1, $2, $3, $4, $5, NOW(), $6) RETURNING id`,
+      [
+        propertyId,
+        row.source,
+        `int-test-${Math.random().toString(36).slice(2)}`,
+        row.status,
+        row.current_price,
+        row.photo_urls,
+      ],
     );
     return result.rows[0].id;
   }
@@ -356,6 +370,216 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
       const page = await listCandidates(profileId, { limit: 2 });
       expect(page.items).toHaveLength(2);
       expect(page.nextCursor).toBeNull();
+    });
+  });
+
+  describe("photos — real Postgres (#167)", () => {
+    it("unions photo_urls across active listings, de-duplicated by URL, in visual (listing, then position) order", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        // Second listing repeats the first listing's second photo — must
+        // appear once in the result, keeping its FIRST (this listing's)
+        // position, not the second listing's.
+        await insertListing(pool, propertyId, {
+          source: "fotocasa",
+          photo_urls: ["https://a/1.jpg", "https://a/2.jpg"],
+        });
+        await insertListing(pool, propertyId, {
+          source: "milanuncios",
+          photo_urls: ["https://a/2.jpg", "https://b/3.jpg"],
+        });
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        const page = await listCandidates(profileId);
+
+        expect(page.items).toHaveLength(1);
+        expect(page.items[0].photos).toEqual(["https://a/1.jpg", "https://a/2.jpg", "https://b/3.jpg"]);
+      });
+    });
+
+    it("caps the photo array at MAX_CARD_PHOTOS (8) rather than returning every photo of a heavily-photographed listing", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        const manyPhotos = Array.from({ length: 12 }, (_, i) => `https://a/${i + 1}.jpg`);
+        await insertListing(pool, propertyId, { photo_urls: manyPhotos });
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        const page = await listCandidates(profileId);
+
+        expect(page.items[0].photos).toHaveLength(8);
+        expect(page.items[0].photos).toEqual(manyPhotos.slice(0, 8));
+      });
+    });
+
+    it("returns an empty array (not null, not an error) when no linked listing has photos", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        await insertListing(pool, propertyId, { photo_urls: null });
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        const page = await listCandidates(profileId);
+
+        expect(page.items[0].photos).toEqual([]);
+      });
+    });
+
+    it("excludes photos from a withdrawn listing, matching how min_price/source badges already exclude non-active listings", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        await insertListing(pool, propertyId, { source: "fotocasa", photo_urls: ["https://a/1.jpg"] });
+        await insertListing(pool, propertyId, {
+          source: "habitaclia",
+          status: "withdrawn",
+          photo_urls: ["https://withdrawn/1.jpg"],
+        });
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        const page = await listCandidates(profileId);
+
+        expect(page.items[0].photos).toEqual(["https://a/1.jpg"]);
+      });
+    });
+
+    // #167 review must-fix 1: orders by listing `source`, NOT by insertion/id
+    // order. The pre-existing test above ("unions photo_urls...") inserts
+    // fotocasa before milanuncios, so id order and alphabetical source order
+    // happen to coincide — it cannot catch a query that (incorrectly) orders
+    // by listing.id, because both orderings produce the same answer. This
+    // test inserts milanuncios FIRST (so it gets the lower id) and fotocasa
+    // SECOND (higher id) — an id-ordered query would put milanuncios's photo
+    // first; a source-ordered query puts fotocasa's photo first, since
+    // "fotocasa" < "milanuncios" alphabetically. Confirmed to fail against
+    // the pre-fix (`ORDER BY listing_id, ord`) query before landing the fix.
+    it("orders the photo union by listing SOURCE, not by insertion/id order", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        await insertListing(pool, propertyId, {
+          source: "milanuncios",
+          photo_urls: ["https://m/1.jpg"],
+        });
+        await insertListing(pool, propertyId, {
+          source: "fotocasa",
+          photo_urls: ["https://f/1.jpg"],
+        });
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        const page = await listCandidates(profileId);
+
+        expect(page.items[0].photos).toEqual(["https://f/1.jpg", "https://m/1.jpg"]);
+      });
+    });
+
+    // #167 review "also fix": a NULL element inside a listing's photo_urls
+    // array (a real shape `TEXT[]` permits) must never survive into the
+    // output — an unguarded null is counted by the client's
+    // `photos.length > 1` ticker gate and renders the placeholder mid-cycle
+    // when the ticker lands on it.
+    it("drops a NULL element from photo_urls instead of propagating it into the photo union", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        await insertListing(pool, propertyId, {
+          source: "fotocasa",
+          photo_urls: ["https://a/1.jpg", null as unknown as string, "https://a/2.jpg"],
+        });
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        const page = await listCandidates(profileId);
+
+        expect(page.items[0].photos).toEqual(["https://a/1.jpg", "https://a/2.jpg"]);
+      });
+    });
+
+    // #167 review must-fix 2: a single per-listing cap of MAX_CARD_PHOTOS
+    // must be sufficient regardless of how many active listings contribute —
+    // each listing's own LATERAL independently returns at most 8 candidates,
+    // but the final union across listings must still respect the *global*
+    // cap and source ordering, not just concatenate each listing's local top
+    // 8 (which would over-count when an earlier-ordered listing alone has
+    // fewer than 8 photos).
+    it("caps the union across multiple active listings at the global MAX_CARD_PHOTOS, filling from the earliest source first", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        // "aliseda" sorts first alphabetically and contributes only 3 —
+        // the remaining 5 slots must come from "milanuncios" (10 available),
+        // not 8 from each concatenated then re-capped to some other mix.
+        await insertListing(pool, propertyId, {
+          source: "aliseda",
+          photo_urls: ["https://a/1.jpg", "https://a/2.jpg", "https://a/3.jpg"],
+        });
+        await insertListing(pool, propertyId, {
+          source: "milanuncios",
+          photo_urls: Array.from({ length: 10 }, (_, i) => `https://m/${i + 1}.jpg`),
+        });
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        const page = await listCandidates(profileId);
+
+        expect(page.items[0].photos).toEqual([
+          "https://a/1.jpg",
+          "https://a/2.jpg",
+          "https://a/3.jpg",
+          "https://m/1.jpg",
+          "https://m/2.jpg",
+          "https://m/3.jpg",
+          "https://m/4.jpg",
+          "https://m/5.jpg",
+        ]);
+      });
+    });
+  });
+
+  describe("photos match the detail-page gallery exactly — real Postgres (#167 review must-fix 1)", () => {
+    // The exact bug reproduction from the review: three listings on one
+    // property — two active (milanuncios, fotocasa) and one withdrawn
+    // (aliseda) — used to render a different lead photo, a different order,
+    // and a different set on the card than on the detail page, because the
+    // card filtered to active + ordered by listing id while the detail page
+    // had no status filter and ordered by source. Proven here by asserting
+    // the two real production code paths (listCandidates + getPropertyDetail)
+    // against each other directly, not by asserting each in isolation against
+    // a hand-derived expectation that could itself encode the same mistake.
+    it("the card's capped photo union is a true prefix of the detail page's uncapped gallery, in the same order", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        await insertListing(pool, propertyId, {
+          source: "milanuncios",
+          status: "active",
+          photo_urls: ["https://m/1.jpg", "https://m/2.jpg"],
+        });
+        await insertListing(pool, propertyId, {
+          source: "fotocasa",
+          status: "active",
+          photo_urls: ["https://f/1.jpg", "https://f/2.jpg"],
+        });
+        await insertListing(pool, propertyId, {
+          source: "aliseda",
+          status: "withdrawn",
+          photo_urls: ["https://w/1.jpg"],
+        });
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        const page = await listCandidates(profileId);
+        const detail = await getPropertyDetail(propertyId);
+
+        expect(detail).not.toBeNull();
+        // Withdrawn listing's photo must lead neither gallery, and must not
+        // appear in either at all.
+        expect(detail!.photo_urls).toEqual([
+          "https://f/1.jpg",
+          "https://f/2.jpg",
+          "https://m/1.jpg",
+          "https://m/2.jpg",
+        ]);
+        expect(page.items[0].photos).toEqual(detail!.photo_urls);
+      });
     });
   });
 

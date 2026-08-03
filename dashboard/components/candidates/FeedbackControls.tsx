@@ -38,6 +38,36 @@ interface FeedbackResponse {
  * had been dropped, so it silently always rendered the bare glyph). Deleted
  * per this project's "no dual code paths" default (#152 review) rather than
  * fixed in place, since nothing exercises it.
+ *
+ * #167: whichever accept/reject/star button matches `state` must stay
+ * visible even when the card isn't hovered/focused, so a marked property
+ * reads as marked while scanning the list — but "visible" alone isn't a
+ * strong enough signal, for two reasons this component handles directly
+ * rather than deferring to CSS visibility alone:
+ *
+ *   - On touch, `@media (hover: none)` already makes *every* button in this
+ *     row permanently visible (globals.css) — so "is it visible" carries no
+ *     information there at all. The active button needs a treatment that
+ *     doesn't depend on visibility: it gets a solid, semantically-coloured
+ *     fill (`--up` green for accept, `--down` red for reject, `--warn` amber
+ *     for star — the same tokens the rest of the app already uses for
+ *     positive/negative/attention state) instead of the muted translucent
+ *     `rgba(0,0,0,0.35)` every other (inactive, hover-revealed) button gets.
+ *     That contrast holds regardless of hover/touch/visibility state, so it
+ *     reads as *this property's status*, not as "a button someone is
+ *     pointing at".
+ *   - Visibility itself is per-button (`.feedback-toggle[data-active="true"]`
+ *     in globals.css), not on the shared `.candidate-card-actions` wrapper —
+ *     an ancestor's `opacity: 0` would zero out every descendant regardless
+ *     of a child's own opacity, so the always-visible exception has to live
+ *     on the button, not the row.
+ *
+ * `getCurrentState` (lib/db/feedback.ts) already collapses accept/reject/star
+ * into one mutually-exclusive derived state — "starring a previously-accepted
+ * candidate replaces 'accepted' with 'starred'" — so there is never a
+ * property with two of these three simultaneously active; the "which one
+ * wins" ambiguity #167 flagged as a possible design question doesn't actually
+ * arise given how `state` is derived here.
  */
 export function FeedbackControls({
   profileId,
@@ -105,7 +135,18 @@ export function FeedbackControls({
     }
   };
 
-  const toggleButtonStyle = (active: boolean): React.CSSProperties => ({
+  // Active fill colour is per-type (#167): reusing the app's existing
+  // positive/negative/attention design tokens means the active button reads
+  // as "what happened" (accepted vs. rejected vs. starred) at a glance, not
+  // just as "the highlighted one" — relevant once it's the only thing
+  // visible without hovering.
+  const ACTIVE_COLORS: Record<StateFeedbackType, string> = {
+    accept: "var(--up)",
+    reject: "var(--down)",
+    star: "var(--warn)",
+  };
+
+  const toggleButtonStyle = (active: boolean, activeColor = "var(--accent)"): React.CSSProperties => ({
     width: 26,
     height: 26,
     display: "inline-flex",
@@ -116,9 +157,15 @@ export function FeedbackControls({
     fontSize: 13,
     lineHeight: 1,
     cursor: "pointer",
-    border: active ? "1px solid var(--accent)" : "1px solid rgba(255,255,255,0.25)",
-    background: active ? "var(--accent)" : "rgba(0,0,0,0.35)",
-    color: active ? "var(--accent-fg, #fff)" : "#fff",
+    border: active ? `1px solid ${activeColor}` : "1px solid rgba(255,255,255,0.25)",
+    background: active ? activeColor : "rgba(0,0,0,0.35)",
+    // `--bg` (not a fixed hex) deliberately: dark theme's --up/--down/--warn
+    // are light pastels chosen to pop against a near-black page, and light
+    // theme's are darker/more saturated chosen to pop against a near-white
+    // page — in both cases the page's own `--bg` token is the contrasting
+    // extreme, so it reads legibly on the active fill in either theme
+    // without a second colour decision per token.
+    color: active ? "var(--bg)" : "#fff",
   });
 
   return (
@@ -133,10 +180,12 @@ export function FeedbackControls({
         <button
           type="button"
           data-testid="feedback-accept"
+          className="feedback-toggle"
+          data-active={state === "accept"}
           aria-pressed={state === "accept"}
           aria-label="Aceptar"
           title="Aceptar"
-          style={toggleButtonStyle(state === "accept")}
+          style={toggleButtonStyle(state === "accept", ACTIVE_COLORS.accept)}
           onClick={() => submit("accept")}
         >
           ✓
@@ -144,10 +193,12 @@ export function FeedbackControls({
         <button
           type="button"
           data-testid="feedback-reject"
+          className="feedback-toggle"
+          data-active={state === "reject"}
           aria-pressed={state === "reject"}
           aria-label="Rechazar"
           title="Rechazar"
-          style={toggleButtonStyle(state === "reject")}
+          style={toggleButtonStyle(state === "reject", ACTIVE_COLORS.reject)}
           onClick={() => submit("reject")}
         >
           ✗
@@ -155,10 +206,12 @@ export function FeedbackControls({
         <button
           type="button"
           data-testid="feedback-star"
+          className="feedback-toggle"
+          data-active={state === "star"}
           aria-pressed={state === "star"}
           aria-label="Destacar"
           title="Destacar"
-          style={toggleButtonStyle(state === "star")}
+          style={toggleButtonStyle(state === "star", ACTIVE_COLORS.star)}
           onClick={() => submit("star")}
         >
           ★
@@ -166,6 +219,7 @@ export function FeedbackControls({
         <button
           type="button"
           data-testid="feedback-note-toggle"
+          className="feedback-toggle"
           aria-label={noteOpen ? "Cerrar nota" : "Añadir nota"}
           aria-expanded={noteOpen}
           title={noteOpen ? "Cerrar nota" : "Añadir nota"}

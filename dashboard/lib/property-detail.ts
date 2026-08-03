@@ -1,10 +1,19 @@
 /**
  * Reads the full detail view for one deduplicated property (task 2.8, #44):
- * all property fields, the union of photos across every linked `listing`
- * (task 2.2's dedup engine may have merged 2+ site listings into one
- * property — a different site can have better/different photos of the same
- * place), every linked listing with its own status, and a combined
- * price/status timeline across all of them.
+ * all property fields, the union of photos across every linked *active*
+ * `listing` (task 2.2's dedup engine may have merged 2+ site listings into
+ * one property — a different site can have better/different photos of the
+ * same place), every linked listing with its own status regardless of
+ * whether it's active, and a combined price/status timeline across all of
+ * them.
+ *
+ * The photo union is active-listings-only (#167 review must-fix 1) — a
+ * withdrawn/sold/expired listing's photos are typically stale (the listing
+ * may be long off-market) and must not lead the gallery a user is actively
+ * evaluating. This mirrors lib/candidates.ts's card-photo query exactly
+ * (same status filter, same `source` order) so the card's lead image and
+ * this gallery's hero are always the same photo — see `getPropertyDetail`'s
+ * implementation comment below for the shared ordering rule.
  *
  * Server-only: imports lib/db-write (the `pg` client) — same reasoning as
  * lib/candidates.ts, never import this from a client component.
@@ -57,7 +66,7 @@ export interface PropertyDetail {
   has_elevator: boolean | null;
   year_built: number | null;
   energy_rating: string | null;
-  /** Union of photo_urls across every linked listing, de-duplicated, order preserved from listing order. */
+  /** Union of photo_urls across every linked *active* listing, de-duplicated, grouped by listing in `source` order (see `getPropertyDetail`'s doc comment — #167 review). */
   photo_urls: string[];
   listings: PropertyListingDetail[];
   price_history: PriceHistoryPoint[];
@@ -125,11 +134,17 @@ export async function getPropertyDetail(propertyId: number): Promise<PropertyDet
       [propertyId],
     ),
     sql<RawListingRow>(
+      // ORDER BY source, id: `id` is a tiebreaker for the (rare, schema-
+      // permitted — only (source, external_id) is UNIQUE, not (property_id,
+      // source)) case of two listings from the same source on one property,
+      // so the photo union built below has a fully deterministic order
+      // rather than depending on whatever order Postgres happens to return
+      // same-source rows in.
       `SELECT id, source, url, listing_kind, status, current_price,
               reference_code, first_seen_at, last_seen_at, photo_urls
          FROM listing
         WHERE property_id = $1
-        ORDER BY source`,
+        ORDER BY source, id`,
       [propertyId],
     ),
     sql<RawPriceHistoryRow>(
@@ -153,10 +168,26 @@ export async function getPropertyDetail(propertyId: number): Promise<PropertyDet
   const propertyRow = propertyRows[0];
   if (!propertyRow) return null;
 
+  // Active listings only, in `source` order (the SQL's ORDER BY source, id),
+  // matching lib/candidates.ts's card-photo query exactly (#167 review
+  // must-fix 1: prior to this fix, the card filtered to active listings and
+  // ordered by listing id, while this gallery had no status filter at all
+  // and ordered by source — different lead image, different order,
+  // different set, including a withdrawn listing's photos able to lead this
+  // gallery). `listings` below still includes every listing regardless of
+  // status — the status/price timeline further down the page is exactly
+  // where a withdrawn listing's history belongs; only the photo union
+  // excludes it.
   const photoUrls: string[] = [];
   const seenPhotos = new Set<string>();
   for (const l of listingRows) {
+    if (l.status !== "active") continue;
     for (const url of l.photo_urls ?? []) {
+      // A NULL array element (same root cause lib/candidates.ts's SQL
+      // guards against with array_remove) would otherwise survive into a
+      // string[]-typed array as a literal `null` and break the gallery's
+      // `<img>` mid-cycle.
+      if (url == null) continue;
       if (!seenPhotos.has(url)) {
         seenPhotos.add(url);
         photoUrls.push(url);

@@ -94,9 +94,10 @@ test.beforeAll(async () => {
   // Deduplicated property: 2 listings, different sources, one withdrawn on
   // one site while still active on the other (a real, expected post-dedup
   // state per EC-1) — plus price history across both so the combined
-  // timeline actually has two categories to plot, and photos on each side
-  // (different photos per site) so the gallery union (EC-2) has something
-  // real to union.
+  // timeline actually has two categories to plot, and photos on each side so
+  // the gallery test below can prove it unions the *active* listing's
+  // photos only (EC-2 was revised by #167's review — the withdrawn
+  // listing's photo must NOT appear in the gallery).
   dedupedPropertyId = await insertProperty(`${NAME_PREFIX}Calle Trafalgar, Chamberí, Madrid`);
   fotocasaListingId = await insertListing(
     dedupedPropertyId,
@@ -196,14 +197,22 @@ test("shows all linked listings and combined history for deduplicated property",
   await expect(page.getByTestId("status-event-timeline")).toContainText(/retirado/i);
 });
 
-test("gallery shows photos from all linked listings", async ({ page }) => {
+test("gallery shows photos from active linked listings only, not a withdrawn one (#167 review must-fix 1)", async ({
+  page,
+}) => {
   skipIfNoDb(test);
 
   await page.goto(`/profiles/${profileId}/properties/${dedupedPropertyId}`);
   await assertNoErrorSurface(page);
 
-  // 2 fotocasa photos + 1 milanuncios photo = 3 thumbnails, the union.
-  await expect(page.locator('[data-testid="photo-gallery-thumb"]')).toHaveCount(3);
+  // 2 fotocasa (active) photos, NOT the milanuncios (withdrawn) photo. Prior
+  // to #167's review, this gallery had no status filter at all and would
+  // union all 3 — a withdrawn listing's (typically stale) photo could lead
+  // the hero image a user evaluating this property sees first. Fixed to
+  // match lib/candidates.ts's card query, which already excluded non-active
+  // listings from everything else it computes (min_price, source badges) —
+  // see getPropertyDetail's doc comment.
+  await expect(page.locator('[data-testid="photo-gallery-thumb"]')).toHaveCount(2);
 });
 
 test("renders correctly for non-deduplicated property", async ({ page }) => {

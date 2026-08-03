@@ -1,8 +1,8 @@
-import Link from "next/link";
 import type { CandidateRow } from "@/lib/candidates";
 import { PROPERTY_TYPE_LABELS, type PROPERTY_TYPES } from "@/lib/profiles-schema";
 import { fmtEUR0, fmtInt } from "@/components/widgets/format";
 import { FeedbackControls } from "./FeedbackControls";
+import { CandidatePhotoTicker } from "./CandidatePhotoTicker";
 
 /**
  * One card per deduplicated property (issue #19) — never one per listing.
@@ -11,14 +11,20 @@ import { FeedbackControls } from "./FeedbackControls";
  *
  * Photo-first layout (#152): the image is the strongest triage signal, so it
  * leads, with price overlaid on it and the numeric facts a user actually
- * scans (zone, planta, hab., baños, m²) on one compact line beneath.
+ * scans (zone, planta, hab., baños, m²) on one compact line beneath. #167
+ * adds prev/next photo controls over that lead image (`CandidatePhotoTicker`)
+ * so a user can flick through a property's photos without leaving the list.
  *
  * The informational content links to the property detail page (task 2.8,
- * #44); FeedbackControls (task 3.1, #20) is a *sibling* of that <Link>, not
- * nested inside it — see that component's docstring for why. #152 moved it
- * to an absolutely-positioned overlay so it costs no vertical space, but the
- * sibling relationship is load-bearing and must survive any future layout
- * change: there is an e2e assertion that clicking feedback does not navigate.
+ * #44), rendered inside `CandidatePhotoTicker`'s `<Link>`. Two overlay
+ * control groups are *siblings* of that `<Link>`, never nested inside it —
+ * see `FeedbackControls.tsx`'s and `CandidatePhotoTicker.tsx`'s docstrings
+ * for why (invalid HTML nesting interactive content inside `<a>`, plus the
+ * usual stopPropagation footguns). #152 moved the feedback bar to an
+ * absolutely-positioned overlay so it costs no vertical space; #167 does the
+ * same for the photo ticker. Both relationships are load-bearing and must
+ * survive any future layout change — there are e2e assertions that acting on
+ * either does not navigate.
  */
 /**
  * `floor` is free text as the sites publish it: "3", "1ª", "Bajo",
@@ -64,6 +70,8 @@ export function CandidateCard({ candidate, profileId }: { candidate: CandidateRo
       ? candidate.rank_explanation
       : null;
 
+  const priceLabel = candidate.min_price !== null ? fmtEUR0(candidate.min_price) : "Precio no disponible";
+
   return (
     <div
       data-testid="candidate-card"
@@ -75,77 +83,16 @@ export function CandidateCard({ candidate, profileId }: { candidate: CandidateRo
         background: "var(--bg-1)",
         display: "flex",
         flexDirection: "column",
-        // Anchors the absolutely-positioned action overlay below.
+        // Anchors the absolutely-positioned action/ticker overlays below.
         position: "relative",
         overflow: "hidden",
       }}
     >
-      <Link
+      <CandidatePhotoTicker
+        photos={candidate.photos}
         href={`/profiles/${profileId}/properties/${candidate.property_id}`}
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          textDecoration: "none",
-          color: "inherit",
-        }}
+        priceLabel={priceLabel}
       >
-        <div
-          data-testid="candidate-photo"
-          style={{
-            position: "relative",
-            width: "100%",
-            aspectRatio: "4 / 3",
-            background: "var(--bg-2)",
-          }}
-        >
-          {candidate.thumbnail_url !== null ? (
-            /* eslint-disable-next-line @next/next/no-img-element -- external, unpredictable-domain photo URLs from scraped listings; next/image's domain allowlist isn't a good fit here. */
-            <img
-              src={candidate.thumbnail_url}
-              data-testid="candidate-photo-img"
-              // Decorative: the address, price and facts beside it already
-              // carry every fact a screen-reader user needs, and scraped
-              // listings give us no meaningful alt text to use.
-              alt=""
-              loading="lazy"
-              style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-            />
-          ) : (
-            <div
-              data-testid="candidate-photo-placeholder"
-              style={{
-                width: "100%",
-                height: "100%",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: 12,
-                color: "var(--fg-subtle)",
-              }}
-            >
-              Sin foto
-            </div>
-          )}
-
-          <p
-            data-testid="candidate-price"
-            style={{
-              position: "absolute",
-              left: 0,
-              bottom: 0,
-              margin: 0,
-              padding: "10px 10px 6px",
-              width: "100%",
-              fontSize: 17,
-              fontWeight: 700,
-              color: "#fff",
-              background: "linear-gradient(to top, rgba(0,0,0,0.72), rgba(0,0,0,0))",
-            }}
-          >
-            {candidate.min_price !== null ? fmtEUR0(candidate.min_price) : "Precio no disponible"}
-          </p>
-        </div>
-
         <div style={{ padding: "8px 10px 10px", display: "flex", flexDirection: "column", gap: 4 }}>
           <p
             data-testid="candidate-zone"
@@ -228,15 +175,18 @@ export function CandidateCard({ candidate, profileId }: { candidate: CandidateRo
             </p>
           )}
         </div>
-      </Link>
+      </CandidatePhotoTicker>
 
       {/*
-        Sibling of the <Link>, never a child — a feedback click must not
-        navigate. Overlaid on the photo so it reclaims the vertical space the
-        old inline bar occupied (#150). Visibility is CSS-driven (see
-        .candidate-card-actions in globals.css): revealed on hover where the
-        device supports hover, always visible on touch, and always visible to
-        keyboard users via :focus-within.
+        Sibling of CandidatePhotoTicker's <Link>, never a child — a feedback
+        click must not navigate. Overlaid on the photo so it reclaims the
+        vertical space the old inline bar occupied (#150). Visibility is
+        CSS-driven (see .candidate-card-actions in globals.css): revealed on
+        hover where the device supports hover, always visible on touch,
+        always visible to keyboard users via :focus-within — and (#167) the
+        one button matching the property's current feedback state, if any,
+        stays visible unconditionally, so a marked card reads as marked while
+        scanning the list.
       */}
       <div className="candidate-card-actions" data-testid="candidate-card-actions">
         <FeedbackControls profileId={profileId} propertyId={candidate.property_id} />

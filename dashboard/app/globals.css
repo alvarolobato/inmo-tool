@@ -197,20 +197,77 @@ body {
 }
 
 /* ============================================================
-   Candidate card action overlay (#152)
+   Candidate card action overlay (#152, extended #167)
 
-   The accept/reject/star bar sits over the card's photo so it costs no
-   vertical space. Three ways it becomes visible, because hover alone
-   strands two real groups of users:
+   The accept/reject/star/note bar sits over the card's photo so it costs no
+   vertical space. Three ways the row becomes interactive, because hover
+   alone strands two real groups of users:
 
      1. :hover            — pointer devices, the intended default
      2. :focus-within     — keyboard users tabbing to the buttons
      3. @media (hover:none) — touch devices, where :hover either never
                               fires or sticks after a tap; always visible
 
+   #167: visibility now lives on each button (.feedback-toggle below), not on
+   this wrapper. A property's currently-active status button
+   (.feedback-toggle[data-active="true"], set by FeedbackControls.tsx) must
+   stay visible unconditionally — scanning the list should show which cards
+   are marked — while the rest of the row keeps the original hover-only
+   behaviour. CSS opacity can't be selectively restored by a descendant (a
+   parent's opacity: 0 multiplies down the whole subtree, full stop), so the
+   wrapper no longer carries an opacity toggle at all; only its background
+   "pill" stays conditional on the same three paths, and each button owns its
+   own opacity/pointer-events.
+
    Kept in the DOM and hit-testable at all times (opacity, not display) so
-   the controls stay reachable programmatically and by assistive tech, and
-   so Playwright's auto-hover-before-click works without special handling.
+   controls stay reachable programmatically and by assistive tech, and so
+   Playwright's auto-hover-before-click works without special handling.
+
+   pointer-events stays at its default `auto` here — NOT because gating it on
+   :hover/:focus-within (the way .candidate-photo-ticker below does) would
+   fix the invisible-but-clickable hazard and this was a "tests over
+   correctness" tradeoff. It was tried twice, both :hover-scoped and
+   :focus-within-scoped `pointer-events: none` → `auto`, and reverted both
+   times because — verified directly, not assumed — neither one actually
+   closes the hazard it looks like it closes:
+
+     - Desktop mouse: :hover flips pointer-events to `auto` and starts the
+       opacity fade on the exact same event a real cursor arriving over the
+       button fires. There is no interval in which a genuine mouse pointer
+       can be sitting over the button while it is still pointer-events:
+       none — the two states change together — so gating pointer-events
+       buys nothing against organic mouse use.
+     - Touch: `@media (hover: none)` below already forces opacity: 1
+       unconditionally, so the button is never invisible there in the first
+       place; pointer-events is moot for that path too.
+     - Assistive tech and programmatic clicks: pointer-events does not gate
+       either of these at all — it is a mouse-hit-testing property. A screen
+       reader's virtual cursor and a JS-triggered `.click()` both activate a
+       `pointer-events: none` element exactly as they would `auto`.
+
+   What toggling it DOES break: Playwright's actionability check resolves
+   the click target via `elementFromPoint` *before* dispatching any real
+   mouse-move. With pointer-events: none by default, that pre-check
+   permanently resolves to `.candidate-card-actions` (the next hit-testable
+   ancestor) instead of the button, since no hover/focus has happened yet to
+   flip it to `auto` — a genuine deadlock (nothing ever performs the hover
+   Playwright is implicitly waiting on), reproduced as a hang/timeout on
+   feedback.spec.ts/scoring.spec.ts/candidates.spec.ts (all click these
+   buttons directly, no prior `.hover()`), not a flake. The :focus-within
+   variant deadlocks the same three files identically, for the same root
+   cause: Playwright's actionability check hit-tests the click point before
+   focusing the element, so the element is still pointer-events: none at the
+   moment the check runs — focusing never gets a chance to flip it. The
+   ticker below has no such legacy (every #167 ticker test already hovers or
+   emulates touch before interacting), so it gets the stricter behaviour at
+   no compatibility cost.
+
+   The real, verified residual hazard this leaves — an opacity: 0 button is
+   still what `elementFromPoint` resolves to, ahead of whatever is visually
+   underneath it, for any click not preceded by a real pointer move — is
+   handled separately, by forcing the button visible on `any-pointer:
+   coarse` rather than by touching pointer-events (see that rule below for
+   the CDP-level reproduction this defends against).
    ============================================================ */
 
 .candidate-card-actions {
@@ -218,30 +275,79 @@ body {
   top: 6px;
   right: 6px;
   z-index: 2;
-  opacity: 0;
-  transform: translateY(-2px);
-  transition: opacity 120ms ease, transform 120ms ease;
   border-radius: 6px;
-  background: rgba(0, 0, 0, 0.55);
-  backdrop-filter: blur(2px);
+  background: transparent;
+  transition: background-color 120ms ease;
 }
 
 .candidate-card:hover .candidate-card-actions,
 .candidate-card:focus-within .candidate-card-actions {
-  opacity: 1;
-  transform: translateY(0);
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
 }
 
-/* Touch and other hover-incapable pointers: no hover to rely on, so the bar
-   is permanently visible. It stays top-right, over the photo — same
-   position as the hover case (see .candidate-card-actions above) — with its
-   own semi-opaque backdrop (rgba(0,0,0,0.55) + blur) keeping the glyphs
-   legible against the photo without needing the price gradient underneath.
-   (Verified on iPhone 13 emulation, 2026-08 — #152 review flagged an earlier
-   version of this comment that wrongly claimed the bar moved below the
-   gradient; it never did, and doesn't need to.) */
+/* Touch and other hover-incapable pointers: no hover to rely on, so the
+   background pill is permanently present. (Verified on iPhone 13 emulation,
+   2026-08 — #152 review flagged an earlier version of this comment that
+   wrongly claimed the bar moved below the gradient; it never did, and
+   doesn't need to. Re-verified under #167's per-button restructuring.) */
 @media (hover: none) {
   .candidate-card-actions {
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(2px);
+  }
+}
+
+/* Individual toggle buttons (accept/reject/star/note): hidden until the row
+   is hovered/focused/touched, EXCEPT the one whose feedback_type matches the
+   property's current state (data-active="true") — see the section comment
+   above for why this moved from the wrapper down to each button.
+   pointer-events is intentionally NOT toggled here — see the section
+   comment above for the reproduced regression that decision avoids. */
+.feedback-toggle {
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.feedback-toggle[data-active="true"] {
+  opacity: 1;
+  transform: none;
+}
+
+.candidate-card:hover .feedback-toggle,
+.candidate-card:focus-within .feedback-toggle {
+  opacity: 1;
+  transform: none;
+}
+
+@media (hover: none) {
+  .feedback-toggle {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Residual hazard, not covered by :hover/:focus-within/(hover:none) above
+   (see the action-overlay section comment for why touching pointer-events
+   isn't the fix): a device whose *primary* pointer is a mouse but that also
+   reports a coarse/touch pointer as available — a hybrid touchscreen
+   laptop is the realistic case — can produce a raw click with no preceding
+   pointer move. Verified directly via CDP `Input.dispatchMouseEvent`
+   (mousePressed/mouseReleased, no prior mouseMoved): `elementFromPoint`
+   resolved to this still-opacity:0 button, `aria-pressed` flipped true, and
+   a `reject` row landed in `feedback_event` — real training-signal
+   corruption from a click nobody could see land, not a theoretical gap.
+   `any-pointer: coarse` matches a mouse-primary/touch-secondary device
+   without touching pointer-events, so it can't reintroduce the
+   actionability deadlock the section comment above describes. Not directly
+   provable inside this Playwright/Chromium suite — `hasTouch` emulation
+   also flips `hover: none` (already covered by the block above), so there
+   is no way to construct "coarse pointer available, but a hover-capable
+   primary pointer" here to assert against. This is reasoned defense-in-depth
+   from the CDP-level reproduction, not a measured e2e fix. */
+@media (any-pointer: coarse) {
+  .feedback-toggle {
     opacity: 1;
     transform: none;
   }
@@ -250,7 +356,82 @@ body {
 /* Users who ask for reduced motion get the visibility change without the
    slide/fade. */
 @media (prefers-reduced-motion: reduce) {
-  .candidate-card-actions {
+  .candidate-card-actions,
+  .feedback-toggle {
+    transition: none;
+  }
+}
+
+/* ============================================================
+   Candidate card photo ticker (#167)
+
+   Prev/next controls that cycle a property's photos in place, without
+   navigating to the detail page (CandidatePhotoTicker.tsx). Same three
+   visibility paths as the action bar above, for the same reason: hover
+   alone strands keyboard and touch users.
+
+   Positioned to exactly cover the photo box with no JS measurement:
+   `.candidate-photo-ticker` is `top: 0; left: 0; width: 100%;
+   aspect-ratio: 4/3` relative to `.candidate-card` (position: relative) —
+   the identical box math the photo itself uses
+   (`[data-testid="candidate-photo"]`), and both are the first thing
+   rendered in their respective (sibling) DOM subtrees with nothing above
+   them to offset from. The wrapper is pointer-events: none so it never
+   intercepts clicks meant for the photo/Link underneath; only the two
+   buttons, and only while visible, are pointer-events: auto (see the hazard
+   note in the action-overlay section above — same fix, same reason).
+   ============================================================ */
+
+.candidate-photo-ticker {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 6px;
+  pointer-events: none;
+}
+
+.candidate-photo-ticker button {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+  color: #fff;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.candidate-card:hover .candidate-photo-ticker button,
+.candidate-card:focus-within .candidate-photo-ticker button {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Touch: no hover to rely on, so the ticker is permanently visible — same
+   reasoning as the action bar's touch case above. */
+@media (hover: none) {
+  .candidate-photo-ticker button {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .candidate-photo-ticker button {
     transition: none;
   }
 }
