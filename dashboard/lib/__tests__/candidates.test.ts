@@ -275,6 +275,16 @@ describe("flagsFromAssessments (#152 review, must-fix 1 and 3)", () => {
     expect(flagsFromAssessments([assessmentRow(1, { condition: "a_reformar" })])).toEqual([
       { kind: "condition:a_reformar", label: "A reformar", tone: "neutral" },
     ]);
+    expect(flagsFromAssessments([assessmentRow(1, { condition: "obra_nueva" })])).toEqual([
+      { kind: "condition:obra_nueva", label: "Obra nueva", tone: "neutral" },
+    ]);
+  });
+
+  it("gives no badge to the unremarkable condition default or the no-info value (#26)", () => {
+    // Same rule as occupancy's `pleno_dominio`: the ordinary/default case and
+    // "we don't know" are not findings, so neither gets a badge.
+    expect(flagsFromAssessments([assessmentRow(1, { condition: "reformado" })])).toEqual([]);
+    expect(flagsFromAssessments([assessmentRow(1, { condition: "unclear" })])).toEqual([]);
   });
 
   it("ignores non-array/non-string caveats defensively rather than throwing", () => {

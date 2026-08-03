@@ -17,6 +17,14 @@
  * the real-estate assessment flows below. Each assessment returns the model's
  * raw text; parsing and persisting the JSON belongs to the flow's own task
  * (#25–#30), which knows the shape it asked for.
+ *
+ * occupancy/condition/redflags (#25/#26/#27) all run at property level — every
+ * live listing of ONE deduplicated property, read together — because the fact
+ * each looks for (occupied, needs reform, embargo pending) is a property of
+ * the physical flat, not of any one advert, and "one portal omits what
+ * another discloses" applies equally to all three. extract (#28) stays at
+ * listing level: it recovers *per-advert* structured fields (each portal's
+ * own structured-data completeness varies), not a shared physical fact.
  */
 
 import { checkDailyBudget } from "./llm-usage";
@@ -39,20 +47,12 @@ export interface AssessmentOpts {
 }
 
 /**
- * Run a single-shot assessment flow over one listing.
- *
- * Shared by condition / redflags / extract: they differ only in their prompt
- * (owned by buildSystemPrompt) and in how the caller parses the result, not in
- * how the request is executed. Temperature is pinned low — these are
- * extraction tasks, not creative ones.
- *
- * Occupancy is deliberately NOT on this path: #25 moved it to property level,
- * where it reads every merged listing at once rather than one advert.
- * #26–#28 should follow when they land — the same "one portal omits what
- * another discloses" argument applies to condition and red flags.
+ * Run a single-shot assessment flow over one listing (#28 extract only — see
+ * the module-level note on why condition/redflags moved off this path).
+ * Temperature is pinned low — this is an extraction task, not a creative one.
  */
 async function runListingAssessment(
-  flow: "condition" | "redflags" | "extract",
+  flow: "extract",
   listing: ListingSnapshot,
   opts?: AssessmentOpts,
 ): Promise<string> {
@@ -77,6 +77,35 @@ async function runListingAssessment(
     throw new Error(`LLM returned an empty response for flow "${flow}"`);
   }
   return result.text;
+}
+
+/**
+ * Run a single-shot assessment flow over EVERY live listing of one
+ * deduplicated property at once (#25 occupancy's pattern, followed by #26
+ * condition and #27 redflags — see the module-level note). Returns the model
+ * that produced the answer alongside the text, so the caller can record which
+ * model a stored verdict came from (mirrors `assessOccupancy`).
+ */
+async function runPropertyAssessment(
+  flow: "condition" | "redflags",
+  listings: ListingSnapshot[],
+  instruction: string,
+  opts?: AssessmentOpts,
+): Promise<{ text: string; model: string }> {
+  await checkDailyBudget();
+
+  const result = await assembleRequest(flow, { listings }, null, instruction, {
+    ctx: opts?.ctx,
+    requestId: opts?.requestId ?? null,
+    endpoint: flow,
+    temperature: 0,
+    maxOutputTokens: 2048,
+  });
+
+  if (!result.text) {
+    throw new Error(`LLM returned an empty response for flow "${flow}"`);
+  }
+  return { text: result.text, model: result.model };
 }
 
 /**
@@ -121,24 +150,46 @@ export async function assessOccupancy(
 
 /**
  * #26 — Assess the property's renovation state.
- * Returns the model's raw JSON text.
+ *
+ * Takes EVERY live listing of one deduplicated property (see the module-level
+ * note): the same flat's condition doesn't change per portal, and one advert
+ * mentioning "a reformar" while another stays silent is resolved the same way
+ * occupancy resolves a silent portal — by reading them together.
+ *
+ * Returns the raw JSON text plus the model that produced it.
  */
 export function assessCondition(
-  listing: ListingSnapshot,
+  listings: ListingSnapshot[],
   opts?: AssessmentOpts,
-): Promise<string> {
-  return runListingAssessment("condition", listing, opts);
+): Promise<{ text: string; model: string }> {
+  return runPropertyAssessment(
+    "condition",
+    listings,
+    "Evalúa el estado de conservación del inmueble según las instrucciones (condition).",
+    opts,
+  );
 }
 
 /**
  * #27 — Extract legal/financial red flags worth a lawyer's review.
- * Returns the model's raw JSON text. An empty `flags` array is a normal result.
+ *
+ * Takes EVERY live listing of one deduplicated property, same reasoning as
+ * `assessCondition` above: a disclosure like "pendiente de embargo" made on
+ * one portal must not be missed because a sibling advert omits it.
+ *
+ * Returns the raw JSON text plus the model that produced it. An empty
+ * `flags` array is a normal result.
  */
 export function extractRedFlags(
-  listing: ListingSnapshot,
+  listings: ListingSnapshot[],
   opts?: AssessmentOpts,
-): Promise<string> {
-  return runListingAssessment("redflags", listing, opts);
+): Promise<{ text: string; model: string }> {
+  return runPropertyAssessment(
+    "redflags",
+    listings,
+    "Extrae señales de alerta legales y financieras del inmueble según las instrucciones (redflags).",
+    opts,
+  );
 }
 
 /**

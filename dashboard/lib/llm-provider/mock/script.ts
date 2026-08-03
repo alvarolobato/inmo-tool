@@ -91,10 +91,18 @@ function mockAssessmentJson(flow: Exclude<MockFlow, "chat">): string {
         confidence: 0.8,
         issues: [],
         evidence: "reformado en 2023",
+        // #25 keys assessments on the property and feeds the model every
+        // merged listing (#26 followed occupancy's pattern), so a verdict
+        // has to name which advert it read.
+        evidence_source: "fotocasa",
         reasoning: "El anuncio menciona una reforma reciente (mock e2e).",
       });
     case "redflags":
-      return JSON.stringify({ flags: [], confidence: 0.7 });
+      return JSON.stringify({
+        flags: [],
+        confidence: 0.7,
+        reasoning: "El anuncio no menciona ninguna señal de alerta (mock e2e).",
+      });
     case "extract":
       return JSON.stringify({
         rooms: 3,
