@@ -4,6 +4,7 @@
 
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import { parse as parseYaml } from "yaml";
 
 // ─── Source MD list (loaded from docs/knowledge-sources.yml) ─────────────────
@@ -29,27 +30,27 @@ const OUTPUT_FILE = path.resolve(__dirname, "../lib/knowledge.ts");
 
 // ─── Types (mirrors dashboard/lib/knowledge.ts) ───────────────────────────────
 
-interface Instruction {
+export interface Instruction {
   instruction: string;
   questions: string[];
 }
 
-interface SqlPair {
+export interface SqlPair {
   question: string;
   sql: string;
 }
 
-interface TableSchema {
+export interface TableSchema {
   table: string;
   alias: string;
   description: string;
   keyColumns: string[];
 }
 
-// All current WrenAI relationships are MANY_TO_ONE; type is kept as string
-// (not a union literal) so future ONE_TO_ONE or MANY_TO_MANY entries in source
-// MDs emit correctly without requiring interface changes.
-interface Relationship {
+// Relationship.type is kept as a plain string (not a union literal) so future
+// ONE_TO_ONE or MANY_TO_MANY entries in source MDs emit correctly without
+// requiring an interface change.
+export interface Relationship {
   from: string;
   fromColumn: string;
   to: string;
@@ -63,12 +64,12 @@ const LLM_HEADING = /^## LLM:(\w[\w-]*)$/;
 // Any ## heading (including non-LLM) terminates the current LLM section.
 const ANY_H2 = /^## /;
 
-interface ParsedSection {
+export interface ParsedSection {
   marker: string;
   content: string;
 }
 
-function parseMarkdownSections(source: string): ParsedSection[] {
+export function parseMarkdownSections(source: string): ParsedSection[] {
   const lines = source.split("\n");
   const sections: ParsedSection[] = [];
   let currentMarker: string | null = null;
@@ -102,7 +103,7 @@ function parseMarkdownSections(source: string): ParsedSection[] {
 
 // ─── Section content extractors ───────────────────────────────────────────────
 
-function extractJsonArray<T>(content: string, marker: string, filePath: string): T[] {
+export function extractJsonArray<T>(content: string, marker: string, filePath: string): T[] {
   // Find first JSON code block in the section content
   const fenceRe = /```(?:json)?\s*\n([\s\S]*?)```/;
   const m = fenceRe.exec(content);
@@ -129,7 +130,7 @@ function extractJsonArray<T>(content: string, marker: string, filePath: string):
   }
 }
 
-function extractSqlPairs(content: string, filePath: string): SqlPair[] {
+export function extractSqlPairs(content: string, filePath: string): SqlPair[] {
   const pairs: SqlPair[] = [];
   // Each pair: ### <question text>\n```sql\n<SQL>\n```
   const entryRe = /^### (.+)$/gm;
@@ -166,7 +167,7 @@ function jsStr(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${");
 }
 
-function emitInstructions(instructions: Instruction[]): string {
+export function emitInstructions(instructions: Instruction[]): string {
   return instructions
     .map((inst) => {
       const qs = inst.questions.map((q) => `      ${JSON.stringify(q)}`).join(",\n");
@@ -175,7 +176,7 @@ function emitInstructions(instructions: Instruction[]): string {
     .join(",\n");
 }
 
-function emitSqlPairs(pairs: SqlPair[]): string {
+export function emitSqlPairs(pairs: SqlPair[]): string {
   return pairs
     .map((pair) => {
       return `  {\n    question: ${JSON.stringify(pair.question)},\n    sql: \`${jsStr(pair.sql)}\`,\n  }`;
@@ -183,7 +184,7 @@ function emitSqlPairs(pairs: SqlPair[]): string {
     .join(",\n");
 }
 
-function emitSchema(tables: TableSchema[]): string {
+export function emitSchema(tables: TableSchema[]): string {
   return tables
     .map((t) => {
       const cols = t.keyColumns.map((c) => `      ${JSON.stringify(c)}`).join(",\n");
@@ -192,7 +193,7 @@ function emitSchema(tables: TableSchema[]): string {
     .join(",\n");
 }
 
-function emitRelationships(rels: Relationship[]): string {
+export function emitRelationships(rels: Relationship[]): string {
   return rels
     .map(
       (r) =>
@@ -355,4 +356,10 @@ ${emitRelationships(relationships)}
   }
 }
 
-main();
+// Only run when executed directly (`tsx scripts/build-knowledge.ts`), not
+// when imported — the test suite imports the pure parse/extract/emit
+// functions above without wanting the disk-writing main() to fire as a
+// module-load side effect.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main();
+}
