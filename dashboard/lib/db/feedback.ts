@@ -29,29 +29,10 @@ export interface FeedbackEventRow {
   created_at: string;
 }
 
-interface RawFeedbackEventRow {
-  id: string;
-  profile_id: string;
-  property_id: string;
-  listing_id: string | null;
-  feedback_type: FeedbackType;
-  value: unknown | null;
-  note: string | null;
-  created_at: string;
-}
-
-function toFeedbackEventRow(r: RawFeedbackEventRow): FeedbackEventRow {
-  return {
-    id: Number(r.id),
-    profile_id: Number(r.profile_id),
-    property_id: Number(r.property_id),
-    listing_id: r.listing_id !== null ? Number(r.listing_id) : null,
-    feedback_type: r.feedback_type,
-    value: r.value,
-    note: r.note,
-    created_at: r.created_at,
-  };
-}
+// id/profile_id/property_id/listing_id (all bigint) arrive as real JS
+// numbers via the driver-level int8 type parser (db-shared.ts, #155), so
+// rows read as FeedbackEventRow directly — no separate "raw string row ->
+// coerced row" mapping step needed anymore.
 
 /**
  * True when `listingId` is a real listing belonging to `propertyId` — a
@@ -81,7 +62,7 @@ export async function recordFeedback(opts: {
   note?: string | null;
   value?: unknown;
 }): Promise<FeedbackEventRow> {
-  const rows = await sql<RawFeedbackEventRow>(
+  const rows = await sql<FeedbackEventRow>(
     `INSERT INTO feedback_event (profile_id, property_id, listing_id, feedback_type, note, value)
      VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING id, profile_id, property_id, listing_id, feedback_type, value, note, created_at`,
@@ -94,7 +75,7 @@ export async function recordFeedback(opts: {
       opts.value !== undefined ? JSON.stringify(opts.value) : null,
     ],
   );
-  return toFeedbackEventRow(rows[0]);
+  return rows[0];
 }
 
 /**
@@ -134,13 +115,13 @@ export async function recordStateFeedbackIfChanged(opts: {
       return { event: null, currentState: current, noop: true };
     }
 
-    const insertResult = await client.query<RawFeedbackEventRow>(
+    const insertResult = await client.query<FeedbackEventRow>(
       `INSERT INTO feedback_event (profile_id, property_id, listing_id, feedback_type, note, value)
        VALUES ($1, $2, $3, $4, NULL, NULL)
        RETURNING id, profile_id, property_id, listing_id, feedback_type, value, note, created_at`,
       [opts.profileId, opts.propertyId, opts.listingId ?? null, opts.feedbackType],
     );
-    const event = toFeedbackEventRow(insertResult.rows[0]);
+    const event = insertResult.rows[0];
     return { event, currentState: opts.feedbackType, noop: false };
   });
 }
@@ -151,14 +132,14 @@ export async function recordStateFeedbackIfChanged(opts: {
  * "current state" below which only reflects the latest accept/reject/star.
  */
 export async function getFeedbackHistory(profileId: number, propertyId: number): Promise<FeedbackEventRow[]> {
-  const rows = await sql<RawFeedbackEventRow>(
+  const rows = await sql<FeedbackEventRow>(
     `SELECT id, profile_id, property_id, listing_id, feedback_type, value, note, created_at
        FROM feedback_event
       WHERE profile_id = $1 AND property_id = $2
       ORDER BY created_at DESC, id DESC`,
     [profileId, propertyId],
   );
-  return rows.map(toFeedbackEventRow);
+  return rows;
 }
 
 /**

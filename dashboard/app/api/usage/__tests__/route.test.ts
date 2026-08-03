@@ -74,19 +74,24 @@ describe("GET /api/usage", () => {
 
   it("returns correct aggregates when data is present", async () => {
     mockSql
+      // today/week/month prompt/completion/total counts are SUM(<integer
+      // column>), i.e. bigint — the driver-level int8 type parser
+      // (db-shared.ts, #155) means `sql()` (what this mock stands in for)
+      // returns real numbers, not strings, for these. estimated_cost_usd
+      // is NUMERIC and genuinely still arrives as a string.
       .mockResolvedValueOnce([
         {
-          today_prompt: "100",
-          today_completion: "200",
-          today_total: "300",
+          today_prompt: 100,
+          today_completion: 200,
+          today_total: 300,
           today_cost: "0.003450",
-          week_prompt: "500",
-          week_completion: "1000",
-          week_total: "1500",
+          week_prompt: 500,
+          week_completion: 1000,
+          week_total: 1500,
           week_cost: "0.017250",
-          month_prompt: "2000",
-          month_completion: "4000",
-          month_total: "6000",
+          month_prompt: 2000,
+          month_completion: 4000,
+          month_total: 6000,
           month_cost: "0.069000",
         },
       ])

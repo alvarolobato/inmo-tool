@@ -17,6 +17,9 @@ vi.mock("pg", () => ({
     end = mockEnd;
     query = mockPoolQuery;
   },
+  // db-shared.ts (#155) registers the int8 type parser at module load —
+  // the mock needs a minimal stand-in so that import doesn't throw.
+  types: { setTypeParser: vi.fn(), builtins: { INT8: 20 } },
 }));
 
 // Task 3.4 (#23): materializeProfile now calls scoreNewCandidates after its
@@ -88,7 +91,7 @@ describe("materializeProfile", () => {
       .mockResolvedValueOnce({ rows: [{ id: 10 }, { id: 11 }] }) // SELECT property.id WHERE ...
       .mockResolvedValueOnce({ rowCount: 2 }) // INSERT ... ON CONFLICT DO UPDATE
       .mockResolvedValueOnce({ rowCount: 1 }) // UPDATE ... matched = false
-      .mockResolvedValueOnce({ rows: [{ count: "1" }] }) // SELECT COUNT(*) ... matched = false
+      .mockResolvedValueOnce({ rows: [{ count: 1 }] }) // SELECT COUNT(*) ... matched = false
       .mockResolvedValueOnce(undefined); // COMMIT
 
     const result = await materializeProfile(1);
@@ -125,7 +128,7 @@ describe("materializeProfile", () => {
       .mockResolvedValueOnce({ rows: [{ id: 10 }, { id: 11 }] }) // SELECT property.id WHERE ...
       .mockResolvedValueOnce({ rowCount: 2 }) // INSERT ... ON CONFLICT DO UPDATE
       .mockResolvedValueOnce({ rowCount: 1 }) // UPDATE ... matched = false
-      .mockResolvedValueOnce({ rows: [{ count: "1" }] }) // SELECT COUNT(*) ... matched = false
+      .mockResolvedValueOnce({ rows: [{ count: 1 }] }) // SELECT COUNT(*) ... matched = false
       .mockResolvedValueOnce(undefined); // COMMIT
 
     mockScoreNewCandidates.mockRejectedValueOnce(new Error("boom: scoring exploded"));
@@ -155,7 +158,7 @@ describe("materializeProfile", () => {
       .mockResolvedValueOnce(undefined) // BEGIN
       .mockResolvedValueOnce({ rows: [] }) // SELECT -> zero matches
       .mockResolvedValueOnce({ rowCount: 3 }) // UPDATE ... matched = false (all previously matched)
-      .mockResolvedValueOnce({ rows: [{ count: "3" }] }) // SELECT COUNT(*) ... matched = false
+      .mockResolvedValueOnce({ rows: [{ count: 3 }] }) // SELECT COUNT(*) ... matched = false
       .mockResolvedValueOnce(undefined); // COMMIT
 
     const result = await materializeProfile(1);
@@ -176,7 +179,7 @@ describe("materializeProfile", () => {
       .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rowCount: 0 })
-      .mockResolvedValueOnce({ rows: [{ count: "0" }] })
+      .mockResolvedValueOnce({ rows: [{ count: 0 }] })
       .mockResolvedValueOnce(undefined);
 
     await materializeProfile(1);
@@ -198,11 +201,13 @@ describe("materializeAllProfiles", () => {
     // Generic per-query-shape stub rather than a strict sequence: this test
     // covers materializeAllProfiles' aggregation, not materializeProfile's
     // own query correctness (covered above) — but it still has to return a
-    // real `count` row for the COUNT(*) query, or `Number(rows[0].count)`
-    // throws on `rows[0]` being undefined.
+    // real `count` row for the COUNT(*) query, or `rows[0].count` throws on
+    // `rows[0]` being undefined. `count` is a real number here, not a
+    // string: COUNT(*) is bigint, which the driver-level int8 type parser
+    // (db-shared.ts, #155) — not a per-call Number() — now normalises.
     mockClientQuery.mockImplementation((sql: unknown) => {
       if (typeof sql === "string" && sql.includes("SELECT COUNT(*)")) {
-        return Promise.resolve({ rows: [{ count: "0" }] });
+        return Promise.resolve({ rows: [{ count: 0 }] });
       }
       return Promise.resolve({ rows: [], rowCount: 0 });
     });
@@ -228,7 +233,7 @@ describe("materializeAllProfiles", () => {
         return Promise.reject(new Error("simulated DB error for profile 1"));
       }
       if (typeof sql === "string" && sql.includes("SELECT COUNT(*)")) {
-        return Promise.resolve({ rows: [{ count: "0" }] });
+        return Promise.resolve({ rows: [{ count: 0 }] });
       }
       return Promise.resolve({ rows: [], rowCount: 0 });
     });

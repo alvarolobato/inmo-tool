@@ -208,18 +208,17 @@ export async function scoreNewCandidates(
   if (!profile || profile.archived_at !== null) return null;
 
   const allInputs = await fetchScoringInputs(profileId);
-  // `property.id` is BIGSERIAL — callers upstream (e.g. materialize.ts's
-  // `matchedIds`, sourced from a `pool.query<{ id: number }>` whose runtime
-  // rows are pg-returned strings despite the `number` type annotation) can
-  // and do pass stringified ids even though this function's own signature
-  // says number[]. `fetchScoringInputs` already normalizes its own
-  // `property_id` to a real Number; without normalizing propertyIds the
-  // same way, a Set-based lookup below silently matches nothing ("179" !==
-  // 179) and every candidate this function was called to score gets
-  // silently skipped — reproduced directly while building this task, not
-  // hypothetical. Normalize defensively here rather than trust every call
-  // site to remember to convert first.
-  const idSet = new Set(propertyIds.map(Number));
+  // `property.id` is BIGSERIAL. Before #155's driver-level int8 type parser
+  // (db-shared.ts), callers upstream (e.g. materialize.ts's `matchedIds`,
+  // sourced from raw pg rows) could pass stringified ids even though this
+  // function's signature says number[], and the Set-based lookup below
+  // would silently match nothing ("179" !== 179) — every candidate this
+  // function was called to score got silently skipped (reproduced directly
+  // while building this task, not hypothetical). The parser now guarantees
+  // every bigint column — including materialize.ts's matchedIds and
+  // fetchScoringInputs's property_id — arrives as a real number, so no
+  // per-site normalization is needed here anymore.
+  const idSet = new Set(propertyIds);
   const inputs = allInputs.filter((row) => idSet.has(row.property_id));
   if (inputs.length === 0) return null;
 

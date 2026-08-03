@@ -11,13 +11,23 @@
  * lib/filtering/__tests__/materialize.integration.test.ts.
  *
  * Cleanup is scoped to exact IDs this file creates (tracked per test),
- * never a broad "delete any orphaned property"/name-prefix scan — vitest
- * runs test files in separate workers by default, all against the same
- * live Postgres, so a broad scan here can race with (and destructively
- * collide with) unrelated data another integration test file is using at
- * the same wall-clock moment. Reproduced directly: running this file
- * together with materialize.integration.test.ts intermittently violated
- * a foreign key on a property this file never touched.
+ * never a broad "delete any orphaned property"/name-prefix scan. Two
+ * distinct race hazards motivate this, and #159 only closed one of them:
+ *
+ *  - Across separate test *runs* (two agents/CI jobs invoking `npm test`
+ *    concurrently, or a crashed run leaving orphaned rows behind) — closed
+ *    by #159's per-session database: each `npm test` invocation gets its
+ *    own throwaway Postgres database, created before the run and dropped
+ *    after, so a broad scan can no longer collide with another run's data
+ *    because there is no other run's data in *this* database.
+ *  - Within one run, across the several integration test *files* vitest
+ *    executes in separate parallel workers against that same per-run
+ *    database — still real, still requires exact-id cleanup (and, for
+ *    geographic tests, coordinates far enough apart not to overlap another
+ *    file's radius scan — see materialize.integration.test.ts). Reproduced
+ *    directly: running this file together with materialize.integration.test.ts
+ *    intermittently violated a foreign key on a property this file never
+ *    touched.
  */
 import { describe, it, expect, afterAll, beforeEach, afterEach } from "vitest";
 import { Pool } from "pg";

@@ -229,17 +229,23 @@ export async function GET(): Promise<NextResponse> {
       status: String(row[2]),
     }));
 
+    // agg.total_discovered/total_fetched (implicit SUM(integer) => bigint)
+    // arrive as real JS numbers via the driver-level int8 type parser
+    // (db-shared.ts, #155).
     const listingsTrend: ListingsTrendPoint[] = reversedRows.map((row) => ({
       started_at: toIsoOrNull(row[0]) ?? "",
-      discovered: row[3] != null ? Number(row[3]) : null,
-      fetched: row[4] != null ? Number(row[4]) : null,
+      discovered: row[3] != null ? (row[3] as number) : null,
+      fetched: row[4] != null ? (row[4] as number) : null,
     }));
 
+    // last_duration_ms is an explicit ::bigint cast above — real JS number
+    // via the driver-level parser too. avg_duration_ms is cast ::int
+    // (INTEGER, not bigint) — that Number() is unrelated to #155 and stays.
     const connectorDurations: ConnectorDuration[] = connectorDurResult.rows.map(
       (row) => ({
         connector_name: String(row[0]),
         avg_duration_ms: Number(row[1]),
-        last_duration_ms: row[2] != null ? Number(row[2]) : null,
+        last_duration_ms: row[2] != null ? (row[2] as number) : null,
       }),
     );
 
@@ -249,22 +255,28 @@ export async function GET(): Promise<NextResponse> {
         fetched_count: Number(row[1] ?? 0),
       }));
 
+    // total/success/partial/failed are all COUNT(*) — bigint — real JS
+    // numbers via the driver-level int8 type parser (db-shared.ts, #155).
     const rr = rateResult.rows[0] ?? [0, 0, 0, 0];
     const successRate: SuccessRate = {
-      total: Number(rr[0]),
-      success: Number(rr[1]),
-      partial: Number(rr[2]),
-      failed: Number(rr[3]),
+      total: rr[0] as number,
+      success: rr[1] as number,
+      partial: rr[2] as number,
+      failed: rr[3] as number,
     };
 
+    // run_id (bigserial) and total_discovered/total_fetched (implicit
+    // SUM(integer) => bigint) arrive as real JS numbers via the parser too.
+    // duration_ms is INTEGER and fetch_rate is an explicit ::numeric(6,4)
+    // cast — those Number() calls are unrelated to #155 and stay.
     const lastRunRow = lastRunResult.rows[0];
     const lastRun: LastRunSummary = lastRunRow
       ? {
-          run_id: lastRunRow[0] != null ? Number(lastRunRow[0]) : null,
+          run_id: lastRunRow[0] != null ? (lastRunRow[0] as number) : null,
           duration_ms: lastRunRow[1] != null ? Number(lastRunRow[1]) : null,
           total_discovered:
-            lastRunRow[2] != null ? Number(lastRunRow[2]) : null,
-          total_fetched: lastRunRow[3] != null ? Number(lastRunRow[3]) : null,
+            lastRunRow[2] != null ? (lastRunRow[2] as number) : null,
+          total_fetched: lastRunRow[3] != null ? (lastRunRow[3] as number) : null,
           fetch_rate: lastRunRow[4] != null ? Number(lastRunRow[4]) : null,
         }
       : {
@@ -275,10 +287,12 @@ export async function GET(): Promise<NextResponse> {
           fetch_rate: null,
         };
 
+    // runs_failed/connectors_failed are COUNT(*) — bigint — real JS numbers
+    // via the driver-level parser.
     const errRow = errorsResult.rows[0] ?? [0, 0];
     const errors24h: Errors24h = {
-      runs_failed: Number(errRow[0] ?? 0),
-      connectors_failed: Number(errRow[1] ?? 0),
+      runs_failed: (errRow[0] as number) ?? 0,
+      connectors_failed: (errRow[1] as number) ?? 0,
     };
 
     const response: EtlStatsResponse = {
