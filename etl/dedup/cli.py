@@ -26,6 +26,18 @@ def _cmd_run(conn) -> int:
         f"{result.merged} merged, {result.suggested} suggested for review, "
         f"{result.conflicts} merge-time conflict(s) flagged."
     )
+    if result.same_source_skipped:
+        # Issue #197: same-source pairs are skipped before ever reaching
+        # evaluate_pair, so they're invisible in the "Compared ..." line
+        # above by construction — surfaced here instead so `ps dedup run`
+        # stays the one place an operator can see them, per that issue's
+        # "don't make same-source duplicates invisible" requirement.
+        print(
+            f"Skipped {result.same_source_skipped} same-source pair(s) "
+            f"(never paired for merge/suggestion — issue #197), of which "
+            f"{result.same_source_cadastral_collisions} shared a "
+            f"cadastral_ref (data-quality flag, see logs)."
+        )
     return 0
 
 
@@ -84,6 +96,19 @@ def _cmd_process_actions(conn) -> int:
     return 0
 
 
+def _cmd_purge_same_source(conn) -> int:
+    """One-off migration companion for issue #197 (`ps dedup
+    purge-same-source`): delete existing `pending` suggested_merge rows
+    whose two listings share a source. Idempotent — a second run against an
+    already-purged database deletes 0 rows and exits 0."""
+    deleted = engine.purge_same_source_pending(conn)
+    print(
+        f"Purged {deleted} pending same-source suggestion(s) "
+        "(issue #197 one-off migration)."
+    )
+    return 0
+
+
 def _cmd_resolve_conflict(conn, suggestion_id: int) -> int:
     try:
         engine.resolve_conflict(conn, suggestion_id)
@@ -116,6 +141,13 @@ def main(argv: list[str] | None = None) -> int:
         "process-actions",
         help="Drain pending dashboard review-queue confirm/reject requests once",
     )
+    subparsers.add_parser(
+        "purge-same-source",
+        help=(
+            "One-off migration (issue #197): delete pending suggested_merge "
+            "rows whose two listings share a source"
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -132,6 +164,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_reject(conn, args.suggestion_id)
         if args.subcommand == "process-actions":
             return _cmd_process_actions(conn)
+        if args.subcommand == "purge-same-source":
+            return _cmd_purge_same_source(conn)
         return _cmd_resolve_conflict(conn, args.suggestion_id)
     finally:
         conn.close()

@@ -43,8 +43,24 @@ from decimal import Decimal
 
 from rapidfuzz import fuzz
 
+from etl.dedup.signals.floor import floors_conflict
 from etl.dedup.signals.fuzzy import normalize_address
 from etl.dedup.types import ListingRecord, PairEvaluation
+
+# Re-exported so phone_extract.py and reference_code.py can keep importing
+# every shared proximity/corroboration primitive from this one module
+# (`from etl.dedup.signals.address_coords import coords_close, prices_close,
+# sizes_close, floors_conflict`), the same pattern already used for the
+# other three — rather than half from here and half from etl.dedup.signals.floor.
+__all__ = [
+    "addresses_close",
+    "coords_close",
+    "evaluate",
+    "floors_conflict",
+    "haversine_meters",
+    "prices_close",
+    "sizes_close",
+]
 
 _MAX_DISTANCE_METERS = 15.0
 _MAX_SIZE_RATIO = Decimal("0.05")
@@ -128,6 +144,16 @@ def evaluate(a: ListingRecord, b: ListingRecord) -> PairEvaluation | None:
         coords_close(a.lat, a.lon, b.lat, b.lon)
         and sizes_close(a.m2_built, b.m2_built, _MAX_SIZE_RATIO)
         and addresses_close(a.address, b.address)
+        # Issue #186: floor as an additional required corroborating
+        # condition. Coordinates+size+address alone can't tell two units in
+        # the same building apart (see this module's own docstring on why
+        # coords are a building-level signal) — a floor that's present on
+        # both sides and disagrees is direct evidence these are different
+        # units, so it vetoes the merge even though the other three
+        # conditions are satisfied. Floor missing on either side falls
+        # through permissively (floors_conflict returns False), same as
+        # every other "can't corroborate, don't block" case in this engine.
+        and not floors_conflict(a.floor, b.floor)
     ):
         return PairEvaluation(
             basis="address_coords", confidence=Decimal("0.900"), decision="merge"

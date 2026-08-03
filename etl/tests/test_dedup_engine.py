@@ -11,6 +11,7 @@ from __future__ import annotations
 from decimal import Decimal
 from pathlib import Path
 
+import imagehash
 import pytest
 
 from etl import orchestrator
@@ -18,6 +19,7 @@ from etl.connectors import base
 from etl.connectors.base import CanonicalListingVersion
 from etl.dedup import engine
 from etl.dedup.engine import _PhotoHashCache
+from etl.dedup.signals import phone_extract, reference_code
 from etl.dedup.types import ListingRecord
 
 _SCHEMA_SQL = Path(__file__).parent.parent / "schema" / "init.sql"
@@ -34,8 +36,8 @@ def _insert_property(conn, **overrides) -> int:
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO property (cadastral_ref, address, lat, lon, m2_built)
-            VALUES (%s, %s, %s, %s, %s) RETURNING id
+            INSERT INTO property (cadastral_ref, address, lat, lon, m2_built, floor)
+            VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
             """,
             (
                 overrides.get("cadastral_ref"),
@@ -43,6 +45,7 @@ def _insert_property(conn, **overrides) -> int:
                 overrides.get("lat"),
                 overrides.get("lon"),
                 overrides.get("m2_built"),
+                overrides.get("floor"),
             ),
         )
         return cur.fetchone()[0]
@@ -172,6 +175,7 @@ def _record(listing_id: int, property_id: int, **overrides) -> ListingRecord:
         current_price=overrides.get("current_price"),
         contact_raw=overrides.get("contact_raw"),
         reference_code=overrides.get("reference_code"),
+        floor=overrides.get("floor"),
     )
 
 
@@ -1239,11 +1243,23 @@ class TestRecordedPairBatching:
         """At 60 listings the old code issued 1770 SELECTs (60*59/2) just to
         ask 'have I seen this pair?'. Count them for real by wrapping the
         cursor, rather than asserting the code merely *looks* batched.
+
+        Split across two sources (30/30), not all "idealista" as this test
+        originally had it (issue #197 review): with a single source, every
+        one of the 1770 candidate pairs is now same-source and skipped
+        before ever reaching the recorded-pairs check this test is actually
+        about, which would make `pairs_compared` assert 0 rather than
+        testing the batching behaviour at all. C(60,2) = 1770 total pairs;
+        C(30,2)*2 = 870 of those are same-source (skipped by issue #197's
+        pair-generation filter, counted in same_source_skipped instead);
+        the remaining 900 are the cross-source pairs this test's assertion
+        below is about.
         """
         n = 60
+        sources = ("idealista", "fotocasa")
         for i in range(n):
             prop = _insert_property(dedup_db, address=f"Calle Batch {i}")
-            _insert_listing(dedup_db, prop, "idealista", f"batch-{i}")
+            _insert_listing(dedup_db, prop, sources[i % 2], f"batch-{i}")
         dedup_db.commit()
 
         suggested_merge_selects = []
@@ -1284,8 +1300,650 @@ class TestRecordedPairBatching:
 
         result = engine.run(_CountingConnection(dedup_db))
 
-        assert result.pairs_compared == n * (n - 1) // 2 == 1770
+        total_pairs = n * (n - 1) // 2
+        same_source_pairs = 2 * (n // 2) * (n // 2 - 1) // 2
+        assert total_pairs == 1770
+        assert same_source_pairs == 870
+        assert result.same_source_skipped == same_source_pairs
+        assert result.pairs_compared == total_pairs - same_source_pairs == 900
         assert len(suggested_merge_selects) == 1, (
             f"expected a single preload query, got {len(suggested_merge_selects)} "
             "— the per-pair skip check is back"
         )
+
+
+class TestSameSourceFiltering:
+    """Issue #197: 'in the same connector they wouldn't be duplicates, only
+    if they come from different connectors ... a duplicate in the same
+    connector would be really strange' (owner). The filter lives in
+    engine.run()'s pair-generation loop, before evaluate_pair is ever
+    called — these tests exercise it through run(), not evaluate_pair
+    directly, since the whole point is that a same-source pair never
+    reaches evaluate_pair at all.
+    """
+
+    def test_same_source_cadastral_match_is_never_merged_or_suggested(self, dedup_db):
+        """Counterpart to TestCadastralExactMatch's cross-source auto-merge
+        test: identical setup, same source both sides. Cadastral is called
+        out explicitly in issue #197 ('applies to every signal including
+        cadastral') — a definitive, always-merge-cross-source signal must
+        still never fire same-source.
+        """
+        _insert_pair(
+            dedup_db,
+            "solvia",
+            "solvia",
+            "cadastral-same-source",
+            cadastral_ref_a="3061226YH0036S0007SM",
+            cadastral_ref_b="3061226YH0036S0007SM",
+            address_a="Calle Mayor 1",
+            address_b="C/ Mayor nº1, esc. 2",
+            m2_built_a=Decimal(80),
+            m2_built_b=Decimal(95),
+            current_price_a=Decimal(230000),
+            current_price_b=Decimal(219000),
+        )
+        result = engine.run(dedup_db)
+
+        assert result.merged == 0
+        assert result.suggested == 0
+        assert result.same_source_skipped == 1
+        assert result.same_source_cadastral_collisions == 1
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT count(*) FROM property_merge_log")
+            assert cur.fetchone()[0] == 0
+            cur.execute("SELECT count(*) FROM suggested_merge")
+            assert cur.fetchone()[0] == 0
+
+    def test_same_source_phone_match_is_never_merged_or_suggested(self, dedup_db):
+        """Counterpart to TestPhoneSignal's corroborated-particular
+        cross-source auto-merge test."""
+        _insert_pair(
+            dedup_db,
+            "idealista",
+            "idealista",
+            "phone-same-source",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            listing_kind_a="particular",
+            listing_kind_b="particular",
+            description_a="Piso reformado, tel 622334455",
+            description_b="Piso reformado, tel 622334455",
+            current_price_a=Decimal(285000),
+            current_price_b=Decimal(279000),
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 0
+        assert result.same_source_skipped == 1
+
+    def test_same_source_fuzzy_candidate_is_never_suggested(self, dedup_db):
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "fotocasa",
+            "fuzzy-same-source",
+            address_a="Calle Alcala 10, Madrid",
+            address_b="Calle Alcala 10, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(72),
+            current_price_a=Decimal(200000),
+            current_price_b=Decimal(205000),
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 0
+        assert result.same_source_skipped == 1
+
+    def test_cross_source_counterpart_of_same_fixture_still_matches(self, dedup_db):
+        """Sanity check that the filter is source-keyed, not a blanket
+        suppression: the same cadastral fixture shape as the test above,
+        with two different sources, still auto-merges."""
+        _insert_pair(
+            dedup_db,
+            "solvia",
+            "servihabitat",
+            "cadastral-cross-source-contrast",
+            cadastral_ref_a="8061226YH0036S0007ZZ",
+            cadastral_ref_b="8061226YH0036S0007ZZ",
+            address_a="Calle Mayor 1",
+            address_b="C/ Mayor nº1, esc. 2",
+            m2_built_a=Decimal(80),
+            m2_built_b=Decimal(95),
+            current_price_a=Decimal(230000),
+            current_price_b=Decimal(219000),
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 1
+        assert result.same_source_skipped == 0
+
+    def test_pair_generation_drops_measurably_on_a_mixed_corpus(self, dedup_db):
+        """Issue #197 acceptance: 'pair-generation cost drops measurably;
+        state the before/after pair count.' Builds a 40-listing corpus (2
+        sources, 20 each), no property already shared, so every one of
+        C(40,2)=780 candidate pairs is a genuine pair-generation decision.
+        'Before' (what the pre-#197 loop would have compared) is
+        recoverable as pairs_compared + same_source_skipped, since the
+        filter only removes iterations from the loop — it doesn't change
+        anything else about which pairs exist. See the PR description for
+        the real-corpus numbers this scales up to.
+        """
+        for i in range(40):
+            source = "idealista" if i % 2 == 0 else "fotocasa"
+            prop = _insert_property(dedup_db, address=f"Calle Corpus {i}")
+            _insert_listing(dedup_db, prop, source, f"corpus-{i}")
+        dedup_db.commit()
+
+        result = engine.run(dedup_db)
+
+        before = result.pairs_compared + result.same_source_skipped
+        assert before == 40 * 39 // 2 == 780
+        assert result.same_source_skipped == 2 * (20 * 19 // 2) == 380
+        assert result.pairs_compared == 400
+
+
+class TestPurgeSameSourcePending:
+    """Issue #197's one-off migration: `engine.purge_same_source_pending`
+    deletes existing `pending` suggested_merge rows whose two listings
+    share a source, and nothing else.
+    """
+
+    def _seed_suggestion(
+        self, conn, source_a: str, source_b: str, ext_prefix: str, status: str
+    ) -> int:
+        """Insert a suggested_merge row directly (bypassing engine.run(),
+        which would never file a same-source suggestion post-#197) to
+        simulate a row left over from before this change shipped."""
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            conn, source_a, source_b, ext_prefix
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO suggested_merge
+                    (listing_id_a, listing_id_b, match_basis, confidence, status)
+                VALUES (%s, %s, 'fuzzy', 0.550, %s) RETURNING id
+                """,
+                (*sorted((listing_a, listing_b)), status),
+            )
+            suggestion_id = cur.fetchone()[0]
+        conn.commit()
+        return suggestion_id
+
+    def test_purges_only_pending_same_source_rows(self, dedup_db):
+        same_source_pending = self._seed_suggestion(
+            dedup_db, "idealista", "idealista", "purge-same-pending", "pending"
+        )
+        same_source_confirmed = self._seed_suggestion(
+            dedup_db, "idealista", "idealista", "purge-same-confirmed", "confirmed"
+        )
+        same_source_rejected = self._seed_suggestion(
+            dedup_db, "fotocasa", "fotocasa", "purge-same-rejected", "rejected"
+        )
+        cross_source_pending = self._seed_suggestion(
+            dedup_db, "idealista", "fotocasa", "purge-cross-pending", "pending"
+        )
+
+        deleted = engine.purge_same_source_pending(dedup_db)
+
+        assert deleted == 1
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT id FROM suggested_merge ORDER BY id")
+            remaining = {row[0] for row in cur.fetchall()}
+        assert remaining == {
+            same_source_confirmed,
+            same_source_rejected,
+            cross_source_pending,
+        }
+        assert same_source_pending not in remaining
+
+    def test_idempotent_second_run_deletes_nothing(self, dedup_db):
+        self._seed_suggestion(
+            dedup_db, "idealista", "idealista", "purge-idempotent", "pending"
+        )
+        first = engine.purge_same_source_pending(dedup_db)
+        second = engine.purge_same_source_pending(dedup_db)
+        assert first == 1
+        assert second == 0
+
+    def test_cli_purge_same_source_subcommand(self, dedup_db, monkeypatch, capsys):
+        from etl.dedup import cli as dedup_cli
+
+        self._seed_suggestion(
+            dedup_db, "idealista", "idealista", "purge-cli", "pending"
+        )
+
+        class _NoCloseConnProxy:
+            """Same reasoning as test_dedup_actions.py's own copy: cli.main()
+            unconditionally closes whatever get_connection() hands it, but
+            this test hands it the shared, function-scoped dedup_db fixture
+            connection, which the fixture's own teardown still needs."""
+
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
+        )
+        exit_code = dedup_cli.main(["purge-same-source"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Purged 1" in captured.out
+
+
+class TestAddressCoordsSignal:
+    """No dedicated coverage existed for address_coords.evaluate's
+    coords+size+address merge path before issue #186 added the floor veto
+    — these tests cover both the pre-existing merge behaviour and the new
+    veto together.
+    """
+
+    _LAT = Decimal("40.416775")
+    _LON = Decimal("-3.703790")
+    # A few meters away — inside the 15m coords_close gate.
+    _LAT_NEAR = Decimal("40.416790")
+    _LON_NEAR = Decimal("-3.703790")
+
+    def test_matching_coords_size_address_and_no_floor_data_auto_merges(self, dedup_db):
+        _insert_pair(
+            dedup_db,
+            "idealista",
+            "fotocasa",
+            "address-coords-merge",
+            address_a="Calle Mayor 5",
+            address_b="Calle Mayor 5",
+            lat_a=self._LAT,
+            lon_a=self._LON,
+            lat_b=self._LAT_NEAR,
+            lon_b=self._LON_NEAR,
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            # Deliberately far apart — address_coords doesn't gate on
+            # price at all, only fuzzy does, and this signal must fire
+            # before fuzzy is ever reached.
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(400000),
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 1
+        assert result.suggested == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT match_basis, confidence FROM property_merge_log "
+                "ORDER BY created_at DESC LIMIT 1"
+            )
+            basis, confidence = cur.fetchone()
+            assert basis == "address_coords"
+            assert confidence == Decimal("0.900")
+
+    def test_conflicting_floor_vetoes_the_merge_and_demotes_to_a_weaker_suggestion(
+        self, dedup_db
+    ):
+        """Issue #186's illustration, structurally: same building
+        (coords+address match), different unit (floor disagrees). The
+        merge is vetoed; because the address text is identical here,
+        fuzzy's weaker bar still fires, so the pair isn't dropped outright
+        — a human sees it as a suggestion with the floor conflict flagged
+        in `detail`, exactly the "discriminating data... nothing read it"
+        gap issue #186 describes, now read.
+        """
+        _insert_pair(
+            dedup_db,
+            "idealista",
+            "fotocasa",
+            "address-coords-floor-veto",
+            address_a="Calle Mayor 5",
+            address_b="Calle Mayor 5",
+            lat_a=self._LAT,
+            lon_a=self._LON,
+            lat_b=self._LAT_NEAR,
+            lon_b=self._LON_NEAR,
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            floor_a="10º",
+            floor_b="A partir de la 15ª planta",
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 1
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT match_basis, confidence, detail FROM suggested_merge")
+            basis, confidence, detail = cur.fetchone()
+            assert basis == "fuzzy"
+            assert confidence == Decimal("0.590")
+            assert detail["floor_conflict"] is True
+
+    def test_floors_agreeing_still_auto_merges(self, dedup_db):
+        """Counterweight: the veto must fire on conflict, not on agreement."""
+        _insert_pair(
+            dedup_db,
+            "idealista",
+            "fotocasa",
+            "address-coords-floor-agree",
+            address_a="Calle Mayor 5",
+            address_b="Calle Mayor 5",
+            lat_a=self._LAT,
+            lon_a=self._LON,
+            lat_b=self._LAT_NEAR,
+            lon_b=self._LON_NEAR,
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(400000),
+            floor_a="3º",
+            floor_b="3ª planta",
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 1
+        assert result.suggested == 0
+
+    def test_floor_missing_on_one_side_does_not_block_the_merge(self, dedup_db):
+        _insert_pair(
+            dedup_db,
+            "idealista",
+            "fotocasa",
+            "address-coords-floor-absent",
+            address_a="Calle Mayor 5",
+            address_b="Calle Mayor 5",
+            lat_a=self._LAT,
+            lon_a=self._LON,
+            lat_b=self._LAT_NEAR,
+            lon_b=self._LON_NEAR,
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(400000),
+            floor_a="10º",
+            floor_b=None,
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 1
+        assert result.suggested == 0
+
+
+class TestFloorCorroborationAcrossSignals:
+    """Issue #186's core acceptance, exercised in-memory (ListingRecord via
+    _record, no DB) against the corroboration helpers directly — the same
+    style as TestCadastralExactMatch.test_cadastral_exact_match_merges.
+    """
+
+    def test_phone_corroboration_blocked_by_conflicting_floor(self):
+        a = _record(
+            1, 100, m2_built=Decimal(70), current_price=Decimal(285000), floor="10º"
+        )
+        b = _record(
+            2,
+            200,
+            m2_built=Decimal(70),
+            current_price=Decimal(279000),
+            floor="A partir de la 15ª planta",
+        )
+        assert phone_extract._corroborated(a, b) is False
+
+    def test_phone_corroboration_permits_absent_floor(self):
+        a = _record(
+            1, 100, m2_built=Decimal(70), current_price=Decimal(285000), floor="10º"
+        )
+        b = _record(
+            2, 200, m2_built=Decimal(70), current_price=Decimal(279000), floor=None
+        )
+        assert phone_extract._corroborated(a, b) is True
+
+    def test_phone_corroboration_permits_agreeing_floor(self):
+        a = _record(
+            1, 100, m2_built=Decimal(70), current_price=Decimal(285000), floor="3º"
+        )
+        b = _record(
+            2,
+            200,
+            m2_built=Decimal(70),
+            current_price=Decimal(279000),
+            floor="3ª planta",
+        )
+        assert phone_extract._corroborated(a, b) is True
+
+    def test_reference_code_proximity_corroboration_blocked_by_conflicting_floor(
+        self,
+    ):
+        a = _record(
+            1, 100, m2_built=Decimal(70), current_price=Decimal(285000), floor="Bajo"
+        )
+        b = _record(
+            2,
+            200,
+            m2_built=Decimal(70),
+            current_price=Decimal(279000),
+            floor="Ático",
+        )
+        assert reference_code._proximity_corroborated(a, b) is False
+
+    def test_reference_code_proximity_corroboration_permits_absent_floor(self):
+        a = _record(
+            1, 100, m2_built=Decimal(70), current_price=Decimal(285000), floor=None
+        )
+        b = _record(
+            2, 200, m2_built=Decimal(70), current_price=Decimal(279000), floor="Ático"
+        )
+        assert reference_code._proximity_corroborated(a, b) is True
+
+    def test_phone_corroborated_merge_is_blocked_by_db_backed_conflicting_floor(
+        self, dedup_db
+    ):
+        """DB round-trip proof that engine.fetch_listing_records actually
+        reads property.floor into ListingRecord.floor — the in-memory
+        tests above exercise the corroboration helpers directly and can't
+        catch a wiring bug in the SELECT/row-unpacking itself."""
+        _insert_pair(
+            dedup_db,
+            "idealista",
+            "fotocasa",
+            "phone-floor-veto-db",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            listing_kind_a="particular",
+            listing_kind_b="particular",
+            description_a="Piso reformado, tel 622334455",
+            description_b="Piso reformado, tel 622334455",
+            current_price_a=Decimal(285000),
+            current_price_b=Decimal(279000),
+            floor_a="10º",
+            floor_b="A partir de la 15ª planta",
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 1
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT match_basis, confidence FROM suggested_merge")
+            basis, confidence = cur.fetchone()
+            assert basis == "phone"
+            assert confidence == Decimal("0.500")
+
+
+class TestPhotoHashAutoMerge:
+    """Issue #188 (approved once #197 removed same-source pairing):
+    match_ratio == 1.0 + size/price tolerance + no floor conflict
+    auto-merges; anything short of that stays a suggestion. Exercised via
+    engine.evaluate_pair directly with a pre-populated _PhotoHashCache
+    (real synthetic ImageHash values, distance controlled by construction)
+    rather than through engine.run(), so no network fetch is ever
+    attempted — same no-network split test_dedup_signals_photo_hash.py's
+    own tests use.
+    """
+
+    _IDENTICAL_HEX = "ffff0000ffff0000"
+
+    def _cache_with_identical_hashes(
+        self, listing_id_a: int, listing_id_b: int
+    ) -> _PhotoHashCache:
+        cache = _PhotoHashCache()
+        cache._cache[listing_id_a] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
+        cache._cache[listing_id_b] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
+        return cache
+
+    def test_suggestion_197_shape_auto_merges(self):
+        """The owner's own measured example: milanuncios 139m²/503.000€ vs
+        fotocasa 145m²/503.000€ — 4.14% size gap (built-vs-useful m²
+        across portals), identical price. Inside tolerance."""
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(139),
+            current_price=Decimal(503000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(145),
+            current_price=Decimal(503000),
+        )
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation.basis == "photo_hash"
+        assert evaluation.decision == "merge"
+        assert evaluation.confidence == Decimal("0.900")
+
+    def test_suggestion_412_shape_price_gap_within_tolerance_auto_merges(self):
+        """58m² both sides, 170.000€ vs 169.000€ — 0.59% price gap (one
+        portal a day stale). Inside the 2% price tolerance."""
+        a = _record(
+            1,
+            100,
+            source="fotocasa",
+            m2_built=Decimal(58),
+            current_price=Decimal(170000),
+        )
+        b = _record(
+            2, 200, source="solvia", m2_built=Decimal(58), current_price=Decimal(169000)
+        )
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation.decision == "merge"
+
+    def test_size_gap_beyond_tolerance_stays_a_suggestion(self):
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(100),
+            current_price=Decimal(200000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(120),
+            current_price=Decimal(200000),
+        )  # 16.7% apart — well past the 5% size tolerance
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation.basis == "photo_hash"
+        assert evaluation.decision == "suggest"
+
+    def test_price_gap_beyond_tolerance_stays_a_suggestion(self):
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(70),
+            current_price=Decimal(200000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(70),
+            current_price=Decimal(230000),
+        )  # 13% apart — well past the 2% price tolerance
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation.decision == "suggest"
+
+    def test_conflicting_floor_vetoes_the_auto_merge(self):
+        """Suggestion 197's exact structural shape: identical photos and
+        price, 6m² apart (within tolerance), floors "10º" vs "A partir de
+        la 15ª planta" — the floor veto must win even though photo/size/
+        price all clear the auto-merge bar."""
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(139),
+            current_price=Decimal(503000),
+            floor="10º",
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(145),
+            current_price=Decimal(503000),
+            floor="A partir de la 15ª planta",
+        )
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation.basis == "photo_hash"
+        assert evaluation.decision == "suggest"
+        assert evaluation.detail["floor_conflict"] is True
+
+    def test_agreeing_floor_does_not_block_the_auto_merge(self):
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(139),
+            current_price=Decimal(503000),
+            floor="3º",
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(145),
+            current_price=Decimal(503000),
+            floor="3ª planta",
+        )
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation.decision == "merge"
+
+    def test_partial_photo_overlap_never_auto_merges_even_with_matching_size_price(
+        self,
+    ):
+        """match_ratio < 1.0 (not a full match) must never auto-merge
+        regardless of size/price agreement — only an exact overlap does.
+        Hex values chosen so the Hamming distance between any two distinct
+        ones exceeds photo_hash._HASH_HAMMING_THRESHOLD (10): h1-h2=32,
+        h1-h4=32, h2-h4=32 (verified independently), so hashes_a's h3
+        genuinely has no match in hashes_b, giving matched=2/len(3)=0.667 —
+        comfortably inside [MIN_MATCH_RATIO, 1.0) but not equal to 1.0.
+        """
+        h1 = imagehash.hex_to_hash("0000000000000000")
+        h2 = imagehash.hex_to_hash("0f0f0f0f0f0f0f0f")
+        h3 = imagehash.hex_to_hash("ffffffffffffffff")
+        h4 = imagehash.hex_to_hash("5555555555555555")
+        cache = _PhotoHashCache()
+        cache._cache[1] = [h1, h2, h3]
+        cache._cache[2] = [h1, h2, h4]
+
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(70),
+            current_price=Decimal(200000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(70),
+            current_price=Decimal(200000),
+        )
+        evaluation = engine.evaluate_pair(a, b, cache)
+        assert evaluation.basis == "photo_hash"
+        assert evaluation.detail["match_ratio"] == pytest.approx(2 / 3, abs=0.001)
+        assert evaluation.decision == "suggest"

@@ -36,6 +36,13 @@ class ListingRecord:
     contact_raw: str | None  # seller/agency display name, used by
     # reference_code.py's agency-match corroboration (issue #72)
     reference_code: str | None  # seller/agency reference code (issue #72)
+    # Free-text floor as published by the source portal (e.g. "3º",
+    # "3ª planta", "Bajo", "A partir de la 15ª planta") — see
+    # etl.dedup.signals.floor for the normalizer. Defaulted so existing
+    # call sites/tests that predate issue #186 don't need updating just to
+    # construct a record; engine.fetch_listing_records always populates it
+    # from property.floor for real runs.
+    floor: str | None = None
 
 
 @dataclass(frozen=True)
