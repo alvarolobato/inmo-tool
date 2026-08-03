@@ -66,6 +66,30 @@ class TestScopeResolution:
         )
         assert key == "madrid/madrid"
 
+    @pytest.mark.parametrize(
+        ("center", "expected_key"),
+        [
+            # Costa del Sol (issue #169 course-correction v1 market) — real
+            # gazetteer coordinates for each municipality, tight radius so a
+            # match can only come from that municipality's own _CITY_SLUGS
+            # entry, not a wide-radius coincidental hit on a neighbour.
+            ((36.75854, -4.39717), "malaga/malaga"),
+            ((36.51443, -4.88604), "malaga/marbella"),
+            ((36.44543, -5.12739), "malaga/estepona"),
+            # Greater Sevilla (owner's other stated v1 market)
+            ((37.25217, -5.95985), "sevilla/dos-hermanas"),
+        ],
+    )
+    def test_v1_market_towns_resolve_to_their_own_provincia_municipio(
+        self, center, expected_key
+    ):
+        """Issue #169: these must resolve to their OWN municipio slug, not
+        collapse to the province capital — the granularity that makes a
+        province-level fallback pointless for a coastal town search."""
+        connector = SolviaConnector()
+        key = connector.scope_key(ConnectorScope(center=center, radius_km=10))
+        assert key == expected_key
+
     def test_unresolvable_center_raises_rather_than_silently_resolving(self):
         """Issue #169: Lisbon is a real center point but matches no known
         place in the shared gazetteer at all — this must raise, not

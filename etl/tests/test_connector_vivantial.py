@@ -213,6 +213,29 @@ class TestGeographyResolution:
         scope = ConnectorScope(center=(40.4168, -3.7038), radius_km=10.0)
         assert _resolve_geography(scope) == "madrid"
 
+    @pytest.mark.parametrize(
+        ("center", "expected_slug"),
+        [
+            # Costa del Sol (issue #169 course-correction v1 market) — real
+            # gazetteer coordinates, tight radius so the match can only come
+            # from that municipality's own _CITY_SLUGS entry (Marbella is
+            # deliberately absent from the table — the live sitemap has no
+            # entries there — so it isn't included here).
+            ((36.75854, -4.39717), "malaga"),
+            ((36.44543, -5.12739), "estepona"),
+            ((36.58975, -4.54213), "benalmadena"),
+            ((36.53507, -4.67355), "mijas"),
+        ],
+    )
+    def test_costa_del_sol_v1_market_towns_resolve_to_their_own_slug(
+        self, center, expected_slug
+    ):
+        """These must resolve to their OWN municipality slug, not collapse
+        to a province-level fallback — the granularity a coastal-town
+        search actually needs."""
+        scope = ConnectorScope(center=center, radius_km=10.0)
+        assert _resolve_geography(scope) == expected_slug
+
     def test_no_geography_at_all_returns_none_not_a_default(self):
         """Issue #71: never silently fall back to a hardcoded city. A scope
         with no center and no geography string has nothing to resolve at

@@ -18,6 +18,7 @@ import pytest
 
 from etl import orchestrator
 from etl.connectors.base import CanonicalListingVersion
+from etl.connectors.fotocasa import FotocasaConnector
 from etl.tests.fixtures.dummy_connector import DiscoverFailsConnector, DummyConnector
 
 _SCHEMA_SQL = Path(__file__).parent.parent / "schema" / "init.sql"
@@ -1309,6 +1310,93 @@ class TestCircuitBreakerIntegration:
                     (connector.name,),
                 )
                 cur.execute("DELETE FROM connector_runs WHERE id = %s", (run_id,))
+            pg_conn.commit()
+
+    def test_unresolvable_geography_reaches_connector_run_results_as_failed(
+        self, pg_conn
+    ):
+        """Issue #169's core bug, proven end-to-end through a REAL connector
+        (not a fake DiscoverFailsConnector, and not a per-connector unit
+        test): a profile centered somewhere the gazetteer cannot identify at
+        all used to read as "connector ran fine, found nothing" —
+        indistinguishable from a real zero-listings day. It must instead
+        surface as a genuine `connector_run_results` row with
+        status='failed' and an error_msg an operator can actually act on.
+
+        Lisbon (a real center point, just not a Spanish municipality the
+        gazetteer covers) is the same unresolvable center
+        `test_geography.py::TestResolvePlace::test_unresolvable_center_raises_not_returns_none`
+        uses — this test proves the same failure survives the full
+        orchestrator round-trip into Postgres, not just the in-process
+        exception.
+        """
+        _apply_schema(pg_conn)
+        # Replace the fixture's Madrid-scoped (resolvable) profile with one
+        # whose only active profile is genuinely unresolvable — otherwise
+        # Fotocasa would also see the fixture's Madrid scope and this run's
+        # status would be a mix, not a clean assertion of the failure path.
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE search_profile SET archived_at = NOW() "
+                "WHERE archived_at IS NULL"
+            )
+            cur.execute(
+                "INSERT INTO search_profile (name, scope) VALUES (%s, %s) RETURNING id",
+                (
+                    "unresolvable-geography-test-profile",
+                    (
+                        '{"geography": {"type": "radius", '
+                        '"center": [38.7223, -9.1393], "radius_km": 10}}'
+                    ),
+                ),
+            )
+            (profile_id,) = cur.fetchone()
+        pg_conn.commit()
+
+        connector = FotocasaConnector()
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, discovered_count, fetched_count, error_msg "
+                    "FROM connector_run_results "
+                    "WHERE run_id = %s AND connector_name = %s",
+                    (run_id, connector.name),
+                )
+                row = cur.fetchone()
+            assert row is not None, (
+                "an unresolvable scope must still produce a "
+                "connector_run_results row — not silence"
+            )
+            status, discovered_count, fetched_count, error_msg = row
+            # The bug this guards against: status='ok' with discovered=0
+            # reads identically to "genuinely searched Lisbon and found
+            # nothing there" — an operator has no way to tell the two
+            # apart. It must be 'failed' instead.
+            assert status == "failed"
+            assert discovered_count == 0
+            assert fetched_count == 0
+            assert error_msg is not None
+            assert "gazetteer" in error_msg.lower() or "resolve" in error_msg.lower()
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT connectors_failed FROM connector_runs WHERE id = %s",
+                    (run_id,),
+                )
+                (connectors_failed,) = cur.fetchone()
+            assert connectors_failed == 1
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            with pg_conn.cursor() as cur:
+                cur.execute("DELETE FROM search_profile WHERE id = %s", (profile_id,))
+                cur.execute(
+                    "UPDATE search_profile SET archived_at = NULL WHERE name = %s",
+                    (_TEST_PROFILE_NAME,),
+                )
             pg_conn.commit()
 
 
