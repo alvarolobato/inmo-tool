@@ -74,7 +74,11 @@ from etl.connectors.base import (
     Throttle,
 )
 from etl.connectors.extraction import first_present, text_to_int
-from etl.connectors.geography import nearest_city
+from etl.connectors.geography import (
+    UnresolvableGeographyError,
+    resolve_place,
+    unresolvable_scope_key,
+)
 from etl.connectors.milanuncios_mapping import (
     attribute_numeric_value,
     attribute_value,
@@ -92,19 +96,32 @@ _BASE_URL = "https://www.milanuncios.com"
 _REQUEST_TIMEOUT_SECONDS = 15
 _INITIAL_PROPS_MARKER = 'window.__INITIAL_PROPS__ = JSON.parse("'
 
-# City name (etl.connectors.geography.CITY_CENTROIDS keys) -> this site's own
-# geography path segment. Milanuncios's URL just repeats the city name
-# itself (see discover()), so this is currently an identity mapping — kept
-# as an explicit table anyway (not scope.center's nearest_city() result used
-# directly) so a future city whose Milanuncios path segment differs from its
-# geography.py key name doesn't require touching discover()'s logic, only
-# this table. Live-verified during issue #71 (real HTTP 200 + real ad-list
-# data) for every entry here.
+# Municipality name (etl.connectors.geography.Place.name values) -> this
+# site's own geography path segment. Milanuncios's URL just repeats the
+# municipality name itself for the original four (see discover()), so this
+# started as an identity mapping — kept as an explicit table anyway (not
+# resolve_place()'s result used directly) so a future municipality whose
+# Milanuncios path segment differs from its gazetteer name doesn't require
+# touching discover()'s logic, only this table. That divergence is real, not
+# hypothetical: verified live during issue #169 that
+# "venta-de-pisos-en-marbella-marbella" does NOT work (redirects to a
+# geography-less nationwide results page — a same-shape trap to Fotocasa's
+# "similar-listings carousel that only exists in test HTML", just discovered
+# before it was shipped) — Marbella is deliberately NOT in this table.
+# Live-verified (real HTTP 200 + real ad-list data via __INITIAL_PROPS__,
+# not just a non-error status) for every entry actually present here.
 _CITY_SLUGS: dict[str, str] = {
     "madrid": "madrid",
     "sevilla": "sevilla",
     "barcelona": "barcelona",
     "valencia": "valencia",
+    # Costa del Sol (issue #169 course-correction v1 market): only the
+    # provincial capital verified so far. Marbella confirmed NOT to follow
+    # the identity pattern (see comment above) and the other Costa del Sol
+    # towns weren't individually re-tried this round — leaving them out is
+    # a legitimate "no coverage for this connector yet" rather than a
+    # guessed slug that might silently crawl the wrong (or no) geography.
+    "malaga": "malaga",
 }
 
 
@@ -113,17 +130,19 @@ def _resolve_geography(scope: ConnectorScope) -> str | None:
 
     Same contract as fotocasa.py's `_resolve_geography` — `scope.geography`
     wins when set (tests/manual construction), otherwise resolve
-    `scope.center` to the nearest known city. No hardcoded default (issue
-    #71): unresolvable means "nothing to discover", not "assume Madrid".
+    `scope.center` via the shared gazetteer (issue #169). No hardcoded
+    default (issue #71): a municipality this connector's own table doesn't
+    cover means "nothing to discover", not "assume Madrid".
+
+    Can raise `UnresolvableGeographyError` (from `resolve_place`) — see
+    fotocasa.py's `_resolve_geography` docstring for why that's deliberate.
     """
     if scope.geography:
         return scope.geography
-    if scope.center is None:
+    place = resolve_place(scope)
+    if place is None:
         return None
-    city = nearest_city(scope.center, scope.radius_km)
-    if city is None:
-        return None
-    return _CITY_SLUGS.get(city)
+    return _CITY_SLUGS.get(place.name)
 
 
 # Note: the feasibility spike (module docstring) confirmed real phone numbers
@@ -302,17 +321,29 @@ class MilanunciosConnector(Connector):
     # shape can be checked directly — see docs/skills/connectors.md.
     def scope_key(self, scope: ConnectorScope) -> str | None:
         """Delegate to `_resolve_geography` — see FotocasaConnector.scope_key
-        for why the resolved slug itself is the right dedup/coverage key."""
-        return _resolve_geography(scope)
+        for why the resolved slug itself is the right dedup/coverage key,
+        and for why an `UnresolvableGeographyError` (issue #169) must be
+        translated into a sentinel key here rather than `None` — this
+        method must never raise itself."""
+        try:
+            return _resolve_geography(scope)
+        except UnresolvableGeographyError:
+            return unresolvable_scope_key(scope)
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
+        # _resolve_geography can raise UnresolvableGeographyError, left to
+        # propagate uncaught (issue #169) — see fotocasa.py's discover() for
+        # the full reasoning.
         geography = _resolve_geography(scope)
         if geography is None:
+            # Reachable only if discover() is invoked directly, bypassing
+            # scope_key()'s gate — see fotocasa.py's discover() docstring.
             raise ConnectorError(
                 "milanuncios discover: scope has neither a resolvable center "
-                "(nearest known city too far away) nor an explicit geography "
-                "string — nothing to discover, not defaulting to a hardcoded "
-                "city (see issue #71)"
+                "nor an explicit geography string, or resolves to a "
+                "municipality this connector's _CITY_SLUGS table doesn't "
+                "cover — nothing to discover, not defaulting to a "
+                "hardcoded city (see issue #71)"
             )
         # "-en-<geo>-<geo>" matches the canonical sale-category URL observed
         # live (e.g. "venta-de-pisos-en-madrid-madrid") — the province/city

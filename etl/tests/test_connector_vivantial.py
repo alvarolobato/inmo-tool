@@ -22,6 +22,7 @@ from unittest.mock import patch
 import pytest
 
 from etl.connectors.base import ConnectorError, ConnectorScope
+from etl.connectors.geography import UnresolvableGeographyError
 from etl.connectors.vivantial import VivantialConnector, _resolve_geography
 from etl.connectors.vivantial_mapping import (
     external_id_from_url,
@@ -114,10 +115,27 @@ class TestFieldExtraction:
 
     def test_price_falls_back_to_precio_rojo_when_meta_is_absent(self):
         """EC: a field with a working fallback chain, proven with the primary
-        path removed. The fallback must still avoid the neighbour's price."""
+        path removed. The fallback must still read the `.precio-rojo`
+        element specifically, not the sibling (empty, in this fixture)
+        plain `precio` div.
+
+        This fixture used to also embed a fabricated `<section
+        class="similares">` decoy carrying a "310.000 €" figure, framed as
+        proof the fallback "avoids the neighbour's price" — removed during
+        issue #144: it never exercised anything real. Both the current
+        `scoped_text(keep=".precio-rojo")` implementation and the regex it
+        replaced select the `.precio-rojo` element directly, so neither
+        would ever have read a page-wide, unscoped match in the first
+        place — the decoy was inert theatre, not a regression test, and (per
+        issue #169's research on this same PR) Vivantial's real pages don't
+        render a server-side "similar properties" section at all. The real
+        neighbour-shaped risk this site actually has — the struck-through
+        *previous* price living in a sibling `precio` div on a discounted
+        listing — is covered by `test_price_ignores_the_struck_through_previous_price`
+        above, against real captured fixtures.
+        """
         page = _fixture("vivantial_sample_detail_no_meta.html")
         assert 'name="description"' not in page
-        assert "310.000" in page
         assert extract_price(page) == Decimal(288000)
 
     def test_photo_urls_are_absolute_and_exclude_site_chrome(self):
@@ -195,11 +213,33 @@ class TestGeographyResolution:
         scope = ConnectorScope(center=(40.4168, -3.7038), radius_km=10.0)
         assert _resolve_geography(scope) == "madrid"
 
-    def test_unresolvable_scope_returns_none_not_a_default(self):
-        """Issue #71: never silently fall back to a hardcoded city."""
+    def test_no_geography_at_all_returns_none_not_a_default(self):
+        """Issue #71: never silently fall back to a hardcoded city. A scope
+        with no center and no geography string has nothing to resolve at
+        all — a legitimate no-op, distinct from the unresolvable-center
+        case below (issue #169)."""
         assert _resolve_geography(ConnectorScope()) is None
+
+    def test_unresolvable_center_raises_not_returns_none(self):
+        """Issue #169: a scope WITH a real center that matches no known
+        place must raise, not silently return None — a None here used to
+        read as "zero listings found" all the way up, identical to a
+        genuinely empty result set."""
         far = ConnectorScope(center=(38.7223, -9.1393), radius_km=5.0)  # Lisbon
-        assert _resolve_geography(far) is None
+        with pytest.raises(UnresolvableGeographyError):
+            _resolve_geography(far)
+
+    def test_scope_key_never_raises_and_uses_a_sentinel_for_unresolvable(self):
+        """scope_key() must never raise (the orchestrator calls it with no
+        try/except) — an unresolvable center must still surface as a
+        distinct, non-None key so the orchestrator calls discover(), whose
+        own _resolve_geography() call raises there and gets recorded as a
+        real connector_run_results failure (issue #169)."""
+        connector = VivantialConnector()
+        far = ConnectorScope(center=(38.7223, -9.1393), radius_km=5.0)  # Lisbon
+        key = connector.scope_key(far)
+        assert key is not None
+        assert key.startswith("unresolvable-geography:")
 
 
 class TestDiscover:

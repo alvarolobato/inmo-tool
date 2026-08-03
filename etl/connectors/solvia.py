@@ -56,6 +56,7 @@ import re
 from typing import Any
 
 import requests
+from bs4 import BeautifulSoup
 
 from etl.connectors.base import (
     CanonicalListingVersion,
@@ -65,8 +66,12 @@ from etl.connectors.base import (
     RawListing,
     Throttle,
 )
-from etl.connectors.extraction import first_present
-from etl.connectors.geography import nearest_city
+from etl.connectors.extraction import first_present, scoped_text
+from etl.connectors.geography import (
+    UnresolvableGeographyError,
+    resolve_place,
+    unresolvable_scope_key,
+)
 from etl.connectors.solvia_mapping import (
     _named,
     _to_decimal,
@@ -124,37 +129,52 @@ _DETAIL_HREF_RE = re.compile(
 # Any non-empty slug works; "x" mirrors Fotocasa's placeholder convention.
 _DETAIL_PATH_TEMPLATE = "/es/propiedades/comprar/x-{external_id}"
 
-# (provincia, municipio) path segments per known city centroid. An explicit
-# table, not a slugify() of the centroid name: Solvia's provincia slugs are
-# not always the city name (e.g. Palma sits under `balears-illes`), so
-# guessing would produce 404s that look like empty results. Verified against
-# live hrefs on the national search page at spike time.
+# (provincia, municipio) path segments per known municipality. An explicit
+# table, not a slugify() of the resolved name: Solvia's provincia slugs are
+# not always the province name (e.g. Palma sits under `balears-illes`), so
+# guessing would produce 404s that look like empty results. Live-verified
+# against real hrefs (real listing detail links, not just HTTP 200) during
+# issue #71 for the original four and during issue #169 for the Costa del
+# Sol / greater Sevilla entries below.
 _CITY_SLUGS: dict[str, tuple[str, str]] = {
     "madrid": ("madrid", "madrid"),
     "sevilla": ("sevilla", "sevilla"),
     "barcelona": ("barcelona", "barcelona"),
     "valencia": ("valencia", "valencia"),
+    # Costa del Sol (issue #169 course-correction v1 market)
+    "malaga": ("malaga", "malaga"),
+    "estepona": ("malaga", "estepona"),
+    "marbella": ("malaga", "marbella"),
+    # Greater Sevilla (owner's other stated v1 market)
+    "dos hermanas": ("sevilla", "dos-hermanas"),
 }
 
 
 def _resolve_geography(scope: ConnectorScope) -> tuple[str, str] | None:
     """Translate a profile's (center, radius_km) into Solvia path segments.
 
-    Returns None when the scope resolves to no city this connector knows —
-    the orchestrator then skips it as a coverage gap rather than treating it
-    as a failure (issue #99).
+    Returns None when the scope resolves to no municipality this
+    connector's own table knows — the orchestrator then skips it as a
+    coverage gap rather than treating it as a failure (issue #99).
+
+    Can raise `UnresolvableGeographyError` (from `resolve_place`) when
+    `scope.center` matches nothing in the shared gazetteer at all (issue
+    #169) — deliberately left to propagate; see fotocasa.py's
+    `_resolve_geography` docstring for the full reasoning. Note this is
+    orthogonal to the malformed-`scope.geography`-string case just below
+    (an explicit-but-wrong-shaped escape-hatch value), which still
+    correctly returns None rather than raising — the free-text escape
+    hatch never goes through gazetteer resolution at all.
     """
     if scope.geography:
         parts = scope.geography.strip("/").split("/")
         if len(parts) == 2 and all(parts):
             return parts[0], parts[1]
         return None
-    if scope.center is None:
+    place = resolve_place(scope)
+    if place is None:
         return None
-    city = nearest_city(scope.center, scope.radius_km)
-    if city is None:
-        return None
-    return _CITY_SLUGS.get(city)
+    return _CITY_SLUGS.get(place.name)
 
 
 def _parse_ng_state(html: str, *, context: str) -> dict[str, Any]:
@@ -218,14 +238,25 @@ class SolviaConnector(Connector):
     discovers_full_inventory = False
 
     def scope_key(self, scope: ConnectorScope) -> str | None:
-        resolved = _resolve_geography(scope)
+        """`UnresolvableGeographyError` (issue #169) must become a sentinel
+        key here rather than `None` — this method must never raise itself,
+        see fotocasa.py's `scope_key` docstring for the full reasoning."""
+        try:
+            resolved = _resolve_geography(scope)
+        except UnresolvableGeographyError:
+            return unresolvable_scope_key(scope)
         if resolved is None:
             return None
         return f"{resolved[0]}/{resolved[1]}"
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
+        # _resolve_geography can raise UnresolvableGeographyError, left to
+        # propagate uncaught (issue #169) — see fotocasa.py's discover() for
+        # the full reasoning.
         resolved = _resolve_geography(scope)
         if resolved is None:
+            # Reachable only if discover() is invoked directly, bypassing
+            # scope_key()'s gate — see fotocasa.py's discover() docstring.
             raise ConnectorError(
                 f"solvia discover: scope {scope!r} resolves to no known Solvia "
                 f"geography — this should have been skipped via scope_key()"
@@ -296,27 +327,38 @@ class SolviaConnector(Connector):
         def _price_from_markup() -> Any:
             if str(detail.get("mostrarPrecio", "S")).upper() == "N":
                 return None
-            # `data-price` is an explicit attribute, safe to search document-
-            # wide. The bare "123.456 €" pattern is NOT: a detail page also
-            # renders "similar properties" cards, and an unscoped search
-            # happily returns a neighbour's price. The Vivantial connector
-            # (#139) shipped exactly that bug — 310.000 € read off an
-            # adjacent card instead of the listing's real 288.000 € — so
-            # restrict the text pattern to the main price container.
+            # `data-price` is an explicit attribute, kept as the first check
+            # (unverified against the current live site during issue #144 —
+            # a real fetch found no `data-price` attribute anywhere on a
+            # current detail page, so this may be dead code from an earlier
+            # template; left as a harmless no-op check rather than removed
+            # on an unverified assumption, since #144 is scoped to the
+            # neighbour-contamination fallback below, not a full price
+            # re-verification).
             match = re.search(r'data-price="([0-9]+(?:\.[0-9]+)?)"', html)
-            if match is None:
-                price_block = re.search(
-                    r'<[^>]+class="[^"]*\b(?:price|precio)\b[^"]*"[^>]*>(.{0,400}?)</',
-                    html,
-                    re.DOTALL | re.IGNORECASE,
-                )
-                if price_block is not None:
-                    match = re.search(
-                        r"([0-9]{1,3}(?:\.[0-9]{3})+)\s*€", price_block.group(1)
-                    )
-            if match is None:
+            if match is not None:
+                return _to_decimal(match.group(1))
+            # Fallback: the price-classed element's own scoped text, via the
+            # shared `scoped_text` helper (issue #144) rather than a
+            # hand-rolled regex bounded to 400 characters after the first
+            # `class="...price|precio..."` match. NOT a "drop a
+            # similar-listings carousel" migration — issue #169's research
+            # (same PR) found Solvia's real, live detail pages render no
+            # server-side "similar properties" markup at all; the
+            # `similarProperties` class only appears inside Angular's
+            # compiled component stylesheet (a `<style>` block), never as an
+            # actual element in the HTML this connector's plain HTTP fetch
+            # sees — the same client-hydrated-and-therefore-absent shape
+            # Fotocasa's PR #153 review already documented, checked fresh
+            # here rather than assumed. `keep=` scopes to the real, single,
+            # server-rendered price element instead; there being nothing
+            # real to `drop=` is exactly why this migration doesn't use it.
+            soup = BeautifulSoup(html, "html.parser")
+            text = scoped_text(soup, keep='[class~="price"], [class~="precio"]')
+            if text is None:
                 return None
-            return _to_decimal(match.group(1).replace(".", ""))
+            euro = re.search(r"([0-9]{1,3}(?:\.[0-9]{3})+)\s*€", text)
+            return _to_decimal(euro.group(1).replace(".", "")) if euro else None
 
         current_price = first_present(
             _price_from_state, _price_from_markup, field="current_price"

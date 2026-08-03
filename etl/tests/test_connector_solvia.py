@@ -19,7 +19,8 @@ from unittest.mock import Mock, patch
 import pytest
 
 from etl.connectors.base import ConnectorError, ConnectorScope
-from etl.connectors.solvia import SolviaConnector
+from etl.connectors.geography import UnresolvableGeographyError
+from etl.connectors.solvia import SolviaConnector, _resolve_geography
 from etl.connectors.solvia_mapping import map_property_type
 from etl.orchestrator import _upsert_canonical_listing
 
@@ -65,13 +66,37 @@ class TestScopeResolution:
         )
         assert key == "madrid/madrid"
 
-    def test_unknown_geography_returns_none_so_orchestrator_skips_it(self):
+    def test_unresolvable_center_raises_rather_than_silently_resolving(self):
+        """Issue #169: Lisbon is a real center point but matches no known
+        place in the shared gazetteer at all — this must raise, not
+        silently return None (which used to read as "no coverage",
+        identical to "zero listings found")."""
+        far = ConnectorScope(center=(38.7223, -9.1393), radius_km=10)
+        with pytest.raises(UnresolvableGeographyError):
+            _resolve_geography(far)
+
+    def test_scope_key_never_raises_and_uses_a_sentinel_for_unresolvable(self):
+        """scope_key() must never raise itself (the orchestrator calls it
+        with no try/except) — the unresolvable case above must still
+        surface as a distinct, non-None key so discover() gets called and
+        raises there, landing as a real connector_run_results failure."""
         connector = SolviaConnector()
-        # Lisbon — outside every known centroid, must not silently pick one.
-        assert (
-            connector.scope_key(ConnectorScope(center=(38.7223, -9.1393), radius_km=10))
-            is None
-        )
+        far = ConnectorScope(center=(38.7223, -9.1393), radius_km=10)
+        key = connector.scope_key(far)
+        assert key is not None
+        assert key.startswith("unresolvable-geography:")
+
+    def test_a_known_municipality_this_connector_doesnt_cover_returns_none(self):
+        """Distinct from the unresolvable case above: a scope that DOES
+        resolve to a real, known municipality (via the shared gazetteer)
+        that Solvia's own `_CITY_SLUGS` table simply doesn't have an entry
+        for is a legitimate, non-failure coverage gap — scope_key() still
+        returns None for this, and the orchestrator skips it without
+        recording a failure (issue #99, unchanged by issue #169)."""
+        connector = SolviaConnector()
+        # A real Spanish municipality, deliberately not in Solvia's table.
+        scope = ConnectorScope(center=(43.463, -3.8044), radius_km=5)  # Santander
+        assert connector.scope_key(scope) is None
 
     def test_free_text_geography_escape_hatch(self):
         connector = SolviaConnector()

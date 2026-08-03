@@ -76,7 +76,11 @@ from etl.connectors.extraction import (
     text_to_int,
 )
 from etl.connectors.fotocasa_mapping import infer_listing_kind, map_property_type
-from etl.connectors.geography import nearest_city
+from etl.connectors.geography import (
+    UnresolvableGeographyError,
+    resolve_place,
+    unresolvable_scope_key,
+)
 
 logger = logging.getLogger("etl.connectors.fotocasa")
 
@@ -139,16 +143,39 @@ _PRICE_COVERAGE_ALARM_RATIO = 0.5
 # slugs (e.g. "madrid-capital") this connector actually uses. See discover().
 _ROBOTS_DISALLOWED_BARE_GEOGRAPHIES = frozenset({"madrid", "barcelona", "valencia"})
 
-# City name (etl.connectors.geography.CITY_CENTROIDS keys) -> this site's own
-# URL slug. Live-verified during issue #71 (real HTTP 200 + real
-# __initial_props__ listing data, not just a non-error status) for every
-# entry here. Extend alongside etl.connectors.geography.CITY_CENTROIDS when
-# a profile's geography resolves to a city not yet listed.
+# Municipality name (etl.connectors.geography.Place.name values) -> this
+# site's own URL slug. "-capital" is Fotocasa's own suffix for a provincial
+# capital's city proper (as opposed to the wider province); every other
+# municipality is the bare hyphenated name. Live-verified (real HTTP 200 +
+# real listing hrefs, not just a non-error status) during issue #71 for the
+# original four and during issue #169 for the Costa del Sol / greater
+# Sevilla entries added below — see the PR for the exact URLs checked.
+# Extend when a profile's geography resolves to a municipality not yet
+# listed; the gazetteer itself (etl/connectors/geography.py) no longer
+# needs touching to do that (issue #169).
 _CITY_SLUGS: dict[str, str] = {
     "madrid": "madrid-capital",
     "sevilla": "sevilla-capital",
     "barcelona": "barcelona-capital",
     "valencia": "valencia-capital",
+    # Costa del Sol (owner's stated v1 market, issue #169 course-correction)
+    "malaga": "malaga-capital",
+    "marbella": "marbella",
+    "estepona": "estepona",
+    "fuengirola": "fuengirola",
+    "torremolinos": "torremolinos",
+    "benalmadena": "benalmadena",
+    "mijas": "mijas",
+    # Greater Sevilla (owner's other stated v1 market)
+    "dos hermanas": "dos-hermanas",
+    "alcala de guadaira": "alcala-de-guadaira",
+    "tomares": "tomares",
+    # Not individually HTTP-verified this round (mechanical extension of
+    # the same verified bare-name rule, per issue #169's "small, mechanical
+    # addition" framing) — flagged here rather than silently blended in
+    # with the verified entries above.
+    "mairena del aljarafe": "mairena-del-aljarafe",
+    "san juan de aznalfarache": "san-juan-de-aznalfarache",
 }
 
 
@@ -157,19 +184,22 @@ def _resolve_geography(scope: ConnectorScope) -> str | None:
 
     `scope.geography` (a free-text escape hatch, see ConnectorScope's
     docstring) wins when set, for tests/manual construction. Otherwise
-    resolve `scope.center` to the nearest known city and look up its
-    Fotocasa slug. No hardcoded default (issue #71) — a scope this connector
-    can't resolve means "nothing to discover for this scope", not "assume
-    Madrid".
+    resolve `scope.center` via the shared gazetteer (issue #169) and look up
+    its Fotocasa slug. No hardcoded default (issue #71) — a scope this
+    connector doesn't have a slug for means "nothing to discover for this
+    scope", not "assume Madrid".
+
+    Can raise `UnresolvableGeographyError` (from `resolve_place`) when
+    `scope.center` is set but matches no place in the gazetteer at all —
+    deliberately NOT caught here. See `scope_key`/`discover` below for how
+    each is expected to handle that.
     """
     if scope.geography:
         return scope.geography
-    if scope.center is None:
+    place = resolve_place(scope)
+    if place is None:
         return None
-    city = nearest_city(scope.center, scope.radius_km)
-    if city is None:
-        return None
-    return _CITY_SLUGS.get(city)
+    return _CITY_SLUGS.get(place.name)
 
 
 def _discover_zone_slugs(html: str, geography: str) -> list[str]:
@@ -541,8 +571,20 @@ class FotocasaConnector(Connector):
         different URLs (confirmed live — see docs/architecture/connectors.md),
         so they must not be deduplicated against each other in
         etl.orchestrator.run_all_connectors's seen_scope_keys tracking.
+
+        Issue #169: `_resolve_geography` can raise `UnresolvableGeographyError`
+        when the scope's center matches no place in the gazetteer at all —
+        this method must never raise itself (the orchestrator calls it with
+        no try/except), so that case is translated into a distinct sentinel
+        key via `unresolvable_scope_key` rather than `None`. Returning `None`
+        here would put the scope back on the "no coverage, not a failure"
+        skip path — the sentinel instead ensures `discover()` still runs and
+        raises there, landing as a real `connector_run_results` failure.
         """
-        geography = _resolve_geography(scope)
+        try:
+            geography = _resolve_geography(scope)
+        except UnresolvableGeographyError:
+            return unresolvable_scope_key(scope)
         if geography is None:
             return None
         if scope.rooms is not None:
@@ -558,13 +600,25 @@ class FotocasaConnector(Connector):
         # actually happened.
         self._last_discovery_prices = {}
 
+        # _resolve_geography can raise UnresolvableGeographyError (a
+        # ConnectorError subclass) when scope.center matches nothing in the
+        # gazetteer at all — deliberately left to propagate uncaught here,
+        # so the orchestrator records a real failure (issue #169) instead of
+        # this method returning an empty list that reads as "no listings".
         geography = _resolve_geography(scope)
         if geography is None:
+            # Reachable only if discover() is invoked directly, bypassing
+            # scope_key()'s gate (e.g. a test, or a future capture-only
+            # caller) — normally scope_key() already returned None for this
+            # exact case (no geography info at all, or a known municipality
+            # this connector's own slug table doesn't cover) and the
+            # orchestrator skipped calling discover() entirely.
             raise ConnectorError(
                 "fotocasa discover: scope has neither a resolvable center "
-                "(nearest known city too far away) nor an explicit geography "
-                "string — nothing to discover, not defaulting to a hardcoded "
-                "city (see issue #71)"
+                "nor an explicit geography string, or resolves to a "
+                "municipality this connector's _CITY_SLUGS table doesn't "
+                "cover — nothing to discover, not defaulting to a "
+                "hardcoded city (see issue #71)"
             )
         if geography in _ROBOTS_DISALLOWED_BARE_GEOGRAPHIES:
             # robots.txt disallows the literal substring "/madrid/" (and

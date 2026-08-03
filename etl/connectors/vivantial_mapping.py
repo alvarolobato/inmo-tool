@@ -46,7 +46,9 @@ import html
 import re
 from decimal import Decimal, InvalidOperation
 
-from etl.connectors.extraction import first_present
+from bs4 import BeautifulSoup
+
+from etl.connectors.extraction import first_present, scoped_text
 
 # Vivantial publishes age ("Antigüedad: 96 años"), not a construction
 # year, so year_built is derived against the current year. UTC rather than
@@ -63,15 +65,20 @@ _PHOTO_RE = re.compile(
 )
 
 _REFERENCIA_RE = re.compile(r'class="[^"]*referencia"[^>]*>\s*([^<]+)', re.IGNORECASE)
-# The *current* asking price. Note there are two `precio` divs: the first
-# is an empty placeholder, the second (`precio-rojo`) holds the real value —
-# so a regex matching plain `precio` picks up the empty one and falls
-# through, which is how an early version of this module ended up reading a
-# neighbouring "similar properties" card's price instead (see
-# `_META_DESCRIPTION_RE` below for the fix).
-_PRECIO_ROJO_RE = re.compile(
-    r'class="[^"]*precio-rojo[^"]*"[^>]*>\s*([^<]+)', re.IGNORECASE
-)
+# The *current* asking price. There are two `precio` divs on a discounted
+# listing: the first holds the OLD price inside a `<del>` (struck through),
+# the second (`precio-rojo`) holds the current one — e.g.
+# `<div class="precio"><del>310.000 €</del></div>
+#  <div class="precio precio-rojo">288.000 €</div>`. A regex/selector
+# matching plain `precio` without the `-rojo` qualifier picks up the
+# *previous*, higher price instead of the current one (verified against two
+# real captured detail pages, Madrid and Murcia — this is a same-listing
+# price-history display, corrected here from an earlier comment that
+# mischaracterised it as a "neighbouring similar-properties card": no such
+# card exists in Vivantial's real server-rendered markup, see
+# `docs/architecture/connectors.md`'s issue #144 note). `-rojo` selection
+# now goes through the shared `scoped_text`/`scoped_node` helper (issue
+# #144) — see `extract_price` below — rather than a hand-rolled regex.
 _H1_RE = re.compile(r"<h1[^>]*>(.*?)</h1>", re.IGNORECASE | re.DOTALL)
 _TITLE_RE = re.compile(r"<title>([^<]*)</title>", re.IGNORECASE)
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -260,10 +267,19 @@ def extract_price(page: str) -> Decimal | None:
     """Current asking price.
 
     Primary: the meta description's "por <price> €" (listing-scoped).
-    Fallback: the `precio-rojo` element, which is the *second* `precio` div
-    (the first is an empty placeholder). Deliberately no page-wide
-    euro-amount fallback — that is what previously read a "similar
-    properties" card's price.
+    Fallback: the `precio-rojo` element specifically, NOT the sibling
+    `precio` div holding the struck-through previous price (see the module
+    comment above `_H1_RE` for the real markup shape and why an earlier
+    comment here mischaracterised this as "similar properties card"
+    contamination). Deliberately no page-wide euro-amount fallback — an
+    unscoped search would hit the `<del>`-wrapped previous price first, not
+    a neighbour's listing.
+
+    The `precio-rojo` scoping goes through the shared `scoped_text` helper
+    (issue #144) instead of a hand-rolled regex: `keep=".precio-rojo"`
+    selects exactly that element's own text, which is what a CSS class
+    selector is for — a regex bounded to N characters after a class match
+    is a weaker, less precise stand-in for the same operation.
     """
 
     def from_meta() -> Decimal | None:
@@ -274,10 +290,11 @@ def extract_price(page: str) -> Decimal | None:
         return _to_decimal(m.group(1)) if m else None
 
     def from_precio_rojo() -> Decimal | None:
-        m = _PRECIO_ROJO_RE.search(page)
-        if not m:
+        soup = BeautifulSoup(page, "html.parser")
+        text = scoped_text(soup, keep=".precio-rojo")
+        if text is None:
             return None
-        euro = _EURO_RE.search(m.group(1))
+        euro = _EURO_RE.search(text)
         return _to_decimal(euro.group(1)) if euro else None
 
     return first_present(from_meta, from_precio_rojo, field="current_price")
