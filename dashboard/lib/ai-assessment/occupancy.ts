@@ -177,6 +177,19 @@ const num = (v: string | null): number | null => (v === null ? null : Number(v))
  *
  * Only `active` listings: a description from a listing that has since been
  * sold or withdrawn describes a state of the world that may no longer hold.
+ *
+ * Returns `[]` — same as "no active listings" — when every active listing's
+ * description is null/empty (#156 review, must-fix 2). A listing with no
+ * description gives `formatListing` nothing to emit, and the eje-2/eje-3
+ * silence rule then hands the model zero text and still expects it to answer
+ * `compraventa`/`pleno_dominio` "because nothing contradicts it" — but
+ * nothing contradicts it because we gave the model nothing to read, not
+ * because the adverts were silent on a topic they otherwise discuss. Treating
+ * this identically to "no listings" is deliberate: `assessPropertyOccupancy`
+ * already turns an empty array into `NoListingsError` (404, "no live
+ * listings to assess"), which is exactly the right framing here too — we
+ * never looked at anything, so we must not write a verdict that looks like
+ * we did.
  */
 export async function loadPropertyListings(
   propertyId: number,
@@ -199,6 +212,9 @@ export async function loadPropertyListings(
     [propertyId],
   );
 
+  const hasDescription = rows.some((l) => (l.description ?? "").trim() !== "");
+  if (!hasDescription) return [];
+
   return rows.map((l) => ({
     propertyId: Number(prop.id),
     listingId: Number(l.id),
@@ -219,6 +235,19 @@ export async function loadPropertyListings(
 }
 
 /**
+ * Ceiling on the confidence of a verdict reached from silence rather than a
+ * citation (#156 review, must-fix 1). The eje-2/eje-3 prompt rule deliberately
+ * asks the model for `compraventa`/`pleno_dominio` at "~0.6-0.7" when nothing
+ * in the adverts contradicts it — that number only existed in prose, so a
+ * model returning 0.95 for an uncited default was written straight through
+ * and could clear a `WHERE confidence > 0.7` filter as if it were a cited
+ * finding. This is the code-side enforcement of that number: it is a ceiling
+ * the model's own confidence is clamped against, not a value we invent when
+ * one is missing.
+ */
+const SILENCE_CONFIDENCE_CAP = 0.7;
+
+/**
  * Parse one axis out of the model's JSON.
  *
  * Strict about the label because these feed scoring and the deal pipeline: an
@@ -227,11 +256,22 @@ export async function loadPropertyListings(
  * like a confident verdict downstream. A missing axis object degrades the same
  * way — silence from the model is "we did not learn anything", never a default
  * "all clear", which on the #145 axes would be an actively dangerous reading.
+ *
+ * `silenceDefault`, when given, is the value the axis's prompt tells the model
+ * to answer *from silence* (e.g. `compraventa` on the transaction axis,
+ * `pleno_dominio` on ownership — see the "Cómo tratar el silencio" block in
+ * system-prompt.ts). When the parsed value equals it AND no evidence was
+ * cited, confidence is capped at `SILENCE_CONFIDENCE_CAP` regardless of what
+ * the model reported — a plausibility judgment from absence of contradiction
+ * must never read as sure as a verdict backed by a quote. Axes with no
+ * silence-default convention (occupancy: silence forces `unknown`, not a
+ * clamp) simply omit the argument and are unaffected.
  */
 function parseVerdict<T extends string>(
   node: unknown,
   key: string,
   allowed: readonly T[],
+  silenceDefault?: T,
 ): Verdict<T> {
   const o = (typeof node === "object" && node !== null ? node : {}) as Record<
     string,
@@ -242,11 +282,17 @@ function parseVerdict<T extends string>(
   const value = (known ? rawValue : "unknown") as T;
 
   const rawConfidence = typeof o.confidence === "number" ? o.confidence : 0;
+  const evidence = typeof o.evidence === "string" ? o.evidence : "";
+
+  let confidence = known ? clamp01(rawConfidence) : 0;
+  if (evidence === "" && silenceDefault !== undefined && value === silenceDefault) {
+    confidence = Math.min(confidence, SILENCE_CONFIDENCE_CAP);
+  }
 
   return {
     value,
-    confidence: known ? clamp01(rawConfidence) : 0,
-    evidence: typeof o.evidence === "string" ? o.evidence : "",
+    confidence,
+    evidence,
     evidence_source:
       typeof o.evidence_source === "string" && o.evidence_source.trim() !== ""
         ? o.evidence_source
@@ -294,9 +340,21 @@ export function parseOccupancyResult(raw: string): OccupancyResult {
 
   const o = parsed as Record<string, unknown>;
 
+  // No silenceDefault for occupancy: per the eje-1 prompt rule, silence
+  // forces `unknown`, not a clamped `vacant` — there is nothing to cap.
   const occupancy = parseVerdict(o.occupancy, "status", OCCUPANCY_STATUSES);
-  const transaction = parseVerdict(o.transaction, "kind", TRANSACTION_KINDS);
-  const ownershipBase = parseVerdict(o.ownership, "extent", OWNERSHIP_EXTENTS);
+  const transaction = parseVerdict(
+    o.transaction,
+    "kind",
+    TRANSACTION_KINDS,
+    "compraventa",
+  );
+  const ownershipBase = parseVerdict(
+    o.ownership,
+    "extent",
+    OWNERSHIP_EXTENTS,
+    "pleno_dominio",
+  );
 
   const ownershipNode = (
     typeof o.ownership === "object" && o.ownership !== null ? o.ownership : {}
@@ -315,14 +373,21 @@ export function parseOccupancyResult(raw: string): OccupancyResult {
 }
 
 /**
- * A share percentage is only meaningful in (0, 100]. Anything else — a stray
- * 0, a 150, a string, a fraction the model wrote as 0.5 — is dropped to null
- * rather than guessed at: a wrong share is worse than a missing one when it is
- * what tells the investor they are buying half a flat.
+ * A share percentage is only meaningful in [1, 100]. Anything else — a stray
+ * 0, a 150, a string, a fraction the model wrote as 0.5 meaning "50%" — is
+ * dropped to null rather than guessed at: a wrong share is worse than a
+ * missing one when it is what tells the investor they are buying half a flat.
+ *
+ * The lower bound is 1, not 0 (#156 review, nice-to-have): no real
+ * `proindiviso` sale trades a sub-1% stake, so a value below 1 is
+ * overwhelmingly a model writing the fraction form of a percentage
+ * (0.5 meaning 50%, not "0.5%") rather than a genuine tiny share. Storing it
+ * literally would silently understate the share by ~100x, which is the wrong
+ * kind of confident wrong this function exists to prevent.
  */
 function parseSharePct(v: unknown): number | null {
   if (typeof v !== "number" || !Number.isFinite(v)) return null;
-  if (v <= 0 || v > 100) return null;
+  if (v < 1 || v > 100) return null;
   return v;
 }
 
@@ -419,9 +484,11 @@ export async function getOccupancyAssessment(
  * Assess one property end-to-end: load its merged listings, ask the model,
  * validate, persist.
  *
- * Throws `NoListingsError` when the property has no live listings — there is
- * nothing to read, and writing an `unknown` verdict would misrepresent "we
- * never looked" as "we looked and could not tell".
+ * Throws `NoListingsError` when the property has no live listings, OR when
+ * every live listing has no description (see `loadPropertyListings`) — in
+ * both cases there is nothing to read, and writing a verdict (`unknown` or
+ * otherwise) would misrepresent "we never looked" as "we looked and could
+ * not tell" or, worse on the #145 axes, as a confident all-clear.
  */
 export async function assessPropertyOccupancy(
   propertyId: number,

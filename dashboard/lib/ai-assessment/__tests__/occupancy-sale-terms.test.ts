@@ -136,6 +136,10 @@ describe("parseOccupancyResult — #145 axes", () => {
   it.each([
     ["out of range high", 150],
     ["zero", 0],
+    // A model writing the fraction form of a percentage (0.5 meaning "50%",
+    // not "0.5%") — no real proindiviso sale trades a sub-1% stake, so this
+    // must drop to null rather than being stored as a ~100x-too-small share
+    // (#156 review, nice-to-have).
     ["a fraction the model wrote as 0.5", 0.5],
     ["a string", "50%"],
   ])("drops an implausible share_pct (%s) to null", (_label, value) => {
@@ -145,9 +149,7 @@ describe("parseOccupancyResult — #145 axes", () => {
       }),
     );
 
-    // 0.5 is in (0,100] so it survives; the others must not.
-    if (value === 0.5) expect(result.ownership.share_pct).toBe(0.5);
-    else expect(result.ownership.share_pct).toBeNull();
+    expect(result.ownership.share_pct).toBeNull();
   });
 
   it("a missing axis degrades to unknown rather than a clean default", () => {
@@ -160,6 +162,83 @@ describe("parseOccupancyResult — #145 axes", () => {
     expect(result.transaction.confidence).toBe(0);
     expect(result.ownership.value).toBe("unknown");
     expect(result.caveats).toEqual([]);
+  });
+});
+
+describe("parseOccupancyResult — confidence cap on evidence-free positive verdicts (#156 review, must-fix 1)", () => {
+  // The prompt's own silence rule only licenses "~0.6-0.7" for a
+  // compraventa/pleno_dominio verdict reached because nothing contradicts
+  // it. Without code-side enforcement, a model returning e.g. 0.95 for that
+  // same uncited default is written straight through and can clear a
+  // `WHERE confidence > 0.7` filter as if it were evidence-backed.
+
+  it("clamps transaction.confidence to <=0.7 when compraventa comes from silence", () => {
+    const result = parseOccupancyResult(
+      modelJson({
+        transaction: {
+          kind: "compraventa",
+          confidence: 0.95,
+          evidence: "",
+          evidence_source: null,
+        },
+      }),
+    );
+
+    expect(result.transaction.value).toBe("compraventa");
+    expect(result.transaction.confidence).toBeLessThanOrEqual(0.7);
+  });
+
+  it("clamps ownership.confidence to <=0.7 when pleno_dominio comes from silence", () => {
+    const result = parseOccupancyResult(
+      modelJson({
+        ownership: {
+          extent: "pleno_dominio",
+          share_pct: null,
+          confidence: 0.99,
+          evidence: "",
+          evidence_source: null,
+        },
+      }),
+    );
+
+    expect(result.ownership.value).toBe("pleno_dominio");
+    expect(result.ownership.confidence).toBeLessThanOrEqual(0.7);
+  });
+
+  it("does NOT clamp when the same default value is actually backed by a citation", () => {
+    const result = parseOccupancyResult(
+      modelJson({
+        transaction: {
+          kind: "compraventa",
+          confidence: 0.95,
+          evidence: "compraventa ordinaria, escritura pública ante notario",
+          evidence_source: "fotocasa",
+        },
+      }),
+    );
+
+    // A real citation is a real finding — the cap only exists to stop a
+    // silence-based guess from *looking* this sure.
+    expect(result.transaction.confidence).toBe(0.95);
+  });
+
+  it("does NOT clamp a non-default (flagged) value even with empty evidence", () => {
+    // Rule 3 already tells the model not to assert an uncited finding; the
+    // cap is scoped to the silence-default value specifically, not to every
+    // evidence-free verdict, so it must not mask an ungrounded venta_deuda
+    // behind a false sense of safety.
+    const result = parseOccupancyResult(
+      modelJson({
+        transaction: {
+          kind: "venta_deuda",
+          confidence: 0.9,
+          evidence: "",
+          evidence_source: null,
+        },
+      }),
+    );
+
+    expect(result.transaction.confidence).toBe(0.9);
   });
 });
 

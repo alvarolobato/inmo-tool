@@ -111,6 +111,43 @@ describe("occupancy prompt — evidence union", () => {
   });
 });
 
+describe("occupancy prompt — axis 2/3 silence override survives ASSESSMENT_RULES (#156 review, must-fix 3)", () => {
+  // ASSESSMENT_RULES (shared by every flow) tells the model "unknown + baja
+  // confidence" on insufficient info, and "if you can't cite anything, don't
+  // assert anything" — both of which flatly contradict the occupancy-specific
+  // instruction to answer compraventa/pleno_dominio from silence on ejes 2-3.
+  // Assembled-prompt ordering matters here (a later instruction can shadow an
+  // earlier one), so these assertions read the REAL buildSystemPrompt output,
+  // not the template source.
+  it("restates the ejes-2/3 override AFTER ASSESSMENT_RULES' generic unknown/no-citation rules", () => {
+    const text = occupancyPromptText([SILENT_ADVERT]);
+
+    const genericNoCiteRuleIdx = text.indexOf("no afirmes nada");
+    const overrideIdx = text.indexOf("Excepción a las reglas 2 y 3");
+
+    expect(genericNoCiteRuleIdx).toBeGreaterThan(-1);
+    expect(overrideIdx).toBeGreaterThan(-1);
+    // The override must come LAST: it is what a model resolving a conflict by
+    // recency will actually obey.
+    expect(overrideIdx).toBeGreaterThan(genericNoCiteRuleIdx);
+  });
+
+  it("explicitly tells the model NOT to answer unknown on ejes 2-3 for lack of a citation", () => {
+    const text = occupancyPromptText([SILENT_ADVERT]);
+
+    expect(text).toContain(
+      "NO respondas `unknown` en los ejes 2 o 3 solo porque no hay",
+    );
+  });
+
+  it("keeps the generic unknown-on-silence rule binding for eje 1 with no exception", () => {
+    const text = occupancyPromptText([SILENT_ADVERT]);
+
+    expect(text).toContain("SIN excepción al");
+    expect(text).toMatch(/eje 1 \(ocupación\)/);
+  });
+});
+
 describe("parseOccupancyResult", () => {
   const full = JSON.stringify({
     occupancy: {

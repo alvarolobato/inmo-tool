@@ -43,12 +43,28 @@ async function withRealDb(fn: (pool: Pool) => Promise<void>) {
   }
 }
 
+// #156 review, must-fix 4 (source-side half): CI's `dashboard-test` job has no
+// `postgres` service, so this file's 8 tests have been silently skipping and
+// reporting green — the workflow-file fix is proposed separately (can't be
+// pushed from here, see D-004 / docs/pending-workflow-changes/). REQUIRE_DB=1
+// (CI should set it once the service is wired in) turns "no reachable
+// Postgres" from a quiet skip into a hard failure, so a future regression in
+// the workflow file (a dropped `services:` block) trips CI immediately
+// instead of reverting to silent green.
+const REQUIRE_DB = process.env.REQUIRE_DB === "1";
+
 const dbAvailable = await (async () => {
   const pool = new Pool(buildPgPoolConfig({ max: 1 }));
   try {
     await pool.query("SELECT 1");
     return true;
-  } catch {
+  } catch (err) {
+    if (REQUIRE_DB) {
+      throw new Error(
+        "REQUIRE_DB=1 but Postgres is unreachable for occupancy.integration.test.ts " +
+          `(POSTGRES_DSN unset, or DB down): ${String(err)}`,
+      );
+    }
     // eslint-disable-next-line no-console
     console.warn(
       "[occupancy.integration.test] no reachable Postgres (POSTGRES_DSN unset or DB down) " +

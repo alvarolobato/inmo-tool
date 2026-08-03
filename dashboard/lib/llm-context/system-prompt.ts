@@ -344,6 +344,15 @@ Reglas cuando las descripciones no coinciden (valen para los tres ejes):
 
 ${ASSESSMENT_RULES}
 
+**Excepción a las reglas 2 y 3 anteriores, SOLO para los ejes 2 y 3 (transacción
+y propiedad):** ya se explicó arriba por qué, en esos dos ejes, el silencio de
+todos los anuncios es evidencia suficiente de \`compraventa\`/\`pleno_dominio\`
+con confidence ~0.6-0.7 y evidence vacía — no es "información insuficiente", es
+la ausencia de una revelación obligatoria. Aplica esa excepción exactamente
+como se describió: NO respondas \`unknown\` en los ejes 2 o 3 solo porque no hay
+cita que ofrecer. Las reglas 2 y 3 de arriba siguen aplicando SIN excepción al
+eje 1 (ocupación): ahí el silencio sigue obligando a \`unknown\`.
+
 Formato de salida (los tres ejes SIEMPRE presentes, aunque sean el caso por
 defecto — nunca omitas una clave):
 {

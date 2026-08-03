@@ -437,7 +437,9 @@ class TestAiAssessmentRekeyMigration:
                 rows = cur.fetchall()
                 assert len(rows) == 1, f"expected one collapsed row, got {rows}"
                 assert rows[0][0] == property_id
-                # a.id < b.id keeps the higher id — the second insert.
+                # Both rows have NULL generated_at (old-shape inserts below
+                # never set it), so the dedup falls back to its id tiebreak —
+                # a.id < b.id keeps the higher id, the second insert.
                 assert rows[0][1] == "tenanted"
 
                 cur.execute(
@@ -445,6 +447,73 @@ class TestAiAssessmentRekeyMigration:
                     "WHERE table_name = 'ai_assessment' AND column_name = 'listing_id'"
                 )
                 assert cur.fetchone() is None, "listing_id should have been dropped"
+        finally:
+            pg_conn.rollback()
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM ai_assessment WHERE property_id = %s", (property_id,)
+                )
+                cur.execute(
+                    "DELETE FROM listing WHERE property_id = %s", (property_id,)
+                )
+                cur.execute("DELETE FROM property WHERE id = %s", (property_id,))
+            pg_conn.commit()
+
+    def test_migration_keeps_latest_generated_at_even_when_its_id_is_lower(
+        self, pg_conn
+    ):
+        """`generated_at`, not `id`, decides "newest" (#156 review, nice-to-have).
+
+        Insert the ACTUALLY-newer verdict with the LOWER id (e.g. a re-run
+        that landed on a connection with a smaller sequence value, or a
+        restored backup re-inserted before a later one). Under a purely
+        id-ordered dedup this row would be discarded; the migration must
+        keep it because it is newer by generated_at.
+        """
+        _apply_schema(pg_conn)
+        property_id = _insert_property(pg_conn)
+        pg_conn.commit()
+        try:
+            listing_a = _insert_listing(pg_conn, property_id, "fotocasa", "mig-gen-a")
+            listing_b = _insert_listing(
+                pg_conn, property_id, "milanuncios", "mig-gen-b"
+            )
+            pg_conn.commit()
+
+            self._install_old_shape(pg_conn)
+            now = datetime.now(timezone.utc)
+            with pg_conn.cursor() as cur:
+                # listing_a: LOWER id, but generated LATER.
+                cur.execute(
+                    "INSERT INTO ai_assessment "
+                    "(listing_id, assessment_type, result, prompt_version, generated_at) "
+                    "VALUES (%s, 'occupancy', '{\"status\":\"tenanted\"}'::jsonb, "
+                    "'occupancy/v1', %s)",
+                    (listing_a, now),
+                )
+                # listing_b: HIGHER id, but generated EARLIER.
+                cur.execute(
+                    "INSERT INTO ai_assessment "
+                    "(listing_id, assessment_type, result, prompt_version, generated_at) "
+                    "VALUES (%s, 'occupancy', '{\"status\":\"vacant\"}'::jsonb, "
+                    "'occupancy/v1', %s)",
+                    (listing_b, now - timedelta(days=1)),
+                )
+            pg_conn.commit()
+
+            _apply_schema(pg_conn)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT result->>'status' FROM ai_assessment "
+                    "WHERE property_id = %s",
+                    (property_id,),
+                )
+                rows = cur.fetchall()
+                assert len(rows) == 1, f"expected one collapsed row, got {rows}"
+                # The higher-id row (vacant) is actually the OLDER one and
+                # must lose to the lower-id, newer-by-generated_at row.
+                assert rows[0][0] == "tenanted"
         finally:
             pg_conn.rollback()
             with pg_conn.cursor() as cur:

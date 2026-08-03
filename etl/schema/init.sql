@@ -445,13 +445,24 @@ BEGIN
 
         -- Two rows that were distinct per-listing can collapse onto one
         -- property. Keep the newest and drop the rest, so SET NOT NULL and
-        -- the new unique constraint below both succeed.
+        -- the new unique constraint below both succeed. "Newest" is by
+        -- `generated_at`, not `id`: id order only happens to agree with
+        -- insertion order, and insertion order is not the question — which
+        -- verdict was actually generated most recently is. Old-shape rows
+        -- with no `generated_at` (NULL) tie amongst themselves, so `id` is
+        -- kept only as the tiebreaker, never the primary key.
         DELETE FROM ai_assessment a
               USING ai_assessment b
               WHERE a.property_id = b.property_id
                 AND a.assessment_type = b.assessment_type
                 AND a.prompt_version IS NOT DISTINCT FROM b.prompt_version
-                AND a.id < b.id;
+                AND (
+                      a.generated_at < b.generated_at
+                      OR (
+                           a.generated_at IS NOT DISTINCT FROM b.generated_at
+                           AND a.id < b.id
+                         )
+                    );
 
         ALTER TABLE ai_assessment DROP COLUMN listing_id;
     END IF;
@@ -463,7 +474,13 @@ ALTER TABLE ai_assessment ALTER COLUMN property_id SET NOT NULL;
 DO $$
 BEGIN
     IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'ai_assessment_property_key'
+        -- Qualified by conrelid, not just conname: pg_constraint is
+        -- database-wide, so an unqualified name lookup can match a
+        -- same-named constraint on a different table (or in a different
+        -- schema on the same search_path) and skip the ADD CONSTRAINT below.
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'ai_assessment_property_key'
+           AND conrelid = 'ai_assessment'::regclass
     ) THEN
         ALTER TABLE ai_assessment ADD CONSTRAINT ai_assessment_property_key
             UNIQUE NULLS NOT DISTINCT (property_id, assessment_type, prompt_version);
@@ -471,8 +488,13 @@ BEGIN
 END
 $$;
 
-CREATE INDEX IF NOT EXISTS idx_ai_assessment_property_type
-    ON ai_assessment (property_id, assessment_type);
+-- No separate (property_id, assessment_type) index: ai_assessment_property_key
+-- above is UNIQUE (property_id, assessment_type, prompt_version), and Postgres
+-- can use a multi-column index's leading columns for a query that only
+-- filters on the prefix — a dedicated two-column index duplicated that for
+-- free. Existing installs still carry the old index; drop it explicitly
+-- rather than leaving dead weight behind.
+DROP INDEX IF EXISTS idx_ai_assessment_property_type;
 
 -- ============================================================
 -- Deduplication audit trail (Phase 2 task 2.2, issue #16, writes here)
