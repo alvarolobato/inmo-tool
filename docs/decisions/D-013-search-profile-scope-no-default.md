@@ -1,10 +1,10 @@
 ---
-id: D-010
+id: D-013
 title: search_profile.scope has no DB-level default
 date: 2026-08-03
 ---
 
-# D-010: search_profile.scope has no DB-level default
+# D-013: search_profile.scope has no DB-level default
 
 *Decided: 2026-08-03*
 

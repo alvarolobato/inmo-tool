@@ -24,7 +24,7 @@
 |----|--------------|
 | [D-005](docs/decisions/D-005-numeric-vs-uuid-keys.md) | Real-estate schema tables use `BIGSERIAL` integer PKs, not `NUMERIC` (no source-system precision constraint like the archived project had) or UUIDs (no distributed-write requirement). |
 | [D-008](docs/decisions/D-008-skip-if-seen-opt-in.md) | Skip-if-seen defaults to 0 (always fetch); opt in per connector. Never skip missing/changed discovery price. |
-| [D-010](docs/decisions/D-010-search-profile-scope-no-default.md) | `search_profile.scope` has no DB-level default — an INSERT must supply an explicit, validated scope; a missing one fails loudly, not silently. |
+| [D-013](docs/decisions/D-013-search-profile-scope-no-default.md) | `search_profile.scope` has no DB-level default — an INSERT must supply an explicit, validated scope; a missing one fails loudly, not silently. |
 
 ## AI layer
 
@@ -32,11 +32,11 @@
 |----|--------------|
 | [D-006](docs/decisions/D-006-llm-context-centralization.md) | All LLM calls go through `assembleRequest()` in `dashboard/lib/llm-context/`. No file outside that directory may import `llmComplete` or `runAgenticChat`; CI enforces it via `check-llm-context.sh`. |
 | [D-007](docs/decisions/D-007-empty-knowledge-corpus-kept.md) | Keep `lib/knowledge.ts`/`scripts/build-knowledge.ts` (real call sites, intentionally empty pending Phase 4/#5). Test the empty-corpus shape contract, don't delete the machinery or invent placeholder content. |
-| [D-010](docs/decisions/D-010-derived-price-signal-in-cache.md) | occupancy/redflags see a bucketed zone-median price comparison (never raw price); the exact string rendered must also be the exact `extraHashInput` passed to `getOrCompute`. |
+| [D-012](docs/decisions/D-012-derived-price-signal-in-cache.md) | occupancy/redflags see a bucketed zone-median price comparison (never raw price); the exact string rendered must also be the exact `extraHashInput` passed to `getOrCompute`. |
 
 ## Product
 
 | ID | Binding rule |
 |----|--------------|
-| [D-008](docs/decisions/D-008-rent-assumption-until-comparables.md) | Rent estimate is an explicit per-profile `€/m²/month` assumption (`thesis_params.rent_assumption`) until #31 ships real comparables. Never fabricate a rent figure; gate yield on the assumption being set. |
-| [D-009](docs/decisions/D-009-acquisition-cost-model.md) | ITP by CCAA is general/base rate only (no brackets/reductions, no new-build path). Actual IBI/community fee from `raw_extra` ADDS to a separate assumed maintenance/vacancy %, never fully replaces it. |
+| [D-010](docs/decisions/D-010-rent-assumption-until-comparables.md) | Rent estimate is an explicit per-profile `€/m²/month` assumption (`thesis_params.rent_assumption`) until #31 ships real comparables. Never fabricate a rent figure; gate yield on the assumption being set. |
+| [D-011](docs/decisions/D-011-acquisition-cost-model.md) | ITP by CCAA is general/base rate only (no brackets/reductions, no new-build path). Actual IBI/community fee from `raw_extra` ADDS to a separate assumed maintenance/vacancy %, never fully replaces it. |

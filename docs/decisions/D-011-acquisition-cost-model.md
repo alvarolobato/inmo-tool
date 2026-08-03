@@ -1,10 +1,10 @@
 ---
-id: D-009
+id: D-011
 title: Acquisition-cost model — ITP by CCAA (general rate only), flat notary/registry/gestoría defaults, actual carrying costs ADD to (not replace) the assumed maintenance/vacancy line
 date: 2026-08-03
 ---
 
-# D-009: Acquisition-cost model — ITP by CCAA, flat notary/registry/gestoría, actual carrying costs are additive to a separate maintenance/vacancy assumption
+# D-011: Acquisition-cost model — ITP by CCAA, flat notary/registry/gestoría, actual carrying costs are additive to a separate maintenance/vacancy assumption
 
 *Decided: 2026-08-03, revised 2026-08 (Opus review on PR #181)*
 
@@ -102,7 +102,7 @@ carrying-cost model applies the same standard to itself: additive,
 individually-labelled real data beats a full-replacement shortcut that
 happens to be directionally biased.
 
-**See**: docs/decisions/D-008-rent-assumption-until-comparables.md,
+**See**: docs/decisions/D-010-rent-assumption-until-comparables.md,
 `dashboard/lib/analytics/acquisition-costs.ts`,
 `dashboard/lib/analytics/yield.ts` (module docstring has the full Málaga
 worked-example trace), `dashboard/lib/analytics/__tests__/yield.test.ts`,
