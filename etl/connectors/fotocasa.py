@@ -336,7 +336,33 @@ def _reference_fallback_text(soup: BeautifulSoup) -> str | None:
     selectors), so it's a reasonable fallback anchor on its own, but the
     regex over the `<li>`'s text (rather than trusting the class survives
     forever) keeps this consistent with `_icon_stat_text`'s more defensive
-    approach."""
+    approach.
+
+    Deliberately NOT carousel-scoped, unlike Vivantial (price, PR #139),
+    Servihabitat (m2, PR #141) and Solvia (latent, PR #138). PR #153 first
+    added a `drop=` for "similar properties" carousels here by analogy with
+    those three, on the assumption the same contamination applied. Review
+    caught that the assumption was untested — the selectors matched nothing
+    but the test's own hand-authored markup — so it was checked against two
+    real pages of different property types (the issue #149 trastero
+    190239270, and Madrid/Chamberi vivienda 189882136), captured as
+    `fotocasa_sample_detail_reference.html`:
+
+        "Referencia:"                        x1
+        ".re-FormContactDetail-referenceAlias" x1
+
+    The reference renders exactly once. "inmuebles similares" / "anuncios
+    similares" do appear, but as i18n translation *values* inside the
+    embedded JSON (saved-search alert copy), not as rendered neighbour cards
+    carrying reference codes. Fotocasa's related-property rails are
+    client-hydrated and absent from the server HTML this connector parses.
+
+    So there is no neighbour reference on the page for `select_one` to
+    prefer, and a `drop=` here would be dead code implying coverage it does
+    not have. If Fotocasa ever server-renders such a rail, `scoped_node(...,
+    drop=...)` is the one-line fix — and the fixture above is what would
+    show it changed.
+    """
     el = soup.select_one(".re-FormContactDetail-referenceAlias li")
     if el is None:
         return None

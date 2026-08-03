@@ -15,11 +15,22 @@ from unittest.mock import Mock, patch
 
 import pytest
 import requests
+from bs4 import BeautifulSoup
 
 from etl.connectors import fotocasa as fotocasa_module
 from etl.connectors.base import ConnectorError, ConnectorScope, RawListing
 from etl.connectors.fotocasa import FotocasaConnector
+from etl.orchestrator import _upsert_canonical_listing
 from etl.tests.robots_matcher import is_allowed, load_star_block_rules
+
+_SCHEMA_SQL = Path(__file__).parent.parent / "schema" / "init.sql"
+
+
+def _apply_schema(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(_SCHEMA_SQL.read_text(encoding="utf-8"))
+    conn.commit()
+
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -939,6 +950,99 @@ class TestReferenceCode:
         )
         canonical = FotocasaConnector().normalize(raw)
         assert canonical.reference_code is None
+
+    def test_css_fallback_reads_the_reference_from_real_captured_markup(self):
+        """The CSS fallback must work against markup a real page actually
+        serves — not against markup written to match the selector.
+
+        PR #153 originally proved this fallback with a hand-authored page
+        containing a "similar properties" carousel, on the assumption that
+        Fotocasa contaminates this field the way it contaminated Vivantial
+        (price), Servihabitat (m2) and Solvia (latent). Review caught the
+        circularity: the carousel selectors matched nothing except the test's
+        own markup, so the test proved "decompose removes nodes matching my
+        selectors", not that a real neighbour rail exists.
+
+        This uses `fotocasa_sample_detail_reference.html`, trimmed from a real
+        fetch of the issue #149 listing, whose header records the counts
+        measured on two real pages of different property types: the reference
+        renders exactly once, and the "similares" strings present are i18n
+        translation values inside the embedded JSON, not neighbour cards.
+        Hence no `drop=` in `_reference_fallback_text`.
+        """
+        html = _read_fixture("fotocasa_sample_detail_reference.html")
+        # The one thing that would invalidate the no-drop decision: if a real
+        # page ever grows a second reference, this fails and prompts a rethink.
+        # Counted over *rendered* text, not the raw source — the fixture's
+        # header comment quotes the label while documenting the measurement,
+        # and a raw substring count would score its own provenance note.
+        fixture_soup = BeautifulSoup(html, "html.parser")
+        assert fixture_soup.get_text(" ", strip=True).count("Referencia:") == 1
+        assert len(fixture_soup.select(".re-FormContactDetail-referenceAlias")) == 1
+        raw = RawListing(
+            external_id="190239270",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/es/comprar/vivienda/sevilla-capital/trastero/190239270/d",
+                # JSON path deliberately absent so the CSS fallback is what runs.
+                "props": {
+                    "realEstate": {
+                        "price": 14000,
+                        "address": {},
+                        "coordinates": {},
+                        "features": {},
+                        "descriptions": {},
+                        "multimedia": [],
+                    }
+                },
+                "html": html,
+            },
+        )
+        canonical = FotocasaConnector().normalize(raw)
+        assert canonical.reference_code == "LCSE43927"
+
+    def test_reference_survives_the_round_trip_to_listing_reference_code(self, pg_conn):
+        """Issue #149's AC: the code must reach `listing.reference_code`, not
+        merely be parsed.
+
+        `normalize()` returns a well-formed dataclass whether or not the value
+        actually lands in the column the dedup signal reads. PR #138 shipped a
+        mapping where 19 normalize()-only tests passed while 100% of real
+        ingests failed on a CHECK constraint, so a parse assertion is not
+        evidence of persistence. Uses the exact listing from the bug report
+        (190239270 / LCSE43927).
+        """
+        _apply_schema(pg_conn)
+        raw = RawListing(
+            external_id="190239270",
+            source="fotocasa",
+            raw={
+                "url": "https://www.fotocasa.es/es/comprar/vivienda/sevilla-capital/trastero/190239270/d",
+                "props": {
+                    "realEstate": {
+                        "price": 12000,
+                        "reference": "LCSE43927",
+                        "buildingType": "Flat",
+                        "address": {},
+                        "coordinates": {},
+                        "features": {},
+                        "descriptions": {},
+                        "multimedia": [],
+                    }
+                },
+            },
+        )
+        _upsert_canonical_listing(pg_conn, FotocasaConnector().normalize(raw))
+        pg_conn.commit()
+
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "SELECT reference_code FROM listing "
+                "WHERE source = 'fotocasa' AND external_id = '190239270'"
+            )
+            row = cur.fetchone()
+        assert row is not None, "nothing persisted"
+        assert row[0] == "LCSE43927"
 
 
 class TestSchemaSupersetFields:

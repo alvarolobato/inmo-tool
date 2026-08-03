@@ -59,6 +59,49 @@ def first_present(*getters: Callable[[], T | None], field: str) -> T | None:
     return None
 
 
+def scoped_node(
+    node: Any,
+    *,
+    keep: str | None = None,
+    drop: Sequence[str] = (),
+) -> Any | None:
+    """Return the subject element after removing `drop` and scoping to `keep`.
+
+    The element-returning sibling of `scoped_text`, for callers that need to
+    run their own regex over the result, read attributes, or iterate child
+    elements rather than consume a flattened string (issue #149 needed a
+    regex over the scoped markup; flattening first would have thrown away
+    the structure it matches against).
+
+    `drop` is applied BEFORE `keep`, which matters: `keep` resolves via
+    `select_one`, so it takes the first match in document order. If a
+    contaminating subtree happens to contain an element matching `keep` and
+    renders earlier in the document, keeping first would select the
+    *neighbour's* container and the subsequent drop would be a no-op on the
+    wrong subtree. Dropping first makes the two options compose in the only
+    order that is correct in every case (Opus review, PR #153).
+
+    Never mutates the caller's tree: `drop` operates on a copy, because a
+    shared helper that silently `decompose()`d the caller's soup would be a
+    trap for the next connector to reach for it — connectors memoise a
+    single parsed soup across every fallback getter, so an in-place
+    decompose would strip markup out from under the other extractors.
+    """
+    if node is None:
+        return None
+    scope = node
+    if drop:
+        scope = copy.copy(scope)
+        for selector in drop:
+            for contaminant in scope.select(selector):
+                contaminant.decompose()
+    if keep is not None:
+        scope = scope.select_one(keep)
+        if scope is None:
+            return None
+    return scope
+
+
 def scoped_text(
     node: Any,
     *,
@@ -66,7 +109,7 @@ def scoped_text(
     drop: Sequence[str] = (),
     separator: str = " ",
 ) -> str | None:
-    """Flatten an element's text after scoping to `keep` and removing `drop`.
+    """Flatten an element's text after removing `drop` and scoping to `keep`.
 
     Exists because three separate connectors independently hit the same bug:
     a listing page renders a "similar properties" carousel whose cards carry
@@ -96,19 +139,14 @@ def scoped_text(
     shared helper that silently `decompose()`d the caller's soup would be a
     trap for the next connector to reach for it. The copy costs one deep-copy
     per listing fetch, negligible against the HTTP request that produced it.
+
+    Scoping order (`drop` then `keep`) and the copy semantics both live in
+    `scoped_node`, which this delegates to — use that directly when you need
+    the element rather than its flattened text.
     """
-    if node is None:
+    scope = scoped_node(node, keep=keep, drop=drop)
+    if scope is None:
         return None
-    scope = node
-    if keep is not None:
-        scope = node.select_one(keep)
-        if scope is None:
-            return None
-    if drop:
-        scope = copy.copy(scope)
-        for selector in drop:
-            for contaminant in scope.select(selector):
-                contaminant.decompose()
     return scope.get_text(separator, strip=True) or None
 
 

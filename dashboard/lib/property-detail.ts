@@ -19,6 +19,12 @@ export interface PropertyListingDetail {
   listing_kind: string | null;
   status: string;
   current_price: number | null;
+  /**
+   * Seller/agency reference (issue #72), e.g. "LCSE43927". Per-listing, not
+   * per-property: each portal carries the code its own seller assigned, and
+   * a shared code across sources is what the dedup signal keys on.
+   */
+  reference_code: string | null;
   first_seen_at: string | null;
   last_seen_at: string | null;
 }
@@ -81,6 +87,7 @@ interface RawListingRow {
   listing_kind: string | null;
   status: string;
   current_price: string | null;
+  reference_code: string | null;
   first_seen_at: string | null;
   last_seen_at: string | null;
   photo_urls: string[] | null;
@@ -119,7 +126,7 @@ export async function getPropertyDetail(propertyId: number): Promise<PropertyDet
     ),
     sql<RawListingRow>(
       `SELECT id, source, url, listing_kind, status, current_price,
-              first_seen_at, last_seen_at, photo_urls
+              reference_code, first_seen_at, last_seen_at, photo_urls
          FROM listing
         WHERE property_id = $1
         ORDER BY source`,
@@ -179,6 +186,7 @@ export async function getPropertyDetail(propertyId: number): Promise<PropertyDet
       listing_kind: l.listing_kind,
       status: l.status,
       current_price: l.current_price !== null ? Number(l.current_price) : null,
+      reference_code: l.reference_code,
       first_seen_at: l.first_seen_at,
       last_seen_at: l.last_seen_at,
     })),
