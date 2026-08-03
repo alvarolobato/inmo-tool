@@ -107,8 +107,19 @@ class TestFieldExtraction:
         price directly above the current one inside the same `precio`
         container. An earlier version fell through to a page-wide
         euro-amount search and reported 310.000 € as the asking price
-        instead of 288.000 €. The `<del>` in the fixture is what makes
-        this test meaningful."""
+        instead of 288.000 €.
+
+        Issue #177 (N2) correction: this fixture HAS a `<meta
+        name="description">`, so `extract_price`'s primary path
+        (`from_meta`, a plain regex over the meta description's "por
+        <price> €" text) wins via `first_present` before `from_precio_rojo`
+        ever runs — the `<del>` sibling is never actually visited by THIS
+        test. The `<del>` here only proves the meta-description path
+        doesn't get confused by it (it can't: `from_meta` never touches the
+        DOM at all). The fallback's own `<del>`-scoping — the thing
+        `scoped_text(keep=".precio-rojo")` actually has to get right — is
+        covered by `test_price_falls_back_to_precio_rojo_when_meta_is_absent`
+        below, not here."""
         page = _fixture("vivantial_sample_detail.html")
         assert "310.000" in page, "fixture must retain the struck-through price"
         assert extract_price(page) == Decimal(288000)
@@ -116,8 +127,19 @@ class TestFieldExtraction:
     def test_price_falls_back_to_precio_rojo_when_meta_is_absent(self):
         """EC: a field with a working fallback chain, proven with the primary
         path removed. The fallback must still read the `.precio-rojo`
-        element specifically, not the sibling (empty, in this fixture)
-        plain `precio` div.
+        element specifically, not the sibling `precio` div — which (issue
+        #177, N2) now carries a REAL `<del>310.000 €</del>` struck-through
+        previous price, matching real captured Vivantial markup, not an
+        empty placeholder div. Before this fix, this fixture's sibling
+        `precio` div was empty, so nothing here ever exercised
+        `from_precio_rojo`'s actual `<del>`-avoidance — the ONLY test that
+        mentioned `<del>` at all (the one above) exercises the unrelated
+        `from_meta` path instead, since that fixture has a meta
+        description. This is the real regression `scoped_text(keep=
+        ".precio-rojo")` (or the regex it replaced) has to guard against:
+        reading 310.000 (the struck-through previous price) instead of
+        288.000 (the current one) when the fallback path is the one
+        actually in play.
 
         This fixture used to also embed a fabricated `<section
         class="similares">` decoy carrying a "310.000 €" figure, framed as
@@ -128,14 +150,11 @@ class TestFieldExtraction:
         would ever have read a page-wide, unscoped match in the first
         place — the decoy was inert theatre, not a regression test, and (per
         issue #169's research on this same PR) Vivantial's real pages don't
-        render a server-side "similar properties" section at all. The real
-        neighbour-shaped risk this site actually has — the struck-through
-        *previous* price living in a sibling `precio` div on a discounted
-        listing — is covered by `test_price_ignores_the_struck_through_previous_price`
-        above, against real captured fixtures.
+        render a server-side "similar properties" section at all.
         """
         page = _fixture("vivantial_sample_detail_no_meta.html")
         assert 'name="description"' not in page
+        assert "310.000" in page, "fixture must retain the struck-through price"
         assert extract_price(page) == Decimal(288000)
 
     def test_photo_urls_are_absolute_and_exclude_site_chrome(self):
@@ -216,15 +235,20 @@ class TestGeographyResolution:
     @pytest.mark.parametrize(
         ("center", "expected_slug"),
         [
-            # Costa del Sol (issue #169 course-correction v1 market) — real
-            # gazetteer coordinates, tight radius so the match can only come
-            # from that municipality's own _CITY_SLUGS entry (Marbella is
-            # deliberately absent from the table — the live sitemap has no
-            # entries there — so it isn't included here).
-            ((36.75854, -4.39717), "malaga"),
-            ((36.44543, -5.12739), "estepona"),
-            ((36.58975, -4.54213), "benalmadena"),
-            ((36.53507, -4.67355), "mijas"),
+            # Costa del Sol (issue #169 course-correction v1 market) —
+            # independently-sourced landmark coordinates (issue #177, M2:
+            # these used to be copied from the gazetteer's own row for each
+            # town, which can only prove nearest_place agrees with itself —
+            # see etl/tests/test_geography.py's TestNearestPlaceReturnsProvince
+            # docstring for the full reasoning and the exact "mijas"
+            # regression this caught), tight radius so the match can only
+            # come from that municipality's own _CITY_SLUGS entry (Marbella
+            # is deliberately absent from the table — the live sitemap has
+            # no entries there — so it isn't included here).
+            ((36.7211, -4.4220), "malaga"),  # Plaza de la Constitución
+            ((36.42643, -5.1465), "estepona"),  # Plaza San Francisco
+            ((36.58975, -4.54213), "benalmadena"),  # general municipality area
+            ((36.59556, -4.63722), "mijas"),  # Mijas PUEBLO, not the gazetteer point
         ],
     )
     def test_costa_del_sol_v1_market_towns_resolve_to_their_own_slug(

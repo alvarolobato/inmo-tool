@@ -69,15 +69,21 @@ class TestScopeResolution:
     @pytest.mark.parametrize(
         ("center", "expected_key"),
         [
-            # Costa del Sol (issue #169 course-correction v1 market) — real
-            # gazetteer coordinates for each municipality, tight radius so a
+            # Costa del Sol (issue #169 course-correction v1 market) —
+            # independently-sourced landmark coordinates (issue #177, M2:
+            # not copied from the gazetteer's own row for each municipality
+            # — see test_geography.py's TestNearestPlaceReturnsProvince
+            # docstring for why that distinction matters), tight radius so a
             # match can only come from that municipality's own _CITY_SLUGS
             # entry, not a wide-radius coincidental hit on a neighbour.
-            ((36.75854, -4.39717), "malaga/malaga"),
-            ((36.51443, -4.88604), "malaga/marbella"),
-            ((36.44543, -5.12739), "malaga/estepona"),
-            # Greater Sevilla (owner's other stated v1 market)
-            ((37.25217, -5.95985), "sevilla/dos-hermanas"),
+            ((36.7211, -4.4220), "malaga/malaga"),  # Plaza de la Constitución
+            ((36.51667, -4.88333), "malaga/marbella"),  # Wikipedia infobox
+            ((36.42643, -5.1465), "malaga/estepona"),  # Plaza San Francisco
+            # Greater Sevilla (owner's other stated v1 market) — the
+            # task/PR reviewer's own measured Dos Hermanas centroid, also
+            # the exact point of the Dos Hermanas regression case (see
+            # test_geography.py's TestDosHermanasRegression).
+            ((37.283689, -5.9226718), "sevilla/dos-hermanas"),
         ],
     )
     def test_v1_market_towns_resolve_to_their_own_provincia_municipio(

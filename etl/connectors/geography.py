@@ -41,6 +41,17 @@ by any of this: it is still correct to refuse a match farther than that (or
 farther than the scope's own tighter radius) from every known point, so a
 profile near the Portuguese border doesn't get silently matched to the
 nearest Spanish town across it.
+
+Issue #177 (Opus review of #169) history, also worth keeping: a denser
+gazetteer introduced its own silent failure mode. Plain nearest-neighbour
+is population-blind, so a point genuinely inside a big city could resolve
+to a smaller neighbouring municipality with a marginally closer centroid —
+one that's typically NOT in any connector's own coverage table, so the
+scope got silently skipped as "no coverage" one layer below the #169 fix
+(real cases: Barcelona's Sant Martí resolving to Sant Adrià de Besòs;
+Valencia's Benimaclet resolving to Alboraya). See `_population_credit_km`
+and `nearest_place`'s own docstring for the fix (a small population-based
+bias on the ranking, not a change to the distance bound).
 """
 
 from __future__ import annotations
@@ -120,28 +131,88 @@ def _haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
     return 2 * 6371.0 * math.asin(math.sqrt(h))
 
 
+# Issue #177 (Opus review of #169, M3): plain nearest-neighbour is
+# population-blind, so a point genuinely inside a big city (Barcelona,
+# Madrid, Valencia — all in every connector's own _CITY_SLUGS/coverage
+# table) can resolve to a much smaller, unrelated neighbouring municipality
+# that happens to have a marginally closer centroid, and that smaller
+# place is typically NOT in any connector's coverage table — the point
+# resolves "successfully" to a real gazetteer entry, but scope_key() then
+# returns None (that resolved municipality just isn't one this connector
+# crawls), and the whole scope is silently skipped as "no coverage",
+# exactly the failure mode issue #169 exists to eliminate, just one layer
+# deeper. Measured real cases (independently-sourced coordinates, not the
+# gazetteer's own): a point at Barcelona's Sant Martí district resolves to
+# "sant adria de besos" (pop 34,482) instead of "barcelona" (pop
+# 1,620,943); a point at Valencia's Benimaclet neighbourhood resolves to
+# "alboraya" (pop 23,228) instead of "valencia" (pop 797,028).
+#
+# Fix: bias the nearest-neighbour ranking by population, cheaply
+# approximating "a bigger city's built-up area extends farther from its
+# recorded centroid than a small town's does" without needing real
+# municipality-boundary polygons (not available in the vendored gazetteer
+# — see geodata/README.md). `ln(1 + population)` grows slowly enough that
+# it only overturns a match when the raw distances are close (a few km);
+# it cannot make a genuinely distant big city (e.g. Madrid, ~270km away)
+# beat a real nearby small town, since a big city's maximum credit here
+# (Madrid, pop 3.2M: ln(1+pop) ≈ 15) is far smaller than that kind of gap.
+# Calibrated (see test_geography.py's TestPopulationWeightedResolution)
+# against three real constraints simultaneously: (1) Barcelona/Sant Adria
+# and (2) Valencia/Alboraya above must resolve to the big city, while (3)
+# Getafe (pop 180,747, ~2.5km from a real Getafe-centered point) must
+# still beat Madrid (pop 3.2M, ~12.4km from that same point) — Getafe is
+# its own real, distinct, closer municipality and must not be swallowed by
+# its much-larger neighbour just because Madrid's population credit is
+# bigger. `_POPULATION_WEIGHT_KM = 1.0` clears all three with several km
+# of margin each; the exact value is not sacred, but changing it requires
+# re-checking all three cases, not just one.
+_POPULATION_WEIGHT_KM = 1.0
+
+
+def _population_credit_km(population: int) -> float:
+    return _POPULATION_WEIGHT_KM * math.log1p(max(population, 0))
+
+
 def nearest_place(
     center: tuple[float, float], radius_km: float | None = None
 ) -> Place | None:
-    """Return the nearest gazetteer entry for `center`, or None if too far.
+    """Return the nearest (population-weighted) gazetteer entry for `center`,
+    or None if too far.
 
-    "Too far" means farther than `min(_MAX_MATCH_DISTANCE_KM, radius_km)`
-    from every known place — a profile scoped somewhere with no nearby
-    known municipality should be flagged as unresolvable, not silently
-    mapped to a random nearest place (see `resolve_place`, the caller most
-    code should actually use).
+    "Nearest" is not pure haversine distance — see
+    `_population_credit_km`'s module-level comment (issue #177, M3): a
+    bigger municipality gets a small credit against its raw distance, so a
+    point genuinely inside e.g. Barcelona resolves to Barcelona rather than
+    to a much smaller neighbouring town whose centroid happens to be
+    marginally closer. This selection bias is intentionally small (see the
+    same comment) — it changes which of several *nearby* places wins, it
+    never reaches out to make a distant big city win over a genuinely
+    local match.
+
+    "Too far" still means farther than `min(_MAX_MATCH_DISTANCE_KM,
+    radius_km)` from the WINNING place — that bound is checked against the
+    winner's real haversine distance, never the population-adjusted score,
+    so the population bias can change which place wins but can never
+    extend how far away a match is allowed to be. A profile scoped
+    somewhere with no nearby known municipality is still flagged as
+    unresolvable, not silently mapped to a random nearest place (see
+    `resolve_place`, the caller most code should actually use).
 
     `radius_km` (a profile's own search radius, when given) tightens the
     global `_MAX_MATCH_DISTANCE_KM` ceiling rather than replacing it — see
     the module-level constant's docstring, and
     `TestNearestPlaceRadiusBounding` in test_geography.py for the exact
-    Getafe/Madrid scenario this guards.
+    Getafe/Madrid scenario this guards (also the scenario that bounds how
+    large `_POPULATION_WEIGHT_KM` may safely be).
     """
     best: Place | None = None
     best_distance = math.inf
+    best_score = math.inf
     for place in PLACES:
         distance = _haversine_km(center, (place.lat, place.lon))
-        if distance < best_distance:
+        score = distance - _population_credit_km(place.population)
+        if score < best_score:
+            best_score = score
             best_distance = distance
             best = place
 

@@ -297,7 +297,10 @@ def build(es_dump_path: str, admin2_codes_path: str) -> list[tuple[str, ...]]:
     for row in existence_candidates:
         key = (row[0], row[3])
         existing = best.get(key)
-        if existing is None or _EXISTENCE_PRIORITY[row[5]] < _EXISTENCE_PRIORITY[existing[5]]:
+        if (
+            existing is None
+            or _EXISTENCE_PRIORITY[row[5]] < _EXISTENCE_PRIORITY[existing[5]]
+        ):
             best[key] = row
 
     final_rows = []
@@ -306,7 +309,9 @@ def build(es_dump_path: str, admin2_codes_path: str) -> list[tuple[str, ...]]:
             admin_row, coord_candidates_by_admin3
         )
         name, _lat, _lon, province, population, _fc, _gid, _admin3 = admin_row
-        final_rows.append((name, lat, lon, province, population, feature_code, geonameid))
+        final_rows.append(
+            (name, lat, lon, province, population, feature_code, geonameid)
+        )
 
     return sorted(final_rows, key=lambda r: (r[0], r[3]))
 

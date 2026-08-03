@@ -19,6 +19,11 @@ import pytest
 from etl import orchestrator
 from etl.connectors.base import CanonicalListingVersion
 from etl.connectors.fotocasa import FotocasaConnector
+from etl.connectors.geography import (
+    UnresolvableGeographyError,
+    resolve_place,
+    unresolvable_scope_key,
+)
 from etl.tests.fixtures.dummy_connector import DiscoverFailsConnector, DummyConnector
 
 _SCHEMA_SQL = Path(__file__).parent.parent / "schema" / "init.sql"
@@ -1856,6 +1861,194 @@ class TestSkipIfSeenIntegration:
             with pg_conn.cursor() as cur:
                 for r in run_ids:
                     cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+
+
+class _GeographyAwareConnector(DummyConnector):
+    """Mimics a real connector's geography-resolution contract — `scope_key`
+    delegating to the shared gazetteer and returning the
+    `unresolvable_scope_key` sentinel (not None) for a scope
+    `resolve_place` can't identify, `discover()` calling `resolve_place`
+    and letting `UnresolvableGeographyError` propagate uncaught — without
+    any network dependency. Every real connector follows this exact shape
+    (see e.g. fotocasa.py's `scope_key`/`discover`); this is the minimal
+    version needed to drive the real sentinel path through the orchestrator
+    for issue #177's M4 tests below.
+
+    `discovers_full_inventory=True` (unlike Fotocasa, which is
+    permanently False and so is EXCLUDED from withdrawal reconciliation
+    regardless of this bug — see run_connector's `reconcilable` gate) is
+    load-bearing here: it's what lets these tests actually exercise
+    reconciliation, which is the specific behaviour M4 is about.
+    """
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("discovers_full_inventory", True)
+        super().__init__(**kwargs)
+
+    def scope_key(self, scope):
+        try:
+            place = resolve_place(scope)
+        except UnresolvableGeographyError:
+            return unresolvable_scope_key(scope)
+        if place is None:
+            return None
+        return place.name
+
+    def discover(self, scope, throttle):
+        self.scopes_seen.append(scope)
+        resolve_place(scope)  # raises UnresolvableGeographyError, left uncaught
+        return list(self.external_ids)
+
+
+class TestUnresolvableScopeReconciliationIsolation:
+    """Issue #177 (Opus review of #169), M4: a scope whose center resolves
+    to nowhere in the gazetteer at all must not poison this run's handling
+    of every OTHER, perfectly resolvable scope for the same connector.
+
+    Before this fix, `etl/orchestrator.py`'s per-scope loop treated
+    `UnresolvableGeographyError` (raised by the sentinel `scope_key()` path
+    — see geography.py's `unresolvable_scope_key` docstring) identically to
+    any other `discover()` failure: it set `reconcilable_union = False` for
+    the WHOLE connector run (skipping withdrawal reconciliation even for
+    scopes that resolved and crawled fine) and `any_scope_failed = True`
+    (permanently marking the connector 'failed' on every run for as long
+    as the one bad profile stayed active) — directly contradicting this
+    same function's own documented intent ("an unresolvable-for-everyone
+    connector must not end up permanently 'failed'").
+    """
+
+    def test_mixed_resolvable_and_unresolvable_scopes_stays_ok_and_reconciles(
+        self, pg_conn
+    ):
+        _apply_schema(pg_conn)
+        # Two active profiles: the fixture's Madrid one (resolvable,
+        # `_apply_schema` already seeded it) plus a genuinely unresolvable
+        # Lisbon one, active for the whole test.
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO search_profile (name, scope) VALUES (%s, %s) RETURNING id",
+                (
+                    "m4-unresolvable-profile",
+                    (
+                        '{"geography": {"type": "radius", '
+                        '"center": [38.7223, -9.1393], "radius_km": 10}}'
+                    ),
+                ),
+            )
+            (profile_id,) = cur.fetchone()
+        pg_conn.commit()
+
+        connector = _GeographyAwareConnector(
+            name="m4-isolation-test", external_ids=("w-1", "w-2")
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, discovered_count, error_msg "
+                    "FROM connector_run_results "
+                    "WHERE run_id = %s AND connector_name = %s",
+                    (run_ids[-1], connector.name),
+                )
+                status, discovered_count, error_msg = cur.fetchone()
+            assert status == "ok", (
+                "one unrelated unresolvable-geography profile (Lisbon) must "
+                "not flip the WHOLE connector to 'failed' when its other "
+                "scope (the Madrid fixture profile) resolved and crawled "
+                "fine this same run"
+            )
+            assert discovered_count == 2
+            assert error_msg is not None and "unresolvable" in error_msg.lower(), (
+                "the unresolvable scope must still be a VISIBLE outcome in "
+                "error_msg, not silently dropped just because the "
+                "connector's overall status ended up 'ok'"
+            )
+
+            # w-2 stops appearing from here on. The Lisbon scope keeps
+            # failing (with UnresolvableGeographyError) on every single one
+            # of these runs too — that's the whole point.
+            connector.external_ids = ("w-1",)
+            for _ in range(orchestrator._WITHDRAWAL_THRESHOLD):
+                run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM listing WHERE source = %s AND external_id = %s",
+                    (connector.name, "w-2"),
+                )
+                (w2_status,) = cur.fetchone()
+            assert w2_status == "withdrawn", (
+                "a genuinely gone listing under the resolvable Madrid scope "
+                "must still withdraw via reconciliation — proving the "
+                "unresolvable Lisbon scope (present in every one of these "
+                "runs) did not disable reconciliation for this connector"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            with pg_conn.cursor() as cur:
+                for r in run_ids:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+                cur.execute("DELETE FROM search_profile WHERE id = %s", (profile_id,))
+            pg_conn.commit()
+
+    def test_only_unresolvable_scopes_still_reports_failed(self, pg_conn):
+        """The other half of the fix: when NOTHING this run ever resolved
+        (every active scope is unresolvable, or otherwise never reached a
+        successful `run_connector` call), the connector must still report
+        'failed' — the fix narrows WHEN 'failed' applies, it does not make
+        an all-bad run silently look healthy. Mirrors
+        `TestCircuitBreakerIntegration.test_unresolvable_geography_reaches_
+        connector_run_results_as_failed` (a real FotocasaConnector), using
+        the lightweight `_GeographyAwareConnector` instead so this stays
+        independent of Fotocasa's own `discovers_full_inventory=False`
+        quirk."""
+        _apply_schema(pg_conn)
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE search_profile SET archived_at = NOW() "
+                "WHERE archived_at IS NULL"
+            )
+            cur.execute(
+                "INSERT INTO search_profile (name, scope) VALUES (%s, %s) RETURNING id",
+                (
+                    "m4-only-unresolvable-profile",
+                    (
+                        '{"geography": {"type": "radius", '
+                        '"center": [38.7223, -9.1393], "radius_km": 10}}'
+                    ),
+                ),
+            )
+            (profile_id,) = cur.fetchone()
+        pg_conn.commit()
+
+        connector = _GeographyAwareConnector(name="m4-all-bad-test")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, error_msg FROM connector_run_results "
+                    "WHERE run_id = %s AND connector_name = %s",
+                    (run_id, connector.name),
+                )
+                status, error_msg = cur.fetchone()
+            assert status == "failed"
+            assert error_msg is not None and "unresolvable" in error_msg.lower()
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            with pg_conn.cursor() as cur:
+                cur.execute("DELETE FROM search_profile WHERE id = %s", (profile_id,))
+                cur.execute(
+                    "UPDATE search_profile SET archived_at = NULL WHERE name = %s",
+                    (_TEST_PROFILE_NAME,),
+                )
             pg_conn.commit()
 
 

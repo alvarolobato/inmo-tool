@@ -53,6 +53,22 @@ GeoNames code the row came from, for traceability), `geonameid` (GeoNames'
 own stable id, for looking a row up on geonames.org if a coordinate looks
 wrong).
 
+**Coordinate preference (PR #177)**: which (name, province) key survives a
+dedup is unchanged (ADM3 first, as above), but the LAT/LON that surviving
+row carries is a separate decision handled by `_pick_coordinate` in the
+build script. GeoNames' plain `ADM3` row is a reference point for the
+*administrative division's boundary*, not necessarily anywhere near where
+the population actually is — measured up to 8.27km off for Madrid, 7.47km
+for Mijas. When a locality-type record (`PPLC`/`PPLA`/`PPLA2`/`PPLA3`/
+`PPLA4`, or a plain `PPL` fallback) exists for the exact same municipality
+(matched by GeoNames' `admin3 code`, Spain's real per-municipio INE code —
+never by name/province text, which can't distinguish two same-named
+villages), its coordinate is used instead — `feature_code`/`geonameid` in
+this file then reflect that locality row, not the ADM3 one, even though
+the municipality's name/province/population still come from ADM3. See
+`_pick_coordinate`'s docstring in `scripts/build-es-gazetteer.py` for the
+full matching logic and the exact measured offsets.
+
 ## What this file is NOT
 
 It does not encode any connector's URL/query vocabulary (a Fotocasa city
