@@ -392,3 +392,73 @@ describe("end-to-end write + read", () => {
     expect(cfg["test.string_key"].source).toBe("file");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Canonical schema — per-flow OpenRouter model keys must match the real
+// DashboardLlmFlow enum, and the PowerShop-leftover keys must not reappear.
+// This loads the ACTUAL repo-root config/schema.yaml (the single canonical
+// source that dev, tests, and Docker all resolve to) — not a synthetic one.
+// ---------------------------------------------------------------------------
+
+describe("canonical config/schema.yaml — flow keys", () => {
+  // Repo-root config/schema.yaml relative to this test file:
+  // __tests__ → system-config → lib → dashboard → repo root.
+  const canonicalSchema = path.resolve(
+    __dirname,
+    "..",
+    "..",
+    "..",
+    "..",
+    "config",
+    "schema.yaml",
+  );
+
+  // Must match `DashboardLlmFlow` in dashboard/lib/llm-provider/types.ts, which
+  // is exactly what dashboard/lib/llm-provider/config.ts reads into
+  // openrouterModelByFlow.
+  const REAL_FLOWS = ["occupancy", "condition", "redflags", "extract", "compare", "chat"];
+  const STALE_FLOWS = ["generate", "modify", "analyze", "weekly"];
+
+  function loadCanonical() {
+    const missingConfig = path.join(_dir, "no-such-config.yaml");
+    return getSystemConfig({
+      schemaPath: canonicalSchema,
+      configPath: missingConfig,
+      noCache: true,
+    });
+  }
+
+  it("exposes a per-flow OpenRouter model key for every real DashboardLlmFlow", () => {
+    const cfg = loadCanonical();
+    for (const flow of REAL_FLOWS) {
+      const key = `dashboard.llm_model_openrouter_${flow}`;
+      expect(cfg[key], `missing canonical schema key ${key}`).toBeDefined();
+      expect(cfg[key].env).toBe(`DASHBOARD_LLM_MODEL_OPENROUTER_${flow.toUpperCase()}`);
+    }
+  });
+
+  it("does NOT contain the stale PowerShop-leftover flow keys", () => {
+    const cfg = loadCanonical();
+    for (const flow of STALE_FLOWS) {
+      const key = `dashboard.llm_model_openrouter_${flow}`;
+      expect(cfg[key], `stale schema key ${key} must not exist`).toBeUndefined();
+    }
+  });
+
+  it("preserves the complete key set (postgres/etl/infra/dashboard) with correct types", () => {
+    const cfg = loadCanonical();
+    // A representative key from each section survives the reconciliation.
+    for (const key of [
+      "postgres.user",
+      "postgres.dsn",
+      "etl.dashboard_base_url",
+      "infra.host_bind",
+      "dashboard.llm_provider",
+      "dashboard.llm_model_openrouter",
+    ]) {
+      expect(cfg[key], `missing canonical schema key ${key}`).toBeDefined();
+    }
+    // query_cost_limit is an integer threshold — the canonical type is int.
+    expect(cfg["dashboard.query_cost_limit"].type).toBe("int");
+  });
+});

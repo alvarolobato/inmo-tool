@@ -64,13 +64,23 @@ export type SystemConfig = Record<string, ConfigValue>;
 // ---------------------------------------------------------------------------
 
 function resolveSchemaPath(): string {
+  // The single canonical schema is the repo-root config/schema.yaml. It is NOT
+  // baked into the image; docker-compose bind-mounts it to /app/config/schema.yaml
+  // (and sets CONFIG_SCHEMA_PATH to that path). There is intentionally no
+  // dashboard/config/schema.yaml — dev, tests, and Docker all resolve to the one
+  // repo-root file via the candidates below.
+  //
   // Candidates in priority order:
-  //   1. Explicit override via env var (always wins).
-  //   2. /app/config/schema.yaml — the path where Dockerfile COPYs the file
-  //      in the standalone image (process.cwd() inside standalone is
-  //      /app/.next/server, so relative paths from cwd are unreliable).
-  //   3. Relative to cwd for local dev (dashboard/ is cwd when running `next dev`).
-  //   4. Repo-root relative to this source file (tests running in dashboard/).
+  //   1. Explicit override via env var (always wins — Docker sets this to the
+  //      bind-mounted /app/config/schema.yaml).
+  //   2. /app/config/schema.yaml — the docker-compose bind-mount target
+  //      (process.cwd() inside standalone is /app/.next/server, so relative
+  //      paths from cwd are unreliable there).
+  //   3. cwd/config/schema.yaml — repo-root config when cwd is the repo root.
+  //   4. cwd/../config/schema.yaml — repo-root config when cwd is dashboard/
+  //      (local `next dev` and vitest both run with cwd=dashboard/; there is no
+  //      dashboard/config/schema.yaml, so #3 misses and this hits).
+  //   5. Repo-root relative to this source file (last-resort for odd cwds).
   const candidates = [
     process.env.CONFIG_SCHEMA_PATH,
     "/app/config/schema.yaml",
