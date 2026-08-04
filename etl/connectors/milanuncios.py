@@ -315,6 +315,46 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
+# Issue #206 / D-020: the CDN behind `ad.images` 404s "Rule parameter not
+# Found" without an explicit `?rule=<preset>` query parameter — see
+# `normalize()`'s own comment on `photo_urls` for the full live investigation
+# (both hosts, both failure/success bodies). Hoisted to module level (out of
+# `normalize()`'s old local closure) for two reasons:
+#
+# 1. Issue #210: PR #209 only fixed this at ingest time. The 795 URLs already
+#    sitting in `listing.photo_urls` before that deploy needed a one-off
+#    backfill migration (`etl/schema/init.sql`'s "Backfill: Milanuncios photo
+#    URLs..." block) — matching that migration's SQL against this exact rule
+#    is the whole point of pulling it out somewhere importable/testable
+#    instead of leaving it trapped inside `normalize()`.
+# 2. `test_connector_milanuncios.py::test_migration_sql_matches_add_photo_rule_if_missing`
+#    (DB-backed) runs the real SQL UPDATE against a battery of URLs and
+#    asserts it produces byte-identical output to this function on the same
+#    inputs — the practical version of "the migration calls the same helper"
+#    a pure-SQL `init.sql` block can offer: one Python source of truth for
+#    the rule, one test that fails the moment the two drift.
+PHOTO_RULE = "detail_640x480"
+
+
+def add_photo_rule_if_missing(url: str) -> str:
+    """Append `?rule=<PHOTO_RULE>` (or `&rule=...` if *url* ends in a bare
+    `?`) when *url* carries no non-empty query string; otherwise return it
+    unchanged.
+
+    Byte-for-byte what `normalize()`'s photo-URL pipeline needs after the
+    scheme has already been normalized to `http(s)://` (see `normalize()` —
+    this function does not itself handle scheme-relative/bare-hostname
+    input, since every already-stored `listing.photo_urls` value predates
+    this split already carries a full scheme). Also what the init.sql
+    backfill migration's SQL reimplements — see the comment on `PHOTO_RULE`
+    above and `test_migration_sql_matches_add_photo_rule_if_missing`.
+    """
+    if urlsplit(url).query:
+        return url
+    separator = "&" if url.endswith("?") else "?"
+    return f"{url}{separator}rule={PHOTO_RULE}"
+
+
 # Fallback source for rooms/bathrooms/m2_built when `ad.attributes` doesn't
 # carry them (issue #78 must-fix) -- Milanuncios' free-text description
 # routinely spells these stats out in prose, e.g. "353 m2 construidos
@@ -569,8 +609,12 @@ class MilanunciosConnector(Connector):
         # "fotocasa_pro"` syndication) — Milanuncios just doesn't put the
         # parameter in the JSON, so this connector adds it instead of
         # storing a URL nothing downstream can actually fetch.
-        _PHOTO_RULE = "detail_640x480"
-
+        #
+        # The rule-appending itself is `add_photo_rule_if_missing` (module
+        # level, above) rather than inline here — issue #210 needed it
+        # importable from both a test that pins it against the init.sql
+        # backfill migration's SQL and (potentially) from that migration's
+        # own tooling. See that function's docstring/PHOTO_RULE's comment.
         def _to_photo_url(img: str) -> str:
             if img.startswith(("http://", "https://")):
                 url = img
@@ -578,10 +622,7 @@ class MilanunciosConnector(Connector):
                 url = f"https:{img}"
             else:
                 url = f"https://{img}"
-            if not urlsplit(url).query:
-                separator = "&" if url.endswith("?") else "?"
-                url = f"{url}{separator}rule={_PHOTO_RULE}"
-            return url
+            return add_photo_rule_if_missing(url)
 
         photo_urls = tuple(
             _to_photo_url(img) for img in images if isinstance(img, str) and img
