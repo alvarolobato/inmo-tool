@@ -89,6 +89,39 @@ def test_milanuncios_does_not_claim_full_inventory_coverage():
     assert MilanunciosConnector.discovers_full_inventory is False
 
 
+class TestSkipIfSeenBudget:
+    """Issue #179. The site caps this connector at ~5 detail fetches per run
+    (16 of 18 circuit-open runs in a 38h production window were identical at
+    `discovered=41 fetched=5 errors=5`). With skip-if-seen off, discover()'s
+    stable sorted order meant all 5 went to the same front every run: 24
+    distinct ids fetched across ~90 attempts. Turning it on lets the budget
+    reach never-fetched listings, which `_should_skip_fetch` rule 1 always
+    admits."""
+
+    def test_declares_a_24h_refetch_window(self):
+        assert MilanunciosConnector.min_refetch_interval_seconds == 24 * 60 * 60
+
+    def test_window_is_enabled_not_merely_defined(self):
+        """Guards the specific regression: reverting to the base default of 0
+        turns the feature off silently (see _should_skip_fetch rule 3), and a
+        test asserting only `>= 0` would not notice."""
+        assert MilanunciosConnector.min_refetch_interval_seconds > 0
+
+    def test_has_no_discovery_price_escape_hatch(self):
+        """The documented COST of the line above, asserted so it cannot be
+        forgotten. `_should_skip_fetch` rule 5 re-fetches immediately when a
+        discovery-time price disagrees with the stored one — but that rule
+        needs a non-empty discovered_prices(), which this connector cannot
+        supply (its `ad` entries carry no price field, and every live
+        re-check has been bot-blocked). So a price change on an
+        already-fetched listing can go unseen for up to the 24h window.
+        Accepted deliberately: today most discovered listings are never
+        fetched at all. If this assertion ever starts failing because a real
+        discovery price landed, revisit the trade-off comment on the
+        connector — the asymmetry with Fotocasa would be gone."""
+        assert MilanunciosConnector().discovered_prices() == {}
+
+
 class TestRateLimitMeasurement:
     """Issue #179 live measurement, 2026-08-03: production was tripping the
     circuit breaker every run at rate_limit_per_minute=20 (5 successes then

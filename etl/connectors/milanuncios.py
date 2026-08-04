@@ -442,9 +442,38 @@ class MilanunciosConnector(Connector):
     # honestly claim full coverage.
     discovers_full_inventory = False
 
-    # Issue #143: does NOT override discovered_prices() or set
-    # min_refetch_interval_seconds above 0 (the base default — always
-    # re-fetch). Investigated, not assumed: this connector's discover()
+    # Issue #179: skip-if-seen IS on, at Fotocasa's 24h precedent, and it is
+    # turned on WITHOUT the discovery-time price safety net that Fotocasa
+    # has. That asymmetry is deliberate; here is the evidence and the cost.
+    #
+    # Evidence (38h of production connector_run_results): 16 of 18
+    # circuit-open runs are byte-identical at `discovered=41 fetched=5
+    # errors=5`. The site caps this connector at ~5 detail fetches per run,
+    # per IP, and the cap resets by the next hourly run. With skip-if-seen
+    # OFF, `discover()` returns ids in a stable sorted order and the
+    # orchestrator spends all 5 fetches on the same front every run: across
+    # 18 runs (~90 attempts) only 24 DISTINCT ids were ever fetched. The
+    # budget was not the limit — re-fetching was. Same pathology and same
+    # fix as Fotocasa (#175), reached from a different cause.
+    #
+    # The cost, stated plainly: _should_skip_fetch's rule 5 (a discovery-time
+    # price that disagrees with the stored one forces an immediate re-fetch)
+    # CANNOT fire for this connector, because discovered_prices() is empty —
+    # see the paragraph below. So a price change on an already-fetched
+    # Milanuncios listing can go unnoticed for up to 24h, where the same
+    # change on Fotocasa is caught on the next sweep.
+    #
+    # That is still a strict improvement, which is why it ships: today the
+    # overwhelming majority of discovered listings are never fetched even
+    # once, so their price is not stale — it is absent. Trading "≤24h stale
+    # for the few we reach" against "never fetched at all for most" is worth
+    # it. Revisit the moment a live search-page fetch succeeds and the `ad`
+    # shape can be checked for a price field (see below) — that would
+    # restore rule 5 and remove the asymmetry entirely.
+    min_refetch_interval_seconds = 24 * 60 * 60
+
+    # Issue #143: does NOT override discovered_prices(). Investigated, not
+    # assumed: this connector's discover()
     # already parses `adListPagination.adList.ads[]` for `id`, and the
     # trimmed test fixtures (milanuncios_sample_search*.html — trimmed to
     # only fields the parsing code actually reads, per this project's own
