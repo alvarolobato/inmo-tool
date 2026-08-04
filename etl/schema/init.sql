@@ -686,11 +686,13 @@ CREATE TABLE IF NOT EXISTS photo_hashes (
     last_attempt_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
--- The store's read filters on (ok OR last_attempt_at > cutoff) for a set of
--- URLs, so failures needing a retry decision are found without scanning the
--- successes, which are the overwhelming majority once warm.
-CREATE INDEX IF NOT EXISTS idx_photo_hashes_retry
-    ON photo_hashes (last_attempt_at) WHERE NOT ok;
+-- No secondary index on purpose. The only query that reads this table is
+-- `photo_url = ANY(...) AND (ok OR last_attempt_at > cutoff)`, which the
+-- planner answers with a bitmap scan on the primary key and evaluates the
+-- second predicate as a heap filter — measured on 50k rows. A partial index
+-- on (last_attempt_at) WHERE NOT ok shipped in the first cut of #221 and was
+-- never chosen by that plan; it only cost write throughput on the hot path.
+DROP INDEX IF EXISTS idx_photo_hashes_retry;
 
 CREATE TABLE IF NOT EXISTS property_merge_log (
     id                  BIGSERIAL    PRIMARY KEY,

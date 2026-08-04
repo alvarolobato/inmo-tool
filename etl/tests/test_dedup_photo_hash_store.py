@@ -8,6 +8,7 @@ that quietly re-fetched but returned the right answer would still be the bug.
 
 from __future__ import annotations
 
+import zlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -60,17 +61,31 @@ class _FakeImageResponse:
         return False
 
 
-def _solid(color: int) -> Image.Image:
-    # Gradient, not a flat fill: phash is DCT-based and a perfectly uniform
-    # image has no frequency content to hash, so two different flat colours
-    # can collide. A gradient keeps distinct inputs distinct.
+def _image_for(url: str) -> Image.Image:
+    """A distinct, deterministic image per URL.
+
+    Deterministic so re-fetching a URL yields the same hash, and *distinct*
+    because a fixture that served one identical image for every URL made every
+    assertion about hash values true by construction: a store that returned
+    some other URL's hash, or returned the right hashes in the wrong order,
+    passed just as happily. The store's entire job is the URL→hash mapping, so
+    the fixture has to be able to tell one URL's image from another's.
+
+    Gradient rather than a flat fill: phash is DCT-based, so a perfectly
+    uniform image has no frequency content to hash and any two flat colours
+    collide. The x/y coefficients (not just an offset) are what actually
+    separate these — a constant offset alone is a mod-256 rotation that phash
+    is invariant to, i.e. `phash(offset 0) == phash(offset 40)`.
+    """
+    seed = zlib.crc32(url.encode())
+    fx, fy = 1 + seed % 7, 1 + (seed >> 3) % 11
     img = Image.new("L", (64, 64))
-    img.putdata([(color + x + y) % 256 for y in range(64) for x in range(64)])
+    img.putdata([(x * fx + y * fy) % 256 for y in range(64) for x in range(64)])
     return img
 
 
-def _ok_response(*_args, **_kwargs):
-    return _FakeImageResponse(_solid(0))
+def _ok_response(url, *_args, **_kwargs):
+    return _FakeImageResponse(_image_for(url))
 
 
 class TestSecondRunCostsNothing:
@@ -97,8 +112,15 @@ class TestSecondRunCostsNothing:
             )
         assert second.call_count == 0, "a warm store must not touch the network"
         # And the answer must be identical, not merely cheap — the hashes are
-        # what the whole dedup comparison rests on.
+        # what the whole dedup comparison rests on. The two URLs carry
+        # different images, so this also pins the per-URL mapping and the
+        # result order: a store that returned the right hashes for the wrong
+        # URLs, or the right set in the wrong order, fails here.
+        assert first_hashes[0] != first_hashes[1], "fixture must distinguish URLs"
         assert [str(h) for h in second_hashes] == [str(h) for h in first_hashes]
+        assert [str(h) for h in second_hashes] == [
+            str(imagehash.phash(_image_for(url))) for url in urls
+        ]
 
 
 class TestIncrementalWork:
@@ -242,10 +264,193 @@ class TestRoundTripFidelity:
     round trip would silently change every downstream Hamming distance."""
 
     def test_hash_survives_a_store_round_trip_exactly(self, store_db):
-        digest = imagehash.phash(_solid(40))
+        digest = imagehash.phash(_image_for("https://x/1.jpg"))
         photo_hash_store.save(
             store_db, photo_url="https://x/1.jpg", phash=digest, source="s"
         )
         loaded = photo_hash_store.load(store_db, ("https://x/1.jpg",))
         assert loaded["https://x/1.jpg"].phash == digest
         assert digest - loaded["https://x/1.jpg"].phash == 0
+
+
+class TestTheStoreCommitsIndependently:
+    """PR #226 blocker: nothing ever committed the store.
+
+    `save()` rode the dedup run's transaction, and `engine.run()` has no
+    commit of its own — the only commits are incidental ones inside
+    `perform_merge`/`file_suggestion`, i.e. only when a pair happens to fire.
+    So a run with no merges persisted nothing at all, and an interrupted cold
+    pass (~46 minutes over 24k URLs, by this PR's own measurement) discarded
+    every hash it had paid for. The optimisation could plausibly never warm up
+    in the real deployment.
+    """
+
+    def test_hashes_survive_an_aborted_run(self, store_db):
+        """What SIGINT / a container stop / an OOM kill does to the run's
+        transaction must not cost the hashes already paid for."""
+        urls = tuple(f"https://cdn.example.com/abort{i}.jpg" for i in range(5))
+        store_conn = photo_hash_store.open_connection()
+        assert store_conn is not None, "these tests need a reachable database"
+        try:
+            with patch(
+                "etl.dedup.signals.photo_hash.requests.get", side_effect=_ok_response
+            ):
+                photo_hash.fetch_hashes(urls, source="fotocasa", store_conn=store_conn)
+            # The run's own connection rolls back everything it was holding.
+            store_db.rollback()
+        finally:
+            photo_hash_store.close_connection(store_conn)
+
+        with store_db.cursor() as cur:
+            cur.execute("SELECT count(*) FROM photo_hashes WHERE ok")
+            assert cur.fetchone()[0] == 5
+
+    def test_open_connection_hands_out_a_connection_that_is_not_the_runs(
+        self, store_db
+    ):
+        """The commit above cannot be bought by committing inside `save()`:
+        the store would then be committing the dedup run's in-flight work too.
+        Its own connection is what makes a per-save commit safe."""
+        store_conn = photo_hash_store.open_connection()
+        try:
+            assert store_conn is not None
+            assert store_conn is not store_db
+            assert store_conn.autocommit is True
+        finally:
+            photo_hash_store.close_connection(store_conn)
+
+    def test_a_concurrent_run_is_not_blocked_by_an_in_flight_one(self, store_db):
+        """PR #226 major: run-long row locks.
+
+        Run A saves a URL; run B upserts the same URL (syndicated listings
+        share CDN objects across sources, so this is the common case, not a
+        corner). With A's write uncommitted, B blocked on the row lock for the
+        whole of A's run — bounded only by the 46-minute pass. `store_db`
+        stands in for run B, with a statement timeout so a lock wait fails the
+        test rather than hanging it.
+        """
+        shared = "https://cdn.example.com/syndicated.jpg"
+        digest = imagehash.phash(_image_for(shared))
+        run_a = photo_hash_store.open_connection()
+        assert run_a is not None
+        try:
+            assert photo_hash_store.save(
+                run_a, photo_url=shared, phash=digest, source="fotocasa"
+            )
+            with store_db.cursor() as cur:
+                cur.execute("SET statement_timeout = '5s'")
+            assert photo_hash_store.save(
+                store_db, photo_url=shared, phash=digest, source="milanuncios"
+            ), "run B blocked on run A's uncommitted row"
+        finally:
+            store_db.rollback()
+            with store_db.cursor() as cur:
+                cur.execute("SET statement_timeout = 0")
+            store_db.commit()
+            photo_hash_store.close_connection(run_a)
+
+
+class TestTheStoreCannotSinkARun:
+    """PR #226 major: `load`/`save` are best-effort by contract — "skip
+    (don't raise on) any that fail" — but were unguarded, so a DB hiccup
+    escaped into the dedup run and killed it. Pre-#221 a malformed URL cost
+    one photo; it must not now cost the run.
+    """
+
+    def test_load_degrades_to_empty_on_an_aborted_transaction(self, store_db):
+        """`InFailedSqlTransaction`: any earlier failed statement in the run
+        poisons the transaction, and every subsequent store read raises."""
+        import psycopg2
+
+        with store_db.cursor() as cur, pytest.raises(psycopg2.errors.UndefinedTable):
+            cur.execute("SELECT * FROM a_table_that_does_not_exist")
+        try:
+            assert photo_hash_store.load(store_db, ("https://cdn.example/x.jpg",)) == {}
+        finally:
+            store_db.rollback()
+
+    def test_save_degrades_to_false_on_a_nul_byte_in_the_url(self, store_db):
+        """psycopg2 raises `ValueError: A string literal cannot contain NUL`
+        client-side. Scraped URLs are not sanitised, so this is reachable from
+        real connector output."""
+        assert (
+            photo_hash_store.save(
+                store_db,
+                photo_url="https://cdn.example/\x00bad.jpg",
+                phash=None,
+                source="milanuncios",
+                failure_reason="whatever",
+            )
+            is False
+        )
+
+    def test_a_url_the_store_chokes_on_costs_one_photo_not_the_run(self, store_db):
+        """End to end through the caller: the poison URL is just another
+        failed photo, and its healthy neighbour still hashes."""
+        urls = ("https://cdn.example/\x00bad.jpg", "https://cdn.example/good.jpg")
+        with patch(
+            "etl.dedup.signals.photo_hash.requests.get", side_effect=_ok_response
+        ):
+            hashes, stats = photo_hash.fetch_hashes_with_stats(
+                urls, source="milanuncios", store_conn=store_db
+            )
+        assert len(hashes) == 2  # both fetched fine; only the *store* choked
+        assert stats.store_write_failures == 1
+
+    def test_an_unusable_store_connection_does_not_stop_the_fetching(self, store_db):
+        """A store that has gone away entirely mid-run degrades to exactly the
+        pre-#221 behaviour: fetch everything, hash everything, log."""
+        dead = photo_hash_store.open_connection()
+        photo_hash_store.close_connection(dead)
+        with patch(
+            "etl.dedup.signals.photo_hash.requests.get", side_effect=_ok_response
+        ) as get:
+            hashes = photo_hash.fetch_hashes(
+                ("https://cdn.example.com/a.jpg", "https://cdn.example.com/b.jpg"),
+                source="solvia",
+                store_conn=dead,
+            )
+        assert len(hashes) == 2
+        assert get.call_count == 2
+
+
+class TestDegenerateRows:
+    def test_an_ok_row_with_no_hash_is_refetched_rather_than_black_holed(
+        self, store_db
+    ):
+        """`ok = true` with `phash IS NULL` satisfies the "never retry a
+        success" short-circuit but carries no hash to return — 0 requests and
+        0 hashes for that URL, forever. `save()` can't write one, but a
+        hand-edit or a partial restore can, so treat it as unknown."""
+        url = "https://cdn.example.com/hashless.jpg"
+        with store_db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO photo_hashes (photo_url, phash, ok, source) "
+                "VALUES (%s, NULL, true, %s)",
+                (url, "milanuncios"),
+            )
+        store_db.commit()
+
+        assert photo_hash_store.load(store_db, (url,)) == {}
+        with patch(
+            "etl.dedup.signals.photo_hash.requests.get", side_effect=_ok_response
+        ) as get:
+            hashes = photo_hash.fetch_hashes((url,), store_conn=store_db)
+        assert get.call_count == 1
+        assert len(hashes) == 1
+
+    def test_a_url_repeated_within_one_listing_is_fetched_once(self, store_db):
+        """`photo_urls` is whatever the connector scraped; a gallery that
+        lists the same image twice used to cost two requests, because the
+        store snapshot was taken before the loop and never updated as saves
+        landed. Both occurrences still contribute a hash — the memo suppresses
+        the request, not the result, so `match_ratio`'s denominators are
+        unchanged."""
+        url = "https://cdn.example.com/twice.jpg"
+        with patch(
+            "etl.dedup.signals.photo_hash.requests.get", side_effect=_ok_response
+        ) as get:
+            hashes = photo_hash.fetch_hashes((url, url), store_conn=store_db)
+        assert get.call_count == 1
+        assert len(hashes) == 2
+        assert hashes[0] == hashes[1]

@@ -474,11 +474,30 @@ class TestAggregatedFailureLogging:
 
 
 class TestAttemptablePhotoCount:
-    """Issue #206: the dedup engine's per-source health tracking needs to
-    know how many URLs `fetch_hashes` will actually try, excluding the
-    video/tour links `_looks_like_photo_url` filters out before any
-    network call — otherwise a listing with photos + video links would
-    make a perfectly healthy source look partially degraded."""
+    """Issue #206: the dedup engine's per-source health tracking counts the
+    URLs actually requested over the network, excluding the video/tour links
+    `_looks_like_photo_url` filters out before any network call — otherwise a
+    listing with photos + video links would make a perfectly healthy source
+    look partially degraded.
+
+    Issue #221/PR #226 moved that count from a separate
+    `attemptable_photo_count(photo_urls)` pass into
+    `fetch_hashes_with_stats`'s own `live_attempted`, because the store made
+    "URLs worth attempting" and "URLs attempted" different numbers: a warm URL
+    is attemptable but costs no request, and counting it as one made a dead
+    CDN look healthy. Counting inside the fetch loop is the only place that
+    can tell those apart.
+    """
+
+    @staticmethod
+    def _stats_for(urls):
+        def _boom(url, **kwargs):
+            raise RuntimeError("404 simulated")
+
+        with pytest.MonkeyPatch.context() as patcher:
+            patcher.setattr(photo_hash.requests, "get", _boom)
+            _, stats = photo_hash.fetch_hashes_with_stats(urls, source="testsource")
+        return stats
 
     def test_counts_only_urls_fetch_hashes_would_attempt(self):
         urls = (
@@ -487,14 +506,14 @@ class TestAttemptablePhotoCount:
             "https://cdn.example.com/real2.jpg",
             "https://vimeo.com/12345",
         )
-        assert photo_hash.attemptable_photo_count(urls) == 2
+        assert self._stats_for(urls).live_attempted == 2
 
     def test_zero_for_an_all_video_photo_set(self):
         urls = ("https://youtu.be/abc", "https://vimeo.com/123")
-        assert photo_hash.attemptable_photo_count(urls) == 0
+        assert self._stats_for(urls).live_attempted == 0
 
     def test_zero_for_an_empty_tuple(self):
-        assert photo_hash.attemptable_photo_count(()) == 0
+        assert self._stats_for(()).live_attempted == 0
 
 
 class TestConfidenceScaling:

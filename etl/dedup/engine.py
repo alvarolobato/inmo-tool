@@ -39,7 +39,7 @@ import logging
 from dataclasses import dataclass
 from decimal import Decimal
 
-from etl.dedup import reconcile
+from etl.dedup import photo_hash_store, reconcile
 from etl.dedup.signals import (
     address_coords,
     cadastral,
@@ -78,8 +78,11 @@ class DedupRunResult:
     # drop just because same-source pairs are never merged.
     same_source_cadastral_collisions: int = 0
     # Issue #206: sources whose photos never hash successfully this run —
-    # `{source: attempted_count}` for every source with at least one
-    # attemptable photo and zero successful hashes. A source in this
+    # `{source: live_attempted}` for every source that fetched at least one
+    # photo over the network and got zero usable images back. Store hits
+    # (issue #221) are excluded on purpose: a cached hash says nothing about
+    # whether the CDN is serving *now*, and counting it as a success silences
+    # this detector for good once the store is warm. A source in this
     # degraded state contributes no photo_hash evidence to ANY pair it's
     # in, and does so invisibly (match_ratio is only computed over
     # successfully-hashed photos, so a listing with zero hashes just looks
@@ -176,43 +179,66 @@ class _PhotoHashCache:
     like "no photo evidence" for every pair it's in, indistinguishable
     from a healthy source that legitimately doesn't match. See
     `zero_success_sources` and `DedupRunResult.photo_hash_zero_success_sources`.
+
+    Those counters track **live network attempts only**, never store hits —
+    see `zero_success_sources`.
     """
 
-    def __init__(self, conn=None) -> None:
+    def __init__(self, store_conn=None) -> None:
         self._cache: dict[int, list] = {}
-        self._attempted_by_source: dict[str, int] = {}
-        self._hashed_by_source: dict[str, int] = {}
+        self._live_attempted_by_source: dict[str, int] = {}
+        self._live_hashed_by_source: dict[str, int] = {}
         # Issue #221: the per-listing memo above still earns its keep (one
-        # listing appears in many pairs), but it dies with the run. `conn`
-        # threads the persistent per-URL store underneath it so the network
-        # cost is paid once ever, not once per run. None keeps the old
+        # listing appears in many pairs), but it dies with the run.
+        # `store_conn` threads the persistent per-URL store underneath it so
+        # the network cost is paid once ever, not once per run. It is the
+        # store's OWN connection (`photo_hash_store.open_connection`), never
+        # the dedup run's — see that module's docstring. None keeps the old
         # fetch-everything behaviour for tests that don't want a database.
-        self._conn = conn
+        self._store_conn = store_conn
 
     def get(self, listing: ListingRecord) -> list:
         if listing.listing_id not in self._cache:
-            hashes = photo_hash.fetch_hashes(
-                listing.photo_urls, source=listing.source, store_conn=self._conn
+            hashes, stats = photo_hash.fetch_hashes_with_stats(
+                listing.photo_urls, source=listing.source, store_conn=self._store_conn
             )
             self._cache[listing.listing_id] = hashes
-            attempted = photo_hash.attemptable_photo_count(listing.photo_urls)
-            if attempted:
-                self._attempted_by_source[listing.source] = (
-                    self._attempted_by_source.get(listing.source, 0) + attempted
+            if stats.live_attempted:
+                self._live_attempted_by_source[listing.source] = (
+                    self._live_attempted_by_source.get(listing.source, 0)
+                    + stats.live_attempted
                 )
-                self._hashed_by_source[listing.source] = self._hashed_by_source.get(
-                    listing.source, 0
-                ) + len(hashes)
+                self._live_hashed_by_source[listing.source] = (
+                    self._live_hashed_by_source.get(listing.source, 0)
+                    + stats.live_hashed
+                )
         return self._cache[listing.listing_id]
 
     def zero_success_sources(self) -> dict[str, int]:
-        """`{source: attempted_count}` for every source with at least one
-        attemptable photo this run and zero successfully hashed — see the
-        class docstring."""
+        """`{source: live_attempted}` for every source that made at least one
+        network fetch this run and got zero usable images back.
+
+        Deliberately counts only photos fetched **live** this run. The
+        question this answers is "is this source's photo CDN serving?", and a
+        hash read out of the `photo_hashes` store (issue #221) is not evidence
+        about the CDN's state now — it was recorded on some earlier run, quite
+        possibly before the breakage. Counting store hits as successes (the
+        first cut of #221 did) silences this detector permanently the moment
+        the store is warm: the #209/#213 Milanuncios shape — every photo
+        404ing, including a brand-new listing whose URLs have never worked —
+        reported a perfectly healthy source.
+
+        The trade is deliberate. A source with no live attempts at all (fully
+        warm, nothing new ingested) is reported as nothing rather than as
+        healthy: "we did not check" is the honest answer, and it is never
+        wrong the way "healthy" was. Any source still ingesting new listings
+        has live attempts every run to be judged on, which is exactly the
+        population where a dead CDN needs catching.
+        """
         return {
             source: attempted
-            for source, attempted in self._attempted_by_source.items()
-            if self._hashed_by_source.get(source, 0) == 0
+            for source, attempted in self._live_attempted_by_source.items()
+            if attempted > 0 and self._live_hashed_by_source.get(source, 0) == 0
         }
 
 
@@ -678,9 +704,31 @@ def run(conn) -> DedupRunResult:
     `_reevaluate_pending_suggestion` for how the fresh verdict is
     reconciled against the existing row (refresh in place / reject / merge
     and mark confirmed).
+
+    Issue #221 — the photo-hash store runs on its own connection, opened and
+    closed here. It must not share *conn*: riding the dedup run's transaction
+    meant hashes were only ever committed when a merge happened to fire (so an
+    interrupted cold pass threw away ~46 minutes of fetching and the next run
+    started cold again), and every saved row stayed locked until the run
+    ended, blocking any concurrent run that touched a shared URL. A store the
+    engine can't open is not an error: `open_connection` returns None and the
+    run just fetches every photo, exactly as it did before #221.
+    """
+    store_conn = photo_hash_store.open_connection()
+    try:
+        return _run(conn, _PhotoHashCache(store_conn))
+    finally:
+        photo_hash_store.close_connection(store_conn)
+
+
+def _run(conn, hash_cache: _PhotoHashCache) -> DedupRunResult:
+    """The run proper, with the photo-hash cache injected.
+
+    Split from `run` so the store connection's lifetime is owned in exactly
+    one place (`run`'s try/finally) rather than threaded through this
+    function's several exit paths.
     """
     listings = fetch_listing_records(conn)
-    hash_cache = _PhotoHashCache(conn)
     result = DedupRunResult()
 
     with conn.cursor() as cur:
@@ -773,7 +821,8 @@ def run(conn) -> DedupRunResult:
     result.photo_hash_zero_success_sources = hash_cache.zero_success_sources()
     for source, attempted in sorted(result.photo_hash_zero_success_sources.items()):
         logger.warning(
-            "dedup: source=%s had 0/%d photo(s) hash successfully this run — "
+            "dedup: source=%s had 0/%d freshly-fetched photo(s) hash "
+            "successfully this run — "
             "photo_hash contributes no evidence to ANY pair involving this "
             "source (issue #206); check the connector's photo URLs are "
             "actually fetchable (CDN auth/params, expired links, ...)",
