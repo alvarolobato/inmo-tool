@@ -13,7 +13,7 @@
 | ID | Binding rule |
 |----|--------------|
 | [D-001](docs/decisions/D-001-bind-mounts.md) | All container data lives in `./data/<service>/` bind mounts. Never named volumes. |
-| [D-002](docs/decisions/D-002-humans-approve-merges.md) | Humans approve every merge. No auto-merge, even for low-risk changes, until the owner establishes trust per category. |
+| [D-029](docs/decisions/D-029-agent-merges-after-review.md) | The coordinating agent merges once a fresh-context Opus review passes; Fable reviews phase boundaries. Escalate on CHANGES REQUIRED you disagree with, irreversible/outward-facing changes, or owner-reserved calls. Supersedes D-002. |
 | [D-003](docs/decisions/D-003-review-policy.md) | Each task PR gets one fresh review pass; each phase gets one fresh cross-task review pass. Once per checkpoint — no iterating a round until "no more feedback." |
 | [D-004](docs/decisions/D-004-no-worker-workflows.md) | Don't push to `.github/workflows/` without a credential that has `workflow` OAuth scope. Never bypass via the GitHub API — leave YAML staged for a human to commit. |
 | [D-009](docs/decisions/D-009-restart-burst-guard.md) | A full sweep skips if a completed run finished within `etl.min_restart_sweep_interval_seconds` ago (crash-loop guard). |
