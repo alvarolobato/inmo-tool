@@ -1,3 +1,9 @@
+---
+id: D-007
+title: Keep the knowledge-corpus machinery; test the empty state, don't delete it
+date: 2026-08-03
+---
+
 # D-007 — Keep the knowledge-corpus machinery; test the empty state, don't delete it
 
 **Status:** accepted

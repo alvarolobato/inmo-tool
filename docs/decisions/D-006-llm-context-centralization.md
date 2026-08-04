@@ -1,3 +1,9 @@
+---
+id: D-006
+title: All LLM calls go through `assembleRequest()`
+date: 2026-08-02
+---
+
 # D-006 — All LLM calls go through `assembleRequest()`
 
 **Status:** accepted
