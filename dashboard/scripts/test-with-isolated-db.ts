@@ -159,6 +159,22 @@ async function main(): Promise<void> {
   const adminDsn = currentDsn();
 
   if (!(await isReachable(adminDsn))) {
+    // Issue #160: skipped and passed are indistinguishable on the PR page. Of
+    // the 18 *.integration.test.ts files, only 7 throw under REQUIRE_DB=1; the
+    // other 11 use `describe.runIf(dbAvailable)`, which warns and passes green.
+    // So a missing database on the vitest side is only *partly* a hard error at
+    // the file level. Enforce it here at the wrapper level instead: when CI
+    // sets REQUIRE_DB=1 and the admin DSN is unreachable, fail loudly rather
+    // than run a suite where most DB-backed files quietly no-op. Locally,
+    // without REQUIRE_DB, the old skip-and-run behaviour is unchanged.
+    if (process.env.REQUIRE_DB === "1") {
+      log(
+        "REQUIRE_DB=1 but Postgres is unreachable (admin DSN unset or DB down). " +
+          "Refusing to run — a green suite with every DB-backed file skipped is " +
+          "exactly the false pass issue #160 exists to prevent.",
+      );
+      process.exit(1);
+    }
     log(
       "no reachable Postgres (POSTGRES_DSN unset or DB down) — running vitest without an " +
         "isolated database; *.integration.test.ts files self-skip individually.",
