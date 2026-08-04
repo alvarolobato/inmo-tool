@@ -115,7 +115,21 @@ test("reject persists and survives reload", async ({ page }) => {
   await expect(rejectButton).toBeVisible();
   await expect(rejectButton).toHaveAttribute("aria-pressed", "false");
 
-  await rejectButton.click();
+  // Wait for the persistence POST to actually COMPLETE, not just for the
+  // optimistic aria-pressed flip. The button flips to "true" the instant the
+  // click handler runs, before the write has committed; reloading in that
+  // window occasionally re-fetched state the POST hadn't landed yet, and the
+  // reloaded button came back "false". This was a genuine ~1-in-3 flake in CI
+  // and locally — the test's bug, not the app's. Gate the reload on the write.
+  const [feedbackResponse] = await Promise.all([
+    page.waitForResponse(
+      (r) =>
+        /\/feedback(\?|$)/.test(new URL(r.url()).pathname) &&
+        r.request().method() === "POST",
+    ),
+    rejectButton.click(),
+  ]);
+  expect(feedbackResponse.ok()).toBe(true);
   await expect(rejectButton).toHaveAttribute("aria-pressed", "true");
 
   // Clicking the reject button must not navigate to the property detail
