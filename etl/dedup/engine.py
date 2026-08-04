@@ -92,6 +92,18 @@ class DedupRunResult:
     photo_hash_zero_success_sources: dict[str, int] = dataclasses.field(
         default_factory=dict
     )
+    # Issue #214: `pending` suggestions are re-scored every run instead of
+    # being frozen at whatever rules were live when they were first filed.
+    # These three count what a pending row turned into this run — *not*
+    # counted in `suggested` above (that stays "brand-new pairs filed for
+    # the first time") or `merged` (see below, it IS still folded into
+    # `merged` since a merge is a merge regardless of which path triggered
+    # it — but `reevaluated_merged` isolates the reevaluation-triggered
+    # subset for reporting).
+    reevaluated_total: int = 0
+    reevaluated_merged: int = 0
+    reevaluated_rejected: int = 0
+    reevaluated_updated: int = 0
 
 
 def fetch_listing_records(conn) -> list[ListingRecord]:
@@ -272,31 +284,114 @@ def evaluate_pair(
     return fuzzy.evaluate(a, b)
 
 
-def _load_recorded_pairs(cur) -> set[tuple[int, int]]:
+@dataclass
+class _PendingSuggestion:
+    """Enough of an existing `pending` `suggested_merge` row to reconcile it
+    with a fresh `evaluate_pair` call — see `_reevaluate_pending_suggestion`."""
+
+    suggestion_id: int
+    match_basis: str
+    confidence: Decimal | None
+    detail: dict
+
+
+def _load_recorded_pairs(
+    cur,
+) -> tuple[set[tuple[int, int]], dict[tuple[int, int], _PendingSuggestion]]:
     """Preload every already-recorded suggestion pair once per run (issue #61).
 
     Previously one `SELECT 1` per candidate pair, layered on top of the
     O(n^2) pairwise scan — i.e. O(n^2) round-trips. One query up front
     instead: the table only ever holds pairs a previous run already
-    suggested, so it's bounded by suggestions filed, not by n^2.
+    suggested, so it's bounded by suggestions filed, not by n^2. Still a
+    single query after issue #214's change below (see
+    TestRecordedPairBatching.test_skip_check_costs_one_query_per_run_not_one_per_pair,
+    which pins "exactly one preload query" as a regression guard) — the
+    extra columns/subquery just ride along on the same round-trip.
 
-    Excludes `status='confirmed'` (issue #60): a confirmed suggestion is a
-    pair a human has approved for merging but which hasn't been merged yet.
-    Skipping it here is what made the queue write-only — the engine would
-    never look at the pair again, so nothing could ever act on the
-    confirmation. Leaving it *out* of this set lets a normal `run` re-
-    evaluate and merge it, alongside the explicit `dedup confirm` path.
+    Returns `(skip_pairs, pending_by_pair)`:
 
-    'rejected' and 'conflict' stay in the skip set on purpose: 'rejected'
-    is a human saying "these are not the same property", and 'conflict'
-    needs `dedup resolve-conflict` (an explicit human decision), not a
-    silent re-evaluation on the next run.
+    - `skip_pairs`: pairs this run must never touch — `status='rejected'`
+      (a human said "not the same property") or `status='conflict'` (needs
+      `dedup resolve-conflict`, an explicit human decision, not a silent
+      re-evaluation), OR a `status='pending'` row that already has an
+      unprocessed `suggested_merge_action` queued (`status='pending'` on
+      that table). That last case is issue #214's answer to "what about a
+      suggestion a human is mid-decision on": a human clicking
+      confirm/reject in the dashboard enqueues a `suggested_merge_action`
+      row that `etl.dedup.actions.run_action_poll_loop` drains every few
+      seconds — a dedup `run()` firing in that same window must not
+      re-score (and potentially reject) a suggestion whose resolution is
+      already in flight. Skipping it here just means this run leaves it
+      alone; if the action fails for an unrelated reason (e.g. a stale
+      listing) the row stays 'pending' and gets reevaluated on the *next*
+      run once the action has been fully processed either way. This does
+      not (and structurally cannot) protect a human who is looking at a
+      suggestion but hasn't clicked yet — there is no "someone has this
+      open" signal anywhere in this schema. See `run()`'s docstring and
+      issue #214's PR description for why that residual race is accepted
+      rather than solved with new state.
+
+    - `pending_by_pair`: every remaining `status='pending'` row, keyed by
+      the normalized `(listing_id_a, listing_id_b)` pair, carrying its
+      `suggested_merge.id`/`match_basis`/`confidence`/`detail` so
+      `run()` can hand it to `_reevaluate_pending_suggestion` instead of
+      silently skipping it forever — issue #214's core fix. Previously
+      this project treated `pending` exactly like `rejected`/`conflict`: a
+      pair scored once, under whatever rules were live that day, was never
+      looked at again no matter how much `evaluate_pair` changed
+      underneath it. Concretely, 193 suggestions were scored while
+      Milanuncios photos were entirely unhashable (`match_ratio` computed
+      from missing data, not just "old" data) and stayed `pending` forever
+      even after the CDN fix (#209/#213) made those same photos hashable.
+
+    `status='confirmed'` rows are in neither set, unchanged from before
+    issue #214: a confirmed suggestion is a pair a human has approved,
+    already merged synchronously by `confirm_suggestion` — its listings
+    already share a `property_id`, so `run()`'s own
+    `a.property_id == b.property_id` check skips it before ever consulting
+    either of these structures. Excluding it here (rather than adding it to
+    `skip_pairs`) is what makes that check reachable at all: if this pair's
+    listings were ever *not* unified for some reason, leaving 'confirmed'
+    out lets a normal `run()` re-evaluate and merge it, alongside the
+    explicit `dedup confirm` path — a pre-issue-#214 behaviour this change
+    doesn't touch.
     """
     cur.execute(
-        "SELECT listing_id_a, listing_id_b FROM suggested_merge "
-        "WHERE status <> 'confirmed'"
+        """
+        SELECT sm.listing_id_a, sm.listing_id_b, sm.status, sm.id,
+               sm.match_basis, sm.confidence, sm.detail,
+               EXISTS (
+                   SELECT 1 FROM suggested_merge_action sma
+                    WHERE sma.suggestion_id = sm.id AND sma.status = 'pending'
+               ) AS action_in_flight
+          FROM suggested_merge sm
+         WHERE sm.status <> 'confirmed'
+        """
     )
-    return {(row[0], row[1]) for row in cur.fetchall()}
+    skip_pairs: set[tuple[int, int]] = set()
+    pending_by_pair: dict[tuple[int, int], _PendingSuggestion] = {}
+    for (
+        listing_id_a,
+        listing_id_b,
+        status,
+        suggestion_id,
+        match_basis,
+        confidence,
+        detail,
+        action_in_flight,
+    ) in cur.fetchall():
+        pair = (listing_id_a, listing_id_b)
+        if status != "pending" or action_in_flight:
+            skip_pairs.add(pair)
+            continue
+        pending_by_pair[pair] = _PendingSuggestion(
+            suggestion_id=suggestion_id,
+            match_basis=match_basis,
+            confidence=confidence,
+            detail=detail if isinstance(detail, dict) else json.loads(detail or "{}"),
+        )
+    return skip_pairs, pending_by_pair
 
 
 def file_suggestion(
@@ -383,6 +478,153 @@ def perform_merge(
     return survivor_id, losing_id, had_conflict
 
 
+def _reevaluate_pending_suggestion(
+    conn,
+    a: ListingRecord,
+    b: ListingRecord,
+    pending: _PendingSuggestion,
+    evaluation: PairEvaluation | None,
+    result: DedupRunResult,
+) -> tuple[int, int] | None:
+    """Reconcile an existing `pending` `suggested_merge` row with a fresh
+    `evaluate_pair` verdict (issue #214).
+
+    `_load_recorded_pairs` no longer freezes a `pending` verdict forever —
+    every pending pair goes back through `evaluate_pair` exactly like a
+    brand-new pair on every run, and this is where that fresh verdict is
+    reconciled against the row that already exists for it:
+
+    - `evaluation is None` (no signal fires at all any more): nothing
+      supports this pair under current rules. The direct analogue of a
+      human looking at the same evidence today and saying "no" — moved to
+      `rejected`. This is the concrete shape of the #186 floor-veto
+      acceptance case: a pair that used to clear `address_coords` now gets
+      vetoed by a floor conflict there, falls through every other signal,
+      and finds nothing to catch it — under the old code this pair would
+      sit at `pending` forever with a `match_ratio`/basis nobody currently
+      stands behind; now it explicitly leaves the queue.
+    - `decision == "suggest"`: still not confident enough to auto-merge,
+      but under current rules, not the rules that were live when this row
+      was filed — refresh `match_basis`/`confidence`/`detail` in place and
+      leave `status='pending'`. This is the fix for the sharpest case in
+      #214: 193 rows scored while Milanuncios photos were entirely
+      unhashable keep a stale `match_ratio` computed from missing data
+      forever otherwise.
+    - `decision == "merge"`: perform the merge (the same `perform_merge`
+      path a brand-new pair takes) and resolve the *existing* row as
+      `confirmed` rather than leaving a suggestion dangling at `pending`
+      for a pair whose listings are already unified.
+
+    Every branch preserves the row's pre-reevaluation state under a
+    `reevaluated_from` key in `detail` — an operator (or a human reviewing
+    a `rejected` row wondering why) can see exactly what this row used to
+    say and why it changed, rather than the history being silently
+    overwritten. `reevaluated_from` never appears on a row a human touched
+    via `confirm_suggestion`/`reject_suggestion`, so its presence alone
+    distinguishes "the engine changed its mind" from "a human decided".
+
+    Returns `(survivor_property_id, losing_property_id)` when this call
+    performed a merge, so `run()`'s caller can fix up its in-memory
+    `listings` list the same way it already does for a brand-new merge.
+    Returns `None` otherwise.
+    """
+    previous = {
+        "status": "pending",
+        "match_basis": pending.match_basis,
+        "confidence": (
+            float(pending.confidence) if pending.confidence is not None else None
+        ),
+        "detail": pending.detail,
+    }
+    result.reevaluated_total += 1
+
+    if evaluation is None:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE suggested_merge
+                   SET status = 'rejected',
+                       resolved_at = NOW(),
+                       detail = detail || %s::jsonb
+                 WHERE id = %s
+                """,
+                (
+                    json.dumps(
+                        {
+                            "reevaluated_from": previous,
+                            "reevaluated_reason": (
+                                "no signal matched this pair under current rules"
+                            ),
+                        }
+                    ),
+                    pending.suggestion_id,
+                ),
+            )
+        conn.commit()
+        result.reevaluated_rejected += 1
+        return None
+
+    if evaluation.decision == "suggest":
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE suggested_merge
+                   SET match_basis = %s,
+                       confidence = %s,
+                       detail = %s::jsonb
+                 WHERE id = %s
+                """,
+                (
+                    evaluation.basis,
+                    evaluation.confidence,
+                    json.dumps(
+                        {**(evaluation.detail or {}), "reevaluated_from": previous}
+                    ),
+                    pending.suggestion_id,
+                ),
+            )
+        conn.commit()
+        result.reevaluated_updated += 1
+        return None
+
+    # decision == "merge"
+    survivor_id, losing_id, had_conflict = perform_merge(conn, a, b, evaluation)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE suggested_merge
+               SET status = 'confirmed',
+                   match_basis = %s,
+                   confidence = %s,
+                   resolved_at = NOW(),
+                   detail = %s::jsonb
+             WHERE id = %s
+            """,
+            (
+                evaluation.basis,
+                evaluation.confidence,
+                json.dumps(
+                    {
+                        **(evaluation.detail or {}),
+                        "reevaluated_from": previous,
+                        "auto_confirmed_merge": {
+                            "survivor_property_id": survivor_id,
+                            "losing_property_id": losing_id,
+                            "had_conflict": had_conflict,
+                        },
+                    }
+                ),
+                pending.suggestion_id,
+            ),
+        )
+    conn.commit()
+    result.reevaluated_merged += 1
+    result.merged += 1
+    if had_conflict:
+        result.conflicts += 1
+    return survivor_id, losing_id
+
+
 def run(conn) -> DedupRunResult:
     """Compare every not-yet-merged listing pair and act on the result.
 
@@ -418,13 +660,23 @@ def run(conn) -> DedupRunResult:
     claiming the same land-registry parcel) worth an operator's attention
     regardless of the no-merge rule, so it's counted and logged separately
     even though it's still never merged or suggested.
+
+    Issue #214 — `pending` suggestions are re-evaluated, not skipped
+    forever. `_load_recorded_pairs` now splits recorded pairs into
+    `skip_pairs` (permanent: `rejected`/`conflict`, plus any `pending` row
+    with an in-flight `suggested_merge_action`) and `pending_by_pair`
+    (every other `pending` row). A pair found in `pending_by_pair` still
+    goes through `evaluate_pair` exactly like a brand-new pair — see
+    `_reevaluate_pending_suggestion` for how the fresh verdict is
+    reconciled against the existing row (refresh in place / reject / merge
+    and mark confirmed).
     """
     listings = fetch_listing_records(conn)
     hash_cache = _PhotoHashCache()
     result = DedupRunResult()
 
     with conn.cursor() as cur:
-        recorded_pairs = _load_recorded_pairs(cur)
+        skip_pairs, pending_by_pair = _load_recorded_pairs(cur)
         for i in range(len(listings)):
             for j in range(i + 1, len(listings)):
                 a, b = listings[i], listings[j]
@@ -447,11 +699,28 @@ def run(conn) -> DedupRunResult:
                             a.cadastral_ref,
                         )
                     continue
-                if tuple(sorted((a.listing_id, b.listing_id))) in recorded_pairs:
+                pair_key = tuple(sorted((a.listing_id, b.listing_id)))
+                if pair_key in skip_pairs:
                     continue
+                pending = pending_by_pair.get(pair_key)
 
                 result.pairs_compared += 1
                 evaluation = evaluate_pair(a, b, hash_cache)
+
+                if pending is not None:
+                    merge_ids = _reevaluate_pending_suggestion(
+                        conn, a, b, pending, evaluation, result
+                    )
+                    if merge_ids is not None:
+                        survivor_id, losing_id = merge_ids
+                        listings = [
+                            dataclasses.replace(rec, property_id=survivor_id)
+                            if rec.property_id == losing_id
+                            else rec
+                            for rec in listings
+                        ]
+                    continue
+
                 if evaluation is None:
                     continue
 
@@ -471,6 +740,17 @@ def run(conn) -> DedupRunResult:
                 else:
                     file_suggestion(conn, a, b, evaluation)
                     result.suggested += 1
+
+    if result.reevaluated_total:
+        logger.info(
+            "dedup: re-evaluated %d pending suggestion(s) against current "
+            "rules (issue #214) — %d merged, %d rejected, %d still pending "
+            "(refreshed in place)",
+            result.reevaluated_total,
+            result.reevaluated_merged,
+            result.reevaluated_rejected,
+            result.reevaluated_updated,
+        )
 
     if result.same_source_skipped:
         logger.info(
