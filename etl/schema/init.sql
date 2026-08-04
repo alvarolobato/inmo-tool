@@ -431,6 +431,42 @@ CREATE INDEX IF NOT EXISTS idx_profile_listing_state_profile_matched
 ALTER TABLE profile_listing_state ADD COLUMN IF NOT EXISTS score_kind TEXT
     CHECK (score_kind IN ('cold_start', 'trained'));
 
+-- Issue #166: lib/candidates.ts's listCandidates() and getAdjacentCandidates()
+-- (#152/#146) both keyset-scan this table with the same predicate/ordering:
+--   WHERE profile_id = $1 AND matched = true
+--     AND (COALESCE(score, -1) < $2 OR (COALESCE(score, -1) = $2 AND property_id < $3))
+--   ORDER BY COALESCE(score, -1) DESC, property_id DESC
+-- Neither idx_profile_listing_state_profile_score (plain `score DESC`, not
+-- COALESCE'd, so a NULL-containing sort can't be served from it) nor
+-- idx_profile_listing_state_profile_matched (no ordering at all) matches this.
+-- Partial on `matched = true` since every consumer of this ordering filters on
+-- it, and excluding matched=false rows (task 2.4's soft-delete convention,
+-- kept for audit) keeps the index smaller and more selective.
+--
+-- Measured with EXPLAIN (ANALYZE, BUFFERS), 5 repeated runs each, on a
+-- freshly-ANALYZEd 60k-row profile_listing_state (one profile, ~15% NULL
+-- scores) — median execution time, mid-scan cursor (not a trivial first/last
+-- page):
+--   listCandidates keyset query:        55.6ms Hash Join+Sort -> 29.1ms Nested Loop  (~48% faster)
+--   getAdjacentCandidates NEXT:         36.3ms Seq Scan+Sort  -> 27.1ms Index Scan   (~25% faster)
+--   getAdjacentCandidates PREV:         33.0ms Seq Scan+Sort  -> 19.3ms Index Scan Backward (~42% faster)
+-- All three plans confirm the new index in use. The win here comes from
+-- avoiding the Sort (and, for listCandidates, the Hash Join build) over the
+-- whole per-profile row set, not from a true bounded index-range seek: the
+-- application's WHERE is written as `(a < x) OR (a = x AND b < y)` cast to
+-- `::double precision`, a shape Postgres's planner does not fold into a
+-- single multi-column index condition (only `profile_id = $1` becomes a real
+-- Index Cond; the rest is still a Filter re-checked per row scanned before
+-- the LIMIT is satisfied). A row-comparison rewrite of the query
+-- (`(COALESCE(score,-1), property_id) < ($2, $3)`, matching the index's
+-- native NUMERIC type) measured sub-millisecond in the same setup, but
+-- changing the query shape is out of scope for this index-only issue —
+-- worth a follow-up if this ever shows up hot in pg_stat_statements at
+-- production scale.
+CREATE INDEX IF NOT EXISTS idx_profile_listing_state_profile_ranked
+    ON profile_listing_state (profile_id, (COALESCE(score, -1)) DESC, property_id DESC)
+    WHERE matched = true;
+
 -- feedback_event.property_id (not listing_id) is what the feedback's
 -- identity is keyed on, matching profile_listing_state above. listing_id
 -- is kept only as an optional "which site listing was the user actually
