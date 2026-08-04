@@ -1,0 +1,80 @@
+{
+  "address": "DOCTOR BARRAQUER, 41720",
+  "area": "BAJO GUADALQUIVIR",
+  "availableForRent": false,
+  "availableForSale": true,
+  "bookNumber": "0573",
+  "categories": [
+    {
+      "code": "101",
+      "name": "Viviendas"
+    }
+  ],
+  "classifications": [
+    {"code": "0003"},
+    {"code": "0004"}
+  ],
+  "code": "60540896",
+  "commercialID": "60540896",
+  "commercializedForRent": false,
+  "commercializedForSale": true,
+  "description": "Piso de 134 m² a la venta en Los Palacios y Villafranca, en la provincia de Sevilla. La vivienda esta distribuida en 3 dormitorios, cocina, salón comedor y 2 baños.",
+  "emissionValues": 43.0,
+  "energyRating": "E",
+  "energyValue": 215.0,
+  "featureList": [
+    {"active": false, "id": "airConditioning"},
+    {"active": false, "id": "heating"},
+    {"active": false, "id": "lift"},
+    {"active": false, "id": "pool"},
+    {"active": false, "id": "garden"},
+    {"active": false, "id": "terrace"},
+    {"active": false, "id": "parking"},
+    {"active": false, "id": "storageRoom"},
+    {"active": true, "id": "yard"},
+    {"active": false, "id": "balcony"},
+    {"active": false, "id": "smokeOutlet"}
+  ],
+  "floor": "1ª Planta",
+  "groundNumber": "30285",
+  "idufir": "41039000721292",
+  "images": [
+    {
+      "altText": "Vivienda en Palacios y villafranca (los)",
+      "format": "superZoom",
+      "galleryIndex": 0,
+      "imageType": "GALLERY",
+      "subtag": "",
+      "tag": "VALUE_0",
+      "url": "/medias/60540896-SVH-1669160207371-Default-WorkingFormat-CMF-1200Wx1200H?context=bWFzdGVyfGltYWdlc3w5Mzg2OA"
+    }
+  ],
+  "isCoordinateAproximated": true,
+  "latitude": "37,1591",
+  "longitude": "-5,918187",
+  "marketingStatus": "IMMEDIATE_MARKETING",
+  "metersBuildable": 126.03,
+  "name": "Vivienda en Palacios y Villafranca (Los)",
+  "numberOfBathRooms": 2,
+  "numberOfBedRooms": 3,
+  "population": "PALACIOS Y VILLAFRANCA (LOS)",
+  "price": {
+    "currencyIso": "EUR",
+    "formattedValue": "90.815 €",
+    "priceType": "BUY",
+    "value": 90815.0
+  },
+  "realStateType": "Vivienda",
+  "registerNumber": "002",
+  "registerPopulation": "UTRERA",
+  "society": {
+    "code": "0731",
+    "name": "Buildingcenter S.A.U"
+  },
+  "superStatusLegalType": "Título inscrito",
+  "superStatusPossesoryType": "Con posesión",
+  "tomeNumber": "2474",
+  "url": "/es/product/60540896/vivienda-en-palacios-y-villafranca-los-",
+  "vpoFlag": false,
+  "wow": false
+}

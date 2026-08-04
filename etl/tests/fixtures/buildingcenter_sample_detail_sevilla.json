@@ -1,0 +1,97 @@
+{
+  "address": "ESTURION, 41015",
+  "area": "METROPOLITANA DE SEVILLA",
+  "availableForRent": false,
+  "availableForSale": true,
+  "bookNumber": "0118",
+  "categories": [
+    {
+      "code": "101",
+      "name": "Viviendas"
+    }
+  ],
+  "classifications": [
+    {
+      "code": "0004"
+    }
+  ],
+  "code": "60672388",
+  "commercialID": "60672388",
+  "commercializedForRent": false,
+  "commercializedForSale": true,
+  "description": "Piso de 47 m² ubicado en Sevilla. Se trata de un piso de 47 m² distribuidos en salón-comedor, cocina, 3 dormitorios y 1 baño. El inmueble se sitúa en el núcleo urbano del barrio de San Jerónimo, con acceso a la SE-30.",
+  "emissionValues": 32.0,
+  "energyRating": "E",
+  "energyValue": 166.0,
+  "featureList": [
+    {"active": false, "id": "airConditioning"},
+    {"active": false, "id": "heating"},
+    {"active": false, "id": "lift"},
+    {"active": false, "id": "pool"},
+    {"active": false, "id": "garden"},
+    {"active": false, "id": "terrace"},
+    {"active": false, "id": "parking"},
+    {"active": false, "id": "storageRoom"},
+    {"active": false, "id": "yard"},
+    {"active": false, "id": "balcony"},
+    {"active": false, "id": "smokeOutlet"}
+  ],
+  "floor": "Planta Baja",
+  "groundNumber": "1730",
+  "idufir": "41024000288425",
+  "images": [
+    {
+      "altText": "Vivienda en Sevilla",
+      "format": "product",
+      "imageType": "PRIMARY",
+      "subtag": "",
+      "tag": "VALUE_0",
+      "url": "/medias/CMF-300Wx300H-Default-WorkingFormat-null?context=bWFzdGVyfGltYWdlc3wzNDc0NHxpbWFnZS9qcGVn"
+    },
+    {
+      "altText": "Vivienda en Sevilla",
+      "format": "superZoom",
+      "galleryIndex": 0,
+      "imageType": "GALLERY",
+      "subtag": "",
+      "tag": "VALUE_0",
+      "url": "/medias/CMF-1200Wx1200H-Default-WorkingFormat-null?context=bWFzdGVyfGltYWdlc3w0NjE4NjJ8aW1hZ2UvanBlZw"
+    }
+  ],
+  "isCoordinateAproximated": true,
+  "labelXConsumptions": "E",
+  "labelXEmissions": "E",
+  "latitude": "37,423859",
+  "longitude": "-5,984684",
+  "marketingStatus": "IMMEDIATE_MARKETING",
+  "metersBuildable": 46.82,
+  "name": "Vivienda en Sevilla",
+  "numberOfBathRooms": 1,
+  "numberOfBedRooms": 3,
+  "pageNumber": "0139",
+  "population": "SEVILLA",
+  "price": {
+    "currencyIso": "EUR",
+    "formattedValue": "81.750 €",
+    "priceType": "BUY",
+    "value": 81750.0
+  },
+  "realStateType": "Vivienda",
+  "registerNumber": "017",
+  "registerPopulation": "SEVILLA",
+  "resultType": "RealStateProduct",
+  "society": {
+    "code": "0731",
+    "name": "Buildingcenter S.A.U"
+  },
+  "stock": {
+    "isValueRounded": false,
+    "stockLevelStatus": "inStock"
+  },
+  "superStatusLegalType": "Título inscrito",
+  "superStatusPossesoryType": "Con posesión",
+  "tomeNumber": "1390",
+  "url": "/es/product/60672388/vivienda-en-sevilla",
+  "vpoFlag": false,
+  "wow": true
+}

@@ -1,0 +1,23 @@
+{
+  "type": "productCategorySearchPageWsDTO",
+  "pagination": {
+    "currentPage": 1,
+    "pageSize": 3,
+    "sort": "relevance",
+    "totalPages": 2,
+    "totalResults": 4
+  },
+  "products": [
+    {
+      "address": "CL. LA REVOLTOSA, 13, A, 2ª PLANTA. 28031, MADRID",
+      "categories": [{"code": "101"}],
+      "code": "73239392",
+      "commercializedForRent": false,
+      "commercializedForSale": true,
+      "latitude": "40,376141",
+      "longitude": "-3,62005",
+      "population": "Madrid",
+      "price": {"currencyIso": "EUR", "formattedValue": "243.000 €", "priceType": "BUY", "value": 243000.0}
+    }
+  ]
+}
