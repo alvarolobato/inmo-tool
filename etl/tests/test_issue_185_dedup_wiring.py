@@ -410,6 +410,28 @@ class TestOwnerReportedPair:
         for photo_hash's own no-network unit tests, and the dedup engine
         module docstring for the general "network signals need network to
         prove anything" caveat.
+
+        UPDATE (issue #206, 2026-08-04): the "photo_hash fires for this
+        exact pair" finding above later regressed for a real, systemic
+        reason — every Milanuncios photo URL 404'd the CDN with "Rule
+        parameter not Found" (see D-019), which would have silently
+        zeroed out Milanuncios' side of `match_ratio` for THIS pair too,
+        not just made-up ones. Re-verified live post-fix (manual check
+        outside this test suite — deliberately not made an automated
+        network-dependent test, matching this repo's no-network testing
+        convention): `MilanunciosConnector().normalize()` +
+        `FotocasaConnector().normalize()` against the real, still-live
+        534062143/185398766 pages, followed by real `photo_hash.fetch_hashes`
+        calls, hashed 11/11 photos on both sides and match_ratio == 1.0 —
+        confirming the acceptance criterion ("properties 62/146 are
+        re-detected by photo_hash") holds again as of the fix. One
+        wrinkle: today's live confidence would actually be 0.900/`merge`,
+        not the 0.800/`suggest` recorded above — issue #188's auto-merge
+        path (match_ratio==1.0 + size/price corroboration + no floor
+        conflict) shipped after that original observation, and this pair
+        clears all three bars (identical size/price, and floor.py's own
+        docstring names "3º" vs "3ª planta" — this pair's exact floors —
+        as its worked example of "same floor, formatted differently").
         """
         conn = dedup_wiring_db
         prop_a, listing_a, prop_b, listing_b = self._seed_pair(conn)

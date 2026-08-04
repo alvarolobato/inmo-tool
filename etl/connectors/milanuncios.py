@@ -113,6 +113,7 @@ import logging
 import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 
@@ -532,12 +533,55 @@ class MilanunciosConnector(Connector):
         # "images-re.milanuncios.com/images/ads/<uuid>") — confirmed live;
         # normalize to an https:// URL rather than storing an unusable
         # schemeless fragment.
+        #
+        # Issue #206: that bare URL is also *unfetchable as-is* for a real
+        # share of listings, not just schemeless. Live evidence, 2026-08-04:
+        # `ad.images` entries for some listings resolve through
+        # images.milanuncios.com/api/v1/ma-ad-media-pro/images/<uuid> — a
+        # named image-transform proxy (the "ma-ad-media-pro" rule engine),
+        # not a plain object store. Fetching that URL bare returns HTTP 404
+        # "Rule parameter not Found" (a real Varnish response body, byte for
+        # byte the production symptom this issue reports) — confirmed this
+        # is a required *query parameter*, not a header problem: neither
+        # Referer nor Origin nor Accept changes the outcome, but appending
+        # `?rule=<preset-name>` does (verified against a live ad both ways).
+        # The site's own rendered <img> tags always carry this param
+        # (`?rule=hw396_70`, `?rule=detail_640x480`, etc. depending on
+        # display context) — `ad.images` itself never includes it; the
+        # frontend adds it at render time, so this connector has to as well.
+        # `detail_640x480` was picked from the confirmed-valid set (also
+        # includes `hw396`/`hw396_70`/`detail_432x320`; `thumb`/`original`
+        # are NOT valid on this host and still 404) as a reasonably large,
+        # non-cropped size — good for the photo_hash dedup signal
+        # (etl/dedup/signals/photo_hash.py), which is the actual consumer
+        # this bug broke (see docs/architecture/connectors.md's Milanuncios
+        # section and D-019 for the full investigation).
+        #
+        # The older images-re.milanuncios.com/images/ads/<uuid> host (still
+        # used by other listings) does NOT require this parameter — it
+        # serves the original asset either way — but accepts the same
+        # `?rule=` resize hint harmlessly (live-verified), so applying it
+        # unconditionally is safe rather than needing per-host branching.
+        # Mirrors what etl/connectors/fotocasa.py already does: Fotocasa's
+        # own `multimedia[].src` values already arrive with `?rule=original`
+        # baked in server-side (both sites share the same Adevinta media
+        # backend, per this module's docstring on `origin.provider =
+        # "fotocasa_pro"` syndication) — Milanuncios just doesn't put the
+        # parameter in the JSON, so this connector adds it instead of
+        # storing a URL nothing downstream can actually fetch.
+        _PHOTO_RULE = "detail_640x480"
+
         def _to_photo_url(img: str) -> str:
             if img.startswith(("http://", "https://")):
-                return img
-            if img.startswith("//"):
-                return f"https:{img}"
-            return f"https://{img}"
+                url = img
+            elif img.startswith("//"):
+                url = f"https:{img}"
+            else:
+                url = f"https://{img}"
+            if not urlsplit(url).query:
+                separator = "&" if url.endswith("?") else "?"
+                url = f"{url}{separator}rule={_PHOTO_RULE}"
+            return url
 
         photo_urls = tuple(
             _to_photo_url(img) for img in images if isinstance(img, str) and img
