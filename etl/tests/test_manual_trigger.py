@@ -24,9 +24,15 @@ def _apply_schema(conn) -> None:
         cur.execute(_SCHEMA_SQL.read_text(encoding="utf-8"))
         # An active profile so DummyConnector has a scope to discover (issue
         # #71: run_all_connectors does nothing with zero active profiles).
-        # Idempotent by name.
+        # `_reset` archives this profile after every test (see below), so
+        # re-activate any archived one first, then insert only if none exists
+        # at all — this keeps exactly one row and never accumulates duplicates.
         cur.execute(
-            "SELECT 1 FROM search_profile WHERE name = %s AND archived_at IS NULL",
+            "UPDATE search_profile SET archived_at = NULL WHERE name = %s",
+            (_TEST_PROFILE_NAME,),
+        )
+        cur.execute(
+            "SELECT 1 FROM search_profile WHERE name = %s",
             (_TEST_PROFILE_NAME,),
         )
         if cur.fetchone() is None:
@@ -97,6 +103,18 @@ def _reset(conn, sources: list[str]) -> None:
     with conn.cursor() as cur:
         cur.execute("DELETE FROM etl_manual_trigger")
         cur.execute("DELETE FROM connector_runs")
+        # Archive the fixture profile so it can never leak into another test
+        # file's "zero active profiles → no crawl" invariant. Every DB-backed
+        # test here shares one session-scoped database (conftest, issue #159),
+        # and this file sorts before test_orchestrator.py — an *active* profile
+        # left behind would make its zero-profile no-op tests derive a scope
+        # they must not (matches test_orchestrator.py's own archive/restore
+        # discipline for its fixture profile). Archive (not delete): FK-safe.
+        cur.execute(
+            "UPDATE search_profile SET archived_at = NOW() "
+            "WHERE name = %s AND archived_at IS NULL",
+            (_TEST_PROFILE_NAME,),
+        )
     conn.commit()
     _cleanup_sources(conn, sources)
     orchestrator.CONNECTORS.clear()
