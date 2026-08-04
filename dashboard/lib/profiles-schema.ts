@@ -104,6 +104,74 @@ export const ScopeSchema = z
 export type Scope = z.infer<typeof ScopeSchema>;
 
 /**
+ * Semantic, order-insensitive equality of two scopes — the gate for issue
+ * #245's "quick refresh": a profile save enqueues a crawl and re-materializes
+ * ONLY when the crawl-relevant scope actually changed, never on a pure rename
+ * (or a thesis_params-only edit, which isn't part of scope at all).
+ *
+ * Deliberately NOT a generic deep-equal / JSON.stringify comparison, because
+ * two forms carry structural noise that isn't a real scope change:
+ *   - `property_types` is a SET the form rebuilds by toggling — reordering the
+ *     checkboxes must not count as a change.
+ *   - a `hard_exclusions` boolean that is absent vs. explicitly `false` is the
+ *     same "no exclusion" — toggling a filter on and back off must not count.
+ *   - an absent numeric bound and `undefined` are the same "no bound".
+ * A JSON string compare would report all three as changes and enqueue a
+ * redundant crawl. `center` stays order-sensitive (it's an ordered
+ * [lat, lng] tuple, not a set).
+ *
+ * Pure and client-safe (no `pg` import) so the PATCH route and its unit tests
+ * can both use it.
+ */
+/** How a profile-refresh crawl enqueue resolved (issue #245). Client-safe. */
+export type CrawlEnqueueStatus = "enqueued" | "already_pending" | "error";
+
+/**
+ * The `refresh` field POST /api/profiles and a scope-changing PATCH
+ * /api/profiles/[id] attach to their response (issue #245). Client-safe (no
+ * `pg`) so both the server helper (lib/filtering/profile-refresh.ts) and the
+ * client page that renders the "buscando datos nuevos…" indicator share one
+ * shape.
+ */
+export interface ProfileRefreshResult {
+  /** True when the profile was re-materialized against the current pool. */
+  materialized: boolean;
+  /** Ad-hoc sweep enqueue outcome; `triggerId` is pollable via GET /api/etl/run?id=. */
+  crawl: { status: CrawlEnqueueStatus; triggerId: number | null };
+}
+
+export function scopesEqual(a: Scope, b: Scope): boolean {
+  // Geography (radius-from-a-point; center is an ordered [lat, lng] tuple).
+  if (a.geography.type !== b.geography.type) return false;
+  if (a.geography.center[0] !== b.geography.center[0]) return false;
+  if (a.geography.center[1] !== b.geography.center[1]) return false;
+  if (a.geography.radius_km !== b.geography.radius_km) return false;
+
+  // property_types compared as a set (order carries no meaning).
+  const at = [...a.property_types].sort();
+  const bt = [...b.property_types].sort();
+  if (at.length !== bt.length) return false;
+  for (let i = 0; i < at.length; i++) {
+    if (at[i] !== bt[i]) return false;
+  }
+
+  // Numeric bounds — an absent bound must equal an absent bound.
+  if (a.price_min !== b.price_min) return false;
+  if (a.price_max !== b.price_max) return false;
+  if (a.size_min !== b.size_min) return false;
+  if (a.size_max !== b.size_max) return false;
+
+  // hard_exclusions — a missing key and an explicit `false` are both "no
+  // exclusion", so normalize to false before comparing.
+  const aeh = a.hard_exclusions ?? {};
+  const beh = b.hard_exclusions ?? {};
+  if ((aeh.requires_elevator ?? false) !== (beh.requires_elevator ?? false)) return false;
+  if ((aeh.excludes_ground_floor ?? false) !== (beh.excludes_ground_floor ?? false)) return false;
+
+  return true;
+}
+
+/**
  * thesis_params fields are used starting Phase 3 (scoring) / Phase 5
  * (yield/cash-on-cash) but persisted from day one — validated only for type
  * shape, not business rules, since exact usage evolves in later phases.

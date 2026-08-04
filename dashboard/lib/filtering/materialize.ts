@@ -7,14 +7,19 @@
  * lib/db/profiles.ts, never import this from a client component.
  *
  * Trigger points (issue #18's "implementer's call, document the choice"):
- *   - Explicit, on demand: POST /api/profiles/[id]/materialize (called from
- *     the client after a create/edit, see ProfileForm.tsx) and
+ *   - Explicit, on demand: POST /api/profiles/[id]/materialize and
  *     POST /api/profiles/materialize-all (all active profiles at once).
- *   - NOT wired automatically into POST/PATCH /api/profiles — see that
- *     route's tests (task 2.3) which assert exact `mockQuery` call counts;
- *     coupling profile-CRUD success to filter-materialization success (and
- *     to those tests' call-count assumptions) isn't worth it for what a
- *     client-side follow-up call achieves identically from the user's POV.
+ *   - On a profile create or scope-changing edit: called SERVER-side via
+ *     `lib/filtering/profile-refresh.ts` (`refreshProfileForScope`), inside
+ *     POST/PATCH /api/profiles — see D-040 (issue #245). This REVERSED the
+ *     original client-side-only choice for those two paths (materialization
+ *     is now robust against the browser navigating away before a follow-up
+ *     fetch fires). Clone still materializes client-side (page.tsx) — a clone
+ *     copies scope unchanged, so it isn't a quick-refresh/scope-change caller.
+ *   - The task-2.3 mock route tests (which assert exact `mockQuery` call
+ *     counts) still pass because the server-side refresh is best-effort and
+ *     swallowed — a rename never reaches it, and a create/scope-edit's extra
+ *     queries never change those tests' assertions on the CRUD query itself.
  *   - NOT wired into the connector orchestrator (task 1.3, Python) after new
  *     listings land — that would mean a Python process calling into this
  *     TypeScript module or hitting this container's HTTP API cross-service.

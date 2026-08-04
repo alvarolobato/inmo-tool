@@ -7,7 +7,8 @@ import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
 import { ProfileForm, DEFAULT_VALUES, type ProfileFormValues } from "@/components/profiles/ProfileForm";
 import { ProfileOverviewRow } from "@/components/profiles/ProfileOverviewRow";
-import type { SearchProfileRow } from "@/lib/profiles-schema";
+import { RefreshIndicator } from "@/components/profiles/RefreshIndicator";
+import type { ProfileRefreshResult, SearchProfileRow } from "@/lib/profiles-schema";
 import type { ProfileOverviewEntry } from "@/lib/profile-overview-types";
 
 type Mode =
@@ -97,6 +98,10 @@ export default function ProfilesPage() {
   const [error, setError] = useState<ApiErrorResponse | string | null>(null);
   const [mode, setMode] = useState<Mode>({ kind: "none" });
   const [busyId, setBusyId] = useState<number | null>(null);
+  // Issue #245: the ad-hoc sweep trigger id from the last create/scope-edit, so
+  // <RefreshIndicator> can poll it and show "buscando datos nuevos…". null when
+  // the last save enqueued no crawl (a rename, or an enqueue that failed).
+  const [refreshTriggerId, setRefreshTriggerId] = useState<number | null>(null);
 
   const fetchProfiles = useCallback(async () => {
     setLoading(true);
@@ -130,13 +135,15 @@ export default function ProfilesPage() {
     fetchProfiles();
   }, [fetchProfiles]);
 
-  // Materialization (task 2.4, #18) is triggered explicitly from here rather
-  // than server-side inside POST/PATCH /api/profiles — see
-  // lib/filtering/materialize.ts's docstring for why. Best-effort: a
-  // materialize failure shouldn't block the profile save from succeeding or
-  // surface as if the save itself failed — it's logged and swallowed, the
-  // candidate list (task 2.5) will just be stale until the next successful
-  // materialize call.
+  // Materialization on create/scope-edit now happens SERVER-side, inside the
+  // POST/PATCH routes' quick-refresh (issue #245) — the client no longer
+  // fires a separate /materialize call for those, so the candidate list is
+  // fresh the instant the save returns even if the browser navigates away.
+  // This client helper is kept ONLY for clone (task 2.4 / Fable phase-2
+  // review): clone's route doesn't scope-change, so it isn't a quick-refresh
+  // caller, but a clone still needs its identical candidate set materialized.
+  // Best-effort: a materialize failure is logged and swallowed, never
+  // surfaced as if the save itself failed.
   const triggerMaterialize = async (id: number) => {
     try {
       const res = await fetch(`/api/profiles/${id}/materialize`, { method: "POST" });
@@ -152,6 +159,21 @@ export default function ProfilesPage() {
     }
   };
 
+  // Issue #245: if the save kicked off an ad-hoc sweep, remember its trigger
+  // id so <RefreshIndicator> can poll it. A rename (refresh null, or crawl
+  // skipped) leaves the previous indicator cleared.
+  const applyRefresh = (refresh: ProfileRefreshResult | null | undefined) => {
+    if (
+      refresh &&
+      refresh.crawl.triggerId !== null &&
+      (refresh.crawl.status === "enqueued" || refresh.crawl.status === "already_pending")
+    ) {
+      setRefreshTriggerId(refresh.crawl.triggerId);
+    } else {
+      setRefreshTriggerId(null);
+    }
+  };
+
   const handleCreate = async (values: ProfileFormValues) => {
     const res = await fetch("/api/profiles", {
       method: "POST",
@@ -162,10 +184,10 @@ export default function ProfilesPage() {
       const body = await res.json().catch(() => null);
       throw new Error(isApiErrorResponse(body) ? body.error : "No se pudo crear el perfil.");
     }
-    const created: SearchProfileRow = await res.json();
+    const created: SearchProfileRow & { refresh?: ProfileRefreshResult | null } = await res.json();
     setMode({ kind: "none" });
     await fetchProfiles();
-    await triggerMaterialize(created.id);
+    applyRefresh(created.refresh);
   };
 
   const handleUpdate = async (id: number, values: ProfileFormValues) => {
@@ -178,9 +200,10 @@ export default function ProfilesPage() {
       const body = await res.json().catch(() => null);
       throw new Error(isApiErrorResponse(body) ? body.error : "No se pudo actualizar el perfil.");
     }
+    const updated: SearchProfileRow & { refresh?: ProfileRefreshResult | null } = await res.json();
     setMode({ kind: "none" });
     await fetchProfiles();
-    await triggerMaterialize(id);
+    applyRefresh(updated.refresh);
   };
 
   const handleArchive = async (id: number) => {
@@ -243,6 +266,15 @@ export default function ProfilesPage() {
           {mode.kind === "create" ? "Cerrar" : "Nuevo perfil"}
         </button>
       </div>
+
+      {/* Issue #245: after a create/scope-edit, poll the ad-hoc sweep and show
+          a subtle "buscando datos nuevos…" indicator. `key` remounts it when a
+          new save starts a new sweep so its poll loop restarts cleanly. */}
+      <RefreshIndicator
+        key={refreshTriggerId ?? "none"}
+        triggerId={refreshTriggerId}
+        onSettled={fetchProfiles}
+      />
 
       {mode.kind === "create" && (
         <div
