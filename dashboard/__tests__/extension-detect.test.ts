@@ -57,6 +57,16 @@ describe("detailPortalForUrl — only real listing-detail pages", () => {
     ["https://www.alisedainmobiliaria.com/", null],
     ["https://www.alisedainmobiliaria.com/comprar/vivienda/malaga", null],
     ["https://www.alisedainmobiliaria.com/inmueble", null],
+    // Altamira (issue #271): best-effort /inmueble/<id> or /ficha/<id> guess —
+    // MUST be verified against a real Altamira detail URL (see detect.js comment).
+    ["https://www.altamirainmuebles.com/inmueble/ABC123", "altamira"],
+    ["https://www.altamirainmuebles.com/inmueble/ABC123/", "altamira"],
+    ["https://www.altamirainmuebles.com/ficha/98765?utm=x#foto", "altamira"],
+    ["https://altamirainmuebles.com/inmueble/piso-madrid-1", "altamira"],
+    // Altamira non-detail pages → null.
+    ["https://www.altamirainmuebles.com/", null],
+    ["https://www.altamirainmuebles.com/comprar/vivienda/madrid", null],
+    ["https://www.altamirainmuebles.com/inmueble", null],
     // Unsupported host → null even on a detail-shaped path.
     ["https://www.fotocasa.es/inmueble/123/", null],
     ["https://example.com/inmueble/123/", null],
@@ -107,6 +117,7 @@ describe("isRenderReady — not an empty SPA shell", () => {
     document.body.innerHTML = `<main><h1>Piso en venta en Antequera</h1><p>${LONG_TEXT}</p></main>`;
     expect(isRenderReady(document, "idealista")).toBe(true);
     expect(isRenderReady(document, "aliseda")).toBe(true);
+    expect(isRenderReady(document, "altamira")).toBe(true);
   });
 
   it("uses generic h1/main fallback for an unknown portal", () => {
