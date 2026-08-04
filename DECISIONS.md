@@ -33,6 +33,7 @@
 | [D-020](docs/decisions/D-020-milanuncios-photo-cdn-rule-parameter.md) | Milanuncios `normalize()` appends `?rule=detail_640x480` to any photo URL missing a query string — the CDN 404s "Rule parameter not Found" without it; headers don't help. |
 | [D-021](docs/decisions/D-021-haya-merged-into-solvia.md) | Haya (`haya.es`) not buildable: the whole domain 301-redirects to `solvia.es` (already ingested, D-018) — Intrum merged Haya into the Solvia servicer brand. No connector written. |
 | [D-022](docs/decisions/D-022-milanuncios-photo-backfill-migration.md) | `init.sql`'s Milanuncios photo-URL backfill mirrors `add_photo_rule_if_missing` exactly, pinned by a DB-backed equivalence test — never hand-reimplement the rule in SQL. |
+| [D-023](docs/decisions/D-023-dedup-pending-reevaluation.md) | `engine.run()` re-evaluates every `pending` `suggested_merge` row every run (only `rejected`/`conflict` stay frozen); an in-flight `suggested_merge_action` defers reevaluation one run. |
 
 ## AI layer
 

@@ -21,7 +21,7 @@ from etl.connectors import base
 from etl.connectors.base import CanonicalListingVersion
 from etl.dedup import engine
 from etl.dedup.engine import _PhotoHashCache
-from etl.dedup.signals import phone_extract, reference_code
+from etl.dedup.signals import fuzzy, phone_extract, reference_code
 from etl.dedup.signals import photo_hash as photo_hash_signal
 from etl.dedup.types import ListingRecord
 
@@ -1215,14 +1215,34 @@ class TestSuggestionResolution:
             assert cur.fetchone()[0] == 1  # still just the confirmed one
 
     def test_pending_suggestion_is_not_refiled_on_the_next_run(self, dedup_db):
-        """The skip set still does its original job for un-reviewed rows —
-        the batching change (#61) must not regress this."""
-        self._file_one_suggestion(dedup_db)
+        """A second run against unchanged data must not create a *second*
+        row for the same pair (the batching change, #61, must not regress
+        this) — but issue #214 means it's no longer a silent no-op either:
+        the row is re-evaluated and refreshed in place, just landing on the
+        same verdict since nothing about the pair or the rules changed."""
+        suggestion_id, *_ = self._file_one_suggestion(dedup_db)
         result = engine.run(dedup_db)
         assert result.suggested == 0
+        assert result.merged == 0
+        # Issue #214: re-evaluated, not skipped — but the verdict didn't
+        # change (same data, same rules), so it's the "still pending,
+        # refreshed" bucket, not merged or rejected.
+        assert result.reevaluated_total == 1
+        assert result.reevaluated_updated == 1
+        assert result.reevaluated_merged == 0
+        assert result.reevaluated_rejected == 0
         with dedup_db.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM suggested_merge")
             assert cur.fetchone()[0] == 1
+            cur.execute(
+                "SELECT status, detail FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            status, detail = cur.fetchone()
+            assert status == "pending"
+            # Refreshed, and the refresh is auditable — a `reevaluated_from`
+            # key distinguishes an engine re-score from a human decision.
+            assert "reevaluated_from" in detail
 
     def test_reject_keeps_the_pair_out_of_future_runs(self, dedup_db):
         suggestion_id, *_ = self._file_one_suggestion(dedup_db)
@@ -1303,6 +1323,276 @@ class TestSuggestionResolution:
     def test_unknown_suggestion_id_is_refused(self, dedup_db):
         with pytest.raises(ValueError, match="No suggested_merge row"):
             engine.confirm_suggestion(dedup_db, 999999)
+
+
+class TestPendingSuggestionReevaluation:
+    """Issue #214: a `pending` `suggested_merge` row used to be frozen the
+    moment it was filed — `_load_recorded_pairs` treated it exactly like
+    `rejected`/`conflict` and the main loop skipped it forever, no matter
+    how much `evaluate_pair`'s rules changed underneath it. These tests
+    exercise the fix through `engine.run()` end to end (real DB round
+    trip), each one changing an actual rule between two runs and asserting
+    the *outcome* changes — not just that some field got touched.
+    """
+
+    def test_pending_reevaluated_to_merged_when_a_veto_rule_is_lifted(self, dedup_db):
+        """Mirrors TestFloorCorroborationAcrossSignals's DB-backed fixture:
+        a phone match corroborated on price/size proximity, but blocked
+        from auto-merging by issue #186's floor veto — filed as a `pending`
+        suggestion (basis='phone', confidence=0.500).
+
+        Simulates the exact shape of #214's real-world trigger (a rule
+        change making a previously-vetoed pair mergeable) by monkeypatching
+        `phone_extract.floors_conflict` to always return False — i.e. "the
+        floor-veto rule no longer blocks this pair" — then re-running.
+        Under the old code this pending row would never be looked at again;
+        under the fix it's re-scored, corroboration now succeeds, and the
+        pair auto-merges.
+        """
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            dedup_db,
+            "idealista",
+            "fotocasa",
+            "reeval-merge",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            listing_kind_a="particular",
+            listing_kind_b="particular",
+            description_a="Piso reformado, tel 622334455",
+            description_b="Piso reformado, tel 622334455",
+            current_price_a=Decimal(285000),
+            current_price_b=Decimal(279000),
+            floor_a="10º",
+            floor_b="A partir de la 15ª planta",
+        )
+
+        first = engine.run(dedup_db)
+        assert first.suggested == 1
+        assert first.merged == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT id, match_basis, confidence, status FROM suggested_merge"
+            )
+            suggestion_id, basis, confidence, status = cur.fetchone()
+            assert (basis, confidence, status) == ("phone", Decimal("0.500"), "pending")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(phone_extract, "floors_conflict", lambda a, b: False)
+            second = engine.run(dedup_db)
+
+        assert second.suggested == 0
+        assert second.merged == 1
+        assert second.reevaluated_total == 1
+        assert second.reevaluated_merged == 1
+        assert second.reevaluated_rejected == 0
+        assert second.reevaluated_updated == 0
+
+        with dedup_db.cursor() as cur:
+            # A real merge happened — both listings now share a property.
+            cur.execute(
+                "SELECT DISTINCT property_id FROM listing WHERE id IN (%s, %s)",
+                (listing_a, listing_b),
+            )
+            assert len(cur.fetchall()) == 1
+
+            # The *original* row was resolved in place, not superseded by a
+            # second row — the pair is unique, so a fresh INSERT would have
+            # violated idx_suggested_merge_pair; this asserts the update
+            # path was actually taken.
+            cur.execute("SELECT COUNT(*) FROM suggested_merge")
+            assert cur.fetchone()[0] == 1
+
+            cur.execute(
+                "SELECT status, match_basis, confidence, resolved_at, detail "
+                "FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            status, basis, confidence, resolved_at, detail = cur.fetchone()
+            assert status == "confirmed"
+            assert basis == "phone"
+            assert confidence == Decimal("0.900")
+            assert resolved_at is not None
+            # Auditable: what it used to say, and that the engine (not a
+            # human) is what changed it.
+            assert detail["reevaluated_from"]["confidence"] == 0.5
+            assert detail["reevaluated_from"]["status"] == "pending"
+            assert "auto_confirmed_merge" in detail
+            assert "confirmed_merge" not in detail  # that key is confirm_suggestion's
+
+    def test_pending_reevaluated_to_rejected_when_no_signal_fires_any_more(
+        self, dedup_db
+    ):
+        """The other acceptance direction: re-evaluation must also be able
+        to move a pair OUT of the queue, not just into a merge. Files a
+        `fuzzy`-basis suggestion (identical address text, price/size within
+        tolerance, nothing stronger available), then tightens
+        `fuzzy._MIN_TEXT_SIMILARITY` past what any two strings could ever
+        score — the direct analogue of the #186 floor-veto acceptance case:
+        a rule change makes the pair fail every signal, and a pending row
+        that fails every signal has nothing left supporting it, so it
+        becomes `rejected` rather than sitting in the queue forever.
+        """
+        listing_a, prop_a, listing_b, prop_b = _insert_pair(
+            dedup_db,
+            "idealista",
+            "fotocasa",
+            "reeval-reject",
+            address_a="Calle Alcala 10, Madrid",
+            address_b="Calle Alcala 10, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(72),
+            current_price_a=Decimal(200000),
+            current_price_b=Decimal(205000),
+        )
+
+        first = engine.run(dedup_db)
+        assert first.suggested == 1
+        assert first.merged == 0
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT id, match_basis, status FROM suggested_merge")
+            suggestion_id, basis, status = cur.fetchone()
+            assert (basis, status) == ("fuzzy", "pending")
+
+        with pytest.MonkeyPatch.context() as mp:
+            # No real address-text similarity score can reach 1.5 — this is
+            # "the rule got strict enough that nothing clears it any more",
+            # not a data change.
+            mp.setattr(fuzzy, "_MIN_TEXT_SIMILARITY", 1.5)
+            second = engine.run(dedup_db)
+
+        assert second.suggested == 0
+        assert second.merged == 0
+        assert second.reevaluated_total == 1
+        assert second.reevaluated_rejected == 1
+        assert second.reevaluated_merged == 0
+        assert second.reevaluated_updated == 0
+
+        with dedup_db.cursor() as cur:
+            # Never merged — listings stay on their own separate properties.
+            cur.execute(
+                "SELECT DISTINCT property_id FROM listing WHERE id IN (%s, %s)",
+                (listing_a, listing_b),
+            )
+            assert {row[0] for row in cur.fetchall()} == {prop_a, prop_b}
+
+            cur.execute(
+                "SELECT status, resolved_at, detail FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            status, resolved_at, detail = cur.fetchone()
+            assert status == "rejected"
+            assert resolved_at is not None
+            assert detail["reevaluated_from"]["match_basis"] == "fuzzy"
+            assert "reevaluated_reason" in detail
+
+    def test_pending_still_pending_when_nothing_about_it_changed(self, dedup_db):
+        """Baseline: unchanged data + unchanged rules re-scores to the same
+        verdict — `TestSuggestionResolution.
+        test_pending_suggestion_is_not_refiled_on_the_next_run` covers this
+        through the reference_code fixture; this one pins the same
+        invariant through the fuzzy signal, which is the one every one of
+        this class's two acceptance tests above mutates a rule on, so it's
+        worth also seeing it do nothing when no rule moves.
+        """
+        _insert_pair(
+            dedup_db,
+            "idealista",
+            "fotocasa",
+            "reeval-noop",
+            address_a="Calle Alcala 10, Madrid",
+            address_b="Calle Alcala 10, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(72),
+            current_price_a=Decimal(200000),
+            current_price_b=Decimal(205000),
+        )
+        engine.run(dedup_db)
+        second = engine.run(dedup_db)
+        assert second.reevaluated_total == 1
+        assert second.reevaluated_updated == 1
+        assert second.reevaluated_merged == 0
+        assert second.reevaluated_rejected == 0
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM suggested_merge")
+            assert cur.fetchone()[0] == 1
+            cur.execute("SELECT status FROM suggested_merge")
+            assert cur.fetchone()[0] == "pending"
+
+    def test_pending_with_an_in_flight_action_is_left_alone(self, dedup_db):
+        """Issue #214's answer to "what about a suggestion a human has
+        already looked at but not acted on yet": there is no `viewed_at`/
+        session concept anywhere in this schema, so this run cannot know a
+        human is *staring* at a suggestion. What it *can* know is that a
+        human already clicked confirm/reject a moment ago and the resulting
+        `suggested_merge_action` row hasn't been drained by
+        `etl.dedup.actions.run_action_poll_loop` yet — reevaluating (and
+        potentially rejecting) the suggestion underneath that in-flight
+        decision would race it. This suggestion must come out completely
+        untouched while the action is still `pending`, and get picked up
+        normally once it no longer is.
+        """
+        _insert_pair(
+            dedup_db,
+            "idealista",
+            "fotocasa",
+            "reeval-inflight",
+            address_a="Calle Alcala 10, Madrid",
+            address_b="Calle Alcala 10, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(72),
+            current_price_a=Decimal(200000),
+            current_price_b=Decimal(205000),
+        )
+        engine.run(dedup_db)
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT id, match_basis, confidence, detail FROM suggested_merge"
+            )
+            suggestion_id, basis_before, confidence_before, _detail_before = (
+                cur.fetchone()
+            )
+            cur.execute(
+                "INSERT INTO suggested_merge_action (suggestion_id, action) "
+                "VALUES (%s, 'confirm')",
+                (suggestion_id,),
+            )
+        dedup_db.commit()
+
+        with pytest.MonkeyPatch.context() as mp:
+            # Even a rule change that would otherwise reject this pair must
+            # not touch it while an action is in flight.
+            mp.setattr(fuzzy, "_MIN_TEXT_SIMILARITY", 1.5)
+            result = engine.run(dedup_db)
+
+        assert result.reevaluated_total == 0
+        assert result.pairs_compared == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT match_basis, confidence, status, detail "
+                "FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            basis_after, confidence_after, status_after, detail_after = cur.fetchone()
+            assert (basis_after, confidence_after) == (basis_before, confidence_before)
+            assert status_after == "pending"
+            assert "reevaluated_from" not in detail_after
+
+        # Once the action is no longer pending (drained by the poll loop,
+        # successfully or not), a normal run reevaluates it again.
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "UPDATE suggested_merge_action SET status = 'done' "
+                "WHERE suggestion_id = %s",
+                (suggestion_id,),
+            )
+        dedup_db.commit()
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(fuzzy, "_MIN_TEXT_SIMILARITY", 1.5)
+            result = engine.run(dedup_db)
+
+        assert result.reevaluated_total == 1
+        assert result.reevaluated_rejected == 1
 
 
 class TestRecordedPairBatching:

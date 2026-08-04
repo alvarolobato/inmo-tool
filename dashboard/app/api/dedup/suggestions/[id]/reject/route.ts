@@ -5,9 +5,10 @@
  * `action` differs).
  *
  * A rejected suggestion's `status` stays 'rejected' forever — `engine.run`'s
- * `_load_recorded_pairs` keeps every non-'confirmed' status (pending,
- * rejected, conflict) in its skip set, so a rejected pair is never
- * re-suggested by a later dedup run.
+ * `_load_recorded_pairs` keeps 'rejected' (and 'conflict') in its permanent
+ * skip set, so a rejected pair is never re-suggested or re-evaluated by a
+ * later dedup run. This is unlike 'pending', which issue #214 made the
+ * engine re-score every run instead of freezing forever.
  */
 
 import { NextRequest, NextResponse } from "next/server";
