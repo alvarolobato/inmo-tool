@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import logging
 import posixpath
+from dataclasses import dataclass
 from decimal import Decimal
 from urllib.parse import urlparse
 
 import imagehash
 import requests
 from PIL import Image
+
+from etl.dedup import photo_hash_store
 
 logger = logging.getLogger(__name__)
 
@@ -196,26 +199,70 @@ PHOTO_MERGE_PRICE_RATIO = Decimal("0.02")
 PHOTO_MERGE_CONFIDENCE = Decimal("0.900")
 
 
-def attemptable_photo_count(photo_urls: tuple[str, ...]) -> int:
-    """How many of *photo_urls* `fetch_hashes` will actually try to fetch —
-    i.e. excluding the video/virtual-tour links `_looks_like_photo_url`
-    filters out before ever making a request.
+@dataclass
+class PhotoFetchStats:
+    """What one `fetch_hashes_with_stats` call actually did.
 
-    Issue #206: the dedup engine's per-source health tracking needs this so
-    a source's photo-hash success rate isn't miscounted against links it
-    was never going to hash in the first place (a listing with 3 photos + 2
-    YouTube links has an attemptable count of 3, not 5).
+    The split that matters is **live vs. cached**, and it exists because of
+    issue #206's `zero_success_sources` health rollup. That rollup asks "did
+    this source hash zero photos?" as a proxy for "is this source's CDN dead?"
+    — a question only *live* traffic can answer. Counting store hits towards
+    it (as the first cut of #221 did) permanently silences the detector: hashes
+    cached while the CDN was healthy keep the success count non-zero forever,
+    so the exact incident it was built for (#209/#213, every Milanuncios photo
+    404ing) reports a healthy source. See `zero_success_sources` in
+    `etl.dedup.engine`.
+
+    `live_attempted` counts URLs this call issued a network request for: not
+    the video/tour links `_looks_like_photo_url` filters out, not store hits,
+    and not a repeat of a URL already fetched in this same call.
     """
-    return sum(1 for url in photo_urls if _looks_like_photo_url(url))
+
+    live_attempted: int = 0
+    live_hashed: int = 0
+    cached_hashed: int = 0
+    cached_failed: int = 0
+    store_write_failures: int = 0
+
+    @property
+    def failed(self) -> int:
+        """Photos that produced no hash, live failures and cached ones alike."""
+        return (self.live_attempted - self.live_hashed) + self.cached_failed
 
 
 def fetch_hashes(
-    photo_urls: tuple[str, ...], *, source: str = "unknown"
+    photo_urls: tuple[str, ...], *, source: str = "unknown", store_conn=None
 ) -> list[imagehash.ImageHash]:
     """Fetch and hash each URL; skip (don't raise on) any that fail.
 
+    Thin wrapper over `fetch_hashes_with_stats` for callers that only want the
+    hashes. Anything reporting on *fetch health* must use that function
+    instead — the hash list alone cannot distinguish a photo hashed over the
+    network this run from one read out of the store, and conflating the two is
+    what broke the #206 rollup (see `PhotoFetchStats`).
+    """
+    return fetch_hashes_with_stats(photo_urls, source=source, store_conn=store_conn)[0]
+
+
+def fetch_hashes_with_stats(
+    photo_urls: tuple[str, ...], *, source: str = "unknown", store_conn=None
+) -> tuple[list[imagehash.ImageHash], PhotoFetchStats]:
+    """Fetch and hash each URL; skip (don't raise on) any that fail.
+
+    Returns the hashes plus a `PhotoFetchStats` describing how they were
+    obtained — see that class for why the live/cached split is load-bearing.
+
+    Issue #221: when *store_conn* is given, per-URL results are read from and
+    written to the `photo_hashes` table, so a URL is fetched at most once ever
+    rather than once per run. Passing None keeps the original fetch-everything
+    behaviour, which is what the pure-comparison unit tests rely on — the
+    persistence is a cost optimisation over an immutable value, never a change
+    in what gets compared.
+
     A single broken/expired photo URL shouldn't sink the whole comparison —
-    this is a best-effort signal, not a required one.
+    this is a best-effort signal, not a required one. That extends to the store
+    itself: `photo_hash_store.load`/`save` never raise, so a database problem
+    degrades to fetching the photo, never to a failed dedup run.
 
     URLs that don't look like a static image (a YouTube/Vimeo walkthrough, a
     Floorfy/Matterport virtual tour, ...) are skipped before the network
@@ -232,11 +279,32 @@ def fetch_hashes(
     line's context — it does not change fetch/hash behaviour.
     """
     hashes: list[imagehash.ImageHash] = []
-    failed = 0
+    stats = PhotoFetchStats()
+    # Seeded from the store, then kept current as this call's own fetches land
+    # so a URL repeated inside one `photo_urls` tuple is fetched once rather
+    # than once per occurrence. Every occurrence still contributes its hash —
+    # the memo suppresses the request, not the result, so `match_ratio`'s
+    # denominators are exactly what they were before.
+    known: dict[str, photo_hash_store.StoredHash] = (
+        photo_hash_store.load(store_conn, photo_urls) if store_conn else {}
+    )
     for url in photo_urls:
         if not _looks_like_photo_url(url):
             logger.debug("photo_hash: skipping non-image URL %s", url)
             continue
+        # A hit here is the whole point of #221: no request at all. A cached
+        # failure still counts as a failure for this listing's rollup, but
+        # neither a cached success nor a cached failure is evidence about the
+        # CDN's state *now* — that's what the live_* counters are for.
+        if url in known:
+            entry = known[url]
+            if entry.ok and entry.phash is not None:
+                hashes.append(entry.phash)
+                stats.cached_hashed += 1
+            else:
+                stats.cached_failed += 1
+            continue
+        stats.live_attempted += 1
         try:
             with requests.get(
                 url, timeout=_REQUEST_TIMEOUT_SECONDS, stream=True
@@ -244,19 +312,47 @@ def fetch_hashes(
                 response.raise_for_status()
                 response.raw.decode_content = True
                 image = Image.open(response.raw)
-                hashes.append(imagehash.phash(image))
+                digest = imagehash.phash(image)
         except Exception as exc:  # noqa: BLE001 - genuinely best-effort per photo
-            failed += 1
             logger.debug("photo_hash: failed to fetch/hash %s: %s", url, exc)
-    if failed:
+            known[url] = photo_hash_store.StoredHash(
+                photo_url=url, phash=None, ok=False
+            )
+            if store_conn and not photo_hash_store.save(
+                store_conn,
+                photo_url=url,
+                phash=None,
+                source=source,
+                failure_reason=str(exc)[:500],
+            ):
+                stats.store_write_failures += 1
+            continue
+        # Success bookkeeping deliberately sits outside the try: a failure
+        # while *recording* a hash must not also count it as a failed fetch.
+        hashes.append(digest)
+        stats.live_hashed += 1
+        known[url] = photo_hash_store.StoredHash(photo_url=url, phash=digest, ok=True)
+        if store_conn and not photo_hash_store.save(
+            store_conn, photo_url=url, phash=digest, source=source
+        ):
+            stats.store_write_failures += 1
+    if stats.failed:
         logger.warning(
             "photo_hash: %d/%d photo(s) failed to fetch/hash (source=%s) — "
             "see DEBUG logs for the individual URLs/errors",
-            failed,
-            failed + len(hashes),
+            stats.failed,
+            stats.failed + len(hashes),
             source,
         )
-    return hashes
+    if stats.store_write_failures:
+        logger.warning(
+            "photo_hash: %d photo hash(es) could not be written to the store "
+            "(source=%s) — they will be re-fetched on a later run; see DEBUG "
+            "logs for the individual URLs/errors",
+            stats.store_write_failures,
+            source,
+        )
+    return hashes, stats
 
 
 def match_ratio(

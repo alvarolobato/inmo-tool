@@ -9,6 +9,7 @@ reconciled state), which mocking the database would not meaningfully test.
 from __future__ import annotations
 
 import io
+import zlib
 from decimal import Decimal
 from pathlib import Path
 
@@ -162,6 +163,11 @@ def _cleanup(conn) -> None:
         cur.execute("DELETE FROM search_profile")
         cur.execute("DELETE FROM listing")
         cur.execute("DELETE FROM property")
+        # Issue #221: the photo-hash store commits on its own connection, so
+        # rows written by one test outlive that test's transaction. Left
+        # behind, they'd turn a later test's intended live fetch into a store
+        # hit — the tests here reuse URLs like `https://<host>/p0.jpg`.
+        cur.execute("DELETE FROM photo_hashes")
     conn.commit()
 
 
@@ -2308,18 +2314,46 @@ class TestPhotoHashAutoMerge:
         assert evaluation.decision == "suggest"
 
 
+def _stub_fetch(hashes_for, *, cached_hashed_for=None):
+    """A `photo_hash.fetch_hashes_with_stats` stand-in for the health tests.
+
+    `hashes_for(source)` gives the hashes a live fetch produced;
+    `cached_hashed_for(source)` (optional) how many came out of the #221 store
+    instead. Live attempts are derived from the URLs the real function would
+    have requested, so a video-only `photo_urls` still counts as zero attempts
+    here exactly as it does in production.
+    """
+
+    def _fetch(urls, source="unknown", store_conn=None):
+        cached = cached_hashed_for(source) if cached_hashed_for else 0
+        live_urls = [u for u in urls if photo_hash_signal._looks_like_photo_url(u)]
+        live_attempted = max(len(live_urls) - cached, 0)
+        hashes = hashes_for(source)
+        stats = photo_hash_signal.PhotoFetchStats(
+            live_attempted=live_attempted,
+            live_hashed=max(len(hashes) - cached, 0),
+            cached_hashed=cached,
+        )
+        return hashes, stats
+
+    return _fetch
+
+
 class TestPhotoHashCacheSourceHealth:
     """Issue #206: `_PhotoHashCache` tracks attempted/hashed photo counts
     per source as it fetches (piggybacking on the existing memoization
     pass, one extra dict update per listing) so a run can report which
     sources had a 0% photo-hash success rate. No DB/network needed here —
-    `photo_hash.fetch_hashes` itself is monkeypatched, same no-network
-    split every other engine-level photo_hash test in this file uses.
+    `photo_hash.fetch_hashes_with_stats` itself is monkeypatched, same
+    no-network split every other engine-level photo_hash test in this file
+    uses.
     """
 
     def test_a_source_with_every_photo_failing_is_reported(self, monkeypatch):
         monkeypatch.setattr(
-            photo_hash_signal, "fetch_hashes", lambda urls, source="unknown": []
+            photo_hash_signal,
+            "fetch_hashes_with_stats",
+            _stub_fetch(lambda source: []),
         )
         cache = _PhotoHashCache()
         listing = _record(
@@ -2331,8 +2365,8 @@ class TestPhotoHashCacheSourceHealth:
     def test_a_source_with_at_least_one_success_is_not_reported(self, monkeypatch):
         monkeypatch.setattr(
             photo_hash_signal,
-            "fetch_hashes",
-            lambda urls, source="unknown": [imagehash.hex_to_hash("0" * 16)],
+            "fetch_hashes_with_stats",
+            _stub_fetch(lambda source: [imagehash.hex_to_hash("0" * 16)]),
         )
         cache = _PhotoHashCache()
         listing = _record(
@@ -2349,7 +2383,9 @@ class TestPhotoHashCacheSourceHealth:
         total failure, and vice versa (only a source with ZERO successes
         across every listing counts as degraded)."""
         monkeypatch.setattr(
-            photo_hash_signal, "fetch_hashes", lambda urls, source="unknown": []
+            photo_hash_signal,
+            "fetch_hashes_with_stats",
+            _stub_fetch(lambda source: []),
         )
         cache = _PhotoHashCache()
         cache.get(
@@ -2373,17 +2409,86 @@ class TestPhotoHashCacheSourceHealth:
         """An empty/video-only photo_urls shouldn't make a source look
         degraded — there was nothing to attempt in the first place."""
         monkeypatch.setattr(
-            photo_hash_signal, "fetch_hashes", lambda urls, source="unknown": []
+            photo_hash_signal,
+            "fetch_hashes_with_stats",
+            _stub_fetch(lambda source: []),
         )
         cache = _PhotoHashCache()
         cache.get(_record(1, 100, source="idealista", photo_urls=()))
         assert cache.zero_success_sources() == {}
 
-    def test_mixed_sources_only_the_failing_one_is_reported(self, monkeypatch):
-        def _fake_fetch_hashes(urls, source="unknown"):
-            return [] if source == "milanuncios" else [imagehash.hex_to_hash("0" * 16)]
+    def test_a_fully_warm_source_reports_nothing_rather_than_healthy(self, monkeypatch):
+        """Issue #221: every photo came out of the store, so this run made no
+        network request at all and has NO evidence about the CDN either way.
 
-        monkeypatch.setattr(photo_hash_signal, "fetch_hashes", _fake_fetch_hashes)
+        Reporting nothing is the honest answer. The tempting alternative —
+        treating the cached hashes as successes — is what silenced this
+        detector: it makes a source look healthy on the strength of hashes
+        recorded before the outage. The paired
+        `..._despite_cached_successes` test below is the other half: as soon
+        as there IS live traffic to judge, a dead CDN is reported again.
+        """
+        monkeypatch.setattr(
+            photo_hash_signal,
+            "fetch_hashes_with_stats",
+            _stub_fetch(
+                lambda source: [imagehash.hex_to_hash("0" * 16)] * 2,
+                cached_hashed_for=lambda source: 2,
+            ),
+        )
+        cache = _PhotoHashCache()
+        cache.get(
+            _record(
+                1,
+                100,
+                source="milanuncios",
+                photo_urls=("https://a.example/1.jpg", "https://a.example/2.jpg"),
+            )
+        )
+        assert cache.zero_success_sources() == {}
+
+    def test_a_source_whose_live_fetches_all_fail_is_reported_despite_cached_successes(
+        self, monkeypatch
+    ):
+        """The #209/#213 shape, and the regression PR #226 was opened on.
+
+        The store is warm with hashes recorded while the CDN was healthy; a
+        newly-ingested listing's URLs now 404 without exception. Counting the
+        cached hashes as this run's successes made the source look perfectly
+        healthy — 100% of live fetches failing, zero warnings. Only live
+        traffic decides.
+        """
+        monkeypatch.setattr(
+            photo_hash_signal,
+            "fetch_hashes_with_stats",
+            # 8 hashes returned, every one of them from the store; the 4 URLs
+            # actually requested over the network all failed.
+            _stub_fetch(
+                lambda source: [imagehash.hex_to_hash("0" * 16)] * 8,
+                cached_hashed_for=lambda source: 8,
+            ),
+        )
+        cache = _PhotoHashCache()
+        cache.get(
+            _record(
+                1,
+                100,
+                source="milanuncios",
+                photo_urls=tuple(f"https://a.example/{i}.jpg" for i in range(12)),
+            )
+        )
+        assert cache.zero_success_sources() == {"milanuncios": 4}
+
+    def test_mixed_sources_only_the_failing_one_is_reported(self, monkeypatch):
+        monkeypatch.setattr(
+            photo_hash_signal,
+            "fetch_hashes_with_stats",
+            _stub_fetch(
+                lambda source: (
+                    [] if source == "milanuncios" else [imagehash.hex_to_hash("0" * 16)]
+                )
+            ),
+        )
         cache = _PhotoHashCache()
         cache.get(
             _record(
@@ -2410,9 +2515,22 @@ class TestDedupRunResultPhotoHealth:
     _BROKEN_HOST = "images.milanuncios.example"
 
     @staticmethod
-    def _jpeg_bytes() -> bytes:
+    def _jpeg_bytes(url: str) -> bytes:
+        """A distinct image per URL.
+
+        Serving one identical image for every URL would make every listing's
+        photos match every other listing's perfectly, so these tests would be
+        running against an accidental auto-merge (issue #188) rather than the
+        health rollup they're about. Derived from the URL so it's stable
+        across runs — the store must return the same hash on a second pass.
+        """
+        seed = zlib.crc32(url.encode()) & 0xFFFF
+        image = Image.new("L", (64, 64))
+        image.putdata(
+            [(seed + x * 7 + y * 13) % 256 for y in range(64) for x in range(64)]
+        )
         buffer = io.BytesIO()
-        Image.new("RGB", (32, 32), (120, 140, 160)).save(buffer, "JPEG")
+        image.convert("RGB").save(buffer, "JPEG")
         return buffer.getvalue()
 
     def _fake_get(self, url, **kwargs):
@@ -2437,9 +2555,13 @@ class TestDedupRunResultPhotoHealth:
                 return False
 
         host = urlsplit(url).hostname or ""
-        if host == self._BROKEN_HOST:
+        if host == self._BROKEN_HOST or self._dead_hosts_only:
             return _FakeResponse(ok=False)
-        return _FakeResponse(ok=True, body=self._jpeg_bytes())
+        return _FakeResponse(ok=True, body=self._jpeg_bytes(url))
+
+    # Flipped to True by the "the CDN went dead after the store warmed up"
+    # test below; every other test leaves the per-host behaviour above alone.
+    _dead_hosts_only = False
 
     def test_a_fully_broken_source_is_flagged_and_a_healthy_one_is_not(
         self, dedup_db, monkeypatch, caplog
@@ -2501,6 +2623,105 @@ class TestDedupRunResultPhotoHealth:
 
         result = engine.run(dedup_db)
         assert result.photo_hash_zero_success_sources == {}
+
+    def test_hashes_persist_even_though_the_run_itself_never_commits(
+        self, dedup_db, monkeypatch
+    ):
+        """Issue #221 blocker: `engine.run()` has no commit of its own — the
+        only commits are incidental ones inside `perform_merge`/
+        `file_suggestion`, so a run where no pair fires (this one: distinct
+        addresses, distinct photos) committed nothing at all. With the store
+        riding that same transaction, a full ~46-minute cold pass killed
+        before a merge happened discarded every hash it had paid for. The
+        store's own connection is what makes the work survive; `rollback()`
+        below is what a SIGINT does to the run's transaction.
+        """
+        monkeypatch.setattr(photo_hash_signal.requests, "get", self._fake_get)
+        prop_a = _insert_property(dedup_db, address="Calle Persistente 1")
+        _insert_listing(
+            dedup_db,
+            prop_a,
+            "fotocasa",
+            "persist-1",
+            photo_urls=[
+                f"https://{self._WORKING_HOST}/persist{i}.jpg" for i in range(2)
+            ],
+        )
+        prop_b = _insert_property(dedup_db, address="Calle Persistente 2")
+        _insert_listing(
+            dedup_db,
+            prop_b,
+            "idealista",
+            "persist-2",
+            photo_urls=[f"https://{self._WORKING_HOST}/keep{i}.jpg" for i in range(2)],
+        )
+        dedup_db.commit()
+
+        result = engine.run(dedup_db)
+        assert result.merged == 0 and result.suggested == 0, (
+            "this test only means something if the run had no incidental commit"
+        )
+        dedup_db.rollback()
+
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT count(*) FROM photo_hashes WHERE ok")
+            assert cur.fetchone()[0] == 4
+
+    def test_a_source_whose_cdn_dies_after_the_store_warmed_up_is_still_flagged(
+        self, dedup_db, monkeypatch
+    ):
+        """The regression PR #226 was opened on, end to end.
+
+        Run 1 hashes Milanuncios' photos while its CDN is healthy, and the
+        issue-#221 store persists them. The CDN then dies exactly as it did in
+        #209/#213 — every request 404s — and a brand-new listing arrives whose
+        four URLs have never worked. Run 2 must still report the source.
+
+        With the store's hits counted as this run's successes, run 2 reported
+        `{}`: eight hashes recorded a week ago outvoted four live 404s, and the
+        detector built for this precise incident stayed silent through it. The
+        rollup only ever looks at live traffic now, so the four failed fetches
+        are the whole of the evidence and they all failed.
+        """
+        prop_mil = _insert_property(dedup_db, address="Calle Viva 1")
+        _insert_listing(
+            dedup_db,
+            prop_mil,
+            "milanuncios",
+            "warm-1",
+            photo_urls=[f"https://{self._WORKING_HOST}/warm{i}.jpg" for i in range(8)],
+        )
+        prop_other = _insert_property(dedup_db, address="Calle Viva 2")
+        _insert_listing(
+            dedup_db,
+            prop_other,
+            "fotocasa",
+            "warm-2",
+            photo_urls=[f"https://{self._WORKING_HOST}/other{i}.jpg" for i in range(2)],
+        )
+        dedup_db.commit()
+
+        monkeypatch.setattr(photo_hash_signal.requests, "get", self._fake_get)
+        assert engine.run(dedup_db).photo_hash_zero_success_sources == {}
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT count(*) FROM photo_hashes WHERE ok")
+            assert cur.fetchone()[0] == 10, "run 1 must have warmed the store"
+
+        # The CDN goes dead, and a new listing arrives that has never been
+        # hashed — its four URLs are fetched live, and all four 404.
+        self._dead_hosts_only = True
+        prop_new = _insert_property(dedup_db, address="Calle Nueva 3")
+        _insert_listing(
+            dedup_db,
+            prop_new,
+            "milanuncios",
+            "new-1",
+            photo_urls=[f"https://{self._WORKING_HOST}/new{i}.jpg" for i in range(4)],
+        )
+        dedup_db.commit()
+
+        result = engine.run(dedup_db)
+        assert result.photo_hash_zero_success_sources == {"milanuncios": 4}
 
     def test_cli_run_prints_the_degraded_source(self, dedup_db, monkeypatch, capsys):
         """`ps dedup run` (etl.dedup.cli._cmd_run) must print the health

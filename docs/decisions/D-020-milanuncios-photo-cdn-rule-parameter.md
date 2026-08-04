@@ -77,7 +77,9 @@ strictly required.
 
 **See**: `etl/connectors/milanuncios.py` (`_to_photo_url`, `normalize()`),
 `etl/dedup/signals/photo_hash.py` (`fetch_hashes`'s aggregated-warning
-change, `attemptable_photo_count`), `etl/dedup/engine.py`
+change, and the attempt counter that became
+`PhotoFetchStats.live_attempted` in [D-025](D-025-photo-hash-store.md)),
+`etl/dedup/engine.py`
 (`_PhotoHashCache`'s per-source health tracking,
 `DedupRunResult.photo_hash_zero_success_sources`), issue #206,
 `docs/architecture/connectors.md`'s Milanuncios section,
