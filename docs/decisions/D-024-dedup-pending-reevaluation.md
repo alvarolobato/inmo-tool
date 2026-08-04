@@ -1,10 +1,10 @@
 ---
-id: D-023
+id: D-024
 title: Dedup engine re-evaluates every pending suggestion on every run
 date: 2026-08-04
 ---
 
-# D-023: Dedup engine re-evaluates every pending suggestion on every run
+# D-024: Dedup engine re-evaluates every pending suggestion on every run
 
 *Decided: 2026-08-04*
 

@@ -26,6 +26,7 @@ def register_all() -> None:
     duplicate, which would otherwise make the orchestrator run the same
     site twice per sweep.
     """
+    from etl.connectors.buildingcenter import BuildingCenterConnector
     from etl.connectors.fotocasa import FotocasaConnector
     from etl.connectors.idealista import IdealistaConnector
     from etl.connectors.milanuncios import MilanunciosConnector
@@ -57,3 +58,5 @@ def register_all() -> None:
         # "every known site"), not functionally load-bearing for the
         # orchestrator's normal sweep, which skips it every time.
         CONNECTORS.append(IdealistaConnector())
+    if BuildingCenterConnector.name not in registered_names:
+        CONNECTORS.append(BuildingCenterConnector())
