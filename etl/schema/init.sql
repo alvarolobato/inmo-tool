@@ -1486,6 +1486,71 @@ CREATE TABLE IF NOT EXISTS etl_one_time_migrations (
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Backfill: Milanuncios photo URLs stored before PR #209 (issue #206) lack
+-- the CDN's required `?rule=<preset>` query parameter (see D-020 — a bare
+-- `images.milanuncios.com/api/v1/ma-ad-media-pro/images/<uuid>` URL 404s
+-- "Rule parameter not Found"; `?rule=detail_640x480` returns HTTP 200).
+-- #209 only fixed this at ingest (`MilanunciosConnector.normalize()`, via
+-- `add_photo_rule_if_missing` in etl/connectors/milanuncios.py) — every URL
+-- already sitting in `listing.photo_urls` before that deploy was untouched.
+-- Issue #210, live-confirmed immediately after deploying #209: 0 of 795
+-- stored Milanuncios photo URLs carried a query string, so the photo_hash
+-- dedup signal contributed zero evidence for the entire existing corpus
+-- (`photo_hash: 9/9 photo(s) failed to fetch/hash (source=milanuncios)`).
+-- Waiting for a natural re-fetch does not fix this: Milanuncios blocks
+-- `fetch_detail()` after ~5 successes per run (D-017) against ~60 stored
+-- listings, and skip-if-seen (issue #143) deliberately never re-fetches an
+-- unchanged listing at all.
+--
+-- Pure string transform on data already held — no network, no re-fetch.
+-- Mirrors `add_photo_rule_if_missing(url)` (etl/connectors/milanuncios.py)
+-- byte for byte: append `?rule=detail_640x480` (or `&rule=...` if the URL
+-- ends in a bare `?`) only when the URL's query part — the substring after
+-- its first `?`, if any — is empty. Every URL already in `listing.photo_urls`
+-- predates the scheme-normalization split in that function (it was already
+-- applied at ingest before #206), so this migration only needs to replicate
+-- the rule-appending half, not the http(s):// scheme handling.
+--
+-- Deliberately NOT `... LIKE '%?%'` (the simpler check): a URL ending in a
+-- bare `?` (no query content after it — none observed in this project's own
+-- data, but not proven impossible on a portal CDN) would already contain a
+-- literal `?` character, so a `LIKE '%?%'` guard would wrongly treat it as
+-- "already has a rule" and skip it — silently diverging from
+-- `add_photo_rule_if_missing`'s `urlsplit(url).query` check, which treats a
+-- trailing bare `?` as "no query" and still appends the parameter. Kept in
+-- sync by test_migration_sql_matches_add_photo_rule_if_missing
+-- (etl/tests/test_connector_milanuncios.py, DB-backed): it runs this exact
+-- UPDATE against a battery of representative URLs (including that trailing-
+-- `?` edge case) and asserts the SQL's output equals the Python helper's
+-- output for the same inputs. If `PHOTO_RULE`/`add_photo_rule_if_missing`
+-- ever changes, that test fails until the literal below is updated to match
+-- — the practical substitute, in a pure-SQL migration, for "the migration
+-- calls the same helper the connector uses."
+--
+-- Idempotent by construction, not by the `etl_one_time_migrations` marker
+-- table above: the WHERE/CASE below only touches rows that still have at
+-- least one URL with an empty query part, so a row already fully backfilled
+-- (including a Milanuncios listing ingested fresh, post-#209, which already
+-- carries `?rule=...` from normalize() itself) is left alone on every
+-- re-run of this file (every ETL container start) — same pattern as
+-- `listing.last_fetched_at`'s backfill earlier in this file.
+UPDATE listing
+SET photo_urls = ARRAY(
+    SELECT CASE
+        WHEN position('?' IN u) = 0
+            OR substring(u FROM position('?' IN u) + 1) = ''
+        THEN u || (CASE WHEN u LIKE '%?' THEN '&' ELSE '?' END) || 'rule=detail_640x480'
+        ELSE u
+    END
+    FROM unnest(photo_urls) AS u
+)
+WHERE source = 'milanuncios'
+  AND EXISTS (
+      SELECT 1 FROM unnest(photo_urls) AS u
+      WHERE position('?' IN u) = 0
+         OR substring(u FROM position('?' IN u) + 1) = ''
+  );
+
 -- ============================================================
 -- ANALYZE (update planner statistics after initial load)
 -- ============================================================

@@ -20,6 +20,7 @@ from etl.connectors.milanuncios import (
     MilanunciosSoftBlockError,
     _has_soft_block_signature,
     _has_usable_jsonld_property_schema,
+    add_photo_rule_if_missing,
 )
 from etl.connectors.milanuncios_mapping import (
     energy_rating_value,
@@ -28,6 +29,7 @@ from etl.connectors.milanuncios_mapping import (
 )
 
 _FIXTURES = Path(__file__).parent / "fixtures"
+_SCHEMA_SQL = Path(__file__).parent.parent / "schema" / "init.sql"
 
 
 def _read_fixture(name: str) -> str:
@@ -40,6 +42,44 @@ def _mock_response(text: str, url: str = "https://www.milanuncios.com/x") -> Moc
     resp.url = url
     resp.raise_for_status = Mock()
     return resp
+
+
+def _apply_schema(conn) -> None:
+    sql = _SCHEMA_SQL.read_text(encoding="utf-8")
+    with conn.cursor() as cur:
+        cur.execute(sql)
+    conn.commit()
+
+
+def _cleanup_listings(conn) -> None:
+    """Issue #210's migration tests below are the only DB-backed tests in
+    this file — clear out any leftover rows from a previous run in this
+    shared, per-session database (same reasoning as test_dedup_engine.py's
+    `_cleanup`) before inserting fresh fixture rows."""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM listing")
+        cur.execute("DELETE FROM property")
+    conn.commit()
+
+
+def _insert_listing(conn, *, source: str, photo_urls: tuple[str, ...]) -> int:
+    """Insert a minimal property + listing row for the migration tests
+    below. Returns the new listing's id."""
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO property DEFAULT VALUES RETURNING id")
+        (property_id,) = cur.fetchone()
+        cur.execute(
+            "INSERT INTO listing (property_id, source, external_id, photo_urls) "
+            "VALUES (%s, %s, %s, %s) RETURNING id",
+            (property_id, source, f"ext-{source}-{property_id}", list(photo_urls)),
+        )
+        (listing_id,) = cur.fetchone()
+    conn.commit()
+    return listing_id
+
+
+def _insert_milanuncios_listing(conn, photo_urls: tuple[str, ...]) -> int:
+    return _insert_listing(conn, source="milanuncios", photo_urls=photo_urls)
 
 
 def test_milanuncios_does_not_claim_full_inventory_coverage():
@@ -437,6 +477,168 @@ class TestPhotoUrlRuleParameter:
             "https://images.milanuncios.com/protocol-relative?rule=detail_640x480",
             "https://images.milanuncios.com/already-https?rule=detail_640x480",
         )
+
+
+class TestAddPhotoRuleIfMissing:
+    """Direct, no-network unit tests for the hoisted module-level helper
+    (issue #210) — `TestPhotoUrlRuleParameter` above already covers it
+    indirectly through `normalize()`; these pin the function itself, since
+    it's now also the reference implementation
+    `TestMilanunciosPhotoUrlBackfillMigration` (below) checks the init.sql
+    backfill migration's SQL against."""
+
+    def test_no_query_string_gets_the_rule_appended(self):
+        assert (
+            add_photo_rule_if_missing("https://images.milanuncios.com/x")
+            == "https://images.milanuncios.com/x?rule=detail_640x480"
+        )
+
+    def test_existing_non_empty_query_string_is_left_alone(self):
+        assert (
+            add_photo_rule_if_missing("https://images.example.com/x?rule=original")
+            == "https://images.example.com/x?rule=original"
+        )
+        assert (
+            add_photo_rule_if_missing("https://images.example.com/x?w=100")
+            == "https://images.example.com/x?w=100"
+        )
+
+    def test_trailing_bare_question_mark_counts_as_no_query_and_uses_ampersand(self):
+        """`urlsplit(...).query` is empty for a URL ending in a bare `?` (no
+        content after it) — the same "no query" bucket as no `?` at all, but
+        the separator must be `&` (not a second `?`) so the migration's SQL,
+        checked byte-for-byte against this function, doesn't itself need a
+        second code path to reach the same string."""
+        assert (
+            add_photo_rule_if_missing("https://images.milanuncios.com/x?")
+            == "https://images.milanuncios.com/x?&rule=detail_640x480"
+        )
+
+
+class TestMilanunciosPhotoUrlBackfillMigration:
+    """Issue #210: PR #209 (issue #206) fixed missing `?rule=` query
+    parameters at ingest (`normalize()`), but every URL already stored in
+    `listing.photo_urls` before that deploy was untouched — live-confirmed
+    0 of 795 stored Milanuncios photo URLs carried a query string
+    immediately after deploying #209. `etl/schema/init.sql`'s "Backfill:
+    Milanuncios photo URLs..." UPDATE is the one-off migration; these tests
+    are the DB-backed proof that (a) it produces the exact same output as
+    `add_photo_rule_if_missing` (not a hand-reimplemented rule that could
+    silently drift from the connector's), and (b) it is safe to re-run
+    indefinitely (this file is re-applied on every ETL container start).
+    """
+
+    def test_migration_sql_matches_add_photo_rule_if_missing(self, pg_conn):
+        """Runs the real init.sql (including the backfill UPDATE) against a
+        battery of representative URLs — both real production shapes (the
+        two CDN hosts from D-020) and the edge cases
+        `TestAddPhotoRuleIfMissing` pins in Python — and asserts the SQL's
+        output equals `add_photo_rule_if_missing`'s output for every one of
+        them. If the two ever disagree, this test catches it before a
+        second, differently-migrated batch of hashes could disagree with
+        the first (see the module docstring/init.sql's own comment on why
+        that matters more than the migration simply "doing something")."""
+        _apply_schema(pg_conn)
+        _cleanup_listings(pg_conn)
+
+        input_urls = [
+            # Real shapes, both hosts (D-020).
+            "https://images-re.milanuncios.com/images/ads/aaa-uuid",
+            (
+                "https://images.milanuncios.com/api/v1/ma-ad-media-pro/images/"
+                "d2b83929-0000-0000-0000-000000000000"
+            ),
+            # Already migrated / freshly ingested post-#209 — must be a
+            # true no-op.
+            "https://images.milanuncios.com/already-done?rule=detail_640x480",
+            # Some other, non-rule query string — must not be double-mangled.
+            "https://images.example.com/x?w=100",
+            # Trailing bare "?" edge case (see TestAddPhotoRuleIfMissing).
+            "https://images.milanuncios.com/trailing-qm?",
+        ]
+        expected = [add_photo_rule_if_missing(u) for u in input_urls]
+
+        listing_id = _insert_milanuncios_listing(pg_conn, tuple(input_urls))
+
+        # init.sql already ran (and already applied the migration) via
+        # _apply_schema above — re-run schema/init.sql's file text a second
+        # time explicitly here so this one test also exercises "the
+        # migration runs against rows inserted after the first pass",
+        # mirroring a real ETL container restart picking up freshly-synced
+        # listings that (for whatever reason) still carry a bare URL.
+        with pg_conn.cursor() as cur:
+            cur.execute(_SCHEMA_SQL.read_text(encoding="utf-8"))
+        pg_conn.commit()
+
+        with pg_conn.cursor() as cur:
+            cur.execute("SELECT photo_urls FROM listing WHERE id = %s", (listing_id,))
+            (actual,) = cur.fetchone()
+
+        assert actual == expected
+
+    def test_migration_is_idempotent_on_a_second_application(self, pg_conn):
+        """Apply the migration (via init.sql) twice against a database
+        populated from `main` and confirm the second run is a no-op — the
+        issue's own explicit acceptance criterion, not just "the WHERE
+        clause looks idempotent"."""
+        _apply_schema(pg_conn)
+        _cleanup_listings(pg_conn)
+
+        listing_id = _insert_milanuncios_listing(
+            pg_conn,
+            (
+                "https://images-re.milanuncios.com/images/ads/bbb-uuid",
+                "https://images.milanuncios.com/api/v1/ma-ad-media-pro/images/ccc",
+            ),
+        )
+
+        # First application: schema/init.sql was already applied once by
+        # _apply_schema() above (before these rows existed) — apply it
+        # again now that the rows are present, which is the actual
+        # backfill pass for this data.
+        with pg_conn.cursor() as cur:
+            cur.execute(_SCHEMA_SQL.read_text(encoding="utf-8"))
+        pg_conn.commit()
+
+        with pg_conn.cursor() as cur:
+            cur.execute("SELECT photo_urls FROM listing WHERE id = %s", (listing_id,))
+            (after_first,) = cur.fetchone()
+
+        assert all("?rule=detail_640x480" in u for u in after_first)
+
+        # Second application — must be a byte-for-byte no-op.
+        with pg_conn.cursor() as cur:
+            cur.execute(_SCHEMA_SQL.read_text(encoding="utf-8"))
+        pg_conn.commit()
+
+        with pg_conn.cursor() as cur:
+            cur.execute("SELECT photo_urls FROM listing WHERE id = %s", (listing_id,))
+            (after_second,) = cur.fetchone()
+
+        assert after_second == after_first
+
+    def test_non_milanuncios_listings_are_never_touched(self, pg_conn):
+        """The migration is scoped to `source = 'milanuncios'` — a
+        Fotocasa/Solvia/etc. listing's bare photo URL (however it got that
+        way) must be left exactly as stored."""
+        _apply_schema(pg_conn)
+        _cleanup_listings(pg_conn)
+
+        listing_id = _insert_listing(
+            pg_conn,
+            source="fotocasa",
+            photo_urls=("https://images.example.com/no-query-string",),
+        )
+
+        with pg_conn.cursor() as cur:
+            cur.execute(_SCHEMA_SQL.read_text(encoding="utf-8"))
+        pg_conn.commit()
+
+        with pg_conn.cursor() as cur:
+            cur.execute("SELECT photo_urls FROM listing WHERE id = %s", (listing_id,))
+            (photo_urls,) = cur.fetchone()
+
+        assert photo_urls == ["https://images.example.com/no-query-string"]
 
 
 class TestPriceChangeHistory:
