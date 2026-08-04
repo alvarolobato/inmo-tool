@@ -20,7 +20,21 @@ def _cmd_run(conn) -> int:
     # directly (issue #185), so a manual `ps dedup run` records a
     # `dedup_runs` row exactly like the automatic post-connector-sweep pass
     # does — one observability path, not two divergent ones.
-    result = orchestrator.run_dedup(conn, trigger="cli-manual")
+    result = orchestrator.run_dedup(
+        conn,
+        trigger="cli-manual",
+        dedup_max_runtime_seconds=Config().dedup_max_runtime_seconds,
+    )
+    if result is None:
+        # Skipped by the single-runner guard (D-036): another dedup pass
+        # already holds the advisory lock. Not an error — a deliberate no-op
+        # so we don't overlap a second ~84-min pass against the same corpus.
+        print(
+            "Another dedup pass is already running (single-runner guard, "
+            "D-036) — skipped. Nothing to do; the in-flight run will finish "
+            "on its own. Check `ps dedup status`."
+        )
+        return 0
     print(
         f"Compared {result.pairs_compared} pair(s): "
         f"{result.merged} merged, {result.suggested} suggested for review, "

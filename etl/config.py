@@ -216,6 +216,29 @@ def cimenta2_include_internal() -> bool:
     return bool(value)
 
 
+def _get_dedup_max_runtime_seconds() -> int:
+    """Bounded lifetime of a dedup pass, in seconds (D-036).
+
+    Same env-first-then-loader precedence as the other ETL knobs above. A
+    dedup_runs row still 'running' past this age with no active run is treated
+    as a dead orphan (crashed container, OOM, SIGKILL) and reconciled to
+    'failed'. 7200 (2h) is comfortable headroom over the ~84 min a pass takes
+    today, and far below the 9-19h orphaned rows seen live. Must be positive —
+    a non-positive value would declare every run orphaned the instant it
+    starts, so it is coerced back to the default.
+    """
+    value: object | None = os.environ.get("ETL_DEDUP_MAX_RUNTIME_SECONDS")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = _loader_get("etl.dedup_max_runtime_seconds", default=None)
+    if value is None:
+        value = "7200"
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 7200
+    return parsed if parsed > 0 else 7200
+
+
 def _get_admin_api_key() -> str:
     """Shared admin key used to authenticate the dashboard callback (issue #94).
 
@@ -237,6 +260,9 @@ class Config:
     admin_api_key: str = field(default_factory=_get_admin_api_key)
     min_restart_sweep_interval_seconds: int = field(
         default_factory=_get_min_restart_sweep_interval_seconds
+    )
+    dedup_max_runtime_seconds: int = field(
+        default_factory=_get_dedup_max_runtime_seconds
     )
 
     def __post_init__(self) -> None:

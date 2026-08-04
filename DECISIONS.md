@@ -44,6 +44,7 @@
 | [D-033](docs/decisions/D-033-cimenta2-not-viable-guest-api-overexposure.md) | Cimenta2 not buildable: no server-rendered content, and its only data path is a guest API leaking confidential/PII fields. Don't build on it, even scoped. Routes to #75. |
 | [D-034](docs/decisions/D-034-cimenta2-sitemap-index-only.md) | Cimenta2 discovery reads the public `ga-activo` sitemap only; `national` scope_key; `discovers_full_inventory=True`. Detail-fetch is per D-035. |
 | [D-035](docs/decisions/D-035-cimenta2-detail-endpoint-injected.md) | Cimenta2 detail-fetch endpoint is injected via `CIMENTA2_DETAIL_ENDPOINT` (never committed); connector is discovery-only without it. Owner-contact fields are never stored. |
+| [D-036](docs/decisions/D-036-dedup-run-reconciliation.md) | Orphaned `dedup_runs` (past `dedup_max_runtime_seconds`, default 2h) reconcile to `failed` with a reason at startup + each pass; a dedup advisory lock skips overlapping passes. |
 
 ## AI layer
 

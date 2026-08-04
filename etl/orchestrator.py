@@ -28,7 +28,17 @@ from etl.connectors.geography import (
     resolve_place,
 )
 from etl.connectors.rate_limit import RateLimiter
+from etl.db import postgres
 from etl.dedup import engine as dedup_engine
+
+# Default bounded lifetime for a single dedup pass (D-036). A run currently
+# takes ~84 min (dropping once issue #226's photo-hash persistence deploys);
+# 2h leaves comfortable headroom over that while still being far below the
+# 9-19h orphaned rows observed on the live instance. A dedup_runs row still
+# 'running' past this age with no active run is treated as a dead orphan and
+# reconciled to 'failed'. Overridable via ETL_DEDUP_MAX_RUNTIME_SECONDS /
+# etl.dedup_max_runtime_seconds (config/schema.yaml).
+_DEFAULT_DEDUP_MAX_RUNTIME_SECONDS = 7200
 
 logger = logging.getLogger("etl.orchestrator")
 
@@ -506,9 +516,38 @@ def _finish_dedup_run(
 
 
 def run_dedup(
-    conn, trigger: str = "scheduler", connector_run_id: int | None = None
-) -> dedup_engine.DedupRunResult:
+    conn,
+    trigger: str = "scheduler",
+    connector_run_id: int | None = None,
+    *,
+    dedup_max_runtime_seconds: int = _DEFAULT_DEDUP_MAX_RUNTIME_SECONDS,
+) -> dedup_engine.DedupRunResult | None:
     """Run the dedup engine once, recording a `dedup_runs` row (issue #185).
+
+    Returns the `DedupRunResult`, or **None** when this call was skipped
+    because another dedup pass already holds the single-runner advisory lock
+    (D-036) — see below. Callers that print a result (`ps dedup run`) must
+    handle the None case.
+
+    Run health / orphan reconciliation (D-036). Two guards wrap the engine:
+
+    1. **Orphan reconciliation** — before anything else, any `dedup_runs` row
+       stuck at status='running' past `dedup_max_runtime_seconds` (a crashed
+       or killed prior process that never wrote its finishing UPDATE) is marked
+       'failed' with an explanatory `error_msg`, via
+       `_reconcile_orphaned_dedup_runs`. This is the core fix for the live
+       incident where three rows were orphaned (9h/10h/19h) with nothing to
+       clean them. Runs on every pass (and at ETL startup, from main.py) so a
+       stuck row never lingers.
+
+    2. **Single-runner guard** — a dedup pass against the shared listing corpus
+       is expensive (~84 min) and two overlapping passes waste that cost and
+       can double-write merges. Before creating its run row this acquires the
+       session-scoped DEDUP advisory lock; if another process holds it (the
+       scheduler pass vs. a manual `ps dedup run`, the exact overlap that left
+       three concurrent 'running' rows live), this call logs the reason and
+       returns None rather than piling a second pass on top. The lock
+       auto-frees if this process is killed, so it never wedges future runs.
 
     This is the sole caller-visible entry point orchestrator.py and
     etl.dedup.cli both go through — previously `ps dedup run` called
@@ -539,31 +578,49 @@ def run_dedup(
     Any merges/suggestions `engine.run()` already committed before the
     exception stay committed (each pair commits independently).
     """
-    run_id = _create_dedup_run(conn, trigger, connector_run_id)
+    # Guard 1: reconcile dead orphans first, so a stuck row is cleaned up even
+    # on a pass that then skips on the lock below (D-036).
+    _reconcile_orphaned_dedup_runs(conn, dedup_max_runtime_seconds)
+
+    # Guard 2: single-runner. Fail closed (skip) if another dedup pass holds
+    # the lock — never overlap a second ~84-min pass against the same corpus.
+    if not postgres.try_acquire_run_lock(conn, postgres.DEDUP_ADVISORY_LOCK_ID):
+        logger.warning(
+            "Dedup run skipped: another dedup pass already holds the "
+            "single-runner advisory lock (D-036). Not starting an overlapping "
+            "pass against the same corpus (trigger=%s); the in-flight run will "
+            "complete on its own.",
+            trigger,
+        )
+        return None
     try:
-        result = dedup_engine.run(conn)
-    except Exception as exc:
-        logger.exception("Dedup run %s failed", run_id)
-        _finish_dedup_run(conn, run_id, status="failed", error_msg=str(exc))
-        raise
-    _finish_dedup_run(
-        conn,
-        run_id,
-        status="success",
-        pairs_compared=result.pairs_compared,
-        merged=result.merged,
-        suggested=result.suggested,
-        conflicts=result.conflicts,
-    )
-    logger.info(
-        "Dedup run %s: compared=%d merged=%d suggested=%d conflicts=%d",
-        run_id,
-        result.pairs_compared,
-        result.merged,
-        result.suggested,
-        result.conflicts,
-    )
-    return result
+        run_id = _create_dedup_run(conn, trigger, connector_run_id)
+        try:
+            result = dedup_engine.run(conn)
+        except Exception as exc:
+            logger.exception("Dedup run %s failed", run_id)
+            _finish_dedup_run(conn, run_id, status="failed", error_msg=str(exc))
+            raise
+        _finish_dedup_run(
+            conn,
+            run_id,
+            status="success",
+            pairs_compared=result.pairs_compared,
+            merged=result.merged,
+            suggested=result.suggested,
+            conflicts=result.conflicts,
+        )
+        logger.info(
+            "Dedup run %s: compared=%d merged=%d suggested=%d conflicts=%d",
+            run_id,
+            result.pairs_compared,
+            result.merged,
+            result.suggested,
+            result.conflicts,
+        )
+        return result
+    finally:
+        postgres.release_run_lock(conn, postgres.DEDUP_ADVISORY_LOCK_ID)
 
 
 def _record_connector_result(
@@ -651,6 +708,68 @@ def _reconcile_stale_runs(conn) -> None:
             "(likely from a crashed prior process)",
             reconciled,
         )
+
+
+def _reconcile_orphaned_dedup_runs(
+    conn, max_runtime_seconds: int = _DEFAULT_DEDUP_MAX_RUNTIME_SECONDS
+) -> int:
+    """Mark dead `dedup_runs` rows stuck at status='running' as failed (D-036).
+
+    A dedup pass whose process is killed mid-run (SIGKILL, container restart,
+    OOM, host reboot) never gets its finishing UPDATE, so its row stays at
+    status='running' with finished_at=NULL *forever* — nothing else would ever
+    transition it. On the live instance three such rows accumulated (9h, 10h,
+    19h old) with no mechanism to detect or clean them, and a permanently
+    'running' row is indistinguishable from "still in progress" to `ps dedup
+    status` or any monitor.
+
+    Unlike `_reconcile_stale_runs` (which blindly fails *every* running
+    connector_runs row on the assumption a new run means the old one is dead),
+    this is **age-based**: only rows whose `started_at` is older than
+    *max_runtime_seconds* are reconciled. A dedup pass can legitimately be
+    triggered from two independent processes — the scheduler (via
+    `run_all_connectors`) and a manual `ps dedup run` — so at reconcile time a
+    genuinely-active concurrent run may exist; the age threshold is what keeps
+    this from failing a run that is still doing real work. The advisory-lock
+    single-runner guard in `run_dedup` is the complementary mechanism that
+    stops two live runs overlapping in the first place; together they mean a
+    run that *does* legitimately exceed the threshold is protected (a
+    concurrent attempt can't start to trigger this reconcile against it —
+    it skips on the lock), while a truly dead orphan is always cleaned up.
+
+    Idempotent — re-applied at every ETL startup and at the start of every
+    dedup pass; a second pass over already-reconciled rows updates nothing.
+    Returns the number of rows reconciled.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE dedup_runs
+               SET status = 'failed',
+                   finished_at = NOW(),
+                   duration_ms = (EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000)::INTEGER,
+                   error_msg = COALESCE(
+                       error_msg,
+                       'orphaned: still ''running'' after ' || %s ||
+                       's (max dedup runtime) with no active run — reconciled '
+                       'as failed on startup/next-run (D-036)'
+                   )
+             WHERE status = 'running'
+               AND started_at < NOW() - make_interval(secs => %s)
+            """,
+            (max_runtime_seconds, max_runtime_seconds),
+        )
+        reconciled = cur.rowcount
+    conn.commit()
+    if reconciled:
+        logger.warning(
+            "Reconciled %d orphaned dedup_runs row(s) stuck at status='running' "
+            "past the %ds max-runtime (likely a crashed/killed prior process) — "
+            "marked 'failed' with an explanatory error_msg (D-036)",
+            reconciled,
+            max_runtime_seconds,
+        )
+    return reconciled
 
 
 def sync_connector_registry(conn) -> None:
@@ -1711,7 +1830,11 @@ def _record_scope_discovered(
 
 
 def run_all_connectors(
-    conn, trigger: str = "scheduler", connector_name: str | None = None
+    conn,
+    trigger: str = "scheduler",
+    connector_name: str | None = None,
+    *,
+    dedup_max_runtime_seconds: int = _DEFAULT_DEDUP_MAX_RUNTIME_SECONDS,
 ) -> int:
     """Run every registered connector once, recording a connector_runs row.
 
@@ -2352,7 +2475,12 @@ def run_all_connectors(
     # below: a dedup bug must not retroactively turn an already-committed,
     # successful connector sweep into a failed run.
     try:
-        run_dedup(conn, trigger=trigger, connector_run_id=run_id)
+        run_dedup(
+            conn,
+            trigger=trigger,
+            connector_run_id=run_id,
+            dedup_max_runtime_seconds=dedup_max_runtime_seconds,
+        )
     except Exception:
         logger.warning(
             "Dedup run raised unexpectedly — connector sweep is committed "
@@ -2590,6 +2718,7 @@ def run_all_connectors_respecting_restart_guard(
     trigger: str = "scheduler",
     *,
     min_restart_sweep_interval_seconds: int = 0,
+    dedup_max_runtime_seconds: int = _DEFAULT_DEDUP_MAX_RUNTIME_SECONDS,
 ) -> int | None:
     """`run_all_connectors()`, unless the restart-burst guard (issue #172)
     says this sweep is too soon after the last completed one.
@@ -2624,13 +2753,16 @@ def run_all_connectors_respecting_restart_guard(
             min_restart_sweep_interval_seconds,
         )
         return None
-    return run_all_connectors(conn, trigger=trigger)
+    return run_all_connectors(
+        conn, trigger=trigger, dedup_max_runtime_seconds=dedup_max_runtime_seconds
+    )
 
 
 def run_scheduler_loop(
     conn_factory,
     interval_seconds: int = 3600,
     min_restart_sweep_interval_seconds: int = 0,
+    dedup_max_runtime_seconds: int = _DEFAULT_DEDUP_MAX_RUNTIME_SECONDS,
 ) -> None:
     """Run all connectors on a fixed interval, forever. Long-running-container mode.
 
@@ -2682,12 +2814,17 @@ def run_scheduler_loop(
                     conn,
                     trigger="scheduler",
                     min_restart_sweep_interval_seconds=min_restart_sweep_interval_seconds,
+                    dedup_max_runtime_seconds=dedup_max_runtime_seconds,
                 )
             else:
                 # Not the process' first sweep — paced by this same loop's
                 # own `sleep(interval_seconds)` below, so the restart-burst
                 # guard has nothing to protect against here. See docstring.
-                run_all_connectors(conn, trigger="scheduler")
+                run_all_connectors(
+                    conn,
+                    trigger="scheduler",
+                    dedup_max_runtime_seconds=dedup_max_runtime_seconds,
+                )
         except Exception:
             logger.exception(
                 "run_all_connectors failed for this scheduler iteration — "

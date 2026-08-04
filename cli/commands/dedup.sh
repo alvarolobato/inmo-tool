@@ -72,7 +72,7 @@ cmd_status() {
         -U "${POSTGRES_USER:-postgres}" \
         -d "${POSTGRES_DB:-inmotool}" \
         -v ON_ERROR_STOP=1 \
-        -c "SELECT id, trigger, connector_run_id, status, pairs_compared, merged, suggested, conflicts, to_char(started_at, 'YYYY-MM-DD HH24:MI') AS started_at, duration_ms FROM dedup_runs ORDER BY started_at DESC LIMIT 20"
+        -c "SELECT id, trigger, connector_run_id, status, pairs_compared, merged, suggested, conflicts, to_char(started_at, 'YYYY-MM-DD HH24:MI') AS started_at, duration_ms, left(error_msg, 80) AS error_msg FROM dedup_runs ORDER BY started_at DESC LIMIT 20"
 }
 
 cmd_suggestions() {
