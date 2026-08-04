@@ -9,6 +9,9 @@
 import { NextResponse } from "next/server";
 import { query, ConnectionError } from "@/lib/db";
 
+// Probes Postgres per request; never prerender at build (no DB then).
+export const dynamic = "force-dynamic";
+
 const STALE_THRESHOLD_HOURS = 36;
 
 function readyBudgetMs(): number {

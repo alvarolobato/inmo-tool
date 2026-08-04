@@ -7,6 +7,9 @@
 import { NextResponse } from "next/server";
 import { getCircuitState } from "@/lib/llm-circuit-breaker";
 
+// Liveness/circuit state must be read per request, never a build-time snapshot.
+export const dynamic = "force-dynamic";
+
 export async function GET(): Promise<NextResponse> {
   return NextResponse.json({ status: "ok", llm_circuit: getCircuitState() });
 }

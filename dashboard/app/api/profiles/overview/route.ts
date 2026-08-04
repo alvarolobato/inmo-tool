@@ -15,6 +15,9 @@ import { NextResponse } from "next/server";
 import { listProfileOverviews } from "@/lib/db/profile-overview";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
+// Queries Postgres per request; never prerender at build (no DB then).
+export const dynamic = "force-dynamic";
+
 export async function GET(): Promise<NextResponse> {
   const requestId = generateRequestId();
   try {

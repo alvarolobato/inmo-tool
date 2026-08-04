@@ -10,6 +10,9 @@
 import { NextResponse } from "next/server";
 import { getLlmUsageAggregates } from "@/lib/llm-usage-stats";
 
+// Queries Postgres per request; never prerender at build (no DB then).
+export const dynamic = "force-dynamic";
+
 export async function GET(): Promise<NextResponse> {
   const body = await getLlmUsageAggregates();
   return NextResponse.json(body);
