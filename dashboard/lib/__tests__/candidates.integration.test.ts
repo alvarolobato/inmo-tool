@@ -34,7 +34,7 @@ import { Pool } from "pg";
 import { buildPgPoolConfig } from "@/lib/db-shared";
 import { resetPool } from "@/lib/db-write";
 import { createProfile } from "@/lib/db/profiles";
-import { getAdjacentCandidates, listCandidates } from "../candidates";
+import { getAdjacentCandidates, listCandidates, listCandidateSources } from "../candidates";
 import { getPropertyDetail } from "../property-detail";
 import type { Scope } from "@/lib/profiles-schema";
 
@@ -817,6 +817,157 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
 
         const page = await listCandidates(profileId);
         expect(page.items[0].score_kind).toBeNull();
+      });
+    });
+  });
+
+  describe("source (portal) filter (#265)", () => {
+    it("narrows the feed to properties with an active sale listing from the selected source", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+
+        // Property A: idealista-only.
+        const idealistaOnly = await insertProperty(pool);
+        await insertListing(pool, idealistaOnly, { source: "idealista" });
+        await markMatched(pool, profileId, idealistaOnly);
+
+        // Property B: fotocasa-only.
+        const fotocasaOnly = await insertProperty(pool);
+        await insertListing(pool, fotocasaOnly, { source: "fotocasa" });
+        await markMatched(pool, profileId, fotocasaOnly);
+
+        // Unfiltered: both properties.
+        const all = await listCandidates(profileId);
+        expect(all.items.map((i) => i.property_id).sort((a, b) => a - b)).toEqual(
+          [idealistaOnly, fotocasaOnly].sort((a, b) => a - b),
+        );
+
+        // Filtered to idealista: only property A.
+        const filtered = await listCandidates(profileId, { source: "idealista" });
+        expect(filtered.items.map((i) => i.property_id)).toEqual([idealistaOnly]);
+      });
+    });
+
+    it("matches a deduplicated property when ANY of its listings is from the source", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+
+        // One property with two source listings (the post-dedup shape).
+        const multi = await insertProperty(pool);
+        await insertListing(pool, multi, { source: "fotocasa", current_price: 285000 });
+        await insertListing(pool, multi, { source: "solvia", current_price: 279000 });
+        await markMatched(pool, profileId, multi);
+
+        // Filtering by EITHER source returns the single deduplicated card,
+        // still carrying BOTH badges (the filter narrows which properties
+        // appear, never which listings a surviving card shows).
+        for (const src of ["fotocasa", "solvia"]) {
+          const page = await listCandidates(profileId, { source: src });
+          expect(page.items.map((i) => i.property_id)).toEqual([multi]);
+          expect(page.items[0].listings.map((l) => l.source).sort()).toEqual(["fotocasa", "solvia"]);
+        }
+      });
+    });
+
+    it("ignores a withdrawn or rent-only listing's source (matches the visible badge set)", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const propertyId = await insertProperty(pool);
+        // Active sale from fotocasa (the badge the card shows) + a WITHDRAWN
+        // aliseda listing that must NOT make the card matchable by "aliseda".
+        await insertListing(pool, propertyId, { source: "fotocasa", status: "active" });
+        await insertListing(pool, propertyId, { source: "aliseda", status: "withdrawn" });
+        await markMatched(pool, profileId, propertyId);
+
+        const byWithdrawn = await listCandidates(profileId, { source: "aliseda" });
+        expect(byWithdrawn.items).toHaveLength(0);
+
+        const byActive = await listCandidates(profileId, { source: "fotocasa" });
+        expect(byActive.items.map((i) => i.property_id)).toEqual([propertyId]);
+      });
+    });
+
+    it("combines with keyset pagination — the filter holds across pages", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const idealistaIds: number[] = [];
+        for (let i = 0; i < 3; i++) {
+          const id = await insertProperty(pool);
+          await insertListing(pool, id, { source: "idealista" });
+          await markMatched(pool, profileId, id);
+          idealistaIds.push(id);
+          // Interleave a fotocasa property that must never appear under the
+          // idealista filter, on any page.
+          const other = await insertProperty(pool);
+          await insertListing(pool, other, { source: "fotocasa" });
+          await markMatched(pool, profileId, other);
+        }
+
+        const first = await listCandidates(profileId, { source: "idealista", limit: 2 });
+        expect(first.items).toHaveLength(2);
+        expect(first.nextCursor).not.toBeNull();
+
+        const second = await listCandidates(profileId, {
+          source: "idealista",
+          cursor: first.nextCursor,
+          limit: 2,
+        });
+        expect(second.items).toHaveLength(1);
+        expect(second.nextCursor).toBeNull();
+
+        const seen = [...first.items, ...second.items].map((i) => i.property_id).sort((a, b) => a - b);
+        expect(seen).toEqual([...idealistaIds].sort((a, b) => a - b));
+      });
+    });
+
+    it("treats an empty/whitespace source as no filter", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const a = await insertProperty(pool);
+        await insertListing(pool, a, { source: "idealista" });
+        await markMatched(pool, profileId, a);
+        const b = await insertProperty(pool);
+        await insertListing(pool, b, { source: "fotocasa" });
+        await markMatched(pool, profileId, b);
+
+        const page = await listCandidates(profileId, { source: "   " });
+        expect(page.items).toHaveLength(2);
+      });
+    });
+  });
+
+  describe("listCandidateSources (#265)", () => {
+    it("returns the distinct active-sale sources present for the profile, alphabetically", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+
+        const p1 = await insertProperty(pool);
+        await insertListing(pool, p1, { source: "solvia" });
+        await insertListing(pool, p1, { source: "aliseda" });
+        await markMatched(pool, profileId, p1);
+
+        const p2 = await insertProperty(pool);
+        await insertListing(pool, p2, { source: "fotocasa" });
+        // A withdrawn source must not appear in the options — it can't be
+        // used to narrow anything (the filter is active-sale only).
+        await insertListing(pool, p2, { source: "milanuncios", status: "withdrawn" });
+        await markMatched(pool, profileId, p2);
+
+        const sources = await listCandidateSources(profileId);
+        expect(sources).toEqual(["aliseda", "fotocasa", "solvia"]);
+      });
+    });
+
+    it("excludes sources from unmatched properties and returns [] when the profile has none", async () => {
+      await withRealDb(async (pool) => {
+        const emptyProfile = await makeProfile(SCOPE);
+        expect(await listCandidateSources(emptyProfile)).toEqual([]);
+
+        const profileId = await makeProfile(SCOPE);
+        const unmatched = await insertProperty(pool);
+        await insertListing(pool, unmatched, { source: "idealista" });
+        await markMatched(pool, profileId, unmatched, false);
+        expect(await listCandidateSources(profileId)).toEqual([]);
       });
     });
   });

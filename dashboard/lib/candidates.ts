@@ -377,10 +377,23 @@ async function loadFlags(propertyIds: number[]): Promise<Map<number, CandidateFl
  */
 export async function listCandidates(
   profileId: number,
-  opts: { cursor?: string | null; limit?: number } = {},
+  opts: { cursor?: string | null; limit?: number; source?: string | null } = {},
 ): Promise<CandidatePage> {
   const limit = Math.min(Math.max(Math.trunc(opts.limit ?? DEFAULT_LIMIT), 1), MAX_LIMIT);
   const rawCursor = opts.cursor ?? null;
+  // Source (portal) filter (#265): isolate one connector's results so the
+  // owner can debug a single portal's data quality. A candidate is a
+  // deduplicated PROPERTY that may span several listings from different
+  // sources; it matches when ANY of its *active sale* listings — the exact
+  // set whose source badges the card renders (see the `listings` subquery
+  // below and CandidateCard's badge row) — comes from the selected source.
+  // Filtering on that same set keeps the UI honest: every card left standing
+  // after the filter genuinely carries a badge for the chosen source, rather
+  // than surviving on a withdrawn or rent sibling the card never shows.
+  // null/empty means "all sources" (no filter). Trimmed so a stray blank
+  // can't become a source that matches nothing.
+  const sourceRaw = opts.source ?? null;
+  const source = sourceRaw !== null && sourceRaw.trim() !== "" ? sourceRaw.trim() : null;
 
   let cursorScore: number | null = null;
   let cursorId: number | null = null;
@@ -528,9 +541,24 @@ export async function listCandidates(
          OR COALESCE(pls.score, ${NO_SCORE_SENTINEL}) < $2::double precision
          OR (COALESCE(pls.score, ${NO_SCORE_SENTINEL}) = $2::double precision AND p.id < $3::bigint)
        )
+       -- Source (portal) filter (#265). $5 NULL = all sources. Uses the
+       -- idx_listing_source_status index; the same active+sale predicate as
+       -- the badge/min_price/listings subqueries so the filter matches
+       -- exactly what the card shows.
+       AND (
+         $5::text IS NULL
+         OR EXISTS (
+           SELECT 1
+             FROM listing lf
+            WHERE lf.property_id = p.id
+              AND lf.source = $5::text
+              AND lf.status = 'active'
+              AND lf.operation = 'sale'
+         )
+       )
      ORDER BY COALESCE(pls.score, ${NO_SCORE_SENTINEL}) DESC, p.id DESC
      LIMIT $4`,
-    [profileId, cursorScore, cursorId, limit + 1],
+    [profileId, cursorScore, cursorId, limit + 1, source],
   );
 
   const hasMore = rows.length > limit;
@@ -575,6 +603,36 @@ export async function listCandidates(
     : null;
 
   return { items, nextCursor };
+}
+
+/**
+ * Distinct source portals present among this profile's candidates (#265) —
+ * the options the list page's source filter offers.
+ *
+ * Derived from live data, not a hardcoded portal list: it returns only the
+ * sources that actually produced a *visible* candidate badge for this
+ * profile (active sale listings on `matched = true` properties — the exact
+ * set `listCandidates`'s badge/`listings` subquery and the source filter
+ * both use). So the dropdown never offers a portal that would narrow the
+ * list to nothing, and it automatically picks up a new connector the moment
+ * one contributes a candidate — no stale enum to maintain here or in the
+ * connector registry.
+ *
+ * Alphabetical, matching the card's own `sources.sort()` badge order.
+ */
+export async function listCandidateSources(profileId: number): Promise<string[]> {
+  const rows = await sql<{ source: string }>(
+    `SELECT DISTINCT l.source
+       FROM profile_listing_state pls
+       JOIN listing l ON l.property_id = pls.property_id
+      WHERE pls.profile_id = $1
+        AND pls.matched = true
+        AND l.status = 'active'
+        AND l.operation = 'sale'
+      ORDER BY l.source`,
+    [profileId],
+  );
+  return rows.map((r) => r.source);
 }
 
 export interface AdjacentCandidates {

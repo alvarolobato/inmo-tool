@@ -67,20 +67,38 @@ describe("listCandidates", () => {
     // Fetches one extra row (limit+1) so nextCursor reflects whether a next
     // page truly exists rather than assuming it does whenever the page
     // happens to be exactly full — see the nextCursor tests below. Params
-    // are (profileId, cursorScore, cursorId, limit+1) — a compound keyset
-    // key, not a single id, since results are ordered by score globally.
-    expect(params).toEqual([7, null, null, 31]);
+    // are (profileId, cursorScore, cursorId, limit+1, source) — a compound
+    // keyset key, not a single id, since results are ordered by score
+    // globally; source ($5) is null when no portal filter is applied (#265).
+    expect(params).toEqual([7, null, null, 31, null]);
   });
 
   it("passes the decoded cursor and clamps limit to [1, 100] (querying limit+1 rows)", async () => {
     mockPoolQuery.mockResolvedValue({ rows: [] });
 
     await listCandidates(7, { cursor: testCursor(0.73, 42), limit: 500 });
-    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, 0.73, 42, 101]);
+    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, 0.73, 42, 101, null]);
 
     mockPoolQuery.mockClear();
     await listCandidates(7, { limit: 0 });
-    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, null, null, 2]);
+    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, null, null, 2, null]);
+  });
+
+  it("passes a trimmed source as $5 and adds the portal EXISTS filter (#265)", async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [] });
+
+    await listCandidates(7, { source: "  idealista  " });
+    const [sql, params] = mockPoolQuery.mock.calls[0];
+    // Trimmed, and the EXISTS subquery gates on the same active+sale set the
+    // card's badges use.
+    expect(params).toEqual([7, null, null, 31, "idealista"]);
+    expect(sql).toContain("EXISTS");
+    expect(sql).toContain("lf.source = $5");
+
+    // An empty / whitespace-only source is "no filter" — $5 stays null.
+    mockPoolQuery.mockClear();
+    await listCandidates(7, { source: "   " });
+    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, null, null, 31, null]);
   });
 
   it("rejects a malformed cursor rather than silently resetting to page 1", async () => {
