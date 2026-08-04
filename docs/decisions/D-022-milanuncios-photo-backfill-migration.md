@@ -103,12 +103,34 @@ this branch's `init.sql` against the copy:
 - A real `python -m etl.dedup.cli run` (genuine network fetches — spot-
   checked directly: `images.milanuncios.com/.../<uuid>` bare 404s, the
   same URL with `?rule=detail_640x480` returns HTTP 200 with a real JPEG)
-  against the migrated copy raised the Milanuncios photo_hash suggestion
-  count from **27 to <AFTER_COUNT>** (`suggested_merge` rows with
-  `match_basis='photo_hash'` where either listing's source is
-  `milanuncios`; `ON CONFLICT (listing_id_a, listing_id_b) DO NOTHING`
-  means pre-existing suggestions were left alone — this is a strict
-  addition, not a replacement).
+  against the migrated copy: the **pending suggestion count stayed at
+  27** (`ON CONFLICT (listing_id_a, listing_id_b) DO NOTHING` leaves
+  pre-existing suggestions alone, and none of the newly-hashable pairs
+  happened to land in the 0.6–0.99 partial-match band), but the run
+  produced a **new, real `photo_hash` auto-merge that was structurally
+  impossible before this migration**: `property_merge_log` row 29
+  (`match_basis='photo_hash'`, `confidence=0.900`, timestamped exactly at
+  this run) merged Fotocasa listing 191 into the property anchored by
+  Milanuncios listing 76 — a `match_ratio == 1.0` pair (issue #188's
+  auto-merge path), corroborated by size/price proximity. Listing 76's
+  `photo_urls` carried bare (no-`?rule=`) URLs before this migration ran
+  against this copy, confirmed against the same restored corpus — this
+  pair could not have been detected by `photo_hash` (which returns `None`
+  whenever either side has zero successfully-hashed photos) until the
+  backfill ran. This is stronger evidence than a suggestion-count increase
+  would have been: a full auto-confirmed merge, not a pending row a human
+  still has to review.
+- The run's own per-source health tracking (`DedupRunResult
+  .photo_hash_zero_success_sources`, issue #206) reported **no source at
+  0% this run** — Milanuncios previously logged `photo_hash: 9/9 photo(s)
+  failed to fetch/hash`; that line is gone entirely post-migration.
+  Confirms issue #210's second acceptance criterion (check whether another
+  source has the same problem): Fotocasa, Solvia, Servihabitat, and
+  Vivantial were all spot-checked with real direct fetches during this
+  same verification and returned real image bytes — none needs a
+  `?rule=`-style fix. Fotocasa's own URLs already arrive with
+  `?rule=original` baked in server-side (D-020's own finding). No other
+  source is at 0% photo-hash success.
 
 **Alternatives rejected**:
 - *A standalone Python migration script that imports and calls
