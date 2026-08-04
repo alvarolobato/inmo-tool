@@ -1,18 +1,25 @@
 /**
- * GET /api/ready — Readiness: PostgreSQL connectivity + ETL data freshness summary.
+ * GET /api/ready — Readiness: PostgreSQL connectivity + connector-pipeline
+ * freshness summary.
  *
- * Intended for orchestrators (Docker health with start_period, k8s readiness).
- * Returns 503 when Postgres is unreachable or checks exceed the time budget.
- * When connected, returns 200 with freshness derived from `etl_watermarks`.
+ * Intended for orchestrators (Docker health with start_period, k8s
+ * readiness). Returns 503 when Postgres is unreachable or checks exceed the
+ * time budget. When connected, returns 200 with freshness derived from
+ * `connector_run_results`/`connector_config` (see dashboard/lib/db/freshness.ts).
+ *
+ * Historical note (issue #241): the freshness portion used to read the
+ * PowerShop-era `etl_watermarks` table the connector pipeline never writes,
+ * so it always reported zero watermarks. It now reads the real connector
+ * tables.
  */
 
 import { NextResponse } from "next/server";
 import { query, ConnectionError } from "@/lib/db";
+import { getConnectorFreshness, UNDEFINED_TABLE } from "@/lib/db/freshness";
 
-// Probes Postgres per request; never prerender at build (no DB then).
+// Evaluate per-request — this route queries Postgres, so it must never be
+// statically prerendered at build time (issue #241 / build-prerender fix).
 export const dynamic = "force-dynamic";
-
-const STALE_THRESHOLD_HOURS = 36;
 
 function readyBudgetMs(): number {
   const raw = process.env.READY_CHECK_BUDGET_MS;
@@ -45,57 +52,34 @@ function withTimeBudget<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 async function runReadyChecks(): Promise<{
-  watermarks: number;
+  connectors: number;
   overallStale: boolean;
-  stalestTable: string | null;
+  stalestConnector: string | null;
+  freshestSuccessAt: string | null;
   note?: string;
 }> {
+  // Connectivity probe via the read pool so a down DB surfaces as
+  // ConnectionError → 503 below.
   await query("SELECT 1");
 
   try {
-    const wm = await query(
-      "SELECT table_name, last_sync_at FROM etl_watermarks ORDER BY last_sync_at ASC",
-    );
-
-    if (wm.rows.length === 0) {
-      return {
-        watermarks: 0,
-        overallStale: false,
-        stalestTable: null,
-      };
-    }
-
-    const now = new Date();
-    const thresholdMs = STALE_THRESHOLD_HOURS * 60 * 60 * 1000;
-    let overallStale = false;
-    let stalest: { name: string; last_sync: string } | null = null;
-
-    for (const row of wm.rows) {
-      const name = String(row[0]);
-      const lastSyncRaw = row[1];
-      const lastSync =
-        lastSyncRaw instanceof Date
-          ? lastSyncRaw.toISOString()
-          : String(lastSyncRaw);
-      const lastSyncDate = new Date(lastSync);
-      const isStale = now.getTime() - lastSyncDate.getTime() > thresholdMs;
-      if (isStale) overallStale = true;
-      if (!stalest) stalest = { name, last_sync: lastSync };
-    }
-
+    const health = await getConnectorFreshness();
     return {
-      watermarks: wm.rows.length,
-      overallStale,
-      stalestTable: stalest?.name ?? null,
+      connectors: health.connectors.length,
+      overallStale: health.overallStale,
+      stalestConnector: health.stalestConnector?.connector ?? null,
+      freshestSuccessAt: health.freshestSuccessAt,
     };
   } catch (err) {
     const pgErr = err as { code?: string };
-    if (pgErr.code === "42P01") {
+    if (pgErr.code === UNDEFINED_TABLE) {
+      // Schema not applied yet — connected, but nothing to report.
       return {
-        watermarks: 0,
+        connectors: 0,
         overallStale: false,
-        stalestTable: null,
-        note: "etl_watermarks missing",
+        stalestConnector: null,
+        freshestSuccessAt: null,
+        note: "connector tables missing",
       };
     }
     throw err;
@@ -115,9 +99,10 @@ export async function GET(): Promise<NextResponse> {
     return NextResponse.json({
       status,
       postgres: "ok",
-      watermarks: summary.watermarks,
+      connectors: summary.connectors,
       overall_stale: summary.overallStale,
-      stalest_table: summary.stalestTable,
+      stalest_connector: summary.stalestConnector,
+      freshest_success_at: summary.freshestSuccessAt,
       ...(summary.note ? { note: summary.note } : {}),
     });
   } catch (err) {

@@ -37,18 +37,23 @@ describe("FreshnessProvider", () => {
 
   it("fetches /api/data-health on mount and exposes tooltip + stale state", async () => {
     const fresh: DataHealthResponse = {
-      tables: [
+      connectors: [
         {
-          name: "ps_ventas",
-          lastSync: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+          connector: "fotocasa",
+          enabled: true,
+          lastSuccessAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+          lastRunAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+          lastRunStatus: "ok",
           isStale: false,
         },
       ],
       overallStale: false,
-      stalestTable: {
-        name: "ps_ventas",
-        lastSync: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+      stalestConnector: {
+        connector: "fotocasa",
+        lastSuccessAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+        lastRunStatus: "ok",
       },
+      freshestSuccessAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
     };
     globalThis.fetch = mockFetch(fresh);
 
@@ -60,7 +65,7 @@ describe("FreshnessProvider", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("tooltip").textContent).toContain(
-        "Última sincronización (ps_ventas):",
+        "Última ejecución correcta (fotocasa):",
       );
     });
     expect(screen.getByTestId("stale").textContent).toBe("false");
@@ -69,18 +74,23 @@ describe("FreshnessProvider", () => {
 
   it("marks stale when overallStale is true", async () => {
     const stale: DataHealthResponse = {
-      tables: [
+      connectors: [
         {
-          name: "ps_stock",
-          lastSync: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+          connector: "milanuncios",
+          enabled: true,
+          lastSuccessAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+          lastRunAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+          lastRunStatus: "failed",
           isStale: true,
         },
       ],
       overallStale: true,
-      stalestTable: {
-        name: "ps_stock",
-        lastSync: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+      stalestConnector: {
+        connector: "milanuncios",
+        lastSuccessAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+        lastRunStatus: "failed",
       },
+      freshestSuccessAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
     };
     globalThis.fetch = mockFetch(stale);
 
@@ -95,7 +105,44 @@ describe("FreshnessProvider", () => {
     });
     expect(screen.getByTestId("text").textContent).toMatch(/Datos desactualizados/);
     expect(screen.getByTestId("tooltip").textContent).toContain(
-      "Última sincronización (ps_stock):",
+      "Última ejecución correcta (milanuncios):",
+    );
+  });
+
+  it("shows 'sin sincronizar' when an enabled connector has never succeeded", async () => {
+    const neverRan: DataHealthResponse = {
+      connectors: [
+        {
+          connector: "solvia",
+          enabled: true,
+          lastSuccessAt: null,
+          lastRunAt: null,
+          lastRunStatus: null,
+          isStale: true,
+        },
+      ],
+      overallStale: true,
+      stalestConnector: {
+        connector: "solvia",
+        lastSuccessAt: null,
+        lastRunStatus: null,
+      },
+      freshestSuccessAt: null,
+    };
+    globalThis.fetch = mockFetch(neverRan);
+
+    render(
+      <FreshnessProvider>
+        <FreshnessProbe />
+      </FreshnessProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("text").textContent).toBe("Datos sin sincronizar");
+    });
+    expect(screen.getByTestId("stale").textContent).toBe("true");
+    expect(screen.getByTestId("tooltip").textContent).toContain(
+      "solvia: sin ejecución correcta",
     );
   });
 
