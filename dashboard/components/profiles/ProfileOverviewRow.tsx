@@ -72,12 +72,19 @@ const kebabButtonStyle: React.CSSProperties = {
   lineHeight: 1,
 };
 
+// `<MenuItems anchor="bottom end">` positions the panel itself (Headless UI
+// portals it and sets its own `position`/`left`/`top` via floating-ui). This
+// style must therefore NOT set `position`/`right`/`top`: a manual `right: 0`
+// layered on top of floating-ui's computed `left`, on a portaled element with
+// no width, makes the panel stretch from that left edge to the viewport's
+// right edge — it rendered full-viewport-width (1280px) instead of hugging its
+// three short labels. `width: max-content` sizes the panel to its content
+// (the labels), `minWidth` keeps a comfortable floor, `maxWidth` a safety cap.
 const menuItemsStyle: React.CSSProperties = {
-  position: "absolute",
-  right: 0,
-  top: 32,
   zIndex: 20,
+  width: "max-content",
   minWidth: 140,
+  maxWidth: 240,
   background: "var(--bg-2)",
   border: "1px solid var(--border)",
   borderRadius: 8,

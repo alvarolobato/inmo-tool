@@ -110,14 +110,25 @@ export function CandidatePhotoTicker({
               // listings give us no meaningful alt text to use.
               alt=""
               loading="lazy"
-              style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+              // Absolutely fill the aspect-ratio box (position:absolute; inset:0)
+              // rather than sit in-flow with height:100%. An in-flow child's
+              // `height: 100%` resolves against the *content* height of a box
+              // whose own height comes only from `aspect-ratio` (an indefinite
+              // height for percentage resolution), so it collapses to `auto` —
+              // the image then renders at its intrinsic size and STRETCHES the
+              // box to its own aspect ratio (a portrait photo made the card
+              // tall, a landscape one short), defeating object-fit:cover
+              // entirely. Taking the image out of flow makes the box height a
+              // pure function of its width (4:3), identical for every card
+              // regardless of the photo's orientation.
+              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", display: "block" }}
             />
           ) : (
             <div
               data-testid="candidate-photo-placeholder"
               style={{
-                width: "100%",
-                height: "100%",
+                position: "absolute",
+                inset: 0,
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
