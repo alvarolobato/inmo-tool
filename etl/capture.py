@@ -19,20 +19,102 @@ import time
 from dataclasses import fields
 from urllib.parse import urlparse
 
+from etl.connectors.aliseda import AlisedaConnector
 from etl.connectors.base import CanonicalListingVersion, ConnectorError, RawListing
 from etl.connectors.idealista import IdealistaConnector
 
 logger = logging.getLogger("etl.capture")
 
-# hostname suffix -> (Connector instance, external_id extractor). Only
-# Idealista exists today (issue #75); a future capture-supported site adds
-# one entry here, not a new processing mechanism.
+# hostname suffix -> (Connector instance, connector class). A capture-supported
+# site adds ONE entry here, not a new processing mechanism (issue #75). Aliseda
+# joined via issue #237 — capture-only for the same reason Idealista is: its
+# real content only exists after a real browser hydrates the Angular app, and
+# its data host is robots.txt Disallow: / (D-019).
+#
+# This dict is the source of truth for "which hosts can be captured". The
+# dashboard mirrors these host suffixes in dashboard/lib/extension-capture-hosts.ts
+# (served to the extension via GET /api/extension/config) so the extension's
+# supported-host badge tracks new portals with no extension redeploy — keep
+# the two lists in step when adding a portal.
 _idealista = IdealistaConnector()
-_CAPTURE_CONNECTORS: dict[str, tuple[object, type[IdealistaConnector]]] = {
+_aliseda = AlisedaConnector()
+_CAPTURE_CONNECTORS: dict[str, tuple[object, type]] = {
     "idealista.com": (_idealista, IdealistaConnector),
+    "alisedainmobiliaria.com": (_aliseda, AlisedaConnector),
 }
 
 _BATCH_LIMIT = 10
+
+
+def worklist_match_key(url: str) -> str:
+    """Canonical correlation key linking a capture back to a capture_worklist
+    row, tolerant of cosmetic URL differences (issue #237).
+
+    key = hostname (lowercased, leading `www.` stripped) + path (trailing
+    slash stripped). Scheme, query string and fragment are dropped. So
+    `https://www.alisedainmobiliaria.com/inmueble/ANT1/` and
+    `http://alisedainmobiliaria.com/inmueble/ANT1?utm=x` both map to
+    `alisedainmobiliaria.com/inmueble/ANT1`. The path case is preserved
+    (asset ids can be case-sensitive); only the host is lowercased.
+
+    MUST stay identical to dashboard/lib/worklist.ts `worklistMatchKey`, which
+    computes the same key at seed time — both are covered by a shared table of
+    (input -> expected) cases asserted in the Python and TypeScript suites.
+    Returns "" for an unparseable URL (it simply won't match any row).
+    """
+    try:
+        parsed = urlparse(url.strip())
+    except ValueError:
+        return ""
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    path = parsed.path.rstrip("/")
+    if not host:
+        return ""
+    return f"{host}{path}"
+
+
+def _correlate_worklist(conn, url: str, status: str, capture_id: int | None) -> None:
+    """Mark the capture_worklist row matching `url` (by worklist_match_key) as
+    `status` ('captured' or 'failed'). No-op if the captured URL isn't on any
+    worklist — the worklist is a guide, not a gate: the owner can free-browse
+    and capture a listing that was never enqueued (issue #237 §1).
+
+    Guard rails:
+      - 'captured' overwrites a 'pending' OR 'failed' row (a retry that finally
+        succeeds should flip a previously-failed row green) and records
+        matched_capture_id.
+      - 'failed' only touches a still-'pending' row — it must never downgrade a
+        row already 'captured' by an earlier good capture.
+    Never raises: worklist correlation is best-effort bookkeeping and must not
+    fail the capture it is annotating.
+    """
+    key = worklist_match_key(url)
+    if not key:
+        return
+    try:
+        with conn.cursor() as cur:
+            if status == "captured":
+                cur.execute(
+                    "UPDATE capture_worklist "
+                    "SET status = 'captured', matched_capture_id = %s "
+                    "WHERE match_key = %s AND status IN ('pending', 'failed')",
+                    (capture_id, key),
+                )
+            elif status == "failed":
+                cur.execute(
+                    "UPDATE capture_worklist SET status = 'failed' "
+                    "WHERE match_key = %s AND status = 'pending'",
+                    (key,),
+                )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception(
+            "capture_worklist correlation failed for url=%s (status=%s) — "
+            "capture itself is unaffected",
+            url,
+            status,
+        )
 
 
 def _connector_for_url(url: str) -> tuple[object, str] | None:
@@ -154,7 +236,7 @@ def process_pending_captures(conn) -> int:
                 "extension_capture id=%s: unexpected error, marking failed",
                 capture_id,
             )
-            _mark_failed(conn, capture_id, "Unexpected internal error")
+            _mark_failed(conn, capture_id, url, "Unexpected internal error")
         processed += 1
 
     if skipped_disabled:
@@ -176,8 +258,9 @@ def _process_one(conn, capture_id: int, url: str, html: str) -> None:
         _mark_failed(
             conn,
             capture_id,
+            url,
             "No capture-capable connector recognizes this URL "
-            "(only Idealista is supported today, issue #75)",
+            "(supported: Idealista, issue #75; Aliseda, issue #237)",
         )
         return
 
@@ -189,7 +272,7 @@ def _process_one(conn, capture_id: int, url: str, html: str) -> None:
     try:
         canonical = connector.normalize(raw)
     except ConnectorError as exc:
-        _mark_failed(conn, capture_id, str(exc))
+        _mark_failed(conn, capture_id, url, str(exc))
         return
 
     # Reuses the exact same persistence path the automated orchestrator
@@ -243,6 +326,10 @@ def _process_one(conn, capture_id: int, url: str, html: str) -> None:
             ),
         )
     conn.commit()
+    # Guided-worklist correlation (issue #237): if this URL was on a
+    # capture_worklist, flip that row to 'captured'. Best-effort, after the
+    # capture itself is safely committed — see _correlate_worklist.
+    _correlate_worklist(conn, url, "captured", capture_id)
     logger.info(
         "extension_capture id=%s: processed via %s -> property_id=%s",
         capture_id,
@@ -276,7 +363,7 @@ def run_capture_poll_loop(conn_factory, interval_seconds: int = 10) -> None:
         time.sleep(interval_seconds)
 
 
-def _mark_failed(conn, capture_id: int, error_msg: str) -> None:
+def _mark_failed(conn, capture_id: int, url: str, error_msg: str) -> None:
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE extension_capture SET status = 'failed', error_msg = %s, "
@@ -284,4 +371,8 @@ def _mark_failed(conn, capture_id: int, error_msg: str) -> None:
             (error_msg, capture_id),
         )
     conn.commit()
+    # If a still-pending worklist row matches this URL, mark it 'failed' too so
+    # the worklist page shows the owner the capture didn't take (e.g. they
+    # captured too early, before the Angular page hydrated). Best-effort.
+    _correlate_worklist(conn, url, "failed", None)
     logger.warning("extension_capture id=%s: failed — %s", capture_id, error_msg)

@@ -1,0 +1,96 @@
+<!--
+  SYNTHETIC / FABRICATED Aliseda detail-page fixture — issue #237.
+
+  This is NOT a real Aliseda page. Every value below (reference code,
+  price, address, m2, rooms, coordinates, photo filenames) was invented for
+  testing and does NOT correspond to any real listing or person — it must
+  not, this is a public repo (AGENTS.md "no scraped personal data").
+
+  Why fabricated: per D-019, the ONLY host that serves Aliseda listing data
+  (`laravel.alisedainmobiliaria.com`) is robots.txt `Disallow: /`, and the
+  public `www.alisedainmobiliaria.com` page is a bare Angular shell whose
+  raw HTTP response carries zero listing content — a plain fetch returns the
+  empty shell for every URL. Real DOM only exists once the owner's own
+  browser hydrates the Angular app. We cannot see that without a live human
+  capture, and this project does not defeat that block.
+
+  So this fixture is a BEST-EFFORT GUESS at the *shape* a hydrated Aliseda
+  detail page plausibly takes: an <app-property-detail> component tree, plus
+  a Google Tag Manager `dataLayer` push carrying the analytics fields D-019
+  observed the real page fire (ciudad / provincia / metros_cuadrados /
+  habitaciones / precio). etl/connectors/aliseda_mapping.py maps against
+  BOTH: the dataLayer blob (primary, most robust) and labelled DOM elements
+  (fallback). The real selectors MUST be validated against a genuine owner
+  capture before this connector is trusted — see aliseda.py's docstring.
+-->
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Piso en venta en Calle Ejemplo 12, Estepona (Málaga) | Aliseda</title>
+  <meta property="og:title" content="Piso en venta en Estepona (Málaga)">
+  <meta property="og:description" content="Piso de 2 habitaciones y 78 m² en Estepona. Referencia ANT99900011122.">
+  <meta property="og:image" content="https://cdn.alisedainmobiliaria.com/media/ant99900011122/foto-01.jpg">
+  <!--
+    Analytics push. D-019 recorded the real page firing an analytics beacon
+    with exactly these keys (ciudad/provincia/metros_cuadrados/habitaciones).
+    Shape of the wrapper (GTM dataLayer) is a guess; the KEYS are grounded.
+  -->
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({
+      "event": "property_view",
+      "referencia": "ANT99900011122",
+      "precio": 148000,
+      "moneda": "EUR",
+      "operacion": "venta",
+      "tipo": "piso",
+      "metros_cuadrados": 78,
+      "habitaciones": 2,
+      "banos": 1,
+      "planta": "2",
+      "ascensor": true,
+      "ciudad": "ESTEPONA",
+      "provincia": "Málaga",
+      "codigo_postal": "29680",
+      "direccion": "Calle Ejemplo 12",
+      "latitud": 36.427540,
+      "longitud": -5.145680
+    });
+  </script>
+</head>
+<body>
+  <app-root>
+    <app-property-detail>
+      <section class="property-detail">
+        <h1 class="property-detail__title">Piso en venta en Calle Ejemplo 12</h1>
+        <p class="property-detail__location">Estepona, Málaga</p>
+
+        <div class="property-detail__price">
+          <span class="property-detail__price-amount">148.000 €</span>
+        </div>
+
+        <ul class="property-detail__features">
+          <li class="feature feature--surface"><span class="feature__label">Superficie</span><span class="feature__value">78 m²</span></li>
+          <li class="feature feature--rooms"><span class="feature__label">Habitaciones</span><span class="feature__value">2</span></li>
+          <li class="feature feature--baths"><span class="feature__label">Baños</span><span class="feature__value">1</span></li>
+          <li class="feature feature--floor"><span class="feature__label">Planta</span><span class="feature__value">2ª</span></li>
+        </ul>
+
+        <div class="property-detail__reference">Referencia: ANT99900011122</div>
+
+        <div class="property-detail__description">
+          Piso exterior muy luminoso en el centro de Estepona, a pocos minutos de la playa.
+          Vivienda de dos dormitorios reformada, con ascensor.
+        </div>
+
+        <div class="property-detail__gallery">
+          <img class="gallery__img" src="https://cdn.alisedainmobiliaria.com/media/ant99900011122/foto-01.jpg" alt="Foto 1">
+          <img class="gallery__img" src="https://cdn.alisedainmobiliaria.com/media/ant99900011122/foto-02.jpg" alt="Foto 2">
+          <img class="gallery__img" src="https://cdn.alisedainmobiliaria.com/media/ant99900011122/foto-03.jpg" alt="Foto 3">
+        </div>
+      </section>
+    </app-property-detail>
+  </app-root>
+</body>
+</html>
