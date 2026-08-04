@@ -26,6 +26,7 @@ def register_all() -> None:
     duplicate, which would otherwise make the orchestrator run the same
     site twice per sweep.
     """
+    from etl.connectors.aliseda import AlisedaConnector
     from etl.connectors.buildingcenter import BuildingCenterConnector
     from etl.connectors.cimenta2 import Cimenta2Connector
     from etl.connectors.fotocasa import FotocasaConnector
@@ -61,6 +62,12 @@ def register_all() -> None:
         CONNECTORS.append(IdealistaConnector())
     if BuildingCenterConnector.name not in registered_names:
         CONNECTORS.append(BuildingCenterConnector())
+    # Issue #237: capture-only, same as Idealista above. scope_key() always
+    # returns None (D-019 — Aliseda's data host is robots.txt Disallow: /, so
+    # there is no live discover(); listings arrive via guided extension
+    # capture). Registered here to keep CONNECTORS "every known site".
+    if AlisedaConnector.name not in registered_names:
+        CONNECTORS.append(AlisedaConnector())
     # Issue #136: sitemap-index/discovery only — it enumerates Cajamar's
     # assets and their reference codes, and deliberately never fetches a
     # detail page (D-033). See cimenta2.py's module docstring.

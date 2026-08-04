@@ -1,0 +1,22 @@
+<!--
+  SYNTHETIC un-hydrated Aliseda shell — issue #237.
+
+  Represents what a plain HTTP fetch (or a capture taken BEFORE the Angular
+  app finished rendering) returns: the bare app shell with no listing
+  content, no dataLayer push, no labelled fields. Per D-019 every page on
+  www.alisedainmobiliaria.com is byte-identical in this state. The mapping
+  must degrade honestly here — extract almost nothing rather than fabricate
+  values — and the popup's field-completeness signal should make the near-
+  empty result visible so the owner re-captures after the page renders.
+-->
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Aliseda Inmobiliaria</title>
+</head>
+<body>
+  <app-root></app-root>
+  <script src="/main.js"></script>
+</body>
+</html>

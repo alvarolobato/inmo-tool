@@ -10,6 +10,9 @@ const ADMIN_NAV = [
   // admin strip rather than the main TopBar — same reasoning (and the same
   // middleware gating, via the `/etl/:path*` matcher) as Monitor ETL above.
   { href: "/etl/connectors", label: "Conectores" },
+  // Guided capture worklist (#237) — the "places to visit one by one" surface
+  // for extension-only portals (Aliseda). Same /etl admin gating.
+  { href: "/etl/captura", label: "Captura guiada" },
   { href: "/admin/slow-queries", label: "Consultas lentas" },
   { href: "/admin/tool-calls", label: "Herramientas LLM" },
   { href: "/admin/usage", label: "Uso LLM" },

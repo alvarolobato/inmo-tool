@@ -1234,6 +1234,74 @@ CREATE INDEX IF NOT EXISTS idx_extension_capture_pending
 
 
 -- ============================================================
+-- Guided capture worklist (issue #237)
+-- ============================================================
+--
+-- The "page with all the places to visit one by one" the owner asked for.
+-- It sits entirely UPSTREAM of the extension-capture pipeline
+-- (extension_capture above) — it is a *producer of URLs for the human to
+-- open*, never a gate on ingestion. A capture whose URL is not in this
+-- table still processes normally (see etl/capture.py); the worklist only
+-- remembers what is left to visit and tracks per-URL progress.
+--
+-- Seeding: manual paste today (Aliseda has no usable sitemap — its only
+-- host that serves listing data is robots.txt `Disallow: /`, see D-019),
+-- so a URL arrives here via the dashboard worklist page
+-- (POST /api/etl/worklist, added_via='manual'). 'sitemap'/'derived' are
+-- reserved for portals that later gain those seeding paths (issue #237 §2)
+-- — the column exists now so no migration is needed when they do.
+--
+-- Correlation: etl/capture.py, after a successful capture reaches 'done',
+-- flips the matching worklist row to 'captured' and records which capture
+-- satisfied it (matched_capture_id). Matching is by `match_key`, a
+-- cosmetic-difference-tolerant canonical form of the URL (host without
+-- www + path without trailing slash, scheme/query/fragment dropped) so a
+-- capture of `https://www.alisedainmobiliaria.com/inmueble/ANT1/` still
+-- correlates to a worklist row seeded as
+-- `http://alisedainmobiliaria.com/inmueble/ANT1`. The identical
+-- canonicalisation runs in two places — dashboard/lib/worklist.ts
+-- (`worklistMatchKey`, at seed time) and etl/capture.py
+-- (`worklist_match_key`, at correlation time) — kept in lockstep by a
+-- shared table of (input -> expected) cases asserted in BOTH test suites.
+CREATE TABLE IF NOT EXISTS capture_worklist (
+    id                 BIGSERIAL    PRIMARY KEY,
+    -- The URL as the operator entered it — this is what the worklist page's
+    -- "Abrir" link opens, so it is preserved verbatim (case, scheme, query),
+    -- NOT rewritten to its canonical form.
+    url                TEXT         NOT NULL,
+    -- Canonical correlation key (see table comment). UNIQUE so re-pasting or
+    -- re-seeding the same listing is idempotent (ON CONFLICT DO NOTHING) and
+    -- so a capture maps to at most one worklist row.
+    match_key          TEXT         NOT NULL UNIQUE,
+    source_portal      TEXT         NOT NULL,
+    status             TEXT         NOT NULL DEFAULT 'pending'
+                                    CHECK (status IN ('pending','captured','failed','skipped')),
+    added_via          TEXT         NOT NULL DEFAULT 'manual'
+                                    CHECK (added_via IN ('sitemap','manual','derived')),
+    note               TEXT,
+    -- Which extension capture satisfied this row (NULL until captured).
+    matched_capture_id BIGINT       REFERENCES extension_capture(id) ON DELETE SET NULL,
+    created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- Per-portal status roll-ups ("Aliseda: 12/40 captured") are the worklist
+-- page's headline query — a composite index keeps them cheap as the list
+-- grows to thousands of rows.
+CREATE INDEX IF NOT EXISTS idx_capture_worklist_portal_status
+    ON capture_worklist (source_portal, status);
+
+-- Reuse the generic set_updated_at() trigger function (defined near the
+-- top of this file, on `property`) so updated_at stays accurate on every
+-- status transition without each writer having to remember to set it.
+DROP TRIGGER IF EXISTS trg_capture_worklist_set_updated_at ON capture_worklist;
+CREATE TRIGGER trg_capture_worklist_set_updated_at
+    BEFORE UPDATE ON capture_worklist
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
+
+
+-- ============================================================
 -- Dashboard App
 -- ============================================================
 
@@ -1772,3 +1840,4 @@ ANALYZE ai_assessment;
 ANALYZE property_merge_log;
 ANALYZE suggested_merge;
 ANALYZE extension_capture;
+ANALYZE capture_worklist;

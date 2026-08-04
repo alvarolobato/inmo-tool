@@ -8,22 +8,66 @@
  * self-hosted inmo-tool backend, not an anonymous multi-tenant SaaS.
  */
 
-const SUPPORTED_HOSTS = ['idealista.com'];
+/**
+ * Supported capture hosts are BACKEND-DRIVEN (issue #237): the dashboard's
+ * GET /api/extension/config returns the current list (mirroring the ETL's
+ * capture connectors), so adding a new portal lights up the badge with no
+ * extension redeploy. This list only gates the cosmetic ✓ badge — capture
+ * itself works on any http(s) tab (popup.js injects the content script on
+ * demand) — so a stale cache or a failed fetch degrades gracefully to this
+ * hardcoded default.
+ */
+const DEFAULT_CAPTURE_HOSTS = ['idealista.com', 'alisedainmobiliaria.com'];
+// Refresh the cached host list at most this often (ms). Cached in
+// chrome.storage.session so it survives the MV3 service worker being torn
+// down and respawned, without re-fetching on every single badge update.
+const CAPTURE_HOSTS_TTL_MS = 5 * 60 * 1000;
 
 /**
- * Check if a hostname matches a supported portal.
+ * Check if a hostname matches one of `hosts` (exact host or a subdomain).
  */
-function isSupportedHost(hostname) {
+function isSupportedHost(hostname, hosts) {
   const h = hostname.replace(/^www\./, '');
-  return SUPPORTED_HOSTS.some((s) => h === s || h.endsWith('.' + s));
+  return hosts.some((s) => h === s || h.endsWith('.' + s));
+}
+
+/**
+ * Return the current capture-host list, fetching it from the backend when the
+ * cache is missing or stale. Never throws — falls back to DEFAULT_CAPTURE_HOSTS
+ * on any error (unreachable backend, missing/invalid admin key, etc.).
+ */
+async function getCaptureHosts() {
+  try {
+    const cached = await chrome.storage.session.get(['captureHosts', 'captureHostsAt']);
+    const fresh =
+      Array.isArray(cached.captureHosts) &&
+      typeof cached.captureHostsAt === 'number' &&
+      Date.now() - cached.captureHostsAt < CAPTURE_HOSTS_TTL_MS;
+    if (fresh) return cached.captureHosts;
+
+    const { apiUrl, apiKey } = await getApiConfig();
+    const response = await fetch(`${apiUrl}/api/extension/config`, {
+      headers: { 'x-admin-key': apiKey },
+    });
+    if (!response.ok) throw new Error(`config ${response.status}`);
+    const data = await response.json();
+    const hosts = Array.isArray(data.capture_hosts) && data.capture_hosts.length > 0
+      ? data.capture_hosts
+      : DEFAULT_CAPTURE_HOSTS;
+    await chrome.storage.session.set({ captureHosts: hosts, captureHostsAt: Date.now() });
+    return hosts;
+  } catch {
+    return DEFAULT_CAPTURE_HOSTS;
+  }
 }
 
 // ─── Badge updates on tab change ─────────────────────────────────
 
-function updateBadge(tabId, url) {
+async function updateBadge(tabId, url) {
   try {
     const hostname = new URL(url).hostname;
-    if (isSupportedHost(hostname)) {
+    const hosts = await getCaptureHosts();
+    if (isSupportedHost(hostname, hosts)) {
       chrome.action.setBadgeText({ tabId, text: '✓' });
       chrome.action.setBadgeBackgroundColor({ tabId, color: '#22c55e' });
       chrome.action.setTitle({ tabId, title: 'Inmo-Tool Listing Capture — Supported site' });
@@ -69,10 +113,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'CHECK_SUPPORT') {
-    sendResponse({
-      supported: isSupportedHost(msg.hostname),
-    });
-    return false;
+    getCaptureHosts()
+      .then((hosts) => sendResponse({ supported: isSupportedHost(msg.hostname, hosts) }))
+      .catch(() => sendResponse({ supported: false }));
+    return true; // async response (host list may need a backend fetch)
   }
 });
 
