@@ -27,7 +27,7 @@ This is a **public repository** — no credentials, scraped personal data (owner
 | `docs/skills/` | AI agent skills (domain-specific guides) — see [docs/skills/skills.md](docs/skills/skills.md) for what's kept vs. pending. |
 | `docs/decisions/` | Active decision index (`DECISIONS.md`) + per-decision files, fresh for this project. |
 | `docs/decisions/archive/` | Source project's full decision history — inactive, kept for context. |
-| `config/schema.yaml`, `dashboard/config/schema.yaml` | Central config schema (env var ↔ admin-UI key mapping). 4D/WrenAI-specific keys removed in task 1.1; a dead ETL-cron pair (`etl.cron_hour`/`etl.delta_cron_minute`, never read by the new orchestrator) removed in task 1.6. |
+| `config/schema.yaml` | **Single canonical** config schema (env var ↔ admin-UI key mapping). Delivered to both the dashboard and ETL containers via the docker-compose bind mount (not baked into images); dev/tests resolve to the same repo-root file. 4D/WrenAI-specific keys removed in task 1.1; a dead ETL-cron pair (`etl.cron_hour`/`etl.delta_cron_minute`, never read by the new orchestrator) removed in task 1.6. Per-flow OpenRouter model keys (`dashboard.llm_model_openrouter_<flow>`) must match the `DashboardLlmFlow` enum. |
 | `local/` | Local config/credentials (git-ignored) |
 | `data/` | Bind-mounted data (postgres, ...) — git-ignored |
 | `docker-compose.yml` | Local stack: `postgres` + `otel-collector` + `etl` + `dashboard` — verified live to all start healthy (task 1.6, #14), which also found and fixed a real bug (the pinned OTel image didn't support the config's `tail_sampling`/`zpages`, which silently blocked every service from starting — see `otel/otelcol-config.yaml`). |

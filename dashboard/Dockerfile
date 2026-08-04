@@ -32,8 +32,13 @@ RUN addgroup --system --gid 1001 nodejs && \
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-# Schema file must be at /app/config/schema.yaml at runtime (resolveSchemaPath priority #2).
-COPY --chown=nextjs:nodejs config/schema.yaml /app/config/schema.yaml
+# The config schema is NOT baked into the image. It is delivered at runtime by
+# the docker-compose bind mount `./config/schema.yaml:/app/config/schema.yaml:ro`
+# (see docker-compose.yml) with CONFIG_SCHEMA_PATH=/app/config/schema.yaml — the
+# single canonical source is the repo-root config/schema.yaml, shared with the
+# ETL service (whose Dockerfile likewise does not bake it). Keeping a baked copy
+# here would require the build context at repo root and would drift from the
+# mounted file; the mount always wins under compose, so we rely on it.
 COPY --chown=nextjs:nodejs docker-entrypoint.sh /app/docker-entrypoint.sh
 # Wrapper sets keepAliveTimeout=65s before Next.js creates its HTTP server.
 # The default Node.js 18+ value (5s) drops SSE connections mid-stream.

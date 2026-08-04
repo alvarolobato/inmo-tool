@@ -4,7 +4,7 @@
 # and which component(s) consume it.
 #
 # Field reference:
-#   key          dot-namespaced identifier (e.g. fourd.host)
+#   key          dot-namespaced identifier (e.g. postgres.host)
 #   env          name of the corresponding environment variable
 #   type         string | int | bool | enum
 #   enum_values  allowed values when type==enum
@@ -152,47 +152,71 @@
   sensitive: false
   default: null
   section: "Dashboard LLM"
-  description: "Modelo OpenRouter por defecto del dashboard. Cualquier ajuste por flujo (generate / modify / analyze / weekly) tiene prioridad sobre este valor."
+  description: "Modelo OpenRouter por defecto del dashboard. Cualquier ajuste por flujo (occupancy / condition / redflags / extract / compare / chat) tiene prioridad sobre este valor."
   requires_restart: []
   components: [dashboard]
 
-- key: dashboard.llm_model_openrouter_generate
-  env: DASHBOARD_LLM_MODEL_OPENROUTER_GENERATE
+# Per-flow OpenRouter model overrides. Keys must match the DashboardLlmFlow
+# enum (dashboard/lib/llm-provider/types.ts) exactly — these are the keys
+# dashboard/lib/llm-provider/config.ts reads into openrouterModelByFlow.
+# An empty value means "no override" → falls back to dashboard.llm_model_openrouter.
+- key: dashboard.llm_model_openrouter_occupancy
+  env: DASHBOARD_LLM_MODEL_OPENROUTER_OCCUPANCY
   type: string
   sensitive: false
   default: null
   section: "Dashboard LLM"
-  description: "Modelo OpenRouter para generación de dashboards (genera el spec inicial desde un prompt). Si está vacío, cae en dashboard.llm_model_openrouter."
+  description: "Modelo OpenRouter para la evaluación de ocupación de un inmueble. Si está vacío, cae en dashboard.llm_model_openrouter."
   requires_restart: []
   components: [dashboard]
 
-- key: dashboard.llm_model_openrouter_modify
-  env: DASHBOARD_LLM_MODEL_OPENROUTER_MODIFY
+- key: dashboard.llm_model_openrouter_condition
+  env: DASHBOARD_LLM_MODEL_OPENROUTER_CONDITION
   type: string
   sensitive: false
   default: null
   section: "Dashboard LLM"
-  description: "Modelo OpenRouter para modificación de dashboards existentes (más SQL agéntico, conviene un modelo fuerte). Si está vacío, cae en dashboard.llm_model_openrouter."
+  description: "Modelo OpenRouter para la evaluación del estado de conservación. Si está vacío, cae en dashboard.llm_model_openrouter."
   requires_restart: []
   components: [dashboard]
 
-- key: dashboard.llm_model_openrouter_analyze
-  env: DASHBOARD_LLM_MODEL_OPENROUTER_ANALYZE
+- key: dashboard.llm_model_openrouter_redflags
+  env: DASHBOARD_LLM_MODEL_OPENROUTER_REDFLAGS
   type: string
   sensitive: false
   default: null
   section: "Dashboard LLM"
-  description: "Modelo OpenRouter para análisis narrativo de un dashboard ya cargado (no hace falta SQL; un modelo barato y rápido suele ir mejor). Si está vacío, cae en dashboard.llm_model_openrouter."
+  description: "Modelo OpenRouter para la extracción de señales de alerta legales/red flags. Si está vacío, cae en dashboard.llm_model_openrouter."
   requires_restart: []
   components: [dashboard]
 
-- key: dashboard.llm_model_openrouter_weekly
-  env: DASHBOARD_LLM_MODEL_OPENROUTER_WEEKLY
+- key: dashboard.llm_model_openrouter_extract
+  env: DASHBOARD_LLM_MODEL_OPENROUTER_EXTRACT
   type: string
   sensitive: false
   default: null
   section: "Dashboard LLM"
-  description: "Modelo OpenRouter para la revisión semanal (digest largo, lectura de muchos números). Si está vacío, cae en dashboard.llm_model_openrouter."
+  description: "Modelo OpenRouter para la extracción de campos estructurados desde el anuncio. Si está vacío, cae en dashboard.llm_model_openrouter."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.llm_model_openrouter_compare
+  env: DASHBOARD_LLM_MODEL_OPENROUTER_COMPARE
+  type: string
+  sensitive: false
+  default: null
+  section: "Dashboard LLM"
+  description: "Modelo OpenRouter para la comparativa de candidatos. Si está vacío, cae en dashboard.llm_model_openrouter."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.llm_model_openrouter_chat
+  env: DASHBOARD_LLM_MODEL_OPENROUTER_CHAT
+  type: string
+  sensitive: false
+  default: null
+  section: "Dashboard LLM"
+  description: "Modelo OpenRouter para el chat conversacional. Si está vacío, cae en dashboard.llm_model_openrouter."
   requires_restart: []
   components: [dashboard]
 
