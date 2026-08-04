@@ -42,6 +42,7 @@
 | [D-028](docs/decisions/D-028-milanuncios-skip-if-seen.md) | Milanuncios (sale) keeps detail-fetching at rate 2; skip-if-seen ON at 24h despite no `discovered_prices()` net; rental subclass explicitly 0. Don't drop, don't go discovery-only. |
 | [D-030](docs/decisions/D-030-scope-fairness-rotation.md) | Scope order is reordered every run by `connector_scope_state.last_attempted_at` (never-attempted first, then oldest-attempted-first) — never a fixed list order, which let one scope starve every other one forever. |
 | [D-033](docs/decisions/D-033-cimenta2-not-viable-guest-api-overexposure.md) | Cimenta2 not buildable: no server-rendered content, and its only data path is a guest API leaking confidential/PII fields. Don't build on it, even scoped. Routes to #75. |
+| [D-034](docs/decisions/D-034-cimenta2-sitemap-index-only.md) | Cimenta2 ships sitemap-index-only: `fetch_detail()` makes no request ever, price/geo/type stay null, `reference_code` is the sole dedup key. Never add a detail path (D-033). |
 
 ## AI layer
 

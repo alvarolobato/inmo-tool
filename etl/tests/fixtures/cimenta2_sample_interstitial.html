@@ -1,0 +1,20 @@
+<!--
+  SYNTHETIC reconstruction, deliberately NOT captured from the live site:
+  nothing on cimenta2.com returned an error or challenge page during either
+  the D-033 spike or this connector's own sitemap fetches (every request was
+  a clean HTTP 200). This stands in for the generic shape a CDN/maintenance
+  interstitial takes -- a 200-with-HTML where XML was expected -- so the
+  connector's "no <loc> entries at all" guard has something to be tested
+  against.
+
+  The guard matters because this connector sets discovers_full_inventory =
+  True: silently returning [] from a discover() that got an error page would
+  mass-mark the entire Cajamar catalogue withdrawn.
+-->
+<html lang="es">
+  <head><title>Servicio no disponible</title></head>
+  <body>
+    <h1>Servicio temporalmente no disponible</h1>
+    <p>Vuelva a intentarlo m&aacute;s tarde.</p>
+  </body>
+</html>

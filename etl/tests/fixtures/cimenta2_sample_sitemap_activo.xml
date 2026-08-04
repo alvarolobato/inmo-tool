@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  TRIMMED real capture of
+  https://inmuebles.cimenta2.com/inmuebles/s/sitemap-ga_activo__c-1.xml
+  fetched 2026-08-04. The live sitemap carries 3,917 <url> entries; this
+  fixture keeps 14 of them verbatim (URL + lastmod unmodified), chosen to
+  cover every reference-code length the live file actually contains
+  (3, 4, 5, 6 and 8 characters, the last being the three 'td'-prefixed
+  alphanumeric codes). Nothing here came from the guest RPC endpoint
+  D-033 rules out -- this is the public, robots-allowed sitemap only.
+-->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">
+  <url><loc>https://inmuebles.cimenta2.com/inmuebles/s/ga-activo/a0v3X00000eYxMdQAK/207</loc><lastmod>2026-08-01T18:14:07.000Z</lastmod></url>
+  <url><loc>https://inmuebles.cimenta2.com/inmuebles/s/ga-activo/a0v3X00000eZ2b6QAC/121</loc><lastmod>2026-08-01T18:18:10.000Z</lastmod></url>
+  <url><loc>https://inmuebles.cimenta2.com/inmuebles/s/ga-activo/a0v3X00000eYvmwQAC/1263</loc><lastmod>2026-08-01T18:12:47.000Z</lastmod></url>
+  <url><loc>https://inmuebles.cimenta2.com/inmuebles/s/ga-activo/a0v3X00000eYvojQAC/1525</loc><lastmod>2026-08-01T18:12:47.000Z</lastmod></url>
+  <url><loc>https://inmuebles.cimenta2.com/inmuebles/s/ga-activo/a0v3X00000eYvt4QAC/6637</loc><lastmod>2026-08-01T18:12:50.000Z</lastmod></url>
+  <url><loc>https://inmuebles.cimenta2.com/inmuebles/s/ga-activo/a0v3X00000dwiQQQAY/90817</loc><lastmod>2026-08-01T18:12:23.000Z</lastmod></url>
+  <url><loc>https://inmuebles.cimenta2.com/inmuebles/s/ga-activo/a0v3X00000dwpMRQAY/90862</loc><lastmod>2026-08-01T18:12:23.000Z</lastmod></url>
+  <url><loc>https://inmuebles.cimenta2.com/inmuebles/s/ga-activo/a0v3X00000dwzkeQAA/90889</loc><lastmod>2026-08-01T18:12:23.000Z</lastmod></url>
+  <url><loc>https://inmuebles.cimenta2.com/inmuebles/s/ga-activo/a0vP8000007lcfKIAQ/100024</loc><lastmod>2026-08-01T18:22:06.000Z</lastmod></url>
+  <url><loc>https://inmuebles.cimenta2.com/inmuebles/s/ga-activo/a0vP8000007wNuhIAE/100039</loc><lastmod>2026-08-01T18:22:06.000Z</lastmod></url>
+  <url><loc>https://inmuebles.cimenta2.com/inmuebles/s/ga-activo/a0vP8000007wNuiIAE/100038</loc><lastmod>2026-08-01T18:22:06.000Z</lastmod></url>
+  <url><loc>https://inmuebles.cimenta2.com/inmuebles/s/ga-activo/a0vP800000RRtyXIAT/td220030</loc><lastmod>2026-08-01T18:23:19.000Z</lastmod></url>
+  <url><loc>https://inmuebles.cimenta2.com/inmuebles/s/ga-activo/a0vP800000RYEPBIA5/td355111</loc><lastmod>2026-08-01T18:10:01.000Z</lastmod></url>
+  <url><loc>https://inmuebles.cimenta2.com/inmuebles/s/ga-activo/a0vP800000TGbFpIAL/td279295</loc><lastmod>2026-08-01T18:10:01.000Z</lastmod></url>
+</urlset>
