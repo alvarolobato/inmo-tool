@@ -254,44 +254,100 @@ class TestProcessPendingCaptures:
         processed = capture.process_pending_captures(pg_conn)
         assert processed == 0
 
-    def test_disabled_connector_does_not_process_its_captures(self, pg_conn):
-        """Issue #100 review: capture is Idealista's ONLY ingestion path — it
-        has no discover() for the orchestrator's enabled-check to gate. Before
-        this, disabling it in the management UI changed nothing at all while
-        the UI claimed "un conector desactivado no se ejecuta en absoluto".
+    def test_capture_processes_when_crawl_disabled_but_capture_enabled(self, pg_conn):
+        """Issue #263 (the core fix): a capture-only portal keeps the crawl
+        `enabled = false` on purpose so its doomed, WAF-blocked automated
+        crawl never runs (D-019) — but capture is its ONLY ingestion path, so
+        that flag must NOT block capture processing. With `enabled = false`
+        and `capture_enabled = true`, the capture must flow through to a real
+        listing.
+
+        This is the revert-and-confirm-it-fails guard for the decoupling: if
+        the poller is reverted to gate on `enabled` (the pre-#263 behaviour),
+        `processed` is 0, the capture stays `pending`, and no listing is
+        ingested — every assertion below fails.
         """
         _apply_schema(pg_conn)
         _cleanup(pg_conn)
         capture_id = _insert_pending(pg_conn, _FIXTURE_URL, _FIXTURE_HTML)
         with pg_conn.cursor() as cur:
+            # Crawl OFF, capture ON — exactly Idealista's intended state.
             cur.execute(
-                "INSERT INTO connector_config (connector_name, enabled) "
-                "VALUES ('idealista', false) "
-                "ON CONFLICT (connector_name) DO UPDATE SET enabled = false"
+                "INSERT INTO connector_config (connector_name, enabled, capture_enabled) "
+                "VALUES ('idealista', false, true) "
+                "ON CONFLICT (connector_name) DO UPDATE SET "
+                "enabled = false, capture_enabled = true"
             )
         pg_conn.commit()
         try:
-            processed = capture.process_pending_captures(pg_conn)
-            assert processed == 0
+            assert capture.process_pending_captures(pg_conn) == 1
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM extension_capture WHERE id = %s", (capture_id,)
+                )
+                assert cur.fetchone()[0] == "done", (
+                    "crawl-disabled but capture-enabled must process the "
+                    "capture (issue #263) — the crawl flag must not gate it"
+                )
+                cur.execute(
+                    "SELECT count(*) FROM listing WHERE source = 'idealista' "
+                    "AND external_id = '106387165'"
+                )
+                assert cur.fetchone()[0] == 1, (
+                    "the capture must reach a real listing even with the crawl disabled"
+                )
+        finally:
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM connector_config WHERE connector_name = 'idealista'"
+                )
+            pg_conn.commit()
+            _cleanup(pg_conn)
+
+    def test_capture_enabled_false_pauses_processing(self, pg_conn):
+        """Issue #263: `capture_enabled = false` is the independent pause knob
+        for a misbehaving capture connector (Fable's planning note). The crawl
+        `enabled` flag is irrelevant to this — here it is even left `true` to
+        prove `capture_enabled` alone gates processing. The capture must stay
+        `pending` (not consumed or failed), and re-enabling capture must drain
+        the same backlog.
+        """
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        capture_id = _insert_pending(pg_conn, _FIXTURE_URL, _FIXTURE_HTML)
+        with pg_conn.cursor() as cur:
+            # Crawl ON, capture OFF — capture_enabled alone must gate.
+            cur.execute(
+                "INSERT INTO connector_config (connector_name, enabled, capture_enabled) "
+                "VALUES ('idealista', true, false) "
+                "ON CONFLICT (connector_name) DO UPDATE SET "
+                "enabled = true, capture_enabled = false"
+            )
+        pg_conn.commit()
+        try:
+            assert capture.process_pending_captures(pg_conn) == 0
 
             with pg_conn.cursor() as cur:
                 cur.execute(
                     "SELECT status FROM extension_capture WHERE id = %s", (capture_id,)
                 )
                 assert cur.fetchone()[0] == "pending", (
-                    "a disabled connector's capture must stay queued, not be "
-                    "consumed or failed — re-enabling should process the backlog"
+                    "a capture-paused connector's capture must stay queued, "
+                    "not be consumed or failed — re-enabling processes it"
                 )
                 cur.execute(
                     "SELECT count(*) FROM listing WHERE source = 'idealista' "
                     "AND external_id = '106387165'"
                 )
-                assert cur.fetchone()[0] == 0, "nothing may be ingested while disabled"
+                assert cur.fetchone()[0] == 0, (
+                    "nothing may be ingested while capture is paused"
+                )
 
-            # Re-enabling drains the same still-pending row.
+            # Re-enabling capture drains the same still-pending row.
             with pg_conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE connector_config SET enabled = true "
+                    "UPDATE connector_config SET capture_enabled = true "
                     "WHERE connector_name = 'idealista'"
                 )
             pg_conn.commit()
@@ -314,3 +370,68 @@ class TestProcessPendingCaptures:
                 )
             pg_conn.commit()
             _cleanup(pg_conn)
+
+    def test_capture_enabled_default_true_and_operator_pause_survives_schema_reapply(
+        self, pg_conn
+    ):
+        """Issue #263 (review of PR #278): init.sql is re-applied on EVERY ETL
+        container startup (etl/main.py's _init_schema), so it must NOT contain a
+        one-time `UPDATE ... SET capture_enabled = true` for the capture-capable
+        portals — that would silently un-pause a connector an operator paused via
+        the UI on the next redeploy (the exact footgun this PR removes).
+
+        Two guarantees:
+        1. Fresh row with no capture value => TRUE (the column's NOT NULL DEFAULT
+           backfills every row when the column is added; a newly-seeded row
+           inherits the same default). This is all the idealista/aliseda/cimenta2
+           capture-enable intent needs — no migration UPDATE required.
+        2. An operator's capture_enabled = false SURVIVES a re-apply of
+           init.sql. If a re-asserting UPDATE were reintroduced, this fails.
+        """
+        _apply_schema(pg_conn)
+        try:
+            with pg_conn.cursor() as cur:
+                # A row seeded like sync_connector_registry does (enabled only,
+                # no capture_enabled) inherits the column default TRUE.
+                cur.execute(
+                    "INSERT INTO connector_config (connector_name, enabled) "
+                    "VALUES ('idealista', false) "
+                    "ON CONFLICT (connector_name) DO UPDATE SET enabled = false"
+                )
+            pg_conn.commit()
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT capture_enabled FROM connector_config "
+                    "WHERE connector_name = 'idealista'"
+                )
+                assert cur.fetchone()[0] is True, (
+                    "a freshly-seeded connector must default to capture_enabled=true "
+                    "via the column default — no migration UPDATE needed"
+                )
+
+            # Operator pauses capture, then the container restarts (init.sql
+            # re-applied). The pause must persist.
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE connector_config SET capture_enabled = false "
+                    "WHERE connector_name = 'idealista'"
+                )
+            pg_conn.commit()
+
+            _apply_schema(pg_conn)  # simulate the next ETL boot re-applying schema
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT capture_enabled FROM connector_config "
+                    "WHERE connector_name = 'idealista'"
+                )
+                assert cur.fetchone()[0] is False, (
+                    "an operator's capture_enabled=false must survive a re-apply "
+                    "of init.sql — init.sql must not re-assert it to true on boot"
+                )
+        finally:
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM connector_config WHERE connector_name = 'idealista'"
+                )
+            pg_conn.commit()

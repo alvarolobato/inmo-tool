@@ -38,6 +38,7 @@ function registryRow(overrides: Record<string, unknown> = {}) {
     supports_discovery: true,
     supported_filters: ["rooms"],
     enabled: null,
+    capture_enabled: null,
     geography_override: null,
     filters: null,
     has_config: false,
@@ -67,6 +68,8 @@ describe("GET /api/etl/connectors", () => {
     const c = body.connectors[0];
     expect(c.name).toBe("fotocasa");
     expect(c.enabled).toBe(true);
+    // Issue #263: no config row => capture enabled (column default TRUE).
+    expect(c.capture_enabled).toBe(true);
     expect(c.usingDefaults).toBe(true);
     expect(c.geography_override).toBeNull();
     // No override and no active profiles -> nothing will be ingested.
@@ -250,6 +253,48 @@ describe("PATCH /api/etl/connectors/:name", () => {
     // Not supplied -> must not be written, so a toggle can't wipe an override.
     expect(upsert[1][3]).toBe(false);
     expect(upsert[1][5]).toBe(false);
+  });
+
+  it("persists a capture_enabled toggle without touching the crawl flag", async () => {
+    // Issue #263: capture processing is independent of the crawl `enabled`
+    // flag. Toggling capture must set capture_enabled and leave enabled alone.
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{ connector_name: "fotocasa", registered: true, supports_discovery: true, supported_filters: ["rooms"] }],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const res = await PATCH(makeRequest({ capture_enabled: false }), {
+      params: { name: "fotocasa" },
+    });
+    expect(res.status).toBe(200);
+    const upsert = mockQuery.mock.calls[1];
+    expect(upsert[0]).toContain("capture_enabled");
+    // [name, setEnabled, enabled, setGeo, geo, setFilters, filters,
+    //  setCaptureEnabled, captureEnabled]
+    expect(upsert[1][1]).toBe(false); // enabled not supplied -> left alone
+    expect(upsert[1][7]).toBe(true); // setCaptureEnabled
+    expect(upsert[1][8]).toBe(false); // the new value
+  });
+
+  it("accepts a capture_enabled toggle on a capture-only connector", async () => {
+    // The whole point of #263: a capture-only portal (Idealista) has the
+    // crawl `enabled=false`, but must still be able to enable/disable capture
+    // processing. The capture-only guard (which rejects geography/filters)
+    // must NOT block this.
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{ connector_name: "idealista", registered: true, supports_discovery: false, supported_filters: [] }],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const res = await PATCH(makeRequest({ capture_enabled: true }), {
+      params: { name: "idealista" },
+    });
+    expect(res.status).toBe(200);
+    const upsert = mockQuery.mock.calls[1];
+    expect(upsert[1][7]).toBe(true); // setCaptureEnabled
+    expect(upsert[1][8]).toBe(true); // the new value
   });
 
   it("404s for a connector that isn't registered", async () => {

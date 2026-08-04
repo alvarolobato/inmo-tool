@@ -1012,6 +1012,39 @@ CREATE TABLE IF NOT EXISTS connector_config (
 
 ALTER TABLE connector_config ADD COLUMN IF NOT EXISTS min_refetch_interval_seconds INTEGER;
 
+-- Issue #263: capture PROCESSING is gated on THIS flag, not the crawl
+-- `enabled` flag above. The two are deliberately independent.
+--
+-- A capture-only portal (Idealista, Aliseda, Cimenta2) is WAF-blocked to
+-- automated crawling (D-019), so its `enabled` is set false on purpose to
+-- keep the doomed nightly crawl from ever running. But capture is those
+-- portals' ONLY ingestion path — the owner browses them with the extension
+-- and the HTML is queued in `extension_capture`. Before this column, the
+-- capture poller (etl/capture.py) gated processing on `enabled`, so those
+-- captures sat `pending` forever: the flag that silences the doomed crawl
+-- also silently killed the extension's whole purpose (issue #263 incident,
+-- 2026-08-05).
+--
+-- `capture_enabled` is the independent knob: the poller checks it, never
+-- `enabled`. Enabling capture never arms the crawl; disabling the crawl
+-- never blocks capture. Default TRUE (and TRUE for every existing row this
+-- ALTER backfills) so a newly-registered capture-only connector processes
+-- captures out of the box — this incident must never recur for a third
+-- portal. It stays operator-controllable so a misbehaving capture connector
+-- can still be paused (capture_enabled=false) without touching code.
+--
+-- No one-time UPDATE seeds idealista/aliseda/cimenta2 to true: the
+-- `NOT NULL DEFAULT true` above already backfills every existing row when the
+-- column is first added, so there is no pre-existing `false` to migrate. And
+-- init.sql is re-applied on EVERY ETL container startup (etl/main.py's
+-- _init_schema), so any `UPDATE ... SET capture_enabled = true` here would
+-- silently un-pause a connector the operator deliberately paused via the UI on
+-- the very next redeploy — the exact silent-reset footgun this PR exists to
+-- remove, and strictly worse than the crawl `enabled` flag (protected by
+-- sync_connector_registry's ON CONFLICT DO NOTHING). An operator's
+-- capture_enabled=false must survive restarts, so it is never re-asserted.
+ALTER TABLE connector_config ADD COLUMN IF NOT EXISTS capture_enabled BOOLEAN NOT NULL DEFAULT true;
+
 -- Issue #100: what connectors *exist*, as opposed to connector_config's
 -- "how is this one configured". The connector management UI has to list
 -- every registered connector — including ones with no connector_config
