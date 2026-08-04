@@ -81,7 +81,9 @@ export function FreshnessProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!health) return;
-    const stalest = health.stalestTable;
+    const stalest = health.stalestConnector;
+    // No enabled connectors reporting at all — nothing to be fresh or stale
+    // about (e.g. a fresh install before any connector is turned on).
     if (!stalest) {
       setFreshnessText("Datos al día");
       setFreshnessStale(false);
@@ -89,10 +91,21 @@ export function FreshnessProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    const lastSync = new Date(stalest.lastSync);
+    // An enabled connector that has never had a successful run: there is no
+    // freshness age to show — say so plainly rather than inventing "0m".
+    if (!stalest.lastSuccessAt) {
+      setFreshnessText("Datos sin sincronizar");
+      setFreshnessStale(true);
+      setFreshnessTooltip(
+        `${stalest.connector}: sin ejecución correcta todavía`,
+      );
+      return;
+    }
+
+    const lastSuccess = new Date(stalest.lastSuccessAt);
     const minutesAgo = Math.max(
       0,
-      Math.round((Date.now() - lastSync.getTime()) / 60000),
+      Math.round((Date.now() - lastSuccess.getTime()) / 60000),
     );
     const age =
       minutesAgo < 60
@@ -106,7 +119,7 @@ export function FreshnessProvider({ children }: { children: ReactNode }) {
     );
     setFreshnessStale(health.overallStale);
     setFreshnessTooltip(
-      `Última sincronización (${stalest.name}): ${formatDate(stalest.lastSync)}`,
+      `Última ejecución correcta (${stalest.connector}): ${formatDate(stalest.lastSuccessAt)}`,
     );
   }, [health]);
 

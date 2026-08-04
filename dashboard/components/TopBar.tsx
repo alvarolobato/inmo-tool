@@ -127,6 +127,7 @@ export function TopBar({
             }}
           />
           <span
+            data-testid="freshness-indicator"
             style={{
               fontSize: 11,
               color: "var(--fg-muted)",

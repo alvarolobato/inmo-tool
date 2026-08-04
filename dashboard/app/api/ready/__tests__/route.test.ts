@@ -15,68 +15,135 @@ vi.mock("pg", () => ({
 
 import { GET } from "../route";
 import { resetPool } from "@/lib/db";
+import { resetPool as resetWritePool } from "@/lib/db-write";
+
+const HOUR = 60 * 60 * 1000;
+
+// The route runs two queries in order: db.query("SELECT 1") on the read pool,
+// then the connector-freshness query on the write pool (db-write.sql). Both
+// hit the same mock; queue the connectivity probe first, freshness second.
+function okProbe() {
+  return { rows: [[1]], fields: [] };
+}
+
+// A freshness query result row shape (named columns — db-write.sql returns
+// result.rows verbatim).
+function freshnessRows(
+  rows: Array<{
+    connector: string;
+    enabled: boolean;
+    last_success_at: Date | null;
+    last_run_at: Date | null;
+    last_run_status: string | null;
+  }>,
+) {
+  return { rows, fields: [] };
+}
 
 describe("GET /api/ready", () => {
   beforeEach(async () => {
     mockQuery.mockReset();
     mockEnd.mockClear();
     delete process.env.READY_CHECK_BUDGET_MS;
+    delete process.env.FRESHNESS_STALE_THRESHOLD_HOURS;
     await resetPool();
+    await resetWritePool();
   });
 
   afterEach(() => {
     delete process.env.READY_CHECK_BUDGET_MS;
+    delete process.env.FRESHNESS_STALE_THRESHOLD_HOURS;
   });
 
-  it("returns 200 ready when postgres and watermarks respond", async () => {
+  it("returns 200 ready when postgres and connector tables respond fresh", async () => {
     const now = Date.now();
-    const oneHourAgo = new Date(now - 60 * 60 * 1000);
-    const twoHoursAgo = new Date(now - 2 * 60 * 60 * 1000);
-    mockQuery.mockResolvedValueOnce({ rows: [[1]], fields: [] }).mockResolvedValueOnce({
-      rows: [
-        ["ventas", twoHoursAgo],
-        ["articulos", oneHourAgo],
-      ],
-      fields: [],
-    });
+    mockQuery.mockResolvedValueOnce(okProbe()).mockResolvedValueOnce(
+      freshnessRows([
+        {
+          connector: "fotocasa",
+          enabled: true,
+          last_success_at: new Date(now - 1 * HOUR),
+          last_run_at: new Date(now - 1 * HOUR),
+          last_run_status: "ok",
+        },
+      ]),
+    );
 
     const res = await GET();
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.status).toBe("ready");
     expect(body.postgres).toBe("ok");
-    expect(body.watermarks).toBe(2);
-    expect(typeof body.overall_stale).toBe("boolean");
+    expect(body.connectors).toBe(1);
+    expect(body.overall_stale).toBe(false);
+    expect(body.stalest_connector).toBe("fotocasa");
+    expect(typeof body.freshest_success_at).toBe("string");
   });
 
-  it("returns status degraded when any watermark is stale", async () => {
-    const old = new Date("2020-01-01T00:00:00.000Z");
-    mockQuery.mockResolvedValueOnce({ rows: [[1]], fields: [] }).mockResolvedValueOnce({
-      rows: [
-        ["ventas", old],
-        ["articulos", new Date("2026-01-02T00:00:00.000Z")],
-      ],
-      fields: [],
-    });
+  it("returns status degraded when an enabled connector is stale", async () => {
+    const now = Date.now();
+    mockQuery.mockResolvedValueOnce(okProbe()).mockResolvedValueOnce(
+      freshnessRows([
+        {
+          connector: "milanuncios",
+          enabled: true,
+          last_success_at: new Date(now - 40 * HOUR), // > 24h default
+          last_run_at: new Date(now - 1 * HOUR),
+          last_run_status: "failed",
+        },
+      ]),
+    );
 
     const res = await GET();
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.status).toBe("degraded");
     expect(body.overall_stale).toBe(true);
+    expect(body.stalest_connector).toBe("milanuncios");
   });
 
-  it("returns 200 ready when etl_watermarks is missing (42P01)", async () => {
+  it("ignores disabled connectors for the stale headline", async () => {
+    const now = Date.now();
+    mockQuery.mockResolvedValueOnce(okProbe()).mockResolvedValueOnce(
+      freshnessRows([
+        {
+          connector: "idealista",
+          enabled: false,
+          last_success_at: new Date(now - 100 * HOUR),
+          last_run_at: new Date(now - 100 * HOUR),
+          last_run_status: "ok",
+        },
+        {
+          connector: "fotocasa",
+          enabled: true,
+          last_success_at: new Date(now - 1 * HOUR),
+          last_run_at: new Date(now - 1 * HOUR),
+          last_run_status: "ok",
+        },
+      ]),
+    );
+
+    const res = await GET();
+    const body = await res.json();
+    expect(body.status).toBe("ready");
+    expect(body.overall_stale).toBe(false);
+    // Only the enabled connector drives the headline.
+    expect(body.stalest_connector).toBe("fotocasa");
+  });
+
+  it("returns 200 ready with a note when connector tables are missing (42P01)", async () => {
     mockQuery
-      .mockResolvedValueOnce({ rows: [[1]], fields: [] })
-      .mockRejectedValueOnce(Object.assign(new Error("relation does not exist"), { code: "42P01" }));
+      .mockResolvedValueOnce(okProbe())
+      .mockRejectedValueOnce(
+        Object.assign(new Error("relation does not exist"), { code: "42P01" }),
+      );
 
     const res = await GET();
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.status).toBe("ready");
-    expect(body.note).toBe("etl_watermarks missing");
-    expect(body.watermarks).toBe(0);
+    expect(body.note).toBe("connector tables missing");
+    expect(body.connectors).toBe(0);
   });
 
   it("returns 503 when the postgres connection fails", async () => {

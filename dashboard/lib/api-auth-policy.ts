@@ -28,8 +28,9 @@ export const PUBLIC_API_PATHS: readonly string[] = [
   // breaker state — no database access, no business data.
   "/api/health",
   // Docker/k8s readiness probe. Touches the database only to answer
-  // "is Postgres reachable and is ETL data fresh" (row counts and a table
-  // name from etl_watermarks); no listing, profile, or conversation data.
+  // "is Postgres reachable and is the connector pipeline fresh" (last
+  // successful run per connector from connector_run_results / connector_config);
+  // no listing, profile, or conversation data.
   // Probes run before any credential is available, so this cannot be gated.
   "/api/ready",
 ];
