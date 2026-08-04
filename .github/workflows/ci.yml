@@ -8,6 +8,11 @@ on:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    # Bound the job so a stuck step (e.g. a vitest process that
+    # won't exit, or a pg client waiting on a stalled connection with
+    # no timeout) fails in minutes instead of occupying a runner for the
+    # 6h default. Set above the observed run time, not near it.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -23,6 +28,11 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    # Bound the job so a stuck step (e.g. a vitest process that
+    # won't exit, or a pg client waiting on a stalled connection with
+    # no timeout) fails in minutes instead of occupying a runner for the
+    # 6h default. Set above the observed run time, not near it.
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16-alpine
@@ -70,6 +80,11 @@ jobs:
 
   dashboard-test:
     runs-on: ubuntu-latest
+    # Bound the job so a stuck step (e.g. a vitest process that
+    # won't exit, or a pg client waiting on a stalled connection with
+    # no timeout) fails in minutes instead of occupying a runner for the
+    # 6h default. Set above the observed run time, not near it.
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: dashboard
@@ -122,6 +137,11 @@ jobs:
 
   dashboard-e2e:
     runs-on: ubuntu-latest
+    # Bound the job so a stuck step (e.g. a vitest process that
+    # won't exit, or a pg client waiting on a stalled connection with
+    # no timeout) fails in minutes instead of occupying a runner for the
+    # 6h default. Set above the observed run time, not near it.
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: dashboard
@@ -208,6 +228,11 @@ jobs:
 
   docker-build:
     runs-on: ubuntu-latest
+    # Bound the job so a stuck step (e.g. a vitest process that
+    # won't exit, or a pg client waiting on a stalled connection with
+    # no timeout) fails in minutes instead of occupying a runner for the
+    # 6h default. Set above the observed run time, not near it.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
