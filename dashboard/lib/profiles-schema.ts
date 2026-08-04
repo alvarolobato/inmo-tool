@@ -143,16 +143,17 @@ export const ThesisParamsSchema = z
       })
       .strict()
       .optional(),
-    // Issue #151's rent-estimation decision (see PR body / rent-estimate.ts
-    // module docstring): #31 (comparable-rental ingestion) is not built and
-    // is out of this PR's scope (etl/connectors is owned by other in-flight
-    // work), so there is no comparable signal to derive a rent estimate
-    // from. Rather than inventing one, this ships a per-profile ASSUMPTION
-    // the user states explicitly — an investment thesis's own €/m²/month
-    // rent expectation for its target zone — which yield.ts consumes and
-    // labels as an assumption, never as a measurement. Unset means "no rent
-    // assumption yet": yield.ts returns an explicit no-estimate result
-    // rather than fabricating a number.
+    // Issue #151's rent-estimation decision (see rent-estimate.ts's module
+    // docstring, D-014): an investment thesis's own €/m²/month rent
+    // expectation for its target zone, stated explicitly by the user.
+    // Since issue #31, `rent-estimate.ts` also computes a measured
+    // comparable-rent estimate from ingested rental listings — but this
+    // field, when set, remains PRIMARY (never silently overridden by the
+    // measured figure; see D-014's precedence rule) and yield.ts still
+    // labels it as an assumption, never as a measurement. Unset means
+    // "no rent assumption": yield.ts falls back to the measured
+    // comparable estimate when one is usable, or an explicit no-estimate
+    // result when neither is available — never a fabricated number.
     rent_assumption: z
       .object({
         eur_per_m2_month: z.number().positive(),

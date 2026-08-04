@@ -452,6 +452,7 @@ export async function listCandidates(
                         ) u
                        WHERE l4.property_id = p.id
                          AND l4.status = 'active'
+                         AND l4.operation = 'sale'
                          AND l4.photo_urls IS NOT NULL
                     ) per_listing
                    ORDER BY photo_url, listing_source, ord
@@ -461,9 +462,19 @@ export async function listCandidates(
          ),
          '[]'
        ) AS photos,
+       -- AND l2.operation = 'sale' (issue #31): every property reaching
+       -- this query already came through profile_listing_state, which
+       -- scope-query.ts now gates on an active SALE listing existing at
+       -- all — so a rent-only property can't reach here today. Kept
+       -- explicit anyway (docs/architecture/data-model.md flagged this
+       -- exact subquery by name as a "cross-cutting landmine for #31,
+       -- not yet fixed") rather than relying solely on that upstream
+       -- invariant holding forever: a candidate card showing a monthly
+       -- rent figure labelled as a sale price would be a severe,
+       -- silent bug if it ever did leak through.
        (SELECT MIN(l2.current_price)
           FROM listing l2
-         WHERE l2.property_id = p.id AND l2.status = 'active') AS min_price,
+         WHERE l2.property_id = p.id AND l2.status = 'active' AND l2.operation = 'sale') AS min_price,
        (SELECT MIN(l3.first_seen_at)
           FROM listing l3
          WHERE l3.property_id = p.id) AS first_seen_at,
@@ -481,7 +492,7 @@ export async function listCandidates(
                    ORDER BY l.source
                  )
             FROM listing l
-           WHERE l.property_id = p.id AND l.status = 'active'),
+           WHERE l.property_id = p.id AND l.status = 'active' AND l.operation = 'sale'),
          '[]'
        ) AS listings
      FROM profile_listing_state pls

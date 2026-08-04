@@ -31,10 +31,16 @@ describe("buildScopeWhereClause", () => {
   // requirement previously lived only inside the price-band subquery, so a
   // profile with no price filter had no status requirement at all and
   // could materialize sold/withdrawn/expired properties as candidates.
-  it("requires at least one active listing unconditionally, even with no price band set", () => {
+  it("requires at least one active SALE listing unconditionally, even with no price band set", () => {
     const { whereSql } = buildScopeWhereClause(baseScope());
+    // "AND listing.operation = 'sale'" (issue #31): every search profile
+    // is a sale-candidate thesis; without this, a rental property (no
+    // active sale listing at all, only an active RENT one) would pass
+    // this EXISTS on the strength of its rent listing and materialize as
+    // if it were a sale candidate. See rent-estimate.ts's module
+    // docstring for the full cross-contamination reasoning.
     expect(whereSql).toContain(
-      "EXISTS (SELECT 1 FROM listing WHERE listing.property_id = property.id AND listing.status = 'active')",
+      "EXISTS (SELECT 1 FROM listing WHERE listing.property_id = property.id AND listing.status = 'active' AND listing.operation = 'sale')",
     );
   });
 
@@ -57,13 +63,17 @@ describe("buildScopeWhereClause", () => {
     expect(params.slice(4)).toEqual([40, 90]);
   });
 
-  it("filters price against MIN(current_price) across active listings via a scalar subquery, not a JOIN", () => {
+  it("filters price against MIN(current_price) across active SALE listings via a scalar subquery, not a JOIN", () => {
     const { whereSql, params } = buildScopeWhereClause(
       baseScope({ price_min: 100000, price_max: 300000 }),
     );
     expect(whereSql).toContain("SELECT MIN(listing.current_price) FROM listing");
     expect(whereSql).toContain("listing.property_id = property.id");
     expect(whereSql).toContain("listing.status = 'active'");
+    // issue #31: without this, a rental property's monthly rent (an order
+    // of magnitude below any sale price) could pass a price-band filter
+    // meant for purchase prices.
+    expect(whereSql).toContain("listing.operation = 'sale'");
     expect(params.slice(4)).toEqual([100000, 300000]);
   });
 

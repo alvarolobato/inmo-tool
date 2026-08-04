@@ -164,9 +164,17 @@ export const OVERVIEW_QUERY_SQL = `WITH feedback_current AS (
        FROM profile_listing_state pls
        JOIN property p ON p.id = pls.property_id
        CROSS JOIN LATERAL (
+         -- operation = 'sale' (issue #31 Opus-review fix, PR #199): this
+         -- feeds min_price/max_price/median_price AND
+         -- gross_yield_median_pct on the profile-overview aggregate card.
+         -- Unreachable today only because dedup keeps a property from ever
+         -- hosting both a sale and a rent listing (see D-016) — but this is
+         -- a yield figure, and a defensive filter here costs nothing, same
+         -- reasoning as the candidates.ts/map-candidates.ts/features.ts
+         -- defense-in-depth filters this PR already added elsewhere.
          SELECT MIN(l.current_price) AS min_price
            FROM listing l
-          WHERE l.property_id = p.id AND l.status = 'active'
+          WHERE l.property_id = p.id AND l.status = 'active' AND l.operation = 'sale'
        ) cand
        WHERE pls.profile_id = sp.id AND pls.matched = true
      ) match_stats ON true

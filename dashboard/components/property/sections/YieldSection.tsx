@@ -2,7 +2,8 @@
  * Investment metrics section (task 5.3, #33; order 40 in DetailSections —
  * see components/property/DetailSections.tsx's reserved-order-values list).
  * Ties together issue #151 (acquisition costs + rent honesty), #32 (area
- * price-per-m²), and #33 (yield/cash-on-cash).
+ * price-per-m²), #33 (yield/cash-on-cash), and #31 (comparable-rental
+ * estimation — replaces the assumption-only rent source PR #181 shipped).
  *
  * Every figure this renders is labelled as an estimate (issue #33 EC-3,
  * issue #1 §11/§16 — decision support, never underwriting-grade
@@ -10,11 +11,30 @@
  * the load-bearing distinction between a measurement and an assumption
  * issue #151's honesty constraint requires a user be able to see just by
  * looking at the UI.
+ *
+ * Issue #31's precedence rule, made visible here (not just in
+ * rent-estimate.ts's types): a profile's own assumption, when set, is
+ * ALWAYS the figure yield is computed from — never silently replaced by a
+ * measured comparable. But `rent.market_comparable` is rendered
+ * alongside it whenever it exists, and `rent.disagreement_pct` is called
+ * out explicitly when the two numbers disagree — "show both", not "pick
+ * the one that looks more sophisticated".
  */
 
 import type { InvestmentMetrics } from "@/lib/investment-metrics";
 import type { RentConfidence } from "@/lib/analytics/rent-estimate";
 import { fmtEUR0, fmtEUR2, fmtPct, fmtInt } from "@/components/widgets/format";
+
+/**
+ * Threshold above which a disagreement between the profile's assumption
+ * and the measured market comparable is called out with a warning
+ * treatment rather than a neutral one — 15%, a documented, tunable
+ * judgment call (not derived from anything statistical): small
+ * disagreements are expected and unremarkable (an assumption is a
+ * judgment call, not meant to match a market median exactly), a
+ * disagreement this large is worth a user's attention.
+ */
+const DISAGREEMENT_WARNING_THRESHOLD = 0.15;
 
 const badgeStyle: React.CSSProperties = {
   fontSize: 10,
@@ -144,38 +164,101 @@ function AreaPriceBlock({ metrics }: { metrics: InvestmentMetrics }) {
   );
 }
 
+/**
+ * Renders the market-comparable figure alongside the primary estimate
+ * whenever one was computed (issue #31's "show both" precedence rule) —
+ * NOT only when it's the primary source. `market_comparable` is attached
+ * even when a profile assumption wins, specifically so this can render
+ * then too.
+ */
+function MarketComparableBlock({ rent }: { rent: InvestmentMetrics["rent_estimate"] }) {
+  const market = rent.market_comparable;
+  // Nothing to show at all (no_property_location) or the market estimate
+  // IS already the primary figure (no separate "secondary" line needed —
+  // the main row below already shows it).
+  if (market === null || rent.method === "market_comparable_high" || rent.method === "market_comparable_low") {
+    return null;
+  }
+  if (market.estimated_monthly_rent === null) {
+    return (
+      <p data-testid="market-comparable-insufficient" style={{ fontSize: 12, color: "var(--fg-subtle)", margin: "4px 0 0" }}>
+        Comparables de alquiler insuficientes en la zona ({fmtInt(market.comparable_count)}
+        {market.comparable_count === 1 ? " anuncio" : " anuncios"}) para contrastar la asunción del perfil.
+      </p>
+    );
+  }
+
+  const disagreement = rent.disagreement_pct;
+  const isWarning = disagreement !== null && Math.abs(disagreement) >= DISAGREEMENT_WARNING_THRESHOLD;
+
+  return (
+    <p
+      data-testid="market-comparable-comparison"
+      data-disagreement-warning={isWarning}
+      style={{ fontSize: 12, color: isWarning ? "var(--danger, #ff9b9b)" : "var(--fg-subtle)", margin: "4px 0 0" }}
+    >
+      Comparables de mercado ({fmtInt(market.comparable_count)} anuncios de alquiler,{" "}
+      {market.confidence === "high" ? "alta confianza" : "confianza baja"}
+      {market.oldest_comp_age_days !== null ? `, vistos hace hasta ${fmtInt(market.oldest_comp_age_days)} días` : ""}
+      ): {fmtEUR2(market.eur_per_m2_month!)}
+      /m²/mes → {fmtEUR0(market.estimated_monthly_rent)}/mes.{" "}
+      {disagreement !== null &&
+        (disagreement > 0
+          ? `La asunción del perfil es ${fmtPct(Math.abs(disagreement))} más alta que el mercado.`
+          : `La asunción del perfil es ${fmtPct(Math.abs(disagreement))} más baja que el mercado.`)}
+    </p>
+  );
+}
+
 export function YieldSection({ metrics }: { metrics: InvestmentMetrics }) {
   const { rent_estimate: rent, yield: yieldResult } = metrics;
 
-  // Two DISTINCT empty states, not one collapsed bucket (Opus review fix):
-  // a profile that already set a rent assumption but whose property lacks
-  // m2_built was previously shown the exact same "define tu asunción de
-  // alquiler" copy as a profile that never set one — wrong instruction,
-  // since the user has nothing left to add on the profile side. Checked
-  // FIRST and separately from the generic null-assumptions fallback below
-  // — both branches leave `assumptions_used === null`, so checking the
-  // generic condition first would always win and this branch would never
-  // render.
+  // Several DISTINCT empty states, not one collapsed bucket (Opus review
+  // fix, extended by issue #31): a profile that already set a rent
+  // assumption but whose property lacks m2_built must not be told to set
+  // an assumption it already set; a property with no lat/lon/property_type
+  // (can't even attempt a market query) must not be told "not enough
+  // comparables" when the real problem is "we don't know where this is".
+  // Checked FIRST and separately from every other branch — every gate
+  // leaves `assumptions_used === null`, so a generic fallback checked
+  // first would always win and these branches would never render.
   if (rent.method === "no_property_size") {
     return (
       <div data-testid="yield-empty-state-no-size">
         <AreaPriceBlock metrics={metrics} />
         <p style={{ fontSize: 12, color: "var(--fg-subtle)", margin: "8px 0 0" }}>
-          Esta propiedad no tiene superficie construida (m²) registrada, así que no se puede aplicar
-          la asunción de alquiler de este perfil (€/m²/mes × m²). El perfil ya tiene definida su
-          asunción — falta el dato de superficie de esta propiedad concreta.
+          Esta propiedad no tiene superficie construida (m²) registrada, así que no se puede estimar
+          el alquiler (ni a partir de una asunción del perfil, ni de comparables de mercado — ambos
+          necesitan multiplicar/dividir por los m² de esta propiedad concreta).
         </p>
       </div>
     );
   }
-  if (rent.method === "no_rent_assumption" || yieldResult.assumptions_used === null) {
+  if (rent.method === "no_property_location") {
+    return (
+      <div data-testid="yield-empty-state-no-location">
+        <AreaPriceBlock metrics={metrics} />
+        <p style={{ fontSize: 12, color: "var(--fg-subtle)", margin: "8px 0 0" }}>
+          Este perfil no tiene una asunción de alquiler definida, y esta propiedad no tiene
+          coordenadas o tipo de vivienda registrados, así que tampoco se pueden buscar comparables
+          de alquiler en la zona.
+        </p>
+      </div>
+    );
+  }
+  if (rent.method === "insufficient_data" || yieldResult.assumptions_used === null) {
     return (
       <div data-testid="yield-empty-state">
         <AreaPriceBlock metrics={metrics} />
         <p style={{ fontSize: 12, color: "var(--fg-subtle)", margin: "8px 0 0" }}>
           Sin estimación de alquiler: este perfil no tiene definida una asunción de alquiler
-          (€/m²/mes). Añádela en la configuración del perfil para ver el yield estimado — inmo-tool
-          no inventa una cifra de alquiler sin que la indiques (issue #151).
+          (€/m²/mes), y no hay suficientes anuncios de alquiler comparables en la zona
+          {rent.market_comparable
+            ? ` (${fmtInt(rent.market_comparable.comparable_count)} ${rent.market_comparable.comparable_count === 1 ? "encontrado" : "encontrados"})`
+            : ""}
+          . Añade
+          una asunción en la configuración del perfil, o espera a que se ingieran más comparables —
+          inmo-tool no inventa una cifra de alquiler sin datos suficientes (issue #151/#31).
         </p>
       </div>
     );
@@ -184,6 +267,20 @@ export function YieldSection({ metrics }: { metrics: InvestmentMetrics }) {
   const { muted, label: confidenceLabel } = confidenceTreatment(rent.confidence);
   const assumptions = yieldResult.assumptions_used;
   const acquisition = assumptions.acquisition_costs;
+  const isMarketPrimary = rent.method === "market_comparable_high" || rent.method === "market_comparable_low";
+  /**
+   * Opus review must-fix #5 (PR #199): MarketComparableBlock renders null
+   * exactly when the market estimate IS primary (see its own comment) —
+   * before this fix, that was the ONE case where the sample size backing
+   * the yield never appeared anywhere on the page ("(3 anuncios de
+   * alquiler, confianza baja)" only ever showed up as a SECONDARY line,
+   * next to a profile assumption). A yield derived from N rental ads must
+   * say N on the page regardless of whether it's primary or secondary.
+   */
+  const primaryRentLabel = isMarketPrimary
+    ? `Alquiler estimado (${fmtInt(rent.comparable_count)} comparables de mercado)`
+    : "Alquiler estimado (asunción del perfil)";
+  const primaryOldestAgeDays = isMarketPrimary ? rent.market_comparable?.oldest_comp_age_days ?? null : null;
 
   return (
     <div data-testid="yield-section-content" style={{ opacity: muted ? 0.85 : 1 }}>
@@ -212,13 +309,31 @@ export function YieldSection({ metrics }: { metrics: InvestmentMetrics }) {
               displayed monthly total against the actual figure used
               underneath it (e.g. 12,5 rounding up to "13 EUR" implies
               1.040 EUR/mes next to an actual 1.000 EUR/mes) — this row
-              exists specifically to make the assumption legible. */}
-          Alquiler estimado ({fmtEUR2(rent.eur_per_m2_month_used ?? 0)}/m²/mes × {fmtInt(rent.m2_used ?? 0)} m²)
+              exists specifically to make the assumption legible.
+              Issue #31: the label itself now distinguishes an assumption
+              from a measured comparable — same underlying row shape,
+              different source. */}
+          {primaryRentLabel} (
+          {fmtEUR2(rent.eur_per_m2_month_used ?? 0)}/m²/mes × {fmtInt(rent.m2_used ?? 0)} m²)
         </span>
         <span data-testid="estimated-rent" style={{ color: "var(--fg)" }}>
           {fmtEUR0(rent.estimated_monthly_rent!)}/mes <EstimateBadge />
         </span>
       </div>
+      {/* Recency (issue #31 Opus review must-fix #3): the comps' worst-case
+          age, surfaced right where the primary figure they back is shown —
+          see rent-estimate.ts's module docstring "Recency" section for
+          exactly what this age does and doesn't guarantee (last_seen_at
+          tracks presence, not price freshness). Only shown when the market
+          estimate is primary — a profile assumption has no comp age. */}
+      {isMarketPrimary && primaryOldestAgeDays !== null && (
+        <p data-testid="market-comparable-age" style={{ fontSize: 11, color: "var(--fg-subtle)", margin: "2px 0 0" }}>
+          Comparables vistos por última vez hace hasta {fmtInt(primaryOldestAgeDays)}{" "}
+          {primaryOldestAgeDays === 1 ? "día" : "días"}.
+        </p>
+      )}
+
+      <MarketComparableBlock rent={rent} />
 
       <div style={rowStyle}>
         <span style={{ color: "var(--fg-muted)" }}>Yield bruto (sobre precio de compra)</span>

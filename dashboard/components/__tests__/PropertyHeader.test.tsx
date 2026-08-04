@@ -16,6 +16,7 @@ function listing(overrides: Partial<PropertyListingDetail> = {}): PropertyListin
     reference_code: null,
     first_seen_at: "2026-07-01T00:00:00.000Z",
     last_seen_at: "2026-07-20T00:00:00.000Z",
+    operation: "sale",
     ...overrides,
   };
 }

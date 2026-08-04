@@ -25,10 +25,13 @@
 | [D-005](docs/decisions/D-005-numeric-vs-uuid-keys.md) | Real-estate schema tables use `BIGSERIAL` integer PKs, not `NUMERIC` (no source-system precision constraint like the archived project had) or UUIDs (no distributed-write requirement). |
 | [D-008](docs/decisions/D-008-skip-if-seen-opt-in.md) | Skip-if-seen defaults to 0 (always fetch); opt in per connector. Never skip missing/changed discovery price. |
 | [D-013](docs/decisions/D-013-search-profile-scope-no-default.md) | `search_profile.scope` has no DB-level default — an INSERT must supply an explicit, validated scope; a missing one fails loudly, not silently. |
+| [D-015](docs/decisions/D-015-rental-connector-site-choice.md) | Rental connector targets Milanuncios `alquiler-de-pisos`, as a `MilanunciosConnector` subclass (own file, own rate limit) — never an edit to the sale connector. |
+| [D-016](docs/decisions/D-016-rental-data-reuses-listing-table.md) | Rentals are `listing` rows with `operation='rent'` — no `rental_listing` table. Every sale-candidate query (materialize, dedup) must filter `operation='sale'` explicitly. |
 | [D-017](docs/decisions/D-017-milanuncios-rate-measurement.md) | Milanuncios `rate_limit_per_minute = 2` — measured (20 and 6/min both fail identically), kept below Fotocasa's 3, not proven sufficient for a full run. |
 | [D-018](docs/decisions/D-018-solvia-sitemap-partitioning.md) | Solvia `discover()` resolves a scope to a provincia only, then sweeps every municipality page the site's own sitemap lists for it (cached 24h). `discovers_full_inventory` stays `False`. |
 | [D-019](docs/decisions/D-019-aliseda-not-viable-disallowed-api.md) | Aliseda (`alisedainmobiliaria.com`) not buildable: every page is a contentless JS shell; the real data API (`laravel.alisedainmobiliaria.com`) declares `Disallow: /` for all crawlers. No connector written. |
 | [D-020](docs/decisions/D-020-milanuncios-photo-cdn-rule-parameter.md) | Milanuncios `normalize()` appends `?rule=detail_640x480` to any photo URL missing a query string — the CDN 404s "Rule parameter not Found" without it; headers don't help. |
+| [D-021](docs/decisions/D-021-haya-merged-into-solvia.md) | Haya (`haya.es`) not buildable: the whole domain 301-redirects to `solvia.es` (already ingested, D-018) — Intrum merged Haya into the Solvia servicer brand. No connector written. |
 | [D-022](docs/decisions/D-022-milanuncios-photo-backfill-migration.md) | `init.sql`'s Milanuncios photo-URL backfill mirrors `add_photo_rule_if_missing` exactly, pinned by a DB-backed equivalence test — never hand-reimplement the rule in SQL. |
 
 ## AI layer
@@ -43,5 +46,5 @@
 
 | ID | Binding rule |
 |----|--------------|
-| [D-010](docs/decisions/D-010-rent-assumption-until-comparables.md) | Rent estimate is an explicit per-profile `€/m²/month` assumption (`thesis_params.rent_assumption`) until #31 ships real comparables. Never fabricate a rent figure; gate yield on the assumption being set. |
 | [D-011](docs/decisions/D-011-acquisition-cost-model.md) | ITP by CCAA is general/base rate only (no brackets/reductions, no new-build path). Actual IBI/community fee from `raw_extra` ADDS to a separate assumed maintenance/vacancy %, never fully replaces it. |
+| [D-014](docs/decisions/D-014-comparable-rent-estimator.md) | Rent estimate: profile's own assumption (if set) is always PRIMARY, never silently replaced; measured comparable is always attached + disagreement surfaced. No assumption → comparable is primary, tiered `high`/`low` by count+dispersion. |

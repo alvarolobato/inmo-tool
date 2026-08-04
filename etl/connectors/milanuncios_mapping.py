@@ -22,6 +22,23 @@ logger = logging.getLogger("etl.connectors.milanuncios_mapping")
 # are mapped; discover() itself is scoped to a single sale category per run
 # (see milanuncios.py), so most of these won't be hit until a future task
 # broadens scope to multiple categories.
+#
+# "alquiler-de-pisos" (issue #31): live-verified 2026-08-03 against
+# https://www.milanuncios.com/alquiler-de-pisos-en-madrid-madrid/ (real
+# HTTP 200, 41 ads, every one carrying this exact category.slug) — the one
+# rental category etl/connectors/milanuncios_rental.py's discover() is
+# scoped to, same "only what's actually reachable today" discipline as the
+# venta-* entries above. Left unmapped WITHOUT this entry, every rental
+# listing would normalize with `property_type = NULL`, which would silently
+# break rent-estimate.ts's comparable query (`WHERE property_type = ...`
+# can never match a NULL) for every single ingested rental row — this is
+# not a cosmetic gap, the feature depends on it. The other alquiler-*
+# siblings (aticos/duplex/chalets/etc.) almost certainly follow the same
+# naming convention as their venta-* counterparts, but that's inference,
+# not verification — deliberately NOT added speculatively (this module's
+# own stated discipline: "only slugs observed... are mapped"); add them
+# once milanuncios_rental.py's discover() actually broadens beyond the
+# single "-de-pisos" category and a real fetch confirms each slug.
 CATEGORY_SLUG_MAP: dict[str, str] = {
     "venta-de-pisos": "piso",
     "venta-de-aticos": "atico",
@@ -35,6 +52,7 @@ CATEGORY_SLUG_MAP: dict[str, str] = {
     "venta-de-terrenos": "terreno",
     "venta-de-fincas": "terreno",
     "venta-de-edificios": "edificio",
+    "alquiler-de-pisos": "piso",
 }
 
 

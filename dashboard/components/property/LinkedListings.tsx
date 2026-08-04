@@ -28,6 +28,7 @@ export function LinkedListings({ listings }: { listings: PropertyListingDetail[]
           data-testid="linked-listing-item"
           data-source={l.source}
           data-status={l.status}
+          data-operation={l.operation}
           style={{
             display: "flex",
             alignItems: "center",
@@ -60,8 +61,32 @@ export function LinkedListings({ listings }: { listings: PropertyListingDetail[]
                 {LISTING_KIND_LABELS[l.listing_kind] ?? l.listing_kind}
               </span>
             )}
+            {/* operation badge + "/mes" suffix (issue #31 Opus-review "Also
+                fix"): this list has no operation filter — a rental listing
+                renders here unlabeled, right next to sale listings, and
+                without this a monthly rent figure reads exactly like a
+                sale price with no way to tell them apart. */}
+            {l.operation === "rent" && (
+              <span
+                data-testid="listing-operation-badge"
+                style={{
+                  fontSize: 10,
+                  lineHeight: "14px",
+                  padding: "1px 6px",
+                  borderRadius: 3,
+                  fontWeight: 600,
+                  background: "var(--bg-2)",
+                  color: "var(--fg-muted)",
+                }}
+              >
+                Alquiler
+              </span>
+            )}
             {l.current_price !== null && (
-              <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>{fmtEUR0(l.current_price)}</span>
+              <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+                {fmtEUR0(l.current_price)}
+                {l.operation === "rent" ? "/mes" : ""}
+              </span>
             )}
             {/* Seller/agency reference (#72). Monospace because it's an opaque
                 identifier the user cross-references against the source portal
