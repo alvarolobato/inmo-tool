@@ -109,7 +109,12 @@ export default function ConnectorsPage() {
       ) : (
         <div style={{ marginTop: 16 }}>
           {connectors.map((c) => (
-            <ConnectorCard key={c.name} connector={c} onPatch={handlePatch} />
+            <ConnectorCard
+              key={c.name}
+              connector={c}
+              onPatch={handlePatch}
+              onRunFinished={fetchConnectors}
+            />
           ))}
         </div>
       )}

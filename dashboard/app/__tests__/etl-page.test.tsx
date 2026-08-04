@@ -95,7 +95,25 @@ const MOCK_STATS_RESPONSE = {
 // ---------------------------------------------------------------------------
 
 function mockFetch(runsOk = true, statsOk = true) {
-  return vi.fn().mockImplementation((url: string) => {
+  return vi.fn().mockImplementation((url: string, opts?: RequestInit) => {
+    // Ad-hoc run (issue #244): POST queues a trigger; GET reports its status.
+    // The `/api/etl/run` prefix would also match `/api/etl/runs`, so this
+    // branch is deliberately checked first and only for the exact path (POST)
+    // or the `?id=` status query (GET).
+    if (url === "/api/etl/run" && opts?.method === "POST") {
+      return Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({ trigger_id: 99, status: "pending", connector_name: null }),
+      });
+    }
+    if (url.startsWith("/api/etl/run?")) {
+      return Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({ id: 99, status: "done", connector_run_id: 1, error_msg: null }),
+      });
+    }
     if (url.startsWith("/api/etl/runs")) {
       return Promise.resolve({
         ok: runsOk,
@@ -286,12 +304,12 @@ describe("EtlMonitorPage", () => {
     });
   });
 
-  // ── 9. Manual-trigger affordances are gone (issue #104) ──────────────────
+  // ── 9. Ad-hoc "Ejecutar todo ahora" (issue #244, revives #104) ────────────
 
-  it("renders no sync/force-resync buttons", async () => {
-    // Both used to POST /api/etl/run, which the connector orchestrator never
-    // polls for — the route was a hard 501 and the buttons were dead. An
-    // affordance that always fails is worse than none.
+  it("renders the Ejecutar todo ahora button", async () => {
+    // The connector orchestrator now polls etl_manual_trigger
+    // (etl/manual_trigger.py), so the full-sweep trigger is a real control
+    // again — not the hard 501 it was after issue #104.
     globalThis.fetch = mockFetch();
     render(<EtlMonitorPage />);
 
@@ -299,28 +317,34 @@ describe("EtlMonitorPage", () => {
       expect(screen.getByTestId("kpi-row")).toBeInTheDocument();
     });
 
-    expect(screen.queryByTestId("sync-now-button")).not.toBeInTheDocument();
+    expect(screen.getByTestId("run-now-all")).toBeInTheDocument();
+    // The old force-resync affordance stays gone — this is a single "run all"
+    // control, not the source project's watermark-resync pair.
     expect(screen.queryByTestId("force-resync-button")).not.toBeInTheDocument();
   });
 
-  it("never calls POST /api/etl/run", async () => {
+  it("clicking Ejecutar todo ahora POSTs a full-sweep trigger to /api/etl/run", async () => {
     const fetchMock = mockFetch();
     globalThis.fetch = fetchMock;
     render(<EtlMonitorPage />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("run-list")).toBeInTheDocument();
+      expect(screen.getByTestId("run-now-all")).toBeInTheDocument();
     });
 
-    const posted = fetchMock.mock.calls.some((call) => {
-      const url = call[0] as string;
-      const opts = call[1] as RequestInit | undefined;
-      return url === "/api/etl/run" || opts?.method === "POST";
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("run-now-all"));
     });
-    expect(posted).toBe(false);
+
+    const post = fetchMock.mock.calls.find(
+      (call) => call[0] === "/api/etl/run" && (call[1] as RequestInit | undefined)?.method === "POST",
+    );
+    expect(post).toBeTruthy();
+    // Full sweep = an empty body (no connector_name).
+    expect(JSON.parse((post![1] as RequestInit).body as string)).toEqual({});
   });
 
-  it("points the operator at the CLI and the connector management page", async () => {
+  it("links to the connector management page", async () => {
     globalThis.fetch = mockFetch();
     render(<EtlMonitorPage />);
 
@@ -328,7 +352,6 @@ describe("EtlMonitorPage", () => {
       expect(screen.getByTestId("kpi-row")).toBeInTheDocument();
     });
 
-    expect(screen.getByText(/ps connector run/)).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: /Gestionar conectores/ }),
     ).toHaveAttribute("href", "/etl/connectors");

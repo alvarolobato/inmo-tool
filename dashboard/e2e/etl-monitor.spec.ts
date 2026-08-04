@@ -192,13 +192,15 @@ test("a run where every connector was skipped is not badged as a success", async
   ).toContainText("Sin actividad");
 });
 
-test("no dead manual-trigger buttons remain", async ({ page }) => {
-  // Both previously POSTed /api/etl/run, which returns a hard 501 because
-  // the connector orchestrator has no manual-trigger polling.
+test("the Ejecutar todo ahora button is present (issue #244)", async ({ page }) => {
+  // The connector orchestrator now polls etl_manual_trigger
+  // (etl/manual_trigger.py), so /api/etl/run is a real endpoint again — the
+  // full-sweep control is back, not the hard 501 it was after issue #104.
   await page.goto("/etl");
   await expect(page.getByTestId("run-list")).toBeVisible();
 
+  await expect(page.getByTestId("run-now-all")).toBeVisible();
+  // The old source-project watermark-resync affordances stay gone.
   await expect(page.getByTestId("sync-now-button")).toHaveCount(0);
   await expect(page.getByTestId("force-resync-button")).toHaveCount(0);
-  await expect(page.getByText(/ps connector run/)).toBeVisible();
 });

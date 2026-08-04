@@ -1507,6 +1507,28 @@ ALTER TABLE etl_manual_trigger ADD COLUMN IF NOT EXISTS force_full   BOOLEAN NOT
 ALTER TABLE etl_manual_trigger ADD COLUMN IF NOT EXISTS force_tables TEXT[]  NOT NULL DEFAULT '{}';
 ALTER TABLE etl_manual_trigger ADD COLUMN IF NOT EXISTS triggered_by TEXT;
 
+-- Issue #244: revive ad-hoc execution. The inmo-tool connector orchestrator
+-- polls this table (etl/manual_trigger.py) and runs a sweep — either every
+-- enabled connector, or just one when `connector_name` is set (NULL = all,
+-- the same "empty = everything" convention `force_tables` already uses). The
+-- old `run_id` FK points at the source project's now-orphaned etl_sync_runs;
+-- the connector pipeline records `connector_runs` instead, so the outcome
+-- links there via `connector_run_id`. `finished_at`/`error_msg` record the
+-- result the dashboard's GET /api/etl/run?id= reports back.
+ALTER TABLE etl_manual_trigger ADD COLUMN IF NOT EXISTS connector_name   TEXT;
+ALTER TABLE etl_manual_trigger ADD COLUMN IF NOT EXISTS connector_run_id BIGINT REFERENCES connector_runs(id) ON DELETE SET NULL;
+ALTER TABLE etl_manual_trigger ADD COLUMN IF NOT EXISTS finished_at      TIMESTAMPTZ;
+ALTER TABLE etl_manual_trigger ADD COLUMN IF NOT EXISTS error_msg        TEXT;
+
+-- The lifecycle is pending -> running -> done|failed (issue #244). 'picked_up'
+-- is kept in the allow-set for the inherited PowerShop helpers/tests that used
+-- it (etl.db.postgres.check_and_consume_trigger); the new poll loop never
+-- writes it. Drop-and-re-add is the idempotent way to widen an inline CHECK,
+-- mirroring connector_run_results' status-constraint migration above.
+ALTER TABLE etl_manual_trigger DROP CONSTRAINT IF EXISTS etl_manual_trigger_status_check;
+ALTER TABLE etl_manual_trigger ADD CONSTRAINT etl_manual_trigger_status_check
+    CHECK (status IN ('pending', 'picked_up', 'running', 'done', 'failed'));
+
 -- Unique: at most one pending trigger row at a time (supports ON CONFLICT idempotency).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_etl_manual_trigger_single_pending
     ON etl_manual_trigger (status) WHERE status = 'pending';

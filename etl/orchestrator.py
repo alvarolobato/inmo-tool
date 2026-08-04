@@ -2809,22 +2809,39 @@ def run_scheduler_loop(
     while True:
         conn = conn_factory()
         try:
-            if first_iteration:
-                run_all_connectors_respecting_restart_guard(
-                    conn,
-                    trigger="scheduler",
-                    min_restart_sweep_interval_seconds=min_restart_sweep_interval_seconds,
-                    dedup_max_runtime_seconds=dedup_max_runtime_seconds,
+            # Run lock (issue #244): the ad-hoc manual-trigger poll loop
+            # (etl/manual_trigger.py) runs in a separate thread and can start a
+            # sweep at any moment. Both take this same advisory lock so a
+            # scheduled sweep and a manual one never run concurrently and
+            # double-write the same listings. If the manual loop is mid-run,
+            # skip this tick and let the next interval retry — the manual run
+            # is doing the same work anyway.
+            if not postgres.try_acquire_run_lock(conn):
+                logger.warning(
+                    "Scheduler sweep skipped this iteration: a manual (or other) "
+                    "connector run holds the run lock. Retrying next interval."
                 )
             else:
-                # Not the process' first sweep — paced by this same loop's
-                # own `sleep(interval_seconds)` below, so the restart-burst
-                # guard has nothing to protect against here. See docstring.
-                run_all_connectors(
-                    conn,
-                    trigger="scheduler",
-                    dedup_max_runtime_seconds=dedup_max_runtime_seconds,
-                )
+                try:
+                    if first_iteration:
+                        run_all_connectors_respecting_restart_guard(
+                            conn,
+                            trigger="scheduler",
+                            min_restart_sweep_interval_seconds=min_restart_sweep_interval_seconds,
+                            dedup_max_runtime_seconds=dedup_max_runtime_seconds,
+                        )
+                    else:
+                        # Not the process' first sweep — paced by this same
+                        # loop's own `sleep(interval_seconds)` below, so the
+                        # restart-burst guard has nothing to protect against
+                        # here. See docstring.
+                        run_all_connectors(
+                            conn,
+                            trigger="scheduler",
+                            dedup_max_runtime_seconds=dedup_max_runtime_seconds,
+                        )
+                finally:
+                    postgres.release_run_lock(conn)
         except Exception:
             logger.exception(
                 "run_all_connectors failed for this scheduler iteration — "

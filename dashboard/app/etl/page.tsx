@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Card } from "@tremor/react";
 import { RunList } from "@/components/etl/RunList";
 import { EvolutionCharts } from "@/components/etl/EvolutionCharts";
+import { RunNowButton } from "@/components/connectors/RunNowButton";
 import type { ConnectorRun } from "@/components/etl/RunList";
 import type { EtlStatsData } from "@/components/etl/EvolutionCharts";
 import { ErrorDisplay } from "@/components/ErrorDisplay";
@@ -209,18 +210,21 @@ export default function EtlMonitorPage() {
           </p>
         </div>
         {/*
-          No "Sincronizar ahora" / "Forzar re-sync" buttons here any more
-          (issue #104). They POSTed to /api/etl/run, which wrote an
-          `etl_manual_trigger` row that the source project's per-table ETL
-          polled for — the connector orchestrator has no such polling, so
-          the route had been reduced to a hard 501 and both buttons were
-          dead. Rather than leave an affordance that visibly fails, the
-          honest path is stated: the orchestrator runs on its own schedule,
-          and a one-off run is a CLI operation. Wiring a real manual trigger
-          needs orchestrator-side polling — tracked as a follow-up, not
-          faked here.
+          "Ejecutar todo ahora" (issue #244): revived now that the connector
+          orchestrator actually polls `etl_manual_trigger` (etl/manual_trigger.py).
+          This queues a full sweep of every enabled connector; the button polls
+          the trigger's status and refreshes the run list when it finishes.
+          A per-connector run lives on the connectors-management page.
         */}
-        <div className="flex flex-col items-end gap-1 text-right">
+        <div className="flex flex-col items-end gap-2 text-right">
+          <RunNowButton
+            label="Ejecutar todo ahora"
+            testIdSuffix="all"
+            onFinished={() => {
+              void fetchRuns(1);
+              void fetchStats();
+            }}
+          />
           <Link
             href="/etl/connectors"
             className="text-sm font-medium hover:underline"
@@ -228,12 +232,6 @@ export default function EtlMonitorPage() {
           >
             Gestionar conectores →
           </Link>
-          <p className="text-xs text-tremor-content-subtle dark:text-dark-tremor-content-subtle">
-            Ejecución manual:{" "}
-            <code className="rounded bg-tremor-background-subtle px-1 py-0.5 dark:bg-dark-tremor-background-subtle">
-              ps connector run &lt;nombre&gt;
-            </code>
-          </p>
         </div>
       </div>
 

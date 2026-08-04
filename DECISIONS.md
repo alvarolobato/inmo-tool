@@ -46,6 +46,7 @@
 | [D-035](docs/decisions/D-035-cimenta2-detail-endpoint-injected.md) | Cimenta2 detail-fetch endpoint is injected via `CIMENTA2_DETAIL_ENDPOINT` (never committed); connector is discovery-only without it. Owner-contact fields are never stored. |
 | [D-036](docs/decisions/D-036-dedup-run-reconciliation.md) | Orphaned `dedup_runs` (past `dedup_max_runtime_seconds`, default 2h) reconcile to `failed` with a reason at startup + each pass; a dedup advisory lock skips overlapping passes. |
 | [D-037](docs/decisions/D-037-aliseda-guided-capture.md) | Aliseda ingests via a capture-only connector + guided `capture_worklist` (`/etl/captura`), correlated by canonical `match_key`. Selectors are a draft, validate vs a real capture. |
+| [D-038](docs/decisions/D-038-adhoc-etl-run-lock.md) | Ad-hoc runs enqueue an `etl_manual_trigger` row (`connector_name` NULL=all); `etl/manual_trigger.py` polls it, runs `run_all_connectors` under `RUN_ADVISORY_LOCK_ID` (shared w/ scheduler), skips the D-009 guard. |
 
 ## AI layer
 

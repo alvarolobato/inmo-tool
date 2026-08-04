@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { LocationPicker, type LocationPickerValue } from "@/components/profiles/LocationPicker";
+import { RunNowButton } from "@/components/connectors/RunNowButton";
 import type {
   ConnectorConfigPatch,
   ConnectorView,
@@ -118,9 +119,13 @@ function ScopeSummary({ connector }: { connector: ConnectorView }) {
 export function ConnectorCard({
   connector,
   onPatch,
+  onRunFinished,
 }: {
   connector: ConnectorView;
   onPatch: (name: string, patch: ConnectorConfigPatch) => Promise<void>;
+  /** Called after an ad-hoc "Ejecutar ahora" run finishes, so the parent can
+   * refresh the last-run summary (issue #244). */
+  onRunFinished?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [editingScope, setEditingScope] = useState(false);
@@ -358,6 +363,23 @@ export function ConnectorCard({
             Filtro nativo del portal: devuelve solo anuncios con exactamente ese
             número de habitaciones (no &ldquo;o más&rdquo;). Déjalo vacío para no
             filtrar por habitaciones.
+          </p>
+        </div>
+      )}
+
+      {connector.registered && connector.supports_discovery && (
+        <div style={{ marginTop: 12 }}>
+          <span style={labelStyle}>Ejecución bajo demanda</span>
+          <div style={{ marginTop: 4 }}>
+            <RunNowButton
+              connectorName={connector.name}
+              testIdSuffix={connector.name}
+              onFinished={onRunFinished}
+            />
+          </div>
+          <p style={{ fontSize: 11, color: "var(--fg-muted)", margin: "6px 0 0" }}>
+            Lanza este conector ahora, sin esperar al barrido programado. Si hay
+            un barrido en curso, la ejecución espera a que termine.
           </p>
         </div>
       )}
