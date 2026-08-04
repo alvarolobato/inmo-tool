@@ -55,17 +55,41 @@ describe("POST /api/etl/worklist", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toMatchObject({ success: true, added: 2, duplicate: 0 });
-    expect(mockAdd).toHaveBeenCalledWith([
-      "https://www.alisedainmobiliaria.com/inmueble/ANT1",
-      "https://www.alisedainmobiliaria.com/inmueble/ANT2",
-    ]);
+    expect(mockAdd).toHaveBeenCalledWith(
+      [
+        "https://www.alisedainmobiliaria.com/inmueble/ANT1",
+        "https://www.alisedainmobiliaria.com/inmueble/ANT2",
+      ],
+      "manual",
+    );
   });
 
   it("accepts an array of urls", async () => {
     mockAdd.mockResolvedValue({ added: 1, duplicate: 0, invalid: [] });
     const res = await POST(post({ urls: ["https://www.alisedainmobiliaria.com/inmueble/ANT9"] }));
     expect(res.status).toBe(200);
-    expect(mockAdd).toHaveBeenCalledWith(["https://www.alisedainmobiliaria.com/inmueble/ANT9"]);
+    expect(mockAdd).toHaveBeenCalledWith(
+      ["https://www.alisedainmobiliaria.com/inmueble/ANT9"],
+      "manual",
+    );
+  });
+
+  it("passes via='derived' through when the extension harvested the URLs (issue #262)", async () => {
+    mockAdd.mockResolvedValue({ added: 1, duplicate: 0, invalid: [] });
+    const res = await POST(
+      post({ urls: ["https://www.idealista.com/inmueble/1/"], via: "derived" }),
+    );
+    expect(res.status).toBe(200);
+    expect(mockAdd).toHaveBeenCalledWith(["https://www.idealista.com/inmueble/1/"], "derived");
+  });
+
+  it("falls back to via='manual' for an unknown via value", async () => {
+    mockAdd.mockResolvedValue({ added: 1, duplicate: 0, invalid: [] });
+    const res = await POST(
+      post({ urls: ["https://www.idealista.com/inmueble/1/"], via: "bogus" }),
+    );
+    expect(res.status).toBe(200);
+    expect(mockAdd).toHaveBeenCalledWith(["https://www.idealista.com/inmueble/1/"], "manual");
   });
 
   it("surfaces a 500 when the DB helper throws", async () => {

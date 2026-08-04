@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { worklistMatchKey, portalForUrl, firstPendingUrl } from "@/lib/worklist";
+import { worklistMatchKey, portalForUrl, firstPendingUrl, pendingUrls } from "@/lib/worklist";
 import type { WorklistRow, WorklistStatus } from "@/lib/worklist";
 
 // Mirror of etl/tests/test_capture_worklist.py MATCH_KEY_CASES.
@@ -89,5 +89,36 @@ describe("firstPendingUrl — human-paced 'Siguiente' advance (issue #254)", () 
   it("returns null when nothing is pending", () => {
     expect(firstPendingUrl([row(1, "https://a/inmueble/1", "captured")])).toBeNull();
     expect(firstPendingUrl([])).toBeNull();
+  });
+});
+
+describe("pendingUrls — the batch queue the extension sweeps (issue #262)", () => {
+  const row = (id: number, url: string, status: WorklistStatus): WorklistRow => ({
+    id,
+    url,
+    source_portal: "aliseda",
+    status,
+    added_via: "derived",
+    external_id: null,
+    note: null,
+    matched_capture_id: null,
+    created_at: "2026-08-05T00:00:00Z",
+    updated_at: "2026-08-05T00:00:00Z",
+  });
+
+  it("returns every pending URL in list order, skipping other statuses", () => {
+    const rows = [
+      row(1, "https://a/inmueble/1", "captured"),
+      row(2, "https://a/inmueble/2", "pending"),
+      row(3, "https://a/inmueble/3", "failed"),
+      row(4, "https://a/inmueble/4", "pending"),
+      row(5, "https://a/inmueble/5", "skipped"),
+    ];
+    expect(pendingUrls(rows)).toEqual(["https://a/inmueble/2", "https://a/inmueble/4"]);
+  });
+
+  it("returns an empty array when nothing is pending", () => {
+    expect(pendingUrls([row(1, "https://a/inmueble/1", "captured")])).toEqual([]);
+    expect(pendingUrls([])).toEqual([]);
   });
 });

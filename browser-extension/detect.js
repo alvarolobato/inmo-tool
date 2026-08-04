@@ -40,12 +40,32 @@
   //   should be re-verified against a live page if a site restructures — the
   //   generic `main` / `h1` fallbacks plus the body-text-volume floor in
   //   isRenderReady() keep it working even if the specific selectors drift.
+  //
+  // isListingPath: URL-shape gate for "this is a SEARCH / RESULTS page" — the
+  //   page that lists many properties, each linking to its own detail page.
+  //   This is the batch-capture entry point (issue #262): from such a page the
+  //   extension harvests every detail link and drives them through the worklist
+  //   queue. Kept strict for the same reason as isDetailPath — a false positive
+  //   would harvest junk anchors.
+  //   - Idealista search/results URLs are `/venta-viviendas/…`,
+  //     `/alquiler-viviendas/…`, `/venta-locales/…`, etc., plus the
+  //     `/areas/<op>-…` aggregate pages. A leading `/(venta|alquiler)-` or
+  //     `/areas/(venta|alquiler)-` segment is the signal; detail pages
+  //     (`/inmueble/<id>`) and the home (`/`) don't match.
+  //   - Aliseda results live under `/comprar/…` / `/alquilar/…` (e.g.
+  //     `/comprar/vivienda/malaga`); detail pages are `/inmueble/<id>`.
   var PORTALS = [
     {
       portal: "idealista",
       hostSuffix: "idealista.com",
       isDetailPath: function (p) {
         return /^\/inmueble\/\d+\/?$/.test(p);
+      },
+      isListingPath: function (p) {
+        return (
+          /^\/(venta|alquiler)-[a-z]/.test(p) ||
+          /^\/areas\/(venta|alquiler)-/.test(p)
+        );
       },
       readySelectors: [
         "h1.main-info__title-main",
@@ -60,6 +80,9 @@
       hostSuffix: "alisedainmobiliaria.com",
       isDetailPath: function (p) {
         return /^\/inmueble\/[^/]+/.test(p);
+      },
+      isListingPath: function (p) {
+        return /^\/(comprar|alquilar)\//.test(p);
       },
       readySelectors: [
         "[class*='ficha']",
@@ -155,6 +178,62 @@
     return detailPortalForUrl(url) !== null;
   }
 
+  /**
+   * The capture portal for which `url` is a SEARCH / RESULTS listing page, or
+   * null. Used by the popup to decide whether to offer "Capturar todas (N)"
+   * (batch capture, issue #262). null for detail pages, home pages,
+   * unsupported hosts and non-http(s).
+   */
+  function listingPortalForUrl(url) {
+    var parsed;
+    try {
+      parsed = new URL(String(url).trim());
+    } catch (e) {
+      return null;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    var cfg = portalConfigForHost(parsed.hostname);
+    if (!cfg || typeof cfg.isListingPath !== "function") return null;
+    return cfg.isListingPath(parsed.pathname) ? cfg.portal : null;
+  }
+
+  /** True iff `url` is a supported search/results listing page. */
+  function isListingUrl(url) {
+    return listingPortalForUrl(url) !== null;
+  }
+
+  /**
+   * Harvest the detail-page URLs from a rendered listing/search page (issue
+   * #262). `hrefs` is the list of anchor hrefs already resolved to absolute
+   * URLs (a content script passes `[...document.querySelectorAll('a[href]')]
+   * .map(a => a.href)`; `a.href` is always absolute). Returns the subset that
+   * are real listing-DETAIL URLs, de-duplicated by canonical `matchKey` so the
+   * same listing linked twice (photo + title anchor) seeds one worklist row.
+   *
+   * If `portal` is given, only detail URLs for that portal are kept — a listing
+   * page occasionally links out to another supported portal, and a batch run is
+   * scoped to the portal the operator is actually browsing.
+   *
+   * Pure: no DOM, no chrome, no network — unit-tested directly.
+   */
+  function extractDetailUrls(hrefs, portal) {
+    var out = [];
+    var seen = Object.create(null);
+    if (!hrefs || typeof hrefs.length !== "number") return out;
+    for (var i = 0; i < hrefs.length; i++) {
+      var href = hrefs[i];
+      if (typeof href !== "string") continue;
+      var p = detailPortalForUrl(href);
+      if (!p) continue;
+      if (portal && p !== portal) continue;
+      var key = matchKey(href);
+      if (!key || seen[key]) continue;
+      seen[key] = true;
+      out.push(href.trim());
+    }
+    return out;
+  }
+
   function readySelectorsFor(portal) {
     for (var i = 0; i < PORTALS.length; i++) {
       if (PORTALS[i].portal === portal) return PORTALS[i].readySelectors;
@@ -239,6 +318,9 @@
     portalConfigForHost: portalConfigForHost,
     detailPortalForUrl: detailPortalForUrl,
     isDetailUrl: isDetailUrl,
+    listingPortalForUrl: listingPortalForUrl,
+    isListingUrl: isListingUrl,
+    extractDetailUrls: extractDetailUrls,
     isRenderReady: isRenderReady,
     createCaptureGuard: createCaptureGuard,
   };

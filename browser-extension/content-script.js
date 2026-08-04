@@ -23,7 +23,38 @@
         url: window.location.href,
         title: document.title,
       });
+      return true;
     }
+
+    // Batch capture (issue #262): the popup asks whether THIS tab is a
+    // listing/search page and, if so, for the detail URLs it links to. The
+    // pure classification + extraction lives in detect.js (self.InmoDetect);
+    // here we just read the current URL and the anchor hrefs off the live DOM.
+    if (msg.type === "DETECT_PAGE") {
+      const D = self.InmoDetect;
+      const url = window.location.href;
+      if (!D) {
+        sendResponse({ isListing: false, isDetail: false, portal: null, detailUrls: [] });
+        return true;
+      }
+      const listingPortal = D.listingPortalForUrl(url);
+      const detailPortal = D.detailPortalForUrl(url);
+      let detailUrls = [];
+      if (listingPortal) {
+        const hrefs = Array.from(document.querySelectorAll("a[href]")).map(
+          (a) => a.href,
+        );
+        detailUrls = D.extractDetailUrls(hrefs, listingPortal);
+      }
+      sendResponse({
+        isListing: !!listingPortal,
+        isDetail: !!detailPortal,
+        portal: listingPortal || detailPortal,
+        detailUrls,
+      });
+      return true;
+    }
+
     return true; // Keep message channel open for async response
   });
 
