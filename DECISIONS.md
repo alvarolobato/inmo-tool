@@ -39,6 +39,7 @@
 | [D-026](docs/decisions/D-026-sareb-not-viable-incapsula-block.md) | Sareb (`sareb.es`) not buildable: Incapsula WAF returns 403 on every path including `robots.txt`. No connector written; routes to browser-extension capture (#75) per the batch's standing WAF rule. |
 | [D-027](docs/decisions/D-027-altamira-not-viable-akamai-block.md) | Altamira (`altamirainmuebles.com`) not buildable: Akamai WAF returns 403 on every path including `robots.txt`. No connector written; routes to browser-extension capture (#75) per the batch's standing WAF rule. |
 | [D-033](docs/decisions/D-033-cimenta2-not-viable-guest-api-overexposure.md) | Cimenta2 not buildable: no server-rendered content, and its only data path is a guest API leaking confidential/PII fields. Don't build on it, even scoped. Routes to #75. |
+| [D-034](docs/decisions/D-034-cimenta2-sitemap-index-only.md) | Cimenta2 ships sitemap-index-only: `fetch_detail()` makes no request ever, price/geo/type stay null, `reference_code` is the sole dedup key. Never add a detail path (D-033). |
 
 ## AI layer
 

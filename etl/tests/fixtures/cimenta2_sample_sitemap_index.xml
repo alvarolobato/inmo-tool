@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Real capture of https://inmuebles.cimenta2.com/inmuebles/s/sitemap.xml
+  fetched 2026-08-04, reformatted onto separate lines for readability;
+  every <loc>/<lastmod> value is verbatim. All eight child sitemaps the live index publishes.
+-->
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">
+  <sitemap><loc>https://inmuebles.cimenta2.com/inmuebles/s/sitemap-inv_expediente__c-1.xml</loc><lastmod>2026-08-04T00:27:01.333Z</lastmod></sitemap>
+  <sitemap><loc>https://inmuebles.cimenta2.com/inmuebles/s/sitemap-ga_promocion__c-1.xml</loc><lastmod>2026-08-04T00:27:01.333Z</lastmod></sitemap>
+  <sitemap><loc>https://inmuebles.cimenta2.com/inmuebles/s/sitemap-ga_activo__c-1.xml</loc><lastmod>2026-08-04T00:27:01.333Z</lastmod></sitemap>
+  <sitemap><loc>https://inmuebles.cimenta2.com/inmuebles/s/sitemap-ga_agrupacion__c-1.xml</loc><lastmod>2026-08-04T00:27:01.333Z</lastmod></sitemap>
+  <sitemap><loc>https://inmuebles.cimenta2.com/inmuebles/s/sitemap-inv_expediente__c-weekly.xml</loc><lastmod>2026-08-04T00:27:01.333Z</lastmod></sitemap>
+  <sitemap><loc>https://inmuebles.cimenta2.com/inmuebles/s/sitemap-ga_promocion__c-weekly.xml</loc><lastmod>2026-08-04T00:27:01.333Z</lastmod></sitemap>
+  <sitemap><loc>https://inmuebles.cimenta2.com/inmuebles/s/sitemap-ga_activo__c-weekly.xml</loc><lastmod>2026-08-04T00:27:01.333Z</lastmod></sitemap>
+  <sitemap><loc>https://inmuebles.cimenta2.com/inmuebles/s/sitemap-view-1.xml</loc><lastmod>2026-08-04T00:27:01.333Z</lastmod></sitemap>
+</sitemapindex>

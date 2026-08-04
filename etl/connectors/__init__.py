@@ -27,6 +27,7 @@ def register_all() -> None:
     site twice per sweep.
     """
     from etl.connectors.buildingcenter import BuildingCenterConnector
+    from etl.connectors.cimenta2 import Cimenta2Connector
     from etl.connectors.fotocasa import FotocasaConnector
     from etl.connectors.idealista import IdealistaConnector
     from etl.connectors.milanuncios import MilanunciosConnector
@@ -60,3 +61,8 @@ def register_all() -> None:
         CONNECTORS.append(IdealistaConnector())
     if BuildingCenterConnector.name not in registered_names:
         CONNECTORS.append(BuildingCenterConnector())
+    # Issue #136: sitemap-index/discovery only — it enumerates Cajamar's
+    # assets and their reference codes, and deliberately never fetches a
+    # detail page (D-033). See cimenta2.py's module docstring.
+    if Cimenta2Connector.name not in registered_names:
+        CONNECTORS.append(Cimenta2Connector())
