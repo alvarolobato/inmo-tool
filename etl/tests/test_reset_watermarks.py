@@ -115,7 +115,7 @@ class TestCreateManualTrigger:
             trigger_id = postgres.create_manual_trigger(
                 pg_conn, force_full=True, force_tables=["stock", "ventas"]
             )
-            force_full, force_tables, triggered_by = postgres.get_trigger_force_flags(
+            force_full, force_tables, _triggered_by = postgres.get_trigger_force_flags(
                 pg_conn, trigger_id
             )
             assert force_full is True
@@ -159,7 +159,7 @@ class TestCreateManualTrigger:
             claimed = postgres.check_and_consume_trigger(pg_conn)
             assert claimed == trigger_id
             # After consume, the row exists as picked_up; force flags still readable.
-            force_full, force_tables, triggered_by = postgres.get_trigger_force_flags(
+            force_full, force_tables, _triggered_by = postgres.get_trigger_force_flags(
                 pg_conn, trigger_id
             )
             assert force_full is False

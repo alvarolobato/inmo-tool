@@ -78,7 +78,11 @@ def load_schema(schema_path: Path | None = None) -> list[dict[str, Any]]:
     with path.open("r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
     if not isinstance(data, list):
-        raise ValueError(f"Config schema must be a YAML list, got {type(data)}")
+        # TRY004 wants TypeError; this is malformed operator input (a bad
+        # schema file), surfaced to the operator as a config complaint.
+        raise ValueError(  # noqa: TRY004
+            f"Config schema must be a YAML list, got {type(data)}"
+        )
     return data
 
 
@@ -96,7 +100,8 @@ def _load_file(config_path: Path) -> dict[str, Any]:
     if data is None:
         return {}
     if not isinstance(data, dict):
-        raise ValueError(
+        # TRY004 wants TypeError; see _load_schema above — same reasoning.
+        raise ValueError(  # noqa: TRY004
             f"config.yaml must be a YAML mapping, got {type(data).__name__}"
         )
     return data  # type: ignore[return-value]
