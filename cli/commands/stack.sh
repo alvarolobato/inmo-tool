@@ -9,6 +9,16 @@ if [ -z "${APP_GIT_DESCRIBE:-}" ] && [ -d "${REPO_ROOT}/.git" ]; then
   export APP_GIT_DESCRIBE="$(cd "${REPO_ROOT}" && git describe --tags --always --dirty 2>/dev/null || true)"
 fi
 
+# Stage the browser extension into the dashboard build context (dashboard/public/)
+# so the built image can serve it via GET /api/extension/download. The extension
+# lives at the repo root, OUTSIDE the ./dashboard docker build context, so it must
+# be packaged in before any `docker compose build`. Idempotent + fast; safe to run
+# on every invocation. See scripts/build-extension-zip.sh for the full rationale.
+if [ -f "${REPO_ROOT}/scripts/build-extension-zip.sh" ]; then
+  bash "${REPO_ROOT}/scripts/build-extension-zip.sh" || \
+    echo -e "\033[1;33mwarning: could not package the browser extension; the in-app download will fall back to manual instructions.\033[0m" >&2
+fi
+
 RED='\033[0;31m'
 CYAN='\033[0;36m'
 GREEN='\033[0;32m'
