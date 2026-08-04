@@ -40,6 +40,12 @@ let pool: Pool;
 let dbAvailable = false;
 let profileId: number;
 let multiListingPropertyId: number;
+// Dedicated profile for the staleness indicator (#243) — kept separate from
+// the pagination-sensitive main profile above so its exact card counts stay
+// stable.
+let stalenessProfileId: number;
+let freshPropertyId: number;
+let stalePropertyId: number;
 
 test.beforeAll(async () => {
   pool = buildPool();
@@ -85,11 +91,12 @@ test.beforeAll(async () => {
     source: string,
     price: number,
     status = "active",
+    lastSeenAt: string | null = null,
   ): Promise<void> {
     await pool.query(
-      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())`,
-      [propertyId, source, `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`, status, price],
+      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, last_seen_at)
+       VALUES ($1, $2, $3, $4, $5, NOW(), $6)`,
+      [propertyId, source, `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`, status, price, lastSeenAt],
     );
   }
 
@@ -123,6 +130,40 @@ test.beforeAll(async () => {
   await insertListing(multiListingPropertyId, "fotocasa", 285000);
   await insertListing(multiListingPropertyId, "milanuncios", 279000);
   await markMatched(multiListingPropertyId);
+
+  // Staleness indicator (#243), on its own profile so the counts above stay
+  // fixed: one freshly-confirmed property (seen 2 days ago) and one stale one
+  // (seen 30 days ago). The e2e proves the band actually renders end-to-end
+  // against real data — a fresh card must NOT read as stale and vice versa.
+  const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
+  const stalenessProfile = await pool.query<{ id: number }>(
+    `INSERT INTO search_profile (name, scope, thesis_params)
+     VALUES ($1, $2::jsonb, '{}'::jsonb) RETURNING id`,
+    [
+      `${NAME_PREFIX}staleness-${Date.now()}`,
+      JSON.stringify({
+        geography: { type: "radius", center: MADRID_SOL, radius_km: 5 },
+        property_types: ["piso"],
+        hard_exclusions: {},
+      }),
+    ],
+  );
+  stalenessProfileId = stalenessProfile.rows[0].id;
+
+  async function markMatchedFor(propId: number): Promise<void> {
+    await pool.query(
+      `INSERT INTO profile_listing_state (profile_id, property_id, matched) VALUES ($1, $2, true)`,
+      [stalenessProfileId, propId],
+    );
+  }
+
+  freshPropertyId = await insertProperty(`${NAME_PREFIX}Fresh, Calle Nueva, Madrid`, 80);
+  await insertListing(freshPropertyId, "fotocasa", 250000, "active", daysAgo(2));
+  await markMatchedFor(freshPropertyId);
+
+  stalePropertyId = await insertProperty(`${NAME_PREFIX}Stale, Calle Vieja, Madrid`, 85);
+  await insertListing(stalePropertyId, "fotocasa", 260000, "active", daysAgo(30));
+  await markMatchedFor(stalePropertyId);
 });
 
 test.afterAll(async () => {
@@ -173,6 +214,31 @@ test("renders real candidate cards for a matched profile, grouping a deduplicate
   await expect(multiCard).toBeVisible();
   await expect(multiCard.getByText(/fotocasa/i)).toBeVisible();
   await expect(multiCard.getByText(/milanuncios/i)).toBeVisible();
+});
+
+test("surfaces per-listing staleness bands on the cards (#243)", async ({ page }) => {
+  skipIfNoDb(test);
+
+  await page.goto(`/profiles/${stalenessProfileId}`);
+  await assertNoErrorSurface(page);
+
+  // Both cards render real content, each with its own staleness band derived
+  // from last_seen_at — the fresh property (seen 2 days ago) must read fresh,
+  // the stale one (seen 30 days ago) must read stale. A regression that stopped
+  // surfacing last_seen_at (the whole point of #243) would drop these badges.
+  const freshBadge = page.locator(
+    `[data-testid="candidate-card"][data-property-id="${freshPropertyId}"] [data-testid="candidate-staleness"]`,
+  );
+  await expect(freshBadge).toBeVisible();
+  await expect(freshBadge).toHaveAttribute("data-staleness-band", "fresh");
+  await expect(freshBadge).toContainText(/visto hace 2 días/i);
+
+  const staleBadge = page.locator(
+    `[data-testid="candidate-card"][data-property-id="${stalePropertyId}"] [data-testid="candidate-staleness"]`,
+  );
+  await expect(staleBadge).toBeVisible();
+  await expect(staleBadge).toHaveAttribute("data-staleness-band", "stale");
+  await expect(staleBadge).toContainText(/visto hace 30 días/i);
 });
 
 test("advances to a real second page and stops offering more once exhausted", async ({ page }) => {

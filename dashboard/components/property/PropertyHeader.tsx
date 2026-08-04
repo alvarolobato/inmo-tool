@@ -1,6 +1,8 @@
 import type { PropertyDetail } from "@/lib/property-detail";
 import { PROPERTY_TYPE_LABELS, type PROPERTY_TYPES } from "@/lib/profiles-schema";
 import { fmtEUR0, fmtInt } from "@/components/widgets/format";
+import { StalenessBadge } from "@/components/StalenessBadge";
+import { freshestActiveLastSeen } from "@/lib/staleness";
 
 // A spread this small between two portals' listed prices is routine rounding
 // (e.g. 249.000€ vs 250.000€), not a genuine disagreement worth flagging.
@@ -39,6 +41,15 @@ export function PropertyHeader({ property }: { property: PropertyDetail }) {
       ? (maxPrice - minPrice) / minPrice > PRICE_DISAGREEMENT_THRESHOLD
       : false;
 
+  // Listing staleness (#243): freshest last_seen_at across ACTIVE listings —
+  // the property is only as stale as its most-recently-re-confirmed live
+  // listing. Active-only, mirroring lib/candidates.ts's card query, so a
+  // withdrawn/sold sibling's frozen timestamp neither rescues nor is mistaken
+  // for a live re-confirmation. Null (badge renders nothing) when nothing is
+  // active — a fully withdrawn/sold property's story is told by the linked-
+  // listings statuses and the status-event timeline, not by a staleness age.
+  const freshestLastSeen = freshestActiveLastSeen(property.listings);
+
   const facts: [string, string | null][] = [
     ["Tipo", typeLabel ?? null],
     ["Superficie construida", property.m2_built !== null ? `${fmtInt(property.m2_built)} m²` : null],
@@ -60,6 +71,10 @@ export function PropertyHeader({ property }: { property: PropertyDetail }) {
         <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: "var(--fg)" }}>
           {minPrice !== null ? fmtEUR0(minPrice) : "Precio no disponible"}
         </h1>
+        {/* Staleness of the freshest active listing (#243) — a fact ("visto
+            hace N días"), not a "sold" inference. Absent when no listing is
+            active. */}
+        <StalenessBadge lastSeenAt={freshestLastSeen} testId="property-staleness" />
       </div>
 
       {isHistorical && minPrice !== null && (

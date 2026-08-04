@@ -21,6 +21,11 @@ function candidate(overrides: Partial<CandidateRow> = {}): CandidateRow {
     flags: [],
     min_price: 279000,
     first_seen_at: "2026-07-01T00:00:00.000Z",
+    // Null by default so the staleness badge is opt-in per test (its band is
+    // relative to `now`, so a hard-coded ISO here would drift bands as real
+    // time passes) — the dedicated staleness tests below set it explicitly
+    // with dates relative to Date.now().
+    last_seen_at: null,
     listings: [{ id: 10, source: "fotocasa", url: "https://x", current_price: 285000 }],
     score: null,
     rank_explanation: null,
@@ -253,6 +258,34 @@ describe("CandidateCard", () => {
       />,
     );
     expect(screen.getByTestId("rank-explanation")).toHaveTextContent(COLD_START_EXPLANATION);
+  });
+
+  // Listing staleness (#243). `daysAgo` builds an ISO relative to the real
+  // `now` the badge reads, so a band assertion stays stable as time passes.
+  const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
+
+  it("#243: renders the staleness age with the fresh band for a recently-seen listing", () => {
+    render(<CandidateCard candidate={candidate({ last_seen_at: daysAgo(3) })} profileId={5} />);
+    const badge = screen.getByTestId("candidate-staleness");
+    expect(badge).toHaveTextContent("visto hace 3 días");
+    expect(badge).toHaveAttribute("data-staleness-band", "fresh");
+  });
+
+  it("#243: escalates the band to aging, then stale, as the last-seen age grows", () => {
+    const { rerender } = render(
+      <CandidateCard candidate={candidate({ last_seen_at: daysAgo(14) })} profileId={5} />,
+    );
+    expect(screen.getByTestId("candidate-staleness")).toHaveAttribute("data-staleness-band", "aging");
+
+    rerender(<CandidateCard candidate={candidate({ last_seen_at: daysAgo(30) })} profileId={5} />);
+    const badge = screen.getByTestId("candidate-staleness");
+    expect(badge).toHaveAttribute("data-staleness-band", "stale");
+    expect(badge).toHaveTextContent("visto hace 30 días");
+  });
+
+  it("#243: renders no staleness badge when last_seen_at is unknown (never claims 'visto hoy')", () => {
+    render(<CandidateCard candidate={candidate({ last_seen_at: null })} profileId={5} />);
+    expect(screen.queryByTestId("candidate-staleness")).not.toBeInTheDocument();
   });
 
   it("#152: keeps the feedback controls outside the detail <Link> so acting on a card can't navigate", () => {
