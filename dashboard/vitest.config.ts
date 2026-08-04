@@ -33,6 +33,16 @@ export default defineConfig({
       "@": path.resolve(__dirname, "."),
     },
   },
+  server: {
+    fs: {
+      // The dashboard is the vite root, but a couple of unit tests import the
+      // browser-extension's pure helpers (browser-extension/detect.js), which
+      // live one level up in the repo root. Allow reading from there so those
+      // tests can exercise the real extension code rather than a drifting copy
+      // (issue #254).
+      allow: [path.resolve(__dirname, "..")],
+    },
+  },
   test: {
     globals: true,
     environment: "node",

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { ErrorDisplay } from "@/components/ErrorDisplay";
 import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
+import { firstPendingUrl } from "@/lib/worklist";
 import type {
   WorklistPortalSummary,
   WorklistRow,
@@ -146,6 +147,19 @@ export default function CapturaWorklistPage() {
     [summaries],
   );
 
+  const nextPendingUrl = useMemo(() => firstPendingUrl(rows), [rows]);
+
+  // Human-paced "Siguiente" advance (issue #254): open the NEXT pending URL in
+  // a new tab, one per click. This is deliberately NOT an auto-advancing queue
+  // — the human clicks once, browses that one listing (the extension
+  // auto-captures it on render), then comes back and clicks again. Rapid-firing
+  // tabs from a queue would look like bot navigation, which is exactly what the
+  // human-in-the-loop design avoids.
+  const handleOpenNext = useCallback(() => {
+    if (!nextPendingUrl) return;
+    window.open(nextPendingUrl, "_blank", "noopener,noreferrer");
+  }, [nextPendingUrl]);
+
   return (
     <main style={{ padding: 24, maxWidth: 980 }} data-testid="worklist-page">
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -173,6 +187,37 @@ export default function CapturaWorklistPage() {
           <ErrorDisplay error={error} />
         </div>
       )}
+
+      {/* ── Human-paced "Siguiente" advance ──────────────────────────── */}
+      <section style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <button
+          data-testid="worklist-open-next"
+          onClick={handleOpenNext}
+          disabled={!nextPendingUrl}
+          title={
+            nextPendingUrl
+              ? "Abre el siguiente anuncio pendiente en una pestaña nueva"
+              : "No hay anuncios pendientes"
+          }
+          style={{
+            padding: "6px 16px",
+            fontSize: 13,
+            fontWeight: 600,
+            borderRadius: 8,
+            border: "none",
+            background: "var(--accent)",
+            color: "#fff",
+            cursor: nextPendingUrl ? "pointer" : "not-allowed",
+            opacity: nextPendingUrl ? 1 : 0.6,
+          }}
+        >
+          Abrir siguiente pendiente →
+        </button>
+        <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+          Abre un anuncio cada vez que pulsas. Navega tú y espera a que cargue: la
+          extensión lo captura sola.
+        </span>
+      </section>
 
       {/* ── Progress summary ─────────────────────────────────────────── */}
       <section data-testid="worklist-summary" style={{ marginTop: 16 }}>

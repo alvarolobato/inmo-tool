@@ -121,7 +121,22 @@
       background: #f1f5f9;
       color: #475569;
       border-radius: 6px;
+      margin-right: 6px;
     }
+
+    .toggle-field {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+    .toggle-field input[type="checkbox"] {
+      margin-top: 2px;
+      width: 16px;
+      height: 16px;
+      flex-shrink: 0;
+    }
+    .toggle-field .toggle-label { font-size: 13px; font-weight: 600; color: #1a1a2e; }
+    .toggle-field .toggle-sub { font-size: 11px; color: #94a3b8; margin-top: 2px; }
   </style>
 </head>
 <body>
@@ -148,6 +163,18 @@
           Inmo-Tool — sin ella, las capturas se rechazan.
         </p>
       </div>
+
+      <div class="field toggle-field">
+        <input type="checkbox" id="auto-capture" />
+        <label for="auto-capture" style="text-transform: none; letter-spacing: normal;">
+          <span class="toggle-label">Captura automática al abrir un anuncio</span>
+          <span class="toggle-sub">
+            Cuando entras en la página de un anuncio (Idealista o Aliseda) y termina de
+            cargar, la extensión lo captura sola — sin pulsar el botón. Verás un aviso
+            cuando ocurra. Nunca navega por ti: solo captura la página que tú abres.
+          </span>
+        </label>
+      </div>
     </div>
 
     <div class="card-footer">
@@ -156,8 +183,9 @@
     </div>
 
     <div class="portals-section">
-      <h3>Sitio soportado</h3>
+      <h3>Sitios soportados</h3>
       <span class="portal-tag">🇪🇸 Idealista</span>
+      <span class="portal-tag">🇪🇸 Aliseda</span>
     </div>
   </div>
 

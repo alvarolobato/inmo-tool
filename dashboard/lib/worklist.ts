@@ -98,3 +98,21 @@ export function portalForUrl(url: string): string | null {
   }
   return null;
 }
+
+/**
+ * The next worklist URL a human should open (issue #254 — human-paced
+ * "Siguiente" advance). Returns the FIRST `pending` row in the given list
+ * order, or null if none is pending.
+ *
+ * Deliberately a pure "pick the next one" over the already-loaded rows, not an
+ * auto-advancing queue-runner: the caller opens exactly ONE tab per human
+ * click. Rapid-firing a sequence of tabs from a queue would look like bot
+ * navigation — the very thing the extension's human-in-the-loop design exists
+ * to avoid (#254). Keeping the pacing in the human's hands is the whole point.
+ */
+export function firstPendingUrl(rows: readonly WorklistRow[]): string | null {
+  for (const r of rows) {
+    if (r.status === "pending") return r.url;
+  }
+  return null;
+}

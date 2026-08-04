@@ -116,6 +116,25 @@ test("renders the seeded worklist URLs and their statuses with no error surface"
   await expect(page.getByText("HTTP 500")).toHaveCount(0);
 });
 
+test("the human-paced 'Siguiente' button is enabled and targets a pending URL (issue #254)", async ({
+  page,
+}) => {
+  await page.goto("/etl/captura");
+  await expect(page.getByTestId("worklist-page")).toBeVisible();
+
+  // With a seeded pending row present, the advance button is enabled. It opens
+  // exactly one tab per click (window.open) — a deliberately human-paced
+  // advance, not an auto-runner — so we assert the affordance is present and
+  // actionable rather than navigating to a real external listing.
+  const nextBtn = page.getByTestId("worklist-open-next");
+  await expect(nextBtn).toBeVisible();
+  await expect(nextBtn).toBeEnabled();
+
+  // No error surface — the D-041 bar.
+  await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
+  await expect(page.getByText("Error al cargar")).toHaveCount(0);
+});
+
 test("manual paste adds a new URL to the worklist", async ({ page }) => {
   await page.goto("/etl/captura");
   await page.getByTestId("worklist-paste").fill(ADD_URL);

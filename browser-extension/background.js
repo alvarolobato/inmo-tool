@@ -118,6 +118,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .catch(() => sendResponse({ supported: false }));
     return true; // async response (host list may need a backend fetch)
   }
+
+  // Auto-capture (issue #254) fired in the content script — flash the toolbar
+  // badge for that tab so the auto-capture is never silent. Cosmetic only; no
+  // response needed.
+  if (msg.type === 'AUTO_CAPTURE_DONE') {
+    const tabId = _sender.tab && _sender.tab.id;
+    if (tabId != null) {
+      chrome.action.setBadgeText({ tabId, text: '✓' });
+      chrome.action.setBadgeBackgroundColor({ tabId, color: '#22c55e' });
+      chrome.action.setTitle({ tabId, title: 'Inmo-Tool — Capturado automáticamente' });
+    }
+    return false; // no async response
+  }
 });
 
 async function getApiConfig() {
