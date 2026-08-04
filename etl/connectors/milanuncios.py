@@ -463,18 +463,32 @@ class MilanunciosConnector(Connector):
     # Milanuncios listing can go unnoticed for up to 24h, where the same
     # change on Fotocasa is caught on the next sweep.
     #
-    # That is still a strict improvement, which is why it ships: today the
-    # overwhelming majority of discovered listings are never fetched even
-    # once, so their price is not stale — it is absent. Trading "≤24h stale
-    # for the few we reach" against "never fetched at all for most" is worth
-    # it. Revisit the moment a live search-page fetch succeeds and the `ad`
+    # That is NOT a strict improvement and this comment used to claim it was
+    # (Opus review, PR #225 — the word is wrong and it's now gone from here,
+    # the PR body and D-028). For the ~5 listings today's budget currently
+    # reaches every hour, price freshness genuinely REGRESSES from ~0h to
+    # ~17-23h. That is a real cost on a real subset. It is decisively
+    # outweighed rather than absent: coverage goes 5/63 -> 63/63, and a
+    # price drop on a listing that has never been fetched is undetectable,
+    # not merely late. "A clearly net-positive trade" is the honest phrasing.
+    #
+    # Two things make the residual cost acceptable rather than merely
+    # smaller (both from PR #225's review; the full argument is in D-028):
+    # issue #1 §10 frames price history around DAILY runs and signals like
+    # "relisted 3 weeks later at -10%", so sub-24h price resolution is not a
+    # product requirement anywhere in the spec; and the genuine loss is
+    # narrow — a price that moves and reverts INSIDE the window becomes
+    # invisible rather than delayed, which for an event log like
+    # listing_price_history is lost data, not lagged data.
+    #
+    # Revisit the moment a live search-page fetch succeeds and the `ad`
     # shape can be checked for a price field (see below) — that would
     # restore rule 5 and remove the asymmetry entirely.
     min_refetch_interval_seconds = 24 * 60 * 60
 
     # Issue #143: does NOT override discovered_prices(). Investigated, not
-    # assumed: this connector's discover()
-    # already parses `adListPagination.adList.ads[]` for `id`, and the
+    # assumed: this connector's discover() already parses
+    # `adListPagination.adList.ads[]` for `id`, and the
     # trimmed test fixtures (milanuncios_sample_search*.html — trimmed to
     # only fields the parsing code actually reads, per this project's own
     # fixture convention) show each `ad` entry carrying `category`,

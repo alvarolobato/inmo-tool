@@ -184,6 +184,43 @@ class MilanunciosRentalConnector(MilanunciosConnector):
     # parent class keeping its own value unchanged.
     discovers_full_inventory = False
 
+    # Skip-if-seen stays OFF here (0 = the base `Connector` default: always
+    # re-fetch), stated explicitly rather than inherited — Opus review,
+    # PR #225. Exactly the same reasoning as `discovers_full_inventory`
+    # immediately above: a per-connector risk property must never depend on
+    # a parent class keeping its own value unchanged. `MilanunciosConnector`
+    # turned this on at 24h in issue #179, and because this class subclasses
+    # it, that change would have silently switched skip-if-seen on for the
+    # rental source too.
+    #
+    # Why 0 and not the parent's 24h — the honest answer is "no evidence,
+    # so no change". Every fact behind the parent's decision (D-028) is
+    # `source='milanuncios'`: 18 circuit-open runs byte-identical at
+    # `discovered=41 fetched=5 errors=5`, 24 distinct ids across ~90
+    # fetch attempts, 38h of production `connector_run_results`. NONE of it
+    # is `milanuncios_rental`, which has its own source, its own
+    # `connector_config` row, its own circuit-breaker instance and a
+    # different rate limit (1/min vs 2). It has also never run unattended
+    # in production — it is seeded DISABLED (see "Disabled by default"
+    # in the module docstring), so there is no run history to reason from
+    # at all. Adopting the parent's window here would be inferring a
+    # site-imposed fetch cap for a category nobody has measured.
+    #
+    # There is a second, connector-specific reason not to guess: these
+    # listings feed the comparable-rent estimator (D-015,
+    # `dashboard/lib/analytics/rent-estimate.ts`), where a stale asking
+    # rent silently biases an *estimate* other decisions are made from,
+    # rather than just showing a stale price on one card. That is a
+    # different staleness cost from the sale connector's, and it deserves
+    # its own analysis rather than the sale connector's conclusion.
+    #
+    # When to revisit: once this connector has actually been enabled and
+    # has produced its own `connector_run_results` showing the same
+    # fetched≈5 / errors≈5 / circuit_open pathology D-028 documents, turn
+    # this on at 24h and cite that data here. Do not flip it on the sale
+    # connector's evidence.
+    min_refetch_interval_seconds = 0
+
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         """Same shape as `MilanunciosConnector.discover()`, targeting the
         `alquiler-de-pisos-en-{geo}-{geo}/` rental category instead of

@@ -128,7 +128,58 @@ malaga; the live run history this window is scoped mostly to Sevilla), but
 directionally: what little this connector does surface is disproportionately
 *not* duplicated by the rest of the fleet, not redundant with it.
 
-## Decision (proposed)
+### (5) Why not the cheaper fix: prioritise never-fetched ids instead of a staleness window
+
+Added on Opus review of PR #225. The reviewer set out to show that a
+cheaper alternative dominated the shipped one — **order the candidate list
+so never-fetched ids go first, within the existing budget, and skip the
+staleness window entirely** — and the numbers said it doesn't. That failed
+attempt is a stronger argument for what shipped than the original writeup
+made, so it is recorded here rather than lost in a PR thread.
+
+First, a fact that constrains the option space: **the orchestrator has no
+candidate-ordering mechanism today.** `run_connector` walks `external_ids`
+in `discover()` order with no reordering hook, and `_fetch_freshness_map`
+is only queried at all when the window is `> 0`. "Ordering only" is not a
+smaller change than what shipped; it is a new mechanism.
+
+Simulated against this file's own measured parameters (N=63 distinct ids,
+5 successes then 5 errors and the breaker trips, hourly runs per
+`_RUN_INTERVAL_SECONDS = 3600`, 7 days):
+
+| policy | coverage | max stale | mean stale | breaker trips after warm-up | blocked reqs / week |
+|---|---|---|---|---|---|
+| today (no skip, no ordering) | **5 / 63** | 0h | 0.0h | 144 / 144 | 840 |
+| **SHIPPED — skip 24h** | **63 / 63** | 23h | 17.2h | **0 / 144** | **58** |
+| ALT-A — ordering only, no window | 63 / 63 | **12h** | **5.8h** | 144 / 144 | 840 |
+| ALT-B — ordering + 24h window | 63 / 63 | 23h | 17.2h | 0 / 144 | 58 |
+| ALT-C — skip 12h, no ordering | 60 / 63 | 11h | 5.5h | 0 / 144 | 526 |
+
+Three conclusions, and they are the binding reasoning for anyone tempted to
+tune this later:
+
+1. **Ordering-only buys freshness at 14× the request volume.** ALT-A is
+   genuinely 3× fresher (5.8h vs 17.2h mean) — and it keeps the circuit
+   breaker tripping *every single run, forever*, firing **840 blocked
+   requests/week instead of 58**. Those requests go into a site that
+   answers with a GeeTest CAPTCHA and has been observed escalating to a
+   block that engulfs `discover()` itself (section (1), 2 of 18 runs). When
+   that deeper block fires you lose **discovery** — all coverage, not just
+   freshness. Spending 14× the volume against that wall to buy freshness
+   the product does not need is the wrong trade.
+2. **Ordering adds nothing on top of a 24h window.** ALT-B is
+   byte-identical to the shipped row: the window binds first. Ordering is
+   only a lever if you *also* shorten the window — which is exactly what
+   ALT-C pays 9× the blocked requests to do.
+3. **The deliberately idle budget is the point, not slack.** The catch-up
+   cycle is ~12.6h, so a 24h window leaves the fetch budget unused on
+   roughly half the runs. That idleness is **request-volume headroom
+   against the deeper block**, not waste. This is the item most likely to
+   be "optimised" away by a future reader who notices "we could be 3×
+   fresher by halving the window" — halving it is ALT-C, and it costs 9×
+   the blocked requests. Don't.
+
+## Decision
 
 **(c) — not (a), not (b).** Keep `MilanunciosConnector` as a real
 detail-fetching connector, not a discovery-only one, and not dropped:
@@ -169,15 +220,58 @@ safe on Fotocasa. It **cannot fire here**, because it needs a non-empty
 `discovered_prices()` and Milanuncios' `ad` entries carry no price field
 (every live re-check of the real shape has been bot-blocked). So a price
 change on an already-fetched Milanuncios listing can go unnoticed for up to
-24h, where the same change on Fotocasa is caught on the next sweep. This is
-accepted, not overlooked: today most discovered listings are never fetched at
-all, so their price is not stale but absent, and "≤24h stale for the few we
-reach" beats "never fetched for most". `test_has_no_discovery_price_escape_
-hatch` asserts the gap so it cannot be quietly forgotten — if it ever starts
-failing because a real discovery price landed, this trade-off is void and the
-asymmetry with Fotocasa disappears.
+24h, where the same change on Fotocasa is caught on the next sweep.
+
+**This is not a "strict improvement" — an earlier draft of this file, the
+PR body and the connector comment all used that phrase and all three were
+wrong** (Opus review, PR #225). For the ~5 listings today's budget reaches
+every hour, price freshness genuinely **regresses** from ~0h to ~17-23h.
+That is a real cost on a real subset. The correct claim is that it is
+**decisively net-positive**: coverage goes 5/63 → 63/63, and a price drop
+on a listing that has never been fetched is *undetectable*, not merely
+late.
+
+Three things make the residual cost acceptable rather than merely smaller:
+
+- **The product does not ask for sub-24h price resolution.** Checked
+  rather than assumed: issue #1 §10 frames price history around *daily*
+  connector runs, a daily/weekly digest, and signals like "withdrawn and
+  relisted 3 weeks later at −10%". A 17-23h lag is invisible at those
+  timescales. This is the strongest defence of the trade-off and the
+  original writeup did not make it.
+- **The genuine loss is narrow and worth naming**: a price that moves *and
+  reverts* inside the window becomes **invisible rather than delayed**.
+  `listing_price_history` is an event log, so that is lost data, not lagged
+  data. Accepted given §10's timescales, but it deserves a sentence rather
+  than silence.
+- `test_has_no_discovery_price_escape_hatch` asserts the gap so it cannot
+  be quietly forgotten — if it ever starts failing because a real discovery
+  price landed, this trade-off is void and the asymmetry with Fotocasa
+  disappears. (That test is a tripwire for a *real discovery price
+  appearing*; it is deliberately independent of the window value itself.)
+
+6. **This applies to `MilanunciosConnector` (the SALE connector) only.**
+   `MilanunciosRentalConnector` subclasses it, so this would have been
+   inherited silently; it now declares `min_refetch_interval_seconds = 0`
+   explicitly instead (Opus review, PR #225). Every fact in this file is
+   `source='milanuncios'` — the rental connector has its own source, its
+   own `connector_config` row, its own circuit-breaker instance, a
+   different rate limit (1/min vs 2), is seeded **disabled**, and has no
+   production run history at all. Its listings also feed the
+   comparable-rent estimator (D-015), where a stale asking rent biases an
+   *estimate* rather than showing a stale number on one card — a different
+   cost from the sale connector's. Turn it on there when that connector's
+   own `connector_run_results` show the same pathology, citing that data;
+   never on this file's evidence.
 
 **Alternatives rejected**:
+- **(d) Prioritise never-fetched ids instead of a staleness window
+  ("ordering only").** Rejected on the numbers in section (5): it requires
+  a candidate-ordering mechanism the orchestrator does not have, buys 3×
+  fresher prices, and pays for them with **14× the blocked requests/week**
+  (840 vs 58) into a site whose escalated block takes out `discover()`
+  itself. Adding ordering *on top of* the 24h window changes nothing at all
+  (the window binds first).
 - **(a) Discovery-only.** Rejected as the primary shape: the fields
   `discover()` can cheaply provide don't clear the bar for candidate cards,
   and detail-fetching demonstrably *does* work (5 successes, 80% of runs) —
