@@ -104,10 +104,6 @@ challenge to satisfy at all. The challenge was not executed or solved and
 nothing here proposes automating it; the point is that a person's own
 browsing is a different signal from an automated fetch.
 
-*(D-025 is not a gap: it is claimed by the decision-ID CI-check record on
-the pending `ci-160-real-database` branch, which had not merged when these
-were numbered.)*
-
 **See**: [issue #121](https://github.com/alvarolobato/inmo-tool/issues/121),
 [issue #132](https://github.com/alvarolobato/inmo-tool/issues/132)
 (tracking issue, standing WAF→capture rule recorded 2026-08-03),
