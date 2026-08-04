@@ -23,6 +23,8 @@ This list shrank sharply in task 1.1 (#9) — most of the source project's skill
 | **[../dashboard-agentic-tools.md](../dashboard-agentic-tools.md)** | Agentic tool-calling runner/provider mechanism (kept). Tool catalog is the old PowerShop-mirror inspection tools — see its Status note. | Adding/understanding the dashboard's tool-calling loop. |
 | **[../testing-strategy.md](../testing-strategy.md)** | Test tiers, commands, coverage-threshold policy. Baselines reset pending real code (Phase 1). | Deciding what tier a new test belongs in, or what must be covered before a risky change. |
 | **[../issue-format.md](../issue-format.md)** | Standard issue/PR template, Exit Criteria conventions, single-track vs. decompose-into-sub-issues escape hatch. | Writing or refining a GitHub issue. |
+| **[../roadmap/connector-etl-ops.md](../roadmap/connector-etl-ops.md)** | Forward roadmap for hardening connectors + ETL ops: management, ad-hoc execution, error tracking/monitoring, aging/withdrawal, dedup. Proposed issue sequence + broken-telemetry findings. | Planning connector/ETL reliability + data-quality work. |
+| **[../roadmap/dedup-optimization.md](../roadmap/dedup-optimization.md)** | Dedup performance/approach analysis: where the runtime goes, blocking/bucketing (deferred), incremental dedup, and profile-scoped review-queue prioritization. | Planning dedup speed or duplicate-review improvements. |
 
 ## Meta Skills
 
