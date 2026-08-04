@@ -143,6 +143,16 @@
   requires_restart: [etl]
   components: [etl]
 
+- key: etl.dedup_max_runtime_seconds
+  env: ETL_DEDUP_MAX_RUNTIME_SECONDS
+  type: int
+  sensitive: false
+  default: 7200
+  section: "ETL"
+  description: "Vida máxima (segundos) de un pase de deduplicación antes de considerarlo huérfano (D-036). Una fila dedup_runs que siga en status='running' pasado este tiempo sin un proceso activo (contenedor matado, OOM, reinicio) se reconcilia a 'failed' con un error_msg explicativo al arrancar el ETL y al inicio de cada pase de dedup. Por defecto 2h: holgura sobre el ~84 min que tarda hoy un pase, muy por debajo de las horas que llegaron a acumular las filas huérfanas en producción."
+  requires_restart: [etl]
+  components: [etl]
+
 # -----------------------------------------------------------------------------
 # OpenRouter / LLM
 # -----------------------------------------------------------------------------

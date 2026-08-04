@@ -96,6 +96,25 @@ def main() -> None:
 
     etl.connectors.register_all()  # registers real connectors (task 1.4) — see module docstring for why this is a deferred call, not an import-time side effect
 
+    # Orphan reconciliation at startup (D-036): a dedup pass killed mid-run by
+    # a container restart/OOM/SIGKILL leaves its `dedup_runs` row stuck at
+    # status='running' forever. Clean any such dead row up front — before the
+    # first sweep — so `ps dedup status` and monitors never show a phantom
+    # "still running" pass from a process that no longer exists. Age-based
+    # (older than dedup_max_runtime_seconds), so a run genuinely in flight from
+    # another process is never touched. Best-effort: a failure here must not
+    # stop the ETL from starting.
+    try:
+        orchestrator._reconcile_orphaned_dedup_runs(
+            conn_pg, config.dedup_max_runtime_seconds
+        )
+    except Exception:
+        logger.exception(
+            "Startup orphaned-dedup-run reconciliation failed — continuing; "
+            "the next dedup pass reconciles again (D-036)"
+        )
+        conn_pg.rollback()
+
     # Publish the registry for the connector-management UI (issue #100) and
     # seed a disabled connector_config row for any connector that lacks one.
     #
@@ -139,13 +158,17 @@ def main() -> None:
                         min_restart_sweep_interval_seconds=(
                             config.min_restart_sweep_interval_seconds
                         ),
+                        dedup_max_runtime_seconds=config.dedup_max_runtime_seconds,
                     )
                 else:
                     # A named single-connector run is a deliberate,
                     # targeted operator action, not the unattended-restart
                     # scenario the guard exists for — never gated.
                     orchestrator.run_all_connectors(
-                        conn_pg, trigger="cli", connector_name=args.connector
+                        conn_pg,
+                        trigger="cli",
+                        connector_name=args.connector,
+                        dedup_max_runtime_seconds=config.dedup_max_runtime_seconds,
                     )
             else:
                 logger.error(
@@ -226,6 +249,7 @@ def main() -> None:
         lambda: postgres.get_connection(config),
         interval_seconds=_RUN_INTERVAL_SECONDS,
         min_restart_sweep_interval_seconds=config.min_restart_sweep_interval_seconds,
+        dedup_max_runtime_seconds=config.dedup_max_runtime_seconds,
     )
 
 

@@ -384,35 +384,42 @@ def fail_orphan_running_runs(conn) -> int:
         raise
 
 
-# Stable lock-id used by try_acquire_run_lock. PostgreSQL advisory locks
-# take a single bigint; this constant is just a project-scoped magic number
-# (chosen as a CRC32 of "etl_sync_runs" — value is opaque, what matters is
-# that it stays consistent across processes and never collides with any
-# other advisory-lock user in the database).
+# Stable lock-ids used by try_acquire_run_lock. PostgreSQL advisory locks
+# take a single bigint; these constants are just project-scoped magic numbers
+# (opaque values — what matters is that each stays consistent across processes
+# and never collides with any other advisory-lock user in the database).
+#
+# Two *independent* locks, one per operation kind, so a connector sweep and a
+# dedup pass never block each other (they are different work against different
+# rows) while two runs of the *same* kind are mutually exclusive:
+#   - RUN_ADVISORY_LOCK_ID   — the project-wide connector/ETL run lock.
+#   - DEDUP_ADVISORY_LOCK_ID — the dedup engine's single-runner lock (D-036).
 RUN_ADVISORY_LOCK_ID = 0x4554_4C53_524E_5F5F  # bigint, fits in PG's lock id
+DEDUP_ADVISORY_LOCK_ID = 0x4445_4455_5052_554E  # "DEDUPRUN" — distinct from above
 
 
-def try_acquire_run_lock(conn) -> bool:
-    """Try to grab the project-wide ETL run advisory lock (non-blocking).
+def try_acquire_run_lock(conn, lock_id: int = RUN_ADVISORY_LOCK_ID) -> bool:
+    """Try to grab a session-scoped advisory lock (non-blocking).
 
-    Returns True when the caller is now the sole owner of the lock and is
-    free to call run_full_sync; False when another scheduler instance (or
-    a parallel manual trigger that escaped the _is_run_active check) is
-    already holding it.
+    Returns True when the caller is now the sole owner of *lock_id* and is
+    free to proceed; False when another process (another scheduler instance,
+    a parallel manual trigger, or — for DEDUP_ADVISORY_LOCK_ID — a concurrent
+    dedup pass) is already holding it.
+
+    *lock_id* selects which operation kind is being guarded — default is the
+    connector/ETL run lock; pass DEDUP_ADVISORY_LOCK_ID for the dedup
+    single-runner guard (D-036). The two locks are independent bigints, so
+    holding one never blocks acquisition of the other.
 
     The lock is session-scoped: it auto-releases when this PG connection
-    closes, so a crashed ETL container will release it on its next
-    reconnect — no zombie locks across container restarts.
-
-    Why this exists: _is_run_active() reads etl_sync_runs.status, but
-    create_run is best-effort and may have failed, leaving no row. In that
-    edge case _is_run_active returns False and a second scheduler could
-    start a concurrent run. The advisory lock is independent of the
-    monitoring rows and survives such failures.
+    closes, so a crashed ETL container (SIGKILL, OOM, host reboot) frees it on
+    the connection teardown — no zombie locks across container restarts, which
+    is exactly why an orphaned run row can outlive the lock that guarded it and
+    must be reconciled separately (see orchestrator._reconcile_orphaned_dedup_runs).
     """
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT pg_try_advisory_lock(%s)", (RUN_ADVISORY_LOCK_ID,))
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (lock_id,))
             got: bool = bool(cur.fetchone()[0])
         conn.commit()
         return got
@@ -426,17 +433,18 @@ def try_acquire_run_lock(conn) -> bool:
         return False
 
 
-def release_run_lock(conn) -> None:
+def release_run_lock(conn, lock_id: int = RUN_ADVISORY_LOCK_ID) -> None:
     """Release the advisory lock acquired by try_acquire_run_lock.
 
-    Safe to call when the lock is not held — pg_advisory_unlock returns
-    false in that case but does not raise. We swallow exceptions because
-    failing to release is recoverable (the lock auto-frees on connection
-    close).
+    Pass the same *lock_id* that was acquired (default: the connector/ETL run
+    lock; DEDUP_ADVISORY_LOCK_ID for the dedup guard). Safe to call when the
+    lock is not held — pg_advisory_unlock returns false in that case but does
+    not raise. We swallow exceptions because failing to release is recoverable
+    (the lock auto-frees on connection close).
     """
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT pg_advisory_unlock(%s)", (RUN_ADVISORY_LOCK_ID,))
+            cur.execute("SELECT pg_advisory_unlock(%s)", (lock_id,))
             cur.fetchone()
         conn.commit()
     except Exception:  # noqa: BLE001 — failing to release is recoverable, see docstring
