@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from etl.connectors.base import ConnectorError, ConnectorScope
+from etl.connectors.base import ConnectorError, ConnectorScope, RawListing
 from etl.connectors.geography import UnresolvableGeographyError
 from etl.connectors.milanuncios import (
     MilanunciosConnector,
@@ -355,6 +355,88 @@ class TestNormalize:
         canonical = connector.normalize(raw)
         assert canonical.m2_built is not None
         assert canonical.m2_built == Decimal(353)
+
+
+class TestPhotoUrlRuleParameter:
+    """Issue #206: every Milanuncios photo URL 404s the dedup photo-hasher
+    with "Rule parameter not Found" — confirmed live, 2026-08-04, against a
+    real ad: `images.milanuncios.com/api/v1/ma-ad-media-pro/images/<uuid>`
+    (a size/crop-transform proxy, not a plain object store) 404s bare and
+    200s with `?rule=<preset>` appended (`detail_640x480` and a handful of
+    others confirmed valid; `thumb`/`original` are NOT). Neither Referer,
+    Origin, nor Accept headers changed the outcome — this is a required
+    query parameter, not a header/auth problem. Full write-up:
+    docs/architecture/connectors.md's Milanuncios section and D-019.
+
+    `ad.images` entries never carry this parameter themselves (unlike
+    Fotocasa's own `multimedia[].src`, which already arrives with
+    `?rule=original` baked in server-side — both sites share the same
+    Adevinta media backend) — Milanuncios' frontend applies it at render
+    time instead, so `normalize()` has to add it.
+
+    Constructs a `RawListing` with a minimal `props` dict directly (rather
+    than a full HTML fixture) since only `ad.images` matters here — every
+    other field normalize() reads defaults safely via `.get(...) or {}`.
+    """
+
+    def _normalize_images(self, images: list[str]):
+        raw = RawListing(
+            external_id="900000001",
+            source="milanuncios",
+            raw={
+                "url": "https://www.milanuncios.com/x",
+                "props": {"ad": {"images": images}},
+            },
+        )
+        return MilanunciosConnector().normalize(raw)
+
+    def test_bare_image_path_gets_a_rule_parameter_appended(self):
+        canonical = self._normalize_images(
+            ["images-re.milanuncios.com/images/ads/aaa-uuid"]
+        )
+        assert canonical.photo_urls == (
+            "https://images-re.milanuncios.com/images/ads/aaa-uuid?rule=detail_640x480",
+        )
+
+    def test_the_reported_ma_ad_media_pro_domain_also_gets_a_rule_parameter(self):
+        """The exact host/path shape from the production log line this
+        issue reports (`images.milanuncios.com/api/v1/ma-ad-media-pro/
+        images/<uuid>`) — live-confirmed to 404 without `?rule=`."""
+        canonical = self._normalize_images(
+            [
+                (
+                    "images.milanuncios.com/api/v1/ma-ad-media-pro/images/"
+                    "d2b83929-0000-0000-0000-000000000000"
+                )
+            ]
+        )
+        assert canonical.photo_urls[0].endswith("?rule=detail_640x480")
+        assert canonical.photo_urls[0].startswith(
+            "https://images.milanuncios.com/api/v1/ma-ad-media-pro/images/"
+        )
+
+    def test_a_url_that_already_carries_a_query_string_is_left_alone(self):
+        """Never double up — an entry that (now or in the future) already
+        includes its own query string must not get a second `?`/`&rule=`
+        glued on."""
+        canonical = self._normalize_images(
+            ["https://images.example.com/already-has-a-rule?rule=original"]
+        )
+        assert canonical.photo_urls == (
+            "https://images.example.com/already-has-a-rule?rule=original",
+        )
+
+    def test_protocol_relative_and_full_https_inputs_both_get_the_rule(self):
+        canonical = self._normalize_images(
+            [
+                "//images.milanuncios.com/protocol-relative",
+                "https://images.milanuncios.com/already-https",
+            ]
+        )
+        assert canonical.photo_urls == (
+            "https://images.milanuncios.com/protocol-relative?rule=detail_640x480",
+            "https://images.milanuncios.com/already-https?rule=detail_640x480",
+        )
 
 
 class TestPriceChangeHistory:

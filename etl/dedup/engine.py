@@ -77,6 +77,21 @@ class DedupRunResult:
     # a portal listing the same unit twice), not something to silently
     # drop just because same-source pairs are never merged.
     same_source_cadastral_collisions: int = 0
+    # Issue #206: sources whose photos never hash successfully this run —
+    # `{source: attempted_count}` for every source with at least one
+    # attemptable photo and zero successful hashes. A source in this
+    # degraded state contributes no photo_hash evidence to ANY pair it's
+    # in, and does so invisibly (match_ratio is only computed over
+    # successfully-hashed photos, so a listing with zero hashes just looks
+    # like "no photo evidence either way", indistinguishable from a
+    # healthy source that simply doesn't match). Same shape as issue #171
+    # (a connector degrading silently while runs still report success) and
+    # the same "visibility counter, not a schema change" precedent as
+    # same_source_skipped above — see run()'s docstring and
+    # _PhotoHashCache.zero_success_sources().
+    photo_hash_zero_success_sources: dict[str, int] = dataclasses.field(
+        default_factory=dict
+    )
 
 
 def fetch_listing_records(conn) -> list[ListingRecord]:
@@ -140,17 +155,45 @@ def fetch_listing_records(conn) -> list[ListingRecord]:
 
 
 class _PhotoHashCache:
-    """Fetches and memoizes each listing's photo hashes at most once per run."""
+    """Fetches and memoizes each listing's photo hashes at most once per run.
+
+    Issue #206: also tracks attempted/hashed photo counts per `source`
+    while it's already touching every listing exactly once, so a run can
+    report which sources (if any) had a 0% photo-hash success rate —
+    without that, a source whose CDN silently 404s every photo just looks
+    like "no photo evidence" for every pair it's in, indistinguishable
+    from a healthy source that legitimately doesn't match. See
+    `zero_success_sources` and `DedupRunResult.photo_hash_zero_success_sources`.
+    """
 
     def __init__(self) -> None:
         self._cache: dict[int, list] = {}
+        self._attempted_by_source: dict[str, int] = {}
+        self._hashed_by_source: dict[str, int] = {}
 
     def get(self, listing: ListingRecord) -> list:
         if listing.listing_id not in self._cache:
-            self._cache[listing.listing_id] = photo_hash.fetch_hashes(
-                listing.photo_urls
-            )
+            hashes = photo_hash.fetch_hashes(listing.photo_urls, source=listing.source)
+            self._cache[listing.listing_id] = hashes
+            attempted = photo_hash.attemptable_photo_count(listing.photo_urls)
+            if attempted:
+                self._attempted_by_source[listing.source] = (
+                    self._attempted_by_source.get(listing.source, 0) + attempted
+                )
+                self._hashed_by_source[listing.source] = self._hashed_by_source.get(
+                    listing.source, 0
+                ) + len(hashes)
         return self._cache[listing.listing_id]
+
+    def zero_success_sources(self) -> dict[str, int]:
+        """`{source: attempted_count}` for every source with at least one
+        attemptable photo this run and zero successfully hashed — see the
+        class docstring."""
+        return {
+            source: attempted
+            for source, attempted in self._attempted_by_source.items()
+            if self._hashed_by_source.get(source, 0) == 0
+        }
 
 
 def evaluate_pair(
@@ -437,6 +480,17 @@ def run(conn) -> DedupRunResult:
             "(data-quality flag, not auto-merged)",
             result.same_source_skipped,
             result.same_source_cadastral_collisions,
+        )
+
+    result.photo_hash_zero_success_sources = hash_cache.zero_success_sources()
+    for source, attempted in sorted(result.photo_hash_zero_success_sources.items()):
+        logger.warning(
+            "dedup: source=%s had 0/%d photo(s) hash successfully this run — "
+            "photo_hash contributes no evidence to ANY pair involving this "
+            "source (issue #206); check the connector's photo URLs are "
+            "actually fetchable (CDN auth/params, expired links, ...)",
+            source,
+            attempted,
         )
 
     return result

@@ -196,7 +196,22 @@ PHOTO_MERGE_PRICE_RATIO = Decimal("0.02")
 PHOTO_MERGE_CONFIDENCE = Decimal("0.900")
 
 
-def fetch_hashes(photo_urls: tuple[str, ...]) -> list[imagehash.ImageHash]:
+def attemptable_photo_count(photo_urls: tuple[str, ...]) -> int:
+    """How many of *photo_urls* `fetch_hashes` will actually try to fetch —
+    i.e. excluding the video/virtual-tour links `_looks_like_photo_url`
+    filters out before ever making a request.
+
+    Issue #206: the dedup engine's per-source health tracking needs this so
+    a source's photo-hash success rate isn't miscounted against links it
+    was never going to hash in the first place (a listing with 3 photos + 2
+    YouTube links has an attemptable count of 3, not 5).
+    """
+    return sum(1 for url in photo_urls if _looks_like_photo_url(url))
+
+
+def fetch_hashes(
+    photo_urls: tuple[str, ...], *, source: str = "unknown"
+) -> list[imagehash.ImageHash]:
     """Fetch and hash each URL; skip (don't raise on) any that fail.
 
     A single broken/expired photo URL shouldn't sink the whole comparison —
@@ -206,8 +221,18 @@ def fetch_hashes(photo_urls: tuple[str, ...]) -> list[imagehash.ImageHash]:
     Floorfy/Matterport virtual tour, ...) are skipped before the network
     call — see `_looks_like_photo_url` above for why this matters beyond
     just saving a doomed request.
+
+    Issue #206: per-photo fetch/hash failures used to each log their own
+    WARNING — dozens of near-identical lines per run when a whole source's
+    CDN is unfetchable for one systemic reason (a live example: every
+    Milanuncios photo 404ing "Rule parameter not Found"). Failures are now
+    logged individually at DEBUG (still in the logs if someone's looking at
+    that level) and rolled up into a single WARNING per listing here.
+    `source` (the connector name, e.g. "milanuncios") is just for that one
+    line's context — it does not change fetch/hash behaviour.
     """
     hashes: list[imagehash.ImageHash] = []
+    failed = 0
     for url in photo_urls:
         if not _looks_like_photo_url(url):
             logger.debug("photo_hash: skipping non-image URL %s", url)
@@ -221,7 +246,16 @@ def fetch_hashes(photo_urls: tuple[str, ...]) -> list[imagehash.ImageHash]:
                 image = Image.open(response.raw)
                 hashes.append(imagehash.phash(image))
         except Exception as exc:  # noqa: BLE001 - genuinely best-effort per photo
-            logger.warning("photo_hash: failed to fetch/hash %s: %s", url, exc)
+            failed += 1
+            logger.debug("photo_hash: failed to fetch/hash %s: %s", url, exc)
+    if failed:
+        logger.warning(
+            "photo_hash: %d/%d photo(s) failed to fetch/hash (source=%s) — "
+            "see DEBUG logs for the individual URLs/errors",
+            failed,
+            failed + len(hashes),
+            source,
+        )
     return hashes
 
 

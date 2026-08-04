@@ -8,11 +8,13 @@ reconciled state), which mocking the database would not meaningfully test.
 
 from __future__ import annotations
 
+import io
 from decimal import Decimal
 from pathlib import Path
 
 import imagehash
 import pytest
+from PIL import Image
 
 from etl import orchestrator
 from etl.connectors import base
@@ -20,6 +22,7 @@ from etl.connectors.base import CanonicalListingVersion
 from etl.dedup import engine
 from etl.dedup.engine import _PhotoHashCache
 from etl.dedup.signals import phone_extract, reference_code
+from etl.dedup.signals import photo_hash as photo_hash_signal
 from etl.dedup.types import ListingRecord
 
 _SCHEMA_SQL = Path(__file__).parent.parent / "schema" / "init.sql"
@@ -59,8 +62,9 @@ def _insert_listing(
             """
             INSERT INTO listing
                 (property_id, source, external_id, listing_kind, description,
-                 current_price, contact_raw, reference_code, operation)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+                 current_price, contact_raw, reference_code, operation,
+                 photo_urls)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
             """,
             (
                 property_id,
@@ -72,6 +76,11 @@ def _insert_listing(
                 overrides.get("contact_raw"),
                 overrides.get("reference_code"),
                 overrides.get("operation", "sale"),
+                # Issue #206: needed by TestPhotoHashSourceHealth below to
+                # seed real photo_urls that engine.run() actually fetches —
+                # every other test in this file omits it (default ()),
+                # matching the pre-#206 behaviour exactly.
+                overrides.get("photo_urls", []),
             ),
         )
         return cur.fetchone()[0]
@@ -2007,3 +2016,233 @@ class TestPhotoHashAutoMerge:
         assert evaluation.basis == "photo_hash"
         assert evaluation.detail["match_ratio"] == pytest.approx(2 / 3, abs=0.001)
         assert evaluation.decision == "suggest"
+
+
+class TestPhotoHashCacheSourceHealth:
+    """Issue #206: `_PhotoHashCache` tracks attempted/hashed photo counts
+    per source as it fetches (piggybacking on the existing memoization
+    pass, one extra dict update per listing) so a run can report which
+    sources had a 0% photo-hash success rate. No DB/network needed here —
+    `photo_hash.fetch_hashes` itself is monkeypatched, same no-network
+    split every other engine-level photo_hash test in this file uses.
+    """
+
+    def test_a_source_with_every_photo_failing_is_reported(self, monkeypatch):
+        monkeypatch.setattr(
+            photo_hash_signal, "fetch_hashes", lambda urls, source="unknown": []
+        )
+        cache = _PhotoHashCache()
+        listing = _record(
+            1, 100, source="milanuncios", photo_urls=("https://a.example/1.jpg",)
+        )
+        cache.get(listing)
+        assert cache.zero_success_sources() == {"milanuncios": 1}
+
+    def test_a_source_with_at_least_one_success_is_not_reported(self, monkeypatch):
+        monkeypatch.setattr(
+            photo_hash_signal,
+            "fetch_hashes",
+            lambda urls, source="unknown": [imagehash.hex_to_hash("0" * 16)],
+        )
+        cache = _PhotoHashCache()
+        listing = _record(
+            1, 100, source="fotocasa", photo_urls=("https://a.example/1.jpg",)
+        )
+        cache.get(listing)
+        assert cache.zero_success_sources() == {}
+
+    def test_counts_accumulate_across_multiple_listings_of_the_same_source(
+        self, monkeypatch
+    ):
+        """A source's health is judged across the whole run, not per
+        listing — one listing with a lucky fetch shouldn't hide another's
+        total failure, and vice versa (only a source with ZERO successes
+        across every listing counts as degraded)."""
+        monkeypatch.setattr(
+            photo_hash_signal, "fetch_hashes", lambda urls, source="unknown": []
+        )
+        cache = _PhotoHashCache()
+        cache.get(
+            _record(
+                1, 100, source="milanuncios", photo_urls=("https://a.example/1.jpg",)
+            )
+        )
+        cache.get(
+            _record(
+                2,
+                200,
+                source="milanuncios",
+                photo_urls=("https://a.example/2.jpg", "https://a.example/3.jpg"),
+            )
+        )
+        assert cache.zero_success_sources() == {"milanuncios": 3}
+
+    def test_a_listing_with_no_attemptable_photos_does_not_count_as_a_failure(
+        self, monkeypatch
+    ):
+        """An empty/video-only photo_urls shouldn't make a source look
+        degraded — there was nothing to attempt in the first place."""
+        monkeypatch.setattr(
+            photo_hash_signal, "fetch_hashes", lambda urls, source="unknown": []
+        )
+        cache = _PhotoHashCache()
+        cache.get(_record(1, 100, source="idealista", photo_urls=()))
+        assert cache.zero_success_sources() == {}
+
+    def test_mixed_sources_only_the_failing_one_is_reported(self, monkeypatch):
+        def _fake_fetch_hashes(urls, source="unknown"):
+            return [] if source == "milanuncios" else [imagehash.hex_to_hash("0" * 16)]
+
+        monkeypatch.setattr(photo_hash_signal, "fetch_hashes", _fake_fetch_hashes)
+        cache = _PhotoHashCache()
+        cache.get(
+            _record(
+                1, 100, source="milanuncios", photo_urls=("https://a.example/1.jpg",)
+            )
+        )
+        cache.get(
+            _record(2, 200, source="fotocasa", photo_urls=("https://a.example/2.jpg",))
+        )
+        assert cache.zero_success_sources() == {"milanuncios": 1}
+
+
+class TestDedupRunResultPhotoHealth:
+    """Issue #206 end-to-end through engine.run() against a real DB: a
+    source whose photos never hash must show up on
+    DedupRunResult.photo_hash_zero_success_sources, not just as per-photo
+    log noise. `photo_hash.requests.get` is monkeypatched (no real network
+    call), keyed on hostname so one source's CDN can fail while another's
+    succeeds — mirroring the real production shape (Milanuncios photos
+    404ing while Fotocasa's keep working fine).
+    """
+
+    _WORKING_HOST = "cdn.fotocasa.example"
+    _BROKEN_HOST = "images.milanuncios.example"
+
+    @staticmethod
+    def _jpeg_bytes() -> bytes:
+        buffer = io.BytesIO()
+        Image.new("RGB", (32, 32), (120, 140, 160)).save(buffer, "JPEG")
+        return buffer.getvalue()
+
+    def _fake_get(self, url, **kwargs):
+        from urllib.parse import urlsplit
+
+        import requests
+
+        class _FakeResponse:
+            def __init__(self, ok: bool, body: bytes = b""):
+                self._ok = ok
+                self.raw = io.BytesIO(body)
+                self.raw.decode_content = True
+
+            def raise_for_status(self):
+                if not self._ok:
+                    raise requests.exceptions.HTTPError("404 simulated CDN failure")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        host = urlsplit(url).hostname or ""
+        if host == self._BROKEN_HOST:
+            return _FakeResponse(ok=False)
+        return _FakeResponse(ok=True, body=self._jpeg_bytes())
+
+    def test_a_fully_broken_source_is_flagged_and_a_healthy_one_is_not(
+        self, dedup_db, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(photo_hash_signal.requests, "get", self._fake_get)
+
+        prop_broken = _insert_property(dedup_db, address="Calle Rota 1")
+        _insert_listing(
+            dedup_db,
+            prop_broken,
+            "milanuncios",
+            "broken-1",
+            photo_urls=[f"https://{self._BROKEN_HOST}/p{i}.jpg" for i in range(3)],
+        )
+        prop_healthy = _insert_property(dedup_db, address="Calle Sana 1")
+        _insert_listing(
+            dedup_db,
+            prop_healthy,
+            "fotocasa",
+            "healthy-1",
+            photo_urls=[f"https://{self._WORKING_HOST}/p{i}.jpg" for i in range(2)],
+        )
+        dedup_db.commit()
+
+        with caplog.at_level("WARNING", logger="etl.dedup.engine"):
+            result = engine.run(dedup_db)
+
+        assert result.photo_hash_zero_success_sources == {"milanuncios": 3}
+        health_warnings = [
+            r.message
+            for r in caplog.records
+            if r.name == "etl.dedup.engine" and "milanuncios" in r.message
+        ]
+        assert health_warnings, "expected a WARNING naming the degraded source"
+        assert "0/3" in health_warnings[0]
+
+    def test_no_zero_success_sources_when_everything_hashes(
+        self, dedup_db, monkeypatch
+    ):
+        monkeypatch.setattr(photo_hash_signal.requests, "get", self._fake_get)
+
+        prop_a = _insert_property(dedup_db, address="Calle Ok 1")
+        _insert_listing(
+            dedup_db,
+            prop_a,
+            "fotocasa",
+            "ok-1",
+            photo_urls=[f"https://{self._WORKING_HOST}/p{i}.jpg" for i in range(2)],
+        )
+        prop_b = _insert_property(dedup_db, address="Calle Ok 2")
+        _insert_listing(
+            dedup_db,
+            prop_b,
+            "idealista",
+            "ok-2",
+            photo_urls=[f"https://{self._WORKING_HOST}/p{i}.jpg" for i in range(2)],
+        )
+        dedup_db.commit()
+
+        result = engine.run(dedup_db)
+        assert result.photo_hash_zero_success_sources == {}
+
+    def test_cli_run_prints_the_degraded_source(self, dedup_db, monkeypatch, capsys):
+        """`ps dedup run` (etl.dedup.cli._cmd_run) must print the health
+        warning too — same "the CLI stays the one place an operator looks"
+        precedent as same_source_skipped's own print."""
+        from etl.dedup.cli import _cmd_run
+
+        monkeypatch.setattr(photo_hash_signal.requests, "get", self._fake_get)
+        prop_broken = _insert_property(dedup_db, address="Calle Rota 2")
+        _insert_listing(
+            dedup_db,
+            prop_broken,
+            "milanuncios",
+            "broken-2",
+            photo_urls=[f"https://{self._BROKEN_HOST}/p0.jpg"],
+        )
+        # A second, different-source listing so at least one pair actually
+        # reaches evaluate_pair (and therefore hash_cache.get()) — a
+        # lone listing with nothing to compare against never touches the
+        # photo-hash cache at all, by construction of the pairwise loop.
+        prop_other = _insert_property(dedup_db, address="Calle Rota 3")
+        _insert_listing(
+            dedup_db,
+            prop_other,
+            "fotocasa",
+            "other-2",
+            photo_urls=[f"https://{self._WORKING_HOST}/p0.jpg"],
+        )
+        dedup_db.commit()
+
+        exit_code = _cmd_run(dedup_db)
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "milanuncios" in captured.out
+        assert "0/1" in captured.out
