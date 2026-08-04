@@ -57,11 +57,27 @@ export interface DedupSuggestion {
   created_at: string;
   listing_a: DedupListingSide;
   listing_b: DedupListingSide;
+  /**
+   * True when at least one side's property matches an active (non-archived)
+   * search profile — i.e. `profile_listing_state.matched = true` for a
+   * profile with `archived_at IS NULL`. Profile-relevant pairs sort first in
+   * the default view (see lib/dedup.ts `listDedupSuggestions`). Lets the UI
+   * badge the row and decrement `profile_relevant_total` on resolve without a
+   * refetch. Issue #246.
+   */
+  profile_relevant: boolean;
 }
 
 export interface DedupSuggestionCounts {
+  /** Full pending queue size — always over the whole queue, never scoped to
+   * the toggle, so switching "solo mis perfiles" / "ver todos" never makes the
+   * chip counts flicker. */
   total: number;
   by_basis: Partial<Record<MatchBasis, number>>;
+  /** How many of the `total` pending pairs are profile-relevant. Always a
+   * subset count over the full queue (never scoped to the toggle), so the UI
+   * can show "12 relevantes a tus perfiles · 200 en total". Issue #246. */
+  profile_relevant_total: number;
 }
 
 export type DedupActionStatus = "pending" | "done" | "failed";

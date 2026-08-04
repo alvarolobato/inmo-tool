@@ -9,6 +9,11 @@
  * (confidence DESC) already surfaces the high-value photo_hash/reference_code
  * rows ahead of the much larger, much weaker fuzzy tail.
  *
+ * `?profile=relevant` — the "solo mis perfiles" toggle: hard-filters to pairs
+ * touching an active search profile (issue #246). Any other value (or absent)
+ * is the default "ver todos" view, which shows everything but sorts
+ * profile-relevant pairs first — nothing is hidden by default.
+ *
  * `?limit`/`?offset` — simple offset pagination (the queue is expected to be
  * worked through, not deep-linked to a specific page).
  *
@@ -36,12 +41,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const requestId = generateRequestId();
   const { searchParams } = new URL(request.url);
   const basis = parseBasis(searchParams.get("basis"));
+  const onlyProfileRelevant = searchParams.get("profile") === "relevant";
   const limit = Math.min(parsePositiveInt(searchParams.get("limit"), 30), 100);
   const offset = parsePositiveInt(searchParams.get("offset"), 0);
 
   try {
     const [items, counts] = await Promise.all([
-      listDedupSuggestions({ basis, limit, offset }),
+      listDedupSuggestions({ basis, onlyProfileRelevant, limit, offset }),
       getDedupSuggestionCounts(),
     ]);
     return NextResponse.json({ items, counts, nextOffset: items.length === limit ? offset + limit : null });

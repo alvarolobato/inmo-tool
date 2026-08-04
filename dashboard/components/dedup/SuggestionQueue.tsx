@@ -29,8 +29,11 @@ interface ListResponse {
  */
 export function SuggestionQueue() {
   const [items, setItems] = useState<DedupSuggestion[]>([]);
-  const [counts, setCounts] = useState<DedupSuggestionCounts>({ total: 0, by_basis: {} });
+  const [counts, setCounts] = useState<DedupSuggestionCounts>({ total: 0, by_basis: {}, profile_relevant_total: 0 });
   const [basis, setBasis] = useState<MatchBasis | null>(null);
+  // "solo mis perfiles" toggle (issue #246). Default false = "ver todos": show
+  // the whole queue with profile-relevant pairs sorted first (nothing hidden).
+  const [onlyProfileRelevant, setOnlyProfileRelevant] = useState(false);
   const [nextOffset, setNextOffset] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -40,6 +43,7 @@ export function SuggestionQueue() {
     async (offset: number, replace: boolean) => {
       const url = new URL("/api/dedup/suggestions", window.location.origin);
       if (basis) url.searchParams.set("basis", basis);
+      if (onlyProfileRelevant) url.searchParams.set("profile", "relevant");
       url.searchParams.set("offset", String(offset));
       const res = await fetch(url.toString().replace(window.location.origin, ""));
       if (!res.ok) {
@@ -52,7 +56,7 @@ export function SuggestionQueue() {
       setCounts(page.counts);
       setNextOffset(page.nextOffset);
     },
-    [basis],
+    [basis, onlyProfileRelevant],
   );
 
   useEffect(() => {
@@ -84,7 +88,16 @@ export function SuggestionQueue() {
       const nextByBasis = { ...prev.by_basis };
       const current = nextByBasis[resolved.match_basis] ?? 0;
       if (current > 0) nextByBasis[resolved.match_basis] = current - 1;
-      return { total: Math.max(0, prev.total - 1), by_basis: nextByBasis };
+      // Keep profile_relevant_total in sync using the resolved row's own flag,
+      // so the "N relevantes" figure decrements without a refetch.
+      const nextRelevant = resolved.profile_relevant
+        ? Math.max(0, prev.profile_relevant_total - 1)
+        : prev.profile_relevant_total;
+      return {
+        total: Math.max(0, prev.total - 1),
+        by_basis: nextByBasis,
+        profile_relevant_total: nextRelevant,
+      };
     });
   };
 
@@ -100,6 +113,28 @@ export function SuggestionQueue() {
 
   return (
     <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 16 }}>
+      <div
+        style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}
+        data-testid="dedup-profile-toggle"
+      >
+        <button
+          type="button"
+          data-testid="dedup-toggle-all"
+          onClick={() => setOnlyProfileRelevant(false)}
+          style={chipStyle(!onlyProfileRelevant)}
+        >
+          Ver todos ({counts.total})
+        </button>
+        <button
+          type="button"
+          data-testid="dedup-toggle-relevant"
+          onClick={() => setOnlyProfileRelevant(true)}
+          style={chipStyle(onlyProfileRelevant)}
+        >
+          Solo mis perfiles ({counts.profile_relevant_total})
+        </button>
+      </div>
+
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }} data-testid="dedup-filter-chips">
         <button
           type="button"
@@ -126,7 +161,9 @@ export function SuggestionQueue() {
         <p data-testid="dedup-empty-state" style={{ fontSize: 13, color: "var(--fg-muted)" }}>
           {counts.total === 0
             ? "No hay sugerencias de duplicados pendientes de revisión."
-            : "No hay sugerencias pendientes para este tipo de coincidencia."}
+            : onlyProfileRelevant
+              ? "No hay sugerencias pendientes relevantes para tus perfiles activos. Cambia a «Ver todos» para revisar el resto de la cola."
+              : "No hay sugerencias pendientes para este tipo de coincidencia."}
         </p>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>

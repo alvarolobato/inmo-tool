@@ -210,6 +210,7 @@ export function SuggestionCard({
       data-testid="dedup-suggestion-card"
       data-suggestion-id={suggestion.id}
       data-match-basis={suggestion.match_basis}
+      data-profile-relevant={suggestion.profile_relevant ? "true" : "false"}
       style={{
         border: "1px solid var(--border)",
         borderRadius: 8,
@@ -238,6 +239,22 @@ export function SuggestionCard({
           <span data-testid="dedup-confidence" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
             Confianza: {confidencePct}%
           </span>
+          {suggestion.profile_relevant && (
+            <span
+              data-testid="dedup-profile-relevant-badge"
+              title="Al menos uno de los anuncios coincide con un perfil de búsqueda activo"
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                padding: "2px 8px",
+                borderRadius: 999,
+                background: "var(--accent-soft)",
+                color: "var(--accent)",
+              }}
+            >
+              En tus perfiles
+            </span>
+          )}
         </div>
         <span style={{ fontSize: 12, color: "var(--fg-subtle)" }}>
           {dedupDetailSummary(suggestion.match_basis, suggestion.detail)}
