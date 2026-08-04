@@ -57,4 +57,8 @@ otel/local/*.json
 # Playwright e2e output (local runs; CI uploads these as workflow artifacts)
 dashboard/test-results/
 dashboard/playwright-report/
+
+# Generated at build time by scripts/build-extension-zip.sh (staged into the
+# dashboard build context so the image can serve the extension). Never committed.
+dashboard/public/inmo-tool-extension.zip
 node_modules

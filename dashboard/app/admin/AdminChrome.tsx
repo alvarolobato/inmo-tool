@@ -13,6 +13,8 @@ const ADMIN_NAV = [
   // Guided capture worklist (#237) — the "places to visit one by one" surface
   // for extension-only portals (Aliseda). Same /etl admin gating.
   { href: "/etl/captura", label: "Captura guiada" },
+  // Extension setup (#256) — download the extension + copy the API URL/key.
+  { href: "/etl/extension", label: "Extensión" },
   { href: "/admin/slow-queries", label: "Consultas lentas" },
   { href: "/admin/tool-calls", label: "Herramientas LLM" },
   { href: "/admin/usage", label: "Uso LLM" },
