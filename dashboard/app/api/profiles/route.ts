@@ -15,6 +15,7 @@ import {
   createProfile,
   listActiveProfiles,
 } from "@/lib/db/profiles";
+import { refreshProfileForScope } from "@/lib/filtering/profile-refresh";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
 // Queries Postgres per request; never prerender at build (no DB then).
@@ -76,7 +77,15 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const scope = ScopeSchema.parse(body.scope);
     const thesisParams = ThesisParamsSchema.parse(body.thesis_params ?? {});
     const profile = await createProfile(body.name.trim(), scope, thesisParams);
-    return NextResponse.json(profile, { status: 201 });
+
+    // Issue #245: a brand-new profile always has a "new" scope — materialize
+    // it against the current pool AND enqueue an ad-hoc sweep so fresh
+    // listings for its geography start arriving now, not at the next
+    // scheduled run. Best-effort inside the helper (a refresh failure never
+    // fails the create); the `refresh` field lets the client surface a
+    // "buscando datos nuevos…" indicator and poll the sweep's status.
+    const refresh = await refreshProfileForScope(profile.id);
+    return NextResponse.json({ ...profile, refresh }, { status: 201 });
   } catch (err) {
     if (err instanceof ZodError) {
       return NextResponse.json(

@@ -10,6 +10,7 @@ import { sql } from "@/lib/db-write";
 import {
   ScopeSchema,
   ThesisParamsSchema,
+  scopesEqual,
   type Scope,
   type ThesisParams,
   type SearchProfileRow,
@@ -185,23 +186,46 @@ export async function createProfile(
   return toSearchProfileRow(rows[0]);
 }
 
+/** Result of {@link updateProfile}: the new row plus whether the crawl-relevant scope changed. */
+export interface UpdateProfileResult {
+  profile: SearchProfileRow;
+  /**
+   * True only when the patch actually changed the scope (issue #245's
+   * quick-refresh gate). A rename or a thesis_params-only edit leaves this
+   * false, so the PATCH route knows not to enqueue a redundant crawl.
+   * Computed against the pre-update `scope` via `scopesEqual` (order- and
+   * false/undefined-insensitive) — see that function for why a plain
+   * deep-equal would over-report.
+   */
+  scopeChanged: boolean;
+}
+
 /**
  * Archived profiles cannot be edited — there is no unarchive path (issue #17
  * doesn't require one), so allowing edits on an archived row would leave it
  * in a confusing "archived but silently still changing" state. A caller
  * wanting to revive a profile's configuration should clone it instead
  * (cloneProfile), which explicitly creates a fresh active row.
+ *
+ * Returns `{ profile, scopeChanged }` on success, or null when the id doesn't
+ * exist or the row is archived.
  */
 export async function updateProfile(
   id: number,
   patch: { name?: string; scope?: Scope; thesis_params?: ThesisParams },
-): Promise<SearchProfileRow | null> {
+): Promise<UpdateProfileResult | null> {
   const existing = await getProfileById(id);
   if (!existing || existing.archived_at !== null) return null;
 
   const name = patch.name ?? existing.name;
   const scope = patch.scope ?? existing.scope;
   const thesisParams = patch.thesis_params ?? existing.thesis_params;
+
+  // The scope changed only when the patch supplied a scope AND it differs
+  // semantically from the stored one — computed here (rather than in the
+  // route) because this is the one place holding both the old scope and the
+  // patch, and it already read `existing` for the archived-row guard.
+  const scopeChanged = patch.scope !== undefined && !scopesEqual(existing.scope, patch.scope);
 
   const rows = await sql<SearchProfileRawRow>(
     `UPDATE search_profile
@@ -210,7 +234,8 @@ export async function updateProfile(
      RETURNING ${SEARCH_PROFILE_COLUMNS}`,
     [id, name, JSON.stringify(scope), JSON.stringify(thesisParams)],
   );
-  return rows.length > 0 ? toSearchProfileRow(rows[0]) : null;
+  if (rows.length === 0) return null;
+  return { profile: toSearchProfileRow(rows[0]), scopeChanged };
 }
 
 /**

@@ -24,6 +24,7 @@ import {
   touchProfileViewedAt,
   updateProfile,
 } from "@/lib/db/profiles";
+import { refreshProfileForScope } from "@/lib/filtering/profile-refresh";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
 type RouteContext = { params: Promise<{ id: string }> | { id: string } };
@@ -129,8 +130,8 @@ export async function PATCH(
     if (body.scope !== undefined) patch.scope = ScopeSchema.parse(body.scope);
     if (body.thesis_params !== undefined) patch.thesis_params = ThesisParamsSchema.parse(body.thesis_params);
 
-    const updated = await updateProfile(id, patch);
-    if (!updated) {
+    const result = await updateProfile(id, patch);
+    if (!result) {
       // updateProfile returns null both when the id doesn't exist and when
       // the profile is archived (edits are blocked on archived profiles —
       // see the docstring on updateProfile). Same 404 either way, matching
@@ -145,7 +146,16 @@ export async function PATCH(
         { status: 404 },
       );
     }
-    return NextResponse.json(updated);
+
+    // Issue #245: only a scope change warrants a quick refresh. A rename (or a
+    // thesis_params-only edit) leaves the candidate set and the crawl scope
+    // untouched, so it enqueues nothing and re-materializes nothing —
+    // `scopeChanged` (computed in updateProfile) is the gate. When it did
+    // change, materialize against current data + enqueue an ad-hoc sweep
+    // (best-effort inside the helper; never fails the save). `refresh` is null
+    // on a non-scope edit so the client shows no "buscando datos…" indicator.
+    const refresh = result.scopeChanged ? await refreshProfileForScope(id) : null;
+    return NextResponse.json({ ...result.profile, refresh });
   } catch (err) {
     if (err instanceof ZodError) {
       return NextResponse.json(
