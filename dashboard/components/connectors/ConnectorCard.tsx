@@ -13,8 +13,40 @@ const cardStyle: React.CSSProperties = {
   border: "1px solid var(--border)",
   borderRadius: 8,
   background: "var(--bg-1)",
-  padding: 16,
-  marginBottom: 12,
+  marginBottom: 8,
+  overflow: "hidden",
+};
+
+// The always-visible summary row. A single narrow band per connector so the
+// list is skimmable — the full configuration lives behind the chevron (issue #264).
+const summaryRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+  padding: "10px 12px",
+};
+
+// The chevron toggle: transparent, borderless, wraps the identity block so the
+// whole left side of the row is one big expand target (matches LogBlock).
+const expandButtonStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+  flex: 1,
+  minWidth: 0,
+  background: "transparent",
+  border: "none",
+  padding: 0,
+  margin: 0,
+  cursor: "pointer",
+  textAlign: "left",
+  color: "inherit",
+  font: "inherit",
+};
+
+const detailStyle: React.CSSProperties = {
+  padding: "4px 16px 16px",
+  borderTop: "1px solid var(--border)",
 };
 
 const labelStyle: React.CSSProperties = {
@@ -116,6 +148,20 @@ function ScopeSummary({ connector }: { connector: ConnectorView }) {
   );
 }
 
+/**
+ * One-line last-run summary for the collapsed row: status, how much it pulled,
+ * and when. The full breakdown (errors, error message) stays in the expanded
+ * detail — this is the at-a-glance version (issue #264).
+ */
+function lastRunSummary(connector: ConnectorView): string {
+  if (!connector.lastRun) return "Sin ejecuciones";
+  const r = connector.lastRun;
+  const when = r.started_at ? new Date(r.started_at).toLocaleString("es-ES") : null;
+  const parts = [r.status, `${r.fetched_count} descargados`];
+  if (when) parts.push(when);
+  return parts.join(" · ");
+}
+
 export function ConnectorCard({
   connector,
   onPatch,
@@ -128,6 +174,10 @@ export function ConnectorCard({
   onRunFinished?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
+  // Collapsed by default: the list must be browsable at a glance, so full
+  // config/scope/last-run detail is hidden until the operator expands a row
+  // (issue #264).
+  const [expanded, setExpanded] = useState(false);
   const [editingScope, setEditingScope] = useState(false);
   const [draftScope, setDraftScope] = useState<LocationPickerValue>(() => ({
     center: connector.geography_override?.center ?? [40.4168, -3.7038],
@@ -169,19 +219,61 @@ export function ConnectorCard({
 
   return (
     <div style={cardStyle} data-testid={`connector-${connector.name}`}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <h2 style={{ fontSize: 15, fontWeight: 600, color: "var(--fg)", margin: 0 }}>
-          {connector.name}
-        </h2>
-        <span data-testid={`status-${connector.name}`}>
-          <Pill
-            text={connector.enabled ? "activo" : "desactivado"}
-            tone={connector.enabled ? "on" : "off"}
-          />
-        </span>
-        {!connector.supports_discovery && <Pill text="solo captura" tone="muted" />}
-        {!connector.registered && <Pill text="no registrado" tone="muted" />}
-        {connector.usingDefaults && <Pill text="sin configurar" tone="muted" />}
+      <div style={summaryRowStyle}>
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          aria-label={
+            expanded
+              ? `Ocultar detalles de ${connector.name}`
+              : `Ver detalles de ${connector.name}`
+          }
+          style={expandButtonStyle}
+          data-testid={`expand-${connector.name}`}
+        >
+          <span
+            aria-hidden="true"
+            style={{
+              transition: "transform 0.15s",
+              display: "inline-block",
+              flexShrink: 0,
+              color: "var(--fg-muted)",
+              transform: expanded ? "rotate(90deg)" : "rotate(0deg)",
+            }}
+          >
+            ▸
+          </span>
+          <h2
+            style={{ fontSize: 15, fontWeight: 600, color: "var(--fg)", margin: 0, flexShrink: 0 }}
+          >
+            {connector.name}
+          </h2>
+          <span data-testid={`status-${connector.name}`} style={{ flexShrink: 0 }}>
+            <Pill
+              text={connector.enabled ? "activo" : "desactivado"}
+              tone={connector.enabled ? "on" : "off"}
+            />
+          </span>
+          {!connector.supports_discovery && <Pill text="solo captura" tone="muted" />}
+          {!connector.registered && <Pill text="no registrado" tone="muted" />}
+          {connector.usingDefaults && <Pill text="sin configurar" tone="muted" />}
+
+          <span
+            data-testid={`lastrun-summary-${connector.name}`}
+            style={{
+              fontSize: 12,
+              color: "var(--fg-muted)",
+              marginLeft: "auto",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              minWidth: 0,
+            }}
+          >
+            {lastRunSummary(connector)}
+          </span>
+        </button>
 
         <button
           type="button"
@@ -194,7 +286,7 @@ export function ConnectorCard({
           }
           style={{
             ...buttonStyle,
-            marginLeft: "auto",
+            flexShrink: 0,
             opacity: busy || locked ? 0.6 : 1,
             cursor: locked ? "not-allowed" : buttonStyle.cursor,
           }}
@@ -204,6 +296,8 @@ export function ConnectorCard({
         </button>
       </div>
 
+      {expanded && (
+        <div style={detailStyle} data-testid={`connector-detail-${connector.name}`}>
       {locked && (
         <p
           style={{ fontSize: 12, color: "var(--fg-muted)", margin: "8px 0 0" }}
@@ -407,6 +501,8 @@ export function ConnectorCard({
           </p>
         )}
       </div>
+        </div>
+      )}
     </div>
   );
 }

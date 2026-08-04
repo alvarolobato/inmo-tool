@@ -96,7 +96,12 @@ export default function ConnectorsPage() {
         </div>
       )}
 
-      {loading ? (
+      {/* Only show the full-page spinner on the FIRST load. A refetch after a
+          PATCH (toggle/scope/rooms) must keep the existing rows mounted —
+          otherwise every card unmounts and remounts, silently collapsing any
+          row the operator had expanded (issue #264: expand state is per-row
+          component state). */}
+      {loading && connectors.length === 0 ? (
         <p style={{ marginTop: 16, fontSize: 13, color: "var(--fg-muted)" }}>Cargando…</p>
       ) : connectors.length === 0 ? (
         <p

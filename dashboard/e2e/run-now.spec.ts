@@ -91,6 +91,8 @@ test("per-connector run writes a scoped trigger, shows a busy state, no error su
   await page.goto("/etl/connectors");
   await expect(page.getByTestId(`connector-${CONNECTOR}`)).toBeVisible();
 
+  // "Ejecutar ahora" lives in the expanded detail region (issue #264).
+  await page.getByTestId(`expand-${CONNECTOR}`).click();
   await page.getByTestId(`run-now-${CONNECTOR}`).click();
 
   // The load-bearing backend assertion: a pending trigger scoped to exactly
