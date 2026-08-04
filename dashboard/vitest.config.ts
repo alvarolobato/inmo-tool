@@ -11,9 +11,20 @@ import path from "path";
 // processes vitest forks restores jsdom's implementation. Set here (not in
 // package.json's test script) so it applies uniformly regardless of how
 // vitest is invoked (npm test, npx vitest, CI, watch mode).
-process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, "--no-experimental-webstorage"]
-  .filter(Boolean)
-  .join(" ");
+//
+// ONLY on Node >= 22. The flag does not exist before 22 (there is no
+// webstorage feature to disable there), and Node REJECTS an unknown flag in
+// NODE_OPTIONS — `node: --no-experimental-webstorage is not allowed in
+// NODE_OPTIONS` — which kills every worker vitest forks. That was invisible
+// locally (Node 26, flag valid) and hung CI for the full timeout (Node 20,
+// flag invalid): the worker never started, vitest respawned it forever. Gate
+// on the running major so the fix applies exactly where the problem exists.
+const nodeMajor = Number(process.versions.node.split(".")[0]);
+if (nodeMajor >= 22) {
+  process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, "--no-experimental-webstorage"]
+    .filter(Boolean)
+    .join(" ");
+}
 
 export default defineConfig({
   plugins: [react()],
