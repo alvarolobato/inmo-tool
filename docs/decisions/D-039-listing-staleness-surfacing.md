@@ -1,10 +1,10 @@
 ---
-id: D-038
+id: D-039
 title: Listing staleness surfacing — last_seen_at, day-grained bands
 date: 2026-08-04
 ---
 
-# D-038: Listing staleness surfacing — `last_seen_at`, day-grained bands
+# D-039: Listing staleness surfacing — `last_seen_at`, day-grained bands
 
 *Decided: 2026-08-04*
 

@@ -18,7 +18,7 @@
  * skip window, so `last_fetched_at` would read "stale" for listings the
  * pipeline is actively confirming. `last_seen_at` is the confirmation signal;
  * `last_fetched_at` is a scraping-budget signal. See init.sql's column
- * comments and D-038.
+ * comments and D-039.
  *
  * ## Honesty
  *
@@ -39,7 +39,7 @@ export type StalenessBand = "fresh" | "aging" | "stale";
 
 /**
  * Band thresholds, in whole days since `last_seen_at`. Documented and
- * rationalised in docs/decisions/D-038-listing-staleness-surfacing.md.
+ * rationalised in docs/decisions/D-039-listing-staleness-surfacing.md.
  *
  * The connector orchestrator sweeps every registered connector roughly
  * hourly (etl.orchestrator.run_scheduler_loop), so a listing a full-inventory
