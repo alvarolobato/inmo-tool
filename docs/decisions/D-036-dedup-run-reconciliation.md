@@ -58,11 +58,22 @@ already existed for `connector_runs` but had no dedup equivalent.
    `None`.
 
 The two compose: the lock stops two *live* passes overlapping, and the
-age-based reconciler cleans up a *dead* pass's row. A pass that legitimately
-exceeds the 2h threshold is still protected — a concurrent attempt can't start
-to trigger the reconciler against it (it skips on the lock), and the
-reconciler at the start of a pass only runs in a process that is itself about
-to hold the lock.
+age-based reconciler cleans up a *dead* pass's row.
+
+What protects a pass that legitimately exceeds the 2h threshold is **the age
+filter plus self-healing**, NOT the lock. The reconciler runs and commits at
+the very start of `run_dedup`, *before* the lock is acquired (deliberately, so
+it runs even on the path that then skips on the lock) — so it is not true that
+"the reconciler only runs in a process about to hold the lock." The real
+guarantees are: (a) the reconciler only touches rows older than the threshold,
+so a &lt;2h pass is never eligible; and (b) if a pass ever does overrun 2h and a
+concurrent trigger reconciles its row to `failed`, `_finish_dedup_run` rewrites
+that row's status and clears `error_msg` on success — so the wrong status is
+transient and self-corrects. The residual exposure is a narrow overrun-plus-
+concurrent-trigger window producing a briefly-wrong status; the thin ~36-min
+margin between the ~84-min pass and the 2h threshold is the thing to widen if
+dedup ever slows again (it should get much faster once D-025 photo-hash
+persistence deploys).
 
 **Alternatives rejected**:
 1. **A heartbeat / `last_progress_at` column** — rejected as unnecessary
