@@ -19,12 +19,15 @@ import { buildPgPoolConfig } from "@/lib/db-shared";
 import { resetPool } from "@/lib/db-write";
 import { createProfile, getProfileById, updateProfile } from "@/lib/db/profiles";
 import { materializeProfile } from "@/lib/filtering/materialize";
-import { diagnoseZeroCandidates } from "../profile-diagnostics";
+import { diagnoseZeroCandidates, getAreaCoverage } from "../profile-diagnostics";
 import type { Scope } from "@/lib/profiles-schema";
 
 // Real coordinates (WGS84 approximate town centers).
 const SEVILLA: [number, number] = [37.3891, -5.9845];
 const DOS_HERMANAS: [number, number] = [37.2836, -5.9223];
+// 117.8 km from Dos Hermanas — issue #217's own profile, and PR #228
+// review finding 2's counter-example.
+const ESTEPONA: [number, number] = [36.42764, -5.14589];
 
 /** Same formula as lib/filtering/scope-query.ts's haversineKm SQL expression — ground truth for distance assertions. */
 function haversineKm(a: [number, number], b: [number, number]): number {
@@ -372,5 +375,134 @@ describe.runIf(dbAvailable)("diagnoseZeroCandidates — real Postgres (issue #19
 
     expect(diagnosis.kind).toBe("not_zero");
     if (diagnosis.kind === "not_zero") expect(diagnosis.matchedCount).toBe(1);
+  });
+
+  /**
+   * Issue #217 / D-030. The containment query is real SQL (haversine against
+   * each scope's own stored circle) — a mock cannot judge whether a point
+   * actually falls inside a scope's radius, which is the entire question
+   * this signal answers.
+   */
+  describe("getAreaCoverage — has anyone actually crawled here? (issue #217)", () => {
+    const CONNECTOR = "test-area-coverage-217";
+
+    async function clearScopeState() {
+      await withRealDb(async (pool) => {
+        await pool.query("DELETE FROM connector_scope_state WHERE connector_name = $1", [CONNECTOR]);
+      });
+    }
+
+    beforeEach(clearScopeState);
+    afterEach(clearScopeState);
+
+    it("never_crawled: no scope's circle contains the point — no record of a crawl here", async () => {
+      await withRealDb(async (pool) => {
+        // A crawled scope exists, but centered on Sevilla with a coverage
+        // circle far too small to reach Dos Hermanas (~10.5 km away).
+        await pool.query(
+          `INSERT INTO connector_scope_state
+             (connector_name, scope_key, last_attempted_at, last_discovered_at,
+              coverage_center_lat, coverage_center_lon, coverage_radius_km)
+           VALUES ($1, 'sevilla', NOW(), NOW(), $2, $3, 2)`,
+          [CONNECTOR, SEVILLA[0], SEVILLA[1]],
+        );
+      });
+      expect(await getAreaCoverage(DOS_HERMANAS)).toEqual({ kind: "never_crawled" });
+    });
+
+    it("awaiting_turn: a covering scope exists but has never been attempted (the Estepona case)", async () => {
+      await withRealDb(async (pool) => {
+        await pool.query(
+          `INSERT INTO connector_scope_state
+             (connector_name, scope_key, last_attempted_at, last_skipped_for_budget_at,
+              coverage_center_lat, coverage_center_lon, coverage_radius_km)
+           VALUES ($1, 'dos-hermanas', NULL, NOW(), $2, $3, 5)`,
+          [CONNECTOR, DOS_HERMANAS[0], DOS_HERMANAS[1]],
+        );
+      });
+      expect(await getAreaCoverage(DOS_HERMANAS)).toEqual({
+        kind: "awaiting_turn",
+        connectorNames: [CONNECTOR],
+      });
+    });
+
+    it("crawled: a covering scope's discover() genuinely SUCCEEDED, so 'no matches' is a real answer", async () => {
+      await withRealDb(async (pool) => {
+        await pool.query(
+          `INSERT INTO connector_scope_state
+             (connector_name, scope_key, last_attempted_at, last_discovered_at,
+              coverage_center_lat, coverage_center_lon, coverage_radius_km)
+           VALUES ($1, 'dos-hermanas', '2026-08-04T07:16:38Z', '2026-08-04T07:16:38Z', $2, $3, 5)`,
+          [CONNECTOR, DOS_HERMANAS[0], DOS_HERMANAS[1]],
+        );
+      });
+      const coverage = await getAreaCoverage(DOS_HERMANAS);
+      expect(coverage.kind).toBe("crawled");
+    });
+
+    /**
+     * PR #228 review, finding 1. `last_attempted_at` is written before
+     * `run_connector` and unconditionally — a scope whose `discover()`
+     * raises on every run carries a real timestamp forever. Reporting that
+     * as `crawled` told the user "esta zona se rastreó por última vez el
+     * ⟨fecha⟩" about an area nothing has ever successfully crawled, which
+     * is issue #217's original misdiagnosis inverted into something worse.
+     */
+    it("attempted_never_succeeded: a real attempt with no successful discover() is NOT crawled", async () => {
+      await withRealDb(async (pool) => {
+        await pool.query(
+          `INSERT INTO connector_scope_state
+             (connector_name, scope_key, last_attempted_at, last_discovered_at,
+              coverage_center_lat, coverage_center_lon, coverage_radius_km)
+           VALUES ($1, 'dos-hermanas', '2026-08-04T07:16:38Z', NULL, $2, $3, 5)`,
+          [CONNECTOR, DOS_HERMANAS[0], DOS_HERMANAS[1]],
+        );
+      });
+      const coverage = await getAreaCoverage(DOS_HERMANAS);
+      expect(coverage.kind).toBe("attempted_never_succeeded");
+      expect(coverage).toMatchObject({ connectorNames: [CONNECTOR] });
+    });
+
+    /**
+     * PR #228 review, finding 2 — the reviewer's exact scenario, at the
+     * dashboard boundary. The stored circle used to be the PROFILE's
+     * `radius_km` (allowed up to 200 km), not what any connector crawls, so
+     * a Dos Hermanas scope at radius 120 reported Estepona — 117.8 km away
+     * and never crawled by anyone — as `crawled`. The ETL now stores the
+     * resolved municipality's own centroid plus a conservative extent
+     * (`_MUNICIPAL_COVERAGE_RADIUS_KM`); this pins the consequence here.
+     */
+    it("a far-away area is never reported covered by a municipality-sized circle", async () => {
+      await withRealDb(async (pool) => {
+        await pool.query(
+          `INSERT INTO connector_scope_state
+             (connector_name, scope_key, last_attempted_at, last_discovered_at,
+              coverage_center_lat, coverage_center_lon, coverage_radius_km)
+           VALUES ($1, 'dos-hermanas', NOW(), NOW(), $2, $3, 5)`,
+          [CONNECTOR, DOS_HERMANAS[0], DOS_HERMANAS[1]],
+        );
+      });
+      // Positive control: the crawled municipality itself still reads as covered.
+      expect((await getAreaCoverage(DOS_HERMANAS)).kind).toBe("crawled");
+      expect(await getAreaCoverage(ESTEPONA)).toEqual({ kind: "never_crawled" });
+    });
+
+    it("a NULL coverage_radius_km never claims coverage it cannot vouch for", async () => {
+      await withRealDb(async (pool) => {
+        // A scope with no derivable crawl footprint: no circle at all.
+        // COALESCE(coverage_radius_km, 0) means it can only ever match its
+        // own exact center, never a different point — inventing a default
+        // radius would silently tell the user their area is covered when
+        // nothing established that.
+        await pool.query(
+          `INSERT INTO connector_scope_state
+             (connector_name, scope_key, last_attempted_at, last_discovered_at,
+              coverage_center_lat, coverage_center_lon, coverage_radius_km)
+           VALUES ($1, 'freetext', NOW(), NOW(), $2, $3, NULL)`,
+          [CONNECTOR, DOS_HERMANAS[0], DOS_HERMANAS[1]],
+        );
+      });
+      expect(await getAreaCoverage(SEVILLA)).toEqual({ kind: "never_crawled" });
+    });
   });
 });

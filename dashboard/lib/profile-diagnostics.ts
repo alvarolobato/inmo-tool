@@ -45,9 +45,9 @@
 import { sql } from "@/lib/db-write";
 import { buildScopeFunnelStages } from "@/lib/filtering/scope-query";
 import type { SearchProfileRow } from "@/lib/profiles-schema";
-import type { NearestPropertyResult, ZeroCandidateDiagnosis } from "@/lib/profile-diagnostics-types";
+import type { AreaCoverage, NearestPropertyResult, ZeroCandidateDiagnosis } from "@/lib/profile-diagnostics-types";
 
-export type { NearestPropertyResult, ZeroCandidateDiagnosis } from "@/lib/profile-diagnostics-types";
+export type { AreaCoverage, NearestPropertyResult, ZeroCandidateDiagnosis } from "@/lib/profile-diagnostics-types";
 
 /** Human labels for scope.hard_exclusions keys — mirrors ProfileForm.tsx's checkbox copy exactly. */
 const EXCLUSION_LABELS: Record<string, string> = {
@@ -150,6 +150,82 @@ async function getConnectorLastRunFinishedAt(): Promise<string | null> {
 }
 
 /**
+ * Has any connector ever actually crawled the area around `center`?
+ * Issue #217 / D-030.
+ *
+ * `connector_scope_state` holds one row per (connector, resolved scope) the
+ * ETL orchestrator has ever been able to resolve, carrying the circle that
+ * scope's connector actually CRAWLS — the resolved municipality's centroid
+ * plus a conservative extent, never the profile's own search radius (PR
+ * #228 review, finding 2; see `_scope_coverage_columns`). So "has anyone
+ * crawled a scope covering this point" is a plain containment test here —
+ * no need to mirror each connector's Python geography resolution in
+ * TypeScript.
+ *
+ * The four outcomes are genuinely different advice, which is the whole
+ * point of the issue: no covering row means we have no record of a crawl
+ * here; a covering scope never attempted means waiting is exactly the right
+ * move; a covering scope attempted but never successfully discovered means
+ * something is broken and waiting will not fix it; only a scope whose
+ * `discover()` actually SUCCEEDED lets "no matches" be a real statement
+ * about real inventory.
+ *
+ * Every uncertainty in here resolves toward claiming LESS coverage, never
+ * more — telling a user their area was crawled and is empty when nothing
+ * ever looked at it is precisely the misdiagnosis issue #217 was filed
+ * about. Hence: `coverage_radius_km` is COALESCEd to 0 rather than to some
+ * default (a row without a radius came from a scope with no derivable crawl
+ * footprint at all, and inventing one would fabricate a coverage claim),
+ * and `crawled` is driven off `last_discovered_at`, never off
+ * `last_attempted_at`.
+ */
+export async function getAreaCoverage(center: [number, number]): Promise<AreaCoverage> {
+  const [lat, lon] = center;
+  const rows = await sql<{
+    connector_name: string;
+    last_attempted_at: string | null;
+    last_discovered_at: string | null;
+  }>(
+    `SELECT connector_name, last_attempted_at, last_discovered_at
+       FROM connector_scope_state
+      WHERE coverage_center_lat IS NOT NULL AND coverage_center_lon IS NOT NULL
+        AND (6371 * acos(least(1, greatest(-1,
+              cos(radians($1)) * cos(radians(coverage_center_lat)) *
+              cos(radians(coverage_center_lon) - radians($2)) +
+              sin(radians($1)) * sin(radians(coverage_center_lat))
+            )))) <= COALESCE(coverage_radius_km, 0)`,
+    [lat, lon],
+  );
+
+  if (rows.length === 0) return { kind: "never_crawled" };
+
+  // Most recent real SUCCESS wins — a point can sit inside several
+  // connectors' scopes, and the freshest successful crawl is what the
+  // user's "has anyone actually looked here?" question is really about.
+  const discovered = rows.filter((r) => r.last_discovered_at !== null);
+  if (discovered.length > 0) {
+    const lastCrawledAt = discovered
+      .map((r) => r.last_discovered_at as string)
+      .sort()
+      .at(-1)!;
+    return { kind: "crawled", lastCrawledAt };
+  }
+
+  const attempted = rows.filter((r) => r.last_attempted_at !== null);
+  if (attempted.length === 0) {
+    return { kind: "awaiting_turn", connectorNames: rows.map((r) => r.connector_name).sort() };
+  }
+  return {
+    kind: "attempted_never_succeeded",
+    connectorNames: attempted.map((r) => r.connector_name).sort(),
+    lastAttemptedAt: attempted
+      .map((r) => r.last_attempted_at as string)
+      .sort()
+      .at(-1)!,
+  };
+}
+
+/**
  * Diagnoses why `profile` currently has zero matched candidates. Callers
  * must only invoke this for a profile already known/believed to be at zero
  * (issue #194: lazy, on-demand, never part of the list's main aggregate) —
@@ -182,15 +258,17 @@ export async function diagnoseZeroCandidates(profile: SearchProfileRow): Promise
 
   const geographyCount = await countProperties(geographyStage.whereSql, geographyStage.params);
   if (geographyCount === 0) {
-    const [nearest, connectorLastRunFinishedAt] = await Promise.all([
+    const [nearest, connectorLastRunFinishedAt, areaCoverage] = await Promise.all([
       findNearestProperty(profile.scope.geography.center),
       getConnectorLastRunFinishedAt(),
+      getAreaCoverage(profile.scope.geography.center),
     ]);
     return {
       kind: "geography_empty",
       radiusKm: profile.scope.geography.radius_km,
       nearest,
       connectorLastRunFinishedAt,
+      areaCoverage,
     };
   }
 

@@ -48,6 +48,7 @@ describe("ZeroCandidatesDiagnostic (issue #194)", () => {
         radiusKm: 7,
         nearest: { propertyId: 99, distanceKm: 7.6 },
         connectorLastRunFinishedAt: "2026-08-01T10:00:00.000Z",
+        areaCoverage: { kind: "crawled", lastCrawledAt: "2026-08-01T10:00:00.000Z" },
       }),
     );
     render(<ZeroCandidatesDiagnostic profileId={1} />);
@@ -69,6 +70,7 @@ describe("ZeroCandidatesDiagnostic (issue #194)", () => {
         radiusKm: 7,
         nearest: null,
         connectorLastRunFinishedAt: null,
+        areaCoverage: { kind: "never_crawled" },
       }),
     );
     render(<ZeroCandidatesDiagnostic profileId={1} />);
@@ -76,6 +78,86 @@ describe("ZeroCandidatesDiagnostic (issue #194)", () => {
       expect(screen.getByText(/No hay ningún inmueble con anuncio activo/)).toBeInTheDocument(),
     );
     expect(screen.getByText(/Ningún conector ha completado una ejecución/)).toBeInTheDocument();
+  });
+
+  // Issue #217 / D-030: these two branches are the whole point of the
+  // areaCoverage signal — before it, both rendered the identical "no
+  // matches nearby" text as the crawled case, which is the message that
+  // sent the owner looking for a filter bug when the real answer was
+  // "nobody has crawled Estepona yet".
+  it("geography_empty + never_crawled: reports the absence of a crawl record without asserting the area is uncovered", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockFetchOnce({
+        kind: "geography_empty",
+        radiusKm: 25,
+        nearest: { propertyId: 5, distanceKm: 112.5 },
+        connectorLastRunFinishedAt: "2026-08-04T07:16:38.000Z",
+        areaCoverage: { kind: "never_crawled" },
+      }),
+    );
+    render(<ZeroCandidatesDiagnostic profileId={1} />);
+    await waitFor(() =>
+      expect(screen.getByText(/No hay constancia de que se haya rastreado/)).toBeInTheDocument(),
+    );
+    // PR #228 review, nit 7: the old copy asserted "Ningún conector cubre
+    // todavía esta zona … hace falta añadir cobertura". Rows only appear
+    // once a scope is attempted or budget-skipped, and coverage circles
+    // deliberately under-report, so a genuinely covered area lands here for
+    // a run or two — where the correct advice is "wait one run", the exact
+    // opposite of what was shown.
+    expect(screen.queryByText(/Ningún conector cubre todavía esta zona/)).not.toBeInTheDocument();
+    expect(screen.getByText(/puede aparecer tras una de las próximas ejecuciones/)).toBeInTheDocument();
+    // Must still not claim the area IS covered and merely awaiting its turn.
+    expect(screen.queryByText(/Esta zona sí está cubierta/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * PR #228 review, finding 1. An attempted-but-never-successful scope must
+   * read as broken, not as crawled-and-empty: nothing was ever retrieved,
+   * so "no hay resultados" says nothing about real inventory.
+   */
+  it("geography_empty + attempted_never_succeeded: never renders the 'se rastreó el <fecha>' claim", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockFetchOnce({
+        kind: "geography_empty",
+        radiusKm: 25,
+        nearest: { propertyId: 5, distanceKm: 112.5 },
+        connectorLastRunFinishedAt: "2026-08-04T07:16:38.000Z",
+        areaCoverage: {
+          kind: "attempted_never_succeeded",
+          connectorNames: ["fotocasa"],
+          lastAttemptedAt: "2026-08-04T07:16:38.000Z",
+        },
+      }),
+    );
+    render(<ZeroCandidatesDiagnostic profileId={1} />);
+    await waitFor(() =>
+      expect(screen.getByText(/ningún rastreo ha llegado a completarse/)).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/fotocasa/)).toBeInTheDocument();
+    expect(screen.queryByText(/Esta zona se rastreó por última vez/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Esta zona sí está cubierta/)).not.toBeInTheDocument();
+  });
+
+  it("geography_empty + awaiting_turn: says the area IS covered and names the connectors that will get to it", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockFetchOnce({
+        kind: "geography_empty",
+        radiusKm: 25,
+        nearest: { propertyId: 5, distanceKm: 112.5 },
+        connectorLastRunFinishedAt: "2026-08-04T07:16:38.000Z",
+        areaCoverage: { kind: "awaiting_turn", connectorNames: ["fotocasa"] },
+      }),
+    );
+    render(<ZeroCandidatesDiagnostic profileId={1} />);
+    await waitFor(() =>
+      expect(screen.getByText(/todavía no le ha tocado el turno/)).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/fotocasa/)).toBeInTheDocument();
+    expect(screen.queryByText(/Ningún conector cubre todavía esta zona/)).not.toBeInTheDocument();
   });
 
   it("type_empty: names the geography count and the excluded property types", async () => {

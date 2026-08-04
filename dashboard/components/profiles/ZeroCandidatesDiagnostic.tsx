@@ -165,10 +165,48 @@ export function ZeroCandidatesDiagnostic({
               {diagnosis.radiusKm} km.
             </p>
           )}
+          {/* Issue #217 / D-030: "no matches nearby" and "nobody has crawled
+              here yet" used to render identically, and the second is the
+              far more common cause for a brand-new profile in a new market.
+              Shown above the global connector-recency line because it is
+              area-specific and therefore strictly more informative. */}
+          {/* PR #228 review, nit 7: this used to assert "ningún conector
+              cubre esta zona … hace falta añadir cobertura", which the data
+              does not support. A scope gets no row until its first attempt
+              or budget-skip, and coverage circles deliberately under-report
+              (see `_MUNICIPAL_COVERAGE_RADIUS_KM`), so a perfectly covered
+              area lands here for a run or two — and the correct advice then
+              is "wait one run", the opposite of what was shown. */}
+          {diagnosis.areaCoverage.kind === "never_crawled" && (
+            <p style={{ margin: "4px 0 0" }}>
+              No hay constancia de que se haya rastreado esta zona todavía. Si acabas de crear el perfil, puede
+              aparecer tras una de las próximas ejecuciones; si sigue igual, probablemente falte cobertura para
+              esta zona.
+            </p>
+          )}
+          {diagnosis.areaCoverage.kind === "awaiting_turn" && (
+            <p style={{ margin: "4px 0 0" }}>
+              Esta zona sí está cubierta ({diagnosis.areaCoverage.connectorNames.join(", ")}), pero todavía no le
+              ha tocado el turno de rastreo. Debería rastrearse en una de las próximas ejecuciones.
+            </p>
+          )}
+          {/* PR #228 review, finding 1: an attempted-but-never-successful
+              scope must never render as "se rastreó el <fecha>" — nothing
+              was ever retrieved, so "no hay resultados" says nothing about
+              real inventory. */}
+          {diagnosis.areaCoverage.kind === "attempted_never_succeeded" && (
+            <p style={{ margin: "4px 0 0" }}>
+              Se ha intentado rastrear esta zona ({diagnosis.areaCoverage.connectorNames.join(", ")}), la última
+              vez el {new Date(diagnosis.areaCoverage.lastAttemptedAt).toLocaleString("es-ES")}, pero ningún
+              rastreo ha llegado a completarse. La falta de resultados no significa que no haya inmuebles.
+            </p>
+          )}
           <p style={{ margin: "4px 0 0", color: "var(--fg-subtle)" }}>
-            {diagnosis.connectorLastRunFinishedAt === null
-              ? "Ningún conector ha completado una ejecución todavía."
-              : `Última ejecución de los conectores: ${new Date(diagnosis.connectorLastRunFinishedAt).toLocaleString("es-ES")}.`}
+            {diagnosis.areaCoverage.kind === "crawled"
+              ? `Esta zona se rastreó por última vez el ${new Date(diagnosis.areaCoverage.lastCrawledAt).toLocaleString("es-ES")}.`
+              : diagnosis.connectorLastRunFinishedAt === null
+                ? "Ningún conector ha completado una ejecución todavía."
+                : `Última ejecución de los conectores: ${new Date(diagnosis.connectorLastRunFinishedAt).toLocaleString("es-ES")}.`}
           </p>
         </>
       )}
