@@ -73,6 +73,42 @@ def test_milanuncios_rental_does_not_claim_full_inventory_coverage():
     assert MilanunciosRentalConnector.discovers_full_inventory is False
 
 
+def test_milanuncios_rental_does_not_inherit_the_sale_connectors_skip_window():
+    """Opus review, PR #225. This class subclasses `MilanunciosConnector`,
+    so issue #179 turning skip-if-seen ON there (24h) would have silently
+    turned it on for the rental source too — a live behaviour change to a
+    connector for which not one row of supporting evidence exists (every
+    fact in D-028 is `source='milanuncios'`).
+
+    The invariant this pins is deliberately expressed BOTH ways, for the
+    same reason `test_milanuncios_rental_rate_limit_stays_below_the_sale_
+    connectors` above does:
+
+    - `== 0` pins today's deliberate value (skip-if-seen off, matching the
+      base `Connector` default) so silently removing the explicit
+      declaration and falling back to inheritance is caught.
+    - the `vars()` check on the *class dictionary* is the part that
+      survives the parent changing its own number again: it asserts this
+      class declares the attribute in its own right, rather than reading
+      through to whatever `MilanunciosConnector` happens to hold. A future
+      edit that deletes the line here would still satisfy `== 0` for
+      exactly as long as the parent also happened to be 0 — which is the
+      silent-inheritance failure mode this whole test exists to catch.
+
+    Deliberately NOT asserted: `!= MilanunciosConnector.min_refetch_
+    interval_seconds`. That reads well but fails for the wrong reason — if
+    the sale connector ever legitimately returns to 0 the two become equal
+    with no inheritance risk whatsoever, and the assertion would fire on a
+    change to a file this test isn't about.
+    """
+    assert MilanunciosRentalConnector.min_refetch_interval_seconds == 0
+    assert "min_refetch_interval_seconds" in vars(MilanunciosRentalConnector), (
+        "min_refetch_interval_seconds must be declared explicitly on "
+        "MilanunciosRentalConnector, not inherited from MilanunciosConnector "
+        "— same per-connector-safety-property rule as discovers_full_inventory"
+    )
+
+
 class TestDiscover:
     def test_discover_requests_the_rental_category_url_not_sale(self):
         """The one real behavioural difference from MilanunciosConnector:

@@ -13,7 +13,14 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from etl.connectors.base import ConnectorError, ConnectorScope, RawListing
+from etl import orchestrator
+from etl.connectors.base import (
+    CanonicalListingVersion,
+    ConnectorError,
+    ConnectorScope,
+    RawListing,
+    Throttle,
+)
 from etl.connectors.geography import UnresolvableGeographyError
 from etl.connectors.milanuncios import (
     MilanunciosConnector,
@@ -87,6 +94,321 @@ def test_milanuncios_does_not_claim_full_inventory_coverage():
     discover() only reads page 1 of one sale category (robots.txt disallows
     pagination here too), against inventory in the thousands."""
     assert MilanunciosConnector.discovers_full_inventory is False
+
+
+class TestSkipIfSeenBudget:
+    """Issue #179. The site caps this connector at ~5 detail fetches per run
+    (16 of 18 circuit-open runs in a 38h production window were identical at
+    `discovered=41 fetched=5 errors=5`). With skip-if-seen off, discover()'s
+    stable sorted order meant all 5 went to the same front every run: 24
+    distinct ids fetched across ~90 attempts. Turning it on lets the budget
+    reach never-fetched listings, which `_should_skip_fetch` rule 1 always
+    admits."""
+
+    def test_declares_a_24h_refetch_window(self):
+        """Pins the value. What this does NOT do is prove the value has the
+        effect D-028 claims — for that see
+        TestSkipIfSeenAdvancesTheFetchFrontier below, which is the test
+        that actually exercises the skip x circuit-breaker interaction.
+
+        (A companion `test_window_is_enabled_not_merely_defined` asserting
+        `> 0` lived here and was removed on Opus review, PR #225: `== 86400`
+        already implies `> 0`, so it was a second test pinning a fact the
+        first one pins, justified against a hypothetical `>= 0` test that
+        does not exist in this file.)"""
+        assert MilanunciosConnector.min_refetch_interval_seconds == 24 * 60 * 60
+
+    def test_has_no_discovery_price_escape_hatch(self):
+        """The documented COST of the line above, asserted so it cannot be
+        forgotten. `_should_skip_fetch` rule 5 re-fetches immediately when a
+        discovery-time price disagrees with the stored one — but that rule
+        needs a non-empty discovered_prices(), which this connector cannot
+        supply (its `ad` entries carry no price field, and every live
+        re-check has been bot-blocked). So a price change on an
+        already-fetched listing can go unseen for up to the 24h window.
+        Accepted deliberately: today most discovered listings are never
+        fetched at all. If this assertion ever starts failing because a real
+        discovery price landed, revisit the trade-off comment on the
+        connector — the asymmetry with Fotocasa would be gone.
+
+        NOT mutation-verified by reverting `min_refetch_interval_seconds` to
+        0, and it never could be: this asserts `discovered_prices() == {}`,
+        which is independent of that line. PR #225's body originally claimed
+        all three tests in this class failed under that mutation; two did.
+        Recorded here rather than quietly fixed, because "a check that
+        cannot fail" is this repo's named defect class and an unverified
+        verification claim is the same thing one level up. This test is a
+        legitimate tripwire for a DIFFERENT change (a real discovery price
+        appearing) — it just isn't evidence for the window."""
+        assert MilanunciosConnector().discovered_prices() == {}
+
+
+_BUDGET_PROBE_PROFILE = "milanuncios-fetch-budget-probe-profile"
+
+# The site's observed per-run detail-fetch allowance (D-028: 16 of 18
+# circuit-open runs were byte-identical at `fetched=5 errors=5`).
+_SITE_FETCH_BUDGET = 5
+
+
+def _apply_schema_with_active_profile(conn) -> None:
+    """`run_all_connectors` derives discovery scope from active
+    `search_profile` rows and does nothing at all with zero of them
+    (issue #71), so the frontier tests below need one to exist. The probe
+    connector ignores `scope` entirely, so the geography is irrelevant —
+    only that some active profile is present. Idempotent (checks by name)
+    so re-running against the session database doesn't accumulate rows."""
+    _apply_schema(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM search_profile WHERE name = %s AND archived_at IS NULL",
+            (_BUDGET_PROBE_PROFILE,),
+        )
+        if cur.fetchone() is None:
+            cur.execute(
+                "INSERT INTO search_profile (name, scope) VALUES (%s, %s)",
+                (
+                    _BUDGET_PROBE_PROFILE,
+                    (
+                        '{"geography": {"type": "radius", '
+                        '"center": [40.4168, -3.7038], "radius_km": 10}}'
+                    ),
+                ),
+            )
+    conn.commit()
+
+
+def _cleanup_source(conn, source: str, run_ids: list[int]) -> None:
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM connector_config WHERE connector_name = %s", (source,))
+        cur.execute(
+            "DELETE FROM connector_run_results WHERE connector_name = %s", (source,)
+        )
+        cur.execute(
+            "DELETE FROM listing_price_history WHERE listing_id IN "
+            "(SELECT id FROM listing WHERE source = %s)",
+            (source,),
+        )
+        cur.execute(
+            "DELETE FROM listing_status_event WHERE listing_id IN "
+            "(SELECT id FROM listing WHERE source = %s)",
+            (source,),
+        )
+        cur.execute("SELECT property_id FROM listing WHERE source = %s", (source,))
+        property_ids = [row[0] for row in cur.fetchall()]
+        cur.execute("DELETE FROM listing WHERE source = %s", (source,))
+        if property_ids:
+            cur.execute("DELETE FROM property WHERE id = ANY(%s)", (property_ids,))
+        for run_id in run_ids:
+            cur.execute("DELETE FROM connector_runs WHERE id = %s", (run_id,))
+    conn.commit()
+
+
+class _MilanunciosFetchBudgetProbe(MilanunciosConnector):
+    """A no-network stand-in that reproduces the ONE production behaviour
+    D-028 turns on: Milanuncios answers roughly `_SITE_FETCH_BUDGET` detail
+    fetches per run and bot-blocks every one after that, and the allowance
+    resets by the next hourly run.
+
+    It subclasses `MilanunciosConnector` deliberately rather than using
+    `DummyConnector`: it must inherit the REAL
+    `min_refetch_interval_seconds`, so reverting that line in
+    `milanuncios.py` makes the frontier test below genuinely fail. A
+    DummyConnector carrying its own copy of `86400` would test the
+    orchestrator's generic policy (already covered by
+    `test_orchestrator.py::TestSkipIfSeenIntegration`) while being
+    completely blind to this connector's own value — the exact "a test
+    that passes by not testing the thing" failure mode this repo names.
+
+    Only the three site-touching methods are replaced. The breaker settings
+    are inherited too (`circuit_breaker_error_rate=0.30`,
+    `min_attempts=10`), which is what makes 5 successes + 5 errors trip it
+    at attempt 10 — reproducing production's `fetched=5 errors=5` exactly
+    rather than by a tuned test constant.
+    """
+
+    name = "milanuncios-fetch-budget-probe"
+    # Not what's under test; keeps the run fast rather than pacing at 2/min.
+    rate_limit_per_minute = 6000
+
+    def __init__(self, external_ids: tuple[str, ...]) -> None:
+        self.external_ids = external_ids
+        self.fetch_calls: list[str] = []
+        self.calls_per_run: list[list[str]] = []
+        self._successes_this_run = 0
+
+    def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
+        # One scope per run, so discover() firing IS the start-of-run
+        # signal — this is where the site's per-run allowance resets.
+        self._successes_this_run = 0
+        self.calls_per_run.append([])
+        # `sorted` mirrors the real discover()'s stable ordering, which is
+        # precisely why the un-skipped budget kept re-walking the same front.
+        return sorted(self.external_ids)
+
+    def fetch_detail(self, external_id: str, throttle: Throttle) -> RawListing:
+        self.fetch_calls.append(external_id)
+        self.calls_per_run[-1].append(external_id)
+        if self._successes_this_run >= _SITE_FETCH_BUDGET:
+            raise ConnectorError(
+                f"simulated Milanuncios bot-interruption for {external_id} "
+                f"(per-run allowance of {_SITE_FETCH_BUDGET} already spent)"
+            )
+        self._successes_this_run += 1
+        return RawListing(
+            external_id=external_id,
+            source=self.name,
+            raw={"price": 150000},
+        )
+
+    def normalize(self, raw: RawListing) -> CanonicalListingVersion:
+        return CanonicalListingVersion(
+            external_id=raw.external_id,
+            source=raw.source,
+            url=f"https://www.milanuncios.com/x/x-{raw.external_id}.htm",
+            listing_kind="particular",
+            status="active",
+            current_price=Decimal(str(raw.raw["price"])),
+            description="Probe listing.",
+            photo_urls=(),
+            contact_raw=None,
+            address="Probe address",
+            lat=None,
+            lon=None,
+            property_type="piso",
+            m2_built=None,
+            m2_useful=None,
+            rooms=None,
+            bathrooms=None,
+            floor=None,
+            year_built=None,
+            has_elevator=None,
+            energy_rating=None,
+        )
+
+
+class TestSkipIfSeenAdvancesTheFetchFrontier:
+    """Issue #179 / D-028's actual thesis, tested as BEHAVIOUR rather than
+    as a constant (Opus review, PR #225 — the original three tests all
+    asserted `min_refetch_interval_seconds == 86400`, which only detects
+    someone editing a line already visible in the diff).
+
+    The claim under test is an INTERACTION between two mechanisms that no
+    single-mechanism test reaches: the site caps detail fetches at ~5 per
+    run and the circuit breaker trips on the errors that follow, so what
+    matters is not "does skipping work" (issue #143 covers that) but
+    "does the surviving budget land on listings we have never fetched,
+    instead of re-walking the same sorted front forever".
+
+    Both tests below run the identical scenario and differ only in whether
+    the window is on, so the pair also documents the pathology D-028
+    describes instead of merely asserting the cure.
+    """
+
+    # 20 ids, zero-padded so string-sort order == numeric order, making
+    # "the first five" and "the next five" unambiguous under discover()'s
+    # `sorted()`.
+    _IDS = tuple(f"probe-{i:02d}" for i in range(1, 21))
+
+    def _persisted_ids(self, conn, source: str) -> set[str]:
+        with conn.cursor() as cur:
+            cur.execute("SELECT external_id FROM listing WHERE source = %s", (source,))
+            return {row[0] for row in cur.fetchall()}
+
+    def test_second_run_fetches_the_next_listings_not_the_same_front(self, pg_conn):
+        """The regression guard D-028 rests on. Run 1 spends its allowance
+        on ids 01-05 (then 06-10 error and trip the breaker); run 2 must
+        skip 01-05 as fresh and spend the same allowance on 06-10, doubling
+        coverage. Fails if `MilanunciosConnector.min_refetch_interval_seconds`
+        goes back to 0, if `run_connector`'s skip check moves after the
+        breaker check, or if discover()'s ordering stops being stable."""
+        _apply_schema_with_active_profile(pg_conn)
+        connector = _MilanunciosFetchBudgetProbe(self._IDS)
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            _cleanup_source(pg_conn, connector.name, [])
+
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            first_run = list(connector.calls_per_run[0])
+            # 5 succeed, the next 5 error, the breaker trips at attempt 10.
+            assert first_run == list(self._IDS[:10]), (
+                "run 1 should walk the sorted front until the breaker trips"
+            )
+            assert self._persisted_ids(pg_conn, connector.name) == set(self._IDS[:5])
+
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            second_run = list(connector.calls_per_run[1])
+
+            # THE point of the whole PR:
+            assert set(second_run).isdisjoint(set(self._IDS[:5])), (
+                "run 2 re-fetched listings run 1 already got — the 5-fetch "
+                "budget is being spent on the same front again, which is "
+                "exactly the pathology issue #179 measured in production "
+                f"(24 distinct ids across ~90 attempts). Run 2 fetched: {second_run}"
+            )
+            assert second_run == list(self._IDS[5:15]), (
+                "run 2 should resume at the first never-fetched id (rule 1 "
+                "always admits those) and run until the breaker trips again"
+            )
+            assert self._persisted_ids(pg_conn, connector.name) == set(
+                self._IDS[:10]
+            ), "coverage must have doubled from 5 to 10 distinct listings"
+
+            # The skips are real skips, not silent no-ops, and they cost
+            # the breaker nothing (`continue` happens before any breaker
+            # interaction) — which is why the budget survives to be spent
+            # further down the list.
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT skipped_count, fetched_count, status "
+                    "FROM connector_run_results "
+                    "WHERE run_id = %s AND connector_name = %s",
+                    (run_ids[1], connector.name),
+                )
+                skipped_count, fetched_count, status = cur.fetchone()
+            assert skipped_count == 5
+            assert fetched_count == _SITE_FETCH_BUDGET
+            assert status == "circuit_open"
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup_source(pg_conn, connector.name, run_ids)
+
+    def test_without_the_window_the_same_front_is_refetched_every_run(self, pg_conn):
+        """The counterfactual, so the test above is a comparison and not
+        just an assertion. Identical scenario with the window forced OFF
+        via `connector_config` (an operator-reachable setting, so this is
+        also a real supported configuration and not only a thought
+        experiment): every run re-walks ids 01-10 and coverage stays frozen
+        at 5 forever, reproducing the production finding that ~90 fetch
+        attempts reached only 24 distinct ids."""
+        _apply_schema_with_active_profile(pg_conn)
+        connector = _MilanunciosFetchBudgetProbe(self._IDS)
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            _cleanup_source(pg_conn, connector.name, [])
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO connector_config "
+                    "(connector_name, min_refetch_interval_seconds) VALUES (%s, %s)",
+                    (connector.name, 0),
+                )
+            pg_conn.commit()
+
+            for _ in range(3):
+                run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            assert connector.calls_per_run == [list(self._IDS[:10])] * 3, (
+                "with the window off, all three runs spend the identical "
+                "budget on the identical front"
+            )
+            assert self._persisted_ids(pg_conn, connector.name) == set(self._IDS[:5]), (
+                "coverage never advances past the first 5 — 30 fetch "
+                "attempts, 5 distinct listings"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup_source(pg_conn, connector.name, run_ids)
 
 
 class TestRateLimitMeasurement:
