@@ -17,6 +17,7 @@
 | [D-003](docs/decisions/D-003-review-policy.md) | Each task PR gets one fresh review pass; each phase gets one fresh cross-task review pass. Once per checkpoint — no iterating a round until "no more feedback." |
 | [D-004](docs/decisions/D-004-no-worker-workflows.md) | Don't push to `.github/workflows/` without a credential that has `workflow` OAuth scope. Never bypass via the GitHub API — leave YAML staged for a human to commit. |
 | [D-009](docs/decisions/D-009-restart-burst-guard.md) | A full sweep skips if a completed run finished within `etl.min_restart_sweep_interval_seconds` ago (crash-loop guard). |
+| [D-023](docs/decisions/D-023-decision-id-collision-ci-check.md) | `scripts/tests/test_decision_ids.py` enforces unique decision IDs, matching frontmatter, resolvable `DECISIONS.md` links, and no stale cross-references. Sequential IDs stay — no scheme change. |
 
 ## Data / connectors
 

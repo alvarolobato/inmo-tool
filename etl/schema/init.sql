@@ -351,7 +351,7 @@ CREATE TABLE IF NOT EXISTS search_profile (
 -- dropping it forces exactly that mistake to surface immediately as a NOT
 -- NULL violation at INSERT time, instead of silently persisting a row that
 -- toSearchProfileRowSafe (lib/db/profiles.ts) can only detect after the fact.
--- See docs/decisions/D-010-search-profile-scope-no-default.md.
+-- See docs/decisions/D-013-search-profile-scope-no-default.md.
 ALTER TABLE search_profile ALTER COLUMN scope DROP DEFAULT;
 
 -- Issue #191 (design: docs comment on #176 §1/§4). Two facts the redesigned

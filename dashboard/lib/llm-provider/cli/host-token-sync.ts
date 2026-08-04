@@ -1,7 +1,8 @@
 /**
  * On-demand trigger for the host's launchd `claude-token-sync` agent.
  *
- * Background — see docs/decisions/D-025-oauth-single-refresher.md for the full context.
+ * Background — see docs/decisions/archive/D-025-oauth-single-refresher.md for the full context
+ * (archived source-project decision; the single-refresher rule it describes still applies here).
  * The macOS Keychain is the single source of truth for the Claude OAuth
  * payload, refreshed only by the host `claude` CLI during interactive use.
  * A launchd agent on the host mirrors the Keychain into
