@@ -121,9 +121,40 @@ test("lists registered connectors with no error surface", async ({ page }) => {
   await expect(page.getByTestId(`status-${CONNECTOR}`)).toContainText("activo");
 });
 
+test("rows are compact by default and expand on click to reveal detail (issue #264)", async ({
+  page,
+}) => {
+  await page.goto("/etl/connectors");
+  await expect(page.getByTestId("connectors-page")).toBeVisible();
+
+  const card = page.getByTestId(`connector-${CONNECTOR}`);
+  await expect(card).toBeVisible();
+
+  // Collapsed by default: the full detail region is not rendered, so the list
+  // stays skimmable (the whole point of #264).
+  await expect(page.getByTestId(`connector-detail-${CONNECTOR}`)).toHaveCount(0);
+  await expect(page.getByTestId(`expand-${CONNECTOR}`)).toHaveAttribute("aria-expanded", "false");
+
+  // Expanding one row reveals its configuration without navigating away.
+  await page.getByTestId(`expand-${CONNECTOR}`).click();
+  await expect(page.getByTestId(`expand-${CONNECTOR}`)).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByTestId(`connector-detail-${CONNECTOR}`)).toBeVisible();
+  await expect(card.getByTestId("scope-summary")).toBeVisible();
+
+  // Still no error surface after the interaction.
+  await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
+  await expect(page.getByText("Error al cargar")).toHaveCount(0);
+
+  // And it collapses again on a second click.
+  await page.getByTestId(`expand-${CONNECTOR}`).click();
+  await expect(page.getByTestId(`connector-detail-${CONNECTOR}`)).toHaveCount(0);
+});
+
 test("shows which active profiles the default scope derives from", async ({ page }) => {
   await page.goto("/etl/connectors");
   const card = page.getByTestId(`connector-${CONNECTOR}`);
+  // Scope detail now lives behind the chevron (issue #264) — expand first.
+  await card.getByTestId(`expand-${CONNECTOR}`).click();
   // The visibility gap issue #96 was about: an operator could not see what
   // "derived from profiles" actually resolved to without reading ETL logs.
   await expect(card.getByTestId("scope-summary")).toContainText(PROFILE_NAME);
@@ -134,6 +165,8 @@ test("shows which active profiles the default scope derives from", async ({ page
 test("a capture-only connector offers no scope or filter controls", async ({ page }) => {
   await page.goto("/etl/connectors");
   const card = page.getByTestId(`connector-${CAPTURE_ONLY}`);
+  // Expand to reach the detail region (issue #264).
+  await card.getByTestId(`expand-${CAPTURE_ONLY}`).click();
   await expect(card.getByTestId("scope-summary")).toContainText("Solo captura");
   // Controls that could never take effect must not be rendered at all.
   await expect(page.getByTestId(`edit-scope-${CAPTURE_ONLY}`)).toHaveCount(0);
@@ -181,6 +214,8 @@ test("disabling a connector in the UI actually stops the ETL running it", async 
 test("saving a rooms filter persists exactly what the ETL will read", async ({ page }) => {
   await page.goto("/etl/connectors");
 
+  // The rooms filter lives in the expanded detail (issue #264).
+  await page.getByTestId(`expand-${CONNECTOR}`).click();
   await page.getByTestId(`rooms-${CONNECTOR}`).fill("2");
   await page.getByTestId(`save-rooms-${CONNECTOR}`).click();
 
