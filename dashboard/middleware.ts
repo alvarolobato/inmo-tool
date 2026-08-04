@@ -32,8 +32,12 @@ function isAdminUiPath(pathname: string): boolean {
  * the small public allow-list in `lib/api-auth-policy.ts`.
  *
  * Gate-by-default is deliberate — see that module for why.
+ *
+ * Exported so `dashboard/__tests__/api-auth-coverage.test.ts` can assert
+ * against the actual runtime gating decision rather than re-deriving an
+ * equivalent (and, per #164, accidentally tautological) predicate of its own.
  */
-function isGatedApiPath(pathname: string): boolean {
+export function isGatedApiPath(pathname: string): boolean {
   return isApiPath(pathname) && !isPublicApiPath(pathname);
 }
 

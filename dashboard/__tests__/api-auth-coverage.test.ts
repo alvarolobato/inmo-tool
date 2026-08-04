@@ -13,8 +13,26 @@ import { describe, it, expect } from "vitest";
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { isApiPath, isPublicApiPath, PUBLIC_API_PATHS } from "@/lib/api-auth-policy";
+import { isGatedApiPath } from "@/middleware";
 
 const API_DIR = join(__dirname, "..", "app", "api");
+
+/**
+ * The complete, reviewed set of routes intentionally reachable without the
+ * admin credential.
+ *
+ * Deliberately maintained here as an independent literal rather than by
+ * importing `PUBLIC_API_PATHS` a second time. `PUBLIC_API_PATHS` is what
+ * `isGatedApiPath` (the thing under test) is itself built from — comparing it
+ * against itself is exactly the tautology that made this suite vacuous before
+ * (#164): `isGatedApiPath` would echo whatever `PUBLIC_API_PATHS` said, so no
+ * edit to the policy module could ever be caught by this test. Requiring a
+ * *second*, hand-maintained list means opening up a route needs a deliberate,
+ * reviewable edit in two places, and a route that is public per the policy
+ * but missing here fails loudly instead of being silently confirmed by its
+ * own source.
+ */
+const EXPECTED_PUBLIC_API_PATHS: readonly string[] = ["/api/health", "/api/ready"];
 
 /** Recursively collect every `route.ts` under `app/api`. */
 function collectRouteFiles(dir: string, acc: string[] = []): string[] {
@@ -53,23 +71,32 @@ describe("API auth coverage", () => {
       const pathname = routeFileToPathname(file);
       // Every route must live under /api/ ...
       expect(isApiPath(pathname), `${pathname} is not recognised as an API path`).toBe(true);
-      // ... and is gated unless explicitly allow-listed.
-      const gated = isApiPath(pathname) && !isPublicApiPath(pathname);
-      if (!gated && !isPublicApiPath(pathname)) ungated.push(pathname);
+      // ... and the *actual* middleware decision (not a predicate re-derived
+      // from the same policy module) must gate it unless it is on the
+      // independently-maintained EXPECTED_PUBLIC_API_PATHS list above.
+      const gated = isGatedApiPath(pathname);
+      const explicitlyPublic = EXPECTED_PUBLIC_API_PATHS.includes(pathname);
+      if (!gated && !explicitlyPublic) ungated.push(pathname);
     }
     expect(ungated).toEqual([]);
   });
 
   it("keeps the public allow-list minimal and intentional", () => {
-    // Deliberately strict: growing this list is a security decision that should
-    // require editing this assertion, not just the policy module.
-    expect([...PUBLIC_API_PATHS].sort()).toEqual(["/api/health", "/api/ready"]);
+    // Deliberately strict: growing PUBLIC_API_PATHS is a security decision
+    // that should require editing EXPECTED_PUBLIC_API_PATHS above too — not
+    // just the policy module — so it fails loudly if the two drift apart.
+    expect([...PUBLIC_API_PATHS].sort()).toEqual([...EXPECTED_PUBLIC_API_PATHS].sort());
   });
 
   it("only allow-lists routes that actually exist on disk", () => {
     const existing = new Set(routeFiles.map(routeFileToPathname));
     for (const pub of PUBLIC_API_PATHS) {
       expect(existing.has(pub), `${pub} is allow-listed but has no route file`).toBe(true);
+    }
+    for (const pub of EXPECTED_PUBLIC_API_PATHS) {
+      expect(existing.has(pub), `${pub} is on the reviewed allow-list but has no route file`).toBe(
+        true,
+      );
     }
   });
 
