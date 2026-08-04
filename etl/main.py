@@ -255,6 +255,21 @@ def main() -> None:
     )
     manual_trigger_thread.start()
 
+    # Worklist sitemap-seed polling (issue #260): the worklist page's
+    # "Refrescar sitemap" button writes a capture_worklist_seed_trigger row;
+    # this thread picks it up and fetches the portal's public sitemap
+    # (discovery-only — two static GETs, never a detail page or the guest RPC)
+    # to upsert pending worklist rows. Same "own short interval, own thread"
+    # reasoning as the three threads above.
+    from etl import worklist_seed
+
+    worklist_seed_thread = threading.Thread(
+        target=worklist_seed.run_worklist_seed_poll_loop,
+        args=(lambda: postgres.get_connection(config),),
+        daemon=True,
+    )
+    worklist_seed_thread.start()
+
     if not registry_synced:
         # Same reasoning as the --once branch: without the seeded rows, every
         # connector would sweep enabled-by-default. Exit rather than idle so

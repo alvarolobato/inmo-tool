@@ -1278,6 +1278,13 @@ CREATE TABLE IF NOT EXISTS capture_worklist (
                                     CHECK (status IN ('pending','captured','failed','skipped')),
     added_via          TEXT         NOT NULL DEFAULT 'manual'
                                     CHECK (added_via IN ('sitemap','manual','derived')),
+    -- The portal's own asset id, parsed from the URL slug at seed time
+    -- (issue #260). Populated for sitemap-seeded rows (e.g. Cimenta2's
+    -- Salesforce record id); NULL for manually-pasted rows whose portal has
+    -- no stable id convention. Purely informational here — correlation is by
+    -- `match_key`, never by this — but it lets Phase B/E key a captured row
+    -- back to the portal's catalogue without re-parsing the URL.
+    external_id        TEXT,
     note               TEXT,
     -- Which extension capture satisfied this row (NULL until captured).
     matched_capture_id BIGINT       REFERENCES extension_capture(id) ON DELETE SET NULL,
@@ -1299,6 +1306,45 @@ CREATE TRIGGER trg_capture_worklist_set_updated_at
     BEFORE UPDATE ON capture_worklist
     FOR EACH ROW
     EXECUTE FUNCTION set_updated_at();
+
+-- Forward-compat: an older DB may already have capture_worklist without the
+-- sitemap-seeding column (issue #260). IF NOT EXISTS keeps this idempotent.
+ALTER TABLE capture_worklist ADD COLUMN IF NOT EXISTS external_id TEXT;
+
+-- ── Worklist sitemap-seed trigger (issue #260) ──────────────────────────────
+-- The same "queue table, not a synchronous call" transport the dashboard uses
+-- for ad-hoc connector runs (etl_manual_trigger) and extension captures: the
+-- worklist page's "Refrescar sitemap" button can't run a sitemap sweep in
+-- process — that's Python in a separate container — so it writes a row here
+-- and etl/worklist_seed.py's poll loop picks it up, fetches the portal's
+-- public sitemap (ONE static GET, discovery-only — never a listing/detail page
+-- or the guest RPC; D-034/D-035), and upserts `pending` `sitemap` worklist
+-- rows. A deliberately separate table from etl_manual_trigger: that one's
+-- single-pending-row index and connector-name validation are about connector
+-- sweeps, and a worklist seed must not block (or be blocked by) one.
+CREATE TABLE IF NOT EXISTS capture_worklist_seed_trigger (
+    id            SERIAL       PRIMARY KEY,
+    source_portal TEXT         NOT NULL,
+    status        TEXT         NOT NULL DEFAULT 'pending'
+                               CHECK (status IN ('pending','running','done','failed')),
+    requested_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    picked_up_at  TIMESTAMPTZ,
+    finished_at   TIMESTAMPTZ,
+    -- How many NEW worklist rows the seed inserted (upsert ignores dupes).
+    added_count   INTEGER,
+    error_msg     TEXT,
+    triggered_by  TEXT
+);
+
+-- At most one pending seed per portal at a time, so a double-click (or the UI
+-- polling and re-posting) is idempotent: the second INSERT trips this and the
+-- route reports the already-queued one (same posture as etl_manual_trigger).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_worklist_seed_trigger_single_pending
+    ON capture_worklist_seed_trigger (source_portal) WHERE status = 'pending';
+
+-- Supports frequent polling/claim of the oldest pending seed request.
+CREATE INDEX IF NOT EXISTS idx_worklist_seed_trigger_pending
+    ON capture_worklist_seed_trigger (requested_at, id) WHERE status = 'pending';
 
 
 -- ============================================================
@@ -1863,3 +1909,4 @@ ANALYZE property_merge_log;
 ANALYZE suggested_merge;
 ANALYZE extension_capture;
 ANALYZE capture_worklist;
+ANALYZE capture_worklist_seed_trigger;

@@ -5,12 +5,26 @@ import Link from "next/link";
 import { ErrorDisplay } from "@/components/ErrorDisplay";
 import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
-import { firstPendingUrl } from "@/lib/worklist";
+import {
+  firstPendingUrl,
+  SITEMAP_SEEDABLE_PORTALS,
+  WORKLIST_STATUSES,
+} from "@/lib/worklist";
 import type {
   WorklistPortalSummary,
   WorklistRow,
   WorklistStatus,
 } from "@/lib/worklist";
+
+type StatusFilter = WorklistStatus | "all";
+
+const FILTER_LABEL: Record<StatusFilter, string> = {
+  all: "Todas",
+  pending: "Pendientes",
+  captured: "Capturadas",
+  failed: "Fallidas",
+  skipped: "Omitidas",
+};
 
 /**
  * Guided capture worklist (issue #237) — "the page with all the places to
@@ -66,6 +80,9 @@ export default function CapturaWorklistPage() {
   const [pasteText, setPasteText] = useState("");
   const [adding, setAdding] = useState(false);
   const [addResult, setAddResult] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [seeding, setSeeding] = useState(false);
+  const [seedResult, setSeedResult] = useState<string | null>(null);
 
   const fetchWorklist = useCallback(async () => {
     setLoading(true);
@@ -160,6 +177,51 @@ export default function CapturaWorklistPage() {
     window.open(nextPendingUrl, "_blank", "noopener,noreferrer");
   }, [nextPendingUrl]);
 
+  // "Refrescar sitemap" (issue #260): signal the ETL to re-seed the worklist
+  // from a portal's public sitemap. It's async — the ETL poll loop fetches the
+  // sitemap and upserts pending rows within ~10s — so this only confirms the
+  // request was queued; the operator refreshes the list to see new rows.
+  const handleSeed = useCallback(
+    async (portal: string) => {
+      setSeeding(true);
+      setSeedResult(null);
+      setError(null);
+      try {
+        const res = await fetch("/api/etl/worklist/seed", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ portal }),
+        });
+        const body = await res.json().catch(() => null);
+        if (!res.ok) {
+          if (res.status === 409) {
+            setSeedResult("Ya hay una siembra en curso para este portal.");
+            return;
+          }
+          setError(isApiErrorResponse(body) ? body : "No se pudo lanzar la siembra");
+          return;
+        }
+        setSeedResult(
+          `Siembra de ${portal} encolada. Se rellenará en unos segundos; ` +
+            "pulsa Actualizar para ver las URLs nuevas.",
+        );
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "No se pudo lanzar la siembra");
+      } finally {
+        setSeeding(false);
+      }
+    },
+    [],
+  );
+
+  const visibleRows = useMemo(
+    () =>
+      statusFilter === "all"
+        ? rows
+        : rows.filter((r) => r.status === statusFilter),
+    [rows, statusFilter],
+  );
+
   return (
     <main style={{ padding: 24, maxWidth: 980 }} data-testid="worklist-page">
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -213,11 +275,56 @@ export default function CapturaWorklistPage() {
         >
           Abrir siguiente pendiente →
         </button>
+        <button
+          data-testid="worklist-refresh"
+          onClick={fetchWorklist}
+          disabled={loading}
+          style={{
+            padding: "6px 16px",
+            fontSize: 13,
+            fontWeight: 600,
+            borderRadius: 8,
+            border: "1px solid var(--border)",
+            background: "var(--bg-1)",
+            color: "var(--fg)",
+            cursor: loading ? "not-allowed" : "pointer",
+          }}
+        >
+          Actualizar
+        </button>
+        <button
+          data-testid="worklist-refresh-sitemap"
+          onClick={() => handleSeed(SITEMAP_SEEDABLE_PORTALS[0])}
+          disabled={seeding}
+          title="Rellena la lista desde el sitemap público de Cimenta2 (solo descubrimiento)"
+          style={{
+            padding: "6px 16px",
+            fontSize: 13,
+            fontWeight: 600,
+            borderRadius: 8,
+            border: "1px solid var(--border)",
+            background: "var(--bg-1)",
+            color: "var(--fg)",
+            cursor: seeding ? "not-allowed" : "pointer",
+            opacity: seeding ? 0.6 : 1,
+          }}
+        >
+          {seeding ? "Sembrando…" : "Refrescar sitemap (Cimenta2)"}
+        </button>
         <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>
           Abre un anuncio cada vez que pulsas. Navega tú y espera a que cargue: la
           extensión lo captura sola.
         </span>
       </section>
+
+      {seedResult && (
+        <p
+          data-testid="worklist-seed-result"
+          style={{ fontSize: 13, color: "var(--fg-muted)", marginTop: 8 }}
+        >
+          {seedResult}
+        </p>
+      )}
 
       {/* ── Progress summary ─────────────────────────────────────────── */}
       <section data-testid="worklist-summary" style={{ marginTop: 16 }}>
@@ -226,33 +333,60 @@ export default function CapturaWorklistPage() {
             Aún no hay URLs en la lista.
           </p>
         ) : (
-          summaries.map((s) => (
-            <div
-              key={s.source_portal}
-              data-testid={`worklist-summary-${s.source_portal}`}
-              style={{
-                display: "flex",
-                gap: 16,
-                alignItems: "baseline",
-                padding: "8px 12px",
-                border: "1px solid var(--border)",
-                borderRadius: 8,
-                marginBottom: 8,
-                fontSize: 13,
-                flexWrap: "wrap",
-              }}
-            >
-              <strong style={{ color: "var(--fg)", textTransform: "capitalize" }}>
-                {s.source_portal}
-              </strong>
-              <span style={{ color: "var(--fg)" }}>
-                {s.captured}/{s.total} capturadas
-              </span>
-              <span style={{ color: "var(--fg-muted)" }}>{s.pending} pendientes</span>
-              {s.failed > 0 && <span style={{ color: "#dc2626" }}>{s.failed} fallidas</span>}
-              {s.skipped > 0 && <span style={{ color: "var(--fg-muted)" }}>{s.skipped} omitidas</span>}
-            </div>
-          ))
+          summaries.map((s) => {
+            const pct = s.total > 0 ? Math.round((s.captured / s.total) * 100) : 0;
+            return (
+              <div
+                key={s.source_portal}
+                data-testid={`worklist-summary-${s.source_portal}`}
+                style={{
+                  padding: "8px 12px",
+                  border: "1px solid var(--border)",
+                  borderRadius: 8,
+                  marginBottom: 8,
+                  fontSize: 13,
+                }}
+              >
+                <div style={{ display: "flex", gap: 16, alignItems: "baseline", flexWrap: "wrap" }}>
+                  <strong style={{ color: "var(--fg)", textTransform: "capitalize" }}>
+                    {s.source_portal}
+                  </strong>
+                  <span style={{ color: "var(--fg)" }}>
+                    {s.captured}/{s.total} capturadas
+                  </span>
+                  <span style={{ color: "var(--fg-muted)" }}>{s.pending} pendientes</span>
+                  {s.failed > 0 && <span style={{ color: "#dc2626" }}>{s.failed} fallidas</span>}
+                  {s.skipped > 0 && <span style={{ color: "var(--fg-muted)" }}>{s.skipped} omitidas</span>}
+                  <span style={{ color: "var(--fg-muted)", marginLeft: "auto" }}>{pct}%</span>
+                </div>
+                {/* Visual progress bar (issue #260): captured share of the portal. */}
+                <div
+                  data-testid={`worklist-progress-${s.source_portal}`}
+                  role="progressbar"
+                  aria-valuenow={pct}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-label={`${s.source_portal}: ${pct}% capturadas`}
+                  style={{
+                    marginTop: 8,
+                    height: 6,
+                    borderRadius: 4,
+                    background: "var(--border)",
+                    overflow: "hidden",
+                  }}
+                >
+                  <div
+                    style={{
+                      width: `${pct}%`,
+                      height: "100%",
+                      background: "#16a34a",
+                      transition: "width 0.2s",
+                    }}
+                  />
+                </div>
+              </div>
+            );
+          })
         )}
       </section>
 
@@ -310,14 +444,52 @@ export default function CapturaWorklistPage() {
         </div>
       </section>
 
+      {/* ── Status filter tabs ───────────────────────────────────────── */}
+      {rows.length > 0 && (
+        <section
+          data-testid="worklist-filters"
+          style={{ marginTop: 24, display: "flex", gap: 8, flexWrap: "wrap" }}
+        >
+          {(["all", ...WORKLIST_STATUSES] as StatusFilter[]).map((f) => {
+            const active = statusFilter === f;
+            const count = f === "all" ? rows.length : rows.filter((r) => r.status === f).length;
+            return (
+              <button
+                key={f}
+                data-testid={`worklist-filter-${f}`}
+                aria-pressed={active}
+                onClick={() => setStatusFilter(f)}
+                style={{
+                  padding: "4px 12px",
+                  fontSize: 13,
+                  fontWeight: active ? 600 : 500,
+                  borderRadius: 999,
+                  border: "1px solid var(--border)",
+                  background: active ? "var(--accent)" : "var(--bg-1)",
+                  color: active ? "#fff" : "var(--fg)",
+                  cursor: "pointer",
+                }}
+              >
+                {FILTER_LABEL[f]} ({count})
+              </button>
+            );
+          })}
+        </section>
+      )}
+
       {/* ── Worklist table ───────────────────────────────────────────── */}
-      <section style={{ marginTop: 24 }}>
+      <section style={{ marginTop: 12 }}>
         {loading ? (
           <p style={{ fontSize: 13, color: "var(--fg-muted)" }}>Cargando…</p>
         ) : rows.length === 0 ? (
           <p style={{ fontSize: 13, color: "var(--fg-muted)" }} data-testid="worklist-empty">
             No hay URLs en la lista todavía. Pega arriba las URLs de los anuncios
-            de Aliseda que quieras capturar.
+            de Aliseda que quieras capturar, o pulsa <strong>Refrescar sitemap</strong>
+            {" "}para sembrar Cimenta2.
+          </p>
+        ) : visibleRows.length === 0 ? (
+          <p style={{ fontSize: 13, color: "var(--fg-muted)" }} data-testid="worklist-filter-empty">
+            Ninguna URL con el estado «{FILTER_LABEL[statusFilter]}».
           </p>
         ) : (
           <div style={{ overflowX: "auto" }}>
@@ -331,7 +503,7 @@ export default function CapturaWorklistPage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => (
+                {visibleRows.map((r) => (
                   <tr
                     key={r.id}
                     data-testid={`worklist-row-${r.id}`}

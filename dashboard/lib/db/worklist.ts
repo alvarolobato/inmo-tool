@@ -29,14 +29,14 @@ export async function listWorklist(
 ): Promise<{ rows: WorklistRow[]; summaries: WorklistPortalSummary[] }> {
   const rows = portal
     ? await sql<WorklistRow>(
-        `SELECT id, url, source_portal, status, added_via, note,
+        `SELECT id, url, source_portal, status, added_via, external_id, note,
                 matched_capture_id, created_at, updated_at
            FROM capture_worklist WHERE source_portal = $1
           ORDER BY created_at DESC, id DESC`,
         [portal],
       )
     : await sql<WorklistRow>(
-        `SELECT id, url, source_portal, status, added_via, note,
+        `SELECT id, url, source_portal, status, added_via, external_id, note,
                 matched_capture_id, created_at, updated_at
            FROM capture_worklist
           ORDER BY created_at DESC, id DESC`,

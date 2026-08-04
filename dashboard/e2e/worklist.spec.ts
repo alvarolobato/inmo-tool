@@ -116,6 +116,43 @@ test("renders the seeded worklist URLs and their statuses with no error surface"
   await expect(page.getByText("HTTP 500")).toHaveCount(0);
 });
 
+test("status filter tabs, per-portal progress bar and the sitemap-refresh button render (issue #260)", async ({
+  page,
+}) => {
+  await page.goto("/etl/captura");
+  await expect(page.getByTestId("worklist-page")).toBeVisible();
+
+  const [pendingId, capturedId, failedId] = seededIds;
+
+  // Per-portal progress bar (visual) with an accessible value.
+  const progress = page.getByTestId(`worklist-progress-${PORTAL}`);
+  await expect(progress).toBeVisible();
+  await expect(progress).toHaveAttribute("aria-valuenow", /\d+/);
+
+  // The sitemap-refresh button is present and actionable. It is NOT clicked
+  // here: clicking would enqueue a real seed row (and there is no ETL loop in
+  // the e2e stack to drain it), so we only assert the affordance exists.
+  const refreshSitemap = page.getByTestId("worklist-refresh-sitemap");
+  await expect(refreshSitemap).toBeVisible();
+  await expect(refreshSitemap).toBeEnabled();
+
+  // Status filter tabs: filtering to "Capturadas" shows the captured row and
+  // hides the pending/failed ones.
+  await page.getByTestId("worklist-filter-captured").click();
+  await expect(page.getByTestId(`worklist-row-${capturedId}`)).toBeVisible();
+  await expect(page.getByTestId(`worklist-row-${pendingId}`)).toHaveCount(0);
+  await expect(page.getByTestId(`worklist-row-${failedId}`)).toHaveCount(0);
+
+  // Back to "Todas" shows every seeded row again.
+  await page.getByTestId("worklist-filter-all").click();
+  await expect(page.getByTestId(`worklist-row-${pendingId}`)).toBeVisible();
+  await expect(page.getByTestId(`worklist-row-${failedId}`)).toBeVisible();
+
+  // No error surface — the D-041 bar.
+  await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
+  await expect(page.getByText("Error al cargar")).toHaveCount(0);
+});
+
 test("the human-paced 'Siguiente' button is enabled and targets a pending URL (issue #254)", async ({
   page,
 }) => {

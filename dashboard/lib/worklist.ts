@@ -13,6 +13,8 @@ export interface WorklistRow {
   source_portal: string;
   status: WorklistStatus;
   added_via: "sitemap" | "manual" | "derived";
+  /** Portal asset id from the URL slug (sitemap-seeded rows); null otherwise. */
+  external_id: string | null;
   note: string | null;
   matched_capture_id: number | null;
   created_at: string;
@@ -55,6 +57,16 @@ export const CAPTURE_PORTALS: readonly { portal: string; hostSuffix: string }[] 
 export const CAPTURE_HOST_SUFFIXES: readonly string[] = CAPTURE_PORTALS.map(
   (p) => p.hostSuffix,
 );
+
+/**
+ * Portals whose worklist can be seeded automatically from a public sitemap
+ * (issue #260). Cimenta2 is the only one today (D-034/D-035); its sitemap
+ * enumerates the full Cajamar inventory, so "Refrescar sitemap" can populate
+ * its worklist without the operator pasting anything. This list is the
+ * dashboard-side mirror of etl/worklist_seed.py's `_SEEDERS` — the two must
+ * stay in step (adding a portal is a one-line edit in each).
+ */
+export const SITEMAP_SEEDABLE_PORTALS: readonly string[] = ["cimenta2"];
 
 /**
  * Canonical correlation key linking a worklist URL to an incoming capture,
