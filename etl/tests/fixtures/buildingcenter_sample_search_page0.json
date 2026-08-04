@@ -1,0 +1,45 @@
+{
+  "type": "productCategorySearchPageWsDTO",
+  "pagination": {
+    "currentPage": 0,
+    "pageSize": 3,
+    "sort": "relevance",
+    "totalPages": 2,
+    "totalResults": 4
+  },
+  "products": [
+    {
+      "address": "CL. ESTURION, 7, DER, PLANTA BAJA. 41015, SEVILLA",
+      "categories": [{"code": "101"}],
+      "code": "60672388",
+      "commercializedForRent": false,
+      "commercializedForSale": true,
+      "latitude": "37,424858",
+      "longitude": "-5,981684",
+      "population": "Sevilla",
+      "price": {"currencyIso": "EUR", "formattedValue": "81.750 €", "priceType": "BUY", "value": 81750.0}
+    },
+    {
+      "address": "CL. DOCTOR BARRAQUER, 6, 1, 1ª PLANTA. 41720, PALACIOS Y VILLAFRANCA (LOS)",
+      "categories": [{"code": "101"}],
+      "code": "60540896",
+      "commercializedForRent": false,
+      "commercializedForSale": true,
+      "latitude": "37,160099",
+      "longitude": "-5,915187",
+      "population": "Palacios Y Villafranca (los)",
+      "price": {"currencyIso": "EUR", "formattedValue": "90.815 €", "priceType": "BUY", "value": 90815.0}
+    },
+    {
+      "address": "PJE. JUANETE EL, S/N. 28971, GRIÑÓN",
+      "categories": [{"code": "105"}],
+      "code": "00295250",
+      "commercializedForRent": false,
+      "commercializedForSale": true,
+      "latitude": "+040.2296000",
+      "longitude": "-003.8445600",
+      "population": "Griñón",
+      "price": {"currencyIso": "EUR", "formattedValue": "119.200 €", "priceType": "BUY", "value": 119200.0}
+    }
+  ]
+}
