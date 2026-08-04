@@ -8,8 +8,12 @@
  *     orders confidence DESC (the ordering the review queue UI depends on
  *     to put photo_hash/reference_code ahead of the much larger fuzzy tail).
  *   - the `basis` filter narrows correctly.
+ *   - profile-relevance (issue #246): pairs touching an active search profile
+ *     sort first by default (mutation-checked against the ORDER BY), the
+ *     `onlyProfileRelevant` toggle hard-filters, the default view hides
+ *     nothing, and archived/matched=false profiles never confer relevance.
  *   - getDedupSuggestionCounts aggregates per match_basis over the FULL
- *     pending set, not just one page.
+ *     pending set, not just one page, and adds profile_relevant_total.
  *   - enqueueDedupAction/getDedupAction round-trip a real
  *     suggested_merge_action row.
  *   - getSuggestionStatus reflects confirmed/rejected/pending correctly.
@@ -70,11 +74,13 @@ describe.runIf(dbAvailable)("dedup review queue — real Postgres", () => {
   let createdPropertyIds: number[] = [];
   let createdListingIds: number[] = [];
   let createdSuggestionIds: number[] = [];
+  let createdProfileIds: number[] = [];
 
   beforeEach(() => {
     createdPropertyIds = [];
     createdListingIds = [];
     createdSuggestionIds = [];
+    createdProfileIds = [];
   });
 
   afterEach(async () => {
@@ -87,14 +93,48 @@ describe.runIf(dbAvailable)("dedup review queue — real Postgres", () => {
           createdSuggestionIds,
         ]);
       }
+      // profile_listing_state FKs both property_id and profile_id — delete it
+      // before the property and search_profile rows it references.
+      if (createdProfileIds.length > 0) {
+        await pool.query("DELETE FROM profile_listing_state WHERE profile_id = ANY($1::bigint[])", [
+          createdProfileIds,
+        ]);
+      }
       if (createdListingIds.length > 0) {
         await pool.query("DELETE FROM listing WHERE id = ANY($1::bigint[])", [createdListingIds]);
       }
       if (createdPropertyIds.length > 0) {
         await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [createdPropertyIds]);
       }
+      if (createdProfileIds.length > 0) {
+        await pool.query("DELETE FROM search_profile WHERE id = ANY($1::bigint[])", [createdProfileIds]);
+      }
     });
   });
+
+  /** Create a search profile. `archived` toggles archived_at so a test can
+   * prove archived profiles never confer relevance. */
+  async function insertProfile(pool: Pool, overrides: { archived?: boolean } = {}) {
+    const result = await pool.query<{ id: number }>(
+      `INSERT INTO search_profile (name, scope, archived_at)
+       VALUES ('dedup-int-profile', '{}'::jsonb, $1) RETURNING id`,
+      [overrides.archived ? new Date() : null],
+    );
+    const id = Number(result.rows[0].id);
+    createdProfileIds.push(id);
+    return id;
+  }
+
+  /** Materialize a property as matching (or not) a profile — the exact signal
+   * profile-relevance reads (profile_listing_state.matched). */
+  async function markProfileMatch(pool: Pool, profileId: number, propertyId: number, matched = true) {
+    await pool.query(
+      `INSERT INTO profile_listing_state (profile_id, property_id, matched)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (profile_id, property_id) DO UPDATE SET matched = EXCLUDED.matched`,
+      [profileId, propertyId, matched],
+    );
+  }
 
   async function insertProperty(pool: Pool, overrides: Partial<{ address: string; m2_built: number }> = {}) {
     const result = await pool.query<{ id: number }>(
@@ -221,6 +261,140 @@ describe.runIf(dbAvailable)("dedup review queue — real Postgres", () => {
       const counts = await getDedupSuggestionCounts();
       expect(counts.total).toBeGreaterThanOrEqual(1);
       expect(counts.by_basis.photo_hash).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  it("sorts profile-relevant pairs first by default — even ahead of a higher-confidence non-relevant pair (issue #246)", async () => {
+    await withRealDb(async (pool) => {
+      const profile = await insertProfile(pool);
+
+      // Relevant pair: LOWER confidence, but one side matches an active profile.
+      const relA = await insertProperty(pool);
+      const relB = await insertProperty(pool);
+      const lRelA = await insertListing(pool, relA);
+      const lRelB = await insertListing(pool, relB);
+      await markProfileMatch(pool, profile, relA); // side A materialized as a match
+      const relevantId = await insertSuggestion(pool, lRelA, lRelB, { match_basis: "fuzzy", confidence: 0.55 });
+
+      // Non-relevant pair: HIGHER confidence, neither side matches any profile.
+      const irrA = await insertProperty(pool);
+      const irrB = await insertProperty(pool);
+      const lIrrA = await insertListing(pool, irrA);
+      const lIrrB = await insertListing(pool, irrB);
+      const irrelevantId = await insertSuggestion(pool, lIrrA, lIrrB, { match_basis: "photo_hash", confidence: 0.9 });
+
+      const items = await listDedupSuggestions({});
+      const ids = items.map((s) => s.id).filter((id) => id === relevantId || id === irrelevantId);
+      // Mutation check: drop `profile_relevant DESC` from the ORDER BY and this
+      // flips to [irrelevantId, relevantId] (pure confidence DESC), failing here.
+      expect(ids).toEqual([relevantId, irrelevantId]);
+
+      // The relevance flag is surfaced per row.
+      expect(items.find((s) => s.id === relevantId)!.profile_relevant).toBe(true);
+      expect(items.find((s) => s.id === irrelevantId)!.profile_relevant).toBe(false);
+    });
+  });
+
+  it("default (show-all) view HIDES NOTHING — the non-relevant pair is still reachable (issue #246)", async () => {
+    await withRealDb(async (pool) => {
+      const profile = await insertProfile(pool);
+      const relA = await insertProperty(pool);
+      const relB = await insertProperty(pool);
+      const lRelA = await insertListing(pool, relA);
+      const lRelB = await insertListing(pool, relB);
+      await markProfileMatch(pool, profile, relB);
+      const relevantId = await insertSuggestion(pool, lRelA, lRelB, { match_basis: "fuzzy", confidence: 0.6 });
+
+      const irrA = await insertProperty(pool);
+      const irrB = await insertProperty(pool);
+      const lIrrA = await insertListing(pool, irrA);
+      const lIrrB = await insertListing(pool, irrB);
+      const irrelevantId = await insertSuggestion(pool, lIrrA, lIrrB, { match_basis: "fuzzy", confidence: 0.61 });
+
+      const items = await listDedupSuggestions({ limit: 100 });
+      const ids = new Set(items.map((s) => s.id));
+      expect(ids.has(relevantId)).toBe(true);
+      expect(ids.has(irrelevantId)).toBe(true); // NOT hidden by the default view
+    });
+  });
+
+  it("onlyProfileRelevant toggle hard-filters to profile-relevant pairs (issue #246)", async () => {
+    await withRealDb(async (pool) => {
+      const profile = await insertProfile(pool);
+      const relA = await insertProperty(pool);
+      const relB = await insertProperty(pool);
+      const lRelA = await insertListing(pool, relA);
+      const lRelB = await insertListing(pool, relB);
+      await markProfileMatch(pool, profile, relA);
+      const relevantId = await insertSuggestion(pool, lRelA, lRelB, { match_basis: "fuzzy", confidence: 0.6 });
+
+      const irrA = await insertProperty(pool);
+      const irrB = await insertProperty(pool);
+      const lIrrA = await insertListing(pool, irrA);
+      const lIrrB = await insertListing(pool, irrB);
+      const irrelevantId = await insertSuggestion(pool, lIrrA, lIrrB, { match_basis: "photo_hash", confidence: 0.9 });
+
+      const filtered = await listDedupSuggestions({ onlyProfileRelevant: true, limit: 100 });
+      const ids = new Set(filtered.map((s) => s.id));
+      expect(ids.has(relevantId)).toBe(true);
+      expect(ids.has(irrelevantId)).toBe(false); // hard-filtered out
+      expect(filtered.every((s) => s.profile_relevant)).toBe(true);
+    });
+  });
+
+  it("an archived profile or a matched=false state does NOT confer relevance (issue #246)", async () => {
+    await withRealDb(async (pool) => {
+      const archived = await insertProfile(pool, { archived: true });
+      const active = await insertProfile(pool);
+
+      // Property tied only to an ARCHIVED profile → not relevant.
+      const archProp = await insertProperty(pool);
+      const archOther = await insertProperty(pool);
+      const lArchA = await insertListing(pool, archProp);
+      const lArchB = await insertListing(pool, archOther);
+      await markProfileMatch(pool, archived, archProp, true);
+      const archivedId = await insertSuggestion(pool, lArchA, lArchB, { match_basis: "fuzzy", confidence: 0.6 });
+
+      // Property tied to an active profile but matched=false → not relevant.
+      const unmatchedProp = await insertProperty(pool);
+      const unmatchedOther = await insertProperty(pool);
+      const lUnA = await insertListing(pool, unmatchedProp);
+      const lUnB = await insertListing(pool, unmatchedOther);
+      await markProfileMatch(pool, active, unmatchedProp, false);
+      const unmatchedId = await insertSuggestion(pool, lUnA, lUnB, { match_basis: "fuzzy", confidence: 0.6 });
+
+      const items = await listDedupSuggestions({ limit: 100 });
+      expect(items.find((s) => s.id === archivedId)!.profile_relevant).toBe(false);
+      expect(items.find((s) => s.id === unmatchedId)!.profile_relevant).toBe(false);
+
+      const filtered = await listDedupSuggestions({ onlyProfileRelevant: true, limit: 100 });
+      const ids = new Set(filtered.map((s) => s.id));
+      expect(ids.has(archivedId)).toBe(false);
+      expect(ids.has(unmatchedId)).toBe(false);
+    });
+  });
+
+  it("profile_relevant_total counts only relevant pairs, over the full pending queue (issue #246)", async () => {
+    await withRealDb(async (pool) => {
+      const profile = await insertProfile(pool);
+      const relA = await insertProperty(pool);
+      const relB = await insertProperty(pool);
+      const lRelA = await insertListing(pool, relA);
+      const lRelB = await insertListing(pool, relB);
+      await markProfileMatch(pool, profile, relA);
+      await insertSuggestion(pool, lRelA, lRelB, { match_basis: "fuzzy", confidence: 0.6 });
+
+      const irrA = await insertProperty(pool);
+      const irrB = await insertProperty(pool);
+      const lIrrA = await insertListing(pool, irrA);
+      const lIrrB = await insertListing(pool, irrB);
+      await insertSuggestion(pool, lIrrA, lIrrB, { match_basis: "fuzzy", confidence: 0.6 });
+
+      const counts = await getDedupSuggestionCounts();
+      // total spans the whole queue; profile_relevant_total is a strict subset.
+      expect(counts.total).toBeGreaterThanOrEqual(2);
+      expect(counts.profile_relevant_total).toBeGreaterThanOrEqual(1);
+      expect(counts.profile_relevant_total).toBeLessThan(counts.total);
     });
   });
 

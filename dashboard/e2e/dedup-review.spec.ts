@@ -111,6 +111,29 @@ async function insertSuggestion(
   return result.rows[0].id;
 }
 
+async function insertProfile(): Promise<number> {
+  const result = await pool.query<{ id: number }>(
+    `INSERT INTO search_profile (name, scope, thesis_params)
+     VALUES ($1, $2::jsonb, '{}'::jsonb) RETURNING id`,
+    [
+      `${NAME_PREFIX}perfil-${Math.random().toString(36).slice(2)}`,
+      JSON.stringify({
+        geography: { type: "radius", center: [36.51, -4.88], radius_km: 5 },
+        property_types: ["piso"],
+        hard_exclusions: {},
+      }),
+    ],
+  );
+  return result.rows[0].id;
+}
+
+async function markProfileMatch(profileId: number, propertyId: number): Promise<void> {
+  await pool.query(
+    `INSERT INTO profile_listing_state (profile_id, property_id, matched) VALUES ($1, $2, true)`,
+    [profileId, propertyId],
+  );
+}
+
 test.beforeAll(async () => {
   pool = buildPool();
   try {
@@ -144,8 +167,14 @@ test.afterAll(async () => {
       "OR losing_property_id IN (SELECT property_id FROM listing WHERE external_id LIKE $1)",
     [`${NAME_PREFIX}%`],
   );
+  // profile_listing_state FKs property_id — delete it before the properties.
+  await pool.query(
+    "DELETE FROM profile_listing_state WHERE profile_id IN (SELECT id FROM search_profile WHERE name LIKE $1)",
+    [`${NAME_PREFIX}%`],
+  );
   await pool.query("DELETE FROM listing WHERE external_id LIKE $1", [`${NAME_PREFIX}%`]);
   await pool.query("DELETE FROM property WHERE address LIKE $1", [`${NAME_PREFIX}%`]);
+  await pool.query("DELETE FROM search_profile WHERE name LIKE $1", [`${NAME_PREFIX}%`]);
   await pool.end();
 });
 
@@ -231,6 +260,72 @@ test("renders both sides of a real photo_hash suggestion, ordered ahead of a wea
       [listingA, listingB, listingC, listingD],
     ]);
     await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [[propA, propB, propC, propD]]);
+  }
+});
+
+test("profile-relevant pairs sort first, and the 'solo mis perfiles' toggle filters them (issue #246)", async ({
+  page,
+}) => {
+  skipIfNoDb(test);
+
+  const profileId = await insertProfile();
+
+  // Relevant pair: LOWER confidence, but one side matches an active profile.
+  const relA = await insertProperty({ address: `${NAME_PREFIX}Perfil Relevante A` });
+  const relB = await insertProperty({ address: `${NAME_PREFIX}Perfil Relevante B` });
+  const lRelA = await insertListing(relA, { source: "milanuncios", current_price: 210000 });
+  const lRelB = await insertListing(relB, { source: "fotocasa", current_price: 210000 });
+  await markProfileMatch(profileId, relA);
+  const relevantId = await insertSuggestion(lRelA, lRelB, { match_basis: "fuzzy", confidence: 0.55 });
+
+  // Non-relevant pair: HIGHER confidence, neither side matches any profile.
+  const irrA = await insertProperty({ address: `${NAME_PREFIX}Sin Perfil A` });
+  const irrB = await insertProperty({ address: `${NAME_PREFIX}Sin Perfil B` });
+  const lIrrA = await insertListing(irrA, { source: "idealista", current_price: 305000 });
+  const lIrrB = await insertListing(irrB, { source: "fotocasa", current_price: 305000 });
+  const irrelevantId = await insertSuggestion(lIrrA, lIrrB, { match_basis: "photo_hash", confidence: 0.9 });
+
+  try {
+    await page.goto("/admin/dedup");
+    await assertNoErrorSurface(page);
+
+    const relCard = page.locator(`[data-suggestion-id="${relevantId}"]`);
+    const irrCard = page.locator(`[data-suggestion-id="${irrelevantId}"]`);
+    await expect(relCard).toBeVisible();
+    await expect(irrCard).toBeVisible(); // default view hides NOTHING
+
+    // Ordering (mutation check): the relevant pair renders before the
+    // higher-confidence non-relevant one. Without `profile_relevant DESC` in
+    // the ORDER BY, pure confidence DESC would flip this.
+    const order = await page
+      .getByTestId("dedup-suggestion-card")
+      .evaluateAll((els) => els.map((e) => e.getAttribute("data-suggestion-id")));
+    expect(order.indexOf(String(relevantId))).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf(String(relevantId))).toBeLessThan(order.indexOf(String(irrelevantId)));
+
+    // The relevant card is badged; the non-relevant one is not.
+    await expect(relCard.getByTestId("dedup-profile-relevant-badge")).toBeVisible();
+    await expect(irrCard.getByTestId("dedup-profile-relevant-badge")).toHaveCount(0);
+
+    // Toggle to "solo mis perfiles": the non-relevant pair is filtered out.
+    await page.getByTestId("dedup-toggle-relevant").click();
+    await expect(relCard).toBeVisible();
+    await expect(irrCard).toHaveCount(0);
+
+    // Back to "ver todos": both reappear.
+    await page.getByTestId("dedup-toggle-all").click();
+    await expect(relCard).toBeVisible();
+    await expect(irrCard).toBeVisible();
+  } finally {
+    await pool.query("DELETE FROM suggested_merge WHERE id = ANY($1::bigint[])", [
+      [relevantId, irrelevantId],
+    ]);
+    await pool.query("DELETE FROM profile_listing_state WHERE profile_id = $1", [profileId]);
+    await pool.query("DELETE FROM search_profile WHERE id = $1", [profileId]);
+    await pool.query("DELETE FROM listing WHERE id = ANY($1::bigint[])", [
+      [lRelA, lRelB, lIrrA, lIrrB],
+    ]);
+    await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [[relA, relB, irrA, irrB]]);
   }
 });
 

@@ -36,12 +36,34 @@ import {
 
 export * from "@/lib/dedup-shared";
 
+/**
+ * Profile-relevance predicate (issue #246): a suggestion pair is relevant to
+ * the owner's active markets when either listing's property matches an active
+ * (non-archived) search profile. "Matches a profile" is the
+ * `profile_listing_state` materialization's own signal (`matched = true`),
+ * keyed on `property_id` — NOT `listing_id` (see the table's schema comment in
+ * etl/schema/init.sql: state is one row per (profile_id, property_id), so a
+ * merged property carries a single per-profile state). Referenced as an
+ * uncorrelated fragment against the `la`/`lb` listing aliases both queries
+ * below share, so the definition can't drift between the list and the count.
+ * Both `idx_profile_listing_state_property` (property_id) and the
+ * `search_profile(id)` PK make this an indexed lookup.
+ */
+const PROFILE_RELEVANT_EXISTS = `EXISTS (
+        SELECT 1 FROM profile_listing_state pls
+        JOIN search_profile sp ON sp.id = pls.profile_id
+        WHERE sp.archived_at IS NULL
+          AND pls.matched = true
+          AND pls.property_id IN (la.property_id, lb.property_id)
+      )`;
+
 interface SuggestionRow {
   id: number;
   match_basis: MatchBasis;
   confidence: string;
   detail: Record<string, unknown>;
   created_at: string;
+  profile_relevant: boolean;
   la_listing_id: number;
   la_property_id: number;
   la_source: string;
@@ -103,17 +125,29 @@ function sideB(row: SuggestionRow): DedupListingSide {
 }
 
 /**
- * List pending review-queue suggestions, strongest evidence first.
+ * List pending review-queue suggestions, most-relevant + strongest evidence
+ * first.
  *
- * Default order is `confidence DESC, created_at DESC` — a live run's actual
- * distribution (585 pending: 527 `fuzzy` averaging ~0.585, 52 `photo_hash`
- * averaging ~0.78) means confidence-descending already surfaces the
- * high-value `photo_hash`/`reference_code`/`phone` rows before the long
- * `fuzzy` tail, without needing a special case per basis. `basis` narrows
- * to one match_basis (the filter chips) on top of that ordering.
+ * Default order (issue #246) is `profile_relevant DESC, confidence DESC,
+ * created_at DESC`: pairs touching an active search profile surface first, and
+ * within each relevance tier the pre-existing `confidence DESC, created_at
+ * DESC` ordering is preserved. A live run's distribution (585 pending: 527
+ * `fuzzy` averaging ~0.585, 52 `photo_hash` averaging ~0.78) means
+ * confidence-descending already surfaces the high-value
+ * `photo_hash`/`reference_code`/`phone` rows before the long `fuzzy` tail
+ * within each tier. `basis` narrows to one match_basis (the filter chips) on
+ * top of that ordering.
+ *
+ * `onlyProfileRelevant` (the "solo mis perfiles" toggle) hard-filters to
+ * profile-relevant pairs. The DEFAULT (false) is deliberately sort-not-filter:
+ * nothing is hidden — a real duplicate that hasn't been materialized against
+ * any profile yet (no `profile_listing_state` row at all) still appears, just
+ * below the relevant ones — so the queue can never silently drop a legitimate
+ * duplicate. See docs/roadmap/dedup-optimization.md §5.
  */
 export async function listDedupSuggestions(opts: {
   basis?: MatchBasis;
+  onlyProfileRelevant?: boolean;
   limit?: number;
   offset?: number;
 }): Promise<DedupSuggestion[]> {
@@ -125,11 +159,13 @@ export async function listDedupSuggestions(opts: {
     params.push(opts.basis);
     basisClause = `AND sm.match_basis = $${params.length}`;
   }
+  const relevantClause = opts.onlyProfileRelevant ? `AND ${PROFILE_RELEVANT_EXISTS}` : "";
   params.push(limit, offset);
 
   const rows = await sql<SuggestionRow>(
     `SELECT
         sm.id, sm.match_basis, sm.confidence, sm.detail, sm.created_at,
+        ${PROFILE_RELEVANT_EXISTS} AS profile_relevant,
         la.id AS la_listing_id, la.property_id AS la_property_id, la.source AS la_source,
         la.url AS la_url, la.current_price AS la_price, la.photo_urls AS la_photos,
         pa.address AS la_address, pa.city AS la_city, pa.m2_built AS la_m2,
@@ -143,8 +179,8 @@ export async function listDedupSuggestions(opts: {
       JOIN property pa ON pa.id = la.property_id
       JOIN listing lb ON lb.id = sm.listing_id_b
       JOIN property pb ON pb.id = lb.property_id
-      WHERE sm.status = 'pending' ${basisClause}
-      ORDER BY sm.confidence DESC, sm.created_at DESC
+      WHERE sm.status = 'pending' ${basisClause} ${relevantClause}
+      ORDER BY profile_relevant DESC, sm.confidence DESC, sm.created_at DESC
       LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params,
   );
@@ -155,6 +191,7 @@ export async function listDedupSuggestions(opts: {
     confidence: Number(row.confidence),
     detail: row.detail ?? {},
     created_at: row.created_at,
+    profile_relevant: row.profile_relevant,
     listing_a: sideA(row),
     listing_b: sideB(row),
   }));
@@ -162,20 +199,37 @@ export async function listDedupSuggestions(opts: {
 
 /** Counts for the filter chips — always over the *full* pending queue, not
  * whatever page/basis is currently displayed, so switching chips shows
- * accurate counts without a round trip per chip. */
+ * accurate counts without a round trip per chip.
+ *
+ * Count semantics (issue #246): `total`/`by_basis` AND `profile_relevant_total`
+ * are ALL computed over the full pending queue, independent of the "solo mis
+ * perfiles" / "ver todos" toggle. This is deliberate — the toggle changes which
+ * *cards* render, but the chip counts stay stable so the UI can always show
+ * "N relevantes a tus perfiles · M en total" as fixed context, and toggling
+ * never makes the numbers jump. */
 export async function getDedupSuggestionCounts(): Promise<DedupSuggestionCounts> {
-  const rows = await sql<{ match_basis: MatchBasis; count: string }>(
-    `SELECT match_basis, COUNT(*) AS count FROM suggested_merge
-      WHERE status = 'pending' GROUP BY match_basis`,
-  );
+  const [byBasisRows, relevantRows] = await Promise.all([
+    sql<{ match_basis: MatchBasis; count: string }>(
+      `SELECT match_basis, COUNT(*) AS count FROM suggested_merge
+        WHERE status = 'pending' GROUP BY match_basis`,
+    ),
+    sql<{ count: string }>(
+      `SELECT COUNT(*) AS count
+        FROM suggested_merge sm
+        JOIN listing la ON la.id = sm.listing_id_a
+        JOIN listing lb ON lb.id = sm.listing_id_b
+        WHERE sm.status = 'pending' AND ${PROFILE_RELEVANT_EXISTS}`,
+    ),
+  ]);
   const by_basis: Partial<Record<MatchBasis, number>> = {};
   let total = 0;
-  for (const row of rows) {
+  for (const row of byBasisRows) {
     const n = Number(row.count);
     by_basis[row.match_basis] = n;
     total += n;
   }
-  return { total, by_basis };
+  const profile_relevant_total = Number(relevantRows[0]?.count ?? 0);
+  return { total, by_basis, profile_relevant_total };
 }
 
 /** The suggestion's current status — used to refuse enqueueing a
