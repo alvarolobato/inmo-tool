@@ -95,10 +95,28 @@ tracking history.
   far — CaixaBank's BuildingCenter and Solvia, both outside this WAF
   pattern, are the counter-examples).
 
-**Rationale**: Same shape as Sareb (D-026) — an edge WAF returning 403 on
-`robots.txt` itself, with the same "nothing to comply with" stop
-condition, a different vendor (Akamai vs. Incapsula) but an identical
-practical outcome. The owner's standing WAF→capture rule already resolves
+**Rationale**: Same *verdict* as Sareb (D-026) — an edge WAF returning 403 on
+`robots.txt` itself, with the same "nothing to comply with" stop condition —
+but **not the same mechanism, and the difference matters for what comes next.**
+
+The PR #224 review compared the two 403 bodies rather than just their status
+codes, and they are different things:
+
+- **Sareb** returns an Incapsula **JS challenge** — a
+  `<script src="/_Incapsula_Resource?SWJIYLWA=...">` plus an iframe. That is a
+  challenge a real browser resolves invisibly in the course of normal
+  browsing, which is *positive* evidence for the browser-extension capture
+  path (#75): a human simply visiting the site would very likely see content.
+- **Altamira** returns a **static Akamai deny** with no challenge script at
+  all — zero application bytes, nothing for a browser to satisfy.
+
+So the extension-capture prospects are genuinely different per site, and the
+earlier "identical practical outcome" framing obscured exactly the fact that
+decides it. Neither challenge was executed or solved, and nothing here
+proposes automating one — the point is only that a human's own browsing is a
+different signal from an automated fetch, and for Altamira it may well not be.
+
+The owner's standing WAF→capture rule already resolves
 the close-vs-rescope question this issue had left explicitly open on
 2026-08-02; recording the decision file makes that resolution durable
 instead of living only in a tracking-issue comment.

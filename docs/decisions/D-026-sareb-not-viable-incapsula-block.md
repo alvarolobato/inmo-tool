@@ -93,6 +93,21 @@ the prior spike rules out "just a User-Agent block," and the owner's
 standing WAF→capture rule already resolves the close-vs-rescope question
 for this exact shape — no further product judgment call is needed here.
 
+One detail from the PR #224 review that is worth keeping, because it is the
+part that decides whether capture will actually work: Sareb's 403 body is an
+Incapsula **JS challenge** (a `<script src="/_Incapsula_Resource?SWJIYLWA=...">`
+plus an iframe), not a static deny. A real browser resolves that invisibly
+during ordinary browsing, so a human visiting the site would very likely see
+content — positive evidence for the #75 extension path, and a genuinely
+different prospect from Altamira (D-027), whose Akamai 403 carries no
+challenge to satisfy at all. The challenge was not executed or solved and
+nothing here proposes automating it; the point is that a person's own
+browsing is a different signal from an automated fetch.
+
+*(D-025 is not a gap: it is claimed by the decision-ID CI-check record on
+the pending `ci-160-real-database` branch, which had not merged when these
+were numbered.)*
+
 **See**: [issue #121](https://github.com/alvarolobato/inmo-tool/issues/121),
 [issue #132](https://github.com/alvarolobato/inmo-tool/issues/132)
 (tracking issue, standing WAF→capture rule recorded 2026-08-03),
