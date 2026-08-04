@@ -138,8 +138,24 @@ export function buildScopeFunnelStages(scope: Scope): ScopeFunnelStage[] {
   // materialize sold/withdrawn properties (issue #18 names listing-level
   // status explicitly). Kept as its own EXISTS rather than folded into the
   // price subquery so it applies unconditionally.
+  //
+  // `AND listing.operation = 'sale'` — added by issue #31. Every search
+  // profile in this schema is a SALE-candidate thesis (there is no rental
+  // equivalent of `search_profile`); once #31's rental connector started
+  // producing `operation = 'rent'` rows in the very same `property`/
+  // `listing` tables (see rent-estimate.ts's module docstring for why
+  // rentals reuse these tables instead of a separate one), a rental
+  // property with no active SALE listing at all would otherwise still
+  // pass this EXISTS check on the strength of its active RENT listing and
+  // materialize into `profile_listing_state` as if it were a sale
+  // candidate — a real cross-contamination bug, invisible until rental
+  // data existed, caught while building #31 (not a pre-existing reported
+  // issue). This is the one gate every profile depends on unconditionally,
+  // so it's the one place this filter is load-bearing; the price-band
+  // subquery below gets the same filter for the same reason, but a
+  // profile with no price filter set relies on THIS EXISTS alone.
   conditions.push(
-    "EXISTS (SELECT 1 FROM listing WHERE listing.property_id = property.id AND listing.status = 'active')",
+    "EXISTS (SELECT 1 FROM listing WHERE listing.property_id = property.id AND listing.status = 'active' AND listing.operation = 'sale')",
   );
   stages.push({ key: "geography", whereSql: conditions.join(" AND "), params: [...params] });
 
@@ -166,8 +182,12 @@ export function buildScopeFunnelStages(scope: Scope): ScopeFunnelStage[] {
     conditions.push("property.m2_built <= " + ph(params.length));
   }
   if (scope.price_min !== undefined || scope.price_max !== undefined) {
+    // `AND listing.operation = 'sale'` — same issue #31 reasoning as the
+    // EXISTS clause above: without it, a rental property's monthly rent
+    // (an order of magnitude smaller than any sale price) could pass a
+    // price-band filter meant for purchase prices.
     const minPriceExpr =
-      "(SELECT MIN(listing.current_price) FROM listing WHERE listing.property_id = property.id AND listing.status = 'active')";
+      "(SELECT MIN(listing.current_price) FROM listing WHERE listing.property_id = property.id AND listing.status = 'active' AND listing.operation = 'sale')";
     if (scope.price_min !== undefined) {
       params.push(scope.price_min);
       conditions.push(minPriceExpr + " >= " + ph(params.length));

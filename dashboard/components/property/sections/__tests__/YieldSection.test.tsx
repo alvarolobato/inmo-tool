@@ -20,6 +20,9 @@ function baseMetrics(overrides: Partial<InvestmentMetrics> = {}): InvestmentMetr
       method: "profile_assumption",
       eur_per_m2_month_used: 10,
       m2_used: 80,
+      market_comparable: null,
+      assumption_monthly_rent: 800,
+      disagreement_pct: null,
     },
     yield: {
       gross_yield_pct: 4.8,
@@ -98,22 +101,25 @@ describe("YieldSection", () => {
     expect(badge.getAttribute("data-muted")).toBe("false");
   });
 
-  it("renders the no-rent-assumption empty state and NO yield figures when the profile has no rent assumption", () => {
+  it("renders the insufficient-data empty state and NO yield figures when there is no assumption AND not enough market comparables", () => {
     const metrics = baseMetrics({
       rent_estimate: {
         estimated_monthly_rent: null,
         comparable_count: 0,
         confidence: null,
-        method: "no_rent_assumption",
+        method: "insufficient_data",
         eur_per_m2_month_used: null,
         m2_used: null,
+        market_comparable: { eur_per_m2_month: null, estimated_monthly_rent: null, comparable_count: 2, confidence: null, oldest_comp_age_days: 5 },
+        assumption_monthly_rent: null,
+        disagreement_pct: null,
       },
       yield: {
         gross_yield_pct: null,
         net_yield_pct: null,
         cash_on_cash_pct: null,
         rent_confidence: null,
-        rent_method: "no_rent_assumption",
+        rent_method: "insufficient_data",
         estimated_monthly_rent: null,
         assumptions_used: null,
       },
@@ -123,16 +129,120 @@ describe("YieldSection", () => {
     expect(screen.queryByTestId("gross-yield")).toBeNull();
     expect(screen.queryByTestId("estimated-rent")).toBeNull();
     expect(screen.getByText(/sin estimaci.n de alquiler/i)).toBeDefined();
+    // The comparable count that WAS found (2, below the gate) is surfaced,
+    // not silently dropped just because it wasn't enough to use.
+    expect(screen.getByText(/2 encontrados/i)).toBeDefined();
     // Area-price comparison is independent of rent and still renders.
     expect(screen.getByTestId("area-price-comparison")).toBeDefined();
   });
 
-  // Opus review fix: a profile that DOES have a rent assumption but whose
-  // property lacks m2_built previously fell into the exact same
-  // "no_rent_assumption" branch and told the user to set something they'd
-  // already set. rent-estimate.ts now returns a distinct "no_property_size"
-  // method, and this must render distinct, correct copy.
-  it("renders a distinct empty state (not the no-rent-assumption copy) when the profile HAS a rent assumption but the property lacks m2_built", () => {
+  it("renders a distinct empty state when the property has no coordinates/type and no assumption is set (can't even attempt a market query)", () => {
+    const metrics = baseMetrics({
+      rent_estimate: {
+        estimated_monthly_rent: null,
+        comparable_count: 0,
+        confidence: null,
+        method: "no_property_location",
+        eur_per_m2_month_used: null,
+        m2_used: null,
+        market_comparable: null,
+        assumption_monthly_rent: null,
+        disagreement_pct: null,
+      },
+      yield: {
+        gross_yield_pct: null,
+        net_yield_pct: null,
+        cash_on_cash_pct: null,
+        rent_confidence: null,
+        rent_method: "no_property_location",
+        estimated_monthly_rent: null,
+        assumptions_used: null,
+      },
+    });
+    render(<YieldSection metrics={metrics} />);
+    expect(screen.getByTestId("yield-empty-state-no-location")).toBeDefined();
+    expect(screen.queryByTestId("yield-empty-state")).toBeNull();
+    expect(screen.getByText(/no tiene coordenadas o tipo de vivienda/i)).toBeDefined();
+  });
+
+  it("renders the measured market estimate as PRIMARY (no assumption set) with the high-confidence label", () => {
+    const metrics = baseMetrics({
+      rent_estimate: {
+        estimated_monthly_rent: 800,
+        comparable_count: 8,
+        confidence: "high",
+        method: "market_comparable_high",
+        eur_per_m2_month_used: 10,
+        m2_used: 80,
+        market_comparable: { eur_per_m2_month: 10, estimated_monthly_rent: 800, comparable_count: 8, confidence: "high", oldest_comp_age_days: 12 },
+        assumption_monthly_rent: null,
+        disagreement_pct: null,
+      },
+      yield: { ...baseMetrics().yield, rent_confidence: "high", rent_method: "market_comparable_high" },
+    });
+    render(<YieldSection metrics={metrics} />);
+    expect(screen.getByText(/comparables de mercado\)/i)).toBeDefined();
+    const badge = screen.getByTestId("rent-confidence-badge");
+    expect(badge.getAttribute("data-confidence")).toBe("high");
+    // The market comparable IS the primary row here — no separate
+    // secondary "market comparison" line duplicating it.
+    expect(screen.queryByTestId("market-comparable-comparison")).toBeNull();
+    // Opus review must-fix #5 (PR #199): when the market estimate IS the
+    // primary figure, MarketComparableBlock renders null (see above), so
+    // this was previously the ONE case where the sample size backing the
+    // yield never appeared anywhere on the page. The primary row itself
+    // must now say "8" (comparable_count), not just show a confidence
+    // badge with no number behind it.
+    const primaryRow = screen.getByTestId("estimated-rent").closest("div");
+    expect(primaryRow?.textContent).toMatch(/8\s*comparables/i);
+  });
+
+  it("shows both figures and a disagreement warning when the profile's assumption and the market comparable disagree materially", () => {
+    const metrics = baseMetrics({
+      rent_estimate: {
+        estimated_monthly_rent: 960, // 12 EUR/m2 * 80 m2 (the assumption, primary)
+        comparable_count: 0,
+        confidence: "assumption",
+        method: "profile_assumption",
+        eur_per_m2_month_used: 12,
+        m2_used: 80,
+        market_comparable: { eur_per_m2_month: 10, estimated_monthly_rent: 800, comparable_count: 8, confidence: "high", oldest_comp_age_days: 3 },
+        assumption_monthly_rent: 960,
+        disagreement_pct: 0.2, // (960-800)/800
+      },
+    });
+    render(<YieldSection metrics={metrics} />);
+    // PRIMARY row still shows the assumption (960), never silently
+    // replaced by the measured 800.
+    expect(screen.getByTestId("estimated-rent").textContent).toMatch(/960/);
+    const comparison = screen.getByTestId("market-comparable-comparison");
+    expect(comparison.textContent).toMatch(/800/);
+    expect(comparison.textContent).toMatch(/20,0\s*%/);
+    expect(comparison.getAttribute("data-disagreement-warning")).toBe("true"); // 20% >= 15% threshold
+  });
+
+  it("shows the market comparison WITHOUT a warning treatment when the disagreement is small", () => {
+    const metrics = baseMetrics({
+      rent_estimate: {
+        ...baseMetrics().rent_estimate,
+        market_comparable: { eur_per_m2_month: 9.8, estimated_monthly_rent: 784, comparable_count: 8, confidence: "high", oldest_comp_age_days: 3 },
+        disagreement_pct: (800 - 784) / 784, // ~2%, well under the 15% threshold
+      },
+    });
+    render(<YieldSection metrics={metrics} />);
+    const comparison = screen.getByTestId("market-comparable-comparison");
+    expect(comparison.getAttribute("data-disagreement-warning")).toBe("false");
+  });
+
+  // Opus review fix (PR #181), extended by issue #31: a profile that DOES
+  // have a rent assumption but whose property lacks m2_built previously
+  // fell into the exact same "no_rent_assumption" branch and told the user
+  // to set something they'd already set. rent-estimate.ts now returns a
+  // distinct "no_property_size" method — and since #31, m2_built gates
+  // BOTH the assumption path and the market-comparable path, so the copy
+  // must be generically correct (not assume an assumption exists) rather
+  // than reference a specific rent source.
+  it("renders a distinct empty state (not the assumption-specific copy) when the property lacks m2_built, regardless of rent source", () => {
     const metrics = baseMetrics({
       rent_estimate: {
         estimated_monthly_rent: null,
@@ -141,6 +251,9 @@ describe("YieldSection", () => {
         method: "no_property_size",
         eur_per_m2_month_used: null,
         m2_used: null,
+        market_comparable: null,
+        assumption_monthly_rent: null,
+        disagreement_pct: null,
       },
       yield: {
         gross_yield_pct: null,
@@ -155,7 +268,7 @@ describe("YieldSection", () => {
     render(<YieldSection metrics={metrics} />);
     expect(screen.getByTestId("yield-empty-state-no-size")).toBeDefined();
     expect(screen.queryByTestId("yield-empty-state")).toBeNull();
-    // Must NOT tell the user to add a rent assumption (they already have one).
+    // Must NOT tell the user to add a rent assumption (that isn't the gate here).
     expect(screen.queryByText(/a.ade.*asunci.n de alquiler/i)).toBeNull();
     expect(screen.getByText(/no tiene superficie construida/i)).toBeDefined();
   });

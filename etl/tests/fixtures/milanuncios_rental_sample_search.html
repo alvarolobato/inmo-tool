@@ -1,0 +1,15 @@
+<!--
+Trimmed synthetic fixture, structurally accurate to a real Milanuncios
+RENTAL search-results page live-fetched during issue #31's implementation
+(2026-08-03) for
+https://www.milanuncios.com/alquiler-de-pisos-en-madrid-madrid/ (HTTP 200,
+41 real ads on that page — trimmed to 3 here, same "only the fields
+discover() actually reads" convention as milanuncios_sample_search.html).
+`category.slug: "alquiler-de-pisos"` on every ad is the real, live-observed
+value (not a guess) — this is what MilanunciosRentalConnector's inherited
+normalize()/infer_operation() derives "rent" from once fetch_detail()
+carries the same category through.
+-->
+<html><head><title>Milanuncios</title></head><body>
+<script>window.__INITIAL_PROPS__ = JSON.parse("{\"adListPagination\": {\"adList\": {\"ads\": [{\"id\": \"549058037\", \"category\": {\"id\": 132, \"name\": \"Alquiler de pisos\", \"slug\": \"alquiler-de-pisos\"}, \"sellerType\": \"professional\", \"origin\": {\"name\": \"milanuncios\", \"provider\": null}}, {\"id\": \"560555908\", \"category\": {\"id\": 132, \"name\": \"Alquiler de pisos\", \"slug\": \"alquiler-de-pisos\"}, \"sellerType\": \"professional\", \"origin\": {\"name\": \"milanuncios\", \"provider\": null}}, {\"id\": \"511445103\", \"category\": {\"id\": 132, \"name\": \"Alquiler de pisos\", \"slug\": \"alquiler-de-pisos\"}, \"sellerType\": \"private\", \"origin\": {\"name\": \"milanuncios\", \"provider\": null}}]}}}");</script>
+</body></html>

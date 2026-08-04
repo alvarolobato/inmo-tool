@@ -1,0 +1,18 @@
+<!--
+Trimmed synthetic fixture, structurally accurate to a real Milanuncios
+RENTAL listing detail page -- external_id 549058037, live-verified to
+exist (issue #31 feasibility spike, 2026-08-03) with `category.slug:
+"alquiler-de-pisos"` and price under `price.cashPrice.value`, exactly the
+same shape milanuncios_sample_detail.html already establishes for a SALE
+ad. This fixture exists to prove MilanunciosRentalConnector's INHERITED
+normalize() (unchanged from MilanunciosConnector) correctly derives
+`operation="rent"` end-to-end from a real rental page via
+infer_operation("alquiler-de-pisos") -- no rental-specific normalize()
+code exists anywhere, so this is the test that would fail if that
+assumption were ever wrong.
+-->
+<html><head><title>Milanuncios</title>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Inicio","item":"https://www.milanuncios.com/"},{"@type":"ListItem","position":2,"name":"Inmobiliaria","item":"https://www.milanuncios.com/inmobiliaria/"},{"@type":"ListItem","position":3,"name":"Alquiler de pisos","item":"https://www.milanuncios.com/alquiler-de-pisos/"}]}</script>
+</head><body>
+<script>window.__INITIAL_PROPS__ = JSON.parse("{\"ad\": {\"id\": \"549058037\", \"title\": \"Piso en alquiler Centro Madrid\", \"description\": \"Moderna y luminosa vivienda exterior totalmente reformada con una superficie de 65 m2 construidos distribuidos en 2 habitaciones y 1 banio.\", \"category\": {\"id\": 132, \"name\": \"Alquiler de pisos\", \"slug\": \"alquiler-de-pisos\"}, \"sellerType\": {\"value\": \"professional\", \"isPrivate\": false}, \"price\": {\"cashPrice\": {\"value\": 900}}, \"location\": {\"province\": {\"id\": 28, \"name\": \"Madrid\", \"slug\": \"madrid\"}, \"city\": {\"id\": 44, \"name\": \"Madrid\", \"slug\": \"madrid\"}, \"geolocation\": {\"latitude\": 40.41680000, \"longitude\": -3.70380000}}, \"attributes\": [{\"type\": \"bedrooms\", \"fieldFormatted\": \"dormitorios\", \"value\": \"2\", \"valueFormatted\": \"2\"}, {\"type\": \"bathrooms\", \"fieldFormatted\": \"banios\", \"value\": \"1\", \"valueFormatted\": \"1\"}, {\"type\": \"squareMeters\", \"fieldFormatted\": \"metros cuadrados\", \"value\": \"65\", \"valueFormatted\": \"65 m2\"}, {\"type\": \"floor\", \"fieldFormatted\": \"planta\", \"value\": \"3\", \"valueFormatted\": \"3\"}], \"images\": [\"images-re.milanuncios.com/images/ads/95080785-9cea-4f22-88d7-0eca6332d974\"], \"author\": {\"id\": \"231888044\", \"userName\": \"Inmobiliaria Centro\"}, \"origin\": {\"name\": \"milanuncios\", \"provider\": null}, \"contactMethods\": {\"chat\": false, \"phone\": true, \"form\": true}}}");</script>
+</body></html>

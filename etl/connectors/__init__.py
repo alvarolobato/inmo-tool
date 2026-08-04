@@ -29,6 +29,7 @@ def register_all() -> None:
     from etl.connectors.fotocasa import FotocasaConnector
     from etl.connectors.idealista import IdealistaConnector
     from etl.connectors.milanuncios import MilanunciosConnector
+    from etl.connectors.milanuncios_rental import MilanunciosRentalConnector
     from etl.connectors.servihabitat import ServihabitatConnector
     from etl.connectors.solvia import SolviaConnector
     from etl.connectors.vivantial import VivantialConnector
@@ -39,6 +40,11 @@ def register_all() -> None:
         CONNECTORS.append(FotocasaConnector())
     if MilanunciosConnector.name not in registered_names:
         CONNECTORS.append(MilanunciosConnector())
+    # Issue #31: rental comps, same site, separate connector — see
+    # milanuncios_rental.py's module docstring for why it's a subclass
+    # rather than a change to MilanunciosConnector itself.
+    if MilanunciosRentalConnector.name not in registered_names:
+        CONNECTORS.append(MilanunciosRentalConnector())
     if ServihabitatConnector.name not in registered_names:
         CONNECTORS.append(ServihabitatConnector())
     if SolviaConnector.name not in registered_names:

@@ -62,8 +62,9 @@ def _insert_listing(
             """
             INSERT INTO listing
                 (property_id, source, external_id, listing_kind, description,
-                 current_price, contact_raw, reference_code, photo_urls)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+                 current_price, contact_raw, reference_code, operation,
+                 photo_urls)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
             """,
             (
                 property_id,
@@ -74,6 +75,7 @@ def _insert_listing(
                 overrides.get("current_price", Decimal(100000)),
                 overrides.get("contact_raw"),
                 overrides.get("reference_code"),
+                overrides.get("operation", "sale"),
                 # Issue #206: needed by TestPhotoHashSourceHealth below to
                 # seed real photo_urls that engine.run() actually fetches —
                 # every other test in this file omits it (default ()),
@@ -190,6 +192,60 @@ def _record(listing_id: int, property_id: int, **overrides) -> ListingRecord:
         reference_code=overrides.get("reference_code"),
         floor=overrides.get("floor"),
     )
+
+
+class TestFetchListingRecordsExcludesRentals:
+    """Issue #31: `fetch_listing_records` must never feed an
+    `operation='rent'` row into the pairwise matcher — see that function's
+    own docstring for why (rentals are read in aggregate by
+    rent-estimate.ts's own query, never resolved to a canonical property
+    the way two sale listings are; matching one against a sale listing
+    would risk a spurious cross-operation merge)."""
+
+    def test_rent_listing_never_appears_in_fetched_records(self, dedup_db):
+        sale_property = _insert_property(dedup_db, address="Calle Sale 1")
+        sale_listing = _insert_listing(
+            dedup_db, sale_property, "fotocasa", "sale-1", operation="sale"
+        )
+        rent_property = _insert_property(dedup_db, address="Calle Rent 1")
+        _insert_listing(
+            dedup_db, rent_property, "milanuncios_rental", "rent-1", operation="rent"
+        )
+        dedup_db.commit()
+
+        records = engine.fetch_listing_records(dedup_db)
+        listing_ids = {r.listing_id for r in records}
+
+        assert sale_listing in listing_ids
+        # The exact assertion this test exists for: a rent listing must be
+        # structurally absent, not merely unmatched by any signal.
+        assert not any(r.source == "milanuncios_rental" for r in records)
+
+    def test_a_property_with_both_a_sale_and_a_rent_listing_only_surfaces_the_sale_one(
+        self, dedup_db
+    ):
+        """Same real-world case rent-estimate.ts's module docstring flags
+        as a risk: a physical unit that happens to be advertised for both
+        sale and rent (or a merged property that ended up with one of
+        each). Only the sale listing should ever reach the matcher."""
+        shared_property = _insert_property(dedup_db, address="Calle Mixta 1")
+        sale_listing = _insert_listing(
+            dedup_db, shared_property, "fotocasa", "mixed-sale", operation="sale"
+        )
+        _insert_listing(
+            dedup_db,
+            shared_property,
+            "milanuncios_rental",
+            "mixed-rent",
+            operation="rent",
+        )
+        dedup_db.commit()
+
+        records = engine.fetch_listing_records(dedup_db)
+        this_property_records = [r for r in records if r.property_id == shared_property]
+
+        assert len(this_property_records) == 1
+        assert this_property_records[0].listing_id == sale_listing
 
 
 class TestCadastralExactMatch:

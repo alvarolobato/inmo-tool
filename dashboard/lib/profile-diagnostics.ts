@@ -84,6 +84,15 @@ function boundingBoxDeltas(latDeg: number, radiusKm: number, padFactor = 1.15): 
  * any single-city search), falling back to an unfiltered full-table scan
  * only if that box is empty (rare in practice: it means literally nothing
  * in the entire ingested inventory is within ~200 km of the profile).
+ *
+ * `listing.operation = 'sale'` (issue #31 Opus-review fix, PR #199): this
+ * function backs `ZeroCandidatesDiagnostic`, which tells the user "the
+ * nearest active listing is X km away, widen your radius" — the exact
+ * screen shown when a profile has zero sale candidates nearby, which is
+ * also where a rental listing is most likely to be the physically nearest
+ * active row now that `operation='rent'` rows exist. Without this filter
+ * the diagnostic could point at a rental and advise widening the radius
+ * when the real issue is that there's no sale inventory there at all.
  */
 export async function findNearestProperty(center: [number, number]): Promise<NearestPropertyResult | null> {
   const [lat, lon] = center;
@@ -101,7 +110,7 @@ export async function findNearestProperty(center: [number, number]): Promise<Nea
     `SELECT property.id, ${haversineExpr} AS distance_km
        FROM property
       WHERE property.lat IS NOT NULL AND property.lon IS NOT NULL
-        AND EXISTS (SELECT 1 FROM listing WHERE listing.property_id = property.id AND listing.status = 'active')
+        AND EXISTS (SELECT 1 FROM listing WHERE listing.property_id = property.id AND listing.status = 'active' AND listing.operation = 'sale')
         AND property.lat BETWEEN $1 - $3 AND $1 + $3
         AND property.lon BETWEEN $2 - $4 AND $2 + $4
       ORDER BY distance_km ASC
@@ -119,7 +128,7 @@ export async function findNearestProperty(center: [number, number]): Promise<Nea
     `SELECT property.id, ${haversineExpr} AS distance_km
        FROM property
       WHERE property.lat IS NOT NULL AND property.lon IS NOT NULL
-        AND EXISTS (SELECT 1 FROM listing WHERE listing.property_id = property.id AND listing.status = 'active')
+        AND EXISTS (SELECT 1 FROM listing WHERE listing.property_id = property.id AND listing.status = 'active' AND listing.operation = 'sale')
       ORDER BY distance_km ASC
       LIMIT 1`,
     [lat, lon],

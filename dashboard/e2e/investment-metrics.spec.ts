@@ -36,12 +36,21 @@ function buildPool(): Pool {
 const TEST_CENTER: [number, number] = [37.3891, -5.9845]; // Sevilla
 const NAME_PREFIX = "e2e-investment-";
 
+// A distinct cluster (issue #31's new fixtures), far outside the
+// DEFAULT_RADIUS_KM (1.5km) used by both area-price.ts and
+// rent-estimate.ts's comparable queries from TEST_CENTER — keeps the new
+// rent-comparable fixtures below from perturbing the existing area-price
+// sample_size assertions above, and vice versa.
+const RENT_TEST_CENTER: [number, number] = [37.3891, -4.9845]; // ~1 degree east of Sevilla
+
 let pool: Pool;
 let dbAvailable = false;
 let profileWithRentId: number;
 let profileNoRentId: number;
 let propertyWithGoodCompsId: number;
 let propertyFewCompsId: number;
+let propertyMarketRentId: number;
+let propertyInsufficientRentId: number;
 
 test.beforeAll(async () => {
   pool = buildPool();
@@ -90,9 +99,26 @@ test.beforeAll(async () => {
 
   async function insertListing(propertyId: number, price: number): Promise<void> {
     await pool.query(
-      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at)
-       VALUES ($1, 'fotocasa', $2, 'active', $3, NOW())`,
+      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, operation)
+       VALUES ($1, 'fotocasa', $2, 'active', $3, NOW(), 'sale')`,
       [propertyId, `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`, price],
+    );
+  }
+
+  /** A rental comparable (issue #31) at RENT_TEST_CENTER, 'piso' type. */
+  async function insertRentComp(m2: number, monthlyRent: number): Promise<void> {
+    const compId = await insertProperty(`${NAME_PREFIX}rent-comp`, RENT_TEST_CENTER[0], RENT_TEST_CENTER[1], "Sevilla");
+    await pool.query(
+      `UPDATE property SET m2_built = $2 WHERE id = $1`,
+      [compId, m2],
+    );
+    // last_seen_at = NOW() (issue #31 Opus-review must-fix #3, PR #199):
+    // required — the comparable-rent query now bounds comps by
+    // last_seen_at (MAX_COMP_AGE_DAYS); a NULL value fails that bound.
+    await pool.query(
+      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, last_seen_at, operation)
+       VALUES ($1, 'milanuncios_rental', $2, 'active', $3, NOW(), NOW(), 'rent')`,
+      [compId, `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`, monthlyRent],
     );
   }
 
@@ -123,6 +149,62 @@ test.beforeAll(async () => {
     const compId = await insertProperty(`${NAME_PREFIX}comp-few`, TEST_CENTER[0] + 0.2, TEST_CENTER[1] + 0.2, "Sevilla");
     await insertListing(compId, price);
   }
+
+  // Issue #31: a property matched to the NO-assumption profile, with 8
+  // real rental comparables nearby (same worked-example (m2, rent) pairs
+  // as rent-estimate.test.ts / the investment route's own worked example
+  // -> median 10 EUR/m2/month, high confidence). Proves the actual new
+  // capability end to end: a profile that never set a manual assumption
+  // still gets a real, measured yield.
+  propertyMarketRentId = await insertProperty(
+    `${NAME_PREFIX}Calle Alquiler Medido`,
+    RENT_TEST_CENTER[0],
+    RENT_TEST_CENTER[1],
+    "Sevilla",
+  );
+  await insertListing(propertyMarketRentId, 200000);
+  await markMatched(profileNoRentId, propertyMarketRentId);
+  for (const [m2, rent] of [
+    [80, 800],
+    [80, 720],
+    [100, 1100],
+    [60, 660],
+    [90, 900],
+    [70, 770],
+    [80, 760],
+    [100, 950],
+  ] as const) {
+    await insertRentComp(m2, rent);
+  }
+
+  // A property matched to the NO-assumption profile, but with only 1
+  // rental comparable nearby — the "insufficient rental comparables"
+  // state (distinct from "no comparables at all", still below the
+  // MIN_LOW_CONFIDENCE_SAMPLE_SIZE gate).
+  propertyInsufficientRentId = await insertProperty(
+    `${NAME_PREFIX}Calle Alquiler Insuficiente`,
+    RENT_TEST_CENTER[0] + 0.2,
+    RENT_TEST_CENTER[1] + 0.2,
+    "Sevilla",
+  );
+  await insertListing(propertyInsufficientRentId, 200000);
+  await markMatched(profileNoRentId, propertyInsufficientRentId);
+  // Reuses insertRentComp's RENT_TEST_CENTER location, so needs its own
+  // helper call at THIS property's own offset instead — inline here
+  // rather than generalizing insertRentComp's location parameter for one
+  // call site.
+  const soloCompId = await insertProperty(
+    `${NAME_PREFIX}rent-comp-solo`,
+    RENT_TEST_CENTER[0] + 0.2,
+    RENT_TEST_CENTER[1] + 0.2,
+    "Sevilla",
+  );
+  await pool.query(`UPDATE property SET m2_built = 80 WHERE id = $1`, [soloCompId]);
+  await pool.query(
+    `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, last_seen_at, operation)
+     VALUES ($1, 'milanuncios_rental', $2, 'active', $3, NOW(), NOW(), 'rent')`,
+    [soloCompId, `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`, 800],
+  );
 });
 
 test.afterAll(async () => {
@@ -235,4 +317,58 @@ test("shows the insufficient-comparables empty state for an area with too few in
   await assertNoErrorSurface(page);
   await expect(page.getByTestId("area-price-insufficient")).toBeVisible();
   await expect(page.getByTestId("area-price-comparison")).toHaveCount(0);
+});
+
+// Issue #31's core new capability, end to end: a profile that never set a
+// manual rent assumption still renders a real, measured yield — derived
+// from real ingested rental comparables, not a fabricated number.
+test("renders a real, measured yield from rental comparables when the profile has no assumption (issue #31)", async ({ page }) => {
+  skipIfNoDb(test);
+
+  await page.goto(`/profiles/${profileNoRentId}/properties/${propertyMarketRentId}`);
+  await expect(page.getByTestId("property-detail-page")).toBeVisible();
+  await assertNoErrorSurface(page);
+
+  await expect(page.getByTestId("yield-section-content")).toBeVisible({ timeout: 15000 });
+  await assertNoErrorSurface(page);
+
+  await expect(page.getByTestId("estimated-rent")).toBeVisible();
+  await expect(page.getByTestId("gross-yield")).toBeVisible();
+
+  // High-confidence market comparable (8 comps, tight dispersion — see
+  // beforeAll's fixture) — NOT the muted "assumption" tier, since no
+  // assumption was ever set for this profile.
+  const confidenceBadge = page.getByTestId("rent-confidence-badge");
+  await expect(confidenceBadge).toHaveAttribute("data-confidence", "high");
+  await expect(confidenceBadge).toHaveAttribute("data-muted", "false");
+
+  // The row label itself must say this came from market comparables, not
+  // silently reuse the assumption-specific wording.
+  await expect(page.getByText(/comparables de mercado\)/i)).toBeVisible();
+
+  // Worked-example numbers (see beforeAll / rent-estimate.test.ts's
+  // matching fixture): median 10 EUR/m2/month * 80 m2 = 800/month ->
+  // gross yield 800*12/200,000*100 = 4.8%.
+  await expect(page.getByTestId("estimated-rent")).toContainText("800");
+  await expect(page.getByTestId("gross-yield")).toContainText("4,8");
+});
+
+test("shows the insufficient-rental-comparables state when the profile has no assumption and too few rentals are nearby", async ({
+  page,
+}) => {
+  skipIfNoDb(test);
+
+  await page.goto(`/profiles/${profileNoRentId}/properties/${propertyInsufficientRentId}`);
+  await expect(page.getByTestId("property-detail-page")).toBeVisible();
+  await assertNoErrorSurface(page);
+
+  await expect(page.getByTestId("yield-empty-state")).toBeVisible({ timeout: 15000 });
+  await assertNoErrorSurface(page);
+
+  await expect(page.getByTestId("gross-yield")).toHaveCount(0);
+  await expect(page.getByTestId("estimated-rent")).toHaveCount(0);
+  // The 1 comparable that WAS found is surfaced, not silently dropped —
+  // distinguishes "we looked and found almost nothing" from "we found
+  // nothing at all" (propertyWithGoodCompsId's own no-assumption test).
+  await expect(page.getByTestId("yield-empty-state")).toContainText(/1 encontrado/i);
 });

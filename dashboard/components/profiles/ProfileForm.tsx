@@ -504,10 +504,12 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
             style={inputStyle}
           />
           <p style={{ margin: "4px 0 0", fontSize: 11, color: "var(--fg-subtle)" }}>
-            Issue #151: inmo-tool no ingiere todavía datos reales de alquileres comparables (#31), así
-            que el yield de una propiedad se calcula únicamente si defines aquí tu propia estimación de
-            alquiler por m² para la zona de este perfil. Sin esta asunción, no se muestra ningún yield
-            (ni se inventa una cifra).
+            Opcional (issue #31): si defines tu propia estimación de alquiler por m² para la zona de
+            este perfil, se usará siempre para calcular el yield, incluso si hay comparables de
+            alquiler ingeridos en la zona — nunca se sustituye en silencio por una cifra medida, aunque
+            ambas se muestran si difieren. Si la dejas en blanco, inmo-tool intentará estimar el
+            alquiler a partir de anuncios de alquiler comparables ya ingeridos en la zona; si no hay
+            suficientes, no se muestra ningún yield (ni se inventa una cifra).
           </p>
         </div>
       </fieldset>

@@ -6,12 +6,15 @@
  * lib/candidates.ts / lib/property-detail.ts, never import from a client
  * component.
  *
- * Placed at `lib/`, not `lib/analytics/`, on purpose: everything in
- * `lib/analytics/` is a pure function (DB-free, cheaply unit-testable —
- * see that directory's own test files). This module is the DB-aggregation
- * layer that feeds them real property data, mirroring how
- * `lib/property-detail.ts` composes `lib/candidates.ts`'s query
- * conventions rather than being a pure function itself.
+ * Placed at `lib/`, not `lib/analytics/`, on purpose: this module is the
+ * DB-aggregation layer that feeds the analytics modules real property
+ * data, mirroring how `lib/property-detail.ts` composes
+ * `lib/candidates.ts`'s query conventions rather than being a pure
+ * function itself. (Note: as of issue #31, `lib/analytics/` itself is no
+ * longer exclusively pure functions — `rent-estimate.ts` now runs its own
+ * DB-backed comparable query, same as `area-price.ts` already did; the
+ * distinction that matters is "does the caller need to load property rows
+ * first", which is still this module's job.)
  */
 
 import { sql } from "@/lib/db-write";
@@ -35,6 +38,10 @@ interface RawInvestmentRow {
   annual_ibi_eur: string | null;
   /** From `listing.raw_extra->>'gastos_comunidad_eur'`. */
   monthly_community_fee_eur: string | null;
+  /** issue #31: needed to run rent-estimate.ts's comparable-rental query, which m2_built/province alone didn't require before. */
+  lat: string | null;
+  lon: string | null;
+  property_type: string | null;
 }
 
 /**
@@ -93,6 +100,9 @@ async function fetchInvestmentInputs(propertyId: number): Promise<RawInvestmentR
     `SELECT
        property.m2_built::text AS m2_built,
        property.province,
+       property.lat::text AS lat,
+       property.lon::text AS lon,
+       property.property_type,
        (SELECT MIN(l.current_price) FROM listing l
           WHERE l.property_id = property.id AND l.status = 'active' AND l.operation = 'sale')::text AS min_price,
        (SELECT l.raw_extra->>'ibi_anual_eur' FROM listing l
@@ -140,7 +150,13 @@ export async function getInvestmentMetrics(
         : null,
   };
 
-  const rentEstimate = estimateRent({ m2_built: m2Built }, thesisParams);
+  const lat = row.lat !== null ? Number(row.lat) : null;
+  const lon = row.lon !== null ? Number(row.lon) : null;
+
+  const rentEstimate = await estimateRent(
+    { id: propertyId, lat, lon, property_type: row.property_type, m2_built: m2Built },
+    thesisParams,
+  );
   const yieldResult = computeYield(
     { purchase_price: minPrice, province: row.province },
     rentEstimate,

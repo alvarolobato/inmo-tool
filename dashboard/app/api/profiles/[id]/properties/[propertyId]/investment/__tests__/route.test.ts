@@ -97,10 +97,32 @@ describe.runIf(dbAvailable)("GET /api/profiles/[id]/properties/[propertyId]/inve
 
   async function insertListing(pool: Pool, propertyId: number, price = 200000): Promise<void> {
     await pool.query(
-      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at)
-       VALUES ($1, 'fotocasa', $2, 'active', $3, NOW())`,
+      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, operation)
+       VALUES ($1, 'fotocasa', $2, 'active', $3, NOW(), 'sale')`,
       [propertyId, `investment-int-test-${Math.random().toString(36).slice(2)}`, price],
     );
+  }
+
+  /** A rental comparable at TEST_COORDS, 'piso' type, m2 and monthly rent given. */
+  async function insertRentComp(pool: Pool, m2: number, monthlyRent: number): Promise<number> {
+    const result = await pool.query<{ id: number }>(
+      `INSERT INTO property (lat, lon, property_type, m2_built, address)
+       VALUES ($1, $2, 'piso', $3, 'Calle comparable alquiler, investment-int-test') RETURNING id`,
+      [TEST_COORDS[0], TEST_COORDS[1], m2],
+    );
+    const id = Number(result.rows[0].id);
+    createdPropertyIds.push(id);
+    // last_seen_at = NOW() (issue #31 Opus-review must-fix #3, PR #199):
+    // rent-estimate.ts's comparable query now bounds comps by
+    // last_seen_at (MAX_COMP_AGE_DAYS) — a NULL value (the previous
+    // behaviour here, before this fix) fails that bound and silently
+    // excludes every comp this helper inserts.
+    await pool.query(
+      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, last_seen_at, operation)
+       VALUES ($1, 'milanuncios_rental', $2, 'active', $3, NOW(), NOW(), 'rent')`,
+      [id, `investment-int-test-rent-${Math.random().toString(36).slice(2)}`, monthlyRent],
+    );
+    return id;
   }
 
   async function makeProfile(thesisParams: ThesisParams = {}): Promise<number> {
@@ -172,7 +194,7 @@ describe.runIf(dbAvailable)("GET /api/profiles/[id]/properties/[propertyId]/inve
     });
   });
 
-  it("returns the explicit no-rent-assumption result (not a fabricated rent) when the profile has none set", async () => {
+  it("returns the explicit insufficient-data result (not a fabricated rent) when the profile has no assumption and there are no rental comparables", async () => {
     await withRealDb(async (pool) => {
       const profileId = await makeProfile({}); // no rent_assumption
       const propertyId = await insertProperty(pool);
@@ -183,10 +205,70 @@ describe.runIf(dbAvailable)("GET /api/profiles/[id]/properties/[propertyId]/inve
       expect(res.status).toBe(200);
       const body = await res.json();
 
-      expect(body.rent_estimate.method).toBe("no_rent_assumption");
+      // issue #31: renamed from "no_rent_assumption" — this property has
+      // zero rental comparables ingested at all (below the count gate,
+      // same as "no comparables"), independent of the assumption gap.
+      expect(body.rent_estimate.method).toBe("insufficient_data");
       expect(body.rent_estimate.estimated_monthly_rent).toBeNull();
+      expect(body.rent_estimate.market_comparable.comparable_count).toBe(0);
       expect(body.yield.gross_yield_pct).toBeNull();
       expect(body.yield.assumptions_used).toBeNull();
+    });
+  });
+
+  // WORKED EXAMPLE, end to end through the real API route (issue #31's
+  // core value proposition: yield reachable for a profile that never set
+  // a manual assumption, from real ingested rental comparables). 8 rent
+  // comps at TEST_COORDS, same (m2, rent) pairs as rent-estimate.test.ts's
+  // own worked example -> median 10 EUR/m2/month, high confidence.
+  // Property: 80 m2, purchase_price 200,000 EUR, Madrid.
+  //   estimated_monthly_rent = 10 * 80 = 800 -> annual gross rent 9,600.
+  //   gross_yield_pct = 9,600 / 200,000 * 100 = 4.8%.
+  it("WORKED EXAMPLE: computes a real, measured yield from rental comparables when no assumption is set (issue #31's core capability)", async () => {
+    await withRealDb(async (pool) => {
+      const profileId = await makeProfile({}); // no rent_assumption — this is the point
+      const propertyId = await insertProperty(pool, { province: "Madrid" });
+      await insertListing(pool, propertyId, 200000);
+      await markMatched(pool, profileId, propertyId);
+
+      const comps: Array<[number, number]> = [
+        [80, 800],
+        [80, 720],
+        [100, 1100],
+        [60, 660],
+        [90, 900],
+        [70, 770],
+        [80, 760],
+        [100, 950],
+      ];
+      for (const [m2, rent] of comps) {
+        await insertRentComp(pool, m2, rent);
+      }
+
+      const res = await GET(null as never, ctx(profileId, propertyId));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+
+      expect(body.rent_estimate.method).toBe("market_comparable_high");
+      expect(body.rent_estimate.confidence).toBe("high");
+      expect(body.rent_estimate.estimated_monthly_rent).toBeCloseTo(800, 6);
+      expect(body.yield.gross_yield_pct).toBeCloseTo(4.8, 6);
+
+      // MATERIALITY CHECK (this issue's own verification standard): a
+      // hypothetical profile using a plausible-but-different rent
+      // assumption (20 EUR/m2/month, chosen independently of the measured
+      // 10 EUR/m2/month median above) must produce a MATERIALLY different
+      // yield — proving the measured estimate isn't a decoration that
+      // happens to agree with whatever a human would have typed anyway.
+      const assumptionProfileId = await makeProfile({ rent_assumption: { eur_per_m2_month: 20 } });
+      await markMatched(pool, assumptionProfileId, propertyId);
+      const assumptionRes = await GET(null as never, ctx(assumptionProfileId, propertyId));
+      const assumptionBody = await assumptionRes.json();
+      // 20 EUR/m2 * 80 m2 = 1,600/month -> annual 19,200 -> 19,200/200,000*100 = 9.6%.
+      expect(assumptionBody.yield.gross_yield_pct).toBeCloseTo(9.6, 6);
+
+      const delta = Math.abs(assumptionBody.yield.gross_yield_pct - body.yield.gross_yield_pct);
+      expect(delta).toBeGreaterThan(3); // 4.8 vs 9.6 = 4.8 points apart — clearly material
     });
   });
 

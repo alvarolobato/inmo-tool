@@ -72,9 +72,16 @@ export async function fetchScoringInputs(profileId: number): Promise<ScoringInpu
        p.floor,
        p.has_elevator,
        p.year_built,
+       -- AND l2.operation = 'sale' (issue #31, defense-in-depth — see
+       -- candidates.ts's identical subquery for the full reasoning):
+       -- every row here already comes through profile_listing_state,
+       -- which scope-query.ts gates on an active SALE listing, so this
+       -- shouldn't be reachable with a rent listing today either. Kept
+       -- explicit so the scoring model's price_per_m2_relative feature
+       -- can never be silently computed from a monthly rent figure.
        (SELECT MIN(l2.current_price)
           FROM listing l2
-         WHERE l2.property_id = p.id AND l2.status = 'active') AS min_price,
+         WHERE l2.property_id = p.id AND l2.status = 'active' AND l2.operation = 'sale') AS min_price,
        (SELECT MIN(l3.first_seen_at)
           FROM listing l3
          WHERE l3.property_id = p.id) AS first_seen_at

@@ -82,9 +82,15 @@ export async function listMapCandidates(profileId: number): Promise<MapCandidate
          p.m2_built,
          p.rooms,
          pls.pipeline_stage,
+         -- AND operation = 'sale' on both subqueries (issue #31,
+         -- defense-in-depth — see candidates.ts's identical pair for the
+         -- full reasoning): every row here already comes through
+         -- profile_listing_state, gated on an active SALE listing by
+         -- scope-query.ts, so this shouldn't be reachable with a rent
+         -- listing today either.
          (SELECT MIN(l2.current_price)
             FROM listing l2
-           WHERE l2.property_id = p.id AND l2.status = 'active') AS min_price,
+           WHERE l2.property_id = p.id AND l2.status = 'active' AND l2.operation = 'sale') AS min_price,
          COALESCE(
            (SELECT json_agg(
                      json_build_object(
@@ -96,7 +102,7 @@ export async function listMapCandidates(profileId: number): Promise<MapCandidate
                      ORDER BY l.source
                    )
               FROM listing l
-             WHERE l.property_id = p.id AND l.status = 'active'),
+             WHERE l.property_id = p.id AND l.status = 'active' AND l.operation = 'sale'),
            '[]'
          ) AS listings
        FROM profile_listing_state pls
