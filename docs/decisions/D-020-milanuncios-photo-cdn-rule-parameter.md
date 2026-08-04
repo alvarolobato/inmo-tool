@@ -1,10 +1,10 @@
 ---
-id: D-019
+id: D-020
 title: Milanuncios photo URLs must carry an explicit ?rule= transform parameter
 date: 2026-08-04
 ---
 
-# D-019: Milanuncios photo URLs must carry an explicit ?rule= transform parameter
+# D-020: Milanuncios photo URLs must carry an explicit ?rule= transform parameter
 
 *Decided: 2026-08-04*
 
