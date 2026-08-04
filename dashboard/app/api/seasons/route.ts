@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { type Season, parseSeason } from "@/lib/seasons";
 
+// Queries Postgres per request; never prerender at build (no DB then).
+export const dynamic = "force-dynamic";
+
 export async function GET(): Promise<NextResponse> {
   try {
     const result = await query(
