@@ -671,6 +671,7 @@ def create_manual_trigger(
     force_full: bool = False,
     force_tables: Sequence[str] | None = None,
     triggered_by: str = "dashboard",
+    connector_name: str | None = None,
 ) -> int:
     """Insert a pending manual trigger row and return its id.
 
@@ -680,6 +681,8 @@ def create_manual_trigger(
 
     Args:
         force_full: if ``True``, the ETL will reset all watermarks before the run.
+            (Inherited PowerShop semantics — the inmo-tool connector orchestrator
+            ignores this; use ``connector_name`` to scope a run.)
         force_tables: optional list of sync names whose watermarks should be
             cleared before the run. Ignored when ``force_full=True``. Caller is
             responsible for validating names against the known sync registry —
@@ -688,17 +691,22 @@ def create_manual_trigger(
         triggered_by: audit string identifying the requester (e.g. client IP,
             ``"dashboard"``, ``"cli"``). Stored verbatim; no validation performed
             here — callers are responsible for sanitising untrusted input.
+        connector_name: issue #244 — when set, the ad-hoc run
+            (etl/manual_trigger.py) is restricted to this one connector; ``None``
+            means run every enabled connector (a full sweep). Not validated here —
+            the poll loop surfaces an unknown name as a ``failed`` trigger.
     """
     tables = list(force_tables) if force_tables else []
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO etl_manual_trigger (status, force_full, force_tables, triggered_by)
-                VALUES ('pending', %s, %s, %s)
+                INSERT INTO etl_manual_trigger
+                    (status, force_full, force_tables, triggered_by, connector_name)
+                VALUES ('pending', %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (bool(force_full), tables, triggered_by),
+                (bool(force_full), tables, triggered_by, connector_name),
             )
             trigger_id: int = cur.fetchone()[0]
         conn.commit()

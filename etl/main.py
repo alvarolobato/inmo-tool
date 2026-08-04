@@ -189,6 +189,14 @@ def main() -> None:
             from etl.dedup import actions as dedup_actions
 
             dedup_actions.process_pending_actions(conn_pg)
+
+            # Also drain one pending ad-hoc manual trigger in --once mode
+            # (issue #244) — same "do queued work" reasoning as the drains
+            # above, so `ps connector run` / manual testing can exercise the
+            # trigger path without waiting for the long-running poll thread.
+            from etl import manual_trigger
+
+            manual_trigger.process_pending_trigger(conn_pg)
         except orchestrator.UnknownConnectorError as exc:
             # Caught specifically, not bare ValueError — an unrelated
             # ValueError from somewhere inside a connector's own code
@@ -230,6 +238,22 @@ def main() -> None:
         daemon=True,
     )
     dedup_action_thread.start()
+
+    # Ad-hoc manual-trigger polling (issue #244): the dashboard's "Ejecutar
+    # ahora" button writes an etl_manual_trigger row; this thread picks it up
+    # on a short interval and runs a sweep (all connectors, or one when
+    # scoped). Same "own short interval, own thread" reasoning as the two
+    # threads above. It takes the connector run lock, so it never overlaps the
+    # scheduler sweep below (etl.orchestrator.run_scheduler_loop takes the
+    # same lock).
+    from etl import manual_trigger
+
+    manual_trigger_thread = threading.Thread(
+        target=manual_trigger.run_manual_trigger_poll_loop,
+        args=(lambda: postgres.get_connection(config),),
+        daemon=True,
+    )
+    manual_trigger_thread.start()
 
     if not registry_synced:
         # Same reasoning as the --once branch: without the seeded rows, every
