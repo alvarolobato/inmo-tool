@@ -8,6 +8,8 @@ date: 2026-08-04
 
 *Decided: 2026-08-04*
 
+> **Superseded in part by [D-035](D-035-cimenta2-detail-endpoint-injected.md) (2026-08-04):** the owner reviewed the detail data (the site's own listing fields) and chose to have the connector fetch it in their private tool, with the endpoint injected via config and never committed to this public repo, and owner-contact fields never stored. D-035 governs detail-fetch; the rest of this record stands.
+
 **Context**: Issue #136, Grupo Cooperativo Cajamar's REO portal
 (`cimenta2.com`), part of #132's bank/fund batch. Unlike Sareb (D-026)
 and Altamira (D-027), this site is **not** WAF-blocked — it responds
@@ -163,6 +165,16 @@ working recipe. Filed as a note on #136 rather than as a repo document.
   type/municipality/province slug is real information, but with no price,
   surface or coordinates it cannot populate a `listing` row or feed #16's
   dedup signals.
+
+  > **Revisited by [D-034](D-034-cimenta2-sitemap-index-only.md)
+  > (2026-08-04), which supersedes this bullet only.** Two of its three
+  > premises turned out to be false when checked against the code:
+  > `listing.current_price` is nullable, so a row *can* be populated, and
+  > the `reference_code` signal *is* reachable (capped at the
+  > uncorroborated 0.500 suggest tier). The third premise was right and is
+  > in fact understated — the geography slugs are worse than assumed. The
+  > endpoint verdict below is untouched: the guest API must not be used,
+  > for any field, under any scoping.
 
 **Rationale**: This batch has now produced three distinct not-buildable
 shapes, and the distinction is worth keeping: Sareb (D-026) and Altamira

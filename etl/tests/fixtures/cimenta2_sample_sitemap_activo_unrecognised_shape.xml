@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  SYNTHETIC, not a real capture. A well-formed sitemap whose <loc> entries
+  are real (they are genuine `inv-expediente` URLs copied verbatim from
+  https://inmuebles.cimenta2.com/inmuebles/s/sitemap-inv_expediente__c-1.xml,
+  fetched 2026-08-04) but which carry NONE of the `ga-activo` asset shape
+  the connector parses.
+
+  Stands in for the day Cajamar renames the asset URL path or the index
+  starts pointing the asset slot at a different object. The connector must
+  RAISE on this rather than return an empty id list: it declares
+  discovers_full_inventory = True, so an empty discover() would be read by
+  etl.orchestrator._reconcile_missed_discoveries as "every Cimenta2 asset
+  was withdrawn at once" after three sweeps.
+-->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">
+  <url><loc>https://inmuebles.cimenta2.com/inmuebles/s/inv-expediente/a4h3X000000LNJlQAO/chalet-antas-almeria</loc><lastmod>2026-08-04T00:27:01.333Z</lastmod></url>
+  <url><loc>https://inmuebles.cimenta2.com/inmuebles/s/inv-expediente/a4h3X000000LNK5QAO/nave-fuente-alamo-murcia</loc><lastmod>2026-08-04T00:27:01.333Z</lastmod></url>
+</urlset>
