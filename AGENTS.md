@@ -106,6 +106,49 @@ The **named flows** (`generate`/`modify`/`analyze`/`suggest`/`gap`/`weekly`/`cha
 
 ---
 
+## How work runs in this repo
+
+The owner's standing instruction is **chain work continuously — do not stop to
+report and wait**. A report is a checkpoint, not a stopping point. The default
+is to keep going to the next queued task.
+
+### The pipeline
+
+```
+implement  →  review        →  merge  →  verify against live data
+              (per PR)         (agent)
+```
+
+| Stage | Who | Notes |
+|-------|-----|-------|
+| Implement | coordinating agent, or a delegated agent in its own worktree | one isolated git worktree per agent — two collisions have already lost uncommitted work |
+| **Review a PR** | **Opus, from a clean context** | a fresh agent, so it re-derives rather than agreeing with the author |
+| **Review a phase** | **Fable** | cross-task architecture/strategy review at phase boundaries, not per PR |
+| Merge | **the coordinating agent merges** | see [D-029](docs/decisions/D-029-agent-merges-after-review.md) |
+| Verify | coordinating agent | redeploy the demo stack, check against real data — not just green tests |
+
+Fable is also the right choice for open-ended spikes and assessments
+(connector viability, "is this buildable", architecture risk), where the
+output is a judgement plus filed follow-ups rather than a diff.
+
+### Merging
+
+The agent merges its own reviewed PRs. This supersedes the original
+human-approves-every-merge rule — see
+[D-029](docs/decisions/D-029-agent-merges-after-review.md) for what changed and
+what still stops a merge. Escalate instead of merging when a review returns
+CHANGES REQUIRED that you disagree with, when the change is irreversible or
+outward-facing, or when the owner has explicitly reserved the decision.
+
+### Reporting
+
+After each completed task or change, emit exactly four sections: **next tasks
+(prioritized table)**, **current work ongoing**, **things needing the owner's
+decision**, **things the owner needs to know**. Keep it short. Leave out agent
+transcripts, implementation play-by-play, and problems already solved.
+
+---
+
 ## Important Rules for AI Assistants
 
 ### No credentials in committed files
