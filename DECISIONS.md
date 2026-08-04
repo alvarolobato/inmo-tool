@@ -27,6 +27,7 @@
 | [D-013](docs/decisions/D-013-search-profile-scope-no-default.md) | `search_profile.scope` has no DB-level default — an INSERT must supply an explicit, validated scope; a missing one fails loudly, not silently. |
 | [D-017](docs/decisions/D-017-milanuncios-rate-measurement.md) | Milanuncios `rate_limit_per_minute = 2` — measured (20 and 6/min both fail identically), kept below Fotocasa's 3, not proven sufficient for a full run. |
 | [D-018](docs/decisions/D-018-solvia-sitemap-partitioning.md) | Solvia `discover()` resolves a scope to a provincia only, then sweeps every municipality page the site's own sitemap lists for it (cached 24h). `discovers_full_inventory` stays `False`. |
+| [D-019](docs/decisions/D-019-aliseda-not-viable-disallowed-api.md) | Aliseda (`alisedainmobiliaria.com`) not buildable: every page is a contentless JS shell; the real data API (`laravel.alisedainmobiliaria.com`) declares `Disallow: /` for all crawlers. No connector written. |
 
 ## AI layer
 
