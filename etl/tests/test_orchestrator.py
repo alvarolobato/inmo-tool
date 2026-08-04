@@ -17,7 +17,7 @@ from typing import ClassVar
 import pytest
 
 from etl import orchestrator
-from etl.connectors.base import CanonicalListingVersion
+from etl.connectors.base import CanonicalListingVersion, ConnectorError
 from etl.connectors.fotocasa import FotocasaConnector
 from etl.connectors.geography import (
     UnresolvableGeographyError,
@@ -3501,7 +3501,47 @@ class _NamedScopeConnector(DummyConnector):
             return "barcelona"
         if 36.0 <= lat < 37.0:
             return "estepona"
+        if 37.0 <= lat < 38.0:
+            return "dos-hermanas"
         return None
+
+
+class _SentinelScopeConnector(_NamedScopeConnector):
+    """A `_NamedScopeConnector` that returns issue #177's
+    `unresolvable-geography:` SENTINEL — not `None` — for a scope it cannot
+    place, which is what every real connector does (see
+    `geography.unresolvable_scope_key`).
+
+    `_NamedScopeConnector` returns `None` there, which exercises only the
+    "resolved to nothing / no coverage" path. The sentinel is a genuinely
+    different third case and the one PR #228's review finding 3 is about.
+    """
+
+    def scope_key(self, scope):
+        key = super().scope_key(scope)
+        if key is None and scope.center is not None:
+            return unresolvable_scope_key(scope)
+        return key
+
+
+class _ScopeDiscoverFailsConnector(_NamedScopeConnector):
+    """A `_NamedScopeConnector` whose `discover()` raises for the scopes
+    whose key is in *broken_keys* and succeeds for every other scope.
+
+    Models the real thing PR #228's review finding 1 is about: a scope that
+    is attempted on every run and fails on every run (a soft-block page, a
+    parse failure after a site redesign), while its neighbours crawl fine.
+    """
+
+    def __init__(self, *, broken_keys: frozenset[str], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._broken_keys = broken_keys
+
+    def discover(self, scope, throttle):
+        key = self.scope_key(scope)
+        if key in self._broken_keys:
+            raise ConnectorError(f"simulated permanent discover failure for {key}")
+        return super().discover(scope, throttle)
 
 
 def _scope_state(conn, connector_name: str) -> dict[str, tuple]:
@@ -3526,6 +3566,65 @@ def _result_row(conn, run_id: int, connector_name: str) -> tuple:
         return cur.fetchone()
 
 
+def _scope_row(conn, connector_name: str, scope_key: str) -> dict:
+    """Every PR #228-relevant column of one `connector_scope_state` row, as a
+    dict — `_scope_state`'s 2-tuple predates `last_discovered_at` and the
+    renamed coverage columns and is kept as-is for the tests already using
+    it."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT last_attempted_at, last_discovered_at, "
+            "last_skipped_for_budget_at, coverage_center_lat, "
+            "coverage_center_lon, coverage_radius_km "
+            "FROM connector_scope_state "
+            "WHERE connector_name = %s AND scope_key = %s",
+            (connector_name, scope_key),
+        )
+        row = cur.fetchone()
+    assert row is not None, (
+        f"no connector_scope_state row for {connector_name}/{scope_key}"
+    )
+    return dict(
+        zip(
+            (
+                "last_attempted_at",
+                "last_discovered_at",
+                "last_skipped_for_budget_at",
+                "coverage_center_lat",
+                "coverage_center_lon",
+                "coverage_radius_km",
+            ),
+            row,
+        )
+    )
+
+
+# The EXACT containment predicate `getAreaCoverage()` runs
+# (dashboard/lib/profile-diagnostics.ts). Duplicated here on purpose: the
+# whole question PR #228's review finding 2 raises is whether the rows the
+# ETL writes make that specific query answer "crawled" for an area nobody
+# crawled, and only running the real predicate against the real rows can
+# settle it. A Python-side re-implementation of "is it inside the circle"
+# would be testing my arithmetic, not the shipped query's.
+_COVERAGE_CONTAINMENT_SQL = """
+    SELECT connector_name, last_attempted_at, last_discovered_at
+      FROM connector_scope_state
+     WHERE connector_name = %s
+       AND coverage_center_lat IS NOT NULL AND coverage_center_lon IS NOT NULL
+       AND (6371 * acos(least(1, greatest(-1,
+             cos(radians(%s)) * cos(radians(coverage_center_lat)) *
+             cos(radians(coverage_center_lon) - radians(%s)) +
+             sin(radians(%s)) * sin(radians(coverage_center_lat))
+           )))) <= COALESCE(coverage_radius_km, 0)
+"""
+
+
+def _covering_rows(conn, connector_name: str, lat: float, lon: float) -> list[tuple]:
+    with conn.cursor() as cur:
+        cur.execute(_COVERAGE_CONTAINMENT_SQL, (connector_name, lat, lon, lat))
+        return cur.fetchall()
+
+
 def _cleanup_scope_state(conn, connector_name: str) -> None:
     with conn.cursor() as cur:
         cur.execute(
@@ -3546,7 +3645,9 @@ class TestScopeFairnessRotation:
     never looked at your area").
     """
 
-    def _add_profile(self, conn, name: str, lat: float, lon: float) -> int:
+    def _add_profile(
+        self, conn, name: str, lat: float, lon: float, radius_km: float = 10
+    ) -> int:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO search_profile (name, scope) VALUES (%s, %s) RETURNING id",
@@ -3557,7 +3658,7 @@ class TestScopeFairnessRotation:
                             "geography": {
                                 "type": "radius",
                                 "center": [lat, lon],
-                                "radius_km": 10,
+                                "radius_km": radius_km,
                             }
                         }
                     ),
@@ -3784,18 +3885,20 @@ class TestScopeFairnessRotation:
                 "record when that happened"
             )
 
-            # The geography columns the dashboard's containment query needs.
-            with pg_conn.cursor() as cur:
-                cur.execute(
-                    "SELECT center_lat, center_lon, radius_km FROM "
-                    "connector_scope_state WHERE connector_name = %s AND "
-                    "scope_key = %s",
-                    (connector.name, "barcelona"),
-                )
-                center_lat, center_lon, radius_km = cur.fetchone()
-            assert center_lat == pytest.approx(41.3851)
-            assert center_lon == pytest.approx(2.1734)
-            assert radius_km == pytest.approx(10.0)
+            # The coverage columns the dashboard's containment query needs.
+            # PR #228 review, finding 2: these describe what the connector
+            # CRAWLS (the resolved municipality's own centroid, plus a
+            # conservative extent), not the profile's search circle — see
+            # `_scope_coverage_columns`. Barcelona's gazetteer centroid is
+            # (41.38879, 2.15899), a little off the profile's (41.3851,
+            # 2.1734), which is exactly the point: the profile's numbers are
+            # no longer what gets stored.
+            row = _scope_row(pg_conn, connector.name, "barcelona")
+            assert row["coverage_center_lat"] == pytest.approx(41.38879)
+            assert row["coverage_center_lon"] == pytest.approx(2.15899)
+            assert row["coverage_radius_km"] == pytest.approx(
+                orchestrator._MUNICIPAL_COVERAGE_RADIUS_KM
+            )
         finally:
             orchestrator.CONNECTORS.clear()
             _cleanup(pg_conn, connector.name, run_id)
@@ -3890,3 +3993,301 @@ class TestScopeFairnessRotation:
             _cleanup(pg_conn, connector.name, run_id)
             _cleanup_scope_state(pg_conn, connector.name)
             self._drop_profile(pg_conn, barcelona_id)
+
+
+class TestScopeCoverageClaims:
+    """PR #228 review, findings 1-3 and nits 5-6.
+
+    Issue #217's fairness rotation is sound; what these tests pin down is
+    the DIAGNOSTIC layer built on top of it, which asserted things the
+    stored data does not support. In its worst form it told the user "esta
+    zona se rastreo por ultima vez el <fecha>" about an area no connector
+    had ever successfully crawled — the exact misdiagnosis #217 was filed
+    about, re-introduced through the feature meant to cure it.
+
+    Everything here follows one rule: a coverage claim shown to a user must
+    be one the ETL can actually vouch for, and every uncertainty resolves
+    toward claiming LESS coverage, never more.
+    """
+
+    _add_profile = TestScopeFairnessRotation._add_profile
+    _drop_profile = TestScopeFairnessRotation._drop_profile
+
+    def test_an_always_failing_scope_is_attempted_but_never_recorded_as_crawled(
+        self, pg_conn
+    ):
+        """Finding 1. `last_attempted_at` is written BEFORE `run_connector`
+        and UNCONDITIONALLY — correct for fairness (a permanently-failing
+        scope must not keep winning the front of the queue), and precisely
+        why it cannot also carry the coverage claim.
+
+        A scope whose `discover()` raises on every run must therefore end up
+        with a real `last_attempted_at` (so rotation still works) and a NULL
+        `last_discovered_at` (so nothing can report it as crawled). Its
+        healthy neighbour in the same run must get both.
+        """
+        _apply_schema(pg_conn)
+        barcelona_id = self._add_profile(pg_conn, "cov-bcn-fail", 41.3851, 2.1734)
+        connector = _ScopeDiscoverFailsConnector(
+            name="test-coverage-failing-scope",
+            broken_keys=frozenset({"madrid"}),
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            broken = _scope_row(pg_conn, connector.name, "madrid")
+            assert broken["last_attempted_at"] is not None, (
+                "a failing scope must still count as attempted, or it wins "
+                "the front of the fairness queue forever (the U+1 bound "
+                "depends on this)"
+            )
+            assert broken["last_discovered_at"] is None, (
+                "discover() raised for this scope — nothing may record it "
+                "as successfully crawled, because the dashboard renders "
+                "that as 'esta zona se rastreo el <fecha>' and 'no hay "
+                "resultados' is then read as a real statement about real "
+                "inventory"
+            )
+
+            healthy = _scope_row(pg_conn, connector.name, "barcelona")
+            assert healthy["last_attempted_at"] is not None
+            assert healthy["last_discovered_at"] is not None, (
+                "a scope whose discover() genuinely succeeded MUST be "
+                "recorded as crawled — otherwise the fix just suppresses "
+                "the signal instead of making it truthful"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            _cleanup_scope_state(pg_conn, connector.name)
+            self._drop_profile(pg_conn, barcelona_id)
+
+    def test_a_far_away_area_is_not_claimed_covered_by_a_wide_radius_profile(
+        self, pg_conn
+    ):
+        """Finding 2, reproducing the reviewer's exact scenario.
+
+        A Dos Hermanas profile at `radius_km=120` (well inside the 200 km
+        the profile schema allows) used to store a 120 km disc as its
+        coverage circle, because the row recorded the PROFILE's search
+        radius. `radius_km` never widens what is crawled — `resolve_place`
+        -> `nearest_place` only uses it to TIGHTEN the match ceiling — so
+        the connector crawled exactly one municipality while the row claimed
+        a disc reaching 120 km in every direction.
+
+        `getAreaCoverage(Estepona)` therefore answered "crawled" for
+        Estepona: 117.8 km away, never crawled by anyone, and the very
+        profile issue #217 was filed about. The user was told their area had
+        been crawled and was genuinely empty.
+
+        Asserted by running the shipped containment predicate itself
+        (`_COVERAGE_CONTAINMENT_SQL`) against the rows a real run writes.
+        """
+        _apply_schema(pg_conn)
+        # The incident's own geography, at the incident's own radius.
+        dh_id = self._add_profile(
+            pg_conn, "cov-dos-hermanas", 37.28287, -5.92088, radius_km=120
+        )
+        connector = _NamedScopeConnector(name="test-coverage-wide-radius")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            row = _scope_row(pg_conn, connector.name, "dos-hermanas")
+            assert row["last_discovered_at"] is not None, (
+                "precondition: this scope really was crawled this run"
+            )
+            # Positive control first: the predicate does find the area that
+            # WAS crawled. Without it, the assertion below would also pass
+            # if coverage were broken outright.
+            assert _covering_rows(pg_conn, connector.name, 37.28287, -5.92088), (
+                "the containment predicate must still report the "
+                "municipality that was actually crawled"
+            )
+
+            # The regression itself: Estepona, 117.8 km from Dos Hermanas.
+            # Asserted BEFORE the column-level checks below so a regression
+            # surfaces as the user-visible claim it is, not as a number.
+            assert _covering_rows(pg_conn, connector.name, 36.42764, -5.14589) == [], (
+                "Estepona is 117.8 km from the only municipality crawled and "
+                "was never looked at — no row may let the diagnostic claim "
+                "it was covered"
+            )
+
+            assert row["coverage_radius_km"] != pytest.approx(120.0), (
+                "the profile's 120 km search radius must never be stored as "
+                "a coverage circle — it describes which listings MATCH, not "
+                "what was crawled"
+            )
+            assert row["coverage_radius_km"] == pytest.approx(
+                orchestrator._MUNICIPAL_COVERAGE_RADIUS_KM
+            )
+            # The resolved municipality's own centroid, not the profile's
+            # center (identical here because the profile was pinned on the
+            # gazetteer entry — the radius is what discriminates).
+            assert row["coverage_center_lat"] == pytest.approx(37.28287)
+            assert row["coverage_center_lon"] == pytest.approx(-5.92088)
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            _cleanup_scope_state(pg_conn, connector.name)
+            self._drop_profile(pg_conn, dh_id)
+
+    def test_unresolvable_scope_behind_the_breaker_cut_is_not_called_a_budget_skip(
+        self, pg_conn
+    ):
+        """Finding 3. The classify loop branched only on `scope_key() is
+        None`, so a scope returning issue #177's `unresolvable-geography:`
+        sentinel fell through to `budget`.
+
+        Two things went wrong from there. `skipped_scopes` said "budget",
+        i.e. "more budget would have helped" — it never will, `discover()`
+        raises for this scope on every run by construction. And the
+        `connector_scope_state` row it wrote (NULL `last_attempted_at`) made
+        the dashboard promise the user "esta zona si esta cubierta, todavia
+        no le ha tocado el turno" for a profile centre matching no place in
+        the gazetteer at all — burying the one thing #177's sentinel exists
+        to surface.
+        """
+        _apply_schema(pg_conn)
+        # (50.1, 8.6) is Frankfurt — no Spanish gazetteer entry within
+        # range, so a real connector's scope_key() returns the sentinel.
+        bad_id = self._add_profile(pg_conn, "cov-unresolvable", 50.1, 8.6)
+        external_ids = tuple(f"dummy-{i}" for i in range(10))
+        connector = _SentinelScopeConnector(
+            name="test-coverage-sentinel",
+            external_ids=external_ids,
+            failing_ids=frozenset(external_ids[1::2]),
+            circuit_breaker_min_attempts=2,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            _status, error_msg, skipped_scopes = _result_row(
+                pg_conn, run_id, connector.name
+            )
+            sentinel_entries = [
+                entry
+                for entry in (skipped_scopes or [])
+                if entry["scope"].startswith("unresolvable-geography:")
+            ]
+            assert sentinel_entries, (
+                "precondition: the unresolvable scope sat behind the "
+                f"breaker cut and was classified — got {skipped_scopes!r}, "
+                f"error_msg={error_msg!r}"
+            )
+            assert [e["reason"] for e in sentinel_entries] == ["unresolvable"], (
+                "an unresolvable geography is not a budget casualty: more "
+                "budget would never have helped it, and calling it one "
+                "sends the operator chasing a crawl that will never run"
+            )
+
+            state = _scope_state(pg_conn, connector.name)
+            assert not [k for k in state if k.startswith("unresolvable-geography:")], (
+                "an unresolvable scope must get NO connector_scope_state "
+                "row — a row with a NULL last_attempted_at is precisely how "
+                "the dashboard says 'covered, awaiting its turn', which is "
+                "the opposite of true here"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            _cleanup_scope_state(pg_conn, connector.name)
+            self._drop_profile(pg_conn, bad_id)
+
+    def test_two_starved_scopes_sharing_a_key_are_reported_once(self, pg_conn):
+        """Nit 5. The classify loop read `seen_scope_keys` but never added
+        to it, so two un-reached scopes resolving to the same key were each
+        appended — duplicated in `skipped_scopes`, duplicated in the
+        `error_msg` prose, and `_record_scope_covered_but_skipped` called
+        twice for one target.
+        """
+        _apply_schema(pg_conn)
+        # Two distinct profiles (they survive `_active_profile_scopes`' 4dp
+        # dedup) that both resolve to the same connector scope_key.
+        bcn_a = self._add_profile(pg_conn, "cov-dup-a", 41.3851, 2.1734)
+        bcn_b = self._add_profile(pg_conn, "cov-dup-b", 41.3901, 2.1801)
+        external_ids = tuple(f"dummy-{i}" for i in range(10))
+        connector = _NamedScopeConnector(
+            name="test-coverage-dup-key",
+            external_ids=external_ids,
+            failing_ids=frozenset(external_ids[1::2]),
+            circuit_breaker_min_attempts=2,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            _status, error_msg, skipped_scopes = _result_row(
+                pg_conn, run_id, connector.name
+            )
+            budget = [
+                e["scope"]
+                for e in (skipped_scopes or [])
+                if e["reason"] == "budget" and e["scope"] == "barcelona"
+            ]
+            assert budget == ["barcelona"], (
+                "two starved scopes resolving to one key are one starved "
+                f"target, reported once — got {skipped_scopes!r}"
+            )
+            assert (error_msg or "").count("barcelona") == 1, (
+                f"the prose must not repeat it either — got {error_msg!r}"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            _cleanup_scope_state(pg_conn, connector.name)
+            self._drop_profile(pg_conn, bcn_a)
+            self._drop_profile(pg_conn, bcn_b)
+
+    def test_a_failing_scope_attempt_write_does_not_kill_the_whole_sweep(
+        self, pg_conn, monkeypatch
+    ):
+        """Nit 6. `_record_scope_attempt` is a DB write that used to sit
+        OUTSIDE the per-scope `try`. If it raised — e.g. the connection left
+        in a failed-transaction state by an earlier scope's DB error, which
+        the generic handler did not roll back — it propagated out of the
+        per-connector loop and killed the sweep for EVERY connector.
+
+        That is strictly wider than the blast radius before this call
+        existed, when the first DB touch after that handler was inside
+        `run_connector` and therefore contained per scope. A second,
+        entirely healthy connector must still run.
+        """
+        _apply_schema(pg_conn)
+        broken = _NamedScopeConnector(name="test-coverage-blast-broken")
+        healthy = _NamedScopeConnector(name="test-coverage-blast-healthy")
+        orchestrator.CONNECTORS[:] = [broken, healthy]
+
+        real_record = orchestrator._record_scope_attempt
+
+        def _explode(conn, connector_name, *args, **kwargs):
+            if connector_name == broken.name:
+                raise RuntimeError("simulated failed-transaction state")
+            return real_record(conn, connector_name, *args, **kwargs)
+
+        monkeypatch.setattr(orchestrator, "_record_scope_attempt", _explode)
+        run_id = None
+        try:
+            # Must not raise: the failure belongs to one scope of one
+            # connector, not to the sweep.
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            assert _result_row(pg_conn, run_id, healthy.name) is not None, (
+                "a DB failure while recording one connector's scope attempt "
+                "must not stop every LATER connector from running at all"
+            )
+            broken_row = _result_row(pg_conn, run_id, broken.name)
+            assert broken_row is not None and broken_row[0] == "failed", (
+                "the connector whose write failed must still be recorded, "
+                f"and recorded as failed — got {broken_row!r}"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, broken.name, run_id)
+            _cleanup(pg_conn, healthy.name, None)
+            _cleanup_scope_state(pg_conn, broken.name)
+            _cleanup_scope_state(pg_conn, healthy.name)

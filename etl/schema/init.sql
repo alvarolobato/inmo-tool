@@ -1052,9 +1052,12 @@ CREATE TABLE IF NOT EXISTS connector_registry (
 -- RESOLVE (scope_key() returned non-None = "I cover this geography"),
 -- which is deliberately broader than "has been attempted":
 --
---   last_attempted_at IS NULL  -> covered, but has never had its turn yet
---                                 (created by the skipped-for-budget path)
---   last_attempted_at IS NOT NULL -> genuinely crawled at least once
+--   last_attempted_at IS NULL      -> covered, but has never had its turn yet
+--                                     (created by the skipped-for-budget path)
+--   last_attempted_at IS NOT NULL  -> we TRIED at least once; says nothing
+--                                     about whether the try worked
+--   last_discovered_at IS NOT NULL -> a discover() for this scope actually
+--                                     SUCCEEDED at least once
 --
 -- That NULL state is what makes issue #217's third acceptance criterion
 -- answerable from data rather than from free-text: "your area is covered,
@@ -1062,13 +1065,30 @@ CREATE TABLE IF NOT EXISTS connector_registry (
 -- while "your area isn't covered by this connector at all" has no row here
 -- at all (scope_key() returned None, so there is no key to store).
 --
--- center_lat/center_lon/radius_km record the ConnectorScope that produced
--- this row, so a consumer that only knows a lat/lon (the dashboard's
--- zero-candidate diagnostic, issue #194) can ask "has any connector ever
--- attempted a scope whose circle contains this point" without needing to
--- reimplement each connector's Python-side geography resolution. Nullable:
--- a scope constructed from a free-text `geography` string (tests, a
--- connector_config geography_override) has no center at all.
+-- last_attempted_at and last_discovered_at are deliberately SEPARATE columns
+-- (PR #228 review, finding 1). Fairness ordering needs failures to count as
+-- attempts, or a permanently-broken scope wins the front of the queue
+-- forever; the user-facing coverage claim needs the exact opposite, or the
+-- dashboard tells someone "this area was crawled on <date>" about a scope
+-- whose discover() has raised on every run since it was created. One column
+-- cannot carry both meanings, so it no longer tries to.
+--
+-- coverage_center_lat/coverage_center_lon/coverage_radius_km describe WHAT
+-- WAS ACTUALLY CRAWLED, so a consumer that only knows a lat/lon (the
+-- dashboard's zero-candidate diagnostic, issue #194) can ask "has any
+-- connector ever crawled a scope covering this point" without reimplementing
+-- each connector's Python-side geography resolution.
+--
+-- These are NOT the profile's own center/radius (PR #228 review, finding 2).
+-- A ConnectorScope's radius_km only TIGHTENS which listings match; it never
+-- widens what gets crawled, and it is allowed up to 200 km. Storing it here
+-- claimed a 200 km disc for a crawl that covered one municipality — which
+-- reported "crawled" for Estepona, 117.8 km from a Dos Hermanas scope that
+-- had never looked at it. The columns now hold the RESOLVED PLACE's own
+-- centroid plus a deliberately conservative municipal extent, so the circle
+-- under-reports rather than over-reports. Nullable: a scope with no center,
+-- or whose center resolves to no place at all, gets no circle and therefore
+-- never contributes a coverage claim.
 CREATE TABLE IF NOT EXISTS connector_scope_state (
     connector_name    TEXT         NOT NULL,
     scope_key         TEXT         NOT NULL,
@@ -1080,27 +1100,48 @@ CREATE TABLE IF NOT EXISTS connector_scope_state (
 -- a correct history on a fresh install; these ALTERs are the current truth.
 -- Idempotent (init.sql is re-applied on every ETL start).
 ALTER TABLE connector_scope_state ALTER COLUMN last_attempted_at DROP NOT NULL;
-ALTER TABLE connector_scope_state ADD COLUMN IF NOT EXISTS center_lat  DOUBLE PRECISION;
-ALTER TABLE connector_scope_state ADD COLUMN IF NOT EXISTS center_lon  DOUBLE PRECISION;
-ALTER TABLE connector_scope_state ADD COLUMN IF NOT EXISTS radius_km   DOUBLE PRECISION;
+-- When a discover() for this scope last SUCCEEDED (NULL = never succeeded,
+-- whether or not it was ever attempted). This, not last_attempted_at, is
+-- what may be reported to a user as "this area was crawled".
+ALTER TABLE connector_scope_state ADD COLUMN IF NOT EXISTS last_discovered_at TIMESTAMPTZ;
+-- PR #228 review, finding 2: the pre-review columns (center_lat/center_lon/
+-- radius_km) held the PROFILE's search circle, which is not what any
+-- connector crawls. Dropped rather than renamed-in-place: their stored
+-- values are coverage claims the ETL was never able to vouch for, so
+-- carrying them forward under a new name would preserve exactly the wrong
+-- answers. Every row repopulates its new columns on the scope's next
+-- attempt or budget-skip. (AGENTS.md: break it by default — no deployment
+-- to keep compatible with.)
+ALTER TABLE connector_scope_state DROP COLUMN IF EXISTS center_lat;
+ALTER TABLE connector_scope_state DROP COLUMN IF EXISTS center_lon;
+ALTER TABLE connector_scope_state DROP COLUMN IF EXISTS radius_km;
+ALTER TABLE connector_scope_state ADD COLUMN IF NOT EXISTS coverage_center_lat DOUBLE PRECISION;
+ALTER TABLE connector_scope_state ADD COLUMN IF NOT EXISTS coverage_center_lon DOUBLE PRECISION;
+ALTER TABLE connector_scope_state ADD COLUMN IF NOT EXISTS coverage_radius_km  DOUBLE PRECISION;
 -- When this scope was last passed over because the shared circuit breaker
 -- was already open (NULL = never skipped for budget). Kept alongside
 -- last_attempted_at rather than replacing it: a scope can legitimately have
 -- both (crawled three runs ago, skipped for budget on the two runs since).
 ALTER TABLE connector_scope_state ADD COLUMN IF NOT EXISTS last_skipped_for_budget_at TIMESTAMPTZ;
--- Covers the dashboard diagnostic's "is this point inside any attempted
+-- Covers the dashboard diagnostic's "is this point inside any crawled
 -- scope" lookup, which filters on a non-NULL center before doing any
 -- haversine arithmetic.
-CREATE INDEX IF NOT EXISTS idx_connector_scope_state_center
-    ON connector_scope_state (center_lat, center_lon)
-    WHERE center_lat IS NOT NULL AND center_lon IS NOT NULL;
+DROP INDEX IF EXISTS idx_connector_scope_state_center;
+CREATE INDEX IF NOT EXISTS idx_connector_scope_state_coverage_center
+    ON connector_scope_state (coverage_center_lat, coverage_center_lon)
+    WHERE coverage_center_lat IS NOT NULL AND coverage_center_lon IS NOT NULL;
 
 -- Issue #217: the structured counterpart to error_msg's human-readable
 -- "skipped for budget (...)" text. One JSON array per run row:
---   [{"scope_key": "estepona", "reason": "budget"}, ...]
--- `reason` is 'budget' (covered, never got its turn — the shared breaker
--- was already open) or 'uncovered' (scope_key() returned None; issue #177's
--- case). Before this, both looked identical from outside — a consumer had
+--   [{"scope": "estepona", "reason": "budget"}, ...]
+-- `reason` is one of:
+--   'budget'       covered, never got its turn — the shared breaker was
+--                  already open before this scope was reached
+--   'uncovered'    scope_key() returned None; issue #177's case
+--   'unresolvable' scope_key() returned the `unresolvable-geography:`
+--                  sentinel — discover() raises for it on every run by
+--                  construction, so more budget would never help
+-- Before this, all of them looked identical from outside — a consumer had
 -- to string-match error_msg to tell "we ran out of budget before reaching
 -- your profile" from "your profile's geography isn't covered at all".
 ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS skipped_scopes JSONB;

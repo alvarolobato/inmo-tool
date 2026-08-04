@@ -34,9 +34,30 @@ export interface NearestPropertyResult {
  *   once, so "no matches nearby" is a real answer about real inventory.
  */
 export type AreaCoverage =
+  /**
+   * No connector has a coverage circle containing this point. Note the
+   * claim is deliberately weak — "we have no record of a crawl here", not
+   * "nobody covers this area". Coverage circles are conservative
+   * under-estimates of the municipality actually crawled (see
+   * `_MUNICIPAL_COVERAGE_RADIUS_KM` in `etl/orchestrator.py`), and a scope
+   * gets no row at all until its first attempt or budget-skip, so a
+   * genuinely covered area can land here for a run or two.
+   */
   | { kind: "never_crawled" }
+  /** A covering scope exists and has never been attempted — waiting helps. */
   | { kind: "awaiting_turn"; connectorNames: string[] }
-  | { kind: "crawled"; lastAttemptedAt: string };
+  /**
+   * A covering scope HAS been attempted, but no `discover()` for it has
+   * ever succeeded (PR #228 review, finding 1). Distinct from `crawled`:
+   * "no matches nearby" is NOT a real statement about real inventory here,
+   * because nothing was ever successfully retrieved for this area.
+   */
+  | { kind: "attempted_never_succeeded"; connectorNames: string[]; lastAttemptedAt: string }
+  /**
+   * A covering scope's `discover()` genuinely succeeded, so "no matches
+   * nearby" is a real answer about real inventory.
+   */
+  | { kind: "crawled"; lastCrawledAt: string };
 
 export type ZeroCandidateDiagnosis =
   | { kind: "not_zero"; matchedCount: number }

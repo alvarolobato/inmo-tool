@@ -22,7 +22,11 @@ from etl.connectors.base import (
     ConnectorScope,
 )
 from etl.connectors.circuit_breaker import CircuitBreaker
-from etl.connectors.geography import UnresolvableGeographyError, resolve_place
+from etl.connectors.geography import (
+    UnresolvableGeographyError,
+    is_unresolvable_scope_key,
+    resolve_place,
+)
 from etl.connectors.rate_limit import RateLimiter
 from etl.dedup import engine as dedup_engine
 
@@ -1510,20 +1514,72 @@ def _order_scopes_by_fairness(
     return sorted(scopes, key=_priority)
 
 
-def _scope_geo_columns(
+_MUNICIPAL_COVERAGE_RADIUS_KM = 5.0
+"""How far from a resolved municipality's own centroid we are willing to
+claim was crawled, in km.
+
+A connector crawls a MUNICIPALITY (a city slug page, a sitemap's municipio
+entries), not a circle — there is no exact radius to store, and the
+gazetteer records centroids only, no boundaries. So this is a deliberate
+under-estimate: it is smaller than the real extent of any large
+municipality (Madrid's own boundary reaches ~15 km from its centroid), which
+means a point genuinely inside a big city's outskirts can fail the
+containment test and be reported as "no record of a crawl here".
+
+That direction is chosen on purpose. Reporting less coverage than was
+actually achieved sends a user to "we have no record of crawling this yet",
+which is honest and self-correcting. Reporting MORE — the pre-review
+behaviour — told the user their area was crawled and is genuinely empty when
+nothing had ever looked at it, which is the exact misdiagnosis issue #217
+was filed about. See D-030 and PR #228 review finding 2.
+"""
+
+
+def _scope_coverage_columns(
     scope: ConnectorScope,
 ) -> tuple[float | None, float | None, float | None]:
-    """(center_lat, center_lon, radius_km) for `connector_scope_state`, or
-    (None, None, None) for a scope with no point geography at all (a
-    free-text `geography` scope — tests, a `connector_config`
-    geography_override). Issue #217: stored so a consumer holding only a
-    lat/lon (the dashboard's zero-candidate diagnostic, issue #194) can ask
-    "was a scope covering this point ever attempted" without reimplementing
+    """(coverage_center_lat, coverage_center_lon, coverage_radius_km) for
+    `connector_scope_state` — the circle describing WHAT WAS ACTUALLY
+    CRAWLED for *scope*, or (None, None, None) when no honest circle can be
+    derived and therefore no coverage may be claimed at all.
+
+    Issue #217 stores this so a consumer holding only a lat/lon (the
+    dashboard's zero-candidate diagnostic, issue #194) can ask "has any
+    connector crawled a scope covering this point" without reimplementing
     each connector's Python-side geography resolution.
+
+    PR #228 review, finding 2: this used to return the scope's OWN center
+    and `radius_km`, which is not a crawl footprint at all. `radius_km` is
+    the profile's search radius — `resolve_place` -> `nearest_place` only
+    ever uses it to TIGHTEN the match ceiling (`min(_MAX_MATCH_DISTANCE_KM,
+    radius_km)`), never to widen what is crawled — and it is allowed up to
+    200 km. A Dos Hermanas profile at `radius_km=120` therefore stored a
+    120 km disc, and the diagnostic answered "crawled" for Estepona, 117.8
+    km away and never looked at by anyone. That is the failure mode issue
+    #217 exists to remove, reintroduced by the feature meant to cure it.
+
+    What is stored instead is the resolved municipality's own centroid plus
+    `_MUNICIPAL_COVERAGE_RADIUS_KM` — the thing the connector actually
+    crawls, with a conservative extent. Connectors that crawl WIDER than one
+    municipality (Solvia sweeps a whole provincia, D-018; BuildingCenter
+    sweeps the national catalogue, D-023) are therefore under-reported, and
+    that is the acceptable direction; nothing here may ever over-report.
+
+    Returns no circle at all when the scope has no center (a free-text
+    `geography` scope — tests, a `connector_config` geography_override) or
+    when its center resolves to no place in the gazetteer (the
+    `unresolvable_scope_key` case): in both, we have no idea what area was
+    crawled, and inventing one is exactly the mistake above.
     """
     if scope.center is None:
         return None, None, None
-    return scope.center[0], scope.center[1], scope.radius_km
+    try:
+        place = resolve_place(scope)
+    except UnresolvableGeographyError:
+        return None, None, None
+    if place is None:
+        return None, None, None
+    return place.lat, place.lon, _MUNICIPAL_COVERAGE_RADIUS_KM
 
 
 def _record_scope_covered_but_skipped(
@@ -1554,20 +1610,21 @@ def _record_scope_covered_but_skipped(
     columns are refreshed, so a profile whose radius changed doesn't leave a
     stale circle behind.
     """
-    center_lat, center_lon, radius_km = _scope_geo_columns(scope)
+    center_lat, center_lon, radius_km = _scope_coverage_columns(scope)
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO connector_scope_state (
                 connector_name, scope_key, last_attempted_at,
-                last_skipped_for_budget_at, center_lat, center_lon, radius_km
+                last_skipped_for_budget_at,
+                coverage_center_lat, coverage_center_lon, coverage_radius_km
             )
             VALUES (%s, %s, NULL, %s, %s, %s, %s)
             ON CONFLICT (connector_name, scope_key) DO UPDATE
                 SET last_skipped_for_budget_at = EXCLUDED.last_skipped_for_budget_at,
-                    center_lat = EXCLUDED.center_lat,
-                    center_lon = EXCLUDED.center_lon,
-                    radius_km  = EXCLUDED.radius_km
+                    coverage_center_lat = EXCLUDED.coverage_center_lat,
+                    coverage_center_lon = EXCLUDED.coverage_center_lon,
+                    coverage_radius_km  = EXCLUDED.coverage_radius_km
             """,
             (connector_name, scope_key, when, center_lat, center_lon, radius_km),
         )
@@ -1599,22 +1656,56 @@ def _record_scope_attempt(
     through this scope's `run_connector` call — a crash must not make this
     scope look never-attempted next run when it genuinely was attempted.
     """
-    center_lat, center_lon, radius_km = _scope_geo_columns(scope)
+    center_lat, center_lon, radius_km = _scope_coverage_columns(scope)
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO connector_scope_state (
                 connector_name, scope_key, last_attempted_at,
-                center_lat, center_lon, radius_km
+                coverage_center_lat, coverage_center_lon, coverage_radius_km
             )
             VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT (connector_name, scope_key) DO UPDATE
                 SET last_attempted_at = EXCLUDED.last_attempted_at,
-                    center_lat = EXCLUDED.center_lat,
-                    center_lon = EXCLUDED.center_lon,
-                    radius_km  = EXCLUDED.radius_km
+                    coverage_center_lat = EXCLUDED.coverage_center_lat,
+                    coverage_center_lon = EXCLUDED.coverage_center_lon,
+                    coverage_radius_km  = EXCLUDED.coverage_radius_km
             """,
             (connector_name, scope_key, when, center_lat, center_lon, radius_km),
+        )
+    conn.commit()
+
+
+def _record_scope_discovered(
+    conn, connector_name: str, scope_key: str, when: datetime
+) -> None:
+    """Persist that a `discover()` for *scope_key* actually SUCCEEDED at
+    *when* — PR #228 review, finding 1.
+
+    Called only after `run_connector` returns without raising, i.e. after a
+    real `discover()` completed. Deliberately separate from
+    `_record_scope_attempt`, which fires before the call and unconditionally
+    because fairness ordering requires failures to count as turns taken.
+
+    That asymmetry is the whole point. `last_attempted_at` answers "has this
+    scope had its turn?" (ordering); `last_discovered_at` answers "did
+    anyone ever actually manage to crawl here?" (the user-facing coverage
+    claim). Driving the dashboard's "this area was crawled on <date>" line
+    off the former meant a scope whose `discover()` raises on every run —
+    a soft-block page, a post-redesign parse failure — still reported itself
+    to the user as successfully crawled and genuinely empty.
+
+    A bare UPDATE, not an upsert: `_record_scope_attempt` runs immediately
+    before `run_connector` for this same key, so the row is guaranteed to
+    exist. Committed immediately for the same durability reason as the
+    attempt write, and it touches neither the attempt timestamp nor the
+    coverage circle — both are already correct from the attempt write.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE connector_scope_state SET last_discovered_at = %s "
+            "WHERE connector_name = %s AND scope_key = %s",
+            (when, connector_name, scope_key),
         )
     conn.commit()
 
@@ -1810,8 +1901,47 @@ def run_all_connectors(
                 # it's the same call every attempted scope gets below, and
                 # it does no I/O.
                 skipped_for_budget: list[str] = []
+                # PR #228 review, nit 5: two un-reached scopes can resolve
+                # to the SAME key (two profiles, one city). Without a local
+                # seen-set they were both appended — duplicated in
+                # skipped_scopes, duplicated in the error_msg prose, and
+                # `_record_scope_covered_but_skipped` called twice. The
+                # outer `seen_scope_keys` is read below but deliberately not
+                # written to: it means "crawled this run", and these scopes
+                # were not.
+                classified_keys: set[str] = set()
                 for remaining in scopes[scope_index:]:
                     remaining_key = connector.scope_key(remaining)
+                    if is_unresolvable_scope_key(remaining_key):
+                        # PR #228 review, finding 3. `scope_key()` returned
+                        # the `unresolvable-geography:` sentinel, which
+                        # issue #177 introduced precisely so this scope is
+                        # NOT confused with "no coverage" — its discover()
+                        # raises UnresolvableGeographyError by construction,
+                        # on this run and every future one.
+                        #
+                        # Calling that a budget casualty is wrong twice
+                        # over: it tells an operator "more budget would have
+                        # helped" when nothing ever will, and the
+                        # connector_scope_state row it used to write made
+                        # the dashboard promise the user "esta zona sí está
+                        # cubierta, todavía no le ha tocado el turno" for a
+                        # profile centre that matches no place in the
+                        # gazetteer at all. So: its own reason, and no row —
+                        # matching how the attempted path already treats
+                        # this as a distinct third outcome
+                        # (`any_scope_unresolvable`) rather than folding it
+                        # into either existing bucket.
+                        if remaining_key not in classified_keys:
+                            classified_keys.add(remaining_key)
+                            skipped_scopes.append(
+                                {"scope": remaining_key, "reason": "unresolvable"}
+                            )
+                            error_msgs.append(
+                                f"unresolvable geography (never reached this "
+                                f"run — breaker already open): {remaining}"
+                            )
+                        continue
                     if remaining_key is None:
                         # Not a budget casualty: this scope would have been
                         # skipped as uncovered even on a completely healthy
@@ -1829,6 +1959,11 @@ def run_all_connectors(
                         # city). Its data is present, so reporting it as
                         # starved would be wrong.
                         continue
+                    if remaining_key in classified_keys:
+                        # A second un-reached scope resolving to a key
+                        # already reported as starved — one report, not two.
+                        continue
+                    classified_keys.add(remaining_key)
                     skipped_for_budget.append(remaining_key)
                     # The row this writes is what lets the dashboard say
                     # "covered, but hasn't had its turn yet" — a
@@ -1951,17 +2086,27 @@ def run_all_connectors(
                 continue
             seen_scope_keys.add(scope_key)
 
-            # Issue #217/D-030: this scope has now reached a real attempt —
-            # persisted BEFORE calling run_connector (not after) so a crash
-            # mid-scope still counts it as "looked at" for next run's
-            # fairness ordering, and unconditionally (not only on success)
-            # so a scope whose discover() keeps failing doesn't also keep
-            # winning the front of the queue forever.
-            _record_scope_attempt(
-                conn, connector.name, scope_key, scope, datetime.now(timezone.utc)
-            )
-
             try:
+                # Issue #217/D-030: this scope has now reached a real
+                # attempt — persisted BEFORE calling run_connector (not
+                # after) so a crash mid-scope still counts it as "looked at"
+                # for next run's fairness ordering, and unconditionally (not
+                # only on success) so a scope whose discover() keeps failing
+                # doesn't also keep winning the front of the queue forever.
+                #
+                # PR #228 review, nit 6: this DB write lives INSIDE the
+                # per-scope try. Outside it, a failure here (e.g. the
+                # connection left in a failed-transaction state by an
+                # earlier scope's DB error) propagated out of the
+                # per-connector loop and killed the sweep for EVERY
+                # connector — a strictly wider blast radius than before this
+                # call existed, when the first DB touch after that handler
+                # was inside run_connector and therefore contained per
+                # scope. It is still the first thing that happens for this
+                # scope, so the ordering guarantee above is unchanged.
+                _record_scope_attempt(
+                    conn, connector.name, scope_key, scope, datetime.now(timezone.utc)
+                )
                 result = run_connector(
                     conn,
                     connector,
@@ -2030,6 +2175,23 @@ def run_all_connectors(
             except (
                 Exception
             ) as exc:  # one scope's discover() failing shouldn't skip the rest
+                # PR #228 review, nit 6: a DB-level failure leaves the
+                # connection in a failed-transaction state, in which EVERY
+                # subsequent statement — including the next scope's
+                # `_record_scope_attempt` — raises until someone rolls back.
+                # Best effort: this handler's job is to contain one scope's
+                # failure, and it cannot do that while leaving the shared
+                # connection unusable for the scopes after it.
+                try:
+                    conn.rollback()
+                except Exception:
+                    logger.exception(
+                        "Connector %s: rollback after a failed scope=%r "
+                        "itself failed — later scopes this run may not be "
+                        "able to write",
+                        connector.name,
+                        scope,
+                    )
                 any_scope_failed = True
                 # A failed scope leaves a hole in the union: its listings
                 # are absent not because they're gone but because we never
@@ -2043,6 +2205,15 @@ def run_all_connectors(
                 )
                 error_msgs.append(f"{scope}: {exc}")
                 continue
+
+            # PR #228 review, finding 1: run_connector returned without
+            # raising, so a real discover() completed for this scope. Only
+            # now may this scope be reported to a user as actually crawled —
+            # `last_attempted_at` above says we tried, which is a different
+            # claim and must not be rendered as this one.
+            _record_scope_discovered(
+                conn, connector.name, scope_key, datetime.now(timezone.utc)
+            )
 
             discovered_total += result["discovered_count"]
             fetched_total += result["fetched_count"]

@@ -392,6 +392,9 @@ def resolve_place(scope: ConnectorScope) -> Place | None:
     return place
 
 
+UNRESOLVABLE_SCOPE_KEY_PREFIX = "unresolvable-geography:"
+
+
 def unresolvable_scope_key(scope: ConnectorScope) -> str:
     """A stable `scope_key()` value for a scope whose geography resolution
     will raise, safe to return from a method that must never raise itself.
@@ -407,4 +410,19 @@ def unresolvable_scope_key(scope: ConnectorScope) -> str:
     `resolve_place()` call raises `UnresolvableGeographyError` there,
     landing the scope as a genuine `connector_run_results` failure.
     """
-    return f"unresolvable-geography:{scope.center}:{scope.radius_km}"
+    return f"{UNRESOLVABLE_SCOPE_KEY_PREFIX}{scope.center}:{scope.radius_km}"
+
+
+def is_unresolvable_scope_key(scope_key: str | None) -> bool:
+    """True if *scope_key* is the `unresolvable_scope_key` sentinel.
+
+    Exists so callers that only hold a key string — the orchestrator's
+    breaker-cut classification loop, which never gets to the `discover()`
+    call that would raise `UnresolvableGeographyError` — can still tell the
+    sentinel apart from a real resolved key. Without it that loop had to
+    treat the sentinel as an ordinary key and reported such a scope as a
+    budget casualty ("more budget would have helped"), when in fact
+    `discover()` raises for it on every run by construction (PR #228 review,
+    finding 3).
+    """
+    return scope_key is not None and scope_key.startswith(UNRESOLVABLE_SCOPE_KEY_PREFIX)
