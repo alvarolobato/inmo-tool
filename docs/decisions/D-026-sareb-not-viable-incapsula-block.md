@@ -1,10 +1,10 @@
 ---
-id: D-042
+id: D-026
 title: Sareb not buildable — Incapsula WAF returns 403 on every path, including robots.txt itself
 date: 2026-08-04
 ---
 
-# D-042: Sareb not buildable — Incapsula WAF returns 403 on every path, including robots.txt itself
+# D-026: Sareb not buildable — Incapsula WAF returns 403 on every path, including robots.txt itself
 
 *Decided: 2026-08-04*
 

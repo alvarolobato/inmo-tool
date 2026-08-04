@@ -36,8 +36,8 @@
 | [D-022](docs/decisions/D-022-milanuncios-photo-backfill-migration.md) | `init.sql`'s Milanuncios photo-URL backfill mirrors `add_photo_rule_if_missing` exactly, pinned by a DB-backed equivalence test — never hand-reimplement the rule in SQL. |
 | [D-023](docs/decisions/D-023-buildingcenter-national-sweep-connector.md) | BuildingCenter talks to `apifrontend.buildingcenter.es` directly; `discover()` sweeps the whole catalogue and filters in-memory — no server-side filter param works. |
 | [D-024](docs/decisions/D-024-dedup-pending-reevaluation.md) | `engine.run()` re-evaluates every `pending` `suggested_merge` row every run (only `rejected`/`conflict` stay frozen); an in-flight `suggested_merge_action` defers reevaluation one run. |
-| [D-042](docs/decisions/D-042-sareb-not-viable-incapsula-block.md) | Sareb (`sareb.es`) not buildable: Incapsula WAF returns 403 on every path including `robots.txt`. No connector written; routes to browser-extension capture (#75) per the batch's standing WAF rule. |
-| [D-043](docs/decisions/D-043-altamira-not-viable-akamai-block.md) | Altamira (`altamirainmuebles.com`) not buildable: Akamai WAF returns 403 on every path including `robots.txt`. No connector written; routes to browser-extension capture (#75) per the batch's standing WAF rule. |
+| [D-026](docs/decisions/D-026-sareb-not-viable-incapsula-block.md) | Sareb (`sareb.es`) not buildable: Incapsula WAF returns 403 on every path including `robots.txt`. No connector written; routes to browser-extension capture (#75) per the batch's standing WAF rule. |
+| [D-027](docs/decisions/D-027-altamira-not-viable-akamai-block.md) | Altamira (`altamirainmuebles.com`) not buildable: Akamai WAF returns 403 on every path including `robots.txt`. No connector written; routes to browser-extension capture (#75) per the batch's standing WAF rule. |
 
 ## AI layer
 

@@ -1,10 +1,10 @@
 ---
-id: D-043
+id: D-027
 title: Altamira not buildable — Akamai edge WAF returns 403 on every path, including robots.txt itself
 date: 2026-08-04
 ---
 
-# D-043: Altamira not buildable — Akamai edge WAF returns 403 on every path, including robots.txt itself
+# D-027: Altamira not buildable — Akamai edge WAF returns 403 on every path, including robots.txt itself
 
 *Decided: 2026-08-04*
 
@@ -32,7 +32,7 @@ none retried**:
    → `95.101.38.164`/`95.101.38.169`. `akamaiedge.net` is Akamai's own
    edge-delivery domain — the block is visible before a single HTTP
    request completes, the same shape as Sareb's Incapsula delegation
-   (D-042) but a different WAF vendor.
+   (D-026) but a different WAF vendor.
 2. `GET https://www.altamirainmuebles.com/robots.txt` → **HTTP 403**,
    `server: AkamaiGHost`. As with Sareb, the one file that would normally
    declare what a bot may request is itself refused — there is no
@@ -95,7 +95,7 @@ tracking history.
   far — CaixaBank's BuildingCenter and Solvia, both outside this WAF
   pattern, are the counter-examples).
 
-**Rationale**: Same shape as Sareb (D-042) — an edge WAF returning 403 on
+**Rationale**: Same shape as Sareb (D-026) — an edge WAF returning 403 on
 `robots.txt` itself, with the same "nothing to comply with" stop
 condition, a different vendor (Akamai vs. Incapsula) but an identical
 practical outcome. The owner's standing WAF→capture rule already resolves
@@ -107,7 +107,7 @@ instead of living only in a tracking-issue comment.
 [issue #132](https://github.com/alvarolobato/inmo-tool/issues/132)
 (tracking issue, standing WAF→capture rule recorded 2026-08-03),
 [issue #75](https://github.com/alvarolobato/inmo-tool/issues/75)
-(browser-extension capture path), [D-042](D-042-sareb-not-viable-incapsula-block.md)
+(browser-extension capture path), [D-026](D-026-sareb-not-viable-incapsula-block.md)
 (Sareb, the same failure shape with a different WAF vendor),
 [D-019](D-019-aliseda-not-viable-disallowed-api.md) (Aliseda, the other
 Santander-family portal in this batch, not buildable for a different
