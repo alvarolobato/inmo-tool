@@ -143,6 +143,8 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
       status: string;
       current_price: number;
       photo_urls: string[] | null;
+      /** ISO string; null leaves last_seen_at unset (never re-confirmed). */
+      last_seen_at: string | null;
     }> = {},
   ): Promise<number> {
     const row = {
@@ -150,11 +152,12 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
       status: "active",
       current_price: 285000,
       photo_urls: null as string[] | null,
+      last_seen_at: null as string | null,
       ...overrides,
     };
     const result = await pool.query<{ id: number }>(
-      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, photo_urls)
-       VALUES ($1, $2, $3, $4, $5, NOW(), $6) RETURNING id`,
+      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, photo_urls, last_seen_at)
+       VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7) RETURNING id`,
       [
         propertyId,
         row.source,
@@ -162,6 +165,7 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
         row.status,
         row.current_price,
         row.photo_urls,
+        row.last_seen_at,
       ],
     );
     return result.rows[0].id;
@@ -711,6 +715,80 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
         const cleanItem = page.items.find((i) => i.property_id === cleanId)!;
         expect(flaggedItem.flags).toEqual([{ kind: "caveat:usufructo", label: "Usufructo", tone: "warn" }]);
         expect(cleanItem.flags).toEqual([]);
+      });
+    });
+  });
+
+  describe("staleness (last_seen_at) — real Postgres (#243)", () => {
+    const daysAgoIso = (n: number) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
+
+    it("returns the freshest active listing's last_seen_at, so lib/staleness can derive the age", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        const seen = daysAgoIso(3);
+        await insertListing(pool, propertyId, { last_seen_at: seen });
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        const page = await listCandidates(profileId);
+        expect(page.items).toHaveLength(1);
+        // pg returns timestamptz as an ISO-ish string; both sides normalised
+        // through Date so a formatting difference doesn't fail a real match.
+        expect(new Date(page.items[0].last_seen_at!).getTime()).toBe(new Date(seen).getTime());
+      });
+    });
+
+    it("reflects the FRESHEST of a deduplicated property's active listings, not the oldest (mutation guard for the MAX)", async () => {
+      // Two active listings on one property: one re-confirmed 30 days ago,
+      // one only 2 days ago. The candidate must carry the 2-day (freshest)
+      // timestamp — a MIN would return the 30-day one and wrongly mark a live
+      // property stale. This is the freshest-of-linked rule issue #243 names.
+      await withRealDb(async (pool) => {
+        const oldSeen = daysAgoIso(30);
+        const freshSeen = daysAgoIso(2);
+        const propertyId = await insertProperty(pool);
+        await insertListing(pool, propertyId, { source: "fotocasa", last_seen_at: oldSeen });
+        await insertListing(pool, propertyId, { source: "milanuncios", last_seen_at: freshSeen });
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        const page = await listCandidates(profileId);
+        expect(page.items).toHaveLength(1);
+        expect(new Date(page.items[0].last_seen_at!).getTime()).toBe(new Date(freshSeen).getTime());
+      });
+    });
+
+    it("excludes a withdrawn listing's last_seen_at — a withdrawn sibling can't make a property look fresher", async () => {
+      // Active listing seen 30 days ago; withdrawn listing seen 1 day ago.
+      // The withdrawn one is fresher in absolute terms but must be excluded —
+      // discover() doesn't re-confirm withdrawn listings, so only the active
+      // 30-day timestamp counts (same active-only rule as min_price/photos).
+      await withRealDb(async (pool) => {
+        const activeSeen = daysAgoIso(30);
+        const propertyId = await insertProperty(pool);
+        await insertListing(pool, propertyId, { source: "fotocasa", status: "active", last_seen_at: activeSeen });
+        await insertListing(pool, propertyId, {
+          source: "habitaclia",
+          status: "withdrawn",
+          last_seen_at: daysAgoIso(1),
+        });
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        const page = await listCandidates(profileId);
+        expect(new Date(page.items[0].last_seen_at!).getTime()).toBe(new Date(activeSeen).getTime());
+      });
+    });
+
+    it("is null when no active listing has ever been re-confirmed (unknown, not fresh)", async () => {
+      await withRealDb(async (pool) => {
+        const propertyId = await insertProperty(pool);
+        await insertListing(pool, propertyId, { last_seen_at: null });
+        const profileId = await makeProfile(SCOPE);
+        await markMatched(pool, profileId, propertyId);
+
+        const page = await listCandidates(profileId);
+        expect(page.items[0].last_seen_at).toBeNull();
       });
     });
   });

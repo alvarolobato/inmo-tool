@@ -88,6 +88,19 @@ export interface CandidateRow {
   min_price: number | null;
   /** Earliest first_seen_at across all of the property's listings. */
   first_seen_at: string | null;
+  /**
+   * FRESHEST `last_seen_at` across the property's *active* sale listings —
+   * "last time discover() re-confirmed this property is still live" (issue
+   * #243, roadmap §6.1). MAX, not MIN: a deduplicated property is only as
+   * stale as its most-recently-confirmed listing (if any linked listing was
+   * seen recently, the property isn't stale). Active-sale-only, matching
+   * `min_price`/`listings`/`photos` above — a withdrawn sibling's frozen
+   * timestamp must neither rescue nor is re-confirmed by discover(). Null when
+   * no active sale listing has a `last_seen_at` (unknown, not fresh). The card
+   * renders `StalenessBadge` from this; see lib/staleness.ts for why
+   * `last_seen_at` and not `last_fetched_at`.
+   */
+  last_seen_at: string | null;
   listings: CandidateListingSummary[];
   /** Task 3.2 (#21): null until this profile has a trained model, or the property hasn't been rescored since one was trained. */
   score: number | null;
@@ -193,6 +206,7 @@ interface RawCandidateRow {
   photos: string[];
   min_price: string | null;
   first_seen_at: string | null;
+  last_seen_at: string | null;
   listings: CandidateListingSummary[];
   score: string | null;
   rank_explanation: string | null;
@@ -478,6 +492,16 @@ export async function listCandidates(
        (SELECT MIN(l3.first_seen_at)
           FROM listing l3
          WHERE l3.property_id = p.id) AS first_seen_at,
+       -- FRESHEST last_seen_at across active SALE listings (issue #243): the
+       -- staleness age the card renders. MAX, not MIN — the property is only
+       -- as stale as its most-recently-re-confirmed listing. Same
+       -- active + operation='sale' filter as min_price/listings/photos, so a
+       -- withdrawn listing's frozen last_seen_at can neither make the property
+       -- look fresher than its live listings nor be treated as a live
+       -- re-confirmation. NULL when no active sale listing has been seen.
+       (SELECT MAX(l6.last_seen_at)
+          FROM listing l6
+         WHERE l6.property_id = p.id AND l6.status = 'active' AND l6.operation = 'sale') AS last_seen_at,
        pls.score,
        pls.rank_explanation,
        pls.score_kind,
@@ -532,6 +556,7 @@ export async function listCandidates(
     flags: flagsByProperty.get(r.property_id) ?? [],
     min_price: r.min_price !== null ? Number(r.min_price) : null,
     first_seen_at: r.first_seen_at,
+    last_seen_at: r.last_seen_at,
     listings: r.listings,
     score: r.score !== null ? Number(r.score) : null,
     rank_explanation: r.rank_explanation,

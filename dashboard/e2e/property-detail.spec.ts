@@ -75,11 +75,12 @@ test.beforeAll(async () => {
     price: number,
     status: string,
     photoUrls: string[],
+    lastSeenAt: string | null = null,
   ): Promise<number> {
     const result = await pool.query<{ id: number }>(
-      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, photo_urls)
-       VALUES ($1, $2, $3, $4, $5, NOW(), $6) RETURNING id`,
-      [propId, source, `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`, status, price, photoUrls],
+      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, photo_urls, last_seen_at)
+       VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7) RETURNING id`,
+      [propId, source, `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`, status, price, photoUrls, lastSeenAt],
     );
     return result.rows[0].id;
   }
@@ -98,6 +99,12 @@ test.beforeAll(async () => {
   // the gallery test below can prove it unions the *active* listing's
   // photos only (EC-2 was revised by #167's review — the withdrawn
   // listing's photo must NOT appear in the gallery).
+  // The active fotocasa listing was last re-confirmed 30 days ago (stale
+  // band, #243) — its withdrawn milanuncios sibling below (seen 1 day ago)
+  // must NOT rescue the property's freshness, since discover() doesn't
+  // re-confirm withdrawn listings.
+  const staleLastSeen = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const recentWithdrawnSeen = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString();
   dedupedPropertyId = await insertProperty(`${NAME_PREFIX}Calle Trafalgar, Chamberí, Madrid`);
   fotocasaListingId = await insertListing(
     dedupedPropertyId,
@@ -105,6 +112,7 @@ test.beforeAll(async () => {
     285000,
     "active",
     [`https://example.com/${NAME_PREFIX}fotocasa-1.jpg`, `https://example.com/${NAME_PREFIX}fotocasa-2.jpg`],
+    staleLastSeen,
   );
   const milanunciosListingId = await insertListing(
     dedupedPropertyId,
@@ -112,6 +120,7 @@ test.beforeAll(async () => {
     279000,
     "withdrawn",
     [`https://example.com/${NAME_PREFIX}milanuncios-1.jpg`],
+    recentWithdrawnSeen,
   );
   await pool.query(
     `INSERT INTO listing_price_history (listing_id, observed_at, price) VALUES
@@ -213,6 +222,23 @@ test("gallery shows photos from active linked listings only, not a withdrawn one
   // listings from everything else it computes (min_price, source badges) —
   // see getPropertyDetail's doc comment.
   await expect(page.locator('[data-testid="photo-gallery-thumb"]')).toHaveCount(2);
+});
+
+test("shows the property-level staleness band from the freshest ACTIVE listing (#243)", async ({
+  page,
+}) => {
+  skipIfNoDb(test);
+
+  await page.goto(`/profiles/${profileId}/properties/${dedupedPropertyId}`);
+  await expect(page.getByTestId("property-detail-page")).toBeVisible();
+  await assertNoErrorSurface(page);
+
+  // The only active listing was last seen 30 days ago → stale. The withdrawn
+  // milanuncios listing seen 1 day ago must NOT make this read fresh.
+  const badge = page.getByTestId("property-staleness");
+  await expect(badge).toBeVisible();
+  await expect(badge).toHaveAttribute("data-staleness-band", "stale");
+  await expect(badge).toContainText(/visto hace 30 días/i);
 });
 
 test("renders correctly for non-deduplicated property", async ({ page }) => {

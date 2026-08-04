@@ -3,6 +3,7 @@ import { PROPERTY_TYPE_LABELS, type PROPERTY_TYPES } from "@/lib/profiles-schema
 import { fmtEUR0, fmtInt } from "@/components/widgets/format";
 import { FeedbackControls } from "./FeedbackControls";
 import { CandidatePhotoTicker } from "./CandidatePhotoTicker";
+import { StalenessBadge } from "@/components/StalenessBadge";
 
 /**
  * One card per deduplicated property (issue #19) — never one per listing.
@@ -114,8 +115,13 @@ export function CandidateCard({ candidate, profileId }: { candidate: CandidateRo
             {facts.length > 0 ? facts.join(" · ") : "Sin datos estructurados"}
           </p>
 
-          {(candidate.flags.length > 0 || sources.length > 0) && (
+          {(candidate.flags.length > 0 || sources.length > 0 || candidate.last_seen_at !== null) && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 2 }}>
+              {/* Listing staleness (#243): "visto hace N días", escalating by
+                  band. Leads the badge row so a stale card reads as stale while
+                  scanning the list. Renders nothing when last_seen_at is
+                  unknown. */}
+              <StalenessBadge lastSeenAt={candidate.last_seen_at} testId="candidate-staleness" />
               {candidate.flags.map((f) => (
                 <span
                   key={f.kind}

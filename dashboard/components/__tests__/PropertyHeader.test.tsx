@@ -102,4 +102,70 @@ describe("PropertyHeader", () => {
 
     expect(screen.getByText("Precio no disponible")).toBeInTheDocument();
   });
+
+  // Listing staleness (#243). `daysAgo` builds an ISO relative to the real
+  // `now` the badge reads, so band assertions stay stable over time.
+  const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
+
+  it("#243: shows the freshest active listing's staleness age", () => {
+    render(
+      <PropertyHeader
+        property={property({ listings: [listing({ last_seen_at: daysAgo(2) })] })}
+      />,
+    );
+    const badge = screen.getByTestId("property-staleness");
+    expect(badge).toHaveTextContent("visto hace 2 días");
+    expect(badge).toHaveAttribute("data-staleness-band", "fresh");
+  });
+
+  it("#243: reflects the FRESHEST of a deduplicated property's active listings, not the oldest (mutation guard for freshest-of-linked)", () => {
+    // One active listing was last confirmed 30 days ago (stale in isolation),
+    // the other only 2 days ago. The property is NOT stale — a MIN/oldest
+    // implementation would wrongly show the 30-day band. This is the exact
+    // freshest-of-linked rule issue #243 calls out.
+    render(
+      <PropertyHeader
+        property={property({
+          listings: [
+            listing({ id: 1, source: "fotocasa", status: "active", last_seen_at: daysAgo(30) }),
+            listing({ id: 2, source: "milanuncios", status: "active", last_seen_at: daysAgo(2) }),
+          ],
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("property-staleness");
+    expect(badge).toHaveAttribute("data-staleness-band", "fresh");
+    expect(badge).toHaveTextContent("visto hace 2 días");
+  });
+
+  it("#243: ignores a withdrawn listing's timestamp — a withdrawn sibling never rescues nor is confirmed", () => {
+    // Withdrawn listing seen 1 day ago must NOT make the property look fresh;
+    // only the active listing (30 days) drives the age.
+    render(
+      <PropertyHeader
+        property={property({
+          listings: [
+            listing({ id: 1, source: "fotocasa", status: "active", last_seen_at: daysAgo(30) }),
+            listing({ id: 2, source: "milanuncios", status: "withdrawn", last_seen_at: daysAgo(1) }),
+          ],
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("property-staleness");
+    expect(badge).toHaveAttribute("data-staleness-band", "stale");
+  });
+
+  it("#243: renders no staleness badge when no listing is active", () => {
+    render(
+      <PropertyHeader
+        property={property({
+          listings: [
+            listing({ id: 1, status: "sold", last_seen_at: daysAgo(3) }),
+            listing({ id: 2, status: "withdrawn", last_seen_at: daysAgo(3) }),
+          ],
+        })}
+      />,
+    );
+    expect(screen.queryByTestId("property-staleness")).not.toBeInTheDocument();
+  });
 });
