@@ -3476,3 +3476,417 @@ class TestRestartBurstGuard:
             with pg_conn.cursor() as cur:
                 cur.execute("DELETE FROM connector_runs")
             pg_conn.commit()
+
+
+class _NamedScopeConnector(DummyConnector):
+    """A DummyConnector whose `scope_key` is a readable city name derived
+    from the scope's latitude, so a fairness test can assert on *which*
+    geography was crawled rather than on an opaque `raw:(40.4, -3.7):10`
+    string. Issue #217/D-030.
+
+    Latitude is the discriminator purely because the fixture profiles these
+    tests use (Madrid 40.41, Barcelona 41.38, Estepona 36.42) differ there;
+    nothing about the fairness mechanism depends on how a real connector
+    resolves geography, only that `scope_key()` returns a stable string per
+    area and `None` for one it doesn't cover.
+    """
+
+    def scope_key(self, scope):
+        if scope.center is None:
+            return None
+        lat = scope.center[0]
+        if 40.0 <= lat < 41.0:
+            return "madrid"
+        if 41.0 <= lat < 42.0:
+            return "barcelona"
+        if 36.0 <= lat < 37.0:
+            return "estepona"
+        return None
+
+
+def _scope_state(conn, connector_name: str) -> dict[str, tuple]:
+    """{scope_key: (last_attempted_at, last_skipped_for_budget_at)} for one
+    connector — the fairness/coverage bookkeeping issue #217 added."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT scope_key, last_attempted_at, last_skipped_for_budget_at "
+            "FROM connector_scope_state WHERE connector_name = %s",
+            (connector_name,),
+        )
+        return {row[0]: (row[1], row[2]) for row in cur.fetchall()}
+
+
+def _result_row(conn, run_id: int, connector_name: str) -> tuple:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT status, error_msg, skipped_scopes FROM connector_run_results "
+            "WHERE run_id = %s AND connector_name = %s",
+            (run_id, connector_name),
+        )
+        return cur.fetchone()
+
+
+def _cleanup_scope_state(conn, connector_name: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM connector_scope_state WHERE connector_name = %s",
+            (connector_name,),
+        )
+    conn.commit()
+
+
+class TestScopeFairnessRotation:
+    """Issue #217 / D-030: the circuit breaker's error budget is shared
+    across every scope in a connector's run (issue #71, deliberate), and a
+    soft-blocking connector reliably exhausts it during the FIRST scope. With
+    `scopes` in a fixed order, every later scope was skipped on every run —
+    not "rarely reached", never. The owner's "Pisos en Estepona" profile sat
+    at 0 candidates indefinitely, nearest property 112.5 km away, while the
+    run reported `circuit_open` (which reads as a connector problem, not "we
+    never looked at your area").
+    """
+
+    def _add_profile(self, conn, name: str, lat: float, lon: float) -> int:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO search_profile (name, scope) VALUES (%s, %s) RETURNING id",
+                (
+                    name,
+                    json.dumps(
+                        {
+                            "geography": {
+                                "type": "radius",
+                                "center": [lat, lon],
+                                "radius_km": 10,
+                            }
+                        }
+                    ),
+                ),
+            )
+            (profile_id,) = cur.fetchone()
+        conn.commit()
+        return profile_id
+
+    def _drop_profile(self, conn, profile_id: int) -> None:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM search_profile WHERE id = %s", (profile_id,))
+        conn.commit()
+
+    def test_scope_starved_by_an_open_breaker_is_attempted_on_the_following_run(
+        self, pg_conn
+    ):
+        """THE acceptance criterion (#217, first bullet): with the breaker
+        opening during scope 1, scope 2 must be attempted on the FOLLOWING
+        run, with no manual intervention.
+
+        Before D-030 this test's second `run_all_connectors` call crawled
+        madrid again — exactly as the first did, and as every run forever
+        would — because `scopes` came back in the same fixed order and the
+        breaker tripped in the same place every time. Barcelona's
+        `discover()` was never called, ever.
+        """
+        _apply_schema(pg_conn)
+        # Fixture profile is Madrid (40.4168); add Barcelona so the
+        # connector has two distinct scopes to be fair between.
+        barcelona_id = self._add_profile(pg_conn, "fairness-barcelona", 41.3851, 2.1734)
+
+        # 10 ids, every other one failing (50% > the 30% threshold) with
+        # min_attempts=2 — trips the shared breaker well inside the FIRST
+        # scope's own fetch loop, which is precisely Fotocasa's real
+        # volume-cumulative soft-block behaviour.
+        external_ids = tuple(f"dummy-{i}" for i in range(10))
+        connector = _NamedScopeConnector(
+            name="test-fairness-rotation",
+            external_ids=external_ids,
+            failing_ids=frozenset(external_ids[1::2]),
+            circuit_breaker_min_attempts=2,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            first_run_keys = [connector.scope_key(s) for s in connector.scopes_seen]
+            # Exactly one scope reached discover(); the breaker ate the rest.
+            assert first_run_keys == ["madrid"], (
+                "run 1 should crawl exactly the first-ordered scope before "
+                f"the breaker trips, got {first_run_keys}"
+            )
+
+            connector.scopes_seen.clear()
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            second_run_keys = [connector.scope_key(s) for s in connector.scopes_seen]
+
+            # The whole fix: barcelona — starved on run 1 — goes FIRST on
+            # run 2, without anyone touching anything.
+            assert second_run_keys == ["barcelona"], (
+                "the scope starved by run 1's open breaker must be the one "
+                f"attempted on run 2, got {second_run_keys}"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            for rid in run_ids:
+                _cleanup(pg_conn, connector.name, rid)
+            _cleanup_scope_state(pg_conn, connector.name)
+            self._drop_profile(pg_conn, barcelona_id)
+
+    def test_a_new_profiles_geography_is_crawled_within_the_stated_bound(self, pg_conn):
+        """#217's second bullet: a newly-created profile in an uncrawled
+        geography gets data within a BOUNDED number of runs — D-030 states
+        that bound as U + 1, where U is the number of *other* never-attempted
+        scopes for that connector at creation time.
+
+        This is the reported incident's exact shape: one connector already
+        crawling one city, owner adds a profile for a genuinely covered new
+        market (estepona), U = 0, so the bound is exactly 1 run. Asserted as
+        a hard upper bound, not as "eventually".
+        """
+        _apply_schema(pg_conn)
+        external_ids = tuple(f"dummy-{i}" for i in range(10))
+        connector = _NamedScopeConnector(
+            name="test-fairness-bound",
+            external_ids=external_ids,
+            failing_ids=frozenset(external_ids[1::2]),
+            circuit_breaker_min_attempts=2,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids = []
+        estepona_id = None
+        try:
+            # Run 0: only the Madrid fixture profile exists — it gets crawled,
+            # so every scope this connector knows about has now had a turn.
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert [connector.scope_key(s) for s in connector.scopes_seen] == ["madrid"]
+
+            # The owner now creates the new-market profile. U = 0.
+            estepona_id = self._add_profile(
+                pg_conn, "fairness-estepona", 36.4253, -5.1453
+            )
+            connector.scopes_seen.clear()
+
+            # Bound = U + 1 = 1 run.
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            crawled = [connector.scope_key(s) for s in connector.scopes_seen]
+            assert "estepona" in crawled, (
+                "a new profile in a covered geography must be crawled within "
+                f"U+1 = 1 run of creation; run crawled {crawled}"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            for rid in run_ids:
+                _cleanup(pg_conn, connector.name, rid)
+            _cleanup_scope_state(pg_conn, connector.name)
+            if estepona_id is not None:
+                self._drop_profile(pg_conn, estepona_id)
+
+    def test_skipped_for_budget_is_distinguishable_from_uncovered_geography(
+        self, pg_conn
+    ):
+        """#217's third bullet: `connector_run_results` must let a consumer
+        tell "we ran out of budget before reaching your geography" from "this
+        connector doesn't cover your geography at all". Both used to produce
+        simply no data and no message.
+
+        Asserted on the STRUCTURED column, not the prose: a consumer that has
+        to string-match `error_msg` to answer this hasn't really been given
+        the distinction.
+        """
+        _apply_schema(pg_conn)
+        barcelona_id = self._add_profile(pg_conn, "fairness-bcn-2", 41.3851, 2.1734)
+        # lat 50.1 -> _NamedScopeConnector.scope_key returns None: genuinely
+        # uncovered, the issue #177 case this must NOT be confused with.
+        uncovered_id = self._add_profile(pg_conn, "fairness-uncovered", 50.1, 8.6)
+
+        external_ids = tuple(f"dummy-{i}" for i in range(10))
+        connector = _NamedScopeConnector(
+            name="test-fairness-reasons",
+            external_ids=external_ids,
+            failing_ids=frozenset(external_ids[1::2]),
+            circuit_breaker_min_attempts=2,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            status, error_msg, skipped_scopes = _result_row(
+                pg_conn, run_id, connector.name
+            )
+            assert status == "circuit_open"
+
+            by_reason: dict[str, list[str]] = {}
+            for entry in skipped_scopes or []:
+                by_reason.setdefault(entry["reason"], []).append(entry["scope"])
+
+            # Barcelona IS covered — it just never got its turn.
+            assert by_reason.get("budget") == ["barcelona"], (
+                "a covered geography that never got its turn must be "
+                f"recorded as reason=budget, got {skipped_scopes}"
+            )
+            # The lat=50 profile is a different animal entirely and must not
+            # be blamed on the budget — more budget would not have helped it.
+            uncovered = by_reason.get("uncovered", [])
+            assert len(uncovered) == 1, (
+                f"the uncovered scope must be recorded separately, got {skipped_scopes}"
+            )
+            assert "barcelona" not in uncovered
+            # The prose stays too — an operator reading logs still gets it.
+            assert "skipped for budget" in error_msg
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            _cleanup_scope_state(pg_conn, connector.name)
+            self._drop_profile(pg_conn, barcelona_id)
+            self._drop_profile(pg_conn, uncovered_id)
+
+    def test_budget_skipped_scope_is_recorded_as_covered_but_never_attempted(
+        self, pg_conn
+    ):
+        """#217's fourth bullet needs a DATA source, not just a log line: the
+        zero-candidate diagnostic (#194) asks "has this area been crawled?"
+        from the dashboard, which cannot run any connector's Python-side
+        geography resolution.
+
+        `connector_scope_state` answers it: a row with a NULL
+        `last_attempted_at` means "covered, but has never had its turn"; no
+        row at all means "no connector covers this". The scope's own
+        center/radius is stored so a lat/lon-only consumer can do the
+        containment test.
+        """
+        _apply_schema(pg_conn)
+        barcelona_id = self._add_profile(pg_conn, "fairness-bcn-3", 41.3851, 2.1734)
+        external_ids = tuple(f"dummy-{i}" for i in range(10))
+        connector = _NamedScopeConnector(
+            name="test-fairness-coverage-row",
+            external_ids=external_ids,
+            failing_ids=frozenset(external_ids[1::2]),
+            circuit_breaker_min_attempts=2,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            state = _scope_state(pg_conn, connector.name)
+
+            assert "madrid" in state and state["madrid"][0] is not None, (
+                "the scope that was actually crawled must carry a real "
+                f"last_attempted_at, got {state}"
+            )
+            assert "barcelona" in state, (
+                "a covered-but-starved scope must still get a row — without "
+                "one it is indistinguishable from an uncovered geography"
+            )
+            attempted_at, skipped_at = state["barcelona"]
+            assert attempted_at is None, (
+                "a scope that never reached discover() must NOT claim to "
+                "have been attempted"
+            )
+            assert skipped_at is not None, (
+                "a scope passed over because the breaker was open must "
+                "record when that happened"
+            )
+
+            # The geography columns the dashboard's containment query needs.
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT center_lat, center_lon, radius_km FROM "
+                    "connector_scope_state WHERE connector_name = %s AND "
+                    "scope_key = %s",
+                    (connector.name, "barcelona"),
+                )
+                center_lat, center_lon, radius_km = cur.fetchone()
+            assert center_lat == pytest.approx(41.3851)
+            assert center_lon == pytest.approx(2.1734)
+            assert radius_km == pytest.approx(10.0)
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            _cleanup_scope_state(pg_conn, connector.name)
+            self._drop_profile(pg_conn, barcelona_id)
+
+    def test_a_null_last_attempted_at_row_does_not_break_scope_ordering(self, pg_conn):
+        """Regression guard for the specific crash the covered-but-skipped
+        row introduces if `_order_scopes_by_fairness` reads it naively: a
+        NULL `last_attempted_at` coming back from the DB puts `None` in the
+        sort dict, and `sorted()` raises TypeError comparing None to a
+        datetime — taking down the whole sweep for every connector.
+
+        The scope must also KEEP its never-attempted priority (a NULL is
+        semantically "never attempted", not "attempted at the epoch").
+        """
+        _apply_schema(pg_conn)
+        connector = _NamedScopeConnector(name="test-fairness-null-row")
+        # TWO scopes are essential here, not one: `sorted()` on a
+        # single-element list never compares anything, so a one-scope
+        # version of this test passes even with the NULL guard removed.
+        # Barcelona carries the covered-but-skipped row (NULL
+        # last_attempted_at); Madrid carries a real timestamp — so the sort
+        # is forced to compare the two.
+        barcelona_id = self._add_profile(pg_conn, "fairness-bcn-null", 41.3851, 2.1734)
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO connector_scope_state (connector_name, scope_key, "
+                "last_attempted_at, last_skipped_for_budget_at) "
+                "VALUES (%s, %s, NULL, NOW())",
+                (connector.name, "barcelona"),
+            )
+            cur.execute(
+                "INSERT INTO connector_scope_state (connector_name, scope_key, "
+                "last_attempted_at) VALUES (%s, %s, NOW())",
+                (connector.name, "madrid"),
+            )
+        pg_conn.commit()
+        try:
+            scopes = orchestrator._active_profile_scopes(pg_conn)
+            ordered = orchestrator._order_scopes_by_fairness(pg_conn, connector, scopes)
+            # Barcelona (NULL = never attempted) must sort AHEAD of Madrid
+            # (genuinely attempted just now).
+            assert [connector.scope_key(s) for s in ordered] == [
+                "barcelona",
+                "madrid",
+            ], (
+                "a NULL last_attempted_at must be treated as never-attempted "
+                "(front of the queue), not crash the sort"
+            )
+        finally:
+            _cleanup_scope_state(pg_conn, connector.name)
+            self._drop_profile(pg_conn, barcelona_id)
+
+    def test_budget_skipped_scopes_block_withdrawal_reconciliation(self, pg_conn):
+        """A scope skipped for budget was never attempted at ALL — not even a
+        failed discover(), which at least tries. Reconciling withdrawal
+        against a union missing its listings would withdraw live inventory,
+        exactly the hazard `_reconcile_missed_discoveries` already documents
+        for a genuinely failed scope.
+
+        Latent before D-030 (the breaker-tripped branch set
+        `any_circuit_open` but never touched `reconcilable_union`), and
+        masked only because Fotocasa sets `discovers_full_inventory=False`.
+        Rotation makes "some scope gets skipped for budget" the NORMAL
+        outcome of every run, so this stops being theoretical.
+        """
+        _apply_schema(pg_conn)
+        barcelona_id = self._add_profile(pg_conn, "fairness-bcn-4", 41.3851, 2.1734)
+        external_ids = tuple(f"dummy-{i}" for i in range(10))
+        connector = _NamedScopeConnector(
+            name="test-fairness-reconcile",
+            external_ids=external_ids,
+            failing_ids=frozenset(external_ids[1::2]),
+            circuit_breaker_min_attempts=2,
+            discovers_full_inventory=True,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        calls = []
+        real = orchestrator._reconcile_missed_discoveries
+        orchestrator._reconcile_missed_discoveries = lambda *a, **k: calls.append(a)
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            assert calls == [], (
+                "withdrawal reconciliation must not run against a union "
+                "missing every skipped-for-budget scope's listings"
+            )
+        finally:
+            orchestrator._reconcile_missed_discoveries = real
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            _cleanup_scope_state(pg_conn, connector.name)
+            self._drop_profile(pg_conn, barcelona_id)

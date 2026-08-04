@@ -45,9 +45,9 @@
 import { sql } from "@/lib/db-write";
 import { buildScopeFunnelStages } from "@/lib/filtering/scope-query";
 import type { SearchProfileRow } from "@/lib/profiles-schema";
-import type { NearestPropertyResult, ZeroCandidateDiagnosis } from "@/lib/profile-diagnostics-types";
+import type { AreaCoverage, NearestPropertyResult, ZeroCandidateDiagnosis } from "@/lib/profile-diagnostics-types";
 
-export type { NearestPropertyResult, ZeroCandidateDiagnosis } from "@/lib/profile-diagnostics-types";
+export type { AreaCoverage, NearestPropertyResult, ZeroCandidateDiagnosis } from "@/lib/profile-diagnostics-types";
 
 /** Human labels for scope.hard_exclusions keys — mirrors ProfileForm.tsx's checkbox copy exactly. */
 const EXCLUSION_LABELS: Record<string, string> = {
@@ -150,6 +150,58 @@ async function getConnectorLastRunFinishedAt(): Promise<string | null> {
 }
 
 /**
+ * Has any connector ever actually crawled the area around `center`?
+ * Issue #217 / D-030.
+ *
+ * `connector_scope_state` holds one row per (connector, resolved scope) the
+ * ETL orchestrator has ever been able to resolve, carrying that scope's own
+ * center/radius. So "is this profile's center inside a scope some connector
+ * covers" is a plain containment test here — no need to mirror each
+ * connector's Python geography resolution in TypeScript.
+ *
+ * The three outcomes are genuinely different advice, which is the whole
+ * point of the issue: nothing covering the point means waiting will never
+ * help; a covering scope that has never been attempted means waiting is
+ * exactly the right move; an attempted scope means "no matches" is a real
+ * statement about real inventory.
+ *
+ * `radius_km` is COALESCEd to 0 rather than to some default: a row without a
+ * radius came from a free-text-geography scope with no circle at all, and
+ * inventing a radius for it would silently claim coverage this function
+ * cannot actually vouch for.
+ */
+export async function getAreaCoverage(center: [number, number]): Promise<AreaCoverage> {
+  const [lat, lon] = center;
+  const rows = await sql<{ connector_name: string; last_attempted_at: string | null }>(
+    `SELECT connector_name, last_attempted_at
+       FROM connector_scope_state
+      WHERE center_lat IS NOT NULL AND center_lon IS NOT NULL
+        AND (6371 * acos(least(1, greatest(-1,
+              cos(radians($1)) * cos(radians(center_lat)) *
+              cos(radians(center_lon) - radians($2)) +
+              sin(radians($1)) * sin(radians(center_lat))
+            )))) <= COALESCE(radius_km, 0)`,
+    [lat, lon],
+  );
+
+  if (rows.length === 0) return { kind: "never_crawled" };
+
+  const attempted = rows.filter((r) => r.last_attempted_at !== null);
+  if (attempted.length === 0) {
+    return { kind: "awaiting_turn", connectorNames: rows.map((r) => r.connector_name).sort() };
+  }
+
+  // Most recent real attempt wins — a point can sit inside several
+  // connectors' scopes, and the freshest crawl is what the user's "has
+  // anyone looked here?" question is really about.
+  const lastAttemptedAt = attempted
+    .map((r) => r.last_attempted_at as string)
+    .sort()
+    .at(-1)!;
+  return { kind: "crawled", lastAttemptedAt };
+}
+
+/**
  * Diagnoses why `profile` currently has zero matched candidates. Callers
  * must only invoke this for a profile already known/believed to be at zero
  * (issue #194: lazy, on-demand, never part of the list's main aggregate) —
@@ -182,15 +234,17 @@ export async function diagnoseZeroCandidates(profile: SearchProfileRow): Promise
 
   const geographyCount = await countProperties(geographyStage.whereSql, geographyStage.params);
   if (geographyCount === 0) {
-    const [nearest, connectorLastRunFinishedAt] = await Promise.all([
+    const [nearest, connectorLastRunFinishedAt, areaCoverage] = await Promise.all([
       findNearestProperty(profile.scope.geography.center),
       getConnectorLastRunFinishedAt(),
+      getAreaCoverage(profile.scope.geography.center),
     ]);
     return {
       kind: "geography_empty",
       radiusKm: profile.scope.geography.radius_km,
       nearest,
       connectorLastRunFinishedAt,
+      areaCoverage,
     };
   }
 

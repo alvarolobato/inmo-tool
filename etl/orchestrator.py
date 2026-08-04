@@ -64,6 +64,16 @@ _WITHDRAWAL_THRESHOLD = 3
 # handler there for why any other violation must propagate instead.
 _LISTING_SOURCE_EXTERNAL_ID_CONSTRAINT = "listing_source_external_id_key"
 
+# Issue #217 (D-030): sort key stand-in for "this scope has never reached a
+# real attempt for this connector" — deliberately timezone-aware so it can
+# be compared directly against `connector_scope_state.last_attempted_at`
+# (a TIMESTAMPTZ, always returned tz-aware by psycopg2) without a
+# naive/aware comparison crashing `sorted()`. Anything actually recorded in
+# `connector_scope_state` sorts after this by construction (real attempts
+# happen well after `datetime.min`), which is what gives a never-attempted
+# scope top priority — see `_order_scopes_by_fairness`.
+_NEVER_ATTEMPTED = datetime.min.replace(tzinfo=timezone.utc)
+
 
 def _constraint_name(exc: Exception) -> str | None:
     """Constraint name from a psycopg2 IntegrityError, or None if unavailable.
@@ -565,6 +575,7 @@ def _record_connector_result(
     started_at: datetime,
     finished_at: datetime,
     skipped_count: int = 0,
+    skipped_scopes: list[dict[str, str]] | None = None,
 ) -> None:
     """`skipped_count` (issue #143) is listings this connector's run left
     unfetched under the skip-if-seen policy — "known, still there per
@@ -573,6 +584,16 @@ def _record_connector_result(
     *connectors* skipped via `connector_config.enabled = false`. The two
     are skip in different senses at different granularities; see each
     column's comment in etl/schema/init.sql.
+
+    `skipped_scopes` (issue #217) is a THIRD, again-different sense of
+    "skipped": whole *geographies* this connector never looked at this run,
+    each tagged with why — `budget` (covered, but the shared circuit
+    breaker was already open before its turn came) or `uncovered` (this
+    connector resolves no target for it at all, issue #177's case). Stored
+    as JSONB so the distinction survives without anyone string-matching
+    `error_msg`. `None`/empty is stored as SQL NULL rather than `[]` — "no
+    scope was skipped" and "an empty list was computed" are the same fact,
+    and NULL keeps `WHERE skipped_scopes IS NOT NULL` a usable filter.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -580,8 +601,8 @@ def _record_connector_result(
             INSERT INTO connector_run_results
                 (run_id, connector_name, started_at, finished_at, status,
                  discovered_count, fetched_count, error_count, error_msg,
-                 skipped_count)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 skipped_count, skipped_scopes)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 run_id,
@@ -594,6 +615,7 @@ def _record_connector_result(
                 error_count,
                 error_msg,
                 skipped_count,
+                json.dumps(skipped_scopes) if skipped_scopes else None,
             ),
         )
     conn.commit()
@@ -1161,7 +1183,15 @@ def _active_profile_scopes(conn) -> list[ConnectorScope]:
     other active profile.
     """
     with conn.cursor() as cur:
-        cur.execute("SELECT id, scope FROM search_profile WHERE archived_at IS NULL")
+        # ORDER BY id (issue #217/D-030): a plain SELECT gives no row-order
+        # guarantee at all absent an ORDER BY. `_order_scopes_by_fairness`
+        # relies on ties (multiple scopes tied at "never attempted") being
+        # broken by profile creation order — oldest-starved-first — which
+        # only holds if this list is deterministically ordered to begin
+        # with.
+        cur.execute(
+            "SELECT id, scope FROM search_profile WHERE archived_at IS NULL ORDER BY id"
+        )
         rows = cur.fetchall()
 
     seen: dict[tuple[float, float, float], ConnectorScope] = {}
@@ -1394,6 +1424,201 @@ def _scopes_for_connector(
     return base_scopes, True, min_refetch_interval_seconds
 
 
+def _order_scopes_by_fairness(
+    conn, connector: Connector, scopes: list[ConnectorScope]
+) -> list[ConnectorScope]:
+    """Reorder *scopes* so a never-(or longest-ago-)attempted scope sorts
+    first — issue #217/D-030.
+
+    The bug this exists to fix: the shared circuit breaker's error budget
+    is cumulative across every scope in a run, and a soft-blocking
+    connector (Fotocasa) reliably exhausts it during the very first scope
+    in list order. Every scope after that gets skipped outright — not
+    "rarely reached", *never*, because the list order never changed
+    between runs. A profile in a brand-new geography that happens to sort
+    anywhere but first was starved permanently, with no error: the run
+    just reports `circuit_open` and moves on.
+
+    Fix: track, per (connector, scope), the last time it actually reached
+    an attempt (`_record_scope_attempt`, called once `run_connector` is
+    about to be invoked for it — see the call site in `run_all_connectors`
+    below). Sorting ascending by that timestamp — treating "never
+    attempted" as older than any real timestamp via `_NEVER_ATTEMPTED` —
+    gives two properties from one persisted field, not two separate
+    mechanisms:
+
+    1. **Prioritise never-crawled scopes.** A scope with no
+       `connector_scope_state` row sorts before every scope that has one,
+       every single run, until it finally gets its own attempt.
+    2. **Rotate the already-crawled scopes.** Whichever scope was reached
+       this run gets its timestamp bumped to "now" (see
+       `_record_scope_attempt`), which pushes it to the BACK of next run's
+       order — so the scope that just consumed this run's budget isn't
+       the one consuming next run's budget too.
+
+    Bound (stated for the acceptance criterion): the shared breaker always
+    lets the run's first-in-order scope reach a full `discover()` call —
+    it starts untripped, and the "already open" skip only fires for scope
+    index >= 1 (see the loop below) — so at least one scope is genuinely
+    attempted per run in the worst case (the one Fotocasa exhibits: the
+    breaker trips during that very first scope and every later one is
+    skipped for budget). A newly-created profile's scope therefore reaches
+    its first attempt within **U + 1** runs of being created, where U is
+    the number of OTHER scopes for that connector that were already
+    "never attempted" at the moment the profile was created (ties among
+    never-attempted scopes break by `scopes`' incoming order, which is
+    `_active_profile_scopes`' `ORDER BY id` — i.e. profile creation order,
+    oldest first). In the common case — the one issue #217 was filed
+    against, a single new profile in an otherwise-fully-crawled
+    connector's coverage — U is 0 and the bound is exactly 1 run,
+    matching the acceptance criterion's "scope 2 is attempted on the
+    following run" literally.
+
+    A scope whose `scope_key()` returns None (no coverage at all for this
+    connector) can't be tracked by key and is treated as
+    `_NEVER_ATTEMPTED` too — harmless, since that branch in the loop below
+    never calls `discover()` or touches the shared breaker, so it can't
+    consume another scope's turn no matter where it sorts.
+
+    Stable sort (Python's `sorted()`): ties keep their incoming relative
+    order, which is what makes the "U older never-attempted scopes go
+    first" bound hold rather than an arbitrary/undefined tie order.
+    """
+    with conn.cursor() as cur:
+        # `last_attempted_at IS NOT NULL` is load-bearing, not defensive
+        # tidiness: since issue #217 added the covered-but-skipped-for-budget
+        # row (`_record_scope_covered_but_skipped`), a row can legitimately
+        # exist with a NULL `last_attempted_at`. Letting that NULL through
+        # would put `None` in this dict and make `sorted()` raise
+        # TypeError comparing None to a datetime — and semantically such a
+        # scope IS still never-attempted, so it must fall through to the
+        # `_NEVER_ATTEMPTED` default below and keep its front-of-queue
+        # priority rather than being treated as recently served.
+        cur.execute(
+            "SELECT scope_key, last_attempted_at FROM connector_scope_state "
+            "WHERE connector_name = %s AND last_attempted_at IS NOT NULL",
+            (connector.name,),
+        )
+        last_attempted = dict(cur.fetchall())
+
+    def _priority(scope: ConnectorScope) -> datetime:
+        key = connector.scope_key(scope)
+        if key is None:
+            return _NEVER_ATTEMPTED
+        return last_attempted.get(key, _NEVER_ATTEMPTED)
+
+    return sorted(scopes, key=_priority)
+
+
+def _scope_geo_columns(
+    scope: ConnectorScope,
+) -> tuple[float | None, float | None, float | None]:
+    """(center_lat, center_lon, radius_km) for `connector_scope_state`, or
+    (None, None, None) for a scope with no point geography at all (a
+    free-text `geography` scope — tests, a `connector_config`
+    geography_override). Issue #217: stored so a consumer holding only a
+    lat/lon (the dashboard's zero-candidate diagnostic, issue #194) can ask
+    "was a scope covering this point ever attempted" without reimplementing
+    each connector's Python-side geography resolution.
+    """
+    if scope.center is None:
+        return None, None, None
+    return scope.center[0], scope.center[1], scope.radius_km
+
+
+def _record_scope_covered_but_skipped(
+    conn,
+    connector_name: str,
+    scope_key: str,
+    scope: ConnectorScope,
+    when: datetime,
+) -> None:
+    """Persist that *scope_key* is genuinely COVERED by *connector_name* but
+    was passed over this run because the shared circuit breaker was already
+    open — issue #217/D-030.
+
+    This is the row that makes the issue's third acceptance criterion
+    answerable from data instead of from prose. A `connector_scope_state`
+    row with `last_attempted_at IS NULL` means "this connector resolves your
+    geography fine, it just hasn't had its turn yet"; *no row at all* means
+    "no connector covers this geography" (`scope_key()` returned None, so
+    there is no key to store under). Before this, a brand-new profile in a
+    covered-but-starved area and one in a genuinely uncovered area both
+    produced exactly nothing anywhere.
+
+    `last_attempted_at` is deliberately left ALONE on conflict (not set,
+    not cleared): a scope crawled three runs ago and skipped for budget
+    since must keep its real attempt timestamp, both because that timestamp
+    is what `_order_scopes_by_fairness` sorts on and because clearing it
+    would falsely claim the area was never crawled. Only the geography
+    columns are refreshed, so a profile whose radius changed doesn't leave a
+    stale circle behind.
+    """
+    center_lat, center_lon, radius_km = _scope_geo_columns(scope)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO connector_scope_state (
+                connector_name, scope_key, last_attempted_at,
+                last_skipped_for_budget_at, center_lat, center_lon, radius_km
+            )
+            VALUES (%s, %s, NULL, %s, %s, %s, %s)
+            ON CONFLICT (connector_name, scope_key) DO UPDATE
+                SET last_skipped_for_budget_at = EXCLUDED.last_skipped_for_budget_at,
+                    center_lat = EXCLUDED.center_lat,
+                    center_lon = EXCLUDED.center_lon,
+                    radius_km  = EXCLUDED.radius_km
+            """,
+            (connector_name, scope_key, when, center_lat, center_lon, radius_km),
+        )
+    conn.commit()
+
+
+def _record_scope_attempt(
+    conn, connector_name: str, scope_key: str, scope: ConnectorScope, when: datetime
+) -> None:
+    """Persist that *scope_key* reached a real attempt for *connector_name*
+    at *when* — issue #217/D-030's fairness bookkeeping.
+
+    Called once per scope actually reached in `run_all_connectors`' loop
+    (right before `run_connector` is invoked for it), regardless of how
+    that attempt turns out — success, per-listing errors, an
+    `UnresolvableGeographyError`, or the shared breaker tripping partway
+    through its own listings. "Attempted" means "we looked", not "we
+    succeeded": a scope whose `discover()` genuinely fails on every run
+    must still rotate to the back of the priority queue, or a
+    persistently-broken scope would starve every other scope exactly the
+    way issue #217's bug did — just via a permanent failure instead of a
+    permanently-losing list position.
+
+    Upsert, not insert: `connector_scope_state`'s PK is
+    (connector_name, scope_key), so a scope attempted on a prior run
+    already has a row and this only ever needs to bump its timestamp.
+    Committed immediately (not batched with the rest of the run's writes)
+    so the fairness state is durable even if the process crashes partway
+    through this scope's `run_connector` call — a crash must not make this
+    scope look never-attempted next run when it genuinely was attempted.
+    """
+    center_lat, center_lon, radius_km = _scope_geo_columns(scope)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO connector_scope_state (
+                connector_name, scope_key, last_attempted_at,
+                center_lat, center_lon, radius_km
+            )
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (connector_name, scope_key) DO UPDATE
+                SET last_attempted_at = EXCLUDED.last_attempted_at,
+                    center_lat = EXCLUDED.center_lat,
+                    center_lon = EXCLUDED.center_lon,
+                    radius_km  = EXCLUDED.radius_km
+            """,
+            (connector_name, scope_key, when, center_lat, center_lon, radius_km),
+        )
+    conn.commit()
+
+
 def run_all_connectors(
     conn, trigger: str = "scheduler", connector_name: str | None = None
 ) -> int:
@@ -1493,6 +1718,14 @@ def run_all_connectors(
             )
             continue
 
+        # Issue #217/D-030: never-attempted scopes first, already-attempted
+        # ones oldest-attempt-first — see _order_scopes_by_fairness for the
+        # full rationale and the bound this gives a newly-created profile.
+        # Must run AFTER the `not scopes` check above (nothing to order for
+        # an empty list) and BEFORE the breaker/limiter are constructed
+        # below, since the per-scope loop iterates this reordered list.
+        scopes = _order_scopes_by_fairness(conn, connector, scopes)
+
         # Issue #143: an explicit connector_config override wins; otherwise
         # fall back to this connector's own class-attribute default (0 for
         # every connector that hasn't opted into skip-if-seen).
@@ -1518,6 +1751,13 @@ def run_all_connectors(
         any_scope_unresolvable = False
         scope_summaries: list[str] = []
         error_msgs: list[str] = []
+        # Issue #217: the structured counterpart to error_msg's prose, so a
+        # consumer never has to string-match free text to tell "we ran out
+        # of budget before reaching your geography" from "this connector
+        # doesn't cover your geography at all". Persisted verbatim to
+        # connector_run_results.skipped_scopes (JSONB); entries are
+        # {"scope": <scope_key or repr(scope)>, "reason": "budget"|"uncovered"}.
+        skipped_scopes: list[dict[str, str]] = []
 
         # Issue #71 hardening: one limiter/breaker per connector per RUN,
         # not per scope — shared across every profile-geography this
@@ -1538,7 +1778,12 @@ def run_all_connectors(
         # scope (see _reconcile_missed_discoveries' docstring: the sweep
         # has no scope predicate, so per-scope reconciliation withdraws
         # other scopes' live listings). `reconcilable_union` stays True
-        # only while every scope processed so far was a safe contributor.
+        # only while every scope processed so far was a safe contributor —
+        # including scopes never even reached this run because the shared
+        # breaker was already open (issue #217): a skipped-for-budget scope
+        # tried even less than a failed one, so its absence from
+        # `discovered_union` is exactly as untrustworthy as a genuine
+        # discover() failure's would be.
         discovered_union: set[str] = set()
         reconcilable_union = True
 
@@ -1550,6 +1795,64 @@ def run_all_connectors(
                 # what "shared across scopes" actually buys: without it,
                 # each scope got its own fresh, untripped breaker.
                 any_circuit_open = True
+                # Issue #217: classify what's left rather than lumping it
+                # all together. "discover() was never CALLED because an
+                # earlier scope used up the shared error budget" and
+                # "discover() was never going to find anything here because
+                # this connector has no coverage for it" (issue #177's
+                # case) are genuinely different answers to a user asking
+                # "why is my profile empty?", and they used to be
+                # indistinguishable from outside — both simply produced no
+                # data and no message.
+                #
+                # `connector.scope_key()` is documented never to raise
+                # (base.py), so calling it here purely to classify is safe —
+                # it's the same call every attempted scope gets below, and
+                # it does no I/O.
+                skipped_for_budget: list[str] = []
+                for remaining in scopes[scope_index:]:
+                    remaining_key = connector.scope_key(remaining)
+                    if remaining_key is None:
+                        # Not a budget casualty: this scope would have been
+                        # skipped as uncovered even on a completely healthy
+                        # run, so labelling it "skipped for budget" would
+                        # actively mislead. Recorded under the uncovered
+                        # reason instead, matching the `scope_key() is None`
+                        # branch below.
+                        skipped_scopes.append(
+                            {"scope": repr(remaining), "reason": "uncovered"}
+                        )
+                        continue
+                    if remaining_key in seen_scope_keys:
+                        # Already crawled earlier this same run under an
+                        # equivalent scope (two profiles resolving to one
+                        # city). Its data is present, so reporting it as
+                        # starved would be wrong.
+                        continue
+                    skipped_for_budget.append(remaining_key)
+                    # The row this writes is what lets the dashboard say
+                    # "covered, but hasn't had its turn yet" — a
+                    # connector_scope_state row with a NULL
+                    # last_attempted_at. Without it, a brand-new profile's
+                    # covered-but-starved geography is indistinguishable
+                    # from one no connector covers at all (no row either
+                    # way).
+                    _record_scope_covered_but_skipped(
+                        conn,
+                        connector.name,
+                        remaining_key,
+                        remaining,
+                        datetime.now(timezone.utc),
+                    )
+                if skipped_for_budget:
+                    error_msgs.append(
+                        "skipped for budget (circuit breaker already open "
+                        "before these scopes were attempted): "
+                        + ", ".join(skipped_for_budget)
+                    )
+                    skipped_scopes.extend(
+                        {"scope": key, "reason": "budget"} for key in skipped_for_budget
+                    )
                 logger.error(
                     "Connector %s: circuit breaker already open — skipping "
                     "remaining scopes this run (%d of %d not attempted)",
@@ -1557,6 +1860,16 @@ def run_all_connectors(
                     len(scopes) - scope_index,
                     len(scopes),
                 )
+                # Issue #217 hardening: these scopes were never attempted at
+                # all — not even a failed discover() call, which at least
+                # tries. Exactly the same "a partial union can't distinguish
+                # gone from not-looked-at" hazard `_reconcile_missed_
+                # discoveries`' docstring already establishes for a failed
+                # scope (see the generic `except Exception` branch below,
+                # which sets this same flag) — reconciliation must not run
+                # against a union that's missing these scopes' listings
+                # just because THIS run happened to reach its budget early.
+                reconcilable_union = False
                 break
 
             scope_key = connector.scope_key(scope)
@@ -1589,6 +1902,11 @@ def run_all_connectors(
                 # scope_key(), not None — see that function's docstring),
                 # but the guard costs nothing and keeps this path from
                 # itself becoming a new way to blow up the loop.
+                #
+                # Issue #217: also recorded structurally, so the "uncovered"
+                # half of the distinction this issue asked for doesn't depend
+                # on a consumer parsing the prose below.
+                skipped_scopes.append({"scope": repr(scope), "reason": "uncovered"})
                 place = None
                 if scope.center is not None:
                     try:
@@ -1632,6 +1950,16 @@ def run_all_connectors(
                 )
                 continue
             seen_scope_keys.add(scope_key)
+
+            # Issue #217/D-030: this scope has now reached a real attempt —
+            # persisted BEFORE calling run_connector (not after) so a crash
+            # mid-scope still counts it as "looked at" for next run's
+            # fairness ordering, and unconditionally (not only on success)
+            # so a scope whose discover() keeps failing doesn't also keep
+            # winning the front of the queue forever.
+            _record_scope_attempt(
+                conn, connector.name, scope_key, scope, datetime.now(timezone.utc)
+            )
 
             try:
                 result = run_connector(
@@ -1821,6 +2149,7 @@ def run_all_connectors(
             skipped_count=skipped_fetch_total,
             error_count=error_total,
             error_msg="; ".join(error_msgs) or None,
+            skipped_scopes=skipped_scopes,
             started_at=started_at,
             finished_at=datetime.now(timezone.utc),
         )

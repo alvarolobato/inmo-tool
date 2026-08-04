@@ -48,6 +48,7 @@ describe("ZeroCandidatesDiagnostic (issue #194)", () => {
         radiusKm: 7,
         nearest: { propertyId: 99, distanceKm: 7.6 },
         connectorLastRunFinishedAt: "2026-08-01T10:00:00.000Z",
+        areaCoverage: { kind: "crawled", lastAttemptedAt: "2026-08-01T10:00:00.000Z" },
       }),
     );
     render(<ZeroCandidatesDiagnostic profileId={1} />);
@@ -69,6 +70,7 @@ describe("ZeroCandidatesDiagnostic (issue #194)", () => {
         radiusKm: 7,
         nearest: null,
         connectorLastRunFinishedAt: null,
+        areaCoverage: { kind: "never_crawled" },
       }),
     );
     render(<ZeroCandidatesDiagnostic profileId={1} />);
@@ -76,6 +78,51 @@ describe("ZeroCandidatesDiagnostic (issue #194)", () => {
       expect(screen.getByText(/No hay ningún inmueble con anuncio activo/)).toBeInTheDocument(),
     );
     expect(screen.getByText(/Ningún conector ha completado una ejecución/)).toBeInTheDocument();
+  });
+
+  // Issue #217 / D-030: these two branches are the whole point of the
+  // areaCoverage signal — before it, both rendered the identical "no
+  // matches nearby" text as the crawled case, which is the message that
+  // sent the owner looking for a filter bug when the real answer was
+  // "nobody has crawled Estepona yet".
+  it("geography_empty + never_crawled: says the area has no coverage at all, and that waiting won't help", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockFetchOnce({
+        kind: "geography_empty",
+        radiusKm: 25,
+        nearest: { propertyId: 5, distanceKm: 112.5 },
+        connectorLastRunFinishedAt: "2026-08-04T07:16:38.000Z",
+        areaCoverage: { kind: "never_crawled" },
+      }),
+    );
+    render(<ZeroCandidatesDiagnostic profileId={1} />);
+    await waitFor(() =>
+      expect(screen.getByText(/Ningún conector cubre todavía esta zona/)).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/hace falta añadir cobertura/)).toBeInTheDocument();
+    // Must NOT claim the area is merely awaiting its turn — that would tell
+    // the user to wait for something that will never happen.
+    expect(screen.queryByText(/todavía no le ha tocado el turno/)).not.toBeInTheDocument();
+  });
+
+  it("geography_empty + awaiting_turn: says the area IS covered and names the connectors that will get to it", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockFetchOnce({
+        kind: "geography_empty",
+        radiusKm: 25,
+        nearest: { propertyId: 5, distanceKm: 112.5 },
+        connectorLastRunFinishedAt: "2026-08-04T07:16:38.000Z",
+        areaCoverage: { kind: "awaiting_turn", connectorNames: ["fotocasa"] },
+      }),
+    );
+    render(<ZeroCandidatesDiagnostic profileId={1} />);
+    await waitFor(() =>
+      expect(screen.getByText(/todavía no le ha tocado el turno/)).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/fotocasa/)).toBeInTheDocument();
+    expect(screen.queryByText(/Ningún conector cubre todavía esta zona/)).not.toBeInTheDocument();
   });
 
   it("type_empty: names the geography count and the excluded property types", async () => {

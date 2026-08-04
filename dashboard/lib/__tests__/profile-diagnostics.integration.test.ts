@@ -19,7 +19,7 @@ import { buildPgPoolConfig } from "@/lib/db-shared";
 import { resetPool } from "@/lib/db-write";
 import { createProfile, getProfileById, updateProfile } from "@/lib/db/profiles";
 import { materializeProfile } from "@/lib/filtering/materialize";
-import { diagnoseZeroCandidates } from "../profile-diagnostics";
+import { diagnoseZeroCandidates, getAreaCoverage } from "../profile-diagnostics";
 import type { Scope } from "@/lib/profiles-schema";
 
 // Real coordinates (WGS84 approximate town centers).
@@ -372,5 +372,83 @@ describe.runIf(dbAvailable)("diagnoseZeroCandidates — real Postgres (issue #19
 
     expect(diagnosis.kind).toBe("not_zero");
     if (diagnosis.kind === "not_zero") expect(diagnosis.matchedCount).toBe(1);
+  });
+
+  /**
+   * Issue #217 / D-030. The containment query is real SQL (haversine against
+   * each scope's own stored circle) — a mock cannot judge whether a point
+   * actually falls inside a scope's radius, which is the entire question
+   * this signal answers.
+   */
+  describe("getAreaCoverage — has anyone actually crawled here? (issue #217)", () => {
+    const CONNECTOR = "test-area-coverage-217";
+
+    async function clearScopeState() {
+      await withRealDb(async (pool) => {
+        await pool.query("DELETE FROM connector_scope_state WHERE connector_name = $1", [CONNECTOR]);
+      });
+    }
+
+    beforeEach(clearScopeState);
+    afterEach(clearScopeState);
+
+    it("never_crawled: no scope's circle contains the point — waiting will not help", async () => {
+      await withRealDb(async (pool) => {
+        // A crawled scope exists, but centered on Sevilla with a radius far
+        // too small to reach Dos Hermanas (~10.5 km away).
+        await pool.query(
+          `INSERT INTO connector_scope_state
+             (connector_name, scope_key, last_attempted_at, center_lat, center_lon, radius_km)
+           VALUES ($1, 'sevilla', NOW(), $2, $3, 2)`,
+          [CONNECTOR, SEVILLA[0], SEVILLA[1]],
+        );
+      });
+      expect(await getAreaCoverage(DOS_HERMANAS)).toEqual({ kind: "never_crawled" });
+    });
+
+    it("awaiting_turn: a covering scope exists but has never been attempted (the Estepona case)", async () => {
+      await withRealDb(async (pool) => {
+        await pool.query(
+          `INSERT INTO connector_scope_state
+             (connector_name, scope_key, last_attempted_at, last_skipped_for_budget_at,
+              center_lat, center_lon, radius_km)
+           VALUES ($1, 'dos-hermanas', NULL, NOW(), $2, $3, 25)`,
+          [CONNECTOR, DOS_HERMANAS[0], DOS_HERMANAS[1]],
+        );
+      });
+      expect(await getAreaCoverage(DOS_HERMANAS)).toEqual({
+        kind: "awaiting_turn",
+        connectorNames: [CONNECTOR],
+      });
+    });
+
+    it("crawled: a covering scope was genuinely attempted, so 'no matches' is a real answer", async () => {
+      await withRealDb(async (pool) => {
+        await pool.query(
+          `INSERT INTO connector_scope_state
+             (connector_name, scope_key, last_attempted_at, center_lat, center_lon, radius_km)
+           VALUES ($1, 'dos-hermanas', '2026-08-04T07:16:38Z', $2, $3, 25)`,
+          [CONNECTOR, DOS_HERMANAS[0], DOS_HERMANAS[1]],
+        );
+      });
+      const coverage = await getAreaCoverage(DOS_HERMANAS);
+      expect(coverage.kind).toBe("crawled");
+    });
+
+    it("a NULL radius_km never claims coverage it cannot vouch for", async () => {
+      await withRealDb(async (pool) => {
+        // A free-text-geography scope: no circle at all. COALESCE(radius_km, 0)
+        // means it can only ever match its own exact center, never a
+        // different point — inventing a default radius here would silently
+        // tell the user their area is covered when nothing established that.
+        await pool.query(
+          `INSERT INTO connector_scope_state
+             (connector_name, scope_key, last_attempted_at, center_lat, center_lon, radius_km)
+           VALUES ($1, 'freetext', NOW(), $2, $3, NULL)`,
+          [CONNECTOR, DOS_HERMANAS[0], DOS_HERMANAS[1]],
+        );
+      });
+      expect(await getAreaCoverage(SEVILLA)).toEqual({ kind: "never_crawled" });
+    });
   });
 });

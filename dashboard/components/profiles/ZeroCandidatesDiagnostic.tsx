@@ -165,10 +165,29 @@ export function ZeroCandidatesDiagnostic({
               {diagnosis.radiusKm} km.
             </p>
           )}
+          {/* Issue #217 / D-030: "no matches nearby" and "nobody has crawled
+              here yet" used to render identically, and the second is the
+              far more common cause for a brand-new profile in a new market.
+              Shown above the global connector-recency line because it is
+              area-specific and therefore strictly more informative. */}
+          {diagnosis.areaCoverage.kind === "never_crawled" && (
+            <p style={{ margin: "4px 0 0" }}>
+              Ningún conector cubre todavía esta zona, así que aún no se ha rastreado. Esperar no hará que
+              aparezcan resultados: hace falta añadir cobertura para esta zona.
+            </p>
+          )}
+          {diagnosis.areaCoverage.kind === "awaiting_turn" && (
+            <p style={{ margin: "4px 0 0" }}>
+              Esta zona sí está cubierta ({diagnosis.areaCoverage.connectorNames.join(", ")}), pero todavía no le
+              ha tocado el turno de rastreo. Debería rastrearse en una de las próximas ejecuciones.
+            </p>
+          )}
           <p style={{ margin: "4px 0 0", color: "var(--fg-subtle)" }}>
-            {diagnosis.connectorLastRunFinishedAt === null
-              ? "Ningún conector ha completado una ejecución todavía."
-              : `Última ejecución de los conectores: ${new Date(diagnosis.connectorLastRunFinishedAt).toLocaleString("es-ES")}.`}
+            {diagnosis.areaCoverage.kind === "crawled"
+              ? `Esta zona se rastreó por última vez el ${new Date(diagnosis.areaCoverage.lastAttemptedAt).toLocaleString("es-ES")}.`
+              : diagnosis.connectorLastRunFinishedAt === null
+                ? "Ningún conector ha completado una ejecución todavía."
+                : `Última ejecución de los conectores: ${new Date(diagnosis.connectorLastRunFinishedAt).toLocaleString("es-ES")}.`}
           </p>
         </>
       )}
