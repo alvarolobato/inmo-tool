@@ -1,0 +1,42 @@
+{
+  "_comment": "SYNTHETIC getRecord response for tests only. NOT a real Cajamar record. Field API NAMES are the real Salesforce names (already effectively public via the committed sitemap filename sitemap-ga_activo__c-1.xml); every VALUE below is invented. Includes owner-contact and internal fields deliberately, to prove the connector drops the former and gates the latter. No real endpoint URL appears here (D-035).",
+  "actions": [
+    {
+      "id": "1;a",
+      "state": "SUCCESS",
+      "returnValue": {
+        "record": {
+          "Id": "a0vTEST000000000AA",
+          "sobjectType": "GA_Activo__c",
+          "Name": "TESTREF-4242",
+          "GA_Direccion__c": "Calle Falsa 123",
+          "GA_Poblacion__c": "Villaejemplo",
+          "GA_Provincia__c": "99",
+          "GA_Provincia__c__f": "PROVINCIA TEST",
+          "GA_Geolocalizacion__Latitude__s": 40.1234567,
+          "GA_Geolocalizacion__Longitude__s": -3.7654321,
+          "GA_SuperficieCons__c": 95.5,
+          "GA_SuperficieUtil__c": 80.25,
+          "GA_NumeroHabitaciones__c": 3,
+          "GA_NumBanos__c": 2,
+          "GA_ReferenciaCatastral__c": "1234567AB1234C0001DE",
+          "GA_PVPVigentePVPVentaReport__c": 123450.0,
+          "GA_PrecioPermanente__c": 130000.0,
+          "GA_Preciom2__c": 1292.15,
+          "GA_TipologiaActivoCategoria__c": "VIVIENDA",
+          "GA_TipologiaActivoSubCategoria__c": "PISO",
+          "GA_CEE__c": "D",
+          "GA_EnlaceWeb__c": "https://example.test/inmueble/4242",
+          "GA_CodigoInmueble__c": "ED-TEST-000-001",
+          "GA_CosteDeAdquisicion__c": 111111.11,
+          "GA_ValorDeTasacion__c": 222222.22,
+          "GA_UNI__c": "Fulano De Tal (agente comercial)",
+          "GA_DatosComPropietarios_NifPresuntoClien__c": "00000000X",
+          "GA_DatosComPropietarios_Telefono__c": "600123456",
+          "GA_DatosComPropietarios_Iban__c": "ES0000000000000000000000",
+          "GA_DatosComPropietarios_Poblacion__c": "Secretville"
+        }
+      }
+    }
+  ]
+}

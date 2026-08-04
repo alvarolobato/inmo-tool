@@ -1,0 +1,22 @@
+<!--
+  SYNTHETIC / trimmed reconstruction of the public Cimenta2 community shell
+  HTML, for tests only. NOT a real capture. It carries just the two tokens the
+  connector scrapes: an Aura framework script path (fwuid) and the app version
+  marker. Both values here are invented placeholders — no real fwuid/marker,
+  and no real endpoint URL appears anywhere in this repo (D-035).
+-->
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <title>Inmuebles</title>
+    <script src="/inmuebles/s/auraFW/javascript/FAKEFWUID000000000/aura_prod.js"></script>
+  </head>
+  <body>
+    <script>
+      window.$A = window.$A || {};
+      // App version marker, as it appears unencoded in the real shell.
+      var ctx = {"APPLICATION@markup://siteforce:communityApp":"9999_FaKeMaRkEr-1"};
+    </script>
+    <div id="auraAppcacheProgress"></div>
+  </body>
+</html>

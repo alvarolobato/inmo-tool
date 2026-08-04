@@ -8,6 +8,8 @@ date: 2026-08-04
 
 *Decided: 2026-08-04*
 
+> **Superseded in part by [D-035](D-035-cimenta2-detail-endpoint-injected.md) (2026-08-04):** the owner reviewed the detail data (the site's own listing fields) and chose to have the connector fetch it in their private tool, with the endpoint injected via config and never committed to this public repo, and owner-contact fields never stored. D-035 governs detail-fetch; the rest of this record stands.
+
 **Context**: Issue #136, Grupo Cooperativo Cajamar's REO portal
 (`cimenta2.com`), part of #132's bank/fund batch. Unlike Sareb (D-026)
 and Altamira (D-027), this site is **not** WAF-blocked — it responds

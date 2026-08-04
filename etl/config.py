@@ -180,6 +180,42 @@ def _get_min_restart_sweep_interval_seconds() -> int:
     return parsed if parsed >= 0 else 900
 
 
+def cimenta2_detail_endpoint() -> str:
+    """Aura `getRecord` endpoint the Cimenta2 connector fetches detail from (D-035).
+
+    Empty string (the default) is deliberate and public-safe: with no endpoint
+    configured the connector stays discovery-only and makes no network request
+    beyond `discover()`'s sitemap sweep. The endpoint value is **never**
+    committed to this public repo — it is injected via the
+    `CIMENTA2_DETAIL_ENDPOINT` env var / `cimenta2.detail_endpoint` config key,
+    so a clone without the secret cannot fetch detail. See D-035.
+
+    Read as a standalone accessor rather than a `Config` field because the
+    connector must read it without constructing `Config` (which requires a
+    PostgreSQL DSN it has no business needing).
+    """
+    value = _loader_get("cimenta2.detail_endpoint", default=None)
+    if value is None:
+        # Loader structurally unavailable (stripped test/CI env) — read env directly.
+        value = os.environ.get("CIMENTA2_DETAIL_ENDPOINT")
+    return str(value).strip() if value else ""
+
+
+def cimenta2_include_internal() -> bool:
+    """Whether the Cimenta2 connector stores bank-internal commercial fields.
+
+    Default False. When True the connector keeps the acquisition-cost and
+    appraisal fields in `listing.raw_extra`; owner-contact fields are never
+    stored regardless of this flag (D-035). Standalone accessor for the same
+    reason as `cimenta2_detail_endpoint`.
+    """
+    value = _loader_get("cimenta2.include_internal", default=None)
+    if value is None:
+        raw = os.environ.get("CIMENTA2_INCLUDE_INTERNAL")
+        return raw is not None and raw.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 def _get_admin_api_key() -> str:
     """Shared admin key used to authenticate the dashboard callback (issue #94).
 

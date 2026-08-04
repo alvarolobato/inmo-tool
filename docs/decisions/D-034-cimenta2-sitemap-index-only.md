@@ -8,6 +8,8 @@ date: 2026-08-04
 
 *Decided: 2026-08-04*
 
+> **Superseded on the detail-fetch point by [D-035](D-035-cimenta2-detail-endpoint-injected.md) (2026-08-04).** This record's "`fetch_detail()` performs no network request / never a detail path" stance no longer holds: the connector now fetches detail when — and only when — a detail endpoint is injected via config (`CIMENTA2_DETAIL_ENDPOINT`), staying discovery-only otherwise. Everything else here (discovery mechanics, why the expediente/agrupacion sitemaps are not ingested, the `national` scope_key, `discovers_full_inventory = True`, born-disabled) remains in force.
+
 **Context**: Issue #136. [D-033](D-033-cimenta2-not-viable-guest-api-overexposure.md)
 established that Cimenta2's property *detail* is reachable only through a
 misconfigured Salesforce guest endpoint that returns the asset object's

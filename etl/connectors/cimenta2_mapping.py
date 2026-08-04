@@ -20,7 +20,10 @@ fallback chain plus the hard "recognised nothing -> raise" guard in
 
 from __future__ import annotations
 
+import json
 import re
+import unicodedata
+from decimal import Decimal, InvalidOperation
 from urllib.parse import unquote, urlsplit
 
 from etl.connectors.extraction import first_present
@@ -153,6 +156,296 @@ def parse_asset_url(url: str) -> tuple[str, str] | None:
         # this is the honest handling if one ever appears.
         return None
     return record_id, reference
+
+
+# ===========================================================================
+# Detail fetch — Salesforce Aura getRecord (issue #136, D-035)
+# ===========================================================================
+#
+# The connector fetches per-property detail only when a detail endpoint is
+# injected via config (never committed — see D-035). The mechanics below are
+# generic and non-secret: the `getRecord` action descriptor is a STOCK
+# Salesforce controller shared by every Experience Cloud community, and the
+# fwuid + app-version marker are scraped fresh from the site's own public
+# shell HTML on each run so a stale build id is never carried. The only
+# site-specific secret — the endpoint URL — lives in config, not here.
+
+# Standard record-detail controller action (not a custom Apex method). Safe to
+# keep in code precisely because it is identical across all communities.
+GETRECORD_DESCRIPTOR = (
+    "serviceComponent://ui.force.components.controllers.detail."
+    "DetailController/ACTION$getRecord"
+)
+
+# fwuid and the app version marker both appear plainly in the shell HTML, no JS
+# execution required (regexes per the request-mechanics reference).
+_FWUID_RE = re.compile(r"/auraFW/javascript/([^/]+)/aura_prod\.js")
+_APP_MARKER_RE = re.compile(r'communityApp"?\s*:\s*"?([0-9]+_[A-Za-z0-9_-]+)"')
+
+# Public property fields the site itself renders — the ONLY keys ever read off
+# a fetched record. This whitelist is the structural guarantee behind D-035's
+# "owner-contact fields are never stored": those keys (and every other
+# unlisted internal field) are simply absent here, so no code path can copy
+# them into a canonical row or raw_extra.
+PUBLIC_FIELD_KEYS = (
+    "Name",
+    "GA_Direccion__c",
+    "GA_Poblacion__c",
+    "GA_Provincia__c",
+    "GA_Provincia__c__f",  # province label variant (coded value + label)
+    "GA_Geolocalizacion__Latitude__s",
+    "GA_Geolocalizacion__Longitude__s",
+    "GA_SuperficieCons__c",
+    "GA_SuperficieUtil__c",
+    "GA_NumeroHabitaciones__c",
+    "GA_NumBanos__c",
+    "GA_ReferenciaCatastral__c",
+    "GA_PVPVigentePVPVentaReport__c",
+    "GA_PrecioPermanente__c",
+    "GA_TipologiaActivoCategoria__c",
+    "GA_TipologiaActivoSubCategoria__c",
+    "GA_CEE__c",
+    "GA_EnlaceWeb__c",
+)
+
+# Bank-internal commercial fields — kept in raw_extra ONLY when the operator
+# opts in via CIMENTA2_INCLUDE_INTERNAL (default off, D-035).
+INTERNAL_COMMERCIAL_KEYS = (
+    "GA_CosteDeAdquisicion__c",  # acquisition cost
+    "GA_ValorDeTasacion__c",  # appraisal value
+)
+
+# Owner-contact fields that must NEVER be read or stored (D-035). No code path
+# references this tuple — it exists purely as the documented negative
+# guarantee and as an assertion target for the test suite.
+OWNER_CONTACT_KEYS = (
+    "GA_UNI__c",
+    "GA_DatosComPropietarios_NifPresuntoClien__c",
+    "GA_DatosComPropietarios_Telefono__c",
+    "GA_DatosComPropietarios_Iban__c",
+    "GA_DatosComPropietarios_Poblacion__c",
+)
+
+
+def scrape_framework_ids(shell_html: str) -> tuple[str, str] | None:
+    """Pull the current `(fwuid, app_version_marker)` out of the shell HTML.
+
+    Returns None when either cannot be found — the site structure may have
+    changed, or guest access may have been withdrawn. The connector treats
+    None as a loud, circuit-breaker-countable failure rather than retrying.
+    """
+    m_fwuid = _FWUID_RE.search(shell_html)
+    decoded = unquote(shell_html)
+    m_marker = _APP_MARKER_RE.search(decoded)
+    if not m_fwuid or not m_marker:
+        return None
+    return m_fwuid.group(1), m_marker.group(1)
+
+
+def aura_request_form(record_id: str, fwuid: str, marker: str) -> dict[str, str]:
+    """The form-encoded body for one guest `getRecord` call.
+
+    `aura.token` is the literal string ``null`` — guest Aura traffic carries no
+    session token. `layoutType=FULL` requests the record's full field set; the
+    connector then reads only the whitelisted public keys from it.
+    """
+    context = {
+        "mode": "PROD",
+        "fwuid": fwuid,
+        "app": "siteforce:communityApp",
+        "loaded": {"APPLICATION@markup://siteforce:communityApp": marker},
+        "dn": [],
+        "globals": {},
+        "uad": False,
+    }
+    message = {
+        "actions": [
+            {
+                "id": "1;a",
+                "descriptor": GETRECORD_DESCRIPTOR,
+                "callingDescriptor": "UNKNOWN",
+                "params": {
+                    "recordId": record_id,
+                    "record": None,
+                    "inContextOfComponent": "",
+                    "mode": "VIEW",
+                    "layoutType": "FULL",
+                    "defaultFieldValues": None,
+                    "navigationLocation": "LIST_VIEW_ROW",
+                },
+            }
+        ]
+    }
+    return {
+        "message": json.dumps(message),
+        "aura.context": json.dumps(context),
+        "aura.token": "null",
+        "aura.pageURI": f"/inmuebles/s/ga-activo/{record_id}/",
+    }
+
+
+def response_is_expired(raw_text: str) -> bool:
+    """A stale fwuid/marker yields an `aura:expiredFrameworkUid` event rather
+    than a normal action result — refresh the context once and retry."""
+    return "expiredFrameworkUid" in raw_text or "clientOutOfSync" in raw_text
+
+
+def record_from_response(raw_text: str) -> dict:
+    """The flat record dict from one getRecord response.
+
+    Raises ``ValueError`` on a malformed or non-SUCCESS response — the
+    connector maps that to ``ConnectorError`` so the run stops cleanly through
+    the circuit breaker instead of looping. An empty ``{}`` (SUCCESS but no
+    record payload) is a per-asset skip, not a stop, so it is returned rather
+    than raised.
+    """
+    data = json.loads(raw_text)  # JSONDecodeError is a ValueError subclass
+    actions = data.get("actions") or []
+    if not actions:
+        raise ValueError("aura response carried no actions")
+    action = actions[0]
+    state = action.get("state")
+    if state != "SUCCESS":
+        raise ValueError(f"aura action state was {state!r}, not SUCCESS")
+    return_value = action.get("returnValue") or {}
+    record = return_value.get("record") or {}
+    return record if isinstance(record, dict) else {}
+
+
+def project_public_fields(record: dict) -> dict:
+    """Copy ONLY the whitelisted public keys out of a fetched record.
+
+    Owner-contact PII and unlisted internal fields are dropped here, before the
+    value ever leaves the fetch step — the strongest place to enforce D-035.
+    """
+    return {key: record[key] for key in PUBLIC_FIELD_KEYS if key in record}
+
+
+def project_internal_fields(record: dict) -> dict:
+    """Copy the two bank-internal commercial keys, if present. Called only when
+    the operator has opted into CIMENTA2_INCLUDE_INTERNAL."""
+    return {
+        key: _clean(record[key]) for key in INTERNAL_COMMERCIAL_KEYS if key in record
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Value coercion (pure; used by the connector's normalize())
+# --------------------------------------------------------------------------- #
+
+
+def _clean(value):
+    """Return a stripped scalar, or None for empty/absent/nested values.
+
+    Salesforce compound/lookup fields arrive as ``{displayValue, value}``
+    dicts — take the display value, never a nested object.
+    """
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        value = value.get("displayValue") or value.get("value")
+        if isinstance(value, dict):
+            return None
+    if isinstance(value, str):
+        value = value.strip()
+        return value or None
+    return value
+
+
+def _dec(value) -> Decimal | None:
+    value = _clean(value)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.replace("€", "").strip()
+        # Tolerate Spanish-formatted numbers ("1.234,56") just in case.
+        if "," in text and "." in text:
+            text = text.replace(".", "").replace(",", ".")
+        elif "," in text:
+            text = text.replace(",", ".")
+        text = re.sub(r"[^0-9.\-]", "", text)
+        if not text:
+            return None
+        value = text
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _int(value) -> int | None:
+    decimal_value = _dec(value)
+    return int(decimal_value) if decimal_value is not None else None
+
+
+def _norm(text: str) -> str:
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return text.upper().strip()
+
+
+# property.property_type CHECK enum: piso|chalet|atico|local|nave|garaje|terreno|edificio
+def map_property_type(category, subcategory) -> str | None:
+    """Map Cimenta2 tipología onto the property_type enum, or None.
+
+    Conservative: anything unrecognised maps to None (the column is nullable),
+    so an unexpected label never aborts an insert nor asserts false precision.
+    """
+    blob = (
+        f"{_norm(str(_clean(category) or ''))} {_norm(str(_clean(subcategory) or ''))}"
+    )
+
+    def has(*words: str) -> bool:
+        return any(word in blob for word in words)
+
+    if has("GARAJE", "PARKING", "APARCAMIENTO", "PLAZA DE GARAJE"):
+        return "garaje"
+    if has("NAVE"):
+        return "nave"
+    if has("EDIFICIO"):
+        return "edificio"
+    if has("SUELO", "TERRENO", "PARCELA", "SOLAR", "FINCA", "RUSTIC"):
+        return "terreno"
+    if has("OFICINA", "LOCAL", "COMERCIAL", "TRASTERO"):
+        return "local"
+    if has("ATICO"):
+        return "atico"
+    if has("CHALET", "UNIFAMILIAR", "ADOSAD", "PAREAD", "VILLA"):
+        return "chalet"
+    if has("VIVIENDA", "PISO", "APARTAMENTO", "DUPLEX", "ESTUDIO"):
+        return "piso"
+    return None
+
+
+def canonical_property_fields(fields: dict) -> dict:
+    """Coerce the whitelisted public `fields` into canonical-row values.
+
+    Reads only keys already projected by `project_public_fields`, so this stays
+    within the D-035 whitelist. Returns the exact set the connector's
+    normalize() needs; a missing/unparseable field becomes None honestly.
+    """
+    return {
+        "reference_code": _clean(fields.get("Name")),
+        "current_price": _dec(fields.get("GA_PVPVigentePVPVentaReport__c"))
+        or _dec(fields.get("GA_PrecioPermanente__c")),
+        "address": _clean(fields.get("GA_Direccion__c")),
+        "city": _clean(fields.get("GA_Poblacion__c")),
+        "province": _clean(fields.get("GA_Provincia__c__f"))
+        or _clean(fields.get("GA_Provincia__c")),
+        "lat": _dec(fields.get("GA_Geolocalizacion__Latitude__s")),
+        "lon": _dec(fields.get("GA_Geolocalizacion__Longitude__s")),
+        "m2_built": _dec(fields.get("GA_SuperficieCons__c")),
+        "m2_useful": _dec(fields.get("GA_SuperficieUtil__c")),
+        "rooms": _int(fields.get("GA_NumeroHabitaciones__c")),
+        "bathrooms": _int(fields.get("GA_NumBanos__c")),
+        "cadastral_ref": _clean(fields.get("GA_ReferenciaCatastral__c")),
+        "property_type": map_property_type(
+            fields.get("GA_TipologiaActivoCategoria__c"),
+            fields.get("GA_TipologiaActivoSubCategoria__c"),
+        ),
+        "energy_rating": _clean(fields.get("GA_CEE__c")),
+        "web_url": _clean(fields.get("GA_EnlaceWeb__c")),
+    }
 
 
 def asset_sitemap_url(index_xml: str, *, base_url: str, default_url: str) -> str | None:

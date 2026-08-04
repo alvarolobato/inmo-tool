@@ -1,35 +1,47 @@
-"""Cimenta2 (Grupo Cooperativo Cajamar) -- sitemap-index / discovery only.
+"""Cimenta2 (Grupo Cooperativo Cajamar) -- sitemap discovery + config-gated detail.
 
-**This connector deliberately never fetches a property detail page, and no
-future change may make it do so.** Cimenta2's detail data is reachable only
-through a misconfigured Salesforce guest endpoint that returns the asset
-object's entire internal field set -- the bank's acquisition cost and
-appraisal value, live offer-negotiation state, and schema fields for an
-owner's tax ID, telephone and IBAN. That finding, the reasoning, and the
-decision not to build on it are recorded in
-[D-033](../../docs/decisions/D-033-cimenta2-not-viable-guest-api-overexposure.md);
-the defect is being disclosed to Cajamar. This module therefore reads the
-**public, robots-allowed sitemap and nothing else**, and
-`fetch_detail()` below makes no network request at all.
+`discover()` reads the public, robots-allowed sitemap and enumerates every
+published Cajamar asset. `fetch_detail()` is **config-gated**: it fetches a
+property's detail from a Salesforce Aura `getRecord` endpoint **only when that
+endpoint is injected via configuration** (`CIMENTA2_DETAIL_ENDPOINT`). With no
+endpoint configured the connector stays discovery-only and makes no request
+beyond the sitemap sweep -- the public-safe default, so a clone of this public
+repo without the secret cannot fetch detail.
 
-If you are here to add a field this connector leaves null: the answer is
-almost certainly no. Every one of those fields lives behind the channel
-D-033 rules out. The sanctioned route to real detail is the
-browser-extension capture path (issue #75), which captures what the site
-actually renders to a human.
+The detail data is the site's own listing fields (price, size, address,
+coordinates, energy rating, and so on). The owner reviewed it and decided it
+is fine for their private tool; the endpoint value is site-specific and is
+therefore **never committed to this public repo** -- it lives only in the
+owner's local config / a secret and is read at runtime. See
+[D-035](../../docs/decisions/D-035-cimenta2-detail-endpoint-injected.md).
 
-Why this exists at all, given D-033 concluded "not buildable"
--------------------------------------------------------------
-D-033 rejected "building the connector on the sitemap alone" as
-*insufficient*, on the grounds that reference codes and geography slugs
-"cannot populate a `listing` row or feed #16's dedup signals". That
-judgement is revisited, not overturned, in
-[D-034](../../docs/decisions/D-034-cimenta2-sitemap-index-only.md): a
-`listing` row **can** be populated (`listing.current_price` is nullable),
-the reference-code dedup signal **is** reachable, and the enumerated URLs
-are exactly the worklist the #75 capture path needs. What D-033 got right
-and D-034 keeps is that this is not a substitute for detail data. See
-"What this actually gets you" below for the honest, narrow value.
+What is and is not read from a fetched record
+---------------------------------------------
+`normalize()` reads an explicit **whitelist** of the site's public property
+fields and nothing else (`cimenta2_mapping.PUBLIC_FIELD_KEYS`). Owner-contact
+fields (tax ID, telephone, IBAN, a named contact) are **never read or stored**,
+by construction -- they are absent from every field list this connector
+touches. Bank-internal commercial fields (acquisition cost, appraisal value)
+are stored in `listing.raw_extra` **only** when the operator opts in via
+`CIMENTA2_INCLUDE_INTERNAL` (default off).
+
+D-035 supersedes the earlier "sitemap-index-only / never fetch detail" stance
+of [D-034](../../docs/decisions/D-034-cimenta2-sitemap-index-only.md) and the
+"not buildable" stance of
+[D-033](../../docs/decisions/D-033-cimenta2-not-viable-guest-api-overexposure.md)
+on the single point of whether detail may be fetched at all.
+
+Request mechanics (only exercised when an endpoint is configured)
+-----------------------------------------------------------------
+One GET of the site's public shell HTML scrapes the current Aura framework ids
+(`fwuid` + app version marker) so a stale build id is never carried; then one
+form-encoded POST of the stock `getRecord` action per asset returns the record
+(`actions[0].returnValue.record`). The `getRecord` descriptor is a standard
+Salesforce controller shared by every Experience Cloud community, so it is
+generic, not a site-specific access recipe, and lives in code. Read-only,
+honest User-Agent, framework-paced (~one request every 2-3s). A non-SUCCESS or
+still-expired response raises `ConnectorError`, which the circuit breaker
+counts and which stops a sweep cleanly rather than looping.
 
 What discover() enumerates
 --------------------------
@@ -71,101 +83,34 @@ record that is not a property is precisely the "wrong guess presented as
 data" that `docs/skills/connectors.md` warns against, so this connector
 takes none of it.
 
-Fields populated vs. left null
-------------------------------
-Populated, all from the URL slug: `external_id` (Salesforce record id),
-`url`, `reference_code` (#72), `operation='sale'`, `status='active'`,
+Fields populated
+----------------
+Always, from the URL slug: `external_id` (Salesforce record id), `url`,
+`reference_code` (#72), `operation='sale'`, `status='active'`,
 `listing_kind='agency'`.
 
-Left null, every one of them because the only source is the D-033 channel:
-`current_price`, `m2_built`, `m2_useful`, `m2_plot`, `rooms`, `bathrooms`,
-`floor`, `has_elevator`, `year_built`, `energy_rating`, `description`,
-`photo_urls`, `contact_raw`, `address`, `lat`, `lon`, `property_type`,
-`city`, `province`, `postal_code`, `features`, `cadastral_ref`.
+Additionally, when a detail endpoint is configured and a record is fetched
+(whitelisted public fields only): `current_price`, `address`, `city`,
+`province`, `lat`, `lon`, `m2_built`, `m2_useful`, `rooms`, `bathrooms`,
+`property_type`, `energy_rating`, and `url` (preferring the record's own
+public web link). With no endpoint configured every one of these stays null
+and the row is the discovery-only shape.
 
-`m2_plot` deserves a specific note because issue #136 called it out (a
-Cajamar portal is expected to carry rural land, and #76 added the field for
-exactly that): the asset slugs encode no surface figure of any kind, so it
-stays null rather than being inferred.
+`m2_plot`, `floor`, `has_elevator`, `year_built`, `description`,
+`photo_urls`, `contact_raw`, `postal_code`, `features` stay null either way:
+the asset record carries no reliable source for them within the whitelist,
+so they are left null rather than inferred.
 
-Price: where it comes from, since it does not come from here
-------------------------------------------------------------
-The owner asked for price from any source *other* than the D-033 endpoint.
-Both halves of that were checked rather than assumed.
-
-**(a) Is there any public price surface at all? No — verified, not
-inferred.** A public detail page (`/ga-activo/a0v3X00000dwiQQQAY/90817`)
-was fetched over plain HTTP with the honest UA on 2026-08-04. This is the
-ordinary public URL, not the Aura RPC; it is the same second-step check
-D-023 established for BuildingCenter. It returned 65,096 bytes with
-`<title>Inmuebles</title>` and exactly two `<meta>` tags (a CSP and a
-viewport). Occurrences of every price-bearing convention, counted in the
-raw body: `og:price` 0, `product:price` 0, `application/ld+json` 0,
-`itemprop` 0, `schema.org` 0, `"precio"`/`"Precio"` 0, `EUR` 0, `€` 0.
-Also absent: the asset's own reference code (`90817`, 0 occurrences), any
-municipality name, `catastral` 0, `latitude`/`longitude`/`lng` 0. The page
-is a Lightning bootstrap and nothing else.
-
-The other public surfaces were checked too, and none carries inventory:
-the sitemap `<url>` entries hold `<loc>` + `<lastmod>` only (no pricing
-extension namespace); `sitemap-view-1.xml` contains exactly one URL, the
-site root; and the WordPress site's RSS feed (`cimenta2.com/feed/`)
-returns HTTP 200 with a well-formed channel containing **zero `<item>`
-elements**. The D-033 spike separately confirmed that the documented,
-non-spoofing `?_escaped_fragment_=` prerender parameter returns a
-byte-identical shell. There is no public price surface on this site.
-
-**(b) So price arrives by cross-portal dedup inheritance, not from this
-connector.** A Cimenta2 asset is frequently the same physical property that
-a servicer or an agent also lists on a portal this repo already ingests. If
-the dedup engine links the two `listing` rows onto one `property`, that
-property has a price — supplied legitimately by the *other* connector,
-which fetched it from a source that publishes it. This connector's job is
-therefore to emit the strongest dedup key the public sitemap allows, which
-is `reference_code` (#72), and to emit it for as many assets as possible:
-3,915 of the 3,917 codes are at least 4 characters and so clear
-`etl/dedup/signals/reference_code._MIN_CODE_LENGTH`; the two 3-character
-codes (`207`, `121`) are ignored by that signal as too low-cardinality to
-be evidence, which is the correct handling rather than something to work
-around.
-
-**The honest limit on (b), stated so nobody over-promises it.** A Cimenta2
-pair can only ever reach the *uncorroborated* tier of that signal.
-`reference_code.evaluate` upgrades a match to `decision="merge"` only with
-coordinate/size/price proximity, and to the middle tier only with a shared
-`contact_raw` — this connector publishes none of those four fields, by
-construction. So a Cimenta2 reference-code match yields
-`decision="suggest"` at confidence 0.500: a pending row a human confirms,
-never an automatic merge. That is a safety property (a bare 5-digit code is
-exactly the kind of value two unrelated portals could share by chance), and
-it means price inheritance is a human-in-the-loop outcome, not an automatic
-one.
-
-Whether Cajamar's codes actually recur on the consumer portals is
-**unverified** and deliberately not claimed here: this connector is born
-disabled, so no Cimenta2 row exists yet to cross-check against. Confirming
-it needs a real sweep of both sides — worth doing before anyone relies on
-price inheritance in practice.
-
-What this actually gets you -- and what it does not
----------------------------------------------------
-Stated plainly so nobody over-reads the connector's value:
-
-  * **It cannot match a search profile.** `dashboard/lib/filtering/
-    scope-query.ts` opens every profile's geography stage with
-    `property.lat IS NOT NULL AND property.lon IS NOT NULL AND
-    <haversine> <= radius`. With no coordinates, a Cimenta2 property is
-    structurally incapable of matching any profile, so these rows will not
-    appear in candidates, the map, or scoring until detail arrives from
-    somewhere else.
-  * **It can feed exactly one dedup signal, at the weakest tier** --
-    `reference_code`, which is also the route by which a price can reach
-    one of these properties at all. See "Price" above for the mechanism and
-    for why it stops at a human-confirmable suggestion.
-  * **It is a real, complete index of Cajamar-owned stock**, with a stable
-    per-asset reference code and a canonical URL -- which is what the
-    browser-extension capture path (#75) needs to know where to look, and
-    what lets "did Cajamar delist this asset" be answered at all.
+Dedup value
+-----------
+`reference_code` is emitted for every asset regardless of detail-fetch, and
+is the strongest dedup key the sitemap alone supplies (3,915 of 3,917 codes
+clear `etl/dedup/signals/reference_code._MIN_CODE_LENGTH`; the two
+3-character codes are ignored by that signal as too low-cardinality). With
+detail fetched, a Cimenta2 property now also carries coordinates, size and
+price, so its dedup matches can corroborate beyond the bare-code
+uncorroborated tier and it becomes eligible to match a search profile's
+geography stage rather than being invisible to it.
 
 Feasibility evidence (live, 2026-08-04, honest UA, no evasion)
 --------------------------------------------------------------
@@ -184,6 +129,7 @@ from typing import Any
 
 import requests
 
+from etl import config
 from etl.connectors.base import (
     CanonicalListingVersion,
     Connector,
@@ -194,8 +140,15 @@ from etl.connectors.base import (
 )
 from etl.connectors.cimenta2_mapping import (
     asset_sitemap_url,
+    aura_request_form,
+    canonical_property_fields,
     iter_locs,
     parse_asset_url,
+    project_internal_fields,
+    project_public_fields,
+    record_from_response,
+    response_is_expired,
+    scrape_framework_ids,
 )
 from etl.connectors.geography import (
     UnresolvableGeographyError,
@@ -208,6 +161,9 @@ logger = logging.getLogger(__name__)
 _BASE_URL = "https://inmuebles.cimenta2.com"
 _SITEMAP_INDEX_URL = f"{_BASE_URL}/inmuebles/s/sitemap.xml"
 _ASSET_SITEMAP_DEFAULT_URL = f"{_BASE_URL}/inmuebles/s/sitemap-ga_activo__c-1.xml"
+# Public community shell — one GET scrapes the current Aura framework ids from
+# it before a detail POST. Only fetched when a detail endpoint is configured.
+_SHELL_URL = f"{_BASE_URL}/inmuebles/s/"
 _REQUEST_TIMEOUT_SECONDS = 25
 _USER_AGENT = (
     "inmo-tool/0.1 (personal real-estate research; "
@@ -235,7 +191,7 @@ _NATIONAL_SCOPE_KEY = "national"
 
 
 class Cimenta2Connector(Connector):
-    """Cajamar's REO portal. Sitemap-index discovery; no detail fetch, ever."""
+    """Cajamar's REO portal. Sitemap discovery; config-gated detail fetch (D-035)."""
 
     name = "cimenta2"
 
@@ -263,15 +219,19 @@ class Cimenta2Connector(Connector):
     supported_filters = ()
 
     # Matches the other single-servicer connectors (Vivantial, Solvia,
-    # BuildingCenter) rather than the framework's 30/min. Barely exercised
-    # here -- a sweep is two requests -- but the pacing courtesy is the house
-    # default (issue #1 §15) and this connector should not be the exception.
+    # BuildingCenter) rather than the framework's 30/min. 20/min = ~one request
+    # every 3s, the polite pacing (issue #1 §15) for the detail POSTs when an
+    # endpoint is configured; a discovery-only sweep is just two requests.
     rate_limit_per_minute = 20
 
     def __init__(self) -> None:
         # external_id -> (detail URL, reference code), populated by
-        # discover(). fetch_detail() reads only from here; see its docstring.
+        # discover(). fetch_detail() reads its sitemap-derived values from here.
         self._assets: dict[str, tuple[str, str]] = {}
+        # Aura framework ids (fwuid, app version marker), scraped from the shell
+        # on the first configured detail fetch and refreshed if they expire.
+        self._fwuid: str | None = None
+        self._marker: str | None = None
 
     def scope_key(self, scope: ConnectorScope) -> str | None:
         """Constant for every resolvable scope -- see `_NATIONAL_SCOPE_KEY`.
@@ -302,6 +262,25 @@ class Cimenta2Connector(Connector):
             response = requests.get(
                 url,
                 headers={"User-Agent": _USER_AGENT},
+                timeout=_REQUEST_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise ConnectorError(f"cimenta2: request failed for {url}: {exc}") from exc
+        return response.text
+
+    def _post_form(self, url: str, form: dict[str, str], throttle: Throttle) -> str:
+        throttle()
+        try:
+            response = requests.post(
+                url,
+                data=form,
+                headers={
+                    "User-Agent": _USER_AGENT,
+                    "Content-Type": (
+                        "application/x-www-form-urlencoded; charset=UTF-8"
+                    ),
+                },
                 timeout=_REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
@@ -390,105 +369,196 @@ class Cimenta2Connector(Connector):
         return external_ids
 
     def fetch_detail(self, external_id: str, throttle: Throttle) -> RawListing:
-        """Return what the sitemap slug already gave us. **No network I/O.**
+        """Return the raw listing for one asset, config-gated on the endpoint.
 
-        There is no detail fetch on this connector by design (D-033, and the
-        module docstring). Everything this method can honestly return was
-        already parsed out of the sitemap URL by `discover()`.
+        Two modes (D-035):
 
-        Two consequences worth stating so they are not "fixed" later:
+        * **No endpoint configured (default).** Discovery-only: return the
+          `(url, reference_code)` `discover()` already parsed from the sitemap
+          slug, making **no network request** and **not** calling `throttle()`.
+          The orchestrator does not acquire the rate limiter around
+          `fetch_detail`; pacing is the connector's own `throttle()` call, so
+          throttling 3,917 zero-request calls at 20/min would needlessly
+          serialise a sweep. This mode is byte-identical to the connector's
+          prior behaviour.
 
-        * `throttle()` is deliberately NOT called. The orchestrator does not
-          acquire the rate limiter around `fetch_detail` -- the connector's
-          own `throttle()` call is the pacing mechanism (see
-          `etl.orchestrator.run_connector`). Calling it here would serialise
-          3,917 zero-request calls at 20/min, turning a two-request sweep
-          into a ~3-hour run for no reason.
-        * A miss raises rather than re-deriving the URL, exactly as
-          `vivantial._detail_url_for` does: fetch_detail is only ever called
-          for ids a preceding `discover()` returned, so a miss is a real
-          bug, not a cache-warming opportunity.
+        * **Endpoint configured.** Fetch the record from the Aura `getRecord`
+          endpoint (one shell GET to prime framework ids, then one POST),
+          project it down to the whitelisted public fields, and — when the
+          operator opted in — the two bank-internal commercial fields. Only
+          those whitelisted keys ever leave this method; owner-contact fields
+          are never read.
+
+        A miss (an id no preceding `discover()` saw) raises: fetch_detail is
+        only ever called for ids `discover()` returned, so a miss is a bug.
         """
         cached = self._assets.get(external_id)
         if cached is None:
             raise ConnectorError(
                 f"cimenta2: no discovered asset for external_id={external_id!r} "
-                "— fetch_detail must be preceded by a discover() that saw this "
-                "id (this connector never fetches a detail page; see D-033)"
+                "— fetch_detail must be preceded by a discover() that saw this id"
             )
         url, reference = cached
-        return RawListing(
-            external_id=external_id,
-            source=self.name,
-            raw={"url": url, "reference_code": reference},
-        )
+
+        endpoint = config.cimenta2_detail_endpoint()
+        if not endpoint:
+            # Public-safe default: discovery-only, no request, no throttle.
+            return RawListing(
+                external_id=external_id,
+                source=self.name,
+                raw={"url": url, "reference_code": reference},
+            )
+
+        record = self._fetch_record(external_id, endpoint, throttle)
+        if not record:
+            # SUCCESS but no record payload — fall back to the discovery-only
+            # shape rather than fabricating fields.
+            return RawListing(
+                external_id=external_id,
+                source=self.name,
+                raw={"url": url, "reference_code": reference},
+            )
+
+        raw: dict[str, Any] = {
+            "url": url,
+            "reference_code": reference,
+            "fields": project_public_fields(record),
+        }
+        if config.cimenta2_include_internal():
+            raw["internal"] = project_internal_fields(record)
+        return RawListing(external_id=external_id, source=self.name, raw=raw)
+
+    def _fetch_record(
+        self, external_id: str, endpoint: str, throttle: Throttle
+    ) -> dict:
+        """One read-only `getRecord` call, refreshing framework ids once on
+        expiry. Raises `ConnectorError` on a non-SUCCESS/unusable response so
+        the run stops cleanly through the circuit breaker instead of looping.
+        """
+        aura_url = _aura_url(endpoint)
+
+        self._ensure_framework_context(throttle)
+        form = aura_request_form(external_id, self._fwuid, self._marker)
+        raw_text = self._post_form(aura_url, form, throttle)
+
+        if response_is_expired(raw_text):
+            logger.info("cimenta2: framework ids expired — refreshing once")
+            self._fwuid = self._marker = None
+            self._ensure_framework_context(throttle)
+            form = aura_request_form(external_id, self._fwuid, self._marker)
+            raw_text = self._post_form(aura_url, form, throttle)
+
+        try:
+            return record_from_response(raw_text)
+        except ValueError as exc:
+            raise ConnectorError(
+                f"cimenta2: detail fetch for {external_id} did not return a "
+                f"usable record ({exc}) — stopping rather than retrying"
+            ) from exc
+
+    def _ensure_framework_context(self, throttle: Throttle) -> None:
+        """Scrape and cache the Aura `(fwuid, marker)` from the public shell."""
+        if self._fwuid and self._marker:
+            return
+        shell = self._fetch(_SHELL_URL, throttle)
+        ids = scrape_framework_ids(shell)
+        if ids is None:
+            raise ConnectorError(
+                "cimenta2: could not scrape Aura framework ids from the shell "
+                "HTML — the site structure may have changed or detail access "
+                "withdrawn; stopping rather than guessing"
+            )
+        self._fwuid, self._marker = ids
 
     def normalize(self, raw: RawListing) -> CanonicalListingVersion:
-        """Map the sitemap-derived raw shape onto the canonical row.
+        """Map the raw shape onto the canonical row.
 
-        Almost every field is None, and that is the honest result rather
-        than an unfinished one — see the module docstring for the field-by-
-        field reason. Nothing here may be filled in from the D-033 channel.
+        When `raw` carries whitelisted detail `fields` (endpoint configured),
+        the property fields are coerced from them; otherwise every detail field
+        stays None — the honest discovery-only result. Fields with no reliable
+        whitelisted source (`floor`, `year_built`, `description`, `photo_urls`,
+        …) are always None. Owner-contact fields are never present here.
         """
-        url: str = raw.raw["url"]
+        url_sitemap: str = raw.raw["url"]
         reference: str = raw.raw["reference_code"]
+        fields = raw.raw.get("fields")
+        internal = raw.raw.get("internal") or {}
+
+        detail = canonical_property_fields(fields) if fields is not None else None
+
+        def d(key: str) -> Any:
+            return detail.get(key) if detail else None
 
         return CanonicalListingVersion(
             external_id=raw.external_id,
             source=self.name,
-            url=url,
+            url=(d("web_url") or url_sitemap),
             # Cajamar holds these assets on its own balance sheet and sells
             # them directly. 'agency' is the honest mapping of the two values
             # the schema allows — the seller is an institution, not a private
-            # individual — and it matches the reasoning vivantial.py records
-            # for the same situation.
+            # individual — matching vivantial.py's reasoning for the same case.
             listing_kind="agency",
             # Presence in the sitemap is the only status signal available.
-            # An asset that leaves the sitemap is handled by the
-            # orchestrator's withdrawal reconciliation, not here.
             status="active",
-            current_price=None,
+            current_price=d("current_price"),
             description=None,
             photo_urls=(),
             contact_raw=None,
-            address=None,
-            lat=None,
-            lon=None,
-            property_type=None,
-            m2_built=None,
-            m2_useful=None,
-            rooms=None,
-            bathrooms=None,
+            address=d("address"),
+            lat=d("lat"),
+            lon=d("lon"),
+            property_type=d("property_type"),
+            m2_built=d("m2_built"),
+            m2_useful=d("m2_useful"),
+            rooms=d("rooms"),
+            bathrooms=d("bathrooms"),
             floor=None,
             has_elevator=None,
             year_built=None,
-            energy_rating=None,
-            city=None,
-            province=None,
+            energy_rating=d("energy_rating"),
+            city=d("city"),
+            province=d("province"),
             postal_code=None,
             m2_plot=None,
             features=(),
-            # The portal is a sales channel for repossessed stock; it has no
-            # rental section.
+            # The portal is a sales channel for repossessed stock; no rentals.
             operation="sale",
-            reference_code=reference,
-            cadastral_ref=None,
-            raw_extra=_raw_extra(url, reference),
+            reference_code=(d("reference_code") or reference),
+            cadastral_ref=d("cadastral_ref"),
+            raw_extra=_raw_extra(
+                url_sitemap,
+                reference,
+                detail_fetched=detail is not None,
+                internal=internal,
+            ),
         )
 
 
-def _raw_extra(url: str, reference: str) -> dict[str, Any]:
-    """Provenance, so a later reader can tell a sitemap-only row apart from a
-    detail-fetched one without consulting this module.
+def _aura_url(endpoint: str) -> str:
+    """The configured endpoint with a request counter appended when it has no
+    query string (`POST <endpoint>?r=1`). Any small integer works."""
+    return endpoint if "?" in endpoint else f"{endpoint}?r=1"
 
-    `discovery` is the load-bearing key: it records that this row is
-    index-only by construction, which is what a #75 capture-path worklist
-    query wants to select on.
+
+def _raw_extra(
+    url: str,
+    reference: str,
+    *,
+    detail_fetched: bool,
+    internal: dict[str, Any],
+) -> dict[str, Any]:
+    """Provenance so a later reader can tell a discovery-only row apart from a
+    detail-fetched one. `internal_commercial` is present only when the operator
+    opted into CIMENTA2_INCLUDE_INTERNAL and the record carried those fields.
     """
-    return {
+    extra: dict[str, Any] = {
         "detail_url": url,
         "sitemap_reference_code": reference,
-        "discovery": "sitemap-index-only",
-        "detail_fetched": False,
-        "detail_unavailable_reason": "D-033",
+        "discovery": "sitemap+detail" if detail_fetched else "sitemap-index-only",
+        "detail_fetched": detail_fetched,
     }
+    if not detail_fetched:
+        extra["detail_unavailable_reason"] = "detail-endpoint-not-configured"
+    if internal:
+        extra["internal_commercial"] = internal
+    return extra

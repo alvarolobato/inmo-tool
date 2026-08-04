@@ -23,6 +23,30 @@
 # whichever listing-site connectors land in tasks 1.4/2.1 (#12/#15) belong
 # here once they exist; don't pre-guess their shape now.
 
+# Cimenta2 detail-fetch (issue #136, D-035). The endpoint URL is a secret that
+# is NEVER committed to this public repo — default is null (unset), which keeps
+# the connector discovery-only. Inject the real value via the env var only
+# (owner's local ~/.config/inmo-tool/.env or a GitHub secret).
+- key: cimenta2.detail_endpoint
+  env: CIMENTA2_DETAIL_ENDPOINT
+  type: string
+  sensitive: true
+  default: null
+  section: "Connectors"
+  description: "Endpoint Aura getRecord del que el conector Cimenta2 obtiene el detalle de cada inmueble (issue #136). Sin valor (por defecto) el conector se queda solo en descubrimiento por sitemap y no hace ninguna petición de detalle. El valor real NUNCA se versiona en este repo público; se inyecta por variable de entorno. Ver D-035."
+  requires_restart: [etl]
+  components: [etl]
+
+- key: cimenta2.include_internal
+  env: CIMENTA2_INCLUDE_INTERNAL
+  type: bool
+  sensitive: false
+  default: false
+  section: "Connectors"
+  description: "Si es true, el conector Cimenta2 guarda los campos comerciales internos del banco (coste de adquisición, valor de tasación) en listing.raw_extra. Por defecto false. Los campos de contacto del propietario nunca se guardan, con este flag activo o no (D-035)."
+  requires_restart: [etl]
+  components: [etl]
+
 # -----------------------------------------------------------------------------
 # PostgreSQL (local mirror — destination for connector sync)
 # -----------------------------------------------------------------------------

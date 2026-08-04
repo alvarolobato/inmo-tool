@@ -1,14 +1,16 @@
-"""Fixture-based tests for the Cimenta2 sitemap-index connector (issue #136).
+"""Fixture-based tests for the Cimenta2 connector (issue #136, D-035).
 
-Fixtures are real captures of the **public, robots-allowed sitemap** at
-`inmuebles.cimenta2.com`, trimmed and annotated in-file. Nothing here came
-from — and nothing here exercises — the guest endpoint D-033 rules out;
-this connector has no detail-fetch path to test at all, which is itself the
-subject of `TestFetchDetailNeverTouchesTheNetwork` below.
+Sitemap fixtures are trimmed captures of the **public, robots-allowed
+sitemap** at `inmuebles.cimenta2.com`. The detail-fetch fixtures
+(`cimenta2_sample_shell.html`, `cimenta2_sample_getrecord.json`) are
+**synthetic** — real Salesforce field API names, but entirely invented
+values, and NO real endpoint URL (D-035).
 
-No live network in any test: `requests.get` is patched everywhere, and the
-fetch_detail tests patch it with an exploding stub precisely to prove the
-method makes no request.
+No live network in any test: `requests.get`/`requests.post` are patched
+everywhere. An autouse fixture forces the public-safe defaults (no endpoint,
+no internal fields) so the owner's ambient local config can never turn a
+discovery-only test into a live fetch; detail tests opt in explicitly via
+patched config accessors and the fake endpoint.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from etl.connectors.cimenta2 import (
     Cimenta2Connector,
 )
 from etl.connectors.cimenta2_mapping import (
+    OWNER_CONTACT_KEYS,
     asset_sitemap_url,
     parse_asset_url,
     record_id_from_url,
@@ -34,6 +37,38 @@ from etl.connectors.cimenta2_mapping import (
 from etl.connectors.geography import UnresolvableGeographyError
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+# A fake endpoint — never the real one, which is injected via config and appears
+# in ZERO committed files (D-035). Tests set this via patched config accessors.
+_FAKE_ENDPOINT = "https://example.test/inmuebles/s/sfsites/aura"
+
+# Invented owner-contact values present in the synthetic getRecord fixture; the
+# connector must never surface any of them. Kept here so the negative assertion
+# reads explicitly rather than re-deriving them from the fixture.
+_OWNER_CONTACT_VALUES = (
+    "Fulano De Tal",
+    "00000000X",
+    "600123456",
+    "ES0000000000000000000000",
+    "Secretville",
+)
+
+
+@pytest.fixture(autouse=True)
+def _cimenta2_config_defaults():
+    """Force the public-safe defaults (no endpoint, no internal fields) for
+    every test unless it explicitly opts in.
+
+    Without this, the owner's ambient local config (`~/.config/inmo-tool/.env`,
+    which may carry the real endpoint) would turn a discovery-only test into a
+    live network fetch when the suite runs on the owner's machine.
+    """
+    with (
+        patch("etl.config.cimenta2_detail_endpoint", return_value=""),
+        patch("etl.config.cimenta2_include_internal", return_value=False),
+    ):
+        yield
+
 
 # Five real sitemap entries, copied verbatim from the live
 # `sitemap-ga_activo__c-1.xml` capture, with the record id and reference
@@ -112,6 +147,38 @@ def _discovered(connector: Cimenta2Connector, scope=MADRID_SCOPE, **kwargs):
     with patch("etl.connectors.cimenta2.requests.get", side_effect=side_effect) as get:
         ids = connector.discover(scope, throttle=lambda: None)
     return ids, get
+
+
+def _shell_get(url, **_kwargs):
+    return _mock_response(_fixture("cimenta2_sample_shell.html"))
+
+
+def _getrecord_post(url, **_kwargs):
+    return _mock_response(_fixture("cimenta2_sample_getrecord.json"))
+
+
+def _fetch_detail_with_endpoint(
+    connector,
+    external_id="a0v3X00000dwiQQQAY",
+    *,
+    include_internal=False,
+    get_side=_shell_get,
+    post_side=_getrecord_post,
+):
+    """Run fetch_detail + normalize with the endpoint configured to the fake URL.
+
+    `connector` must already have been through `_discovered()` so `_assets` is
+    populated. Returns (raw, canonical, post_mock).
+    """
+    with (
+        patch("etl.config.cimenta2_detail_endpoint", return_value=_FAKE_ENDPOINT),
+        patch("etl.config.cimenta2_include_internal", return_value=include_internal),
+        patch("etl.connectors.cimenta2.requests.get", side_effect=get_side),
+        patch("etl.connectors.cimenta2.requests.post", side_effect=post_side) as post,
+    ):
+        raw = connector.fetch_detail(external_id, throttle=lambda: None)
+        canonical = connector.normalize(raw)
+    return raw, canonical, post
 
 
 class TestDiscover:
@@ -365,7 +432,10 @@ class TestNormalize:
         canonical = self._canonical()
         assert canonical.raw_extra["discovery"] == "sitemap-index-only"
         assert canonical.raw_extra["detail_fetched"] is False
-        assert canonical.raw_extra["detail_unavailable_reason"] == "D-033"
+        assert (
+            canonical.raw_extra["detail_unavailable_reason"]
+            == "detail-endpoint-not-configured"
+        )
         assert canonical.raw_extra["detail_url"] == REAL_ENTRIES[0][0]
 
     def test_alphanumeric_reference_codes_survive(self):
@@ -607,3 +677,106 @@ class TestRegistration:
         register_all()
         register_all()
         assert [c.name for c in CONNECTORS].count("cimenta2") == 1
+
+
+class TestDetailFetchWhenEndpointConfigured:
+    """Config-gated detail fetch (D-035): with the endpoint injected, the
+    connector fetches and maps the site's public property fields."""
+
+    def test_normalize_maps_every_property_field(self):
+        from decimal import Decimal
+
+        connector = Cimenta2Connector()
+        _discovered(connector)
+        _, canonical, post = _fetch_detail_with_endpoint(connector)
+
+        assert post.call_count == 1
+        assert canonical.reference_code == "TESTREF-4242"
+        assert canonical.current_price == Decimal("123450.0")
+        assert canonical.address == "Calle Falsa 123"
+        assert canonical.city == "Villaejemplo"
+        assert canonical.province == "PROVINCIA TEST"
+        assert canonical.lat == Decimal("40.1234567")
+        assert canonical.lon == Decimal("-3.7654321")
+        assert canonical.m2_built == Decimal("95.5")
+        assert canonical.m2_useful == Decimal("80.25")
+        assert canonical.rooms == 3
+        assert canonical.bathrooms == 2
+        assert canonical.cadastral_ref == "1234567AB1234C0001DE"
+        assert canonical.property_type == "piso"
+        assert canonical.energy_rating == "D"
+        # url prefers the record's own public web link over the sitemap URL.
+        assert canonical.url == "https://example.test/inmueble/4242"
+        assert canonical.raw_extra["detail_fetched"] is True
+        assert canonical.raw_extra["discovery"] == "sitemap+detail"
+
+    def test_scrapes_the_shell_once_then_posts_getrecord_to_the_endpoint(self):
+        connector = Cimenta2Connector()
+        _discovered(connector)
+        _, _, post = _fetch_detail_with_endpoint(connector)
+        # POST target is the configured endpoint with the ?r=1 counter appended.
+        assert post.call_args.args[0] == f"{_FAKE_ENDPOINT}?r=1"
+
+    def test_owner_contact_fields_are_never_stored(self):
+        # Even with the record carrying them and include_internal ON, none of
+        # the owner-contact keys or values may appear in the produced row, its
+        # raw_extra, or the transient raw payload.
+        connector = Cimenta2Connector()
+        _discovered(connector)
+        raw, canonical, _ = _fetch_detail_with_endpoint(
+            connector, include_internal=True
+        )
+        haystack = repr(canonical) + repr(canonical.raw_extra) + repr(raw.raw)
+        for value in _OWNER_CONTACT_VALUES:
+            assert value not in haystack, f"owner-contact value {value!r} leaked"
+        for key in OWNER_CONTACT_KEYS:
+            assert key not in haystack, f"owner-contact key {key!r} leaked"
+
+    def test_include_internal_off_stores_no_acquisition_cost(self):
+        connector = Cimenta2Connector()
+        _discovered(connector)
+        _, canonical, _ = _fetch_detail_with_endpoint(connector, include_internal=False)
+        assert "internal_commercial" not in canonical.raw_extra
+        assert "111111.11" not in repr(canonical.raw_extra)
+
+    def test_include_internal_on_stores_internal_in_raw_extra(self):
+        connector = Cimenta2Connector()
+        _discovered(connector)
+        _, canonical, _ = _fetch_detail_with_endpoint(connector, include_internal=True)
+        internal = canonical.raw_extra["internal_commercial"]
+        assert "GA_CosteDeAdquisicion__c" in internal
+        assert "GA_ValorDeTasacion__c" in internal
+        # No owner-contact key rides along inside the internal block either.
+        for key in OWNER_CONTACT_KEYS:
+            assert key not in internal
+
+
+class TestDetailFetchStaysOffWhenEndpointUnset:
+    """The public-safe default: no endpoint => discovery-only, no request."""
+
+    def test_endpoint_unset_makes_no_detail_request_and_leaves_fields_null(self):
+        connector = Cimenta2Connector()
+        _discovered(connector)
+
+        def _explode(*_args, **_kwargs):
+            raise AssertionError(
+                "no network request may be made when CIMENTA2_DETAIL_ENDPOINT "
+                "is unset — the connector must stay discovery-only"
+            )
+
+        # The autouse fixture already forces the endpoint empty; patch both
+        # verbs to prove neither is used.
+        with (
+            patch("etl.connectors.cimenta2.requests.get", side_effect=_explode),
+            patch(
+                "etl.connectors.cimenta2.requests.post", side_effect=_explode
+            ) as post,
+        ):
+            raw = connector.fetch_detail("a0v3X00000dwiQQQAY", throttle=lambda: None)
+            canonical = connector.normalize(raw)
+
+        assert post.call_count == 0
+        assert "fields" not in raw.raw
+        assert canonical.current_price is None
+        assert canonical.lat is None
+        assert canonical.raw_extra["detail_fetched"] is False
