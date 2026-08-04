@@ -10,7 +10,8 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { worklistMatchKey, portalForUrl } from "@/lib/worklist";
+import { worklistMatchKey, portalForUrl, firstPendingUrl } from "@/lib/worklist";
+import type { WorklistRow, WorklistStatus } from "@/lib/worklist";
 
 // Mirror of etl/tests/test_capture_worklist.py MATCH_KEY_CASES.
 const MATCH_KEY_CASES: [string, string][] = [
@@ -50,5 +51,43 @@ describe("portalForUrl", () => {
   it("returns null for an unrecognised host", () => {
     expect(portalForUrl("https://www.fotocasa.es/vivienda/1")).toBeNull();
     expect(portalForUrl("not a url")).toBeNull();
+  });
+});
+
+describe("firstPendingUrl — human-paced 'Siguiente' advance (issue #254)", () => {
+  const row = (id: number, url: string, status: WorklistStatus): WorklistRow => ({
+    id,
+    url,
+    source_portal: "aliseda",
+    status,
+    added_via: "manual",
+    note: null,
+    matched_capture_id: null,
+    created_at: "2026-08-04T00:00:00Z",
+    updated_at: "2026-08-04T00:00:00Z",
+  });
+
+  it("returns the first pending URL in list order", () => {
+    const rows = [
+      row(1, "https://a/inmueble/1", "captured"),
+      row(2, "https://a/inmueble/2", "pending"),
+      row(3, "https://a/inmueble/3", "pending"),
+    ];
+    expect(firstPendingUrl(rows)).toBe("https://a/inmueble/2");
+  });
+
+  it("skips captured/failed/skipped rows", () => {
+    const rows = [
+      row(1, "https://a/inmueble/1", "captured"),
+      row(2, "https://a/inmueble/2", "failed"),
+      row(3, "https://a/inmueble/3", "skipped"),
+      row(4, "https://a/inmueble/4", "pending"),
+    ];
+    expect(firstPendingUrl(rows)).toBe("https://a/inmueble/4");
+  });
+
+  it("returns null when nothing is pending", () => {
+    expect(firstPendingUrl([row(1, "https://a/inmueble/1", "captured")])).toBeNull();
+    expect(firstPendingUrl([])).toBeNull();
   });
 });

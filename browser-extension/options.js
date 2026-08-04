@@ -9,9 +9,16 @@
 const $ = (sel) => document.querySelector(sel);
 
 async function load() {
-  const config = await chrome.storage.sync.get(['apiUrl', 'apiKey']);
+  const config = await chrome.storage.sync.get(['apiUrl', 'apiKey', 'autoCaptureEnabled']);
   $('#api-url').value = config.apiUrl || 'http://localhost:4000';
   $('#api-key').value = config.apiKey || '';
+  // Auto-capture defaults ON (issue #254): the human already installed a
+  // capture extension and deliberately opened a listing-detail page, so
+  // capturing it without a click is the intended flow. `undefined` (never
+  // saved) therefore means checked.
+  $('#auto-capture').checked = config.autoCaptureEnabled === undefined
+    ? true
+    : !!config.autoCaptureEnabled;
 }
 
 function showStatus(msg, kind) {
@@ -67,6 +74,14 @@ $('#save-btn').addEventListener('click', async () => {
 
   await chrome.storage.sync.set({ apiUrl, apiKey });
   showStatus('Guardado', 'success');
+});
+
+// The auto-capture toggle is independent of the API URL/key (no host-permission
+// prompt to gate it on), so persist it immediately on change rather than making
+// the user hit "Guardar".
+$('#auto-capture').addEventListener('change', async (e) => {
+  await chrome.storage.sync.set({ autoCaptureEnabled: e.target.checked });
+  showStatus(e.target.checked ? 'Captura automática activada' : 'Captura automática desactivada', 'success');
 });
 
 load();
