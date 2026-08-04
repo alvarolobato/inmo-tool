@@ -178,14 +178,22 @@ class _PhotoHashCache:
     `zero_success_sources` and `DedupRunResult.photo_hash_zero_success_sources`.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, conn=None) -> None:
         self._cache: dict[int, list] = {}
         self._attempted_by_source: dict[str, int] = {}
         self._hashed_by_source: dict[str, int] = {}
+        # Issue #221: the per-listing memo above still earns its keep (one
+        # listing appears in many pairs), but it dies with the run. `conn`
+        # threads the persistent per-URL store underneath it so the network
+        # cost is paid once ever, not once per run. None keeps the old
+        # fetch-everything behaviour for tests that don't want a database.
+        self._conn = conn
 
     def get(self, listing: ListingRecord) -> list:
         if listing.listing_id not in self._cache:
-            hashes = photo_hash.fetch_hashes(listing.photo_urls, source=listing.source)
+            hashes = photo_hash.fetch_hashes(
+                listing.photo_urls, source=listing.source, store_conn=self._conn
+            )
             self._cache[listing.listing_id] = hashes
             attempted = photo_hash.attemptable_photo_count(listing.photo_urls)
             if attempted:
@@ -672,7 +680,7 @@ def run(conn) -> DedupRunResult:
     and mark confirmed).
     """
     listings = fetch_listing_records(conn)
-    hash_cache = _PhotoHashCache()
+    hash_cache = _PhotoHashCache(conn)
     result = DedupRunResult()
 
     with conn.cursor() as cur:

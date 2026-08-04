@@ -655,6 +655,43 @@ ALTER TABLE ai_assessment ADD COLUMN IF NOT EXISTS content_hash TEXT;
 -- Deduplication audit trail (Phase 2 task 2.2, issue #16, writes here)
 -- ============================================================
 
+-- Perceptual photo hashes, keyed on the URL (issue #221).
+--
+-- A perceptual hash of a given image never changes, so a URL only ever needs
+-- hashing once. Before this table the dedup engine memoised hashes for the
+-- duration of a single run and threw them away, re-downloading every photo of
+-- every listing on the next pass: ~8,800 HTTP fetches per run against
+-- third-party CDNs, outside any connector's rate limiter, which put a full
+-- run over 30 minutes and made dedup impractical to run per sweep (#185).
+--
+-- Keyed on photo_url alone, not (listing_id, photo_url): a listing whose
+-- photo_urls array changes then re-hashes only the genuinely new URLs, and
+-- syndicated listings that share CDN objects across sources hash them once
+-- for the whole corpus. Nothing needs invalidating, because the cached value
+-- is immutable.
+--
+-- ok = false rows are failures, kept deliberately. A dead URL used to be
+-- retried every run forever — exactly how the Milanuncios "Rule parameter not
+-- Found" breakage (#209/#213) stayed invisible, its cost spread evenly across
+-- every run instead of showing up as a spike. Retried only after a backoff
+-- (etl/dedup/photo_hash_store.py), so a transient outage still heals.
+CREATE TABLE IF NOT EXISTS photo_hashes (
+    photo_url       TEXT         PRIMARY KEY,
+    phash           TEXT,
+    ok              BOOLEAN      NOT NULL,
+    source          TEXT,
+    failure_reason  TEXT,
+    attempts        INTEGER      NOT NULL DEFAULT 1,
+    first_seen_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    last_attempt_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- The store's read filters on (ok OR last_attempt_at > cutoff) for a set of
+-- URLs, so failures needing a retry decision are found without scanning the
+-- successes, which are the overwhelming majority once warm.
+CREATE INDEX IF NOT EXISTS idx_photo_hashes_retry
+    ON photo_hashes (last_attempt_at) WHERE NOT ok;
+
 CREATE TABLE IF NOT EXISTS property_merge_log (
     id                  BIGSERIAL    PRIMARY KEY,
     property_id         BIGINT       REFERENCES property(id),

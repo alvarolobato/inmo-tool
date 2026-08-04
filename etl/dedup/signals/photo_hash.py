@@ -18,6 +18,8 @@ import imagehash
 import requests
 from PIL import Image
 
+from etl.dedup import photo_hash_store
+
 logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT_SECONDS = 10
@@ -210,9 +212,16 @@ def attemptable_photo_count(photo_urls: tuple[str, ...]) -> int:
 
 
 def fetch_hashes(
-    photo_urls: tuple[str, ...], *, source: str = "unknown"
+    photo_urls: tuple[str, ...], *, source: str = "unknown", store_conn=None
 ) -> list[imagehash.ImageHash]:
     """Fetch and hash each URL; skip (don't raise on) any that fail.
+
+    Issue #221: when *store_conn* is given, per-URL results are read from and
+    written to the `photo_hashes` table, so a URL is fetched at most once ever
+    rather than once per run. Passing None keeps the original fetch-everything
+    behaviour, which is what the pure-comparison unit tests rely on — the
+    persistence is a cost optimisation over an immutable value, never a change
+    in what gets compared.
 
     A single broken/expired photo URL shouldn't sink the whole comparison —
     this is a best-effort signal, not a required one.
@@ -233,9 +242,21 @@ def fetch_hashes(
     """
     hashes: list[imagehash.ImageHash] = []
     failed = 0
+    stored = photo_hash_store.load(store_conn, photo_urls) if store_conn else {}
     for url in photo_urls:
         if not _looks_like_photo_url(url):
             logger.debug("photo_hash: skipping non-image URL %s", url)
+            continue
+        # A hit here is the whole point of #221: no request at all. A stored
+        # failure counts as a failure again without re-fetching, so the
+        # per-listing rollup below still reports honestly rather than making a
+        # dead source look healthy just because we stopped asking.
+        if url in stored:
+            entry = stored[url]
+            if entry.ok and entry.phash is not None:
+                hashes.append(entry.phash)
+            else:
+                failed += 1
             continue
         try:
             with requests.get(
@@ -244,10 +265,23 @@ def fetch_hashes(
                 response.raise_for_status()
                 response.raw.decode_content = True
                 image = Image.open(response.raw)
-                hashes.append(imagehash.phash(image))
+                digest = imagehash.phash(image)
+            hashes.append(digest)
+            if store_conn:
+                photo_hash_store.save(
+                    store_conn, photo_url=url, phash=digest, source=source
+                )
         except Exception as exc:  # noqa: BLE001 - genuinely best-effort per photo
             failed += 1
             logger.debug("photo_hash: failed to fetch/hash %s: %s", url, exc)
+            if store_conn:
+                photo_hash_store.save(
+                    store_conn,
+                    photo_url=url,
+                    phash=None,
+                    source=source,
+                    failure_reason=str(exc)[:500],
+                )
     if failed:
         logger.warning(
             "photo_hash: %d/%d photo(s) failed to fetch/hash (source=%s) — "

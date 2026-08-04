@@ -2319,7 +2319,9 @@ class TestPhotoHashCacheSourceHealth:
 
     def test_a_source_with_every_photo_failing_is_reported(self, monkeypatch):
         monkeypatch.setattr(
-            photo_hash_signal, "fetch_hashes", lambda urls, source="unknown": []
+            photo_hash_signal,
+            "fetch_hashes",
+            lambda urls, source="unknown", store_conn=None: [],
         )
         cache = _PhotoHashCache()
         listing = _record(
@@ -2332,7 +2334,9 @@ class TestPhotoHashCacheSourceHealth:
         monkeypatch.setattr(
             photo_hash_signal,
             "fetch_hashes",
-            lambda urls, source="unknown": [imagehash.hex_to_hash("0" * 16)],
+            lambda urls, source="unknown", store_conn=None: [
+                imagehash.hex_to_hash("0" * 16)
+            ],
         )
         cache = _PhotoHashCache()
         listing = _record(
@@ -2349,7 +2353,9 @@ class TestPhotoHashCacheSourceHealth:
         total failure, and vice versa (only a source with ZERO successes
         across every listing counts as degraded)."""
         monkeypatch.setattr(
-            photo_hash_signal, "fetch_hashes", lambda urls, source="unknown": []
+            photo_hash_signal,
+            "fetch_hashes",
+            lambda urls, source="unknown", store_conn=None: [],
         )
         cache = _PhotoHashCache()
         cache.get(
@@ -2373,14 +2379,16 @@ class TestPhotoHashCacheSourceHealth:
         """An empty/video-only photo_urls shouldn't make a source look
         degraded — there was nothing to attempt in the first place."""
         monkeypatch.setattr(
-            photo_hash_signal, "fetch_hashes", lambda urls, source="unknown": []
+            photo_hash_signal,
+            "fetch_hashes",
+            lambda urls, source="unknown", store_conn=None: [],
         )
         cache = _PhotoHashCache()
         cache.get(_record(1, 100, source="idealista", photo_urls=()))
         assert cache.zero_success_sources() == {}
 
     def test_mixed_sources_only_the_failing_one_is_reported(self, monkeypatch):
-        def _fake_fetch_hashes(urls, source="unknown"):
+        def _fake_fetch_hashes(urls, source="unknown", store_conn=None):
             return [] if source == "milanuncios" else [imagehash.hex_to_hash("0" * 16)]
 
         monkeypatch.setattr(photo_hash_signal, "fetch_hashes", _fake_fetch_hashes)
