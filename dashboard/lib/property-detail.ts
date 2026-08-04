@@ -29,6 +29,17 @@ export interface PropertyListingDetail {
   status: string;
   current_price: number | null;
   /**
+   * `'sale' | 'rent'` (issue #31 Opus-review "Also fix": this query had no
+   * `operation`/`status` filter and no `operation` column at all, so a
+   * monthly rent figure would render indistinguishable from a sale price
+   * — see LinkedListings.tsx, which now suffixes "/mes" and badges this
+   * explicitly. Not filtered out: today's dedup design (D-016) means a
+   * property can only ever host one operation's listings, so filtering
+   * would hide a rental-only property's entire listing list; the fix is
+   * to label, not drop.
+   */
+  operation: string;
+  /**
    * Seller/agency reference (issue #72), e.g. "LCSE43927". Per-listing, not
    * per-property: each portal carries the code its own seller assigned, and
    * a shared code across sources is what the dedup signal keys on.
@@ -43,6 +54,8 @@ export interface PriceHistoryPoint {
   source: string;
   observed_at: string;
   price: number;
+  /** `'sale' | 'rent'` — see PropertyListingDetail.operation's comment. */
+  operation: string;
 }
 
 export interface StatusEventPoint {
@@ -100,6 +113,7 @@ interface RawListingRow {
   first_seen_at: string | null;
   last_seen_at: string | null;
   photo_urls: string[] | null;
+  operation: string;
 }
 
 interface RawPriceHistoryRow {
@@ -107,6 +121,7 @@ interface RawPriceHistoryRow {
   source: string;
   observed_at: string;
   price: string;
+  operation: string;
 }
 
 interface RawStatusEventRow {
@@ -141,14 +156,14 @@ export async function getPropertyDetail(propertyId: number): Promise<PropertyDet
       // rather than depending on whatever order Postgres happens to return
       // same-source rows in.
       `SELECT id, source, url, listing_kind, status, current_price,
-              reference_code, first_seen_at, last_seen_at, photo_urls
+              reference_code, first_seen_at, last_seen_at, photo_urls, operation
          FROM listing
         WHERE property_id = $1
         ORDER BY source, id`,
       [propertyId],
     ),
     sql<RawPriceHistoryRow>(
-      `SELECT h.listing_id, l.source, h.observed_at, h.price
+      `SELECT h.listing_id, l.source, h.observed_at, h.price, l.operation
          FROM listing_price_history h
          JOIN listing l ON l.id = h.listing_id
         WHERE l.property_id = $1
@@ -224,12 +239,14 @@ export async function getPropertyDetail(propertyId: number): Promise<PropertyDet
       reference_code: l.reference_code,
       first_seen_at: l.first_seen_at,
       last_seen_at: l.last_seen_at,
+      operation: l.operation,
     })),
     price_history: priceRows.map((h) => ({
       listing_id: h.listing_id,
       source: h.source,
       observed_at: h.observed_at,
       price: Number(h.price),
+      operation: h.operation,
     })),
     status_events: statusRows.map((e) => ({
       listing_id: e.listing_id,

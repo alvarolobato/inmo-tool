@@ -71,20 +71,71 @@ much less so. This is documented here rather than silently assumed: verify
 then every failure still fails loudly via the normal `ConnectorError`/
 circuit-breaker path, same as any other connector — never silently.
 
-## Rate limit: half of the sale connector's, not the same value
+## Rate limit: below the sale connector's measured, evidence-based value
+## (Opus review correction, PR #199 — this section originally said "half
+## of 20", written before issue #179/#205 measured the sale connector's
+## real rate)
 
-`rate_limit_per_minute = 10` (vs. `MilanunciosConnector`'s 20). Both
-connectors hit the *same domain, same IP* — the orchestrator's rate
-limiter is per-connector-instance, so running both at their own "safe"
-20/min would, in total, double the request volume Milanuncios sees from
-this IP versus what the original sale-only feasibility spike ever
-validated. Unlike Fotocasa (whose cumulative soft-block threshold was
-directly measured at ~136 fetches before tripping — see this PR's other
-findings), Milanuncios' cumulative tolerance has never been measured. This
-value is a conservative default given that unknown, not a measured
-number — documented as tunable, same convention as every other
-connector's rate limit in this codebase, once real combined-volume data
-exists from production.
+`rate_limit_per_minute = 1` (vs. `MilanunciosConnector`'s `2`, itself a
+measured, evidence-based value per D-017 — NOT the `20` this file
+originally compared itself against). The original "half the sale
+connector's rate" reasoning was written and merged before #179/#205's live
+measurement dropped the sale connector from `20` to `2`; left unchanged,
+this connector's `10` became FIVE TIMES the only Milanuncios rate D-017's
+live measurement ever found non-catastrophic (`20` and `6`/min both
+tripped the identical GeeTest wall within ~5 requests — see
+`milanuncios.py`'s own module docstring). `1` is the smallest value
+strictly below `2` a `rate_limit_per_minute: int` class attribute can
+hold — not itself measured (this connector's OWN cumulative tolerance
+still isn't; see the live-verification section above), but it can no
+longer be read as "half of a number that was never real."
+
+Both connectors hit the *same domain, same IP* with **independent** rate
+limiters and circuit breakers — the orchestrator has no cross-connector
+budget concept, so nothing here actually keeps the two connectors' request
+volumes from simply adding up on the wire. That is precisely why this
+connector must not run unattended alongside the sale connector by
+default: see "Disabled by default" below.
+
+## Disabled by default — operator opt-in required (Opus review must-fix,
+## PR #199)
+
+Every connector is born with `connector_config.enabled = false`
+(`etl/orchestrator.sync_connector_registry`, issue #100 — "todos
+desactivados hasta que defina los filtros de búsqueda") and this connector
+relies on exactly that same generic mechanism; it does nothing here to
+special-case itself further. What makes that generic protection matter
+MORE for this connector than most others: `MilanunciosConnector` (the
+sale connector) is the single most important connector in this codebase —
+it's the core product's primary sale-listing source — and this rental
+connector shares its exact domain/IP anti-bot budget with independent,
+uncoordinated rate limiting (previous section). An operator who enables
+this connector without accounting for that is not adding a nice-to-have
+signal for free; they are spending some of the sale connector's own
+tolerance. Turn this on deliberately, not reflexively, and watch
+`milanuncios` (the sale connector)'s own circuit-breaker trip rate after
+doing so — see `etl/tests/test_connector_registry_sync.py`'s
+`test_new_connector_is_seeded_disabled_and_ingests_nothing` for the
+mechanism this relies on, and
+`test_milanuncios_rental_is_seeded_disabled_by_default` below for the
+same guarantee proven against this specific connector, not just the
+generic case.
+
+## What this connector does NOT unblock (Opus review, PR #199)
+
+`fetch_detail()` (inherited, see "Live verification" above) hits the same
+GeeTest wall the sale connector does — ~5 successes per run, city-wide,
+a COUNT-based trigger `discover()`'s success doesn't change (D-017). That
+means a realistic run yields on the order of 5 new rental listings
+city-wide, not 5 per neighbourhood — the comparable-rent estimator's
+`MIN_HIGH_CONFIDENCE_SAMPLE_SIZE = 8` gate
+(`dashboard/lib/analytics/rent-estimate.ts`) is reachable in principle but
+not, realistically, in the sample volume this connector alone can
+currently produce for any one property's size/location band. This PR's
+estimator is real, correct machinery — it just doesn't yet have a data
+source that reliably feeds it. See issue #211 (linked from D-015) tracking
+a viable rental data source; that, not this estimator, is #31's actual
+remaining blocker.
 """
 
 from __future__ import annotations
@@ -119,9 +170,11 @@ class MilanunciosRentalConnector(MilanunciosConnector):
     # relying on that never-in-practice guarantee).
     name = "milanuncios_rental"
 
-    # Half of MilanunciosConnector's 20 — see module docstring's "Rate
-    # limit" section for why this isn't the same value.
-    rate_limit_per_minute = 10
+    # Strictly below MilanunciosConnector's measured rate_limit_per_minute
+    # (2, per D-017) — see module docstring's "Rate limit" section for why
+    # this used to say 10 ("half of 20") and why that became indefensible
+    # once #205 measured the sale connector down to 2.
+    rate_limit_per_minute = 1
 
     # Same reasoning as MilanunciosConnector (inherited docstring applies
     # verbatim: discover() only reads page 1 of one category, robots.txt

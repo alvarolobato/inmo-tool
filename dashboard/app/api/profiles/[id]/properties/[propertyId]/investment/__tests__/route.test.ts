@@ -112,9 +112,14 @@ describe.runIf(dbAvailable)("GET /api/profiles/[id]/properties/[propertyId]/inve
     );
     const id = Number(result.rows[0].id);
     createdPropertyIds.push(id);
+    // last_seen_at = NOW() (issue #31 Opus-review must-fix #3, PR #199):
+    // rent-estimate.ts's comparable query now bounds comps by
+    // last_seen_at (MAX_COMP_AGE_DAYS) — a NULL value (the previous
+    // behaviour here, before this fix) fails that bound and silently
+    // excludes every comp this helper inserts.
     await pool.query(
-      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, operation)
-       VALUES ($1, 'milanuncios_rental', $2, 'active', $3, NOW(), 'rent')`,
+      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, last_seen_at, operation)
+       VALUES ($1, 'milanuncios_rental', $2, 'active', $3, NOW(), NOW(), 'rent')`,
       [id, `investment-int-test-rent-${Math.random().toString(36).slice(2)}`, monthlyRent],
     );
     return id;

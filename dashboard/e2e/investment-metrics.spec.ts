@@ -112,9 +112,12 @@ test.beforeAll(async () => {
       `UPDATE property SET m2_built = $2 WHERE id = $1`,
       [compId, m2],
     );
+    // last_seen_at = NOW() (issue #31 Opus-review must-fix #3, PR #199):
+    // required — the comparable-rent query now bounds comps by
+    // last_seen_at (MAX_COMP_AGE_DAYS); a NULL value fails that bound.
     await pool.query(
-      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, operation)
-       VALUES ($1, 'milanuncios_rental', $2, 'active', $3, NOW(), 'rent')`,
+      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, last_seen_at, operation)
+       VALUES ($1, 'milanuncios_rental', $2, 'active', $3, NOW(), NOW(), 'rent')`,
       [compId, `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`, monthlyRent],
     );
   }
@@ -198,8 +201,8 @@ test.beforeAll(async () => {
   );
   await pool.query(`UPDATE property SET m2_built = 80 WHERE id = $1`, [soloCompId]);
   await pool.query(
-    `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, operation)
-     VALUES ($1, 'milanuncios_rental', $2, 'active', $3, NOW(), 'rent')`,
+    `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, last_seen_at, operation)
+     VALUES ($1, 'milanuncios_rental', $2, 'active', $3, NOW(), NOW(), 'rent')`,
     [soloCompId, `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`, 800],
   );
 });

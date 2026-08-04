@@ -28,6 +28,7 @@ import {
   MIN_LOW_CONFIDENCE_SAMPLE_SIZE,
   MIN_HIGH_CONFIDENCE_SAMPLE_SIZE,
   MAX_HIGH_CONFIDENCE_RELATIVE_IQR,
+  MAX_COMP_AGE_DAYS,
 } from "../rent-estimate";
 
 // Granada — deliberately distinct from every other integration test
@@ -113,19 +114,36 @@ describe.runIf(dbAvailable)("estimateRent — real Postgres", () => {
   async function insertListing(
     pool: Pool,
     propertyId: number,
-    overrides: Partial<{ source: string; status: string; current_price: number; operation: "sale" | "rent" }> = {},
+    overrides: Partial<{
+      source: string;
+      status: string;
+      current_price: number;
+      operation: "sale" | "rent";
+      /** Days ago (real Date math, not a DB expression) — defaults to 0 (NOW()), so every existing test that doesn't care about recency gets a fresh comp by default and passes MAX_COMP_AGE_DAYS's filter unchanged (must-fix #3, PR #199). */
+      last_seen_days_ago: number;
+    }> = {},
   ): Promise<void> {
     const row = {
       source: "milanuncios_rental",
       status: "active",
       current_price: 800,
       operation: "rent" as const,
+      last_seen_days_ago: 0,
       ...overrides,
     };
+    const lastSeenAt = new Date(Date.now() - row.last_seen_days_ago * 24 * 60 * 60 * 1000);
     await pool.query(
-      `INSERT INTO listing (property_id, source, external_id, status, current_price, operation)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [propertyId, row.source, `rent-estimate-test-${Math.random().toString(36).slice(2)}`, row.status, row.current_price, row.operation],
+      `INSERT INTO listing (property_id, source, external_id, status, current_price, operation, last_seen_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        propertyId,
+        row.source,
+        `rent-estimate-test-${Math.random().toString(36).slice(2)}`,
+        row.status,
+        row.current_price,
+        row.operation,
+        lastSeenAt,
+      ],
     );
   }
 
@@ -371,6 +389,158 @@ describe.runIf(dbAvailable)("estimateRent — real Postgres", () => {
         { id: targetId, lat: TEST_CENTER[0], lon: TEST_CENTER[1], property_type: "piso", m2_built: 80 },
         {},
       );
+      expect(result.comparable_count).toBe(3);
+    });
+  });
+
+  // Opus review must-fix #4 (PR #199), the exact scenario the review
+  // measured against real Postgres: 8 comps, 4 of them "precio a
+  // consultar" (current_price=0, common for rentals) — before the fix,
+  // MIN(current_price) still picked 0 as the cheapest "price" for those 4
+  // properties and divided 0/m2_built into the median, giving 4.9 instead
+  // of the true ~11. After the fix, current_price > 0 excludes the 4
+  // zero-priced comps from the aggregate entirely rather than treating
+  // Decimal("0") as a real low rent.
+  it("Opus review must-fix #4: excludes zero-priced ('precio a consultar') comps from the median instead of treating them as a real €0 rent", async () => {
+    await withRealDb(async (pool) => {
+      const targetId = await insertProperty(pool, { m2_built: 80 });
+      // 4 real comps, all 80m2, EUR/m2/month = 11 exactly (rent 880).
+      for (let i = 0; i < 4; i++) await insertRentComp(pool, 80, 880);
+      // 4 "precio a consultar" comps — current_price = 0, same size band.
+      for (let i = 0; i < 4; i++) await insertRentComp(pool, 80, 0);
+
+      const result = await estimateRent(
+        { id: targetId, lat: TEST_CENTER[0], lon: TEST_CENTER[1], property_type: "piso", m2_built: 80 },
+        {},
+      );
+      // Only the 4 real comps count — the 4 zero-priced ones are excluded
+      // entirely, not averaged in as if €0/month were a real observation.
+      expect(result.comparable_count).toBe(4);
+      expect(result.eur_per_m2_month_used).toBeCloseTo(11, 6);
+      expect(result.estimated_monthly_rent).toBeCloseTo(880, 6);
+      // The bug this guards against: with all 8 counted, median would be
+      // 4.9 (understating rent ~55%, per the review's own live measurement).
+      expect(result.eur_per_m2_month_used).not.toBeCloseTo(4.9, 1);
+    });
+  });
+
+  it("Opus review must-fix #4: an ALL-zero-priced sample never produces a fabricated €0/month estimate — falls back to insufficient_data", async () => {
+    await withRealDb(async (pool) => {
+      const targetId = await insertProperty(pool, { m2_built: 80 });
+      // 5 comps, all "precio a consultar" — none pass current_price > 0.
+      for (let i = 0; i < 5; i++) await insertRentComp(pool, 80, 0);
+
+      const result = await estimateRent(
+        { id: targetId, lat: TEST_CENTER[0], lon: TEST_CENTER[1], property_type: "piso", m2_built: 80 },
+        {},
+      );
+      // Zero real comps found (all excluded by current_price > 0) — the
+      // count gate alone already produces insufficient_data here; this is
+      // the guard rail that stops a 0-priced sample from EVER reaching
+      // yield.ts as a fabricated "0,0 %" yield with an "estimado" badge
+      // (the exact bug already fixed once via fmtPct(null), reached here
+      // by a different route per the review).
+      expect(result.method).toBe("insufficient_data");
+      expect(result.estimated_monthly_rent).toBeNull();
+      expect(result.confidence).toBeNull();
+      expect(result.market_comparable!.comparable_count).toBe(0);
+    });
+  });
+
+  // Opus review must-fix #3 (PR #199): the rental connector never
+  // withdraws stale listings (discovers_full_inventory=False), so without
+  // a recency bound a rental ad ingested once would stay comp-eligible
+  // forever. MAX_COMP_AGE_DAYS bounds this on last_seen_at.
+  it("Opus review must-fix #3: excludes a comp whose last_seen_at is older than MAX_COMP_AGE_DAYS", async () => {
+    await withRealDb(async (pool) => {
+      expect(MAX_COMP_AGE_DAYS).toBe(30);
+      const targetId = await insertProperty(pool, { m2_built: 80 });
+      await insertRentComp(pool, 80, 800);
+      await insertRentComp(pool, 80, 820);
+      // A same-type/same-size/same-location comp, but last confirmed
+      // present well beyond the recency bound — would badly skew the
+      // count/median if wrongly included.
+      const staleId = await insertProperty(pool, { m2_built: 80 });
+      await insertListing(pool, staleId, { current_price: 5000, last_seen_days_ago: MAX_COMP_AGE_DAYS + 5 });
+
+      const result = await estimateRent(
+        { id: targetId, lat: TEST_CENTER[0], lon: TEST_CENTER[1], property_type: "piso", m2_built: 80 },
+        {},
+      );
+      // 2 real comps + the stale one excluded = below the count gate.
+      expect(result.method).toBe("insufficient_data");
+      expect(result.market_comparable!.comparable_count).toBe(2);
+    });
+  });
+
+  it("Opus review must-fix #3: surfaces oldest_comp_age_days as the worst-case age among the comps actually used", async () => {
+    await withRealDb(async (pool) => {
+      const targetId = await insertProperty(pool, { m2_built: 80 });
+      await insertRentComp(pool, 80, 800); // fresh (0 days)
+      const midId = await insertProperty(pool, { m2_built: 80 });
+      await insertListing(pool, midId, { current_price: 820, last_seen_days_ago: 5 });
+      const oldestId = await insertProperty(pool, { m2_built: 80 });
+      await insertListing(pool, oldestId, { current_price: 780, last_seen_days_ago: 20 }); // oldest still-valid comp
+
+      const result = await estimateRent(
+        { id: targetId, lat: TEST_CENTER[0], lon: TEST_CENTER[1], property_type: "piso", m2_built: 80 },
+        {},
+      );
+      expect(result.market_comparable!.comparable_count).toBe(3);
+      // Worst-case bound: the oldest of the 3 comps used was seen ~20 days
+      // ago — the surfaced age must reflect that, not the freshest one.
+      expect(result.market_comparable!.oldest_comp_age_days).toBeGreaterThanOrEqual(19);
+      expect(result.market_comparable!.oldest_comp_age_days).toBeLessThanOrEqual(21);
+    });
+  });
+
+  // "Also fix" (Opus review, PR #199): the dispersion gate used to only
+  // apply to 8+ samples — a 3-7 sample's IQR was computed and discarded,
+  // so wildly scattered small samples (the NORMAL case post-#205's
+  // fetch_detail() wall — see rent-estimate.ts's module docstring) still
+  // rendered a full "low"-confidence yield block. This is the review's own
+  // worked example: [5, 10, 30] EUR/m2/month, median 10, relative IQR 1.25
+  // (far above MAX_HIGH_CONFIDENCE_RELATIVE_IQR=0.6).
+  it('WORKED EXAMPLE (Opus review "Also fix"): a 3-comp sample with extreme dispersion demotes to insufficient_data, not a noisy "low"', async () => {
+    await withRealDb(async (pool) => {
+      const targetId = await insertProperty(pool, { m2_built: 80 });
+      // EUR/m2/month via (m2=80): 5, 10, 30 -> rents 400, 800, 2400.
+      await insertRentComp(pool, 80, 400);
+      await insertRentComp(pool, 80, 800);
+      await insertRentComp(pool, 80, 2400);
+
+      const result = await estimateRent(
+        { id: targetId, lat: TEST_CENTER[0], lon: TEST_CENTER[1], property_type: "piso", m2_built: 80 },
+        {},
+      );
+      // Count gate alone would have said "low" (3 >= MIN_LOW_CONFIDENCE_
+      // SAMPLE_SIZE) — the widened dispersion gate must override that to
+      // insufficient_data given how wildly these 3 comps disagree.
+      expect(result.method).toBe("insufficient_data");
+      expect(result.confidence).toBeNull();
+      expect(result.estimated_monthly_rent).toBeNull();
+      // The comparable count is still surfaced (not silently dropped) —
+      // same convention as every other insufficient_data path.
+      expect(result.market_comparable!.comparable_count).toBe(3);
+    });
+  });
+
+  it('a 3-comp sample with TIGHT dispersion still resolves to "low", not insufficient_data (the widened gate only demotes, never over-demotes a genuinely usable small sample)', async () => {
+    await withRealDb(async (pool) => {
+      // Reuses WORKED EXAMPLE 1's exact fixture (median 10, relative IQR
+      // well under 0.6) to prove the widened gate doesn't regress the
+      // ordinary case.
+      const targetId = await insertProperty(pool, { m2_built: 80 });
+      await insertRentComp(pool, 80, 720);
+      await insertRentComp(pool, 80, 800);
+      await insertRentComp(pool, 80, 880);
+
+      const result = await estimateRent(
+        { id: targetId, lat: TEST_CENTER[0], lon: TEST_CENTER[1], property_type: "piso", m2_built: 80 },
+        {},
+      );
+      expect(result.method).toBe("market_comparable_low");
+      expect(result.confidence).toBe("low");
       expect(result.comparable_count).toBe(3);
     });
   });

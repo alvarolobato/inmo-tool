@@ -79,12 +79,56 @@
  * this module adds a dispersion gate the issue's Technical approach didn't
  * ask for but the brief explicitly did: a sample can be large and still
  * too scattered to trust. `MAX_HIGH_CONFIDENCE_RELATIVE_IQR = 0.6` — the
- * interquartile range of comps' EUR/m²/month, divided by their median —
- * downgrades an otherwise-`high` (8+) sample to `low` when the comps
- * disagree with each other by more than that. This can only ever demote
- * `high` to `low`, never promote a small sample to `high` and never turn
- * a real sample into `insufficient_data` — the count gate alone still
- * decides usable vs. not.
+ * interquartile range of comps' EUR/m²/month, divided by their median.
+ *
+ * **Opus review (PR #199) correction**: the gate originally only fired for
+ * 8+ samples (demoting `high` -> `low`), while a 3-7 sample's dispersion
+ * was computed and silently discarded — so `[5, 10, 30]` (relative IQR
+ * 1.25, wildly scattered) still produced a full `low`-confidence yield
+ * block off 3 comparables. Post-#205's fetch_detail() wall (see the
+ * connector's own module docstring) makes 3-7 comps the NORMAL case, not
+ * an edge case, so this gap mattered in practice, not just in theory. The
+ * gate now applies at every tier: an 8+ sample failing it still demotes to
+ * `low` (unchanged); a 3-7 sample failing it demotes to `insufficient_data`
+ * instead — there is no tier below `low` to demote a small, wildly-
+ * scattered sample INTO, so declaring it unusable is the only honest move.
+ * This can still never PROMOTE anything (a small sample never becomes
+ * `high`, tight dispersion never turns `insufficient_data` into usable) —
+ * only ever demotes, in both directions the count gate alone used to leave
+ * alone.
+ *
+ * ## Recency (issue #31 Opus review must-fix #3, PR #199)
+ *
+ * `discovers_full_inventory = False` on the rental connector (module
+ * docstring's own "not claiming full inventory" flag) means
+ * `_reconcile_missed_discoveries` never runs for it — nothing in this
+ * codebase ever marks a rental `listing.status` as `'withdrawn'`, and
+ * `normalize()` (inherited from `MilanunciosConnector`) hardcodes
+ * `status="active"` on every row it produces. Left unfiltered, a rental ad
+ * ingested once in the app's first week stays `status='active'` and
+ * therefore comp-eligible forever, even after the actual apartment was
+ * rented out months ago — rental turnover is measured in weeks, not the
+ * years a `status='active'` filter alone would tolerate.
+ *
+ * `MAX_COMP_AGE_DAYS = 30`: a comp is only used if `listing.last_seen_at`
+ * is within this many days of query time. **What this bound actually
+ * guarantees, precisely** (worth being exact about, since it's easy to
+ * over-claim): `_update_last_seen_for_discovered` (etl/orchestrator.py)
+ * bumps `last_seen_at = NOW()` for every id `discover()` returns on EVERY
+ * run, regardless of whether `fetch_detail()` ever runs or succeeds that
+ * run — so the bound tracks **presence** ("this ad still appeared on page
+ * 1 of the rental category search within N days"), not **price
+ * freshness** ("this ad's price was re-verified within N days"). Given
+ * `fetch_detail()`'s GeeTest wall (~5 successes per run, city-wide,
+ * D-017), most rental listings' `current_price` was set once, at
+ * first-successful-fetch, and may be considerably older than
+ * `last_seen_at` implies — a price change on a still-listed ad would not
+ * be caught until `fetch_detail()` happens to succeed for it again. The
+ * bound rules out "this ad was removed from the site weeks ago and nobody
+ * ever told us"; it does not rule out "this ad's price is stale but the ad
+ * itself is still up." `oldest_comp_age_days` on `MarketComparableRent`
+ * surfaces the worst-case presence age among the comps actually used, so
+ * the UI states this rather than implying a false precision.
  *
  * ## Precedence vs. the profile's own assumption (this issue's brief:
  * "do not silently replace the user's number... decide the precedence
@@ -102,10 +146,26 @@
  * numbers exist — so the UI can show both and flag a disagreement rather
  * than hide it (see `YieldSection.tsx`). When no assumption is set at
  * all, the market-comparable estimate becomes the PRIMARY figure fed to
- * `yield.ts` — this is the actual point of issue #31: unblocking yield for
- * any profile that never set a manual assumption, per the swap-in-without-
- * a-signature-change design `RentConfidence`'s `"high"`/`"low"` values
- * were reserved for from the start.
+ * `yield.ts`, per the swap-in-without-a-signature-change design
+ * `RentConfidence`'s `"high"`/`"low"` values were reserved for from the
+ * start.
+ *
+ * **Honesty about what this actually unblocks (Opus review, PR #199)**:
+ * this module is real, measured-comparable machinery, not a stand-in —
+ * but its data source is thin. `MilanunciosRentalConnector` inherits
+ * `fetch_detail()` from the sale connector verbatim, and post-#205 that
+ * method hits a GeeTest wall after ~5 successes per run, city-wide (see
+ * the connector's own module docstring, D-017). That means a realistic
+ * run rarely clears `MIN_HIGH_CONFIDENCE_SAMPLE_SIZE` (8) for any single
+ * property's size/location band — `"high"` confidence is reachable in
+ * principle but not in the data volume this connector can currently
+ * produce, and `"low"` (or, after the dispersion-gate widening above,
+ * `insufficient_data`) is the realistic outcome for most properties for
+ * the foreseeable future. This module correctly computes whatever
+ * comparables exist; it does not, by itself, mean "measured rental yield
+ * is now generally available" — see `milanuncios_rental.py`'s module
+ * docstring and D-015 for the connector-side honesty note, and issue #211
+ * (tracking a viable rental data source, referenced from both).
  *
  * Server-only: imports lib/db-write (the `pg` client), same reasoning as
  * area-price.ts — never import this from a client component.
@@ -119,6 +179,15 @@ export const SIZE_BAND_RATIO = 0.35;
 export const MIN_LOW_CONFIDENCE_SAMPLE_SIZE = 3;
 export const MIN_HIGH_CONFIDENCE_SAMPLE_SIZE = 8;
 export const MAX_HIGH_CONFIDENCE_RELATIVE_IQR = 0.6;
+/**
+ * Max age (days) of `listing.last_seen_at` for a rental comp to be used —
+ * see module docstring's "Recency" section for exactly what this bound
+ * does and doesn't guarantee. 30 days: rental turnover is measured in
+ * weeks, and this is a documented, tunable module constant (same
+ * convention as every other threshold here), not derived from a
+ * measurement — revisit once real rental-market turnover data exists.
+ */
+export const MAX_COMP_AGE_DAYS = 30;
 
 /**
  * `"high" | "low"` are the real comparable-count/dispersion tiers this
@@ -137,8 +206,16 @@ export interface MarketComparableRent {
   estimated_monthly_rent: number | null;
   /** Count of comparable rental listings actually used — always populated, even in the insufficient-data case (mirrors area-price.ts's sample_size convention). */
   comparable_count: number;
-  /** null exactly when comparable_count < MIN_LOW_CONFIDENCE_SAMPLE_SIZE. */
+  /** null when comparable_count < MIN_LOW_CONFIDENCE_SAMPLE_SIZE, OR (Opus review widening) when a 3-7 sample's dispersion exceeds MAX_HIGH_CONFIDENCE_RELATIVE_IQR — see module docstring's "Confidence" section. */
   confidence: "high" | "low" | null;
+  /**
+   * Age in days (floor) of the LEAST-recently-confirmed-present comp among
+   * those actually used — i.e. the worst-case bound on this estimate's
+   * freshness. Null exactly when comparable_count is 0. See module
+   * docstring's "Recency" section for precisely what this age does and
+   * doesn't guarantee (last_seen_at tracks presence, not price freshness).
+   */
+  oldest_comp_age_days: number | null;
 }
 
 export interface RentEstimateResult {
@@ -179,27 +256,69 @@ interface RawComparableRentRow {
   median_eur_per_m2_month: string | null;
   p25_eur_per_m2_month: string | null;
   p75_eur_per_m2_month: string | null;
+  /** Worst-case (largest) age in days among the comps used, as a float — see module docstring's "Recency" section. Null when sample_size is 0. */
+  max_age_days: string | null;
 }
 
+const INSUFFICIENT: MarketComparableRent = {
+  eur_per_m2_month: null,
+  estimated_monthly_rent: null,
+  comparable_count: 0,
+  confidence: null,
+  oldest_comp_age_days: null,
+};
+
 /**
- * Runs the size-banded, radius-bounded comparable-rent query for one
- * property. Pure DB read, no side effects — split out from `estimateRent`
- * so the SQL and its tiering logic are independently testable/reviewable,
- * same separation `area-price.ts` uses internally (one function, one job).
+ * Runs the size-banded, radius-bounded, recency-bounded comparable-rent
+ * query for one property. Pure DB read, no side effects — split out from
+ * `estimateRent` so the SQL and its tiering logic are independently
+ * testable/reviewable, same separation `area-price.ts` uses internally
+ * (one function, one job).
  */
 async function queryMarketComparableRent(
   property: { id: number; lat: number; lon: number; property_type: string; m2_built: number },
-  opts: { radiusKm?: number; sizeBandRatio?: number } = {},
+  opts: { radiusKm?: number; sizeBandRatio?: number; maxAgeDays?: number } = {},
 ): Promise<MarketComparableRent> {
   const radiusKm = opts.radiusKm ?? DEFAULT_RADIUS_KM;
   const sizeBandRatio = opts.sizeBandRatio ?? SIZE_BAND_RATIO;
+  const maxAgeDays = opts.maxAgeDays ?? MAX_COMP_AGE_DAYS;
 
   const rows = await sql<RawComparableRentRow>(
     `WITH comps AS (
-       SELECT p.id, p.m2_built,
-         (SELECT MIN(l.current_price) FROM listing l
-           WHERE l.property_id = p.id AND l.status = 'active' AND l.operation = 'rent') AS monthly_rent
+       -- LATERAL, one qualifying listing per property (Opus review
+       -- must-fix #4 + #3, PR #199): the original MIN(current_price)
+       -- subquery could pick a price with no way to also know THAT row's
+       -- last_seen_at, and had no price>0 or recency filter at all — a
+       -- "precio a consultar" ad (current_price=0, common — see
+       -- milanuncios.py's _to_decimal) silently dragged the median down
+       -- toward zero, and a listing.status='active' row from months ago
+       -- (the rental connector never withdraws — see module docstring)
+       -- counted as a live comp forever. A LATERAL join picks ONE row —
+       -- the cheapest qualifying listing per property — so current_price
+       -- and last_seen_at always come from the same physical row.
+       SELECT (cand.current_price / p.m2_built) AS eur_per_m2_month, cand.last_seen_at
        FROM property p
+       JOIN LATERAL (
+         SELECT l.current_price, l.last_seen_at
+         FROM listing l
+         WHERE l.property_id = p.id
+           AND l.status = 'active'
+           AND l.operation = 'rent'
+           -- current_price > 0 (must-fix #4): excludes "precio a
+           -- consultar" rows (current_price=0) from the aggregate
+           -- entirely, rather than letting a real Decimal("0") divide
+           -- into the median as if it were a genuine low rent.
+           AND l.current_price > 0
+           -- Recency bound (must-fix #3) — see module docstring's
+           -- "Recency" section for exactly what this does and doesn't
+           -- guarantee (last_seen_at tracks presence, not price
+           -- freshness). NULL last_seen_at (never discovered since
+           -- ingestion, shouldn't happen in practice but not assumed)
+           -- fails this comparison and is correctly excluded.
+           AND l.last_seen_at >= NOW() - ($8 * INTERVAL '1 day')
+         ORDER BY l.current_price ASC
+         LIMIT 1
+       ) cand ON true
        WHERE p.id <> $1
          AND p.property_type = $4
          AND p.lat IS NOT NULL AND p.lon IS NOT NULL
@@ -222,21 +341,14 @@ async function queryMarketComparableRent(
                cos(radians(p.lon) - radians($3)) +
                sin(radians($2)) * sin(radians(p.lat))
              )))) <= $7
-         AND EXISTS (
-           SELECT 1 FROM listing l2
-           WHERE l2.property_id = p.id AND l2.status = 'active' AND l2.operation = 'rent'
-         )
-     ),
-     valid_comps AS (
-       SELECT (monthly_rent / m2_built) AS eur_per_m2_month
-       FROM comps
-       WHERE monthly_rent IS NOT NULL
      )
      SELECT
-       (SELECT COUNT(*) FROM valid_comps)::text AS sample_size,
-       (SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY eur_per_m2_month) FROM valid_comps)::text AS median_eur_per_m2_month,
-       (SELECT PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY eur_per_m2_month) FROM valid_comps)::text AS p25_eur_per_m2_month,
-       (SELECT PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY eur_per_m2_month) FROM valid_comps)::text AS p75_eur_per_m2_month`,
+       COUNT(*)::text AS sample_size,
+       (PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY eur_per_m2_month))::text AS median_eur_per_m2_month,
+       (PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY eur_per_m2_month))::text AS p25_eur_per_m2_month,
+       (PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY eur_per_m2_month))::text AS p75_eur_per_m2_month,
+       (MAX(EXTRACT(EPOCH FROM (NOW() - last_seen_at)) / 86400.0))::text AS max_age_days
+     FROM comps`,
     [
       property.id,
       property.lat,
@@ -245,34 +357,54 @@ async function queryMarketComparableRent(
       property.m2_built * (1 - sizeBandRatio),
       property.m2_built * (1 + sizeBandRatio),
       radiusKm,
+      maxAgeDays,
     ],
   );
 
   const row = rows[0];
   const sampleSize = Number(row.sample_size);
+  const oldestCompAgeDays = row.max_age_days !== null ? Math.floor(Number(row.max_age_days)) : null;
 
   if (sampleSize < MIN_LOW_CONFIDENCE_SAMPLE_SIZE) {
-    return { eur_per_m2_month: null, estimated_monthly_rent: null, comparable_count: sampleSize, confidence: null };
+    return { ...INSUFFICIENT, comparable_count: sampleSize, oldest_comp_age_days: oldestCompAgeDays };
   }
 
   const median = Number(row.median_eur_per_m2_month);
   const p25 = Number(row.p25_eur_per_m2_month);
   const p75 = Number(row.p75_eur_per_m2_month);
-  // median > 0 is guaranteed here: every valid_comps row divides a
-  // positive current_price by a positive m2_built (both gated above), so
-  // eur_per_m2_month > 0 for every row and therefore so is its median.
-  const relativeIqr = (p75 - p25) / median;
 
+  // Defensive median > 0 guard (Opus review must-fix #4, belt-and-braces
+  // on top of the query's own current_price > 0 filter): every comp now
+  // divides a positive current_price by a positive m2_built, so median
+  // should always be > 0 in practice — but yield.ts's gate downstream only
+  // checks `=== null`, so a 0 (or NaN from an unexpected empty-string
+  // parse) sliding through here would render a fabricated "0,0 %" yield
+  // labelled "estimado" instead of the honest insufficient-data state.
+  if (!(median > 0)) {
+    return { ...INSUFFICIENT, comparable_count: sampleSize, oldest_comp_age_days: oldestCompAgeDays };
+  }
+
+  const relativeIqr = (p75 - p25) / median;
   const meetsHighCount = sampleSize >= MIN_HIGH_CONFIDENCE_SAMPLE_SIZE;
-  // Dispersion can only ever demote high -> low, never promote a small
-  // sample or turn a real sample into insufficient (see module docstring).
-  const confidence: "high" | "low" = meetsHighCount && relativeIqr <= MAX_HIGH_CONFIDENCE_RELATIVE_IQR ? "high" : "low";
+  const dispersionOk = relativeIqr <= MAX_HIGH_CONFIDENCE_RELATIVE_IQR;
+
+  // Dispersion gate applies at every tier (Opus review widening — see
+  // module docstring's "Confidence" section for the [5,10,30] example this
+  // fixes). An 8+ sample failing dispersion demotes high -> low (original
+  // behaviour). A 3-7 sample failing dispersion has no lower tier to
+  // demote INTO, so it demotes past "low" entirely, to insufficient_data.
+  if (!dispersionOk && !meetsHighCount) {
+    return { ...INSUFFICIENT, comparable_count: sampleSize, oldest_comp_age_days: oldestCompAgeDays };
+  }
+
+  const confidence: "high" | "low" = meetsHighCount && dispersionOk ? "high" : "low";
 
   return {
     eur_per_m2_month: median,
     estimated_monthly_rent: median * property.m2_built,
     comparable_count: sampleSize,
     confidence,
+    oldest_comp_age_days: oldestCompAgeDays,
   };
 }
 

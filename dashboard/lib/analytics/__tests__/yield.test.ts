@@ -33,7 +33,7 @@ const NO_ASSUMPTION: RentEstimateResult = {
   method: "insufficient_data",
   eur_per_m2_month_used: null,
   m2_used: null,
-  market_comparable: { eur_per_m2_month: null, estimated_monthly_rent: null, comparable_count: 0, confidence: null },
+  market_comparable: { eur_per_m2_month: null, estimated_monthly_rent: null, comparable_count: 0, confidence: null, oldest_comp_age_days: null },
   assumption_monthly_rent: null,
   disagreement_pct: null,
 };

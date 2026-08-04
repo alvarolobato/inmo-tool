@@ -198,7 +198,9 @@ function MarketComparableBlock({ rent }: { rent: InvestmentMetrics["rent_estimat
       style={{ fontSize: 12, color: isWarning ? "var(--danger, #ff9b9b)" : "var(--fg-subtle)", margin: "4px 0 0" }}
     >
       Comparables de mercado ({fmtInt(market.comparable_count)} anuncios de alquiler,{" "}
-      {market.confidence === "high" ? "alta confianza" : "confianza baja"}): {fmtEUR2(market.eur_per_m2_month!)}
+      {market.confidence === "high" ? "alta confianza" : "confianza baja"}
+      {market.oldest_comp_age_days !== null ? `, vistos hace hasta ${fmtInt(market.oldest_comp_age_days)} días` : ""}
+      ): {fmtEUR2(market.eur_per_m2_month!)}
       /m²/mes → {fmtEUR0(market.estimated_monthly_rent)}/mes.{" "}
       {disagreement !== null &&
         (disagreement > 0
@@ -266,6 +268,19 @@ export function YieldSection({ metrics }: { metrics: InvestmentMetrics }) {
   const assumptions = yieldResult.assumptions_used;
   const acquisition = assumptions.acquisition_costs;
   const isMarketPrimary = rent.method === "market_comparable_high" || rent.method === "market_comparable_low";
+  /**
+   * Opus review must-fix #5 (PR #199): MarketComparableBlock renders null
+   * exactly when the market estimate IS primary (see its own comment) —
+   * before this fix, that was the ONE case where the sample size backing
+   * the yield never appeared anywhere on the page ("(3 anuncios de
+   * alquiler, confianza baja)" only ever showed up as a SECONDARY line,
+   * next to a profile assumption). A yield derived from N rental ads must
+   * say N on the page regardless of whether it's primary or secondary.
+   */
+  const primaryRentLabel = isMarketPrimary
+    ? `Alquiler estimado (${fmtInt(rent.comparable_count)} comparables de mercado)`
+    : "Alquiler estimado (asunción del perfil)";
+  const primaryOldestAgeDays = isMarketPrimary ? rent.market_comparable?.oldest_comp_age_days ?? null : null;
 
   return (
     <div data-testid="yield-section-content" style={{ opacity: muted ? 0.85 : 1 }}>
@@ -298,13 +313,25 @@ export function YieldSection({ metrics }: { metrics: InvestmentMetrics }) {
               Issue #31: the label itself now distinguishes an assumption
               from a measured comparable — same underlying row shape,
               different source. */}
-          {isMarketPrimary ? "Alquiler estimado (comparables de mercado)" : "Alquiler estimado (asunción del perfil)"} (
+          {primaryRentLabel} (
           {fmtEUR2(rent.eur_per_m2_month_used ?? 0)}/m²/mes × {fmtInt(rent.m2_used ?? 0)} m²)
         </span>
         <span data-testid="estimated-rent" style={{ color: "var(--fg)" }}>
           {fmtEUR0(rent.estimated_monthly_rent!)}/mes <EstimateBadge />
         </span>
       </div>
+      {/* Recency (issue #31 Opus review must-fix #3): the comps' worst-case
+          age, surfaced right where the primary figure they back is shown —
+          see rent-estimate.ts's module docstring "Recency" section for
+          exactly what this age does and doesn't guarantee (last_seen_at
+          tracks presence, not price freshness). Only shown when the market
+          estimate is primary — a profile assumption has no comp age. */}
+      {isMarketPrimary && primaryOldestAgeDays !== null && (
+        <p data-testid="market-comparable-age" style={{ fontSize: 11, color: "var(--fg-subtle)", margin: "2px 0 0" }}>
+          Comparables vistos por última vez hace hasta {fmtInt(primaryOldestAgeDays)}{" "}
+          {primaryOldestAgeDays === 1 ? "día" : "días"}.
+        </p>
+      )}
 
       <MarketComparableBlock rent={rent} />
 

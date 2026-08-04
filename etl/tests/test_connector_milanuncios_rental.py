@@ -44,16 +44,29 @@ def test_milanuncios_rental_has_its_own_source_name():
     assert MilanunciosRentalConnector.name != MilanunciosConnector.name
 
 
-def test_milanuncios_rental_rate_limit_is_half_the_sale_connectors():
+def test_milanuncios_rental_rate_limit_stays_below_the_sale_connectors():
     """Mutation check for the module docstring's stated rate-limit
     reasoning — both connectors share Milanuncios' cumulative anti-bot
-    budget, so the rental connector's own limit must stay strictly below
-    the sale connector's, not accidentally equal or higher."""
+    budget with INDEPENDENT limiters, so the rental connector's own limit
+    must stay strictly below the sale connector's, not accidentally equal
+    or higher.
+
+    Opus review (PR #199): this used to assert `== 10` ("half of the sale
+    connector's 20"), written before #179/#205 measured the sale
+    connector down to `rate_limit_per_minute = 2` (D-017) — at which point
+    `10` silently became FIVE TIMES the only Milanuncios rate D-017's live
+    measurement ever found non-catastrophic, not half of anything real.
+    The relative assertion (`<` the sale connector, whatever that
+    currently is) is what actually encodes the intended invariant; the
+    absolute `== 1` pins today's smallest-integer-below-2 value so a
+    future accidental bump is still caught even if MilanunciosConnector's
+    own rate ever changes again.
+    """
     assert (
         MilanunciosRentalConnector.rate_limit_per_minute
         < MilanunciosConnector.rate_limit_per_minute
     )
-    assert MilanunciosRentalConnector.rate_limit_per_minute == 10
+    assert MilanunciosRentalConnector.rate_limit_per_minute == 1
 
 
 def test_milanuncios_rental_does_not_claim_full_inventory_coverage():
@@ -185,3 +198,67 @@ class TestFetchDetailAndNormalizeInherited:
             raw = connector.fetch_detail("549058037", throttle=lambda: None)
         canonical = connector.normalize(raw)
         assert canonical.operation != "sale"
+
+
+class TestDisabledByDefault:
+    """Opus review must-fix (PR #199): this connector shares its domain/IP
+    anti-bot budget with `MilanunciosConnector` — the core product's sale
+    connector — via independent, uncoordinated rate limiters (see module
+    docstring's "Disabled by default" section). It relies on the SAME
+    generic born-disabled mechanism every connector gets
+    (`sync_connector_registry`, issue #100,
+    `test_connector_registry_sync.py::test_new_connector_is_seeded_disabled_and_ingests_nothing`)
+    rather than inventing a connector-specific one — this test proves that
+    generic protection genuinely covers THIS connector by exercising the
+    real class end to end, rather than trusting a DummyConnector stand-in
+    generalizes to it.
+    """
+
+    def test_milanuncios_rental_is_seeded_disabled_by_default(self, pg_conn):
+        from etl import orchestrator
+
+        schema_sql = (Path(__file__).parent.parent / "schema" / "init.sql").read_text(
+            encoding="utf-8"
+        )
+        with pg_conn.cursor() as cur:
+            cur.execute(schema_sql)
+        pg_conn.commit()
+
+        connector = MilanunciosRentalConnector()
+        original = list(orchestrator.CONNECTORS)
+        try:
+            orchestrator.CONNECTORS[:] = [connector]
+            orchestrator.sync_connector_registry(pg_conn)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT enabled FROM connector_config WHERE connector_name = %s",
+                    (connector.name,),
+                )
+                row = cur.fetchone()
+            assert row is not None, "sync must seed an explicit config row"
+            assert row[0] is False, (
+                "milanuncios_rental must start disabled — it competes with "
+                "the sale connector's anti-bot budget and must be an "
+                "explicit operator opt-in, not an accidental default-on"
+            )
+
+            scopes, enabled, _ = orchestrator._scopes_for_connector(
+                pg_conn,
+                connector.name,
+                [ConnectorScope(center=(40.4168, -3.7038), radius_km=10)],
+            )
+            assert enabled is False
+            assert scopes == []
+        finally:
+            orchestrator.CONNECTORS[:] = original
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM connector_registry WHERE connector_name = %s",
+                    (connector.name,),
+                )
+                cur.execute(
+                    "DELETE FROM connector_config WHERE connector_name = %s",
+                    (connector.name,),
+                )
+            pg_conn.commit()

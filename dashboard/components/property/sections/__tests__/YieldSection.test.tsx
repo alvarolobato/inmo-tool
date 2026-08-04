@@ -110,7 +110,7 @@ describe("YieldSection", () => {
         method: "insufficient_data",
         eur_per_m2_month_used: null,
         m2_used: null,
-        market_comparable: { eur_per_m2_month: null, estimated_monthly_rent: null, comparable_count: 2, confidence: null },
+        market_comparable: { eur_per_m2_month: null, estimated_monthly_rent: null, comparable_count: 2, confidence: null, oldest_comp_age_days: 5 },
         assumption_monthly_rent: null,
         disagreement_pct: null,
       },
@@ -174,7 +174,7 @@ describe("YieldSection", () => {
         method: "market_comparable_high",
         eur_per_m2_month_used: 10,
         m2_used: 80,
-        market_comparable: { eur_per_m2_month: 10, estimated_monthly_rent: 800, comparable_count: 8, confidence: "high" },
+        market_comparable: { eur_per_m2_month: 10, estimated_monthly_rent: 800, comparable_count: 8, confidence: "high", oldest_comp_age_days: 12 },
         assumption_monthly_rent: null,
         disagreement_pct: null,
       },
@@ -187,6 +187,14 @@ describe("YieldSection", () => {
     // The market comparable IS the primary row here — no separate
     // secondary "market comparison" line duplicating it.
     expect(screen.queryByTestId("market-comparable-comparison")).toBeNull();
+    // Opus review must-fix #5 (PR #199): when the market estimate IS the
+    // primary figure, MarketComparableBlock renders null (see above), so
+    // this was previously the ONE case where the sample size backing the
+    // yield never appeared anywhere on the page. The primary row itself
+    // must now say "8" (comparable_count), not just show a confidence
+    // badge with no number behind it.
+    const primaryRow = screen.getByTestId("estimated-rent").closest("div");
+    expect(primaryRow?.textContent).toMatch(/8\s*comparables/i);
   });
 
   it("shows both figures and a disagreement warning when the profile's assumption and the market comparable disagree materially", () => {
@@ -198,7 +206,7 @@ describe("YieldSection", () => {
         method: "profile_assumption",
         eur_per_m2_month_used: 12,
         m2_used: 80,
-        market_comparable: { eur_per_m2_month: 10, estimated_monthly_rent: 800, comparable_count: 8, confidence: "high" },
+        market_comparable: { eur_per_m2_month: 10, estimated_monthly_rent: 800, comparable_count: 8, confidence: "high", oldest_comp_age_days: 3 },
         assumption_monthly_rent: 960,
         disagreement_pct: 0.2, // (960-800)/800
       },
@@ -217,7 +225,7 @@ describe("YieldSection", () => {
     const metrics = baseMetrics({
       rent_estimate: {
         ...baseMetrics().rent_estimate,
-        market_comparable: { eur_per_m2_month: 9.8, estimated_monthly_rent: 784, comparable_count: 8, confidence: "high" },
+        market_comparable: { eur_per_m2_month: 9.8, estimated_monthly_rent: 784, comparable_count: 8, confidence: "high", oldest_comp_age_days: 3 },
         disagreement_pct: (800 - 784) / 784, // ~2%, well under the 15% threshold
       },
     });
