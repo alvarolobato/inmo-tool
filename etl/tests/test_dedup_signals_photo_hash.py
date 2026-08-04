@@ -314,6 +314,189 @@ class TestNonImageUrlFiltering:
         assert int(result[0] - _hash(room)) <= photo_hash._HASH_HAMMING_THRESHOLD
 
 
+class TestRuleParameterCdnPattern:
+    """Issue #206: encodes the real Milanuncios CDN behaviour discovered
+    live (2026-08-04, evidence in the PR description) as an offline,
+    network-free regression test — a fake `requests.get` that reproduces
+    exactly the confirmed contract (404 "Rule parameter not Found" without
+    a `?rule=` query param, 200 with one) rather than merely asserting
+    against a canned response. This is the pattern the connector fix
+    (`etl/connectors/milanuncios.py::normalize`'s `_to_photo_url`) exists
+    to satisfy — see that module for the live curl evidence.
+    """
+
+    @staticmethod
+    def _fake_milanuncios_cdn(image):
+        """A `requests.get` stand-in for images.milanuncios.com/api/v1/
+        ma-ad-media-pro/... : 404s any URL without a `rule` query param,
+        200s (with a real image) otherwise. Mirrors the live response body
+        ("404 Rule parameter not Found") closely enough to exercise
+        `raise_for_status()` the same way the real `requests.HTTPError`
+        does."""
+
+        class _FakeResponse:
+            def __init__(self, ok: bool):
+                self._ok = ok
+                if ok:
+                    buffer = io.BytesIO()
+                    image.convert("RGB").save(buffer, "JPEG")
+                    buffer.seek(0)
+                    self.raw = buffer
+                    self.raw.decode_content = True
+
+            def raise_for_status(self):
+                if not self._ok:
+                    import requests as _requests
+
+                    raise _requests.exceptions.HTTPError(
+                        "404 Client Error: Rule parameter not Found"
+                    )
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def _fake_get(url, **kwargs):
+            has_rule = "rule=" in url.split("?", 1)[1] if "?" in url else False
+            return _FakeResponse(ok=has_rule)
+
+        return _fake_get
+
+    def test_bare_url_without_rule_param_fails_exactly_like_production(
+        self, monkeypatch
+    ):
+        """Pins the actual reported symptom: a bare `ad.images` URL (the
+        pre-fix shape) fails against this CDN."""
+        monkeypatch.setattr(
+            photo_hash.requests, "get", self._fake_milanuncios_cdn(_synthetic_room(1))
+        )
+        bare_url = (
+            "https://images.milanuncios.com/api/v1/ma-ad-media-pro/"
+            "images/d2b83929-0000-0000-0000-000000000000"
+        )
+        result = photo_hash.fetch_hashes((bare_url,), source="milanuncios")
+        assert result == []
+
+    def test_connector_normalized_url_succeeds_against_the_same_cdn(self, monkeypatch):
+        """The connector's fix (appending `?rule=detail_640x480`) produces
+        a URL this same simulated CDN accepts — i.e. the fix in
+        milanuncios.py and the CDN contract this test encodes actually
+        line up, not just each in isolation."""
+        from etl.connectors.base import RawListing
+        from etl.connectors.milanuncios import MilanunciosConnector
+
+        monkeypatch.setattr(
+            photo_hash.requests, "get", self._fake_milanuncios_cdn(_synthetic_room(1))
+        )
+        raw = RawListing(
+            external_id="1",
+            source="milanuncios",
+            raw={
+                "url": "https://www.milanuncios.com/x",
+                "props": {
+                    "ad": {
+                        "images": [
+                            (
+                                "images.milanuncios.com/api/v1/ma-ad-media-pro/"
+                                "images/d2b83929-0000-0000-0000-000000000000"
+                            )
+                        ]
+                    }
+                },
+            },
+        )
+        canonical = MilanunciosConnector().normalize(raw)
+        result = photo_hash.fetch_hashes(canonical.photo_urls, source="milanuncios")
+        assert len(result) == 1
+
+
+class TestAggregatedFailureLogging:
+    """Issue #206: a failed hash used to log its own WARNING per photo —
+    dozens of near-identical lines per run for one systemic CDN failure.
+    Individual failures now log at DEBUG; one aggregated WARNING per
+    `fetch_hashes` call (i.e. per listing) reports the count.
+    """
+
+    def _fake_get_always_fails(self, url, **kwargs):
+        raise ConnectionError("simulated network failure")
+
+    def test_multiple_failures_produce_one_warning_not_one_per_photo(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(photo_hash.requests, "get", self._fake_get_always_fails)
+        urls = tuple(f"https://cdn.example.com/p{i}.jpg" for i in range(5))
+        with caplog.at_level("DEBUG", logger="etl.dedup.signals.photo_hash"):
+            result = photo_hash.fetch_hashes(urls, source="testsource")
+        assert result == []
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        debugs = [r for r in caplog.records if r.levelname == "DEBUG"]
+        assert len(warnings) == 1, (
+            f"expected exactly one aggregated WARNING for 5 failures, got "
+            f"{len(warnings)}: {[w.message for w in warnings]}"
+        )
+        assert "5/5" in warnings[0].message
+        assert "testsource" in warnings[0].message
+        # The individual per-URL failures are still traceable, just at a
+        # quieter level — not silently dropped.
+        assert len(debugs) == 5
+
+    def test_no_failures_means_no_warning(self, monkeypatch, caplog):
+        room = _synthetic_room(1)
+
+        class _FakeResponse:
+            def __init__(self):
+                buffer = io.BytesIO()
+                room.convert("RGB").save(buffer, "JPEG")
+                buffer.seek(0)
+                self.raw = buffer
+                self.raw.decode_content = True
+
+            def raise_for_status(self):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        monkeypatch.setattr(
+            photo_hash.requests, "get", lambda url, **kwargs: _FakeResponse()
+        )
+        with caplog.at_level("DEBUG", logger="etl.dedup.signals.photo_hash"):
+            result = photo_hash.fetch_hashes(
+                ("https://cdn.example.com/ok.jpg",), source="testsource"
+            )
+        assert len(result) == 1
+        assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+
+
+class TestAttemptablePhotoCount:
+    """Issue #206: the dedup engine's per-source health tracking needs to
+    know how many URLs `fetch_hashes` will actually try, excluding the
+    video/tour links `_looks_like_photo_url` filters out before any
+    network call — otherwise a listing with photos + video links would
+    make a perfectly healthy source look partially degraded."""
+
+    def test_counts_only_urls_fetch_hashes_would_attempt(self):
+        urls = (
+            "https://cdn.example.com/real1.jpg",
+            "https://www.youtube.com/watch?v=abc",
+            "https://cdn.example.com/real2.jpg",
+            "https://vimeo.com/12345",
+        )
+        assert photo_hash.attemptable_photo_count(urls) == 2
+
+    def test_zero_for_an_all_video_photo_set(self):
+        urls = ("https://youtu.be/abc", "https://vimeo.com/123")
+        assert photo_hash.attemptable_photo_count(urls) == 0
+
+    def test_zero_for_an_empty_tuple(self):
+        assert photo_hash.attemptable_photo_count(()) == 0
+
+
 class TestConfidenceScaling:
     def test_floor_ratio_maps_to_the_floor_confidence(self):
         assert (

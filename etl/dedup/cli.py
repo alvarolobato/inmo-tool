@@ -38,6 +38,25 @@ def _cmd_run(conn) -> int:
             f"{result.same_source_cadastral_collisions} shared a "
             f"cadastral_ref (data-quality flag, see logs)."
         )
+    if result.photo_hash_zero_success_sources:
+        # Issue #206: a source whose photos never hash is otherwise
+        # invisible — match_ratio is only computed over successfully-
+        # hashed photos, so this source contributes no photo evidence to
+        # any pair it's in, and every such pair looks identical to "no
+        # match found" rather than "couldn't check". Surfaced here (like
+        # same_source_skipped above) so `ps dedup run` stays the one place
+        # an operator sees it, not just a per-run WARNING in the logs.
+        parts = ", ".join(
+            f"{source} (0/{attempted})"
+            for source, attempted in sorted(
+                result.photo_hash_zero_success_sources.items()
+            )
+        )
+        print(
+            f"WARNING: 0% photo-hash success this run for: {parts} — "
+            f"photo_hash contributes no evidence for pairs involving "
+            f"these sources (issue #206)."
+        )
     return 0
 
 
