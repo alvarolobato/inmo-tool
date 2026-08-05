@@ -325,6 +325,35 @@ describe("flagsFromAssessments (#152 review, must-fix 1 and 3)", () => {
     ]);
   });
 
+  it("refines the `a_reformar` badge with renovation severity when present (#313)", () => {
+    expect(
+      flagsFromAssessments([assessmentRow(1, { condition: "a_reformar", renovation_severity: "integral" })]),
+    ).toEqual([{ kind: "condition:a_reformar:integral", label: "A reformar (integral)", tone: "neutral" }]);
+    expect(
+      flagsFromAssessments([assessmentRow(1, { condition: "a_reformar", renovation_severity: "leve" })]),
+    ).toEqual([{ kind: "condition:a_reformar:leve", label: "A reformar (leve)", tone: "neutral" }]);
+  });
+
+  it("keeps the plain `a_reformar` badge for ungraded/absent severity — backward compatible with pre-#313 rows", () => {
+    // A row written before #313 has no renovation_severity field; `unknown`
+    // (needs work, depth ungraded) and a stray null carry no extra info. All
+    // three must render exactly the pre-#313 badge, kind included.
+    const plain = { kind: "condition:a_reformar", label: "A reformar", tone: "neutral" };
+    expect(flagsFromAssessments([assessmentRow(1, { condition: "a_reformar" })])).toEqual([plain]);
+    expect(
+      flagsFromAssessments([assessmentRow(1, { condition: "a_reformar", renovation_severity: "unknown" })]),
+    ).toEqual([plain]);
+    expect(
+      flagsFromAssessments([assessmentRow(1, { condition: "a_reformar", renovation_severity: null })]),
+    ).toEqual([plain]);
+  });
+
+  it("does not refine obra_nueva with a stray severity value (#313 — refinement is scoped to a_reformar)", () => {
+    expect(
+      flagsFromAssessments([assessmentRow(1, { condition: "obra_nueva", renovation_severity: "integral" })]),
+    ).toEqual([{ kind: "condition:obra_nueva", label: "Obra nueva", tone: "neutral" }]);
+  });
+
   it("gives no badge to the unremarkable condition default or the no-info value (#26)", () => {
     // Same rule as occupancy's `pleno_dominio`: the ordinary/default case and
     // "we don't know" are not findings, so neither gets a badge.

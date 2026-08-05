@@ -268,13 +268,17 @@ describe.runIf(dbAvailable)("assessment cache — real Postgres round trip", () 
       const freshRead = await getLatestAssessment(propertyId, "condition", CONDITION_PROMPT_VERSION);
       expect(freshRead?.stale).toBe(false);
 
-      // THE ACTUAL SKEW THIS FIXES: the prompt bumps to v2 (the module
-      // constant a real flow would now use as "current"), but nobody has
-      // recomputed under v2 yet — only the v1 row exists. The pre-#30
+      // THE ACTUAL SKEW THIS FIXES: the prompt bumps to a newer version (the
+      // module constant a real flow would now use as "current"), but nobody
+      // has recomputed under it yet — only the current row exists. The pre-#30
       // behaviour filtered strictly by the current version, so this would
       // find NOTHING and 404 even though a real (now-stale) verdict exists.
-      // getLatestAssessment must still find the v1 row, marked stale.
-      const beforeRecompute = await getLatestAssessment(propertyId, "condition", "condition/v2");
+      // getLatestAssessment must still find the existing row, marked stale.
+      // `-next` is derived from the constant so this stays correct across real
+      // prompt-version bumps (e.g. #313's v1 -> v2), rather than hardcoding a
+      // literal that eventually collides with CONDITION_PROMPT_VERSION.
+      const bumpedVersion = `${CONDITION_PROMPT_VERSION}-next`;
+      const beforeRecompute = await getLatestAssessment(propertyId, "condition", bumpedVersion);
       expect(beforeRecompute).not.toBeNull();
       expect(beforeRecompute?.prompt_version).toBe(CONDITION_PROMPT_VERSION);
       expect(beforeRecompute?.stale).toBe(true);
@@ -282,7 +286,6 @@ describe.runIf(dbAvailable)("assessment cache — real Postgres round trip", () 
       // Simulate a prompt bump: caller now asks with a newer version string,
       // and its own save() writes that same new version (real usage: both
       // come from the SAME flow constant, e.g. CONDITION_PROMPT_VERSION).
-      const bumpedVersion = "condition/v2";
       const afterBump = await getOrCompute(
         propertyId,
         "condition",

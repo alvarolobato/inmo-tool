@@ -67,6 +67,7 @@
 | [D-007](docs/decisions/D-007-empty-knowledge-corpus-kept.md) | Keep `lib/knowledge.ts`/`scripts/build-knowledge.ts` (real call sites, intentionally empty pending Phase 4/#5). Test the empty-corpus shape contract, don't delete the machinery or invent placeholder content. |
 | [D-012](docs/decisions/D-012-derived-price-signal-in-cache.md) | occupancy/redflags see a bucketed zone-median price comparison (never raw price); the exact string rendered must also be the exact `extraHashInput` passed to `getOrCompute`. |
 | [D-052](docs/decisions/D-052-assessment-auto-trigger-dashboard-side.md) | The AI-assessment auto-trigger is a dashboard-side in-process scheduled pass (`ai-assessment/{batch,scheduler}.ts`, started from `instrumentation.ts`), NOT an ETL hook — bounded N-oldest-unassessed per tick, skips current-prompt-version verdicts, stops cleanly on budget/circuit errors. Configured via `dashboard.assessment_*`. |
+| [D-056](docs/decisions/D-056-renovation-severity-subaxis.md) | Renovation depth is an ADDITIVE `renovation_severity` field (`leve`/`integral`/`unknown`/`null`) on the condition result, meaningful only for `a_reformar` (else `null`) — never a wider `condition` enum. `unknown` degrades, never guesses. Bump `CONDITION_PROMPT_VERSION` (v1→v2) to re-trigger #308's scheduler. Badge refines only leve/integral; pre-severity rows unchanged. |
 
 ## Product
 

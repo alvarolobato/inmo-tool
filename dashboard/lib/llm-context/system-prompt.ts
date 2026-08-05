@@ -560,6 +560,21 @@ defecto — nunca omitas una clave):
  * was fixed up". A finer split (recently-renovated-with-premium-finishes vs.
  * generic-move-in-ready) would need a 5th value; noted on issue #26 for the
  * owner if that granularity turns out to matter for scoring later.
+ *
+ * ## `renovation_severity` sub-axis on `a_reformar` (#313, D-056)
+ *
+ * The base 4-value enum stays flat, but `a_reformar` now also carries a
+ * `renovation_severity` grading the DEPTH of work — `leve` (cosmetic) vs
+ * `integral` (structural/whole-systems) vs `unknown` (needs work, text can't
+ * grade it). This is what unblocks #45's refurb cost bands: light and heavy
+ * reform sit in the same category but map to very different money. It is a
+ * prompt/parsing split off the SAME evidence the base verdict already
+ * requires — NOT a second speculative pass — so the same "cite it or don't
+ * assert it" discipline applies (see `parseRenovationSeverity` in
+ * `lib/ai-assessment/condition.ts`, which degrades an ungradeable
+ * `a_reformar` to `unknown` rather than guessing). The field is only
+ * meaningful for `a_reformar`; the parser forces it to `null` for every other
+ * verdict, so `reformado`/`obra_nueva`/`unclear` are unchanged.
  */
 export function buildConditionPrompt(vars: FlowVars): {
   stable: string;
@@ -588,10 +603,34 @@ reformó por última vez?":
   pendiente, no la fecha de la última reforma.
 - \`a_reformar\` — necesita reforma, de cualquier calibre, para ser habitable
   o competitivo: instalaciones antiguas, baño/cocina a renovar, humedades,
-  reforma integral o estructural. No distingas cosmético de estructural en la
-  categoría — usa \`issues\` para eso.
+  reforma integral o estructural.
 - \`unclear\` — el anuncio no da información suficiente para decidir si
   necesita obra o no (ni lo dice ni da pistas indirectas de un lado u otro).
+
+### Calibre de la reforma (\`renovation_severity\`) — SOLO si \`condition\` es \`a_reformar\`
+
+Cuando —y solo cuando— la categoría es \`a_reformar\`, gradúa la PROFUNDIDAD de
+la obra en \`renovation_severity\`. Esto alimenta la estimación de coste de
+reforma (comprar-y-reformar): "repintar y cambiar la cocina" y "reforma
+estructural completa" caen ambas en \`a_reformar\` pero cuestan cosas muy
+distintas.
+- \`leve\` — reforma cosmética/ligera: pintura, actualizar cocina o baño,
+  suelos, carpintería, acabados. Sin obra estructural ni de instalaciones
+  completas ("a reformar, actualizar cocina y baño", "para dar un lavado de
+  cara", "cambiar suelos").
+- \`integral\` — reforma pesada/estructural: "reforma integral", menciones
+  estructurales, varias instalaciones a cambiar (eléctrica + fontanería + …),
+  dejar el piso en bruto, "para reformar integralmente", "necesita reforma
+  completa".
+- \`unknown\` — es \`a_reformar\` pero el texto no dice lo suficiente para
+  graduar el calibre. Igual que con la categoría: no lo adivines. Si solo
+  sabes que "hay que reformar" sin pistas de cuánto, usa \`unknown\`.
+
+Aplica la MISMA disciplina de evidencia que a la categoría: gradúa el calibre
+a partir de lo que el anuncio dice de verdad (la misma cita que sostiene el
+veredicto sirve aquí), nunca de una suposición. Para cualquier otra categoría
+(\`reformado\`, \`obra_nueva\`, \`unclear\`) NO emitas \`renovation_severity\`
+o ponlo a \`null\` — no aplica.
 
 **El silencio NO es prueba de \`reformado\`.** Que un anuncio no mencione el
 estado es lo más habitual del mundo, y no hay ninguna convención de mercado
@@ -624,12 +663,15 @@ se explicó arriba.
 Formato de salida:
 {
   "condition": "obra_nueva" | "reformado" | "a_reformar" | "unclear",
+  "renovation_severity": "leve" | "integral" | "unknown" | null,
   "confidence": 0.0-1.0,
   "issues": ["problemas concretos citados: humedades, instalación eléctrica antigua, necesita baño nuevo, …"],
   "evidence": "cita literal del anuncio, o \\"\\" si no hay",
   "evidence_source": "portal del que sale la cita (p. ej. \\"fotocasa\\"), o null",
   "reasoning": "una o dos frases en español"
-}`;
+}
+(\`renovation_severity\` solo tiene sentido si \`condition\` es \`a_reformar\`;
+en el resto de casos, \`null\`.)`;
 
   return { stable, volatile: propertyVolatile(vars) };
 }

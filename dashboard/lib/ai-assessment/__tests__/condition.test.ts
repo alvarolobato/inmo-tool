@@ -214,7 +214,133 @@ describe("parseConditionResult", () => {
 
 describe("prompt version", () => {
   it("is pinned, so a prompt change forces a new row rather than overwriting", () => {
-    expect(CONDITION_PROMPT_VERSION).toBe("condition/v1");
+    // #313 bumped v1 -> v2 when the renovation_severity sub-axis landed, so
+    // #308's batch scheduler re-assesses pre-severity `a_reformar` rows rather
+    // than reading them back stale. The bump IS the re-assessment trigger.
+    expect(CONDITION_PROMPT_VERSION).toBe("condition/v2");
+  });
+});
+
+describe("condition prompt — renovation_severity sub-axis (#313)", () => {
+  it("asks for renovation_severity only when the verdict is `a_reformar`", () => {
+    const text = conditionPromptText([REFORM_NEEDED_ADVERT]);
+    expect(text).toContain("renovation_severity");
+    // Both graded values must be offered so the model can distinguish depth.
+    expect(text).toContain("leve");
+    expect(text).toContain("integral");
+    // Scoped to a_reformar, not a fifth top-level category.
+    expect(text.toLowerCase()).toContain("solo si");
+  });
+
+  it("carries the leve-vs-integral cue language the split keys off", () => {
+    const text = conditionPromptText([REFORM_NEEDED_ADVERT]).toLowerCase();
+    expect(text).toContain("cosmética");
+    expect(text).toContain("estructural");
+  });
+
+  it("offers `null` for renovation_severity in the output schema (non-a_reformar case)", () => {
+    const text = conditionPromptText([REFORM_NEEDED_ADVERT]);
+    expect(text).toMatch(/"renovation_severity":\s*"leve" \| "integral" \| "unknown" \| null/);
+  });
+});
+
+describe("parseConditionResult — renovation_severity (#313, EC-1)", () => {
+  it("structural-renovation language yields `a_reformar` + `integral`", () => {
+    const r = parseConditionResult(
+      JSON.stringify({
+        condition: "a_reformar",
+        renovation_severity: "integral",
+        confidence: 0.8,
+        evidence: "para reformar integralmente, necesita reforma estructural completa",
+        evidence_source: "fotocasa",
+      }),
+    );
+    expect(r.condition).toBe("a_reformar");
+    expect(r.renovation_severity).toBe("integral");
+  });
+
+  it("cosmetic-only language yields `a_reformar` + `leve`", () => {
+    const r = parseConditionResult(
+      JSON.stringify({
+        condition: "a_reformar",
+        renovation_severity: "leve",
+        confidence: 0.7,
+        evidence: "necesita repintar y cambiar la cocina, un lavado de cara",
+        evidence_source: "milanuncios",
+      }),
+    );
+    expect(r.condition).toBe("a_reformar");
+    expect(r.renovation_severity).toBe("leve");
+  });
+
+  it("`a_reformar` with no gradeable severity degrades to `unknown`, not a guess", () => {
+    const r = parseConditionResult(
+      JSON.stringify({
+        condition: "a_reformar",
+        confidence: 0.6,
+        evidence: "a reformar",
+        evidence_source: "idealista",
+      }),
+    );
+    expect(r.condition).toBe("a_reformar");
+    expect(r.renovation_severity).toBe("unknown");
+  });
+
+  it("an unrecognised severity value on `a_reformar` degrades to `unknown`", () => {
+    const r = parseConditionResult(
+      JSON.stringify({
+        condition: "a_reformar",
+        renovation_severity: "media",
+        confidence: 0.6,
+        evidence: "a reformar",
+      }),
+    );
+    expect(r.renovation_severity).toBe("unknown");
+  });
+
+  it("a no-renovation-signal advert keeps `unclear` and a `null` severity (axis N/A)", () => {
+    const r = parseConditionResult(JSON.stringify({ reasoning: "no dice nada" }));
+    expect(r.condition).toBe("unclear");
+    expect(r.renovation_severity).toBeNull();
+  });
+
+  it("forces severity to `null` for `reformado`/`obra_nueva` even if the model volunteers one", () => {
+    // Severity only means anything for a_reformar; a model that fills it on a
+    // non-a_reformar verdict must not leak that into the stored result.
+    const reformado = parseConditionResult(
+      JSON.stringify({
+        condition: "reformado",
+        renovation_severity: "integral",
+        confidence: 0.9,
+        evidence: "reformado en 2023",
+      }),
+    );
+    expect(reformado.renovation_severity).toBeNull();
+
+    const obraNueva = parseConditionResult(
+      JSON.stringify({
+        condition: "obra_nueva",
+        renovation_severity: "leve",
+        confidence: 0.8,
+        evidence: "promoción de obra nueva a estrenar",
+      }),
+    );
+    expect(obraNueva.renovation_severity).toBeNull();
+  });
+
+  it("forces severity to `null` when an uncited `a_reformar` is downgraded to `unclear`", () => {
+    // The evidence backstop turns {a_reformar, evidence:""} into unclear; the
+    // severity must follow the FINAL verdict, not the raw one.
+    const r = parseConditionResult(
+      JSON.stringify({
+        condition: "a_reformar",
+        renovation_severity: "integral",
+        confidence: 0.95,
+        evidence: "",
+      }),
+    );
+    expect(r.condition).toBe("unclear");
+    expect(r.renovation_severity).toBeNull();
   });
 });
 

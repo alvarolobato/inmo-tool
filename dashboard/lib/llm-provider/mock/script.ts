@@ -88,6 +88,9 @@ function mockAssessmentJson(flow: Exclude<MockFlow, "chat">): string {
     case "condition":
       return JSON.stringify({
         condition: "reformado",
+        // #313: null because the mock verdict is `reformado`, not
+        // `a_reformar` — severity only applies to `a_reformar`.
+        renovation_severity: null,
         confidence: 0.8,
         issues: [],
         evidence: "reformado en 2023",
