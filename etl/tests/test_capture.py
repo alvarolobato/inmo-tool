@@ -435,3 +435,153 @@ class TestProcessPendingCaptures:
                     "DELETE FROM connector_config WHERE connector_name = 'idealista'"
                 )
             pg_conn.commit()
+
+
+class TestCaptureTriggersMaterialize:
+    """Issue #269: a browser-extension capture that lands a real listing must
+    trigger the same dashboard re-materialize + scoring the connector
+    orchestrator fires after a sweep (issue #94).
+
+    Before this, captures were the one ingestion path that wrote new listings
+    without ever notifying the dashboard — so an active profile silently went
+    stale and under-reported (the live Estepona 0-matches incident) until a
+    human hit `POST /api/profiles/materialize-all` by hand. Capture is the ONLY
+    ingestion path for capture-only portals (Idealista, Aliseda), and a bulk
+    one since the batch-capture-a-search-page feature (#262), which makes this
+    gap load-bearing.
+
+    `notify_materialize_all` itself (the cross-container HTTP round trip) is
+    covered by TestMaterializeAllNotification in test_orchestrator.py; these
+    tests prove the capture path *invokes* it — real Postgres for the ingest,
+    the notifier stubbed to record calls.
+    """
+
+    def test_successful_capture_notifies_materialize_all(self, pg_conn, monkeypatch):
+        """The core #269 fix: a capture that ingests a listing fires the
+        dashboard re-materialize. Reverting the notify call in
+        etl/capture.py makes this fail — proving the hook, not incidental
+        behaviour, is what drives it."""
+        from etl import orchestrator
+
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            orchestrator,
+            "notify_materialize_all",
+            lambda trigger="scheduler": calls.append(trigger) or True,
+        )
+        try:
+            _insert_pending(pg_conn, _FIXTURE_URL, _FIXTURE_HTML)
+            processed = capture.process_pending_captures(pg_conn)
+            assert processed == 1
+            assert calls == ["capture"], (
+                "a capture that landed a listing must trigger exactly one "
+                "materialize-all notification, tagged trigger='capture'"
+            )
+        finally:
+            _cleanup(pg_conn)
+
+    def test_notification_fires_once_per_batch_not_per_listing(
+        self, pg_conn, monkeypatch
+    ):
+        """A batch that ingests several listings (the #262 batch-capture
+        shape) must re-materialize ONCE, not once per listing —
+        materialization is a full recompute of every profile, so per-listing
+        calls would be pure waste."""
+        from etl import orchestrator
+
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn, external_id="106387165")
+        second_url = "https://www.idealista.com/inmueble/106387165/?utm=x"
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            orchestrator,
+            "notify_materialize_all",
+            lambda trigger="scheduler": calls.append(trigger) or True,
+        )
+        try:
+            # Two captures of the same listing (idempotent upsert) is enough to
+            # prove batch-level firing: both go through the ingest path, and the
+            # notification must still fire exactly once for the batch.
+            _insert_pending(pg_conn, _FIXTURE_URL, _FIXTURE_HTML)
+            _insert_pending(pg_conn, second_url, _FIXTURE_HTML)
+            processed = capture.process_pending_captures(pg_conn)
+            assert processed == 2
+            assert len(calls) == 1, (
+                "the materialize-all notification must fire once per batch that "
+                "ingested something, never once per captured listing"
+            )
+        finally:
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM extension_capture WHERE url = ANY(%s)",
+                    ([_FIXTURE_URL, second_url],),
+                )
+            pg_conn.commit()
+            _cleanup(pg_conn)
+
+    def test_batch_that_ingests_nothing_does_not_notify(self, pg_conn, monkeypatch):
+        """A batch of only failed/unrecognized captures must NOT re-materialize
+        — nothing was ingested, so there is nothing new to fold into any
+        profile, and a pointless full recompute of every profile should not
+        fire."""
+        from etl import orchestrator
+
+        _apply_schema(pg_conn)
+        url = "https://www.some-unsupported-portal.example/listing/1"
+        with pg_conn.cursor() as cur:
+            cur.execute("DELETE FROM extension_capture WHERE url = %s", (url,))
+        pg_conn.commit()
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            orchestrator,
+            "notify_materialize_all",
+            lambda trigger="scheduler": calls.append(trigger) or True,
+        )
+        try:
+            _insert_pending(pg_conn, url, "<html></html>")
+            processed = capture.process_pending_captures(pg_conn)
+            assert processed == 1
+            assert calls == [], (
+                "an all-failures batch ingested no listing — it must not fire a "
+                "materialize-all notification"
+            )
+        finally:
+            with pg_conn.cursor() as cur:
+                cur.execute("DELETE FROM extension_capture WHERE url = %s", (url,))
+            pg_conn.commit()
+
+    def test_notification_failure_does_not_break_capture_processing(
+        self, pg_conn, monkeypatch
+    ):
+        """The notify is best-effort: an exception from it must not turn an
+        already-committed, successful capture batch into a failure."""
+        from etl import orchestrator
+
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+
+        def boom(trigger: str = "scheduler") -> bool:
+            raise RuntimeError("dashboard notifier exploded")
+
+        monkeypatch.setattr(orchestrator, "notify_materialize_all", boom)
+        try:
+            capture_id = _insert_pending(pg_conn, _FIXTURE_URL, _FIXTURE_HTML)
+            processed = capture.process_pending_captures(pg_conn)
+            assert processed == 1
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM extension_capture WHERE id = %s",
+                    (capture_id,),
+                )
+                (status,) = cur.fetchone()
+            assert status == "done", (
+                "a notifier failure must not roll back or fail the capture that "
+                "already succeeded"
+            )
+        finally:
+            _cleanup(pg_conn)

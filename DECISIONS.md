@@ -48,6 +48,7 @@
 | [D-037](docs/decisions/D-037-aliseda-guided-capture.md) | Aliseda ingests via a capture-only connector + guided `capture_worklist` (`/etl/captura`), correlated by canonical `match_key`. Selectors are a draft, validate vs a real capture. |
 | [D-038](docs/decisions/D-038-adhoc-etl-run-lock.md) | Ad-hoc runs enqueue an `etl_manual_trigger` row (`connector_name` NULL=all); `etl/manual_trigger.py` polls it, runs `run_all_connectors` under `RUN_ADVISORY_LOCK_ID` (shared w/ scheduler), skips the D-009 guard. |
 | [D-043](docs/decisions/D-043-batch-capture-auto-advance.md) | Batch capture is a fully-automated SEQUENTIAL queue in the extension (open→activate→auto-capture→close→advance), seeded from a listing page. Keep the JITTERED pacing between pages — never fixed-interval, never a tab-bomb. Supersedes the human-paced one-tab-per-click design. |
+| [D-044](docs/decisions/D-044-ingest-triggers-rematerialize.md) | Every listing-ingest path must trigger a dashboard re-materialize after commit via `notify_materialize_all` — connector sweeps (#94) AND browser-extension captures (`process_pending_captures`). Fire once per batch, only if something was ingested; best-effort; never re-implement the materializer in Python. |
 
 ## AI layer
 
