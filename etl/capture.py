@@ -20,6 +20,7 @@ from dataclasses import fields
 from urllib.parse import urlparse
 
 from etl.connectors.aliseda import AlisedaConnector
+from etl.connectors.altamira import AltamiraConnector
 from etl.connectors.base import CanonicalListingVersion, ConnectorError, RawListing
 from etl.connectors.idealista import IdealistaConnector
 
@@ -29,18 +30,22 @@ logger = logging.getLogger("etl.capture")
 # site adds ONE entry here, not a new processing mechanism (issue #75). Aliseda
 # joined via issue #237 — capture-only for the same reason Idealista is: its
 # real content only exists after a real browser hydrates the Angular app, and
-# its data host is robots.txt Disallow: / (D-019).
+# its data host is robots.txt Disallow: / (D-019). Altamira joined via issue
+# #271 — capture-only because every direct HTTP request gets an Akamai WAF 403
+# (D-027), yet the page renders normally for a human (2026-08-05 live test).
 #
 # This dict is the source of truth for "which hosts can be captured". The
-# dashboard mirrors these host suffixes in dashboard/lib/extension-capture-hosts.ts
-# (served to the extension via GET /api/extension/config) so the extension's
-# supported-host badge tracks new portals with no extension redeploy — keep
-# the two lists in step when adding a portal.
+# dashboard mirrors these host suffixes in dashboard/lib/worklist.ts
+# (CAPTURE_PORTALS, served to the extension via GET /api/extension/config) so
+# the extension's supported-host badge tracks new portals with no extension
+# redeploy — keep the two lists in step when adding a portal.
 _idealista = IdealistaConnector()
 _aliseda = AlisedaConnector()
+_altamira = AltamiraConnector()
 _CAPTURE_CONNECTORS: dict[str, tuple[object, type]] = {
     "idealista.com": (_idealista, IdealistaConnector),
     "alisedainmobiliaria.com": (_aliseda, AlisedaConnector),
+    "altamirainmuebles.com": (_altamira, AltamiraConnector),
 }
 
 _BATCH_LIMIT = 10
@@ -311,7 +316,8 @@ def _process_one(conn, capture_id: int, url: str, html: str) -> bool:
             capture_id,
             url,
             "No capture-capable connector recognizes this URL "
-            "(supported: Idealista, issue #75; Aliseda, issue #237)",
+            "(supported: Idealista, issue #75; Aliseda, issue #237; "
+            "Altamira, issue #271)",
         )
         return False
 

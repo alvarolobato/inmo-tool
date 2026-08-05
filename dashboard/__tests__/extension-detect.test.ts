@@ -63,16 +63,26 @@ describe("detailPortalForUrl — only real listing-detail pages", () => {
     ["https://www.alisedainmobiliaria.com/", null],
     ["https://www.alisedainmobiliaria.com/comprar/vivienda/malaga", null],
     ["https://www.alisedainmobiliaria.com/inmueble", null],
-    // Altamira (issue #271): best-effort /inmueble/<id> or /ficha/<id> guess —
-    // MUST be verified against a real Altamira detail URL (see detect.js comment).
-    ["https://www.altamirainmuebles.com/inmueble/ABC123", "altamira"],
-    ["https://www.altamirainmuebles.com/inmueble/ABC123/", "altamira"],
-    ["https://www.altamirainmuebles.com/ficha/98765?utm=x#foto", "altamira"],
-    ["https://altamirainmuebles.com/inmueble/piso-madrid-1", "altamira"],
-    // Altamira non-detail pages → null.
+    // Altamira (issue #271): VERIFIED against real captures —
+    // /venta-de-<tipo>/<provincia>/<municipio>/segunda-mano/<REF>/<id>/1.
+    [
+      "https://www.altamirainmuebles.com/venta-de-atico/pontevedra/sanxenxo/segunda-mano/9186_1001_PE0001/375859/1",
+      "altamira",
+    ],
+    [
+      "https://www.altamirainmuebles.com/venta-de-casa/murcia/alhama-de-murcia/segunda-mano/9186-1004-pe0001/375864/1",
+      "altamira",
+    ],
+    // Trailing photo-index segment optional; query/fragment ignored.
+    [
+      "https://www.altamirainmuebles.com/alquiler-de-piso/madrid/madrid/segunda-mano/9186_2002_PE0001/400111?utm=x#foto",
+      "altamira",
+    ],
+    // Altamira non-detail pages → null (the old /inmueble|/ficha guess is gone).
     ["https://www.altamirainmuebles.com/", null],
-    ["https://www.altamirainmuebles.com/comprar/vivienda/madrid", null],
-    ["https://www.altamirainmuebles.com/inmueble", null],
+    ["https://www.altamirainmuebles.com/venta-viviendas/cualquier-provincia", null],
+    ["https://www.altamirainmuebles.com/venta-viviendas/pontevedra", null],
+    ["https://www.altamirainmuebles.com/inmueble/ABC123", null],
     // Unsupported host → null even on a detail-shaped path.
     ["https://www.fotocasa.es/inmueble/123/", null],
     ["https://example.com/inmueble/123/", null],
@@ -195,6 +205,16 @@ describe("listingPortalForUrl — only search/results pages", () => {
     // Aliseda detail / home → not a listing.
     ["https://www.alisedainmobiliaria.com/inmueble/ANT1", null],
     ["https://www.alisedainmobiliaria.com/", null],
+    // Altamira search/results route (issue #271) → listing.
+    ["https://www.altamirainmuebles.com/venta-viviendas/cualquier-provincia", "altamira"],
+    ["https://www.altamirainmuebles.com/venta-viviendas/pontevedra", "altamira"],
+    ["https://www.altamirainmuebles.com/alquiler-viviendas/madrid", "altamira"],
+    // Altamira detail / home → not a listing (a `-de-` detail URL never matches).
+    [
+      "https://www.altamirainmuebles.com/venta-de-atico/pontevedra/sanxenxo/segunda-mano/9186_1001_PE0001/375859/1",
+      null,
+    ],
+    ["https://www.altamirainmuebles.com/", null],
     // Unsupported host / non-http / junk → null.
     ["https://www.fotocasa.es/es/comprar/viviendas/madrid/", null],
     ["ftp://www.idealista.com/venta-viviendas/x/", null],

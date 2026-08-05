@@ -8,6 +8,24 @@ date: 2026-08-04
 
 *Decided: 2026-08-04*
 
+**2026-08-05 addendum** (issue #271): The owner ran a live human browsing test.
+**Altamira renders normally for a human in an ordinary browser** despite the
+static-Akamai-deny / no-JS-challenge signature — the automated-fetch 403 above
+is unchanged and correct, but this decision's *prediction* about human browsing
+(the Rationale below reasoned that a static deny with "zero application bytes,
+nothing for a browser to satisfy" was a *weaker* signal for human-browsing
+success than Sareb's JS challenge) was **empirically wrong**. Sareb (D-026)
+went the other way: it stayed blocked for a human across two separate phones
+despite its JS-challenge signature, which D-026 read as *positive* evidence a
+human would get through. Net finding from this n=2 test: **the WAF-response
+shape (JS challenge vs. static deny) does not reliably predict whether a human
+browser gets content** — do not lean on that heuristic to prioritise capture
+portals. The automated-connector verdict here is unchanged (still not buildable
+as a crawler); only the human-browsing prediction is corrected. Altamira is now
+the "GO" capture portal: issue #271 builds the capture-only connector
+(`etl/connectors/altamira.py`), and Sareb stays parked (#121). See D-026's
+matching addendum.
+
 **Context**: Issue #122, one of three Santander-family portals in #132's
 bank/fund REO batch (alongside Aliseda #123 and Diglo #117). An earlier
 same-day spike (2026-08-02) found the site blocked by Akamai and flagged

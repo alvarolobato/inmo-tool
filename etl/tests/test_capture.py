@@ -57,6 +57,31 @@ def _insert_pending(conn, url: str, html: str) -> int:
     return capture_id
 
 
+class TestCaptureConnectorRegistration:
+    """DB-free: the capture registry recognises each supported portal's detail
+    URL and hands it to the right connector with the right external_id. This is
+    the check that fails with "No capture-capable connector recognizes this URL"
+    when a portal is captured before its connector is registered (issue #271)."""
+
+    def test_altamira_detail_url_resolves(self):
+        url = (
+            "https://www.altamirainmuebles.com/venta-de-atico/pontevedra/sanxenxo/"
+            "segunda-mano/9186_1001_PE0001/375859/1"
+        )
+        resolved = capture._connector_for_url(url)
+        assert resolved is not None
+        connector, external_id = resolved
+        assert connector.name == "altamira"
+        assert external_id == "375859"
+
+    def test_all_expected_capture_hosts_registered(self):
+        assert set(capture._CAPTURE_CONNECTORS) == {
+            "idealista.com",
+            "alisedainmobiliaria.com",
+            "altamirainmuebles.com",
+        }
+
+
 class TestProcessPendingCaptures:
     def test_real_idealista_capture_flows_through_normal_persistence_path(
         self, pg_conn
