@@ -42,8 +42,12 @@ export function TopBar({
   // open its pre-filtered searches → track capture progress) is a first-class
   // user task, not admin. SETUP (extension install, API key, connector config,
   // the raw worklist table) stays under /etl (Admin). See D-045.
+  // Issue #195: the standalone "Inicio" entry was dropped (owner-approved,
+  // 2026-08-03). `/inicio` and `/` now render the same redesigned Perfiles
+  // surface the "Perfiles" link points at, so a separate nav entry would be a
+  // duplicate. The Perfiles link is marked active for `/`, `/inicio`, and
+  // `/profiles` alike (see isActive below).
   const navLinks = [
-    { href: "/inicio", label: "Inicio" },
     { href: "/profiles", label: "Perfiles" },
     { href: "/captura", label: "Captura" },
     { href: "/conversations", label: "Conversaciones" },
@@ -80,8 +84,10 @@ export function TopBar({
             const isExternal = "external" in link && link.external;
             const isActive =
               !isExternal &&
-              (link.href === "/inicio"
-                ? pathname === "/" || pathname.startsWith("/inicio")
+              (link.href === "/profiles"
+                ? pathname === "/" ||
+                  pathname.startsWith("/inicio") ||
+                  pathname.startsWith("/profiles")
                 : pathname.startsWith(link.href));
             const style = {
               padding: "6px 12px",

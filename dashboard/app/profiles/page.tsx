@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { ErrorDisplay } from "@/components/ErrorDisplay";
 import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
 import { ProfileForm, DEFAULT_VALUES, type ProfileFormValues } from "@/components/profiles/ProfileForm";
 import { ProfileOverviewRow } from "@/components/profiles/ProfileOverviewRow";
+import { NovedadesStrip } from "@/components/profiles/NovedadesStrip";
 import { RefreshIndicator } from "@/components/profiles/RefreshIndicator";
 import type { ProfileRefreshResult, SearchProfileRow } from "@/lib/profiles-schema";
 import type { ProfileOverviewEntry } from "@/lib/profile-overview-types";
@@ -102,6 +103,28 @@ export default function ProfilesPage() {
   // <RefreshIndicator> can poll it and show "buscando datos nuevos…". null when
   // the last save enqueued no crawl (a rename, or an enqueue that failed).
   const [refreshTriggerId, setRefreshTriggerId] = useState<number | null>(null);
+  // Issue #195: the profile row the "novedades" strip last jumped to — briefly
+  // ringed so the eye lands on it after the scroll. Cleared on a timer.
+  const [highlightedId, setHighlightedId] = useState<number | null>(null);
+  const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Scroll to and briefly highlight a profile row (novedades strip click).
+  const jumpToProfile = useCallback((profileId: number) => {
+    setHighlightedId(profileId);
+    if (typeof document !== "undefined") {
+      document
+        .getElementById(`profile-row-${profileId}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    if (highlightTimer.current) clearTimeout(highlightTimer.current);
+    highlightTimer.current = setTimeout(() => setHighlightedId(null), 2500);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimer.current) clearTimeout(highlightTimer.current);
+    };
+  }, []);
 
   const fetchProfiles = useCallback(async () => {
     setLoading(true);
@@ -350,11 +373,17 @@ export default function ProfilesPage() {
         </p>
       ) : (
         <div style={{ marginTop: 16 }}>
+          {/* Issue #195: the "novedades" glance — sums each profile's new_count
+              (candidates first-seen since last visit) into a page-level strip.
+              Rendered only for the full overview shape; the degraded plain-list
+              fallback has no new_count, so NovedadesStrip returns null there. */}
+          <NovedadesStrip overviews={overviews} onJumpToProfile={jumpToProfile} />
           {overviews !== null &&
             overviews.map((entry) => (
               <ProfileOverviewRow
                 key={entry.ok ? entry.profile.id : entry.id}
                 entry={entry}
+                highlighted={entry.ok && highlightedId === entry.profile.id}
                 busy={busyId === (entry.ok ? entry.profile.id : entry.id)}
                 onEdit={() =>
                   entry.ok

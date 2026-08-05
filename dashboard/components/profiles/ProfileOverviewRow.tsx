@@ -30,17 +30,20 @@ export function ProfileOverviewRow({
   onClone,
   onArchive,
   busy,
+  highlighted = false,
 }: {
   entry: ProfileOverviewEntry;
   onEdit: () => void;
   onClone: () => void;
   onArchive: () => void;
   busy: boolean;
+  /** Issue #195: the "novedades" strip's jump-to briefly rings this row when it's the profile that changed. */
+  highlighted?: boolean;
 }) {
   if (!entry.ok) {
     return <BrokenProfileRow id={entry.id} name={entry.name} issues={entry.issues} onEdit={onEdit} onArchive={onArchive} busy={busy} />;
   }
-  return <ValidProfileRow entry={entry} onEdit={onEdit} onClone={onClone} onArchive={onArchive} busy={busy} />;
+  return <ValidProfileRow entry={entry} onEdit={onEdit} onClone={onClone} onArchive={onArchive} busy={busy} highlighted={highlighted} />;
 }
 
 const rowStyle: React.CSSProperties = {
@@ -266,12 +269,14 @@ function ValidProfileRow({
   onClone,
   onArchive,
   busy,
+  highlighted = false,
 }: {
   entry: Extract<ProfileOverviewEntry, { ok: true }>;
   onEdit: () => void;
   onClone: () => void;
   onArchive: () => void;
   busy: boolean;
+  highlighted?: boolean;
 }) {
   const { profile, metrics } = entry;
   const [showZeroDiagnostic, setShowZeroDiagnostic] = useState(false);
@@ -294,9 +299,19 @@ function ValidProfileRow({
 
   return (
     <div
-      style={{ ...rowStyle, flexDirection: "column", gap: 0 }}
+      id={`profile-row-${profile.id}`}
+      style={{
+        ...rowStyle,
+        flexDirection: "column",
+        gap: 0,
+        ...(highlighted
+          ? { borderColor: "var(--accent)", boxShadow: "0 0 0 2px var(--accent)" }
+          : {}),
+        transition: "box-shadow 0.2s ease, border-color 0.2s ease",
+      }}
       data-testid="profile-row"
       data-profile-id={profile.id}
+      data-highlighted={highlighted ? "true" : undefined}
     >
       <div style={{ display: "flex", gap: 12, width: "100%" }}>
       <Thumbnails thumbnails={metrics.thumbnails} />
