@@ -264,6 +264,51 @@ def _get_materialize_reconciler_interval_seconds() -> int:
     return parsed if parsed > 0 else 120
 
 
+def _get_default_freshness_interval_hours() -> int:
+    """Default freshness cadence (hours) for a connector with no override
+    (issue #295, D-050).
+
+    Same env-first-then-loader precedence as the other ETL knobs above. A
+    connector only STARTS a refresh cycle when its data is older than this
+    interval; a cycle already in progress continues regardless. 24h matches the
+    dashboard's FRESHNESS_STALE_THRESHOLD_HOURS default (#241). Must be positive
+    — a non-positive interval would make every connector perpetually "due", so
+    it is coerced back to the default.
+    """
+    value: object | None = os.environ.get("ETL_DEFAULT_FRESHNESS_INTERVAL_HOURS")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = _loader_get("etl.default_freshness_interval_hours", default=None)
+    if value is None:
+        value = "24"
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 24
+    return parsed if parsed > 0 else 24
+
+
+def _get_freshness_cycle_stuck_after_hours() -> int:
+    """Age (hours) past which an in-progress refresh cycle is flagged 'stuck'
+    for observability (issue #295, D-050).
+
+    Purely a visibility threshold — a stuck cycle logs a WARNING and reads as
+    "still refreshing, taking unusually long", but is NEVER force-completed.
+    Same env-first-then-loader precedence as the other ETL knobs above. Must be
+    positive; a non-positive value would flag every cycle stuck the instant it
+    starts, so it is coerced back to the default (168h = 7 days).
+    """
+    value: object | None = os.environ.get("ETL_FRESHNESS_CYCLE_STUCK_AFTER_HOURS")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = _loader_get("etl.freshness_cycle_stuck_after_hours", default=None)
+    if value is None:
+        value = "168"
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 168
+    return parsed if parsed > 0 else 168
+
+
 def _get_admin_api_key() -> str:
     """Shared admin key used to authenticate the dashboard callback (issue #94).
 
@@ -291,6 +336,12 @@ class Config:
     )
     materialize_reconciler_interval_seconds: int = field(
         default_factory=_get_materialize_reconciler_interval_seconds
+    )
+    default_freshness_interval_hours: int = field(
+        default_factory=_get_default_freshness_interval_hours
+    )
+    freshness_cycle_stuck_after_hours: int = field(
+        default_factory=_get_freshness_cycle_stuck_after_hours
     )
 
     def __post_init__(self) -> None:

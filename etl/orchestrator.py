@@ -14,8 +14,9 @@ import json
 import logging
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Literal, NamedTuple
 
 from etl.connectors.base import (
     CanonicalListingVersion,
@@ -42,6 +43,15 @@ from etl.dedup import engine as dedup_engine
 # reconciled to 'failed'. Overridable via ETL_DEDUP_MAX_RUNTIME_SECONDS /
 # etl.dedup_max_runtime_seconds (config/schema.yaml).
 _DEFAULT_DEDUP_MAX_RUNTIME_SECONDS = 7200
+
+# Issue #295 (D-050): freshness cadence defaults, used when no operator config
+# is threaded in (manual/CLI paths, direct test callers). The scheduler path
+# passes the operator-configured values (etl.default_freshness_interval_hours /
+# etl.freshness_cycle_stuck_after_hours, config/schema.yaml) instead. 24h
+# matches the dashboard's FRESHNESS_STALE_THRESHOLD_HOURS (#241); 168h (7d) is a
+# pure visibility threshold that never force-completes a cycle.
+_DEFAULT_FRESHNESS_INTERVAL_HOURS = 24
+_DEFAULT_FRESHNESS_CYCLE_STUCK_AFTER_HOURS = 168
 
 logger = logging.getLogger("etl.orchestrator")
 
@@ -1982,12 +1992,251 @@ def _record_scope_discovered(
     conn.commit()
 
 
+# ---------------------------------------------------------------------------
+# Freshness cadence (issue #295, D-050)
+# ---------------------------------------------------------------------------
+
+
+class FreshnessRow(NamedTuple):
+    """The connector_freshness_state row for one connector (or a synthetic
+    all-NULL row when none exists yet — a connector with no row is simply
+    "never fresh", due immediately, same posture as every other
+    NULL-means-never-happened column in this schema)."""
+
+    last_fresh_at: datetime | None
+    cycle_started_at: datetime | None
+    cycle_target_scope_count: int | None
+
+
+def _load_connector_freshness(conn, connector_name: str) -> FreshnessRow | None:
+    """Current connector_freshness_state row, or None when the connector has
+    never entered the cadence machinery (no row yet = never fresh = due)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT last_fresh_at, cycle_started_at, cycle_target_scope_count "
+            "FROM connector_freshness_state WHERE connector_name = %s",
+            (connector_name,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return FreshnessRow(*row)
+
+
+def _resolve_freshness_interval_hours(
+    conn, connector_name: str, default_interval_hours: int
+) -> int:
+    """Effective freshness interval for *connector_name*: the per-connector
+    `connector_config.freshness_interval_hours` override when present and valid,
+    else the global *default_interval_hours*.
+
+    Same override-vs-global-default precedence as
+    `min_refetch_interval_seconds` (issue #143). A NULL, non-positive, or
+    non-int override falls back to the default rather than disabling the gate —
+    NULL means "use the default", never "never track freshness".
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT freshness_interval_hours FROM connector_config "
+            "WHERE connector_name = %s",
+            (connector_name,),
+        )
+        row = cur.fetchone()
+    if row is None or row[0] is None:
+        return default_interval_hours
+    raw = row[0]
+    if isinstance(raw, bool):
+        # bool is a subclass of int — same trap guarded elsewhere.
+        return default_interval_hours
+    try:
+        candidate = int(raw)
+    except (TypeError, ValueError):
+        return default_interval_hours
+    return candidate if candidate > 0 else default_interval_hours
+
+
+def _freshness_decision(
+    freshness_row: FreshnessRow | None,
+    interval_hours: int,
+    trigger: str,
+    now: datetime,
+) -> Literal["skip", "start", "continue"]:
+    """Decide, for one connector on one tick, whether to skip it entirely,
+    start a new refresh cycle, or continue an in-flight one (issue #295, D-050).
+
+    - Manual/CLI triggers (`trigger != "scheduler"` — `ps connector run`, the
+      dashboard's "Ejecutar ahora"/etl_manual_trigger) BYPASS the gate, like
+      D-038's restart-guard bypass: a deliberate operator action must never
+      silently no-op because the connector happens to be fresh. They continue an
+      existing cycle, or start one.
+    - A cycle already in flight (`cycle_started_at IS NOT NULL`) always
+      continues, regardless of how the interval compares to elapsed time — the
+      interval gates only STARTING a new cycle, never abandoning one partway.
+    - Never fresh (`last_fresh_at IS NULL`) → due immediately → start.
+    - Fresh and the interval has elapsed → start; otherwise → skip.
+    """
+    if trigger != "scheduler":
+        if freshness_row is not None and freshness_row.cycle_started_at is not None:
+            return "continue"
+        return "start"
+
+    if freshness_row is not None and freshness_row.cycle_started_at is not None:
+        return "continue"
+
+    last_fresh_at = freshness_row.last_fresh_at if freshness_row is not None else None
+    if last_fresh_at is None:
+        return "start"
+    if now - last_fresh_at >= timedelta(hours=interval_hours):
+        return "start"
+    return "skip"
+
+
+def _target_scope_keys(connector: Connector, scopes: list[ConnectorScope]) -> set[str]:
+    """The set of resolvable scope keys a cycle must cover for *connector* given
+    this tick's resolved *scopes* — `scope_key()` results that are neither None
+    (no coverage) nor the unresolvable-geography sentinel (discover() raises for
+    it by construction). Deduped, since two profiles can resolve to one key."""
+    keys: set[str] = set()
+    for scope in scopes:
+        key = connector.scope_key(scope)
+        if key is None or is_unresolvable_scope_key(key):
+            continue
+        keys.add(key)
+    return keys
+
+
+def _scope_keys_discovered_since(
+    conn, connector_name: str, since: datetime
+) -> set[str]:
+    """scope_keys whose discover() last SUCCEEDED at/after *since* — the "done
+    this cycle" set, read live from connector_scope_state (issue #217/D-030), so
+    no separate per-scope progress table is needed."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT scope_key FROM connector_scope_state "
+            "WHERE connector_name = %s AND last_discovered_at >= %s",
+            (connector_name, since),
+        )
+        return {row[0] for row in cur.fetchall()}
+
+
+def _start_connector_freshness_cycle(
+    conn, connector_name: str, cycle_started_at: datetime, target_scope_count: int
+) -> None:
+    """Upsert a new in-progress cycle: cycle_started_at set to now, last_fresh_at
+    left as-is (idle→in-progress transition), target count snapshotted."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO connector_freshness_state (
+                connector_name, cycle_started_at, cycle_target_scope_count,
+                updated_at
+            )
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (connector_name) DO UPDATE
+                SET cycle_started_at = EXCLUDED.cycle_started_at,
+                    cycle_target_scope_count = EXCLUDED.cycle_target_scope_count,
+                    updated_at = EXCLUDED.updated_at
+            """,
+            (connector_name, cycle_started_at, target_scope_count, cycle_started_at),
+        )
+    conn.commit()
+
+
+def _complete_connector_freshness_cycle(
+    conn, connector_name: str, now: datetime
+) -> None:
+    """Mark a cycle complete: last_fresh_at = now, cycle_started_at = NULL. The
+    connector goes quiet until the interval elapses again."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO connector_freshness_state (
+                connector_name, last_fresh_at, cycle_started_at, updated_at
+            )
+            VALUES (%s, %s, NULL, %s)
+            ON CONFLICT (connector_name) DO UPDATE
+                SET last_fresh_at = EXCLUDED.last_fresh_at,
+                    cycle_started_at = NULL,
+                    updated_at = EXCLUDED.updated_at
+            """,
+            (connector_name, now, now),
+        )
+    conn.commit()
+
+
+def _finalize_connector_freshness_cycle(
+    conn,
+    connector: Connector,
+    cycle_started_at: datetime,
+    scopes: list[ConnectorScope],
+    now: datetime,
+    stuck_after_hours: int,
+) -> None:
+    """Cycle completion / stuck detection for one connector at the end of its
+    per-run block (issue #295, D-050).
+
+    Completion is binary and DERIVED, never stored as a list: compute the
+    connector's live target scope-key set from *scopes*, count how many have
+    been discovered since *cycle_started_at*, and if 100% (including the vacuous
+    zero-target case) mark the cycle fresh and clear it. Otherwise leave
+    cycle_started_at untouched so the next tick continues it — and if the cycle
+    is older than *stuck_after_hours*, log a WARNING and let it read as
+    "still refreshing, taking unusually long" forever. NEVER force-complete: a
+    connector that can't finish (Fotocasa tripping the breaker every tick, #270)
+    must never falsely claim fresh.
+    """
+    target_keys = _target_scope_keys(connector, scopes)
+    discovered_since = _scope_keys_discovered_since(
+        conn, connector.name, cycle_started_at
+    )
+    remaining = target_keys - discovered_since
+    if not remaining:
+        _complete_connector_freshness_cycle(conn, connector.name, now)
+        logger.info(
+            "Connector %s: freshness cycle complete — %d/%d target scope(s) "
+            "discovered since cycle start %s; marked fresh, next cycle waits out "
+            "the interval",
+            connector.name,
+            len(target_keys),
+            len(target_keys),
+            cycle_started_at,
+        )
+        return
+
+    if now - cycle_started_at > timedelta(hours=stuck_after_hours):
+        logger.warning(
+            "Connector %s: freshness cycle STUCK — started %s (>%dh ago), still "
+            "%d of %d target scope(s) not yet discovered this cycle. Flagging "
+            "for observability; NOT force-completing (it will keep reading as "
+            "'refreshing', never falsely 'fresh'). This usually means the site "
+            "can't be fully covered (e.g. the circuit breaker trips every tick "
+            "— #270).",
+            connector.name,
+            cycle_started_at,
+            stuck_after_hours,
+            len(remaining),
+            len(target_keys),
+        )
+    else:
+        logger.info(
+            "Connector %s: freshness cycle continuing — %d/%d target scope(s) "
+            "discovered so far this cycle (started %s); resumes next tick",
+            connector.name,
+            len(target_keys) - len(remaining),
+            len(target_keys),
+            cycle_started_at,
+        )
+
+
 def run_all_connectors(
     conn,
     trigger: str = "scheduler",
     connector_name: str | None = None,
     *,
     dedup_max_runtime_seconds: int = _DEFAULT_DEDUP_MAX_RUNTIME_SECONDS,
+    default_freshness_interval_hours: int = _DEFAULT_FRESHNESS_INTERVAL_HOURS,
+    freshness_cycle_stuck_after_hours: int = _DEFAULT_FRESHNESS_CYCLE_STUCK_AFTER_HOURS,
 ) -> int:
     """Run every registered connector once, recording a connector_runs row.
 
@@ -2072,16 +2321,87 @@ def run_all_connectors(
             )
             skipped += 1
             continue
+
+        # Issue #295 (D-050): freshness cadence gate. Decide, per connector per
+        # tick, whether this connector is due for (or mid-) a refresh cycle
+        # BEFORE spending any discover()/breaker/limiter cost. A scheduler tick
+        # for a connector that is fresh and not yet due is skipped ENTIRELY —
+        # no connector_run_results row, same "genuinely nothing to do" posture
+        # as the empty-`scopes` early-continue below (issue #71/#99). Manual and
+        # CLI triggers bypass the gate (D-038 precedent): a human pressing a
+        # button must never silently no-op. `cycle_started_at` (this cycle's
+        # anchor) drives both resume (skip scopes already discovered since it)
+        # and completion (all target scopes discovered since it → fresh).
+        now_freshness = datetime.now(timezone.utc)
+        freshness_row = _load_connector_freshness(conn, connector.name)
+        interval_hours = _resolve_freshness_interval_hours(
+            conn, connector.name, default_freshness_interval_hours
+        )
+        decision = _freshness_decision(
+            freshness_row, interval_hours, trigger, now_freshness
+        )
+        if decision == "skip":
+            logger.info(
+                "Connector %s: fresh (last_fresh_at=%s, interval=%dh) and no "
+                "cycle in progress — skipping this scheduler tick (not due yet, "
+                "no run row created)",
+                connector.name,
+                freshness_row.last_fresh_at if freshness_row else None,
+                interval_hours,
+            )
+            continue
+        if decision == "start":
+            cycle_started_at = now_freshness
+            _start_connector_freshness_cycle(
+                conn,
+                connector.name,
+                cycle_started_at,
+                target_scope_count=len(_target_scope_keys(connector, scopes)),
+            )
+            logger.info(
+                "Connector %s: starting a freshness cycle at %s "
+                "(trigger=%s, interval=%dh)",
+                connector.name,
+                cycle_started_at,
+                trigger,
+                interval_hours,
+            )
+        else:  # "continue" — a cycle is already in flight
+            assert freshness_row is not None  # only reachable with a real row
+            cycle_started_at = freshness_row.cycle_started_at
+            assert cycle_started_at is not None
+            logger.info(
+                "Connector %s: continuing an in-progress freshness cycle "
+                "(started %s, trigger=%s)",
+                connector.name,
+                cycle_started_at,
+                trigger,
+            )
+
         if not scopes:
             # Same posture issue #71 established for "no active profiles":
             # not an error, nothing to record — just genuinely nothing for
             # this connector to do this run (no override, and no active
             # profile's geography resolves to its coverage).
+            #
+            # Issue #295 (D-050): the vacuous-completion case. A cycle is active
+            # (we just started it, or are continuing one) but the connector has
+            # zero currently-covered scopes — that is 100% of an empty target
+            # set, so the cycle is trivially complete. Mark it fresh and clear
+            # it, or it would stay "refreshing" forever with nothing to do.
             logger.warning(
                 "Connector %s: no scopes to discover this run (no "
                 "connector_config override and no active search profile "
                 "reaches its coverage) — skipping",
                 connector.name,
+            )
+            _finalize_connector_freshness_cycle(
+                conn,
+                connector,
+                cycle_started_at,
+                [],
+                datetime.now(timezone.utc),
+                freshness_cycle_stuck_after_hours,
             )
             continue
 
@@ -2159,6 +2479,19 @@ def run_all_connectors(
             soft_block_error_rate_threshold=connector.circuit_breaker_soft_block_error_rate,
         )
         seen_scope_keys: set[str] = set()
+        # Issue #295 (D-050): the resume mechanism. scope_keys already
+        # discovered since this cycle started are skipped in the per-scope loop
+        # below — no discover() call, no rate-limiter/breaker cost — so a
+        # multi-tick cycle picks up exactly where it left off instead of
+        # re-crawling scopes it already refreshed this cycle. One query, read
+        # live from connector_scope_state (no separate progress table). Composes
+        # with #217/D-030's fairness ordering: fairness puts the genuinely
+        # remaining (oldest-attempted) scopes first, and this guarantees any
+        # already-done ones are never redundantly re-walked if the breaker had
+        # leftover budget after finishing them.
+        already_fresh_this_cycle = _scope_keys_discovered_since(
+            conn, connector.name, cycle_started_at
+        )
         # Withdrawal reconciliation runs once per connector per run,
         # against the union of every scope's discovered ids — never per
         # scope (see _reconcile_missed_discoveries' docstring: the sweep
@@ -2262,6 +2595,14 @@ def run_all_connectors(
                         # equivalent scope (two profiles resolving to one
                         # city). Its data is present, so reporting it as
                         # starved would be wrong.
+                        continue
+                    if remaining_key in already_fresh_this_cycle:
+                        # Issue #295 (D-050): already discovered earlier THIS
+                        # CYCLE (a prior tick). Not starved for budget — its
+                        # data is fresh for the current cycle, so it neither
+                        # blocks completion nor needs a "covered but skipped"
+                        # row. Classifying it as budget would misreport a done
+                        # scope as waiting.
                         continue
                     if remaining_key in classified_keys:
                         # A second un-reached scope resolving to a key
@@ -2380,6 +2721,31 @@ def run_all_connectors(
                         connector.name,
                         scope,
                     )
+                continue
+
+            if scope_key in already_fresh_this_cycle:
+                # Issue #295 (D-050): resume skip. This scope was already
+                # discovered since the current cycle started (an earlier tick
+                # covered it), so the cycle doesn't need to redo it — no
+                # discover() call, no rate-limiter/breaker cost spent. Recorded
+                # under the `fresh_this_cycle` reason (extending #217/D-030's
+                # budget/uncovered/unresolvable vocabulary), logged at INFO,
+                # never an error. Marked seen so any duplicate scope resolving to
+                # the same key later this run is also treated as done. It still
+                # counts toward completion — its connector_scope_state row
+                # already has last_discovered_at >= cycle_started_at.
+                seen_scope_keys.add(scope_key)
+                skipped_scopes.append(
+                    {"scope": scope_key, "reason": "fresh_this_cycle"}
+                )
+                logger.info(
+                    "Connector %s: scope key=%r already discovered this "
+                    "freshness cycle (since %s) — skipping (clean resume, not "
+                    "an error)",
+                    connector.name,
+                    scope_key,
+                    cycle_started_at,
+                )
                 continue
 
             if scope_key in seen_scope_keys:
@@ -2704,6 +3070,24 @@ def run_all_connectors(
             finished_at=datetime.now(timezone.utc),
         )
 
+        # Issue #295 (D-050): cycle completion / stuck detection, after this
+        # connector's per-scope loop has committed every _record_scope_discovered
+        # for the scopes it covered this tick. If 100% of the live target scope
+        # set has been discovered since cycle_started_at, the cycle is marked
+        # fresh and cleared; otherwise it's left in progress for the next tick to
+        # continue (and flagged stuck, never force-completed, past the threshold).
+        # The run STATUS above is unchanged by this — a mid-cycle "continue" is a
+        # perfectly normal run row (issue #295 §5); freshness state is a separate,
+        # connector-level, non-error signal layered on top.
+        _finalize_connector_freshness_cycle(
+            conn,
+            connector,
+            cycle_started_at,
+            scopes,
+            datetime.now(timezone.utc),
+            freshness_cycle_stuck_after_hours,
+        )
+
     # Issue #285: the end-of-sweep bookkeeping (`_finish_connector_run`, the
     # dedup pass) and the re-materialize notify are wrapped so the notify runs
     # in a `finally`. Before this, a raise anywhere between the connector loop
@@ -2990,6 +3374,8 @@ def run_all_connectors_respecting_restart_guard(
     *,
     min_restart_sweep_interval_seconds: int = 0,
     dedup_max_runtime_seconds: int = _DEFAULT_DEDUP_MAX_RUNTIME_SECONDS,
+    default_freshness_interval_hours: int = _DEFAULT_FRESHNESS_INTERVAL_HOURS,
+    freshness_cycle_stuck_after_hours: int = _DEFAULT_FRESHNESS_CYCLE_STUCK_AFTER_HOURS,
 ) -> int | None:
     """`run_all_connectors()`, unless the restart-burst guard (issue #172)
     says this sweep is too soon after the last completed one.
@@ -3025,7 +3411,11 @@ def run_all_connectors_respecting_restart_guard(
         )
         return None
     return run_all_connectors(
-        conn, trigger=trigger, dedup_max_runtime_seconds=dedup_max_runtime_seconds
+        conn,
+        trigger=trigger,
+        dedup_max_runtime_seconds=dedup_max_runtime_seconds,
+        default_freshness_interval_hours=default_freshness_interval_hours,
+        freshness_cycle_stuck_after_hours=freshness_cycle_stuck_after_hours,
     )
 
 
@@ -3034,6 +3424,8 @@ def run_scheduler_loop(
     interval_seconds: int = 3600,
     min_restart_sweep_interval_seconds: int = 0,
     dedup_max_runtime_seconds: int = _DEFAULT_DEDUP_MAX_RUNTIME_SECONDS,
+    default_freshness_interval_hours: int = _DEFAULT_FRESHNESS_INTERVAL_HOURS,
+    freshness_cycle_stuck_after_hours: int = _DEFAULT_FRESHNESS_CYCLE_STUCK_AFTER_HOURS,
 ) -> None:
     """Run all connectors on a fixed interval, forever. Long-running-container mode.
 
@@ -3100,6 +3492,8 @@ def run_scheduler_loop(
                             trigger="scheduler",
                             min_restart_sweep_interval_seconds=min_restart_sweep_interval_seconds,
                             dedup_max_runtime_seconds=dedup_max_runtime_seconds,
+                            default_freshness_interval_hours=default_freshness_interval_hours,
+                            freshness_cycle_stuck_after_hours=freshness_cycle_stuck_after_hours,
                         )
                     else:
                         # Not the process' first sweep — paced by this same
@@ -3110,6 +3504,8 @@ def run_scheduler_loop(
                             conn,
                             trigger="scheduler",
                             dedup_max_runtime_seconds=dedup_max_runtime_seconds,
+                            default_freshness_interval_hours=default_freshness_interval_hours,
+                            freshness_cycle_stuck_after_hours=freshness_cycle_stuck_after_hours,
                         )
                 finally:
                     postgres.release_run_lock(conn)
