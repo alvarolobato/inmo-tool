@@ -14,6 +14,12 @@ vi.mock("@/lib/db/profiles", () => ({
   getProfileById: vi.fn(),
 }));
 
+// No learned examples in these tests → resolveSearchTasks falls back to the
+// hand-written builders, so the URLs asserted below are the builder output.
+vi.mock("@/lib/db/search-url-example", () => ({
+  findExamplesForPortal: vi.fn().mockResolvedValue([]),
+}));
+
 import { GET } from "../search-urls/route";
 import * as profiles from "@/lib/db/profiles";
 import type { SearchProfileRow } from "@/lib/profiles-schema";

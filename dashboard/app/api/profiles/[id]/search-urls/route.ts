@@ -19,7 +19,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getProfileById } from "@/lib/db/profiles";
-import { buildSearchUrls } from "@/lib/search-url";
+import { resolveSearchTasks } from "@/lib/search-url/resolve";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
 type RouteContext = { params: Promise<{ id: string }> | { id: string } };
@@ -55,7 +55,10 @@ export async function GET(
     return NextResponse.json({
       profileId: profile.id,
       name: profile.name,
-      tasks: buildSearchUrls(profile.scope),
+      // Learned-aware: a confirmed template wins over the hand-written builder
+      // per (portal × section) when one has been captured for this profile's
+      // section/area (#293); otherwise the hand-written task stands unchanged.
+      tasks: await resolveSearchTasks(profile.scope),
     });
   } catch (error) {
     return NextResponse.json(

@@ -241,6 +241,11 @@ async function onStartBatch() {
       type: 'START_BATCH',
       portal: batchContext.portal,
       urls: batchContext.detailUrls,
+      // The search-results page URL we're mining. Piggybacks capture-to-infer
+      // (issue #293): the background worker also saves this as a learned
+      // search-URL example. No separate UI — starting a batch already is an
+      // explicit owner action on a search page worth mining.
+      searchUrl: batchContext.tab?.url || null,
     });
   } catch (err) {
     showError(err.message || 'No se pudo iniciar la captura por lotes');

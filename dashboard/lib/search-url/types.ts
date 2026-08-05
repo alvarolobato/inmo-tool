@@ -107,3 +107,73 @@ export interface PortalSearchUrlBuilder {
    */
   build(scope: CanonicalSearchScope): SearchTask[];
 }
+
+// ─── Capture-to-infer: learn URL grammars from real navigated URLs (issue #293)
+
+/**
+ * The decoded, portal-neutral filters a {@link PortalSearchUrlParser.parse}
+ * recovers from a real search URL — the best-effort structural inverse of what
+ * {@link PortalSearchUrlBuilder.build} encoded. A field the parser did not
+ * recognise is simply left undefined (never fabricated).
+ *
+ * Geography under the owner-confirmed slug grammar (#296) rides in the URL PATH
+ * as a `<municipio>-<provincia>` (idealista) or `<comunidad>/<provincia>`
+ * (aliseda) slug — NOT a polyline. `locationSlug` is that literal path segment;
+ * `center` is its approximate `[lat, lng]` centroid resolved from the known
+ * municipio/province tables, used only for same-rough-area matching (both
+ * undefined for a national / unresolved search).
+ */
+export interface ParsedSearchFilters {
+  /** Portal section the URL targets (idealista operation / aliseda tipo-plural). */
+  section: string;
+  /** Property types the URL narrows to, in canonical order. */
+  propertyTypes: PropertyType[];
+  /** The literal location path slug the URL carries, or "" (national/unresolved). */
+  locationSlug: string;
+  priceMin?: number;
+  priceMax?: number;
+  sizeMin?: number;
+  sizeMax?: number;
+  roomsMin?: number;
+  /** Approximate `[lat, lng]` centroid of `locationSlug`, when resolvable. */
+  center?: [number, number];
+}
+
+/**
+ * The result of decoding one real search URL: the recognised filters, a
+ * deterministic `categoryKey` (the CATEGORICAL axis we match a profile on
+ * exactly — section + sorted property types, never geography or numeric
+ * ranges), and a `template` — the original URL with every continuous numeric
+ * value swapped for a named placeholder (`{price_min}` …) so a profile's own
+ * values can be substituted back in later. Everything the parser did NOT
+ * recognise stays literal in `template`.
+ */
+export interface ParsedSearchUrl {
+  filters: ParsedSearchFilters;
+  categoryKey: string;
+  template: string;
+}
+
+/**
+ * A per-portal URL parser — the structural inverse of the same portal's
+ * {@link PortalSearchUrlBuilder}. One per capture-capable portal that supports
+ * capture-to-infer (issue #293). Kept honest by round-trip tests:
+ * `parse(build(scope))` decodes back to `scope`'s filters, and re-substituting
+ * those filters into `template` reproduces the original URL byte-for-byte.
+ */
+export interface PortalSearchUrlParser {
+  /** Portal key — matches the builder's `portal`. */
+  readonly portal: string;
+  /** Decode a real search URL, or null if it isn't this portal's search grammar. */
+  parse(url: string): ParsedSearchUrl | null;
+  /**
+   * Substitute a profile scope's numeric values into a stored `template`,
+   * returning the resulting URL and any profile constraints the template had no
+   * placeholder for (the portal genuinely can't express them → broadened,
+   * reported like `build()` does).
+   */
+  substitute(
+    template: string,
+    scope: CanonicalSearchScope,
+  ): { url: string; unfilled: LoosenableConstraint[] };
+}
