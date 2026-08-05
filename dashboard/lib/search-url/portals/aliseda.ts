@@ -41,10 +41,15 @@ import { PROPERTY_TYPES } from "@/lib/profiles-schema";
 import { provinceForPoint } from "../provinces";
 import { stableTaskId } from "../task-id";
 import { taskLabel } from "../labels";
+import { centerForLocationSlug, makeCategoryKey, PLACEHOLDER } from "../parse-shared";
 import type {
   CanonicalSearchScope,
+  LoosenableConstraint,
   LoosenedConstraint,
+  ParsedSearchFilters,
+  ParsedSearchUrl,
   PortalSearchUrlBuilder,
+  PortalSearchUrlParser,
   PropertyType,
   SearchTask,
 } from "../types";
@@ -221,4 +226,98 @@ function buildAliseda(scope: CanonicalSearchScope): SearchTask[] {
 export const alisedaBuilder: PortalSearchUrlBuilder = {
   portal: PORTAL,
   build: buildAliseda,
+};
+
+// ─── parse(): the structural inverse of buildAliseda (issue #293) ────────────
+//
+// build() emits `/comprar-viviendas/<plural>[/<comunidad>/<provincia>]?subtipo=<code>&precio=<min>-<max>`.
+// parse() reads it back. Round-trip tests (aliseda.test.ts) fail loudly on any
+// build() grammar drift — the mechanism that stops us re-breaking the URL shape.
+
+/** Reverse of PLURAL_BY_TYPE: aliseda path plural → property type. */
+const TYPE_BY_PLURAL: Record<string, PropertyType> = Object.fromEntries(
+  (Object.entries(PLURAL_BY_TYPE) as Array<[PropertyType, string]>).map(([t, p]) => [p, t]),
+);
+
+const PRECIO_PLACEHOLDER = `${PLACEHOLDER.priceMin}-${PLACEHOLDER.priceMax}`;
+
+// origin | plural | comunidad | provincia | query (without leading ?)
+const PARSE_RE =
+  /^(https?:\/\/(?:www\.)?alisedainmobiliaria\.com)\/comprar-viviendas\/([^/?#]+)(?:\/([^/?#]+)\/([^/?#]+))?(?:\?([^#]*))?$/;
+
+function parseAliseda(url: string): ParsedSearchUrl | null {
+  const m = PARSE_RE.exec(url.trim());
+  if (!m) return null;
+  const [, origin, plural, comunidad, provincia, rawQuery] = m;
+  const type = TYPE_BY_PLURAL[plural];
+  if (!type) return null;
+
+  const locationSlug = comunidad && provincia ? `${comunidad}/${provincia}` : "";
+  const filters: ParsedSearchFilters = {
+    section: plural,
+    propertyTypes: [type],
+    locationSlug,
+    center: centerForLocationSlug(locationSlug),
+  };
+
+  let templateQuery = rawQuery ?? "";
+  if (rawQuery) {
+    const params = new URLSearchParams(rawQuery);
+    const precio = params.get("precio");
+    if (precio) {
+      const mm = /^(\d+)-(\d+)$/.exec(precio);
+      if (mm) {
+        if (Number(mm[1]) > 0) filters.priceMin = Number(mm[1]); // 0 is the "no min" sentinel
+        filters.priceMax = Number(mm[2]);
+        templateQuery = templateQuery.replace(/precio=\d+-\d+/, `precio=${PRECIO_PLACEHOLDER}`);
+      }
+    }
+  }
+
+  const path = `/comprar-viviendas/${plural}${locationSlug ? `/${locationSlug}` : ""}`;
+  const template = templateQuery ? `${origin}${path}?${templateQuery}` : `${origin}${path}`;
+  return { filters, categoryKey: makeCategoryKey(plural), template };
+}
+
+function substituteAliseda(
+  template: string,
+  scope: CanonicalSearchScope,
+): { url: string; unfilled: LoosenableConstraint[] } {
+  const m = PARSE_RE.exec(template);
+  if (!m) return { url: template, unfilled: [] };
+  const [, origin, plural, comunidad, provincia, rawQuery] = m;
+  const unfilled: LoosenableConstraint[] = [];
+
+  const outParams: string[] = [];
+  const hasPrecioPlaceholder = (rawQuery ?? "").includes(PRECIO_PLACEHOLDER);
+  if (rawQuery) {
+    for (const part of rawQuery.split("&")) {
+      if (part === `precio=${PRECIO_PLACEHOLDER}`) {
+        if (scope.priceMax !== undefined) {
+          const min = scope.priceMin !== undefined ? Math.round(scope.priceMin) : 0;
+          outParams.push(`precio=${min}-${Math.round(scope.priceMax)}`);
+        } else if (scope.priceMin !== undefined) {
+          // No upper bound → can't form the range → drop the floor (broader).
+          unfilled.push("price_min");
+        }
+        continue;
+      }
+      outParams.push(part); // subtipo / literal
+    }
+  }
+
+  // Price the template can't express, and size (aliseda has no size grammar).
+  if (scope.priceMax !== undefined && !hasPrecioPlaceholder) unfilled.push("price_max");
+  if (scope.sizeMin !== undefined) unfilled.push("size_min");
+  if (scope.sizeMax !== undefined) unfilled.push("size_max");
+
+  const path = `/comprar-viviendas/${plural}${comunidad && provincia ? `/${comunidad}/${provincia}` : ""}`;
+  const query = outParams.join("&");
+  return { url: query ? `${origin}${path}?${query}` : `${origin}${path}`, unfilled };
+}
+
+export const alisedaParser: PortalSearchUrlParser = {
+  portal: PORTAL,
+  parse: parseAliseda,
+  substitute: substituteAliseda,
 };

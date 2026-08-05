@@ -288,11 +288,32 @@ async function fetchPendingUrls(portal) {
 }
 
 /**
+ * Learn the search-results page's OWN URL as a capture-to-infer example
+ * (issue #293). Fire-and-forget: a failure here must never block the batch —
+ * saving the URL grammar is a side-benefit of mining, not a precondition.
+ */
+async function saveSearchUrlExample(searchUrl) {
+  if (!searchUrl) return;
+  try {
+    const { apiUrl, apiKey } = await getApiConfig();
+    await fetch(`${apiUrl}/api/extension/search-url-example`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-admin-key': apiKey },
+      body: JSON.stringify({ url: searchUrl }),
+    });
+  } catch {
+    /* best-effort: never let a learned-example save disrupt the capture run */
+  }
+}
+
+/**
  * Begin a batch run for one portal. Seeds the harvested URLs, then builds the
  * queue from the portal's current pending set (so already-captured listings are
  * skipped and any pre-existing pending rows are swept too). Fires the loop.
  */
-async function startBatch({ portal, urls }) {
+async function startBatch({ portal, urls, searchUrl }) {
+  // Piggyback capture-to-infer: also learn this search page's URL grammar.
+  await saveSearchUrlExample(searchUrl);
   if (Array.isArray(urls) && urls.length > 0) {
     await seedWorklist(urls);
   }

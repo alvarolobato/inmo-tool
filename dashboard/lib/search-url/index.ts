@@ -35,8 +35,12 @@ export type {
   SearchTask,
 } from "./types";
 
-/** Registered builders, keyed by portal. */
-const BUILDERS: Record<string, PortalSearchUrlBuilder> = {
+/**
+ * Registered builders, keyed by portal. Exported so the server-only resolver
+ * (./resolve.ts, issue #293) can reuse the exact same hand-written builders as
+ * its fallback layer and to derive a profile's categoryKey (build → parse).
+ */
+export const BUILDERS: Record<string, PortalSearchUrlBuilder> = {
   [idealistaBuilder.portal]: idealistaBuilder,
   [alisedaBuilder.portal]: alisedaBuilder,
 };

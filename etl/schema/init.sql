@@ -1427,6 +1427,54 @@ CREATE TABLE IF NOT EXISTS capture_task_run (
 -- extra index is needed.
 
 
+-- ── Capture-to-infer: learned search-URL examples (issue #293, D-051) ───────
+-- Instead of hand-maintaining each portal's search-URL grammar, we LEARN it
+-- from the owner's real navigated URLs. When the owner clicks "Capturar todas"
+-- on a search-results page, the extension already has that page's URL; it POSTs
+-- it here (POST /api/extension/search-url-example), where the matching portal's
+-- parse() — the structural inverse of the owner-confirmed slug builder (#296) —
+-- decodes it into `filters` + `category_key` + `template`. Auto-trusted (owner
+-- decision 2026-08-05): the owner navigated it, so it's a correct example — no
+-- review step. The resolver (dashboard/lib/search-url/resolve.ts) later prefers
+-- a confirmed template over the hand-written builder, per (portal × section).
+--
+-- Additive, no changes to capture_worklist / extension_capture: this learns a
+-- search page's OWN URL grammar, a different concern from mining its detail
+-- links (#262). `match_key` reuses the same cosmetic-tolerant canonicalisation
+-- as the worklist so re-navigating the same page is idempotent (ON CONFLICT).
+CREATE TABLE IF NOT EXISTS search_url_example (
+    id            BIGSERIAL    PRIMARY KEY,
+    portal        TEXT         NOT NULL,
+    -- The search URL exactly as captured (what the operator navigated).
+    url           TEXT         NOT NULL,
+    -- Canonical correlation key (host without www + path without trailing
+    -- slash). UNIQUE per portal so a re-capture of the same page refreshes the
+    -- decoded columns rather than inserting a duplicate.
+    match_key     TEXT         NOT NULL,
+    -- Decoded, portal-neutral filters (ParsedSearchFilters): section, property
+    -- types, price/size bands, the location path slug (idealista
+    -- <municipio>-<provincia> / aliseda <comunidad>/<provincia>), and its
+    -- approximate centroid resolved from the known municipio/province tables
+    -- (NULL for a national / unresolved search) — used only for area matching.
+    filters       JSONB        NOT NULL,
+    -- The categorical match axis: the portal section (idealista operation /
+    -- aliseda tipo-plural), which under the slug grammar IS the property-type
+    -- granularity. Never geography or numeric ranges.
+    category_key  TEXT         NOT NULL,
+    -- The captured URL with every continuous numeric value swapped for a named
+    -- placeholder ({price_min} …) so a profile's own values substitute back in.
+    template      TEXT         NOT NULL,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    UNIQUE (portal, match_key)
+);
+
+-- The resolver's read query is `WHERE portal = $1` then in-memory section /
+-- area matching; a composite (portal, category_key) index keeps the exact
+-- section lookup cheap as examples accumulate.
+CREATE INDEX IF NOT EXISTS idx_search_url_example_lookup
+    ON search_url_example (portal, category_key);
+
+
 -- ============================================================
 -- Dashboard App
 -- ============================================================
@@ -1991,3 +2039,4 @@ ANALYZE extension_capture;
 ANALYZE capture_worklist;
 ANALYZE capture_worklist_seed_trigger;
 ANALYZE capture_task_run;
+ANALYZE search_url_example;

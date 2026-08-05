@@ -44,10 +44,20 @@ import { municipioForPoint } from "../municipios";
 import { provinceForPoint } from "../provinces";
 import { stableTaskId } from "../task-id";
 import { taskLabel } from "../labels";
+import {
+  centerForLocationSlug,
+  makeCategoryKey,
+  NUMERIC_FIELDS,
+  PLACEHOLDER,
+} from "../parse-shared";
 import type {
   CanonicalSearchScope,
+  LoosenableConstraint,
   LoosenedConstraint,
+  ParsedSearchFilters,
+  ParsedSearchUrl,
   PortalSearchUrlBuilder,
+  PortalSearchUrlParser,
   PropertyType,
   SearchTask,
 } from "../types";
@@ -201,4 +211,119 @@ function buildIdealista(scope: CanonicalSearchScope): SearchTask[] {
 export const idealistaBuilder: PortalSearchUrlBuilder = {
   portal: PORTAL,
   build: buildIdealista,
+};
+
+// ─── parse(): the structural inverse of buildIdealista (issue #293) ──────────
+//
+// build() emits `/<operation>[/<location>][/con-<t1>,<t2>,…]/`; parse() walks
+// that exact grammar backwards. It mirrors the CURRENT owner-confirmed builder
+// (#296); the round-trip tests (idealista.test.ts) fail loudly the day build()'s
+// grammar changes, which is precisely how this stops us getting the URL wrong.
+
+/** The property types each operation section maps back to (build is 1 task/section). */
+const TYPES_BY_OPERATION: Record<string, readonly PropertyType[]> = {
+  "venta-viviendas": ["piso", "chalet", "atico"],
+  "venta-locales": ["local", "nave"],
+  "venta-garajes": ["garaje"],
+  "venta-terrenos": ["terreno"],
+  "venta-edificios": ["edificio"],
+};
+
+/** The confirmed min-rooms token (build emits it for roomsMin ≥ 4). */
+const ROOMS_TOKEN = "de-cuatro-cinco-habitaciones-o-mas";
+
+/** A recognised numeric `con-` token: its regex + which scope field it fills. */
+const NUM_TOKEN_SPECS = [
+  { field: "priceMin", re: /^precio-desde_(\d+)$/, placeholderToken: `precio-desde_${PLACEHOLDER.priceMin}` },
+  { field: "priceMax", re: /^precio-hasta_(\d+)$/, placeholderToken: `precio-hasta_${PLACEHOLDER.priceMax}` },
+  { field: "sizeMin", re: /^metros-cuadrados-mas-de_(\d+)$/, placeholderToken: `metros-cuadrados-mas-de_${PLACEHOLDER.sizeMin}` },
+  { field: "sizeMax", re: /^metros-cuadrados-menos-de_(\d+)$/, placeholderToken: `metros-cuadrados-menos-de_${PLACEHOLDER.sizeMax}` },
+] as const satisfies ReadonlyArray<{
+  field: "priceMin" | "priceMax" | "sizeMin" | "sizeMax";
+  re: RegExp;
+  placeholderToken: string;
+}>;
+
+// origin | operation | location (a segment NOT starting with "con-") | con tokens
+const PARSE_RE =
+  /^(https?:\/\/(?:www\.)?idealista\.com)\/([^/?#]+)(?:\/((?!con-)[^/?#]+))?(?:\/con-([^/?#]+))?\/?$/;
+
+function parseIdealista(url: string): ParsedSearchUrl | null {
+  const m = PARSE_RE.exec(url.trim());
+  if (!m) return null;
+  const [, origin, operation, location, tokensStr] = m;
+  if (!(operation in TYPES_BY_OPERATION)) return null;
+
+  const filters: ParsedSearchFilters = {
+    section: operation,
+    propertyTypes: [...TYPES_BY_OPERATION[operation]],
+    locationSlug: location ?? "",
+  };
+
+  const templateTokens: string[] = [];
+  if (tokensStr) {
+    for (const token of tokensStr.split(",")) {
+      if (token === ROOMS_TOKEN) {
+        filters.roomsMin = 4; // build only emits this token for roomsMin ≥ 4
+        templateTokens.push(token); // categorical → literal in template
+        continue;
+      }
+      const spec = NUM_TOKEN_SPECS.find((s) => s.re.test(token));
+      if (spec) {
+        filters[spec.field] = Number(spec.re.exec(token)![1]);
+        templateTokens.push(spec.placeholderToken);
+        continue;
+      }
+      templateTokens.push(token); // unrecognised → keep verbatim, no filter
+    }
+  }
+
+  filters.center = centerForLocationSlug(filters.locationSlug);
+
+  const locationPart = filters.locationSlug ? `/${filters.locationSlug}` : "";
+  const conPart = templateTokens.length > 0 ? `/con-${templateTokens.join(",")}` : "";
+  const template = `${origin}/${operation}${locationPart}${conPart}/`;
+  return { filters, categoryKey: makeCategoryKey(operation), template };
+}
+
+function substituteIdealista(
+  template: string,
+  scope: CanonicalSearchScope,
+): { url: string; unfilled: LoosenableConstraint[] } {
+  const m = PARSE_RE.exec(template);
+  if (!m) return { url: template, unfilled: [] };
+  const [, origin, operation, location, tokensStr] = m;
+
+  const outTokens: string[] = [];
+  if (tokensStr) {
+    for (const token of tokensStr.split(",")) {
+      const field = NUMERIC_FIELDS.find((f) => token.includes(f.placeholder));
+      if (!field) {
+        outTokens.push(token); // literal (rooms / opaque)
+        continue;
+      }
+      const value = scope[field.key];
+      if (value === undefined) continue; // profile omits it → drop token (broader)
+      outTokens.push(token.replace(field.placeholder, String(Math.round(value))));
+    }
+  }
+
+  // Profile numerics the template has NO placeholder for → the learned example
+  // never filtered on them, so results are broader: flag each.
+  const unfilled: LoosenableConstraint[] = [];
+  for (const f of NUMERIC_FIELDS) {
+    if (scope[f.key] !== undefined && !(tokensStr ?? "").includes(f.placeholder)) {
+      unfilled.push(f.constraint);
+    }
+  }
+
+  const locationPart = location ? `/${location}` : "";
+  const conPart = outTokens.length > 0 ? `/con-${outTokens.join(",")}` : "";
+  return { url: `${origin}/${operation}${locationPart}${conPart}/`, unfilled };
+}
+
+export const idealistaParser: PortalSearchUrlParser = {
+  portal: PORTAL,
+  parse: parseIdealista,
+  substitute: substituteIdealista,
 };
