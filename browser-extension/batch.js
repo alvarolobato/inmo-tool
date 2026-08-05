@@ -320,8 +320,38 @@
     });
   }
 
+  /**
+   * makeSerializer() → run(fn): an in-memory async mutex (issue #321).
+   *
+   * Returns a `run` that chains each call onto the previous one's completion,
+   * so overlapping callers execute their async `fn` strictly one-at-a-time.
+   * background.js wraps it around every `chrome.storage.session` get-modify-set
+   * of the shared batch state: with bounded concurrency (#318) two tabs can
+   * settle in the same tick and interleave their read → modify → write,
+   * lost-updating one another's slot flip. Serializing the critical section
+   * removes the interleave so no write is clobbered.
+   *
+   * Each call resolves/rejects with its OWN `fn`'s outcome; a rejection does
+   * not break the chain for later callers (the tail advances past both
+   * fulfilment and rejection). Pure — Promises only, no chrome/DOM — so it lives
+   * here with the rest of the unit-testable queue logic and is MV3-safe with no
+   * dependency.
+   */
+  function makeSerializer() {
+    var tail = Promise.resolve();
+    function noop() {}
+    return function run(fn) {
+      var result = tail.then(fn);
+      // Advance the chain past this section regardless of its success/failure,
+      // but hand the caller its real outcome (don't swallow a rejection).
+      tail = result.then(noop, noop);
+      return result;
+    };
+  }
+
   var api = {
     STATUSES: STATUSES,
+    makeSerializer: makeSerializer,
     SLOT: SLOT,
     DEFAULT_CONCURRENCY: DEFAULT_CONCURRENCY,
     MAX_CONCURRENCY: MAX_CONCURRENCY,
