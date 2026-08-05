@@ -31,6 +31,7 @@ def register_all() -> None:
     from etl.connectors.buildingcenter import BuildingCenterConnector
     from etl.connectors.cimenta2 import Cimenta2Connector
     from etl.connectors.diglo import DigloConnector
+    from etl.connectors.escogecasa import EscogecasaConnector
     from etl.connectors.fotocasa import FotocasaConnector
     from etl.connectors.fotocasa_rental import FotocasaRentalConnector
     from etl.connectors.idealista import IdealistaConnector
@@ -102,3 +103,12 @@ def register_all() -> None:
     # page publishes lat/lon (batch's second after Diglo). Born disabled (#100).
     if UnicajaConnector.name not in registered_names:
         CONNECTORS.append(UnicajaConnector())
+    # Issue #135: Abanca's own REO portal (escogecasa.es — the .com the issue
+    # named is a dead domain). Legacy Java map-search; discover() POSTs a
+    # center/radius bounding box to the results loader and parses its
+    # createMarker() payload (coords + price per listing), the detail page is
+    # server-rendered. Bbox capped (~100 markers) so discovers_full_inventory
+    # is False. Publishes lat/lon (batch's third after Diglo/Unicaja) and a
+    # postal code. Born disabled (#100).
+    if EscogecasaConnector.name not in registered_names:
+        CONNECTORS.append(EscogecasaConnector())
