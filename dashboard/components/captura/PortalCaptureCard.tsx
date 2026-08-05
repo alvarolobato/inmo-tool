@@ -19,7 +19,7 @@ import { portalLabel, type PortalCaptureView } from "@/lib/captura-view";
  * in the extension. This is the launch pad + progress mirror.
  */
 export function PortalCaptureCard({ view }: { view: PortalCaptureView }) {
-  const { portal, searchUrl, loosened, summary, capturedPct } = view;
+  const { portal, tasks, summary, capturedPct } = view;
   const label = portalLabel(portal);
 
   return (
@@ -35,53 +35,66 @@ export function PortalCaptureCard({ view }: { view: PortalCaptureView }) {
         gap: 12,
       }}
     >
-      {/* Header: portal name + launch action */}
+      {/* Header: portal name */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <strong style={{ fontSize: 15, color: "var(--fg)" }}>{label}</strong>
-        <a
-          data-testid={`captura-open-${portal}`}
-          href={searchUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          title={searchUrl}
-          style={{
-            marginLeft: "auto",
-            padding: "7px 16px",
-            fontSize: 13,
-            fontWeight: 600,
-            borderRadius: 8,
-            background: "var(--accent)",
-            color: "#fff",
-            textDecoration: "none",
-            whiteSpace: "nowrap",
-          }}
-        >
-          Abrir búsqueda ↗
-        </a>
       </div>
 
-      {/* Loosened-constraint notes: the search is broader than the profile. */}
-      {loosened.length > 0 && (
-        <ul
-          data-testid={`captura-loosened-${portal}`}
-          style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 4 }}
-        >
-          {loosened.map((l) => (
-            <li
-              key={l.constraint}
-              style={{
-                fontSize: 12,
-                color: "var(--warn)",
-                background: "var(--warn-bg)",
-                borderRadius: 6,
-                padding: "4px 8px",
-              }}
-            >
-              <strong>búsqueda ampliada:</strong> {l.reason}
-            </li>
-          ))}
-        </ul>
-      )}
+      {/* One openable pre-filtered search per task (idealista/aliseda search one
+          section at a time), each with its own loosened-constraint notes. */}
+      <ul
+        data-testid={`captura-tasks-${portal}`}
+        style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 10 }}
+      >
+        {tasks.map((task) => (
+          <li key={task.id} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 13, color: "var(--fg)" }}>{task.label}</span>
+              <a
+                data-testid={`captura-open-${task.id}`}
+                href={task.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={task.url}
+                style={{
+                  marginLeft: "auto",
+                  padding: "6px 14px",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  borderRadius: 8,
+                  background: "var(--accent)",
+                  color: "#fff",
+                  textDecoration: "none",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Abrir búsqueda ↗
+              </a>
+            </div>
+            {task.loosened.length > 0 && (
+              <ul
+                data-testid={`captura-loosened-${task.id}`}
+                style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 4 }}
+              >
+                {task.loosened.map((l) => (
+                  <li
+                    key={l.constraint + l.reason}
+                    style={{
+                      fontSize: 12,
+                      color: "var(--warn)",
+                      background: "var(--warn-bg)",
+                      borderRadius: 6,
+                      padding: "4px 8px",
+                    }}
+                  >
+                    <strong>búsqueda ampliada:</strong> {l.reason}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </li>
+        ))}
+      </ul>
 
       {/* Worklist progress for this portal (global roll-up). */}
       {summary ? (

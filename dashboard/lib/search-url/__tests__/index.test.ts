@@ -56,11 +56,13 @@ describe("SEARCH_URL_PORTALS", () => {
 });
 
 describe("buildSearchUrl", () => {
-  it("builds one portal's URL", () => {
+  it("builds one portal's tasks (an array)", () => {
     const result = buildSearchUrl("idealista", SCOPE);
     expect(result).not.toBeNull();
-    expect(result!.portal).toBe("idealista");
-    expect(result!.url).toContain("idealista.com/areas/venta-viviendas");
+    // piso + chalet share the venta-viviendas section → a single idealista task.
+    expect(result).toHaveLength(1);
+    expect(result![0].portal).toBe("idealista");
+    expect(result![0].url).toContain("idealista.com/venta-viviendas");
   });
 
   it("returns null for a portal with no builder", () => {
@@ -69,21 +71,28 @@ describe("buildSearchUrl", () => {
 });
 
 describe("buildSearchUrls", () => {
-  it("builds every capture portal's URL in CAPTURE_PORTALS order", () => {
-    const urls = buildSearchUrls(SCOPE);
-    expect(urls.map((u) => u.portal)).toEqual(["idealista", "aliseda"]);
-    for (const u of urls) {
-      expect(u.url).toMatch(/^https:\/\//);
-      expect(Array.isArray(u.loosened)).toBe(true);
+  it("returns a flat task list across every capture portal in CAPTURE_PORTALS order", () => {
+    const tasks = buildSearchUrls(SCOPE);
+    // idealista: 1 viviendas task; aliseda: one task per type (piso, chalet).
+    expect(tasks.map((t) => t.portal)).toEqual(["idealista", "aliseda", "aliseda"]);
+    for (const t of tasks) {
+      expect(t.url).toMatch(/^https:\/\//);
+      expect(typeof t.id).toBe("string");
+      expect(typeof t.label).toBe("string");
+      expect(Array.isArray(t.loosened)).toBe(true);
     }
   });
 
-  it("carries per-portal loosened flags (aliseda geography always widened)", () => {
-    const urls = buildSearchUrls(SCOPE);
-    const aliseda = urls.find((u) => u.portal === "aliseda")!;
-    expect(aliseda.loosened.some((l) => l.constraint === "geography")).toBe(true);
-    const idealista = urls.find((u) => u.portal === "idealista")!;
-    // idealista renders this two-home-subtype scope faithfully.
-    expect(idealista.loosened).toEqual([]);
+  it("gives every task a distinct, stable id", () => {
+    const ids = buildSearchUrls(SCOPE).map((t) => t.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    // Deterministic across calls.
+    expect(buildSearchUrls(SCOPE).map((t) => t.id)).toEqual(ids);
+  });
+
+  it("carries per-task loosened flags (aliseda geography always widened)", () => {
+    const tasks = buildSearchUrls(SCOPE);
+    const aliseda = tasks.filter((t) => t.portal === "aliseda");
+    expect(aliseda.every((t) => t.loosened.some((l) => l.constraint === "geography"))).toBe(true);
   });
 });

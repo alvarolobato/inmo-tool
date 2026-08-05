@@ -71,10 +71,29 @@ export interface LoosenedConstraint {
   reason: string;
 }
 
-/** One portal's pre-filtered search URL plus any constraints it had to widen. */
-export interface PortalSearchUrl {
+/**
+ * One discrete, openable pre-filtered search TASK (issue #277 restructure).
+ *
+ * A portal can search only ONE section at a time (idealista: one property-type
+ * operation section; aliseda: one property-type path segment), so a single
+ * profile fans out into SEVERAL tasks — one openable URL per (portal × section)
+ * — instead of one merged URL with a "types widened" note. The Captura UI shows
+ * each task as its own button.
+ */
+export interface SearchTask {
+  /**
+   * Stable, deterministic id — the SAME profile + filters always reproduce the
+   * SAME id (a hash of portal + normalized filters; see ./task-id.ts). A
+   * separate UI feature records last-run time keyed on this.
+   */
+  id: string;
+  /** Portal key — matches `CAPTURE_PORTALS[].portal` in lib/worklist.ts. */
   portal: string;
+  /** Human, Spanish-facing label, e.g. "Idealista — pisos en Estepona ≤200.000 €". */
+  label: string;
+  /** The openable, pre-filtered search URL. */
   url: string;
+  /** Constraints the portal's URL grammar had to broaden (never narrow). */
   loosened: LoosenedConstraint[];
 }
 
@@ -82,6 +101,9 @@ export interface PortalSearchUrl {
 export interface PortalSearchUrlBuilder {
   /** Portal key — matches `CAPTURE_PORTALS[].portal` in lib/worklist.ts. */
   readonly portal: string;
-  /** Map canonical scope → this portal's pre-filtered search URL. */
-  build(scope: CanonicalSearchScope): PortalSearchUrl;
+  /**
+   * Map canonical scope → this portal's pre-filtered search TASKS (one per
+   * searchable section; at least one).
+   */
+  build(scope: CanonicalSearchScope): SearchTask[];
 }

@@ -1,34 +1,59 @@
 /**
- * Idealista pre-filtered search-URL builder (issue #267).
+ * Idealista pre-filtered search-URL builder (issue #277; owner-reported grammar
+ * fix 2026-08-05; task-list restructure).
  *
- * Idealista's URL grammar for a MAP-DRAWN area search is:
+ * The original #277 builder emitted a map-draw grammar (`/areas/…?shape=<enc>`)
+ * that was reverse-engineered and WRONG. The owner tested "Abrir búsqueda" and
+ * supplied the real path grammar:
  *
- *   https://www.idealista.com/areas/<operation>/con-<f1>,<f2>,…/?shape=<enc>
+ *   /<operation>/<municipio>-<provincia>/con-<f1>[,<f2>,…]/
  *
- * where `<operation>` is the section (venta-viviendas / venta-locales / …),
- * the `con-…` path segment carries comma-separated filter tokens, and `shape`
- * is a Google-encoded polygon of the drawn zone (see ../geo.ts). When there
- * are no filter tokens the `con-…` segment is omitted.
+ * Confirmed real examples (Estepona piso, ≤ 200 000 €):
  *
- * Grammar is best-effort by design (issue #267): idealista can search only ONE
- * operation section at a time, so property types that span sections force us
- * to pick one and broaden the rest — recorded as a loosened `property_types`.
- * Geography is rendered faithfully by the polygon, so it is never loosened
- * here. These path/token spellings are the volatile part; they live in this
- * one file so refreshing them (or adding a portal) is a local edit.
+ *   https://www.idealista.com/venta-viviendas/estepona-malaga/con-precio-hasta_200000/
+ *   …with 4+ rooms:
+ *   https://www.idealista.com/venta-viviendas/estepona-malaga/con-precio-hasta_200000,de-cuatro-cinco-habitaciones-o-mas/
+ *
+ * Idealista searches ONE operation section at a time (venta-viviendas /
+ * venta-locales / venta-garajes / …), so a multi-section profile fans out into
+ * ONE TASK PER SECTION — not one merged URL with a "types widened" note.
+ * Property types within a section (piso/chalet/atico all → venta-viviendas) are
+ * NOT further narrowed: the owner's confirmed URL carries no home-subtype token,
+ * so the section IS the granularity.
+ *
+ * CONFIRMED vs. GUESSED (guessed items are flagged as loosened):
+ *   - path `/<operation>/<municipio>-<provincia>/con-…/` ...... confirmed
+ *   - `<municipio>-<provincia>` (e.g. `estepona-malaga`) resolved from the
+ *     profile lat/lng via ../municipios.ts (nearest-town). A town match is the
+ *     accepted representation (owner-confirmed) → NOT flagged. No town within
+ *     range → province fallback (`<provincia>-provincia`, slug inferred) + flag,
+ *     or a national search + flag when no province matches either.
+ *   - price `con-precio-hasta_<max>` / `con-precio-desde_<min>` ... confirmed
+ *   - rooms `de-cuatro-cinco-habitaciones-o-mas` (min ≥ 4) ... owner-confirmed;
+ *     a lower minimum has no confirmed token → omit + flag.
+ *   - size `metros-cuadrados-mas-de_ / menos-de_` ............ standard idealista
+ *     tokens (kept; not owner-re-confirmed but long-established).
+ *
+ * These path/token spellings are the volatile part; they live in this one file.
+ * The profile scope has NO rooms field today (CanonicalSearchScope.roomsMin is
+ * reserved), so the rooms token only fires when a caller supplies roomsMin.
  */
 
 import { PROPERTY_TYPES } from "@/lib/profiles-schema";
-import { idealistaShape } from "../geo";
+import { municipioForPoint } from "../municipios";
+import { provinceForPoint } from "../provinces";
+import { stableTaskId } from "../task-id";
+import { taskLabel } from "../labels";
 import type {
   CanonicalSearchScope,
   LoosenedConstraint,
-  PortalSearchUrl,
   PortalSearchUrlBuilder,
   PropertyType,
+  SearchTask,
 } from "../types";
 
 const ORIGIN = "https://www.idealista.com";
+const PORTAL = "idealista";
 
 /** Idealista operation section each property type lives in. */
 const OPERATION_BY_TYPE: Record<PropertyType, string> = {
@@ -42,72 +67,138 @@ const OPERATION_BY_TYPE: Record<PropertyType, string> = {
   edificio: "venta-edificios",
 };
 
-/**
- * Within the `venta-viviendas` section, the `con-…` token that narrows to a
- * home subtype. Types not present here (they belong to other sections) have
- * no subtype token.
- */
-const HOMES_SUBTYPE_TOKEN: Partial<Record<PropertyType, string>> = {
-  piso: "pisos",
-  chalet: "chalets",
-  atico: "aticos",
-};
-
 /** Property types in the canonical PROPERTY_TYPES order (deterministic). */
 function inCanonicalOrder(types: readonly PropertyType[]): PropertyType[] {
   const wanted = new Set(types);
   return PROPERTY_TYPES.filter((t) => wanted.has(t));
 }
 
-function buildIdealista(scope: CanonicalSearchScope): PortalSearchUrl {
-  const loosened: LoosenedConstraint[] = [];
-  const types = inCanonicalOrder(scope.propertyTypes);
+/** Group the profile's types by their operation section, in canonical order. */
+function sectionsInOrder(
+  types: readonly PropertyType[],
+): Array<{ operation: string; types: PropertyType[] }> {
+  const bySection = new Map<string, PropertyType[]>();
+  for (const t of inCanonicalOrder(types)) {
+    const op = OPERATION_BY_TYPE[t];
+    const bucket = bySection.get(op);
+    if (bucket) bucket.push(t);
+    else bySection.set(op, [t]);
+  }
+  return [...bySection.entries()].map(([operation, ts]) => ({ operation, types: ts }));
+}
 
-  // Idealista searches one operation section at a time. Pick the section of
-  // the first (canonical-order) type; if other types live in other sections,
-  // broaden to just this section and flag it.
-  const operation = OPERATION_BY_TYPE[types[0]];
-  const otherSections = types.filter((t) => OPERATION_BY_TYPE[t] !== operation);
-  if (otherSections.length > 0) {
-    loosened.push({
-      constraint: "property_types",
+/** Geography resolved once per profile (same location for every section task). */
+interface GeoResolution {
+  /** The `<municipio>-<provincia>` / `<provincia>-provincia` slug, or "" (national). */
+  locationSegment: string;
+  /** Location key for the deterministic task id. */
+  idLocation: string;
+  /** Slug used for the human label. */
+  labelSlug: string;
+  /** A geography loosened flag when the location was broadened, else null. */
+  flag: LoosenedConstraint | null;
+}
+
+function resolveGeo(scope: CanonicalSearchScope): GeoResolution {
+  const muni = municipioForPoint(scope.center);
+  if (muni) {
+    const seg = `${muni.municipio}-${muni.provincia}`;
+    // A town match is the owner-accepted representation → not a loosening.
+    return { locationSegment: seg, idLocation: seg, labelSlug: muni.municipio, flag: null };
+  }
+  const province = provinceForPoint(scope.center);
+  if (province) {
+    const seg = `${province.provincia}-provincia`;
+    return {
+      locationSegment: seg,
+      idLocation: seg,
+      labelSlug: province.provincia,
+      flag: {
+        constraint: "geography",
+        reason:
+          `Idealista: sin municipio cercano conocido; se aproxima a la provincia entera ` +
+          `("${seg}", slug inferido), más amplia que el radio de ${scope.radiusKm} km. ` +
+          `Verifica el slug y acota la zona a mano.`,
+      },
+    };
+  }
+  return {
+    locationSegment: "",
+    idLocation: "",
+    labelSlug: "",
+    flag: {
+      constraint: "geography",
       reason:
-        `Idealista solo busca en una sección a la vez; se usa "${operation}" y se ` +
-        `amplían los tipos de otras secciones (${otherSections.join(", ")}).`,
-    });
-  }
+        `Idealista: zona no determinada a partir de las coordenadas ` +
+        `(${scope.center[0]}, ${scope.center[1]}); búsqueda nacional aproximada — acota la zona a mano.`,
+    },
+  };
+}
 
+/** The confirmed idealista token for a minimum-rooms filter, or null (+ flag). */
+function roomsToken(roomsMin: number | undefined, loosened: LoosenedConstraint[]): string | null {
+  if (roomsMin === undefined) return null;
+  if (roomsMin >= 4) return "de-cuatro-cinco-habitaciones-o-mas"; // owner-confirmed "4-5+"
+  loosened.push({
+    constraint: "rooms",
+    reason:
+      `Idealista: sólo está confirmado el token de "4-5+ habitaciones"; para un mínimo de ` +
+      `${roomsMin} no se aplica filtro de habitaciones (resultados más amplios).`,
+  });
+  return null;
+}
+
+function buildTask(
+  operation: string,
+  types: PropertyType[],
+  geo: GeoResolution,
+  scope: CanonicalSearchScope,
+): SearchTask {
+  const loosened: LoosenedConstraint[] = [];
+  if (geo.flag) loosened.push(geo.flag);
+
+  // Comma-joined `con-` filter tokens, in the owner-confirmed order
+  // (price, then rooms), followed by the standard size tokens.
   const tokens: string[] = [];
-
-  // Home subtype tokens (only meaningful in venta-viviendas). Narrowing to the
-  // selected subtypes is faithful, not a loosening.
-  if (operation === "venta-viviendas") {
-    const subtypeTokens = types
-      .map((t) => HOMES_SUBTYPE_TOKEN[t])
-      .filter((tok): tok is string => Boolean(tok));
-    // Only add subtype tokens when they'd actually narrow — listing all three
-    // home subtypes is identical to the unfiltered section.
-    const allHomeSubtypes = Object.keys(HOMES_SUBTYPE_TOKEN).length;
-    if (subtypeTokens.length > 0 && subtypeTokens.length < allHomeSubtypes) {
-      tokens.push(...subtypeTokens);
-    }
-  }
-
   if (scope.priceMin !== undefined) tokens.push(`precio-desde_${Math.round(scope.priceMin)}`);
   if (scope.priceMax !== undefined) tokens.push(`precio-hasta_${Math.round(scope.priceMax)}`);
+  const rooms = roomsToken(scope.roomsMin, loosened);
+  if (rooms) tokens.push(rooms);
   if (scope.sizeMin !== undefined) tokens.push(`metros-cuadrados-mas-de_${Math.round(scope.sizeMin)}`);
-  if (scope.sizeMax !== undefined) {
-    tokens.push(`metros-cuadrados-menos-de_${Math.round(scope.sizeMax)}`);
-  }
+  if (scope.sizeMax !== undefined) tokens.push(`metros-cuadrados-menos-de_${Math.round(scope.sizeMax)}`);
 
-  const conSegment = tokens.length > 0 ? `/con-${tokens.join(",")}` : "";
-  const shape = encodeURIComponent(idealistaShape(scope.center, scope.radiusKm));
-  const url = `${ORIGIN}/areas/${operation}${conSegment}/?shape=${shape}`;
+  const locationPart = geo.locationSegment ? `/${geo.locationSegment}` : "";
+  const conPart = tokens.length > 0 ? `/con-${tokens.join(",")}` : "";
+  const url = `${ORIGIN}/${operation}${locationPart}${conPart}/`;
 
-  return { portal: "idealista", url, loosened };
+  const id = stableTaskId({
+    portal: PORTAL,
+    section: operation,
+    location: geo.idLocation,
+    priceMin: scope.priceMin,
+    priceMax: scope.priceMax,
+    sizeMin: scope.sizeMin,
+    sizeMax: scope.sizeMax,
+    roomsMin: scope.roomsMin,
+  });
+
+  return {
+    id,
+    portal: PORTAL,
+    label: taskLabel(PORTAL, types, geo.labelSlug, scope.priceMin, scope.priceMax),
+    url,
+    loosened,
+  };
+}
+
+function buildIdealista(scope: CanonicalSearchScope): SearchTask[] {
+  const geo = resolveGeo(scope);
+  return sectionsInOrder(scope.propertyTypes).map(({ operation, types }) =>
+    buildTask(operation, types, geo, scope),
+  );
 }
 
 export const idealistaBuilder: PortalSearchUrlBuilder = {
-  portal: "idealista",
+  portal: PORTAL,
   build: buildIdealista,
 };

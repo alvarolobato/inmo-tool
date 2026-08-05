@@ -26,14 +26,23 @@ const PROFILES = [
   { id: 2, name: "Costa", scope: {}, thesis_params: {} },
 ];
 
+const ALISEDA_TASK_ID = "aliseda:pisos:0000abcd";
 const SEARCH_URLS = {
   profileId: 1,
   name: "Madrid centro",
-  urls: [
-    { portal: "idealista", url: "https://www.idealista.com/venta-viviendas/madrid/", loosened: [] },
+  tasks: [
     {
+      id: "idealista:venta-viviendas:0000ffff",
+      portal: "idealista",
+      label: "Idealista — pisos en Madrid",
+      url: "https://www.idealista.com/venta-viviendas/madrid/",
+      loosened: [],
+    },
+    {
+      id: ALISEDA_TASK_ID,
       portal: "aliseda",
-      url: "https://www.alisedainmobiliaria.com/venta?precioMax=200000",
+      label: "Aliseda — pisos en Malaga ≤200.000 €",
+      url: "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/andalucia/malaga?subtipo=36&precio=0-200000",
       loosened: [{ constraint: "geography", reason: "Aliseda no busca por radio." }],
     },
   ],
@@ -89,14 +98,14 @@ describe("CapturaPage", () => {
     // Both portals render as cards with a pre-filtered open link.
     await waitFor(() => expect(screen.getByTestId("captura-portal-idealista")).toBeInTheDocument());
     expect(screen.getByTestId("captura-portal-aliseda")).toBeInTheDocument();
-    expect(screen.getByTestId("captura-open-aliseda")).toHaveAttribute(
+    expect(screen.getByTestId(`captura-open-${ALISEDA_TASK_ID}`)).toHaveAttribute(
       "href",
-      "https://www.alisedainmobiliaria.com/venta?precioMax=200000",
+      "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/andalucia/malaga?subtipo=36&precio=0-200000",
     );
 
     // Aliseda's worklist progress + loosened flag surface.
     expect(screen.getByTestId("captura-captured-aliseda")).toHaveTextContent("5/10 capturadas");
-    expect(screen.getByTestId("captura-loosened-aliseda")).toHaveTextContent("búsqueda ampliada");
+    expect(screen.getByTestId(`captura-loosened-${ALISEDA_TASK_ID}`)).toHaveTextContent("búsqueda ampliada");
     // Idealista has no worklist rows → "aún sin lista".
     expect(screen.getByTestId("captura-nolist-idealista")).toBeInTheDocument();
 

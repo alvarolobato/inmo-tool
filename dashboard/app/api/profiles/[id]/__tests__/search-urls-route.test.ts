@@ -49,19 +49,21 @@ function ctx(id = "7") {
 describe("GET /api/profiles/[id]/search-urls", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("returns per-portal pre-filtered URLs for the profile scope", async () => {
+  it("returns a flat list of pre-filtered search tasks for the profile scope", async () => {
     mockGet.mockResolvedValue(makeProfile());
     const res = await GET(req(), ctx());
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.profileId).toBe(7);
     expect(body.name).toBe("Centro Madrid");
-    expect(body.urls.map((u: { portal: string }) => u.portal)).toEqual([
-      "idealista",
-      "aliseda",
-    ]);
-    const idealista = body.urls.find((u: { portal: string }) => u.portal === "idealista");
-    expect(idealista.url).toContain("idealista.com/areas/venta-viviendas");
+    // A single-piso profile → one idealista task + one aliseda task.
+    expect(body.tasks.map((t: { portal: string }) => t.portal)).toEqual(["idealista", "aliseda"]);
+    for (const t of body.tasks) {
+      expect(typeof t.id).toBe("string");
+      expect(typeof t.label).toBe("string");
+    }
+    const idealista = body.tasks.find((t: { portal: string }) => t.portal === "idealista");
+    expect(idealista.url).toContain("idealista.com/venta-viviendas");
     expect(idealista.url).toContain("precio-hasta_250000");
   });
 

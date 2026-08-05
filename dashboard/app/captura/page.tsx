@@ -7,7 +7,7 @@ import { PortalCaptureCard } from "@/components/captura/PortalCaptureCard";
 import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
 import { buildPortalCaptureViews, captureTotals } from "@/lib/captura-view";
-import type { PortalSearchUrl } from "@/lib/search-url";
+import type { SearchTask } from "@/lib/search-url";
 import type { SearchProfileRow } from "@/lib/profiles-schema";
 import type { WorklistPortalSummary } from "@/lib/worklist";
 
@@ -36,7 +36,7 @@ type ProfileOption = Pick<SearchProfileRow, "id" | "name">;
 interface SearchUrlsResponse {
   profileId: number;
   name: string;
-  urls: PortalSearchUrl[];
+  tasks: SearchTask[];
 }
 
 export default function CapturaPage() {
@@ -44,7 +44,7 @@ export default function CapturaPage() {
   const [profilesLoading, setProfilesLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
-  const [urls, setUrls] = useState<PortalSearchUrl[]>([]);
+  const [tasks, setTasks] = useState<SearchTask[]>([]);
   const [summaries, setSummaries] = useState<WorklistPortalSummary[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState<ApiErrorResponse | string | null>(null);
@@ -96,7 +96,7 @@ export default function CapturaPage() {
       }
       const urlsBody: SearchUrlsResponse = await urlsRes.json();
       const wlBody = await wlRes.json();
-      setUrls(urlsBody.urls ?? []);
+      setTasks(urlsBody.tasks ?? []);
       setSummaries(wlBody.summaries ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo cargar la captura del perfil.");
@@ -109,7 +109,7 @@ export default function CapturaPage() {
     if (selectedId !== null) fetchDetail(selectedId);
   }, [selectedId, fetchDetail]);
 
-  const views = useMemo(() => buildPortalCaptureViews(urls, summaries), [urls, summaries]);
+  const views = useMemo(() => buildPortalCaptureViews(tasks, summaries), [tasks, summaries]);
   const totals = useMemo(() => captureTotals(views), [views]);
 
   return (
