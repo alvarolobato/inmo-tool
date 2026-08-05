@@ -30,9 +30,12 @@
 import { query } from "@/lib/db";
 import { loadSchedulerConfig } from "@/lib/ai-assessment/scheduler";
 import { getSystemConfig } from "@/lib/system-config/loader";
-import { OCCUPANCY_PROMPT_VERSION } from "@/lib/ai-assessment/occupancy";
-import { CONDITION_PROMPT_VERSION } from "@/lib/ai-assessment/condition";
-import { REDFLAGS_PROMPT_VERSION } from "@/lib/ai-assessment/redflags";
+import {
+  DISABLED_SOURCES_CTE,
+  assessmentEligibleClause,
+  selectionFlowValues,
+  missingCurrentVerdictClause,
+} from "@/lib/ai-assessment/eligibility";
 import {
   parseRateTable,
   rollUpCosts,
@@ -54,18 +57,6 @@ function num(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-/**
- * The three selection flows the assessment scheduler drains (extract runs
- * opportunistically and is NOT a gate — mirrors SELECTION_FLOWS in batch.ts).
- * Coverage is defined against exactly these so the backlog count here equals
- * what the scheduler would actually pick up.
- */
-const SELECTION_FLOWS: Array<[type: string, version: string]> = [
-  ["occupancy", OCCUPANCY_PROMPT_VERSION],
-  ["condition", CONDITION_PROMPT_VERSION],
-  ["redflags", REDFLAGS_PROMPT_VERSION],
-];
-
 /** Endpoints that count as an AI-assessment run (for per-property avg cost). */
 const ASSESSMENT_ENDPOINTS = ["occupancy", "condition", "redflags", "extract", "compare"];
 
@@ -79,12 +70,10 @@ export async function getLlmHealth(): Promise<LlmHealthResponse> {
   const rates = parseRateTable(rateOverride);
   const scheduler = loadSchedulerConfig();
 
-  // Coverage query params: the (atype, ver) pairs, then reused. Built as a
-  // VALUES list so the eligibility matches batch.ts exactly.
-  const covValues = SELECTION_FLOWS.map(
-    (_f, i) => `($${i * 2 + 1}, $${i * 2 + 2})`,
-  ).join(", ");
-  const covParams = SELECTION_FLOWS.flatMap((f) => [f[0], f[1]]);
+  // Coverage query params: the (atype, ver) pairs, built with the SHARED
+  // fragment so eligibility + backlog match `selectPropertiesNeedingAssessment`
+  // exactly (#330).
+  const { valuesSql: covValues, params: covParams } = selectionFlowValues(1);
 
   const [flowRes, providerRes, modelRes, coverageRes, avgCostRes, errorRes, errorCodeRes] =
     await Promise.all([
@@ -129,34 +118,23 @@ export async function getLlmHealth(): Promise<LlmHealthResponse> {
           GROUP BY COALESCE(llm_provider, 'openrouter'), model`,
       ),
 
-      // 4. Assessment coverage / backlog. Eligible = a property with an active
-      //    listing carrying a non-empty description (exactly batch.ts's rule).
-      //    Pending = eligible AND missing a current-prompt-version verdict for
-      //    at least one selection flow. Covered = eligible − pending.
+      // 4. Assessment coverage / backlog, using the SHARED eligibility predicate
+      //    (#330) so these numbers equal what the scheduler actually assesses.
+      //    Eligible = matched candidate of an active profile + a readable
+      //    active listing from a non-disabled source (#327 rule). Pending =
+      //    eligible AND missing a current-prompt-version verdict for at least
+      //    one selection flow. Covered = eligible − pending.
       query(
-        `WITH eligible AS (
+        `WITH ${DISABLED_SOURCES_CTE},
+         eligible AS (
            SELECT p.id
              FROM property p
-            WHERE EXISTS (
-                    SELECT 1 FROM listing l
-                     WHERE l.property_id = p.id
-                       AND l.status = 'active'
-                       AND COALESCE(TRIM(l.description), '') <> ''
-                  )
+            WHERE ${assessmentEligibleClause("p")}
          ),
          pending AS (
            SELECT e.id
              FROM eligible e
-            WHERE EXISTS (
-                    SELECT 1
-                      FROM (VALUES ${covValues}) AS f(atype, ver)
-                     WHERE NOT EXISTS (
-                             SELECT 1 FROM ai_assessment a
-                              WHERE a.property_id = e.id
-                                AND a.assessment_type = f.atype
-                                AND a.prompt_version = f.ver
-                           )
-                  )
+            WHERE ${missingCurrentVerdictClause("e", covValues)}
          )
          SELECT (SELECT COUNT(*) FROM eligible) AS eligible,
                 (SELECT COUNT(*) FROM pending)  AS pending`,
