@@ -65,6 +65,9 @@ function baseMetrics(overrides: Partial<InvestmentMetrics> = {}): InvestmentMetr
         },
       },
     },
+    // Rental profiles carry no flip metrics (issue #45 — flip is gated to
+    // thesis_type="flip"); YieldSection ignores this field entirely.
+    flip: null,
     ...overrides,
   };
 }

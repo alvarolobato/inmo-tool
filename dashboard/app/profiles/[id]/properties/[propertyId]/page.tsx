@@ -13,6 +13,7 @@ import { PhotoGallery } from "@/components/property/PhotoGallery";
 import { LinkedListings } from "@/components/property/LinkedListings";
 import { PriceHistoryChart } from "@/components/property/PriceHistoryChart";
 import { YieldSection } from "@/components/property/sections/YieldSection";
+import { FlipSection } from "@/components/property/sections/FlipSection";
 import { DetailSections, type DetailSection } from "@/components/property/DetailSections";
 
 interface Adjacent {
@@ -187,6 +188,19 @@ export default function PropertyDetailPage() {
                 title: "Métricas de inversión",
                 order: 40,
                 content: <YieldSection metrics={investmentMetrics} />,
+              },
+            ]
+          : []),
+        // Buy-to-flip metrics (issue #45 — reserved order 45). Gated: only
+        // present when the profile's thesis_type is "flip" (getInvestmentMetrics
+        // returns flip=null otherwise), so a rental profile never sees it.
+        ...(investmentMetrics?.flip
+          ? [
+              {
+                id: "flip",
+                title: "Reforma, ARV y margen de flip",
+                order: 45,
+                content: <FlipSection metrics={investmentMetrics} />,
               },
             ]
           : []),

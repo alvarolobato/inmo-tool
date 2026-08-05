@@ -73,6 +73,7 @@ describe.runIf(dbAvailable)("GET /api/profiles/[id]/properties/[propertyId]/inve
         await pool.query("DELETE FROM profile_listing_state WHERE property_id = ANY($1::bigint[])", [
           createdPropertyIds,
         ]);
+        await pool.query("DELETE FROM ai_assessment WHERE property_id = ANY($1::bigint[])", [createdPropertyIds]);
         await pool.query("DELETE FROM listing WHERE property_id = ANY($1::bigint[])", [createdPropertyIds]);
       }
       if (createdProfileIds.length > 0) {
@@ -191,6 +192,95 @@ describe.runIf(dbAvailable)("GET /api/profiles/[id]/properties/[propertyId]/inve
       // data shape, not null — property itself has lat/lon).
       expect(body.area_price).not.toBeNull();
       expect(body.area_price.area_median_price_per_m2).toBeNull();
+    });
+  });
+
+  async function seedConditionAssessment(
+    pool: Pool,
+    propertyId: number,
+    condition: string,
+    severity: string | null,
+  ): Promise<void> {
+    await pool.query(
+      `INSERT INTO ai_assessment
+         (property_id, assessment_type, result, confidence, model, prompt_version, generated_at)
+       VALUES ($1, 'condition', $2::jsonb, 0.8, 'int-test-seed', 'condition/v2', NOW())`,
+      [
+        propertyId,
+        JSON.stringify({
+          condition,
+          renovation_severity: severity,
+          confidence: 0.8,
+          evidence: "int-test",
+          evidence_source: "fotocasa",
+          issues: [],
+          reasoning: "int-test",
+        }),
+      ],
+    );
+  }
+
+  it("is null on the response for a non-flip (rental) thesis (issue #45 EC-3)", async () => {
+    await withRealDb(async (pool) => {
+      const profileId = await makeProfile({ thesis_type: "rent", rent_assumption: { eur_per_m2_month: 12 } });
+      const propertyId = await insertProperty(pool, { province: "Madrid" });
+      await insertListing(pool, propertyId, 200000);
+      await markMatched(pool, profileId, propertyId);
+
+      const res = await GET(null as never, ctx(profileId, propertyId));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.flip).toBeNull();
+    });
+  });
+
+  it("returns flip metrics (renovation/ARV/margin) for a flip thesis (issue #45)", async () => {
+    await withRealDb(async (pool) => {
+      const profileId = await makeProfile({ thesis_type: "flip", rent_assumption: { eur_per_m2_month: 12 } });
+      // Target fixer-upper: 80 m², 200,000 (2,500 EUR/m2).
+      const propertyId = await insertProperty(pool, { province: "Madrid" });
+      await insertListing(pool, propertyId, 200000);
+      await markMatched(pool, profileId, propertyId);
+      // "a reformar", light reform → 400 EUR/m2 * 80 = 32,000 refurb.
+      await seedConditionAssessment(pool, propertyId, "a_reformar", "leve");
+      // 5 renovated comps at 3,500 EUR/m2 (280,000 for 80 m2) → zone median
+      // 3,500 → ARV ≈ 280,000, clearing area-price's MIN_SAMPLE_SIZE.
+      for (let i = 0; i < 5; i++) {
+        const compId = await insertProperty(pool, { province: "Madrid" });
+        await insertListing(pool, compId, 280000);
+      }
+
+      const res = await GET(null as never, ctx(profileId, propertyId));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+
+      expect(body.flip).not.toBeNull();
+      expect(body.flip.renovation.tier).toBe("leve");
+      expect(body.flip.renovation.total_eur).toBe(32000);
+      expect(body.flip.arv.arv_eur).toBeCloseTo(280000, 6);
+      expect(body.flip.margin.computable).toBe(true);
+      // margin = 280,000 - 200,000 - 32,000 - 10%*200,000 (20,000) = 28,000.
+      expect(body.flip.margin.margin_eur).toBeCloseTo(28000, 6);
+      // Rental yield still present alongside (buy-to-rent comparison).
+      expect(body.yield.gross_yield_pct).not.toBeNull();
+    });
+  });
+
+  it("degrades flip metrics cleanly when the condition assessment is missing (issue #45)", async () => {
+    await withRealDb(async (pool) => {
+      const profileId = await makeProfile({ thesis_type: "flip" });
+      const propertyId = await insertProperty(pool, { province: "Madrid" });
+      await insertListing(pool, propertyId, 200000);
+      await markMatched(pool, profileId, propertyId);
+      // No ai_assessment seeded, and only this property at the coordinate →
+      // no ARV comps either. Flip must still return, with no margin.
+      const res = await GET(null as never, ctx(profileId, propertyId));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.flip).not.toBeNull();
+      expect(body.flip.renovation.tier).toBe("no_estimate");
+      expect(body.flip.margin.computable).toBe(false);
+      expect(body.flip.margin.margin_eur).toBeNull();
     });
   });
 

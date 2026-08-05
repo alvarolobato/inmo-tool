@@ -22,12 +22,24 @@ import type { ThesisParams } from "@/lib/profiles-schema";
 import { computeAreaPriceComparison, type AreaPriceComparison } from "@/lib/analytics/area-price";
 import { estimateRent, type RentEstimateResult } from "@/lib/analytics/rent-estimate";
 import { computeYield, type YieldResult, type CarryingCostsKnown } from "@/lib/analytics/yield";
+import { computeFlipMetrics, type FlipMetrics } from "@/lib/analytics/flip-margin";
+import { loadFlipConfig } from "@/lib/analytics/flip-config";
+import { getConditionAssessment } from "@/lib/ai-assessment/condition";
 
 export interface InvestmentMetrics {
   /** Null when the property itself has no lat/lon/property_type — nothing to compare geographically (see area-price.ts). */
   area_price: AreaPriceComparison | null;
   rent_estimate: RentEstimateResult;
   yield: YieldResult;
+  /**
+   * Buy-to-flip metrics (issue #45): renovation cost, ARV, flip margin.
+   * Non-null ONLY when the profile's thesis_params mark it as a flip thesis
+   * (`thesis_type === "flip"`) — null for buy-to-rent profiles, which gates
+   * the flip section off entirely on the detail page (EC-3). The rental
+   * yield above always renders regardless, so a flip profile sees BOTH plays
+   * side by side (issue #45 buy-to-rent comparison).
+   */
+  flip: FlipMetrics | null;
 }
 
 interface RawInvestmentRow {
@@ -165,9 +177,29 @@ export async function getInvestmentMetrics(
   );
   const areaPrice = await computeAreaPriceComparison(propertyId);
 
+  // Flip metrics only for flip-thesis profiles (issue #45 EC-3). Reuses the
+  // area-price median as the ARV basis and the condition assessment (may be
+  // absent — the estimate degrades to "sin estimación" then, never crashes).
+  let flip: FlipMetrics | null = null;
+  if (thesisParams.thesis_type === "flip") {
+    const conditionAssessment = await getConditionAssessment(propertyId);
+    flip = computeFlipMetrics(
+      {
+        condition: conditionAssessment?.result.condition ?? null,
+        severity: conditionAssessment?.result.renovation_severity ?? null,
+        m2: m2Built,
+        purchasePrice: minPrice,
+        areaMedianPricePerM2: areaPrice?.area_median_price_per_m2 ?? null,
+        sampleSize: areaPrice?.sample_size ?? 0,
+      },
+      loadFlipConfig(),
+    );
+  }
+
   return {
     area_price: areaPrice,
     rent_estimate: rentEstimate,
     yield: yieldResult,
+    flip,
   };
 }

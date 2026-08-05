@@ -176,8 +176,24 @@ export function scopesEqual(a: Scope, b: Scope): boolean {
  * (yield/cash-on-cash) but persisted from day one — validated only for type
  * shape, not business rules, since exact usage evolves in later phases.
  */
+/**
+ * Investment thesis kind (issue #45 — the documented `thesis_type` marker
+ * convention task 2.3 left open for later phases to define). A buy-to-flip
+ * profile (`"flip"`) is the architect-investor's refurbish-and-resell play;
+ * `"rent"` (or unset — the historical default) is the buy-to-rent play the
+ * yield/cash-on-cash metrics already serve.
+ *
+ * Gates the renovation-cost / ARV / flip-margin section on the property detail
+ * page: it renders ONLY for `thesis_type === "flip"` (issue #45 EC-3). Unset is
+ * treated as `"rent"` so every pre-#45 profile keeps its exact current
+ * behaviour — no flip section, no schema break.
+ */
+export const THESIS_TYPES = ["rent", "flip"] as const;
+export type ThesisType = (typeof THESIS_TYPES)[number];
+
 export const ThesisParamsSchema = z
   .object({
+    thesis_type: z.enum(THESIS_TYPES).optional(),
     target_yield_pct: z.number().nonnegative().optional(),
     financing: z
       .object({
