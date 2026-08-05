@@ -60,6 +60,7 @@ const {
   paceBaseMs,
   shouldReattach,
   orphanTabsToClose,
+  makeSerializer,
 } = B as {
   STATUSES: { RUNNING: string; PAUSED: string; DONE: string };
   SLOT: { PENDING: string; INFLIGHT: string; CAPTURED: string; FAILED: string };
@@ -86,6 +87,7 @@ const {
     looping: boolean,
     persistedTabIds: unknown,
   ) => number[];
+  makeSerializer: () => <T>(fn: () => Promise<T> | T) => Promise<T>;
 };
 
 const URLS = [
@@ -432,5 +434,107 @@ describe("orphanTabsToClose — reconcile the tabs leaked at eviction", () => {
   it("returns [] for a paused/done queue even with persisted ids", () => {
     expect(orphanTabsToClose(pause(running), false, [42])).toEqual([]);
     expect(orphanTabsToClose(stop(running), false, [42])).toEqual([]);
+  });
+});
+
+// ── makeSerializer — the in-memory async mutex (issue #321) ─────────────────
+//
+// The driver's get-modify-set of the shared batch state runs on
+// chrome.storage.session, whose get()/set() are async. With bounded
+// concurrency (#318) two driveOnePage calls can settle in the same tick and
+// interleave read → modify → write, lost-updating one another's slot flip.
+// These tests model that exact async get-modify-set against an in-memory store
+// (a tick() microtask stands in for storage's async boundary) and prove the
+// serializer closes the race that an unguarded update leaves open.
+describe("makeSerializer — serialize the storage get-modify-set", () => {
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+
+  // An async key-value cell mimicking chrome.storage.session: both get and set
+  // yield, so an unguarded read-modify-write can interleave with another's.
+  function makeAsyncStore(initial: BatchState) {
+    let value = initial;
+    return {
+      get: async () => {
+        await tick();
+        return value;
+      },
+      set: async (v: BatchState) => {
+        await tick();
+        value = v;
+      },
+      peek: () => value,
+    };
+  }
+
+  // Two slots already in flight — the state at the moment two tabs settle.
+  function twoInflight(): BatchState {
+    const first = launchNext(makeBatchState(URLS)); // slot 0 → inflight
+    return launchNext(first.state).state; // slot 1 → inflight
+  }
+
+  it("UNGUARDED get-modify-set loses one update (the race we're closing)", async () => {
+    const store = makeAsyncStore(twoInflight());
+    const update = async (fn: (s: BatchState) => BatchState) => {
+      const s = await store.get();
+      await store.set(fn(s)); // read and write straddle the async boundary
+    };
+    // Two tabs settle at once: slot 0 and slot 1 both captured.
+    await Promise.all([
+      update((s) => recordResultAt(s, 0, true)),
+      update((s) => recordResultAt(s, 1, true)),
+    ]);
+    // The later write read the pre-flip state and clobbered the earlier flip —
+    // only one capture survives. This is the lost update from #321.
+    expect(progress(store.peek()).captured).toBe(1);
+  });
+
+  it("SERIALIZED get-modify-set persists BOTH updates (fix)", async () => {
+    const store = makeAsyncStore(twoInflight());
+    const run = makeSerializer();
+    const update = (fn: (s: BatchState) => BatchState) =>
+      run(async () => {
+        const s = await store.get();
+        await store.set(fn(s));
+      });
+    await Promise.all([
+      update((s) => recordResultAt(s, 0, true)),
+      update((s) => recordResultAt(s, 1, true)),
+    ]);
+    // Both flips survive — no lost update.
+    expect(progress(store.peek()).captured).toBe(2);
+  });
+
+  it("runs sections strictly one-at-a-time, in call order (FIFO)", async () => {
+    const run = makeSerializer();
+    const events: string[] = [];
+    const section = (id: string) =>
+      run(async () => {
+        events.push(`${id}:start`);
+        await tick();
+        events.push(`${id}:end`);
+      });
+    await Promise.all([section("a"), section("b"), section("c")]);
+    // No two sections overlap, and they execute in the order submitted.
+    expect(events).toEqual([
+      "a:start",
+      "a:end",
+      "b:start",
+      "b:end",
+      "c:start",
+      "c:end",
+    ]);
+  });
+
+  it("returns each caller's own result and keeps the chain alive after a rejection", async () => {
+    const run = makeSerializer();
+    const ok1 = run(async () => "one");
+    const boom = run(async () => {
+      throw new Error("boom");
+    });
+    const ok2 = run(async () => "two");
+    await expect(ok1).resolves.toBe("one");
+    await expect(boom).rejects.toThrow("boom");
+    // A rejected section must not stall or break later sections.
+    await expect(ok2).resolves.toBe("two");
   });
 });

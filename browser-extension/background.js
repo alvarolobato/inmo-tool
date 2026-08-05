@@ -260,6 +260,29 @@ async function setBatchState(state) {
   await chrome.storage.session.set({ [BATCH_KEY]: state });
 }
 
+// Serialize every get-modify-set of the shared batch state (BATCH_KEY). With
+// bounded concurrency (#318) two driveOnePage calls (or a launch racing a
+// settle) can interleave their read → modify → write on chrome.storage.session
+// and lost-update a slot flip — one write clobbers the other, momentarily
+// reverting a `captured` slot to `inflight`. This in-memory async mutex makes
+// each read-modify-write atomic so no update is lost (issue #321). It does NOT
+// change the concurrency level or the jittered pacing.
+const runBatchStateExclusive = InmoBatch.makeSerializer();
+
+/**
+ * Atomic read-modify-write of the shared batch state: read the persisted state,
+ * apply `fn`, persist the result — all inside the serializer so concurrent
+ * callers run strictly one-at-a-time. Returns the new state.
+ */
+function updateBatchState(fn) {
+  return runBatchStateExclusive(async () => {
+    const state = await getBatchState();
+    const next = fn(state);
+    await setBatchState(next);
+    return next;
+  });
+}
+
 /**
  * Persist / read / clear the set of currently-open batch tab ids (eviction
  * recovery). Persisted as a plain array; `persistBatchTabs` snapshots the live
@@ -345,17 +368,13 @@ async function startBatch({ portal, urls, searchUrl }) {
 
 /** Apply a pure state transition (pause/resume) and return fresh progress. */
 async function mutateBatch(fn) {
-  const state = await getBatchState();
-  const next = fn(state);
-  await setBatchState(next);
+  const next = await updateBatchState(fn);
   return InmoBatch.progress(next);
 }
 
 /** Stop the run: mark done, unblock every in-flight wait, close all open tabs. */
 async function stopBatch() {
-  const state = await getBatchState();
-  const next = InmoBatch.stop(state);
-  await setBatchState(next);
+  const next = await updateBatchState((state) => InmoBatch.stop(state));
   // Unblock every outstanding wait (each resolves false → recorded as failed,
   // but recordResultAt ignores a DONE queue, so counts stay put).
   for (const finish of batchWaiters.values()) finish(false);
@@ -427,8 +446,9 @@ async function captureOnePage(url) {
  */
 async function driveOnePage(index, url) {
   const ok = await captureOnePage(url);
-  const state = await getBatchState();
-  await setBatchState(InmoBatch.recordResultAt(state, index, ok));
+  // Atomic: two tabs settling in the same tick would otherwise interleave this
+  // get-modify-set and lose one's slot flip (issue #321).
+  await updateBatchState((state) => InmoBatch.recordResultAt(state, index, ok));
 }
 
 /**
@@ -453,10 +473,18 @@ async function runBatchLoop() {
       // pace. Each launch flips a slot to `inflight` and persists it first, so
       // an eviction mid-launch is recoverable.
       while (InmoBatch.isActive(state) && inflight.size < state.concurrency) {
-        const launch = InmoBatch.launchNext(state);
+        // Atomic launch: re-read, pick the next pending slot, flip it to
+        // inflight, and persist — all inside the serializer so a concurrently
+        // settling driveOnePage can't clobber the flip (issue #321). Re-reading
+        // fresh here also means launchNext always sees the latest slots.
+        const launch = await runBatchStateExclusive(async () => {
+          const cur = await getBatchState();
+          const next = InmoBatch.launchNext(cur);
+          if (next.index !== -1) await setBatchState(next.state);
+          return next;
+        });
         if (launch.index === -1) break; // nothing pending / cap reached
         state = launch.state;
-        await setBatchState(state);
         const idx = launch.index;
         const p = driveOnePage(idx, launch.url).finally(() => inflight.delete(idx));
         inflight.set(idx, p);
@@ -510,8 +538,7 @@ async function reattachIfStranded() {
 
   // Those in-flight slots referred to the tabs we just closed — reset them to
   // pending so the restarted driver re-launches them (capture is idempotent).
-  state = InmoBatch.resetInflightToPending(state);
-  await setBatchState(state);
+  state = await updateBatchState((s) => InmoBatch.resetInflightToPending(s));
   runBatchLoop(); // resumes from the persisted slots
 }
 
