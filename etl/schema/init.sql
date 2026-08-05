@@ -1586,6 +1586,41 @@ CREATE INDEX IF NOT EXISTS idx_search_url_example_lookup
     ON search_url_example (portal, category_key);
 
 
+-- URL-building discovery catalog (issue #336, D-063).
+--
+-- One row per connector × discovery session. The browser extension enumerates a
+-- portal's search-form filter OPTIONS (property type, rooms, condition, price
+-- buckets, zones — as the portal labels them) and the URL FRAGMENT each option
+-- produces, then POSTs the catalog to /api/extension/filter-catalog. The
+-- connector's URL builder reads the LATEST catalog per connector
+-- (lib/search-url/discovered-mapping.ts) and prefers the discovered option→slug
+-- mapping over its hard-coded seed table, so a portal re-labelling `pisos` or
+-- adding a subtype code never needs a code change — only a re-run of discovery.
+--
+-- Connector-agnostic by construction: `axes` is a JSONB object of
+-- {axisName -> [{label, portalValue?, urlFragment, category?, subtipo?, ...}]},
+-- so it carries whatever axes a portal exposes; only Aliseda is wired first.
+-- Latest-wins: the read path loads the newest row per connector (no upsert —
+-- each session is retained for drift archaeology).
+CREATE TABLE IF NOT EXISTS portal_filter_catalog (
+    id            BIGSERIAL    PRIMARY KEY,
+    connector     TEXT         NOT NULL,
+    -- Where the catalog came from: the in-page embedded config JSON
+    -- (least brittle), the live form <option> elements, or operator-navigated
+    -- click-through. Kept for auditing which source produced a mapping.
+    source        TEXT         NOT NULL,   -- embedded-config | form-options | navigated
+    -- axis -> [{label, portalValue?, urlFragment, category?, subtipo?, ...}]
+    axes          JSONB        NOT NULL,
+    captured_at   TIMESTAMPTZ  NOT NULL,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- The read path is `WHERE connector = $1 ORDER BY captured_at DESC LIMIT 1`
+-- (latest catalog wins); this composite index serves it directly.
+CREATE INDEX IF NOT EXISTS idx_portal_filter_catalog_latest
+    ON portal_filter_catalog (connector, captured_at DESC);
+
+
 -- ============================================================
 -- Dashboard App
 -- ============================================================

@@ -347,11 +347,63 @@
     }
   }
 
+  // ── 3. URL-building discovery pass (issue #336) ───────────────────────────
+  //
+  // When the dashboard's /etl/discovery opens a portal SEARCH page with the
+  // `#inmo-discover` signal, enumerate the search form's filter OPTIONS + the
+  // URL fragment each produces (self.InmoDiscover, pure) and POST the catalog
+  // through the background worker. Reads FORM METADATA only — never listings.
+  const DISCOVER_POLL_MS = 500;
+  const DISCOVER_MAX_WAIT_MS = 20000;
+  let discoveryHandled = false;
+
+  function runDiscoveryWhenReady(url, deadline) {
+    if (discoveryHandled) return;
+    if (window.location.href !== url) return; // navigated away
+    const Disc = self.InmoDiscover;
+    if (!Disc) return; // discover.js failed to load — nothing to do
+    const payload = Disc.buildDiscoveryPayload(url, document, new Date());
+    if (payload) {
+      discoveryHandled = true;
+      let responded = false;
+      try {
+        chrome.runtime.sendMessage({ type: "DISCOVER_CATALOG", payload }, (res) => {
+          responded = true;
+          if (chrome.runtime.lastError || !res || !res.success) {
+            showToast("Inmo-Tool: no se pudo guardar el catálogo de filtros");
+            return;
+          }
+          showToast(
+            "Inmo-Tool: catálogo de filtros capturado (" + (res.optionsCount || 0) + " opciones)",
+          );
+        });
+      } catch {
+        showToast("Inmo-Tool: no se pudo enviar el catálogo de filtros");
+        return;
+      }
+      setTimeout(() => {
+        if (!responded) showToast("Inmo-Tool: no se pudo enviar el catálogo de filtros");
+      }, MAX_WAIT_MS);
+      return;
+    }
+    // Options not enumerated yet (form/config may still be rendering) — retry.
+    if (Date.now() > deadline) return;
+    setTimeout(() => runDiscoveryWhenReady(url, deadline), DISCOVER_POLL_MS);
+  }
+
+  function startDiscoveryLoop() {
+    if (discoveryHandled) return;
+    const url = window.location.href;
+    if (!D.discoverSignalPresent(url)) return; // not a discovery-signalled page
+    runDiscoveryWhenReady(url, Date.now() + DISCOVER_MAX_WAIT_MS);
+  }
+
   (async () => {
     // The banner + app-signal auto-start are ALWAYS available (the banner is a
     // manual button; the signal is an explicit per-open intent), independent of
     // the detail auto-capture kill switch.
     startListingLoop();
+    startDiscoveryLoop();
     if (await autoCaptureEnabled()) startAutoCaptureLoop();
     try {
       const navObs = new MutationObserver(onMaybeNavigated);

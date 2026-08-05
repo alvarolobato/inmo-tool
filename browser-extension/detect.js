@@ -260,24 +260,46 @@
   // agree byte-for-byte with dashboard/lib/extension-capture.ts `withCaptureSignal`.
   var CAPTURE_SIGNAL = "inmo-capture";
 
-  /**
-   * True iff `url` carries the batch auto-start signal (see CAPTURE_SIGNAL).
-   * Pure — no DOM/chrome. Returns false for an unparseable URL.
-   */
-  function captureSignalPresent(url) {
+  // ── URL-building discovery signal (issue #336) ────────────────────────────
+  //
+  // The dashboard's /etl/discovery "Iniciar descubrimiento" opens a portal
+  // SEARCH page carrying `#inmo-discover` (query fallback `?inmo-discover`) so
+  // the content script runs the OPTION-ENUMERATION pass (discover.js) instead
+  // of the listing-capture pass. Same fragment-preferred contract as
+  // CAPTURE_SIGNAL; must agree byte-for-byte with the dashboard opener.
+  var DISCOVER_SIGNAL = "inmo-discover";
+
+  /** True iff `url` carries the given fragment/query signal. Pure; false on parse error. */
+  function urlSignalPresent(url, signal) {
     var parsed;
     try {
       parsed = new URL(String(url).trim());
     } catch (e) {
       return false;
     }
-    if (parsed.hash.replace(/^#/, "") === CAPTURE_SIGNAL) return true;
+    if (parsed.hash.replace(/^#/, "") === signal) return true;
     try {
-      if (parsed.searchParams.has(CAPTURE_SIGNAL)) return true;
+      if (parsed.searchParams.has(signal)) return true;
     } catch (e) {
       /* searchParams unavailable — ignore */
     }
     return false;
+  }
+
+  /**
+   * True iff `url` carries the batch auto-start signal (see CAPTURE_SIGNAL).
+   * Pure — no DOM/chrome. Returns false for an unparseable URL.
+   */
+  function captureSignalPresent(url) {
+    return urlSignalPresent(url, CAPTURE_SIGNAL);
+  }
+
+  /**
+   * True iff `url` carries the URL-building discovery signal (issue #336).
+   * Pure — no DOM/chrome. Returns false for an unparseable URL.
+   */
+  function discoverSignalPresent(url) {
+    return urlSignalPresent(url, DISCOVER_SIGNAL);
   }
 
   /**
@@ -517,7 +539,9 @@
     isRenderReady: isRenderReady,
     createCaptureGuard: createCaptureGuard,
     CAPTURE_SIGNAL: CAPTURE_SIGNAL,
+    DISCOVER_SIGNAL: DISCOVER_SIGNAL,
     captureSignalPresent: captureSignalPresent,
+    discoverSignalPresent: discoverSignalPresent,
     stripCaptureSignal: stripCaptureSignal,
     listingCaptureAction: listingCaptureAction,
     buildCaptureBanner: buildCaptureBanner,
