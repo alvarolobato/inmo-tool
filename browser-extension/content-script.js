@@ -274,7 +274,7 @@
             return;
           }
           showToast(
-            `Inmo-Tool: capturando ${res.total} anuncio(s), uno a uno…`,
+            `Inmo-Tool: capturando ${res.total} anuncio(s) en varias pestañas…`,
           );
         },
       );

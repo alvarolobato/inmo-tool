@@ -216,7 +216,18 @@ describe("listingPortalForUrl — only search/results pages", () => {
     // Aliseda results route → listing.
     ["https://www.alisedainmobiliaria.com/comprar/vivienda/malaga", "aliseda"],
     ["https://www.alisedainmobiliaria.com/alquilar/vivienda/madrid", "aliseda"],
-    // Aliseda detail / home → not a listing.
+    // The REAL Aliseda search URL (owner-confirmed #296/#318): path root is
+    // `/comprar-viviendas/`, NOT `/comprar/…`. The old `/^\/(comprar|alquilar)\//`
+    // regex required a slash right after "comprar" and never matched these, so
+    // Aliseda listing pages were invisible. These MUST classify as listing now.
+    [
+      "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/andalucia/malaga?hab=2",
+      "aliseda",
+    ],
+    ["https://www.alisedainmobiliaria.com/alquiler-viviendas/pisos/madrid", "aliseda"],
+    ["https://www.alisedainmobiliaria.com/comprar", "aliseda"],
+    // Aliseda detail / home → not a listing (detail root is `/inmueble/…`, a
+    // different path root, so it never collides with the listing gate).
     ["https://www.alisedainmobiliaria.com/inmueble/ANT1", null],
     ["https://www.alisedainmobiliaria.com/", null],
     // Altamira search/results route (issue #271) → listing.
@@ -267,6 +278,29 @@ describe("extractDetailUrls — harvest detail links off a listing DOM", () => {
       "https://www.idealista.com/inmueble/106387165/",
       "https://www.idealista.com/inmueble/222/#photos",
     ]);
+  });
+
+  it("harvests /inmueble/<id> detail links off a REAL Aliseda search page (#318)", () => {
+    // The page at /comprar-viviendas/pisos/andalucia/malaga links each result
+    // card to an /inmueble/<slug> detail page. Now that the search page is
+    // recognised as a listing, these links must be extractable and scoped to
+    // Aliseda (the search page's own URL is excluded — it isn't a detail URL).
+    const searchUrl =
+      "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/andalucia/malaga";
+    const hrefs = [
+      searchUrl, // the listing page itself → excluded
+      "https://www.alisedainmobiliaria.com/inmueble/ANT1",
+      "https://www.alisedainmobiliaria.com/inmueble/ANT1?utm=x", // dup by match key
+      "https://www.alisedainmobiliaria.com/inmueble/piso-malaga-2222",
+      "https://www.alisedainmobiliaria.com/favoritos", // non-detail → excluded
+    ];
+    expect(extractDetailUrls(hrefs, "aliseda")).toEqual([
+      "https://www.alisedainmobiliaria.com/inmueble/ANT1",
+      "https://www.alisedainmobiliaria.com/inmueble/piso-malaga-2222",
+    ]);
+    // And the search page classifies as listing (not detail) — mutually exclusive.
+    expect(isListingUrl(searchUrl)).toBe(true);
+    expect(isDetailUrl(searchUrl)).toBe(false);
   });
 
   it("scopes to a single portal when one is given", () => {

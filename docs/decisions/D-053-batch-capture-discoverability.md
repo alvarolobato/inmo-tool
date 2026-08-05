@@ -38,7 +38,7 @@ only decide WHEN to fire `START_BATCH`:
    which NEVER breaks the URL (returns the input unchanged on a parse failure).
    On a recognized listing page carrying the signal, the content script
    AUTO-STARTS the batch once rendered — respecting the existing render-ready
-   wait, the sequential/jittered pacing, and the same guards. The extension
+   wait, the bounded-concurrency/jittered pacing, and the same guards. The extension
    reads the signal with the pure `InmoDetect.captureSignalPresent` /
    `listingCaptureAction`.
 

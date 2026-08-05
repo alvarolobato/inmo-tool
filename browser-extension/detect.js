@@ -52,8 +52,15 @@
   //     `/areas/<op>-…` aggregate pages. A leading `/(venta|alquiler)-` or
   //     `/areas/(venta|alquiler)-` segment is the signal; detail pages
   //     (`/inmueble/<id>`) and the home (`/`) don't match.
-  //   - Aliseda results live under `/comprar/…` / `/alquilar/…` (e.g.
-  //     `/comprar/vivienda/malaga`); detail pages are `/inmueble/<id>`.
+  //   - Aliseda results live under a `/comprar…` / `/alquilar…` /
+  //     `/alquiler…` path ROOT. The real search URL (owner-confirmed, #296/#318)
+  //     is `/comprar-viviendas/pisos/andalucia/malaga?…` — path
+  //     `/comprar-viviendas/`, NOT `/comprar/…`. So the gate is a leading
+  //     `/(comprar|alquilar|alquiler)` prefix with NO trailing-slash
+  //     requirement, matching `/comprar-viviendas`, `/alquiler-viviendas`,
+  //     `/comprar`, `/comprar/vivienda/malaga`, etc. Detail pages are
+  //     `/inmueble/<id>` (a different root), so they never match here — listing
+  //     and detail stay mutually exclusive.
   var PORTALS = [
     {
       portal: "idealista",
@@ -82,7 +89,7 @@
         return /^\/inmueble\/[^/]+/.test(p);
       },
       isListingPath: function (p) {
-        return /^\/(comprar|alquilar)\//.test(p);
+        return /^\/(comprar|alquilar|alquiler)/.test(p);
       },
       readySelectors: [
         "[class*='ficha']",
