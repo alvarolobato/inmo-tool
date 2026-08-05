@@ -1012,6 +1012,21 @@ CREATE TABLE IF NOT EXISTS connector_config (
 
 ALTER TABLE connector_config ADD COLUMN IF NOT EXISTS min_refetch_interval_seconds INTEGER;
 
+-- Issue #295 (D-050): per-connector override for the freshness cadence — how
+-- often this connector's data should be re-refreshed. NULL (the default for
+-- every row, including ones seeded by sync_connector_registry) means "no
+-- override, use the global etl.default_freshness_interval_hours (config/
+-- schema.yaml, 24h)", NOT "no freshness tracking" — a connector with a NULL
+-- override is still fully in the cadence machinery, just at the default
+-- interval. Same override-vs-global-default shape as
+-- min_refetch_interval_seconds above (issue #143), reused rather than
+-- inventing a second pattern. Unlike geography_override/filters, this is a
+-- framework-level scheduling knob, valid even for capture-only
+-- (supports_discovery=false) connectors — it doubles as the staleness window
+-- #289's manual-capture UI should read (converted to days), so the PATCH route
+-- must accept it for capture-only connectors too (Phase 2).
+ALTER TABLE connector_config ADD COLUMN IF NOT EXISTS freshness_interval_hours INTEGER;
+
 -- Issue #263: capture PROCESSING is gated on THIS flag, not the crawl
 -- `enabled` flag above. The two are deliberately independent.
 --
@@ -1217,6 +1232,64 @@ CREATE INDEX IF NOT EXISTS idx_connector_scope_state_coverage_center
 -- to string-match error_msg to tell "we ran out of budget before reaching
 -- your profile" from "your profile's geography isn't covered at all".
 ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS skipped_scopes JSONB;
+
+-- ============================================================
+-- Connector freshness cadence (issue #295, D-050)
+-- ============================================================
+--
+-- Per-connector "how fresh do I want this data" scheduling, layered ON TOP of
+-- the hourly scheduler tick (which stays hourly, unchanged). The scheduler
+-- keeps running often; a connector only STARTS a refresh cycle when it's due
+-- (its data is older than its interval), then CONTINUES that same cycle across
+-- as many ticks as needed (budget caps, rate limits, the shared circuit
+-- breaker tripping mid-sweep) until every currently-covered scope has been
+-- re-discovered = fresh, then waits out the interval before starting again.
+--
+-- The ONLY genuinely new per-connector state is the two-column cycle marker
+-- (last_fresh_at + cycle_started_at). "Which scopes still need doing this
+-- cycle" is NOT stored here — it's a live query against the existing
+-- connector_scope_state table (issue #217/D-030): a scope is "done this cycle"
+-- iff its last_discovered_at >= cycle_started_at. That is why no new per-scope
+-- progress table exists: connector_scope_state already records exactly when
+-- each scope was last confirmed discovered.
+--
+-- Crash safety falls out for free: a process that dies mid-cycle leaves
+-- cycle_started_at set and connector_scope_state exactly as of the last
+-- committed scope. Resuming after a restart is just "the next tick sees
+-- cycle_started_at IS NOT NULL and continues" — there is no 'running' status to
+-- wedge (unlike connector_runs/dedup_runs, which need _reconcile_stale_runs),
+-- only a timestamp plus a live query against durable per-scope state.
+--
+--   last_fresh_at            -> when the last full cycle completed. NULL =
+--                               never completed a cycle = due immediately (same
+--                               NULL-means-never-happened posture as every
+--                               other timestamp column in this schema; no
+--                               backfill needed).
+--   cycle_started_at         -> non-NULL WHILE a cycle is in progress, NULL when
+--                               idle/waiting for the next due time. The single
+--                               "in progress" marker; continuation is
+--                               unconditional once it's set (the interval only
+--                               gates STARTING a new cycle, never abandoning one
+--                               partway through).
+--   cycle_target_scope_count -> observability snapshot taken at cycle start
+--                               (how many resolvable scopes this cycle set out
+--                               to cover); NOT used in completion logic, which
+--                               recomputes the live target set each tick.
+--
+-- A cycle whose cycle_started_at is older than
+-- etl.freshness_cycle_stuck_after_hours (default 7d) is DERIVED as "stuck" for
+-- observability (a connector that can never fully refresh, e.g. Fotocasa
+-- tripping the breaker every tick — #270). Stuck is NEVER force-completed: it
+-- reads as "still refreshing, taking unusually long" forever, never falsely
+-- fresh. There is deliberately no stored `stuck` column — the age of
+-- cycle_started_at IS the signal, computed by the consumer (Phase 2).
+CREATE TABLE IF NOT EXISTS connector_freshness_state (
+    connector_name           TEXT         PRIMARY KEY,
+    last_fresh_at            TIMESTAMPTZ,
+    cycle_started_at         TIMESTAMPTZ,
+    cycle_target_scope_count INTEGER,
+    updated_at               TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
 
 -- Browser-extension listing capture (issue #75): a queue table, not a
 -- synchronous request/response — the dashboard (Node/TypeScript) and the

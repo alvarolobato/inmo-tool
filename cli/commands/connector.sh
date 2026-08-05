@@ -81,6 +81,37 @@ cmd_status() {
         -d "${PG_DB}" \
         -v ON_ERROR_STOP=1 \
         -c "SELECT r.connector_name, r.status, r.discovered_count, r.fetched_count, r.skipped_count, r.error_count, to_char(r.finished_at, 'YYYY-MM-DD HH24:MI') AS finished_at FROM connector_run_results r WHERE r.finished_at = (SELECT max(r2.finished_at) FROM connector_run_results r2 WHERE r2.connector_name = r.connector_name) ORDER BY r.connector_name"
+
+    # Issue #295 (D-050): per-connector freshness cadence state. Derived from
+    # connector_freshness_state + the effective interval
+    # (connector_config.freshness_interval_hours override, else 24h default).
+    # Stuck threshold hardcoded to the 168h (7d) config default for this
+    # readout — it's a visibility line, not the authoritative gate (that lives
+    # in the orchestrator, honouring etl.freshness_cycle_stuck_after_hours).
+    echo -e "${CYAN}Freshness cadence per connector:${NC}"
+    "${DC[@]}" exec -T postgres psql \
+        -U "${PG_USER}" \
+        -d "${PG_DB}" \
+        -v ON_ERROR_STOP=1 \
+        -c "SELECT f.connector_name,
+                   COALESCE(cc.freshness_interval_hours, 24) AS interval_h,
+                   CASE
+                     WHEN f.cycle_started_at IS NOT NULL
+                          AND NOW() - f.cycle_started_at > INTERVAL '168 hours'
+                       THEN 'stuck'
+                     WHEN f.cycle_started_at IS NOT NULL THEN 'refreshing'
+                     WHEN f.last_fresh_at IS NULL THEN 'due (never fresh)'
+                     WHEN NOW() - f.last_fresh_at
+                          >= (COALESCE(cc.freshness_interval_hours, 24) || ' hours')::interval
+                       THEN 'due'
+                     ELSE 'fresh'
+                   END AS state,
+                   f.cycle_target_scope_count AS target_scopes,
+                   to_char(f.last_fresh_at, 'YYYY-MM-DD HH24:MI') AS last_fresh_at,
+                   to_char(f.cycle_started_at, 'YYYY-MM-DD HH24:MI') AS cycle_started_at
+              FROM connector_freshness_state f
+              LEFT JOIN connector_config cc ON cc.connector_name = f.connector_name
+             ORDER BY f.connector_name"
 }
 
 cmd_logs() {

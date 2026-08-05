@@ -159,6 +159,12 @@ def main() -> None:
                             config.min_restart_sweep_interval_seconds
                         ),
                         dedup_max_runtime_seconds=config.dedup_max_runtime_seconds,
+                        default_freshness_interval_hours=(
+                            config.default_freshness_interval_hours
+                        ),
+                        freshness_cycle_stuck_after_hours=(
+                            config.freshness_cycle_stuck_after_hours
+                        ),
                     )
                 else:
                     # A named single-connector run is a deliberate,
@@ -315,6 +321,8 @@ def main() -> None:
         interval_seconds=_RUN_INTERVAL_SECONDS,
         min_restart_sweep_interval_seconds=config.min_restart_sweep_interval_seconds,
         dedup_max_runtime_seconds=config.dedup_max_runtime_seconds,
+        default_freshness_interval_hours=config.default_freshness_interval_hours,
+        freshness_cycle_stuck_after_hours=config.freshness_cycle_stuck_after_hours,
     )
 
 

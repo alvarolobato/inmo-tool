@@ -3289,8 +3289,17 @@ class TestRestartBurstGuard:
         orchestrator.CONNECTORS[:] = [connector]
         run_ids: list[int] = []
         try:
+            # Issue #295 (D-050): this test isolates the restart-burst guard,
+            # not the freshness cadence — a second scheduler sweep seconds after
+            # the first would otherwise be freshness-skipped (the connector is
+            # fresh, well inside its default 24h interval). default_freshness_
+            # interval_hours=0 makes it always-due, so both genuine sweeps run
+            # and the assertion tests the guard alone.
             run_id_1 = orchestrator.run_all_connectors_respecting_restart_guard(
-                pg_conn, trigger="scheduler", min_restart_sweep_interval_seconds=1
+                pg_conn,
+                trigger="scheduler",
+                min_restart_sweep_interval_seconds=1,
+                default_freshness_interval_hours=0,
             )
             assert run_id_1 is not None
             run_ids.append(run_id_1)
@@ -3304,7 +3313,10 @@ class TestRestartBurstGuard:
             pg_conn.commit()
 
             run_id_2 = orchestrator.run_all_connectors_respecting_restart_guard(
-                pg_conn, trigger="scheduler", min_restart_sweep_interval_seconds=1
+                pg_conn,
+                trigger="scheduler",
+                min_restart_sweep_interval_seconds=1,
+                default_freshness_interval_hours=0,
             )
             assert run_id_2 is not None
             run_ids.append(run_id_2)

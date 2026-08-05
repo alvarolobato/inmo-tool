@@ -202,6 +202,26 @@
   requires_restart: [etl]
   components: [etl]
 
+- key: etl.default_freshness_interval_hours
+  env: ETL_DEFAULT_FRESHNESS_INTERVAL_HOURS
+  type: int
+  sensitive: false
+  default: 24
+  section: "ETL"
+  description: "Cadencia de frescura por defecto (horas) para un conector sin override (issue #295, D-050). Un conector solo INICIA un ciclo de refresco cuando sus datos son más antiguos que este intervalo; una vez fresco, el barrido programado lo salta (sin fila connector_run_results) hasta que vuelve a vencer. Un ciclo en curso continúa siempre, sin importar el intervalo. Override por conector en connector_config.freshness_interval_hours. Por defecto 24h, coincidiendo con FRESHNESS_STALE_THRESHOLD_HOURS del dashboard (#241). Las ejecuciones manuales ('Ejecutar ahora', ps connector run) ignoran esta puerta."
+  requires_restart: [etl]
+  components: [etl]
+
+- key: etl.freshness_cycle_stuck_after_hours
+  env: ETL_FRESHNESS_CYCLE_STUCK_AFTER_HOURS
+  type: int
+  sensitive: false
+  default: 168
+  section: "ETL"
+  description: "Antigüedad (horas) a partir de la cual un ciclo de refresco en curso se considera 'atascado' para observabilidad (issue #295, D-050). Solo es un umbral de visibilidad: un ciclo cuyo cycle_started_at supera este tiempo registra un WARNING y se muestra como 'atascado' (p. ej. Fotocasa abriendo el breaker en cada tick — #270), pero NUNCA se fuerza a completarse; un conector que no puede refrescarse del todo se muestra honestamente como 'refrescando' para siempre, jamás como falsamente fresco. Por defecto 168h (7 días)."
+  requires_restart: [etl]
+  components: [etl]
+
 # -----------------------------------------------------------------------------
 # OpenRouter / LLM
 # -----------------------------------------------------------------------------
