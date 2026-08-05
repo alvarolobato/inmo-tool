@@ -444,9 +444,25 @@ test.describe("#167: touch/coarse-pointer behaviour (iPhone 13 emulation)", () =
   test("action bar and photo ticker are permanently visible without hover on a touch device, and the active status button is visually distinct from a merely-visible one", async ({
     page,
   }) => {
+    // The active status fill is an inline React style reconciled by TWO
+    // independent async setState sources in FeedbackControls: the mount-time
+    // GET (returns null at page load — no feedback exists yet for a freshly
+    // seeded property) and the tap's POST response (returns "accept"). A mount
+    // GET that resolves *after* the tap clobbers the optimistic "accept" back
+    // to null, reverting the button to the muted fill. That's the residual
+    // #167 flake round 1 didn't close: waiting for the colour to *reach* green
+    // can pass on a transient value, then a late GET reverts it before the
+    // sample below. Pin both signals deterministically — await the mount GET
+    // before tapping, await the POST after tapping — so nothing remains in
+    // flight that could revert "accept" when the colours are read.
+    const topFeedbackGet = page.waitForResponse(
+      (r) => r.url().includes(`/candidates/${topId}/feedback`) && r.request().method() === "GET",
+    );
     await page.goto(`/profiles/${profileId}`);
     const target = card(page, topId);
     await expect(target).toBeVisible();
+    // Mount GET resolved — it can no longer overwrite the state we set below.
+    await topFeedbackGet;
 
     const actions = target.getByTestId("candidate-card-actions");
     const reject = actions.getByTestId("feedback-reject");
@@ -471,21 +487,27 @@ test.describe("#167: touch/coarse-pointer behaviour (iPhone 13 emulation)", () =
     // though every button here was already opacity: 1 before the tap —
     // "visible" alone can't be the signal on this device.
     const rejectBgBefore = await reject.evaluate((el) => getComputedStyle(el).backgroundColor);
+    // Await the POST so the state is reconciled server-side to "accept"
+    // (terminal), not merely optimistically set, before reading any colour.
+    // Combined with the mount-GET wait above, this leaves no in-flight setState
+    // that could revert the fill after we sample it.
+    const topFeedbackPost = page.waitForResponse(
+      (r) => r.url().includes(`/candidates/${topId}/feedback`) && r.request().method() === "POST",
+    );
     await accept.tap();
+    await topFeedbackPost;
     await expect(accept).toHaveAttribute("aria-pressed", "true");
     await expect(accept).toHaveCSS("opacity", "1");
 
-    // The active fill is an inline React style driven by `state === "accept"`,
-    // which reconciles against the server POST response (and a mount-time GET
-    // that also calls setState). `aria-pressed` flips on the optimistic render,
-    // but the settled --up green lands a beat later once the POST resolves —
-    // so sampling getComputedStyle once here occasionally read the pre-settle
-    // muted fill (rgba(0,0,0,0.35)), the #167 flake. Wait for the settled
-    // colour with an auto-retrying web-first assertion first. There is no CSS
+    // Settled active fill: neither the muted inactive colour nor a transparent
+    // deleted-token value. Web-first + auto-retrying. There is no CSS
     // transition on background-color (only opacity/transform animate —
-    // globals.css), so this resolves directly to the final colour with no
-    // intermediate values to sample.
+    // globals.css), so this resolves directly to the final colour, and with
+    // both async setState sources now resolved nothing can revert it.
     await expect(accept).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0.35)");
+    // Reject is never tapped — assert it holds the muted inactive fill so the
+    // rejectBgBefore/After comparison below is against a deterministic value.
+    await expect(reject).toHaveCSS("background-color", "rgba(0, 0, 0, 0.35)");
 
     const acceptBg = await accept.evaluate((el) => getComputedStyle(el).backgroundColor);
     const rejectBgAfter = await reject.evaluate((el) => getComputedStyle(el).backgroundColor);
