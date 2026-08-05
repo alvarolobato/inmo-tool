@@ -69,6 +69,29 @@
         "h1",
       ],
     },
+    {
+      portal: "altamira",
+      hostSuffix: "altamirainmuebles.com",
+      // ⚠️ BEST-EFFORT / UNVERIFIED — issue #271. Altamira's real detail-URL
+      // pattern has NOT yet been confirmed against a live page. This matches a
+      // `/inmueble/<id>` or `/ficha/<id>` path segment (the common Spanish-portal
+      // shapes), which is a reasonable guess but MUST be verified against a real
+      // Altamira detail URL and tightened/corrected before relying on
+      // auto-capture. NOTE: manual capture via the popup button works on ANY
+      // http(s) tab regardless of isDetailPath, so the owner can already capture
+      // an Altamira page (to seed the #271 connector) even if this heuristic is
+      // wrong — only the automatic fire-once capture depends on it.
+      isDetailPath: function (p) {
+        return /^\/(?:inmueble|ficha)\/[^/]+/.test(p);
+      },
+      readySelectors: [
+        "[class*='ficha']",
+        "[class*='detalle']",
+        "[class*='precio']",
+        "main",
+        "h1",
+      ],
+    },
   ];
 
   // Minimum trimmed text on a "key node" for it to count as rendered.
