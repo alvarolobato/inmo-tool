@@ -37,9 +37,15 @@ export function TopBar({
   // Conversaciones (free chat) stays — Phase 4 plans its own chat flow, and
   // the raw chat UI has reuse value independent of the dashboard-builder it
   // was originally paired with.
+  // "Captura" (issue #268) is the top-level guided-capture EXECUTION surface,
+  // deliberately placed next to Perfiles: the day-to-day loop (pick a profile →
+  // open its pre-filtered searches → track capture progress) is a first-class
+  // user task, not admin. SETUP (extension install, API key, connector config,
+  // the raw worklist table) stays under /etl (Admin). See D-045.
   const navLinks = [
     { href: "/inicio", label: "Inicio" },
     { href: "/profiles", label: "Perfiles" },
+    { href: "/captura", label: "Captura" },
     { href: "/conversations", label: "Conversaciones" },
   ] as const;
 
