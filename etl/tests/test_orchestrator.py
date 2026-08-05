@@ -389,11 +389,9 @@ class TestConnectorConfig:
                     (run_id,),
                 )
                 total, ok, failed, run_skipped = cur.fetchone()
-            # Issue #99 hardening: a disabled connector is now visibly
-            # skipped, not silently absent from every count — it's counted
-            # in total_connectors and connectors_skipped, but not toward
-            # ok/failed, since "told not to run" is neither a success nor
-            # a failure.
+            # A disabled connector is counted in the per-run summary
+            # (total_connectors + connectors_skipped), never toward ok/failed —
+            # "told not to run" is neither a success nor a failure.
             assert total == 1
             assert ok == 0
             assert failed == 0
@@ -405,12 +403,12 @@ class TestConnectorConfig:
                     "WHERE run_id = %s AND connector_name = %s",
                     (run_id, connector.name),
                 )
-                (status,) = cur.fetchone()
-            # A real result row exists now — 'skipped', not absent — so a
-            # fully-disabled run is distinguishable from a fully-healthy
-            # empty one by inspection, not just by the total_connectors
-            # count.
-            assert status == "skipped"
+                row = cur.fetchone()
+            # Issue #292: a deliberately-disabled connector no longer writes a
+            # per-sweep 'skipped' result row (that flooded the health surface).
+            # Only the lightweight connectors_skipped summary above records it;
+            # there is NO connector_run_results row for it.
+            assert row is None
         finally:
             orchestrator.CONNECTORS.clear()
             self._cleanup_config(pg_conn, connector.name)

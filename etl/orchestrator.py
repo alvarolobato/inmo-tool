@@ -1548,17 +1548,15 @@ def _scopes_for_connector(
 
     Returns (scopes, enabled, min_refetch_interval_seconds_override).
     `enabled=False` means the caller must skip this connector entirely —
-    before ever deriving a scope or calling discover(). It still gets a
-    `connector_run_results` row (status='skipped', counted separately from
-    ok/failed) so a disabled connector is visible in run history rather
-    than silently absent — an operator turning a connector off is not a
-    failure, and shouldn't add 'failed'/'ok' noise, but it also shouldn't
-    look identical to "everything ran fine and there was simply nothing to
-    do". This is a different, more absolute case than `enabled=True,
-    scopes=[]` (nothing to do this run because there's no override and no
-    active profile reaches this connector's coverage — issue #71's
-    existing, already-normal no-op path, which still gets no result row
-    since nothing was ever skipped by operator choice).
+    before ever deriving a scope or calling discover(). Since issue #292 it
+    gets NO `connector_run_results` row (a deliberately-disabled connector is
+    not a per-sweep event worth a row — that flooded the health surface); it
+    is counted only in the per-run `connector_runs.connectors_skipped`
+    summary, and remains visible as disabled in the connectors config page.
+    This is a different, more absolute case than `enabled=True, scopes=[]`
+    (nothing to do this run because there's no override and no active profile
+    reaches this connector's coverage — issue #71's existing, already-normal
+    no-op path, which likewise gets no result row).
 
     `min_refetch_interval_seconds_override` (issue #143) is `None` when no
     override is configured — the caller falls back to
@@ -2290,34 +2288,29 @@ def run_all_connectors(
             conn, connector.name, profile_scopes
         )
         if not enabled:
-            # Issue #99 hardening: an operator explicitly turned this
-            # connector off — real and worth a visible trace, not a silent
-            # no-op. A run where every connector happens to be disabled
-            # used to look byte-identical to a healthy, fully-successful
-            # empty run; recording a 'skipped' result row (and counting it
-            # separately from ok/failed) is what makes "nothing ran because
-            # I told it not to" distinguishable from "nothing ran and I
-            # have no idea why". WARNING, not INFO, to match the severity
-            # this project already uses for "no scopes to discover" below —
-            # an operator forgetting they disabled a connector is exactly
-            # the kind of thing that should be noisy, not buried in INFO.
-            logger.warning(
+            # Issue #292: a deliberately-disabled connector is NOT an event
+            # worth a per-connector `connector_run_results` row every sweep.
+            # Under issue #99 it wrote a 'skipped' row each tick, which — once
+            # several connectors are born disabled (Diglo #117, Unicaja #119,
+            # Fotocasa rental #211) — floods the ETL/capture health surface
+            # with dozens of rows that read like events (63 rows / 8
+            # connectors at the time of #292). An operator turning a connector
+            # off is not a failure and shouldn't leave a trail of rows.
+            #
+            # We still keep the lightweight per-RUN summary: the `skipped`
+            # counter below feeds `connector_runs.connectors_skipped`, so a
+            # run where nothing ran because everything was disabled is still
+            # distinguishable ("3 skipped") from a mystery empty run — WITHOUT
+            # the per-connector row noise. Which connectors are off remains
+            # visible in the connectors config page (reads connector_config
+            # directly), so nothing is hidden. INFO, not WARNING: a disabled
+            # connector is the operator's own standing choice, expected on
+            # every sweep, and must not colour the run.
+            logger.info(
                 "Connector %s: disabled via connector_config — skipping "
-                "entirely this run",
+                "entirely this run (no result row; counted in "
+                "connectors_skipped)",
                 connector.name,
-            )
-            now = datetime.now(timezone.utc)
-            _record_connector_result(
-                conn,
-                run_id,
-                connector.name,
-                status="skipped",
-                discovered_count=0,
-                fetched_count=0,
-                error_count=0,
-                error_msg="disabled via connector_config",
-                started_at=now,
-                finished_at=now,
             )
             skipped += 1
             continue

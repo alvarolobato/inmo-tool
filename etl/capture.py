@@ -17,12 +17,13 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import fields
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from etl.connectors.aliseda import AlisedaConnector
 from etl.connectors.altamira import AltamiraConnector
 from etl.connectors.base import CanonicalListingVersion, ConnectorError, RawListing
 from etl.connectors.idealista import IdealistaConnector
+from etl.listing_detect import detail_portal_for_url, listing_portal_for_url
 
 logger = logging.getLogger("etl.capture")
 
@@ -304,13 +305,148 @@ def process_pending_captures(conn) -> int:
     return processed
 
 
+def _extract_detail_urls_from_html(
+    html: str | None, base_url: str, portal: str
+) -> list[str]:
+    """Harvest the listing-DETAIL URLs from a captured SEARCH/results page's
+    HTML (issue #292). Server-side mirror of detect.js `extractDetailUrls`:
+    every anchor href is resolved to an absolute URL against `base_url`, kept
+    only if it is a detail page for `portal`, and de-duplicated by the same
+    canonical `worklist_match_key` used everywhere else (so the same listing
+    linked twice — photo + title anchor — seeds one worklist row).
+
+    Best-effort and total: a parse failure or missing HTML yields an empty
+    list rather than raising — a listing page with zero harvestable links is
+    still a clean 'listing page' outcome, just with N=0.
+    """
+    if not html:
+        return []
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception:
+        logger.warning(
+            "extension_capture: could not parse listing-page HTML for %s — "
+            "treating as a listing page with 0 detail links",
+            base_url,
+            exc_info=True,
+        )
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for anchor in soup.find_all("a", href=True):
+        raw_href = anchor["href"]
+        if not isinstance(raw_href, str):
+            continue
+        href = urljoin(base_url, raw_href.strip())
+        if detail_portal_for_url(href) != portal:
+            continue
+        key = worklist_match_key(href)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(href)
+    return out
+
+
+def _seed_derived_worklist(conn, portal: str, urls: list[str]) -> int:
+    """Upsert harvested detail URLs into `capture_worklist` as `added_via =
+    'derived'` (issue #262/#292) — the same batch-capture / mine-results path
+    the extension's client-side harvest feeds, so a listing page captured as a
+    single page is routed there too. Idempotent via ON CONFLICT (match_key).
+    Returns the number of NEW rows added (already-known listings are skipped).
+
+    Best-effort: never raises — worklist seeding is downstream bookkeeping and
+    must not turn a clean listing-page outcome back into a failure."""
+    if not urls:
+        return 0
+    added = 0
+    try:
+        with conn.cursor() as cur:
+            for url in urls:
+                key = worklist_match_key(url)
+                if not key:
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO capture_worklist
+                        (url, match_key, source_portal, added_via, status)
+                    VALUES (%s, %s, %s, 'derived', 'pending')
+                    ON CONFLICT (match_key) DO NOTHING
+                    RETURNING id
+                    """,
+                    (url, key, portal),
+                )
+                if cur.fetchone() is not None:
+                    added += 1
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception(
+            "capture_worklist derived-seed failed for portal=%s (%d url(s)) — "
+            "the listing-page capture itself is unaffected",
+            portal,
+            len(urls),
+        )
+        return 0
+    return added
+
+
+def _mark_listing(
+    conn, capture_id: int, url: str, portal: str, detail_links: int
+) -> None:
+    """Record a captured SEARCH/results page as a clean 'listing' outcome
+    (issue #292) — NOT a failure. `status = 'listing'` is neutral end-to-end:
+    the data-health portal view counts it separately (never in failed_7d), and
+    the popup renders it as an informational result. The HTML is dropped like a
+    'done' row (we've already harvested the detail links from it)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE extension_capture
+               SET status = 'listing', connector_name = %s,
+                   title = %s, error_msg = NULL, fields_extracted = %s,
+                   processed_at = NOW(), html = NULL
+             WHERE id = %s
+            """,
+            (
+                portal,
+                f"Página de resultados — {detail_links} enlaces de detalle",
+                detail_links,
+                capture_id,
+            ),
+        )
+    conn.commit()
+    logger.info(
+        "extension_capture id=%s: %s listing/search page — %d detail link(s) "
+        "harvested into the batch worklist (not a failure)",
+        capture_id,
+        portal,
+        detail_links,
+    )
+
+
 def _process_one(conn, capture_id: int, url: str, html: str) -> bool:
     """Process one capture. Returns True if a listing was actually ingested
-    (upserted into `property`/`listing`), False if the capture was marked
-    failed. The caller uses the True count to decide whether the batch should
-    fire a dashboard re-materialize (issue #269)."""
+    (upserted into `property`/`listing`), False otherwise (a listing/search
+    page routed to the batch worklist, or a genuinely failed detail capture).
+    The caller uses the True count to decide whether the batch should fire a
+    dashboard re-materialize (issue #269)."""
     resolved = _connector_for_url(url)
     if resolved is None:
+        # Issue #292: a captured SEARCH/results page is not a broken detail
+        # capture — it's a listing page. Recognise it, harvest its detail
+        # links into the batch-capture / mine-results worklist (#262/#290),
+        # and record a clean 'listing' outcome. `failed` is reserved for
+        # genuinely broken DETAIL captures.
+        portal = listing_portal_for_url(url)
+        if portal is not None:
+            detail_urls = _extract_detail_urls_from_html(html, url, portal)
+            _seed_derived_worklist(conn, portal, detail_urls)
+            _mark_listing(conn, capture_id, url, portal, len(detail_urls))
+            return False
         _mark_failed(
             conn,
             capture_id,
