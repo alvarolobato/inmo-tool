@@ -475,6 +475,18 @@ test.describe("#167: touch/coarse-pointer behaviour (iPhone 13 emulation)", () =
     await expect(accept).toHaveAttribute("aria-pressed", "true");
     await expect(accept).toHaveCSS("opacity", "1");
 
+    // The active fill is an inline React style driven by `state === "accept"`,
+    // which reconciles against the server POST response (and a mount-time GET
+    // that also calls setState). `aria-pressed` flips on the optimistic render,
+    // but the settled --up green lands a beat later once the POST resolves —
+    // so sampling getComputedStyle once here occasionally read the pre-settle
+    // muted fill (rgba(0,0,0,0.35)), the #167 flake. Wait for the settled
+    // colour with an auto-retrying web-first assertion first. There is no CSS
+    // transition on background-color (only opacity/transform animate —
+    // globals.css), so this resolves directly to the final colour with no
+    // intermediate values to sample.
+    await expect(accept).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0.35)");
+
     const acceptBg = await accept.evaluate((el) => getComputedStyle(el).backgroundColor);
     const rejectBgAfter = await reject.evaluate((el) => getComputedStyle(el).backgroundColor);
     // The now-active accept button gets a distinct, semantically-coloured
