@@ -268,6 +268,42 @@ class SoftBlockError(ConnectorError):
     """
 
 
+# HTTP statuses a detail fetch returns when the listing itself no longer
+# exists at the source — it was removed/withdrawn between the discover()
+# sweep that surfaced its id and this run's detail fetch. 410 Gone is the
+# explicit signal; 404 is what most listing sites actually return for a
+# since-removed detail page. Kept here (not in a connector) so every
+# connector classifies the same statuses, and as a bare int set so this
+# module keeps its deliberate zero-`requests`-import property (see the
+# module docstring) — each connector extracts the status from its own
+# already-caught HTTPError and checks membership. See issue #291.
+LISTING_GONE_HTTP_STATUSES = frozenset({404, 410})
+
+
+class ListingUnavailableError(ConnectorError):
+    """fetch_detail found that a discovered listing no longer exists at the
+    source (an HTTP status in `LISTING_GONE_HTTP_STATUSES`).
+
+    A real classifieds site turns inventory over constantly: a listing
+    present in a discover() search page is routinely removed by the seller
+    (or expires) in the minutes before this run's detail fetch reaches it.
+    That is expected churn, not a fetch/parse failure an operator should
+    chase — but before issue #291 every connector wrapped a 404 into a
+    plain ConnectorError, so a handful of just-removed listings inflated
+    `connector_run_results.error_count` on essentially every fotocasa /
+    milanuncios scope run (the persistent `errors=7..10` the issue reports).
+
+    A distinct subclass lets `etl.orchestrator.run_connector` treat this as
+    a clean skip — not counted toward `error_count` — while still a
+    ConnectorError, so a mass of them (the detail-URL shape broke, so
+    *every* fetch 404s) still trips the shared circuit breaker rather than
+    silently fetching nothing. Connectors raise it only for the unambiguous
+    HTTP-gone case; a 200-with-no-payload page stays a generic
+    ConnectorError, because that is the soft-block signature and must never
+    be reclassified as "listing gone". See issue #291 and issue #66.
+    """
+
+
 class Connector(ABC):
     """Base class every site connector subclasses.
 

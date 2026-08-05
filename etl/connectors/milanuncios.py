@@ -118,10 +118,12 @@ from urllib.parse import urlsplit
 import requests
 
 from etl.connectors.base import (
+    LISTING_GONE_HTTP_STATUSES,
     CanonicalListingVersion,
     Connector,
     ConnectorError,
     ConnectorScope,
+    ListingUnavailableError,
     RawListing,
     SoftBlockError,
     Throttle,
@@ -592,6 +594,20 @@ class MilanunciosConnector(Connector):
             )
             response.raise_for_status()
         except requests.RequestException as exc:
+            # A 404/410 means this ad was removed at the source between
+            # discover() and this fetch — normal churn, a clean skip rather
+            # than a run error (issue #291). The soft-block signature is an
+            # HTTP 200 with no __INITIAL_PROPS__ (handled by
+            # _extract_initial_props below as MilanunciosSoftBlockError), so
+            # this HTTP-status branch can never swallow a block as "gone".
+            # Inherited unchanged by MilanunciosRentalConnector.
+            gone_status = getattr(getattr(exc, "response", None), "status_code", None)
+            if gone_status in LISTING_GONE_HTTP_STATUSES:
+                raise ListingUnavailableError(
+                    f"milanuncios fetch_detail: external_id={external_id} returned "
+                    f"HTTP {gone_status} — ad removed/withdrawn at source between "
+                    "discovery and fetch"
+                ) from exc
             raise ConnectorError(
                 f"milanuncios fetch_detail: request failed for external_id={external_id}: {exc}"
             ) from exc
