@@ -76,14 +76,21 @@ describe("firstPendingUrl — human-paced 'Siguiente' advance (issue #254)", () 
     expect(firstPendingUrl(rows)).toBe("https://a/inmueble/2");
   });
 
-  it("skips captured/failed/skipped rows", () => {
+  it("skips captured/failed/skipped/stale rows", () => {
+    // 'stale' (issue #273): a listing that left the portal's sitemap must never
+    // be surfaced by "Abrir siguiente pendiente".
     const rows = [
       row(1, "https://a/inmueble/1", "captured"),
       row(2, "https://a/inmueble/2", "failed"),
       row(3, "https://a/inmueble/3", "skipped"),
-      row(4, "https://a/inmueble/4", "pending"),
+      row(4, "https://a/inmueble/4", "stale"),
+      row(5, "https://a/inmueble/5", "pending"),
     ];
-    expect(firstPendingUrl(rows)).toBe("https://a/inmueble/4");
+    expect(firstPendingUrl(rows)).toBe("https://a/inmueble/5");
+  });
+
+  it("returns null when the only non-pending rows are stale", () => {
+    expect(firstPendingUrl([row(1, "https://a/inmueble/1", "stale")])).toBeNull();
   });
 
   it("returns null when nothing is pending", () => {

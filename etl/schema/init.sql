@@ -1307,8 +1307,14 @@ CREATE TABLE IF NOT EXISTS capture_worklist (
     -- so a capture maps to at most one worklist row.
     match_key          TEXT         NOT NULL UNIQUE,
     source_portal      TEXT         NOT NULL,
+    -- 'stale' (issue #273): a sitemap-seeded row whose listing has since
+    -- vanished from the portal's sitemap (sold/delisted). Set by the reseed
+    -- reconciliation in etl/worklist_seed.py, distinct from 'skipped' (owner
+    -- choice) and 'failed' (a capture was attempted and didn't land). Excluded
+    -- from the "Abrir siguiente pendiente" pool.
     status             TEXT         NOT NULL DEFAULT 'pending'
-                                    CHECK (status IN ('pending','captured','failed','skipped')),
+                                    CONSTRAINT capture_worklist_status_check
+                                    CHECK (status IN ('pending','captured','failed','skipped','stale')),
     added_via          TEXT         NOT NULL DEFAULT 'manual'
                                     CHECK (added_via IN ('sitemap','manual','derived')),
     -- The portal's own asset id, parsed from the URL slug at seed time
@@ -1343,6 +1349,18 @@ CREATE TRIGGER trg_capture_worklist_set_updated_at
 -- Forward-compat: an older DB may already have capture_worklist without the
 -- sitemap-seeding column (issue #260). IF NOT EXISTS keeps this idempotent.
 ALTER TABLE capture_worklist ADD COLUMN IF NOT EXISTS external_id TEXT;
+
+-- Migration (issue #273): widen the status CHECK to admit 'stale'. A DB created
+-- before #273 carries the four-value constraint under its default name
+-- (capture_worklist_status_check); CREATE TABLE IF NOT EXISTS above never alters
+-- an existing table, so drop-and-re-add here. init.sql is re-applied on every
+-- ETL boot, so this must be idempotent: DROP IF EXISTS then ADD is a no-op-safe
+-- pair (Postgres has no ADD CONSTRAINT IF NOT EXISTS for CHECKs). No data
+-- rewrite — 'stale' only widens the allowed set, so every existing row still
+-- satisfies it.
+ALTER TABLE capture_worklist DROP CONSTRAINT IF EXISTS capture_worklist_status_check;
+ALTER TABLE capture_worklist ADD CONSTRAINT capture_worklist_status_check
+    CHECK (status IN ('pending','captured','failed','skipped','stale'));
 
 -- ── Worklist sitemap-seed trigger (issue #260) ──────────────────────────────
 -- The same "queue table, not a synchronous call" transport the dashboard uses

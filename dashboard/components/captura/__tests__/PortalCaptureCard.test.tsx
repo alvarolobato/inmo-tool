@@ -24,7 +24,7 @@ function makeView(over: Partial<PortalCaptureView> = {}): PortalCaptureView {
     tasks: over.tasks ?? [makeTask()],
     summary:
       over.summary === undefined
-        ? { source_portal: "aliseda", total: 10, pending: 4, captured: 5, failed: 1, skipped: 0 }
+        ? { source_portal: "aliseda", total: 10, pending: 4, captured: 5, failed: 1, skipped: 0, stale: 0 }
         : over.summary,
     capturedPct: over.capturedPct ?? 50,
   };
@@ -94,7 +94,7 @@ describe("PortalCaptureCard", () => {
     render(
       <PortalCaptureCard
         view={makeView({
-          summary: { source_portal: "aliseda", total: 5, pending: 2, captured: 3, failed: 0, skipped: 0 },
+          summary: { source_portal: "aliseda", total: 5, pending: 2, captured: 3, failed: 0, skipped: 0, stale: 0 },
         })}
       />,
     );

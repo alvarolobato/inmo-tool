@@ -15,6 +15,11 @@ nothing more:
     NOTHING`, so re-running adds only genuinely-new listings and never
     duplicates or resurrects a row the operator has since skipped/captured
     (those keep their status; the insert is simply ignored).
+  * **Reconciled (issue #273).** After the additive upsert, the existing
+    worklist is reconciled against the current sitemap: a `pending` row whose
+    listing has dropped out is marked `'stale'`, and a previously-`'stale'` row
+    that has reappeared returns to `'pending'`. `captured`/`failed`/`skipped`
+    rows are never touched — see `_reconcile_worklist`.
 
 Transport: the worklist page can't run this in-process (it's Python, in a
 separate container), so it signals a run by writing a
@@ -99,6 +104,48 @@ def parse_worklist_rows(child_sitemap_xml: str) -> list[dict[str, str]]:
     return rows
 
 
+def _reconcile_worklist(conn, portal: str, current_keys: list[str]) -> tuple[int, int]:
+    """Reconcile a portal's worklist against the freshly-fetched sitemap (issue
+    #273). Returns `(resurrected, staled)`.
+
+    The sitemap is the live catalogue; `current_keys` is every `match_key` in
+    it. Two lifecycle transitions, both scoped to this portal's rows and both
+    idempotent (running twice with the same sitemap is a no-op):
+
+      * **Removed → stale.** A `pending` row whose listing has dropped out of
+        the sitemap (sold, delisted) flips to `'stale'`. Only `pending` rows
+        are touched: `captured`/`failed` keep their capture history and
+        `skipped` keeps the owner's choice — none of those should be silently
+        rewritten just because the listing left the catalogue. `'stale'`
+        excludes the row from "Abrir siguiente pendiente" without pretending it
+        never existed.
+      * **Reappeared → pending.** A row previously marked `'stale'` that is back
+        in the sitemap returns to `'pending'`, so a relisted property re-enters
+        the backlog instead of being stuck stale forever. Only `'stale'` rows
+        (a system-managed state) are resurrected — never an owner's `skipped`.
+
+    `current_keys` is always non-empty here (`seed_cimenta2_worklist` raises on
+    an empty sitemap before calling this), so the `<> ALL` / `= ANY` guards are
+    well-defined.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE capture_worklist SET status = 'pending' "
+            "WHERE source_portal = %s AND status = 'stale' "
+            "AND match_key = ANY(%s)",
+            (portal, current_keys),
+        )
+        resurrected = cur.rowcount
+        cur.execute(
+            "UPDATE capture_worklist SET status = 'stale' "
+            "WHERE source_portal = %s AND status = 'pending' "
+            "AND match_key <> ALL(%s)",
+            (portal, current_keys),
+        )
+        staled = cur.rowcount
+    return resurrected, staled
+
+
 def seed_cimenta2_worklist(conn, *, fetch: Fetcher = _http_get) -> int:
     """Fetch Cimenta2's public sitemap and upsert `pending` worklist rows.
 
@@ -108,6 +155,12 @@ def seed_cimenta2_worklist(conn, *, fetch: Fetcher = _http_get) -> int:
     — that is the shape of an error/interstitial page served with a 200, and
     (mirroring `cimenta2.discover()`'s guards) it must be a loud failure, not a
     silent "0 added", so the trigger is marked failed rather than done.
+
+    Beyond inserting new rows, this reconciles the existing worklist against the
+    current sitemap (issue #273): listings that have dropped out are marked
+    `'stale'`, and previously-stale listings that have reappeared return to
+    `'pending'` — see `_reconcile_worklist`. The additive upsert alone never
+    signalled a removal, so a sold/delisted URL sat `pending` forever.
     """
     index_xml = fetch(_SITEMAP_INDEX_URL)
     child_url = asset_sitemap_url(
@@ -146,10 +199,17 @@ def seed_cimenta2_worklist(conn, *, fetch: Fetcher = _http_get) -> int:
             )
             if cur.fetchone() is not None:
                 added += 1
+
+    resurrected, staled = _reconcile_worklist(
+        conn, CIMENTA2_PORTAL, [row["match_key"] for row in rows]
+    )
     conn.commit()
     logger.info(
-        "cimenta2 worklist seed: %d new row(s) from %d sitemap asset(s) at %s",
+        "cimenta2 worklist seed: %d new row(s), %d resurrected, %d marked stale "
+        "from %d sitemap asset(s) at %s",
         added,
+        resurrected,
+        staled,
         len(rows),
         child_url,
     )

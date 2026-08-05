@@ -21,13 +21,23 @@ export interface WorklistRow {
   updated_at: string;
 }
 
-export type WorklistStatus = "pending" | "captured" | "failed" | "skipped";
+// 'stale' (issue #273): a sitemap-seeded row whose listing has since dropped
+// out of the portal's sitemap (sold/delisted). Distinct from 'skipped' (owner
+// choice) and 'failed' (a capture was attempted and didn't land). Set by
+// etl/worklist_seed.py's reseed reconciliation; excluded from firstPendingUrl.
+export type WorklistStatus =
+  | "pending"
+  | "captured"
+  | "failed"
+  | "skipped"
+  | "stale";
 
 export const WORKLIST_STATUSES: readonly WorklistStatus[] = [
   "pending",
   "captured",
   "failed",
   "skipped",
+  "stale",
 ];
 
 /** Per-portal status roll-up for the worklist page header. */
@@ -38,6 +48,7 @@ export interface WorklistPortalSummary {
   captured: number;
   failed: number;
   skipped: number;
+  stale: number;
 }
 
 /**
