@@ -25,6 +25,10 @@ const {
   listingPortalForUrl,
   isListingUrl,
   extractDetailUrls,
+  captureSignalPresent,
+  stripCaptureSignal,
+  listingCaptureAction,
+  buildCaptureBanner,
 } = D as {
   detailPortalForUrl: (u: string) => string | null;
   isDetailUrl: (u: string) => boolean;
@@ -40,6 +44,16 @@ const {
   listingPortalForUrl: (u: string) => string | null;
   isListingUrl: (u: string) => boolean;
   extractDetailUrls: (hrefs: unknown, portal?: string) => string[];
+  captureSignalPresent: (u: string) => boolean;
+  stripCaptureSignal: (u: string) => string;
+  listingCaptureAction: (
+    u: string,
+    detailUrls: unknown,
+  ) => { action: "none" | "autostart" | "banner"; portal?: string; count?: number };
+  buildCaptureBanner: (
+    doc: Document,
+    opts: { count?: number; onCapture?: () => void; onDismiss?: () => void },
+  ) => HTMLElement | null;
 };
 
 describe("detailPortalForUrl — only real listing-detail pages", () => {
@@ -271,5 +285,120 @@ describe("extractDetailUrls — harvest detail links off a listing DOM", () => {
     ).toEqual(["https://www.idealista.com/inmueble/1/"]);
     expect(extractDetailUrls(undefined)).toEqual([]);
     expect(extractDetailUrls(null)).toEqual([]);
+  });
+});
+
+// ── Batch auto-start signal + in-page banner (issue #297) ───────────────────
+
+describe("captureSignalPresent — the app's #inmo-capture auto-start signal", () => {
+  it("true for the fragment form", () => {
+    expect(
+      captureSignalPresent("https://www.idealista.com/venta-viviendas/estepona/#inmo-capture"),
+    ).toBe(true);
+  });
+
+  it("true for the query-key fallback form", () => {
+    expect(
+      captureSignalPresent("https://www.idealista.com/venta-viviendas/estepona/?inmo-capture=1"),
+    ).toBe(true);
+    expect(
+      captureSignalPresent("https://www.idealista.com/venta-viviendas/estepona/?x=1&inmo-capture"),
+    ).toBe(true);
+  });
+
+  it("false without the signal, and for junk URLs", () => {
+    expect(captureSignalPresent("https://www.idealista.com/venta-viviendas/estepona/")).toBe(false);
+    expect(captureSignalPresent("https://www.idealista.com/venta-viviendas/estepona/#gallery")).toBe(
+      false,
+    );
+    expect(captureSignalPresent("not a url")).toBe(false);
+    expect(captureSignalPresent("")).toBe(false);
+  });
+});
+
+describe("stripCaptureSignal — clean the URL before capture-to-infer learning (#303)", () => {
+  it("removes the fragment form", () => {
+    expect(
+      stripCaptureSignal("https://www.idealista.com/venta-viviendas/estepona/#inmo-capture"),
+    ).toBe("https://www.idealista.com/venta-viviendas/estepona/");
+  });
+
+  it("removes the query-key form, preserving other params", () => {
+    expect(
+      stripCaptureSignal("https://www.idealista.com/venta-viviendas/estepona/?a=1&inmo-capture=1"),
+    ).toBe("https://www.idealista.com/venta-viviendas/estepona/?a=1");
+  });
+
+  it("leaves a URL without the signal (and junk) untouched", () => {
+    const clean = "https://www.idealista.com/venta-viviendas/estepona/";
+    expect(stripCaptureSignal(clean)).toBe(clean);
+    expect(stripCaptureSignal("not a url")).toBe("not a url");
+  });
+});
+
+describe("listingCaptureAction — what the content script should do", () => {
+  const LISTING = "https://www.idealista.com/venta-viviendas/estepona-malaga/";
+  const URLS = ["https://www.idealista.com/inmueble/1/", "https://www.idealista.com/inmueble/2/"];
+
+  it("auto-starts on a listing page carrying the signal (≥1 detail URL)", () => {
+    const v = listingCaptureAction(`${LISTING}#inmo-capture`, URLS);
+    expect(v).toEqual({ action: "autostart", portal: "idealista", count: 2 });
+  });
+
+  it("shows the banner on a listing page WITHOUT the signal (no auto-start)", () => {
+    const v = listingCaptureAction(LISTING, URLS);
+    expect(v).toEqual({ action: "banner", portal: "idealista", count: 2 });
+  });
+
+  it("does nothing on a non-listing page even with the signal", () => {
+    expect(listingCaptureAction(`https://www.idealista.com/inmueble/1/#inmo-capture`, URLS)).toEqual({
+      action: "none",
+    });
+  });
+
+  it("does nothing on a listing page with zero harvested detail URLs", () => {
+    expect(listingCaptureAction(`${LISTING}#inmo-capture`, [])).toEqual({ action: "none" });
+    expect(listingCaptureAction(LISTING, undefined)).toEqual({ action: "none" });
+  });
+});
+
+describe("buildCaptureBanner — the in-page manual fallback", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("renders a branded, dismissible banner naming the property count", () => {
+    const el = buildCaptureBanner(document, { count: 7 });
+    expect(el).not.toBeNull();
+    document.body.appendChild(el as HTMLElement);
+    const banner = document.getElementById("inmo-capture-banner");
+    expect(banner).not.toBeNull();
+    expect(banner?.getAttribute("data-inmo-banner")).toBe("1");
+    expect(banner?.textContent).toContain("Inmo-Tool");
+    expect(banner?.textContent).toContain("7 propiedades");
+    // Fixed + max z-index so it can't be confused with / hidden behind site UI.
+    expect(banner?.style.position).toBe("fixed");
+    expect(banner?.style.zIndex).toBe("2147483647");
+    expect(document.querySelector("[data-inmo-banner-start]")).not.toBeNull();
+    expect(document.querySelector("[data-inmo-banner-dismiss]")).not.toBeNull();
+  });
+
+  it("wires the capture button to onCapture and the × to onDismiss", () => {
+    let captured = 0;
+    let dismissed = 0;
+    const el = buildCaptureBanner(document, {
+      count: 3,
+      onCapture: () => (captured += 1),
+      onDismiss: () => (dismissed += 1),
+    });
+    document.body.appendChild(el as HTMLElement);
+    (document.querySelector("[data-inmo-banner-start]") as HTMLButtonElement).click();
+    (document.querySelector("[data-inmo-banner-dismiss]") as HTMLButtonElement).click();
+    expect(captured).toBe(1);
+    expect(dismissed).toBe(1);
+  });
+
+  it("returns null for a missing document rather than throwing", () => {
+    expect(buildCaptureBanner(undefined as unknown as Document, { count: 1 })).toBeNull();
   });
 });

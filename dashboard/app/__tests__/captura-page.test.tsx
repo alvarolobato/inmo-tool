@@ -178,7 +178,15 @@ describe("CapturaPage (task-driven)", () => {
         ),
       ).toBe(true),
     );
-    await waitFor(() => expect(openSpy).toHaveBeenCalledWith(ALISEDA_URL, "_blank", expect.any(String)));
+    // Opens the search tagged with the auto-start signal (#inmo-capture, #297)
+    // so the extension starts the batch without a popup/banner click.
+    await waitFor(() =>
+      expect(openSpy).toHaveBeenCalledWith(
+        `${ALISEDA_URL}#inmo-capture`,
+        "_blank",
+        expect.any(String),
+      ),
+    );
     // Optimistic grey-out.
     await waitFor(() =>
       expect(screen.getByTestId(`captura-task-${ALISEDA_TASK_ID}`)).toHaveAttribute("data-muted", "true"),

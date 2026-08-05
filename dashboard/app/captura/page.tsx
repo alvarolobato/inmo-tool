@@ -20,6 +20,7 @@ import {
 } from "@/lib/captura-tasks";
 import type { SearchProfileRow } from "@/lib/profiles-schema";
 import type { WorklistPortalSummary } from "@/lib/worklist";
+import { withCaptureSignal } from "@/lib/extension-capture";
 
 /**
  * Captura — task-driven guided-capture EXECUTION page (issue #289, part of
@@ -168,8 +169,11 @@ export default function CapturaPage() {
         // search. The last-done note just won't update until the next reload.
       } finally {
         // Open in the click's user gesture so popup blockers don't eat it.
+        // Tag the URL with the auto-start signal (#inmo-capture) so the
+        // extension starts the batch on that tab without any popup/banner
+        // click (issue #297). withCaptureSignal never breaks the URL.
         if (typeof window !== "undefined") {
-          window.open(task.url, "_blank", "noopener,noreferrer");
+          window.open(withCaptureSignal(task.url), "_blank", "noopener,noreferrer");
         }
       }
     },

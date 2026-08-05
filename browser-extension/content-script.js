@@ -214,19 +214,145 @@
     pollUntilReady(info, Date.now() + MAX_WAIT_MS);
   }
 
+  // ── 3. Listing/search pages: in-page banner + auto-start (issue #297) ──────
+  //
+  // On a recognized SEARCH/RESULTS page the owner previously got nothing until
+  // they hunted for "Capturar todas" in the popup. Now, once the page renders:
+  //   - if the URL carries the app's auto-start signal (#inmo-capture — set by
+  //     the dashboard's "Abrir búsqueda") → auto-start the SAME batch the popup
+  //     would (START_BATCH → background), no click needed;
+  //   - otherwise → inject a small, dismissible, branded banner whose "Capturar
+  //     todas" button starts that same batch.
+  // Both reuse the existing batch queue (issue #262/#279) verbatim — this file
+  // only decides WHEN to fire START_BATCH and (for the banner) renders the
+  // trigger. N = extractDetailUrls(...).length.
+  let listingHandled = false; // fired the banner/auto-start for the current URL
+  let bannerEl = null;
+
+  function currentListing() {
+    const url = window.location.href;
+    const portal = D.listingPortalForUrl(url);
+    if (!portal) return null;
+    return { url, portal };
+  }
+
+  function harvestDetailUrls(portal) {
+    const hrefs = Array.from(document.querySelectorAll("a[href]")).map(
+      (a) => a.href,
+    );
+    return D.extractDetailUrls(hrefs, portal);
+  }
+
+  function removeBanner() {
+    if (bannerEl) {
+      try {
+        bannerEl.remove();
+      } catch {
+        /* already gone */
+      }
+      bannerEl = null;
+    }
+  }
+
+  // Kick off the SAME batch run as the popup's "Capturar todas": seed + drive
+  // the sequential/jittered queue in the background service worker (batch.js).
+  // We pass this search page's OWN url as `searchUrl` so the background's
+  // capture-to-infer piggyback (issue #303) learns its grammar exactly as the
+  // popup path does — signal-stripped so our synthetic #inmo-capture never
+  // pollutes the learned example.
+  function startBatchFromPage(portal, urls) {
+    removeBanner();
+    const searchUrl = D.stripCaptureSignal(window.location.href);
+    let responded = false;
+    try {
+      chrome.runtime.sendMessage(
+        { type: "START_BATCH", portal, urls, searchUrl },
+        (res) => {
+          responded = true;
+          if (chrome.runtime.lastError || !res || !res.started) {
+            showToast("Inmo-Tool: no se pudo iniciar la captura por lotes");
+            return;
+          }
+          showToast(
+            `Inmo-Tool: capturando ${res.total} anuncio(s), uno a uno…`,
+          );
+        },
+      );
+    } catch {
+      showToast("Inmo-Tool: no se pudo iniciar la captura por lotes");
+      return;
+    }
+    // Service worker asleep and no callback — surface it rather than hang silent.
+    setTimeout(() => {
+      if (!responded) showToast("Inmo-Tool: no se pudo iniciar la captura");
+    }, MAX_WAIT_MS);
+  }
+
+  function showBanner(portal, urls) {
+    if (document.getElementById("inmo-capture-banner")) return; // already shown
+    const el = D.buildCaptureBanner(document, {
+      count: urls.length,
+      onCapture: () => startBatchFromPage(portal, urls),
+      onDismiss: () => removeBanner(),
+    });
+    if (!el || !document.body) return;
+    document.body.appendChild(el);
+    bannerEl = el;
+  }
+
+  function handleListingWhenReady(info, deadline) {
+    if (listingHandled) return;
+    const now = currentListing();
+    if (!now || now.url !== info.url) return; // navigated away — nav handler re-arms
+    if (D.isRenderReady(document, info.portal)) {
+      const urls = harvestDetailUrls(info.portal);
+      const verdict = D.listingCaptureAction(info.url, urls);
+      if (verdict.action === "none") {
+        // Rendered but no detail links harvested yet — keep polling to deadline
+        // (anchors may still be streaming in) before giving up.
+        if (Date.now() > deadline) return;
+        setTimeout(() => handleListingWhenReady(info, deadline), READY_POLL_MS);
+        return;
+      }
+      listingHandled = true;
+      if (verdict.action === "autostart") {
+        startBatchFromPage(verdict.portal, urls);
+      } else {
+        showBanner(verdict.portal, urls);
+      }
+      return;
+    }
+    if (Date.now() > deadline) return; // never rendered enough — nothing to do
+    setTimeout(() => handleListingWhenReady(info, deadline), READY_POLL_MS);
+  }
+
+  function startListingLoop() {
+    if (listingHandled) return;
+    const info = currentListing();
+    if (!info) return; // not a listing/search page
+    handleListingWhenReady(info, Date.now() + MAX_WAIT_MS);
+  }
+
   // Detect SPA route changes (URL changes without a full reload).
   let lastHref = window.location.href;
   function onMaybeNavigated() {
     if (window.location.href !== lastHref) {
       lastHref = window.location.href;
       loopKey = null;
+      // A new URL is a fresh listing decision: drop any stale banner and re-arm.
+      listingHandled = false;
+      removeBanner();
       startAutoCaptureLoop();
+      startListingLoop();
     }
   }
 
   (async () => {
-    if (!(await autoCaptureEnabled())) return;
-    startAutoCaptureLoop();
+    // The banner + app-signal auto-start are ALWAYS available (the banner is a
+    // manual button; the signal is an explicit per-open intent), independent of
+    // the detail auto-capture kill switch.
+    startListingLoop();
+    if (await autoCaptureEnabled()) startAutoCaptureLoop();
     try {
       const navObs = new MutationObserver(onMaybeNavigated);
       navObs.observe(document, { childList: true, subtree: true });
