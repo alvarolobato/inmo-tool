@@ -87,6 +87,56 @@
   components: [dashboard]
 
 # -----------------------------------------------------------------------------
+# Flip / reforma-ARV (buy-to-flip thesis metrics — issue #45, D-058)
+# -----------------------------------------------------------------------------
+# €/m² refurbishment bands + a transaction/holding buffer, used to estimate
+# renovation cost, after-repair value (ARV) and flip margin for profiles marked
+# thesis_type: "flip". Deliberately ROUGH, directional v1 placeholders the owner
+# tunes against real regional cost data WITHOUT a code change — the calc logic
+# (dashboard/lib/analytics/renovation-estimate.ts / arv.ts / flip-margin.ts)
+# reads these via dashboard/lib/analytics/flip-config.ts. Read only by the
+# dashboard; env > config.yaml > default like every other key.
+- key: flip.refurb_cost_leve_eur_m2
+  env: FLIP_REFURB_COST_LEVE_EUR_M2
+  type: int
+  sensitive: false
+  default: 400
+  section: "Flip"
+  description: "Coste de reforma aproximado (€/m²) para una reforma LIGERA (renovation_severity=leve: pintura, cocina/baño, suelos). Valor orientativo v1; ajústalo a tu mercado. Solo se usa en perfiles con thesis_type=flip."
+  requires_restart: []
+  components: [dashboard]
+
+- key: flip.refurb_cost_integral_eur_m2
+  env: FLIP_REFURB_COST_INTEGRAL_EUR_M2
+  type: int
+  sensitive: false
+  default: 900
+  section: "Flip"
+  description: "Coste de reforma aproximado (€/m²) para una reforma INTEGRAL (renovation_severity=integral: estructural, instalaciones, vaciado). Valor orientativo v1; ajústalo a tu mercado."
+  requires_restart: []
+  components: [dashboard]
+
+- key: flip.refurb_cost_unknown_eur_m2
+  env: FLIP_REFURB_COST_UNKNOWN_EUR_M2
+  type: int
+  sensitive: false
+  default: 650
+  section: "Flip"
+  description: "Coste de reforma aproximado (€/m²) cuando el inmueble está 'a reformar' pero no se ha podido graduar la profundidad (renovation_severity=unknown/null). Banda MEDIA conservadora, marcada como provisional. Valor orientativo v1."
+  requires_restart: []
+  components: [dashboard]
+
+- key: flip.sale_holding_cost_pct
+  env: FLIP_SALE_HOLDING_COST_PCT
+  type: int
+  sensitive: false
+  default: 10
+  section: "Flip"
+  description: "Colchón de gastos de transacción y tenencia de un flip (impuestos de compra, comisión de venta, gastos durante la obra) como % del precio de compra. Regla gruesa v1; se resta al calcular el margen de flip. Ajustable."
+  requires_restart: []
+  components: [dashboard]
+
+# -----------------------------------------------------------------------------
 # PostgreSQL (local mirror — destination for connector sync)
 # -----------------------------------------------------------------------------
 - key: postgres.user
