@@ -1,12 +1,12 @@
-"""Unit tests for the Aliseda capture connector (issue #237).
+"""Unit tests for the Aliseda capture connector (issues #237, #266).
 
-Pure normalize() tests against a FABRICATED fixture — this connector never
-makes a live request (D-019: Aliseda's data host is robots.txt Disallow: /,
-and the public page is a JS shell). Every value asserted below is invented in
-etl/tests/fixtures/aliseda_sample_detail.html, not scraped. These tests pin
-the CURRENT best-effort mapping so that refining the selectors against a real
-owner capture (see aliseda.py's validation checklist) is a deliberate,
-test-visible change — they are not evidence the selectors match the real site.
+normalize() is exercised against THREE real captured Aliseda detail pages
+(trimmed to the load-bearing markup — the two JSON-LD blocks, the feature
+block, the description, and the photo gallery), preserved as
+etl/tests/fixtures/aliseda_detail_*.html. This connector never makes a live
+request (D-019: Aliseda's data host is robots.txt Disallow: /). The captures
+were taken by a human viewing `/inmueble/<id>` in their own browser and are
+the ground truth these selectors were calibrated against.
 """
 
 from __future__ import annotations
@@ -20,17 +20,58 @@ from etl.connectors.aliseda import AlisedaConnector
 from etl.connectors.base import ConnectorError, RawListing
 
 _FIXTURES = Path(__file__).parent / "fixtures"
-_DETAIL_HTML = (_FIXTURES / "aliseda_sample_detail.html").read_text(encoding="utf-8")
 _SHELL_HTML = (_FIXTURES / "aliseda_sample_shell.html").read_text(encoding="utf-8")
-_DETAIL_URL = "https://www.alisedainmobiliaria.com/inmueble/ANT99900011122"
+
+# (fixture, slug, expected price, m², rooms, baths, postal, city, province)
+_CASES = {
+    "vtr319552": (
+        "aliseda_detail_vtr319552.html",
+        "vtr0200319552",
+        Decimal(445000),
+        Decimal(87),
+        2,
+        2,
+        "41010",
+        "Sevilla",
+        "Sevilla",
+    ),
+    "vtr319563": (
+        "aliseda_detail_vtr319563.html",
+        "vtr0200319563",
+        Decimal(738000),
+        Decimal(81),
+        3,
+        None,  # this capture exposes no "Baños" feature
+        "41010",
+        "Sevilla",
+        "Sevilla",
+    ),
+    "vpa120399": (
+        "aliseda_detail_vpa120399.html",
+        "vpa41007120399",
+        Decimal(189000),
+        Decimal(75),
+        3,
+        1,
+        "41007",
+        "Sevilla",
+        "Sevilla",
+    ),
+}
 
 
-def _normalize(html: str, url: str = _DETAIL_URL, external_id: str = "ANT99900011122"):
+def _normalize(html: str, slug: str):
     connector = AlisedaConnector()
+    url = f"https://www.alisedainmobiliaria.com/inmueble/{slug}"
     raw = RawListing(
-        external_id=external_id, source=connector.name, raw={"url": url, "html": html}
+        external_id=slug, source=connector.name, raw={"url": url, "html": html}
     )
     return connector.normalize(raw)
+
+
+def _case(key: str):
+    fixture = _CASES[key][0]
+    return (_FIXTURES / fixture).read_text(encoding="utf-8"), _CASES[key][1]
 
 
 class TestExternalIdFromUrl:
@@ -38,12 +79,12 @@ class TestExternalIdFromUrl:
         "url,expected",
         [
             (
-                "https://www.alisedainmobiliaria.com/inmueble/ant00030657045",
-                "ant00030657045",
+                "https://www.alisedainmobiliaria.com/inmueble/vtr0200319552",
+                "vtr0200319552",
             ),
             (
-                "https://www.alisedainmobiliaria.com/inmueble/ANT99900011122/",
-                "ANT99900011122",
+                "https://www.alisedainmobiliaria.com/inmueble/VPA41007120399/",
+                "VPA41007120399",
             ),
             (
                 "https://www.alisedainmobiliaria.com/inmueble/ANT1?utm=x",
@@ -56,60 +97,71 @@ class TestExternalIdFromUrl:
         assert AlisedaConnector.external_id_from_url(url) == expected
 
 
-class TestNormalizeDetailPage:
-    def test_maps_the_grounded_analytics_fields(self):
-        c = _normalize(_DETAIL_HTML)
-        assert c.external_id == "ANT99900011122"
+class TestNormalizeRealCaptures:
+    @pytest.mark.parametrize("key", list(_CASES))
+    def test_core_fields_extracted(self, key):
+        html, slug = _case(key)
+        (_f, _slug, price, m2, rooms, baths, postal, city, province) = _CASES[key]
+        c = _normalize(html, slug)
+
         assert c.source == "aliseda"
-        assert c.url == _DETAIL_URL
-        # Grounded (D-019 observed these analytics keys on the real page).
-        assert c.current_price == Decimal(148000)
-        assert c.m2_built == Decimal(78)
-        assert c.rooms == 2
-        assert c.bathrooms == 1
-        assert c.city == "Estepona"  # title-cased from shouty "ESTEPONA"
-        assert c.province == "Málaga"
-        assert c.postal_code == "29680"
-        assert c.address == "Calle Ejemplo 12"
-        assert c.lat == Decimal("36.427540")
-        assert c.lon == Decimal("-5.145680")
+        assert c.external_id == slug
+        assert c.reference_code == slug.upper()
+        assert c.current_price == price
+        assert c.m2_built == m2
+        assert c.rooms == rooms
+        assert c.bathrooms == baths
+        assert c.postal_code == postal
+        assert c.city == city
+        assert c.province == province
         assert c.property_type == "piso"
         assert c.operation == "sale"
-        assert c.reference_code == "ANT99900011122"
-        assert c.floor == "2"
-        assert c.has_elevator is True
+        assert c.status == "active"
+        assert c.listing_kind == "agency"
 
-    def test_captures_photos_and_description(self):
-        c = _normalize(_DETAIL_HTML)
-        assert len(c.photo_urls) == 3
+    @pytest.mark.parametrize("key", list(_CASES))
+    def test_photos_belong_to_this_listing_only(self, key):
+        html, slug = _case(key)
+        c = _normalize(html, slug)
+        # The detail page also embeds a "también te puede interesar" carousel
+        # with OTHER listings' photos — every extracted URL must carry THIS
+        # listing's reference, and there must be a real gallery (>= 10).
+        assert len(c.photo_urls) >= 10
+        ref = slug.upper()
+        assert all(f"/{ref}/" in u for u in c.photo_urls)
         assert all(
-            u.startswith("https://cdn.alisedainmobiliaria.com/") for u in c.photo_urls
+            u.startswith("https://storage.googleapis.com/aliseda/ImagenesActivos/")
+            for u in c.photo_urls
         )
-        assert c.description and "Estepona" in c.description
+        # No site-chrome (FrontWeb logos/banners) leaks in.
+        assert not any("FrontWeb" in u for u in c.photo_urls)
+        # Deduped.
+        assert len(set(c.photo_urls)) == len(c.photo_urls)
 
-    def test_provenance_and_status(self):
-        c = _normalize(_DETAIL_HTML)
-        assert c.status == "active"  # capture connector can only assert active
-        assert c.listing_kind == "agency"  # REO portal
+    def test_address_and_description(self):
+        html, slug = _case("vtr319552")
+        c = _normalize(html, slug)
+        assert c.address == "calle Samuel Morse"
+        assert c.description and "PRÍNCIPES" in c.description
+        # The "Descripción" heading label is stripped from the body.
+        assert not c.description.startswith("Descripción")
+
+    def test_provenance(self):
+        html, slug = _case("vpa120399")
+        c = _normalize(html, slug)
         assert c.raw_extra["capture_source"] == "browser-extension"
         assert c.raw_extra["capture_portal"] == "aliseda"
-        assert c.raw_extra["aliseda_datalayer"]["referencia"] == "ANT99900011122"
+        assert c.contact_raw is None  # no owner-contact PII persisted
 
-    def test_dom_fallback_when_datalayer_absent(self):
-        """Strip the analytics blob: the DOM-selector fallback path must still
-        recover the core fields, since a real capture might not carry the
-        dataLayer push in the shape we guessed."""
-        html_no_dl = _DETAIL_HTML.replace("dataLayer.push", "notADataLayer.push")
-        c = _normalize(html_no_dl)
-        # Recovered purely from labelled DOM elements now.
-        assert c.current_price == Decimal(148000)
-        assert c.m2_built == Decimal(78)
-        assert c.rooms == 2
-        assert c.bathrooms == 1
-        assert c.reference_code == "ANT99900011122"
-        assert c.city == "Estepona"
-        assert c.province == "Málaga"
-        assert c.property_type == "piso"
+    def test_price_mutation_is_caught(self):
+        """Revert-and-confirm-fail: corrupt the JSON-LD price the parser reads
+        and the extracted price must change — proving it is genuinely parsed
+        from the fixture, not hard-coded/coincidental."""
+        html, slug = _case("vtr319552")
+        assert _normalize(html, slug).current_price == Decimal(445000)
+        mutated = html.replace('"price": 445000', '"price": 999111')
+        assert mutated != html  # the token we mutate really is in the fixture
+        assert _normalize(mutated, slug).current_price == Decimal(999111)
 
 
 class TestNormalizeEmptyShell:
@@ -118,7 +170,16 @@ class TestNormalizeEmptyShell:
         is a bare shell. The mapping must degrade to mostly-None rather than
         fabricate — the popup's completeness signal then nudges a re-capture.
         """
-        c = _normalize(_SHELL_HTML, external_id="ANT404")
+        connector = AlisedaConnector()
+        raw = RawListing(
+            external_id="ANT404",
+            source=connector.name,
+            raw={
+                "url": "https://www.alisedainmobiliaria.com/inmueble/ANT404",
+                "html": _SHELL_HTML,
+            },
+        )
+        c = connector.normalize(raw)
         assert c.external_id == "ANT404"
         assert c.source == "aliseda"
         assert c.status == "active"
@@ -126,7 +187,6 @@ class TestNormalizeEmptyShell:
         assert c.m2_built is None
         assert c.rooms is None
         assert c.city is None
-        assert c.reference_code is None
         assert c.photo_urls == ()
 
 

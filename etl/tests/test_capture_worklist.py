@@ -61,11 +61,11 @@ class TestWorklistMatchKey:
 # ── End-to-end correlation ─────────────────────────────────────────────────
 
 _FIXTURES = Path(__file__).parent / "fixtures"
-_DETAIL_HTML = (_FIXTURES / "aliseda_sample_detail.html").read_text(encoding="utf-8")
+_DETAIL_HTML = (_FIXTURES / "aliseda_detail_vtr319552.html").read_text(encoding="utf-8")
 _SHELL_HTML = (_FIXTURES / "aliseda_sample_shell.html").read_text(encoding="utf-8")
 _SCHEMA_SQL = Path(__file__).parent.parent / "schema" / "init.sql"
-_URL = "https://www.alisedainmobiliaria.com/inmueble/ANT99900011122"
-_EXTERNAL_ID = "ANT99900011122"
+_URL = "https://www.alisedainmobiliaria.com/inmueble/vtr0200319552"
+_EXTERNAL_ID = "vtr0200319552"
 
 
 def _apply_schema(conn) -> None:
@@ -158,7 +158,7 @@ class TestWorklistCorrelation:
                 lrow = cur.fetchone()
             assert lrow is not None
             assert lrow[1] == 2  # rooms
-            assert lrow[3] == "Estepona"  # city
+            assert lrow[3] == "Sevilla"  # city
         finally:
             _cleanup(pg_conn)
 

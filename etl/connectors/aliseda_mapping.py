@@ -1,7 +1,7 @@
 """Aliseda-specific field mapping: raw captured values -> canonical vocabulary.
 
 ═══════════════════════════════════════════════════════════════════════════
-  DRAFT SELECTORS — NOT YET VALIDATED AGAINST A REAL ALISEDA CAPTURE.
+  CALIBRATED AGAINST REAL ALISEDA CAPTURES (issue #266).
 ═══════════════════════════════════════════════════════════════════════════
 
 Like Idealista (etl/connectors/idealista.py), Aliseda is capture-only: it is
@@ -14,20 +14,10 @@ plain HTTP fetch has nothing to parse. Real DOM only exists once the owner's
 own browser hydrates the Angular app, which the browser extension
 (browser-extension/, issue #75) then captures.
 
-Because this project has (correctly) never fetched the disallowed API and
-never scraped a live rendered page, the field locations below are a
-BEST-EFFORT GUESS at the shape a hydrated Aliseda page plausibly takes, built
-against a fabricated fixture (etl/tests/fixtures/aliseda_sample_detail.html),
-NOT a real capture. The one thing that is grounded rather than guessed is the
-set of analytics keys D-019 observed the real page fire
-(`ciudad`/`provincia`/`metros_cuadrados`/`habitaciones`/`precio`) — hence the
-mapping prefers the analytics `dataLayer` blob and treats labelled DOM
-elements as a fallback.
-
-Refining against a real capture is meant to be a SMALL EDIT, not a rewrite:
-change the selector/key constants in aliseda.py and the vocabulary tables
-here; the normalize()/persistence shape does not move. See aliseda.py's
-module docstring for the validation checklist.
+The vocabulary tables below map the free-text `property_type` and `operation`
+that aliseda.py lifts from the listing title (e.g. "Piso en venta en …") onto
+the canonical CHECK vocabularies. See aliseda.py's module docstring for the
+JSON-LD / DOM extraction the connector actually performs.
 """
 
 from __future__ import annotations
@@ -99,24 +89,3 @@ def map_operation(raw_operation: str | None) -> str | None:
     if "venta" in lowered or "sale" in lowered or "compra" in lowered:
         return "sale"
     return None
-
-
-def split_location(location_text: str | None) -> tuple[str | None, str | None]:
-    """Split a compound "Ciudad, Provincia" location string into
-    (city, province), best-effort.
-
-    Used only when the structured analytics `ciudad`/`provincia` fields are
-    absent and the mapping falls back to the DOM's location line (e.g.
-    "Estepona, Málaga"). The last comma-separated segment is treated as the
-    province, the first as the city — Spanish address convention. Returns
-    (None, None) on empty input; a single segment is taken as the city with
-    no province (better None than mislabelling a city as a province).
-    """
-    if not location_text:
-        return None, None
-    parts = [p.strip() for p in location_text.split(",") if p.strip()]
-    if not parts:
-        return None, None
-    if len(parts) == 1:
-        return parts[0], None
-    return parts[0], parts[-1]
