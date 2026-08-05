@@ -1,0 +1,33 @@
+<!--
+Trimmed synthetic fixture, structurally accurate to a real Fotocasa RENTAL
+search-results page live-fetched during issue #211's implementation
+(2026-08-05) for
+https://www.fotocasa.es/es/alquiler/viviendas/madrid-capital/todas-las-zonas/l
+(HTTP 200 with the connector's own bot User-Agent, 31 real rental ads on
+page 1 — trimmed to 3 here, keeping only the fields
+FotocasaRentalConnector.discover()/normalize() actually read).
+
+Every field below was live-observed on real listings (not invented):
+`initialSearch.result.realEstates[]` with per-listing `coordinates`
+(lat/lon — the field Milanuncios' own search payload lacks, see D-066),
+`rawPrice` (numeric monthly rent), `buildingType` (→ map_property_type),
+`transactionTypeId: 3` (rent), a flat `features[]` list carrying
+`surface`/`rooms`/`bathrooms`, and an `address` block. Transport is plain
+JSON inside the server-rendered application/json script tag (NOT the
+double-JSON-encoded shape Milanuncios uses), matching
+_extract_initial_props' real-page assumption. (This comment deliberately
+avoids the literal marker string so the extractor matches the real tag
+below, not this note.)
+
+Entry shapes exercised: an agency Flat (clientUrl with /inmobiliaria-),
+a private Flat (clientId null + "Particular" alias), and an agency
+Penthouse (buildingType → "atico") to cover both listing kinds and a
+second property_type mapping.
+-->
+<html><head><title>Fotocasa</title></head><body>
+<script type="application/json" id="__initial_props__">{"initialSearch": {"result": {"realEstates": [
+  {"id": 190014264, "transactionTypeId": 3, "buildingType": "Flat", "buildingSubtype": "Flat", "rawPrice": 1200, "coordinates": {"latitude": 40.43970952626037, "longitude": -3.68982940025934, "accuracy": 0}, "features": [{"key": "surface", "value": 75}, {"key": "rooms", "value": 2}, {"key": "bathrooms", "value": 1}, {"key": "elevator", "value": 1}, {"key": "floor", "value": 3}], "address": {"country": "España", "district": "Chamartín", "neighborhood": "El Viso", "municipality": "Madrid", "city": "Madrid", "province": "Madrid", "zipCode": "28046"}, "description": "Dúplex reformado en El Viso, disponible para entrada inmediata.", "multimedia": [{"type": "image", "src": "https://static.fotocasa.es/images/ads/573e8c35-ebdc-433b-bb52-303898c21601?rule=original", "roomType": "other"}], "clientUrl": "/es/inmobiliaria-olisson-club/alquiler/viviendas/espana/todas-las-zonas/l?clientId=9202762059565", "clientAlias": "Olisson Club", "clientId": "9202762059565", "clientType": "professional", "clientTypeId": 3, "detail": {"es-ES": "/es/alquiler/vivienda/madrid-capital/aire-acondicionado-ascensor/190014264/d"}},
+  {"id": 189725317, "transactionTypeId": 3, "buildingType": "Flat", "buildingSubtype": "Flat", "rawPrice": 950, "coordinates": {"latitude": 40.41773245671154, "longitude": -3.6782591706892425, "accuracy": 0}, "features": [{"key": "surface", "value": 60}, {"key": "rooms", "value": 1}, {"key": "bathrooms", "value": 1}], "address": {"country": "España", "district": "Salamanca", "neighborhood": "Goya", "municipality": "Madrid", "city": "Madrid", "province": "Madrid", "zipCode": "28001"}, "description": "Estudio amueblado junto a Goya.", "multimedia": [{"type": "image", "src": "https://static.fotocasa.es/images/ads/f72eb4d8-28b4-4e30-9b9a-9b1dcc46ecfd?rule=original", "roomType": "other"}], "clientUrl": null, "clientAlias": "Particular", "clientId": null, "clientType": "private", "clientTypeId": 1, "detail": {"es-ES": "/es/alquiler/vivienda/madrid-capital/amueblado/189725317/d"}},
+  {"id": 188990001, "transactionTypeId": 3, "buildingType": "Penthouse", "buildingSubtype": "Attic", "rawPrice": 2100, "coordinates": {"latitude": 40.4256, "longitude": -3.6912}, "features": [{"key": "surface", "value": 110}, {"key": "rooms", "value": 3}, {"key": "bathrooms", "value": 2}, {"key": "terrace", "value": 1}], "address": {"country": "España", "district": "Chamberí", "neighborhood": "Almagro", "municipality": "Madrid", "city": "Madrid", "province": "Madrid", "zipCode": "28010"}, "description": "Ático con terraza en Almagro.", "multimedia": [], "clientUrl": "/es/inmobiliaria-fincas-almagro/alquiler/viviendas/espana/todas-las-zonas/l?clientId=1234567890", "clientAlias": "Fincas Almagro", "clientId": "1234567890", "clientType": "professional", "clientTypeId": 3, "detail": {"es-ES": "/es/alquiler/vivienda/madrid-capital/terraza/188990001/d"}}
+]}}}</script>
+</body></html>

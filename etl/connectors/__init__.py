@@ -32,6 +32,7 @@ def register_all() -> None:
     from etl.connectors.cimenta2 import Cimenta2Connector
     from etl.connectors.diglo import DigloConnector
     from etl.connectors.fotocasa import FotocasaConnector
+    from etl.connectors.fotocasa_rental import FotocasaRentalConnector
     from etl.connectors.idealista import IdealistaConnector
     from etl.connectors.milanuncios import MilanunciosConnector
     from etl.connectors.milanuncios_rental import MilanunciosRentalConnector
@@ -46,6 +47,14 @@ def register_all() -> None:
         CONNECTORS.append(FotocasaConnector())
     if MilanunciosConnector.name not in registered_names:
         CONNECTORS.append(MilanunciosConnector())
+    # Issue #211: rental comps at volume from Fotocasa's SEARCH payload
+    # (coordinates + price + m2 + type per listing, no detail fetch) — a
+    # subclass of FotocasaConnector overriding discover()/fetch_detail()/
+    # normalize() to read the search-results JSON instead of a walled
+    # detail page. Born disabled (#100). See fotocasa_rental.py's module
+    # docstring and D-066.
+    if FotocasaRentalConnector.name not in registered_names:
+        CONNECTORS.append(FotocasaRentalConnector())
     # Issue #31: rental comps, same site, separate connector — see
     # milanuncios_rental.py's module docstring for why it's a subclass
     # rather than a change to MilanunciosConnector itself.
