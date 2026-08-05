@@ -294,6 +294,42 @@ export function ConnectorCard({
         >
           {connector.enabled ? "Desactivar" : "Activar"}
         </button>
+
+        {/* Issue #263: a capture-only portal (Idealista, Aliseda) runs with the
+            crawl toggle OFF (its automated crawl is WAF-blocked) but must still
+            process extension captures. Capture PROCESSING is an independent
+            knob, kept here in the always-visible row next to the crawl toggle
+            so both are usable without expanding. The "independent of the crawl"
+            explanation lives in the expanded detail below. */}
+        {!connector.supports_discovery && (
+          <>
+            <span data-testid={`capture-status-${connector.name}`} style={{ flexShrink: 0 }}>
+              <Pill
+                text={connector.capture_enabled ? "captura activa" : "captura en pausa"}
+                tone={connector.capture_enabled ? "on" : "off"}
+              />
+            </span>
+            <button
+              type="button"
+              onClick={() => run({ capture_enabled: !connector.capture_enabled })}
+              disabled={busy || locked}
+              title={
+                locked
+                  ? "Este conector ya no está registrado en el ETL: su configuración no tendría ningún efecto."
+                  : undefined
+              }
+              style={{
+                ...buttonStyle,
+                flexShrink: 0,
+                opacity: busy || locked ? 0.6 : 1,
+                cursor: locked ? "not-allowed" : buttonStyle.cursor,
+              }}
+              data-testid={`capture-toggle-${connector.name}`}
+            >
+              {connector.capture_enabled ? "Pausar captura" : "Activar captura"}
+            </button>
+          </>
+        )}
       </div>
 
       {expanded && (
@@ -319,6 +355,21 @@ export function ConnectorCard({
         <span style={labelStyle}>Qué descargará</span>
         <ScopeSummary connector={connector} />
       </div>
+
+      {/* Issue #263: the capture toggle itself lives in the always-visible row
+          above (usable without expanding); this expanded note explains why it
+          is independent of the crawl `enabled` flag. */}
+      {!connector.supports_discovery && (
+        <div style={{ marginTop: 12 }} data-testid={`capture-note-${connector.name}`}>
+          <span style={labelStyle}>Procesado de capturas (extensión)</span>
+          <p style={{ fontSize: 11, color: "var(--fg-muted)", margin: "2px 0 0" }}>
+            El botón «captura» de la fila controla si las capturas de la
+            extensión se procesan. Es independiente del rastreo automático:
+            activar la captura no arranca el rastreo (bloqueado por el portal),
+            y desactivar el rastreo no detiene la captura.
+          </p>
+        </div>
+      )}
 
       {configurable && (
         <div

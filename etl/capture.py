@@ -166,19 +166,30 @@ def _field_completeness(canonical: CanonicalListingVersion) -> tuple[int, int]:
     return extracted, available
 
 
-def _connector_enabled(conn, connector_name: str) -> bool:
-    """Whether `connector_name` is enabled in connector_config.
+def _connector_capture_enabled(conn, connector_name: str) -> bool:
+    """Whether capture PROCESSING is enabled for `connector_name`.
 
-    A missing row means enabled, matching `etl.orchestrator.
-    _scopes_for_connector`'s treatment of the same absence (issue #71's
-    default). In practice `sync_connector_registry` seeds an explicit
-    `enabled = false` row for every registered connector on first publish
-    (issue #100 review), so the missing-row case only arises for a
-    connector that has never been through a registry sync at all.
+    Issue #263: this reads `connector_config.capture_enabled`, NOT the crawl
+    `enabled` flag. The two are deliberately independent. A capture-only
+    portal (Idealista, Aliseda, Cimenta2) keeps `enabled = false` on purpose
+    so its doomed, WAF-blocked automated crawl never runs (D-019) — but
+    capture is its ONLY ingestion path, so gating processing on `enabled`
+    (the pre-#263 behaviour) left every extension capture `pending` forever.
+    `capture_enabled` is the knob the poller checks; it defaults TRUE so a
+    capture-only connector processes captures out of the box, and stays
+    operator-controllable so a misbehaving one can still be paused.
+
+    A missing row means enabled, matching how `etl.orchestrator.
+    _scopes_for_connector` treats an absent row for the crawl flag (issue
+    #71's default). In practice `sync_connector_registry` seeds a row for
+    every registered connector on first publish (issue #100 review), and the
+    `capture_enabled` column defaults TRUE, so the missing-row case only
+    arises for a connector that has never been through a registry sync at
+    all.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT enabled FROM connector_config WHERE connector_name = %s",
+            "SELECT capture_enabled FROM connector_config WHERE connector_name = %s",
             (connector_name,),
         )
         row = cur.fetchone()
@@ -191,15 +202,15 @@ def process_pending_captures(conn) -> int:
     capture (a connector bug, a genuinely malformed HTML blob) must not
     block the rest of the batch or wedge this poll loop.
 
-    Captures whose connector is disabled in `connector_config` are left
-    `pending` and are NOT counted as processed (issue #100 review). The
-    connector-management UI states that "un conector desactivado no se
-    ejecuta en absoluto"; before this check, disabling Idealista changed
-    nothing at all, because capture is its *only* ingestion path — it has
-    no discover() for the orchestrator's enabled-check to gate. Leaving the
-    row pending rather than failing it means re-enabling the connector
-    processes the backlog instead of discarding it: the operator paused
-    ingestion, they didn't reject these captures.
+    Captures whose connector has `capture_enabled = false` in
+    `connector_config` are left `pending` and are NOT counted as processed
+    (issue #100 review). Issue #263: this gates on `capture_enabled`, NOT the
+    crawl `enabled` flag — a capture-only portal is deliberately
+    `enabled = false` (so its doomed automated crawl never runs) but must
+    still process its extension captures. Leaving the row pending rather than
+    failing it means re-enabling capture processes the backlog instead of
+    discarding it: the operator paused capture, they didn't reject these
+    captures.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -220,7 +231,7 @@ def process_pending_captures(conn) -> int:
             if resolved is not None:
                 connector_name = resolved[0].name
                 if connector_name not in enabled_cache:
-                    enabled_cache[connector_name] = _connector_enabled(
+                    enabled_cache[connector_name] = _connector_capture_enabled(
                         conn, connector_name
                     )
                 if not enabled_cache[connector_name]:
@@ -244,9 +255,10 @@ def process_pending_captures(conn) -> int:
         # seconds and a disabled connector's backlog would otherwise flood
         # the log with identical warnings forever.
         logger.info(
-            "%d pending capture(s) left unprocessed: their connector is "
-            "disabled in connector_config. They stay pending and will be "
-            "processed if it is re-enabled.",
+            "%d pending capture(s) left unprocessed: their connector has "
+            "capture_enabled=false in connector_config. They stay pending and "
+            "will be processed if capture is re-enabled (this is independent "
+            "of the crawl 'enabled' flag — issue #263).",
             skipped_disabled,
         )
     return processed

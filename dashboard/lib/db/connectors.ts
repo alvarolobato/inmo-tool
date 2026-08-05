@@ -22,6 +22,7 @@ interface RegistryRow {
   supports_discovery: boolean;
   supported_filters: unknown;
   enabled: boolean | null;
+  capture_enabled: boolean | null;
   geography_override: unknown;
   filters: unknown;
   has_config: boolean;
@@ -247,6 +248,7 @@ export async function listConnectors(): Promise<ConnectorView[]> {
               g.supports_discovery,
               g.supported_filters,
               c.enabled,
+              c.capture_enabled,
               c.geography_override,
               c.filters,
               (c.connector_name IS NOT NULL) AS has_config
@@ -263,6 +265,10 @@ export async function listConnectors(): Promise<ConnectorView[]> {
     // Absent config row => enabled (matches the column default and the
     // ETL's "no row means issue #71's unmodified default" behaviour).
     const enabled = row.enabled ?? true;
+    // Absent config row (or NULL) => capture enabled, matching the
+    // `capture_enabled` column default TRUE and the poller's missing-row
+    // default (etl/capture.py `_connector_capture_enabled`, issue #263).
+    const captureEnabled = row.capture_enabled ?? true;
     const supportsDiscovery = row.supports_discovery;
 
     let scopeSource: ConnectorView["scopeSource"];
@@ -286,6 +292,7 @@ export async function listConnectors(): Promise<ConnectorView[]> {
       supported_filters: parseSupportedFilters(row.supported_filters),
       usingDefaults: !row.has_config,
       enabled,
+      capture_enabled: captureEnabled,
       geography_override: override,
       filters: parseFilters(row.filters),
       scopeSource,
@@ -349,6 +356,7 @@ export async function updateConnectorConfig(
   patch: ConnectorConfigPatch,
 ): Promise<void> {
   const setEnabled = patch.enabled !== undefined;
+  const setCaptureEnabled = patch.capture_enabled !== undefined;
   // Distinguish "not supplied" (leave alone) from "explicitly null" (clear
   // the override) — `null` is a meaningful value here, not just absence.
   const setGeography = Object.prototype.hasOwnProperty.call(patch, "geography_override");
@@ -356,11 +364,14 @@ export async function updateConnectorConfig(
 
   await sql(
     `INSERT INTO connector_config (
-        connector_name, enabled, geography_override, filters, updated_at
+        connector_name, enabled, capture_enabled, geography_override, filters, updated_at
      )
      VALUES (
         $1,
         COALESCE($3::boolean, true),
+        -- Issue #263: a config row created by a patch that doesn't touch
+        -- capture defaults to capture-enabled, matching the column default.
+        COALESCE($9::boolean, true),
         $5::jsonb,
         COALESCE($7::jsonb, '{}'::jsonb),
         NOW()
@@ -368,6 +379,8 @@ export async function updateConnectorConfig(
      ON CONFLICT (connector_name) DO UPDATE SET
         enabled = CASE WHEN $2 THEN COALESCE($3::boolean, connector_config.enabled)
                        ELSE connector_config.enabled END,
+        capture_enabled = CASE WHEN $8 THEN COALESCE($9::boolean, connector_config.capture_enabled)
+                               ELSE connector_config.capture_enabled END,
         geography_override = CASE WHEN $4 THEN $5::jsonb
                                   ELSE connector_config.geography_override END,
         filters = CASE WHEN $6 THEN COALESCE($7::jsonb, '{}'::jsonb)
@@ -383,6 +396,8 @@ export async function updateConnectorConfig(
         : null,
       setFilters,
       setFilters ? JSON.stringify(patch.filters) : null,
+      setCaptureEnabled,
+      setCaptureEnabled ? patch.capture_enabled : null,
     ],
   );
 }

@@ -49,6 +49,12 @@ export type ConnectorFilters = z.infer<typeof ConnectorFiltersSchema>;
 export const ConnectorConfigPatchSchema = z
   .object({
     enabled: z.boolean().optional(),
+    // Issue #263: capture PROCESSING toggle, independent of the crawl
+    // `enabled` flag above. A capture-only portal (Idealista, Aliseda) keeps
+    // `enabled=false` so its doomed automated crawl never runs, but must
+    // still process extension captures — that is what this controls. Enabling
+    // capture never arms the crawl.
+    capture_enabled: z.boolean().optional(),
     // `null` explicitly clears an override (back to profile-derived scope);
     // omitting the key leaves whatever is stored untouched. These are
     // genuinely different operations, so the field is nullable rather than
@@ -96,6 +102,14 @@ export interface ConnectorView {
   /** True when no `connector_config` row exists — running on pure defaults. */
   usingDefaults: boolean;
   enabled: boolean;
+  /**
+   * Whether extension-capture PROCESSING is enabled for this connector
+   * (issue #263) — independent of `enabled`, which only governs the automated
+   * crawl. A capture-only portal runs with `enabled=false` (crawl off) and
+   * `capture_enabled=true` (captures still processed). Defaults `true` when no
+   * config row exists.
+   */
+  capture_enabled: boolean;
   geography_override: GeographyOverride | null;
   filters: ConnectorFilters;
 
