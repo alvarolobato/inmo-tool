@@ -77,6 +77,10 @@ const sampleConnectors = [
     fetched_count: 28,
     error_count: 3,
     error_msg: null,
+    failure_classification: null,
+    geography_scope: [
+      { scope_key: "madrid", center: [40.4, -3.7] as [number, number], radius_km: 10, rooms: null, outcome: "crawled" },
+    ],
   },
   {
     id: 2,
@@ -89,6 +93,8 @@ const sampleConnectors = [
     fetched_count: 17,
     error_count: 0,
     error_msg: null,
+    failure_classification: null,
+    geography_scope: null,
   },
   {
     id: 3,
@@ -101,6 +107,10 @@ const sampleConnectors = [
     fetched_count: 0,
     error_count: 1,
     error_msg: "Connection timeout after 60s: could not connect to server",
+    failure_classification: "network",
+    geography_scope: [
+      { scope_key: "sevilla", center: null, radius_km: null, rooms: null, outcome: "failed" },
+    ],
   },
 ];
 
@@ -117,6 +127,8 @@ const newStatusConnectors = [
     fetched_count: 4,
     error_count: 8,
     error_msg: "circuit breaker open after 8/10 errors",
+    failure_classification: "structure_change",
+    geography_scope: null,
   },
   {
     id: 11,
@@ -129,6 +141,8 @@ const newStatusConnectors = [
     fetched_count: 0,
     error_count: 0,
     error_msg: "disabled via connector_config",
+    failure_classification: null,
+    geography_scope: null,
   },
 ];
 
@@ -273,6 +287,33 @@ describe("RunDetail component", () => {
     expect(row.textContent).toContain("31");
     expect(row.textContent).toContain("28");
     expect(row.textContent).toContain("3");
+  });
+
+  it("surfaces the typed failure classification and the resolved geography scope (#242/#109)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ run: failedRun, connectors: sampleConnectors }),
+    });
+    render(<RunDetail runId="2" />);
+    await waitFor(() => { expect(screen.getByTestId("connector-stats")).toBeInTheDocument(); });
+
+    // #242: the failed connector's typed kind renders as a human label, not
+    // the raw enum value.
+    const failureBadge = screen.getByTestId("connector-failure-idealista");
+    expect(failureBadge.textContent).toBe("Red / conexión");
+    // A clean connector carries no failure badge.
+    expect(screen.queryByTestId("connector-failure-milanuncios")).not.toBeInTheDocument();
+
+    // #109: the geography a run ran against is displayed per connector, with
+    // its per-scope outcome (crawled here) — the audit trail #109 asked for.
+    const geoRow = screen.getByTestId("connector-row-fotocasa-geo");
+    expect(geoRow.textContent).toContain("madrid");
+    expect(geoRow.textContent).toContain("Rastreada");
+    // The failed connector's geography shows its 'failed' outcome.
+    const idealistaGeo = screen.getByTestId("connector-row-idealista-geo");
+    expect(idealistaGeo.textContent).toContain("Error");
+    // A connector with no recorded scope shows no geography row.
+    expect(screen.queryByTestId("connector-row-milanuncios-geo")).not.toBeInTheDocument();
   });
 
   it("renders circuit_open and skipped as distinct states", async () => {

@@ -25,6 +25,15 @@ export interface ConnectorRun {
   trigger: string;
 }
 
+/** Issue #109 (D-079): one resolved geography a run ran against, with outcome. */
+export interface GeographyScopeEntry {
+  scope_key: string | null;
+  center: [number, number] | null;
+  radius_km: number | null;
+  rooms: number | null;
+  outcome: string;
+}
+
 export interface ConnectorRunResult {
   id: number;
   connector_name: string;
@@ -36,6 +45,10 @@ export interface ConnectorRunResult {
   fetched_count: number;
   error_count: number;
   error_msg: string | null;
+  /** Issue #242 (D-079): typed failure kind, or null on a clean run. */
+  failure_classification: string | null;
+  /** Issue #109 (D-079): the geographies this run actually ran against. */
+  geography_scope: GeographyScopeEntry[] | null;
 }
 
 export interface EtlRunDetailData {
@@ -106,6 +119,79 @@ function statusLabel(status: RunStatus | ConnectorStatus): string {
     case "running": return "En curso";
     default: return status;
   }
+}
+
+// Issue #242 (D-079): human-readable Spanish labels for the typed
+// failure_classification enum. An operator scanning the monitor should see
+// "Bloqueo temporal" not "soft_block". Unknown values fall through to the raw
+// string so a future taxonomy value is never swallowed.
+const FAILURE_CLASS_LABELS: Record<string, string> = {
+  soft_block: "Bloqueo temporal",
+  network: "Red / conexión",
+  structure_change: "Cambio de estructura",
+  unresolvable: "Geografía no resoluble",
+  uncovered: "Sin cobertura",
+  empty_result: "Sin resultados",
+  other: "Otro",
+};
+
+function failureClassLabel(kind: string): string {
+  return FAILURE_CLASS_LABELS[kind] ?? kind;
+}
+
+// Issue #242 (D-079): a soft-block/empty result is a clean-run signal (amber /
+// gray), a genuine break is red — the badge colour must not cry wolf.
+function failureClassColor(kind: string): BadgeColor {
+  switch (kind) {
+    case "soft_block":
+    case "empty_result":
+      return "amber";
+    case "uncovered":
+    case "unresolvable":
+      return "gray";
+    default:
+      return "red";
+  }
+}
+
+// Issue #109 (D-079): per-geography outcome labels for the coverage audit.
+const GEO_OUTCOME_LABELS: Record<string, string> = {
+  crawled: "Rastreada",
+  empty: "Sin anuncios",
+  uncovered: "Sin cobertura",
+  unresolvable: "No resoluble",
+  budget: "Sin presupuesto",
+  soft_block: "Bloqueo temporal",
+  fresh_this_cycle: "Ya actualizada",
+  duplicate: "Duplicada",
+  failed: "Error",
+};
+
+function geoOutcomeLabel(outcome: string): string {
+  return GEO_OUTCOME_LABELS[outcome] ?? outcome;
+}
+
+// A crawled/fresh geography is a good outcome (emerald); a genuine failure is
+// red; everything else (empty/uncovered/budget/etc.) is a neutral note.
+function geoOutcomeColor(outcome: string): BadgeColor {
+  switch (outcome) {
+    case "crawled":
+    case "fresh_this_cycle":
+      return "emerald";
+    case "failed":
+      return "red";
+    case "soft_block":
+    case "budget":
+      return "amber";
+    default:
+      return "gray";
+  }
+}
+
+/** A [lat, lon] centre as a short label when a scope has no site-specific key. */
+function formatCenter(center: [number, number] | null): string {
+  if (!center) return "—";
+  return `${center[0].toFixed(3)}, ${center[1].toFixed(3)}`;
 }
 
 const TRIGGER_LABELS: Record<string, string> = {
@@ -237,13 +323,59 @@ function ConnectorStatsTable({ connectors }: ConnectorStatsTableProps) {
                 >
                   <td className="py-2 pr-3 font-mono text-tremor-content-strong dark:text-dark-tremor-content-strong">{c.connector_name}</td>
                   <td className="py-2 pr-3">
-                    <Badge color={statusBadgeColor(c.status)} size="xs">{statusLabel(c.status)}</Badge>
+                    <div className="flex flex-col items-start gap-1">
+                      <Badge color={statusBadgeColor(c.status)} size="xs">{statusLabel(c.status)}</Badge>
+                      {c.failure_classification && (
+                        <Badge
+                          color={failureClassColor(c.failure_classification)}
+                          size="xs"
+                          data-testid={`connector-failure-${c.connector_name}`}
+                        >
+                          {failureClassLabel(c.failure_classification)}
+                        </Badge>
+                      )}
+                    </div>
                   </td>
                   <td className="py-2 pr-3 text-right tabular-nums text-tremor-content dark:text-dark-tremor-content">{formatNumber(c.discovered_count)}</td>
                   <td className="py-2 pr-3 text-right tabular-nums text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis">{formatNumber(c.fetched_count)}</td>
                   <td className={`py-2 pr-3 text-right tabular-nums ${c.error_count > 0 ? "text-red-500 dark:text-red-400" : "text-tremor-content dark:text-dark-tremor-content"}`}>{formatNumber(c.error_count)}</td>
                   <td className="py-2 text-right tabular-nums text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis">{formatDuration(c.duration_ms)}</td>
                 </tr>
+                {c.geography_scope && c.geography_scope.length > 0 && (
+                  <tr
+                    key={`${c.id}-geo`}
+                    className="border-b border-tremor-border/50 dark:border-dark-tremor-border/50"
+                    data-testid={`connector-row-${c.connector_name}-geo`}
+                  >
+                    {/*
+                      Issue #109 (D-079): which geographies this run actually ran
+                      against, and what happened to each. The queryable audit
+                      trail that used to survive only as free text inside
+                      error_msg — now an operator can confirm the exact
+                      city/radius a run used, and tell "uncovered" from
+                      "unresolvable" for the same place at a glance.
+                    */}
+                    <td colSpan={6} className="pb-2 pt-0 pl-2">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-tremor-content-subtle dark:text-dark-tremor-content-subtle">
+                          Ámbito:
+                        </span>
+                        {c.geography_scope.map((g, i) => (
+                          <span
+                            key={i}
+                            className="inline-flex items-center gap-1 rounded bg-tremor-background-subtle dark:bg-dark-tremor-background-subtle px-1.5 py-0.5 font-mono text-tremor-content dark:text-dark-tremor-content"
+                          >
+                            <span>{g.scope_key ?? formatCenter(g.center)}</span>
+                            {g.rooms != null && <span>· {g.rooms}h</span>}
+                            <Badge color={geoOutcomeColor(g.outcome)} size="xs">
+                              {geoOutcomeLabel(g.outcome)}
+                            </Badge>
+                          </span>
+                        ))}
+                      </div>
+                    </td>
+                  </tr>
+                )}
                 {c.error_msg && (
                   <tr key={`${c.id}-error`} className="border-b border-tremor-border/50 dark:border-dark-tremor-border/50" data-testid={`connector-row-${c.connector_name}-error`}>
                     <td colSpan={6} className="pb-2 pt-0 pl-2">
