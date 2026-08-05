@@ -14,6 +14,10 @@ interface FreshnessState {
   freshnessText: string;
   /** True when any table is past the staleness threshold. */
   freshnessStale: boolean;
+  /**
+   * True when a connector is actively refreshing (mid-cycle, not stuck) and
+   * nothing is stale — a distinct pill state from stale (issue #295, D-050). */
+  freshnessRefreshing: boolean;
   /** Hover tooltip with the precise last-sync timestamp. */
   freshnessTooltip: string | null;
   /** Raw `/api/data-health` payload, for components that need the table list. */
@@ -26,6 +30,7 @@ interface FreshnessState {
 const FreshnessContext = createContext<FreshnessState>({
   freshnessText: "Datos al día",
   freshnessStale: false,
+  freshnessRefreshing: false,
   freshnessTooltip: null,
   health: null,
   setFreshnessText: () => {},
@@ -52,6 +57,7 @@ function formatDate(iso: string): string {
 export function FreshnessProvider({ children }: { children: ReactNode }) {
   const [freshnessText, setFreshnessText] = useState("Datos al día");
   const [freshnessStale, setFreshnessStale] = useState(false);
+  const [freshnessRefreshing, setFreshnessRefreshing] = useState(false);
   const [freshnessTooltip, setFreshnessTooltip] = useState<string | null>(null);
   const [health, setHealth] = useState<DataHealthResponse | null>(null);
 
@@ -87,15 +93,17 @@ export function FreshnessProvider({ children }: { children: ReactNode }) {
     if (!stalest) {
       setFreshnessText("Datos al día");
       setFreshnessStale(false);
+      setFreshnessRefreshing(false);
       setFreshnessTooltip(null);
       return;
     }
 
-    // An enabled connector that has never had a successful run: there is no
+    // An enabled connector that has never completed a fresh cycle: there is no
     // freshness age to show — say so plainly rather than inventing "0m".
     if (!stalest.lastSuccessAt) {
       setFreshnessText("Datos sin sincronizar");
       setFreshnessStale(true);
+      setFreshnessRefreshing(false);
       setFreshnessTooltip(
         `${stalest.connector}: sin ejecución correcta todavía`,
       );
@@ -112,12 +120,18 @@ export function FreshnessProvider({ children }: { children: ReactNode }) {
         ? `hace ${minutesAgo}m`
         : `hace ${Math.round(minutesAgo / 60)}h`;
 
+    // A connector actively mid-cycle (and nothing stale) reads as "refreshing"
+    // — a distinct, non-alarming state from stale (issue #295, D-050).
+    const refreshing = health.overallRefreshing === true && !health.overallStale;
     setFreshnessText(
       health.overallStale
         ? `Datos desactualizados · ${age}`
-        : `Datos al día · ${age}`,
+        : refreshing
+          ? `Refrescando datos · ${age}`
+          : `Datos al día · ${age}`,
     );
     setFreshnessStale(health.overallStale);
+    setFreshnessRefreshing(refreshing);
     setFreshnessTooltip(
       `Última ejecución correcta (${stalest.connector}): ${formatDate(stalest.lastSuccessAt)}`,
     );
@@ -128,6 +142,7 @@ export function FreshnessProvider({ children }: { children: ReactNode }) {
       value={{
         freshnessText,
         freshnessStale,
+        freshnessRefreshing,
         freshnessTooltip,
         health,
         setFreshnessText,

@@ -5,6 +5,7 @@ import { LocationPicker, type LocationPickerValue } from "@/components/profiles/
 import { RunNowButton } from "@/components/connectors/RunNowButton";
 import type {
   ConnectorConfigPatch,
+  ConnectorFreshnessState,
   ConnectorView,
   GeographyOverride,
 } from "@/lib/connectors-schema";
@@ -160,6 +161,112 @@ function lastRunSummary(connector: ConnectorView): string {
   const parts = [r.status, `${r.fetched_count} descargados`];
   if (when) parts.push(when);
   return parts.join(" · ");
+}
+
+/** Preset cadence options for the "frescura deseada" control (issue #295). */
+const FRESHNESS_PRESETS: { label: string; hours: number | null }[] = [
+  { label: "usar valor por defecto", hours: null },
+  { label: "1 hora", hours: 1 },
+  { label: "6 horas", hours: 6 },
+  { label: "24 horas", hours: 24 },
+  { label: "3 días", hours: 72 },
+  { label: "7 días", hours: 168 },
+];
+
+function ageLabel(iso: string | null): string | null {
+  if (!iso) return null;
+  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  return mins < 60 ? `hace ${mins}m` : `hace ${Math.round(mins / 60)}h`;
+}
+
+/** The human phrasing of one connector's freshness cadence state (issue #295). */
+function freshnessStateText(f: ConnectorFreshnessState): string {
+  switch (f.kind) {
+    case "fresh":
+      return `fresco (${ageLabel(f.lastFreshAt) ?? "recién refrescado"})`;
+    case "refreshing":
+      return `refrescando… (${f.coveredScopeCount ?? 0}/${f.targetScopeCount ?? 0} ámbitos)`;
+    case "stuck":
+      return `atascado — lleva más de ${f.stuckAfterHours}h refrescando`;
+    case "due":
+    default:
+      return "obsoleto, sin ciclo iniciado";
+  }
+}
+
+function freshnessTone(kind: ConnectorFreshnessState["kind"]): "on" | "off" | "muted" {
+  if (kind === "fresh") return "on";
+  if (kind === "stuck") return "off";
+  return "muted";
+}
+
+/**
+ * The "Frescura deseada" control + current-state readout (issue #295, D-050).
+ * Rendered for every connector, including capture-only ones — the interval is a
+ * valid knob for them (it doubles as #289's manual-capture staleness window).
+ */
+function FreshnessControl({
+  connector,
+  busy,
+  onPatch,
+}: {
+  connector: ConnectorView;
+  busy: boolean;
+  onPatch: (patch: ConnectorConfigPatch) => void;
+}) {
+  const f = connector.freshness;
+  // The stored override might not match a preset (e.g. an API-set 48h). Surface
+  // it as an extra option so the select never silently misrepresents state.
+  const presets = [...FRESHNESS_PRESETS];
+  if (
+    f.intervalHours !== null &&
+    !presets.some((p) => p.hours === f.intervalHours)
+  ) {
+    presets.push({ label: `${f.intervalHours} h (personalizado)`, hours: f.intervalHours });
+  }
+  const currentValue = f.intervalHours === null ? "" : String(f.intervalHours);
+
+  return (
+    <div style={{ marginTop: 12 }} data-testid={`freshness-${connector.name}`}>
+      <span style={labelStyle}>Frescura deseada</span>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <select
+          value={currentValue}
+          disabled={busy}
+          data-testid={`freshness-interval-${connector.name}`}
+          onChange={(e) => {
+            const v = e.target.value;
+            onPatch({ freshness_interval_hours: v === "" ? null : Number(v) });
+          }}
+          style={{
+            padding: "6px 9px",
+            background: "var(--bg-2)",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            color: "var(--fg)",
+            fontSize: 13,
+          }}
+        >
+          {presets.map((p) => (
+            <option key={p.label} value={p.hours === null ? "" : String(p.hours)}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+        <span
+          data-testid={`freshness-state-${connector.name}`}
+          style={{ fontSize: 12 }}
+        >
+          <Pill text={freshnessStateText(f)} tone={freshnessTone(f.kind)} />
+        </span>
+      </div>
+      <p style={{ fontSize: 11, color: "var(--fg-muted)", margin: "4px 0 0" }}>
+        Cada cuánto se refrescan los datos de este conector. Por defecto{" "}
+        {f.effectiveIntervalHours} h. El barrido programado solo inicia un ciclo
+        cuando los datos superan este intervalo; una ejecución manual lo ignora.
+      </p>
+    </div>
+  );
 }
 
 export function ConnectorCard({
@@ -336,6 +443,10 @@ export function ConnectorCard({
         <span style={labelStyle}>Qué descargará</span>
         <ScopeSummary connector={connector} />
       </div>
+
+      {/* Issue #295 (D-050): freshness cadence — valid for every connector,
+          capture-only included (it's #289's manual-capture staleness window). */}
+      <FreshnessControl connector={connector} busy={busy} onPatch={run} />
 
       {/* Issue #319 / D-055: a capture-only connector has a single Activo/
           Desactivado toggle (the row above) that controls whether extension

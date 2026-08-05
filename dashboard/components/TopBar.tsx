@@ -29,6 +29,9 @@ export function TopBar({
   const freshnessText = propFreshnessText ?? ctx.freshnessText;
   const freshnessStale = propFreshnessStale ?? ctx.freshnessStale;
   const freshnessTooltip = propFreshnessTooltip ?? ctx.freshnessTooltip;
+  // Refreshing (issue #295, D-050): a live cycle in progress, nothing stale —
+  // shown with a distinct dot colour from both fresh (up) and stale (warn).
+  const freshnessRefreshing = ctx.freshnessRefreshing && !freshnessStale;
 
   // Wren nav link removed: WrenAI doesn't exist in this project (removed in
   // task 1.1). Paneles + Revisión removed (#101): both were the inherited
@@ -132,7 +135,11 @@ export function TopBar({
               width: 6,
               height: 6,
               borderRadius: "50%",
-              background: freshnessStale ? "var(--warn)" : "var(--up)",
+              background: freshnessStale
+                ? "var(--warn)"
+                : freshnessRefreshing
+                  ? "var(--accent)"
+                  : "var(--up)",
               animation: "pulse-dot 2s ease-in-out infinite",
               display: "inline-block",
               flexShrink: 0,

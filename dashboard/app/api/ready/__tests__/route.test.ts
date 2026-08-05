@@ -26,8 +26,12 @@ function okProbe() {
   return { rows: [[1]], fields: [] };
 }
 
-// A freshness query result row shape (named columns — db-write.sql returns
-// result.rows verbatim).
+// A freshness query result row shape. Issue #295 (D-050): staleness now derives
+// from connector_freshness_state, so the query returns last_fresh_at /
+// cycle_started_at rather than a per-run last_success_at. This helper keeps the
+// test cases phrased in terms of "last fresh N hours ago, no cycle" (the common
+// case) by mapping `last_success_at` → the new `last_fresh_at` column and
+// defaulting the cycle columns to idle.
 function freshnessRows(
   rows: Array<{
     connector: string;
@@ -35,9 +39,26 @@ function freshnessRows(
     last_success_at: Date | null;
     last_run_at: Date | null;
     last_run_status: string | null;
+    cycle_started_at?: Date | null;
+    cycle_target_scope_count?: number | null;
+    covered_scope_count?: number | null;
+    freshness_interval_hours?: number | null;
   }>,
 ) {
-  return { rows, fields: [] };
+  return {
+    rows: rows.map((r) => ({
+      connector: r.connector,
+      enabled: r.enabled,
+      freshness_interval_hours: r.freshness_interval_hours ?? null,
+      last_fresh_at: r.last_success_at,
+      cycle_started_at: r.cycle_started_at ?? null,
+      cycle_target_scope_count: r.cycle_target_scope_count ?? null,
+      covered_scope_count: r.covered_scope_count ?? 0,
+      last_run_at: r.last_run_at,
+      last_run_status: r.last_run_status,
+    })),
+    fields: [],
+  };
 }
 
 describe("GET /api/ready", () => {

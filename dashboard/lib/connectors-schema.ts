@@ -45,10 +45,48 @@ export const ConnectorFiltersSchema = z.object({
 
 export type ConnectorFilters = z.infer<typeof ConnectorFiltersSchema>;
 
+/**
+ * Freshness-cadence defaults (issue #295, D-050). These mirror the ETL's
+ * `etl.default_freshness_interval_hours` (24h) and
+ * `etl.freshness_cycle_stuck_after_hours` (168h / 7d) from config/schema.yaml.
+ * They are the dashboard-side copy of the same numbers: the ETL is the
+ * authority that acts on them, this side only resolves the effective interval
+ * for display and derives the observability state. Kept in this client-safe
+ * module (no `pg` import) so both the API layer and UI can reuse them.
+ *
+ * The 24h default deliberately coincides with the freshness pill's
+ * `FRESHNESS_STALE_THRESHOLD_HOURS` (issue #241) — a connector at the default
+ * cadence and the "data is stale after a day" pill agree on the same horizon.
+ */
+export const DEFAULT_FRESHNESS_INTERVAL_HOURS = 24;
+export const DEFAULT_FRESHNESS_CYCLE_STUCK_AFTER_HOURS = 168;
+/**
+ * Write-side sanity cap on a per-connector override — 90 days. The ETL
+ * enforces no upper bound (any positive int is honoured), so this is purely a
+ * "nobody meant to type 100000" guard, the same posture as the geography
+ * radius cap above.
+ */
+export const MAX_FRESHNESS_INTERVAL_HOURS = 24 * 90;
+
 /** PATCH body. Every field optional — a request may change only one thing. */
 export const ConnectorConfigPatchSchema = z
   .object({
     enabled: z.boolean().optional(),
+    // Issue #295 (D-050): the per-connector freshness cadence override, in
+    // hours. `null` explicitly clears the override (back to the global
+    // default); omitting the key leaves the stored value untouched — the same
+    // clear-vs-leave-alone distinction geography_override draws, so nullable
+    // rather than merely optional. Unlike geography_override/filters, this is a
+    // framework-level scheduling knob VALID EVEN FOR capture-only connectors
+    // (supports_discovery=false): it doubles as the staleness window #289's
+    // manual-capture UI reads, so the PATCH route must NOT reject it for them.
+    freshness_interval_hours: z
+      .number()
+      .int()
+      .positive()
+      .max(MAX_FRESHNESS_INTERVAL_HOURS)
+      .nullable()
+      .optional(),
     // Issue #263: capture PROCESSING toggle, independent of the crawl
     // `enabled` flag above. A capture-only portal (Idealista, Aliseda) keeps
     // `enabled=false` so its doomed automated crawl never runs, but must
@@ -72,6 +110,39 @@ export interface DerivedScopeSource {
   profile_name: string;
   center: [number, number];
   radius_km: number;
+}
+
+/**
+ * Observability state of a connector's freshness cadence (issue #295, D-050),
+ * derived — never stored — from `connector_freshness_state` + the effective
+ * interval:
+ *   - `"fresh"`      — idle (no cycle) and last_fresh_at is inside the interval.
+ *   - `"refreshing"` — a cycle is in progress and not yet past the stuck horizon.
+ *   - `"stuck"`      — a cycle has been in progress longer than the stuck horizon
+ *                      (never force-completed; reads as "taking unusually long").
+ *   - `"due"`        — idle and either never fresh or the interval has elapsed;
+ *                      the next scheduler tick will start a cycle.
+ */
+export type ConnectorFreshnessKind = "fresh" | "refreshing" | "stuck" | "due";
+
+/** The freshness-cadence snapshot the connectors page renders per connector. */
+export interface ConnectorFreshnessState {
+  /** Derived state (see ConnectorFreshnessKind). */
+  kind: ConnectorFreshnessKind;
+  /** The per-connector override in hours, or null when using the global default. */
+  intervalHours: number | null;
+  /** The resolved interval actually in effect (override ?? global default). */
+  effectiveIntervalHours: number;
+  /** When the last full cycle completed, ISO — null when never fresh. */
+  lastFreshAt: string | null;
+  /** When the in-progress cycle started, ISO — null when idle. */
+  cycleStartedAt: string | null;
+  /** How many scopes this cycle set out to cover (snapshot at cycle start). */
+  targetScopeCount: number | null;
+  /** How many of those have been (re)discovered since the cycle started. */
+  coveredScopeCount: number | null;
+  /** The stuck horizon in hours, so the UI can phrase "más de Nh refrescando". */
+  stuckAfterHours: number;
 }
 
 /** Most recent run outcome for a connector, if it has ever run. */
@@ -122,6 +193,13 @@ export interface ConnectorView {
    */
   scopeSource: "override" | "profiles" | "none" | "capture-only";
   derivedFrom: DerivedScopeSource[];
+
+  /**
+   * Freshness cadence state (issue #295, D-050). Present for every connector,
+   * including capture-only ones — the interval is a valid knob for them too
+   * (it's the staleness window #289's manual-capture UI reads).
+   */
+  freshness: ConnectorFreshnessState;
 
   lastRun: ConnectorLastRun | null;
 }
