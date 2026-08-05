@@ -9,16 +9,6 @@ if [ -z "${APP_GIT_DESCRIBE:-}" ] && [ -d "${REPO_ROOT}/.git" ]; then
   export APP_GIT_DESCRIBE="$(cd "${REPO_ROOT}" && git describe --tags --always --dirty 2>/dev/null || true)"
 fi
 
-# Stage the browser extension into the dashboard build context (dashboard/public/)
-# so the built image can serve it via GET /api/extension/download. The extension
-# lives at the repo root, OUTSIDE the ./dashboard docker build context, so it must
-# be packaged in before any `docker compose build`. Idempotent + fast; safe to run
-# on every invocation. See scripts/build-extension-zip.sh for the full rationale.
-if [ -f "${REPO_ROOT}/scripts/build-extension-zip.sh" ]; then
-  bash "${REPO_ROOT}/scripts/build-extension-zip.sh" || \
-    echo -e "\033[1;33mwarning: could not package the browser extension; the in-app download will fall back to manual instructions.\033[0m" >&2
-fi
-
 RED='\033[0;31m'
 CYAN='\033[0;36m'
 GREEN='\033[0;32m'
@@ -26,6 +16,29 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 DC=(docker compose -f "${REPO_ROOT}/docker-compose.yml")
+
+# Stage the browser extension into the dashboard build context (dashboard/public/)
+# so the built image can serve it via GET /api/extension/download. The extension
+# lives at the repo root, OUTSIDE the ./dashboard docker build context, so it must
+# be packaged in *from current source* immediately before any `docker compose
+# --build`. It MUST run AFTER `git pull` in `update` — staging pre-pull source and
+# then building was the root cause of #334 (a redeploy shipped 0.7.0 after 0.7.1
+# merged). See scripts/build-extension-zip.sh for the full rationale.
+stage_extension() {
+  if [ ! -f "${REPO_ROOT}/scripts/build-extension-zip.sh" ]; then
+    return 0
+  fi
+  if ! bash "${REPO_ROOT}/scripts/build-extension-zip.sh"; then
+    echo -e "${YELLOW}warning: could not package the browser extension; the in-app download will fall back to manual instructions.${NC}" >&2
+    return 0
+  fi
+  # Belt-and-suspenders: if packaging silently produced a stale/missing zip, make
+  # it loud rather than shipping the old extension again (the #334 failure mode).
+  if [ -f "${REPO_ROOT}/scripts/check-extension-zip-fresh.sh" ]; then
+    bash "${REPO_ROOT}/scripts/check-extension-zip-fresh.sh" || \
+      echo -e "${YELLOW}warning: extension zip looks stale after packaging — the served extension may be out of date.${NC}" >&2
+  fi
+}
 
 usage() {
     cat <<EOF
@@ -43,6 +56,8 @@ EOF
 }
 
 cmd_up() {
+    # `up -d` builds any image that doesn't exist yet, so stage the extension first.
+    stage_extension
     echo -e "${CYAN}Starting stack...${NC}"
     "${DC[@]}" up -d
     echo ""
@@ -93,6 +108,11 @@ cmd_update() {
 
     echo -e "${CYAN}Pulling latest from origin/${branch}...${NC}"
     git pull --ff-only origin "$branch"
+
+    # Re-package the extension from the JUST-PULLED source, right before the build.
+    # (Staging before the pull would bake the pre-pull extension into the image —
+    # exactly the #334 stale-ship bug.)
+    stage_extension
 
     echo -e "${CYAN}Rebuilding images and starting stack...${NC}"
     "${DC[@]}" up -d --build
