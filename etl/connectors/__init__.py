@@ -37,6 +37,7 @@ def register_all() -> None:
     from etl.connectors.milanuncios_rental import MilanunciosRentalConnector
     from etl.connectors.servihabitat import ServihabitatConnector
     from etl.connectors.solvia import SolviaConnector
+    from etl.connectors.unicaja import UnicajaConnector
     from etl.connectors.vivantial import VivantialConnector
     from etl.orchestrator import CONNECTORS
 
@@ -86,3 +87,9 @@ def register_all() -> None:
     # Drupal site; publishes lat/lon (a batch first). Born disabled (#100).
     if DigloConnector.name not in registered_names:
         CONNECTORS.append(DigloConnector())
+    # Issue #119: Unicaja Banco's own REO portal (unicajainmuebles.com),
+    # operated by its servicer GIA. Server-rendered Java/Struts app (no
+    # sitemap): discover() paginates the province search action; the detail
+    # page publishes lat/lon (batch's second after Diglo). Born disabled (#100).
+    if UnicajaConnector.name not in registered_names:
+        CONNECTORS.append(UnicajaConnector())

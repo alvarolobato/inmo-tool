@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<!--
+  Trimmed reconstruction of a REAL Unicaja Inmuebles detail page
+  (fichainmueble.do?referencia=0017922090 — "ALTA, Teba", the same listing
+  whose search CARD is in unicaja_sample_search.html), captured live
+  2026-08-05. Only the fragments the connector parses are kept: the title,
+  the label/text datos block (tipo, superficies, habitaciones, baños,
+  referencia), the scoped price block, the server-injected coordX/coordY JS
+  (placeholder zeros THEN the real quoted values, to exercise "last quoted
+  wins"), the description, and BaseInmueble photo <img>s (thumbnails + a bare
+  full-size). NOT a literal full-page dump. No referencia catastral / postal
+  code / energy-letter is present on the detail page — those are asserted
+  absent in the tests (the postal code comes from the search card instead).
+-->
+<html lang="es"><head><title> Ficha Inmueble</title></head><body>
+<div id="content"><div id="containerpromocion"><div id="containerpromocionUP"><div id="infofichapromo">
+<div><div id="columnatitulo" class="">ALTA , Teba</div></div>
+<div id="columna1Datos" class="inline-block">
+				<div>
+					<span class="label">Tipo :</span> <span class="text"> Casa
+					</span>
+				</div>
+				<div>
+
+					
+						
+						
+							<span class="label">Sup. Const:
+							</span>
+							<span class="text">
+								
+									
+									171.14 m<sup>2</sup>
+								
+							</span>
+						
+					
+				</div>
+
+				
+					<div>
+						<span class="label">Sup. Útil: </span>
+						<span class="text">148.81 m<sup>2</sup></span>
+					</div>
+				
+
+				<!-- ELIMINADOPLANTA  
+
+				-->
+			</div>
+			<div id="columna2Datos" class="inline-block">
+				
+					<div>
+						<span class="label">Habitaciones: </span> <span class="text">
+											
+											4
+										</span>
+					</div>
+				
+				
+					<div>
+						<span class="label">Baños: </span> <span class="text">2</span>
+					</div>
+				
+				<div>
+					<span class="label">Referencia: </span> <span class="text">0017922090</span>
+				</div>
+			</div>
+		</div>
+		<div
+</div></div>
+<div id="columnaprecio" class="inline-block">
+				
+					<label> Compra*:
+					</label>
+					<span> 46.500,00 &euro;
+					</span>
+					<div class="eficienciacontainer compraventaboton" onclick="openpopCompraventa();">
+						Gastos compraventa
+					</div>
+				
+				
+			</div>
+</div></div>
+<div class="tituloGris"> Descripción: </div>
+<div id="descripcioncontainer"><div id="bloquedescripcion"><div class="containerdescriptex"> Casa A REFORMAR con 4 habitaciones en la provincia de Málaga, en el municipio de Teba, en la calle ALTA. </div></div></div>
+<div id="galeria">
+<img src="/unicaja/datos/BaseInmueble%2D%2D2039530958/54643/398343_250x150.png" />
+<img class="thumbnail" src="/unicaja/datos/BaseInmueble%2D%2D2039530958/54643/398343_42x32.png" />
+<img src="/unicaja/datos/BaseInmueble%2D%2D2039530958/54643/398335_250x150.png" />
+<img src="/unicaja/datos/BaseInmueble%2D%2D2039530000/54000/500001.png" />
+</div>
+<script type="text/javascript">
+var coordX = 0;
+var coordY = 0;
+if('36.9833293' != '' && '-4.9188665' != ''){
+var coordX = '36.9833293';
+var coordY = '-4.9188665';
+}
+</script>
+</body></html>
