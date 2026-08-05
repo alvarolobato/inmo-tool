@@ -388,11 +388,24 @@ function SourceQualitySection({ rows }: { rows: SourceDataQuality[] }) {
   );
 }
 
-function StaleProfilesSection({ rows }: { rows: StaleProfile[] }) {
+function StaleProfilesSection({
+  rows,
+  sweepInProgress,
+}: {
+  rows: StaleProfile[];
+  sweepInProgress: boolean;
+}) {
   return (
     <section className="space-y-3" data-testid="stale-profiles">
       <SectionTitle>Perfiles sin re-materializar</SectionTitle>
-      {rows.length === 0 ? (
+      {sweepInProgress ? (
+        // During a sweep, last_seen_at is bumped before last_materialized_at
+        // catches up, so staleness isn't trustworthy — mirror the reconciler
+        // and don't flag anything (issue #285).
+        <EmptyRow testId="stale-profiles-sweep">
+          No evaluable durante una ejecución de conectores en curso.
+        </EmptyRow>
+      ) : rows.length === 0 ? (
         <EmptyRow testId="stale-profiles-empty">
           Todos los perfiles están al día con los últimos anuncios.
         </EmptyRow>
@@ -499,7 +512,10 @@ export default function DataHealthPage() {
           <ConnectorHealthSection rows={data.connectors} />
           <PortalHealthSection rows={data.portals} />
           <SourceQualitySection rows={data.sources} />
-          <StaleProfilesSection rows={data.stale_profiles} />
+          <StaleProfilesSection
+            rows={data.stale_profiles}
+            sweepInProgress={data.sweep_in_progress}
+          />
         </div>
       ) : null}
     </div>

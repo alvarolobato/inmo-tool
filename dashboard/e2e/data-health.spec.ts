@@ -98,14 +98,24 @@ test.beforeAll(async () => {
     [runId, FAILED_CONN],
   );
 
-  // A property + listing so the capture join to photo_urls resolves.
+  // A property + listing so the capture join to photo_urls resolves. The
+  // timestamps are deliberately staggered to prove the staleness predicate
+  // uses GREATEST(last_seen_at, last_fetched_at, first_seen_at), not
+  // last_seen_at alone: first_seen_at/last_seen_at are OLD, only
+  // last_fetched_at is recent (a detail re-fetch). A MAX(last_seen_at)-only
+  // query would report this listing as 30 days old and NOT flag the profile;
+  // GREATEST catches the recent re-fetch and DOES.
   const prop = await pool.query<{ id: number }>(
     `INSERT INTO property (created_at) VALUES (NOW()) RETURNING id`,
   );
   propertyId = prop.rows[0].id;
   const lst = await pool.query<{ id: number }>(
-    `INSERT INTO listing (property_id, source, external_id, photo_urls, last_seen_at)
-     VALUES ($1,$2,'E2E-DH-1', ARRAY['a','b','c','d','e'], NOW()) RETURNING id`,
+    `INSERT INTO listing
+       (property_id, source, external_id, photo_urls,
+        first_seen_at, last_seen_at, last_fetched_at)
+     VALUES ($1,$2,'E2E-DH-1', ARRAY['a','b','c','d','e'],
+        NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days', NOW())
+     RETURNING id`,
     [propertyId, E2E_SOURCE],
   );
   listingId = lst.rows[0].id;
@@ -124,10 +134,13 @@ test.beforeAll(async () => {
     [DONE_URL, listingId],
   );
 
-  // A stale profile: never materialized, but listing data exists.
+  // A profile materialized 1 day ago — AFTER the listing's first/last_seen_at
+  // (30 days ago) but BEFORE its last_fetched_at (now). So it is stale ONLY
+  // via the last_fetched_at branch of GREATEST — the exact case a
+  // last_seen_at-only query misses.
   const prof = await pool.query<{ id: number }>(
     `INSERT INTO search_profile (name, scope, thesis_params, last_materialized_at)
-     VALUES ($1, $2::jsonb, '{}'::jsonb, NULL) RETURNING id`,
+     VALUES ($1, $2::jsonb, '{}'::jsonb, NOW() - INTERVAL '1 day') RETURNING id`,
     [
       E2E_PROFILE,
       JSON.stringify({ geography: ["Estepona"], property_types: ["flat"] }),
@@ -209,12 +222,45 @@ test("distinguishes a clean budget stop from a real failure", async ({ page }) =
   );
 });
 
-test("surfaces a stale profile", async ({ page }) => {
+test("surfaces a profile stale only via last_fetched_at (GREATEST predicate)", async ({
+  page,
+}) => {
   await page.goto("/etl/salud");
+  // The profile's last_materialized_at is newer than the listing's
+  // first/last_seen_at but older than its last_fetched_at — so it is stale
+  // ONLY because the predicate uses GREATEST across all three timestamps,
+  // matching etl/materialize_reconciler.py::_stale_profiles_exist.
   await expect(page.getByTestId(`stale-profile-${profileId}`)).toBeVisible();
   await expect(page.getByTestId(`stale-profile-${profileId}`)).toContainText(
     E2E_PROFILE,
   );
+});
+
+test("does not flag stale profiles while a connector sweep is running", async ({
+  page,
+}) => {
+  // A running connector_runs row means last_seen_at is being bumped mid-sweep
+  // before last_materialized_at catches up — the reconciler defers, and so
+  // must this page (else it floods false positives for the whole sweep).
+  const running = await pool.query<{ id: number }>(
+    `INSERT INTO connector_runs (trigger, status) VALUES ('manual','running') RETURNING id`,
+  );
+  const runningId = running.rows[0].id;
+  try {
+    await page.goto("/etl/salud");
+    await expect(page.getByTestId("data-health-page")).toBeVisible();
+    // The section is annotated as not-evaluable, and the otherwise-stale
+    // profile is NOT flagged.
+    await expect(page.getByTestId("stale-profiles-sweep")).toBeVisible();
+    await expect(page.getByTestId("stale-profiles-sweep")).toContainText(
+      "No evaluable",
+    );
+    await expect(page.getByTestId(`stale-profile-${profileId}`)).toHaveCount(0);
+    // Still no error surface.
+    await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
+  } finally {
+    await pool.query("DELETE FROM connector_runs WHERE id = $1", [runningId]);
+  }
 });
 
 test("loads with no error surface (EC-4)", async ({ page }) => {

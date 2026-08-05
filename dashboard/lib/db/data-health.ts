@@ -51,7 +51,7 @@ function numOrNull(v: unknown): number | null {
  * polls this at a slow cadence, not per-widget.
  */
 export async function getDataHealth(): Promise<DataHealthResponse> {
-  const [connectorRes, portalRes, sourceRes, staleRes] = await Promise.all([
+  const [connectorRes, portalRes, sourceRes, staleRes, sweepRes] = await Promise.all([
     // 1. Latest run per connector + the prior run's error_count. LEAD over a
     //    DESC ordering returns the NEXT (older) row — i.e. the previous run.
     query(
@@ -117,10 +117,19 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
     ),
 
     // 4. Stale profiles: newest listing data (globally) is newer than the
-    //    profile's last materialization. Archived profiles excluded. Returns
-    //    ONLY the stale ones — an empty result is the healthy state.
+    //    profile's last materialization. This MUST agree with the reconciler
+    //    it surfaces — etl/materialize_reconciler.py::_stale_profiles_exist
+    //    (#285): the newest-listing timestamp is
+    //    MAX(GREATEST(last_seen_at, last_fetched_at, first_seen_at)), not
+    //    last_seen_at alone (GREATEST catches every path a listing's data can
+    //    change; Postgres GREATEST ignores NULLs). Archived profiles excluded.
+    //    Returns ONLY the stale ones — an empty result is the healthy state.
+    //    Gated below by the running-sweep guard.
     query(
-      `WITH newest AS (SELECT MAX(last_seen_at) AS ts FROM listing)
+      `WITH newest AS (
+         SELECT MAX(GREATEST(last_seen_at, last_fetched_at, first_seen_at)) AS ts
+           FROM listing
+       )
        SELECT sp.id, sp.name, sp.last_materialized_at, newest.ts AS newest_listing_at
          FROM search_profile sp
          CROSS JOIN newest
@@ -129,7 +138,22 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
           AND (sp.last_materialized_at IS NULL OR sp.last_materialized_at < newest.ts)
         ORDER BY sp.last_materialized_at ASC NULLS FIRST, sp.id`,
     ),
+
+    // Running-sweep guard (mirrors _sweep_in_progress, #285). While a sweep
+    // runs, last_seen_at is bumped mid-sweep before last_materialized_at
+    // catches up, so an unguarded staleness check flags nearly every active
+    // profile for the whole ~hourly sweep — a false-positive flood an
+    // observability page must not produce. When one is running we DON'T
+    // evaluate staleness (empty list + a UI annotation), same as the
+    // reconciler defers to the sweep's own end-of-sweep materialize-all.
+    query(
+      `SELECT EXISTS (
+         SELECT 1 FROM connector_runs WHERE status = 'running' LIMIT 1
+       ) AS sweeping`,
+    ),
   ]);
+
+  const sweepInProgress = Boolean(sweepRes.rows[0]?.[0]);
 
   const connectors: ConnectorHealth[] = connectorRes.rows.map((row) => {
     const status = String(row[1]);
@@ -200,18 +224,24 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
     avg_photo_count: numOrNull(row[2]),
   }));
 
-  const stale_profiles: StaleProfile[] = staleRes.rows.map((row) => ({
-    id: num(row[0]),
-    name: String(row[1]),
-    last_materialized_at: toIsoOrNull(row[2]),
-    newest_listing_at: toIsoOrNull(row[3]),
-  }));
+  // While a sweep is running the staleness signal is not trustworthy — defer
+  // to the sweep's own end-of-sweep materialize (the reconciler does the same)
+  // and surface nothing rather than a flood of freshly-swept false positives.
+  const stale_profiles: StaleProfile[] = sweepInProgress
+    ? []
+    : staleRes.rows.map((row) => ({
+        id: num(row[0]),
+        name: String(row[1]),
+        last_materialized_at: toIsoOrNull(row[2]),
+        newest_listing_at: toIsoOrNull(row[3]),
+      }));
 
   return {
     connectors,
     portals,
     sources,
     stale_profiles,
+    sweep_in_progress: sweepInProgress,
     generated_at: new Date().toISOString(),
   };
 }

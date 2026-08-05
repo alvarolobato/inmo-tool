@@ -94,6 +94,16 @@ export interface DataHealthResponse {
   portals: PortalCaptureHealth[];
   sources: SourceDataQuality[];
   stale_profiles: StaleProfile[];
+  /**
+   * True when a connector sweep is currently running. While a sweep runs,
+   * `last_seen_at` is bumped incrementally on the mirror before
+   * `last_materialized_at` has caught up, so an unguarded staleness check
+   * would flag essentially every active profile (the reconciler's own
+   * `_sweep_in_progress` guard, #285). When true the stale-profiles check is
+   * NOT evaluated — `stale_profiles` is empty and the UI annotates the
+   * section as "no evaluable durante sweep" rather than crying wolf.
+   */
+  sweep_in_progress: boolean;
   generated_at: string;
 }
 
