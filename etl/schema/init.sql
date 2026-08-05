@@ -1398,6 +1398,35 @@ CREATE INDEX IF NOT EXISTS idx_worklist_seed_trigger_pending
     ON capture_worklist_seed_trigger (requested_at, id) WHERE status = 'pending';
 
 
+-- ── Capture-task last-run ledger (issue #289) ───────────────────────────────
+-- The task-driven Captura page (/captura) shows one openable capture TASK per
+-- (profile × portal × searchable section) — the deterministic `tasks[]` shape
+-- from the search-url builder (GET /api/profiles/[id]/search-urls). Each task
+-- has a stable `task_id` derived from the profile+filters, so "when did I last
+-- run this exact task" is a single fact keyed by (profile_id, task_id).
+--
+-- A row is upserted every time the operator executes a task (the button POSTs
+-- before opening the portal). `last_run_at` drives the staleness window in the
+-- UI: a task run within its window is greyed out (not due); once the window
+-- elapses it returns to full colour (due again). Graying is a visual cue only,
+-- never a block — the operator can always re-run, which just bumps last_run_at.
+--
+-- No status/outcome column: this is a "last touched" ledger, not a capture
+-- result (capture outcomes live in capture_worklist / extension_capture). ON
+-- DELETE CASCADE so deleting a profile drops its task-run history with it.
+CREATE TABLE IF NOT EXISTS capture_task_run (
+    profile_id   BIGINT       NOT NULL
+                              REFERENCES search_profile(id) ON DELETE CASCADE,
+    task_id      TEXT         NOT NULL,
+    last_run_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (profile_id, task_id)
+);
+
+-- The Captura page reads every task-run row for one profile in a single query
+-- (keyed on profile_id); the PK's leading column already serves that, so no
+-- extra index is needed.
+
+
 -- ============================================================
 -- Dashboard App
 -- ============================================================
@@ -1961,3 +1990,4 @@ ANALYZE suggested_merge;
 ANALYZE extension_capture;
 ANALYZE capture_worklist;
 ANALYZE capture_worklist_seed_trigger;
+ANALYZE capture_task_run;
