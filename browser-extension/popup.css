@@ -194,6 +194,49 @@ body {
   background: #fff;
 }
 
+/* ─── Batch capture (issue #262) ───────────────────────────────── */
+
+.batch-actions {
+  border-top: none;
+  background: transparent;
+  padding: 4px 0 0;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.batch-hint {
+  max-width: 300px;
+}
+
+.batch-progress {
+  width: 100%;
+  max-width: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.batch-bar-track {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+
+.batch-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: #22c55e;
+  transition: width 0.25s ease;
+}
+
+.batch-count {
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+}
+
 /* ─── Scrollbar ────────────────────────────────────────────────── */
 
 body::-webkit-scrollbar {

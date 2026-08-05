@@ -112,19 +112,33 @@ export function portalForUrl(url: string): string | null {
 }
 
 /**
- * The next worklist URL a human should open (issue #254 — human-paced
- * "Siguiente" advance). Returns the FIRST `pending` row in the given list
- * order, or null if none is pending.
+ * The next `pending` worklist URL in the given list order, or null if none is
+ * pending.
  *
- * Deliberately a pure "pick the next one" over the already-loaded rows, not an
- * auto-advancing queue-runner: the caller opens exactly ONE tab per human
- * click. Rapid-firing a sequence of tabs from a queue would look like bot
- * navigation — the very thing the extension's human-in-the-loop design exists
- * to avoid (#254). Keeping the pacing in the human's hands is the whole point.
+ * History (do not "restore" the old behaviour): through #254/#260 this backed a
+ * deliberately human-paced "open ONE tab per click" flow, on the reasoning that
+ * rapid-firing tabs from a queue looks like bot navigation. Issue #262 (D-043)
+ * supersedes that: the browser extension now drives a fully-automated
+ * sequential queue itself (open → activate → auto-capture → close → advance),
+ * because "click once, do nothing else" is the owner's north-star for every
+ * capture connector. The WAF concern the old design named did NOT go away — it
+ * moved into the extension, which keeps a JITTERED delay between pages (see the
+ * extension's batch.js / D-043). This helper survives only as the fallback
+ * "Abrir siguiente pendiente" affordance on the /etl/captura page for when the
+ * operator wants to open one by hand.
  */
 export function firstPendingUrl(rows: readonly WorklistRow[]): string | null {
   for (const r of rows) {
     if (r.status === "pending") return r.url;
   }
   return null;
+}
+
+/**
+ * All `pending` worklist URLs in list order — the full queue the extension's
+ * batch runner sweeps (issue #262). The extension fetches this set for a portal
+ * and processes it one page at a time with jittered pacing (D-043).
+ */
+export function pendingUrls(rows: readonly WorklistRow[]): string[] {
+  return rows.filter((r) => r.status === "pending").map((r) => r.url);
 }

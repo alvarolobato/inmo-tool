@@ -166,12 +166,13 @@ export default function CapturaWorklistPage() {
 
   const nextPendingUrl = useMemo(() => firstPendingUrl(rows), [rows]);
 
-  // Human-paced "Siguiente" advance (issue #254): open the NEXT pending URL in
-  // a new tab, one per click. This is deliberately NOT an auto-advancing queue
-  // — the human clicks once, browses that one listing (the extension
-  // auto-captures it on render), then comes back and clicks again. Rapid-firing
-  // tabs from a queue would look like bot navigation, which is exactly what the
-  // human-in-the-loop design avoids.
+  // Manual fallback advance (issue #262, D-043): open the NEXT pending URL in a
+  // new tab, one per click. This used to be the PRIMARY flow (#254's deliberate
+  // human-paced design), but batch capture now lives in the browser extension:
+  // from a listing page the extension harvests every detail link and runs the
+  // whole worklist itself — open → activate → auto-capture → close → advance,
+  // with jittered pacing for WAF safety (see the extension's batch.js / D-043).
+  // This button remains only for opening a single pending listing by hand.
   const handleOpenNext = useCallback(() => {
     if (!nextPendingUrl) return;
     window.open(nextPendingUrl, "_blank", "noopener,noreferrer");
@@ -239,9 +240,11 @@ export default function CapturaWorklistPage() {
       <p style={{ fontSize: 13, color: "var(--fg-muted)", marginTop: 8 }}>
         Lista de anuncios a visitar uno por uno para portales que solo se pueden
         capturar con la extensión del navegador (Aliseda no publica los datos por
-        HTTP — ver D-019). Pulsa <strong>Abrir</strong>, espera a que la página
-        termine de cargar en tu navegador y captura con la extensión. La lista se
-        marca sola como capturada cuando llega la captura.
+        HTTP — ver D-019). Desde una página de resultados, la extensión detecta
+        todos los anuncios y con <strong>«Capturar todas»</strong> los captura en
+        secuencia sola (issue #262). Aquí puedes seguir el progreso, sembrar URLs
+        a mano o abrir una pendiente suelta con <strong>Abrir siguiente</strong>.
+        La lista se marca sola como capturada cuando llega cada captura.
       </p>
 
       {error && (

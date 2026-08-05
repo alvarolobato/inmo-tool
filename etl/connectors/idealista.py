@@ -33,6 +33,13 @@ This connector therefore:
     HTML a human's browser rendered and the extension in browser-extension/
     submitted via POST /api/extension/capture (dashboard) ->
     extension_capture table (etl/schema/init.sql) -> here.
+
+Batch capture pacing (issue #262, D-043): the extension can now drive a
+listing/search page's detail links through the worklist automatically (open ->
+activate -> auto-capture -> close -> advance). That is still real browser
+navigation of pages a human asked to batch — but it MUST stay paced: the
+extension keeps a jittered delay between pages precisely because Idealista sits
+behind a CAPTCHA/bot wall that a burst would trip. Don't remove that pacing.
 """
 
 from __future__ import annotations

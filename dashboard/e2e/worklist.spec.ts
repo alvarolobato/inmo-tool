@@ -153,19 +153,22 @@ test("status filter tabs, per-portal progress bar and the sitemap-refresh button
   await expect(page.getByText("Error al cargar")).toHaveCount(0);
 });
 
-test("the human-paced 'Siguiente' button is enabled and targets a pending URL (issue #254)", async ({
+test("the manual-fallback 'Siguiente' button is enabled and targets a pending URL (issue #262, D-043)", async ({
   page,
 }) => {
   await page.goto("/etl/captura");
   await expect(page.getByTestId("worklist-page")).toBeVisible();
 
-  // With a seeded pending row present, the advance button is enabled. It opens
-  // exactly one tab per click (window.open) — a deliberately human-paced
-  // advance, not an auto-runner — so we assert the affordance is present and
-  // actionable rather than navigating to a real external listing.
+  // With a seeded pending row present, the manual-fallback advance button is
+  // enabled. Batch capture now lives in the extension (D-043); this button
+  // remains only for opening a single pending listing by hand, so we assert the
+  // affordance is present and actionable rather than navigating externally.
   const nextBtn = page.getByTestId("worklist-open-next");
   await expect(nextBtn).toBeVisible();
   await expect(nextBtn).toBeEnabled();
+
+  // The page documents the extension's "Capturar todas" batch flow (issue #262).
+  await expect(page.getByText("Capturar todas")).toBeVisible();
 
   // No error surface — the D-041 bar.
   await expect(page.getByText("Detalles técnicos")).toHaveCount(0);

@@ -22,6 +22,9 @@ const {
   matchKey,
   isRenderReady,
   createCaptureGuard,
+  listingPortalForUrl,
+  isListingUrl,
+  extractDetailUrls,
 } = D as {
   detailPortalForUrl: (u: string) => string | null;
   isDetailUrl: (u: string) => boolean;
@@ -34,6 +37,9 @@ const {
     isDone: (k: string) => boolean;
     isInflight: (k: string) => boolean;
   };
+  listingPortalForUrl: (u: string) => string | null;
+  isListingUrl: (u: string) => boolean;
+  extractDetailUrls: (hrefs: unknown, portal?: string) => string[];
 };
 
 describe("detailPortalForUrl — only real listing-detail pages", () => {
@@ -168,5 +174,82 @@ describe("createCaptureGuard — fire exactly once per URL", () => {
   it("never claims an empty key", () => {
     const g = createCaptureGuard();
     expect(g.claim("")).toBe(false);
+  });
+});
+
+// ── Batch capture: listing-page detection (issue #262) ──────────────────────
+
+describe("listingPortalForUrl — only search/results pages", () => {
+  const CASES: [string, string | null][] = [
+    // Idealista search/results pages → listing.
+    ["https://www.idealista.com/venta-viviendas/madrid-madrid/", "idealista"],
+    ["https://www.idealista.com/alquiler-viviendas/barcelona-barcelona/", "idealista"],
+    ["https://www.idealista.com/venta-locales/valencia/", "idealista"],
+    ["https://www.idealista.com/areas/venta-viviendas/con-precio-hasta_200000/", "idealista"],
+    // Idealista detail / home / bare → not a listing.
+    ["https://www.idealista.com/inmueble/106387165/", null],
+    ["https://www.idealista.com/", null],
+    // Aliseda results route → listing.
+    ["https://www.alisedainmobiliaria.com/comprar/vivienda/malaga", "aliseda"],
+    ["https://www.alisedainmobiliaria.com/alquilar/vivienda/madrid", "aliseda"],
+    // Aliseda detail / home → not a listing.
+    ["https://www.alisedainmobiliaria.com/inmueble/ANT1", null],
+    ["https://www.alisedainmobiliaria.com/", null],
+    // Unsupported host / non-http / junk → null.
+    ["https://www.fotocasa.es/es/comprar/viviendas/madrid/", null],
+    ["ftp://www.idealista.com/venta-viviendas/x/", null],
+    ["not a url", null],
+  ];
+
+  it.each(CASES)("%s → %s", (url, expected) => {
+    expect(listingPortalForUrl(url)).toBe(expected);
+  });
+
+  it("isListingUrl agrees with listingPortalForUrl", () => {
+    expect(isListingUrl("https://www.idealista.com/venta-viviendas/madrid-madrid/")).toBe(true);
+    expect(isListingUrl("https://www.idealista.com/inmueble/1/")).toBe(false);
+  });
+
+  it("a URL is never simultaneously a detail and a listing page", () => {
+    for (const [url] of CASES) {
+      if (isDetailUrl(url) || isListingUrl(url)) {
+        expect(isDetailUrl(url) && isListingUrl(url)).toBe(false);
+      }
+    }
+  });
+});
+
+describe("extractDetailUrls — harvest detail links off a listing DOM", () => {
+  it("keeps only detail URLs, de-duplicated by canonical match key", () => {
+    const hrefs = [
+      "https://www.idealista.com/inmueble/106387165/", // detail
+      "https://www.idealista.com/inmueble/106387165/?utm=x", // dup of the above (query dropped)
+      "https://www.idealista.com/inmueble/222/#photos", // detail, distinct
+      "https://www.idealista.com/venta-viviendas/madrid-madrid/", // listing page → excluded
+      "https://www.idealista.com/", // home → excluded
+      "https://www.idealista.com/agente/123/", // non-detail → excluded
+    ];
+    expect(extractDetailUrls(hrefs)).toEqual([
+      "https://www.idealista.com/inmueble/106387165/",
+      "https://www.idealista.com/inmueble/222/#photos",
+    ]);
+  });
+
+  it("scopes to a single portal when one is given", () => {
+    const hrefs = [
+      "https://www.idealista.com/inmueble/1/",
+      "https://www.alisedainmobiliaria.com/inmueble/ANT1",
+    ];
+    expect(extractDetailUrls(hrefs, "aliseda")).toEqual([
+      "https://www.alisedainmobiliaria.com/inmueble/ANT1",
+    ]);
+  });
+
+  it("tolerates junk entries and a non-array input", () => {
+    expect(
+      extractDetailUrls(["https://www.idealista.com/inmueble/1/", "", null, 5, "not a url"]),
+    ).toEqual(["https://www.idealista.com/inmueble/1/"]);
+    expect(extractDetailUrls(undefined)).toEqual([]);
+    expect(extractDetailUrls(null)).toEqual([]);
   });
 });

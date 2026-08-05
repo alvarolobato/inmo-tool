@@ -34,6 +34,13 @@ This connector therefore mirrors IdealistaConnector precisely:
     RawListing built from HTML a human's browser rendered and the extension
     POSTed to /api/extension/capture.
 
+Batch capture pacing (issue #262, D-043): the extension can now sweep an
+Aliseda results page's detail links through the worklist automatically (open ->
+activate -> auto-capture -> close -> advance). It keeps a JITTERED delay between
+pages on purpose — an unthrottled auto-advance loop is closer to bot navigation
+than the human-paced flow it replaces, and Aliseda's data host walls crawlers
+off entirely (D-019). Don't remove that pacing.
+
 ──────────────────────────────────────────────────────────────────────────
   GROUND TRUTH: three real hydrated captures (issue #266).
 ──────────────────────────────────────────────────────────────────────────

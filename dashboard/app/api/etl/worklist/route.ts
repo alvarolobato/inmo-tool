@@ -2,8 +2,11 @@
  * Capture worklist API (issue #237).
  *
  * GET  /api/etl/worklist[?portal=aliseda]  — rows + per-portal status roll-ups.
- * POST /api/etl/worklist  { urls: string[] | string }  — add manually-pasted
- *      URLs (added_via='manual'); returns {added, duplicate, invalid}.
+ * POST /api/etl/worklist  { urls: string[] | string, via?: 'manual'|'derived' }
+ *      — add URLs. `via` defaults to 'manual' (the page's paste box);
+ *      'derived' is what the browser extension sends when it harvested the URLs
+ *      off a listing page for batch capture (issue #262). Returns
+ *      {added, duplicate, invalid}.
  *
  * Mounted under /api/etl so middleware.ts's `/api/etl/:path*` matcher already
  * admin-gates it, same as the connector-management surface (issue #100). No
@@ -12,7 +15,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { addWorklistUrls, listWorklist } from "@/lib/db/worklist";
+import { addWorklistUrls, listWorklist, type WorklistAddedVia } from "@/lib/db/worklist";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
 const MAX_URLS_PER_REQUEST = 5000;
@@ -39,7 +42,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
 interface AddBody {
   urls?: string[] | string;
+  via?: string;
 }
+
+const VALID_ADDED_VIA: readonly WorklistAddedVia[] = ["manual", "derived"];
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const requestId = generateRequestId();
@@ -85,8 +91,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
+  const via: WorklistAddedVia =
+    typeof body.via === "string" && VALID_ADDED_VIA.includes(body.via as WorklistAddedVia)
+      ? (body.via as WorklistAddedVia)
+      : "manual";
+
   try {
-    const result = await addWorklistUrls(urls);
+    const result = await addWorklistUrls(urls, via);
     return NextResponse.json({ success: true, ...result });
   } catch (err) {
     console.error(`[${requestId}] Error al añadir URLs a la worklist:`, err);

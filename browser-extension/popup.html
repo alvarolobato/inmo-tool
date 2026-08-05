@@ -30,6 +30,32 @@
     <p class="state-sub">Navega a un anuncio de Idealista y vuelve a intentarlo.</p>
   </div>
 
+  <!-- Batch capture (issue #262): shown on a listing/search page, or whenever a
+       batch run is already in progress. -->
+  <div id="state-batch" class="state hidden">
+    <div class="state-icon">📋</div>
+    <p id="batch-title" class="state-text">Página de resultados</p>
+    <p id="batch-sub" class="state-sub"></p>
+
+    <div id="batch-progress" class="batch-progress hidden">
+      <div class="batch-bar-track">
+        <div id="batch-bar-fill" class="batch-bar-fill"></div>
+      </div>
+      <p id="batch-count" class="batch-count"></p>
+    </div>
+
+    <div class="actions batch-actions">
+      <button id="batch-start-btn" class="btn btn-primary">Capturar todas</button>
+      <button id="batch-pause-btn" class="btn btn-secondary hidden">Pausar</button>
+      <button id="batch-resume-btn" class="btn btn-primary hidden">Reanudar</button>
+      <button id="batch-stop-btn" class="btn btn-secondary hidden">Detener</button>
+    </div>
+    <p class="state-sub batch-hint">
+      La extensión abre cada anuncio, lo captura y lo cierra sola, con una pausa
+      entre cada uno. No cierres esta ventana del navegador.
+    </p>
+  </div>
+
   <div id="state-error" class="state hidden">
     <div class="state-icon">⚠️</div>
     <p id="error-message" class="state-text">Algo salió mal</p>

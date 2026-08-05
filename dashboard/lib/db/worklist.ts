@@ -74,14 +74,22 @@ export async function listWorklist(
   return { rows, summaries };
 }
 
+/** How a batch of URLs entered the worklist. */
+export type WorklistAddedVia = "manual" | "derived";
+
 /**
- * Add manually-pasted URLs to the worklist. Each URL is validated
- * (http/https + a known capture host), canonicalised to a match_key, and
- * inserted `added_via='manual'`. Re-adding an existing listing is idempotent
- * (ON CONFLICT (match_key) DO NOTHING) and reported as a duplicate rather than
- * an error — the operator pasting an overlapping batch is expected.
+ * Add URLs to the worklist. Each URL is validated (http/https + a known capture
+ * host), canonicalised to a match_key, and inserted with the given `addedVia`
+ * (default `'manual'` — the operator's pasted list; `'derived'` when the browser
+ * extension harvested them off a listing page for batch capture, issue #262).
+ * Re-adding an existing listing is idempotent (ON CONFLICT (match_key) DO
+ * NOTHING) and reported as a duplicate rather than an error — an overlapping
+ * batch (pasted or harvested) is expected.
  */
-export async function addWorklistUrls(urls: string[]): Promise<AddWorklistResult> {
+export async function addWorklistUrls(
+  urls: string[],
+  addedVia: WorklistAddedVia = "manual",
+): Promise<AddWorklistResult> {
   const result: AddWorklistResult = { added: 0, duplicate: 0, invalid: [] };
   const seenKeys = new Set<string>();
 
@@ -123,10 +131,10 @@ export async function addWorklistUrls(urls: string[]): Promise<AddWorklistResult
 
     const inserted = await sql<{ id: number }>(
       `INSERT INTO capture_worklist (url, match_key, source_portal, added_via)
-         VALUES ($1, $2, $3, 'manual')
+         VALUES ($1, $2, $3, $4)
        ON CONFLICT (match_key) DO NOTHING
        RETURNING id`,
-      [url, matchKey, portal],
+      [url, matchKey, portal, addedVia],
     );
     if (inserted.length > 0) result.added += 1;
     else result.duplicate += 1;
