@@ -6,6 +6,10 @@
  *   - Bootstrap config.yaml on first start (if absent).
  *   - Apply PostgreSQL migrations (etl/schema/init.sql, idempotent) so the
  *     dashboard never starts against a DB that's missing tables it requires.
+ *   - Start the AI-assessment scheduler (#308) — the dashboard-side background
+ *     pass that runs occupancy/condition/redflags/extract for ingested
+ *     properties lacking a current verdict, so the candidate feed actually
+ *     shows the badges those flows produce (D-052).
  */
 
 export async function register() {
@@ -55,6 +59,23 @@ export async function register() {
         }
       } catch (err) {
         console.warn("[migrate] Could not run init.sql migration:", err);
+      }
+    }
+
+    // Start the AI-assessment background scheduler (#308). Guarded by the same
+    // SKIP_DB_MIGRATE flag as the migration above: both need a reachable DB,
+    // and build-time prerender (no DB) sets SKIP_DB_MIGRATE=1. The scheduler
+    // has its own dashboard.assessment_auto_enabled kill switch and is
+    // idempotent, so a double register() never starts two loops. Non-fatal:
+    // a failure here must not stop the server from coming up.
+    if (process.env.SKIP_DB_MIGRATE !== "1") {
+      try {
+        const { startAssessmentScheduler } = await import(
+          "./lib/ai-assessment/scheduler"
+        );
+        startAssessmentScheduler();
+      } catch (err) {
+        console.warn("[ai-assessment] Could not start the assessment scheduler:", err);
       }
     }
   }

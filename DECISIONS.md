@@ -63,6 +63,7 @@
 | [D-006](docs/decisions/D-006-llm-context-centralization.md) | All LLM calls go through `assembleRequest()` in `dashboard/lib/llm-context/`. No file outside that directory may import `llmComplete` or `runAgenticChat`; CI enforces it via `check-llm-context.sh`. |
 | [D-007](docs/decisions/D-007-empty-knowledge-corpus-kept.md) | Keep `lib/knowledge.ts`/`scripts/build-knowledge.ts` (real call sites, intentionally empty pending Phase 4/#5). Test the empty-corpus shape contract, don't delete the machinery or invent placeholder content. |
 | [D-012](docs/decisions/D-012-derived-price-signal-in-cache.md) | occupancy/redflags see a bucketed zone-median price comparison (never raw price); the exact string rendered must also be the exact `extraHashInput` passed to `getOrCompute`. |
+| [D-052](docs/decisions/D-052-assessment-auto-trigger-dashboard-side.md) | The AI-assessment auto-trigger is a dashboard-side in-process scheduled pass (`ai-assessment/{batch,scheduler}.ts`, started from `instrumentation.ts`), NOT an ETL hook — bounded N-oldest-unassessed per tick, skips current-prompt-version verdicts, stops cleanly on budget/circuit errors. Configured via `dashboard.assessment_*`. |
 
 ## Product
 

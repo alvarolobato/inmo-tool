@@ -365,6 +365,47 @@
   components: [dashboard]
 
 # -----------------------------------------------------------------------------
+# Evaluación IA automática (#308, D-052)
+# -----------------------------------------------------------------------------
+# Un pase programado en el propio dashboard (arrancado desde instrumentation.ts)
+# ejecuta los cuatro flujos de evaluación (occupancy/condition/redflags/extract)
+# sobre los inmuebles ingeridos que aún no tienen un veredicto de la versión de
+# prompt actual, para que las tarjetas de candidatos muestren de verdad las
+# insignias de ocupación/estado/red-flags/precio-bajo-mercado sin que nadie
+# llame a mano a POST /api/properties/[id]/assessments/*. Acotado y sin gastar
+# de más: lote de tamaño fijo por tick (más antiguos primero), salta los que ya
+# están al día y respeta el presupuesto/circuit-breaker de lib/llm.ts.
+- key: dashboard.assessment_auto_enabled
+  env: DASHBOARD_ASSESSMENT_AUTO_ENABLED
+  type: bool
+  sensitive: false
+  default: true
+  section: "Evaluación IA"
+  description: "Interruptor general del pase automático de evaluación IA (#308). Con false, el scheduler no arranca y las evaluaciones solo se ejecutan si se llama a mano al endpoint POST de assessments."
+  requires_restart: [dashboard]
+  components: [dashboard]
+
+- key: dashboard.assessment_batch_size
+  env: DASHBOARD_ASSESSMENT_BATCH_SIZE
+  type: int
+  sensitive: false
+  default: 5
+  section: "Evaluación IA"
+  description: "Número máximo de inmuebles procesados por tick del pase de evaluación IA (los más antiguos sin veredicto actual primero). Acota el gasto LLM por ciclo; no es un backfill de todo el histórico de golpe. Debe ser positivo."
+  requires_restart: [dashboard]
+  components: [dashboard]
+
+- key: dashboard.assessment_interval_seconds
+  env: DASHBOARD_ASSESSMENT_INTERVAL_SECONDS
+  type: int
+  sensitive: false
+  default: 900
+  section: "Evaluación IA"
+  description: "Cadencia (segundos) del pase de evaluación IA. Por defecto 15 min: suficiente para que un inmueble recién ingerido reciba sus veredictos dentro de una ventana acotada sin martillear el LLM. Debe ser positivo."
+  requires_restart: [dashboard]
+  components: [dashboard]
+
+# -----------------------------------------------------------------------------
 # Agentic tool-calling
 # -----------------------------------------------------------------------------
 - key: dashboard.agentic_tools_enabled
