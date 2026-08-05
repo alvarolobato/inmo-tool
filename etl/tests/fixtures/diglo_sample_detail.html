@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<!--
+  Trimmed/synthetic reconstruction of a real digloservicer.com detail page
+  observed live 2026-08-05 (issue #117), for /venta-pisos/madrid/madrid/
+  efe0000200053. Keeps only the structures the connector reads:
+    - the corporate JSON-LD (RealEstateAgent) — proves the connector does
+      NOT read the property from it (its address is Santander's HQ);
+    - BOTH utag_data assignments (an empty {} placeholder, then the real one);
+    - the drupalSettings JSON with the subject's coordinates;
+    - the og: meta tags and h1;
+    - the subject's .product-print-sheet block (price + icon stats);
+    - the description paragraph with the built/useful surface split;
+    - ONE .listing-info "inmuebles similares" card carrying a NEIGHBOUR's
+      figures (385.000 €, 91 m², refcode EFE0000200055) — load-bearing for
+      the carousel-isolation regression test.
+  Real values cross-checked against the live page.
+-->
+<html lang="es">
+<head>
+  <meta property="og:title" content="VIV CALLE MENDIVIL, 44 - BAJO 1 en venta | Diglo" />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://digloservicer.com/venta-pisos/madrid/madrid/efe0000200053" />
+  <meta property="og:site_name" content="Diglo" />
+  <meta property="og:description" content="VIV CALLE MENDIVIL, 44 - BAJO 1 de 78,30 metros cuadrados. Entra en Diglo, portal del Banco Santander." />
+  <meta property="og:image" content="https://storage.googleapis.com/gcs-diglo-web-contents-pd/imagenes/activos/Espana/Madrid/Madrid/EFE0000200053/EFE0000200053_01.jpg" />
+
+  <script type="application/ld+json">
+  {
+    "@context":"https://schema.org",
+    "@type":"RealEstateAgent",
+    "name":"Diglo Servicer",
+    "description":"Diglo es el nuevo portal inmobiliario del Grupo Banco Santander con amplia oferta de inmuebles en venta.",
+    "url":"https://digloservicer.com/",
+    "telephone":"+34 91 835 87 80",
+    "address":{"@type":"PostalAddress","addressLocality":"Boadilla del Monte","addressRegion":"Madrid","postalCode":"28660","streetAddress":"Avenida de Cantabria, s/n, Ciudad Grupo Santander","addressCountry":"ES"}
+  }
+  </script>
+
+  <script>window.utag_data = {};</script>
+
+  <script type="application/json" data-drupal-selector="drupal-settings-json">
+  {"path":{"baseUrl":"/"},"node_id":"43431","node_title":"VIV CALLE MENDIVIL, 44 - BAJO 1","yera_producto_lat":"40.3993774335","yera_producto_lon":"-3.6635205596738","is_product":true,"is_offerable":false,"is_visitable":true,"is_santander":false,"page_title":"VIV CALLE MENDIVIL, 44 - BAJO 1"}
+  </script>
+</head>
+<body>
+  <h1>Piso en venta en Calle Mendivil 44</h1>
+
+  <div class="product-print-sheet d-none d-print-block">
+    <div class="product-print-sheet__summary">
+      <div class="product-print-sheet__price">308.000 &euro;</div>
+      <div class="product-print-sheet__details">
+        <div class="listing-details info my-0">
+          <div class="icons-detail row pb-0 px-0">
+            <div class="info-icon"><img src="/themes/custom/diglo/icons/icon-superficie.svg" alt="">78 m&sup2;</div>
+            <div class="info-icon"><img src="/themes/custom/diglo/icons/icon-habitacion.svg" alt="">2&nbsp;&nbsp;Hab.</div>
+            <div class="info-icon"><img src="/themes/custom/diglo/icons/icon-bano.svg" alt="">1&nbsp;&nbsp;Ba&ntilde;o/s</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <section class="product-description">
+    <p>Magn&iacute;fico piso de obra nueva en venta sobre plano, con Licencia de Obra ya Concedida, ubicado en la planta baja de un edificio de corte moderno en el barrio de Numancia (Puente de Vallecas). La vivienda cuenta con una superficie construida de 78,30 m&sup2; (51,67 m&sup2; &uacute;tiles), perfectamente distribuidos en 2 habitaciones y un ba&ntilde;o.</p>
+  </section>
+
+  <div class="gallery">
+    <img src="https://storage.googleapis.com/gcs-diglo-web-contents-pd/imagenes/activos/Espana/Madrid/Madrid/EFE0000200053/EFE0000200053_02.jpg" alt="">
+    <img src="https://storage.googleapis.com/gcs-diglo-web-contents-pd/imagenes/activos/Espana/Madrid/Madrid/EFE0000200053/EFE0000200053_03.jpg" alt="">
+  </div>
+
+  <!-- inmuebles similares carousel: a NEIGHBOUR, different price/size/refcode -->
+  <div class="container-similares">
+    <div class="listing-info">
+      <div class="listing-content">
+        <div class="price">385.000 &euro;</div>
+        <p>Piso en venta en Calle Larga 7 Madrid</p>
+        <div class="icons-detail row">
+          <div class="info-icon"><img src="/themes/custom/diglo/icons/icon-superficie.svg" alt="">91 m&sup2;</div>
+          <div class="info-icon"><img src="/themes/custom/diglo/icons/icon-habitacion.svg" alt="">3 Hab.</div>
+          <div class="info-icon"><img src="/themes/custom/diglo/icons/icon-bano.svg" alt="">2 Ba&ntilde;o/s</div>
+        </div>
+        <img src="https://storage.googleapis.com/gcs-diglo-web-contents-pd/imagenes/activos/Espana/Madrid/Madrid/EFE0000200055/EFE0000200055_01.jpg" alt="">
+      </div>
+    </div>
+  </div>
+
+  <script>
+    window.utag_data = {
+      "crm_id": "",
+      "customer_is_logged_in": "0",
+      "item_id": "EFE0000200053",
+      "operation_type": "Compra",
+      "page_friendly_url": "/venta-pisos/madrid/madrid/efe0000200053",
+      "page_name": "VIV CALLE MENDIVIL, 44 - BAJO 1",
+      "page_type": "product",
+      "property_city": "Madrid",
+      "property_community": "Madrid",
+      "property_date_published": "2025-12-09",
+      "property_price": "308000.00",
+      "property_province": "Madrid",
+      "property_type": "Pisos",
+      "property_type_id": "4706",
+      "site_section": "Inmueble",
+      "tealium_event": "page_view"
+    };
+  </script>
+</body>
+</html>
