@@ -33,9 +33,11 @@ def register_all() -> None:
     from etl.connectors.diglo import DigloConnector
     from etl.connectors.fotocasa import FotocasaConnector
     from etl.connectors.fotocasa_rental import FotocasaRentalConnector
+    from etl.connectors.habitaclia import HabitacliaConnector
     from etl.connectors.idealista import IdealistaConnector
     from etl.connectors.milanuncios import MilanunciosConnector
     from etl.connectors.milanuncios_rental import MilanunciosRentalConnector
+    from etl.connectors.pisos import PisosConnector
     from etl.connectors.servihabitat import ServihabitatConnector
     from etl.connectors.solvia import SolviaConnector
     from etl.connectors.unicaja import UnicajaConnector
@@ -102,3 +104,16 @@ def register_all() -> None:
     # page publishes lat/lon (batch's second after Diglo). Born disabled (#100).
     if UnicajaConnector.name not in registered_names:
         CONNECTORS.append(UnicajaConnector())
+    # Issue #79: pisos.com (Vocento), a mainstream generalist portal — scope
+    # expansion beyond the original Fotocasa/Milanuncios set. Search-payload-
+    # primary (rich ad-preview cards + per-card JSON-LD geo, no detail fetch),
+    # publishes lat/lon. Born disabled (#100). See pisos.py's docstring / D-069.
+    if PisosConnector.name not in registered_names:
+        CONNECTORS.append(PisosConnector())
+    # Issue #79: habitaclia.com (Adevinta), Spain's #4 portal — scope
+    # expansion. Discover(search) + fetch_detail(detail) bespoke-HTML
+    # connector; coordinates via VGPSLat/VGPSLon (no JSON-LD, no Fotocasa
+    # payload reuse despite shared owner). Born disabled (#100). See
+    # habitaclia.py's docstring / D-070.
+    if HabitacliaConnector.name not in registered_names:
+        CONNECTORS.append(HabitacliaConnector())
