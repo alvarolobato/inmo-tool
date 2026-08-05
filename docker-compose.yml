@@ -191,9 +191,15 @@ services:
       # from the admin /config UI (env-sourced keys are surfaced as read-only).
       # Set them on the host shell only if you genuinely want a hard override.
       # Claude Code CLI credentials for DASHBOARD_LLM_PROVIDER=cli.
-      # Run `claude /install-github-app` once to generate a 1-year OAuth token.
-      # Copy the full contents of ~/.claude/.credentials.json into your
-      # ~/.config/inmo-tool/.env as CLAUDE_CODE_OAUTH_TOKEN='<json>'.
+      # This env var takes a BARE long-lived OAuth token string (looks like
+      # `sk-ant-oat01-...`), NOT the ~/.claude/.credentials.json JSON object —
+      # the claude binary reads CLAUDE_CODE_OAUTH_TOKEN directly and expects
+      # only the token. The accessToken inside .credentials.json is short-lived
+      # (expires in hours) and must not be used here.
+      # Mint the long-lived token on the host and copy the single printed line:
+      #   CLAUDE_CONFIG_DIR=~/.claude-personal claude setup-token
+      # then set it in ~/.config/inmo-tool/.env as:
+      #   CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...   (no quotes needed)
       # The CLI reads this env var directly — no file mount needed.
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       HOME: /home/nextjs
