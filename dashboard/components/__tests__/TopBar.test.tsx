@@ -66,7 +66,18 @@ describe("TopBar", () => {
     const nav = screen.getByRole("navigation");
     const links = Array.from(nav.querySelectorAll("a"));
     const labels = links.map((l) => l.textContent?.trim());
-    expect(labels).toEqual(["Inicio", "Perfiles", "Conversaciones"]);
+    expect(labels).toEqual(["Inicio", "Perfiles", "Captura", "Conversaciones"]);
+  });
+
+  it("includes 'Captura' link (top-level execution UI, #268) right after Perfiles", () => {
+    render(<TopBar />);
+    const capturaLink = screen.getByRole("link", { name: "Captura" });
+    expect(capturaLink).toBeInTheDocument();
+    expect(capturaLink).toHaveAttribute("href", "/captura");
+    const nav = screen.getByRole("navigation");
+    const links = Array.from(nav.querySelectorAll("a"));
+    const labels = links.map((l) => l.textContent?.trim());
+    expect(labels.indexOf("Captura")).toBe(labels.indexOf("Perfiles") + 1);
   });
 
   it("includes 'Conversaciones' link pointing to /conversations", () => {
