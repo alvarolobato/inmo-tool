@@ -39,7 +39,12 @@
  */
 
 import { sql } from "@/lib/db-write";
-import { DISABLED_SOURCES_CTE, activeSourceClause } from "@/lib/db/source-active";
+import {
+  DISABLED_SOURCES_CTE,
+  assessmentEligibleClause,
+  selectionFlowValues,
+  missingCurrentVerdictClause,
+} from "./eligibility";
 import { BudgetExceededError, CircuitBreakerOpenError } from "@/lib/llm";
 import type { LlmAgenticContext } from "@/lib/llm-tools/types";
 import { getLatestAssessment, type AssessmentType } from "./cache";
@@ -71,23 +76,6 @@ export const DEFAULT_BATCH_FLOWS: BatchFlow[] = [
   { type: "redflags", promptVersion: REDFLAGS_PROMPT_VERSION, assess: assessPropertyRedFlags },
   { type: "extract", promptVersion: EXTRACT_PROMPT_VERSION, assess: assessPropertyExtract },
 ];
-
-/**
- * The three flows whose ABSENCE drives selection. Deliberately excludes
- * `extract`: a property that already has every structured field never gets an
- * `extract` row (the flow self-gates via `needsExtraction`), so keying
- * selection on a missing `extract` row would re-select the same fully-
- * structured properties every tick forever. Occupancy/condition/redflags
- * always produce a row, so once all three are current the property drops out
- * of selection and stops consuming a batch slot. `extract` still runs
- * opportunistically for any property selected on one of these three — it gets
- * exactly one attempt, alongside the property's initial assessment.
- */
-const SELECTION_FLOWS: Array<{ type: AssessmentType; promptVersion: string }> =
-  DEFAULT_BATCH_FLOWS.filter((f) => f.type !== "extract").map((f) => ({
-    type: f.type,
-    promptVersion: f.promptVersion,
-  }));
 
 /** Why a batch stopped early — a clean, budget-driven halt, not a crash. */
 export type BatchStopReason = "budget" | "circuit";
@@ -141,41 +129,17 @@ export async function selectPropertiesNeedingAssessment(
   batchSize: number,
 ): Promise<number[]> {
   if (batchSize <= 0) return [];
-  const values = SELECTION_FLOWS.map((_f, i) => `($${i * 2 + 1}, $${i * 2 + 2})`).join(", ");
-  const params: string[] = SELECTION_FLOWS.flatMap((f) => [f.type, f.promptVersion]);
+  // Eligibility (stage 1 + stage 2a) and the pending predicate (stage 2b) come
+  // from the shared `eligibility.ts` fragments, so the cost panel's coverage
+  // (`lib/db/llm-health.ts`) counts EXACTLY the population this query drains.
+  const { valuesSql, params } = selectionFlowValues(1);
   const limitParam = `$${params.length + 1}`;
   const rows = await sql<{ id: string }>(
     `WITH ${DISABLED_SOURCES_CTE}
      SELECT p.id
        FROM property p
-      WHERE EXISTS (
-              -- Stage 1: matched candidate of at least one ACTIVE profile.
-              SELECT 1
-                FROM profile_listing_state pls
-                JOIN search_profile sp ON sp.id = pls.profile_id
-               WHERE pls.property_id = p.id
-                 AND pls.matched = true
-                 AND sp.archived_at IS NULL
-            )
-        AND EXISTS (
-              -- Stage 2a: something readable exists, from an ACTIVE source.
-              SELECT 1 FROM listing l
-               WHERE l.property_id = p.id
-                 AND l.status = 'active'
-                 AND COALESCE(TRIM(l.description), '') <> ''
-                 AND ${activeSourceClause("l")}
-            )
-        AND EXISTS (
-              -- Stage 2b: at least one selection flow lacks a current verdict.
-              SELECT 1
-                FROM (VALUES ${values}) AS f(atype, ver)
-               WHERE NOT EXISTS (
-                       SELECT 1 FROM ai_assessment a
-                        WHERE a.property_id = p.id
-                          AND a.assessment_type = f.atype
-                          AND a.prompt_version = f.ver
-                     )
-            )
+      WHERE ${assessmentEligibleClause("p")}
+        AND ${missingCurrentVerdictClause("p", valuesSql)}
       ORDER BY p.created_at ASC, p.id ASC
       LIMIT ${limitParam}`,
     [...params, String(batchSize)],
