@@ -1358,7 +1358,11 @@ CREATE TABLE IF NOT EXISTS extension_capture (
     -- 'failed' row keeps its html for debugging.
     html             TEXT,
     connector_name   TEXT,
-    status           TEXT         NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','done','failed')),
+    -- 'listing' (issue #292): the captured page was a SEARCH/results listing
+    -- page, not a detail page — a clean, informational outcome (its detail
+    -- links are harvested into capture_worklist), NOT a failure. 'failed' is
+    -- reserved for genuinely broken DETAIL captures.
+    status           TEXT         NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','done','failed','listing')),
     error_msg        TEXT,
     property_id      BIGINT       REFERENCES property(id),
     listing_id       BIGINT       REFERENCES listing(id),
@@ -1375,6 +1379,30 @@ CREATE TABLE IF NOT EXISTS extension_capture (
 -- done/failed rows accumulate (they're never re-scanned by the poll).
 CREATE INDEX IF NOT EXISTS idx_extension_capture_pending
     ON extension_capture (created_at) WHERE status = 'pending';
+
+-- Migration (issue #292): widen the status CHECK to admit 'listing'. A DB
+-- created before #292 carries the three-value constraint under its default
+-- name (extension_capture_status_check); CREATE TABLE IF NOT EXISTS above
+-- never alters an existing table, so drop-and-re-add here. init.sql re-applies
+-- on every ETL boot, so this must be idempotent: DROP IF EXISTS then ADD is a
+-- no-op-safe pair. No data rewrite — 'listing' only widens the allowed set.
+ALTER TABLE extension_capture DROP CONSTRAINT IF EXISTS extension_capture_status_check;
+ALTER TABLE extension_capture ADD CONSTRAINT extension_capture_status_check
+    CHECK (status IN ('pending','done','failed','listing'));
+
+-- One-time migration (issue #292): drop the per-sweep 'disabled via
+-- connector_config' rows that issue #99 wrote to connector_run_results for
+-- every disabled connector on every sweep (~63 rows / 8 connectors). A
+-- deliberately-disabled connector no longer emits a result row (see
+-- etl/orchestrator.py run_all_connectors); this clears the historical noise
+-- so the ETL health surface is green unless something is genuinely broken.
+-- Idempotent by construction — a plain DELETE re-runs to a no-op once the rows
+-- are gone. Only the exact orchestrator-written marker is matched, so a
+-- user-authored row could never be touched. The historical
+-- connector_runs.connectors_skipped counters are left as-is (past aggregates).
+DELETE FROM connector_run_results
+ WHERE status = 'skipped'
+   AND error_msg = 'disabled via connector_config';
 
 
 -- ============================================================

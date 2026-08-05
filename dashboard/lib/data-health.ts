@@ -68,6 +68,13 @@ export interface PortalCaptureHealth {
   oldest_pending_age_seconds: number | null;
   done_7d: number;
   failed_7d: number;
+  /**
+   * Search/listing pages captured over the 7d window (issue #292). A clean,
+   * informational outcome — the owner captured a results page and its detail
+   * links were harvested into the batch worklist. NEVER counted as a failure
+   * (it is not in `failed_7d`); surfaced as a neutral note, not amber/red.
+   */
+  listing_7d: number;
   /** Avg fields_extracted/fields_available over the 7d window, or null. */
   avg_fields_ratio_7d: number | null;
   /** Avg photo count per done capture over the 7d window, or null. */

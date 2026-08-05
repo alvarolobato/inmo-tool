@@ -320,6 +320,23 @@ function PortalHealthSection({ rows }: { rows: PortalCaptureHealth[] }) {
                       </span>
                     </dd>
                   </div>
+                  {/* Issue #292: search/listing-page captures are a clean,
+                      informational outcome — never counted as failures.
+                      Surfaced as a neutral note so a captured results page
+                      reads as "handled", not as an error. */}
+                  {p.listing_7d > 0 && (
+                    <div className="flex justify-between">
+                      <dt className="text-tremor-content dark:text-dark-tremor-content">
+                        Páginas de resultados (7d)
+                      </dt>
+                      <dd
+                        className="font-medium text-tremor-content-strong dark:text-dark-tremor-content-strong"
+                        data-testid={`portal-listing-${p.portal}`}
+                      >
+                        {p.listing_7d}
+                      </dd>
+                    </div>
+                  )}
                   <div className="flex justify-between">
                     <dt className="text-tremor-content dark:text-dark-tremor-content">
                       Completitud

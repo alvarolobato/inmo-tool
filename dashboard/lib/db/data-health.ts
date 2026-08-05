@@ -93,6 +93,8 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
              AND ec.created_at > NOW() - INTERVAL '7 days')                 AS done_7d,
            COUNT(*) FILTER (WHERE ec.status = 'failed'
              AND ec.created_at > NOW() - INTERVAL '7 days')                 AS failed_7d,
+           COUNT(*) FILTER (WHERE ec.status = 'listing'
+             AND ec.created_at > NOW() - INTERVAL '7 days')                 AS listing_7d,
            AVG(ec.fields_extracted::numeric / NULLIF(ec.fields_available, 0))
              FILTER (WHERE ec.status = 'done' AND ec.fields_available > 0
                AND ec.created_at > NOW() - INTERVAL '7 days')              AS avg_fields_ratio_7d,
@@ -185,8 +187,9 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
     const oldest = numOrNull(row[2]);
     const done = num(row[3]);
     const failed = num(row[4]);
-    const ratio = numOrNull(row[5]);
-    const photos = numOrNull(row[6]);
+    const listing = num(row[5]);
+    const ratio = numOrNull(row[6]);
+    const photos = numOrNull(row[7]);
     const existing = portalMap.get(portal);
     if (!existing) {
       portalMap.set(portal, {
@@ -195,6 +198,7 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
         oldest_pending_age_seconds: oldest,
         done_7d: done,
         failed_7d: failed,
+        listing_7d: listing,
         avg_fields_ratio_7d: ratio,
         avg_photo_count_7d: photos,
       });
@@ -202,6 +206,7 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
       existing.pending_count += pending;
       existing.done_7d += done;
       existing.failed_7d += failed;
+      existing.listing_7d += listing;
       // Oldest across hosts (nulls ignored) — the worst wait is the signal.
       existing.oldest_pending_age_seconds = maxDefined(
         existing.oldest_pending_age_seconds,
