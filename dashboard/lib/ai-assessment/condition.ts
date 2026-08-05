@@ -47,8 +47,15 @@ export { NoListingsError, loadPropertyListings };
  * change a verdict, so `ai_assessment`'s unique key treats the new output as
  * a distinct row rather than colliding with a verdict the old prompt
  * produced (same convention as `OCCUPANCY_PROMPT_VERSION`).
+ *
+ * `v2` (#313): the prompt/output gained the `renovation_severity` sub-axis on
+ * `a_reformar`. Bumping the version is the correct trigger for #308's batch
+ * scheduler (`lib/ai-assessment/batch.ts` selects properties lacking a row at
+ * the *current* prompt_version) to re-assess every property so pre-severity
+ * `a_reformar` verdicts get a severity, rather than being read back stale as
+ * if they had always carried the field (D-056).
  */
-export const CONDITION_PROMPT_VERSION = "condition/v1";
+export const CONDITION_PROMPT_VERSION = "condition/v2";
 
 /**
  * Renovation-state vocabulary (issue #26 technical approach #1). Kept to
@@ -66,6 +73,42 @@ export const CONDITION_CATEGORIES = [
 export type ConditionCategory = (typeof CONDITION_CATEGORIES)[number];
 
 /**
+ * Renovation severity — the sub-axis on `a_reformar` (#313, D-056).
+ *
+ * The base `condition` enum deliberately stays a flat 4-value set (#26): its
+ * two endpoints — `reformado` (no capex) and `obra_nueva` (new-build) — are
+ * already unambiguous, and `unclear` is the no-signal case. What #45
+ * (renovation cost & ARV tiering) needs, and what the flat enum could not
+ * give it, is a light-vs-heavy split *within* `a_reformar`: "repintar y
+ * cambiar cocina" and "reforma estructural completa" are the same category
+ * today but map to very different cost bands.
+ *
+ * Modelled as a separate, additive field rather than by splitting the
+ * `condition` enum, so every existing consumer of `condition` (the card badge
+ * vocabulary in `lib/candidates.ts`, the hard filters in #310, the mock
+ * fixtures) keeps reading exactly the same closed 4-value set it always did.
+ *
+ *  - `leve`     — cosmetic / light reform: paint, kitchen/bath refresh,
+ *                 fixtures, flooring. No structural or whole-systems work.
+ *  - `integral` — heavy / structural reform: "reforma integral", structural
+ *                 mentions, multiple systems (electrical + plumbing + …) to
+ *                 replace, gutting back to shell.
+ *  - `unknown`  — the property IS `a_reformar` but the text doesn't say
+ *                 enough to grade the depth of work. Same evidence discipline
+ *                 as the base verdict: a severity is asserted only from cited
+ *                 cues, never guessed, so "needs work, unclear how much" is a
+ *                 first-class value rather than a coin-flip.
+ *
+ * `null` on the result means the axis does not apply — `condition` is not
+ * `a_reformar` (a `reformado`/`obra_nueva`/`unclear` property has no
+ * renovation to grade). #45 keys its cost bands off `leve`/`integral` and
+ * treats `unknown`/`null` as "no graded estimate available".
+ */
+export const RENOVATION_SEVERITIES = ["leve", "integral", "unknown"] as const;
+
+export type RenovationSeverity = (typeof RENOVATION_SEVERITIES)[number];
+
+/**
  * Single-axis result. Flattened (not wrapped in a nested `verdict` object
  * like occupancy's three axes) because there is only one axis here — nesting
  * would just be `result.verdict.value` for no benefit. Still carries the same
@@ -76,6 +119,13 @@ export type ConditionCategory = (typeof CONDITION_CATEGORIES)[number];
  */
 export interface ConditionResult {
   condition: ConditionCategory;
+  /**
+   * Depth of work when `condition === "a_reformar"` (#313, D-056), else
+   * `null` (the axis does not apply to `reformado`/`obra_nueva`/`unclear`).
+   * See `RENOVATION_SEVERITIES` for the value semantics. #45 maps this to
+   * refurb cost bands.
+   */
+  renovation_severity: RenovationSeverity | null;
   confidence: number;
   /** Literal quote from one advert, or "" when nothing could be cited. */
   evidence: string;
@@ -130,12 +180,33 @@ export function parseConditionResult(raw: string): ConditionResult {
 
   return {
     condition: verdict.value,
+    renovation_severity: parseRenovationSeverity(o, verdict.value),
     confidence: verdict.confidence,
     evidence: verdict.evidence,
     evidence_source: verdict.evidence_source,
     issues,
     reasoning: typeof o.reasoning === "string" ? o.reasoning : "",
   };
+}
+
+/**
+ * Grade the depth of an `a_reformar` verdict (#313, D-056).
+ *
+ * Bound to the *final* condition (after the `unclear`-on-no-evidence backstop
+ * above), not to whatever the model put in the JSON: severity only means
+ * anything for `a_reformar`, so any other verdict — including one the backstop
+ * just downgraded to `unclear` — yields `null`. When the verdict IS
+ * `a_reformar`, an unrecognised or missing severity degrades to `"unknown"`
+ * ("needs work, can't grade the depth") rather than being invented, mirroring
+ * how `parseVerdict` degrades an unknown category rather than guessing.
+ */
+function parseRenovationSeverity(
+  o: Record<string, unknown>,
+  condition: ConditionCategory,
+): RenovationSeverity | null {
+  if (condition !== "a_reformar") return null;
+  const raw = typeof o.renovation_severity === "string" ? o.renovation_severity : "";
+  return raw === "leve" || raw === "integral" ? raw : "unknown";
 }
 
 /**

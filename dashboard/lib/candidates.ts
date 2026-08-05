@@ -266,7 +266,25 @@ export function flagsFromAssessments(rows: RawAssessmentRow[]): CandidateFlag[] 
     const condition = typeof result.condition === "string" ? result.condition : null;
     if (condition !== null) {
       const label = CONDITION_LABELS[condition];
-      if (label !== undefined) flags.push({ kind: `condition:${condition}`, label, tone: "neutral" });
+      if (label !== undefined) {
+        // #313: when the condition is `a_reformar`, refine the badge with the
+        // renovation-severity sub-axis (leve/integral) so a glance tells light
+        // from heavy reform — the light-vs-heavy distinction #45 keys its cost
+        // bands off. `unknown`/`null`/absent severity keeps the plain
+        // "A reformar" badge (and stable `condition:a_reformar` kind), so a
+        // pre-#313 row with no severity field is unchanged.
+        const severity =
+          condition === "a_reformar" ? RENOVATION_SEVERITY_LABELS[String(result.renovation_severity)] : undefined;
+        if (severity !== undefined) {
+          flags.push({
+            kind: `condition:a_reformar:${result.renovation_severity}`,
+            label: `${label} (${severity})`,
+            tone: "neutral",
+          });
+        } else {
+          flags.push({ kind: `condition:${condition}`, label, tone: "neutral" });
+        }
+      }
     }
   }
   const byKind = new Map<string, CandidateFlag>();
@@ -302,6 +320,19 @@ const CAVEAT_LABELS: Record<string, string> = {
 const CONDITION_LABELS: Record<string, string> = {
   a_reformar: "A reformar",
   obra_nueva: "Obra nueva",
+};
+
+/**
+ * Renovation-severity refinement of the `a_reformar` badge (#313, D-056).
+ * Only `leve`/`integral` earn a refined badge — `unknown` (needs work, depth
+ * ungraded) and `null` (axis N/A) carry no extra information, so they fall
+ * through to the plain "A reformar" badge. Closed set, validated at the writer
+ * (`RENOVATION_SEVERITIES` in `lib/ai-assessment/condition.ts`) — same drop-
+ * unrecognised discipline as `CONDITION_LABELS` above.
+ */
+const RENOVATION_SEVERITY_LABELS: Record<string, string> = {
+  leve: "leve",
+  integral: "integral",
 };
 
 export interface RawAssessmentRow {

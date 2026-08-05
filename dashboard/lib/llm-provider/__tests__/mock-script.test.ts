@@ -89,6 +89,8 @@ describe("mockRunStep — assessment flows", () => {
       const parsed = JSON.parse(step.content);
       expect(parsed.condition).toBe("reformado");
       expect(Array.isArray(parsed.issues)).toBe(true);
+      // #313: severity is null on a non-a_reformar verdict.
+      expect(parsed.renovation_severity).toBeNull();
     }
   });
 
