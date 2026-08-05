@@ -159,12 +159,17 @@ def _repo_slug() -> str | None:
 
 def open_pr_decision_ids(
     exclude_branch: str | None = None,
+    exclude_sha: str | None = None,
 ) -> dict[int, tuple[str, set[int]]] | None:
     """Decision ids claimed on every open PR's head branch.
 
     Returns ``{pr_number: (head_branch, {ids})}``, or ``None`` when ``gh`` is
-    unavailable/offline (so callers degrade gracefully). ``exclude_branch``
-    skips one branch — the caller's own — so a PR never collides with itself.
+    unavailable/offline (so callers degrade gracefully). A PR is skipped — so it
+    never collides with itself — when its head branch equals ``exclude_branch``
+    **or** its head commit equals ``exclude_sha``. The SHA path matters because a
+    detached-HEAD checkout (GitHub Actions, `gh pr checkout` of a branch already
+    in a worktree, a reviewer worktree) reports its branch as ``"HEAD"``, so
+    name-only exclusion silently fails to skip the caller's own PR.
 
     A branch that has no ``docs/decisions/`` dir (404) or an individual API
     hiccup is treated as "no ids on that branch" and skipped, rather than
@@ -181,7 +186,7 @@ def open_pr_decision_ids(
                 "--limit",
                 "200",
                 "--json",
-                "number,headRefName",
+                "number,headRefName,headRefOid",
             ]
         )
     except GhUnavailable:
@@ -200,9 +205,12 @@ def open_pr_decision_ids(
     for pr in prs:
         branch = pr.get("headRefName")
         number = pr.get("number")
+        oid = pr.get("headRefOid")
         if branch is None or number is None:
             continue
         if exclude_branch is not None and branch == exclude_branch:
+            continue
+        if exclude_sha is not None and oid is not None and oid == exclude_sha:
             continue
         try:
             contents = _run_gh(
@@ -251,6 +259,19 @@ def current_branch() -> str | None:
         return None
     name = out.strip()
     return name or None
+
+
+def head_sha() -> str | None:
+    """The current ``HEAD`` commit sha, or ``None`` (no git / not a repo).
+
+    Used to exclude the caller's own PR by commit when the branch name is
+    unavailable (detached HEAD reports its branch as ``"HEAD"``).
+    """
+    out = _run_git(["rev-parse", "HEAD"])
+    if out is None:
+        return None
+    sha = out.strip()
+    return sha or None
 
 
 def new_ids_vs_base(base: str = "origin/main") -> set[int] | None:

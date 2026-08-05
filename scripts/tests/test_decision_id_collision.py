@@ -89,8 +89,15 @@ def test_this_branch_has_no_cross_pr_collision():
     if not new_ids:
         pytest.skip("this branch adds no new decision records — nothing to check")
 
-    branch = di.current_branch()
-    pr_map = di.open_pr_decision_ids(exclude_branch=branch)
+    # Resolve "our own" PR so it isn't flagged as colliding with itself.
+    # A detached-HEAD checkout (CI, `gh pr checkout` of a branch already in a
+    # worktree, a reviewer worktree) reports its branch as "HEAD", so we can't
+    # rely on the branch name alone: prefer the CI-provided source-branch env,
+    # fall back to the local branch name, and ALSO exclude by head commit sha.
+    import os
+
+    branch = os.environ.get("GITHUB_HEAD_REF") or di.current_branch()
+    pr_map = di.open_pr_decision_ids(exclude_branch=branch, exclude_sha=di.head_sha())
     if pr_map is None:
         pytest.skip(
             "gh unavailable/offline — cannot read other open PRs; renumber-at-merge is the backstop"

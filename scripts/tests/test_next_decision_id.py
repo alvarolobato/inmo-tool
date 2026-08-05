@@ -105,6 +105,21 @@ def test_open_pr_decision_ids_excludes_own_branch(monkeypatch):
     assert result == {2: ("other", {51})}
 
 
+def test_open_pr_decision_ids_excludes_own_by_sha(monkeypatch):
+    # Detached HEAD (CI, reviewer worktree) reports branch "HEAD", so name-only
+    # exclusion can't skip the caller's own PR — exclude by head commit sha.
+    pr_list = (
+        '[{"number": 1, "headRefName": "mine", "headRefOid": "abc123"},'
+        ' {"number": 2, "headRefName": "other", "headRefOid": "def456"}]'
+    )
+    contents = {"mine": ["D-050-a.md"], "other": ["D-051-b.md"]}
+    monkeypatch.setattr(di, "_run_gh", _fake_gh(pr_list, contents))
+    # Branch name "HEAD" matches nothing; sha exclusion must still drop PR #1.
+    result = di.open_pr_decision_ids(exclude_branch="HEAD", exclude_sha="abc123")
+    assert 1 not in result
+    assert result == {2: ("other", {51})}
+
+
 def test_open_pr_decision_ids_branch_without_decisions_dir(monkeypatch):
     # A branch whose docs/decisions 404s is recorded with an empty claim set,
     # not dropped and not fatal.
