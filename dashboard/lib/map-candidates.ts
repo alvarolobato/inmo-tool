@@ -14,6 +14,7 @@
  */
 
 import { sql } from "@/lib/db-write";
+import { DISABLED_SOURCES_CTE, activeSourceClause } from "@/lib/db/source-active";
 
 export interface MapListingSummary {
   id: number;
@@ -73,7 +74,13 @@ interface RawCountRow {
 export async function listMapCandidates(profileId: number): Promise<MapCandidates> {
   const [rows, counts] = await Promise.all([
     sql<RawMapRow>(
-      `SELECT
+      // Issue #319 / D-055: the map is the SAME candidate feed as the list, so
+      // it hides disabled-source data identically — no pin, badge, or price for
+      // a source whose connector is OFF. The `disabled_sources` CTE and the
+      // per-subquery filters mirror listCandidates exactly (see
+      // lib/db/source-active.ts and lib/candidates.ts).
+      `WITH ${DISABLED_SOURCES_CTE}
+       SELECT
          p.id AS property_id,
          p.address,
          p.lat,
@@ -90,7 +97,8 @@ export async function listMapCandidates(profileId: number): Promise<MapCandidate
          -- listing today either.
          (SELECT MIN(l2.current_price)
             FROM listing l2
-           WHERE l2.property_id = p.id AND l2.status = 'active' AND l2.operation = 'sale') AS min_price,
+           WHERE l2.property_id = p.id AND l2.status = 'active' AND l2.operation = 'sale'
+             AND ${activeSourceClause("l2")}) AS min_price,
          COALESCE(
            (SELECT json_agg(
                      json_build_object(
@@ -102,7 +110,8 @@ export async function listMapCandidates(profileId: number): Promise<MapCandidate
                      ORDER BY l.source
                    )
               FROM listing l
-             WHERE l.property_id = p.id AND l.status = 'active' AND l.operation = 'sale'),
+             WHERE l.property_id = p.id AND l.status = 'active' AND l.operation = 'sale'
+               AND ${activeSourceClause("l")}),
            '[]'
          ) AS listings
        FROM profile_listing_state pls
@@ -111,18 +120,48 @@ export async function listMapCandidates(profileId: number): Promise<MapCandidate
          AND pls.matched = true
          AND p.lat IS NOT NULL
          AND p.lon IS NOT NULL
+         -- Issue #319 / D-055: drop a property whose active-sale listings are
+         -- ALL from disabled sources (identical to listCandidates); a property
+         -- with no active-sale listing at all keeps its prior behaviour.
+         AND (
+           NOT EXISTS (
+             SELECT 1 FROM listing ld
+              WHERE ld.property_id = p.id AND ld.status = 'active' AND ld.operation = 'sale'
+           )
+           OR EXISTS (
+             SELECT 1 FROM listing lv
+              WHERE lv.property_id = p.id AND lv.status = 'active' AND lv.operation = 'sale'
+                AND ${activeSourceClause("lv")}
+           )
+         )
        ORDER BY p.id DESC
        LIMIT $2`,
       [profileId, MAX_MAP_CANDIDATES],
     ),
     sql<RawCountRow>(
-      `SELECT
+      // Issue #319 / D-055: the counts must match what's plotted — a property
+      // whose active-sale listings are all from disabled sources neither shows
+      // a pin nor counts (owner: "ni cuentan en métricas"). Same drop condition
+      // as the rows query above.
+      `WITH ${DISABLED_SOURCES_CTE}
+       SELECT
          COUNT(*) FILTER (WHERE p.lat IS NOT NULL AND p.lon IS NOT NULL) AS plottable_count,
          COUNT(*) FILTER (WHERE p.lat IS NULL OR p.lon IS NULL) AS unplottable_count
        FROM profile_listing_state pls
        JOIN property p ON p.id = pls.property_id
        WHERE pls.profile_id = $1
-         AND pls.matched = true`,
+         AND pls.matched = true
+         AND (
+           NOT EXISTS (
+             SELECT 1 FROM listing ld
+              WHERE ld.property_id = p.id AND ld.status = 'active' AND ld.operation = 'sale'
+           )
+           OR EXISTS (
+             SELECT 1 FROM listing lv
+              WHERE lv.property_id = p.id AND lv.status = 'active' AND lv.operation = 'sale'
+                AND ${activeSourceClause("lv")}
+           )
+         )`,
       [profileId],
     ),
   ]);

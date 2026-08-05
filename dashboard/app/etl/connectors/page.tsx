@@ -84,10 +84,11 @@ export default function ConnectorsPage() {
       </div>
 
       <p style={{ fontSize: 13, color: "var(--fg-muted)", marginTop: 8 }}>
-        Activa o desactiva cada conector y define qué descarga. Un conector
-        desactivado no se ejecuta en absoluto: ni descubre ni descarga nada, y
-        tampoco procesa capturas de la extensión. Los conectores nuevos nacen
-        desactivados: no se descarga nada hasta que lo actives aquí.
+        Cada conector tiene un único interruptor Activar/Desactivar. En los
+        conectores normales controla el rastreo automático; en los de «solo
+        captura» (que no rastrean) controla si se procesan las capturas de la
+        extensión. Al desactivar un conector, además de dejar de ingerir, sus
+        anuncios dejan de aparecer en los candidatos.
       </p>
 
       {error && (

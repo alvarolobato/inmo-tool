@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
- * Unit tests for the compact connector row (issue #264) and the
- * capture-processing toggle (issue #263).
+ * Unit tests for the compact connector row (issue #264) and the single
+ * Activar/Desactivar toggle (issue #319 / D-055).
  *
  * Compact row (#264): the load-bearing behaviour is the collapse/expand — the
  * list must be browsable at a glance, so every row renders only its identity +
@@ -11,14 +11,14 @@
  * a second click. The enable/disable toggle stays a basic action, visible
  * without expanding.
  *
- * Capture toggle (#263): a capture-only portal (Idealista, Aliseda) runs with
- * the crawl `enabled` flag off (its automated crawl is WAF-blocked) while
- * extension captures must still be processed. Capture PROCESSING is an
- * independent knob that lives in the always-visible collapsed row next to the
- * crawl toggle (usable without expanding); the "independent of the crawl"
- * explanation lives in the expanded detail. These tests prove the toggle only
- * appears for capture-only connectors, reflects `capture_enabled`, and PATCHes
- * `capture_enabled` without touching the crawl flag.
+ * Single toggle (#319): the owner collapsed the old two-toggle layout (crawl
+ * `enabled` + capture `capture_enabled`) into ONE Activar/Desactivar button
+ * per connector. For a normal (crawl) connector it maps to `enabled`; for a
+ * capture-only connector (Idealista, Aliseda — no automated crawl) it maps to
+ * `capture_enabled`, and NO separate crawl button is rendered. The user sees a
+ * single Activo/Desactivado state; "solo captura" is a descriptive badge, not
+ * a mode they toggle. These tests prove the mapping per connector type and
+ * that no second toggle survives.
  */
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, within, act } from "@testing-library/react";
@@ -133,35 +133,44 @@ describe("ConnectorCard — compact collapse/expand", () => {
   });
 });
 
-describe("ConnectorCard — capture toggle (issue #263)", () => {
-  it("shows an active capture toggle in the collapsed row for a capture-only connector", () => {
+describe("ConnectorCard — single toggle (issue #319 / D-055)", () => {
+  it("a capture-only connector shows ONE toggle mapped to capture_enabled, and no crawl button", () => {
     render(<ConnectorCard connector={captureOnly()} onPatch={vi.fn()} />);
 
-    // Both the capture pill and toggle are usable without expanding.
+    // Exactly one Activar/Desactivar toggle, usable without expanding.
     expect(screen.queryByTestId("connector-detail-idealista")).not.toBeInTheDocument();
-    expect(screen.getByTestId("capture-status-idealista")).toHaveTextContent("captura activa");
-    expect(screen.getByTestId("capture-toggle-idealista")).toHaveTextContent("Pausar captura");
+    expect(screen.getByTestId("toggle-idealista")).toHaveTextContent("Desactivar");
+
+    // The old second controls (crawl toggle / capture toggle / capture pill)
+    // must be gone — the whole point of #319 is a single lever.
+    expect(screen.queryByTestId("capture-toggle-idealista")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("capture-status-idealista")).not.toBeInTheDocument();
+
+    // Status reads from capture_enabled (active here) and "solo captura" stays
+    // a descriptive badge.
+    expect(screen.getByTestId("status-idealista")).toHaveTextContent("activo");
+    expect(screen.getByText("solo captura")).toBeInTheDocument();
   });
 
-  it("PATCHes capture_enabled=false without touching the crawl flag", async () => {
+  it("the capture-only toggle PATCHes capture_enabled, never enabled", async () => {
     const onPatch = vi.fn().mockResolvedValue(undefined);
     render(<ConnectorCard connector={captureOnly()} onPatch={onPatch} />);
 
     await act(async () => {
-      fireEvent.click(screen.getByTestId("capture-toggle-idealista"));
+      fireEvent.click(screen.getByTestId("toggle-idealista"));
     });
 
     expect(onPatch).toHaveBeenCalledTimes(1);
     expect(onPatch).toHaveBeenCalledWith("idealista", { capture_enabled: false });
   });
 
-  it("reflects a paused capture and re-enables it on click", async () => {
+  it("a disabled capture-only connector reads as 'desactivado' and re-enables via capture_enabled", async () => {
     const onPatch = vi.fn().mockResolvedValue(undefined);
     render(<ConnectorCard connector={captureOnly({ capture_enabled: false })} onPatch={onPatch} />);
 
-    expect(screen.getByTestId("capture-status-idealista")).toHaveTextContent("captura en pausa");
-    const toggle = screen.getByTestId("capture-toggle-idealista");
-    expect(toggle).toHaveTextContent("Activar captura");
+    expect(screen.getByTestId("status-idealista")).toHaveTextContent("desactivado");
+    const toggle = screen.getByTestId("toggle-idealista");
+    expect(toggle).toHaveTextContent("Activar");
 
     await act(async () => {
       fireEvent.click(toggle);
@@ -169,23 +178,28 @@ describe("ConnectorCard — capture toggle (issue #263)", () => {
     expect(onPatch).toHaveBeenCalledWith("idealista", { capture_enabled: true });
   });
 
-  it("disables the capture toggle for a deregistered connector", () => {
-    render(<ConnectorCard connector={captureOnly({ registered: false })} onPatch={vi.fn()} />);
-    expect(screen.getByTestId("capture-toggle-idealista")).toBeDisabled();
+  it("a normal connector's toggle maps to enabled, never capture_enabled", () => {
+    const onPatch = vi.fn(async () => {});
+    render(<ConnectorCard connector={makeConnector({ enabled: true })} onPatch={onPatch} />);
+
+    fireEvent.click(screen.getByTestId("toggle-fotocasa"));
+    expect(onPatch).toHaveBeenCalledWith("fotocasa", { enabled: false });
+    // No capture controls on a discovery connector.
+    expect(screen.queryByTestId("capture-toggle-fotocasa")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("capture-status-fotocasa")).not.toBeInTheDocument();
   });
 
-  it("explains the crawl-independence in the expanded detail", () => {
+  it("disables the single toggle for a deregistered connector", () => {
+    render(<ConnectorCard connector={captureOnly({ registered: false })} onPatch={vi.fn()} />);
+    expect(screen.getByTestId("toggle-idealista")).toBeDisabled();
+  });
+
+  it("describes 'solo captura' in the expanded detail, not a two-toggle explanation", () => {
     render(<ConnectorCard connector={captureOnly()} onPatch={vi.fn()} />);
 
     // The note lives behind the chevron, not in the narrow collapsed row.
     expect(screen.queryByTestId("capture-note-idealista")).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId("expand-idealista"));
-    expect(screen.getByTestId("capture-note-idealista")).toHaveTextContent("independiente");
-  });
-
-  it("does not render capture controls for a discovery connector", () => {
-    render(<ConnectorCard connector={makeConnector()} onPatch={vi.fn()} />);
-    expect(screen.queryByTestId("capture-toggle-fotocasa")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("capture-status-fotocasa")).not.toBeInTheDocument();
+    expect(screen.getByTestId("capture-note-idealista")).toHaveTextContent("extensión");
   });
 });

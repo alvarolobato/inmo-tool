@@ -12,6 +12,7 @@
  */
 
 import { sql } from "@/lib/db-write";
+import { DISABLED_SOURCES_CTE, activeSourceClause } from "@/lib/db/source-active";
 
 export interface CandidateListingSummary {
   id: number;
@@ -410,7 +411,15 @@ export async function listCandidates(
   // instead of assuming it does whenever a page is exactly full (that
   // false-positive was showing a dead "Cargar más" on the last page).
   const rows = await sql<RawCandidateRow>(
-    `SELECT
+    // Issue #319 / D-055: hide listings whose source connector is OFF. The
+    // `disabled_sources` CTE resolves each portal's on/off state once (see
+    // lib/db/source-active.ts) and every listing subquery below filters
+    // against it, so a disabled source contributes no card, badge, price,
+    // photo, or staleness — and a property whose only active-sale listings
+    // are all from disabled sources drops out of the feed entirely (the main
+    // WHERE's enabled-source EXISTS below).
+    `WITH ${DISABLED_SOURCES_CTE}
+     SELECT
        p.id AS property_id,
        p.address,
        p.lat,
@@ -480,6 +489,7 @@ export async function listCandidates(
                        WHERE l4.property_id = p.id
                          AND l4.status = 'active'
                          AND l4.operation = 'sale'
+                         AND ${activeSourceClause("l4")}
                          AND l4.photo_urls IS NOT NULL
                     ) per_listing
                    ORDER BY photo_url, listing_source, ord
@@ -501,10 +511,12 @@ export async function listCandidates(
        -- silent bug if it ever did leak through.
        (SELECT MIN(l2.current_price)
           FROM listing l2
-         WHERE l2.property_id = p.id AND l2.status = 'active' AND l2.operation = 'sale') AS min_price,
+         WHERE l2.property_id = p.id AND l2.status = 'active' AND l2.operation = 'sale'
+           AND ${activeSourceClause("l2")}) AS min_price,
        (SELECT MIN(l3.first_seen_at)
           FROM listing l3
-         WHERE l3.property_id = p.id) AS first_seen_at,
+         WHERE l3.property_id = p.id
+           AND ${activeSourceClause("l3")}) AS first_seen_at,
        -- FRESHEST last_seen_at across active SALE listings (issue #243): the
        -- staleness age the card renders. MAX, not MIN — the property is only
        -- as stale as its most-recently-re-confirmed listing. Same
@@ -514,7 +526,8 @@ export async function listCandidates(
        -- re-confirmation. NULL when no active sale listing has been seen.
        (SELECT MAX(l6.last_seen_at)
           FROM listing l6
-         WHERE l6.property_id = p.id AND l6.status = 'active' AND l6.operation = 'sale') AS last_seen_at,
+         WHERE l6.property_id = p.id AND l6.status = 'active' AND l6.operation = 'sale'
+           AND ${activeSourceClause("l6")}) AS last_seen_at,
        pls.score,
        pls.rank_explanation,
        pls.score_kind,
@@ -529,13 +542,36 @@ export async function listCandidates(
                    ORDER BY l.source
                  )
             FROM listing l
-           WHERE l.property_id = p.id AND l.status = 'active' AND l.operation = 'sale'),
+           WHERE l.property_id = p.id AND l.status = 'active' AND l.operation = 'sale'
+             AND ${activeSourceClause("l")}),
          '[]'
        ) AS listings
      FROM profile_listing_state pls
      JOIN property p ON p.id = pls.property_id
      WHERE pls.profile_id = $1
        AND pls.matched = true
+       -- Issue #319 / D-055: hide a property whose active-sale listings are
+       -- ALL from disabled sources. Phrased as "keep unless it has active-sale
+       -- listings and none survive the source filter" so a property with no
+       -- active-sale listing at all keeps its prior behaviour (the source
+       -- toggle only ever removes disabled-source data, never anything else).
+       AND (
+         NOT EXISTS (
+           SELECT 1
+             FROM listing ld
+            WHERE ld.property_id = p.id
+              AND ld.status = 'active'
+              AND ld.operation = 'sale'
+         )
+         OR EXISTS (
+           SELECT 1
+             FROM listing lv
+            WHERE lv.property_id = p.id
+              AND lv.status = 'active'
+              AND lv.operation = 'sale'
+              AND ${activeSourceClause("lv")}
+         )
+       )
        AND (
          $2::double precision IS NULL
          OR COALESCE(pls.score, ${NO_SCORE_SENTINEL}) < $2::double precision
@@ -554,6 +590,7 @@ export async function listCandidates(
               AND lf.source = $5::text
               AND lf.status = 'active'
               AND lf.operation = 'sale'
+              AND ${activeSourceClause("lf")}
          )
        )
      ORDER BY COALESCE(pls.score, ${NO_SCORE_SENTINEL}) DESC, p.id DESC
@@ -622,13 +659,18 @@ export async function listCandidates(
  */
 export async function listCandidateSources(profileId: number): Promise<string[]> {
   const rows = await sql<{ source: string }>(
-    `SELECT DISTINCT l.source
+    // Issue #319 / D-055: exclude sources whose connector is OFF — a disabled
+    // source produces no visible candidate, so it must not be offered as a
+    // filter option either (it would narrow the list to nothing).
+    `WITH ${DISABLED_SOURCES_CTE}
+     SELECT DISTINCT l.source
        FROM profile_listing_state pls
        JOIN listing l ON l.property_id = pls.property_id
       WHERE pls.profile_id = $1
         AND pls.matched = true
         AND l.status = 'active'
         AND l.operation = 'sale'
+        AND ${activeSourceClause("l")}
       ORDER BY l.source`,
     [profileId],
   );

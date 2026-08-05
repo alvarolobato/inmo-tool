@@ -223,4 +223,104 @@ describe.runIf(dbAvailable)("listMapCandidates — real Postgres", () => {
       expect(result.unplottableCount).toBe(0);
     });
   });
+
+  describe("hides data from disabled sources (#319 / D-055)", () => {
+    // Mirrors the list feed's test (candidates.integration.test.ts): the map
+    // is the SAME candidate feed, so a disabled source must vanish from it too
+    // — no pin, no badge, no price, and no contribution to the counts.
+    const NORMAL_OFF = "d319-map-normal-off";
+    const NORMAL_ON = "d319-map-normal-on";
+    const CAPTURE_OFF = "d319-map-capture-off";
+    const CAPTURE_ON = "d319-map-capture-on";
+    const ALL_CONNS = [NORMAL_OFF, NORMAL_ON, CAPTURE_OFF, CAPTURE_ON];
+
+    async function registerConnector(
+      pool: Pool,
+      name: string,
+      opts: { supportsDiscovery: boolean; on: boolean },
+    ) {
+      await pool.query(
+        `INSERT INTO connector_registry
+           (connector_name, registered, supports_discovery, supported_filters)
+         VALUES ($1, true, $2, '[]'::jsonb)
+         ON CONFLICT (connector_name) DO UPDATE SET supports_discovery = EXCLUDED.supports_discovery`,
+        [name, opts.supportsDiscovery],
+      );
+      const enabled = opts.supportsDiscovery ? opts.on : true;
+      const captureEnabled = opts.supportsDiscovery ? true : opts.on;
+      await pool.query(
+        `INSERT INTO connector_config (connector_name, enabled, capture_enabled, filters)
+         VALUES ($1, $2, $3, '{}'::jsonb)
+         ON CONFLICT (connector_name) DO UPDATE SET enabled = $2, capture_enabled = $3`,
+        [name, enabled, captureEnabled],
+      );
+    }
+
+    afterEach(async () => {
+      await withRealDb(async (pool) => {
+        await pool.query("DELETE FROM connector_config WHERE connector_name = ANY($1::text[])", [ALL_CONNS]);
+        await pool.query("DELETE FROM connector_registry WHERE connector_name = ANY($1::text[])", [ALL_CONNS]);
+      });
+    });
+
+    it("omits a disabled normal source's property from items AND the counts, keeps an enabled one", async () => {
+      await withRealDb(async (pool) => {
+        await registerConnector(pool, NORMAL_OFF, { supportsDiscovery: true, on: false });
+        await registerConnector(pool, NORMAL_ON, { supportsDiscovery: true, on: true });
+        const profileId = await makeProfile(SCOPE);
+
+        const offProp = await insertProperty(pool, TEST_COORDS);
+        await insertListing(pool, offProp, { source: NORMAL_OFF });
+        await markMatched(pool, profileId, offProp);
+
+        const onProp = await insertProperty(pool, TEST_COORDS);
+        await insertListing(pool, onProp, { source: NORMAL_ON });
+        await markMatched(pool, profileId, onProp);
+
+        const result = await listMapCandidates(profileId);
+        // Only the enabled-source property plots, and the disabled one is not
+        // silently reclassified as "unplottable" either — it's gone entirely.
+        expect(result.items.map((i) => i.property_id)).toEqual([onProp]);
+        expect(result.unplottableCount).toBe(0);
+      });
+    });
+
+    it("omits a disabled capture-only source's property, keeps an enabled capture-only one", async () => {
+      await withRealDb(async (pool) => {
+        await registerConnector(pool, CAPTURE_OFF, { supportsDiscovery: false, on: false });
+        await registerConnector(pool, CAPTURE_ON, { supportsDiscovery: false, on: true });
+        const profileId = await makeProfile(SCOPE);
+
+        const offProp = await insertProperty(pool, TEST_COORDS);
+        await insertListing(pool, offProp, { source: CAPTURE_OFF });
+        await markMatched(pool, profileId, offProp);
+
+        const onProp = await insertProperty(pool, TEST_COORDS);
+        await insertListing(pool, onProp, { source: CAPTURE_ON });
+        await markMatched(pool, profileId, onProp);
+
+        const result = await listMapCandidates(profileId);
+        expect(result.items.map((i) => i.property_id)).toEqual([onProp]);
+      });
+    });
+
+    it("keeps a mixed property but drops the disabled source's badge and price", async () => {
+      await withRealDb(async (pool) => {
+        await registerConnector(pool, NORMAL_OFF, { supportsDiscovery: true, on: false });
+        await registerConnector(pool, NORMAL_ON, { supportsDiscovery: true, on: true });
+        const profileId = await makeProfile(SCOPE);
+
+        const propertyId = await insertProperty(pool, TEST_COORDS);
+        // Disabled source is cheaper — if it leaked into MIN it would win.
+        await insertListing(pool, propertyId, { source: NORMAL_ON, current_price: 300000 });
+        await insertListing(pool, propertyId, { source: NORMAL_OFF, current_price: 100000 });
+        await markMatched(pool, profileId, propertyId);
+
+        const result = await listMapCandidates(profileId);
+        expect(result.items).toHaveLength(1);
+        expect(result.items[0].listings.map((l) => l.source)).toEqual([NORMAL_ON]);
+        expect(result.items[0].min_price).toBe(300000);
+      });
+    });
+  });
 });
