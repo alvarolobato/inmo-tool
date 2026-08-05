@@ -26,6 +26,7 @@ function summary(portal: string, over: Partial<WorklistPortalSummary> = {}): Wor
     captured: 5,
     failed: 1,
     skipped: 0,
+    stale: 0,
     ...over,
   };
 }

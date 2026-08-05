@@ -24,6 +24,7 @@ const FILTER_LABEL: Record<StatusFilter, string> = {
   captured: "Capturadas",
   failed: "Fallidas",
   skipped: "Omitidas",
+  stale: "Obsoletas",
 };
 
 /**
@@ -47,6 +48,8 @@ const STATUS_LABEL: Record<WorklistStatus, string> = {
   captured: "Capturada",
   failed: "Fallida",
   skipped: "Omitida",
+  // 'stale' (issue #273): the listing left the portal's sitemap (sold/delisted).
+  stale: "Obsoleta",
 };
 
 const STATUS_COLOR: Record<WorklistStatus, string> = {
@@ -54,6 +57,7 @@ const STATUS_COLOR: Record<WorklistStatus, string> = {
   captured: "#16a34a",
   failed: "#dc2626",
   skipped: "var(--fg-muted)",
+  stale: "var(--fg-muted)",
 };
 
 function StatusBadge({ status, id }: { status: WorklistStatus; id: number }) {
@@ -360,6 +364,7 @@ export default function CapturaWorklistPage() {
                   <span style={{ color: "var(--fg-muted)" }}>{s.pending} pendientes</span>
                   {s.failed > 0 && <span style={{ color: "#dc2626" }}>{s.failed} fallidas</span>}
                   {s.skipped > 0 && <span style={{ color: "var(--fg-muted)" }}>{s.skipped} omitidas</span>}
+                  {s.stale > 0 && <span style={{ color: "var(--fg-muted)" }}>{s.stale} obsoletas</span>}
                   <span style={{ color: "var(--fg-muted)", marginLeft: "auto" }}>{pct}%</span>
                 </div>
                 {/* Visual progress bar (issue #260): captured share of the portal. */}
@@ -531,7 +536,9 @@ export default function CapturaWorklistPage() {
                       <StatusBadge status={r.status} id={r.id} />
                     </td>
                     <td style={{ padding: "6px 8px", textAlign: "right", whiteSpace: "nowrap" }}>
-                      {r.status !== "skipped" && r.status !== "captured" && (
+                      {r.status !== "skipped" &&
+                        r.status !== "captured" &&
+                        r.status !== "stale" && (
                         <button
                           data-testid={`worklist-skip-${r.id}`}
                           onClick={() => handleSetStatus(r.id, "skipped")}

@@ -271,6 +271,67 @@ class TestProcessPendingCaptures:
         finally:
             _cleanup(pg_conn)
 
+    def test_recapture_updates_in_place(self, pg_conn):
+        """EC-3 (issue #273): re-capturing a URL already ingested with a CHANGED
+        price updates the existing property/listing in place — it does NOT
+        create a second property row. The second capture's price wins (COALESCE
+        prefers the new non-None value), both extension_capture rows land 'done',
+        and both point at the same listing_id.
+
+        This locks down the capture→_upsert_canonical_listing correlation that
+        was only correct-by-inspection before: reverting
+        `_upsert_canonical_listing` to an unconditional INSERT (dropping its
+        (source, external_id) lookup) would duplicate the property and flip the
+        second capture's price assertion — every assertion below then fails.
+        """
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        # Same listing, a later capture with a different asking price.
+        second_html = _FIXTURE_HTML.replace(
+            '<span class="txt-bold">3,600,000</span>',
+            '<span class="txt-bold">3,750,000</span>',
+        )
+        assert second_html != _FIXTURE_HTML, "price-swap fixture must actually differ"
+        try:
+            first_id = _insert_pending(pg_conn, _FIXTURE_URL, _FIXTURE_HTML)
+            assert capture.process_pending_captures(pg_conn) == 1
+            second_id = _insert_pending(pg_conn, _FIXTURE_URL, second_html)
+            assert capture.process_pending_captures(pg_conn) == 1
+
+            # Exactly one property + one listing for this (source, external_id).
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, property_id, current_price FROM listing "
+                    "WHERE source = 'idealista' AND external_id = '106387165'",
+                )
+                listing_rows = cur.fetchall()
+            assert len(listing_rows) == 1, "re-capture must not duplicate the listing"
+            listing_id, property_id, current_price = listing_rows[0]
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM property WHERE id = %s", (property_id,)
+                )
+                assert cur.fetchone()[0] == 1
+
+            # The second capture's changed price won via COALESCE(new, old).
+            assert int(current_price) == 3_750_000
+
+            # Both captures processed 'done' and correlate to the SAME listing.
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, status, listing_id FROM extension_capture "
+                    "WHERE id = ANY(%s) ORDER BY id",
+                    ([first_id, second_id],),
+                )
+                caps = cur.fetchall()
+            assert len(caps) == 2
+            for _cid, status, cap_listing_id in caps:
+                assert status == "done"
+                assert cap_listing_id == listing_id
+        finally:
+            _cleanup(pg_conn)
+
     def test_empty_queue_processes_nothing(self, pg_conn):
         _apply_schema(pg_conn)
         with pg_conn.cursor() as cur:

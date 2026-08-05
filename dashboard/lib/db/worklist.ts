@@ -62,6 +62,7 @@ export async function listWorklist(
         captured: 0,
         failed: 0,
         skipped: 0,
+        stale: 0,
       } satisfies WorklistPortalSummary);
     const n = Number(r.n);
     s[r.status] += n;

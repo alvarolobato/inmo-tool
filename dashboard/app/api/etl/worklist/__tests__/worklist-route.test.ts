@@ -106,7 +106,7 @@ describe("GET /api/etl/worklist", () => {
     mockList.mockResolvedValue({
       rows: [],
       summaries: [
-        { source_portal: "aliseda", total: 3, pending: 1, captured: 2, failed: 0, skipped: 0 },
+        { source_portal: "aliseda", total: 3, pending: 1, captured: 2, failed: 0, skipped: 0, stale: 0 },
       ],
     });
     const req = new NextRequest("http://localhost:4000/api/etl/worklist?portal=aliseda");

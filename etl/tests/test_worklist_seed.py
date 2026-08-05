@@ -149,6 +149,150 @@ class TestSeedCimenta2Worklist:
             _cleanup(pg_conn)
 
 
+# ── Reseed reconciliation (issue #273) ──────────────────────────────────────
+
+# Three real ga-activo assets (verbatim ids/refs from the live-capture fixture),
+# used as a small, controllable catalogue so a reseed can drop or restore one.
+_ASSET_A = ("a0v3X00000eYxMdQAK", "207")
+_ASSET_B = ("a0v3X00000eZ2b6QAC", "121")
+_ASSET_C = ("a0v3X00000eYvmwQAC", "1263")
+
+
+def _activo_xml(assets: list[tuple[str, str]]) -> str:
+    """Build a minimal ga-activo child sitemap for the given (record_id, ref)
+    assets — same shape iter_locs/parse_asset_url read, so the seed path treats
+    it exactly like the real trimmed fixture."""
+    locs = "\n".join(
+        "  <url><loc>https://inmuebles.cimenta2.com/inmuebles/s/ga-activo/"
+        f"{rid}/{ref}</loc></url>"
+        for rid, ref in assets
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        f"{locs}\n</urlset>\n"
+    )
+
+
+def _asset_key(asset: tuple[str, str]) -> str:
+    rid, ref = asset
+    return worklist_match_key(
+        f"https://inmuebles.cimenta2.com/inmuebles/s/ga-activo/{rid}/{ref}"
+    )
+
+
+def _status_of(conn, asset: tuple[str, str]) -> str | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT status FROM capture_worklist WHERE match_key = %s",
+            (_asset_key(asset),),
+        )
+        row = cur.fetchone()
+    return row[0] if row is not None else None
+
+
+class TestReseedReconciliation:
+    def test_reseed_marks_removed_url_stale(self, pg_conn):
+        """EC-1: a listing that drops out of the sitemap between reseeds flips
+        from 'pending' to 'stale' — the other still-present rows are untouched.
+
+        Revert-and-confirm-fail guard: delete the reconciliation call in
+        seed_cimenta2_worklist and the removed URL stays 'pending', so the
+        `stale` assertion below fails.
+        """
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        try:
+            seed = _fake_fetch(_INDEX_XML, _activo_xml([_ASSET_A, _ASSET_B, _ASSET_C]))
+            assert worklist_seed.seed_cimenta2_worklist(pg_conn, fetch=seed) == 3
+            assert _status_of(pg_conn, _ASSET_C) == "pending"
+
+            # Reseed with C removed from the sitemap.
+            reseed = _fake_fetch(_INDEX_XML, _activo_xml([_ASSET_A, _ASSET_B]))
+            # No NEW rows on a reseed of an already-seeded subset.
+            assert worklist_seed.seed_cimenta2_worklist(pg_conn, fetch=reseed) == 0
+
+            assert _status_of(pg_conn, _ASSET_C) == "stale"
+            assert _status_of(pg_conn, _ASSET_A) == "pending"
+            assert _status_of(pg_conn, _ASSET_B) == "pending"
+            assert _worklist_count(pg_conn) == 3  # staled, never deleted
+        finally:
+            _cleanup(pg_conn)
+
+    def test_reseed_is_idempotent_on_already_stale_rows(self, pg_conn):
+        """Running the same reduced reseed twice leaves an already-'stale' row
+        stale — reconciliation only touches 'pending' rows, so a second pass is
+        a no-op, never an error or a status flip-flop."""
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        try:
+            seed = _fake_fetch(_INDEX_XML, _activo_xml([_ASSET_A, _ASSET_B, _ASSET_C]))
+            worklist_seed.seed_cimenta2_worklist(pg_conn, fetch=seed)
+            reseed = _fake_fetch(_INDEX_XML, _activo_xml([_ASSET_A, _ASSET_B]))
+            worklist_seed.seed_cimenta2_worklist(pg_conn, fetch=reseed)
+            assert _status_of(pg_conn, _ASSET_C) == "stale"
+            # Second identical reseed: C stays stale, no exception.
+            worklist_seed.seed_cimenta2_worklist(pg_conn, fetch=reseed)
+            assert _status_of(pg_conn, _ASSET_C) == "stale"
+        finally:
+            _cleanup(pg_conn)
+
+    def test_reappeared_stale_url_returns_to_pending(self, pg_conn):
+        """A previously-'stale' listing that comes back into the sitemap is
+        resurrected to 'pending' — a relisted property must re-enter the backlog
+        rather than stay stuck stale forever."""
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        try:
+            full = _fake_fetch(_INDEX_XML, _activo_xml([_ASSET_A, _ASSET_B, _ASSET_C]))
+            worklist_seed.seed_cimenta2_worklist(pg_conn, fetch=full)
+            reduced = _fake_fetch(_INDEX_XML, _activo_xml([_ASSET_A, _ASSET_B]))
+            worklist_seed.seed_cimenta2_worklist(pg_conn, fetch=reduced)
+            assert _status_of(pg_conn, _ASSET_C) == "stale"
+
+            # C reappears in the sitemap.
+            worklist_seed.seed_cimenta2_worklist(pg_conn, fetch=full)
+            assert _status_of(pg_conn, _ASSET_C) == "pending"
+        finally:
+            _cleanup(pg_conn)
+
+    def test_reconcile_never_touches_captured_or_skipped_rows(self, pg_conn):
+        """Only 'pending' rows go stale on removal. A 'captured' row keeps its
+        capture history and a 'skipped' row keeps the owner's choice even when
+        their listing has left the sitemap — those states are never rewritten to
+        'stale'."""
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        try:
+            full = _fake_fetch(_INDEX_XML, _activo_xml([_ASSET_A, _ASSET_B, _ASSET_C]))
+            worklist_seed.seed_cimenta2_worklist(pg_conn, fetch=full)
+            # A is captured, B is skipped by the owner.
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE capture_worklist SET status = 'captured' WHERE match_key = %s",
+                    (_asset_key(_ASSET_A),),
+                )
+                cur.execute(
+                    "UPDATE capture_worklist SET status = 'skipped' WHERE match_key = %s",
+                    (_asset_key(_ASSET_B),),
+                )
+            pg_conn.commit()
+
+            # Reseed with ALL of A, B, C gone from the sitemap.
+            empty_like = _fake_fetch(_INDEX_XML, _activo_xml([_ASSET_C]))
+            # Only C was pending -> it goes stale; A/B keep their states.
+            worklist_seed.seed_cimenta2_worklist(pg_conn, fetch=empty_like)
+            # Now drop C too.
+            gone = _fake_fetch(_INDEX_XML, _activo_xml([_ASSET_A]))
+            worklist_seed.seed_cimenta2_worklist(pg_conn, fetch=gone)
+
+            assert _status_of(pg_conn, _ASSET_A) == "captured"
+            assert _status_of(pg_conn, _ASSET_B) == "skipped"
+            assert _status_of(pg_conn, _ASSET_C) == "stale"
+        finally:
+            _cleanup(pg_conn)
+
+
 class TestProcessSeedTrigger:
     def _insert_trigger(self, conn, portal: str) -> int:
         with conn.cursor() as cur:
