@@ -23,6 +23,7 @@ const states = {
   error: $('#state-error'),
   results: $('#state-results'),
   batch: $('#state-batch'),
+  guide: $('#state-guide'),
 };
 
 let extractedData = null;
@@ -86,7 +87,65 @@ async function init() {
     return;
   }
 
+  // Guided capture (issue #237): a SUPPORTED portal page that is neither a
+  // detail nor a search page (home / saved search / filter form). Don't
+  // blind-capture it (the backend can't parse a non-listing page and would
+  // error) — guide the owner with their worklist progress and a shortcut to
+  // the next pending listing. A supported-portal DETAIL page still falls
+  // through to the single-capture path below.
+  if (page?.role === 'other' && page?.supportedPortal) {
+    await enterGuideMode(tab, page.supportedPortal);
+    return;
+  }
+
+  // Unsupported host (a portal not yet wired, or Cimenta2's SPA) keeps the
+  // universal manual-capture escape hatch: capture whatever tab we're on.
   await runSingleCapture(tab);
+}
+
+// ─── Guided capture (supported portal, non-capturable page) ─────
+
+/**
+ * Guide the owner from a supported-portal page they can't directly capture.
+ * Fetches that portal's worklist progress via the background worker (which
+ * holds the admin key) and shows N/M captured plus an "open the next pending
+ * listing" shortcut. Keeps a "Capturar esta página igualmente" escape hatch so
+ * manual capture of the current page is always reachable.
+ */
+async function enterGuideMode(tab, portal) {
+  showState('guide');
+  const cap = portal.charAt(0).toUpperCase() + portal.slice(1);
+  $('#guide-title').textContent = `Estás en ${cap}`;
+  $('#guide-sub').textContent = 'Cargando tu progreso de captura…';
+  $('#guide-open-next-btn').classList.add('hidden');
+  $('#guide-capture-anyway-btn').onclick = () => runSingleCapture(tab);
+
+  let res;
+  try {
+    res = await chrome.runtime.sendMessage({ type: 'GET_WORKLIST_PROGRESS', portal });
+  } catch {
+    res = null;
+  }
+
+  const prog = res?.success ? res.progress : null;
+  if (prog && prog.total > 0) {
+    $('#guide-sub').textContent =
+      `${cap}: ${prog.captured}/${prog.total} capturadas · ${prog.pending} pendientes.`;
+  } else {
+    $('#guide-sub').textContent =
+      `Aún no hay anuncios de ${cap} en tu lista de captura. ` +
+      'Abre una página de resultados para detectarlos, o captura este anuncio.';
+  }
+
+  if (prog?.nextUrl) {
+    const btn = $('#guide-open-next-btn');
+    btn.textContent = `Abrir siguiente pendiente (${prog.pending})`;
+    btn.classList.remove('hidden');
+    btn.onclick = () => {
+      chrome.tabs.create({ url: prog.nextUrl, active: true });
+      window.close();
+    };
+  }
 }
 
 async function detectPage(tab) {

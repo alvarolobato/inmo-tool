@@ -56,6 +56,24 @@
     </p>
   </div>
 
+  <!-- Guided capture (issue #237): shown on a SUPPORTED portal page that is
+       neither a detail nor a search page (home, saved search, filter form).
+       Instead of blind-capturing junk, guide the owner: show worklist progress
+       and offer to open the next pending listing. -->
+  <div id="state-guide" class="state hidden">
+    <div class="state-icon">🧭</div>
+    <p id="guide-title" class="state-text">Captura guiada</p>
+    <p id="guide-sub" class="state-sub"></p>
+    <div class="actions">
+      <button id="guide-open-next-btn" class="btn btn-primary hidden">Abrir siguiente pendiente</button>
+      <button id="guide-capture-anyway-btn" class="btn btn-secondary">Capturar esta página igualmente</button>
+    </div>
+    <p class="state-sub">
+      Para capturar toda una búsqueda, abre una página de resultados del portal:
+      la extensión detecta los anuncios y los captura en secuencia.
+    </p>
+  </div>
+
   <div id="state-error" class="state hidden">
     <div class="state-icon">⚠️</div>
     <p id="error-message" class="state-text">Algo salió mal</p>

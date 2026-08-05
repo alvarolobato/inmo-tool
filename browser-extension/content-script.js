@@ -50,6 +50,13 @@
         isListing: !!listingPortal,
         isDetail: !!detailPortal,
         portal: listingPortal || detailPortal,
+        // Guided capture (issue #237): the supported portal for this HOST
+        // regardless of page role, plus the page role itself, so the popup can
+        // show GUIDANCE on a supported-portal page that is neither a detail nor
+        // a listing page (home / saved search / filter form) instead of
+        // blind-capturing it.
+        supportedPortal: D.supportedPortalForUrl(url),
+        role: D.pageRoleForUrl(url),
         detailUrls,
       });
       return true;
