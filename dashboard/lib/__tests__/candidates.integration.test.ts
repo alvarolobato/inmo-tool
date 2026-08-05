@@ -969,6 +969,177 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
     });
   });
 
+  describe("hard filters — occupancy / condition / below-market (#310, D-059)", () => {
+    // A matched, priced candidate with optional occupancy + condition
+    // assessments. Reuses the SAME signals the ranking blend reads (the
+    // per-axis columns the CTE derives), so filter and rank agree.
+    async function seedFilterable(
+      pool: Pool,
+      profileId: number,
+      opts: {
+        price: number;
+        occupancy?: "vacant" | "tenanted" | "occupied_illegally";
+        condition?: "a_reformar" | "reformado" | "obra_nueva";
+        renovation?: "leve" | "integral";
+      },
+    ): Promise<number> {
+      const id = await insertProperty(pool);
+      await insertListing(pool, id, { source: "fotocasa", current_price: opts.price });
+      await markMatched(pool, profileId, id);
+      if (opts.occupancy) {
+        // occupancy is a NESTED Verdict — the CTE reads ->'occupancy'->>'value'.
+        await insertAssessment(pool, id, {
+          assessmentType: "occupancy",
+          result: {
+            occupancy: { value: opts.occupancy },
+            caveats: opts.occupancy === "vacant" ? [] : [opts.occupancy],
+          },
+          promptVersion: "occupancy/v2",
+          generatedAt: new Date("2026-02-01T00:00:00Z"),
+        });
+      }
+      if (opts.condition) {
+        await insertAssessment(pool, id, {
+          assessmentType: "condition",
+          result: {
+            condition: opts.condition,
+            renovation_severity: opts.condition === "a_reformar" ? (opts.renovation ?? "unknown") : null,
+          },
+          promptVersion: "condition/v2",
+          generatedAt: new Date("2026-02-01T00:00:00Z"),
+        });
+      }
+      return id;
+    }
+
+    it("occupancy=occupied returns only tenanted/illegally-occupied candidates (EC: filter by occupied)", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const tenanted = await seedFilterable(pool, profileId, { price: 300000, occupancy: "tenanted" });
+        const squatted = await seedFilterable(pool, profileId, {
+          price: 300000,
+          occupancy: "occupied_illegally",
+        });
+        const vacant = await seedFilterable(pool, profileId, { price: 300000, occupancy: "vacant" });
+
+        const page = await listCandidates(profileId, { occupancy: "occupied", limit: 10 });
+        expect(page.items.map((i) => i.property_id).sort((a, b) => a - b)).toEqual(
+          [tenanted, squatted].sort((a, b) => a - b),
+        );
+        expect(page.items.map((i) => i.property_id)).not.toContain(vacant);
+
+        // The complementary filter keeps only the vacant one.
+        const free = await listCandidates(profileId, { occupancy: "free", limit: 10 });
+        expect(free.items.map((i) => i.property_id)).toEqual([vacant]);
+      });
+    });
+
+    it("condition=a_reformar excludes reformado; renovation=integral narrows to the integral one (EC: filter by renovation integral)", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const integral = await seedFilterable(pool, profileId, {
+          price: 300000,
+          condition: "a_reformar",
+          renovation: "integral",
+        });
+        const leve = await seedFilterable(pool, profileId, {
+          price: 300000,
+          condition: "a_reformar",
+          renovation: "leve",
+        });
+        const reformado = await seedFilterable(pool, profileId, { price: 300000, condition: "reformado" });
+
+        // condition filter: both a_reformar, not the reformado one.
+        const aReformar = await listCandidates(profileId, { condition: "a_reformar", limit: 10 });
+        expect(aReformar.items.map((i) => i.property_id).sort((a, b) => a - b)).toEqual(
+          [integral, leve].sort((a, b) => a - b),
+        );
+        expect(aReformar.items.map((i) => i.property_id)).not.toContain(reformado);
+
+        // renovation severity narrows to just the integral one.
+        const integralOnly = await listCandidates(profileId, { renovation: "integral", limit: 10 });
+        expect(integralOnly.items.map((i) => i.property_id)).toEqual([integral]);
+      });
+    });
+
+    it("minBelowMarketPct keeps only candidates ≥ N% below the pool median price/m² (EC: filter by below-market)", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // 3 fillers at 300k set the pool median (>= MIN_POOL_SIZE); a deal at
+        // 200k sits ~33% below it. m2_built is fixed at 70, so price drives ppm2.
+        for (let i = 0; i < 3; i++) {
+          await seedFilterable(pool, profileId, { price: 300000 });
+        }
+        const deal = await seedFilterable(pool, profileId, { price: 200000 });
+
+        const page = await listCandidates(profileId, { minBelowMarketPct: 0.15, limit: 10 });
+        // Only the deal clears ≥15%; the at-median fillers (0% discount) drop.
+        expect(page.items.map((i) => i.property_id)).toEqual([deal]);
+        expect(page.items[0].below_market_pct).toBeGreaterThan(0.3);
+      });
+    });
+
+    it("combines an assessment filter with the below-market filter", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        for (let i = 0; i < 3; i++) {
+          await seedFilterable(pool, profileId, { price: 300000 });
+        }
+        // Two deals ≥15% below; only one is also a_reformar.
+        const cheapReformar = await seedFilterable(pool, profileId, {
+          price: 200000,
+          condition: "a_reformar",
+        });
+        const cheapReformado = await seedFilterable(pool, profileId, {
+          price: 200000,
+          condition: "reformado",
+        });
+
+        const page = await listCandidates(profileId, {
+          condition: "a_reformar",
+          minBelowMarketPct: 0.15,
+          limit: 10,
+        });
+        expect(page.items.map((i) => i.property_id)).toEqual([cheapReformar]);
+        expect(page.items.map((i) => i.property_id)).not.toContain(cheapReformado);
+      });
+    });
+
+    it("degrades cleanly: an assessment filter with NO assessment data returns an empty feed, not an error", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // Matched, priced, but NEVER assessed — the deployment reality until
+        // #316 wires the LLM. Filtering on occupancy must return [] (unknown
+        // excluded), not throw and not silently pass the property through.
+        await seedFilterable(pool, profileId, { price: 300000 });
+        await seedFilterable(pool, profileId, { price: 280000 });
+
+        const occ = await listCandidates(profileId, { occupancy: "occupied", limit: 10 });
+        expect(occ.items).toEqual([]);
+        const cond = await listCandidates(profileId, { condition: "a_reformar", limit: 10 });
+        expect(cond.items).toEqual([]);
+
+        // Sanity: with no filter the same profile DOES return its candidates,
+        // so the empty result above is the filter's doing, not a broken feed.
+        const unfiltered = await listCandidates(profileId, { limit: 10 });
+        expect(unfiltered.items).toHaveLength(2);
+      });
+    });
+
+    it("no filters set behaves exactly as before (no regression)", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const a = await seedFilterable(pool, profileId, { price: 300000, occupancy: "tenanted" });
+        const b = await seedFilterable(pool, profileId, { price: 280000, condition: "a_reformar" });
+
+        const page = await listCandidates(profileId, { limit: 10 });
+        expect(page.items.map((i) => i.property_id).sort((x, y) => x - y)).toEqual(
+          [a, b].sort((x, y) => x - y),
+        );
+      });
+    });
+  });
+
   describe("source (portal) filter (#265)", () => {
     it("narrows the feed to properties with an active sale listing from the selected source", async () => {
       await withRealDb(async (pool) => {

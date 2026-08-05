@@ -19,10 +19,17 @@ import {
   flagsFromAssessments,
   getAdjacentCandidates,
   listCandidates,
+  OCCUPIED_STATUSES,
   WARN_CAVEAT_CODES,
   type RawAssessmentRow,
 } from "../candidates";
 import { resetPool } from "@/lib/db-write";
+
+// #310 (D-059) appended five params after WARN_CAVEAT_CODES ($6): occupancy
+// ($7), the occupied-statuses list ($8), condition ($9), renovation ($10), and
+// min-below-market ($11). This is the "all filters off" tail every existing
+// listCandidates assertion carries now.
+const NO_FILTER_TAIL = [null, OCCUPIED_STATUSES, null, null, null] as const;
 
 /** Builds a cursor the same way `listCandidates` does internally, purely for test setup — tests otherwise treat cursors as opaque and decode `nextCursor` to assert on it. */
 function testCursor(score: number | null, id: number): string {
@@ -72,18 +79,18 @@ describe("listCandidates", () => {
     // are (profileId, cursorScore, cursorId, limit+1, source) — a compound
     // keyset key, not a single id, since results are ordered by score
     // globally; source ($5) is null when no portal filter is applied (#265).
-    expect(params).toEqual([7, null, null, 31, null, WARN_CAVEAT_CODES]);
+    expect(params).toEqual([7, null, null, 31, null, WARN_CAVEAT_CODES, ...NO_FILTER_TAIL]);
   });
 
   it("passes the decoded cursor and clamps limit to [1, 100] (querying limit+1 rows)", async () => {
     mockPoolQuery.mockResolvedValue({ rows: [] });
 
     await listCandidates(7, { cursor: testCursor(0.73, 42), limit: 500 });
-    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, 0.73, 42, 101, null, WARN_CAVEAT_CODES]);
+    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, 0.73, 42, 101, null, WARN_CAVEAT_CODES, ...NO_FILTER_TAIL]);
 
     mockPoolQuery.mockClear();
     await listCandidates(7, { limit: 0 });
-    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, null, null, 2, null, WARN_CAVEAT_CODES]);
+    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, null, null, 2, null, WARN_CAVEAT_CODES, ...NO_FILTER_TAIL]);
   });
 
   it("passes a trimmed source as $5 and adds the portal EXISTS filter (#265)", async () => {
@@ -93,14 +100,14 @@ describe("listCandidates", () => {
     const [sql, params] = mockPoolQuery.mock.calls[0];
     // Trimmed, and the EXISTS subquery gates on the same active+sale set the
     // card's badges use.
-    expect(params).toEqual([7, null, null, 31, "idealista", WARN_CAVEAT_CODES]);
+    expect(params).toEqual([7, null, null, 31, "idealista", WARN_CAVEAT_CODES, ...NO_FILTER_TAIL]);
     expect(sql).toContain("EXISTS");
     expect(sql).toContain("lf.source = $5");
 
     // An empty / whitespace-only source is "no filter" — $5 stays null.
     mockPoolQuery.mockClear();
     await listCandidates(7, { source: "   " });
-    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, null, null, 31, null, WARN_CAVEAT_CODES]);
+    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, null, null, 31, null, WARN_CAVEAT_CODES, ...NO_FILTER_TAIL]);
   });
 
   it("rejects a malformed cursor rather than silently resetting to page 1", async () => {

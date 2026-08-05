@@ -30,12 +30,34 @@ export function CandidateList({ profileId }: { profileId: number }) {
   const [source, setSource] = useState<string | null>(null);
   const [availableSources, setAvailableSources] = useState<string[]>([]);
 
+  // #310 hard filters (D-059). All optional, all combine with each other and
+  // with the source filter/pagination. `occupancy`/`conditionSel` gate on AI
+  // assessment data (empty until #316), so they legitimately narrow the feed to
+  // nothing until that data flows — the empty state below says so explicitly
+  // instead of implying the feed is broken. `minDiscount` is a percent computed
+  // from price and works today. `conditionSel` is a composite token ("" |
+  // "a_reformar" | "a_reformar:leve" | "a_reformar:integral" | "reformado" |
+  // "obra_nueva") that maps to the API's separate condition/renovation params.
+  const [occupancy, setOccupancy] = useState<string>("");
+  const [conditionSel, setConditionSel] = useState<string>("");
+  const [minDiscount, setMinDiscount] = useState<string>("");
+
+  const assessmentFilterActive = occupancy !== "" || conditionSel !== "";
+
   const fetchPage = useCallback(
     async (afterCursor: string | null, replace: boolean) => {
       const url = new URL(`/api/profiles/${profileId}/candidates`, window.location.origin);
       if (afterCursor !== null) url.searchParams.set("cursor", afterCursor);
       // Combines with pagination (cursor) rather than replacing it (#265).
       if (source !== null) url.searchParams.set("source", source);
+      // #310 filters. `conditionSel` splits into condition + renovation params.
+      if (occupancy !== "") url.searchParams.set("occupancy", occupancy);
+      if (conditionSel !== "") {
+        const [cond, sev] = conditionSel.split(":");
+        url.searchParams.set("condition", cond);
+        if (sev) url.searchParams.set("renovation", sev);
+      }
+      if (minDiscount !== "") url.searchParams.set("minDiscount", minDiscount);
       const res = await fetch(url.toString().replace(window.location.origin, ""));
       if (!res.ok) {
         const body = await res.json().catch(() => null);
@@ -46,7 +68,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
       setItems((prev) => (replace ? page.items : [...prev, ...page.items]));
       setCursor(page.nextCursor);
     },
-    [profileId, source],
+    [profileId, source, occupancy, conditionSel, minDiscount],
   );
 
   // Load the portal options once per profile (independent of the active
@@ -89,45 +111,102 @@ export function CandidateList({ profileId }: { profileId: number }) {
     }
   };
 
-  // The source filter must render in EVERY state (loading/error/empty/
-  // populated), not just alongside a full grid — otherwise narrowing to a
-  // portal with zero candidates would early-return the empty state and hide
-  // the very control the user needs to clear the filter. Rendered once here,
-  // above whatever body the state below produces. Hidden when the profile has
-  // no sources at all (nothing to filter).
-  const filterBar =
-    availableSources.length > 0 ? (
-      <div
-        data-testid="source-filter-bar"
-        style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, flexWrap: "wrap" }}
+  // The filter bar must render in EVERY state (loading/error/empty/populated),
+  // not just alongside a full grid — otherwise narrowing to a filter with zero
+  // candidates would early-return the empty state and hide the very controls
+  // the user needs to clear the filter. Rendered once here, above whatever body
+  // the state below produces. The #310 distress/condition/discount filters
+  // always render (they don't depend on live source data); the source (#265)
+  // select is hidden only when the profile has no sources at all.
+  const selectStyle = {
+    padding: "5px 8px",
+    fontSize: 13,
+    color: "var(--fg)",
+    background: "var(--bg-1)",
+    border: "1px solid var(--border)",
+    borderRadius: 6,
+  } as const;
+  const filterBar = (
+    <div
+      data-testid="candidate-filter-bar"
+      style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, flexWrap: "wrap" }}
+    >
+      {availableSources.length > 0 && (
+        <>
+          <label htmlFor="candidate-source-filter" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+            Fuente
+          </label>
+          <select
+            id="candidate-source-filter"
+            data-testid="source-filter"
+            value={source ?? ""}
+            onChange={(e) => setSource(e.target.value === "" ? null : e.target.value)}
+            style={{ ...selectStyle, textTransform: "capitalize" }}
+          >
+            <option value="">Todas las fuentes</option>
+            {availableSources.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        </>
+      )}
+
+      {/* #310: occupancy (occupied vs free). Needs assessment data (#316). */}
+      <label htmlFor="candidate-occupancy-filter" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+        Ocupación
+      </label>
+      <select
+        id="candidate-occupancy-filter"
+        data-testid="occupancy-filter"
+        value={occupancy}
+        onChange={(e) => setOccupancy(e.target.value)}
+        style={selectStyle}
       >
-        <label htmlFor="candidate-source-filter" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
-          Fuente
-        </label>
-        <select
-          id="candidate-source-filter"
-          data-testid="source-filter"
-          value={source ?? ""}
-          onChange={(e) => setSource(e.target.value === "" ? null : e.target.value)}
-          style={{
-            padding: "5px 8px",
-            fontSize: 13,
-            color: "var(--fg)",
-            background: "var(--bg-1)",
-            border: "1px solid var(--border)",
-            borderRadius: 6,
-            textTransform: "capitalize",
-          }}
-        >
-          <option value="">Todas las fuentes</option>
-          {availableSources.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-      </div>
-    ) : null;
+        <option value="">Cualquiera</option>
+        <option value="occupied">Ocupado</option>
+        <option value="free">Libre</option>
+      </select>
+
+      {/* #310: condition + renovation severity (#313), combined. Needs assessment data. */}
+      <label htmlFor="candidate-condition-filter" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+        Estado
+      </label>
+      <select
+        id="candidate-condition-filter"
+        data-testid="condition-filter"
+        value={conditionSel}
+        onChange={(e) => setConditionSel(e.target.value)}
+        style={selectStyle}
+      >
+        <option value="">Cualquiera</option>
+        <option value="a_reformar">A reformar</option>
+        <option value="a_reformar:leve">A reformar (leve)</option>
+        <option value="a_reformar:integral">A reformar (integral)</option>
+        <option value="reformado">Reformado</option>
+        <option value="obra_nueva">Obra nueva</option>
+      </select>
+
+      {/* #310: below-market discount threshold. Works today (computed from price). */}
+      <label htmlFor="candidate-discount-filter" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+        Bajo mercado
+      </label>
+      <select
+        id="candidate-discount-filter"
+        data-testid="discount-filter"
+        value={minDiscount}
+        onChange={(e) => setMinDiscount(e.target.value)}
+        style={selectStyle}
+      >
+        <option value="">Cualquiera</option>
+        <option value="10">≥ 10%</option>
+        <option value="15">≥ 15%</option>
+        <option value="20">≥ 20%</option>
+        <option value="25">≥ 25%</option>
+      </select>
+    </div>
+  );
 
   if (loading) {
     return (
@@ -148,17 +227,39 @@ export function CandidateList({ profileId }: { profileId: number }) {
   }
 
   if (items.length === 0) {
-    // When a source filter is active, an empty feed means "no candidates from
-    // this portal", NOT that the profile itself has none — so the
-    // ZeroCandidatesDiagnostic (which explains why a whole profile has no
-    // candidates) would be misleading here. Show a filter-scoped message
-    // instead, keeping the filter bar so the user can clear it.
-    if (source !== null) {
+    // #310 graceful degradation: an occupancy/condition filter reads AI
+    // assessment data that is empty until #316 wires the LLM, so an empty feed
+    // here does NOT mean the profile has no candidates — it means no candidate
+    // has been assessed yet. Say so explicitly rather than showing empty as if
+    // broken, and keep the bar so the user can clear the filter. Checked before
+    // the source/diagnostic branches because this is the more specific cause.
+    if (assessmentFilterActive) {
       return (
         <div>
           {filterBar}
-          <p data-testid="no-candidates-for-source" style={{ marginTop: 16, fontSize: 13, color: "var(--fg-muted)", margin: 0 }}>
-            No hay candidatos de esta fuente. Cambia o quita el filtro para ver el resto.
+          <p
+            data-testid="no-candidates-needs-assessment"
+            style={{ marginTop: 16, fontSize: 13, color: "var(--fg-muted)", margin: 0 }}
+          >
+            No hay candidatos con estos criterios. Los filtros de ocupación y estado usan datos de
+            evaluación de la IA, que aún no están disponibles para estas propiedades. Quita el filtro
+            para ver el resto.
+          </p>
+        </div>
+      );
+    }
+    // A below-market (or source) filter is active but no assessment filter:
+    // the feed is genuinely narrowed to nothing by a working filter, not
+    // blocked on missing data. Filter-scoped message, keep the bar.
+    if (minDiscount !== "" || source !== null) {
+      return (
+        <div>
+          {filterBar}
+          <p
+            data-testid="no-candidates-for-filter"
+            style={{ marginTop: 16, fontSize: 13, color: "var(--fg-muted)", margin: 0 }}
+          >
+            No hay candidatos con estos criterios. Cambia o quita los filtros para ver el resto.
           </p>
         </div>
       );

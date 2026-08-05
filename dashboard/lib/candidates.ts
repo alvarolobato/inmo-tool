@@ -257,6 +257,56 @@ export const WARN_CAVEAT_CODES: string[] = [
   "derecho_superficie",
 ];
 
+// ── Hard filters (#310 / D-059) ──────────────────────────────────────────────
+//
+// The candidate feed can hard-filter (not just rank) on the same distress /
+// below-market signals #309 already computes — the "show me ONLY occupied /
+// needs-integral-reform / ≥N% below market" glance-and-act view. Each filter
+// reads the exact per-axis column the `ranked` CTE derives, so a filtered feed
+// and its ranking never disagree about what a signal means. All filters are
+// applied in the OUTER query (like the #265 source filter), never inside
+// `pool` — so narrowing the feed never shifts the pool median that DEFINES the
+// below-market discount (a below-market filter must not move its own goalposts).
+//
+// Graceful degradation (the current deployment reality until #316 wires the
+// LLM): the occupancy/condition/renovation filters read `ai_assessment`, which
+// is empty today, so they correctly return an EMPTY feed (every candidate's
+// axis is NULL → excluded), never an error. The below-market filter is computed
+// from price/m² and works today. The UI must signal "needs assessment data"
+// rather than showing empty-as-broken — see CandidateList.
+
+/** Occupancy hard-filter values. `occupied` = tenanted or illegally occupied; `free` = vacant. Anything else (unknown / unassessed) matches neither. */
+export const OCCUPANCY_FILTERS = ["occupied", "free"] as const;
+export type OccupancyFilter = (typeof OCCUPANCY_FILTERS)[number];
+
+/** Condition hard-filter values — the `ConditionCategory` set worth sourcing on (`unclear` is not a filter target). */
+export const CONDITION_FILTERS = ["a_reformar", "reformado", "obra_nueva"] as const;
+export type ConditionFilter = (typeof CONDITION_FILTERS)[number];
+
+/** Renovation-severity hard-filter values (#313). Only meaningful within `a_reformar`; a non-null value implies that category. */
+export const RENOVATION_FILTERS = ["leve", "integral"] as const;
+export type RenovationFilter = (typeof RENOVATION_FILTERS)[number];
+
+/** The two physical-occupancy statuses that count as "occupied" (kept as a SQL param, never interpolated). Exported for the route test's param-shape assertion. */
+export const OCCUPIED_STATUSES: string[] = ["tenanted", "occupied_illegally"];
+
+export interface CandidateFilters {
+  /** #310: keep only occupied / only free candidates. `null` = no occupancy filter. */
+  occupancy?: OccupancyFilter | null;
+  /** #310: keep only candidates whose latest condition assessment is this category. `null` = no condition filter. */
+  condition?: ConditionFilter | null;
+  /** #310: keep only `a_reformar` candidates of this renovation depth (#313). `null` = no severity filter. */
+  renovation?: RenovationFilter | null;
+  /**
+   * #310: keep only candidates priced at least this fraction below the pool
+   * median price/m² (`below_market_pct >= minBelowMarketPct`), e.g. `0.15` for
+   * "≥15% below market". A candidate with a null `below_market_pct` (pool too
+   * small, or no price/m²) is EXCLUDED — treated as "unknown", never a false
+   * pass. `null`/undefined = no below-market filter.
+   */
+  minBelowMarketPct?: number | null;
+}
+
 /**
  * The shared `disabled_sources → base → pool → ranked` CTE chain that
  * materializes `effective_score` (and `below_market_pct`) for EVERY matched,
@@ -291,7 +341,13 @@ function rankedCandidatesCte(warnParam: string): string {
          mp.min_price,
          CASE WHEN p.m2_built IS NOT NULL AND p.m2_built > 0 AND mp.min_price IS NOT NULL
               THEN mp.min_price / p.m2_built ELSE NULL END AS ppm2,
-         dist.distress_level
+         dist.distress_level,
+         -- Per-axis raw signals for the #310 hard filters (D-059). Carried
+         -- through ranked.* so the outer query can WHERE on them; NULL =
+         -- that axis unassessed (excluded by any filter on it, never matched).
+         dist.occupancy_status,
+         dist.condition_category,
+         dist.renovation_severity
        FROM profile_listing_state pls
        JOIN property p ON p.id = pls.property_id
        -- MIN active-sale price across ENABLED sources only (#322/D-055): the
@@ -308,6 +364,18 @@ function rankedCandidatesCte(warnParam: string): string {
        -- +1 for a warn-tone occupancy caveat, +1 for any red flag, +1 for an
        -- a_reformar condition. jsonb_typeof guards keep a non-array caveats/
        -- flags value from throwing mid-scan.
+       --
+       -- The same subquery also surfaces the three PER-AXIS raw signals the
+       -- #310 hard filters gate on (occupancy status, condition category,
+       -- renovation severity). Deriving them here — from the identical
+       -- DISTINCT-ON-latest-per-axis rows that feed distress_level — is what
+       -- keeps the FILTER and the RANK in agreement by construction (D-059): a
+       -- candidate the "occupied"/"a_reformar" filter keeps is exactly one the
+       -- distress boost lifted. max(...) FILTER picks the single latest row's
+       -- value per axis (la holds at most one row per assessment_type, so the
+       -- aggregate is really just "the one non-null value"); NULL means that
+       -- axis was never assessed — the graceful-degradation case the filters
+       -- treat as "unknown, excluded", never "matched".
        LEFT JOIN LATERAL (
          SELECT
              (COALESCE(bool_or(
@@ -324,7 +392,14 @@ function rankedCandidatesCte(warnParam: string): string {
            + (COALESCE(bool_or(
                 la.assessment_type = 'condition'
                 AND la.result->>'condition' = 'a_reformar'), false))::int
-             AS distress_level
+             AS distress_level,
+           -- occupancy is a NESTED Verdict ({ value, confidence, … }), so the
+           -- physical status is result->'occupancy'->>'value' (#25/#145); the
+           -- condition axis is flat (result->>'condition'), as is #313's
+           -- renovation_severity.
+           max(la.result->'occupancy'->>'value') FILTER (WHERE la.assessment_type = 'occupancy') AS occupancy_status,
+           max(la.result->>'condition')          FILTER (WHERE la.assessment_type = 'condition') AS condition_category,
+           max(la.result->>'renovation_severity') FILTER (WHERE la.assessment_type = 'condition') AS renovation_severity
          FROM (
            SELECT DISTINCT ON (a.assessment_type) a.assessment_type, a.result
              FROM ai_assessment a
@@ -657,10 +732,27 @@ async function loadFlags(propertyIds: number[]): Promise<Map<number, CandidateFl
  */
 export async function listCandidates(
   profileId: number,
-  opts: { cursor?: string | null; limit?: number; source?: string | null } = {},
+  opts: {
+    cursor?: string | null;
+    limit?: number;
+    source?: string | null;
+  } & CandidateFilters = {},
 ): Promise<CandidatePage> {
   const limit = Math.min(Math.max(Math.trunc(opts.limit ?? DEFAULT_LIMIT), 1), MAX_LIMIT);
   const rawCursor = opts.cursor ?? null;
+
+  // #310 hard filters (D-059). Each normalises to null ("no filter") when
+  // unset, so an untouched call behaves exactly as before. Validation of the
+  // enum membership happens at the API boundary; here we only guard the
+  // below-market threshold against a non-finite/negative value (a silent
+  // no-op filter would be worse than passing null through).
+  const occupancy: OccupancyFilter | null = opts.occupancy ?? null;
+  const condition: ConditionFilter | null = opts.condition ?? null;
+  const renovation: RenovationFilter | null = opts.renovation ?? null;
+  const minBelowMarketPct: number | null =
+    typeof opts.minBelowMarketPct === "number" && Number.isFinite(opts.minBelowMarketPct)
+      ? opts.minBelowMarketPct
+      : null;
   // Source (portal) filter (#265): isolate one connector's results so the
   // owner can debug a single portal's data quality. A candidate is a
   // deduplicated PROPERTY that may span several listings from different
@@ -855,9 +947,48 @@ export async function listCandidates(
               AND ${activeSourceClause("lf")}
          )
        )
+       -- #310 hard filters (D-059). All applied in the OUTER query, on the
+       -- per-axis signals ranked already carries — so the below-market
+       -- filter can't shift its own pool median, and the assessment filters
+       -- agree with the ranking's distress boost by construction. NULL param =
+       -- filter off. A NULL axis value (never assessed) fails every equality
+       -- below, so an assessment filter with no data yet yields an EMPTY feed
+       -- (correct graceful degradation), not an error.
+       --
+       -- occupancy ($7): 'occupied' -> tenanted/occupied_illegally; 'free' ->
+       -- vacant; the OCCUPIED_STATUSES list is a param ($8), never interpolated.
+       AND (
+         $7::text IS NULL
+         OR ($7 = 'occupied' AND ranked.occupancy_status = ANY($8::text[]))
+         OR ($7 = 'free' AND ranked.occupancy_status = 'vacant')
+       )
+       -- $9 condition category (a_reformar / reformado / obra_nueva).
+       AND ($9::text IS NULL OR ranked.condition_category = $9::text)
+       -- $10 renovation severity (#313) — only a_reformar rows carry a
+       -- non-null severity, so this implicitly narrows to a_reformar too.
+       AND ($10::text IS NULL OR ranked.renovation_severity = $10::text)
+       -- $11 below-market: keep only ≥ N% below the pool median price/m². A
+       -- null below_market_pct (pool too small / no price/m²) is excluded as
+       -- "unknown", never a false pass.
+       AND (
+         $11::double precision IS NULL
+         OR (ranked.below_market_pct IS NOT NULL AND ranked.below_market_pct >= $11::double precision)
+       )
      ORDER BY ranked.effective_score DESC, ranked.property_id DESC
      LIMIT $4`,
-    [profileId, cursorScore, cursorId, limit + 1, source, WARN_CAVEAT_CODES],
+    [
+      profileId,
+      cursorScore,
+      cursorId,
+      limit + 1,
+      source,
+      WARN_CAVEAT_CODES,
+      occupancy,
+      OCCUPIED_STATUSES,
+      condition,
+      renovation,
+      minBelowMarketPct,
+    ],
   );
 
   const hasMore = rows.length > limit;

@@ -16,7 +16,7 @@ vi.mock("pg", () => ({
 import { GET } from "../route";
 import { GET as SOURCES_GET } from "../../candidate-sources/route";
 import { resetPool } from "@/lib/db-write";
-import { WARN_CAVEAT_CODES } from "@/lib/candidates";
+import { OCCUPIED_STATUSES, WARN_CAVEAT_CODES } from "@/lib/candidates";
 import { NextRequest } from "next/server";
 
 function makeRequest(url: string): NextRequest {
@@ -80,7 +80,21 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
 
     const candidatesCall = mockQuery.mock.calls[1];
     expect(candidatesCall[0]).toContain("lf.source = $5");
-    expect(candidatesCall[1]).toEqual([3, null, null, 31, "milanuncios_rental", WARN_CAVEAT_CODES]);
+    // #310 appended $7–$11 (occupancy, occupied-statuses list, condition,
+    // renovation, min-below-market); all null/default when only source is set.
+    expect(candidatesCall[1]).toEqual([
+      3,
+      null,
+      null,
+      31,
+      "milanuncios_rental",
+      WARN_CAVEAT_CODES,
+      null,
+      OCCUPIED_STATUSES,
+      null,
+      null,
+      null,
+    ]);
   });
 
   it("treats an absent source as no filter ($5 = null)", async () => {
@@ -89,7 +103,92 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
 
     const res = await GET(makeRequest("http://localhost/api/profiles/3/candidates"), ctx("3"));
     expect(res.status).toBe(200);
-    expect(mockQuery.mock.calls[1][1]).toEqual([3, null, null, 31, null, WARN_CAVEAT_CODES]);
+    expect(mockQuery.mock.calls[1][1]).toEqual([
+      3,
+      null,
+      null,
+      31,
+      null,
+      WARN_CAVEAT_CODES,
+      null,
+      OCCUPIED_STATUSES,
+      null,
+      null,
+      null,
+    ]);
+  });
+});
+
+describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () => {
+  it("rejects an unknown occupancy value before touching the DB (400)", async () => {
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?occupancy=maybe"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown condition value (400)", async () => {
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?condition=ruina"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown renovation value (400)", async () => {
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?renovation=media"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("rejects a minDiscount outside 0–100 (400)", async () => {
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?minDiscount=150"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-numeric minDiscount (400)", async () => {
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?minDiscount=cheap"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("passes valid filters through: occupancy=$7, condition=$9, renovation=$10, minDiscount(pct→fraction)=$11", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await GET(
+      makeRequest(
+        "http://localhost/api/profiles/3/candidates?occupancy=occupied&condition=a_reformar&renovation=integral&minDiscount=15",
+      ),
+      ctx("3"),
+    );
+    expect(res.status).toBe(200);
+    expect(mockQuery.mock.calls[1][1]).toEqual([
+      3,
+      null,
+      null,
+      31,
+      null,
+      WARN_CAVEAT_CODES,
+      "occupied",
+      OCCUPIED_STATUSES,
+      "a_reformar",
+      "integral",
+      0.15, // 15% → fraction
+    ]);
   });
 });
 
