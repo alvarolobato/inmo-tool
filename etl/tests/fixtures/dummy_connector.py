@@ -14,6 +14,7 @@ from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
     RawListing,
+    SoftBlockError,
     Throttle,
 )
 
@@ -25,9 +26,15 @@ class DummyConnector(Connector):
         external_ids: tuple[str, ...] = ("dummy-1", "dummy-2", "dummy-3"),
         failing_ids: frozenset[str] = frozenset(),
         db_error_ids: frozenset[str] = frozenset(),
+        # Issue #270 (D-047): ids whose fetch_detail() raises a SoftBlockError
+        # (site rate-throttling) rather than a genuine ConnectorError — used to
+        # exercise the soft-block-vs-fatal classification. Distinct from
+        # `failing_ids` (fatal) so a test can mix both.
+        soft_block_ids: frozenset[str] = frozenset(),
         rate_limit_per_minute: int = 6000,  # fast for tests — not what's under test here
         circuit_breaker_error_rate: float = 0.30,
         circuit_breaker_min_attempts: int = 2,
+        circuit_breaker_soft_block_error_rate: float | None = None,
         price: int = 150000,
         discovers_full_inventory: bool = True,
         min_refetch_interval_seconds: int = 0,
@@ -36,6 +43,9 @@ class DummyConnector(Connector):
         self.rate_limit_per_minute = rate_limit_per_minute
         self.circuit_breaker_error_rate = circuit_breaker_error_rate
         self.circuit_breaker_min_attempts = circuit_breaker_min_attempts
+        self.circuit_breaker_soft_block_error_rate = (
+            circuit_breaker_soft_block_error_rate
+        )
         self.discovers_full_inventory = discovers_full_inventory
         # Issue #143: 0 (default) matches every connector's original
         # behaviour — always fetch — so every pre-#143 test using this
@@ -49,6 +59,7 @@ class DummyConnector(Connector):
         self.external_ids = external_ids
         self.price = price
         self._failing_ids = failing_ids
+        self._soft_block_ids = soft_block_ids
         # IDs that fetch/normalize fine but fail at persist time — simulates
         # a mid-transaction DB error (as opposed to `failing_ids`, which
         # simulates a connector-side failure before persistence is ever
@@ -85,6 +96,8 @@ class DummyConnector(Connector):
 
     def fetch_detail(self, external_id: str, throttle: Throttle) -> RawListing:
         self.fetch_calls.append(external_id)
+        if external_id in self._soft_block_ids:
+            raise SoftBlockError(f"simulated soft-block for {external_id}")
         if external_id in self._failing_ids:
             raise ConnectorError(f"simulated fetch failure for {external_id}")
         return RawListing(
@@ -130,6 +143,29 @@ class DiscoverFailsConnector(Connector):
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         raise ConnectorError("discover() is broken")
+
+    def fetch_detail(
+        self, external_id: str, throttle: Throttle
+    ) -> RawListing:  # pragma: no cover — unreachable
+        raise NotImplementedError
+
+    def normalize(self, raw: RawListing) -> CanonicalListingVersion:  # pragma: no cover
+        raise NotImplementedError
+
+
+class DiscoverSoftBlocksConnector(Connector):
+    """A connector whose discover() raises a SoftBlockError — the site
+    rate-throttling us at discovery time (issue #270, D-047, e.g. Milanuncios'
+    GeeTest wall). Must be recorded as a clean "waited for budget" outcome, not
+    a failure."""
+
+    name = "soft-block-discover"
+    rate_limit_per_minute = 6000
+
+    def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
+        raise SoftBlockError(
+            "soft-block/interruption page detected (rate-throttling) — backing off"
+        )
 
     def fetch_detail(
         self, external_id: str, throttle: Throttle

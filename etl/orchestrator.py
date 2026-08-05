@@ -20,6 +20,7 @@ from etl.connectors.base import (
     CanonicalListingVersion,
     Connector,
     ConnectorScope,
+    SoftBlockError,
 )
 from etl.connectors.circuit_breaker import CircuitBreaker
 from etl.connectors.geography import (
@@ -1178,7 +1179,16 @@ def run_connector(
     fetched = 0
     skipped = 0
     errors = 0
+    # Issue #270 (D-047): soft-block (site rate-throttling) fetch failures,
+    # tracked separately from `errors` (which stays the count of ALL failed
+    # fetches, genuine or soft-block, for error_count/#291) so the caller can
+    # tell a "waited for budget" backoff from a genuine-failure burst.
+    soft_block_errors = 0
     circuit_open = False
+    # Which category tripped the breaker for this scope, if it did: 'fatal'
+    # (genuine failures — worth surfacing) or 'soft' (rate-throttle — a clean
+    # budget stop). None while the breaker stays closed.
+    circuit_open_by: str | None = None
 
     # Issue #143: one batched lookup for the whole scope rather than one
     # query per listing — skipped entirely when the feature is off for this
@@ -1199,12 +1209,20 @@ def run_connector(
     for external_id in external_ids:
         if breaker.tripped:
             circuit_open = True
-            logger.error(
-                "Connector %s: circuit breaker open after %d/%d errors — "
-                "aborting remaining %d of %d discovered listings",
+            circuit_open_by = breaker.tripped_by
+            # Issue #270 (D-047): a soft-block-driven trip is the site
+            # rate-throttling us — a clean "budget spent for this run" stop,
+            # logged as a warning; a fatal-driven trip is a genuine failure
+            # burst worth an error-level alarm.
+            log = logger.warning if circuit_open_by == "soft" else logger.error
+            log(
+                "Connector %s: circuit breaker open (%s) after %d/%d errors "
+                "(%d soft-block) — aborting remaining %d of %d discovered listings",
                 connector.name,
+                circuit_open_by,
                 breaker.errors,
                 breaker.attempts,
+                breaker.soft_block_errors,
                 len(external_ids) - fetched - errors - skipped,
                 len(external_ids),
             )
@@ -1246,10 +1264,20 @@ def run_connector(
         except Exception as exc:  # noqa: BLE001 — any failure (fetch, normalize, or persist) counts toward the breaker
             conn.rollback()  # reset connection state in case the failure was a DB error mid-transaction
             errors += 1
-            breaker.record_error()
+            # Issue #270 (D-047): a soft-block is the site rate-throttling us,
+            # not a broken connector. It STILL counts as a failed fetch in
+            # `errors`/error_count (reducing those is issue #291's job), but is
+            # recorded against the breaker's looser soft-block threshold so a
+            # transient throttle burst doesn't trip it like a genuine failure
+            # burst would.
+            soft_block = isinstance(exc, SoftBlockError)
+            if soft_block:
+                soft_block_errors += 1
+            breaker.record_error(soft_block=soft_block)
             logger.warning(
-                "Connector %s: failed on external_id=%s: %s",
+                "Connector %s: %s on external_id=%s: %s",
                 connector.name,
+                "soft-blocked" if soft_block else "failed",
                 external_id,
                 exc,
             )
@@ -1280,7 +1308,12 @@ def run_connector(
         "fetched_count": fetched,
         "skipped_count": skipped,
         "error_count": errors,
+        "soft_block_error_count": soft_block_errors,
         "circuit_open": circuit_open,
+        # 'fatal' | 'soft' | None — which category tripped the breaker this
+        # scope (D-047). Drives whether the caller records the connector's
+        # stop as a genuine problem or a clean budget backoff.
+        "circuit_open_by": circuit_open_by,
         # Returned rather than acted on here: withdrawal reconciliation is
         # a per-connector-per-run decision the caller makes against the
         # union of every scope's ids. See _reconcile_missed_discoveries.
@@ -1954,7 +1987,22 @@ def run_all_connectors(
         fetched_total = 0
         skipped_fetch_total = 0
         error_total = 0
-        any_circuit_open = False
+        # Issue #270 (D-047): the subset of error_total that was soft-block
+        # (rate-throttle), for the informational notice. error_total still
+        # counts every failed fetch (genuine + soft-block) as an error — only
+        # the run STATUS treats a soft-block-driven stop as clean.
+        soft_block_error_total = 0
+        # A breaker trip driven by GENUINE fatal errors — worth surfacing as
+        # 'circuit_open'. Distinct from a soft-block/budget stop, which is a
+        # clean 'ok' outcome recorded only as an informational note.
+        any_fatal_circuit_open = False
+        # Issue #270 (D-047): clean "waited for budget" notices — the breaker
+        # tripped on soft-blocks, a discover() hit a soft-block wall, or whole
+        # scopes were skipped because the (soft-block-tripped) breaker was
+        # already open. None of these are failures; a non-empty list just means
+        # the run stopped short of full coverage for a benign reason and keeps
+        # the status 'ok'.
+        budget_notes: list[str] = []
         any_scope_failed = False
         # Issue #177 (M4): tracked separately from any_scope_failed — see
         # the UnresolvableGeographyError except clause below for why a
@@ -1985,6 +2033,10 @@ def run_all_connectors(
             connector.circuit_breaker_error_rate,
             connector.circuit_breaker_min_attempts,
             window=connector.circuit_breaker_window,
+            # Issue #270 (D-047): soft-block (rate-throttle) errors trip against
+            # this looser threshold; None falls back to the fatal rate inside
+            # CircuitBreaker, a no-op for connectors that don't opt in.
+            soft_block_error_rate_threshold=connector.circuit_breaker_soft_block_error_rate,
         )
         seen_scope_keys: set[str] = set()
         # Withdrawal reconciliation runs once per connector per run,
@@ -2008,7 +2060,16 @@ def run_all_connectors(
                 # outright, not attempted and immediately aborted. This is
                 # what "shared across scopes" actually buys: without it,
                 # each scope got its own fresh, untripped breaker.
-                any_circuit_open = True
+                #
+                # Issue #270 (D-047): whether this stop is surfaced as a
+                # problem or recorded as a clean "waited for budget" outcome
+                # depends on WHY the earlier scope tripped the breaker (fatal
+                # vs soft-block) — that was already captured on the tripping
+                # scope into any_fatal_circuit_open / budget_notes. The
+                # skipped-for-budget scopes here are themselves never a failure
+                # (they were never even attempted), so this branch only records
+                # them (as a budget note below); it does not, by itself, decide
+                # the run status.
                 # Issue #217: classify what's left rather than lumping it
                 # all together. "discover() was never CALLED because an
                 # earlier scope used up the shared error budget" and
@@ -2103,17 +2164,23 @@ def run_all_connectors(
                         datetime.now(timezone.utc),
                     )
                 if skipped_for_budget:
-                    error_msgs.append(
-                        "skipped for budget (circuit breaker already open "
-                        "before these scopes were attempted): "
+                    budget_notes.append(
+                        "no se cargaron más zonas por presupuesto de la "
+                        "ejecución (circuit breaker ya abierto): "
                         + ", ".join(skipped_for_budget)
                     )
                     skipped_scopes.extend(
                         {"scope": key, "reason": "budget"} for key in skipped_for_budget
                     )
-                logger.error(
+                # Issue #270 (D-047): a clean, expected outcome (we simply
+                # didn't get to these zones this run), logged at INFO — not an
+                # error. What tripped the breaker in the first place was already
+                # logged (warning for soft-block, error for fatal) by the scope
+                # that tripped it.
+                logger.info(
                     "Connector %s: circuit breaker already open — skipping "
-                    "remaining scopes this run (%d of %d not attempted)",
+                    "remaining scopes this run (%d of %d not attempted, "
+                    "clean budget stop)",
                     connector.name,
                     len(scopes) - scope_index,
                     len(scopes),
@@ -2315,12 +2382,37 @@ def run_all_connectors(
                         connector.name,
                         scope,
                     )
-                any_scope_failed = True
-                # A failed scope leaves a hole in the union: its listings
-                # are absent not because they're gone but because we never
-                # looked. Reconciling against a partial union would
-                # withdraw them.
+                # A scope that didn't complete leaves a hole in the union: its
+                # listings are absent not because they're gone but because we
+                # never looked. Reconciling against a partial union would
+                # withdraw them — true whether the cause was a genuine failure
+                # or a soft-block backoff.
                 reconcilable_union = False
+                if isinstance(exc, SoftBlockError):
+                    # Issue #270 (D-047): the site rate-throttled us at
+                    # discover() time (e.g. Milanuncios' GeeTest wall). This is
+                    # a clean "waited for budget" backoff, NOT a connector
+                    # failure — do not set any_scope_failed. Recorded as a
+                    # notice and, structurally, as a skipped scope with a
+                    # soft-block reason so it stops looking like an error in the
+                    # health surface.
+                    budget_notes.append(
+                        f"no se pudo cargar {scope} por bloqueo temporal del "
+                        f"sitio (rate-throttling): {exc}"
+                    )
+                    skipped_scopes.append(
+                        {"scope": repr(scope), "reason": "soft_block"}
+                    )
+                    logger.warning(
+                        "Connector %s: discover() soft-blocked for scope=%r "
+                        "(rate-throttling) — clean budget backoff, not a "
+                        "failure: %s",
+                        connector.name,
+                        scope,
+                        exc,
+                    )
+                    continue
+                any_scope_failed = True
                 logger.exception(
                     "Connector %s: discover() failed for scope=%r",
                     connector.name,
@@ -2342,7 +2434,22 @@ def run_all_connectors(
             fetched_total += result["fetched_count"]
             skipped_fetch_total += result["skipped_count"]
             error_total += result["error_count"]
-            any_circuit_open = any_circuit_open or result["circuit_open"]
+            soft_block_error_total += result["soft_block_error_count"]
+            # Issue #270 (D-047): route a breaker trip by its cause. A fatal
+            # trip (genuine failure burst) is surfaced as 'circuit_open'; a
+            # soft-block trip (site rate-throttling) is a clean "waited for
+            # budget" stop that keeps the status 'ok' with an informational
+            # notice.
+            if result["circuit_open"]:
+                if result["circuit_open_by"] == "fatal":
+                    any_fatal_circuit_open = True
+                else:
+                    budget_notes.append(
+                        f"{scope_key}: se alcanzó el límite por bloqueo temporal "
+                        f"del sitio (rate-throttling) tras "
+                        f"{result['fetched_count']} descargas; el resto se "
+                        f"reintentará en la próxima ejecución"
+                    )
             discovered_union |= result["discovered_external_ids"]
             reconcilable_union = reconcilable_union and result["reconcilable"]
             scope_summaries.append(
@@ -2379,8 +2486,18 @@ def run_all_connectors(
         #      genuine, unrelated scope failure behind "oh, it was just
         #      the circuit breaker" when both happened in the same run —
         #      a real failure must never be hidden behind a different,
-        #      less-alarming status.
-        #   2. any_circuit_open (and no explicit failure) -> 'circuit_open'.
+        #      less-alarming status. "Failed" now means only GENUINE
+        #      (fatal) failures: a discover() that raised anything other
+        #      than a SoftBlockError. A soft-block backoff is NOT a failure
+        #      (see #4).
+        #   2. any_fatal_circuit_open (and no explicit failure) ->
+        #      'circuit_open'. Issue #270 (D-047): ONLY a breaker trip driven
+        #      by GENUINE fatal errors surfaces here — that is the "something
+        #      is really wrong (site structure changed, network dead)" signal
+        #      worth alarming on. A breaker trip driven by SOFT-BLOCKS (site
+        #      rate-throttling) is deliberately NOT here — it is a clean
+        #      "waited for budget" stop and falls through to 'ok' (#4) with an
+        #      informational notice.
         #   3. any_scope_unresolvable (issue #177, M4) AND nothing else
         #      this run ever reached a successful `run_connector` call
         #      (`scope_summaries` empty) -> 'failed'. Every active scope
@@ -2392,34 +2509,52 @@ def run_all_connectors(
         #      loudly, unchanged from before this fix.
         #   4. otherwise -> 'ok'. This covers "every attempted scope
         #      succeeded", "zero scopes were attempted because all of them
-        #      were unresolvable/duplicate" (no `UnresolvableGeographyError`
-        #      involved at all — the plain `scope_key() is None` path), AND
-        #      (issue #177, M4) "at least one scope succeeded even though a
-        #      DIFFERENT scope this run had an unresolvable geography" — a
-        #      connector doing real, successful work for the markets it
-        #      actually covers must not be flipped to 'failed' every single
-        #      night just because one unrelated profile has a bogus/foreign
-        #      center (this is what issue #71's review originally flagged,
-        #      and what the #169 sentinel path had regressed: "an
-        #      unresolvable-for-everyone connector must not end up
-        #      permanently 'failed'" applies just as much to "unresolvable
-        #      for ONE profile out of several" as it does to zero profiles
-        #      at all). The unresolvable scope is still fully visible via
-        #      `error_msgs` below, unconditionally — 'ok' here means "don't
-        #      cry wolf on the connector as a whole", not "hide the
-        #      problem".
+        #      were unresolvable/duplicate", AND (issue #270, D-047) every
+        #      BUDGET/SOFT-BLOCK outcome: the breaker tripped on rate-throttle,
+        #      a discover() hit a soft-block wall, or whole scopes were skipped
+        #      because the (soft-block-tripped) breaker was already open. The
+        #      owner's principle (#270): "waiting for budget is NOT an error —
+        #      it's a clean run outcome, just a notice that we couldn't load
+        #      more this time." A connector that ingested fine and then stopped
+        #      because it spent its per-run budget must show green, not an error
+        #      state, in the health UI — the reason is surfaced via the
+        #      informational notice folded into error_msg below (and
+        #      skipped_scopes), and the genuine fetch failures via error_count,
+        #      never via a scary status. Also (issue #177, M4) "at least one
+        #      scope succeeded even though a DIFFERENT scope had an
+        #      unresolvable geography".
         # `scope_summaries`/`error_msgs` (folded into error_msg below) make
-        # a mixed-outcome run distinguishable from a total failure/total
-        # no-op by inspection, even though `status` itself can only be one
-        # of three values.
+        # a mixed-outcome run distinguishable by inspection, even though
+        # `status` itself can only be one of three values.
         if any_scope_failed:
             status = "failed"
-        elif any_circuit_open:
+        elif any_fatal_circuit_open:
             status = "circuit_open"
         elif any_scope_unresolvable and not scope_summaries:
             status = "failed"
         else:
             status = "ok"
+
+        # Issue #270 (D-047): make explicit that error_count INCLUDES
+        # soft-block (rate-throttle) fetch failures — they are genuine failed
+        # fetches (counted for #291) even though the run status stays clean.
+        # This keeps "error_count=7 but status ok" self-explanatory in the
+        # health surface rather than looking contradictory.
+        if soft_block_error_total:
+            budget_notes.append(
+                f"{soft_block_error_total} de {error_total} errores fueron "
+                "bloqueos temporales del sitio (rate-throttling), no fallos del "
+                "conector (ver #291)"
+            )
+
+        # Issue #270 (D-047): budget/soft-block notices are informational and
+        # belong on the run REGARDLESS of status — a clean 'ok' run that hit
+        # its budget must still tell the operator "no se cargaron más por
+        # presupuesto". Prefixed so they read as notices, not errors, when the
+        # UI shows error_msg. Emitted before "scopes ok:" so the headline
+        # reason comes first.
+        for note in budget_notes:
+            error_msgs.append(f"nota: {note}")
 
         if status != "ok" and scope_summaries:
             # Only worth stating "these scopes were fine" when the overall
