@@ -9,15 +9,34 @@
  *   source — portal filter (#265): narrow to candidates with an active sale
  *            listing from this source. Combines with cursor/limit. Omitted =
  *            all sources. Options come from GET .../candidate-sources.
+ *   occupancy   — #310 hard filter: `occupied` | `free`.
+ *   condition   — #310 hard filter: `a_reformar` | `reformado` | `obra_nueva`.
+ *   renovation  — #310 hard filter (#313): `leve` | `integral` (a_reformar depth).
+ *   minDiscount — #310 hard filter: keep only candidates priced at least this
+ *                 PERCENT (0–100) below the pool median price/m². Sent as a
+ *                 percent (e.g. `15`); converted to a fraction for the query.
+ *   All #310 filters combine with each other, with `source`, and with
+ *   cursor/limit. The occupancy/condition/renovation filters read AI-assessment
+ *   data (empty until #316) and correctly return an empty feed until it flows;
+ *   minDiscount is computed from price and works today.
  *
  * Error codes:
- *   400 — Invalid id, cursor, limit, or source
+ *   400 — Invalid id, cursor, limit, source, or #310 filter value
  *   404 — Profile not found or archived
  *   500 — Unexpected error
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { decodeCursor, listCandidates } from "@/lib/candidates";
+import {
+  CONDITION_FILTERS,
+  OCCUPANCY_FILTERS,
+  RENOVATION_FILTERS,
+  decodeCursor,
+  listCandidates,
+  type ConditionFilter,
+  type OccupancyFilter,
+  type RenovationFilter,
+} from "@/lib/candidates";
 import { getProfileById } from "@/lib/db/profiles";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
@@ -64,6 +83,65 @@ export async function GET(
     source = rawSource;
   }
 
+  // #310 hard filters. Each is an optional closed-vocabulary token or a bounded
+  // percent; a value outside the vocabulary is a malformed request (400), never
+  // silently ignored (which would show an unfiltered feed the user didn't ask
+  // for). Absent/empty = filter off.
+  const rawOccupancy = searchParams.get("occupancy");
+  let occupancy: OccupancyFilter | null = null;
+  if (rawOccupancy !== null && rawOccupancy !== "") {
+    if (!(OCCUPANCY_FILTERS as readonly string[]).includes(rawOccupancy)) {
+      return NextResponse.json(
+        formatApiError("Filtro de ocupación no válido.", "VALIDATION", undefined, requestId),
+        { status: 400 },
+      );
+    }
+    occupancy = rawOccupancy as OccupancyFilter;
+  }
+
+  const rawCondition = searchParams.get("condition");
+  let condition: ConditionFilter | null = null;
+  if (rawCondition !== null && rawCondition !== "") {
+    if (!(CONDITION_FILTERS as readonly string[]).includes(rawCondition)) {
+      return NextResponse.json(
+        formatApiError("Filtro de estado no válido.", "VALIDATION", undefined, requestId),
+        { status: 400 },
+      );
+    }
+    condition = rawCondition as ConditionFilter;
+  }
+
+  const rawRenovation = searchParams.get("renovation");
+  let renovation: RenovationFilter | null = null;
+  if (rawRenovation !== null && rawRenovation !== "") {
+    if (!(RENOVATION_FILTERS as readonly string[]).includes(rawRenovation)) {
+      return NextResponse.json(
+        formatApiError("Filtro de reforma no válido.", "VALIDATION", undefined, requestId),
+        { status: 400 },
+      );
+    }
+    renovation = rawRenovation as RenovationFilter;
+  }
+
+  // minDiscount arrives as a PERCENT (0–100); the query wants a fraction.
+  let minBelowMarketPct: number | null = null;
+  const rawMinDiscount = searchParams.get("minDiscount");
+  if (rawMinDiscount !== null && rawMinDiscount !== "") {
+    const pct = Number(rawMinDiscount);
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+      return NextResponse.json(
+        formatApiError(
+          "Descuento mínimo no válido (0–100).",
+          "VALIDATION",
+          undefined,
+          requestId,
+        ),
+        { status: 400 },
+      );
+    }
+    minBelowMarketPct = pct / 100;
+  }
+
   // Cursor is an opaque string (encodes a compound score+id keyset key, see
   // lib/candidates.ts) — validate it decodes, but don't parse it ourselves.
   let cursor: string | null = null;
@@ -103,7 +181,15 @@ export async function GET(
       );
     }
 
-    const page = await listCandidates(id, { cursor, limit, source });
+    const page = await listCandidates(id, {
+      cursor,
+      limit,
+      source,
+      occupancy,
+      condition,
+      renovation,
+      minBelowMarketPct,
+    });
     return NextResponse.json(page);
   } catch (err) {
     console.error(`[${requestId}] Error al listar candidatos del perfil:`, err);
