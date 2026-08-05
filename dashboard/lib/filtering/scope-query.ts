@@ -61,6 +61,83 @@ function ph(n: number): string {
 const GROUND_FLOOR_VALUE = "bajo";
 
 /**
+ * The `property` columns whose NULLs the hard-filter engine can fill from an
+ * LLM-recovered value in `ai_assessment` (assessment_type='extract', #28) —
+ * exactly the fields that flow writes into `result`, minus `m2_useful` (no
+ * current scope filter reads it — see data-model.md). `rooms`/`bathrooms`
+ * aren't consulted by any filter today either, but are kept here so a future
+ * filter that adds them gets the fallback for free.
+ */
+export type ExtractFallbackColumn =
+  | "m2_built"
+  | "rooms"
+  | "bathrooms"
+  | "floor"
+  | "has_elevator";
+
+/**
+ * Per-column SQL cast for the JSON *text* value pulled out of
+ * `ai_assessment.result` (`->>` always yields text), so the fallback compares
+ * and behaves exactly like the real `property.<col>`. `floor` is inherently
+ * free text, so it takes no cast.
+ */
+const EXTRACT_FALLBACK_CAST: Record<ExtractFallbackColumn, string> = {
+  m2_built: "::numeric",
+  rooms: "::integer",
+  bathrooms: "::integer",
+  floor: "",
+  has_elevator: "::boolean",
+};
+
+/**
+ * Minimum per-field confidence an extracted value must clear before a HARD
+ * filter is allowed to trust it (D-067). Below this the field is treated as
+ * UNKNOWN: the subquery returns no row, so the COALESCE falls straight
+ * through to `property.<col>` (i.e. NULL when the connector never structured
+ * it). A shaky extraction must never be able to *confidently exclude* a real
+ * match — a false negative from a low-confidence guess is a worse failure
+ * mode for a hard filter than simply lacking the datum (issue #182 EC-2).
+ */
+export const EXTRACT_FALLBACK_MIN_CONFIDENCE = 0.6;
+
+/**
+ * `COALESCE(property.<col>, <latest high-confidence extract value>)` for one
+ * field, as a bare SQL fragment.
+ *
+ * `property.<col>` ALWAYS wins when present (issue #182 EC-3) — a
+ * connector-structured value is never shadowed by an LLM inference, and a
+ * later sync that fills the column silently retires the fallback. Only when
+ * `property.<col>` is NULL does the scalar subquery supply the extracted
+ * value, and only when that field's `confidence_per_field` entry clears
+ * `EXTRACT_FALLBACK_MIN_CONFIDENCE` (issue #182 EC-1/EC-2).
+ *
+ * The "latest row for the type" shape mirrors `getLatestAssessment`
+ * (ai-assessment/cache.ts) and `loadFlags` (candidates.ts) exactly
+ * (`ORDER BY generated_at DESC, id DESC`), inlined as a correlated
+ * `LIMIT 1` subquery so this module stays a PURE, DB-connectionless SQL
+ * string builder (its documented contract). It binds NO params: the column
+ * comes from a closed union (never user input) and the threshold is a fixed
+ * policy literal, so the funnel stages' positional-`$n` ordering is
+ * untouched — every existing placeholder keeps its number.
+ */
+export function extractFallbackExpr(column: ExtractFallbackColumn): string {
+  const valueExpr = "(ax.result->>'" + column + "')" + EXTRACT_FALLBACK_CAST[column];
+  return (
+    "COALESCE(property." +
+    column +
+    ", (SELECT " +
+    valueExpr +
+    " FROM ai_assessment ax WHERE ax.property_id = property.id" +
+    " AND ax.assessment_type = 'extract'" +
+    " AND (ax.result->'confidence_per_field'->>'" +
+    column +
+    "')::numeric >= " +
+    EXTRACT_FALLBACK_MIN_CONFIDENCE +
+    " ORDER BY ax.generated_at DESC NULLS LAST, ax.id DESC LIMIT 1))"
+  );
+}
+
+/**
  * Radius geography uses the Haversine formula directly in SQL rather than a
  * PostGIS/earthdistance extension — good enough at city scale (issue #18
  * Technical approach item 1) and avoids an extension dependency for the
@@ -173,13 +250,18 @@ export function buildScopeFunnelStages(scope: Scope): ScopeFunnelStage[] {
   // not a query shape materialize.ts has to know about. A property with zero
   // active listings (e.g. every listing withdrawn) has a NULL subquery
   // result, which correctly fails any price condition rather than matching.
+  // m2_built with the #28 extract fallback (issue #182): a private-seller
+  // listing whose portal never structured m² but stated it in prose still
+  // gets size-filtered, via the high-confidence extracted value, instead of
+  // silently failing every size band. `property.m2_built` still wins when
+  // present (EC-3).
   if (scope.size_min !== undefined) {
     params.push(scope.size_min);
-    conditions.push("property.m2_built >= " + ph(params.length));
+    conditions.push(extractFallbackExpr("m2_built") + " >= " + ph(params.length));
   }
   if (scope.size_max !== undefined) {
     params.push(scope.size_max);
-    conditions.push("property.m2_built <= " + ph(params.length));
+    conditions.push(extractFallbackExpr("m2_built") + " <= " + ph(params.length));
   }
   if (scope.price_min !== undefined || scope.price_max !== undefined) {
     // `AND listing.operation = 'sale'` — same issue #31 reasoning as the
@@ -202,11 +284,23 @@ export function buildScopeFunnelStages(scope: Scope): ScopeFunnelStage[] {
   // --- Hard exclusions ---
   const exclusions = scope.hard_exclusions;
   if (exclusions?.requires_elevator) {
-    conditions.push("property.has_elevator IS TRUE");
+    // `IS NOT FALSE`, not `IS TRUE` (changed by issue #182 EC-2). A hard
+    // exclusion removes only what is KNOWN-bad — the same philosophy
+    // excludes_ground_floor already applies to an unpublished floor (see
+    // GROUND_FLOOR_VALUE's note). Once the #28 extract fallback can supply a
+    // value, `IS TRUE` would wrongly reject a property whose elevator is
+    // genuinely UNKNOWN (NULL, or a below-threshold extraction the fallback
+    // deliberately drops) — indistinguishable, post-gate, from a confident
+    // "no elevator". `IS NOT FALSE` keeps unknowns and excludes only a
+    // property whose elevator is confidently known to be absent
+    // (property.has_elevator = false, or a >= 0.6 extraction of false).
+    conditions.push(extractFallbackExpr("has_elevator") + " IS NOT FALSE");
   }
   if (exclusions?.excludes_ground_floor) {
     params.push(GROUND_FLOOR_VALUE);
-    conditions.push("LOWER(COALESCE(property.floor, '')) <> " + ph(params.length));
+    conditions.push(
+      "LOWER(COALESCE(" + extractFallbackExpr("floor") + ", '')) <> " + ph(params.length),
+    );
   }
   stages.push({ key: "exclusions", whereSql: conditions.join(" AND "), params: [...params] });
 

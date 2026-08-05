@@ -43,7 +43,7 @@
  */
 
 import { sql } from "@/lib/db-write";
-import { buildScopeFunnelStages } from "@/lib/filtering/scope-query";
+import { buildScopeFunnelStages, extractFallbackExpr } from "@/lib/filtering/scope-query";
 import type { SearchProfileRow } from "@/lib/profiles-schema";
 import type { AreaCoverage, NearestPropertyResult, ZeroCandidateDiagnosis } from "@/lib/profile-diagnostics-types";
 
@@ -301,11 +301,20 @@ export async function diagnoseZeroCandidates(profile: SearchProfileRow): Promise
     for (const [key] of activeExclusions) {
       const isolatedConditions = [priceSizeStage.whereSql];
       const isolatedParams = [...priceSizeStage.params];
+      // These isolated predicates MUST match buildScopeFunnelStages' hard
+      // exclusions exactly (issue #182): both now consult the #28 extract
+      // fallback via `extractFallbackExpr`, and requires_elevator is
+      // `IS NOT FALSE` (excludes only a confidently-known missing elevator),
+      // so the "which stage zeroed the count" attribution stays faithful to
+      // what the real filter did. `extractFallbackExpr` binds no params, so
+      // the `$${isolatedParams.length}` numbering below is unaffected.
       if (key === "requires_elevator") {
-        isolatedConditions.push("property.has_elevator IS TRUE");
+        isolatedConditions.push(extractFallbackExpr("has_elevator") + " IS NOT FALSE");
       } else if (key === "excludes_ground_floor") {
         isolatedParams.push("bajo");
-        isolatedConditions.push(`LOWER(COALESCE(property.floor, '')) <> $${isolatedParams.length}`);
+        isolatedConditions.push(
+          `LOWER(COALESCE(${extractFallbackExpr("floor")}, '')) <> $${isolatedParams.length}`,
+        );
       } else {
         continue;
       }
