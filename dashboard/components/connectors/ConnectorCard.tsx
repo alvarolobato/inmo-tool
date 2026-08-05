@@ -215,6 +215,11 @@ function FreshnessControl({
   onPatch: (patch: ConnectorConfigPatch) => void;
 }) {
   const f = connector.freshness;
+  // A deregistered connector can never run again, so any cadence change would
+  // 409 at the API — disable the control, consistent with the toggle/scope/
+  // rooms controls (which are all locked for an unregistered connector). The
+  // state readout still renders so its history stays legible.
+  const locked = !connector.registered;
   // The stored override might not match a preset (e.g. an API-set 48h). Surface
   // it as an extra option so the select never silently misrepresents state.
   const presets = [...FRESHNESS_PRESETS];
@@ -232,7 +237,7 @@ function FreshnessControl({
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
         <select
           value={currentValue}
-          disabled={busy}
+          disabled={busy || locked}
           data-testid={`freshness-interval-${connector.name}`}
           onChange={(e) => {
             const v = e.target.value;
