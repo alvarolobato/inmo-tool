@@ -39,6 +39,7 @@
  */
 
 import { sql } from "@/lib/db-write";
+import { DISABLED_SOURCES_CTE, activeSourceClause } from "@/lib/db/source-active";
 import { BudgetExceededError, CircuitBreakerOpenError } from "@/lib/llm";
 import type { LlmAgenticContext } from "@/lib/llm-tools/types";
 import { getLatestAssessment, type AssessmentType } from "./cache";
@@ -110,10 +111,31 @@ export interface AssessmentBatchResult {
  * Property IDs that still need at least one of the selection flows, oldest
  * ingested first, bounded to `batchSize`.
  *
- * Only properties with at least one ACTIVE listing carrying a non-empty
- * description are eligible — `loadPropertyListings` would return `[]` (→
- * `NoListingsError`) otherwise, so selecting them would waste a batch slot on
- * a property nothing can be read from.
+ * ## Two-stage filter (issue #326)
+ *
+ * The LLM assessment is expensive, and capture is deliberately broad (a whole
+ * province via a Cimenta2 sitemap, a wide crawl) — most ingested properties
+ * match no profile and the investor never sees them, so assessing them wastes
+ * LLM calls (and €). Selection is therefore gated in two stages:
+ *
+ *  - **Stage 1 (cheap, SQL):** a property is eligible ONLY if it is a matched
+ *    candidate of at least one ACTIVE (non-archived) profile — a row in
+ *    `profile_listing_state` with `matched = true` whose `search_profile` is
+ *    not archived. Materialization already computed that row respecting each
+ *    profile's full scope (geography / price / type / rooms / hard-exclusions),
+ *    so "would the investor ever see this?" is answered by a single EXISTS, not
+ *    re-derived here. A new listing becomes eligible the moment it matches a
+ *    profile (works with #285 self-healing rematerialize).
+ *  - **Stage 2 (the existing gate):** among stage-1 survivors, keep only those
+ *    with at least one ACTIVE listing carrying a non-empty description from a
+ *    non-disabled source (`loadPropertyListings` would return `[]` →
+ *    `NoListingsError` otherwise) that still lack a current-prompt-version
+ *    verdict for at least one selection flow.
+ *
+ * Disabled-source hiding (#322 / D-055): the described-active-listing gate
+ * requires `activeSourceClause` too, so a candidate whose only active listings
+ * come from a switched-off connector is not assessed — matching the candidate
+ * feed, which hides those listings entirely.
  */
 export async function selectPropertiesNeedingAssessment(
   batchSize: number,
@@ -123,15 +145,28 @@ export async function selectPropertiesNeedingAssessment(
   const params: string[] = SELECTION_FLOWS.flatMap((f) => [f.type, f.promptVersion]);
   const limitParam = `$${params.length + 1}`;
   const rows = await sql<{ id: string }>(
-    `SELECT p.id
+    `WITH ${DISABLED_SOURCES_CTE}
+     SELECT p.id
        FROM property p
       WHERE EXISTS (
+              -- Stage 1: matched candidate of at least one ACTIVE profile.
+              SELECT 1
+                FROM profile_listing_state pls
+                JOIN search_profile sp ON sp.id = pls.profile_id
+               WHERE pls.property_id = p.id
+                 AND pls.matched = true
+                 AND sp.archived_at IS NULL
+            )
+        AND EXISTS (
+              -- Stage 2a: something readable exists, from an ACTIVE source.
               SELECT 1 FROM listing l
                WHERE l.property_id = p.id
                  AND l.status = 'active'
                  AND COALESCE(TRIM(l.description), '') <> ''
+                 AND ${activeSourceClause("l")}
             )
         AND EXISTS (
+              -- Stage 2b: at least one selection flow lacks a current verdict.
               SELECT 1
                 FROM (VALUES ${values}) AS f(atype, ver)
                WHERE NOT EXISTS (
