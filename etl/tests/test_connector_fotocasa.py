@@ -18,7 +18,12 @@ import requests
 from bs4 import BeautifulSoup
 
 from etl.connectors import fotocasa as fotocasa_module
-from etl.connectors.base import ConnectorError, ConnectorScope, RawListing
+from etl.connectors.base import (
+    ConnectorError,
+    ConnectorScope,
+    ListingUnavailableError,
+    RawListing,
+)
 from etl.connectors.fotocasa import FotocasaConnector
 from etl.connectors.geography import UnresolvableGeographyError
 from etl.orchestrator import _upsert_canonical_listing
@@ -894,6 +899,71 @@ class TestRobotsCompliance:
         ):
             allowed, reason = is_allowed(rules, url)
             assert allowed, f"matcher wrongly disallowed {url}: {reason}"
+
+
+def _http_error_response(status_code: int) -> Mock:
+    """A mock response whose raise_for_status() raises the same HTTPError
+    `requests` would for that status — carrying a `.response.status_code`,
+    which is what the connector inspects to classify a 404/410 as 'gone'."""
+    resp = Mock()
+    err = requests.HTTPError(f"{status_code} Client Error")
+    err.response = Mock(status_code=status_code)
+    resp.raise_for_status = Mock(side_effect=err)
+    return resp
+
+
+class TestFetchDetailFailureClassification:
+    """Issue #291: a detail fetch that 404/410s means the listing was
+    removed at the source between discovery and fetch (normal churn) — that
+    must raise ListingUnavailableError so the orchestrator counts it as a
+    clean skip, not one of the persistent per-scope `errors`. Any OTHER
+    request failure (timeout, 500, DNS) stays a generic ConnectorError.
+    """
+
+    @pytest.mark.parametrize("status", [404, 410])
+    def test_gone_status_raises_listing_unavailable(self, status):
+        with (
+            patch(
+                "etl.connectors.fotocasa.requests.get",
+                return_value=_http_error_response(status),
+            ),
+            pytest.raises(ListingUnavailableError, match=f"HTTP {status}"),
+        ):
+            FotocasaConnector().fetch_detail("190011971", throttle=lambda: None)
+
+    def test_listing_unavailable_is_a_connector_error_subclass(self):
+        # So any handler that only knows the base type still treats a gone
+        # listing as a failed fetch — the orchestrator's specific handling
+        # is an added narrowing, not a contract change.
+        assert issubclass(ListingUnavailableError, ConnectorError)
+
+    @pytest.mark.parametrize("status", [500, 503])
+    def test_server_error_stays_generic_connector_error(self, status):
+        with (
+            patch(
+                "etl.connectors.fotocasa.requests.get",
+                return_value=_http_error_response(status),
+            ),
+            pytest.raises(ConnectorError) as excinfo,
+        ):
+            FotocasaConnector().fetch_detail("190011971", throttle=lambda: None)
+        # A 5xx is a transient/site problem, not a removed listing — it must
+        # NOT be reclassified as gone.
+        assert not isinstance(excinfo.value, ListingUnavailableError)
+        assert "request failed" in str(excinfo.value)
+
+    def test_timeout_stays_generic_connector_error(self):
+        # A timeout has no `.response`, so the status probe degrades to None
+        # and never matches the gone set.
+        with (
+            patch(
+                "etl.connectors.fotocasa.requests.get",
+                side_effect=requests.Timeout("simulated timeout"),
+            ),
+            pytest.raises(ConnectorError) as excinfo,
+        ):
+            FotocasaConnector().fetch_detail("190011971", throttle=lambda: None)
+        assert not isinstance(excinfo.value, ListingUnavailableError)
 
 
 class TestNormalize:

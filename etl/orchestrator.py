@@ -13,6 +13,7 @@ import dataclasses
 import json
 import logging
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -20,6 +21,7 @@ from etl.connectors.base import (
     CanonicalListingVersion,
     Connector,
     ConnectorScope,
+    ListingUnavailableError,
     SoftBlockError,
 )
 from etl.connectors.circuit_breaker import CircuitBreaker
@@ -72,6 +74,22 @@ _SCOPE_DEDUP_DECIMALS = 4
 # that's genuinely gone — not empirically tuned yet, revisit once real
 # sweep-to-sweep variance is observed in practice.
 _WITHDRAWAL_THRESHOLD = 3
+
+# Issue #291: a fetch_detail() that returns HTTP 404/410 for a discovered
+# listing is expected inventory churn (the listing was removed at the source
+# between discovery and fetch) and is counted as a clean skip, not an error.
+# But if a LARGE fraction of a scope's fetch attempts come back "gone", that
+# is not churn — it's the detail-URL shape (or the whole detail path) having
+# broken, so every real listing 404s. Above this fraction of attempted
+# fetches, and with at least `_GONE_ALARM_MIN_ATTEMPTS` attempts to have a
+# meaningful sample, that's logged as a structural alarm (the shared circuit
+# breaker also trips on a total break, since "gone" still records a breaker
+# error — this alarm is the specific diagnosis that a bare circuit_open
+# status can't give). Deliberately high: real churn between a fresh
+# discover() and an immediate fetch is a small single-digit percent (the
+# live evidence in issue #291 is ~5%: 7 gone of ~143 attempted).
+_GONE_ALARM_RATIO = 0.5
+_GONE_ALARM_MIN_ATTEMPTS = 10
 
 # Postgres' auto-generated name for listing's UNIQUE (source, external_id)
 # — the one unique violation `_upsert_canonical_listing` knows how to
@@ -1184,6 +1202,20 @@ def run_connector(
     # fetches, genuine or soft-block, for error_count/#291) so the caller can
     # tell a "waited for budget" backoff from a genuine-failure burst.
     soft_block_errors = 0
+    # Issue #291: listings a discover() sweep surfaced but whose detail
+    # fetch returned HTTP 404/410 — removed/withdrawn at the source between
+    # discovery and fetch. Tracked separately from `errors` (and from D-047's
+    # soft_block_errors) so this expected inventory churn stops inflating
+    # `connector_run_results.error_count`.
+    gone = 0
+    # Issue #291 instrumentation: a breakdown of the per-listing errors that
+    # DID count (fatal or soft-block, but not the reclassified "gone" ones)
+    # by exception type, logged once per scope. The run result stores only an
+    # aggregate count, so before this the only way to see WHAT the recurring
+    # handful of errors were was to grep individual WARNING lines; this makes
+    # the pattern skimmable (e.g. "SoftBlockError=5, ConnectorError=2")
+    # without a schema change.
+    error_kinds: Counter[str] = Counter()
     circuit_open = False
     # Which category tripped the breaker for this scope, if it did: 'fatal'
     # (genuine failures — worth surfacing) or 'soft' (rate-throttle — a clean
@@ -1223,7 +1255,7 @@ def run_connector(
                 breaker.errors,
                 breaker.attempts,
                 breaker.soft_block_errors,
-                len(external_ids) - fetched - errors - skipped,
+                len(external_ids) - fetched - errors - skipped - gone,
                 len(external_ids),
             )
             break
@@ -1261,9 +1293,45 @@ def run_connector(
             raw = connector.fetch_detail(external_id, throttle=limiter.acquire)
             canonical = connector.normalize(raw)
             _upsert_canonical_listing(conn, canonical)
+        except ListingUnavailableError as exc:
+            # Issue #291: the source says this listing is gone (HTTP 404/410)
+            # — it was removed/withdrawn between the discover() sweep that
+            # surfaced its id and this detail fetch. That is expected churn
+            # on a live classifieds site, not a run error an operator should
+            # chase, so it is NOT counted toward `errors` (this is what lets
+            # a normal fotocasa/milanuncios scope report error_count=0
+            # instead of the persistent 7-10 the issue reports). It IS still
+            # recorded as a breaker error, deliberately: if the detail-URL
+            # shape breaks, EVERY fetch 404s, and that total break must still
+            # trip the shared breaker rather than silently fetching nothing
+            # and reporting a clean run (the `_GONE_ALARM_RATIO` check after
+            # the loop is the specific diagnosis a bare circuit_open can't
+            # give). A removed listing is NOT a soft-block (D-047): it records
+            # a FATAL breaker error (soft_block=False), so a wholesale 404
+            # break trips the tight fatal threshold, not the looser soft-block
+            # one. Deliberately does NOT mark the listing withdrawn: a single
+            # 404 is not the `_WITHDRAWAL_THRESHOLD`-miss evidence withdrawal
+            # requires, and trusting one here would reintroduce exactly the
+            # mass-withdrawal hazard `_reconcile_missed_discoveries` guards
+            # against if the URL shape ever broke.
+            conn.rollback()
+            gone += 1
+            breaker.record_error(soft_block=False)
+            logger.info(
+                "Connector %s: external_id=%s no longer available at source "
+                "(%s) — clean skip, not counted as a run error",
+                connector.name,
+                external_id,
+                exc,
+            )
+            continue
         except Exception as exc:  # noqa: BLE001 — any failure (fetch, normalize, or persist) counts toward the breaker
             conn.rollback()  # reset connection state in case the failure was a DB error mid-transaction
             errors += 1
+            # Issue #291 instrumentation: tally by exception type (includes
+            # SoftBlockError, which still counts in `errors` per D-047) so the
+            # per-scope breakdown below shows WHAT the counted errors were.
+            error_kinds[type(exc).__name__] += 1
             # Issue #270 (D-047): a soft-block is the site rate-throttling us,
             # not a broken connector. It STILL counts as a failed fetch in
             # `errors`/error_count (reducing those is issue #291's job), but is
@@ -1303,12 +1371,64 @@ def run_connector(
             errors,
         )
 
+    if gone:
+        # Issue #291: expected inventory churn — logged at INFO (not an
+        # error) so a run reports it without treating removed listings as
+        # failures. The aggregate here is the skimmable counterpart to the
+        # per-listing INFO lines above.
+        logger.info(
+            "Connector %s: %d/%d discovered listings were gone at the source "
+            "(HTTP 404/410) this scope — removed between discovery and fetch, "
+            "counted as clean skips, not errors",
+            connector.name,
+            gone,
+            len(external_ids),
+        )
+
+    if errors:
+        # Issue #291 instrumentation: surface WHAT the counted per-listing
+        # errors were (by exception type), so a recurring pattern is visible
+        # at a glance in the log stream rather than only reconstructable from
+        # individual WARNING lines. These exclude the "gone" reclassification
+        # above but INCLUDE soft-blocks (which still count in `errors` per
+        # D-047) — the SoftBlockError-vs-other split in the breakdown is
+        # exactly what tells a transient throttle apart from a real bug.
+        logger.warning(
+            "Connector %s: %d counted per-listing error(s) this scope "
+            "(%d soft-block), by type: %s",
+            connector.name,
+            errors,
+            soft_block_errors,
+            ", ".join(f"{kind}={n}" for kind, n in sorted(error_kinds.items())),
+        )
+
+    # Issue #291: a handful of "gone" listings is normal churn; a large
+    # fraction of every fetch coming back gone is the detail path having
+    # broken (every real listing 404s), which the bare fetched/errors counts
+    # would otherwise hide. Alarm on the fraction of ATTEMPTED fetches, not
+    # of discovered ids (most discovered ids can be skip-if-seen skips).
+    attempted = fetched + errors + gone
+    if attempted >= _GONE_ALARM_MIN_ATTEMPTS and gone > attempted * _GONE_ALARM_RATIO:
+        logger.error(
+            "Connector %s: %d/%d ATTEMPTED fetches returned HTTP 404/410 "
+            "(gone) this scope — far above the churn a live site produces "
+            "between discovery and fetch. This is the signature of the "
+            "detail-URL shape (or the whole detail path) having broken so "
+            "every real listing 404s, not normal removals; the shared "
+            "circuit breaker should also be tripping. Check fetch_detail's "
+            "URL construction against the live site.",
+            connector.name,
+            gone,
+            attempted,
+        )
+
     return {
         "discovered_count": len(external_ids),
         "fetched_count": fetched,
         "skipped_count": skipped,
         "error_count": errors,
         "soft_block_error_count": soft_block_errors,
+        "gone_count": gone,
         "circuit_open": circuit_open,
         # 'fatal' | 'soft' | None — which category tripped the breaker this
         # scope (D-047). Drives whether the caller records the connector's
@@ -2455,7 +2575,8 @@ def run_all_connectors(
             scope_summaries.append(
                 f"{scope_key}: discovered={result['discovered_count']} "
                 f"fetched={result['fetched_count']} "
-                f"skipped={result['skipped_count']} errors={result['error_count']}"
+                f"skipped={result['skipped_count']} "
+                f"gone={result['gone_count']} errors={result['error_count']}"
             )
 
         # Withdrawal reconciliation: once per connector per run, against

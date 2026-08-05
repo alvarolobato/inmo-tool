@@ -63,10 +63,12 @@ import requests
 from bs4 import BeautifulSoup
 
 from etl.connectors.base import (
+    LISTING_GONE_HTTP_STATUSES,
     CanonicalListingVersion,
     Connector,
     ConnectorError,
     ConnectorScope,
+    ListingUnavailableError,
     RawListing,
     SoftBlockError,
     Throttle,
@@ -962,6 +964,20 @@ class FotocasaConnector(Connector):
             )
             response.raise_for_status()
         except requests.RequestException as exc:
+            # A 404/410 here means the listing was removed/withdrawn at the
+            # source between discover() surfacing its id and this fetch —
+            # expected inventory churn on a live classifieds site, not a
+            # fetch failure worth counting as a run error (issue #291). Only
+            # the unambiguous HTTP-gone statuses qualify: a soft-block is an
+            # HTTP 200 with no payload and is handled below by
+            # _extract_initial_props, so it can never be misread as "gone".
+            gone_status = getattr(getattr(exc, "response", None), "status_code", None)
+            if gone_status in LISTING_GONE_HTTP_STATUSES:
+                raise ListingUnavailableError(
+                    f"fotocasa fetch_detail: external_id={external_id} returned "
+                    f"HTTP {gone_status} — listing removed/withdrawn at source "
+                    "between discovery and fetch"
+                ) from exc
             raise ConnectorError(
                 f"fotocasa fetch_detail: request failed for external_id={external_id}: {exc}"
             ) from exc

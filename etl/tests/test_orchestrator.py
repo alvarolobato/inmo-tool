@@ -4516,3 +4516,149 @@ class TestSoftBlockCleanOutcomes:
             _cleanup(pg_conn, connector.name, run_id)
             _cleanup_scope_state(pg_conn, connector.name)
             self._drop_profile(pg_conn, estepona_id)
+
+
+class TestListingGoneReclassification:
+    """Issue #291: a discovered listing whose detail fetch returns HTTP
+    404/410 (removed at the source between discovery and fetch) is normal
+    inventory churn — the orchestrator must count it as a clean skip, NOT as
+    one of the persistent per-scope `errors` the issue reports. A genuine
+    fetch/parse failure still counts as an error, and a WHOLESALE break
+    (every fetch 404s) must still trip the shared circuit breaker so the run
+    doesn't silently fetch nothing while reporting error_count=0.
+    """
+
+    def test_gone_listing_is_a_clean_skip_not_an_error(self, pg_conn):
+        _apply_schema(pg_conn)
+        # 3 discovered: one is gone (HTTP 404), two fetch fine.
+        connector = DummyConnector(
+            name="test-gone-connector",
+            external_ids=("keep-0", "gone-1", "keep-2"),
+            gone_ids=frozenset({"gone-1"}),
+            circuit_breaker_min_attempts=10,  # don't trip; isolate the reclassification
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, discovered_count, fetched_count, error_count "
+                    "FROM connector_run_results WHERE run_id = %s AND connector_name = %s",
+                    (run_id, connector.name),
+                )
+                result_row = cur.fetchone()
+            # error_count is 0 — the gone listing did NOT inflate it. This is
+            # the exact regression the issue is about (errors=7..10 on every
+            # otherwise-healthy scope).
+            assert result_row == ("ok", 3, 2, 0)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM connector_runs WHERE id = %s", (run_id,)
+                )
+                (run_status,) = cur.fetchone()
+            assert run_status == "success"
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT external_id FROM listing WHERE source = %s ORDER BY external_id",
+                    (connector.name,),
+                )
+                persisted = [row[0] for row in cur.fetchall()]
+            # The gone listing was never persisted; the other two were.
+            assert persisted == ["keep-0", "keep-2"]
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+
+    def test_gone_and_genuine_error_are_counted_separately(self, pg_conn):
+        """A gone listing (404) and a genuine fetch failure in the same scope
+        must not be conflated: only the genuine one shows up in error_count.
+        """
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="test-gone-plus-error",
+            external_ids=("ok-0", "gone-1", "fail-2"),
+            gone_ids=frozenset({"gone-1"}),
+            failing_ids=frozenset({"fail-2"}),
+            circuit_breaker_min_attempts=10,  # don't trip
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, discovered_count, fetched_count, error_count "
+                    "FROM connector_run_results WHERE run_id = %s AND connector_name = %s",
+                    (run_id, connector.name),
+                )
+                result_row = cur.fetchone()
+            # discovered=3, fetched=1 (ok-0), gone=1 (not counted), error=1 (fail-2).
+            assert result_row == ("ok", 3, 1, 1)
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+
+    def test_run_connector_reports_gone_count_and_omits_it_from_errors(self, pg_conn):
+        """Unit-level: run_connector's summary dict exposes gone_count so the
+        distinction is testable and loggable, and error_count excludes it."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="test-gone-summary",
+            external_ids=("g-0", "g-1", "ok-2"),
+            gone_ids=frozenset({"g-0", "g-1"}),
+            circuit_breaker_min_attempts=10,
+        )
+        limiter = orchestrator.RateLimiter(connector.rate_limit_per_minute)
+        breaker = orchestrator.CircuitBreaker(
+            connector.circuit_breaker_error_rate,
+            connector.circuit_breaker_min_attempts,
+            window=connector.circuit_breaker_window,
+        )
+        try:
+            result = orchestrator.run_connector(
+                pg_conn,
+                connector,
+                orchestrator.ConnectorScope(geography="x"),
+                limiter,
+                breaker,
+            )
+            assert result["gone_count"] == 2
+            assert result["error_count"] == 0
+            assert result["fetched_count"] == 1
+        finally:
+            _cleanup(pg_conn, connector.name)
+
+    def test_wholesale_gone_still_trips_the_circuit_breaker(self, pg_conn):
+        """A total detail-path break (every fetch 404s) must NOT silently
+        report a clean run: because 'gone' still records a breaker error, the
+        shared circuit breaker trips exactly as it would for any other
+        site-wide failure — the run's status is circuit_open, not ok. This is
+        the safety net that keeps reclassifying 404s from masking a genuine
+        outage."""
+        _apply_schema(pg_conn)
+        external_ids = tuple(f"gone-{i}" for i in range(10))
+        connector = DummyConnector(
+            name="test-all-gone",
+            external_ids=external_ids,
+            gone_ids=frozenset(external_ids),
+            circuit_breaker_min_attempts=2,  # trip quickly once the rate is high
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM connector_run_results "
+                    "WHERE run_id = %s AND connector_name = %s",
+                    (run_id, connector.name),
+                )
+                (status,) = cur.fetchone()
+            assert status == "circuit_open"
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)

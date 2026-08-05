@@ -13,6 +13,7 @@ from etl.connectors.base import (
     Connector,
     ConnectorError,
     ConnectorScope,
+    ListingUnavailableError,
     RawListing,
     SoftBlockError,
     Throttle,
@@ -25,6 +26,7 @@ class DummyConnector(Connector):
         name: str = "dummy",
         external_ids: tuple[str, ...] = ("dummy-1", "dummy-2", "dummy-3"),
         failing_ids: frozenset[str] = frozenset(),
+        gone_ids: frozenset[str] = frozenset(),
         db_error_ids: frozenset[str] = frozenset(),
         # Issue #270 (D-047): ids whose fetch_detail() raises a SoftBlockError
         # (site rate-throttling) rather than a genuine ConnectorError — used to
@@ -60,6 +62,12 @@ class DummyConnector(Connector):
         self.price = price
         self._failing_ids = failing_ids
         self._soft_block_ids = soft_block_ids
+        # Issue #291: ids whose fetch_detail() raises ListingUnavailableError
+        # (the source returned HTTP 404/410 — listing removed between
+        # discovery and fetch). Distinct from `failing_ids`: those simulate a
+        # genuine fetch/parse failure that must still count as a run error,
+        # while these must be reclassified as a clean skip (not an error).
+        self._gone_ids = gone_ids
         # IDs that fetch/normalize fine but fail at persist time — simulates
         # a mid-transaction DB error (as opposed to `failing_ids`, which
         # simulates a connector-side failure before persistence is ever
@@ -98,6 +106,10 @@ class DummyConnector(Connector):
         self.fetch_calls.append(external_id)
         if external_id in self._soft_block_ids:
             raise SoftBlockError(f"simulated soft-block for {external_id}")
+        if external_id in self._gone_ids:
+            raise ListingUnavailableError(
+                f"simulated HTTP 404 (listing gone) for {external_id}"
+            )
         if external_id in self._failing_ids:
             raise ConnectorError(f"simulated fetch failure for {external_id}")
         return RawListing(

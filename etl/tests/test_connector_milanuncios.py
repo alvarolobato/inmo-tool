@@ -12,12 +12,14 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
+import requests
 
 from etl import orchestrator
 from etl.connectors.base import (
     CanonicalListingVersion,
     ConnectorError,
     ConnectorScope,
+    ListingUnavailableError,
     RawListing,
     Throttle,
 )
@@ -580,6 +582,39 @@ class TestFetchDetail:
             pytest.raises(MilanunciosSoftBlockError),
         ):
             connector.fetch_detail("700000001", throttle=lambda: None)
+
+    @pytest.mark.parametrize("status", [404, 410])
+    def test_fetch_detail_raises_listing_unavailable_on_gone_status(self, status):
+        """Issue #291: a 404/410 detail page means the ad was removed at the
+        source between discovery and fetch — normal churn, so it raises
+        ListingUnavailableError and the orchestrator counts it as a clean
+        skip rather than one of the persistent per-scope `errors`. Distinct
+        from the 200-no-payload soft-block case above, which the HTTP-status
+        branch can never swallow because it isn't a RequestException."""
+        resp = Mock()
+        err = requests.HTTPError(f"{status} Client Error")
+        err.response = Mock(status_code=status)
+        resp.raise_for_status = Mock(side_effect=err)
+        with (
+            patch("etl.connectors.milanuncios.requests.get", return_value=resp),
+            pytest.raises(ListingUnavailableError, match=f"HTTP {status}"),
+        ):
+            MilanunciosConnector().fetch_detail("700000001", throttle=lambda: None)
+
+    def test_fetch_detail_server_error_stays_generic_connector_error(self):
+        """A 5xx is a transient site problem, not a removed ad — it must NOT
+        be reclassified as gone."""
+        resp = Mock()
+        err = requests.HTTPError("500 Server Error")
+        err.response = Mock(status_code=500)
+        resp.raise_for_status = Mock(side_effect=err)
+        with (
+            patch("etl.connectors.milanuncios.requests.get", return_value=resp),
+            pytest.raises(ConnectorError) as excinfo,
+        ):
+            MilanunciosConnector().fetch_detail("700000001", throttle=lambda: None)
+        assert not isinstance(excinfo.value, ListingUnavailableError)
+        assert "request failed" in str(excinfo.value)
 
 
 class TestSoftBlockSignature:
