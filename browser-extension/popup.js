@@ -6,8 +6,9 @@
  *     HTML to the capture endpoint and poll for the parsed result.
  *   - Listing/search page (or a batch run already in progress) → batch capture
  *     (issue #262): harvest the detail links, seed the worklist, and drive a
- *     fully-automated sequential queue in the background service worker, showing
- *     live N/M progress with stop/resume. The operator clicks once.
+ *     fully-automated bounded-concurrency queue (several tabs at a time, #318)
+ *     in the background service worker, showing live N/M progress with
+ *     stop/resume. The operator clicks once.
  *
  * Forked from property_web_scraper's popup.js — see NOTICE.md. Haul
  * creation/history/limit-reached/no-key states are removed: there is
@@ -258,7 +259,7 @@ async function onStartBatch() {
   }
 
   startBtn.classList.add('hidden');
-  $('#batch-sub').textContent = 'Capturando anuncios, uno a uno…';
+  $('#batch-sub').textContent = 'Capturando anuncios en varias pestañas…';
   $('#batch-progress').classList.remove('hidden');
   renderBatchProgress({ total: res.total, done: 0, captured: 0, failed: 0, status: 'running' });
   startBatchPolling();
@@ -335,7 +336,7 @@ function renderBatchProgress(prog) {
   } else {
     resumeBtn.classList.add('hidden');
     pauseBtn.classList.remove('hidden');
-    $('#batch-sub').textContent = 'Capturando anuncios, uno a uno…';
+    $('#batch-sub').textContent = 'Capturando anuncios en varias pestañas…';
   }
 }
 

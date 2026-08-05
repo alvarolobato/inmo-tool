@@ -7,15 +7,15 @@
  * haul-history.js) is removed: this extension talks to exactly one
  * self-hosted inmo-tool backend, not an anonymous multi-tenant SaaS.
  *
- * Batch capture (issue #262): the pure queue logic lives in batch.js
- * (self.InmoBatch); this worker drives the chrome-tab lifecycle around it —
- * open+activate a detail tab, wait for the content script's AUTO_CAPTURE_DONE,
- * close it, wait a jittered pace, advance. See the "Batch capture" section
- * below and D-043.
+ * Batch capture (issue #262, bounded concurrency #318): the pure queue logic
+ * lives in batch.js (self.InmoBatch); this worker drives the chrome-tab
+ * lifecycle around it — open+activate up to N detail tabs, staggered by a
+ * jittered pace, wait for each content script's AUTO_CAPTURE_DONE, close it,
+ * top the pool back up. See the "Batch capture" section below and D-043.
  */
 
-// Pure queue state machine (makeBatchState/currentUrl/recordResult/…). Classic
-// MV3 worker → synchronous importScripts at top level.
+// Pure queue state machine (makeBatchState/launchNext/recordResultAt/…).
+// Classic MV3 worker → synchronous importScripts at top level.
 importScripts("batch.js");
 
 /**
@@ -131,15 +131,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   // Auto-capture (issue #254) fired in the content script — flash the toolbar
   // badge for that tab so the auto-capture is never silent. Cosmetic only; no
-  // response needed. ALSO the advance signal for a batch run (issue #262): if
-  // this is the tab the batch loop is currently waiting on, unblock it.
+  // response needed. ALSO the settle signal for a batch run (issue #262): if
+  // this is one of the tabs the batch loop is waiting on, unblock that tab's
+  // wait. With bounded concurrency (issue #318) there may be several concurrent
+  // waits — one per open tab — so we look the resolver up by tab id.
   if (msg.type === 'AUTO_CAPTURE_DONE') {
     const tabId = _sender.tab && _sender.tab.id;
     if (tabId != null) {
       chrome.action.setBadgeText({ tabId, text: '✓' });
       chrome.action.setBadgeBackgroundColor({ tabId, color: '#22c55e' });
       chrome.action.setTitle({ tabId, title: 'Inmo-Tool — Capturado automáticamente' });
-      if (batchWaitFinish && tabId === batchWaitTabId) batchWaitFinish(true);
+      const finish = batchWaiters.get(tabId);
+      if (finish) finish(true);
     }
     return false; // no async response
   }
@@ -181,55 +184,67 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
 // ═══ Batch capture ══════════════════════════════════════════════════════════
 //
-// A fully-automated sequential queue (issue #262, D-043). The operator clicks
-// "Capturar todas (N)" once on a listing page; from there this worker:
+// A fully-automated BOUNDED-CONCURRENCY queue (issue #262 + #318, D-043). The
+// operator clicks "Capturar todas (N)" once on a listing page; from there this
+// worker:
 //   1. seeds the harvested detail URLs into capture_worklist (added_via
 //      'derived'), then loads the portal's PENDING set as the queue,
-//   2. opens each URL in a NEW tab it ACTIVATES itself — an active tab renders
-//      normally (background tabs are throttled, which is why a 40-tab bomb
-//      never works, see the issue), so the content script's existing
-//      auto-capture (issue #254) fires and posts the capture,
-//   3. waits for that tab's AUTO_CAPTURE_DONE (or a timeout), closes the tab,
-//      waits a JITTERED delay (WAF safety — never a fixed metronome), advances.
-// Progress lives in chrome.storage.session so a reopened popup (or a
-// respawned worker) can render N/M with stop/resume.
+//   2. opens up to BATCH_CONCURRENCY URLs at a time, each in a NEW tab it
+//      ACTIVATES itself — an active tab renders normally (background tabs are
+//      throttled, which is why an unbounded wall of tabs never works, see the
+//      issue), so the content script's existing auto-capture (issue #254) fires
+//      and posts the capture,
+//   3. STAGGERS launches by a JITTERED delay (WAF safety — never a simultaneous
+//      burst), waits for each tab's AUTO_CAPTURE_DONE (or a timeout), closes the
+//      tab, and keeps the in-flight pool topped up to the cap.
+// Progress lives in chrome.storage.session so a reopened popup (or a respawned
+// worker) can render N/M with stop/resume.
+//
+// Why the cap is small (see D-043): WAF safety (idealista CAPTCHA / aliseda
+// `Disallow: /`) AND Chrome background-tab render throttling — only the ACTIVE
+// tab renders reliably, so the jittered stagger gives each tab a foreground
+// window to render+capture before the next launch steals focus. Past a small N,
+// later in-flight tabs sit throttled in the background and time out, so MORE
+// concurrency HURTS reliability. N=3 (cap 5) is the balance.
 //
 // MV3 eviction: the driver loop is in-memory. Chrome can evict the worker
 // mid-run (e.g. a slow/CAPTCHA page emitting no events for ~30 s). The queue
 // STATE survives (storage.session), and a watchdog (chrome.alarms +
-// onStartup/onInstalled, plus every popup open) re-attaches the loop from the
-// persisted index and closes the tab that was orphaned at eviction time. The
-// open tab id is persisted too, so a respawned worker can find and close it.
+// onStartup/onInstalled, plus every popup open) re-attaches the loop: it closes
+// the tabs orphaned at eviction time (their ids are persisted), resets those
+// in-flight slots back to pending, and restarts the driver.
 
 const BATCH_KEY = 'inmoBatch';
-// The tab the loop currently has open, persisted so a respawned worker can
-// reconcile (close) it after an eviction rather than leaking it.
-const BATCH_TAB_KEY = 'inmoBatchTab';
+// The tabs the loop currently has open (an array), persisted so a respawned
+// worker can reconcile (close) them after an eviction rather than leaking them.
+const BATCH_TABS_KEY = 'inmoBatchTabs';
 // Watchdog alarm that recovers a stranded run without any user action.
 const BATCH_ALARM = 'inmoBatchWatchdog';
 // 0.5 min = 30 s, Chrome's minimum periodic-alarm interval. Short enough to
 // recover an unattended run promptly, long enough not to churn. (A popup open
 // recovers instantly via GET_BATCH_STATE; this is the no-user-present net.)
 const BATCH_ALARM_PERIOD_MIN = 0.5;
-// Pace between closing one tab and opening the next: a randomised dwell whose
-// BASE lengthens as the run gets long (InmoBatch.paceBaseMs) — the mandatory
-// 4–9 s minimum holds at the start, and 100+ listing sweeps space out. The
-// spread stays constant. Long enough not to read as a burst to the portal's
-// WAF; short enough to keep the awaited loop alive under the MV3 ~30 s
-// idle-kill (each iteration also spends several seconds opening + capturing a
-// tab). See D-043 for the tradeoff.
+// How many detail tabs may be open at once. Kept small and CAPPED (batch.js
+// clamps to MAX_CONCURRENCY) — WAF safety + Chrome background-tab render
+// throttling. See D-043 for why more isn't better.
+const BATCH_CONCURRENCY = 3;
+// Stagger between one tab LAUNCH and the next: a randomised dwell whose BASE
+// lengthens as the run gets long (InmoBatch.paceBaseMs) — the mandatory 4–9 s
+// minimum holds at the start, and 100+ listing sweeps space out. The spread
+// stays constant. This is the pacing guarantee that keeps the N tabs from
+// opening simultaneously. See D-043 for the tradeoff.
 const BATCH_PACE_SPREAD_MS = 5000;
 // Give one page this long to render + auto-capture before counting it failed
 // and moving on (mirrors the content script's own MAX_WAIT_MS, plus slack for
 // tab creation).
 const BATCH_CAPTURE_TIMEOUT_MS = 30000;
 
-// Transient (not persisted): the tab the loop is currently driving, the
-// resolver that unblocks the current wait, and a re-entrancy guard so only one
-// loop runs at a time.
-let batchTabId = null;
-let batchWaitTabId = null;
-let batchWaitFinish = null;
+// Transient (not persisted): the tabs the loop currently has open, the per-tab
+// resolvers that unblock each in-flight wait (keyed by tab id, since with
+// concurrency several waits are outstanding at once), and a re-entrancy guard
+// so only one driver loop runs at a time.
+const batchTabIds = new Set();
+const batchWaiters = new Map(); // tabId -> finish(ok)
 let batchLooping = false;
 
 function sleep(ms) {
@@ -245,17 +260,21 @@ async function setBatchState(state) {
   await chrome.storage.session.set({ [BATCH_KEY]: state });
 }
 
-/** Persist / read / clear the currently-open batch tab id (eviction recovery). */
-async function persistBatchTab(tabId) {
-  await chrome.storage.session.set({ [BATCH_TAB_KEY]: tabId });
+/**
+ * Persist / read / clear the set of currently-open batch tab ids (eviction
+ * recovery). Persisted as a plain array; `persistBatchTabs` snapshots the live
+ * `batchTabIds` set each time it changes.
+ */
+async function persistBatchTabs() {
+  await chrome.storage.session.set({ [BATCH_TABS_KEY]: [...batchTabIds] });
 }
-async function readBatchTab() {
-  const o = await chrome.storage.session.get(BATCH_TAB_KEY);
-  const id = o[BATCH_TAB_KEY];
-  return typeof id === 'number' ? id : null;
+async function readBatchTabs() {
+  const o = await chrome.storage.session.get(BATCH_TABS_KEY);
+  const ids = o[BATCH_TABS_KEY];
+  return Array.isArray(ids) ? ids.filter((id) => typeof id === 'number') : [];
 }
-async function clearBatchTab() {
-  await chrome.storage.session.remove(BATCH_TAB_KEY);
+async function clearBatchTabs() {
+  await chrome.storage.session.remove(BATCH_TABS_KEY);
 }
 
 /** Seed harvested detail URLs into the worklist (added_via='derived'). */
@@ -318,7 +337,7 @@ async function startBatch({ portal, urls, searchUrl }) {
     await seedWorklist(urls);
   }
   const pending = await fetchPendingUrls(portal);
-  const state = InmoBatch.makeBatchState(pending);
+  const state = InmoBatch.makeBatchState(pending, BATCH_CONCURRENCY);
   await setBatchState(state);
   runBatchLoop(); // fire-and-forget; drives tabs until paused/stopped/done
   return { started: true, total: pending.length };
@@ -332,31 +351,33 @@ async function mutateBatch(fn) {
   return InmoBatch.progress(next);
 }
 
-/** Stop the run: mark done, unblock any in-flight wait, close the open tab. */
+/** Stop the run: mark done, unblock every in-flight wait, close all open tabs. */
 async function stopBatch() {
   const state = await getBatchState();
   const next = InmoBatch.stop(state);
   await setBatchState(next);
-  if (batchWaitFinish) batchWaitFinish(false);
-  // Close whichever tab is open — the in-memory id on the fast path, or the
-  // persisted id if a respawned worker is stopping a run it didn't start.
-  const openTab = batchTabId != null ? batchTabId : await readBatchTab();
-  if (openTab != null) {
+  // Unblock every outstanding wait (each resolves false → recorded as failed,
+  // but recordResultAt ignores a DONE queue, so counts stay put).
+  for (const finish of batchWaiters.values()) finish(false);
+  // Close every open tab — the in-memory set on the fast path, plus any
+  // persisted ids in case a respawned worker is stopping a run it didn't start.
+  const ids = new Set([...batchTabIds, ...(await readBatchTabs())]);
+  for (const id of ids) {
     try {
-      await chrome.tabs.remove(openTab);
+      await chrome.tabs.remove(id);
     } catch {
       /* tab already gone */
     }
-    batchTabId = null;
   }
-  await clearBatchTab();
+  batchTabIds.clear();
+  await clearBatchTabs();
   return InmoBatch.progress(next);
 }
 
 /**
  * Wait for the given tab to signal AUTO_CAPTURE_DONE, or time out. Resolves
- * true on capture, false on timeout/stop. Only one wait is ever outstanding
- * (the queue is strictly sequential).
+ * true on capture, false on timeout/stop. Registers a per-tab resolver so
+ * several waits can be outstanding at once (bounded concurrency, issue #318).
  */
 function waitForCaptureSignal(tabId, timeoutMs) {
   return new Promise((resolve) => {
@@ -365,12 +386,10 @@ function waitForCaptureSignal(tabId, timeoutMs) {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      batchWaitFinish = null;
-      batchWaitTabId = null;
+      batchWaiters.delete(tabId);
       resolve(ok);
     };
-    batchWaitTabId = tabId;
-    batchWaitFinish = finish;
+    batchWaiters.set(tabId, finish);
     const timer = setTimeout(() => finish(false), timeoutMs);
   });
 }
@@ -383,66 +402,82 @@ async function captureOnePage(url) {
   } catch {
     return false;
   }
-  batchTabId = tab.id;
-  // Persist the open tab id BEFORE the (up to 30 s) wait — that's exactly the
+  batchTabIds.add(tab.id);
+  // Persist the open-tab set BEFORE the (up to 30 s) wait — that's exactly the
   // window in which Chrome may evict the worker, and a respawned one must be
-  // able to find and close this tab.
-  await persistBatchTab(tab.id);
+  // able to find and close every open tab.
+  await persistBatchTabs();
   const ok = await waitForCaptureSignal(tab.id, BATCH_CAPTURE_TIMEOUT_MS);
   try {
     await chrome.tabs.remove(tab.id);
   } catch {
     /* tab already closed */
   }
-  if (batchTabId === tab.id) batchTabId = null;
-  await clearBatchTab();
+  batchTabIds.delete(tab.id);
+  await persistBatchTabs();
   return ok;
 }
 
 /**
- * The sequential driver. Re-entrancy-guarded so PAUSE→RESUME (or a duplicate
- * START) never runs two loops. Re-reads the persisted state each iteration so
- * a pause/stop that lands DURING a page's capture takes effect the moment that
- * page settles — the current page always finishes cleanly, we never orphan a
- * half-captured tab.
+ * Drive ONE page end to end: open+activate its tab, wait for the capture (or
+ * timeout), close it, then record the outcome against that exact slot. Settles
+ * may land OUT OF ORDER across the concurrent tabs, so we address the slot by
+ * `index` rather than a moving pointer. recordResultAt ignores a stopped queue
+ * and flips to `done` only when nothing is left pending or in flight.
+ */
+async function driveOnePage(index, url) {
+  const ok = await captureOnePage(url);
+  const state = await getBatchState();
+  await setBatchState(InmoBatch.recordResultAt(state, index, ok));
+}
+
+/**
+ * The bounded-concurrency driver. Re-entrancy-guarded so PAUSE→RESUME (or a
+ * duplicate START) never runs two loops. Keeps up to BATCH_CONCURRENCY tabs in
+ * flight: it launches the next pending URL, STAGGERS by a jittered delay, and
+ * tops the pool back up whenever a tab settles. Re-reads the persisted state
+ * around every launch so a pause/stop takes effect promptly — in-flight pages
+ * always finish cleanly (their tabs close in `captureOnePage`), we never orphan
+ * a half-captured tab. The `finally` drains any still-open tabs so none leak
+ * past the loop's exit (e.g. after a pause with tabs mid-capture).
  */
 async function runBatchLoop() {
   if (batchLooping) return;
   batchLooping = true;
+  const inflight = new Map(); // index -> Promise (the driveOnePage in progress)
   try {
     for (;;) {
       let state = await getBatchState();
-      if (!InmoBatch.isActive(state)) break;
-      const url = InmoBatch.currentUrl(state);
-      if (!url) break;
 
-      const ok = await captureOnePage(url);
+      // Top the in-flight pool up to the cap, launching staggered by a jittered
+      // pace. Each launch flips a slot to `inflight` and persists it first, so
+      // an eviction mid-launch is recoverable.
+      while (InmoBatch.isActive(state) && inflight.size < state.concurrency) {
+        const launch = InmoBatch.launchNext(state);
+        if (launch.index === -1) break; // nothing pending / cap reached
+        state = launch.state;
+        await setBatchState(state);
+        const idx = launch.index;
+        const p = driveOnePage(idx, launch.url).finally(() => inflight.delete(idx));
+        inflight.set(idx, p);
+        // Jittered stagger (WAF safety — never a simultaneous burst). BASE grows
+        // with how many pages have settled so long sweeps space out (4–9 s
+        // minimum preserved at the start). D-043.
+        const done = InmoBatch.progress(state).done;
+        await sleep(InmoBatch.jitterDelay(InmoBatch.paceBaseMs(done), BATCH_PACE_SPREAD_MS));
+        state = await getBatchState(); // re-read for a pause/stop landing mid-stagger
+      }
 
-      // The wait may have been ended by STOP — re-read before recording.
-      const after = await getBatchState();
-      if (!after || after.status === InmoBatch.STATUSES.DONE) break;
-
-      // Record the page we just processed. It IS done regardless of a pause
-      // that arrived mid-capture, so advance the pointer + counts on a
-      // running clone, then re-apply the pause if the queue isn't finished.
-      const wasPaused = after.status === InmoBatch.STATUSES.PAUSED;
-      const recorded = InmoBatch.recordResult(
-        { ...after, status: InmoBatch.STATUSES.RUNNING },
-        ok,
-      );
-      const finalState =
-        wasPaused && recorded.status !== InmoBatch.STATUSES.DONE
-          ? { ...recorded, status: InmoBatch.STATUSES.PAUSED }
-          : recorded;
-      await setBatchState(finalState);
-
-      if (finalState.status !== InmoBatch.STATUSES.RUNNING) break; // paused/done
-      // Gentle backoff: the dwell BASE grows with how many pages we've done, so
-      // long sweeps space out (4–9 s minimum preserved at the start). D-043.
-      const done = finalState.captured + finalState.failed;
-      await sleep(InmoBatch.jitterDelay(InmoBatch.paceBaseMs(done), BATCH_PACE_SPREAD_MS));
+      // Nothing more to launch and nothing open → paused/stopped/done: exit and
+      // let `finally` drain. Otherwise wait for at least one tab to settle, then
+      // re-evaluate (a settle frees a concurrency slot).
+      if (inflight.size === 0) break;
+      await Promise.race(inflight.values());
     }
   } finally {
+    // Ensure every open tab settles + closes before the loop exits, so a pause
+    // (or an early break) never leaves a tab leaked.
+    await Promise.allSettled(inflight.values());
     batchLooping = false;
   }
 }
@@ -457,20 +492,27 @@ async function runBatchLoop() {
 // every popup open.
 async function reattachIfStranded() {
   if (batchLooping) return; // loop alive — nothing stranded
-  const state = await getBatchState();
+  let state = await getBatchState();
   if (!InmoBatch.shouldReattach(state, batchLooping)) return;
 
-  const persistedTabId = await readBatchTab();
-  const orphan = InmoBatch.orphanTabToClose(state, batchLooping, persistedTabId);
-  if (orphan != null) {
+  // Close every tab orphaned at eviction time (their ids were persisted).
+  const persistedTabIds = await readBatchTabs();
+  const orphans = InmoBatch.orphanTabsToClose(state, batchLooping, persistedTabIds);
+  for (const id of orphans) {
     try {
-      await chrome.tabs.remove(orphan);
+      await chrome.tabs.remove(id);
     } catch {
       /* tab already gone */
     }
-    await clearBatchTab();
   }
-  runBatchLoop(); // resumes from the persisted index
+  batchTabIds.clear();
+  await clearBatchTabs();
+
+  // Those in-flight slots referred to the tabs we just closed — reset them to
+  // pending so the restarted driver re-launches them (capture is idempotent).
+  state = InmoBatch.resetInflightToPending(state);
+  await setBatchState(state);
+  runBatchLoop(); // resumes from the persisted slots
 }
 
 // Arm the watchdog alarm (idempotent) and try an immediate re-attach. Runs on

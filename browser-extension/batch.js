@@ -1,84 +1,192 @@
 /**
- * batch.js — Pure sequential-queue state for batch capture (issue #262).
+ * batch.js — Pure bounded-concurrency queue state for batch capture (issue #262,
+ * concurrency in #318).
  *
  * NO side effects at load time: no `chrome`/`window`/`document`/network. This
- * is the queue *logic* only — "which URL is next", "advance after a page
- * finished", "how long to wait before the next one". The chrome-API wiring that
+ * is the queue *logic* only — "which URLs may I launch now", "record that one
+ * finished", "how long to jitter between launches". The chrome-API wiring that
  * actually opens/activates/closes tabs and listens for AUTO_CAPTURE_DONE lives
- * in background.js; keeping this file pure makes the advance/pacing decisions
+ * in background.js; keeping this file pure makes the scheduling/pacing decisions
  * unit-testable outside a browser (dashboard/__tests__/extension-batch.test.ts).
  *
  * Loaded into the service worker via `importScripts('batch.js')` (classic MV3
  * worker) and published on `self.InmoBatch`; also exported via CommonJS for the
  * tests.
  *
- * ── Why sequential, and why paced ──────────────────────────────────────────
+ * ── Bounded concurrency, and why it stays paced ─────────────────────────────
  * The owner's north-star for #262 is "click once, do nothing else": the
  * extension opens each detail URL, activates the tab itself (an ACTIVE tab is
  * not subject to Chrome's background-tab render throttling, so auto-capture's
- * render wait actually completes), captures, closes it, and advances. This
- * REPLACES the earlier human-paced "open one tab per click" design
- * (lib/worklist.ts `firstPendingUrl`, see D-043) — but it deliberately keeps
- * real pacing between pages. An auto-advance loop that opens tab N+1 the instant
- * tab N captures is closer to bot navigation than the human-paced version it
- * replaces; Idealista/Aliseda both sit behind WAFs that a burst would trip. So
- * the queue advances ONE page at a time and background.js waits a JITTERED
- * (randomised, not fixed) delay between closing one tab and opening the next.
+ * render wait actually completes), captures, closes it, and advances.
+ *
+ * The original #262 design drove this STRICTLY SEQUENTIALLY — one tab at a
+ * time. The owner (#318) found that too slow on long idealista sweeps and asked
+ * for several tabs open at once with random waits. So the queue is now a
+ * BOUNDED-CONCURRENCY scheduler: up to N tabs in flight at a time (N is small
+ * and CAPPED), each launch STAGGERED by a jittered/random delay — never a
+ * simultaneous burst. Two hard constraints keep N small (see D-043):
+ *   1. WAF safety. Idealista (CAPTCHA wall) and Aliseda (`Disallow: /`, D-019)
+ *      punish bursts. Bounded + jittered launches read as human-ish browsing,
+ *      an unbounded wall of tabs reads as a bot.
+ *   2. Chrome background-tab render throttling. Only the ACTIVE tab renders
+ *      reliably; unfocused tabs' JS/rendering is deferred. Each launch
+ *      activates its new tab (`chrome.tabs.create({active:true})`), so the
+ *      jittered stagger gives every tab a foreground window to render+capture
+ *      before the next launch steals focus. Too-high N means later in-flight
+ *      tabs sit throttled in the background and time out — MORE concurrency
+ *      past a small N HURTS reliability rather than helping. N=3 (cap 5)
+ *      balances throughput against that.
+ *
+ * State model — a per-URL slot array (so out-of-order settlement and MV3
+ * eviction recovery are both exact):
+ *   slots[i] ∈ { pending, inflight, captured, failed }
+ * The scheduler launches the first `pending` slot while `inflightCount <
+ * concurrency`; a settle flips a slot to captured/failed; the run is `done`
+ * when nothing is pending and nothing is in flight. On eviction the slot array
+ * (with any `inflight`) is persisted, and a respawned worker resets `inflight →
+ * pending` (those tabs are gone) and re-launches them — safe because capture is
+ * idempotent (worklist `match_key` + the content-script fire-once guard).
  */
 
 (function () {
   "use strict";
 
   var STATUSES = { RUNNING: "running", PAUSED: "paused", DONE: "done" };
+  // Per-URL slot lifecycle: pending → inflight → captured | failed.
+  var SLOT = {
+    PENDING: "pending",
+    INFLIGHT: "inflight",
+    CAPTURED: "captured",
+    FAILED: "failed",
+  };
+
+  // How many detail tabs may be open (in flight) at once. Small on purpose —
+  // WAF safety + Chrome background-tab render throttling (see the module
+  // header / D-043). DEFAULT is the balanced pick; MAX is a hard clamp so a
+  // bad/hostile config can never turn the run into an unbounded tab burst.
+  var DEFAULT_CONCURRENCY = 3;
+  var MAX_CONCURRENCY = 5;
+
+  /** Clamp a requested concurrency to [1, MAX_CONCURRENCY]; default when absent/garbage. */
+  function clampConcurrency(n) {
+    var c = typeof n === "number" && n > 0 ? Math.floor(n) : DEFAULT_CONCURRENCY;
+    if (c < 1) c = 1;
+    if (c > MAX_CONCURRENCY) c = MAX_CONCURRENCY;
+    return c;
+  }
 
   /**
    * Build the initial queue state for a batch run over `urls` (already
-   * de-duplicated pending URLs). Starts `running` at index 0. An empty list
-   * starts already `done`.
+   * de-duplicated pending URLs), with up to `concurrency` tabs in flight.
+   * Every slot starts `pending`. Starts `running`; an empty list starts `done`.
    */
-  function makeBatchState(urls) {
-    var list = Array.isArray(urls) ? urls.filter(function (u) {
-      return typeof u === "string" && u.length > 0;
-    }) : [];
+  function makeBatchState(urls, concurrency) {
+    var list = Array.isArray(urls)
+      ? urls.filter(function (u) {
+          return typeof u === "string" && u.length > 0;
+        })
+      : [];
     return {
       urls: list,
-      index: 0,
-      captured: 0,
-      failed: 0,
+      slots: list.map(function () {
+        return SLOT.PENDING;
+      }),
+      concurrency: clampConcurrency(concurrency),
       status: list.length > 0 ? STATUSES.RUNNING : STATUSES.DONE,
     };
   }
 
-  /**
-   * The URL the loop should open right now, or null. Only a `running` queue
-   * with an in-range index has a current URL — a paused/done queue yields null
-   * so background.js's loop naturally halts.
-   */
-  function currentUrl(state) {
-    if (!state || state.status !== STATUSES.RUNNING) return null;
-    if (state.index < 0 || state.index >= state.urls.length) return null;
-    return state.urls[state.index];
+  /** Count slots in a given state (0 for a malformed state). */
+  function countSlot(state, kind) {
+    var slots = state && state.slots;
+    if (!slots) return 0;
+    var n = 0;
+    for (var i = 0; i < slots.length; i++) if (slots[i] === kind) n++;
+    return n;
+  }
+
+  /** How many tabs are currently in flight. */
+  function inflightCount(state) {
+    return countSlot(state, SLOT.INFLIGHT);
+  }
+
+  /** Index of the first `pending` slot, or -1 if none remain. */
+  function firstPendingIndex(state) {
+    var slots = state && state.slots;
+    if (!slots) return -1;
+    for (var i = 0; i < slots.length; i++) {
+      if (slots[i] === SLOT.PENDING) return i;
+    }
+    return -1;
   }
 
   /**
-   * Record the outcome of the current page and advance. `ok` true → captured++,
-   * false (timed out / enqueue failed) → failed++. Advancing past the last URL
-   * flips the queue to `done`. A queue that isn't `running` is returned
-   * unchanged (a late signal after a stop/pause must not move the pointer).
-   * Returns a NEW state object (pure — never mutates its argument), so the
-   * caller can persist it verbatim to chrome.storage.session.
+   * May the driver launch another tab right now? True only when the queue is
+   * running, we're below the concurrency cap, and at least one URL is pending.
+   * A paused/done queue (or a full in-flight pool) yields false so the driver
+   * naturally stops opening new tabs.
    */
-  function recordResult(state, ok) {
-    if (!state || state.status !== STATUSES.RUNNING) return state;
-    var next = {
-      urls: state.urls,
-      index: state.index + 1,
-      captured: state.captured + (ok ? 1 : 0),
-      failed: state.failed + (ok ? 0 : 1),
-      status: state.status,
+  function canLaunch(state) {
+    if (!state || state.status !== STATUSES.RUNNING) return false;
+    if (inflightCount(state) >= state.concurrency) return false;
+    return firstPendingIndex(state) !== -1;
+  }
+
+  /**
+   * Claim the next pending URL for launch. Returns `{ state, index, url }` with
+   * the chosen slot flipped to `inflight` on a NEW state (pure — never mutates
+   * its argument). When nothing may be launched, returns the state unchanged
+   * with `{ index: -1, url: null }`.
+   */
+  function launchNext(state) {
+    if (!canLaunch(state)) return { state: state, index: -1, url: null };
+    var i = firstPendingIndex(state);
+    var slots = state.slots.slice();
+    slots[i] = SLOT.INFLIGHT;
+    return {
+      state: Object.assign({}, state, { slots: slots }),
+      index: i,
+      url: state.urls[i],
     };
-    if (next.index >= next.urls.length) next.status = STATUSES.DONE;
+  }
+
+  /**
+   * Record the outcome of the in-flight page at `index` and return a NEW state
+   * (pure). `ok` true → that slot becomes `captured`, false → `failed`. When no
+   * slot is left pending or in flight, a running queue flips to `done`. Ignored
+   * (state returned unchanged) if the queue is already `done` — a late signal
+   * after a stop must not resurrect counts — or if `index` isn't an in-flight
+   * slot (a duplicate/stray signal). Settlement may arrive OUT OF ORDER across
+   * the concurrent tabs; addressing the exact slot keeps counts exact.
+   */
+  function recordResultAt(state, index, ok) {
+    if (!state || !state.slots || state.status === STATUSES.DONE) return state;
+    if (index < 0 || index >= state.slots.length) return state;
+    if (state.slots[index] !== SLOT.INFLIGHT) return state;
+    var slots = state.slots.slice();
+    slots[index] = ok ? SLOT.CAPTURED : SLOT.FAILED;
+    var next = Object.assign({}, state, { slots: slots });
+    if (
+      state.status === STATUSES.RUNNING &&
+      firstPendingIndex(next) === -1 &&
+      inflightCount(next) === 0
+    ) {
+      next.status = STATUSES.DONE;
+    }
     return next;
+  }
+
+  /**
+   * Reset every `inflight` slot back to `pending` (pure). Used on MV3
+   * eviction-recovery: the tabs those slots referred to were orphaned and
+   * closed, so their work must be re-launched. No-op when nothing is in flight.
+   */
+  function resetInflightToPending(state) {
+    if (!state || !state.slots || inflightCount(state) === 0) return state;
+    var slots = state.slots.map(function (s) {
+      return s === SLOT.INFLIGHT ? SLOT.PENDING : s;
+    });
+    return Object.assign({}, state, { slots: slots });
   }
 
   /** Pause a running queue (no-op otherwise). Returns a new state. */
@@ -88,14 +196,17 @@
   }
 
   /**
-   * Resume a paused queue. If the pointer is already past the end, resuming
-   * completes it rather than re-running (defensive). Returns a new state.
+   * Resume a paused queue. If nothing is left to do (no pending, none in
+   * flight), resuming completes it rather than re-running (defensive). Returns
+   * a new state.
    */
   function resume(state) {
     if (!state || state.status !== STATUSES.PAUSED) return state;
-    var status =
-      state.index >= state.urls.length ? STATUSES.DONE : STATUSES.RUNNING;
-    return Object.assign({}, state, { status: status });
+    var complete =
+      firstPendingIndex(state) === -1 && inflightCount(state) === 0;
+    return Object.assign({}, state, {
+      status: complete ? STATUSES.DONE : STATUSES.RUNNING,
+    });
   }
 
   /** Stop a queue outright (running or paused → done). Returns a new state. */
@@ -112,26 +223,38 @@
 
   /**
    * A compact, UI-friendly view of progress (what the popup renders as N/M).
-   * `done` is how many pages have been processed (captured + failed), so an
-   * in-flight page counts once it settles, not while it's open.
+   * `done` is how many pages have settled (captured + failed); `inflight` is how
+   * many tabs are open right now.
    */
   function progress(state) {
-    if (!state) {
-      return { total: 0, done: 0, captured: 0, failed: 0, status: STATUSES.DONE };
+    if (!state || !state.slots) {
+      return {
+        total: 0,
+        done: 0,
+        captured: 0,
+        failed: 0,
+        inflight: 0,
+        status: STATUSES.DONE,
+      };
     }
+    var captured = countSlot(state, SLOT.CAPTURED);
+    var failed = countSlot(state, SLOT.FAILED);
     return {
       total: state.urls.length,
-      done: state.captured + state.failed,
-      captured: state.captured,
-      failed: state.failed,
+      done: captured + failed,
+      captured: captured,
+      failed: failed,
+      inflight: inflightCount(state),
       status: state.status,
     };
   }
 
   /**
-   * Milliseconds to wait between closing one tab and opening the next. A
-   * RANDOMISED delay (base + up to `spread`), not a fixed interval, so the
-   * cadence doesn't read as a metronome to a WAF (see the module header / D-043).
+   * Milliseconds to wait between one tab LAUNCH and the next. A RANDOMISED
+   * delay (base + up to `spread`), not a fixed interval, so the launch cadence
+   * doesn't read as a metronome to a WAF (see the module header / D-043). With
+   * bounded concurrency this delay is what staggers the launches — it is the
+   * pacing guarantee that keeps N tabs from opening simultaneously.
    * `rnd` is injectable (defaults to Math.random) purely so the delay is
    * deterministic under test.
    */
@@ -145,19 +268,19 @@
   // ── Long-run gentle backoff (issue #262 follow-up) ─────────────────────────
   // A 100+ listing sweep is 10–15 min of steady automated navigation — the most
   // likely rate-trip scenario. Rather than cap the run (and make the operator
-  // click again), the dwell BASE lengthens as the run gets long, so late pages
-  // are spaced further apart. The mandatory 4–9 s minimum is preserved: at
-  // processed=0 the base is PACE_MIN_BASE_MS and jitterDelay(base, 5000) is
-  // [4000, 9000). The extra is stepwise and capped.
+  // click again), the launch-stagger BASE lengthens as the run gets long, so
+  // late launches are spaced further apart. The mandatory 4–9 s minimum is
+  // preserved: at processed=0 the base is PACE_MIN_BASE_MS and
+  // jitterDelay(base, 5000) is [4000, 9000). The extra is stepwise and capped.
   var PACE_MIN_BASE_MS = 4000;
   var PACE_STEP_EVERY = 25; // add one step per this many processed pages
   var PACE_STEP_MS = 2000; // size of each step
   var PACE_MAX_EXTRA_MS = 12000; // cap: base never exceeds MIN + this
 
   /**
-   * The dwell BASE (ms) for the next page given how many have already been
-   * processed. `jitterDelay(paceBaseMs(done), spread)` gives the actual pause.
-   * Pure; never below PACE_MIN_BASE_MS, never above MIN + PACE_MAX_EXTRA_MS.
+   * The launch-stagger BASE (ms) given how many pages have already settled.
+   * `jitterDelay(paceBaseMs(done), spread)` gives the actual pause between
+   * launches. Pure; never below PACE_MIN_BASE_MS, never above MIN + MAX_EXTRA.
    */
   function paceBaseMs(processed) {
     var n = processed > 0 ? Math.floor(processed) : 0;
@@ -182,23 +305,35 @@
   }
 
   /**
-   * The tab id a re-attaching worker must reconcile (close) before resuming, or
-   * null. When we re-attach after an eviction, the tab that was open at
-   * eviction time is orphaned (its in-memory id was lost) — return the id
-   * persisted for it so the caller can close it. Returns null when nothing is
-   * stranded or no tab id was persisted (so a live loop is never disturbed).
+   * The tab ids a re-attaching worker must reconcile (close) before resuming.
+   * With bounded concurrency there may be several tabs open at eviction time;
+   * their ids are persisted alongside the state, and this returns the subset
+   * worth closing (numeric ids) — but ONLY when the run is genuinely stranded,
+   * so a live loop's tabs are never disturbed. Returns [] when not stranded or
+   * no ids were persisted.
    */
-  function orphanTabToClose(state, looping, persistedTabId) {
-    if (!shouldReattach(state, looping)) return null;
-    if (persistedTabId == null) return null;
-    return persistedTabId;
+  function orphanTabsToClose(state, looping, persistedTabIds) {
+    if (!shouldReattach(state, looping)) return [];
+    if (!Array.isArray(persistedTabIds)) return [];
+    return persistedTabIds.filter(function (id) {
+      return typeof id === "number";
+    });
   }
 
   var api = {
     STATUSES: STATUSES,
+    SLOT: SLOT,
+    DEFAULT_CONCURRENCY: DEFAULT_CONCURRENCY,
+    MAX_CONCURRENCY: MAX_CONCURRENCY,
+    clampConcurrency: clampConcurrency,
     makeBatchState: makeBatchState,
-    currentUrl: currentUrl,
-    recordResult: recordResult,
+    countSlot: countSlot,
+    inflightCount: inflightCount,
+    firstPendingIndex: firstPendingIndex,
+    canLaunch: canLaunch,
+    launchNext: launchNext,
+    recordResultAt: recordResultAt,
+    resetInflightToPending: resetInflightToPending,
     pause: pause,
     resume: resume,
     stop: stop,
@@ -207,7 +342,7 @@
     jitterDelay: jitterDelay,
     paceBaseMs: paceBaseMs,
     shouldReattach: shouldReattach,
-    orphanTabToClose: orphanTabToClose,
+    orphanTabsToClose: orphanTabsToClose,
   };
 
   if (typeof self !== "undefined") {
