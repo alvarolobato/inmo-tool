@@ -203,23 +203,13 @@ jobs:
         run: PGPASSWORD=inmotool psql -h localhost -U inmotool -d inmotool -f etl/schema/init.sql
       - name: Install Playwright browsers
         run: npx playwright install chromium --with-deps
-      # Specs are listed explicitly rather than globbed, so wiring a new one in
-      # is visible in the diff instead of being picked up silently.
+      # Run the ENTIRE e2e/ suite (playwright.config.ts testDir = ./e2e).
+      # This used to be an explicit allow-list, which silently dropped every
+      # new spec a PR added — agents can't edit workflows (D-029/#275), so the
+      # D-041 "e2e required" gate was cosmetic for ~9 specs. To intentionally
+      # exclude a spec, use `testIgnore` in playwright.config.ts, not here.
       - name: Run Playwright e2e tests
-        run: >-
-          npx playwright test
-          e2e/candidates.spec.ts
-          e2e/card-detail-ux.spec.ts
-          e2e/connectors.spec.ts
-          e2e/dedup-review.spec.ts
-          e2e/etl-monitor.spec.ts
-          e2e/feedback.spec.ts
-          e2e/investment-metrics.spec.ts
-          e2e/location-picker.spec.ts
-          e2e/map.spec.ts
-          e2e/profile-switcher.spec.ts
-          e2e/property-detail.spec.ts
-          e2e/scoring.spec.ts
+        run: npx playwright test
       - uses: actions/upload-artifact@v4
         if: always()
         with:
