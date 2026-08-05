@@ -936,6 +936,142 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
     });
   });
 
+  describe("hides data from disabled sources (#319 / D-055)", () => {
+    // Connector names this block registers, cleaned up per-test. `listing.source`
+    // equals `connector_registry.connector_name` (see lib/db/source-active.ts),
+    // so a listing's source resolves to its connector's on/off state.
+    const NORMAL_OFF = "d319-normal-off";
+    const NORMAL_ON = "d319-normal-on";
+    const CAPTURE_OFF = "d319-capture-off";
+    const CAPTURE_ON = "d319-capture-on";
+    const ALL_CONNS = [NORMAL_OFF, NORMAL_ON, CAPTURE_OFF, CAPTURE_ON];
+
+    // Register a connector + its config so the feed can resolve its source
+    // to an on/off state. `supportsDiscovery=false` marks a capture-only
+    // connector (its OFF state is capture_enabled=false); a normal connector's
+    // OFF state is enabled=false.
+    async function registerConnector(
+      pool: Pool,
+      name: string,
+      opts: { supportsDiscovery: boolean; on: boolean },
+    ) {
+      await pool.query(
+        `INSERT INTO connector_registry
+           (connector_name, registered, supports_discovery, supported_filters)
+         VALUES ($1, true, $2, '[]'::jsonb)
+         ON CONFLICT (connector_name) DO UPDATE SET supports_discovery = EXCLUDED.supports_discovery`,
+        [name, opts.supportsDiscovery],
+      );
+      // enabled drives a normal connector's on/off; capture_enabled drives a
+      // capture-only one. Set both explicitly so the row is unambiguous.
+      const enabled = opts.supportsDiscovery ? opts.on : true;
+      const captureEnabled = opts.supportsDiscovery ? true : opts.on;
+      await pool.query(
+        `INSERT INTO connector_config (connector_name, enabled, capture_enabled, filters)
+         VALUES ($1, $2, $3, '{}'::jsonb)
+         ON CONFLICT (connector_name) DO UPDATE SET enabled = $2, capture_enabled = $3`,
+        [name, enabled, captureEnabled],
+      );
+    }
+
+    afterEach(async () => {
+      await withRealDb(async (pool) => {
+        await pool.query("DELETE FROM connector_config WHERE connector_name = ANY($1::text[])", [ALL_CONNS]);
+        await pool.query("DELETE FROM connector_registry WHERE connector_name = ANY($1::text[])", [ALL_CONNS]);
+      });
+    });
+
+    it("excludes a property whose only active-sale listing is from a disabled NORMAL connector", async () => {
+      await withRealDb(async (pool) => {
+        await registerConnector(pool, NORMAL_OFF, { supportsDiscovery: true, on: false });
+        await registerConnector(pool, NORMAL_ON, { supportsDiscovery: true, on: true });
+        const profileId = await makeProfile(SCOPE);
+
+        const offProp = await insertProperty(pool);
+        await insertListing(pool, offProp, { source: NORMAL_OFF });
+        await markMatched(pool, profileId, offProp);
+
+        const onProp = await insertProperty(pool);
+        await insertListing(pool, onProp, { source: NORMAL_ON });
+        await markMatched(pool, profileId, onProp);
+
+        const page = await listCandidates(profileId);
+        expect(page.items.map((i) => i.property_id)).toEqual([onProp]);
+      });
+    });
+
+    it("excludes a property from a disabled CAPTURE-ONLY connector, includes an enabled one", async () => {
+      await withRealDb(async (pool) => {
+        await registerConnector(pool, CAPTURE_OFF, { supportsDiscovery: false, on: false });
+        await registerConnector(pool, CAPTURE_ON, { supportsDiscovery: false, on: true });
+        const profileId = await makeProfile(SCOPE);
+
+        const offProp = await insertProperty(pool);
+        await insertListing(pool, offProp, { source: CAPTURE_OFF });
+        await markMatched(pool, profileId, offProp);
+
+        const onProp = await insertProperty(pool);
+        await insertListing(pool, onProp, { source: CAPTURE_ON });
+        await markMatched(pool, profileId, onProp);
+
+        const page = await listCandidates(profileId);
+        expect(page.items.map((i) => i.property_id)).toEqual([onProp]);
+      });
+    });
+
+    it("keeps a property that has an enabled source, but drops the disabled source's badge/price", async () => {
+      await withRealDb(async (pool) => {
+        await registerConnector(pool, NORMAL_OFF, { supportsDiscovery: true, on: false });
+        await registerConnector(pool, NORMAL_ON, { supportsDiscovery: true, on: true });
+        const profileId = await makeProfile(SCOPE);
+
+        const propertyId = await insertProperty(pool);
+        // Enabled source at a higher price, disabled source at a lower price:
+        // if the disabled listing leaked into MIN it would win — proving it's
+        // genuinely excluded, not just hidden from the badge list.
+        await insertListing(pool, propertyId, { source: NORMAL_ON, current_price: 300000 });
+        await insertListing(pool, propertyId, { source: NORMAL_OFF, current_price: 100000 });
+        await markMatched(pool, profileId, propertyId);
+
+        const page = await listCandidates(profileId);
+        expect(page.items).toHaveLength(1);
+        expect(page.items[0].listings.map((l) => l.source)).toEqual([NORMAL_ON]);
+        expect(page.items[0].min_price).toBe(300000);
+      });
+    });
+
+    it("treats a source with no registry/config row as active (default on)", async () => {
+      await withRealDb(async (pool) => {
+        // No registerConnector call at all — the source is unknown to the
+        // registry, which must default to active (matching the ETL's
+        // missing-row defaults), not vanish from the feed.
+        const profileId = await makeProfile(SCOPE);
+        const propertyId = await insertProperty(pool);
+        await insertListing(pool, propertyId, { source: "d319-unregistered" });
+        await markMatched(pool, profileId, propertyId);
+
+        const page = await listCandidates(profileId);
+        expect(page.items.map((i) => i.property_id)).toEqual([propertyId]);
+      });
+    });
+
+    it("listCandidateSources omits a disabled source from the filter options", async () => {
+      await withRealDb(async (pool) => {
+        await registerConnector(pool, NORMAL_OFF, { supportsDiscovery: true, on: false });
+        await registerConnector(pool, NORMAL_ON, { supportsDiscovery: true, on: true });
+        const profileId = await makeProfile(SCOPE);
+
+        const propertyId = await insertProperty(pool);
+        await insertListing(pool, propertyId, { source: NORMAL_ON });
+        await insertListing(pool, propertyId, { source: NORMAL_OFF });
+        await markMatched(pool, profileId, propertyId);
+
+        const sources = await listCandidateSources(profileId);
+        expect(sources).toEqual([NORMAL_ON]);
+      });
+    });
+  });
+
   describe("listCandidateSources (#265)", () => {
     it("returns the distinct active-sale sources present for the profile, alphabetically", async () => {
       await withRealDb(async (pool) => {

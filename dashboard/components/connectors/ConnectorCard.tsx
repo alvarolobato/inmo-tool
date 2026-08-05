@@ -217,6 +217,21 @@ export function ConnectorCard({
   const locked = !connector.registered;
   const configurable = connector.supports_discovery && !locked;
 
+  // Issue #319 / D-055: ONE toggle per connector — the user sees a single
+  // Activo/Desactivado state. What that maps to depends on the connector type:
+  //   - normal crawl connector → `enabled` (the automated crawl).
+  //   - capture-only connector → `capture_enabled` (whether extension captures
+  //     are processed). Its crawl `enabled` flag is never shown or toggled: a
+  //     capture-only portal's automated crawl is WAF-blocked and never runs,
+  //     so exposing it would be a control that does nothing. "Solo captura"
+  //     stays a descriptive badge, not a mode the user switches.
+  // A disabled source is also hidden from the candidate feed (see
+  // lib/db/source-active.ts) — the toggle is the single lever for both.
+  const isCaptureOnly = !connector.supports_discovery;
+  const active = isCaptureOnly ? connector.capture_enabled : connector.enabled;
+  const toggleActive = () =>
+    run(isCaptureOnly ? { capture_enabled: !active } : { enabled: !active });
+
   return (
     <div style={cardStyle} data-testid={`connector-${connector.name}`}>
       <div style={summaryRowStyle}>
@@ -250,12 +265,11 @@ export function ConnectorCard({
             {connector.name}
           </h2>
           <span data-testid={`status-${connector.name}`} style={{ flexShrink: 0 }}>
-            <Pill
-              text={connector.enabled ? "activo" : "desactivado"}
-              tone={connector.enabled ? "on" : "off"}
-            />
+            {/* A disabled connector reads as neutral, not error (issue #319):
+                "desactivado" is a deliberate operator choice, not a failure. */}
+            <Pill text={active ? "activo" : "desactivado"} tone={active ? "on" : "muted"} />
           </span>
-          {!connector.supports_discovery && <Pill text="solo captura" tone="muted" />}
+          {isCaptureOnly && <Pill text="solo captura" tone="muted" />}
           {!connector.registered && <Pill text="no registrado" tone="muted" />}
           {connector.usingDefaults && <Pill text="sin configurar" tone="muted" />}
 
@@ -275,9 +289,12 @@ export function ConnectorCard({
           </span>
         </button>
 
+        {/* Issue #319 / D-055: the ONE toggle. For a capture-only connector it
+            writes `capture_enabled`; for a normal one it writes `enabled`. The
+            user never sees two separate on/off states. */}
         <button
           type="button"
-          onClick={() => run({ enabled: !connector.enabled })}
+          onClick={toggleActive}
           disabled={busy || locked}
           title={
             locked
@@ -292,44 +309,8 @@ export function ConnectorCard({
           }}
           data-testid={`toggle-${connector.name}`}
         >
-          {connector.enabled ? "Desactivar" : "Activar"}
+          {active ? "Desactivar" : "Activar"}
         </button>
-
-        {/* Issue #263: a capture-only portal (Idealista, Aliseda) runs with the
-            crawl toggle OFF (its automated crawl is WAF-blocked) but must still
-            process extension captures. Capture PROCESSING is an independent
-            knob, kept here in the always-visible row next to the crawl toggle
-            so both are usable without expanding. The "independent of the crawl"
-            explanation lives in the expanded detail below. */}
-        {!connector.supports_discovery && (
-          <>
-            <span data-testid={`capture-status-${connector.name}`} style={{ flexShrink: 0 }}>
-              <Pill
-                text={connector.capture_enabled ? "captura activa" : "captura en pausa"}
-                tone={connector.capture_enabled ? "on" : "off"}
-              />
-            </span>
-            <button
-              type="button"
-              onClick={() => run({ capture_enabled: !connector.capture_enabled })}
-              disabled={busy || locked}
-              title={
-                locked
-                  ? "Este conector ya no está registrado en el ETL: su configuración no tendría ningún efecto."
-                  : undefined
-              }
-              style={{
-                ...buttonStyle,
-                flexShrink: 0,
-                opacity: busy || locked ? 0.6 : 1,
-                cursor: locked ? "not-allowed" : buttonStyle.cursor,
-              }}
-              data-testid={`capture-toggle-${connector.name}`}
-            >
-              {connector.capture_enabled ? "Pausar captura" : "Activar captura"}
-            </button>
-          </>
-        )}
       </div>
 
       {expanded && (
@@ -356,17 +337,20 @@ export function ConnectorCard({
         <ScopeSummary connector={connector} />
       </div>
 
-      {/* Issue #263: the capture toggle itself lives in the always-visible row
-          above (usable without expanding); this expanded note explains why it
-          is independent of the crawl `enabled` flag. */}
-      {!connector.supports_discovery && (
+      {/* Issue #319 / D-055: a capture-only connector has a single Activo/
+          Desactivado toggle (the row above) that controls whether extension
+          captures are processed — there is no separate crawl control, because
+          its automated crawl is WAF-blocked and never runs. This note just
+          describes what the connector is. */}
+      {isCaptureOnly && (
         <div style={{ marginTop: 12 }} data-testid={`capture-note-${connector.name}`}>
-          <span style={labelStyle}>Procesado de capturas (extensión)</span>
+          <span style={labelStyle}>Solo captura</span>
           <p style={{ fontSize: 11, color: "var(--fg-muted)", margin: "2px 0 0" }}>
-            El botón «captura» de la fila controla si las capturas de la
-            extensión se procesan. Es independiente del rastreo automático:
-            activar la captura no arranca el rastreo (bloqueado por el portal),
-            y desactivar el rastreo no detiene la captura.
+            Este conector no realiza rastreo automático (bloqueado por el
+            portal). Sus anuncios entran mediante la extensión de navegador. El
+            botón Activar/Desactivar de la fila controla si esas capturas se
+            procesan; al desactivarlo, sus anuncios dejan de aparecer en los
+            candidatos.
           </p>
         </div>
       )}

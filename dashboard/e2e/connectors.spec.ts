@@ -174,6 +174,64 @@ test("a capture-only connector offers no scope or filter controls", async ({ pag
   await expect(page.getByTestId(`whole-city-warning-${CAPTURE_ONLY}`)).toHaveCount(0);
 });
 
+test("single toggle per connector — capture-only has no separate crawl button (issue #319)", async ({
+  page,
+}) => {
+  await page.goto("/etl/connectors");
+  await expect(page.getByTestId("connectors-page")).toBeVisible();
+
+  // Both connector types expose exactly ONE Activar/Desactivar toggle.
+  await expect(page.getByTestId(`toggle-${CONNECTOR}`)).toBeVisible();
+  await expect(page.getByTestId(`toggle-${CAPTURE_ONLY}`)).toBeVisible();
+
+  // The old two-toggle layout is gone: no separate crawl/capture button on
+  // the capture-only connector — that confusion is exactly what #319 removed.
+  await expect(page.getByTestId(`capture-toggle-${CAPTURE_ONLY}`)).toHaveCount(0);
+  await expect(page.getByTestId(`capture-status-${CAPTURE_ONLY}`)).toHaveCount(0);
+
+  // A capture-only connector with no config row reads as active (its
+  // capture_enabled default is TRUE) and keeps its descriptive badge.
+  await expect(page.getByTestId(`status-${CAPTURE_ONLY}`)).toContainText("activo");
+  await expect(page.getByTestId(`connector-${CAPTURE_ONLY}`).getByText("solo captura")).toBeVisible();
+
+  // No error surface — the D-041 bar for a user-facing dashboard surface.
+  await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
+  await expect(page.getByText("Error al cargar")).toHaveCount(0);
+  await expect(page.getByText("HTTP 500")).toHaveCount(0);
+});
+
+test("the capture-only toggle writes capture_enabled, leaving the crawl flag alone (issue #319)", async ({
+  page,
+}) => {
+  await page.goto("/etl/connectors");
+
+  // No config row yet → capture-only reads as active by default.
+  await expect(page.getByTestId(`status-${CAPTURE_ONLY}`)).toContainText("activo");
+
+  await page.getByTestId(`toggle-${CAPTURE_ONLY}`).click();
+  await expect(page.getByTestId(`status-${CAPTURE_ONLY}`)).toContainText("desactivado");
+
+  // The load-bearing assertion: the single toggle wrote capture_enabled (the
+  // knob the capture poller reads), NOT the crawl `enabled` flag.
+  const row = await pool.query(
+    "SELECT enabled, capture_enabled FROM connector_config WHERE connector_name = $1",
+    [CAPTURE_ONLY],
+  );
+  expect(row.rowCount).toBe(1);
+  expect(row.rows[0].capture_enabled).toBe(false);
+
+  // Survives a reload, and re-enabling is symmetric.
+  await page.reload();
+  await expect(page.getByTestId(`status-${CAPTURE_ONLY}`)).toContainText("desactivado");
+  await page.getByTestId(`toggle-${CAPTURE_ONLY}`).click();
+  await expect(page.getByTestId(`status-${CAPTURE_ONLY}`)).toContainText("activo");
+  const reEnabled = await pool.query(
+    "SELECT capture_enabled FROM connector_config WHERE connector_name = $1",
+    [CAPTURE_ONLY],
+  );
+  expect(reEnabled.rows[0].capture_enabled).toBe(true);
+});
+
 test("disabling a connector in the UI actually stops the ETL running it", async ({ page }) => {
   await page.goto("/etl/connectors");
 
