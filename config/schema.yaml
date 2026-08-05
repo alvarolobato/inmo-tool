@@ -475,6 +475,23 @@
   requires_restart: [dashboard]
   components: [dashboard]
 
+# Tabla de tarifas por modelo para la estimación de coste LLM en €/1M tokens
+# (panel "LLM / IA" de /etl/salud, #324). JSON: objeto model-id → {in_eur_per_mtok,
+# out_eur_per_mtok}. Se fusiona SOBRE la tabla por defecto de lib/llm-health.ts,
+# así que sólo hace falta declarar los modelos cuyo precio quieras corregir o
+# añadir. El coste es una ESTIMACIÓN (tokens × tarifa), nunca un importe facturado;
+# las filas del proveedor CLI cuentan como 0 € (suscripción). Vacío = usar la tabla
+# por defecto. Ejemplo: {"anthropic/claude-sonnet-4":{"in_eur_per_mtok":3.0,"out_eur_per_mtok":15.0}}
+- key: dashboard.llm_cost_rates_eur
+  env: DASHBOARD_LLM_COST_RATES_EUR
+  type: string
+  sensitive: false
+  default: ""
+  section: "Evaluación IA"
+  description: "Tabla JSON de tarifas por modelo (€/1M tokens) para estimar el coste LLM en el panel de salud (#324). Objeto model-id → {in_eur_per_mtok, out_eur_per_mtok}; se fusiona sobre la tabla por defecto. Vacío usa los valores por defecto. El proveedor CLI siempre cuenta 0 €."
+  requires_restart: [dashboard]
+  components: [dashboard]
+
 # -----------------------------------------------------------------------------
 # Notificaciones / Digest diario (issue #35, Phase 5.5, D-054)
 # -----------------------------------------------------------------------------
