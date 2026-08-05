@@ -197,6 +197,15 @@ def main() -> None:
             from etl import manual_trigger
 
             manual_trigger.process_pending_trigger(conn_pg)
+
+            # Also run one materialize-staleness reconciler tick in --once mode
+            # (issue #285) — same "do queued/backstop work" reasoning as the
+            # drains above. Harmless after the sweep just fired its own notify
+            # (nothing is stale, so it no-ops); mainly lets `ps connector run`
+            # exercise the self-heal path without the long-running poll thread.
+            from etl import materialize_reconciler
+
+            materialize_reconciler.reconcile_stale_profiles(conn_pg)
         except orchestrator.UnknownConnectorError as exc:
             # Caught specifically, not bare ValueError — an unrelated
             # ValueError from somewhere inside a connector's own code
@@ -269,6 +278,23 @@ def main() -> None:
         daemon=True,
     )
     worklist_seed_thread.start()
+
+    # Profile-materialize staleness reconciler (issue #285, D-046): a
+    # sweep-INDEPENDENT poll loop that re-fires notify_materialize_all whenever
+    # an active profile has gone stale because a best-effort notify was
+    # missed/failed on an ingest path. This is the durable self-healing backstop
+    # for the Estepona class of bug (a single skipped notify stranding a profile
+    # at 0/stale data with nothing to retry it). Same "own short interval, own
+    # thread, daemon" pattern as the four threads above.
+    from etl import materialize_reconciler
+
+    materialize_reconciler_thread = threading.Thread(
+        target=materialize_reconciler.run_materialize_reconciler_poll_loop,
+        args=(lambda: postgres.get_connection(config),),
+        kwargs={"interval_seconds": config.materialize_reconciler_interval_seconds},
+        daemon=True,
+    )
+    materialize_reconciler_thread.start()
 
     if not registry_synced:
         # Same reasoning as the --once branch: without the seeded rows, every

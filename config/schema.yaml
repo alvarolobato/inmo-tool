@@ -153,6 +153,16 @@
   requires_restart: [etl]
   components: [etl]
 
+- key: etl.materialize_reconciler_interval_seconds
+  env: ETL_MATERIALIZE_RECONCILER_INTERVAL_SECONDS
+  type: int
+  sensitive: false
+  default: 120
+  section: "ETL"
+  description: "Cadencia (segundos) del reconciliador de materialización de perfiles (issue #285, D-046). Un hilo independiente del barrido comprueba si algún perfil activo se ha quedado obsoleto (su last_materialized_at es anterior al listing más reciente, o nunca se materializó) porque se perdió/falló un aviso notify_materialize_all en alguna vía de ingesta, y en ese caso vuelve a disparar el mismo materialize-all. Es una red de seguridad barata: la comprobación es una sola consulta agregada y solo dispara cuando de verdad se saltó un aviso. Por defecto 2 min, que acota cuánto tiempo puede quedar obsoleto un perfil. Debe ser positivo."
+  requires_restart: [etl]
+  components: [etl]
+
 # -----------------------------------------------------------------------------
 # OpenRouter / LLM
 # -----------------------------------------------------------------------------

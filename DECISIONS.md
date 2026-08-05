@@ -50,6 +50,7 @@
 | [D-043](docs/decisions/D-043-batch-capture-auto-advance.md) | Batch capture is a fully-automated SEQUENTIAL queue in the extension (open→activate→auto-capture→close→advance), seeded from a listing page. Keep the JITTERED pacing between pages — never fixed-interval, never a tab-bomb. Supersedes the human-paced one-tab-per-click design. |
 | [D-044](docs/decisions/D-044-ingest-triggers-rematerialize.md) | Every listing-ingest path must trigger a dashboard re-materialize after commit via `notify_materialize_all` — connector sweeps (#94) AND browser-extension captures (`process_pending_captures`). Fire once per batch, only if something was ingested; best-effort; never re-implement the materializer in Python. |
 | [D-045](docs/decisions/D-045-capture-execution-top-level.md) | Guided-capture EXECUTION is the top-level `/captura` page (nav, next to Perfiles); SETUP stays under `/etl/*` (admin). It composes `/api/profiles/[id]/search-urls` + `/api/etl/worklist` via pure `lib/captura-view.ts`, never re-implements the batch loop, and surfaces loosened pre-filter flags. |
+| [D-046](docs/decisions/D-046-materialize-staleness-reconciler.md) | A sweep-independent ETL poll loop (`etl/materialize_reconciler.py`, default 120s) re-fires `notify_materialize_all` whenever an active profile's `last_materialized_at` is behind the newest listing (or NULL), self-healing a missed best-effort notify (D-044). The connector-path notify also moves into a `finally`. Skips while a sweep is `running`; never re-implements the materializer in Python. |
 
 ## AI layer
 

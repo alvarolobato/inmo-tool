@@ -2448,73 +2448,88 @@ def run_all_connectors(
             finished_at=datetime.now(timezone.utc),
         )
 
-    _finish_connector_run(conn, run_id, ok, failed, skipped)
-
-    # Issue #185: run dedup once per connector sweep, unconditionally — not
-    # gated on this run having discovered anything, not gated on every
-    # connector having succeeded. Two reasons this is the right place:
-    #
-    # 1. AFTER every connector's withdrawal reconciliation, never before or
-    #    interleaved: reconciliation (_reconcile_missed_discoveries, inside
-    #    the per-connector loop above) is what's allowed to *withdraw* a
-    #    listing, and issue #25's occupancy assessment depends on duplicates
-    #    already being consolidated by the time it runs. Running dedup here
-    #    — after the whole connector loop, before `notify_materialize_all`
-    #    — guarantees both orderings hold: reconciliation-before-dedup and
-    #    dedup-before-assess.
-    # 2. Dedup itself never withdraws anything — it only merges/suggests
-    #    pairs of listings that already exist in the DB (see run_dedup's
-    #    docstring) — so it's safe to run even when this sweep was partial
-    #    (a circuit breaker tripped, a scope failed): an incomplete
-    #    candidate set just means fewer pairs get compared this pass, never
-    #    a false "these are gone" conclusion the way a partial withdrawal
-    #    reconciliation would be. That asymmetry is why dedup does NOT need
-    #    an equivalent to `reconcilable_union` gating it.
-    #
-    # Wrapped in try/except, same posture as notify_materialize_all just
-    # below: a dedup bug must not retroactively turn an already-committed,
-    # successful connector sweep into a failed run.
+    # Issue #285: the end-of-sweep bookkeeping (`_finish_connector_run`, the
+    # dedup pass) and the re-materialize notify are wrapped so the notify runs
+    # in a `finally`. Before this, a raise anywhere between the connector loop
+    # and the notify — a `_finish_connector_run` failure, an unexpected raise
+    # escaping the dedup guard — silently *skipped* the re-materialize, and
+    # nothing retried it until the next successful sweep. That best-effort-but-
+    # skippable notify is the likely real cause of the Estepona stale-profile
+    # incident (D-044/D-046). The notify stays best-effort (a dashboard outage
+    # must not fail an already-committed ingest); the `finally` only guarantees
+    # it is *attempted* even when bookkeeping raises. The periodic staleness
+    # reconciler (etl.materialize_reconciler, D-046) is the durable backstop for
+    # the case where the notify is attempted here but the dashboard is down.
     try:
-        run_dedup(
-            conn,
-            trigger=trigger,
-            connector_run_id=run_id,
-            dedup_max_runtime_seconds=dedup_max_runtime_seconds,
-        )
-    except Exception:
-        logger.warning(
-            "Dedup run raised unexpectedly — connector sweep is committed "
-            "and the run record is final; continuing",
-            exc_info=True,
-        )
+        _finish_connector_run(conn, run_id, ok, failed, skipped)
 
-    # Issue #94: a completed run used to leave freshly-ingested properties
-    # unscored indefinitely — `scoreNewCandidates`/`materializeProfile` were
-    # only ever reachable from two dashboard-side API routes, so nothing
-    # scored a new listing until a human clicked something. Notify the
-    # dashboard now that the run's bookkeeping is committed.
-    #
-    # Deliberately AFTER _finish_connector_run, never inside it: the run's
-    # own record must already be durable before an outbound HTTP call that
-    # can hang or fail. A callback failure must not retroactively make a
-    # successful ingest look like a failed run.
-    #
-    # Also deliberately AFTER dedup (issue #25: assess only after duplicates
-    # are consolidated) — materialize is what triggers scoring/assessment,
-    # so it must never run ahead of the dedup pass above.
-    #
-    # notify_materialize_all() already swallows its own failures, so this
-    # guard is belt-and-braces: it keeps an unexpected bug (or a test double)
-    # in the notifier from destroying an already-committed run's return
-    # value, which is what callers use to look the run up afterwards.
-    try:
-        notify_materialize_all(trigger=trigger)
-    except Exception:
-        logger.warning(
-            "materialize-all notification raised unexpectedly — ingest is "
-            "committed and the run record is final; continuing",
-            exc_info=True,
-        )
+        # Issue #185: run dedup once per connector sweep, unconditionally — not
+        # gated on this run having discovered anything, not gated on every
+        # connector having succeeded. Two reasons this is the right place:
+        #
+        # 1. AFTER every connector's withdrawal reconciliation, never before or
+        #    interleaved: reconciliation (_reconcile_missed_discoveries, inside
+        #    the per-connector loop above) is what's allowed to *withdraw* a
+        #    listing, and issue #25's occupancy assessment depends on duplicates
+        #    already being consolidated by the time it runs. Running dedup here
+        #    — after the whole connector loop, before `notify_materialize_all`
+        #    — guarantees both orderings hold: reconciliation-before-dedup and
+        #    dedup-before-assess.
+        # 2. Dedup itself never withdraws anything — it only merges/suggests
+        #    pairs of listings that already exist in the DB (see run_dedup's
+        #    docstring) — so it's safe to run even when this sweep was partial
+        #    (a circuit breaker tripped, a scope failed): an incomplete
+        #    candidate set just means fewer pairs get compared this pass, never
+        #    a false "these are gone" conclusion the way a partial withdrawal
+        #    reconciliation would be. That asymmetry is why dedup does NOT need
+        #    an equivalent to `reconcilable_union` gating it.
+        #
+        # Wrapped in try/except, same posture as notify_materialize_all in the
+        # `finally` below: a dedup bug must not retroactively turn an
+        # already-committed, successful connector sweep into a failed run.
+        try:
+            run_dedup(
+                conn,
+                trigger=trigger,
+                connector_run_id=run_id,
+                dedup_max_runtime_seconds=dedup_max_runtime_seconds,
+            )
+        except Exception:
+            logger.warning(
+                "Dedup run raised unexpectedly — connector sweep is committed "
+                "and the run record is final; continuing",
+                exc_info=True,
+            )
+    finally:
+        # Issue #94: a completed run used to leave freshly-ingested properties
+        # unscored indefinitely — `scoreNewCandidates`/`materializeProfile` were
+        # only ever reachable from two dashboard-side API routes, so nothing
+        # scored a new listing until a human clicked something. Notify the
+        # dashboard now that the run's bookkeeping is committed.
+        #
+        # Deliberately AFTER _finish_connector_run and dedup (issue #25: assess
+        # only after duplicates are consolidated) — but in a `finally` (issue
+        # #285) so that even a raise in that bookkeeping still ATTEMPTS the
+        # re-materialize instead of silently skipping it and stranding every
+        # active profile at stale data until the next successful sweep (the
+        # likely Estepona cause — D-044/D-046). The connector run's own record
+        # is already durable by the time we get here, so this outbound HTTP call
+        # can hang or fail without retroactively making a successful ingest look
+        # like a failed run.
+        #
+        # notify_materialize_all() already swallows its own failures, so this
+        # guard is belt-and-braces: it keeps an unexpected bug (or a test
+        # double) in the notifier from propagating out of this `finally` and
+        # masking whatever the `try` was already raising, or destroying an
+        # already-committed run's return value.
+        try:
+            notify_materialize_all(trigger=trigger)
+        except Exception:
+            logger.warning(
+                "materialize-all notification raised unexpectedly — ingest is "
+                "committed and the run record is final; continuing",
+                exc_info=True,
+            )
 
     return run_id
 

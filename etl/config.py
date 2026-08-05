@@ -239,6 +239,31 @@ def _get_dedup_max_runtime_seconds() -> int:
     return parsed if parsed > 0 else 7200
 
 
+def _get_materialize_reconciler_interval_seconds() -> int:
+    """Poll cadence (seconds) of the profile-materialize staleness reconciler
+    (issue #285, D-046).
+
+    Same env-first-then-loader precedence as the other ETL knobs above. The
+    reconciler is a sweep-independent backstop that re-materializes active
+    profiles whose data has gone stale because a best-effort
+    `notify_materialize_all` was missed/failed on an ingest path. 120s (2 min)
+    is a cheap default — the check is a single aggregate query and only fires
+    when a notify was genuinely skipped — that bounds how long a stranded
+    profile stays stale. Must be positive; a non-positive value would busy-loop
+    the poll thread, so it is coerced back to the default.
+    """
+    value: object | None = os.environ.get("ETL_MATERIALIZE_RECONCILER_INTERVAL_SECONDS")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = _loader_get("etl.materialize_reconciler_interval_seconds", default=None)
+    if value is None:
+        value = "120"
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 120
+    return parsed if parsed > 0 else 120
+
+
 def _get_admin_api_key() -> str:
     """Shared admin key used to authenticate the dashboard callback (issue #94).
 
@@ -263,6 +288,9 @@ class Config:
     )
     dedup_max_runtime_seconds: int = field(
         default_factory=_get_dedup_max_runtime_seconds
+    )
+    materialize_reconciler_interval_seconds: int = field(
+        default_factory=_get_materialize_reconciler_interval_seconds
     )
 
     def __post_init__(self) -> None:
