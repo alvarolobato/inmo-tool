@@ -4687,7 +4687,7 @@ class TestDiscoveryPriceHistory:
 
     Idempotent: an observation is appended only when the discovery price
     differs from the listing's most recent recorded price, and
-    `listing.current_price` stays exclusively fetch-path-owned (D-068).
+    `listing.current_price` stays exclusively fetch-path-owned (D-070).
     """
 
     def _history_prices(self, conn, source: str, external_id: str) -> list:
@@ -4779,7 +4779,7 @@ class TestDiscoveryPriceHistory:
                 Decimal(195000),
             ], "the discovery-time price drop must be appended to the timeline"
             assert self._current_price(pg_conn, source, "t-1") == Decimal(205000), (
-                "current_price stays fetch-path-owned (D-068): a discovery-time "
+                "current_price stays fetch-path-owned (D-070): a discovery-time "
                 "observation must not touch it, or _should_skip_fetch's "
                 "price-change re-fetch trigger would stop firing"
             )

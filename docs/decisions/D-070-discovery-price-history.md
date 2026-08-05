@@ -1,10 +1,10 @@
 ---
-id: D-068
+id: D-070
 title: Discovery-time prices are written to listing_price_history, decoupled from the fetch budget
 date: 2026-08-06
 ---
 
-# D-068: Discovery-time prices are written to listing_price_history, decoupled from the fetch budget
+# D-070: Discovery-time prices are written to listing_price_history, decoupled from the fetch budget
 
 *Decided: 2026-08-06*
 

@@ -1000,7 +1000,7 @@ def _record_discovery_price_observations(
     * Across runs: once a discovery price is recorded it becomes the latest
       row, so re-seeing the same price on the next sweep is a no-op.
 
-    `listing.current_price` is deliberately left **fetch-path-owned** (D-068):
+    `listing.current_price` is deliberately left **fetch-path-owned** (D-070):
     updating it from a discovery price would make `_should_skip_fetch`'s
     "discovery price disagrees with stored price -> force a re-fetch" trigger
     (its central price-change safety net) stop firing, since stored would then
