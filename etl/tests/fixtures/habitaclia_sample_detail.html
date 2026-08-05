@@ -1,0 +1,61 @@
+<!--
+  TRIMMED / SYNTHETIC reconstruction of a real habitaclia.com listing detail
+  page (https://www.habitaclia.com/comprar-piso-en_venta_en_sagrada_familia_
+  sagrada_familia-barcelona-i4737003828090.htm) observed live 2026-08 during
+  issue #79's feasibility spike. Reduced to only what HabitacliaConnector.
+  normalize() reads:
+    - the escaped VGPSLat/VGPSLon StreetView-config coordinates,
+    - the subject `.price` element in the summary block,
+    - a `.sim-price` similar-listings carousel (DIFFERENT price) that must be
+      IGNORED — the carousel-contamination trap docs/skills/connectors.md warns
+      about; included precisely so the test proves .price scoping,
+    - the "Distribución" feature <article> (rooms/surface/baths),
+    - the "Referencia del anuncio" line,
+    - og:image + meta description.
+  The live page carries NO JSON-LD (the property_web_scraper reference mapping's
+  jsonLdPath strategy is stale) — deliberately none here either.
+-->
+<!doctype html>
+<html lang="es">
+<head>
+  <title>Piso por 425.000 &#8364; de 61 metros en Sagrada F&#xE0;milia Barcelona - habitaclia</title>
+  <meta property="og:title" content="Piso por 425.000 &#8364; de 61 metros - habitaclia" />
+  <meta name="description" content="piso en venta en sagrada familia. PISO EXTERIOR CON BALC&#xD3;N Y PISCINA COMUNITARIA." />
+  <meta property="og:image" content="//images.habimg.com/imgh/4737-3828090/piso-en-venta-en-sagrada-familia-barcelona_5461decbXL.jpg" />
+  <script>
+    var GeoRepositoryDTO = JSON.parse("{"mapsContainerId":"map","VGPSLat":41.4056000000,"VGPSLon":2.1825000000,"zoom":15}");
+  </script>
+</head>
+<body>
+  <div class="summary bg-white">
+    <div class="summary-left">
+      <h1>Piso en venta en Sagrada F&#xE0;milia</h1>
+      <p class="price">Oportunidad 425.000 &#8364; <span class="alert">Av&#xED;same si baja</span></p>
+    </div>
+  </div>
+
+  <article class="has-aside">
+    <h3 class="f-left">Distribuci&#xF3;n</h3>
+    <ul>
+      <li>1 habitaci&#xF3;n</li>
+      <li>Superficie 61&nbsp;m<sup>2</sup></li>
+      <li>1 Ba&#xF1;o</li>
+    </ul>
+  </article>
+
+  <article class="has-aside">
+    <h3 class="f-left">Caracter&#xED;sticas generales</h3>
+    <ul><li>Calefacci&#xF3;n</li></ul>
+  </article>
+
+  <div class="detail-reference">
+    <p>Referencia del anuncio habitaclia/VB2606024</p>
+  </div>
+
+  <!-- Similar-listings carousel: DIFFERENT prices, must be ignored. -->
+  <section class="similar">
+    <div class="sim-item"><span class="sim-info sim-price">397.000 &#8364;</span></div>
+    <div class="sim-item"><span class="sim-info sim-price">330.000 &#8364;</span></div>
+  </section>
+</body>
+</html>
