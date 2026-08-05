@@ -174,6 +174,45 @@ Solvia also publishes **no coordinates at all** (verified across five live
 listings), so `address_coords` dedup cannot fire for it — which is exactly
 why the cadastral reference is load-bearing here rather than a bonus.
 
+### Escogecasa (Abanca REO): the search payload carries what the detail page can't (issue #135, D-073)
+
+Escogecasa (`escogecasa.es` — the `.com` issue #135 named is a **dead
+domain**, authoritative DNS SERVFAIL from 8.8.8.8 and 1.1.1.1 both; always
+confirm the domain in the spike) is a legacy server-rendered Java map search.
+Its results loader `POST /buscador/cargar_resultados.jsp` (a map form with a
+`lat_min`/`lat_max`/`lng_min`/`lng_max` bounding box) responds with JavaScript
+calling `parent.createMarker(id, lat, lon, 'subtipo - precio', '<card>',
+estado)` once per listing — so the **discovery request already carries lat/lon
++ price + subtipo + built-m² + detail URL + a photo per listing**, with no
+detail fetch. Two transferable points:
+
+- **Coordinates live ONLY in the search payload; the detail page has none.**
+  Stash the createMarker data in `discover()` (keyed by external_id) and merge
+  it in `normalize()` — the same "stash at discovery, read per-listing"
+  pattern Unicaja uses for its card-only postal code, here for coordinates.
+  This makes Escogecasa the batch's third lat/lon-publishing REO connector
+  (after Diglo/Unicaja).
+- **A class *prefix* can be the subject scope.** The detail page's SUBJECT
+  fields are all `dato_`-prefixed (`dato_precio`, `dato_habs`, `dato_cp`, …)
+  while the "inmuebles similares" carousel cards use the *un-prefixed* twins
+  (`habs`/`bans`/`superficie`/`precio`/`referencia`). Reading only `dato_*`
+  sidesteps the carousel-contamination trap with no CSS-container scoping —
+  worth checking for on any templated portal before reaching for `scoped_text`.
+- **A map bbox is capped (~100 markers) and `pag` does not extend it**
+  (live-verified: an all-Spain bbox returned 103 on page 0, 0 after) — so
+  `discovers_full_inventory = False`, the Fotocasa lesson again.
+
+### Batch #132 not-feasible outcomes (2026-08 spikes)
+
+Three targets in this pass produced a documented "don't build", each a
+distinct stop reason worth recognising on the next portal:
+
+| Target | Reason | Verdict |
+|---|---|---|
+| **Kutxabank** (#137, D-074) | `kutxabankinmobiliaria.com`→`.es` redirects to a **Servihabitat-hosted microsite**; Servihabitat already ingests Kutxabank stock. | Brand-consolidated onto an ingested servicer (like Ibercaja D-065 / Haya D-021) — no connector. |
+| **Hipoges** (#207, D-075) | Advertised asset sitemaps AND GET asset API both return app-level **403 "No tiene permisos suficientes"** to an honest client (confirmed from two independent egress IPs); only channel is an internal `POST /api/assets/map` DTO the site walls. | Not respectfully crawlable — the Cimenta2 stop condition (D-033). Capture-only (#75). |
+| **Divarian** (#134, D-076) | Host resolves but 443/80 **time out** here and **ECONNREFUSED** from Anthropic egress — offline/unreachable from two networks (a RETRY that confirmed the prior finding). Ex-Anida book flows via Haya→Solvia. | Unreachable — no portal to spike. Revisit if it returns. |
+
 `ConnectorScope.geography` (the original free-text field) still exists as an explicit escape hatch for tests/manual construction that want to bypass point-based resolution entirely — connector-level unit tests (`test_connector_fotocasa.py`/`test_connector_milanuncios.py`) use it directly rather than going through a seeded search profile, since they're testing `discover()` in isolation from the profile-derivation machinery.
 
 ## Withdrawal detection requires knowing whether a connector actually sees its full inventory

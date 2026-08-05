@@ -242,6 +242,16 @@
   requires_restart: [etl]
   components: [etl]
 
+- key: etl.manual_trigger_max_runtime_seconds
+  env: ETL_MANUAL_TRIGGER_MAX_RUNTIME_SECONDS
+  type: int
+  sensitive: false
+  default: 7200
+  section: "ETL"
+  description: "Vida máxima (segundos) de una ejecución ad-hoc de etl_manual_trigger antes de considerarla huérfana (D-068). Una fila que quede en status='running' con picked_up_at anterior a este tiempo sin proceso activo (SIGKILL/reinicio del contenedor entre reclamar la fila y marcarla done) se reconcilia a 'failed' con un error_msg explicativo al arrancar el ETL y al inicio de cada sondeo del poll loop. Un disparo manual ejecuta un barrido completo run_all_connectors que incluye un pase de dedup, así que por defecto 2h (igual que D-036): holgura sobre el barrido+dedup más largo realista y lo que evita reconciliar una ejecución que aún hace trabajo real en el despliegue de un solo worker. Debe ser positivo."
+  requires_restart: [etl]
+  components: [etl]
+
 - key: etl.materialize_reconciler_interval_seconds
   env: ETL_MATERIALIZE_RECONCILER_INTERVAL_SECONDS
   type: int

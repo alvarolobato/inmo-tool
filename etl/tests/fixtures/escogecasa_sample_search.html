@@ -1,0 +1,33 @@
+<!DOCTYPE HTML>
+<!--
+  Trimmed/synthetic reconstruction of a real escogecasa.es
+  /buscador/cargar_resultados.jsp response observed live 2026-08-05 (Abanca
+  REO portal, issue #135). Real structure: the loader returns JS that calls
+  parent.createMarker(id, lat, lon, 'subtipo - precio', '<card html>',
+  estado) once per result. Trimmed to three markers:
+    - I_50905  Piso (residential, the subject matched by the detail fixture)
+    - I_50996  Vivienda aislada (residential)
+    - I_50800  Local (NON-residential — must be dropped by discover())
+  Coordinates and the third marker are representative reconstructions; the
+  card HTML mirrors the real map_ficha_* class structure.
+-->
+<html xmlns="http://www.w3.org/1999/xhtml" lang="es-ES">
+<head>
+<script type="text/javascript">
+function cargar_onload(){
+parent.document.getElementById('formBuscar').action='/comprar/viviendas/pontevedra/42.24/-8.72/zoom-11/';
+parent.changeH1('<span>Viviendas</span> en <span>venta</span> en <span>pontevedra</span>');
+
+parent.createMarker('I_50905','42.2380000000','-8.7180000000','Piso - 205.000 €','<div class="map_ficha_wrap"><a class="map_ficha_link" href="/detalle-piso-en-venta-en-teis-en-pontevedra/5250485/50905/" rel="noreferrer" target="_blank" onclick="return abrir_ficha(\'/detalle-piso-en-venta-en-teis-en-pontevedra/5250485/50905/\');"><div class="map_ficha_foto"><img src="/inmuebles/fotos/1/50905_7.jpg"></div><div class="map_ficha_cuerpo"><ul class="map_ficha_list"><li class="map_ficha_subtipo">Piso</li><li class="map_ficha_sup">70,00 <span>m<sup>2</sup></span></li><li class="map_ficha_precio">205.000 </li></ul></div></a></div>','I');
+
+parent.createMarker('I_50996','42.3967000000','-8.6916000000','Vivienda aislada - 80.000 €','<div class="map_ficha_wrap"><a class="map_ficha_link" href="/detalle-vivienda-aislada-en-venta-en-marin-en-pontevedra/9313366/50996/" rel="noreferrer" target="_blank" onclick="return abrir_ficha(\'/detalle-vivienda-aislada-en-venta-en-marin-en-pontevedra/9313366/50996/\');"><div class="map_ficha_foto"><img src="/inmuebles/fotos/1/50996_7.jpg"></div><div class="map_ficha_cuerpo"><ul class="map_ficha_list"><li class="map_ficha_subtipo">Vivienda aislada</li><li class="map_ficha_sup">69,38 <span>m<sup>2</sup></span></li><li class="map_ficha_precio">80.000 </li></ul></div></a></div>','IN');
+
+parent.createMarker('I_50800','42.2300000000','-8.6100000000','Local - 45.000 €','<div class="map_ficha_wrap"><a class="map_ficha_link" href="/detalle-local-en-venta-en-vigo-en-pontevedra/9300000/50800/" rel="noreferrer" target="_blank" onclick="return abrir_ficha(\'/detalle-local-en-venta-en-vigo-en-pontevedra/9300000/50800/\');"><div class="map_ficha_foto"><img src="/inmuebles/fotos/1/50800_1.jpg"></div><div class="map_ficha_cuerpo"><ul class="map_ficha_list"><li class="map_ficha_subtipo">Local</li><li class="map_ficha_sup">120,00 <span>m<sup>2</sup></span></li><li class="map_ficha_precio">45.000 </li></ul></div></a></div>','I');
+
+parent.document.getElementById('nResults').value='3';
+parent.load_nivoslider('slider_results');
+}
+</script>
+</head>
+<body onload="cargar_onload();"></body>
+</html>
