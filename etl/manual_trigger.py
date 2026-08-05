@@ -47,6 +47,80 @@ from etl.db import postgres
 
 logger = logging.getLogger("etl.manual_trigger")
 
+# Default bounded lifetime of an ad-hoc manual-trigger run, in seconds (D-068).
+# Mirrors etl.config._get_manual_trigger_max_runtime_seconds' default so the
+# reconciler has a sane threshold even on the direct call paths (tests, the
+# --once drain) that don't thread a Config value through. Matches D-036's dedup
+# threshold: a manual trigger runs a full run_all_connectors sweep that itself
+# includes a dedup pass, so 2h sits comfortably above the longest realistic run.
+_DEFAULT_MANUAL_TRIGGER_MAX_RUNTIME_SECONDS = 7200
+
+
+def reconcile_orphaned_manual_triggers(
+    conn, max_runtime_seconds: int = _DEFAULT_MANUAL_TRIGGER_MAX_RUNTIME_SECONDS
+) -> int:
+    """Mark dead `etl_manual_trigger` rows stuck at status='running' as failed (D-068).
+
+    A manual trigger whose process is SIGKILLed / restarted / OOM-killed
+    *between* claiming the row (the commit to status='running' in
+    `_claim_pending_trigger`) and marking it done never gets its finishing
+    UPDATE, so the row stays at status='running' with finished_at=NULL
+    *forever* — nothing else transitions it, and `GET /api/etl/run?id=` reports
+    a phantom "still running" run from a process that no longer exists. The
+    single-pending partial index (`WHERE status='pending'`) means the orphan
+    never re-runs, so this is non-breaking, but it misreports status
+    indefinitely — the same gap D-036 closed for `dedup_runs`.
+
+    **Age-based**, using `picked_up_at` (set to NOW() the instant the row flips
+    to 'running') as the start marker — a natural, already-persisted heartbeat,
+    so no new column is needed. Only rows whose `picked_up_at` is older than
+    *max_runtime_seconds* are reconciled. This is the not-stomp-a-live-run
+    safety: on the single-worker deployment the poll loop is single-threaded
+    and runs one trigger to completion before polling again, so a genuinely
+    in-flight run is never concurrently reconciled by the same thread; the age
+    threshold is the belt-and-suspenders that also protects against a
+    theoretical second poller. (Assumption noted: there is no per-run heartbeat
+    column beyond `picked_up_at`, so a run that legitimately exceeds
+    *max_runtime_seconds* while still alive is the residual exposure — the
+    threshold is set well above the longest realistic sweep+dedup to avoid it,
+    exactly as D-036 does for dedup.) `COALESCE(picked_up_at, requested_at)`
+    guards the (never-observed) case of a 'running' row with a NULL
+    `picked_up_at`.
+
+    Idempotent — re-applied at ETL startup and at the start of every poll; a
+    second pass over already-reconciled rows updates nothing. Returns the
+    number of rows reconciled.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE etl_manual_trigger
+               SET status = 'failed',
+                   finished_at = NOW(),
+                   error_msg = COALESCE(
+                       error_msg,
+                       'orphaned: still ''running'' after ' || %s ||
+                       's (max manual-trigger runtime) with no active run — '
+                       'reconciled as failed on startup/next-poll (D-068)'
+                   )
+             WHERE status = 'running'
+               AND COALESCE(picked_up_at, requested_at)
+                   < NOW() - make_interval(secs => %s)
+            """,
+            (max_runtime_seconds, max_runtime_seconds),
+        )
+        reconciled = cur.rowcount
+    conn.commit()
+    if reconciled:
+        logger.warning(
+            "Reconciled %d orphaned etl_manual_trigger row(s) stuck at "
+            "status='running' past the %ds max-runtime (likely a crashed/killed "
+            "prior process) — marked 'failed' with an explanatory error_msg (D-068)",
+            reconciled,
+            max_runtime_seconds,
+        )
+    return reconciled
+
 
 def _claim_pending_trigger(conn) -> tuple[int, str | None] | None:
     """Claim the oldest pending trigger, flipping it to 'running'.
@@ -106,7 +180,10 @@ def _mark_failed(conn, trigger_id: int, error_msg: str) -> None:
     logger.warning("etl_manual_trigger id=%s: failed — %s", trigger_id, error_msg)
 
 
-def process_pending_trigger(conn) -> int | None:
+def process_pending_trigger(
+    conn,
+    max_runtime_seconds: int = _DEFAULT_MANUAL_TRIGGER_MAX_RUNTIME_SECONDS,
+) -> int | None:
     """Claim and run one pending manual trigger, if any and if free to run.
 
     Returns the processed trigger id (done or failed), or None when there was
@@ -118,6 +195,20 @@ def process_pending_trigger(conn) -> int | None:
     orchestrator imports etl.connectors, which imports the orchestrator back
     inside register_all(), so a top-level import here risks that cycle.
     """
+    # Orphan reconciliation (D-068): before doing anything, clean up any dead
+    # 'running' row left behind by a crashed/killed prior process, so a wedged
+    # orphan never misreports "still running" to the dashboard. Age-based, and
+    # this thread is the single poller, so a genuinely in-flight run is never
+    # touched. Best-effort: a reconcile failure must not block the poll.
+    try:
+        reconcile_orphaned_manual_triggers(conn, max_runtime_seconds)
+    except Exception:
+        logger.exception(
+            "Orphaned manual-trigger reconciliation failed — continuing this "
+            "poll; the next poll reconciles again (D-068)"
+        )
+        conn.rollback()
+
     # Guard 1: never overlap a scheduled/other sweep. Acquire BEFORE claiming
     # so a trigger that can't run right now stays pending rather than getting
     # stuck at 'running' behind a sweep we're not allowed to start.
@@ -171,17 +262,23 @@ def process_pending_trigger(conn) -> int | None:
         postgres.release_run_lock(conn)
 
 
-def run_manual_trigger_poll_loop(conn_factory, interval_seconds: int = 10) -> None:
+def run_manual_trigger_poll_loop(
+    conn_factory,
+    interval_seconds: int = 10,
+    max_runtime_seconds: int = _DEFAULT_MANUAL_TRIGGER_MAX_RUNTIME_SECONDS,
+) -> None:
     """Poll `etl_manual_trigger` on a short interval, forever.
 
     Its own thread (see etl/main.py), on a much shorter interval than the
     hourly scheduler, with the same "one bad iteration shouldn't kill the
-    loop" isolation as etl.capture.run_capture_poll_loop.
+    loop" isolation as etl.capture.run_capture_poll_loop. Each poll first
+    reconciles any orphaned 'running' row older than *max_runtime_seconds*
+    (D-068).
     """
     while True:
         conn = conn_factory()
         try:
-            trigger_id = process_pending_trigger(conn)
+            trigger_id = process_pending_trigger(conn, max_runtime_seconds)
             if trigger_id is not None:
                 logger.info("Processed manual trigger id=%s", trigger_id)
         except Exception:
