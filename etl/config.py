@@ -239,6 +239,34 @@ def _get_dedup_max_runtime_seconds() -> int:
     return parsed if parsed > 0 else 7200
 
 
+def _get_manual_trigger_max_runtime_seconds() -> int:
+    """Bounded lifetime of an ad-hoc manual trigger run, in seconds (D-068).
+
+    Same env-first-then-loader precedence as the other ETL knobs above. An
+    `etl_manual_trigger` row flipped to status='running' whose `picked_up_at`
+    is older than this age with no active run is treated as a dead orphan (the
+    process was SIGKILLed / the container restarted between claiming the row
+    and marking it done) and reconciled to 'failed'. A manual trigger runs a
+    full `run_all_connectors` sweep — which itself includes a dedup pass — so
+    the default (7200s / 2h) sits comfortably above the longest realistic
+    sweep+dedup runtime, matching D-036's dedup threshold, and is what keeps
+    the reconciler from ever failing a run still doing real work on the
+    single-worker deployment. Must be positive — a non-positive value would
+    declare every run orphaned the instant it starts, so it is coerced back to
+    the default.
+    """
+    value: object | None = os.environ.get("ETL_MANUAL_TRIGGER_MAX_RUNTIME_SECONDS")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = _loader_get("etl.manual_trigger_max_runtime_seconds", default=None)
+    if value is None:
+        value = "7200"
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 7200
+    return parsed if parsed > 0 else 7200
+
+
 def _get_materialize_reconciler_interval_seconds() -> int:
     """Poll cadence (seconds) of the profile-materialize staleness reconciler
     (issue #285, D-046).
@@ -333,6 +361,9 @@ class Config:
     )
     dedup_max_runtime_seconds: int = field(
         default_factory=_get_dedup_max_runtime_seconds
+    )
+    manual_trigger_max_runtime_seconds: int = field(
+        default_factory=_get_manual_trigger_max_runtime_seconds
     )
     materialize_reconciler_interval_seconds: int = field(
         default_factory=_get_materialize_reconciler_interval_seconds

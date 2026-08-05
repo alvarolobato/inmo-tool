@@ -115,6 +115,27 @@ def main() -> None:
         )
         conn_pg.rollback()
 
+    # Orphan reconciliation at startup (D-068): a manual trigger (issue #244)
+    # SIGKILLed between claiming its etl_manual_trigger row (commit to
+    # status='running') and marking it done leaves that row stuck at 'running'
+    # forever, misreporting a phantom run to GET /api/etl/run?id=. Clean any
+    # such dead row up front — the crash-then-restart case the issue #253 fix
+    # targets. Age-based (older than manual_trigger_max_runtime_seconds), so a
+    # run genuinely in flight is never touched. Best-effort: a failure here
+    # must not stop the ETL from starting.
+    try:
+        from etl import manual_trigger
+
+        manual_trigger.reconcile_orphaned_manual_triggers(
+            conn_pg, config.manual_trigger_max_runtime_seconds
+        )
+    except Exception:
+        logger.exception(
+            "Startup orphaned-manual-trigger reconciliation failed — continuing; "
+            "the next poll reconciles again (D-068)"
+        )
+        conn_pg.rollback()
+
     # Publish the registry for the connector-management UI (issue #100) and
     # seed a disabled connector_config row for any connector that lacks one.
     #
@@ -202,7 +223,9 @@ def main() -> None:
             # trigger path without waiting for the long-running poll thread.
             from etl import manual_trigger
 
-            manual_trigger.process_pending_trigger(conn_pg)
+            manual_trigger.process_pending_trigger(
+                conn_pg, config.manual_trigger_max_runtime_seconds
+            )
 
             # Also run one materialize-staleness reconciler tick in --once mode
             # (issue #285) — same "do queued/backstop work" reasoning as the
@@ -266,6 +289,7 @@ def main() -> None:
     manual_trigger_thread = threading.Thread(
         target=manual_trigger.run_manual_trigger_poll_loop,
         args=(lambda: postgres.get_connection(config),),
+        kwargs={"max_runtime_seconds": config.manual_trigger_max_runtime_seconds},
         daemon=True,
     )
     manual_trigger_thread.start()
