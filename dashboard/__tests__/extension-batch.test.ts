@@ -43,6 +43,9 @@ const {
   isActive,
   progress,
   jitterDelay,
+  paceBaseMs,
+  shouldReattach,
+  orphanTabToClose,
 } = B as {
   STATUSES: { RUNNING: string; PAUSED: string; DONE: string };
   makeBatchState: (urls: unknown) => BatchState;
@@ -54,6 +57,13 @@ const {
   isActive: (s: BatchState | null) => boolean;
   progress: (s: BatchState | null) => Progress;
   jitterDelay: (base: number, spread: number, rnd?: () => number) => number;
+  paceBaseMs: (processed: number) => number;
+  shouldReattach: (s: BatchState | null, looping: boolean) => boolean;
+  orphanTabToClose: (
+    s: BatchState | null,
+    looping: boolean,
+    persistedTabId: number | null,
+  ) => number | null;
 };
 
 const URLS = [
@@ -208,5 +218,70 @@ describe("jitterDelay", () => {
       expect(d).toBeGreaterThanOrEqual(4000);
       expect(d).toBeLessThanOrEqual(9000);
     }
+  });
+});
+
+describe("paceBaseMs — gentle backoff for long sweeps (issue #262 follow-up)", () => {
+  it("keeps the 4–9 s minimum at the start of a run", () => {
+    expect(paceBaseMs(0)).toBe(4000);
+    expect(paceBaseMs(24)).toBe(4000);
+    // Combined with the 5000 spread, the actual dwell is [4000, 9000).
+    expect(jitterDelay(paceBaseMs(0), 5000, () => 0)).toBe(4000);
+    expect(jitterDelay(paceBaseMs(0), 5000, () => 0.9999)).toBeLessThan(9000);
+  });
+
+  it("lengthens the base stepwise as the run gets long", () => {
+    expect(paceBaseMs(25)).toBe(6000);
+    expect(paceBaseMs(50)).toBe(8000);
+    expect(paceBaseMs(100)).toBe(12000);
+  });
+
+  it("caps the base so it never runs away (MIN + 12 s)", () => {
+    expect(paceBaseMs(150)).toBe(16000);
+    expect(paceBaseMs(100000)).toBe(16000);
+  });
+
+  it("treats a negative/garbage processed count as 0", () => {
+    expect(paceBaseMs(-5)).toBe(4000);
+  });
+});
+
+describe("shouldReattach — MV3 eviction recovery decision (issue #262 review)", () => {
+  const running = makeBatchState(URLS);
+
+  it("re-attaches when the queue is running but no loop is active", () => {
+    expect(shouldReattach(running, false)).toBe(true);
+  });
+
+  it("does nothing when a loop is already driving the queue", () => {
+    expect(shouldReattach(running, true)).toBe(false);
+  });
+
+  it("does nothing for a paused / done / null queue", () => {
+    expect(shouldReattach(pause(running), false)).toBe(false);
+    expect(shouldReattach(stop(running), false)).toBe(false);
+    expect(shouldReattach(makeBatchState([]), false)).toBe(false);
+    expect(shouldReattach(null, false)).toBe(false);
+  });
+});
+
+describe("orphanTabToClose — reconcile the tab leaked at eviction (issue #262 review)", () => {
+  const running = makeBatchState(URLS);
+
+  it("returns the persisted tab id when the run is stranded", () => {
+    expect(orphanTabToClose(running, false, 42)).toBe(42);
+  });
+
+  it("returns null when a loop is still alive (never disturb a live tab)", () => {
+    expect(orphanTabToClose(running, true, 42)).toBeNull();
+  });
+
+  it("returns null when no tab id was persisted", () => {
+    expect(orphanTabToClose(running, false, null)).toBeNull();
+  });
+
+  it("returns null for a paused/done queue even with a persisted id", () => {
+    expect(orphanTabToClose(pause(running), false, 42)).toBeNull();
+    expect(orphanTabToClose(stop(running), false, 42)).toBeNull();
   });
 });

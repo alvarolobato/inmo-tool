@@ -36,12 +36,27 @@ advance, showing live N/M progress with stop/resume.
    worker POSTs them to `capture_worklist` (`added_via='derived'`), then sweeps
    the portal's `pending` set.
 2. **Pacing is mandatory and must stay jittered.** A randomised delay
-   (`batch.js jitterDelay`, currently 4–9 s) sits between closing one tab and
+   (`batch.js jitterDelay`, 4–9 s minimum) sits between closing one tab and
    opening the next. The WAF concern the old human-paced design named did not
    disappear when the pacing left the human's hands — it moved into the
    extension. Idealista (CAPTCHA wall) and Aliseda (`Disallow: /` data host,
    D-019) both punish bursts. Do **not** remove or fixed-interval-ise the pace.
-3. The old human-paced affordances survive only as a **manual fallback**:
+   For long sweeps the dwell BASE lengthens stepwise (`batch.js paceBaseMs`:
+   +2 s every 25 pages, capped at +12 s) — a 100+ listing run is 10–15 min of
+   steady navigation, the most likely rate-trip, so late pages space out while
+   the 4–9 s minimum still holds at the start. Chosen over capping a run,
+   because "click once" means the operator shouldn't have to re-trigger.
+3. **The run survives MV3 worker eviction.** The driver loop is in-memory but
+   the queue *state* — and the id of the tab currently open — persist in
+   `chrome.storage.session`. A watchdog re-attaches a stranded run (persisted
+   state `running` but no active loop): `chrome.alarms` (30 s), plus
+   `onStartup`/`onInstalled`, plus every popup open (`GET_BATCH_STATE`) call
+   `reattachIfStranded()`, which closes the tab orphaned at eviction time
+   (`batch.js orphanTabToClose`) and restarts the loop from the persisted
+   index. Re-opening a page that was mid-capture at eviction is safe — capture
+   is idempotent (worklist `match_key` + the content-script fire-once guard).
+   Requires the `alarms` permission.
+4. The old human-paced affordances survive only as a **manual fallback**:
    `firstPendingUrl` / "Abrir siguiente pendiente" open one pending listing by
    hand. Their docstrings are rewritten to say so — a future agent reading them
    cold must not "restore" the anti-auto-advance stance this decision overturns.
@@ -64,8 +79,12 @@ human-paced design was protecting, without the babysitting the owner no longer
 wants. This is stated as the target automation level for ALL capture-based
 connectors.
 
-**See**: issue #262; `browser-extension/batch.js`, `browser-extension/background.js`
-(Batch capture section), `browser-extension/detect.js` (`isListingPath` /
-`extractDetailUrls`), `dashboard/lib/worklist.ts` (`firstPendingUrl` /
-`pendingUrls`), `dashboard/app/etl/captura/page.tsx`; D-037 (Aliseda guided
-capture), D-019 (Aliseda not viable), #254 (auto-capture), #260/#261 (worklist).
+**See**: issue #262 (incl. the review requesting the eviction-recovery
+watchdog + long-run backoff); `browser-extension/batch.js` (`paceBaseMs`,
+`shouldReattach`, `orphanTabToClose`), `browser-extension/background.js`
+(Batch capture + `reattachIfStranded` / watchdog alarm),
+`browser-extension/detect.js` (`isListingPath` / `extractDetailUrls`),
+`browser-extension/manifest.json` (`alarms` permission),
+`dashboard/lib/worklist.ts` (`firstPendingUrl` / `pendingUrls`),
+`dashboard/app/etl/captura/page.tsx`; D-037 (Aliseda guided capture),
+D-019 (Aliseda not viable), #254 (auto-capture), #260/#261 (worklist).

@@ -3,7 +3,7 @@
   "name": "Inmo-Tool Listing Capture",
   "version": "0.4.0",
   "description": "Capture a rendered listing page into inmo-tool, for sites the automated connectors can't reach (Idealista, Aliseda, Altamira).",
-  "permissions": ["activeTab", "scripting", "storage", "tabs"],
+  "permissions": ["activeTab", "alarms", "scripting", "storage", "tabs"],
   "host_permissions": [
     "http://localhost/*",
     "http://127.0.0.1/*",
