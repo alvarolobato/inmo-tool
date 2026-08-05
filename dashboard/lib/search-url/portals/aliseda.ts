@@ -73,6 +73,7 @@ import {
   makeCategoryKey,
   PLACEHOLDER,
 } from "../parse-shared";
+import { discoveredSegmentFor } from "../discovered-mapping";
 import type {
   CanonicalSearchScope,
   LoosenableConstraint,
@@ -188,18 +189,34 @@ function buildTask(
   const loosened: LoosenedConstraint[] = [];
   const map = TYPE_MAP[type];
 
+  // URL-building discovery (issue #336, D-063): prefer the option→fragment the
+  // extension discovered from the live portal over the hard-coded TYPE_MAP seed
+  // (#338); fall back to the seed (verified/offline default) when nothing was
+  // discovered. Discovery informs the RESIDENTIAL subtype slot only — the
+  // top-level `comprar-<category>` grammar (#338) is authoritative, so a type
+  // with no `subtype` (non-residential: locales/naves/…) keeps its bare
+  // `comprar-<category>` path with no subtipo and never consults discovery.
+  // When a discovered value IS used it is authoritative, so the seed's
+  // approximate-mapping flag (atico→pisos, chalet→chalets-adosados) is
+  // suppressed. With no catalog, this reduces exactly to #338's buildTask.
+  const discovered = map.subtype
+    ? discoveredSegmentFor(PORTAL, "property_type", type)
+    : null;
+  const slug = discovered?.slug ?? map.subtype?.slug;
+  const code = discovered?.code ?? map.subtype?.code;
+
   const segments = [map.category];
-  if (map.subtype) segments.push(map.subtype.slug);
+  if (slug) segments.push(slug);
   segments.push(...geo.segments);
 
   loosened.push(geo.flag);
 
-  if (map.approxReason) {
+  if (!discovered && map.approxReason) {
     loosened.push({ constraint: "property_types", reason: map.approxReason });
   }
 
   const params = new URLSearchParams();
-  if (map.subtype) params.set("subtipo", String(map.subtype.code));
+  if (code !== undefined) params.set("subtipo", String(code));
 
   // precio=<min>-<max>: hyphen range, no separators. min defaults to 0. Needs
   // an upper bound to form a range; a lower-bound-only profile can't be
@@ -236,10 +253,11 @@ function buildTask(
   const query = params.toString(); // hyphen + digits are URL-safe, so precio survives verbatim
   const url = query ? `${ORIGIN}${path}?${query}` : `${ORIGIN}${path}`;
 
-  // Section = the URL's discriminating segment: the subtype slug for viviendas,
-  // else the category. Two types that collapse onto the same section+filters
-  // (piso + atico → pisos) get the same id and are de-duplicated in build().
-  const section = map.subtype ? map.subtype.slug : map.category;
+  // Section = the URL's discriminating segment: the (possibly discovered)
+  // subtype slug for viviendas, else the category. Two types that collapse onto
+  // the same section+filters (piso + atico → pisos) get the same id and are
+  // de-duplicated in build().
+  const section = slug ?? map.category;
 
   const id = stableTaskId({
     portal: PORTAL,

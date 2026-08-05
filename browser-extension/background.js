@@ -129,6 +129,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true; // async response (host list may need a backend fetch)
   }
 
+  // URL-building discovery (issue #336): the content script enumerated a
+  // portal's search-form filter options and the URL fragment each produces;
+  // persist the catalog via the ingest route so the connector's URL builder can
+  // read it. Needs the admin key, which only the background worker holds.
+  if (msg.type === 'DISCOVER_CATALOG') {
+    postFilterCatalog(msg.payload)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ success: false, error: { message: err.message } }));
+    return true; // async response
+  }
+
   // Auto-capture (issue #254) fired in the content script — flash the toolbar
   // badge for that tab so the auto-capture is never silent. Cosmetic only; no
   // response needed. ALSO the settle signal for a batch run (issue #262): if
@@ -346,6 +357,34 @@ async function saveSearchUrlExample(searchUrl) {
   } catch {
     /* best-effort: never let a learned-example save disrupt the capture run */
   }
+}
+
+/**
+ * POST a discovered filter catalog to the ingest route (issue #336). Unlike
+ * the fire-and-forget example save, this DOES report its outcome back to the
+ * content script (so the operator sees a success/failure toast) — but it never
+ * throws past the caller's `.catch`. `payload` is the body discover.js built
+ * (pageUrl + source + capturedAt + axes); the server derives the connector from
+ * pageUrl's host and validates the shape.
+ */
+async function postFilterCatalog(payload) {
+  const { apiUrl, apiKey } = await getApiConfig();
+  const response = await fetch(`${apiUrl}/api/extension/filter-catalog`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-admin-key': apiKey },
+    body: JSON.stringify(payload),
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok || !body || !body.success) {
+    return { success: false, error: { message: (body && body.error) || `HTTP ${response.status}` } };
+  }
+  return {
+    success: true,
+    stored: !!body.stored,
+    connector: body.connector,
+    optionsCount: body.options_count || 0,
+    axesCount: body.axes_count || 0,
+  };
 }
 
 /**
