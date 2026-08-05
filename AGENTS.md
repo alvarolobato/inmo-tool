@@ -112,6 +112,13 @@ The owner's standing instruction is **chain work continuously — do not stop to
 report and wait**. A report is a checkpoint, not a stopping point. The default
 is to keep going to the next queued task.
 
+**Default to high parallelism.** Keep many workstreams in flight at once — the
+coordinator dispatches build/review/spike agents aggressively rather than
+serializing. When a review slot frees or a queued item has no unmet dependency,
+start it; don't idle waiting for one PR to land before beginning the next
+independent piece. Only serialize when there's a genuine dependency (shared
+file/schema, or one builds on another's merged output).
+
 ### The pipeline
 
 ```
@@ -146,6 +153,16 @@ After each completed task or change, emit exactly four sections: **next tasks
 (prioritized table)**, **current work ongoing**, **things needing the owner's
 decision**, **things the owner needs to know**. Keep it short. Leave out agent
 transcripts, implementation play-by-play, and problems already solved.
+
+**Owner-facing items must be actionable *now*.** Only list something as "needs
+the owner's decision" or "blocked on you" if the owner can act on it this moment
+with nothing of yours outstanding. If it depends on work you haven't finished —
+a PR not yet merged, a page not yet shipped, a data sample you could capture
+yourself — it is **your** task, not the owner's; keep it off the owner-facing
+list until you've delivered your part and it is genuinely the owner's move.
+Never pad the "blocked on you" list with items that aren't yet actionable — an
+empty "needs you" list is the correct output when nothing is truly waiting on
+them.
 
 ---
 
