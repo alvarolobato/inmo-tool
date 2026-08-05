@@ -370,6 +370,44 @@ ALTER TABLE search_profile ALTER COLUMN scope DROP DEFAULT;
 ALTER TABLE search_profile ADD COLUMN IF NOT EXISTS last_materialized_at TIMESTAMPTZ;
 ALTER TABLE search_profile ADD COLUMN IF NOT EXISTS last_viewed_at TIMESTAMPTZ;
 
+-- Issue #35 (Phase 5.5, D-054): per-profile daily/weekly "what's new" digest.
+--   - digest_cadence: how often this profile's digest is assembled and sent.
+--     'daily' by default so a fresh install produces digests immediately; the
+--     send is a no-op (logged) until SMTP is configured, so 'daily' can't spam
+--     an unconfigured deployment. 'off' opts a profile out entirely. Task 2.3's
+--     profile-edit API will expose this; until then it is DB-default-driven.
+--   - digest_email: the recipient for THIS profile's digest. NULL falls back to
+--     the global notifications.digest_to config value (personal tool, one owner),
+--     so a working default needs zero per-profile setup.
+-- Both ALTER (not part of the CREATE TABLE below-first path) for the standard
+-- already-migrated-database reason as last_viewed_at above.
+ALTER TABLE search_profile ADD COLUMN IF NOT EXISTS digest_cadence TEXT
+    NOT NULL DEFAULT 'daily'
+    CHECK (digest_cadence IN ('daily', 'weekly', 'off'));
+ALTER TABLE search_profile ADD COLUMN IF NOT EXISTS digest_email TEXT;
+
+-- Issue #35: one row per digest actually assembled for a profile — the
+-- "since last digest" watermark the next run reads (its `sent_at` becomes the
+-- next run's lower bound for "new candidates"), plus a lightweight audit of
+-- how much each digest carried. Written on EVERY assembled cycle, including
+-- the empty case (candidate_count = 0, no email sent) — that is exactly how an
+-- empty digest advances the watermark without sending a content-free email
+-- (issue #35 EC-2 / technical approach §4). `sent` records whether an email
+-- actually went out (false for an empty digest or an unconfigured-SMTP no-op),
+-- so the audit distinguishes "nothing to say" from "SMTP not set up".
+CREATE TABLE IF NOT EXISTS digest_run (
+    id              BIGSERIAL    PRIMARY KEY,
+    profile_id      BIGINT       NOT NULL REFERENCES search_profile(id) ON DELETE CASCADE,
+    sent_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    candidate_count INTEGER      NOT NULL DEFAULT 0,
+    sent            BOOLEAN      NOT NULL DEFAULT false
+);
+
+-- The scheduler's due-check reads the most recent digest_run per profile
+-- (ORDER BY sent_at DESC LIMIT 1) — index the (profile_id, sent_at DESC) path.
+CREATE INDEX IF NOT EXISTS idx_digest_run_profile_sent
+    ON digest_run (profile_id, sent_at DESC);
+
 -- profile_listing_state is keyed on (profile_id, property_id), NOT
 -- listing_id. This is load-bearing: once dedup (task 2.2) unions two
 -- listings from different sites into one property, this table must still
