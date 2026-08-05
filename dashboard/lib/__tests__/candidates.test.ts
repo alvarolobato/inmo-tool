@@ -15,9 +15,11 @@ vi.mock("pg", () => ({
 
 import {
   decodeCursor,
+  describeRankingBoost,
   flagsFromAssessments,
   getAdjacentCandidates,
   listCandidates,
+  WARN_CAVEAT_CODES,
   type RawAssessmentRow,
 } from "../candidates";
 import { resetPool } from "@/lib/db-write";
@@ -70,18 +72,18 @@ describe("listCandidates", () => {
     // are (profileId, cursorScore, cursorId, limit+1, source) — a compound
     // keyset key, not a single id, since results are ordered by score
     // globally; source ($5) is null when no portal filter is applied (#265).
-    expect(params).toEqual([7, null, null, 31, null]);
+    expect(params).toEqual([7, null, null, 31, null, WARN_CAVEAT_CODES]);
   });
 
   it("passes the decoded cursor and clamps limit to [1, 100] (querying limit+1 rows)", async () => {
     mockPoolQuery.mockResolvedValue({ rows: [] });
 
     await listCandidates(7, { cursor: testCursor(0.73, 42), limit: 500 });
-    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, 0.73, 42, 101, null]);
+    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, 0.73, 42, 101, null, WARN_CAVEAT_CODES]);
 
     mockPoolQuery.mockClear();
     await listCandidates(7, { limit: 0 });
-    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, null, null, 2, null]);
+    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, null, null, 2, null, WARN_CAVEAT_CODES]);
   });
 
   it("passes a trimmed source as $5 and adds the portal EXISTS filter (#265)", async () => {
@@ -91,14 +93,14 @@ describe("listCandidates", () => {
     const [sql, params] = mockPoolQuery.mock.calls[0];
     // Trimmed, and the EXISTS subquery gates on the same active+sale set the
     // card's badges use.
-    expect(params).toEqual([7, null, null, 31, "idealista"]);
+    expect(params).toEqual([7, null, null, 31, "idealista", WARN_CAVEAT_CODES]);
     expect(sql).toContain("EXISTS");
     expect(sql).toContain("lf.source = $5");
 
     // An empty / whitespace-only source is "no filter" — $5 stays null.
     mockPoolQuery.mockClear();
     await listCandidates(7, { source: "   " });
-    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, null, null, 31, null]);
+    expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, null, null, 31, null, WARN_CAVEAT_CODES]);
   });
 
   it("rejects a malformed cursor rather than silently resetting to page 1", async () => {
@@ -214,19 +216,21 @@ describe("listCandidates", () => {
     // in final (score DESC, id DESC) order — deliberately NOT id-DESC order
     // — and both `items` and `nextCursor` must reflect that order exactly,
     // with no further client-side re-sort.
+    // The cursor now encodes the blended effective_score (#309), which the SQL
+    // returns per row — supply it so the mock reflects the real result shape.
     mockPoolQuery.mockResolvedValueOnce({
       rows: [
-        { ...stubRow(2), score: "0.900" }, // highest score, but lowest id
-        { ...stubRow(9), score: "0.500" },
-        { ...stubRow(5), score: null }, // unscored sorts last (NO_SCORE_SENTINEL)
+        { ...stubRow(2), score: "0.900", effective_score: "0.900" }, // highest, but lowest id
+        { ...stubRow(9), score: "0.500", effective_score: "0.500" },
+        { ...stubRow(5), score: null, effective_score: "-1" }, // unscored sorts last (NO_SCORE_SENTINEL)
       ],
     });
     const page = await listCandidates(1, { limit: 2 });
 
     expect(page.items.map((i) => i.property_id)).toEqual([2, 9]);
-    // Cursor must resume after row id=9 (score 0.5) — the second, last-kept
-    // row in this already-sorted result — not after whichever id happened
-    // to sort last in some separate re-sort.
+    // Cursor must resume after row id=9 (effective_score 0.5) — the second,
+    // last-kept row in this already-sorted result — not after whichever id
+    // happened to sort last in some separate re-sort.
     expect(decodeCursor(page.nextCursor!)).toEqual({ score: 0.5, id: 9 });
   });
 
@@ -453,8 +457,10 @@ describe("getAdjacentCandidates", () => {
     expect(mockPoolQuery).toHaveBeenCalledTimes(1);
   });
 
-  it("treats a NULL anchor score as NO_SCORE_SENTINEL when comparing neighbours", async () => {
-    mockPoolQuery.mockResolvedValueOnce({ rows: [{ score: null }] });
+  it("treats a NULL anchor effective_score as NO_SCORE_SENTINEL when comparing neighbours", async () => {
+    // The anchor query now reads the blended `effective_score` from the ranked
+    // CTE (#309); a never-scored, no-signal anchor comes back null.
+    mockPoolQuery.mockResolvedValueOnce({ rows: [{ effective_score: null }] });
     mockPoolQuery.mockResolvedValueOnce({ rows: [] }); // next
     mockPoolQuery.mockResolvedValueOnce({ rows: [] }); // prev
 
@@ -469,7 +475,7 @@ describe("getAdjacentCandidates", () => {
   });
 
   it("returns null for a side with no neighbour (top/bottom of the ranking) while still returning the other side", async () => {
-    mockPoolQuery.mockResolvedValueOnce({ rows: [{ score: "0.91" }] }); // anchor
+    mockPoolQuery.mockResolvedValueOnce({ rows: [{ effective_score: "0.91" }] }); // anchor
     mockPoolQuery.mockResolvedValueOnce({ rows: [] }); // no next (top of ranking)
     mockPoolQuery.mockResolvedValueOnce({ rows: [{ property_id: 3 }] }); // prev exists
 
@@ -484,7 +490,7 @@ describe("getAdjacentCandidates", () => {
     // #155) that now guarantees this in production, so the mock supplies
     // the already-parsed number directly — this is a pass-through guard on
     // getAdjacentCandidates, not a test of the coercion itself.
-    mockPoolQuery.mockResolvedValueOnce({ rows: [{ score: "0.5" }] });
+    mockPoolQuery.mockResolvedValueOnce({ rows: [{ effective_score: "0.5" }] });
     mockPoolQuery.mockResolvedValueOnce({ rows: [{ property_id: 42 }] });
     mockPoolQuery.mockResolvedValueOnce({ rows: [{ property_id: 7 }] });
 
@@ -494,8 +500,8 @@ describe("getAdjacentCandidates", () => {
     expect(result.prevPropertyId).toBe(7);
   });
 
-  it("reuses listCandidates's exact keyset ordering/comparison — same NO_SCORE_SENTINEL, same (score, id) compound tiebreak direction", async () => {
-    mockPoolQuery.mockResolvedValueOnce({ rows: [{ score: "0.5" }] });
+  it("reuses listCandidates's exact keyset ordering/comparison — same blended effective_score, same (score, id) compound tiebreak direction", async () => {
+    mockPoolQuery.mockResolvedValueOnce({ rows: [{ effective_score: "0.5" }] });
     mockPoolQuery.mockResolvedValueOnce({ rows: [] });
     mockPoolQuery.mockResolvedValueOnce({ rows: [] });
 
@@ -504,11 +510,44 @@ describe("getAdjacentCandidates", () => {
     const [nextSql] = mockPoolQuery.mock.calls[1];
     const [prevSql] = mockPoolQuery.mock.calls[2];
     // "next" (ranked worse) sorts DESC and compares strictly-less-than the
-    // anchor, mirroring listCandidates's page-forward direction.
-    expect(nextSql).toContain("ORDER BY COALESCE(pls.score, -1) DESC, pls.property_id DESC");
+    // anchor, mirroring listCandidates's page-forward direction — now on the
+    // blended effective_score (#309), not the raw score.
+    expect(nextSql).toContain("ORDER BY effective_score DESC, property_id DESC");
     expect(nextSql).toContain("< $2::double precision");
     // "prev" (ranked better) reverses both the sort and the comparison.
-    expect(prevSql).toContain("ORDER BY COALESCE(pls.score, -1) ASC, pls.property_id ASC");
+    expect(prevSql).toContain("ORDER BY effective_score ASC, property_id ASC");
     expect(prevSql).toContain("> $2::double precision");
+  });
+});
+
+describe("describeRankingBoost (#309)", () => {
+  it("returns null when there is no notable signal (graceful — no placeholder)", () => {
+    expect(describeRankingBoost(null, 0)).toBeNull();
+    // A discount below the notable threshold is noise, not a "deal".
+    expect(describeRankingBoost(0.02, 0)).toBeNull();
+    // An at/above-market (negative discount) property is not a below-market signal.
+    expect(describeRankingBoost(-0.3, 0)).toBeNull();
+  });
+
+  it("names the below-market discount as a rounded percentage when notable", () => {
+    const reason = describeRankingBoost(0.23, 0);
+    expect(reason).toContain("23%");
+    expect(reason).toContain("por debajo de la mediana");
+    expect(reason).toMatch(/^Destacado:/);
+  });
+
+  it("names distress when at least one axis is flagged", () => {
+    const reason = describeRankingBoost(null, 2);
+    expect(reason).toContain("señales de oportunidad");
+    expect(reason).toMatch(/^Destacado:/);
+  });
+
+  it("combines both signals in one explanation when both are present", () => {
+    const reason = describeRankingBoost(0.31, 1)!;
+    expect(reason).toContain("31%");
+    expect(reason).toContain("señales de oportunidad");
+    // Both clauses, semicolon-joined, single sentence.
+    expect(reason.split(";")).toHaveLength(2);
+    expect(reason.endsWith(".")).toBe(true);
   });
 });

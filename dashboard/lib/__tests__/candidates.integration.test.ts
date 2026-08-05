@@ -821,6 +821,154 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
     });
   });
 
+  describe("ranking blend — below-market + distress (#309, D-057)", () => {
+    // Seed a matched, scored candidate with a chosen price and optional
+    // distress assessment. m2_built is fixed at 70 by insertProperty, so the
+    // price alone drives price/m² and therefore the below-market signal.
+    async function seedCandidate(
+      pool: Pool,
+      profileId: number,
+      opts: { price: number; score: number | null; caveats?: string[] },
+    ): Promise<number> {
+      const id = await insertProperty(pool);
+      await insertListing(pool, id, { source: "fotocasa", current_price: opts.price });
+      await markMatched(pool, profileId, id);
+      await setScore(pool, profileId, id, opts.score);
+      if (opts.caveats) {
+        await insertAssessment(pool, id, {
+          assessmentType: "occupancy",
+          result: { caveats: opts.caveats },
+          promptVersion: "occupancy/v1",
+          generatedAt: new Date("2026-01-01T00:00:00Z"),
+        });
+      }
+      return id;
+    }
+
+    it("floats a below-market candidate above an equal/higher base-score at-market one, while the at-market one keeps its base score", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // 3 fillers at 300k establish the pool median (>= MIN_POOL_SIZE priced
+        // candidates) and sit low on base score.
+        for (let i = 0; i < 3; i++) {
+          await seedCandidate(pool, profileId, { price: 300000, score: 0.1 });
+        }
+        // At-market, HIGHER base score than the deal — no boost, so it must
+        // keep exactly its base score (graceful: never sinks).
+        const atMarket = await seedCandidate(pool, profileId, { price: 300000, score: 0.6 });
+        // Deep discount (~40% below the 300k pool median), LOWER base score —
+        // only the below-market boost can lift it.
+        const deal = await seedCandidate(pool, profileId, { price: 180000, score: 0.5 });
+
+        const page = await listCandidates(profileId, { limit: 10 });
+        const order = page.items.map((i) => i.property_id);
+
+        // The deal outranks the higher-base at-market candidate purely on the
+        // below-market boost (0.5 + ~0.2 > 0.6).
+        expect(order.indexOf(deal)).toBeLessThan(order.indexOf(atMarket));
+        expect(page.items[0].property_id).toBe(deal);
+
+        const dealRow = page.items.find((i) => i.property_id === deal)!;
+        const atMarketRow = page.items.find((i) => i.property_id === atMarket)!;
+
+        // The deal's discount is real and surfaced (~40% below the pool median).
+        expect(dealRow.below_market_pct).toBeGreaterThan(0.3);
+        expect(dealRow.effective_score!).toBeGreaterThan(dealRow.score!); // boosted above base
+        expect(dealRow.ranking_boost_reason).toContain("por debajo de la mediana");
+
+        // The at-market candidate is NOT boosted — its effective score is its
+        // base score (blend augments, never discards the learned score).
+        expect(atMarketRow.effective_score!).toBeCloseTo(0.6, 5);
+        expect(atMarketRow.ranking_boost_reason).toBeNull();
+      });
+    });
+
+    it("floats a distress-flagged candidate above an equal-base clean one, and leaves the clean one on its base score", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // Only two candidates → pool below MIN_POOL_SIZE, so no below-market
+        // boost applies and the distress signal is isolated. Same price and
+        // same base score; the only difference is the distress caveat.
+        const clean = await seedCandidate(pool, profileId, { price: 300000, score: 0.5 });
+        const distressed = await seedCandidate(pool, profileId, {
+          price: 300000,
+          score: 0.5,
+          caveats: ["venta_deuda"],
+        });
+
+        const page = await listCandidates(profileId, { limit: 10 });
+        const order = page.items.map((i) => i.property_id);
+
+        expect(order.indexOf(distressed)).toBeLessThan(order.indexOf(clean));
+
+        const distressedRow = page.items.find((i) => i.property_id === distressed)!;
+        const cleanRow = page.items.find((i) => i.property_id === clean)!;
+
+        expect(distressedRow.distress_level).toBe(1);
+        expect(distressedRow.effective_score!).toBeGreaterThan(distressedRow.score!);
+        expect(distressedRow.ranking_boost_reason).toContain("señales de oportunidad");
+        // No below-market signal (tiny pool) and no distress → clean stays on base.
+        expect(cleanRow.distress_level).toBe(0);
+        expect(cleanRow.below_market_pct).toBeNull();
+        expect(cleanRow.effective_score!).toBeCloseTo(0.5, 5);
+        expect(cleanRow.ranking_boost_reason).toBeNull();
+      });
+    });
+
+    it("keeps a never-scored candidate last even with a deep discount (the base sentinel dominates the bounded boost)", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // Fillers to establish a pool median at 300k.
+        for (let i = 0; i < 3; i++) {
+          await seedCandidate(pool, profileId, { price: 300000, score: 0.1 });
+        }
+        // A real (low) scored candidate, at market.
+        const scored = await seedCandidate(pool, profileId, { price: 300000, score: 0.1 });
+        // A never-scored candidate with a deep discount: its boost is real but
+        // bounded, so it must still sort below any genuinely scored candidate
+        // rather than leapfrogging the whole scored pool from the null set.
+        const unscoredDeal = await seedCandidate(pool, profileId, { price: 150000, score: null });
+
+        const page = await listCandidates(profileId, { limit: 10 });
+        const order = page.items.map((i) => i.property_id);
+
+        // The unscored deal is boosted (discount surfaced) but ranks last.
+        const unscoredRow = page.items.find((i) => i.property_id === unscoredDeal)!;
+        expect(unscoredRow.below_market_pct).toBeGreaterThan(0.3);
+        expect(order.indexOf(scored)).toBeLessThan(order.indexOf(unscoredDeal));
+        expect(order[order.length - 1]).toBe(unscoredDeal);
+      });
+    });
+
+    it("degrades cleanly when NO candidate has any assessment or below-market discount — order and effective_score fall back to the base score", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // All same price (identical price/m² → zero discount for everyone) and
+        // no assessments — the exact state of this deployment until #316 wires
+        // the LLM. Ranking must reduce to the base score with no boost, no
+        // error, no fabricated discount.
+        const scores = [0.2, 0.8, 0.5];
+        const byScore: { id: number; score: number }[] = [];
+        for (const score of scores) {
+          const id = await seedCandidate(pool, profileId, { price: 300000, score });
+          byScore.push({ id, score });
+        }
+        const expected = byScore.sort((a, b) => b.score - a.score).map((r) => r.id);
+
+        const page = await listCandidates(profileId, { limit: 10 });
+        expect(page.items.map((i) => i.property_id)).toEqual(expected);
+        for (const row of page.items) {
+          expect(row.effective_score!).toBeCloseTo(row.score!, 5);
+          expect(row.ranking_boost_reason).toBeNull();
+          expect(row.distress_level).toBe(0);
+          // pool median == every ppm2, so the discount is exactly 0 (not null:
+          // the pool is large enough), and never a fabricated positive.
+          expect(row.below_market_pct).toBeCloseTo(0, 5);
+        }
+      });
+    });
+  });
+
   describe("source (portal) filter (#265)", () => {
     it("narrows the feed to properties with an active sale listing from the selected source", async () => {
       await withRealDb(async (pool) => {

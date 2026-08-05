@@ -16,6 +16,7 @@ vi.mock("pg", () => ({
 import { GET } from "../route";
 import { GET as SOURCES_GET } from "../../candidate-sources/route";
 import { resetPool } from "@/lib/db-write";
+import { WARN_CAVEAT_CODES } from "@/lib/candidates";
 import { NextRequest } from "next/server";
 
 function makeRequest(url: string): NextRequest {
@@ -79,7 +80,7 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
 
     const candidatesCall = mockQuery.mock.calls[1];
     expect(candidatesCall[0]).toContain("lf.source = $5");
-    expect(candidatesCall[1]).toEqual([3, null, null, 31, "milanuncios_rental"]);
+    expect(candidatesCall[1]).toEqual([3, null, null, 31, "milanuncios_rental", WARN_CAVEAT_CODES]);
   });
 
   it("treats an absent source as no filter ($5 = null)", async () => {
@@ -88,7 +89,7 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
 
     const res = await GET(makeRequest("http://localhost/api/profiles/3/candidates"), ctx("3"));
     expect(res.status).toBe(200);
-    expect(mockQuery.mock.calls[1][1]).toEqual([3, null, null, 31, null]);
+    expect(mockQuery.mock.calls[1][1]).toEqual([3, null, null, 31, null, WARN_CAVEAT_CODES]);
   });
 });
 

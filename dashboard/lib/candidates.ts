@@ -118,6 +118,47 @@ export interface CandidateRow {
    * un-suppress the old sentence on every card (#152 review).
    */
   score_kind: "cold_start" | "trained" | null;
+  /**
+   * The blended ranking score the feed actually sorts on (#309, D-057) — the
+   * learned/cold-start `score` AUGMENTED with an opportunity boost so a
+   * below-market or distressed listing surfaces near the top for the
+   * "glance and act" persona, WITHOUT discarding the learned score. See
+   * `RANKED_CTE`'s `effective_score` for the exact formula. Boosts are
+   * additive and non-negative, so a candidate with no assessment and no
+   * below-market discount keeps its base score exactly (never sinks); a
+   * never-scored candidate still sorts last (its −1 sentinel dominates the
+   * small boost). Always a real number when a row exists.
+   */
+  effective_score: number | null;
+  /**
+   * How far this property's price/m² sits below the MEDIAN price/m² of THIS
+   * profile's current candidate pool, as a signed fraction (positive =
+   * cheaper than the pool median = a discount, e.g. `0.2` = "20% below").
+   * The below-market signal that drives the ranking boost (#309). Null when
+   * the pool is too small to have a stable median (< `MIN_POOL_SIZE` priced
+   * candidates) or this property has no price/m² — a genuine "no comparison"
+   * rather than a fabricated "at market" (mirrors area-price.ts's own
+   * silence-not-zero rule). This is a cheap, globally-orderable proxy for the
+   * geographic zone-median discount (area-price.ts / #184); see D-057 for why
+   * the pool median is used here rather than the per-property zone median.
+   */
+  below_market_pct: number | null;
+  /**
+   * Count of distinct distress axes the latest AI assessments flag for this
+   * property (0–3): a warn-tone occupancy caveat, any red flag, and/or an
+   * `a_reformar` condition (#308 populates these; empty in this deployment
+   * until the LLM is wired, #316 — hence `0` for every candidate today, and
+   * the ranking degrades to the below-market/base signal alone). Feeds the
+   * distress half of the ranking boost.
+   */
+  distress_level: number;
+  /**
+   * Short Spanish explanation of WHY this candidate was boosted up the
+   * ranking (below-market discount and/or distress), or null when no boost
+   * applied — so the card can answer "why is this near the top" (#309 EC-3).
+   * Distinct from `rank_explanation`, which explains the learned `score`.
+   */
+  ranking_boost_reason: string | null;
 }
 
 export interface CandidatePage {
@@ -162,6 +203,207 @@ const MAX_CARD_PHOTOS = 8;
  * plain numeric compound compare instead of needing NULL-aware branching.
  */
 const NO_SCORE_SENTINEL = -1;
+
+// ── Ranking blend (#309 / D-057) ────────────────────────────────────────────
+//
+// The default feed used to sort purely on the learned `score`, so a genuinely
+// below-market or distressed listing showed its badge but never rose in the
+// list — the investor still had to scan for it. #309 blends two OPPORTUNITY
+// signals into the sort key as an additive, non-negative boost on top of the
+// learned score:
+//
+//   effective_score = COALESCE(score, -1)
+//                   + below_market_boost   (0 … BELOW_MARKET_DISCOUNT_CAP·WEIGHT)
+//                   + distress_boost        (0 … DISTRESS_MAX_UNITS·UNIT_WEIGHT)
+//
+// Because both boosts are ≥ 0, a candidate with no assessment and no discount
+// keeps its base score EXACTLY (graceful degradation — it never sinks or
+// errors), and a never-scored candidate (score NULL → −1 sentinel) still sorts
+// last: even the maximum boost (0.25 + 0.15 = 0.40) leaves it at −0.6, below
+// any real sigmoid score. The learned model is augmented, never replaced.
+
+/** Below-market discount is capped at 50% below the pool median — beyond that is almost always a data error (wrong m²) or a different asset class, not a real deal worth over-weighting. */
+const BELOW_MARKET_DISCOUNT_CAP = 0.5;
+/** Weight on the (capped) discount fraction. 0.5 → a property 50% below the pool median gets the maximum +0.25 boost, enough to overtake a meaningful learned-score gap without swamping it. */
+const BELOW_MARKET_WEIGHT = 0.5;
+/** Distress axes counted (occupancy warn caveat / red flag / a_reformar); capped so all three present is +0.15, kept smaller than the max discount boost (price is the harder signal). */
+const DISTRESS_MAX_UNITS = 3;
+const DISTRESS_UNIT_WEIGHT = 0.05;
+/**
+ * Minimum number of priced candidates in the pool before a below-market
+ * discount is trusted for ranking — a "median" of one or two listings is
+ * noise, the same reasoning behind area-price.ts's `MIN_SAMPLE_SIZE` gate.
+ * Below this, `below_market_pct` and its boost are null/0 (no fabricated
+ * discount), and candidates fall back to base score + distress.
+ */
+const MIN_POOL_SIZE = 3;
+/** A discount only worth NAMING in the explanation once it clears this — smaller than this reads as noise, not a "deal". */
+const MIN_NOTABLE_DISCOUNT = 0.05;
+
+/**
+ * Occupancy caveat codes that count as a distress/opportunity signal for
+ * ranking — exactly the warn-tone set `CAVEAT_LABELS` renders as a badge
+ * (kept in sync deliberately: a caveat worth a warn badge is a caveat worth a
+ * ranking nudge). Passed as a SQL parameter, not interpolated, so the list
+ * can't drift into an injection surface.
+ */
+export const WARN_CAVEAT_CODES: string[] = [
+  "tenanted",
+  "occupied_illegally",
+  "venta_deuda",
+  "nuda_propiedad",
+  "usufructo",
+  "proindiviso",
+  "derecho_superficie",
+];
+
+/**
+ * The shared `disabled_sources → base → pool → ranked` CTE chain that
+ * materializes `effective_score` (and `below_market_pct`) for EVERY matched,
+ * source-visible candidate of a profile. Both `listCandidates` and
+ * `getAdjacentCandidates` build on it verbatim so the feed order and the
+ * detail page's prev/next can never diverge (the same invariant the file's
+ * `getAdjacentCandidates` doc already insists on for the old score ordering).
+ *
+ * `$1` is the profile id in every caller; `warnParam` is the placeholder for
+ * the warn-caveat text[] (its position differs per caller, so it's injected).
+ * No other parameters are referenced, keeping the fragment caller-agnostic.
+ *
+ * Cost: `base` is one lightweight row per matched candidate (a MIN-price
+ * LATERAL + a tiny latest-per-axis `ai_assessment` aggregate, both index-fed);
+ * the heavy photo/listing aggregation stays in the outer SELECT, applied only
+ * to the LIMITed page. The pool median is a single pass over `base`. The new
+ * sort key (`effective_score`) is not covered by
+ * `idx_profile_listing_state_profile_ranked`, so ordering now sorts the
+ * matched set rather than walking that index — acceptable at the current
+ * per-profile matched-set size; if a profile's pool grows large enough for
+ * that sort to hurt, the follow-up is to materialize `effective_score` in the
+ * scoring pass (see D-057), not to move the Haversine zone-median into this
+ * per-row expression.
+ */
+function rankedCandidatesCte(warnParam: string): string {
+  return `${DISABLED_SOURCES_CTE},
+     base AS (
+       SELECT
+         p.id AS property_id,
+         p.address, p.lat, p.lon, p.property_type, p.m2_built, p.rooms, p.bathrooms, p.floor,
+         pls.score, pls.rank_explanation, pls.score_kind,
+         mp.min_price,
+         CASE WHEN p.m2_built IS NOT NULL AND p.m2_built > 0 AND mp.min_price IS NOT NULL
+              THEN mp.min_price / p.m2_built ELSE NULL END AS ppm2,
+         dist.distress_level
+       FROM profile_listing_state pls
+       JOIN property p ON p.id = pls.property_id
+       -- MIN active-sale price across ENABLED sources only (#322/D-055): the
+       -- below-market signal must never be computed from a hidden source's
+       -- price, exactly like the badge/min_price the card shows.
+       CROSS JOIN LATERAL (
+         SELECT MIN(l2.current_price) AS min_price
+           FROM listing l2
+          WHERE l2.property_id = p.id AND l2.status = 'active' AND l2.operation = 'sale'
+            AND ${activeSourceClause("l2")}
+       ) mp
+       -- Distress level from the LATEST assessment per axis (DISTINCT ON, same
+       -- rule loadFlags uses so a stale prompt-version row can't double-count):
+       -- +1 for a warn-tone occupancy caveat, +1 for any red flag, +1 for an
+       -- a_reformar condition. jsonb_typeof guards keep a non-array caveats/
+       -- flags value from throwing mid-scan.
+       LEFT JOIN LATERAL (
+         SELECT
+             (COALESCE(bool_or(
+                la.assessment_type = 'occupancy'
+                AND jsonb_typeof(la.result->'caveats') = 'array'
+                AND EXISTS (
+                  SELECT 1 FROM jsonb_array_elements_text(la.result->'caveats') cv
+                   WHERE cv = ANY(${warnParam}::text[])
+                )), false))::int
+           + (COALESCE(bool_or(
+                la.assessment_type = 'redflags'
+                AND jsonb_typeof(la.result->'flags') = 'array'
+                AND jsonb_array_length(la.result->'flags') > 0), false))::int
+           + (COALESCE(bool_or(
+                la.assessment_type = 'condition'
+                AND la.result->>'condition' = 'a_reformar'), false))::int
+             AS distress_level
+         FROM (
+           SELECT DISTINCT ON (a.assessment_type) a.assessment_type, a.result
+             FROM ai_assessment a
+            WHERE a.property_id = p.id
+              AND a.assessment_type IN ('occupancy', 'condition', 'redflags')
+            ORDER BY a.assessment_type, a.generated_at DESC NULLS LAST, a.id DESC
+         ) la
+       ) dist ON true
+       WHERE pls.profile_id = $1
+         AND pls.matched = true
+         -- Same disabled-source visibility gate as the feed (#319/D-055): a
+         -- property whose only active-sale listings are all from disabled
+         -- sources drops out here too, so it neither ranks nor skews the pool.
+         AND (
+           NOT EXISTS (
+             SELECT 1 FROM listing ld
+              WHERE ld.property_id = p.id AND ld.status = 'active' AND ld.operation = 'sale'
+           )
+           OR EXISTS (
+             SELECT 1 FROM listing lv
+              WHERE lv.property_id = p.id AND lv.status = 'active' AND lv.operation = 'sale'
+                AND ${activeSourceClause("lv")}
+           )
+         )
+     ),
+     pool AS (
+       SELECT
+         percentile_cont(0.5) WITHIN GROUP (ORDER BY ppm2) AS median_ppm2,
+         COUNT(ppm2) AS n
+       FROM base
+     ),
+     ranked AS (
+       SELECT
+         base.*,
+         CASE
+           WHEN base.ppm2 IS NOT NULL AND pool.n >= ${MIN_POOL_SIZE}
+                AND pool.median_ppm2 IS NOT NULL AND pool.median_ppm2 > 0
+           THEN (pool.median_ppm2 - base.ppm2) / pool.median_ppm2
+           ELSE NULL
+         END AS below_market_pct,
+         (
+           COALESCE(base.score, ${NO_SCORE_SENTINEL})
+           + CASE
+               WHEN base.ppm2 IS NOT NULL AND pool.n >= ${MIN_POOL_SIZE}
+                    AND pool.median_ppm2 IS NOT NULL AND pool.median_ppm2 > 0
+               THEN LEAST(
+                      GREATEST((pool.median_ppm2 - base.ppm2) / pool.median_ppm2, 0),
+                      ${BELOW_MARKET_DISCOUNT_CAP}
+                    ) * ${BELOW_MARKET_WEIGHT}
+               ELSE 0
+             END
+           + LEAST(base.distress_level, ${DISTRESS_MAX_UNITS}) * ${DISTRESS_UNIT_WEIGHT}
+         ) AS effective_score
+       FROM base CROSS JOIN pool
+     )`;
+}
+
+/**
+ * Pure, dependency-free copy generator for `CandidateRow.ranking_boost_reason`
+ * (#309 EC-3). Returns null when neither signal is notable, so the caller can
+ * render nothing rather than a placeholder — the same "no badge on every card"
+ * discipline `flagsFromAssessments` follows. Exported for direct unit testing.
+ */
+export function describeRankingBoost(
+  belowMarketPct: number | null,
+  distressLevel: number,
+): string | null {
+  const parts: string[] = [];
+  if (belowMarketPct !== null && belowMarketPct >= MIN_NOTABLE_DISCOUNT) {
+    parts.push(
+      `precio/m² ~${Math.round(belowMarketPct * 100)}% por debajo de la mediana de tus candidatos`,
+    );
+  }
+  if (distressLevel > 0) {
+    parts.push("señales de oportunidad detectadas (ocupación / estado / cargas)");
+  }
+  if (parts.length === 0) return null;
+  return `Destacado: ${parts.join("; ")}.`;
+}
 
 interface CandidateCursor {
   score: number;
@@ -212,6 +454,12 @@ interface RawCandidateRow {
   score: string | null;
   rank_explanation: string | null;
   score_kind: "cold_start" | "trained" | null;
+  /** Blended sort key (#309) — pg NUMERIC/double, arrives as a string. */
+  effective_score: string | null;
+  /** Signed discount fraction vs the pool median price/m² (#309), NUMERIC as a string; null when the pool is too small or price/m² is unknown. */
+  below_market_pct: string | null;
+  /** 0–3 distress axes flagged (#309); a plain int. */
+  distress_level: number;
 }
 
 /**
@@ -442,24 +690,27 @@ export async function listCandidates(
   // instead of assuming it does whenever a page is exactly full (that
   // false-positive was showing a dead "Cargar más" on the last page).
   const rows = await sql<RawCandidateRow>(
-    // Issue #319 / D-055: hide listings whose source connector is OFF. The
-    // `disabled_sources` CTE resolves each portal's on/off state once (see
-    // lib/db/source-active.ts) and every listing subquery below filters
-    // against it, so a disabled source contributes no card, badge, price,
-    // photo, or staleness — and a property whose only active-sale listings
-    // are all from disabled sources drops out of the feed entirely (the main
-    // WHERE's enabled-source EXISTS below).
-    `WITH ${DISABLED_SOURCES_CTE}
+    // #309 / D-057: the default order is now the BLENDED `effective_score`
+    // (learned score + below-market + distress boost), materialized by the
+    // shared `ranked` CTE (see rankedCandidatesCte). Issue #319 / D-055 still
+    // holds — the CTE hides disabled-source data and every listing subquery
+    // below filters against `disabled_sources`, so a disabled source
+    // contributes no card, badge, price, photo, staleness, or ranking weight,
+    // and a property whose only active-sale listings are all from disabled
+    // sources drops out entirely (inside the CTE's `base` WHERE). The heavy
+    // photo/listing aggregation stays here in the outer SELECT so it runs only
+    // for the LIMITed page, not for every matched row the CTE ranks.
+    `WITH ${rankedCandidatesCte("$6")}
      SELECT
-       p.id AS property_id,
-       p.address,
-       p.lat,
-       p.lon,
-       p.property_type,
-       p.m2_built,
-       p.rooms,
-       p.bathrooms,
-       p.floor,
+       ranked.property_id,
+       ranked.address,
+       ranked.lat,
+       ranked.lon,
+       ranked.property_type,
+       ranked.m2_built,
+       ranked.rooms,
+       ranked.bathrooms,
+       ranked.floor,
        -- Capped, de-duplicated union of photo_urls across this property's
        -- active listings (#167), ordered to match the detail page's gallery
        -- exactly (getPropertyDetail in lib/property-detail.ts, which also
@@ -517,7 +768,7 @@ export async function listCandidates(
                                  WITH ORDINALITY AS uu(photo_url, ord)
                            LIMIT ${MAX_CARD_PHOTOS}
                         ) u
-                       WHERE l4.property_id = p.id
+                       WHERE l4.property_id = ranked.property_id
                          AND l4.status = 'active'
                          AND l4.operation = 'sale'
                          AND ${activeSourceClause("l4")}
@@ -540,13 +791,13 @@ export async function listCandidates(
        -- invariant holding forever: a candidate card showing a monthly
        -- rent figure labelled as a sale price would be a severe,
        -- silent bug if it ever did leak through.
-       (SELECT MIN(l2.current_price)
-          FROM listing l2
-         WHERE l2.property_id = p.id AND l2.status = 'active' AND l2.operation = 'sale'
-           AND ${activeSourceClause("l2")}) AS min_price,
+       -- min_price already computed once inside the ranked CTE (it also feeds
+       -- the below-market signal) — surface it directly rather than re-running
+       -- the MIN subquery.
+       ranked.min_price,
        (SELECT MIN(l3.first_seen_at)
           FROM listing l3
-         WHERE l3.property_id = p.id
+         WHERE l3.property_id = ranked.property_id
            AND ${activeSourceClause("l3")}) AS first_seen_at,
        -- FRESHEST last_seen_at across active SALE listings (issue #243): the
        -- staleness age the card renders. MAX, not MIN — the property is only
@@ -557,11 +808,14 @@ export async function listCandidates(
        -- re-confirmation. NULL when no active sale listing has been seen.
        (SELECT MAX(l6.last_seen_at)
           FROM listing l6
-         WHERE l6.property_id = p.id AND l6.status = 'active' AND l6.operation = 'sale'
+         WHERE l6.property_id = ranked.property_id AND l6.status = 'active' AND l6.operation = 'sale'
            AND ${activeSourceClause("l6")}) AS last_seen_at,
-       pls.score,
-       pls.rank_explanation,
-       pls.score_kind,
+       ranked.score,
+       ranked.rank_explanation,
+       ranked.score_kind,
+       ranked.effective_score,
+       ranked.below_market_pct,
+       ranked.distress_level,
        COALESCE(
          (SELECT json_agg(
                    json_build_object(
@@ -573,60 +827,37 @@ export async function listCandidates(
                    ORDER BY l.source
                  )
             FROM listing l
-           WHERE l.property_id = p.id AND l.status = 'active' AND l.operation = 'sale'
+           WHERE l.property_id = ranked.property_id AND l.status = 'active' AND l.operation = 'sale'
              AND ${activeSourceClause("l")}),
          '[]'
        ) AS listings
-     FROM profile_listing_state pls
-     JOIN property p ON p.id = pls.property_id
-     WHERE pls.profile_id = $1
-       AND pls.matched = true
-       -- Issue #319 / D-055: hide a property whose active-sale listings are
-       -- ALL from disabled sources. Phrased as "keep unless it has active-sale
-       -- listings and none survive the source filter" so a property with no
-       -- active-sale listing at all keeps its prior behaviour (the source
-       -- toggle only ever removes disabled-source data, never anything else).
-       AND (
-         NOT EXISTS (
-           SELECT 1
-             FROM listing ld
-            WHERE ld.property_id = p.id
-              AND ld.status = 'active'
-              AND ld.operation = 'sale'
-         )
-         OR EXISTS (
-           SELECT 1
-             FROM listing lv
-            WHERE lv.property_id = p.id
-              AND lv.status = 'active'
-              AND lv.operation = 'sale'
-              AND ${activeSourceClause("lv")}
-         )
-       )
-       AND (
+     FROM ranked
+     WHERE (
          $2::double precision IS NULL
-         OR COALESCE(pls.score, ${NO_SCORE_SENTINEL}) < $2::double precision
-         OR (COALESCE(pls.score, ${NO_SCORE_SENTINEL}) = $2::double precision AND p.id < $3::bigint)
+         OR ranked.effective_score < $2::double precision
+         OR (ranked.effective_score = $2::double precision AND ranked.property_id < $3::bigint)
        )
        -- Source (portal) filter (#265). $5 NULL = all sources. Uses the
        -- idx_listing_source_status index; the same active+sale predicate as
        -- the badge/min_price/listings subqueries so the filter matches
-       -- exactly what the card shows.
+       -- exactly what the card shows. Applied in the OUTER query (not the pool)
+       -- so the pool median still reflects the profile's whole candidate set,
+       -- not a single portal's slice.
        AND (
          $5::text IS NULL
          OR EXISTS (
            SELECT 1
              FROM listing lf
-            WHERE lf.property_id = p.id
+            WHERE lf.property_id = ranked.property_id
               AND lf.source = $5::text
               AND lf.status = 'active'
               AND lf.operation = 'sale'
               AND ${activeSourceClause("lf")}
          )
        )
-     ORDER BY COALESCE(pls.score, ${NO_SCORE_SENTINEL}) DESC, p.id DESC
+     ORDER BY ranked.effective_score DESC, ranked.property_id DESC
      LIMIT $4`,
-    [profileId, cursorScore, cursorId, limit + 1, source],
+    [profileId, cursorScore, cursorId, limit + 1, source, WARN_CAVEAT_CODES],
   );
 
   const hasMore = rows.length > limit;
@@ -657,17 +888,25 @@ export async function listCandidates(
     score: r.score !== null ? Number(r.score) : null,
     rank_explanation: r.rank_explanation,
     score_kind: r.score_kind ?? null,
+    effective_score: r.effective_score != null ? Number(r.effective_score) : null,
+    below_market_pct: r.below_market_pct != null ? Number(r.below_market_pct) : null,
+    distress_level: r.distress_level ?? 0,
+    ranking_boost_reason: describeRankingBoost(
+      r.below_market_pct != null ? Number(r.below_market_pct) : null,
+      r.distress_level ?? 0,
+    ),
   }));
 
-  // Cursor is derived from the *last row of the SQL result*, which is
-  // already in final (score, id) DESC order — there is no separate
-  // client-side re-sort of `pageRows` to accidentally derive it from
-  // afterward (that was the bug: a previous version sorted `pageRows` by
-  // score for display *after* the cursor should have been captured from
-  // the id-ordered fetch, corrupting the keyset scan).
+  // Cursor is derived from the *last row of the SQL result*, which is already
+  // in final (effective_score, id) DESC order (#309) — there is no separate
+  // client-side re-sort of `pageRows` to accidentally derive it from afterward
+  // (that was the bug: a previous version sorted `pageRows` by score for
+  // display *after* the cursor should have been captured from the id-ordered
+  // fetch, corrupting the keyset scan). The keyset key is now the blended
+  // `effective_score`, matching the ORDER BY above.
   const lastRow = pageRows[pageRows.length - 1];
   const nextCursor = hasMore
-    ? encodeCursor(lastRow.score !== null ? Number(lastRow.score) : null, lastRow.property_id)
+    ? encodeCursor(lastRow.effective_score != null ? Number(lastRow.effective_score) : null, lastRow.property_id)
     : null;
 
   return { items, nextCursor };
@@ -722,9 +961,10 @@ export interface AdjacentCandidates {
  * **Recomputed live, not snapshotted.** Both are defensible; this picks live
  * deliberately:
  *
- *   - It reuses the exact `(COALESCE(score, -1) DESC, id DESC)` ordering and
- *     keyset comparison `listCandidates` uses, so the sequence can't silently
- *     diverge from the list the user is paging through. A snapshot would need
+ *   - It reuses the exact `(effective_score DESC, id DESC)` ordering (the same
+ *     `rankedCandidatesCte` blend `listCandidates` sorts on, #309) and keyset
+ *     comparison, so the sequence can't silently diverge from the list the
+ *     user is paging through. A snapshot would need
  *     that ordering duplicated in a second place and kept in sync — the class
  *     of drift that produced #23's cursor bug, where the cursor was derived
  *     from a different ordering than the display sort.
@@ -744,43 +984,43 @@ export async function getAdjacentCandidates(
   profileId: number,
   propertyId: number,
 ): Promise<AdjacentCandidates> {
-  const anchor = await sql<{ score: string | null }>(
-    `SELECT score
-       FROM profile_listing_state
-      WHERE profile_id = $1 AND property_id = $2 AND matched = true`,
-    [profileId, propertyId],
+  // #309: neighbours are computed under the SAME blended `effective_score`
+  // ordering the list uses (rankedCandidatesCte), not the raw `score` — so the
+  // detail page's prev/next never diverges from the feed the user is paging
+  // through. The anchor's own effective_score is read from the same CTE.
+  const anchor = await sql<{ effective_score: string | null }>(
+    `WITH ${rankedCandidatesCte("$3")}
+     SELECT effective_score FROM ranked WHERE property_id = $2`,
+    [profileId, propertyId, WARN_CAVEAT_CODES],
   );
   if (anchor.length === 0) {
     return { prevPropertyId: null, nextPropertyId: null };
   }
-  const anchorScore = anchor[0].score !== null ? Number(anchor[0].score) : NO_SCORE_SENTINEL;
+  const anchorScore =
+    anchor[0].effective_score != null ? Number(anchor[0].effective_score) : NO_SCORE_SENTINEL;
 
   // "next" = ranked after the anchor under the list's DESC ordering; "prev"
   // reverses both the comparison and the sort, then takes the nearest row.
   const [nextRows, prevRows] = await Promise.all([
     sql<{ property_id: number }>(
-      `SELECT pls.property_id
-         FROM profile_listing_state pls
-        WHERE pls.profile_id = $1
-          AND pls.matched = true
-          AND (COALESCE(pls.score, ${NO_SCORE_SENTINEL}) < $2::double precision
-               OR (COALESCE(pls.score, ${NO_SCORE_SENTINEL}) = $2::double precision
-                   AND pls.property_id < $3::bigint))
-        ORDER BY COALESCE(pls.score, ${NO_SCORE_SENTINEL}) DESC, pls.property_id DESC
+      `WITH ${rankedCandidatesCte("$4")}
+       SELECT property_id
+         FROM ranked
+        WHERE (effective_score < $2::double precision
+               OR (effective_score = $2::double precision AND property_id < $3::bigint))
+        ORDER BY effective_score DESC, property_id DESC
         LIMIT 1`,
-      [profileId, anchorScore, propertyId],
+      [profileId, anchorScore, propertyId, WARN_CAVEAT_CODES],
     ),
     sql<{ property_id: number }>(
-      `SELECT pls.property_id
-         FROM profile_listing_state pls
-        WHERE pls.profile_id = $1
-          AND pls.matched = true
-          AND (COALESCE(pls.score, ${NO_SCORE_SENTINEL}) > $2::double precision
-               OR (COALESCE(pls.score, ${NO_SCORE_SENTINEL}) = $2::double precision
-                   AND pls.property_id > $3::bigint))
-        ORDER BY COALESCE(pls.score, ${NO_SCORE_SENTINEL}) ASC, pls.property_id ASC
+      `WITH ${rankedCandidatesCte("$4")}
+       SELECT property_id
+         FROM ranked
+        WHERE (effective_score > $2::double precision
+               OR (effective_score = $2::double precision AND property_id > $3::bigint))
+        ORDER BY effective_score ASC, property_id ASC
         LIMIT 1`,
-      [profileId, anchorScore, propertyId],
+      [profileId, anchorScore, propertyId, WARN_CAVEAT_CODES],
     ),
   ]);
 
