@@ -42,6 +42,21 @@ didn't visibly remove that portal's data.
    main-WHERE requirement that a candidate have at least one active-sale listing
    from an enabled source.
 
+**Scope — what "the feed" means**: the rule applies to every surface that is
+the *profile candidate feed*, which today is BOTH:
+- the list view (`lib/candidates.ts` — `listCandidates`, `listCandidateSources`), and
+- the map view (`lib/map-candidates.ts` — `listMapCandidates`, including its
+  plottable/unplottable counts). The map is the same feed rendered as pins, so
+  it hides disabled-source pins/badges/prices/counts identically.
+
+It deliberately does NOT apply to **property-detail** surfaces:
+`getPropertyDetail` (`lib/property-detail.ts`) and `getAdjacentCandidates`
+(`lib/candidates.ts`) are out of feed scope — once a user has drilled into a
+specific property, its full listing history (including from a now-disabled
+source) is legitimate context, and prev/next navigation is anchored on the
+`profile_listing_state` ranking, not on which sources are currently on. If a
+future surface becomes a "feed", apply `DISABLED_SOURCES_CTE` there too.
+
 **Alternatives rejected**:
 - *Keep two toggles.* The whole point of the owner's ask was to remove the
   confusion; a capture-only connector has exactly one meaningful lever.
@@ -58,7 +73,8 @@ visible, and the shared CTE keeps the "is this source active?" rule in one place
 for the feed, the source filter, and any future consumer (e.g. data-health).
 
 **See**: `dashboard/lib/db/source-active.ts`,
-`dashboard/lib/candidates.ts`, `dashboard/components/connectors/ConnectorCard.tsx`,
+`dashboard/lib/candidates.ts`, `dashboard/lib/map-candidates.ts`,
+`dashboard/components/connectors/ConnectorCard.tsx`,
 `dashboard/app/etl/connectors/page.tsx`, issue #319 (owner "Spec afinada"),
 D-047/#263 (the capture toggle this supersedes for capture-only connectors).
 Data-health neutral-for-disabled (#304) is a deferred follow-up.
