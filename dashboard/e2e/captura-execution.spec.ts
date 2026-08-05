@@ -109,16 +109,20 @@ test("renders the profile's per-portal capture cards, open-search links and prog
 
   // Both capture portals render as cards.
   await expect(page.getByTestId("captura-portal-idealista")).toBeVisible();
-  await expect(page.getByTestId("captura-portal-aliseda")).toBeVisible();
+  const alisedaCard = page.getByTestId("captura-portal-aliseda");
+  await expect(alisedaCard).toBeVisible();
 
-  // "Abrir búsqueda" opens a real pre-filtered portal URL in a new tab.
-  const alisedaOpen = page.getByTestId("captura-open-aliseda");
+  // Each card renders one "Abrir búsqueda" link per pre-filtered search task
+  // (a portal searches one section at a time — issue #277). Scope to the
+  // aliseda card and pick its first task link; the test-id is the stable task
+  // id, so we locate by role/text instead of a hard-coded id.
+  const alisedaOpen = alisedaCard.getByRole("link", { name: /Abrir búsqueda/ }).first();
   await expect(alisedaOpen).toBeVisible();
-  await expect(alisedaOpen).toHaveAttribute("href", /alisedainmobiliaria\.com\/venta/);
+  await expect(alisedaOpen).toHaveAttribute("href", /alisedainmobiliaria\.com\/comprar-viviendas/);
   await expect(alisedaOpen).toHaveAttribute("target", "_blank");
 
   // Aliseda always loosens geography (issue #267) — surfaced, never hidden.
-  await expect(page.getByTestId("captura-loosened-aliseda")).toContainText("búsqueda ampliada");
+  await expect(alisedaCard).toContainText("búsqueda ampliada");
 
   // Worklist progress for aliseda: 1 of 2 captured from the seed.
   await expect(page.getByTestId("captura-captured-aliseda")).toContainText("1/2 capturadas");
