@@ -54,7 +54,7 @@ still active, so withdrawal-from-absence must stay disabled.
 Registered `enabled = false` via the generic connector_config mechanism
 (#100). This is a scope expansion (issue #79) beyond the original
 Fotocasa/Milanuncios target set; enabling a new site's live crawl is an
-operator decision, not a default. See D-069.
+operator decision, not a default. See D-071.
 """
 
 from __future__ import annotations

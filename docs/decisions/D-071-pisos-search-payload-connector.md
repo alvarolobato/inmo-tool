@@ -1,16 +1,16 @@
 ---
-id: D-069
+id: D-071
 title: pisos.com is a search-payload-primary connector (no detail fetch)
 date: 2026-08-06
 ---
 
-# D-069: pisos.com is a search-payload-primary connector (no detail fetch)
+# D-071: pisos.com is a search-payload-primary connector (no detail fetch)
 
 *Decided: 2026-08-06*
 
-> Note: decision IDs D-060–D-068 were being claimed by parallel connector-batch
-> agents when this was written; this file took the next free id it could see
-> (D-069). Expect a renumber at review if it collides.
+> Note: originally drafted as D-069, but D-068/D-069/D-070 were concurrently
+> claimed by parallel connector-batch PRs (#344/#343/#345); renumbered to D-071
+> at review to resolve the collision.
 
 **Context**: Issue #79 (a scope expansion beyond the original Fotocasa/
 Milanuncios target set) asked to evaluate pisos.com (Vocento) as a new

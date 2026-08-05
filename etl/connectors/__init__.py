@@ -107,13 +107,13 @@ def register_all() -> None:
     # Issue #79: pisos.com (Vocento), a mainstream generalist portal — scope
     # expansion beyond the original Fotocasa/Milanuncios set. Search-payload-
     # primary (rich ad-preview cards + per-card JSON-LD geo, no detail fetch),
-    # publishes lat/lon. Born disabled (#100). See pisos.py's docstring / D-069.
+    # publishes lat/lon. Born disabled (#100). See pisos.py's docstring / D-071.
     if PisosConnector.name not in registered_names:
         CONNECTORS.append(PisosConnector())
     # Issue #79: habitaclia.com (Adevinta), Spain's #4 portal — scope
     # expansion. Discover(search) + fetch_detail(detail) bespoke-HTML
     # connector; coordinates via VGPSLat/VGPSLon (no JSON-LD, no Fotocasa
     # payload reuse despite shared owner). Born disabled (#100). See
-    # habitaclia.py's docstring / D-070.
+    # habitaclia.py's docstring / D-072.
     if HabitacliaConnector.name not in registered_names:
         CONNECTORS.append(HabitacliaConnector())

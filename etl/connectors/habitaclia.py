@@ -54,7 +54,7 @@ disabled, same as Fotocasa/pisos.
 ## Born disabled — operator opt-in required
 
 Registered `enabled = false` (#100): a scope expansion (issue #79) whose
-live per-listing crawl is an operator decision, not a default. See D-070.
+live per-listing crawl is an operator decision, not a default. See D-072.
 """
 
 from __future__ import annotations

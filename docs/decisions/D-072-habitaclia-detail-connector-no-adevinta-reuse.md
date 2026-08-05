@@ -1,16 +1,16 @@
 ---
-id: D-070
+id: D-072
 title: habitaclia is a bespoke detail-fetch connector — no Adevinta/Fotocasa reuse
 date: 2026-08-06
 ---
 
-# D-070: habitaclia is a bespoke detail-fetch connector — no Adevinta/Fotocasa reuse
+# D-072: habitaclia is a bespoke detail-fetch connector — no Adevinta/Fotocasa reuse
 
 *Decided: 2026-08-06*
 
-> Note: decision IDs D-060–D-068 were being claimed by parallel connector-batch
-> agents when this was written; this file took the next free id it could see
-> (D-070). Expect a renumber at review if it collides.
+> Note: originally drafted as D-070, but D-068/D-069/D-070 were concurrently
+> claimed by parallel connector-batch PRs (#344/#343/#345); renumbered to D-072
+> at review to resolve the collision (pisos.com became D-071).
 
 **Context**: Issue #79 asked to evaluate habitaclia.com (Spain's #4 portal)
 as a connector, and specifically flagged that habitaclia is **Adevinta-owned
@@ -36,7 +36,7 @@ every field via `jsonLdPath` (schema.org JSON-LD). A fresh feasibility spike
 
 **Decision**: Ship `etl/connectors/habitaclia.py` (+ `habitaclia_mapping.py`)
 as a **discover + fetch_detail** connector (NOT search-payload-only, unlike
-pisos.com/D-069, because coordinates require the detail page): `discover()`
+pisos.com/D-071, because coordinates require the detail page): `discover()`
 fetches one `viviendas-<slug>.htm` search page, extracts each
 `/comprar-...-i<id>.htm` link, stashes the full detail URL keyed by id (the
 id alone can't rebuild the slug-bearing URL — the "stash at discovery, read
@@ -56,7 +56,7 @@ signal). Born disabled (#100).
   imply a shared stack.
 - *Follow `es_habitaclia.json`'s `jsonLdPath` extraction*: rejected — the
   live page has no JSON-LD; the reference mapping is stale.
-- *Search-payload-only (the pisos.com/D-069 shape)*: rejected — the search
+- *Search-payload-only (the pisos.com/D-071 shape)*: rejected — the search
   page has no coordinates, and this source's value is its geolocated
   listings, so a detail fetch is required.
 
@@ -69,5 +69,5 @@ re-testing the same false hypotheses.
 **See**: `etl/connectors/habitaclia.py`, `etl/connectors/habitaclia_mapping.py`,
 `etl/tests/test_connector_habitaclia.py`,
 `etl/tests/fixtures/habitaclia_sample_{search,detail}.html`, issue #79,
-D-069 (pisos.com, the same batch), docs/skills/connectors.md,
+D-071 (pisos.com, the same batch), docs/skills/connectors.md,
 docs/architecture/connectors.md.
