@@ -426,6 +426,118 @@
   components: [dashboard]
 
 # -----------------------------------------------------------------------------
+# Notificaciones / Digest diario (issue #35, Phase 5.5, D-054)
+# -----------------------------------------------------------------------------
+# Un pase programado en el propio dashboard (arrancado desde instrumentation.ts,
+# mismo patrón que la evaluación IA / D-052) arma cada día un digest "qué hay de
+# nuevo" por perfil: nuevos candidatos desde el último digest (ordenados por
+# señal de oportunidad — descuento bajo mercado, red flags de distress),
+# bajadas de precio y cambios de estado (vendido/retirado) sobre sus inmuebles.
+# Se entrega por email (SMTP). Sin SMTP configurado el envío es un no-op
+# registrado en el log: el scheduler corre igual y el watermark avanza, así que
+# un despliegue sin correo no se rompe. Un digest vacío no envía email (evita
+# fatiga de notificaciones) pero sí registra la ejecución.
+- key: notifications.digest_auto_enabled
+  env: NOTIFICATIONS_DIGEST_AUTO_ENABLED
+  type: bool
+  sensitive: false
+  default: true
+  section: "Notificaciones"
+  description: "Interruptor general del pase automático del digest diario (#35). Con false, el scheduler no arranca y no se arma ni envía ningún digest."
+  requires_restart: [dashboard]
+  components: [dashboard]
+
+- key: notifications.digest_interval_seconds
+  env: NOTIFICATIONS_DIGEST_INTERVAL_SECONDS
+  type: int
+  sensitive: false
+  default: 3600
+  section: "Notificaciones"
+  description: "Cadencia (segundos) del tick del scheduler del digest. Por defecto 1h: cada tick comprueba qué perfiles están 'vencidos' según su cadencia (diaria/semanal) y su último envío. La idempotencia (un digest por día por perfil) la garantiza el watermark digest_run, no este intervalo. Debe ser positivo."
+  requires_restart: [dashboard]
+  components: [dashboard]
+
+- key: notifications.digest_send_hour
+  env: NOTIFICATIONS_DIGEST_SEND_HOUR
+  type: int
+  sensitive: false
+  default: 7
+  section: "Notificaciones"
+  description: "Hora local (0-23) a partir de la cual se envía el digest de un perfil que toca ese día. Evita que un digest caiga de madrugada. Por defecto 7 (07:00). Fuera de rango cae al valor por defecto."
+  requires_restart: [dashboard]
+  components: [dashboard]
+
+- key: notifications.digest_to
+  env: NOTIFICATIONS_DIGEST_TO
+  type: string
+  sensitive: false
+  default: null
+  section: "Notificaciones"
+  description: "Destinatario global por defecto del digest. Cada perfil puede tener su propio digest_email; si no lo tiene, se usa este. Sin valor y sin digest_email por perfil, no hay destinatario y el envío es un no-op registrado."
+  requires_restart: []
+  components: [dashboard]
+
+- key: notifications.smtp_host
+  env: NOTIFICATIONS_SMTP_HOST
+  type: string
+  sensitive: false
+  default: null
+  section: "Notificaciones"
+  description: "Host del servidor SMTP para enviar los digests. Sin valor, el envío es un no-op registrado (el scheduler sigue corriendo). Junto con smtp_from define si el SMTP está 'configurado'."
+  requires_restart: []
+  components: [dashboard]
+
+- key: notifications.smtp_port
+  env: NOTIFICATIONS_SMTP_PORT
+  type: int
+  sensitive: false
+  default: 587
+  section: "Notificaciones"
+  description: "Puerto SMTP. Por defecto 587 (STARTTLS). Usa 465 con smtp_secure=true para TLS implícito."
+  requires_restart: []
+  components: [dashboard]
+
+- key: notifications.smtp_user
+  env: NOTIFICATIONS_SMTP_USER
+  type: string
+  sensitive: false
+  default: null
+  section: "Notificaciones"
+  description: "Usuario SMTP. Vacío = relay sin autenticación."
+  requires_restart: []
+  components: [dashboard]
+
+- key: notifications.smtp_password
+  env: NOTIFICATIONS_SMTP_PASSWORD
+  type: string
+  sensitive: true
+  default: null
+  section: "Notificaciones"
+  description: "Contraseña SMTP. Nunca se versiona; se inyecta por variable de entorno o config.yaml local."
+  requires_restart: []
+  components: [dashboard]
+
+- key: notifications.smtp_from
+  env: NOTIFICATIONS_SMTP_FROM
+  type: string
+  sensitive: false
+  default: null
+  section: "Notificaciones"
+  description: "Dirección remitente del digest (ej: 'inmo-tool <digest@example.com>'). Junto con smtp_host define si el SMTP está 'configurado'."
+  requires_restart: []
+  components: [dashboard]
+
+- key: notifications.smtp_secure
+  env: NOTIFICATIONS_SMTP_SECURE
+  type: bool
+  sensitive: false
+  default: false
+  section: "Notificaciones"
+  description: "TLS implícito (SMTPS, normalmente puerto 465). Déjalo en false para STARTTLS en el 587."
+  requires_restart: []
+  components: [dashboard]
+
+# -----------------------------------------------------------------------------
 # Agentic tool-calling
 # -----------------------------------------------------------------------------
 - key: dashboard.agentic_tools_enabled

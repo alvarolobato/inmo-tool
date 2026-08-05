@@ -77,6 +77,18 @@ export async function register() {
       } catch (err) {
         console.warn("[ai-assessment] Could not start the assessment scheduler:", err);
       }
+
+      // Start the daily "what's new" digest scheduler (#35, D-054). Same
+      // startup seam, DB requirement (SKIP_DB_MIGRATE gate), idempotency, and
+      // non-fatal handling as the assessment scheduler above. Its own
+      // notifications.digest_auto_enabled kill switch and the SMTP-not-configured
+      // no-op mean it is harmless on a deployment without mail set up.
+      try {
+        const { startDigestScheduler } = await import("./lib/notifications/scheduler");
+        startDigestScheduler();
+      } catch (err) {
+        console.warn("[digest] Could not start the digest scheduler:", err);
+      }
     }
   }
 }
