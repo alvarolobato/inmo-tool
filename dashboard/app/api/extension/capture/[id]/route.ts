@@ -19,7 +19,7 @@ import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/e
 import { adminApiKeyValid, adminUnauthorized } from "@/lib/admin-api-auth";
 
 interface CaptureRow {
-  status: "pending" | "done" | "failed";
+  status: "pending" | "done" | "failed" | "listing";
   error_msg: string | null;
   property_id: number | string | null;
   fields_extracted: number | null;
@@ -67,6 +67,18 @@ export async function GET(
 
     if (row.status === "pending") {
       return NextResponse.json({ success: true, status: "pending" });
+    }
+    // Issue #292: the captured page was a SEARCH/results listing page, not a
+    // detail page. A clean, informational outcome (its detail links were
+    // harvested into the batch worklist) — NOT a failure. fields_extracted
+    // carries the harvested detail-link count; title carries the summary.
+    if (row.status === "listing") {
+      return NextResponse.json({
+        success: true,
+        status: "listing",
+        title: row.title,
+        detail_links: row.fields_extracted,
+      });
     }
     if (row.status === "failed") {
       return NextResponse.json({

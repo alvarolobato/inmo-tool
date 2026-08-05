@@ -40,6 +40,7 @@ const SAMPLE: DataHealthResponse = {
       oldest_pending_age_seconds: 42,
       done_7d: 9,
       failed_7d: 1,
+      listing_7d: 3,
       avg_fields_ratio_7d: 0.8,
       avg_photo_count_7d: 5,
     },
@@ -61,6 +62,10 @@ describe("GET /api/etl/data-health", () => {
     expect(body.connectors).toHaveLength(1);
     expect(body.connectors[0].notice).toContain("presupuesto");
     expect(body.portals[0].portal).toBe("idealista");
+    // Issue #292: search/listing-page captures are surfaced as a neutral count,
+    // never folded into failed_7d.
+    expect(body.portals[0].listing_7d).toBe(3);
+    expect(body.portals[0].failed_7d).toBe(1);
     expect(body.sources[0].listing_count).toBe(100);
     expect(body.stale_profiles).toEqual([]);
   });

@@ -37,8 +37,13 @@ function buildPool(): Pool {
 // Distinctive markers so cleanup is precise and can't touch real data.
 const HEALTHY_CONN = "e2e_health_ok";
 const FAILED_CONN = "e2e_health_failed";
+// Issue #292: a legacy/disabled 'skipped' run must render NEUTRAL (never
+// attention), and a captured search/listing page must render as a clean,
+// informational outcome (never a failure).
+const SKIPPED_CONN = "e2e_health_skipped";
 const STUCK_URL = "https://www.idealista.com/inmueble/E2E-DH-STUCK";
 const DONE_URL = "https://www.idealista.com/inmueble/E2E-DH-DONE";
+const LISTING_URL = "https://www.idealista.com/venta-viviendas/E2E-DH-LISTING/";
 const E2E_SOURCE = "e2e_health_src";
 const E2E_PROFILE = "E2E Salud Perfil";
 
@@ -97,6 +102,16 @@ test.beforeAll(async () => {
      VALUES ($1,$2,'circuit_open', NOW(), NOW(), 5, 0, 7, 'discover failed: 403 soft-block')`,
     [runId, FAILED_CONN],
   );
+  // Disabled/skipped connector (issue #292): a 'skipped' run — the kind a
+  // pre-#292 DB still carries for a disabled connector — must render as a
+  // neutral 'Omitido' badge, NOT amber/red, and NOT as an error surface.
+  await pool.query(
+    `INSERT INTO connector_run_results
+       (run_id, connector_name, status, started_at, finished_at,
+        discovered_count, fetched_count, error_count, error_msg)
+     VALUES ($1,$2,'skipped', NOW(), NOW(), 0, 0, 0, 'disabled via connector_config')`,
+    [runId, SKIPPED_CONN],
+  );
 
   // A property + listing so the capture join to photo_urls resolves. The
   // timestamps are deliberately staggered to prove the staleness predicate
@@ -132,6 +147,17 @@ test.beforeAll(async () => {
        (url, status, listing_id, fields_extracted, fields_available, created_at, processed_at)
      VALUES ($1,'done',$2, 8, 10, NOW(), NOW())`,
     [DONE_URL, listingId],
+  );
+  // A captured SEARCH/listing page (issue #292): status='listing', clean —
+  // its detail links were harvested into the batch worklist. It must be
+  // surfaced as a neutral count and MUST NOT count as a failure (so idealista
+  // stays at 100% success: 1 done / 0 failed).
+  await pool.query(
+    `INSERT INTO extension_capture
+       (url, status, connector_name, fields_extracted, title, created_at, processed_at)
+     VALUES ($1,'listing','idealista', 12,
+             'Página de resultados — 12 enlaces de detalle', NOW(), NOW())`,
+    [LISTING_URL],
   );
 
   // A profile materialized 1 day ago — AFTER the listing's first/last_seen_at
@@ -261,6 +287,33 @@ test("does not flag stale profiles while a connector sweep is running", async ({
   } finally {
     await pool.query("DELETE FROM connector_runs WHERE id = $1", [runningId]);
   }
+});
+
+test("renders a disabled/skipped connector as neutral, never as an error (#292)", async ({
+  page,
+}) => {
+  await page.goto("/etl/salud");
+  await expect(page.getByTestId(`connector-health-${SKIPPED_CONN}`)).toBeVisible();
+  // Neutral 'Omitido' badge — NOT the attention (circuit_open/failed) styling.
+  await expect(page.getByTestId(`connector-status-${SKIPPED_CONN}`)).toHaveText(
+    "Omitido",
+  );
+  // A disabled connector never renders an error line, and its "disabled via
+  // connector_config" reason is not surfaced as an error.
+  await expect(page.getByTestId(`connector-error-${SKIPPED_CONN}`)).toHaveCount(0);
+});
+
+test("renders a captured listing/search page as a clean outcome, never a failure (#292)", async ({
+  page,
+}) => {
+  await page.goto("/etl/salud");
+  await expect(page.getByTestId("portal-health-idealista")).toBeVisible();
+  // The listing capture is surfaced as a neutral informational count …
+  await expect(page.getByTestId("portal-listing-idealista")).toContainText("1");
+  // … and it did NOT count as a failure: the portal stays at 100% success
+  // (1 done ✓ / 0 failed ✗), proving a captured results page is not an error.
+  await expect(page.getByTestId("portal-success-idealista")).toContainText("100%");
+  await expect(page.getByTestId("portal-success-idealista")).toContainText("0✗");
 });
 
 test("loads with no error surface (EC-4)", async ({ page }) => {

@@ -671,3 +671,123 @@ class TestCaptureTriggersMaterialize:
             )
         finally:
             _cleanup(pg_conn)
+
+
+class TestListingPageCaptureReclassification:
+    """Issue #292: capturing a SEARCH/results listing page is a clean outcome,
+    NOT a failure. The poller recognises the listing-page URL, harvests its
+    detail links into the batch-capture worklist (added_via='derived'), and
+    marks the extension_capture row 'listing' — reserving 'failed' for
+    genuinely broken DETAIL captures."""
+
+    _LISTING_URL = "https://www.idealista.com/venta-viviendas/madrid-madrid/"
+    _LISTING_HTML = (
+        "<html><body>"
+        "<a href='/inmueble/11111/'>Piso 1</a>"
+        "<a href='/inmueble/22222/'>Piso 2</a>"
+        # Duplicate of #11111 (title + photo anchor) — must de-dupe to one row.
+        "<a href='https://www.idealista.com/inmueble/11111/'>Piso 1 foto</a>"
+        # A non-detail link on the page — must be ignored.
+        "<a href='/venta-viviendas/madrid-madrid/pagina-2'>Siguiente</a>"
+        "</body></html>"
+    )
+
+    def _cleanup_listing(self, conn) -> None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM extension_capture WHERE url = %s", (self._LISTING_URL,)
+            )
+            cur.execute(
+                "DELETE FROM capture_worklist WHERE source_portal = 'idealista' "
+                "AND added_via = 'derived'"
+            )
+        conn.commit()
+
+    def test_listing_page_marked_listing_and_seeds_worklist(self, pg_conn):
+        _apply_schema(pg_conn)
+        self._cleanup_listing(pg_conn)
+        try:
+            capture_id = _insert_pending(pg_conn, self._LISTING_URL, self._LISTING_HTML)
+            processed = capture.process_pending_captures(pg_conn)
+            assert processed == 1
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, connector_name, error_msg, fields_extracted, "
+                    "html, title FROM extension_capture WHERE id = %s",
+                    (capture_id,),
+                )
+                status, connector_name, error_msg, fields_extracted, html, title = (
+                    cur.fetchone()
+                )
+            # A clean, informational outcome — never 'failed'.
+            assert status == "listing"
+            assert connector_name == "idealista"
+            assert error_msg is None
+            # Two unique detail links harvested (the duplicate + the non-detail
+            # link are dropped).
+            assert fields_extracted == 2
+            assert "2" in (title or "")
+            # HTML is dropped like a 'done' row — we've harvested what we need.
+            assert html is None
+
+            # The two detail links were seeded into the batch worklist as
+            # 'derived' pending rows — routing toward the #262/#290 path.
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT url, status, added_via FROM capture_worklist "
+                    "WHERE source_portal = 'idealista' AND added_via = 'derived' "
+                    "ORDER BY url"
+                )
+                rows = cur.fetchall()
+            assert len(rows) == 2
+            assert all(r[1] == "pending" and r[2] == "derived" for r in rows)
+            assert any("11111" in r[0] for r in rows)
+            assert any("22222" in r[0] for r in rows)
+        finally:
+            self._cleanup_listing(pg_conn)
+
+    def test_listing_page_with_no_detail_links_is_still_clean(self, pg_conn):
+        """A listing page the harvester finds no detail links on is STILL a
+        clean 'listing' outcome (N=0), not a failure — the classification is by
+        URL shape, independent of what the HTML happened to contain."""
+        _apply_schema(pg_conn)
+        self._cleanup_listing(pg_conn)
+        try:
+            capture_id = _insert_pending(
+                pg_conn, self._LISTING_URL, "<html><body>sin enlaces</body></html>"
+            )
+            capture.process_pending_captures(pg_conn)
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, fields_extracted, error_msg "
+                    "FROM extension_capture WHERE id = %s",
+                    (capture_id,),
+                )
+                status, fields_extracted, error_msg = cur.fetchone()
+            assert status == "listing"
+            assert fields_extracted == 0
+            assert error_msg is None
+        finally:
+            self._cleanup_listing(pg_conn)
+
+    def test_listing_capture_does_not_notify_materialize(self, pg_conn, monkeypatch):
+        """A listing-page capture ingests no listing itself (its links are
+        merely queued), so it must NOT fire a materialize-all — same rule as an
+        all-failures batch."""
+        from etl import orchestrator
+
+        _apply_schema(pg_conn)
+        self._cleanup_listing(pg_conn)
+        calls: list[str] = []
+        monkeypatch.setattr(
+            orchestrator,
+            "notify_materialize_all",
+            lambda trigger="scheduler": calls.append(trigger) or True,
+        )
+        try:
+            _insert_pending(pg_conn, self._LISTING_URL, self._LISTING_HTML)
+            capture.process_pending_captures(pg_conn)
+            assert calls == []
+        finally:
+            self._cleanup_listing(pg_conn)

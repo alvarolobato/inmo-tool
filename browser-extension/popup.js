@@ -179,6 +179,16 @@ async function pollForResult(captureId) {
       return;
     }
 
+    // Issue #292: the backend recognised this as a SEARCH/results listing
+    // page, not a detail page — a clean outcome, not a failure. Its detail
+    // links were harvested into the batch-capture worklist. Show it in the
+    // (neutral 📋) batch state as an informational message, with no live run
+    // to drive.
+    if (status.status === 'listing') {
+      showListingResult(status.detail_links ?? 0);
+      return;
+    }
+
     // Still 'pending' — wait and check again.
     await sleep(POLL_INTERVAL_MS);
   }
@@ -187,6 +197,24 @@ async function pollForResult(captureId) {
     'Todavía procesando — puede tardar unos segundos más de lo normal. ' +
       'Revisa el dashboard de Inmo-Tool en breve.',
   );
+}
+
+// Issue #292: render a captured listing/search page as a clean, neutral
+// outcome (not the ⚠️ error state). Reuses the 📋 batch panel but hides the
+// live-run progress bar and its action buttons — there is nothing to drive,
+// the detail links are already queued in the batch worklist.
+function showListingResult(detailLinks) {
+  showState('batch');
+  $('#batch-title').textContent = 'Página de resultados';
+  $('#batch-sub').textContent =
+    detailLinks > 0
+      ? `${detailLinks} anuncio(s) añadidos a la lista de captura por lotes.`
+      : 'No se encontraron enlaces de detalle en esta página.';
+  $('#batch-progress').classList.add('hidden');
+  const actions = document.querySelector('.batch-actions');
+  if (actions) actions.classList.add('hidden');
+  const hint = document.querySelector('.batch-hint');
+  if (hint) hint.classList.add('hidden');
 }
 
 // ─── Batch capture (listing page) ───────────────────────────────
