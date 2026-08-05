@@ -243,6 +243,183 @@
     return out;
   }
 
+  // ── Batch auto-start signal (issue #297) ──────────────────────────────────
+  //
+  // The dashboard's "Abrir búsqueda" opens a portal search URL carrying a
+  // signal so the extension AUTO-STARTS the batch on that tab — no popup, no
+  // banner click. The signal is either the fragment `#inmo-capture` (preferred:
+  // invisible to the portal, never sent to its server) or a query key
+  // `?inmo-capture` (fallback when the URL already has a fragment). This must
+  // agree byte-for-byte with dashboard/lib/extension-capture.ts `withCaptureSignal`.
+  var CAPTURE_SIGNAL = "inmo-capture";
+
+  /**
+   * True iff `url` carries the batch auto-start signal (see CAPTURE_SIGNAL).
+   * Pure — no DOM/chrome. Returns false for an unparseable URL.
+   */
+  function captureSignalPresent(url) {
+    var parsed;
+    try {
+      parsed = new URL(String(url).trim());
+    } catch (e) {
+      return false;
+    }
+    if (parsed.hash.replace(/^#/, "") === CAPTURE_SIGNAL) return true;
+    try {
+      if (parsed.searchParams.has(CAPTURE_SIGNAL)) return true;
+    } catch (e) {
+      /* searchParams unavailable — ignore */
+    }
+    return false;
+  }
+
+  /**
+   * Return `url` with the auto-start signal removed (both the `#inmo-capture`
+   * fragment and the `?inmo-capture` query-key forms). Used when handing the
+   * search page's OWN url to the capture-to-infer learner (issue #293/#303) so
+   * the learned grammar never picks up our synthetic signal. Pure; returns the
+   * input unchanged on a parse failure.
+   */
+  function stripCaptureSignal(url) {
+    var parsed;
+    try {
+      parsed = new URL(String(url).trim());
+    } catch (e) {
+      return url;
+    }
+    if (parsed.hash.replace(/^#/, "") === CAPTURE_SIGNAL) parsed.hash = "";
+    try {
+      if (parsed.searchParams.has(CAPTURE_SIGNAL)) {
+        parsed.searchParams.delete(CAPTURE_SIGNAL);
+      }
+    } catch (e) {
+      /* searchParams unavailable — ignore */
+    }
+    return parsed.toString();
+  }
+
+  /**
+   * Decide what a content script should do on the page at `url`, given the
+   * detail URLs it harvested. Pure — the DOM/chrome wiring in content-script.js
+   * calls this and acts on the verdict, so the decision itself is unit-testable.
+   *
+   * Returns one of:
+   *   { action: "none" }                         — not a listing, or nothing to capture
+   *   { action: "autostart", portal, count }     — listing + signal + ≥1 detail URL
+   *   { action: "banner",    portal, count }     — listing + ≥1 detail URL, no signal
+   *
+   * `count` is detailUrls.length. Auto-start requires the app-supplied signal so
+   * capture stays human-initiated in spirit (the owner clicked "Abrir búsqueda");
+   * without it the owner gets the manual banner button instead.
+   */
+  function listingCaptureAction(url, detailUrls) {
+    var portal = listingPortalForUrl(url);
+    var count =
+      detailUrls && typeof detailUrls.length === "number" ? detailUrls.length : 0;
+    if (!portal || count === 0) return { action: "none" };
+    return {
+      action: captureSignalPresent(url) ? "autostart" : "banner",
+      portal: portal,
+      count: count,
+    };
+  }
+
+  /**
+   * Build (but do NOT append) the in-page capture banner element (issue #297).
+   * `doc` is injected (the content script passes `document`) so it's testable
+   * against a jsdom document with no chrome APIs. The banner is a small, fixed,
+   * Inmo-Tool-branded, dismissible bar whose primary button invokes `onCapture`
+   * and whose "×" invokes `onDismiss`. Styled so it can't be confused with the
+   * portal's own UI and never blocks page content. Returns the root element, or
+   * null if it can't be built.
+   */
+  function buildCaptureBanner(doc, opts) {
+    if (!doc || typeof doc.createElement !== "function") return null;
+    var o = opts || {};
+    var count = typeof o.count === "number" ? o.count : 0;
+
+    var root = doc.createElement("div");
+    root.id = "inmo-capture-banner";
+    root.setAttribute("data-inmo-banner", "1");
+    Object.assign(root.style, {
+      position: "fixed",
+      top: "14px",
+      left: "50%",
+      transform: "translateX(-50%)",
+      zIndex: "2147483647",
+      display: "flex",
+      alignItems: "center",
+      gap: "14px",
+      maxWidth: "92vw",
+      background: "#0f172a",
+      color: "#fff",
+      font: "500 13px/1.4 -apple-system, Segoe UI, Roboto, sans-serif",
+      padding: "10px 14px",
+      borderRadius: "12px",
+      boxShadow: "0 6px 24px rgba(0,0,0,0.35)",
+      border: "1px solid rgba(255,255,255,0.12)",
+    });
+
+    var label = doc.createElement("span");
+    label.setAttribute("data-inmo-banner-label", "1");
+    label.textContent =
+      "Inmo-Tool: capturar las " + count + " propiedades de esta búsqueda";
+    label.style.whiteSpace = "nowrap";
+    label.style.overflow = "hidden";
+    label.style.textOverflow = "ellipsis";
+
+    var capture = doc.createElement("button");
+    capture.id = "inmo-capture-banner-start";
+    capture.setAttribute("data-inmo-banner-start", "1");
+    capture.type = "button";
+    capture.textContent = "Capturar todas";
+    Object.assign(capture.style, {
+      flexShrink: "0",
+      padding: "6px 14px",
+      font: "600 13px/1 -apple-system, Segoe UI, Roboto, sans-serif",
+      color: "#0f172a",
+      background: "#fff",
+      border: "none",
+      borderRadius: "8px",
+      cursor: "pointer",
+    });
+    if (typeof o.onCapture === "function") {
+      capture.addEventListener("click", function () {
+        o.onCapture();
+      });
+    }
+
+    var dismiss = doc.createElement("button");
+    dismiss.id = "inmo-capture-banner-dismiss";
+    dismiss.setAttribute("data-inmo-banner-dismiss", "1");
+    dismiss.type = "button";
+    dismiss.setAttribute("aria-label", "Descartar");
+    dismiss.textContent = "×"; // ×
+    Object.assign(dismiss.style, {
+      flexShrink: "0",
+      width: "24px",
+      height: "24px",
+      lineHeight: "22px",
+      textAlign: "center",
+      font: "600 16px/1 -apple-system, Segoe UI, Roboto, sans-serif",
+      color: "#fff",
+      background: "transparent",
+      border: "none",
+      borderRadius: "6px",
+      cursor: "pointer",
+    });
+    if (typeof o.onDismiss === "function") {
+      dismiss.addEventListener("click", function () {
+        o.onDismiss();
+      });
+    }
+
+    root.appendChild(label);
+    root.appendChild(capture);
+    root.appendChild(dismiss);
+    return root;
+  }
+
   function readySelectorsFor(portal) {
     for (var i = 0; i < PORTALS.length; i++) {
       if (PORTALS[i].portal === portal) return PORTALS[i].readySelectors;
@@ -332,6 +509,11 @@
     extractDetailUrls: extractDetailUrls,
     isRenderReady: isRenderReady,
     createCaptureGuard: createCaptureGuard,
+    CAPTURE_SIGNAL: CAPTURE_SIGNAL,
+    captureSignalPresent: captureSignalPresent,
+    stripCaptureSignal: stripCaptureSignal,
+    listingCaptureAction: listingCaptureAction,
+    buildCaptureBanner: buildCaptureBanner,
   };
 
   // Publish for content-script.js (shared isolated world).
