@@ -1,10 +1,10 @@
 ---
-id: D-070
+id: D-075
 title: Hipoges not respectfully crawlable — enumeration channels walled, capture-only
 date: 2026-08-06
 ---
 
-# D-070: Hipoges not respectfully crawlable — enumeration channels walled
+# D-075: Hipoges not respectfully crawlable — enumeration channels walled
 
 *Decided: 2026-08-06*
 

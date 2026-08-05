@@ -1,10 +1,10 @@
 ---
-id: D-071
+id: D-076
 title: Divarian (ex-Anida) not buildable — host unreachable, REO flows via Haya
 date: 2026-08-06
 ---
 
-# D-071: Divarian (ex-Anida) not buildable — host unreachable
+# D-076: Divarian (ex-Anida) not buildable — host unreachable
 
 *Decided: 2026-08-06*
 

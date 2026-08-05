@@ -1,10 +1,10 @@
 ---
-id: D-069
+id: D-074
 title: Kutxabank Inmobiliaria not buildable — served by Servihabitat
 date: 2026-08-06
 ---
 
-# D-069: Kutxabank Inmobiliaria not buildable — served by Servihabitat
+# D-074: Kutxabank Inmobiliaria not buildable — served by Servihabitat
 
 *Decided: 2026-08-06*
 

@@ -174,7 +174,7 @@ Solvia also publishes **no coordinates at all** (verified across five live
 listings), so `address_coords` dedup cannot fire for it — which is exactly
 why the cadastral reference is load-bearing here rather than a bonus.
 
-### Escogecasa (Abanca REO): the search payload carries what the detail page can't (issue #135, D-068)
+### Escogecasa (Abanca REO): the search payload carries what the detail page can't (issue #135, D-073)
 
 Escogecasa (`escogecasa.es` — the `.com` issue #135 named is a **dead
 domain**, authoritative DNS SERVFAIL from 8.8.8.8 and 1.1.1.1 both; always
@@ -209,9 +209,9 @@ distinct stop reason worth recognising on the next portal:
 
 | Target | Reason | Verdict |
 |---|---|---|
-| **Kutxabank** (#137, D-069) | `kutxabankinmobiliaria.com`→`.es` redirects to a **Servihabitat-hosted microsite**; Servihabitat already ingests Kutxabank stock. | Brand-consolidated onto an ingested servicer (like Ibercaja D-065 / Haya D-021) — no connector. |
-| **Hipoges** (#207, D-070) | Advertised asset sitemaps AND GET asset API both return app-level **403 "No tiene permisos suficientes"** to an honest client (confirmed from two independent egress IPs); only channel is an internal `POST /api/assets/map` DTO the site walls. | Not respectfully crawlable — the Cimenta2 stop condition (D-033). Capture-only (#75). |
-| **Divarian** (#134, D-071) | Host resolves but 443/80 **time out** here and **ECONNREFUSED** from Anthropic egress — offline/unreachable from two networks (a RETRY that confirmed the prior finding). Ex-Anida book flows via Haya→Solvia. | Unreachable — no portal to spike. Revisit if it returns. |
+| **Kutxabank** (#137, D-074) | `kutxabankinmobiliaria.com`→`.es` redirects to a **Servihabitat-hosted microsite**; Servihabitat already ingests Kutxabank stock. | Brand-consolidated onto an ingested servicer (like Ibercaja D-065 / Haya D-021) — no connector. |
+| **Hipoges** (#207, D-075) | Advertised asset sitemaps AND GET asset API both return app-level **403 "No tiene permisos suficientes"** to an honest client (confirmed from two independent egress IPs); only channel is an internal `POST /api/assets/map` DTO the site walls. | Not respectfully crawlable — the Cimenta2 stop condition (D-033). Capture-only (#75). |
+| **Divarian** (#134, D-076) | Host resolves but 443/80 **time out** here and **ECONNREFUSED** from Anthropic egress — offline/unreachable from two networks (a RETRY that confirmed the prior finding). Ex-Anida book flows via Haya→Solvia. | Unreachable — no portal to spike. Revisit if it returns. |
 
 `ConnectorScope.geography` (the original free-text field) still exists as an explicit escape hatch for tests/manual construction that want to bypass point-based resolution entirely — connector-level unit tests (`test_connector_fotocasa.py`/`test_connector_milanuncios.py`) use it directly rather than going through a seeded search profile, since they're testing `discover()` in isolation from the profile-derivation machinery.
 

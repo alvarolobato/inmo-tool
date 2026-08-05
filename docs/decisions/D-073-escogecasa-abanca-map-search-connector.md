@@ -1,10 +1,10 @@
 ---
-id: D-068
+id: D-073
 title: Escogecasa (Abanca REO) map-search connector on escogecasa.es
 date: 2026-08-06
 ---
 
-# D-068: Escogecasa (Abanca REO) map-search connector on escogecasa.es
+# D-073: Escogecasa (Abanca REO) map-search connector on escogecasa.es
 
 *Decided: 2026-08-06*
 
@@ -79,10 +79,10 @@ identifying User-Agent, requests spaced apart, none assumed):
 **Rationale**: Genuinely additive inventory — Abanca's own ex-Novagalicia
 stock, concentrated in Galicia and the northern coast, geographically
 complementary to the Madrid/Levante-weighted fleet, and NOT consolidated onto
-any existing connector's source (unlike Kutxabank→Servihabitat, D-069). Rich
+any existing connector's source (unlike Kutxabank→Servihabitat, D-074). Rich
 per-listing data (coords + price at discovery, postal code + year built at
 detail) on a permissive, server-rendered, un-walled site.
 
 **See**: `etl/connectors/escogecasa.py`, `etl/connectors/escogecasa_mapping.py`,
 `etl/tests/test_connector_escogecasa.py`, issue #135, D-061 (Diglo), D-064
-(Unicaja), D-069 (Kutxabank overlap).
+(Unicaja), D-074 (Kutxabank overlap).
