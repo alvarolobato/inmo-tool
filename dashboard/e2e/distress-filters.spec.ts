@@ -1,6 +1,6 @@
 /**
  * E2E: candidate list distress / condition / below-market hard filters
- * (#310, D-058).
+ * (#310, D-059).
  *
  * D-041 gate for a user-facing surface change: drives a real Next.js server
  * against a real (seeded, synthetic) Postgres and proves the #310 filters

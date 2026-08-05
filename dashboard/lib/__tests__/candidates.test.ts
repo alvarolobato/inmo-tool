@@ -25,7 +25,7 @@ import {
 } from "../candidates";
 import { resetPool } from "@/lib/db-write";
 
-// #310 (D-058) appended five params after WARN_CAVEAT_CODES ($6): occupancy
+// #310 (D-059) appended five params after WARN_CAVEAT_CODES ($6): occupancy
 // ($7), the occupied-statuses list ($8), condition ($9), renovation ($10), and
 // min-below-market ($11). This is the "all filters off" tail every existing
 // listCandidates assertion carries now.

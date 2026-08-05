@@ -30,7 +30,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
   const [source, setSource] = useState<string | null>(null);
   const [availableSources, setAvailableSources] = useState<string[]>([]);
 
-  // #310 hard filters (D-058). All optional, all combine with each other and
+  // #310 hard filters (D-059). All optional, all combine with each other and
   // with the source filter/pagination. `occupancy`/`conditionSel` gate on AI
   // assessment data (empty until #316), so they legitimately narrow the feed to
   // nothing until that data flows — the empty state below says so explicitly

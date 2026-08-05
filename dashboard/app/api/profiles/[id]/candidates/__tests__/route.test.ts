@@ -119,7 +119,7 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
   });
 });
 
-describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-058)", () => {
+describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () => {
   it("rejects an unknown occupancy value before touching the DB (400)", async () => {
     const res = await GET(
       makeRequest("http://localhost/api/profiles/3/candidates?occupancy=maybe"),

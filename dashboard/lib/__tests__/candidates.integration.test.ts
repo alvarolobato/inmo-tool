@@ -969,7 +969,7 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
     });
   });
 
-  describe("hard filters — occupancy / condition / below-market (#310, D-058)", () => {
+  describe("hard filters — occupancy / condition / below-market (#310, D-059)", () => {
     // A matched, priced candidate with optional occupancy + condition
     // assessments. Reuses the SAME signals the ranking blend reads (the
     // per-axis columns the CTE derives), so filter and rank agree.

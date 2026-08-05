@@ -257,7 +257,7 @@ export const WARN_CAVEAT_CODES: string[] = [
   "derecho_superficie",
 ];
 
-// ── Hard filters (#310 / D-058) ──────────────────────────────────────────────
+// ── Hard filters (#310 / D-059) ──────────────────────────────────────────────
 //
 // The candidate feed can hard-filter (not just rank) on the same distress /
 // below-market signals #309 already computes — the "show me ONLY occupied /
@@ -342,7 +342,7 @@ function rankedCandidatesCte(warnParam: string): string {
          CASE WHEN p.m2_built IS NOT NULL AND p.m2_built > 0 AND mp.min_price IS NOT NULL
               THEN mp.min_price / p.m2_built ELSE NULL END AS ppm2,
          dist.distress_level,
-         -- Per-axis raw signals for the #310 hard filters (D-058). Carried
+         -- Per-axis raw signals for the #310 hard filters (D-059). Carried
          -- through ranked.* so the outer query can WHERE on them; NULL =
          -- that axis unassessed (excluded by any filter on it, never matched).
          dist.occupancy_status,
@@ -369,7 +369,7 @@ function rankedCandidatesCte(warnParam: string): string {
        -- #310 hard filters gate on (occupancy status, condition category,
        -- renovation severity). Deriving them here — from the identical
        -- DISTINCT-ON-latest-per-axis rows that feed distress_level — is what
-       -- keeps the FILTER and the RANK in agreement by construction (D-058): a
+       -- keeps the FILTER and the RANK in agreement by construction (D-059): a
        -- candidate the "occupied"/"a_reformar" filter keeps is exactly one the
        -- distress boost lifted. max(...) FILTER picks the single latest row's
        -- value per axis (la holds at most one row per assessment_type, so the
@@ -741,7 +741,7 @@ export async function listCandidates(
   const limit = Math.min(Math.max(Math.trunc(opts.limit ?? DEFAULT_LIMIT), 1), MAX_LIMIT);
   const rawCursor = opts.cursor ?? null;
 
-  // #310 hard filters (D-058). Each normalises to null ("no filter") when
+  // #310 hard filters (D-059). Each normalises to null ("no filter") when
   // unset, so an untouched call behaves exactly as before. Validation of the
   // enum membership happens at the API boundary; here we only guard the
   // below-market threshold against a non-finite/negative value (a silent
@@ -947,7 +947,7 @@ export async function listCandidates(
               AND ${activeSourceClause("lf")}
          )
        )
-       -- #310 hard filters (D-058). All applied in the OUTER query, on the
+       -- #310 hard filters (D-059). All applied in the OUTER query, on the
        -- per-axis signals ranked already carries — so the below-market
        -- filter can't shift its own pool median, and the assessment filters
        -- agree with the ranking's distress boost by construction. NULL param =

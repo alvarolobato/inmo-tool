@@ -1,10 +1,10 @@
 ---
-id: D-058
+id: D-059
 title: Hard-filter the candidate feed by occupancy, condition, and below-market discount
 date: 2026-08-05
 ---
 
-# D-058: Hard-filter the candidate feed by occupancy, condition, and below-market discount
+# D-059: Hard-filter the candidate feed by occupancy, condition, and below-market discount
 
 *Decided: 2026-08-05*
 
