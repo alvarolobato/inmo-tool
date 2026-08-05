@@ -1,14 +1,23 @@
 /**
- * Unit tests for the aliseda search-URL builder (issue #277; owner-reported
- * grammar fix + task-list restructure 2026-08-05).
+ * Unit tests for the aliseda search-URL builder.
  *
- * Grammar (owner-confirmed):
- *   /comprar-viviendas/<tipo-plural>/<comunidad>/<provincia>?subtipo=<code>&precio=<min>-<max>
- * Confirmed example: Estepona-area piso ≤ 200 000 € →
+ * Grammar (verified against the live portal 2026-08-05, issue #336):
+ *   top-level category  → /comprar-<category>/<comunidad>/<provincia>
+ *   residential subtype → /comprar-viviendas/<subtype-slug>/<comunidad>/<provincia>?subtipo=<code>
+ * Confirmed owner example: Estepona-area piso ≤ 200 000 € →
  *   https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/andalucia/malaga?subtipo=36&precio=0-200000
  *
- * Aliseda searches one property type at a time (type is a path segment), so a
- * multi-type profile yields ONE TASK PER TYPE.
+ * Provenance (captured, no live network in these tests):
+ *   - category slugs from /sitemap-category-aliseda-es-0.xml
+ *     (viviendas, locales, naves, garajes, terrenos, edificios, …);
+ *   - vivienda subtype slugs from the app bundle main-*.js i18n map
+ *     (pisos, duplex, casas, chalets-adosados, … — NO `aticos`);
+ *   - subtipo codes pisos=36 / chalets-adosados=31 from Google-indexed URLs.
+ *
+ * Root-cause the fix addresses: Aliseda has NO `ático` category (the string
+ * never appears in its app), and non-home types are their OWN top-level
+ * categories — so the old `/comprar-viviendas/aticos/…` and
+ * `/comprar-viviendas/locales/…` URLs matched nothing.
  */
 
 import { describe, it, expect } from "vitest";
@@ -35,7 +44,7 @@ function one(scope: Partial<CanonicalSearchScope>) {
   return tasks[0];
 }
 
-describe("alisedaBuilder", () => {
+describe("alisedaBuilder — residential (comprar-viviendas + subtipo)", () => {
   it("reproduces the owner's confirmed Estepona piso ≤200k example exactly", () => {
     const task = one({ priceMax: 200000 });
 
@@ -44,7 +53,7 @@ describe("alisedaBuilder", () => {
       "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/andalucia/malaga?subtipo=36&precio=0-200000",
     );
     expect(task.label).toContain("Aliseda");
-    // Piso plural + subtipo are confirmed; only geography (radius→province) loosens.
+    // Piso is exact; only geography (radius→province) loosens.
     expect(task.loosened.map((l) => l.constraint)).toEqual(["geography"]);
   });
 
@@ -59,7 +68,9 @@ describe("alisedaBuilder", () => {
 
   it("defaults precio min to 0 and honours an explicit min", () => {
     expect(one({ priceMax: 200000 }).url).toContain("precio=0-200000");
-    expect(one({ priceMin: 50000, priceMax: 200000 }).url).toContain("precio=50000-200000");
+    expect(one({ priceMin: 50000, priceMax: 200000 }).url).toContain(
+      "precio=50000-200000",
+    );
   });
 
   it("resolves greater-Sevilla coordinates to andalucia/sevilla", () => {
@@ -69,9 +80,79 @@ describe("alisedaBuilder", () => {
       "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/andalucia/sevilla?subtipo=36&precio=0-200000",
     );
   });
+});
 
+describe("alisedaBuilder — ático fix (#336: Aliseda has no ático category)", () => {
+  it("maps ático onto the pisos subtype (subtipo=36) and flags the broadening", () => {
+    const task = one({ propertyTypes: ["atico"], priceMax: 200000 });
+    // Áticos are published as pisos on Aliseda → the SAME valid pisos URL,
+    // NOT the old broken `/comprar-viviendas/aticos/…` that matched nothing.
+    expect(task.url).toBe(
+      "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/andalucia/malaga?subtipo=36&precio=0-200000",
+    );
+    const typeFlags = task.loosened.filter(
+      (l) => l.constraint === "property_types",
+    );
+    expect(typeFlags).toHaveLength(1);
+    expect(typeFlags[0].reason).toContain("ático");
+    expect(typeFlags[0].reason.toLowerCase()).toContain("pisos");
+    // No invalid `aticos` slug anywhere.
+    expect(task.url).not.toContain("aticos");
+  });
+
+  it("de-duplicates piso + ático (both collapse to the pisos search) into ONE task", () => {
+    const tasks = build({ propertyTypes: ["piso", "atico"], priceMax: 200000 });
+    expect(tasks).toHaveLength(1);
+    // The exact `piso` task wins the de-dup (no property_types flag).
+    expect(tasks[0].loosened.map((l) => l.constraint)).toEqual(["geography"]);
+    expect(tasks[0].url).toBe(
+      "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/andalucia/malaga?subtipo=36&precio=0-200000",
+    );
+  });
+});
+
+describe("alisedaBuilder — chalet (approximate: adosados only)", () => {
+  it("maps chalet onto chalets-adosados (subtipo=31) and flags the approximation", () => {
+    const task = one({ propertyTypes: ["chalet"], priceMax: 200000 });
+    expect(task.url).toBe(
+      "https://www.alisedainmobiliaria.com/comprar-viviendas/chalets-adosados/andalucia/malaga?subtipo=31&precio=0-200000",
+    );
+    const typeFlags = task.loosened.filter(
+      (l) => l.constraint === "property_types",
+    );
+    expect(typeFlags).toHaveLength(1);
+    expect(typeFlags[0].reason.toLowerCase()).toContain("chalet");
+  });
+});
+
+describe("alisedaBuilder — non-residential top-level categories (#336 fix)", () => {
+  it.each([
+    ["local", "comprar-locales"],
+    ["nave", "comprar-naves"],
+    ["garaje", "comprar-garajes"],
+    ["terreno", "comprar-terrenos"],
+    ["edificio", "comprar-edificios"],
+  ] as const)(
+    "%s → its own top-level category %s (NOT nested under viviendas)",
+    (type, category) => {
+      const task = one({ propertyTypes: [type], priceMax: 200000 });
+      expect(task.url).toBe(
+        `https://www.alisedainmobiliaria.com/${category}/andalucia/malaga?precio=0-200000`,
+      );
+      // No subtipo for non-residential categories, and never nested under viviendas.
+      expect(task.url).not.toContain("subtipo");
+      expect(task.url).not.toContain("comprar-viviendas");
+      // Category is exact → only geography loosens.
+      expect(task.loosened.map((l) => l.constraint)).toEqual(["geography"]);
+    },
+  );
+});
+
+describe("alisedaBuilder — geography", () => {
   it("ALWAYS loosens geography — radius broadens to the whole province", () => {
-    const geo = one({ priceMax: 200000 }).loosened.find((l) => l.constraint === "geography");
+    const geo = one({ priceMax: 200000 }).loosened.find(
+      (l) => l.constraint === "geography",
+    );
     expect(geo).toBeDefined();
     expect(geo!.reason).toContain("provincia");
     expect(geo!.reason).toContain("radio");
@@ -87,28 +168,20 @@ describe("alisedaBuilder", () => {
     expect(geo).toBeDefined();
     expect(geo!.reason).toContain("Provincia no determinada");
   });
+});
 
-  it("guesses non-piso plural segments and flags them, and omits an unknown subtipo", () => {
-    const task = one({ propertyTypes: ["atico"], priceMax: 200000 });
-    // Guessed plural in the path, no subtipo param (unknown code).
-    expect(task.url).toBe(
-      "https://www.alisedainmobiliaria.com/comprar-viviendas/aticos/andalucia/malaga?precio=0-200000",
-    );
-    const typeFlags = task.loosened.filter((l) => l.constraint === "property_types");
-    // One flag for the guessed plural, one for the unknown subtipo.
-    expect(typeFlags.length).toBe(2);
-    expect(typeFlags.some((f) => f.reason.includes("conjetura"))).toBe(true);
-    expect(typeFlags.some((f) => f.reason.includes("subtipo"))).toBe(true);
-  });
-
-  it("yields one task per property type (type is a path segment), with distinct ids", () => {
-    const tasks = build({ propertyTypes: ["piso", "atico"], priceMax: 200000 });
+describe("alisedaBuilder — multi-type fan-out and numeric constraints", () => {
+  it("yields one task per DISTINCT Aliseda search, with distinct ids", () => {
+    const tasks = build({
+      propertyTypes: ["piso", "local", "garaje"],
+      priceMax: 200000,
+    });
     expect(tasks.map((t) => t.url)).toEqual([
       "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/andalucia/malaga?subtipo=36&precio=0-200000",
-      "https://www.alisedainmobiliaria.com/comprar-viviendas/aticos/andalucia/malaga?precio=0-200000",
+      "https://www.alisedainmobiliaria.com/comprar-locales/andalucia/malaga?precio=0-200000",
+      "https://www.alisedainmobiliaria.com/comprar-garajes/andalucia/malaga?precio=0-200000",
     ]);
-    // Distinct, stable ids per task.
-    expect(new Set(tasks.map((t) => t.id)).size).toBe(2);
+    expect(new Set(tasks.map((t) => t.id)).size).toBe(3);
   });
 
   it("drops a lower-bound-only price (needs a range) and flags price_min", () => {
