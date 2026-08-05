@@ -18,6 +18,7 @@
 | [D-004](docs/decisions/D-004-no-worker-workflows.md) | Don't push to `.github/workflows/` without a credential that has `workflow` OAuth scope. Never bypass via the GitHub API — leave YAML staged for a human to commit. |
 | [D-009](docs/decisions/D-009-restart-burst-guard.md) | A full sweep skips if a completed run finished within `etl.min_restart_sweep_interval_seconds` ago (crash-loop guard). |
 | [D-032](docs/decisions/D-032-decision-id-collision-ci-check.md) | `scripts/tests/test_decision_ids.py` enforces unique decision IDs, matching frontmatter, resolvable `DECISIONS.md` links, and no stale cross-references. Sequential IDs stay — no scheme change. |
+| [D-077](docs/decisions/D-077-decision-id-cross-branch-allocation.md) | Allocate decision IDs with `scripts/next-decision-id.py` (scans local tree + every open PR head) BEFORE writing a record; `test_decision_id_collision.py` fails when a HEAD-vs-`origin/main` new ID is claimed on another open PR. Both skip gracefully offline; sequential IDs kept (extends D-032); renumber-at-merge is the residual-race backstop. |
 | [D-060](docs/decisions/D-060-extension-zip-freshness.md) | Stage the extension zip from POST-pull source right before every `docker compose --build` (`stage_extension()` in `stack.sh`, after `git pull`) — never before. `scripts/check-extension-zip-fresh.sh` fails when the zip is missing/older than `browser-extension/`; runs as post-stage self-check + CI gate. |
 
 ## Data / connectors

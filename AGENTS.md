@@ -231,7 +231,12 @@ When you fix a non-obvious bug or discover a gotcha, document it. Procedure: [ag
 
 When recording a new decision:
 
-1. **Pick the next free ID.** IDs are sequential (`D-001`, `D-002`, ...) for *this* project — separate from the archived source-project IDs under `docs/decisions/archive/`. Skip IDs are fine when a decision is retired — never reuse them.
+1. **Allocate the next free ID — run the allocator, don't eyeball `DECISIONS.md`.** IDs are sequential (`D-001`, `D-002`, ...) for *this* project — separate from the archived source-project IDs under `docs/decisions/archive/`. Skip IDs are fine when a decision is retired — never reuse them. **Because parallel branches each pick "the next free ID" and collide silently on merge (D-077, issues #203/#229), you MUST get the ID from the pre-flight allocator, which scans the local tree AND every open PR head branch:**
+   ```bash
+   python3 scripts/next-decision-id.py            # prints e.g. D-077
+   python3 scripts/next-decision-id.py --verbose  # also lists who reserved what
+   ```
+   Do this **right before** you write the file (not at the start of the task — other branches land while you work). If the allocator warns it couldn't reach GitHub (`gh` missing/offline), the ID it prints only reflects the local tree and may still collide — re-run once online before committing. The cross-branch check `scripts/tests/test_decision_id_collision.py` runs in the suite and fails if your new ID is already claimed on another open PR (it skips gracefully when offline). Renumber-at-merge remains the backstop for the residual race where two agents allocate in the same second before either pushes.
 2. **Write the full file** at `docs/decisions/D-NN-<short-slug>.md`. Use this template:
    ```markdown
    ---
