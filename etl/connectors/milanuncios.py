@@ -123,6 +123,7 @@ from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
     RawListing,
+    SoftBlockError,
     Throttle,
 )
 from etl.connectors.extraction import first_present, text_to_int
@@ -170,11 +171,21 @@ _SOFT_BLOCK_MARKERS = (
 )
 
 
-class MilanunciosSoftBlockError(ConnectorError):
+class MilanunciosSoftBlockError(SoftBlockError):
     """__INITIAL_PROPS__ was missing AND the page carries Milanuncios' own
-    confirmed bot-mitigation signature. Subclasses ConnectorError so the
-    orchestrator's circuit breaker keeps counting it exactly as before —
-    this is a narrower diagnosis, not a different failure category."""
+    confirmed bot-mitigation signature (a GeeTest CAPTCHA / "visita
+    interrumpida" wall).
+
+    Issue #270 (D-047): now subclasses `SoftBlockError` (itself a
+    `ConnectorError`, so existing handlers are unaffected). This is Milanuncios
+    rate-throttling us — a "waited for budget" backoff, not a failure — so the
+    orchestrator records a discover/breaker stop caused by it as a CLEAN 'ok'
+    outcome with a notice rather than 'failed'/'circuit_open'. The failed fetch
+    still counts in error_count (issue #291). Milanuncios keeps the DEFAULT
+    (tight) soft-block breaker threshold — unlike Fotocasa's transient burst,
+    its block is a long hard lockout (~60 min per the module docstring), so
+    tripping promptly is correct; the trip is just no longer mislabelled an
+    error."""
 
 
 def _has_soft_block_signature(html: str) -> bool:

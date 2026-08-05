@@ -24,7 +24,11 @@ from etl.connectors.geography import (
     resolve_place,
     unresolvable_scope_key,
 )
-from etl.tests.fixtures.dummy_connector import DiscoverFailsConnector, DummyConnector
+from etl.tests.fixtures.dummy_connector import (
+    DiscoverFailsConnector,
+    DiscoverSoftBlocksConnector,
+    DummyConnector,
+)
 
 _SCHEMA_SQL = Path(__file__).parent.parent / "schema" / "init.sql"
 
@@ -3830,7 +3834,13 @@ class TestScopeFairnessRotation:
             )
             assert "barcelona" not in uncovered
             # The prose stays too — an operator reading logs still gets it.
-            assert "skipped for budget" in error_msg
+            # Issue #270 (D-047): budget skips are now surfaced as a clean
+            # informational NOTE (prefixed "nota:") rather than error prose,
+            # in Spanish to match the operator-facing UI ("no se cargaron más
+            # ... por presupuesto"). The structured skipped_scopes above is the
+            # real contract; this just confirms the human-readable note is there.
+            assert "presupuesto" in error_msg
+            assert "nota:" in error_msg
         finally:
             orchestrator.CONNECTORS.clear()
             _cleanup(pg_conn, connector.name, run_id)
@@ -4291,3 +4301,218 @@ class TestScopeCoverageClaims:
             _cleanup(pg_conn, healthy.name, None)
             _cleanup_scope_state(pg_conn, broken.name)
             _cleanup_scope_state(pg_conn, healthy.name)
+
+
+def _result_full_row(conn, run_id: int, connector_name: str) -> dict:
+    """status / error_count / fetched_count / error_msg / skipped_scopes for one
+    connector_run_results row (issue #270, D-047 status-reclassification tests)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT status, error_count, fetched_count, error_msg, skipped_scopes "
+            "FROM connector_run_results WHERE run_id = %s AND connector_name = %s",
+            (run_id, connector_name),
+        )
+        status, error_count, fetched_count, error_msg, skipped_scopes = cur.fetchone()
+    return {
+        "status": status,
+        "error_count": error_count,
+        "fetched_count": fetched_count,
+        "error_msg": error_msg,
+        "skipped_scopes": skipped_scopes,
+    }
+
+
+def _run_counts(conn, run_id: int) -> tuple[int, int, int]:
+    """(connectors_ok, connectors_failed, connectors_skipped) for a run — the
+    run-level rollup a budget stop must NOT inflate as a failure."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT connectors_ok, connectors_failed, connectors_skipped "
+            "FROM connector_runs WHERE id = %s",
+            (run_id,),
+        )
+        return cur.fetchone()
+
+
+class _UncoveredConnector(DummyConnector):
+    """A connector with NO coverage anywhere — `scope_key` always returns None,
+    modelling Milanuncios on a Costa del Sol center it resolves but cannot
+    serve (issue #270's "resolved but uncovered"). Every scope must be a clean
+    skip with a reason, never a failure."""
+
+    def scope_key(self, scope):
+        return None
+
+
+class TestSoftBlockCleanOutcomes:
+    """Issue #270 (D-047): the owner's principle — "waiting for budget is NOT
+    an error, it's a clean run outcome". A connector that ingested fine but
+    stopped because it hit a soft-block / rate cap, or skipped scopes it could
+    not serve, must record a CLEAN status with an informational notice — not
+    'failed'/'circuit_open', and not inflate error/failed counts. Only genuine
+    FATAL fetch/parse failures surface as errors (their root cause is #291)."""
+
+    def _add_profile(self, conn, name, lat, lon, radius_km=10):
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO search_profile (name, scope) VALUES (%s, %s) RETURNING id",
+                (
+                    name,
+                    json.dumps(
+                        {
+                            "geography": {
+                                "type": "radius",
+                                "center": [lat, lon],
+                                "radius_km": radius_km,
+                            }
+                        }
+                    ),
+                ),
+            )
+            (profile_id,) = cur.fetchone()
+        conn.commit()
+        return profile_id
+
+    def _drop_profile(self, conn, profile_id):
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM search_profile WHERE id = %s", (profile_id,))
+        conn.commit()
+
+    def test_soft_block_breaker_trip_is_a_clean_ok_run_not_an_error(self, pg_conn):
+        """THE owner-requested test: a run that ingested fine and then stopped
+        because the site rate-throttled it (soft-block breaker trip) is CLEAN.
+
+        - status is 'ok' (NOT 'circuit_open'/'failed')
+        - the run's connectors_failed count does not include it
+        - error_count STILL counts the soft-block fetch failures (they are
+          genuine failed fetches, tracked for #291) — a clean status and a
+          non-zero error_count coexist by design
+        - an informational budget notice is present
+
+        Revert-and-confirm-fail: before D-047 a breaker trip always produced
+        status 'circuit_open', so the `status == "ok"` assertion pins the new
+        behaviour — reverting the classification flips it straight back.
+        """
+        _apply_schema(pg_conn)
+        external_ids = tuple(f"dummy-{i}" for i in range(10))
+        connector = DummyConnector(
+            name="test-softblock-clean",
+            external_ids=external_ids,
+            # Odd ids soft-block; with min_attempts=2 the breaker trips on a
+            # soft-block early in the single (madrid) scope after real fetches.
+            soft_block_ids=frozenset(external_ids[1::2]),
+            circuit_breaker_min_attempts=2,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            row = _result_full_row(pg_conn, run_id, connector.name)
+            assert row["status"] == "ok", (
+                "a soft-block (rate-throttle) stop is a clean budget outcome, "
+                f"not an error state — got {row['status']}"
+            )
+            assert row["fetched_count"] >= 1, (
+                "it should have ingested before backing off"
+            )
+            assert row["error_count"] >= 1, (
+                "soft-block fetch failures are still genuine failed fetches and "
+                "must be counted in error_count (tracked for #291)"
+            )
+            assert row["error_msg"] and "nota:" in row["error_msg"], (
+                f"a budget notice must be present, got {row['error_msg']!r}"
+            )
+            ok, failed, _skipped = _run_counts(pg_conn, run_id)
+            assert failed == 0, "a budget stop must not count as a failed connector"
+            assert ok == 1
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            _cleanup_scope_state(pg_conn, connector.name)
+
+    def test_fatal_breaker_trip_still_surfaces_as_circuit_open(self, pg_conn):
+        """Contrast/guard: a breaker trip driven by GENUINE fatal fetch failures
+        is a real problem and MUST still surface as 'circuit_open' — the clean
+        soft-block reclassification must not silence genuine failures."""
+        _apply_schema(pg_conn)
+        external_ids = tuple(f"dummy-{i}" for i in range(10))
+        connector = DummyConnector(
+            name="test-fatal-trip",
+            external_ids=external_ids,
+            failing_ids=frozenset(external_ids[1::2]),  # fatal ConnectorError
+            circuit_breaker_min_attempts=2,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            row = _result_full_row(pg_conn, run_id, connector.name)
+            assert row["status"] == "circuit_open", (
+                f"a fatal-error breaker trip must surface, got {row['status']}"
+            )
+            _ok, failed, _sk = _run_counts(pg_conn, run_id)
+            assert failed == 1
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            _cleanup_scope_state(pg_conn, connector.name)
+
+    def test_soft_block_at_discover_is_clean_not_failed(self, pg_conn):
+        """Milanuncios' discover-time GeeTest wall: a SoftBlockError raised by
+        discover() is the site rate-throttling us — a clean 'waited for budget'
+        backoff, NOT a connector failure. Must be status 'ok' with a
+        soft_block-reason skipped scope, never 'failed'."""
+        _apply_schema(pg_conn)
+        connector = DiscoverSoftBlocksConnector()
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            row = _result_full_row(pg_conn, run_id, connector.name)
+            assert row["status"] == "ok", (
+                "a discover() soft-block is a clean backoff, not a failure — "
+                f"got {row['status']}"
+            )
+            assert row["error_count"] == 0
+            reasons = {e["reason"] for e in (row["skipped_scopes"] or [])}
+            assert "soft_block" in reasons, (
+                f"the soft-blocked scope must be recorded with a soft_block "
+                f"reason, got {row['skipped_scopes']}"
+            )
+            assert row["error_msg"] and "nota:" in row["error_msg"]
+            _ok, failed, _sk = _run_counts(pg_conn, run_id)
+            assert failed == 0
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            _cleanup_scope_state(pg_conn, connector.name)
+
+    def test_resolved_but_uncovered_scope_is_a_clean_skip_not_failed(self, pg_conn):
+        """Issue #270 point 4: a scope a connector genuinely cannot serve
+        (Milanuncios on a Costa del Sol center) is a clean skip with a reason,
+        NOT 'failed'. `discover()` is never called; the run stays 'ok'."""
+        _apply_schema(pg_conn)
+        estepona_id = self._add_profile(pg_conn, "softblock-estepona", 36.4268, -5.1468)
+        connector = _UncoveredConnector(name="test-uncovered-clean")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            row = _result_full_row(pg_conn, run_id, connector.name)
+            assert row["status"] == "ok", (
+                f"a genuinely uncovered scope is a clean skip, not a failure — "
+                f"got {row['status']}"
+            )
+            assert row["error_count"] == 0
+            assert connector.fetch_calls == [], "discover/fetch must never run"
+            reasons = {e["reason"] for e in (row["skipped_scopes"] or [])}
+            assert reasons == {"uncovered"}, (
+                f"every scope must be recorded uncovered, got {row['skipped_scopes']}"
+            )
+            _ok, failed, _sk = _run_counts(pg_conn, run_id)
+            assert failed == 0
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            _cleanup_scope_state(pg_conn, connector.name)
+            self._drop_profile(pg_conn, estepona_id)

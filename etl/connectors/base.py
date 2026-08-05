@@ -242,6 +242,29 @@ class ConnectorError(Exception):
     The orchestrator counts these (and any other exception) toward the
     circuit breaker's error rate — connectors don't need to know the
     breaker exists, they just raise on failure like any other code.
+
+    A plain `ConnectorError` is a FATAL failure (network error, invalid JSON,
+    an HTML structure that genuinely changed). For site-side rate-throttling
+    that should be treated as a clean "waited for budget" backoff rather than
+    an error state, raise `SoftBlockError` instead — see below and D-047.
+    """
+
+
+class SoftBlockError(ConnectorError):
+    """A connector hit the site's own rate-throttling / bot-mitigation wall
+    (issue #270, D-047): an HTTP 200 whose listing payload is withheld, a
+    CAPTCHA interstitial, or an equivalent "come back later" response.
+
+    This is NOT a bug and NOT a sign the connector is broken — it's the site
+    telling us we've spent this run's budget. Subclasses `ConnectorError` so
+    existing `except ConnectorError` handlers keep working, but the
+    orchestrator classifies it distinctly: it trips the circuit breaker only
+    at the looser soft-block threshold, and a breaker/discover stop caused by
+    it is recorded as a CLEAN run outcome (status stays 'ok', with an
+    informational notice) rather than 'failed'/'circuit_open'. The failed
+    fetch is still counted in `error_count` — reducing those genuine failures
+    is tracked separately (issue #291). See etl.connectors.circuit_breaker and
+    etl.orchestrator.
     """
 
 
@@ -271,6 +294,18 @@ class Connector(ABC):
     circuit_breaker_error_rate: float = 0.30
     circuit_breaker_min_attempts: int = 10
     circuit_breaker_window: int = 20
+    # Issue #270 (D-047): the looser rolling-window error-rate at which
+    # SOFT-BLOCK errors (site rate-throttling, `SoftBlockError`) trip the
+    # breaker — kept separate from `circuit_breaker_error_rate`, which gates
+    # genuine FATAL errors. None (the default) means "trip soft-blocks exactly
+    # like fatal errors", a conservative no-op that changes no connector's trip
+    # timing unless it opts in. A connector whose soft-block is TRANSIENT
+    # (Fotocasa: a throttle burst mid-sweep that clears) raises this so a burst
+    # doesn't trip the breaker and abandon the connector's other scopes for the
+    # run; one whose block is a long hard lockout (Milanuncios) leaves it None
+    # and trips promptly. Either way the trip is recorded as a clean
+    # "waited for budget" stop, not an error. Must be >= circuit_breaker_error_rate.
+    circuit_breaker_soft_block_error_rate: float | None = None
 
     # Whether discover() sees the connector's *entire* active inventory for
     # its scope on every sweep, or only some subset of it (e.g. one search-

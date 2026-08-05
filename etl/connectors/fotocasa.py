@@ -68,6 +68,7 @@ from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
     RawListing,
+    SoftBlockError,
     Throttle,
 )
 from etl.connectors.extraction import (
@@ -244,9 +245,21 @@ def _extract_initial_props(html: str) -> dict[str, Any]:
 
     marker_idx = html.find(_INITIAL_PROPS_MARKER)
     if marker_idx == -1:
-        raise ConnectorError(
-            "fotocasa: __initial_props__ script tag not found — page structure "
-            "may have changed, or this is a soft-block/interruption page"
+        # A real Fotocasa page ALWAYS embeds this tag (discover() relies on the
+        # same invariant — see _fetch_search_page). Its total absence on an
+        # HTTP 200 is Fotocasa's own soft-block/interruption page, not a
+        # structure change: measured live (issue #270) as rate-induced
+        # throttling that clusters into a burst once the sweep's pace catches
+        # up with the site. Classified as a SoftBlockError (D-047) so the burst
+        # is treated as a clean "waited for budget" backoff — it still counts
+        # in error_count, but doesn't flip the whole connector to a failure
+        # state. A genuine tag rename would surface differently (unterminated
+        # tag / invalid JSON below, still fatal ConnectorError) and would also
+        # break discover()'s marker check.
+        raise FotocasaSoftBlockError(
+            "fotocasa: __initial_props__ script tag not found — soft-block/"
+            "interruption page (rate-induced throttling), not a page-structure "
+            "change; backing off rather than treating this as a parsing bug"
         )
     tag_close_idx = html.find(">", marker_idx)
     if tag_close_idx == -1:
@@ -461,8 +474,26 @@ def _reference_fallback_text(soup: BeautifulSoup) -> str | None:
     return match.group(1) if match else None
 
 
+class FotocasaSoftBlockError(SoftBlockError):
+    """Fotocasa served a soft-block/interruption page (HTTP 200 with the
+    `__initial_props__` payload withheld) — its documented rate-throttling
+    signature (issue #270, D-047). See `_extract_initial_props`."""
+
+
 class FotocasaConnector(Connector):
     name = "fotocasa"
+    # Issue #270 (D-047): Fotocasa's soft-block is TRANSIENT (a burst that
+    # clears within minutes — see rate_limit_per_minute's write-up), so a
+    # cluster of soft-block detail fetches mid-sweep must not trip the breaker
+    # and abandon this connector's OTHER scopes for the whole run (Fotocasa is
+    # the biggest source — a tripped breaker was costing whole-city coverage,
+    # issue #270). Tolerate soft-blocks up to 75% of the rolling window before
+    # tripping (vs the 30% fatal threshold): a transient burst is ridden
+    # through and coverage continues, while a site that has gone FULLY into
+    # block mode still stops the run — and either way the stop is recorded as a
+    # clean "waited for budget" outcome, never a failure. Genuine fatal errors
+    # (network, invalid JSON) keep the tight 30% threshold.
+    circuit_breaker_soft_block_error_rate = 0.75
     # Measured, not guessed (issue #65). Zone partitioning turned a 1-request
     # sweep into ~161, which made this rate load-bearing in a way it never
     # was before, so it was characterised live:
