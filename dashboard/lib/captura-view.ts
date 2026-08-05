@@ -20,21 +20,32 @@
  * Client-safe: only type imports from lib/search-url + lib/worklist. No `pg`.
  */
 
-import type { PortalSearchUrl } from "@/lib/search-url";
+import type { SearchTask } from "@/lib/search-url";
 import type { WorklistPortalSummary } from "@/lib/worklist";
+
+/** One openable pre-filtered search task within a portal card. */
+export interface CaptureTaskLink {
+  /** Stable task id (see lib/search-url/task-id.ts). */
+  id: string;
+  /** Human, Spanish-facing label. */
+  label: string;
+  /** The openable, pre-filtered search URL. */
+  url: string;
+  /** Constraints the portal's URL grammar had to broaden (never narrow). */
+  loosened: SearchTask["loosened"];
+}
 
 /**
  * One capture portal as the Captura page renders it: the profile's pre-filtered
- * search link (+ any loosened constraints) joined to that portal's worklist
- * roll-up (or null when the portal has no worklist rows yet).
+ * search TASKS for that portal (a portal can search one section at a time, so
+ * several tasks) joined to that portal's worklist roll-up (or null when the
+ * portal has no worklist rows yet).
  */
 export interface PortalCaptureView {
   /** Portal key — matches `CAPTURE_PORTALS[].portal` in lib/worklist.ts. */
   portal: string;
-  /** The profile's pre-filtered search URL for this portal. */
-  searchUrl: string;
-  /** Constraints the portal's URL grammar had to broaden (never narrow). */
-  loosened: PortalSearchUrl["loosened"];
+  /** The portal's pre-filtered search tasks, in build order. */
+  tasks: CaptureTaskLink[];
   /** This portal's global worklist roll-up, or null if it has no rows yet. */
   summary: WorklistPortalSummary | null;
   /** Captured share of the portal's worklist, 0–100 (0 when empty). */
@@ -48,24 +59,37 @@ export function capturedPct(summary: WorklistPortalSummary | null): number {
 }
 
 /**
- * Join a profile's per-portal search URLs to the global worklist summaries,
- * preserving the search-URL order (which follows CAPTURE_PORTALS). One entry
- * per portal that has a pre-filtered search URL — the portals the operator can
- * actually launch a guided capture into. A portal with a URL but no worklist
- * rows yet gets `summary: null` (the card shows "aún sin lista").
+ * Group a profile's flat search-TASK list by portal and join each portal to its
+ * global worklist summary. Portals appear in first-seen task order (which
+ * follows CAPTURE_PORTALS); within a portal, tasks keep their build order. One
+ * entry per portal that has at least one pre-filtered task — the portals the
+ * operator can actually launch a guided capture into. A portal with tasks but
+ * no worklist rows yet gets `summary: null` (the card shows "aún sin lista").
  */
 export function buildPortalCaptureViews(
-  urls: readonly PortalSearchUrl[],
+  tasks: readonly SearchTask[],
   summaries: readonly WorklistPortalSummary[],
 ): PortalCaptureView[] {
-  const byPortal = new Map<string, WorklistPortalSummary>();
-  for (const s of summaries) byPortal.set(s.source_portal, s);
-  return urls.map((u) => {
-    const summary = byPortal.get(u.portal) ?? null;
+  const byPortalSummary = new Map<string, WorklistPortalSummary>();
+  for (const s of summaries) byPortalSummary.set(s.source_portal, s);
+
+  const order: string[] = [];
+  const grouped = new Map<string, CaptureTaskLink[]>();
+  for (const t of tasks) {
+    let bucket = grouped.get(t.portal);
+    if (!bucket) {
+      bucket = [];
+      grouped.set(t.portal, bucket);
+      order.push(t.portal);
+    }
+    bucket.push({ id: t.id, label: t.label, url: t.url, loosened: t.loosened });
+  }
+
+  return order.map((portal) => {
+    const summary = byPortalSummary.get(portal) ?? null;
     return {
-      portal: u.portal,
-      searchUrl: u.url,
-      loosened: u.loosened,
+      portal,
+      tasks: grouped.get(portal)!,
       summary,
       capturedPct: capturedPct(summary),
     };

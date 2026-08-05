@@ -5,11 +5,17 @@ import {
   captureTotals,
   portalLabel,
 } from "@/lib/captura-view";
-import type { PortalSearchUrl } from "@/lib/search-url";
+import type { SearchTask } from "@/lib/search-url";
 import type { WorklistPortalSummary } from "@/lib/worklist";
 
-function url(portal: string, loosened: PortalSearchUrl["loosened"] = []): PortalSearchUrl {
-  return { portal, url: `https://${portal}.example/venta`, loosened };
+function task(portal: string, over: Partial<SearchTask> = {}): SearchTask {
+  return {
+    id: over.id ?? `${portal}:section:0000abcd`,
+    portal,
+    label: over.label ?? `${portal} — pisos`,
+    url: over.url ?? `https://${portal}.example/venta`,
+    loosened: over.loosened ?? [],
+  };
 }
 
 function summary(portal: string, over: Partial<WorklistPortalSummary> = {}): WorklistPortalSummary {
@@ -41,10 +47,10 @@ describe("capturedPct", () => {
 });
 
 describe("buildPortalCaptureViews", () => {
-  it("joins each search URL to its worklist summary, preserving URL order", () => {
-    const urls = [url("idealista"), url("aliseda")];
+  it("groups tasks by portal and joins each portal to its worklist summary, preserving order", () => {
+    const tasks = [task("idealista"), task("aliseda")];
     const summaries = [summary("aliseda", { total: 4, captured: 2 })];
-    const views = buildPortalCaptureViews(urls, summaries);
+    const views = buildPortalCaptureViews(tasks, summaries);
 
     expect(views.map((v) => v.portal)).toEqual(["idealista", "aliseda"]);
     // idealista has no worklist rows → null summary, 0%
@@ -55,19 +61,29 @@ describe("buildPortalCaptureViews", () => {
     expect(views[1].capturedPct).toBe(50);
   });
 
-  it("carries the search URL and loosened flags through unchanged", () => {
-    const loosened = [{ constraint: "geography" as const, reason: "sin radio" }];
-    const views = buildPortalCaptureViews([url("aliseda", loosened)], []);
-    expect(views[0].searchUrl).toBe("https://aliseda.example/venta");
-    expect(views[0].loosened).toEqual(loosened);
+  it("collects several tasks for the same portal into one view (first-seen order)", () => {
+    const tasks = [
+      task("aliseda", { id: "aliseda:pisos:1", url: "https://a/pisos" }),
+      task("aliseda", { id: "aliseda:aticos:2", url: "https://a/aticos" }),
+    ];
+    const views = buildPortalCaptureViews(tasks, []);
+    expect(views).toHaveLength(1);
+    expect(views[0].tasks.map((t) => t.url)).toEqual(["https://a/pisos", "https://a/aticos"]);
   });
 
-  it("returns an empty array when there are no search URLs", () => {
+  it("carries each task's url + loosened flags through unchanged", () => {
+    const loosened = [{ constraint: "geography" as const, reason: "sin radio" }];
+    const views = buildPortalCaptureViews([task("aliseda", { loosened })], []);
+    expect(views[0].tasks[0].url).toBe("https://aliseda.example/venta");
+    expect(views[0].tasks[0].loosened).toEqual(loosened);
+  });
+
+  it("returns an empty array when there are no tasks", () => {
     expect(buildPortalCaptureViews([], [summary("aliseda")])).toEqual([]);
   });
 
-  it("ignores summaries for portals with no search URL", () => {
-    const views = buildPortalCaptureViews([url("idealista")], [summary("cimenta2")]);
+  it("ignores summaries for portals with no task", () => {
+    const views = buildPortalCaptureViews([task("idealista")], [summary("cimenta2")]);
     expect(views).toHaveLength(1);
     expect(views[0].portal).toBe("idealista");
     expect(views[0].summary).toBeNull();
@@ -77,7 +93,7 @@ describe("buildPortalCaptureViews", () => {
 describe("captureTotals", () => {
   it("sums counts across portals and computes the overall percentage", () => {
     const views = buildPortalCaptureViews(
-      [url("idealista"), url("aliseda")],
+      [task("idealista"), task("aliseda")],
       [
         summary("idealista", { total: 10, pending: 6, captured: 4, failed: 0, skipped: 0 }),
         summary("aliseda", { total: 10, pending: 4, captured: 6, failed: 0, skipped: 0 }),
@@ -92,7 +108,7 @@ describe("captureTotals", () => {
   });
 
   it("counts portals with no summary but contributes 0 to the counts", () => {
-    const views = buildPortalCaptureViews([url("idealista"), url("aliseda")], []);
+    const views = buildPortalCaptureViews([task("idealista"), task("aliseda")], []);
     const t = captureTotals(views);
     expect(t.portals).toBe(2);
     expect(t.total).toBe(0);

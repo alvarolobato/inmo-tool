@@ -3,34 +3,57 @@ import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { PortalCaptureCard } from "../PortalCaptureCard";
-import type { PortalCaptureView } from "@/lib/captura-view";
+import type { PortalCaptureView, CaptureTaskLink } from "@/lib/captura-view";
+
+const TASK_ID = "aliseda:pisos:0000abcd";
+const TASK_URL =
+  "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/andalucia/malaga?subtipo=36&precio=0-200000";
+
+function makeTask(over: Partial<CaptureTaskLink> = {}): CaptureTaskLink {
+  return {
+    id: over.id ?? TASK_ID,
+    label: over.label ?? "Aliseda — pisos en Malaga ≤200.000 €",
+    url: over.url ?? TASK_URL,
+    loosened: over.loosened ?? [],
+  };
+}
 
 function makeView(over: Partial<PortalCaptureView> = {}): PortalCaptureView {
   return {
     portal: "aliseda",
-    searchUrl: "https://www.alisedainmobiliaria.com/venta?precioMax=200000",
-    loosened: [],
-    summary: {
-      source_portal: "aliseda",
-      total: 10,
-      pending: 4,
-      captured: 5,
-      failed: 1,
-      skipped: 0,
-    },
-    capturedPct: 50,
-    ...over,
+    tasks: over.tasks ?? [makeTask()],
+    summary:
+      over.summary === undefined
+        ? { source_portal: "aliseda", total: 10, pending: 4, captured: 5, failed: 1, skipped: 0 }
+        : over.summary,
+    capturedPct: over.capturedPct ?? 50,
   };
 }
 
 describe("PortalCaptureCard", () => {
-  it("renders the portal label and a pre-filtered 'Abrir búsqueda' link", () => {
+  it("renders the portal label and a pre-filtered 'Abrir búsqueda' link per task", () => {
     render(<PortalCaptureCard view={makeView()} />);
     expect(screen.getByTestId("captura-portal-aliseda")).toBeInTheDocument();
-    const link = screen.getByTestId("captura-open-aliseda");
-    expect(link).toHaveAttribute("href", "https://www.alisedainmobiliaria.com/venta?precioMax=200000");
+    const link = screen.getByTestId(`captura-open-${TASK_ID}`);
+    expect(link).toHaveAttribute("href", TASK_URL);
     expect(link).toHaveAttribute("target", "_blank");
     expect(screen.getByText("Aliseda")).toBeInTheDocument();
+    expect(screen.getByText("Aliseda — pisos en Malaga ≤200.000 €")).toBeInTheDocument();
+  });
+
+  it("renders one launch link per task", () => {
+    render(
+      <PortalCaptureCard
+        view={makeView({
+          tasks: [
+            makeTask({ id: "aliseda:pisos:1", url: "https://a/pisos" }),
+            makeTask({ id: "aliseda:aticos:2", url: "https://a/aticos" }),
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByTestId("captura-open-aliseda:pisos:1")).toHaveAttribute("href", "https://a/pisos");
+    expect(screen.getByTestId("captura-open-aliseda:aticos:2")).toHaveAttribute("href", "https://a/aticos");
   });
 
   it("shows the worklist progress and an accessible progress bar", () => {
@@ -43,22 +66,22 @@ describe("PortalCaptureCard", () => {
     expect(screen.getByText("1 fallidas")).toBeInTheDocument();
   });
 
-  it("surfaces loosened-constraint notes as 'búsqueda ampliada'", () => {
+  it("surfaces a task's loosened-constraint notes as 'búsqueda ampliada'", () => {
     render(
       <PortalCaptureCard
         view={makeView({
-          loosened: [{ constraint: "geography", reason: "Aliseda no busca por radio." }],
+          tasks: [makeTask({ loosened: [{ constraint: "geography", reason: "Aliseda no busca por radio." }] })],
         })}
       />,
     );
-    const note = screen.getByTestId("captura-loosened-aliseda");
+    const note = screen.getByTestId(`captura-loosened-${TASK_ID}`);
     expect(note).toHaveTextContent("búsqueda ampliada");
     expect(note).toHaveTextContent("Aliseda no busca por radio.");
   });
 
-  it("renders no loosened block when there are no loosened constraints", () => {
-    render(<PortalCaptureCard view={makeView({ loosened: [] })} />);
-    expect(screen.queryByTestId("captura-loosened-aliseda")).not.toBeInTheDocument();
+  it("renders no loosened block when a task has no loosened constraints", () => {
+    render(<PortalCaptureCard view={makeView({ tasks: [makeTask({ loosened: [] })] })} />);
+    expect(screen.queryByTestId(`captura-loosened-${TASK_ID}`)).not.toBeInTheDocument();
   });
 
   it("shows an 'aún sin lista' hint when the portal has no worklist rows yet", () => {

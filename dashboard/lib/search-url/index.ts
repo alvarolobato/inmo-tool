@@ -22,17 +22,17 @@ import { idealistaBuilder } from "./portals/idealista";
 import { alisedaBuilder } from "./portals/aliseda";
 import type {
   CanonicalSearchScope,
-  PortalSearchUrl,
   PortalSearchUrlBuilder,
+  SearchTask,
 } from "./types";
 
 export type {
   CanonicalSearchScope,
   LoosenableConstraint,
   LoosenedConstraint,
-  PortalSearchUrl,
   PortalSearchUrlBuilder,
   PropertyType,
+  SearchTask,
 } from "./types";
 
 /** Registered builders, keyed by portal. */
@@ -64,26 +64,29 @@ export function canonicalScopeFromProfile(scope: Scope): CanonicalSearchScope {
 }
 
 /**
- * Build the pre-filtered search URL for ONE portal from a profile scope, or
- * null if that portal has no builder registered.
+ * Build the pre-filtered search TASKS for ONE portal from a profile scope, or
+ * null if that portal has no builder registered. A portal can yield several
+ * tasks (one per searchable section — see SearchTask).
  */
-export function buildSearchUrl(portal: string, scope: Scope): PortalSearchUrl | null {
+export function buildSearchUrl(portal: string, scope: Scope): SearchTask[] | null {
   const builder = BUILDERS[portal];
   if (!builder) return null;
   return builder.build(canonicalScopeFromProfile(scope));
 }
 
 /**
- * Build the pre-filtered search URL for every capture portal that has a
- * builder, in CAPTURE_PORTALS order. This is what the guided-capture UI opens
- * (one tab per portal) and what the API route returns for a profile.
+ * Build the flat list of pre-filtered search TASKS across every capture portal
+ * that has a builder, in CAPTURE_PORTALS order (idealista tasks, then aliseda,
+ * …). Each task is one openable, pre-filtered URL for a single (portal ×
+ * section). This is what the API route returns for a profile; the Captura UI
+ * renders each task as its own "Abrir búsqueda" button.
  */
-export function buildSearchUrls(scope: Scope): PortalSearchUrl[] {
+export function buildSearchUrls(scope: Scope): SearchTask[] {
   const canonical = canonicalScopeFromProfile(scope);
-  const out: PortalSearchUrl[] = [];
+  const out: SearchTask[] = [];
   for (const { portal } of CAPTURE_PORTALS) {
     const builder = BUILDERS[portal];
-    if (builder) out.push(builder.build(canonical));
+    if (builder) out.push(...builder.build(canonical));
   }
   return out;
 }
