@@ -1,47 +1,78 @@
 /**
- * Aliseda pre-filtered search-URL builder (issue #277; owner-reported grammar
- * fix 2026-08-05; task-list restructure).
+ * Aliseda pre-filtered search-URL builder.
  *
- * The original #277 builder emitted a query-string grammar
- * (`/venta?tipo=…&precioMax=…`) that was reverse-engineered and WRONG. The
- * owner tested "Abrir búsqueda" and supplied the real grammar:
+ * ─── Grammar (verified against the live portal 2026-08-05, issue #336) ───────
  *
- *   /comprar-viviendas/<tipo-plural>/<comunidad>/<provincia>?subtipo=<code>&precio=<min>-<max>
+ * Aliseda organises its catalogue as a set of TOP-LEVEL category paths, each
+ * nested by region:
  *
- * Confirmed real example (Estepona-area piso, ≤ 200 000 €):
+ *   /comprar-<category>/<comunidad>/<provincia>
+ *
+ * The residential category `comprar-viviendas` additionally carries a SUBTYPE
+ * as an extra path segment + a numeric `?subtipo=<code>`:
+ *
+ *   /comprar-viviendas/<subtype-slug>/<comunidad>/<provincia>?subtipo=<code>
+ *
+ * Confirmed real example (owner-tested — Estepona-area piso, ≤ 200 000 €):
  *
  *   https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/andalucia/malaga?subtipo=36&precio=0-200000
  *
- * Aliseda encodes the property type as a single PATH segment (one type per
- * search), so a multi-type profile fans out into ONE TASK PER TYPE — not one
- * merged URL. Each task is an independently openable pre-filtered search.
+ * ─── What was WRONG before #336 ──────────────────────────────────────────────
+ * The previous builder nested EVERY property type under `comprar-viviendas`
+ * (e.g. `/comprar-viviendas/locales/…`, `/comprar-viviendas/aticos/…`). That is
+ * broken: `local`/`nave`/`garaje`/`terreno`/`edificio` are their OWN top-level
+ * `comprar-<category>` paths, and — the driving bug — Aliseda has **no `ático`
+ * category at all** (the string "atico" appears zero times in the portal's app
+ * bundle; áticos are published as `pisos`). So the emitted `…/aticos/…` slug
+ * matched nothing → the search 404'd / returned no results.
  *
- * What is CONFIRMED vs. GUESSED (everything guessed is flagged as loosened):
- *   - base path `/comprar-viviendas` .......................... confirmed
- *   - `<tipo-plural>`: `pisos` for piso ...................... confirmed
- *     other types' plural segments (aticos/chalets/…) ........ GUESSED → flag
- *   - `<comunidad>/<provincia>` slugs (e.g. andalucia/malaga)  confirmed shape;
- *     resolved from the profile's lat/lng via ../provinces.ts (bounding boxes).
- *     Aliseda has NO radius search, so a point+radius always broadens to the
- *     whole province → geography is ALWAYS loosened. If the point matches no
- *     known province we drop the geo segments (province-less search) and flag.
- *   - `subtipo=36` = piso ................................... confirmed
- *     other subtipo codes are unknown → omit subtipo + flag
- *   - `precio=<min>-<max>`: hyphen range, no separators; min defaults to 0 when
- *     the profile has no lower bound (matches the confirmed example) ... confirmed
- *   - superficie (size): NO confirmed grammar → size is dropped, and flagged
- *     when the profile sets one (broader, never narrower).
+ * ─── Provenance of the mapping (no live network in tests) ─────────────────────
+ * Category slugs verified from the live category sitemap
+ * (`/sitemap-category-aliseda-es-0.xml`, 2026-08-05): the distinct top-level
+ * `comprar-*` segments are viviendas, locales, naves, garajes, terrenos,
+ * edificios, oficinas, trasteros, obras-paradas, negocios, otros.
+ * Vivienda subtype slugs verified from the app bundle's i18n slug map
+ * (`main-*.js`, 2026-08-05): pisos, duplex, pisos-turisticos, lofts, casas,
+ * chalets-adosados, chalets-pareados — there is NO `aticos`.
+ * `subtipo` codes verified from Google-indexed real category URLs:
+ * `pisos → 36`, `chalets-adosados → 31`. Other codes are NOT guessed.
+ *
+ * ─── Canonical-type → Aliseda mapping ────────────────────────────────────────
+ *   piso     → comprar-viviendas / pisos (subtipo=36) ............... exact
+ *   atico    → comprar-viviendas / pisos (subtipo=36) ....... folded, broadened
+ *              (Aliseda has no ático bucket; áticos are pisos → broader search)
+ *   chalet   → comprar-viviendas / chalets-adosados (subtipo=31) . approximate
+ *              (Aliseda splits houses into casas / chalets-adosados /
+ *               chalets-pareados; no single "chalet" filter → flagged)
+ *   local    → comprar-locales ..................................... exact
+ *   nave     → comprar-naves ...................................... exact
+ *   garaje   → comprar-garajes .................................... exact
+ *   terreno  → comprar-terrenos ................................... exact
+ *   edificio → comprar-edificios .................................. exact
+ *
+ * Aliseda encodes ONE search per (category × subtype), so a multi-type profile
+ * fans out into ONE TASK PER type. Types that collapse onto the same Aliseda
+ * URL (piso + atico → pisos) are de-duplicated, keeping the exact one.
+ *
+ * Geography: Aliseda has NO radius search — a point+radius always broadens to
+ * the whole province, so geography is ALWAYS loosened. Province slugs come from
+ * ../provinces.ts (bounding boxes). A point matching no known province drops the
+ * geo segments (province-less search) and flags.
  *
  * The path/query spellings are the volatile part; they live in this one file so
- * refreshing them is a local edit. NB idealista.ts is a SEPARATE grammar (also
- * owner-confirmed for its own example) — do not cross-reference the two.
+ * refreshing them is a local edit. NB idealista.ts is a SEPARATE grammar — do
+ * not cross-reference the two.
  */
 
-import { PROPERTY_TYPES } from "@/lib/profiles-schema";
 import { provinceForPoint } from "../provinces";
 import { stableTaskId } from "../task-id";
 import { taskLabel } from "../labels";
-import { centerForLocationSlug, makeCategoryKey, PLACEHOLDER } from "../parse-shared";
+import {
+  centerForLocationSlug,
+  inCanonicalOrder,
+  makeCategoryKey,
+  PLACEHOLDER,
+} from "../parse-shared";
 import type {
   CanonicalSearchScope,
   LoosenableConstraint,
@@ -56,44 +87,59 @@ import type {
 
 const ORIGIN = "https://www.alisedainmobiliaria.com";
 const PORTAL = "aliseda";
-const BASE_SEGMENT = "comprar-viviendas";
 
-/**
- * The plural path segment Aliseda uses per property type. Only `piso → pisos`
- * is owner-confirmed; the rest are plausible-but-GUESSED plurals (see
- * {@link CONFIRMED_PLURALS}) and are flagged when used.
- */
-const PLURAL_BY_TYPE: Record<PropertyType, string> = {
-  piso: "pisos", // owner-confirmed 2026-08-05
-  chalet: "chalets",
-  atico: "aticos",
-  local: "locales",
-  nave: "naves",
-  garaje: "garajes",
-  terreno: "terrenos",
-  edificio: "edificios",
-};
-
-/** Property types whose plural segment the owner confirmed. */
-const CONFIRMED_PLURALS: ReadonlySet<PropertyType> = new Set<PropertyType>(["piso"]);
-
-/**
- * Aliseda's numeric `subtipo` code per property type. Only `piso = 36` is
- * owner-confirmed; unknown codes are omitted (never guessed) and flagged.
- */
-const SUBTIPO_BY_TYPE: Partial<Record<PropertyType, number>> = {
-  piso: 36, // owner-confirmed 2026-08-05
-};
-
-/** Property types in the canonical PROPERTY_TYPES order (deterministic). */
-function inCanonicalOrder(types: readonly PropertyType[]): PropertyType[] {
-  const wanted = new Set(types);
-  return PROPERTY_TYPES.filter((t) => wanted.has(t));
+/** A residential subtype: the `comprar-viviendas` path slug + its `?subtipo=` code. */
+interface VivendaSubtype {
+  slug: string;
+  code: number;
 }
+
+/** How one canonical property type maps onto Aliseda's URL grammar. */
+interface AlisedaTypeMapping {
+  /** Top-level category path segment, e.g. `comprar-viviendas` / `comprar-locales`. */
+  category: string;
+  /** Present only for residential types: the vivienda subtype slug + subtipo code. */
+  subtype?: VivendaSubtype;
+  /**
+   * Set when this canonical type has no exact Aliseda equivalent and is mapped
+   * onto a BROADER or approximate Aliseda bucket. Surfaced as a `property_types`
+   * loosened flag so the operator knows the open search isn't an exact match.
+   */
+  approxReason?: string;
+}
+
+const VIVIENDAS = "comprar-viviendas";
+
+/** Canonical property type → Aliseda category / subtype (verified 2026-08-05, #336). */
+const TYPE_MAP: Record<PropertyType, AlisedaTypeMapping> = {
+  // Residential — one `comprar-viviendas` category split into subtypes.
+  piso: { category: VIVIENDAS, subtype: { slug: "pisos", code: 36 } },
+  atico: {
+    category: VIVIENDAS,
+    subtype: { slug: "pisos", code: 36 },
+    approxReason:
+      "Aliseda no tiene una categoría «ático»: los áticos se publican como pisos. " +
+      "La búsqueda se hace en «pisos» (más amplia — incluye pisos que no son áticos).",
+  },
+  chalet: {
+    category: VIVIENDAS,
+    subtype: { slug: "chalets-adosados", code: 31 },
+    approxReason:
+      "Aliseda divide las casas en «casas», «chalets adosados» y «chalets pareados»; " +
+      "no existe un filtro único «chalet». Se usa «chalets adosados»; revisa a mano " +
+      "pareados y casas independientes si procede.",
+  },
+  // Non-residential — each is its OWN top-level category (NOT nested under viviendas).
+  local: { category: "comprar-locales" },
+  nave: { category: "comprar-naves" },
+  garaje: { category: "comprar-garajes" },
+  terreno: { category: "comprar-terrenos" },
+  edificio: { category: "comprar-edificios" },
+};
 
 /** Geography resolved once per profile (same province for every task). */
 interface GeoResolution {
-  /** Path segments to append after the tipo (`[comunidad, provincia]` or `[]`). */
+  /** Region path segments (`[comunidad, provincia]` or `[]`). */
   segments: string[];
   /** Location key for the deterministic task id (`comunidad/provincia` or ""). */
   idLocation: string;
@@ -134,35 +180,26 @@ function resolveGeo(scope: CanonicalSearchScope): GeoResolution {
 }
 
 /** Build the single task for one property type. */
-function buildTask(type: PropertyType, geo: GeoResolution, scope: CanonicalSearchScope): SearchTask {
+function buildTask(
+  type: PropertyType,
+  geo: GeoResolution,
+  scope: CanonicalSearchScope,
+): SearchTask {
   const loosened: LoosenedConstraint[] = [];
-  const plural = PLURAL_BY_TYPE[type];
-  const segments = [BASE_SEGMENT, plural, ...geo.segments];
+  const map = TYPE_MAP[type];
+
+  const segments = [map.category];
+  if (map.subtype) segments.push(map.subtype.slug);
+  segments.push(...geo.segments);
 
   loosened.push(geo.flag);
 
-  if (!CONFIRMED_PLURALS.has(type)) {
-    loosened.push({
-      constraint: "property_types",
-      reason:
-        `El segmento de ruta para «${type}» ("${plural}") es una conjetura; ` +
-        `sólo "pisos" está confirmado. Verifica que la URL abra el tipo correcto.`,
-    });
+  if (map.approxReason) {
+    loosened.push({ constraint: "property_types", reason: map.approxReason });
   }
 
   const params = new URLSearchParams();
-
-  const subtipo = SUBTIPO_BY_TYPE[type];
-  if (subtipo !== undefined) {
-    params.set("subtipo", String(subtipo));
-  } else {
-    loosened.push({
-      constraint: "property_types",
-      reason:
-        `Código «subtipo» desconocido para «${type}» (sólo piso=36 confirmado); ` +
-        `se omite subtipo y la búsqueda no filtra el subtipo exacto.`,
-    });
-  }
+  if (map.subtype) params.set("subtipo", String(map.subtype.code));
 
   // precio=<min>-<max>: hyphen range, no separators. min defaults to 0. Needs
   // an upper bound to form a range; a lower-bound-only profile can't be
@@ -199,9 +236,14 @@ function buildTask(type: PropertyType, geo: GeoResolution, scope: CanonicalSearc
   const query = params.toString(); // hyphen + digits are URL-safe, so precio survives verbatim
   const url = query ? `${ORIGIN}${path}?${query}` : `${ORIGIN}${path}`;
 
+  // Section = the URL's discriminating segment: the subtype slug for viviendas,
+  // else the category. Two types that collapse onto the same section+filters
+  // (piso + atico → pisos) get the same id and are de-duplicated in build().
+  const section = map.subtype ? map.subtype.slug : map.category;
+
   const id = stableTaskId({
     portal: PORTAL,
-    section: plural,
+    section,
     location: geo.idLocation,
     priceMin: scope.priceMin,
     priceMax: scope.priceMax,
@@ -212,7 +254,13 @@ function buildTask(type: PropertyType, geo: GeoResolution, scope: CanonicalSearc
   return {
     id,
     portal: PORTAL,
-    label: taskLabel(PORTAL, [type], geo.labelSlug, scope.priceMin, scope.priceMax),
+    label: taskLabel(
+      PORTAL,
+      [type],
+      geo.labelSlug,
+      scope.priceMin,
+      scope.priceMax,
+    ),
     url,
     loosened,
   };
@@ -220,7 +268,17 @@ function buildTask(type: PropertyType, geo: GeoResolution, scope: CanonicalSearc
 
 function buildAliseda(scope: CanonicalSearchScope): SearchTask[] {
   const geo = resolveGeo(scope);
-  return inCanonicalOrder(scope.propertyTypes).map((type) => buildTask(type, geo, scope));
+  const seen = new Set<string>();
+  const tasks: SearchTask[] = [];
+  // Canonical order → piso precedes atico, so the exact `pisos` task wins the
+  // de-dup over atico's folded (broadened) one.
+  for (const type of inCanonicalOrder(scope.propertyTypes)) {
+    const task = buildTask(type, geo, scope);
+    if (seen.has(task.url)) continue;
+    seen.add(task.url);
+    tasks.push(task);
+  }
+  return tasks;
 }
 
 export const alisedaBuilder: PortalSearchUrlBuilder = {
@@ -228,34 +286,112 @@ export const alisedaBuilder: PortalSearchUrlBuilder = {
   build: buildAliseda,
 };
 
-// ─── parse(): the structural inverse of buildAliseda (issue #293) ────────────
+// ─── parse(): the structural inverse of buildAliseda (issue #293 / #336) ─────
 //
-// build() emits `/comprar-viviendas/<plural>[/<comunidad>/<provincia>]?subtipo=<code>&precio=<min>-<max>`.
-// parse() reads it back. Round-trip tests (aliseda.test.ts) fail loudly on any
-// build() grammar drift — the mechanism that stops us re-breaking the URL shape.
+// build() emits `/comprar-<category>[/<subtype-slug>][/<comunidad>/<provincia>]?subtipo=<code>&precio=<min>-<max>`.
+// parse() reads it back — and, since the save route (search-url-example.ts) and
+// resolver feed it REAL operator-navigated URLs, it also decodes captured URLs
+// across every Aliseda category, not only the ones build() emits. Round-trip
+// tests (parse.test.ts / aliseda.test.ts) fail loudly on any build() drift.
 
-/** Reverse of PLURAL_BY_TYPE: aliseda path plural → property type. */
-const TYPE_BY_PLURAL: Record<string, PropertyType> = Object.fromEntries(
-  (Object.entries(PLURAL_BY_TYPE) as Array<[PropertyType, string]>).map(([t, p]) => [p, t]),
-);
+/** Known top-level Aliseda categories (superset of what build() emits). */
+const CATEGORY_SLUGS: ReadonlySet<string> = new Set([
+  "comprar-viviendas",
+  "comprar-locales",
+  "comprar-naves",
+  "comprar-garajes",
+  "comprar-terrenos",
+  "comprar-edificios",
+  "comprar-oficinas",
+  "comprar-trasteros",
+  "comprar-obras-paradas",
+  "comprar-negocios",
+  "comprar-otros",
+  "comprar-todos",
+]);
+
+/** Residential subtype slugs (verified from the app bundle, 2026-08-05). */
+const VIVIENDA_SUBTYPE_SLUGS: ReadonlySet<string> = new Set([
+  "pisos",
+  "duplex",
+  "pisos-turisticos",
+  "lofts",
+  "casas",
+  "chalets-adosados",
+  "chalets-pareados",
+]);
+
+/** Subtype slug → canonical coarse property type (parse direction). */
+const SUBTYPE_TO_TYPE: Record<string, PropertyType> = {
+  pisos: "piso",
+  duplex: "piso",
+  "pisos-turisticos": "piso",
+  lofts: "piso",
+  casas: "chalet",
+  "chalets-adosados": "chalet",
+  "chalets-pareados": "chalet",
+};
+
+/** Category slug → canonical property type(s) when no subtype narrows it. */
+const CATEGORY_TO_TYPES: Record<string, PropertyType[]> = {
+  "comprar-viviendas": ["piso", "chalet", "atico"],
+  "comprar-locales": ["local"],
+  "comprar-naves": ["nave"],
+  "comprar-garajes": ["garaje"],
+  "comprar-terrenos": ["terreno"],
+  "comprar-edificios": ["edificio"],
+};
 
 const PRECIO_PLACEHOLDER = `${PLACEHOLDER.priceMin}-${PLACEHOLDER.priceMax}`;
 
-// origin | plural | comunidad | provincia | query (without leading ?)
-const PARSE_RE =
-  /^(https?:\/\/(?:www\.)?alisedainmobiliaria\.com)\/comprar-viviendas\/([^/?#]+)(?:\/([^/?#]+)\/([^/?#]+))?(?:\?([^#]*))?$/;
+// origin | category | remaining path segments | query (without leading ?)
+const PATH_RE =
+  /^(https?:\/\/(?:www\.)?alisedainmobiliaria\.com)\/(comprar-[a-z0-9-]+)((?:\/[^/?#]+)*)(?:\?([^#]*))?$/;
+
+interface AlisedaPathParts {
+  origin: string;
+  category: string;
+  subtypeSlug?: string;
+  /** Region path segments after the (optional) subtype, e.g. `["andalucia","malaga"]`. */
+  regionSegments: string[];
+  rawQuery?: string;
+}
+
+/** Split an Aliseda URL into {category, subtype?, region, query}, or null. */
+function splitAlisedaPath(url: string): AlisedaPathParts | null {
+  const m = PATH_RE.exec(url.trim());
+  if (!m) return null;
+  const [, origin, category, rest, rawQuery] = m;
+  if (!CATEGORY_SLUGS.has(category)) return null;
+
+  const segs = rest ? rest.split("/").filter(Boolean) : [];
+  let subtypeSlug: string | undefined;
+  if (
+    category === "comprar-viviendas" &&
+    segs.length > 0 &&
+    VIVIENDA_SUBTYPE_SLUGS.has(segs[0])
+  ) {
+    subtypeSlug = segs.shift();
+  }
+  return { origin, category, subtypeSlug, regionSegments: segs, rawQuery };
+}
 
 function parseAliseda(url: string): ParsedSearchUrl | null {
-  const m = PARSE_RE.exec(url.trim());
-  if (!m) return null;
-  const [, origin, plural, comunidad, provincia, rawQuery] = m;
-  const type = TYPE_BY_PLURAL[plural];
-  if (!type) return null;
+  const p = splitAlisedaPath(url);
+  if (!p) return null;
+  const { origin, category, subtypeSlug, regionSegments, rawQuery } = p;
 
-  const locationSlug = comunidad && provincia ? `${comunidad}/${provincia}` : "";
+  const locationSlug = regionSegments.join("/");
+  const section = subtypeSlug ?? category;
+  // subtypeSlug is only set when it's a known VIVIENDA_SUBTYPE_SLUGS entry, and
+  // every such slug has a SUBTYPE_TO_TYPE mapping — so the lookup is total.
+  const propertyTypes = subtypeSlug
+    ? [SUBTYPE_TO_TYPE[subtypeSlug]]
+    : (CATEGORY_TO_TYPES[category] ?? []);
+
   const filters: ParsedSearchFilters = {
-    section: plural,
-    propertyTypes: [type],
+    section,
+    propertyTypes,
     locationSlug,
     center: centerForLocationSlug(locationSlug),
   };
@@ -269,23 +405,41 @@ function parseAliseda(url: string): ParsedSearchUrl | null {
       if (mm) {
         if (Number(mm[1]) > 0) filters.priceMin = Number(mm[1]); // 0 is the "no min" sentinel
         filters.priceMax = Number(mm[2]);
-        templateQuery = templateQuery.replace(/precio=\d+-\d+/, `precio=${PRECIO_PLACEHOLDER}`);
+        templateQuery = templateQuery.replace(
+          /precio=\d+-\d+/,
+          `precio=${PRECIO_PLACEHOLDER}`,
+        );
       }
     }
   }
 
-  const path = `/comprar-viviendas/${plural}${locationSlug ? `/${locationSlug}` : ""}`;
-  const template = templateQuery ? `${origin}${path}?${templateQuery}` : `${origin}${path}`;
-  return { filters, categoryKey: makeCategoryKey(plural), template };
+  const path = alisedaPath(category, subtypeSlug, locationSlug);
+  const template = templateQuery
+    ? `${origin}${path}?${templateQuery}`
+    : `${origin}${path}`;
+  return { filters, categoryKey: makeCategoryKey(section), template };
+}
+
+/** Rebuild the path portion from its parts (shared by parse + substitute). */
+function alisedaPath(
+  category: string,
+  subtypeSlug: string | undefined,
+  locationSlug: string,
+): string {
+  const parts = [category];
+  if (subtypeSlug) parts.push(subtypeSlug);
+  if (locationSlug) parts.push(locationSlug);
+  return `/${parts.join("/")}`;
 }
 
 function substituteAliseda(
   template: string,
   scope: CanonicalSearchScope,
 ): { url: string; unfilled: LoosenableConstraint[] } {
-  const m = PARSE_RE.exec(template);
-  if (!m) return { url: template, unfilled: [] };
-  const [, origin, plural, comunidad, provincia, rawQuery] = m;
+  const p = splitAlisedaPath(template);
+  if (!p) return { url: template, unfilled: [] };
+  const { origin, category, subtypeSlug, regionSegments, rawQuery } = p;
+  const locationSlug = regionSegments.join("/");
   const unfilled: LoosenableConstraint[] = [];
 
   const outParams: string[] = [];
@@ -294,7 +448,8 @@ function substituteAliseda(
     for (const part of rawQuery.split("&")) {
       if (part === `precio=${PRECIO_PLACEHOLDER}`) {
         if (scope.priceMax !== undefined) {
-          const min = scope.priceMin !== undefined ? Math.round(scope.priceMin) : 0;
+          const min =
+            scope.priceMin !== undefined ? Math.round(scope.priceMin) : 0;
           outParams.push(`precio=${min}-${Math.round(scope.priceMax)}`);
         } else if (scope.priceMin !== undefined) {
           // No upper bound → can't form the range → drop the floor (broader).
@@ -307,13 +462,17 @@ function substituteAliseda(
   }
 
   // Price the template can't express, and size (aliseda has no size grammar).
-  if (scope.priceMax !== undefined && !hasPrecioPlaceholder) unfilled.push("price_max");
+  if (scope.priceMax !== undefined && !hasPrecioPlaceholder)
+    unfilled.push("price_max");
   if (scope.sizeMin !== undefined) unfilled.push("size_min");
   if (scope.sizeMax !== undefined) unfilled.push("size_max");
 
-  const path = `/comprar-viviendas/${plural}${comunidad && provincia ? `/${comunidad}/${provincia}` : ""}`;
+  const path = alisedaPath(category, subtypeSlug, locationSlug);
   const query = outParams.join("&");
-  return { url: query ? `${origin}${path}?${query}` : `${origin}${path}`, unfilled };
+  return {
+    url: query ? `${origin}${path}?${query}` : `${origin}${path}`,
+    unfilled,
+  };
 }
 
 export const alisedaParser: PortalSearchUrlParser = {
