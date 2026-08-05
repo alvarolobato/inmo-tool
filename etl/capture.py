@@ -225,6 +225,7 @@ def process_pending_captures(conn) -> int:
     enabled_cache: dict[str, bool] = {}
     processed = 0
     skipped_disabled = 0
+    ingested = 0
     for capture_id, url, html in pending:
         try:
             resolved = _connector_for_url(url)
@@ -241,7 +242,8 @@ def process_pending_captures(conn) -> int:
             # marks it failed with the "no capture-capable connector"
             # message — unchanged behaviour, and not something a disabled
             # connector should silently swallow.
-            _process_one(conn, capture_id, url, html)
+            if _process_one(conn, capture_id, url, html):
+                ingested += 1
         except Exception:
             logger.exception(
                 "extension_capture id=%s: unexpected error, marking failed",
@@ -249,6 +251,39 @@ def process_pending_captures(conn) -> int:
             )
             _mark_failed(conn, capture_id, url, "Unexpected internal error")
         processed += 1
+
+    # Issue #269: a capture that actually landed a listing must trigger the
+    # same dashboard re-materialize + scoring the connector orchestrator fires
+    # after a sweep (issue #94). Without this, a browser-extension capture — the
+    # ONLY ingestion path for capture-only portals (Idealista, Aliseda), and a
+    # bulk one since the batch-capture-a-search-page feature (#262) — wrote new
+    # listings that no active profile ever folded in, so a profile silently went
+    # stale and under-reported (the live Estepona 0-matches incident) until a
+    # human hit `POST /api/profiles/materialize-all` by hand. The connector
+    # sweeps already notify; captures were the remaining gap.
+    #
+    # Fired ONCE per batch (not per listing) and only when something was
+    # genuinely ingested — a batch of only failures/disabled rows re-materializes
+    # nothing. Best-effort and fully swallowed, exactly like the orchestrator's
+    # own call site: the captures are already committed by now, and materialize
+    # is idempotent, so a dashboard that is down/misconfigured only means the
+    # candidates stay unscored until the next sweep or manual trigger — never a
+    # reason to fail the capture that already succeeded. Lazy import mirrors
+    # `_process_one`'s: etl.orchestrator ↔ etl.connectors have an import cycle
+    # that a top-level import here could trip.
+    if ingested:
+        try:
+            from etl import orchestrator
+
+            orchestrator.notify_materialize_all(trigger="capture")
+        except Exception:
+            logger.warning(
+                "materialize-all notification after %d captured listing(s) raised "
+                "unexpectedly — the captures are committed and unaffected; "
+                "candidates will be scored on the next sweep or manual trigger",
+                ingested,
+                exc_info=True,
+            )
 
     if skipped_disabled:
         # One line per batch, not per row: this poll loop runs every few
@@ -264,7 +299,11 @@ def process_pending_captures(conn) -> int:
     return processed
 
 
-def _process_one(conn, capture_id: int, url: str, html: str) -> None:
+def _process_one(conn, capture_id: int, url: str, html: str) -> bool:
+    """Process one capture. Returns True if a listing was actually ingested
+    (upserted into `property`/`listing`), False if the capture was marked
+    failed. The caller uses the True count to decide whether the batch should
+    fire a dashboard re-materialize (issue #269)."""
     resolved = _connector_for_url(url)
     if resolved is None:
         _mark_failed(
@@ -274,7 +313,7 @@ def _process_one(conn, capture_id: int, url: str, html: str) -> None:
             "No capture-capable connector recognizes this URL "
             "(supported: Idealista, issue #75; Aliseda, issue #237)",
         )
-        return
+        return False
 
     connector, external_id = resolved
     raw = RawListing(
@@ -285,7 +324,7 @@ def _process_one(conn, capture_id: int, url: str, html: str) -> None:
         canonical = connector.normalize(raw)
     except ConnectorError as exc:
         _mark_failed(conn, capture_id, url, str(exc))
-        return
+        return False
 
     # Reuses the exact same persistence path the automated orchestrator
     # sweep uses (etl.orchestrator._upsert_canonical_listing) — a captured
@@ -348,6 +387,7 @@ def _process_one(conn, capture_id: int, url: str, html: str) -> None:
         connector.name,
         property_id,
     )
+    return True
 
 
 def run_capture_poll_loop(conn_factory, interval_seconds: int = 10) -> None:
