@@ -962,6 +962,89 @@ def _update_last_seen_for_discovered(
     conn.commit()
 
 
+def _record_discovery_price_observations(
+    conn, source: str, discovery_prices: dict[str, Decimal]
+) -> int:
+    """Append every discovery-time price to `listing_price_history` (issue #183).
+
+    Fotocasa's `discovered_prices()` yields a verified, detail-accurate price
+    for *every* discovered listing on *every* sweep, at zero extra request
+    cost (it's read out of the same `__initial_props__` JSON blob `discover()`
+    already fetches — see `etl.connectors.fotocasa`). Before this, that signal
+    was used only as a boolean gate in `_should_skip_fetch` and then thrown
+    away: a price change seen at discovery time was lost unless the listing
+    also happened to win a slot in this run's fetch budget (circuit breaker /
+    rate limit / `min_refetch_interval_seconds`). During Fotocasa's initial
+    backfill the fetch front only advances ~40 ids/run, so a verified price for
+    the whole ~1,358-listing inventory was sitting unused every sweep while
+    price-drop detection (issue #34) stayed stale for days.
+
+    This writes those prices straight to the price-history timeline,
+    **decoupled entirely from the fetch budget** — a discovered listing the
+    budget never reaches this run still gets its observation recorded.
+
+    Dedup / idempotency mirrors the fetch-path write in
+    `_update_existing_listing`: that path appends a row only when the newly
+    fetched price differs from what's stored, and updates the stored anchor in
+    the same transaction so the same price is never re-inserted on the next
+    run. Here the anchor is the listing's **most recent recorded price**
+    (the latest `listing_price_history` row), and a row is inserted only when
+    the discovery price `IS DISTINCT FROM` it. That gives the same guarantees
+    without touching `listing.current_price`:
+
+    * Same run: a listing the fetch loop DID re-fetch (a discovery-time price
+      delta forces exactly that, `_should_skip_fetch` reason #5) already had
+      its authoritative fetched price appended by `_update_existing_listing`,
+      so the discovery price equals the latest row and is deduped away — no
+      double-insert of the same observation.
+    * Across runs: once a discovery price is recorded it becomes the latest
+      row, so re-seeing the same price on the next sweep is a no-op.
+
+    `listing.current_price` is deliberately left **fetch-path-owned** (D-068):
+    updating it from a discovery price would make `_should_skip_fetch`'s
+    "discovery price disagrees with stored price -> force a re-fetch" trigger
+    (its central price-change safety net) stop firing, since stored would then
+    already equal the discovered value. `listing_price_history` is the only
+    consumer of the discovery-time signal.
+
+    Connector-agnostic by construction: drives off whatever
+    `Connector.discovered_prices()` returns, which is `{}` for every connector
+    that hasn't verified a discovery-time price field — so this is a cheap
+    early-return no-op for all but Fotocasa today. Only listings that already
+    have a `listing` row can get an observation (the FK requires it); a
+    brand-new discovered id with no row yet gets its first price on its first
+    real fetch, exactly as before. Commits its own transaction, like the other
+    discovery-time helper `_update_last_seen_for_discovered`. Returns the
+    number of observations written.
+    """
+    if not discovery_prices:
+        return 0
+    external_ids = list(discovery_prices.keys())
+    prices = [discovery_prices[external_id] for external_id in external_ids]
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO listing_price_history (listing_id, observed_at, price)
+            SELECT l.id, NOW(), incoming.price
+              FROM unnest(%s::text[], %s::numeric[])
+                       AS incoming(external_id, price)
+              JOIN listing l
+                ON l.source = %s AND l.external_id = incoming.external_id
+             WHERE incoming.price IS DISTINCT FROM (
+                       SELECT h.price
+                         FROM listing_price_history h
+                        WHERE h.listing_id = l.id
+                        ORDER BY h.observed_at DESC, h.id DESC
+                        LIMIT 1
+                   )
+            """,
+            (external_ids, prices, source),
+        )
+        recorded = cur.rowcount
+    conn.commit()
+    return recorded
+
+
 def _fetch_freshness_map(
     conn, source: str, external_ids: list[str]
 ) -> dict[str, tuple[datetime | None, Decimal | None, str | None]]:
@@ -1364,6 +1447,26 @@ def run_connector(
         fetched += 1
         breaker.record_success()
 
+    # Issue #183: persist every discovery-time price observation straight to
+    # listing_price_history, decoupled from the fetch budget. Runs AFTER the
+    # fetch loop on purpose: a listing the loop re-fetched has already had its
+    # authoritative price appended by _update_existing_listing, so deduping
+    # against the latest recorded price (see the helper) collapses the
+    # discovery observation into that row rather than double-inserting it,
+    # while a listing the budget never reached this run still gets its
+    # verified discovery-time price recorded. No-op ({} early return) for every
+    # connector that hasn't verified a discovery-time price field.
+    discovery_price_observations = _record_discovery_price_observations(
+        conn, connector.name, discovery_prices
+    )
+    if discovery_price_observations:
+        logger.info(
+            "Connector %s: recorded %d discovery-time price observation(s) to "
+            "listing_price_history this scope (decoupled from the fetch budget)",
+            connector.name,
+            discovery_price_observations,
+        )
+
     if skipped:
         # Opus review, PR #175: the per-listing INFO line above is up to
         # one line per discovered id (1,358 for a full Fotocasa sweep) —
@@ -1439,6 +1542,9 @@ def run_connector(
         "error_count": errors,
         "soft_block_error_count": soft_block_errors,
         "gone_count": gone,
+        # Issue #183: discovery-time price observations written to
+        # listing_price_history this scope, independent of the fetch budget.
+        "discovery_price_observations": discovery_price_observations,
         "circuit_open": circuit_open,
         # 'fatal' | 'soft' | None — which category tripped the breaker this
         # scope (D-047). Drives whether the caller records the connector's
