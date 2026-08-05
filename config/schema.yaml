@@ -48,6 +48,45 @@
   components: [etl]
 
 # -----------------------------------------------------------------------------
+# Captura (task-driven guided-capture page — issue #289)
+# -----------------------------------------------------------------------------
+# The /captura page shows one openable capture TASK per (profile × portal ×
+# section). Each task greys out for `capture.staleness_days` after it was last
+# run, then returns to colour (due again). The per-portal keys override the
+# global default for that portal only; leave them unset (null) to inherit the
+# global value. Resolution: env > config.yaml > default, per key, with
+# per-portal winning over global (see dashboard/lib/captura-tasks.ts).
+- key: capture.staleness_days
+  env: CAPTURE_STALENESS_DAYS
+  type: int
+  sensitive: false
+  default: 7
+  section: "Captura"
+  description: "Ventana de caducidad (días) de una tarea de captura: tras ejecutarla, la tarea queda atenuada (hecha) durante estos días; al pasar la ventana vuelve a estar activa (toca repetirla). Es solo una señal visual — siempre se puede repetir antes. Valor global; se puede afinar por portal."
+  requires_restart: []
+  components: [dashboard]
+
+- key: capture.staleness_days_idealista
+  env: CAPTURE_STALENESS_DAYS_IDEALISTA
+  type: int
+  sensitive: false
+  default: null
+  section: "Captura"
+  description: "Ventana de caducidad (días) específica para las tareas de Idealista. Sin valor hereda capture.staleness_days (el global)."
+  requires_restart: []
+  components: [dashboard]
+
+- key: capture.staleness_days_aliseda
+  env: CAPTURE_STALENESS_DAYS_ALISEDA
+  type: int
+  sensitive: false
+  default: null
+  section: "Captura"
+  description: "Ventana de caducidad (días) específica para las tareas de Aliseda. Sin valor hereda capture.staleness_days (el global)."
+  requires_restart: []
+  components: [dashboard]
+
+# -----------------------------------------------------------------------------
 # PostgreSQL (local mirror — destination for connector sync)
 # -----------------------------------------------------------------------------
 - key: postgres.user
