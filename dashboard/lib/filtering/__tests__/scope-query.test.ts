@@ -52,13 +52,19 @@ describe("buildScopeWhereClause", () => {
     expect(params).not.toContain(undefined);
   });
 
-  it("filters m2_built (not m2_useful) for size_min/size_max", () => {
+  it("filters m2_built (not m2_useful) for size_min/size_max, via the #28 extract fallback", () => {
     const { whereSql, params } = buildScopeWhereClause(
       baseScope({ size_min: 40, size_max: 90 }),
     );
-    // $1-$3 geography, $4 property_types, so size starts at $5.
-    expect(whereSql).toContain("property.m2_built >= $5");
-    expect(whereSql).toContain("property.m2_built <= $6");
+    // #182: the size band now coalesces property.m2_built with a
+    // high-confidence extracted value, but property.m2_built still wins when
+    // present (COALESCE order) and the extract subquery binds no params, so
+    // $1-$3 geography, $4 property_types, size still at $5/$6.
+    expect(whereSql).toContain("COALESCE(property.m2_built, (SELECT (ax.result->>'m2_built')::numeric");
+    expect(whereSql).toMatch(/>= \$5/);
+    expect(whereSql).toMatch(/<= \$6/);
+    // The confidence gate (issue #182 EC-1/EC-2) is on the m2_built field.
+    expect(whereSql).toContain("confidence_per_field'->>'m2_built')::numeric >= 0.6");
     expect(whereSql).not.toContain("m2_useful");
     expect(params.slice(4)).toEqual([40, 90]);
   });
@@ -84,21 +90,33 @@ describe("buildScopeWhereClause", () => {
     expect(params[4]).toBe(150000);
   });
 
-  it("requires_elevator excludes properties without a known elevator (IS TRUE, not = true)", () => {
+  it("requires_elevator excludes ONLY a confidently-known missing elevator (IS NOT FALSE), consulting the #28 extract fallback", () => {
     const { whereSql } = buildScopeWhereClause(
       baseScope({ hard_exclusions: { requires_elevator: true } }),
     );
-    // IS TRUE (not `= true`) so a NULL has_elevator (unknown) is correctly
-    // excluded rather than matching via NULL = true's UNKNOWN-is-falsy quirk
-    // being accidentally relied upon instead of stated explicitly.
-    expect(whereSql).toContain("property.has_elevator IS TRUE");
+    // #182 EC-2: `IS NOT FALSE`, not `IS TRUE`. A hard exclusion removes only
+    // what is KNOWN-bad (same rule excludes_ground_floor applies to an
+    // unpublished floor). A NULL/unknown elevator — including a
+    // below-threshold extraction the fallback drops — is kept, not rejected;
+    // only property.has_elevator=false or a >= 0.6 extraction of false
+    // excludes.
+    expect(whereSql).toContain("COALESCE(property.has_elevator, (SELECT (ax.result->>'has_elevator')::boolean");
+    expect(whereSql).toContain("IS NOT FALSE");
+    expect(whereSql).toContain("confidence_per_field'->>'has_elevator')::numeric >= 0.6");
+    expect(whereSql).not.toContain("property.has_elevator IS TRUE");
   });
 
-  it("excludes_ground_floor treats NULL/unknown floor as NOT ground floor (included, not excluded)", () => {
+  it("excludes_ground_floor treats NULL/unknown floor as NOT ground floor (included, not excluded), consulting the #28 extract fallback", () => {
     const { whereSql, params } = buildScopeWhereClause(
       baseScope({ hard_exclusions: { excludes_ground_floor: true } }),
     );
-    expect(whereSql).toContain("LOWER(COALESCE(property.floor, ''))");
+    // #182: floor now coalesces property.floor with a high-confidence
+    // extracted value before the ground-floor comparison; property.floor
+    // still wins when present, and both-NULL still resolves to '' <> 'bajo'
+    // (kept, not excluded). The extract subquery binds no params, so 'bajo'
+    // is still the last positional param.
+    expect(whereSql).toContain("LOWER(COALESCE(COALESCE(property.floor, (SELECT (ax.result->>'floor')");
+    expect(whereSql).toContain("confidence_per_field'->>'floor')::numeric >= 0.6");
     expect(params.at(-1)).toBe("bajo");
   });
 
