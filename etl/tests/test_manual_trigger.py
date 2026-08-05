@@ -302,6 +302,133 @@ class TestManualTriggerConcurrency:
             _reset(pg_conn, [])
 
 
+def _insert_running(
+    conn, *, age_seconds: int, connector_name: str | None = None
+) -> int:
+    """Insert a row already at status='running' whose picked_up_at is
+    `age_seconds` in the past — stands in for a trigger claimed by a process
+    that then died before marking it done (issue #253 / D-068)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO etl_manual_trigger
+                   (status, requested_at, picked_up_at, connector_name, triggered_by)
+            VALUES ('running',
+                    NOW() - make_interval(secs => %s),
+                    NOW() - make_interval(secs => %s),
+                    %s, 'test')
+            RETURNING id
+            """,
+            (age_seconds, age_seconds, connector_name),
+        )
+        trigger_id = int(cur.fetchone()[0])
+    conn.commit()
+    return trigger_id
+
+
+class TestReconcileOrphanedManualTriggers:
+    """Age-reconciler for orphaned 'running' rows (issue #253, D-068)."""
+
+    def test_stuck_old_running_row_is_reconciled_to_failed(self, pg_conn):
+        """A 'running' row whose picked_up_at is older than the threshold — a
+        crashed/killed process's orphan — is transitioned to 'failed' with a
+        reason and a finished_at, so it never misreports 'running' forever."""
+        _apply_schema(pg_conn)
+        try:
+            # picked up 3h ago; threshold 1h -> orphan.
+            trigger_id = _insert_running(pg_conn, age_seconds=10800)
+
+            reconciled = manual_trigger.reconcile_orphaned_manual_triggers(
+                pg_conn, max_runtime_seconds=3600
+            )
+
+            assert reconciled == 1
+            row = _trigger_row(pg_conn, trigger_id)
+            assert row["status"] == "failed"
+            assert row["finished_at"] is not None
+            assert row["error_msg"] is not None
+            assert "orphaned" in row["error_msg"]
+
+            # Idempotent: a second pass touches nothing (row is now 'failed').
+            assert (
+                manual_trigger.reconcile_orphaned_manual_triggers(
+                    pg_conn, max_runtime_seconds=3600
+                )
+                == 0
+            )
+        finally:
+            _reset(pg_conn, [])
+
+    def test_fresh_running_row_is_not_reconciled(self, pg_conn):
+        """A 'running' row younger than the threshold is a genuinely in-flight
+        run and must be left untouched — the not-stomp-a-live-run safety."""
+        _apply_schema(pg_conn)
+        try:
+            # picked up 60s ago; threshold 1h -> still running, leave alone.
+            trigger_id = _insert_running(pg_conn, age_seconds=60)
+
+            reconciled = manual_trigger.reconcile_orphaned_manual_triggers(
+                pg_conn, max_runtime_seconds=3600
+            )
+
+            assert reconciled == 0
+            row = _trigger_row(pg_conn, trigger_id)
+            assert row["status"] == "running"
+            assert row["finished_at"] is None
+            assert row["error_msg"] is None
+        finally:
+            _reset(pg_conn, [])
+
+    def test_reconciler_leaves_pending_and_done_rows_alone(self, pg_conn):
+        """Only status='running' rows are eligible — a pending row (queued, not
+        yet claimed) and a done row (already terminal) are never touched even
+        though their timestamps are old."""
+        _apply_schema(pg_conn)
+        try:
+            pending_id = _insert_pending(pg_conn, connector_name=None)
+            # Make the pending row old too, to prove age alone doesn't reconcile it.
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE etl_manual_trigger "
+                    "SET requested_at = NOW() - make_interval(secs => 99999) "
+                    "WHERE id = %s",
+                    (pending_id,),
+                )
+            pg_conn.commit()
+
+            reconciled = manual_trigger.reconcile_orphaned_manual_triggers(
+                pg_conn, max_runtime_seconds=3600
+            )
+
+            assert reconciled == 0
+            assert _trigger_row(pg_conn, pending_id)["status"] == "pending"
+        finally:
+            _reset(pg_conn, [])
+
+
+class TestManualTriggerMaxRuntimeConfig:
+    """Unit tests for the configurable threshold (no DB)."""
+
+    def test_default_is_7200(self, monkeypatch):
+        from etl import config
+
+        monkeypatch.delenv("ETL_MANUAL_TRIGGER_MAX_RUNTIME_SECONDS", raising=False)
+        assert config._get_manual_trigger_max_runtime_seconds() == 7200
+
+    def test_env_override_wins(self, monkeypatch):
+        from etl import config
+
+        monkeypatch.setenv("ETL_MANUAL_TRIGGER_MAX_RUNTIME_SECONDS", "1800")
+        assert config._get_manual_trigger_max_runtime_seconds() == 1800
+
+    def test_non_positive_and_garbage_coerce_to_default(self, monkeypatch):
+        from etl import config
+
+        for bad in ("0", "-5", "not-an-int"):
+            monkeypatch.setenv("ETL_MANUAL_TRIGGER_MAX_RUNTIME_SECONDS", bad)
+            assert config._get_manual_trigger_max_runtime_seconds() == 7200
+
+
 def postgres_dsn_config():
     """A minimal object exposing the DSN the way get_connection expects.
 
