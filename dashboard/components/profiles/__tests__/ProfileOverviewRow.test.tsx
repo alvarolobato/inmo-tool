@@ -128,6 +128,21 @@ describe("ProfileOverviewRow (issue #193)", () => {
     expect(screen.queryByTestId("profile-zero-why-link")).not.toBeInTheDocument();
   });
 
+  it("exposes a stable row anchor id and reflects the highlighted prop (issue #195 novedades jump-to)", () => {
+    const entry: ProfileOverviewEntry = { ok: true, profile: profile({ id: 7 }), metrics: metrics() };
+    const { rerender } = render(
+      <ProfileOverviewRow entry={entry} onEdit={noop} onClone={noop} onArchive={noop} busy={false} />,
+    );
+    const row = screen.getByTestId("profile-row");
+    expect(row).toHaveAttribute("id", "profile-row-7");
+    expect(row).not.toHaveAttribute("data-highlighted");
+
+    rerender(
+      <ProfileOverviewRow entry={entry} onEdit={noop} onClone={noop} onArchive={noop} busy={false} highlighted />,
+    );
+    expect(screen.getByTestId("profile-row")).toHaveAttribute("data-highlighted", "true");
+  });
+
   it("renders 4 thumbnail slots, real photos where present and placeholders where absent — never an empty gap", () => {
     const entry: ProfileOverviewEntry = {
       ok: true,

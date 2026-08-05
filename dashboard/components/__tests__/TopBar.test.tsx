@@ -8,7 +8,7 @@ import "@testing-library/jest-dom/vitest";
 // ---------------------------------------------------------------------------
 
 vi.mock("next/navigation", () => ({
-  usePathname: () => "/inicio",
+  usePathname: () => "/profiles",
 }));
 
 vi.mock("@/components/FreshnessContext", () => ({
@@ -46,19 +46,16 @@ describe("TopBar", () => {
     expect(() => render(<TopBar />)).not.toThrow();
   });
 
-  it("includes 'Inicio' as a navigation link", () => {
+  it("no longer includes a standalone 'Inicio' link (issue #195 — / and /inicio render Perfiles)", () => {
     render(<TopBar />);
-    const inicioLink = screen.getByRole("link", { name: "Inicio" });
-    expect(inicioLink).toBeInTheDocument();
-    expect(inicioLink).toHaveAttribute("href", "/inicio");
+    expect(screen.queryByRole("link", { name: "Inicio" })).not.toBeInTheDocument();
   });
 
-  it("'Inicio' is the first navigation link (before Perfiles)", () => {
+  it("'Perfiles' is the first navigation link", () => {
     render(<TopBar />);
     const nav = screen.getByRole("navigation");
     const links = nav.querySelectorAll("a");
-    expect(links[0]).toHaveTextContent("Inicio");
-    expect(links[1]).toHaveTextContent("Perfiles");
+    expect(links[0]).toHaveTextContent("Perfiles");
   });
 
   it("includes all expected navigation links in order", () => {
@@ -66,7 +63,7 @@ describe("TopBar", () => {
     const nav = screen.getByRole("navigation");
     const links = Array.from(nav.querySelectorAll("a"));
     const labels = links.map((l) => l.textContent?.trim());
-    expect(labels).toEqual(["Inicio", "Perfiles", "Captura", "Conversaciones"]);
+    expect(labels).toEqual(["Perfiles", "Captura", "Conversaciones"]);
   });
 
   it("includes 'Captura' link (top-level execution UI, #268) right after Perfiles", () => {
@@ -87,11 +84,11 @@ describe("TopBar", () => {
     expect(conversacionesLink).toHaveAttribute("href", "/conversations");
   });
 
-  it("marks '/inicio' link as active when on the inicio page", () => {
-    // When pathname is '/inicio', the Inicio link should have bg-2 background style
+  it("marks 'Perfiles' active on /profiles (and on / and /inicio, which now render it — issue #195)", () => {
+    // Mocked pathname is '/profiles'; the Perfiles link should read as active.
     render(<TopBar />);
-    const inicioLink = screen.getByRole("link", { name: "Inicio" });
+    const perfilesLink = screen.getByRole("link", { name: "Perfiles" });
     // Active links get background: var(--bg-2) and fontWeight 500
-    expect(inicioLink).toHaveStyle({ fontWeight: 500 });
+    expect(perfilesLink).toHaveStyle({ fontWeight: 500 });
   });
 });
