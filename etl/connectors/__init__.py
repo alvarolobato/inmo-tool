@@ -30,6 +30,7 @@ def register_all() -> None:
     from etl.connectors.altamira import AltamiraConnector
     from etl.connectors.buildingcenter import BuildingCenterConnector
     from etl.connectors.cimenta2 import Cimenta2Connector
+    from etl.connectors.diglo import DigloConnector
     from etl.connectors.fotocasa import FotocasaConnector
     from etl.connectors.idealista import IdealistaConnector
     from etl.connectors.milanuncios import MilanunciosConnector
@@ -80,3 +81,8 @@ def register_all() -> None:
     # detail page (D-033). See cimenta2.py's module docstring.
     if Cimenta2Connector.name not in registered_names:
         CONNECTORS.append(Cimenta2Connector())
+    # Issue #117: Banco Santander's own REO portal (digloservicer.com).
+    # Sitemap-driven full-inventory discovery over a permissive-robots
+    # Drupal site; publishes lat/lon (a batch first). Born disabled (#100).
+    if DigloConnector.name not in registered_names:
+        CONNECTORS.append(DigloConnector())
