@@ -1,10 +1,10 @@
 ---
-id: D-061
+id: D-062
 title: Aliseda search-URL grammar — top-level category per type, vivienda subtype via slug+subtipo, no ático
 date: 2026-08-05
 ---
 
-# D-061: Aliseda search-URL grammar — category-per-type + vivienda subtype (slug + subtipo), no ático bucket
+# D-062: Aliseda search-URL grammar — category-per-type + vivienda subtype (slug + subtipo), no ático bucket
 
 *Decided: 2026-08-05*
 

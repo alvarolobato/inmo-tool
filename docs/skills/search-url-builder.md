@@ -104,7 +104,7 @@ local edit; the tests pin current behaviour.
   collapse to the same URL (piso+ático) are de-duped. **Not guessed**: subtipo
   codes for chalet-pareados/casas/lofts/… (omitted). Province slugs come from
   `provinces.ts` (bounding boxes for málaga and sevilla, both `andalucia`). See
-  [D-061](../decisions/D-061-aliseda-category-subtype-url-grammar.md).
+  [D-062](../decisions/D-062-aliseda-category-subtype-url-grammar.md).
 - **Idealista** — path grammar **owner-confirmed 2026-08-05** (issue #277 fix).
   The builder emits `/<operation>/<municipio>-<provincia>/con-<f1>[,<f2>,…]/`.
   Confirmed examples (Estepona piso ≤ 200 000 €):
