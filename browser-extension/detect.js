@@ -95,22 +95,31 @@
     {
       portal: "altamira",
       hostSuffix: "altamirainmuebles.com",
-      // ⚠️ BEST-EFFORT / UNVERIFIED — issue #271. Altamira's real detail-URL
-      // pattern has NOT yet been confirmed against a live page. This matches a
-      // `/inmueble/<id>` or `/ficha/<id>` path segment (the common Spanish-portal
-      // shapes), which is a reasonable guess but MUST be verified against a real
-      // Altamira detail URL and tightened/corrected before relying on
-      // auto-capture. NOTE: manual capture via the popup button works on ANY
-      // http(s) tab regardless of isDetailPath, so the owner can already capture
-      // an Altamira page (to seed the #271 connector) even if this heuristic is
-      // wrong — only the automatic fire-once capture depends on it.
+      // VERIFIED against two real captured Altamira detail pages (issue #271).
+      // Detail URLs are
+      //   /venta-de-<tipo>/<provincia>/<municipio>/segunda-mano/<REF>/<id>/1
+      // (e.g. /venta-de-atico/pontevedra/sanxenxo/segunda-mano/
+      //  9186_1001_PE0001/375859/1). The discriminators: a `-de-` type prefix
+      // (`venta-de-…` / `alquiler-de-…`, NOT the `venta-viviendas` search
+      // root) AND a trailing numeric listing id (optionally followed by a
+      // photo-index segment). This corrects the earlier `/inmueble|/ficha`
+      // guess from #280, which Altamira does not use. NOTE: manual capture via
+      // the popup button works on ANY http(s) tab regardless of isDetailPath;
+      // only the automatic fire-once capture depends on this.
       isDetailPath: function (p) {
-        return /^\/(?:inmueble|ficha)\/[^/]+/.test(p);
+        return /^\/(?:venta|alquiler)-de-[^/]+\/.+\/\d+(?:\/\d+)?\/?$/.test(p);
+      },
+      // Search/results pages are `/venta-viviendas/…` / `/alquiler-viviendas/…`
+      // (and sibling `/venta-locales/…` etc.) — a `-viviendas`/`-locales` root
+      // WITHOUT the `-de-` type prefix. The negative lookahead keeps a detail
+      // URL (`/venta-de-…`) from ever matching here.
+      isListingPath: function (p) {
+        return /^\/(?:venta|alquiler)-(?!de-)[a-z]+(?:\/|$)/.test(p);
       },
       readySelectors: [
-        "[class*='ficha']",
-        "[class*='detalle']",
-        "[class*='precio']",
+        "#soloPrecio",
+        "h2.titulo",
+        ".caracteristicas",
         "main",
         "h1",
       ],

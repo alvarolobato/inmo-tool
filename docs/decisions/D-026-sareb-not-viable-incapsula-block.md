@@ -8,6 +8,21 @@ date: 2026-08-04
 
 *Decided: 2026-08-04*
 
+**2026-08-05 addendum** (issue #271): The owner ran a live human browsing test.
+**Sareb stayed blocked even for a human, across two separate phones** — despite
+its Incapsula **JS-challenge** signature, which this decision's Rationale read
+as *positive* evidence a human would get through (a challenge "a real browser
+resolves invisibly in the course of normal browsing"). That prediction was
+**empirically wrong**. Altamira (D-027) went the other way: it renders normally
+for a human despite a *static* Akamai deny that D-027 reasoned was a *weaker*
+signal for human-browsing success. Net finding from this n=2 test: **the
+WAF-response shape (JS challenge vs. static deny) does not reliably predict
+whether a human browser gets content** — don't use it to prioritise capture
+portals. The automated-connector verdict here is unchanged (still not buildable
+as a crawler). **Sareb stays PARKED — no code work** (issue #271 explicitly
+scopes Sareb out); reopen #121 only if a future capture attempt actually
+renders. See D-027's matching addendum (Altamira, the "GO" portal this round).
+
 **Context**: Issue #121, the largest single portfolio in #132's bank/fund
 REO batch (Sareb, the Spanish state "bad bank"). An earlier same-day spike
 (2026-08-02) found the site fully blocked by Incapsula and closed the
