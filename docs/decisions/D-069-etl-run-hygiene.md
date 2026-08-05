@@ -1,10 +1,10 @@
 ---
-id: D-068
+id: D-069
 title: ETL run hygiene — disabled connectors and captured listing pages are neutral, not errors
 date: 2026-08-06
 ---
 
-# D-068: ETL run hygiene — disabled connectors and captured listing pages are neutral, not errors
+# D-069: ETL run hygiene — disabled connectors and captured listing pages are neutral, not errors
 
 *Decided: 2026-08-06*
 
