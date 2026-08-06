@@ -677,7 +677,15 @@ async function enumerateResultsPages(portal, searchUrl, page1Urls) {
       // clean scheme as a final backstop.
       const next = rendered.result.nextUrl || D.resultsPageUrl(current, page + 1);
       if (!next) break;
-      if (D.matchKey(next) === D.matchKey(current)) break; // didn't advance
+      // Didn't-advance guard. Compare the results-PAGE NUMBER, not matchKey:
+      // matchKey drops the query string, so for the query-param portals
+      // (aliseda/altamira `?pagina=N`) matchKey(next) === matchKey(current)
+      // ALWAYS — the page number lives in the query — which would falsely stop
+      // the walk after page 1 on the very portal (Aliseda) this fix targets.
+      // currentResultsPage reads the page number under every scheme (path or
+      // query), so this both advances query portals and still catches a stall
+      // (next resolves to the same or an earlier page → break).
+      if (D.currentResultsPage(next) <= D.currentResultsPage(current)) break;
       current = next;
 
       // Polite pacing between results-page loads (mirror the capture jitter).
