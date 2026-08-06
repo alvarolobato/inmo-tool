@@ -117,7 +117,7 @@ export async function GET(
     const resultsResult = await query(
       `SELECT id, connector_name, started_at, finished_at, status,
               discovered_count, fetched_count, error_count, error_msg,
-              failure_classification, geography_scope,
+              failure_classification, geography_scope, extraction_quality_summary,
               CASE
                   WHEN started_at IS NULL OR finished_at IS NULL THEN NULL
                   ELSE ROUND(EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000)::bigint
@@ -146,7 +146,11 @@ export async function GET(
       error_msg: row[8] != null ? String(row[8]) : null,
       failure_classification: row[9] != null ? String(row[9]) : null,
       geography_scope: (row[10] as ConnectorRunResult["geography_scope"]) ?? null,
-      duration_ms: row[11] != null ? (row[11] as number) : null,
+      // extraction_quality_summary (JSONB, #171) arrives already parsed as a JS
+      // object by the pg driver, same as geography_scope above.
+      extraction_quality_summary:
+        (row[11] as ConnectorRunResult["extraction_quality_summary"]) ?? null,
+      duration_ms: row[12] != null ? (row[12] as number) : null,
     }));
 
     const response: EtlRunDetailResponse = { run, connectors };

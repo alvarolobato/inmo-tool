@@ -35,6 +35,11 @@ from etl.connectors.rate_limit import RateLimiter
 from etl.db import postgres
 from etl.dedup import engine as dedup_engine
 from etl.extraction_quality import compute_extraction_quality
+from etl.extraction_quality_summary import (
+    TREND_WINDOW,
+    compute_trend,
+    summarize_scores,
+)
 from etl.failure_classification import classify_fatal_exception
 
 # Default bounded lifetime for a single dedup pass (D-036). A run currently
@@ -672,6 +677,87 @@ def run_dedup(
         postgres.release_run_lock(conn, postgres.DEDUP_ADVISORY_LOCK_ID)
 
 
+def _run_listing_scores(conn, connector_name: str, started_at: datetime) -> list[dict]:
+    """The per-listing extraction-quality scores this connector run produced.
+
+    Issue #171: reuses #80/D-084's stored per-listing grade rather than
+    recomputing anything — selects the ``raw_extra.extraction_quality`` dict of
+    exactly the listings this run (re)persisted, identified by
+    ``source = connector_name`` AND ``last_fetched_at >= started_at`` (the same
+    unconditional-NOW() write ``_update_existing_listing``/the INSERT path set on
+    every real fetch this run). Skip-if-seen listings the run never re-fetched
+    have an older ``last_fetched_at`` and are correctly excluded — the aggregate
+    reflects what this run actually extracted, not the whole standing inventory.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT raw_extra -> 'extraction_quality'
+              FROM listing
+             WHERE source = %s
+               AND last_fetched_at >= %s
+               AND raw_extra ? 'extraction_quality'
+            """,
+            (connector_name, started_at),
+        )
+        return [row[0] for row in cur.fetchall() if row[0] is not None]
+
+
+def _baseline_quality_means(
+    conn, connector_name: str, weights_version: int | None, limit: int
+) -> list[float]:
+    """The mean_score of this connector's most recent healthy prior summaries.
+
+    Issue #171 trend baseline: the last `limit` `status='ok'` result rows for
+    this connector that carry an extraction-quality summary, most-recent-first.
+    Only rows scored under the SAME `weights_version` are compared — a rubric
+    change (etl.extraction_quality.WEIGHTS_VERSION bump) makes older means
+    apples-to-oranges, so mixing them would fabricate a bogus drop the run
+    after a bump. A `weights_version` of None (mixed-rubric current run) has no
+    comparable history, so the baseline comes back empty and no drop is flagged.
+    """
+    if weights_version is None:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT extraction_quality_summary ->> 'mean_score'
+              FROM connector_run_results
+             WHERE connector_name = %s
+               AND status = 'ok'
+               AND extraction_quality_summary IS NOT NULL
+               AND (extraction_quality_summary ->> 'weights_version')::int = %s
+             ORDER BY started_at DESC
+             LIMIT %s
+            """,
+            (connector_name, weights_version, limit),
+        )
+        return [float(row[0]) for row in cur.fetchall() if row[0] is not None]
+
+
+def _extraction_quality_summary_for_run(
+    conn, connector_name: str, started_at: datetime
+) -> dict | None:
+    """The run-level extraction-quality summary + degradation trend, or None.
+
+    Issue #171: composes #80's stored per-listing scores (never recomputes
+    them) into a single JSONB descriptor for `connector_run_results`. Returns
+    None — stored as SQL NULL — when the run produced no scored listings (a
+    failed/empty run, or one that only skip-if-seen'd), so a fetch-nothing run
+    never fabricates a quality number. The `trend` sub-object compares this
+    run's mean to the connector's trailing baseline (see `_baseline_quality_means`
+    / `compute_trend`) so a silent degradation is visible in the ETL monitor.
+    """
+    summary = summarize_scores(_run_listing_scores(conn, connector_name, started_at))
+    if summary is None:
+        return None
+    baseline = _baseline_quality_means(
+        conn, connector_name, summary["weights_version"], TREND_WINDOW
+    )
+    summary["trend"] = compute_trend(summary["mean_score"], baseline)
+    return summary
+
+
 def _record_connector_result(
     conn,
     run_id: int,
@@ -717,6 +803,13 @@ def _record_connector_result(
     scope was skipped" and "an empty list was computed" are the same fact,
     and NULL keeps `WHERE skipped_scopes IS NOT NULL` a usable filter.
     """
+    # Issue #171: aggregate the extraction quality of the listings THIS run
+    # produced (reusing #80/D-084's per-listing scores) and attach a
+    # run-over-run degradation trend, computed BEFORE this row's INSERT so its
+    # own summary isn't in its own baseline. None on a run that scored nothing.
+    extraction_quality_summary = _extraction_quality_summary_for_run(
+        conn, connector_name, started_at
+    )
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -724,8 +817,8 @@ def _record_connector_result(
                 (run_id, connector_name, started_at, finished_at, status,
                  discovered_count, fetched_count, error_count, error_msg,
                  skipped_count, skipped_scopes, failure_classification,
-                 geography_scope)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 geography_scope, extraction_quality_summary)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 run_id,
@@ -741,6 +834,9 @@ def _record_connector_result(
                 json.dumps(skipped_scopes) if skipped_scopes else None,
                 failure_classification,
                 json.dumps(geography_scope) if geography_scope else None,
+                json.dumps(extraction_quality_summary)
+                if extraction_quality_summary
+                else None,
             ),
         )
     conn.commit()

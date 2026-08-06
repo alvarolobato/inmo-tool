@@ -73,16 +73,16 @@ test.beforeAll(async () => {
     `INSERT INTO connector_run_results
         (run_id, connector_name, started_at, finished_at, status,
          discovered_count, fetched_count, error_count, error_msg,
-         failure_classification, geography_scope)
+         failure_classification, geography_scope, extraction_quality_summary)
      VALUES
         ($1, 'fotocasa',    NOW() - INTERVAL '10 minutes', NOW() - INTERVAL '9 minutes',
          'ok', 31, 28, 3, NULL, NULL,
-         $2::jsonb),
+         $2::jsonb, $3::jsonb),
         ($1, 'milanuncios', NOW() - INTERVAL '9 minutes',  NOW() - INTERVAL '8 minutes',
          'circuit_open', 41, 4, 8, 'circuit breaker open after 8/10 errors',
-         'structure_change', NULL),
+         'structure_change', NULL, NULL),
         ($1, 'idealista',   NOW() - INTERVAL '8 minutes',  NOW() - INTERVAL '8 minutes',
-         'skipped', 0, 0, 0, 'disabled via connector_config', NULL, NULL)`,
+         'skipped', 0, 0, 0, 'disabled via connector_config', NULL, NULL, NULL)`,
     [
       runId,
       JSON.stringify([
@@ -94,6 +94,21 @@ test.beforeAll(async () => {
           outcome: "crawled",
         },
       ]),
+      // Issue #171: fotocasa ran healthy — a run-level extraction-quality
+      // aggregate with a stable trend (not degraded).
+      JSON.stringify({
+        n: 28,
+        mean_score: 0.88,
+        grade_histogram: { A: 20, B: 6, C: 2, F: 0 },
+        low_quality_count: 2,
+        weights_version: 1,
+        trend: {
+          baseline_mean: 0.86,
+          baseline_n_runs: 4,
+          delta: 0.02,
+          degraded: false,
+        },
+      }),
     ],
   );
 });
@@ -192,7 +207,84 @@ test("run detail shows the per-connector funnel and the two new statuses", async
   await expect(geo).toContainText("madrid-capital");
   await expect(geo).toContainText("Rastreada");
 
+  // Issue #171: the run-level extraction-quality aggregate renders in the new
+  // "Calidad" column — a grade + mean completeness percent — and fotocasa's
+  // stable run carries no degraded alarm.
+  const fotocasaQuality = page.getByTestId("connector-quality-fotocasa");
+  await expect(fotocasaQuality).toContainText("88 %");
+  await expect(fotocasaQuality).toContainText("A");
+
   await expect(page.getByTestId("error-display")).toHaveCount(0);
+});
+
+test("a silently-degraded connector (status ok) is flagged in the ETL monitor (#171)", async ({
+  page,
+}) => {
+  // The #171 failure mode: a connector runs status='ok' with zero fetch errors,
+  // but its average extraction completeness silently dropped vs recent runs
+  // (a partial markup change). status/error_count cannot represent it — only
+  // the run-level extraction-quality trend can. Seed exactly that and assert
+  // the degraded badge makes it visible next to a genuinely-healthy connector.
+  const r = await pool.query<{ id: number }>(
+    `INSERT INTO connector_runs
+        (trigger, started_at, finished_at, duration_ms, status,
+         connectors_ok, connectors_failed, connectors_skipped, total_connectors)
+     VALUES ($1, NOW() - INTERVAL '6 minutes', NOW() - INTERVAL '5 minutes',
+             60000, 'success', 2, 0, 0, 2)
+     RETURNING id`,
+    [TRIGGER],
+  );
+  const degradedRunId = r.rows[0].id;
+
+  const healthy = {
+    n: 30,
+    mean_score: 0.9,
+    grade_histogram: { A: 24, B: 4, C: 2, F: 0 },
+    low_quality_count: 2,
+    weights_version: 1,
+    trend: { baseline_mean: 0.89, baseline_n_runs: 5, delta: 0.01, degraded: false },
+  };
+  const degraded = {
+    n: 22,
+    mean_score: 0.58,
+    grade_histogram: { A: 2, B: 3, C: 9, F: 8 },
+    low_quality_count: 17,
+    weights_version: 1,
+    trend: { baseline_mean: 0.9, baseline_n_runs: 5, delta: -0.32, degraded: true },
+  };
+
+  await pool.query(
+    `INSERT INTO connector_run_results
+        (run_id, connector_name, started_at, finished_at, status,
+         discovered_count, fetched_count, error_count, error_msg,
+         failure_classification, geography_scope, extraction_quality_summary)
+     VALUES
+        ($1, 'fotocasa',    NOW() - INTERVAL '6 minutes', NOW() - INTERVAL '5 minutes',
+         'ok', 31, 30, 0, NULL, NULL, NULL, $2::jsonb),
+        ($1, 'milanuncios', NOW() - INTERVAL '6 minutes', NOW() - INTERVAL '5 minutes',
+         'ok', 24, 22, 0, NULL, NULL, NULL, $3::jsonb)`,
+    [degradedRunId, JSON.stringify(healthy), JSON.stringify(degraded)],
+  );
+
+  await page.goto(`/etl/${degradedRunId}`);
+  await expect(page.getByTestId("run-detail")).toBeVisible();
+  await expect(page.getByTestId("connector-stats")).toBeVisible();
+
+  // milanuncios: status OK, zero errors — but the degraded trend badge is shown.
+  await expect(
+    page.getByTestId("connector-row-milanuncios").getByText("OK"),
+  ).toBeVisible();
+  const degradedBadge = page.getByTestId("connector-quality-trend-milanuncios");
+  await expect(degradedBadge).toBeVisible();
+  await expect(degradedBadge).toContainText("Calidad");
+
+  // fotocasa is healthy in the same run — it must NOT carry the degraded badge,
+  // so a real drop is distinguishable from a genuinely-healthy connector.
+  const healthyTrend = page.getByTestId("connector-quality-trend-fotocasa");
+  await expect(healthyTrend).not.toContainText("Calidad");
+
+  await expect(page.getByTestId("error-display")).toHaveCount(0);
+  await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
 });
 
 test("a run where every connector was skipped is not badged as a success", async ({

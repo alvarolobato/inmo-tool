@@ -34,6 +34,24 @@ export interface GeographyScopeEntry {
   outcome: string;
 }
 
+/** Issue #171 (D-086): run-over-run degradation trend for extraction quality. */
+export interface ExtractionQualityTrend {
+  baseline_mean: number | null;
+  baseline_n_runs: number;
+  delta: number | null;
+  degraded: boolean;
+}
+
+/** Issue #171 (D-086): run-level aggregate of the per-listing quality grades. */
+export interface ExtractionQualitySummary {
+  n: number;
+  mean_score: number;
+  grade_histogram: { A: number; B: number; C: number; F: number };
+  low_quality_count: number;
+  weights_version: number | null;
+  trend?: ExtractionQualityTrend;
+}
+
 export interface ConnectorRunResult {
   id: number;
   connector_name: string;
@@ -49,6 +67,8 @@ export interface ConnectorRunResult {
   failure_classification: string | null;
   /** Issue #109 (D-079): the geographies this run actually ran against. */
   geography_scope: GeographyScopeEntry[] | null;
+  /** Issue #171 (D-086): extraction-quality aggregate + trend, or null. */
+  extraction_quality_summary: ExtractionQualitySummary | null;
 }
 
 export interface EtlRunDetailData {
@@ -188,6 +208,42 @@ function geoOutcomeColor(outcome: string): BadgeColor {
   }
 }
 
+// ─── Extraction-quality helpers (issue #171, D-086) ──────────────────────────
+
+// The same grade bands etl/extraction_quality.py uses, applied to the run's
+// MEAN weighted-completeness fraction so a run gets a single at-a-glance letter.
+function meanGrade(score: number): "A" | "B" | "C" | "F" {
+  if (score >= 0.85) return "A";
+  if (score >= 0.65) return "B";
+  if (score >= 0.45) return "C";
+  return "F";
+}
+
+function qualityGradeColor(grade: "A" | "B" | "C" | "F"): BadgeColor {
+  switch (grade) {
+    case "A":
+      return "emerald";
+    case "B":
+      return "blue";
+    case "C":
+      return "amber";
+    default:
+      return "red";
+  }
+}
+
+/** A 0..1 completeness fraction as a percent, e.g. 0.782 → "78 %". */
+function formatQualityPct(score: number): string {
+  return `${Math.round(score * 100)} %`;
+}
+
+/** A signed delta (0..1 fraction) as percentage points, e.g. -0.12 → "−12 pp". */
+function formatDeltaPp(delta: number): string {
+  const pp = Math.round(delta * 100);
+  const sign = pp > 0 ? "+" : pp < 0 ? "−" : "±";
+  return `${sign}${Math.abs(pp)} pp`;
+}
+
 /** A [lat, lon] centre as a short label when a scope has no site-specific key. */
 function formatCenter(center: [number, number] | null): string {
   if (!center) return "—";
@@ -278,6 +334,81 @@ function DurationChart({ connectors }: DurationChartProps) {
   );
 }
 
+// ─── Extraction-quality cell (issue #171, D-086) ─────────────────────────────
+
+interface QualityCellProps {
+  summary: ExtractionQualitySummary | null;
+  connectorName: string;
+}
+
+// The run-level extraction-quality signal: a single grade + mean-completeness
+// percent, plus a run-over-run trend indicator. The trend is the whole point of
+// issue #171 — a connector can keep reporting status='ok' while its average
+// extraction completeness silently drifts down (a partial markup change), and
+// the degraded badge here is what makes that visible before anyone reads a
+// single listing's badge.
+function QualityCell({ summary, connectorName }: QualityCellProps) {
+  if (!summary || summary.n === 0) {
+    // A run that produced no scored listings (failed/empty/all-skipped) has no
+    // quality to show — an em dash, never a fabricated 0 %.
+    return (
+      <span
+        className="text-tremor-content-subtle dark:text-dark-tremor-content-subtle"
+        data-testid={`connector-quality-${connectorName}`}
+      >
+        —
+      </span>
+    );
+  }
+
+  const grade = meanGrade(summary.mean_score);
+  const trend = summary.trend;
+  const hasBaseline = trend != null && trend.delta != null;
+
+  return (
+    <div
+      className="flex flex-col items-end gap-1"
+      data-testid={`connector-quality-${connectorName}`}
+    >
+      <div className="flex items-center gap-1.5">
+        <Badge color={qualityGradeColor(grade)} size="xs">
+          {grade}
+        </Badge>
+        <span
+          className="tabular-nums text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis"
+          title={`${summary.n} anuncio${summary.n === 1 ? "" : "s"} · A ${summary.grade_histogram.A} · B ${summary.grade_histogram.B} · C ${summary.grade_histogram.C} · F ${summary.grade_histogram.F}`}
+        >
+          {formatQualityPct(summary.mean_score)}
+        </span>
+      </div>
+      {trend?.degraded ? (
+        // A meaningful drop vs the connector's trailing baseline — the silent-
+        // degradation alarm. Red, and it must show even on a status='ok' run.
+        <Badge
+          color="red"
+          size="xs"
+          data-testid={`connector-quality-trend-${connectorName}`}
+        >
+          ▼ Calidad {trend.delta != null ? formatDeltaPp(trend.delta) : ""}
+        </Badge>
+      ) : hasBaseline ? (
+        // Has history and is stable/improving — a muted delta, not an alarm.
+        <span
+          className="text-xs text-tremor-content-subtle dark:text-dark-tremor-content-subtle"
+          data-testid={`connector-quality-trend-${connectorName}`}
+          title={
+            trend?.baseline_mean != null
+              ? `Media reciente: ${formatQualityPct(trend.baseline_mean)} (${trend.baseline_n_runs} ejec.)`
+              : undefined
+          }
+        >
+          {trend?.delta != null ? formatDeltaPp(trend.delta) : ""}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 // ─── Per-table stats table ────────────────────────────────────────────────────
 
 interface ConnectorStatsTableProps { connectors: ConnectorRunResult[]; }
@@ -311,6 +442,7 @@ function ConnectorStatsTable({ connectors }: ConnectorStatsTableProps) {
               <th className="pb-2 pr-3 text-right font-medium text-tremor-content dark:text-dark-tremor-content" title="Anuncios localizados en la fase de descubrimiento">Encontrados</th>
               <th className="pb-2 pr-3 text-right font-medium text-tremor-content dark:text-dark-tremor-content" title="Anuncios descargados, normalizados y guardados">Guardados</th>
               <th className="pb-2 pr-3 text-right font-medium text-tremor-content dark:text-dark-tremor-content" title="Anuncios que fallaron al descargar o parsear">Errores</th>
+              <th className="pb-2 pr-3 text-right font-medium text-tremor-content dark:text-dark-tremor-content" title="Calidad media de extracción de los anuncios de esta ejecución y su tendencia frente a ejecuciones recientes (issue #171)">Calidad</th>
               <th className="pb-2 text-right font-medium text-tremor-content dark:text-dark-tremor-content">Duración</th>
             </tr>
           </thead>
@@ -339,6 +471,9 @@ function ConnectorStatsTable({ connectors }: ConnectorStatsTableProps) {
                   <td className="py-2 pr-3 text-right tabular-nums text-tremor-content dark:text-dark-tremor-content">{formatNumber(c.discovered_count)}</td>
                   <td className="py-2 pr-3 text-right tabular-nums text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis">{formatNumber(c.fetched_count)}</td>
                   <td className={`py-2 pr-3 text-right tabular-nums ${c.error_count > 0 ? "text-red-500 dark:text-red-400" : "text-tremor-content dark:text-dark-tremor-content"}`}>{formatNumber(c.error_count)}</td>
+                  <td className="py-2 pr-3 text-right">
+                    <QualityCell summary={c.extraction_quality_summary} connectorName={c.connector_name} />
+                  </td>
                   <td className="py-2 text-right tabular-nums text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis">{formatDuration(c.duration_ms)}</td>
                 </tr>
                 {c.geography_scope && c.geography_scope.length > 0 && (
@@ -355,7 +490,7 @@ function ConnectorStatsTable({ connectors }: ConnectorStatsTableProps) {
                       city/radius a run used, and tell "uncovered" from
                       "unresolvable" for the same place at a glance.
                     */}
-                    <td colSpan={6} className="pb-2 pt-0 pl-2">
+                    <td colSpan={7} className="pb-2 pt-0 pl-2">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <span className="text-tremor-content-subtle dark:text-dark-tremor-content-subtle">
                           Ámbito:
@@ -378,7 +513,7 @@ function ConnectorStatsTable({ connectors }: ConnectorStatsTableProps) {
                 )}
                 {c.error_msg && (
                   <tr key={`${c.id}-error`} className="border-b border-tremor-border/50 dark:border-dark-tremor-border/50" data-testid={`connector-row-${c.connector_name}-error`}>
-                    <td colSpan={6} className="pb-2 pt-0 pl-2">
+                    <td colSpan={7} className="pb-2 pt-0 pl-2">
                       {/*
                         On a 'skipped' row this is the reason (e.g. "disabled
                         via connector_config") — informational, not an error,
