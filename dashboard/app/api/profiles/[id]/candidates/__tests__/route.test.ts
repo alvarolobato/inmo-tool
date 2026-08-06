@@ -82,7 +82,8 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
     expect(candidatesCall[0]).toContain("lf.source = $5");
     // #310 appended $7–$11 (occupancy, occupied-statuses list, condition,
     // renovation, min-below-market); #386 appended $13/$14 (caveat, redflagType);
-    // all null/default when only source is set.
+    // #392 appended $15/$16 (beachProximity, heritageZone); all null/default when
+    // only source is set.
     expect(candidatesCall[1]).toEqual([
       3,
       null,
@@ -96,6 +97,8 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       null,
       null,
       false,
+      null,
+      null,
       null,
       null,
     ]);
@@ -120,6 +123,8 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       null,
       null,
       false,
+      null,
+      null,
       null,
       null,
     ]);
@@ -198,6 +203,8 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
       false,
       null,
       null,
+      null,
+      null,
     ]);
   });
 
@@ -246,6 +253,59 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
     expect(res.status).toBe(200);
     const params = mockQuery.mock.calls[1][1];
     expect(params[13]).toBe("subasta_judicial");
+  });
+
+  it("rejects an unknown beachProximity value before touching the DB (400) (#392)", async () => {
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?beachProximity=oceanfront"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("rejects `none` as a beachProximity value — it is not a filter target (400) (#392)", async () => {
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?beachProximity=none"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("passes a valid beachProximity=$15 through to listCandidates (#392)", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?beachProximity=frontline"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(200);
+    expect(mockQuery.mock.calls[1][1][14]).toBe("frontline");
+  });
+
+  it("passes heritageZone=true through as $16=true, and any other value as null (#392)", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const on = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?heritageZone=true"),
+      ctx("3"),
+    );
+    expect(on.status).toBe(200);
+    expect(mockQuery.mock.calls[1][1][15]).toBe(true);
+
+    for (const raw of ["", "1", "false", "yes"]) {
+      mockQuery.mockReset();
+      mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
+      mockQuery.mockResolvedValueOnce({ rows: [] });
+      const off = await GET(
+        makeRequest(`http://localhost/api/profiles/3/candidates?heritageZone=${raw}`),
+        ctx("3"),
+      );
+      expect(off.status).toBe(200);
+      expect(mockQuery.mock.calls[1][1][15]).toBeNull();
+    }
   });
 
   it("passes includeRejected=true to listCandidates as $12 when the show-rejected toggle is on (#379)", async () => {

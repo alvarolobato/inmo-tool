@@ -1279,6 +1279,137 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
     });
   });
 
+  describe("beach-proximity + heritage-zone filters and soft boost (#392, Fase 4 of #385)", () => {
+    // A matched, priced candidate carrying an optional `location` assessment —
+    // seeded through the SAME ai_assessment row the ranking CTE reads for both
+    // the beach/heritage filters and the soft beach boost (D-059).
+    async function seedLocated(
+      pool: Pool,
+      profileId: number,
+      opts: { beach?: string; heritage?: boolean; score?: number | null },
+    ): Promise<number> {
+      const id = await insertProperty(pool);
+      await insertListing(pool, id, { source: "fotocasa", current_price: 300000 });
+      await markMatched(pool, profileId, id);
+      if (opts.score !== undefined) await setScore(pool, profileId, id, opts.score);
+      if (opts.beach !== undefined || opts.heritage !== undefined) {
+        await insertAssessment(pool, id, {
+          assessmentType: "location",
+          result: {
+            beach_proximity: opts.beach ?? "none",
+            beach_evidence: opts.beach && opts.beach !== "none" ? `menciona ${opts.beach}` : "",
+            heritage_zone: opts.heritage ?? false,
+            heritage_evidence: opts.heritage ? "casco histórico" : "",
+          },
+          promptVersion: "location/v1",
+          generatedAt: new Date("2026-03-01T00:00:00Z"),
+        });
+      }
+      return id;
+    }
+
+    it("beachProximity=frontline keeps ONLY primera-línea candidates (owner's hard-filter ask)", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const front = await seedLocated(pool, profileId, { beach: "frontline" });
+        const view = await seedLocated(pool, profileId, { beach: "sea_view" });
+        const near = await seedLocated(pool, profileId, { beach: "near_beach" });
+        const none = await seedLocated(pool, profileId, { beach: "none" });
+
+        const page = await listCandidates(profileId, { beachProximity: "frontline", limit: 10 });
+        expect(page.items.map((i) => i.property_id)).toEqual([front]);
+        for (const other of [view, near, none]) {
+          expect(page.items.map((i) => i.property_id)).not.toContain(other);
+        }
+      });
+    });
+
+    it("beachProximity is a MINIMUM grade: sea_view keeps frontline+sea_view; near_beach keeps all three positive grades", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const front = await seedLocated(pool, profileId, { beach: "frontline" });
+        const view = await seedLocated(pool, profileId, { beach: "sea_view" });
+        const near = await seedLocated(pool, profileId, { beach: "near_beach" });
+        const none = await seedLocated(pool, profileId, { beach: "none" });
+
+        const sea = await listCandidates(profileId, { beachProximity: "sea_view", limit: 10 });
+        expect(sea.items.map((i) => i.property_id).sort((a, b) => a - b)).toEqual(
+          [front, view].sort((a, b) => a - b),
+        );
+        expect(sea.items.map((i) => i.property_id)).not.toContain(near);
+        expect(sea.items.map((i) => i.property_id)).not.toContain(none);
+
+        const nearOrBetter = await listCandidates(profileId, {
+          beachProximity: "near_beach",
+          limit: 10,
+        });
+        expect(nearOrBetter.items.map((i) => i.property_id).sort((a, b) => a - b)).toEqual(
+          [front, view, near].sort((a, b) => a - b),
+        );
+        // 'none' (assessed, no signal) is still excluded from even the loosest grade.
+        expect(nearOrBetter.items.map((i) => i.property_id)).not.toContain(none);
+      });
+    });
+
+    it("heritageZone keeps only casco-histórico candidates; false and unassessed are excluded", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const heritage = await seedLocated(pool, profileId, { beach: "none", heritage: true });
+        const notHeritage = await seedLocated(pool, profileId, { beach: "none", heritage: false });
+        const unassessed = await seedLocated(pool, profileId, {}); // no location row at all
+
+        const page = await listCandidates(profileId, { heritageZone: true, limit: 10 });
+        expect(page.items.map((i) => i.property_id)).toEqual([heritage]);
+        expect(page.items.map((i) => i.property_id)).not.toContain(notHeritage);
+        expect(page.items.map((i) => i.property_id)).not.toContain(unassessed);
+      });
+    });
+
+    it("degrades cleanly: a beach/heritage filter with NO location assessment returns an empty feed, not an error", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        await seedLocated(pool, profileId, {}); // matched + priced, never assessed
+        await seedLocated(pool, profileId, {});
+
+        const beach = await listCandidates(profileId, { beachProximity: "frontline", limit: 10 });
+        expect(beach.items).toEqual([]);
+        const heritage = await listCandidates(profileId, { heritageZone: true, limit: 10 });
+        expect(heritage.items).toEqual([]);
+
+        // Sanity: unfiltered, both properties come back — the empties are the
+        // filters' doing (null beach_proximity/heritage_zone = unknown), not a break.
+        const unfiltered = await listCandidates(profileId, { limit: 10 });
+        expect(unfiltered.items).toHaveLength(2);
+      });
+    });
+
+    it("SOFT boost: a sea-view candidate floats above an equal-base non-beach one, which keeps its base score (no filtering)", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // Only two candidates → pool below MIN_POOL_SIZE, so no below-market boost;
+        // same price + same base score, so ONLY the beach grade differs.
+        const plain = await seedLocated(pool, profileId, { beach: "none", score: 0.5 });
+        const seaView = await seedLocated(pool, profileId, { beach: "sea_view", score: 0.5 });
+
+        const page = await listCandidates(profileId, { limit: 10 });
+        const order = page.items.map((i) => i.property_id);
+        // The sea-view candidate is lifted above the equal-base plain one — but the
+        // plain one is NOT filtered out (soft boost, both still present).
+        expect(order.indexOf(seaView)).toBeLessThan(order.indexOf(plain));
+        expect(order).toContain(plain);
+
+        const seaRow = page.items.find((i) => i.property_id === seaView)!;
+        const plainRow = page.items.find((i) => i.property_id === plain)!;
+        // sea_view = 2 units × 0.03 = +0.06 over the base 0.5.
+        expect(seaRow.effective_score!).toBeCloseTo(0.56, 5);
+        expect(seaRow.ranking_boost_reason).toContain("proximidad a la playa");
+        // The non-beach candidate keeps EXACTLY its base score (augment, never sink).
+        expect(plainRow.effective_score!).toBeCloseTo(0.5, 5);
+        expect(plainRow.ranking_boost_reason).toBeNull();
+      });
+    });
+  });
+
   describe("source (portal) filter (#265)", () => {
     it("narrows the feed to properties with an active sale listing from the selected source", async () => {
       await withRealDb(async (pool) => {

@@ -237,12 +237,13 @@ const NO_SCORE_SENTINEL = -1;
 //   effective_score = COALESCE(score, -1)
 //                   + below_market_boost   (0 … BELOW_MARKET_DISCOUNT_CAP·WEIGHT)
 //                   + distress_boost        (0 … DISTRESS_MAX_UNITS·UNIT_WEIGHT)
+//                   + beach_boost           (0 … 3·BEACH_UNIT_WEIGHT, #392)
 //
-// Because both boosts are ≥ 0, a candidate with no assessment and no discount
+// Because all boosts are ≥ 0, a candidate with no assessment and no discount
 // keeps its base score EXACTLY (graceful degradation — it never sinks or
 // errors), and a never-scored candidate (score NULL → −1 sentinel) still sorts
-// last: even the maximum boost (0.25 + 0.15 = 0.40) leaves it at −0.6, below
-// any real sigmoid score. The learned model is augmented, never replaced.
+// last: even the maximum boost (0.25 + 0.15 + 0.09 = 0.49) leaves it at −0.51,
+// below any real sigmoid score. The learned model is augmented, never replaced.
 
 /** Below-market discount is capped at 50% below the pool median — beyond that is almost always a data error (wrong m²) or a different asset class, not a real deal worth over-weighting. */
 const BELOW_MARKET_DISCOUNT_CAP = 0.5;
@@ -251,6 +252,28 @@ const BELOW_MARKET_WEIGHT = 0.5;
 /** Distress axes counted (occupancy warn caveat / red flag / a_reformar); capped so all three present is +0.15, kept smaller than the max discount boost (price is the harder signal). */
 const DISTRESS_MAX_UNITS = 3;
 const DISTRESS_UNIT_WEIGHT = 0.05;
+/**
+ * Beach-proximity ranking boost (#392, Fase 4 of #385). A SOFT, graded lift —
+ * NOT a filter: a beachfront/sea-view/near-beach listing rises in the order
+ * without excluding the rest, so the owner chooses in the UI between "filtrar
+ * por" (the hard filter below) and "priorizar" (this boost). Graded exactly
+ * like the axis itself (frontline > sea_view > near_beach > none): the per-grade
+ * unit count here × BEACH_UNIT_WEIGHT. `frontline` earns the TOP boost even
+ * though it is ALSO the hard-filter target — the two mechanisms are independent
+ * (the filter says "show only these"; the boost says "lift this when present"),
+ * so a frontline property still surfaces at the top of an UNfiltered feed. Max
+ * beach boost is 3 × 0.03 = 0.09, deliberately below the distress max (0.15) and
+ * the below-market max (0.25) — price and distress stay the harder signals; and
+ * the combined max boost (0.25 + 0.15 + 0.09 = 0.49) still leaves a never-scored
+ * candidate (−1 sentinel) at −0.51, below any real sigmoid score, so #309's
+ * "augment, never replace" invariant holds.
+ */
+const BEACH_PROXIMITY_BOOST_UNITS: Record<string, number> = {
+  frontline: 3,
+  sea_view: 2,
+  near_beach: 1,
+};
+const BEACH_UNIT_WEIGHT = 0.03;
 /**
  * Minimum number of priced candidates in the pool before a below-market
  * discount is trusted for ranking — a "median" of one or two listings is
@@ -349,6 +372,20 @@ export const REDFLAG_TYPE_FILTERS = [
 ] as const;
 export type RedflagTypeFilter = (typeof REDFLAG_TYPE_FILTERS)[number];
 
+/**
+ * Beach-proximity hard-filter values (#392, Fase 4 of #385). A MINIMUM-GRADE
+ * filter, NOT an exact match: the token is the LEAST beach signal a candidate
+ * must carry to survive, graded frontline > sea_view > near_beach:
+ *   - `frontline`  → only primera línea de playa (the owner's explicit ask).
+ *   - `sea_view`   → frontline OR sea_view ("al menos vistas al mar").
+ *   - `near_beach` → any of the three (any beach signal at all).
+ * `none` is deliberately not a filter target — it means "no signal", nothing to
+ * source on (same rule the badge vocabulary follows). A subset of the axis's
+ * `BEACH_PROXIMITIES`. Kept as a SQL param, never interpolated.
+ */
+export const BEACH_PROXIMITY_FILTERS = ["frontline", "sea_view", "near_beach"] as const;
+export type BeachProximityFilter = (typeof BEACH_PROXIMITY_FILTERS)[number];
+
 /** The two physical-occupancy statuses that count as "occupied" (kept as a SQL param, never interpolated). Exported for the route test's param-shape assertion. */
 export const OCCUPIED_STATUSES: string[] = ["tenanted", "occupied_illegally"];
 
@@ -383,6 +420,24 @@ export interface CandidateFilters {
    * assessed) is EXCLUDED. `null` = off.
    */
   redflagType?: RedflagTypeFilter | null;
+  /**
+   * #392: minimum beach-proximity grade a candidate must reach (`frontline` =
+   * only primera línea; `sea_view` = frontline OR sea_view; `near_beach` = any
+   * of the three). Reads `ranked.beach_proximity`, derived from the SAME latest
+   * `location` assessment row the beach boost reads (D-059). A null
+   * beach_proximity (location never assessed) OR `none` (assessed, no signal) is
+   * EXCLUDED — "unknown / no signal", never a false pass, matching #310/#387.
+   * `null` = off.
+   */
+  beachProximity?: BeachProximityFilter | null;
+  /**
+   * #392: keep only casco-histórico candidates (`ranked.heritage_zone = true`).
+   * A false (assessed, not heritage) OR null (location never assessed) value is
+   * EXCLUDED, matching #310/#387. A UI toggle, so `false`/`null`/undefined all
+   * mean "off". Reads the derived heritage_zone boolean, never a separate JOIN
+   * (D-059).
+   */
+  heritageZone?: boolean | null;
 }
 
 /**
@@ -410,6 +465,14 @@ export interface CandidateFilters {
  * per-row expression.
  */
 function rankedCandidatesCte(warnParam: string): string {
+  // #392 graded beach boost, built from BEACH_PROXIMITY_BOOST_UNITS. Keys are
+  // hardcoded enum values and values are numeric constants — never user input —
+  // so interpolating them into the CASE is safe. `none`/NULL fall through to
+  // ELSE 0 (no lift). frontline earns the top units (see the constant's doc for
+  // why the hard-filter target is still boosted).
+  const beachBoostCase = `CASE base.beach_proximity ${Object.entries(BEACH_PROXIMITY_BOOST_UNITS)
+    .map(([grade, units]) => `WHEN '${grade}' THEN ${units}`)
+    .join(" ")} ELSE 0 END`;
   return `${DISABLED_SOURCES_CTE},
      base AS (
        SELECT
@@ -433,6 +496,13 @@ function rankedCandidatesCte(warnParam: string): string {
          -- distress boost (D-059). NULL = that axis unassessed → excluded.
          dist.caveats,
          dist.redflag_types,
+         -- #392 beach-proximity + heritage-zone hard filters and the soft beach
+         -- boost. Same derive-once discipline (D-059): read off the identical
+         -- latest-per-axis location row, never a separate JOIN. beach_proximity
+         -- NULL = location never assessed (excluded by any beach filter, boost 0);
+         -- heritage_zone NULL likewise excluded when the toggle is on.
+         dist.beach_proximity,
+         dist.heritage_zone,
          -- Current accept/reject/star verdict for this profile (#379),
          -- derived latest-wins over accept/reject/star/clear; a trailing
          -- clear collapses to NULL (neutral). Feeds both the card's marked
@@ -514,12 +584,23 @@ function rankedCandidatesCte(warnParam: string): string {
                             AND rf.value->>'type' IS NOT NULL
                        )
                   ELSE NULL END
-           ) AS redflag_types
+           ) AS redflag_types,
+           -- #392 location axis: the graded beach_proximity enum and the
+           -- heritage_zone boolean, read off the SAME latest location row.
+           -- Only the single location row has these keys (max()/bool_or() ignore
+           -- the NULLs the other axes yield), so each aggregate collapses to that
+           -- one row's value. NULL means the location axis was never assessed —
+           -- excluded by any beach/heritage filter, and the boost sees none.
+           -- Location is NOT a distress axis, so nothing above counts it.
+           max(la.result->>'beach_proximity')
+             FILTER (WHERE la.assessment_type = 'location') AS beach_proximity,
+           bool_or(la.result->>'heritage_zone' = 'true')
+             FILTER (WHERE la.assessment_type = 'location') AS heritage_zone
          FROM (
            SELECT DISTINCT ON (a.assessment_type) a.assessment_type, a.result
              FROM ai_assessment a
             WHERE a.property_id = p.id
-              AND a.assessment_type IN ('occupancy', 'condition', 'redflags')
+              AND a.assessment_type IN ('occupancy', 'condition', 'redflags', 'location')
             ORDER BY a.assessment_type, a.generated_at DESC NULLS LAST, a.id DESC
          ) la
        ) dist ON true
@@ -579,6 +660,9 @@ function rankedCandidatesCte(warnParam: string): string {
                ELSE 0
              END
            + LEAST(base.distress_level, ${DISTRESS_MAX_UNITS}) * ${DISTRESS_UNIT_WEIGHT}
+           -- #392 soft beach boost (graded, non-negative → augments, never
+           -- filters). frontline/sea_view/near_beach lift; none/NULL add 0.
+           + (${beachBoostCase}) * ${BEACH_UNIT_WEIGHT}
          ) AS effective_score
        FROM base CROSS JOIN pool
      )`;
@@ -593,6 +677,7 @@ function rankedCandidatesCte(warnParam: string): string {
 export function describeRankingBoost(
   belowMarketPct: number | null,
   distressLevel: number,
+  beachProximity: string | null = null,
 ): string | null {
   const parts: string[] = [];
   if (belowMarketPct !== null && belowMarketPct >= MIN_NOTABLE_DISCOUNT) {
@@ -602,6 +687,13 @@ export function describeRankingBoost(
   }
   if (distressLevel > 0) {
     parts.push("señales de oportunidad detectadas (ocupación / estado / cargas)");
+  }
+  // #392: a positive beach grade lifts the ranking, so name it too (`none`/null
+  // carries no boost, so it earns no mention — same "no reason on every card"
+  // discipline as the signals above). Uses the axis's own Spanish badge label so
+  // the reason and the card's badge read consistently.
+  if (beachProximity !== null && BEACH_PROXIMITY_LABELS[beachProximity] !== undefined) {
+    parts.push(`proximidad a la playa (${BEACH_PROXIMITY_LABELS[beachProximity].toLowerCase()})`);
   }
   if (parts.length === 0) return null;
   return `Destacado: ${parts.join("; ")}.`;
@@ -662,6 +754,8 @@ interface RawCandidateRow {
   below_market_pct: string | null;
   /** 0–3 distress axes flagged (#309); a plain int. */
   distress_level: number;
+  /** #392: graded beach proximity from the latest `location` row; null when unassessed or `none`. Feeds the ranking-boost reason (the badge itself comes from loadFlags). */
+  beach_proximity: string | null;
   /** Current verdict (#379), already `clear`-collapsed-to-null in SQL; null when none. */
   feedback_state: StateFeedbackType | null;
 }
@@ -933,6 +1027,12 @@ export async function listCandidates(
   // byte-identical to before.
   const caveat: CaveatFilter | null = opts.caveat ?? null;
   const redflagType: RedflagTypeFilter | null = opts.redflagType ?? null;
+  // #392 beach/heritage filters. Closed-vocabulary token validated at the API
+  // boundary; normalise to null ("off") here. heritageZone is a toggle — false/
+  // undefined collapse to null so the "all filters off" param tail stays uniform
+  // and the SQL `IS NOT TRUE` guard treats it as off.
+  const beachProximity: BeachProximityFilter | null = opts.beachProximity ?? null;
+  const heritageZone: true | null = opts.heritageZone === true ? true : null;
   // Source (portal) filter (#265): isolate one connector's results so the
   // owner can debug a single portal's data quality. A candidate is a
   // deduplicated PROPERTY that may span several listings from different
@@ -1088,6 +1188,7 @@ export async function listCandidates(
        ranked.effective_score,
        ranked.below_market_pct,
        ranked.distress_level,
+       ranked.beach_proximity,
        COALESCE(
          (SELECT json_agg(
                    json_build_object(
@@ -1169,6 +1270,24 @@ export async function listCandidates(
        -- #386 redflag-type filter ($14). Keep only candidates carrying a redflag
        -- of this type. NULL redflag_types (redflags never assessed) → excluded.
        AND ($14::text IS NULL OR $14 = ANY(ranked.redflag_types))
+       -- #392 beach-proximity MINIMUM-GRADE hard filter ($15). frontline → only
+       -- primera línea; sea_view → frontline OR sea_view; near_beach → any of the
+       -- three. Reads ranked.beach_proximity (the CTE's per-axis column from the
+       -- latest location row — D-059, never a separate JOIN). NULL (location
+       -- unassessed) and 'none' (assessed, no signal) match nothing → excluded,
+       -- never a false pass — same graceful degradation as the other assessment
+       -- filters until the LLM populates the axis in this deployment.
+       AND (
+         $15::text IS NULL
+         OR ($15 = 'frontline' AND ranked.beach_proximity = 'frontline')
+         OR ($15 = 'sea_view' AND ranked.beach_proximity IN ('frontline', 'sea_view'))
+         OR ($15 = 'near_beach' AND ranked.beach_proximity IN ('frontline', 'sea_view', 'near_beach'))
+       )
+       -- #392 heritage-zone hard filter ($16). true → keep only casco-histórico
+       -- candidates. IS NOT TRUE passes when the filter is off (NULL/false); when
+       -- on, a NULL heritage_zone (location unassessed) or false is excluded
+       -- (unknown, never a false pass).
+       AND ($16::boolean IS NOT TRUE OR ranked.heritage_zone = true)
      ORDER BY ranked.effective_score DESC, ranked.property_id DESC
      LIMIT $4`,
     [
@@ -1186,6 +1305,8 @@ export async function listCandidates(
       includeRejected,
       caveat,
       redflagType,
+      beachProximity,
+      heritageZone,
     ],
   );
 
@@ -1223,6 +1344,7 @@ export async function listCandidates(
     ranking_boost_reason: describeRankingBoost(
       r.below_market_pct != null ? Number(r.below_market_pct) : null,
       r.distress_level ?? 0,
+      r.beach_proximity ?? null,
     ),
     feedback_state: r.feedback_state ?? null,
   }));
