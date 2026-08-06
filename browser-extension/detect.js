@@ -74,6 +74,14 @@
           /^\/areas\/(venta|alquiler)-/.test(p)
         );
       },
+      // Results-page pagination (issue #362). Idealista appends a
+      // `pagina-<n>.htm` PATH segment to the search path: page 1 is the bare
+      // `/venta-viviendas/madrid-madrid/`, page 2 is
+      // `/venta-viviendas/madrid-madrid/pagina-2.htm`. VERIFIED from
+      // idealista's robots.txt, which disallows `/*/pagina-*.htm` (the
+      // pagination path family). The segment goes on the PATH, before any
+      // `?query`/`#hash`, which are preserved.
+      pagination: { kind: "path-htm" },
       readySelectors: [
         "h1.main-info__title-main",
         ".info-data-price",
@@ -91,6 +99,16 @@
       isListingPath: function (p) {
         return /^\/(comprar|alquilar|alquiler)/.test(p);
       },
+      // Results-page pagination (issue #362). Aliseda's results are a
+      // CLIENT-SIDE-RENDERED Angular SPA (the server ships an empty
+      // `<app-root>` — a raw fetch carries zero listing/pagination markup), so
+      // NO clean page-N URL scheme could be verified statically against the
+      // live site. Best-effort `?pagina=<n>` write scheme (page 1 drops the
+      // param); the enumeration walk PREFERS the next-page URL harvested from
+      // the RENDERED DOM (nextResultsUrlFromHrefs) over this guess. If the
+      // rendered page exposes no numbered next-page anchor (e.g. infinite
+      // scroll), enumeration stops after page 1 — documented in the PR.
+      pagination: { kind: "query", param: "pagina" },
       readySelectors: [
         "[class*='ficha']",
         "[class*='detalle']",
@@ -123,6 +141,14 @@
       isListingPath: function (p) {
         return /^\/(?:venta|alquiler)-(?!de-)[a-z]+(?:\/|$)/.test(p);
       },
+      // Results-page pagination (issue #362). Altamira sits behind an Akamai
+      // WAF that 403s any non-session request (its own ETL connector abandons
+      // server-side access entirely), so no page-N URL scheme could be
+      // verified statically. Best-effort `?pagina=<n>` write scheme (page 1
+      // drops the param); like Aliseda, the enumeration walk PREFERS the
+      // rendered DOM's next-page anchor (nextResultsUrlFromHrefs) and stops
+      // after page 1 if the rendered page exposes no numbered next control.
+      pagination: { kind: "query", param: "pagina" },
       readySelectors: [
         "#soloPrecio",
         "h2.titulo",
@@ -299,6 +325,129 @@
       out.push(href.trim());
     }
     return out;
+  }
+
+  // ── Results-page pagination (issue #362) ──────────────────────────────────
+  //
+  // The batch capture historically harvested detail links off ONLY the current
+  // results page's DOM — so a search with N pages captured just page 1 (the
+  // owner reported this on Aliseda). These PURE helpers let the batch flow walk
+  // every results page: given a results URL, derive the URL of a specific page
+  // (`resultsPageUrl`) or the next page (`nextResultsUrl`), and — when a portal
+  // renders its pagination client-side with no clean URL scheme — pick the
+  // next-page anchor out of the rendered DOM's hrefs (`nextResultsUrlFromHrefs`).
+  //
+  // Bounded so a pathological "next page always exists" loop can't run away.
+  var RESULTS_PAGE_CAP = 40;
+
+  /** The `pagination` config for the portal whose host owns `parsed`, or null. */
+  function paginationConfigForParsed(parsed) {
+    var cfg = portalConfigForHost(parsed.hostname);
+    return cfg && cfg.pagination ? cfg.pagination : null;
+  }
+
+  /**
+   * The 1-based results-page number encoded in `url`, or 1 when none is present
+   * (page 1 is the canonical, indicator-free URL). Recognises ALL the schemes
+   * this module writes — idealista's `/pagina-<n>.htm` path segment and the
+   * `?pagina=`/`?page=`/`?pag=` query params — regardless of portal, so the
+   * DOM-anchor fallback can read a "next page" link whatever shape it takes.
+   * Pure; returns 1 for an unparseable URL.
+   */
+  function currentResultsPage(url) {
+    var parsed;
+    try {
+      parsed = new URL(String(url).trim());
+    } catch (e) {
+      return 1;
+    }
+    var m = /\/pagina-(\d+)\.htm$/i.exec(parsed.pathname);
+    if (m) return parseInt(m[1], 10) || 1;
+    m = /\/pagina[/-](\d+)(?:\/|$)/i.exec(parsed.pathname);
+    if (m) return parseInt(m[1], 10) || 1;
+    try {
+      var params = parsed.searchParams;
+      var keys = ["pagina", "page", "pag"];
+      for (var i = 0; i < keys.length; i++) {
+        if (params.has(keys[i])) {
+          var n = parseInt(params.get(keys[i]), 10);
+          if (n > 0) return n;
+        }
+      }
+    } catch (e) {
+      /* searchParams unavailable — ignore */
+    }
+    return 1;
+  }
+
+  /**
+   * The URL of results page `n` (1-based) for the same search as `url`, using
+   * the portal's own write scheme. Page 1 returns the canonical,
+   * indicator-free URL (any existing page indicator is stripped). Preserves the
+   * rest of the path, the query (minus the page key) and the hash. Pure;
+   * returns null for an unparseable URL, an unsupported portal, or `n < 1`.
+   */
+  function resultsPageUrl(url, n) {
+    if (typeof n !== "number" || n < 1) return null;
+    var parsed;
+    try {
+      parsed = new URL(String(url).trim());
+    } catch (e) {
+      return null;
+    }
+    var pg = paginationConfigForParsed(parsed);
+    if (!pg) return null;
+    if (pg.kind === "path-htm") {
+      // Strip any existing `/pagina-<n>.htm`, normalise a trailing slash, then
+      // append the segment for pages ≥ 2. Query + hash ride along untouched.
+      var path = parsed.pathname.replace(/\/pagina-\d+\.htm$/i, "");
+      if (!/\/$/.test(path)) path += "/";
+      if (n > 1) path += "pagina-" + n + ".htm";
+      parsed.pathname = path;
+      return parsed.toString();
+    }
+    if (pg.kind === "query") {
+      var param = pg.param || "pagina";
+      try {
+        parsed.searchParams.delete(param);
+        if (n > 1) parsed.searchParams.set(param, String(n));
+      } catch (e) {
+        return null;
+      }
+      return parsed.toString();
+    }
+    return null;
+  }
+
+  /**
+   * The URL of the results page AFTER `url` (current page + 1) via the portal's
+   * write scheme, or null when `url` isn't a supported results URL. This is the
+   * clean-URL path; a caller that has the rendered DOM can prefer
+   * nextResultsUrlFromHrefs when a portal renders pagination client-side.
+   */
+  function nextResultsUrl(url) {
+    return resultsPageUrl(url, currentResultsPage(url) + 1);
+  }
+
+  /**
+   * Fallback for portals that render pagination client-side with no clean URL
+   * scheme (issue #362): given the anchor hrefs harvested off the RENDERED
+   * results page plus the current URL, return the href that points at the NEXT
+   * results page (current page + 1) for `portal`, or null. Matches any scheme
+   * currentResultsPage understands (path or query), so it works whether the
+   * rendered "siguiente" link is `?pagina=2`, `/pagina-2.htm`, etc. Pure.
+   */
+  function nextResultsUrlFromHrefs(hrefs, currentUrl, portal) {
+    if (!hrefs || typeof hrefs.length !== "number") return null;
+    var want = currentResultsPage(currentUrl) + 1;
+    for (var i = 0; i < hrefs.length; i++) {
+      var href = hrefs[i];
+      if (typeof href !== "string") continue;
+      if (listingPortalForUrl(href) !== portal) continue;
+      if (currentResultsPage(href) !== want) continue;
+      return href.trim();
+    }
+    return null;
   }
 
   // ── Batch auto-start signal (issue #297) ──────────────────────────────────
@@ -589,6 +738,11 @@
     supportedPortalForUrl: supportedPortalForUrl,
     pageRoleForUrl: pageRoleForUrl,
     extractDetailUrls: extractDetailUrls,
+    RESULTS_PAGE_CAP: RESULTS_PAGE_CAP,
+    currentResultsPage: currentResultsPage,
+    resultsPageUrl: resultsPageUrl,
+    nextResultsUrl: nextResultsUrl,
+    nextResultsUrlFromHrefs: nextResultsUrlFromHrefs,
     isRenderReady: isRenderReady,
     createCaptureGuard: createCaptureGuard,
     CAPTURE_SIGNAL: CAPTURE_SIGNAL,

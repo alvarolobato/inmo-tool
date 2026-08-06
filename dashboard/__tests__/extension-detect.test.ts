@@ -31,6 +31,11 @@ const {
   stripCaptureSignal,
   listingCaptureAction,
   buildCaptureBanner,
+  RESULTS_PAGE_CAP,
+  currentResultsPage,
+  resultsPageUrl,
+  nextResultsUrl,
+  nextResultsUrlFromHrefs,
 } = D as {
   detailPortalForUrl: (u: string) => string | null;
   isDetailUrl: (u: string) => boolean;
@@ -58,6 +63,15 @@ const {
     doc: Document,
     opts: { count?: number; onCapture?: () => void; onDismiss?: () => void },
   ) => HTMLElement | null;
+  RESULTS_PAGE_CAP: number;
+  currentResultsPage: (u: string) => number;
+  resultsPageUrl: (u: string, n: number) => string | null;
+  nextResultsUrl: (u: string) => string | null;
+  nextResultsUrlFromHrefs: (
+    hrefs: unknown,
+    currentUrl: string,
+    portal: string,
+  ) => string | null;
 };
 
 describe("detailPortalForUrl — only real listing-detail pages", () => {
@@ -390,6 +404,124 @@ describe("extractDetailUrls — harvest detail links off a listing DOM", () => {
     ).toEqual(["https://www.idealista.com/inmueble/1/"]);
     expect(extractDetailUrls(undefined)).toEqual([]);
     expect(extractDetailUrls(null)).toEqual([]);
+  });
+});
+
+// ── Results-page pagination (issue #362) ────────────────────────────────────
+
+describe("currentResultsPage — read the page number off a results URL", () => {
+  const CASES: [string, number][] = [
+    // Idealista path-htm scheme.
+    ["https://www.idealista.com/venta-viviendas/madrid-madrid/", 1],
+    ["https://www.idealista.com/venta-viviendas/madrid-madrid/pagina-2.htm", 2],
+    ["https://www.idealista.com/venta-viviendas/madrid-madrid/pagina-13.htm", 13],
+    // Query-param scheme (aliseda/altamira best-effort + generic DOM read).
+    ["https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/malaga", 1],
+    ["https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/malaga?pagina=3", 3],
+    ["https://www.altamirainmuebles.com/venta-viviendas/madrid?page=4", 4],
+    ["https://www.altamirainmuebles.com/venta-viviendas/madrid?pag=5", 5],
+    // Unparseable → page 1.
+    ["not a url", 1],
+    ["", 1],
+  ];
+  it.each(CASES)("%s → page %d", (url, expected) => {
+    expect(currentResultsPage(url)).toBe(expected);
+  });
+});
+
+describe("resultsPageUrl / nextResultsUrl — derive page-N and next-page URLs", () => {
+  it("idealista: appends /pagina-N.htm for N≥2, canonical for page 1 (1→2→3)", () => {
+    const base = "https://www.idealista.com/venta-viviendas/madrid-madrid/";
+    const p2 = resultsPageUrl(base, 2);
+    expect(p2).toBe(
+      "https://www.idealista.com/venta-viviendas/madrid-madrid/pagina-2.htm",
+    );
+    // 2 → 3 derives from the page-2 URL.
+    expect(nextResultsUrl(p2!)).toBe(
+      "https://www.idealista.com/venta-viviendas/madrid-madrid/pagina-3.htm",
+    );
+    // 1 → 2 via nextResultsUrl on the canonical page-1 URL.
+    expect(nextResultsUrl(base)).toBe(p2);
+    // Page 1 strips any existing pagina segment back to the canonical URL.
+    expect(resultsPageUrl(p2!, 1)).toBe(base);
+  });
+
+  it("idealista: normalises a missing trailing slash before the pagina segment", () => {
+    expect(
+      resultsPageUrl("https://www.idealista.com/venta-viviendas/madrid-madrid", 2),
+    ).toBe("https://www.idealista.com/venta-viviendas/madrid-madrid/pagina-2.htm");
+  });
+
+  it("idealista: preserves the query string and hash", () => {
+    expect(
+      resultsPageUrl(
+        "https://www.idealista.com/venta-viviendas/madrid-madrid/?ordenado-por=precio-asc#map",
+        2,
+      ),
+    ).toBe(
+      "https://www.idealista.com/venta-viviendas/madrid-madrid/pagina-2.htm?ordenado-por=precio-asc#map",
+    );
+  });
+
+  it("aliseda/altamira: query-param scheme sets ?pagina=N (dropped on page 1)", () => {
+    const base = "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/malaga";
+    expect(resultsPageUrl(base, 2)).toBe(base + "?pagina=2");
+    expect(nextResultsUrl(base + "?pagina=2")).toBe(base + "?pagina=3");
+    // Page 1 removes the param.
+    expect(resultsPageUrl(base + "?pagina=2", 1)).toBe(base);
+    expect(
+      resultsPageUrl("https://www.altamirainmuebles.com/venta-viviendas/madrid", 2),
+    ).toBe("https://www.altamirainmuebles.com/venta-viviendas/madrid?pagina=2");
+  });
+
+  it("returns null for an unsupported portal, a bad URL, or n<1", () => {
+    expect(resultsPageUrl("https://www.fotocasa.es/lista/", 2)).toBeNull();
+    expect(resultsPageUrl("not a url", 2)).toBeNull();
+    expect(resultsPageUrl("https://www.idealista.com/venta-viviendas/x/", 0)).toBeNull();
+    expect(nextResultsUrl("https://www.fotocasa.es/lista/")).toBeNull();
+  });
+
+  it("RESULTS_PAGE_CAP is a sane bounded cap", () => {
+    expect(typeof RESULTS_PAGE_CAP).toBe("number");
+    expect(RESULTS_PAGE_CAP).toBeGreaterThan(1);
+    expect(RESULTS_PAGE_CAP).toBeLessThanOrEqual(100);
+  });
+});
+
+describe("nextResultsUrlFromHrefs — the rendered-DOM 'siguiente' fallback", () => {
+  it("picks the anchor pointing at current page + 1, scoped to the portal", () => {
+    const current = "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/malaga";
+    const hrefs = [
+      "https://www.alisedainmobiliaria.com/inmueble/ANT1", // detail, not a page link
+      "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/malaga?pagina=2", // next
+      "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/malaga?pagina=3", // page 3
+      "https://www.idealista.com/venta-viviendas/x/pagina-2.htm", // other portal
+    ];
+    expect(nextResultsUrlFromHrefs(hrefs, current, "aliseda")).toBe(
+      "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/malaga?pagina=2",
+    );
+  });
+
+  it("advances from page 2 to the page-3 anchor", () => {
+    const current =
+      "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/malaga?pagina=2";
+    const hrefs = [
+      "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/malaga?pagina=3",
+    ];
+    expect(nextResultsUrlFromHrefs(hrefs, current, "aliseda")).toBe(hrefs[0]);
+  });
+
+  it("returns null when no next-page anchor is present (last page / infinite scroll)", () => {
+    const current = "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/malaga";
+    expect(
+      nextResultsUrlFromHrefs(
+        ["https://www.alisedainmobiliaria.com/inmueble/ANT1"],
+        current,
+        "aliseda",
+      ),
+    ).toBeNull();
+    expect(nextResultsUrlFromHrefs(null, current, "aliseda")).toBeNull();
+    expect(nextResultsUrlFromHrefs(undefined, current, "aliseda")).toBeNull();
   });
 });
 
