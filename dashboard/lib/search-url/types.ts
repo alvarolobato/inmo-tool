@@ -17,6 +17,7 @@
  */
 
 import type { PROPERTY_TYPES } from "@/lib/profiles-schema";
+import type { CodeMappingAxes } from "./drift";
 
 export type PropertyType = (typeof PROPERTY_TYPES)[number];
 
@@ -106,6 +107,13 @@ export interface PortalSearchUrlBuilder {
    * searchable section; at least one).
    */
   build(scope: CanonicalSearchScope): SearchTask[];
+  /**
+   * This connector's CODE mapping, per axis — the hard-coded slugs/codes the
+   * builder emits, exposed so drift detection (lib/search-url/drift.ts) can diff
+   * them against the portal's captured filter catalog (issue #371, D-090). Pure
+   * & static; every URL-building portal implements it.
+   */
+  codeMapping(): CodeMappingAxes;
 }
 
 // ─── Capture-to-infer: learn URL grammars from real navigated URLs (issue #293)

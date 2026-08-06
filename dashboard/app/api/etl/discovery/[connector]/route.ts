@@ -15,6 +15,8 @@
 
 import { NextResponse } from "next/server";
 import { findLatestCatalog, countCatalogOptions } from "@/lib/db/portal-filter-catalog";
+import { codeMappingForPortal } from "@/lib/search-url";
+import { computePortalDrift } from "@/lib/search-url/drift";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
 // Queries Postgres per request; never prerender at build (no DB then).
@@ -45,6 +47,14 @@ export async function GET(
       Object.entries(row.axes).map(([axis, opts]) => [axis, opts?.length ?? 0]),
     );
 
+    // Deterministic drift (issue #371, D-090): diff the captured catalog against
+    // the connector's hard-coded code mapping so the page can FLAG where the code
+    // needs updating. Pure/no-LLM; null when the connector has no builder to diff.
+    const codeMapping = codeMappingForPortal(connector);
+    const drift = codeMapping
+      ? computePortalDrift(connector, row.axes, codeMapping)
+      : null;
+
     return NextResponse.json({
       connector: row.connector,
       source: row.source,
@@ -52,6 +62,7 @@ export async function GET(
       axes: row.axes,
       axis_summary: axisSummary,
       options_count: countCatalogOptions(row.axes),
+      drift,
     });
   } catch (err) {
     console.error(`[${requestId}] Error al cargar el catálogo de «${connector}»:`, err);

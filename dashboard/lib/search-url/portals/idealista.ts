@@ -50,6 +50,7 @@ import {
   NUMERIC_FIELDS,
   PLACEHOLDER,
 } from "../parse-shared";
+import type { CodeMappingAxes, CodeMappingOption } from "../drift";
 import type {
   CanonicalSearchScope,
   LoosenableConstraint,
@@ -208,9 +209,27 @@ function buildIdealista(scope: CanonicalSearchScope): SearchTask[] {
   );
 }
 
+/**
+ * The Idealista CODE mapping, per axis (issue #371, D-090) — the `venta-<section>`
+ * operations the builder emits, for drift detection against the portal's captured
+ * catalog. Identity is the operation segment (`venta-viviendas`, …); Idealista
+ * encodes no numeric subtype, and each operation covers several canonical types
+ * (viviendas → piso/chalet/atico), so there is no single `canonicalType` per
+ * slug — label-drift is not asserted for Idealista, only ADDED / REMOVED sections.
+ */
+function idealistaCodeMapping(): CodeMappingAxes {
+  const bySlug = new Map<string, CodeMappingOption>();
+  for (const operation of Object.values(OPERATION_BY_TYPE)) {
+    if (bySlug.has(operation)) continue;
+    bySlug.set(operation, { slug: operation, label: operation });
+  }
+  return { property_type: [...bySlug.values()] };
+}
+
 export const idealistaBuilder: PortalSearchUrlBuilder = {
   portal: PORTAL,
   build: buildIdealista,
+  codeMapping: idealistaCodeMapping,
 };
 
 // ─── parse(): the structural inverse of buildIdealista (issue #293) ──────────

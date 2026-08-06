@@ -28,8 +28,6 @@
 import type { Scope } from "@/lib/profiles-schema";
 import { CAPTURE_PORTALS } from "@/lib/worklist";
 import { findExamplesForPortal, type SearchUrlExampleRow } from "@/lib/db/search-url-example";
-import { findLatestCatalog } from "@/lib/db/portal-filter-catalog";
-import { primeDiscoveredCatalog } from "./discovered-mapping";
 import { BUILDERS, canonicalScopeFromProfile } from "./index";
 import { haversineKm } from "./parse-shared";
 import { PARSERS } from "./parsers";
@@ -129,16 +127,12 @@ export async function resolveSearchTasks(scope: Scope): Promise<SearchTask[]> {
     const builder = BUILDERS[portal];
     if (!builder) continue;
 
-    // Prime the discovered option→fragment mapping (issue #336, D-063) so the
-    // builder prefers a discovered slug/code over its hard-coded seed. Best
-    // effort: a DB miss/error just clears it → the builder uses its seed.
-    try {
-      const catalog = await findLatestCatalog(portal);
-      primeDiscoveredCatalog(portal, catalog?.axes ?? null);
-    } catch {
-      primeDiscoveredCatalog(portal, null);
-    }
-
+    // URL building is 100% code-driven (D-090, issue #371): the builder's
+    // hard-coded per-portal map is authoritative. Discovery no longer feeds URL
+    // construction — the discovered catalog is used only for drift DETECTION
+    // (lib/search-url/drift.ts), surfaced on /etl/discovery. This resolver still
+    // upgrades tasks from owner-navigated LEARNED examples (#293), which is a
+    // separate mechanism from discovery.
     const baseTasks = builder.build(canonical);
 
     const parser = PARSERS[portal];

@@ -1,32 +1,25 @@
 /**
- * Discovered option→URL-fragment mapping (issue #336, D-063) — CLIENT-SAFE.
+ * Discovered filter catalog — shape, validation, and canonical resolution
+ * (issue #336, D-063; reframed detection-only by issue #371, D-090) —
+ * CLIENT-SAFE.
  *
- * The read-side of "URL-building discovery mode": the browser extension
- * enumerates a portal's search-form filter OPTIONS and the URL fragment each
- * produces, POSTs that catalog (POST /api/extension/filter-catalog), and it is
- * persisted to `portal_filter_catalog`. This module lets a per-portal URL
- * BUILDER (lib/search-url/portals/<name>.ts) consult the LATEST discovered
- * catalog for a per-axis segment (property-type slug, subtipo code, …) and
- * PREFER it over the hard-coded seed table — falling back to the seed when no
- * discovered value exists (offline, never-run, or a type the portal doesn't
- * expose). The hard-coded map stays the verified seed / offline default.
+ * The browser extension enumerates a portal's search-form filter OPTIONS and
+ * the URL fragment each produces, POSTs that catalog (POST
+ * /api/extension/filter-catalog), and it is persisted to
+ * `portal_filter_catalog`. This module owns the catalog's TYPES, the ingest
+ * PAYLOAD VALIDATOR, and the portal-label → canonical `PropertyType` resolver.
  *
- * Why a module-level cache + sync accessor (not a build() parameter):
- *   - Builders are pure & synchronous (index.ts is client-safe, imports no
- *     `pg`); threading an async DB read through every builder + caller would
- *     change the public build() signature. Instead the SERVER-ONLY resolver
- *     (resolve.ts) PRIMES this cache (`primeDiscoveredCatalog`) with the latest
- *     row right before it builds, then the builder reads it synchronously.
- *   - The cache is keyed by connector and only ever holds the single LATEST
- *     catalog per connector, so concurrent priming across requests converges on
- *     the same value — benign for a low-traffic admin tool. Any non-primed path
- *     (e.g. the client-safe buildSearchUrls) simply sees an empty cache and
- *     falls back to the seed, which is the correct default.
+ * IMPORTANT (D-090): the catalog is used ONLY for deterministic DRIFT DETECTION
+ * (lib/search-url/drift.ts) — it does NOT feed URL construction. URL building
+ * is 100% code-driven from each connector's hard-coded per-portal map. The
+ * self-healing "prefer the discovered slug/subtipo over the seed" path that
+ * #339/D-063 shipped was REMOVED per the owner: discovery flags drift, humans
+ * update the code. There is no module-level catalog cache and no
+ * `discoveredSegmentFor()` any more.
  *
  * No `pg` here — the DB reads live in lib/db/portal-filter-catalog.ts.
  */
 
-import { PROPERTY_TYPES } from "@/lib/profiles-schema";
 import type { PropertyType } from "./types";
 
 /** The axes a discovery catalog can carry (connector-agnostic; a portal may expose any subset). */
@@ -73,18 +66,6 @@ export interface DiscoveredCatalog {
   source: CatalogSource;
   capturedAt: string;
   axes: CatalogAxes;
-}
-
-/** What the builder gets back for one canonical value, or null to fall back. */
-export interface DiscoveredSegment {
-  /** The URL path slug the portal uses (last segment of `urlFragment`). */
-  slug: string;
-  /** A numeric subtype code, if the portal encodes one (Aliseda `subtipo`). */
-  code?: number;
-  /** The top-level category path, if the portal roots this type elsewhere. */
-  category?: string;
-  /** The portal's own label for the option (for diagnostics / diffing). */
-  label: string;
 }
 
 // ── Payload validation (pure; shared by the ingest route and its tests) ──────
@@ -157,26 +138,6 @@ export function validateCatalogPayload(body: unknown): ValidateCatalogResult {
   return { ok: true, source: source as CatalogSource, axes, capturedAt };
 }
 
-// ── Client-safe latest-catalog cache (primed server-side by resolve.ts) ──────
-
-const CACHE = new Map<string, CatalogAxes>();
-
-/**
- * Store (or clear) the latest discovered catalog for a connector. Called by the
- * server-only resolver right before it builds that connector's tasks; passing
- * `null` clears any cached catalog (so a builder falls back to its seed).
- * Overwrites — the latest catalog always wins.
- */
-export function primeDiscoveredCatalog(connector: string, axes: CatalogAxes | null): void {
-  if (axes) CACHE.set(connector, axes);
-  else CACHE.delete(connector);
-}
-
-/** Drop all cached catalogs — test hook, and a manual invalidation escape hatch. */
-export function resetDiscoveredCatalogCache(): void {
-  CACHE.clear();
-}
-
 // ── Canonical property-type resolution (this layer owns our taxonomy) ────────
 //
 // The extension scrapes portal LABELS ("Piso", "Ático", "Chalet adosado"), not
@@ -233,49 +194,9 @@ export function canonicalPropertyType(label: string): PropertyType | null {
 }
 
 /** Last non-empty path segment of a URL fragment ("/comprar-viviendas/pisos" → "pisos"). */
-function lastPathSegment(urlFragment: string): string | null {
+export function lastPathSegment(urlFragment: string): string | null {
   // Strip query/hash, split on "/", take the last non-empty piece.
   const path = urlFragment.split(/[?#]/)[0];
   const parts = path.split("/").filter(Boolean);
   return parts.length > 0 ? parts[parts.length - 1] : null;
-}
-
-/**
- * The discovered segment for one canonical value on one axis, or null to fall
- * back to the builder's hard-coded seed.
- *
- * Only `property_type` is resolved today (the axis Aliseda is wired for): the
- * cached catalog's `property_type` options are matched to the canonical
- * PropertyType by label, and the first match wins. Returns null when nothing is
- * cached for the connector, the axis is absent, or no option maps to the value.
- */
-export function discoveredSegmentFor(
-  connector: string,
-  axis: CatalogAxis,
-  canonicalValue: string,
-): DiscoveredSegment | null {
-  const axes = CACHE.get(connector);
-  if (!axes) return null;
-  const options = axes[axis];
-  if (!options || options.length === 0) return null;
-
-  if (axis === "property_type") {
-    // Validate the requested value is a real PropertyType before matching.
-    if (!(PROPERTY_TYPES as readonly string[]).includes(canonicalValue)) return null;
-    for (const opt of options) {
-      if (canonicalPropertyType(opt.label) !== canonicalValue) continue;
-      const slug = lastPathSegment(opt.urlFragment);
-      if (!slug) continue; // an option with no usable fragment can't inform a segment
-      return {
-        slug,
-        code: typeof opt.subtipo === "number" ? opt.subtipo : undefined,
-        category: typeof opt.category === "string" ? opt.category : undefined,
-        label: opt.label,
-      };
-    }
-    return null;
-  }
-
-  // Other axes are captured & stored, but not yet consumed by any builder.
-  return null;
 }
