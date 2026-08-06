@@ -49,6 +49,14 @@ export function CandidateList({ profileId }: { profileId: number }) {
   // rather than implying the feed is broken.
   const [caveat, setCaveat] = useState<string>("");
   const [redflagType, setRedflagType] = useState<string>("");
+  // #392 (Fase 4 of #385): the owner's headline ask — beach proximity as a
+  // MINIMUM-grade hard filter (frontline = only primera línea; sea_view =
+  // frontline or vistas al mar; near_beach = any beach signal) plus a
+  // casco-histórico toggle. Both read the `location` AI-assessment axis (empty
+  // until the LLM populates it), so they're folded into `assessmentFilterActive`
+  // below — an empty feed says "needs assessment", not "broken".
+  const [beachProximity, setBeachProximity] = useState<string>("");
+  const [heritageZone, setHeritageZone] = useState(false);
   // #379: show-rejected toggle. Default OFF — the feed hides rejected
   // candidates (today's behaviour), so a reject only "removes" a card on the
   // next fetch. ON re-fetches with `includeRejected=true`, surfacing rejected
@@ -57,7 +65,12 @@ export function CandidateList({ profileId }: { profileId: number }) {
   const [showRejected, setShowRejected] = useState(false);
 
   const assessmentFilterActive =
-    occupancy !== "" || conditionSel !== "" || caveat !== "" || redflagType !== "";
+    occupancy !== "" ||
+    conditionSel !== "" ||
+    caveat !== "" ||
+    redflagType !== "" ||
+    beachProximity !== "" ||
+    heritageZone;
 
   const fetchPage = useCallback(
     async (afterCursor: string | null, replace: boolean) => {
@@ -76,6 +89,9 @@ export function CandidateList({ profileId }: { profileId: number }) {
       // #386 caveat / redflag-type filters.
       if (caveat !== "") url.searchParams.set("caveat", caveat);
       if (redflagType !== "") url.searchParams.set("redflagType", redflagType);
+      // #392 beach-proximity (min grade) + casco-histórico toggle.
+      if (beachProximity !== "") url.searchParams.set("beachProximity", beachProximity);
+      if (heritageZone) url.searchParams.set("heritageZone", "true");
       // #379: opt in to rejected candidates. Omitted (default) keeps them hidden.
       if (showRejected) url.searchParams.set("includeRejected", "true");
       const res = await fetch(url.toString().replace(window.location.origin, ""));
@@ -88,7 +104,18 @@ export function CandidateList({ profileId }: { profileId: number }) {
       setItems((prev) => (replace ? page.items : [...prev, ...page.items]));
       setCursor(page.nextCursor);
     },
-    [profileId, source, occupancy, conditionSel, minDiscount, caveat, redflagType, showRejected],
+    [
+      profileId,
+      source,
+      occupancy,
+      conditionSel,
+      minDiscount,
+      caveat,
+      redflagType,
+      beachProximity,
+      heritageZone,
+      showRejected,
+    ],
   );
 
   // Load the portal options once per profile (independent of the active
@@ -266,6 +293,42 @@ export function CandidateList({ profileId }: { profileId: number }) {
         <option value="deuda_comunidad">Deuda comunidad</option>
         <option value="structural_damage">Daño estructural</option>
       </select>
+
+      {/* #392: beach proximity as a MINIMUM-grade filter (owner's headline ask).
+          frontline = only primera línea; sea_view = frontline or vistas al mar;
+          near_beach = any beach signal. Needs the `location` assessment axis. */}
+      <label htmlFor="candidate-beach-filter" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+        Playa
+      </label>
+      <select
+        id="candidate-beach-filter"
+        data-testid="beach-filter"
+        value={beachProximity}
+        onChange={(e) => setBeachProximity(e.target.value)}
+        style={selectStyle}
+      >
+        <option value="">Cualquiera</option>
+        <option value="frontline">Primera línea</option>
+        <option value="sea_view">Vistas al mar o mejor</option>
+        <option value="near_beach">Cerca de playa o mejor</option>
+      </select>
+
+      {/* #392: casco-histórico toggle. On → only heritage-zone candidates. Needs
+          the `location` assessment axis. */}
+      <label
+        htmlFor="candidate-heritage-toggle"
+        style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--fg-muted)", cursor: "pointer" }}
+      >
+        <input
+          id="candidate-heritage-toggle"
+          data-testid="heritage-filter"
+          type="checkbox"
+          checked={heritageZone}
+          onChange={(e) => setHeritageZone(e.target.checked)}
+          style={{ cursor: "pointer" }}
+        />
+        Casco histórico
+      </label>
 
       {/* #379: show/hide rejected candidates. Default off (rejected hidden).
           Turning it on re-fetches with includeRejected=true so the user can

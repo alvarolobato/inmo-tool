@@ -19,6 +19,11 @@
  *                 (`unfinished_construction` | `embargo` | `litigio` |
  *                 `construccion_ilegal` | `herencia_yacente` | `deuda_comunidad` |
  *                 `structural_damage`). Reads AI-assessment data.
+ *   beachProximity — #392 hard filter (MINIMUM grade): `frontline` (only primera
+ *                 línea) | `sea_view` (frontline or sea_view) | `near_beach`
+ *                 (any beach signal). Reads the `location` AI-assessment axis.
+ *   heritageZone — #392 hard filter: `true` keeps only casco-histórico
+ *                 candidates. Reads the `location` axis. Any other value = off.
  *   minDiscount — #310 hard filter: keep only candidates priced at least this
  *                 PERCENT (0–100) below the pool median price/m². Sent as a
  *                 percent (e.g. `15`); converted to a fraction for the query.
@@ -38,6 +43,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import {
+  BEACH_PROXIMITY_FILTERS,
   CAVEAT_FILTERS,
   CONDITION_FILTERS,
   OCCUPANCY_FILTERS,
@@ -45,6 +51,7 @@ import {
   RENOVATION_FILTERS,
   decodeCursor,
   listCandidates,
+  type BeachProximityFilter,
   type CaveatFilter,
   type ConditionFilter,
   type OccupancyFilter,
@@ -164,6 +171,27 @@ export async function GET(
     redflagType = rawRedflagType as RedflagTypeFilter;
   }
 
+  // #392 beach-proximity filter (Fase 4 of #385). Closed-vocabulary token
+  // (frontline / sea_view / near_beach) — a minimum grade, validated here; a
+  // value outside BEACH_PROXIMITY_FILTERS is a malformed request (400), never an
+  // ignored filter.
+  const rawBeachProximity = searchParams.get("beachProximity");
+  let beachProximity: BeachProximityFilter | null = null;
+  if (rawBeachProximity !== null && rawBeachProximity !== "") {
+    if (!(BEACH_PROXIMITY_FILTERS as readonly string[]).includes(rawBeachProximity)) {
+      return NextResponse.json(
+        formatApiError("Filtro de playa no válido.", "VALIDATION", undefined, requestId),
+        { status: 400 },
+      );
+    }
+    beachProximity = rawBeachProximity as BeachProximityFilter;
+  }
+
+  // #392 heritage-zone toggle. Only the exact string "true" turns it on (keep
+  // only casco-histórico candidates); absent/anything else leaves it off — a
+  // permissive parse here can't silently narrow the feed.
+  const heritageZone = searchParams.get("heritageZone") === "true";
+
   // #379: show-rejected toggle. Absent/anything-but-"true" keeps today's
   // behaviour (rejected candidates hidden). Only the exact string "true"
   // opts in — a permissive parse here can't silently surface rejected cards.
@@ -237,6 +265,8 @@ export async function GET(
       minBelowMarketPct,
       caveat,
       redflagType,
+      beachProximity,
+      heritageZone,
       includeRejected,
     });
     return NextResponse.json(page);

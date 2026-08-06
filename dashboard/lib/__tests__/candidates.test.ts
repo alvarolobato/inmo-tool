@@ -29,9 +29,21 @@ import { resetPool } from "@/lib/db-write";
 // ($7), the occupied-statuses list ($8), condition ($9), renovation ($10), and
 // min-below-market ($11). #379 appends includeRejected ($12), false by default
 // (rejected candidates hidden). #386 appends caveat ($13) and redflagType
-// ($14), both null (off) by default. This is the "all filters off" tail every
+// ($14), both null (off) by default. #392 appends beachProximity ($15) and
+// heritageZone ($16), both null (off). This is the "all filters off" tail every
 // existing listCandidates assertion carries now.
-const NO_FILTER_TAIL = [null, OCCUPIED_STATUSES, null, null, null, false, null, null] as const;
+const NO_FILTER_TAIL = [
+  null,
+  OCCUPIED_STATUSES,
+  null,
+  null,
+  null,
+  false,
+  null,
+  null,
+  null,
+  null,
+] as const;
 
 /** Builds a cursor the same way `listCandidates` does internally, purely for test setup — tests otherwise treat cursors as opaque and decode `nextCursor` to assert on it. */
 function testCursor(score: number | null, id: number): string {
@@ -185,6 +197,51 @@ describe("listCandidates", () => {
     expect(params[6]).toBe("occupied");
     expect(params[12]).toBe("nuda_propiedad");
     expect(params[13]).toBe("embargo");
+  });
+
+  it("passes the beachProximity filter as $15 and gates on ranked.beach_proximity by min grade (#392)", async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [] });
+
+    await listCandidates(7, { beachProximity: "sea_view" });
+    const [sql, params] = mockPoolQuery.mock.calls[0];
+    // $15 carries the min-grade token; the outer filter reads ranked.beach_proximity
+    // (the CTE's per-axis column from the latest location row), never a JOIN (D-059).
+    expect(params[14]).toBe("sea_view");
+    expect(params[15]).toBeNull();
+    expect(sql).toContain("$15 = 'sea_view' AND ranked.beach_proximity IN ('frontline', 'sea_view')");
+    // The CTE derives the beach_proximity column itself from the location axis.
+    expect(sql).toContain("AS beach_proximity");
+    expect(sql).toContain("'occupancy', 'condition', 'redflags', 'location'");
+  });
+
+  it("passes the heritageZone toggle as $16=true and gates on ranked.heritage_zone (#392)", async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [] });
+
+    await listCandidates(7, { heritageZone: true });
+    const [sql, params] = mockPoolQuery.mock.calls[0];
+    expect(params[15]).toBe(true);
+    expect(sql).toContain("$16::boolean IS NOT TRUE OR ranked.heritage_zone = true");
+    expect(sql).toContain("AS heritage_zone");
+  });
+
+  it("normalises a falsy heritageZone to null so the off-tail stays uniform (#392)", async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [] });
+
+    await listCandidates(7, { heritageZone: false });
+    expect(mockPoolQuery.mock.calls[0][1][15]).toBeNull();
+  });
+
+  it("emits the graded beach boost in effective_score (soft, non-filtering — #392)", async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [] });
+
+    await listCandidates(7);
+    const [sql] = mockPoolQuery.mock.calls[0];
+    // The boost is a graded CASE on base.beach_proximity added to effective_score.
+    expect(sql).toContain("CASE base.beach_proximity");
+    expect(sql).toContain("WHEN 'frontline' THEN 3");
+    expect(sql).toContain("WHEN 'sea_view' THEN 2");
+    expect(sql).toContain("WHEN 'near_beach' THEN 1");
+    expect(sql).toContain("* 0.03");
   });
 
   it("rejects a malformed cursor rather than silently resetting to page 1", async () => {
@@ -737,5 +794,24 @@ describe("describeRankingBoost (#309)", () => {
     // Both clauses, semicolon-joined, single sentence.
     expect(reason.split(";")).toHaveLength(2);
     expect(reason.endsWith(".")).toBe(true);
+  });
+
+  it("names beach proximity as a boost reason for a positive grade (#392)", () => {
+    const frontline = describeRankingBoost(null, 0, "frontline")!;
+    expect(frontline).toContain("proximidad a la playa");
+    expect(frontline.toLowerCase()).toContain("primera línea");
+    expect(describeRankingBoost(null, 0, "sea_view")).toContain("vistas al mar");
+    // `none`/null/unmapped carry no boost, so no reason clause (and a default
+    // arg keeps every existing 2-arg caller unchanged).
+    expect(describeRankingBoost(null, 0, "none")).toBeNull();
+    expect(describeRankingBoost(null, 0, null)).toBeNull();
+  });
+
+  it("joins the beach reason with the other signals as a third clause (#392)", () => {
+    const reason = describeRankingBoost(0.2, 1, "sea_view")!;
+    expect(reason.split(";")).toHaveLength(3);
+    expect(reason).toContain("20%");
+    expect(reason).toContain("señales de oportunidad");
+    expect(reason).toContain("proximidad a la playa");
   });
 });
