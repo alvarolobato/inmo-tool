@@ -745,6 +745,15 @@ Tipos (\`type\`) — problemas FÍSICOS del inmueble:
   reformar" o acabados antiguos — eso es condición, no un daño estructural.
 - \`other\` — cualquier otro problema (legal, financiero o físico) relevante
   citado explícitamente, que no encaje en las categorías anteriores.
+  Cuando uses \`other\`, propón ADEMÁS un \`candidate_type\`: un slug corto en
+  \`snake_case\` (2-4 palabras, minúsculas, sin acentos ni espacios; usa \`_\` como
+  separador) que nombre ese problema como si fuera un tipo nuevo del vocabulario
+  (p.ej. \`servidumbre_paso\`, \`ruido_excesivo\`, \`inundacion_riesgo\`), y una
+  \`definition\`: la misma definición de una línea que darías a un tipo con nombre.
+  El slug NO se muestra al usuario todavía ni se convierte en filtro: sirve para
+  agrupar los \`other\` por concepto. Solo para \`other\`; los tipos con nombre NO
+  llevan \`candidate_type\` ni \`definition\`. El guard de evidencia se mantiene:
+  un \`other\` sin \`evidence\` se descarta aunque traiga \`candidate_type\`.
 
 ### Regla central: NO especules a partir del silencio
 
@@ -776,7 +785,9 @@ Formato de salida:
       "type": "embargo" | "subasta_judicial" | "herencia_yacente" | "deuda_comunidad" | "construccion_ilegal" | "litigio" | "unfinished_construction" | "structural_damage" | "other",
       "description": "qué debería comprobar el inversor, una frase",
       "evidence": "cita literal del anuncio en la que te apoyas",
-      "evidence_source": "portal del que sale la cita, o null"
+      "evidence_source": "portal del que sale la cita, o null",
+      "candidate_type": "solo si type='other': slug snake_case corto (2-4 palabras) que nombre el problema; omítelo en los tipos con nombre",
+      "definition": "solo si type='other': definición de una línea del candidate_type; omítelo en los tipos con nombre"
     }
   ],
   "confidence": 0.0-1.0,
