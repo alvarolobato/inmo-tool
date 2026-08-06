@@ -47,6 +47,7 @@ const SAMPLE: DataHealthResponse = {
   ],
   sources: [{ source: "idealista", listing_count: 100, avg_photo_count: 6 }],
   stale_profiles: [],
+  zero_result_regressions: [],
   sweep_in_progress: false,
   generated_at: "2026-08-05T00:00:00.000Z",
 };

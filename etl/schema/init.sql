@@ -1713,6 +1713,15 @@ CREATE TABLE IF NOT EXISTS capture_task_run (
 -- (keyed on profile_id); the PK's leading column already serves that, so no
 -- extra index is needed.
 
+-- Issue #376 (zero-results regression monitor): the real harvested result count
+-- the LAST time this (profile, task) capture was run. The dashboard task-run
+-- POST records it when known; it is the extension-path counterpart to the
+-- server connectors' per-scope `connector_run_results.geography_scope`
+-- discovered_count. ADD COLUMN IF NOT EXISTS (a column inside the CREATE TABLE
+-- above is a no-op against an already-created table), NULL for rows written
+-- before the column existed and for runs that recorded no count.
+ALTER TABLE capture_task_run ADD COLUMN IF NOT EXISTS last_result_count INTEGER;
+
 
 -- ── Capture-to-infer: learned search-URL examples (issue #293, D-051) ───────
 -- Instead of hand-maintaining each portal's search-URL grammar, we LEARN it
@@ -1760,6 +1769,17 @@ CREATE TABLE IF NOT EXISTS search_url_example (
 -- section lookup cheap as examples accumulate.
 CREATE INDEX IF NOT EXISTS idx_search_url_example_lookup
     ON search_url_example (portal, category_key);
+
+-- Issue #376 (zero-results regression monitor): the real harvested result count
+-- the last time the extension enumerated this (portal, search URL) — the count
+-- `enumerateResultsPages()` (#362) computes as `seen.size` and, until now,
+-- discarded. The extension re-POSTs to /api/extension/search-url-example at the
+-- END of enumeration with `resultCount`, and the writer upserts it here. This
+-- is the extension-side counterpart to the server connectors' per-scope
+-- discovered_count; keyed by (portal, match_key) = (connector, resolved
+-- scope/filter). ADD COLUMN IF NOT EXISTS (idempotent), NULL until an
+-- enumeration reports a count.
+ALTER TABLE search_url_example ADD COLUMN IF NOT EXISTS last_result_count INTEGER;
 
 
 -- URL-building discovery catalog (issue #336, D-063).

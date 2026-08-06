@@ -282,9 +282,15 @@
   requires_restart: [etl]
   components: [etl]
 
-# -----------------------------------------------------------------------------
-# OpenRouter / LLM
-# -----------------------------------------------------------------------------
+- key: etl.zero_result_regression_runs
+  env: ETL_ZERO_RESULT_REGRESSION_RUNS
+  type: int
+  sensitive: false
+  default: 3
+  section: "ETL"
+  description: "Número N de ejecuciones consecutivas con 0 resultados que, tras una observación previa distinta de cero, marca una (conector, ámbito) como regresión de resultados en la Salud de datos (issue #376) — la señal 'una búsqueda que antes devolvía anuncios ahora devuelve 0', típica de una deriva de filtro/URL. Un ámbito que SIEMPRE ha estado a 0 (zona escasa nunca cubierta) no se marca; un 0 puntual tampoco; una recuperación (un valor distinto de cero posterior) limpia la marca. Por defecto 3. Solo lo lee el dashboard."
+  requires_restart: []
+  components: [dashboard]
 - key: openrouter.api_key
   env: OPENROUTER_API_KEY
   type: string

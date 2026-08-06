@@ -72,6 +72,9 @@ export async function GET(
 
 interface RecordBody {
   taskId?: unknown;
+  // Issue #376: the real harvested result count for this run, when the caller
+  // knows it (the zero-results regression monitor's extension-path signal).
+  resultCount?: unknown;
 }
 
 export async function POST(
@@ -114,7 +117,11 @@ export async function POST(
         { status: 404 },
       );
     }
-    const lastRunAt = await recordTaskRun(id, taskId);
+    const resultCount =
+      typeof body.resultCount === "number" && Number.isFinite(body.resultCount)
+        ? body.resultCount
+        : null;
+    const lastRunAt = await recordTaskRun(id, taskId, resultCount);
     return NextResponse.json({ ok: true, taskId, lastRunAt });
   } catch (error) {
     return NextResponse.json(

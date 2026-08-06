@@ -28,6 +28,7 @@ import {
   type PortalCaptureHealth,
   type SourceDataQuality,
   type StaleProfile,
+  type ZeroResultRegression,
 } from "@/lib/data-health";
 import { getLlmEndpointMetaEs } from "@/lib/llm-endpoint-meta";
 import type { LlmHealthResponse } from "@/lib/llm-health";
@@ -432,6 +433,59 @@ function SourceQualitySection({ rows }: { rows: SourceDataQuality[] }) {
             </table>
           </div>
         </Card>
+      )}
+    </section>
+  );
+}
+
+function ZeroResultRegressionSection({ rows }: { rows: ZeroResultRegression[] }) {
+  return (
+    <section className="space-y-3" data-testid="zero-result-regressions">
+      <div>
+        <SectionTitle>Búsquedas que dejaron de devolver resultados</SectionTitle>
+        <p className="mt-1 text-sm text-tremor-content dark:text-dark-tremor-content">
+          Ámbitos (conector × zona/filtro) que antes devolvían anuncios y llevan
+          varias ejecuciones seguidas devolviendo 0 — señal probable de deriva de
+          filtro o de URL. No se marcan las zonas escasas que siempre estuvieron a
+          0, ni un 0 puntual; una ejecución posterior con resultados limpia la
+          marca.
+        </p>
+      </div>
+      {rows.length === 0 ? (
+        <EmptyRow testId="zero-result-regressions-empty">
+          Ninguna búsqueda ha dejado de devolver resultados.
+        </EmptyRow>
+      ) : (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {rows.map((z) => (
+            <Card
+              key={`${z.connector}::${z.scope_key}`}
+              className="p-4"
+              data-testid={`zero-result-regression-${z.connector}-${z.scope_key}`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <p className="font-semibold text-tremor-content-strong dark:text-dark-tremor-content-strong">
+                  {z.connector}
+                </p>
+                <Badge tone="warn" testId={`zero-result-badge-${z.connector}-${z.scope_key}`}>
+                  {z.consecutive_zeros} ejec. a 0
+                </Badge>
+              </div>
+              <p className="mt-1 text-xs text-tremor-content dark:text-dark-tremor-content">
+                {z.scope_key}
+              </p>
+              <p
+                className="mt-2 text-xs"
+                style={{ color: "var(--danger, #b91c1c)" }}
+                data-testid={`zero-result-detail-${z.connector}-${z.scope_key}`}
+              >
+                Antes devolvía{" "}
+                {z.last_nonzero_count !== null ? `${z.last_nonzero_count} anuncio(s)` : "resultados"}
+                ; ahora 0 desde {formatRelative(z.drift_started_at)}.
+              </p>
+            </Card>
+          ))}
+        </div>
       )}
     </section>
   );
@@ -891,6 +945,7 @@ export default function DataHealthPage() {
       ) : data ? (
         <div className="space-y-8">
           <ConnectorHealthSection rows={data.connectors} />
+          <ZeroResultRegressionSection rows={data.zero_result_regressions} />
           <PortalHealthSection rows={data.portals} />
           <SourceQualitySection rows={data.sources} />
           <StaleProfilesSection

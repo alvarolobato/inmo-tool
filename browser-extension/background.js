@@ -433,14 +433,24 @@ async function fetchWorklistProgress(portal) {
  * (issue #293). Fire-and-forget: a failure here must never block the batch —
  * saving the URL grammar is a side-benefit of mining, not a precondition.
  */
-async function saveSearchUrlExample(searchUrl) {
+async function saveSearchUrlExample(searchUrl, resultCount) {
   if (!searchUrl) return;
   try {
     const { apiUrl, apiKey } = await getApiConfig();
+    // Issue #376: on the end-of-enumeration call we carry `resultCount` — the
+    // real harvested count enumerateResultsPages() computed (`seen.size`),
+    // which used to be discarded — so the zero-results regression monitor has
+    // the extension-path count keyed by (portal, search URL). Omitted on the
+    // batch-start call (no count yet); the server COALESCEs so the countless
+    // start save never wipes a later real count.
+    const body = { url: searchUrl };
+    if (typeof resultCount === 'number' && Number.isFinite(resultCount)) {
+      body.resultCount = resultCount;
+    }
     await fetch(`${apiUrl}/api/extension/search-url-example`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-admin-key': apiKey },
-      body: JSON.stringify({ url: searchUrl }),
+      body: JSON.stringify(body),
     });
   } catch {
     /* best-effort: never let a learned-example save disrupt the capture run */
@@ -703,6 +713,11 @@ async function enumerateResultsPages(portal, searchUrl, page1Urls) {
       batchTabIds.delete(tabId);
       await persistBatchTabs();
     }
+    // Issue #376: persist the REAL harvested count (`seen.size`) for this
+    // (portal, search URL) — the count #362 already computed but discarded.
+    // Best-effort and keyed by the same search URL the batch-start save used,
+    // so the zero-results regression monitor gets the extension-path signal.
+    await saveSearchUrlExample(D.stripCaptureSignal(searchUrl), seen.size);
   }
 }
 

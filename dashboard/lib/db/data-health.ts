@@ -21,6 +21,7 @@
 
 import { query } from "@/lib/db";
 import { toIsoOrNull } from "@/lib/format";
+import { getZeroResultRegressions } from "@/lib/db/zero-result-regression";
 import {
   connectorHealthLevel,
   hostToPortal,
@@ -51,7 +52,8 @@ function numOrNull(v: unknown): number | null {
  * polls this at a slow cadence, not per-widget.
  */
 export async function getDataHealth(): Promise<DataHealthResponse> {
-  const [connectorRes, portalRes, sourceRes, staleRes, sweepRes] = await Promise.all([
+  const [connectorRes, portalRes, sourceRes, staleRes, sweepRes, zeroResultRegressions] =
+    await Promise.all([
     // 1. Latest run per connector + the prior run's error_count. LEAD over a
     //    DESC ordering returns the NEXT (older) row — i.e. the previous run.
     query(
@@ -153,6 +155,11 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
          SELECT 1 FROM connector_runs WHERE status = 'running' LIMIT 1
        ) AS sweeping`,
     ),
+
+    // 5. Zero-results regression monitor (issue #376): (connector, scope) pairs
+    //    that used to return listings and now return 0 for N consecutive runs.
+    //    Its own read + pure detector — see lib/db/zero-result-regression.ts.
+    getZeroResultRegressions(),
   ]);
 
   const sweepInProgress = Boolean(sweepRes.rows[0]?.[0]);
@@ -246,6 +253,7 @@ export async function getDataHealth(): Promise<DataHealthResponse> {
     portals,
     sources,
     stale_profiles,
+    zero_result_regressions: zeroResultRegressions,
     sweep_in_progress: sweepInProgress,
     generated_at: new Date().toISOString(),
   };
