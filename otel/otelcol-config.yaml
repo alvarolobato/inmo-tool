@@ -96,19 +96,18 @@ processors:
   # `service.extensions`, so it silently prevented the collector from
   # starting at all rather than just disabling a feature.
   #
-  # This is a real, not-yet-restored regression, not just a config
-  # simplification: every trace is now exported (see `traces_sampler:
-  # parentbased_always_on` in docker-compose.yml's etl/dashboard env), with
-  # no way to reproduce the old "keep 100% of errors and slow (>5s) traces,
-  # sample only 10% of normal ones" behavior — head sampling (the only kind
-  # this image's valid-processors list supports; `elastictrace` is an APM
-  # span-enrichment processor, not a sampler, so it's not a substitute)
-  # can't inspect a trace's outcome/duration before deciding to keep it.
-  # Harmless for Phase 1's local-dev/file-sink usage, but worth fixing
-  # properly (either a different collector image, or accepting head
-  # sampling via OTEL_TRACES_SAMPLER=parentbased_traceidratio +
-  # OTEL_TRACES_SAMPLER_ARG=0.1) before any real production/cost-sensitive
-  # deployment — see issue #52 for options.
+  # Resolution (issue #52, D-091): rather than swap the pinned image, sampling
+  # was restored at the SDK level via head sampling —
+  # OTEL_TRACES_SAMPLER=parentbased_traceidratio + OTEL_TRACES_SAMPLER_ARG
+  # (default 0.1 = 10%) on the etl/dashboard services in docker-compose.yml.
+  # This controls trace volume with a configurable rate and keeps whole traces
+  # intact (parent-based), but — unlike the old tail_sampling policy — it cannot
+  # preferentially keep error/slow traces, because the keep/drop decision is
+  # made before a trace's outcome or duration is known. If a collector
+  # distribution that compiles `tail_sampling` is later adopted, re-add the
+  # processor here and set the SDK samplers back to parentbased_always_on so the
+  # collector owns the (smarter) sampling decision. `elastictrace` is an APM
+  # span-enrichment processor, not a sampler, so it is not a substitute.
 
 exporters:
   # File exporter — always-on local sink. In production this writes a rolling
@@ -143,9 +142,11 @@ exporters:
 service:
   extensions: [health_check]
   pipelines:
-    # Traces — no tail-sampling (see the processors section above for why);
-    # every trace is exported as-is until that's re-added against a
-    # compatible processor.
+    # Traces — no tail-sampling in the collector (the pinned image can't
+    # compile that processor; see the processors section above). Sampling is
+    # instead applied as head sampling at the SDK (issue #52, D-091): the
+    # etl/dashboard OTEL_TRACES_SAMPLER=parentbased_traceidratio env var drops
+    # unsampled traces before they ever reach this receiver.
     traces:
       receivers: [otlp]
       processors: [memory_limiter, attributes/redact, resource, batch]
