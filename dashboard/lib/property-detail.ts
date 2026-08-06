@@ -52,6 +52,13 @@ export interface PropertyListingDetail {
   first_seen_at: string | null;
   last_seen_at: string | null;
   /**
+   * The advert body text as scraped from the source portal (issue #360).
+   * Populated for most sources; null/empty for listings that predate the
+   * field or came from a source that carries no free-text body. Rendered by
+   * components/property/PropertyDescription.tsx on the detail page.
+   */
+  description: string | null;
+  /**
    * Per-listing extraction-quality grade the ETL stamped on
    * `raw_extra.extraction_quality` (issue #80). Null for listings that
    * predate the feature — they self-heal on their next fetch. See
@@ -125,6 +132,7 @@ interface RawListingRow {
   last_seen_at: string | null;
   photo_urls: string[] | null;
   operation: string;
+  description: string | null;
   /** `raw_extra->'extraction_quality'` — untyped JSON, narrowed on read. */
   extraction_quality: unknown;
 }
@@ -170,6 +178,7 @@ export async function getPropertyDetail(propertyId: number): Promise<PropertyDet
       // same-source rows in.
       `SELECT id, source, url, listing_kind, status, current_price,
               reference_code, first_seen_at, last_seen_at, photo_urls, operation,
+              description,
               raw_extra->'extraction_quality' AS extraction_quality
          FROM listing
         WHERE property_id = $1
@@ -254,6 +263,7 @@ export async function getPropertyDetail(propertyId: number): Promise<PropertyDet
       first_seen_at: l.first_seen_at,
       last_seen_at: l.last_seen_at,
       operation: l.operation,
+      description: l.description,
       extraction_quality: parseExtractionQuality(l.extraction_quality),
     })),
     price_history: priceRows.map((h) => ({
