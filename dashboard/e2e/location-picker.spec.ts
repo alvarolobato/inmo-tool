@@ -53,6 +53,19 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   if (dbAvailable) {
+    // Delete FK children first: search_profile is referenced by
+    // profile_listing_state (profile_listing_state_profile_id_fkey). A plain
+    // DELETE FROM search_profile fails if any listing-state rows point at a
+    // seeded profile — which happens whenever a background matcher attaches
+    // one to the profile the search-and-select test creates. Clear the
+    // children by the same name prefix, then the profiles themselves, so
+    // teardown is robust and can't mask a test body's real result.
+    await pool.query(
+      `DELETE FROM profile_listing_state WHERE profile_id IN (
+         SELECT id FROM search_profile WHERE name LIKE $1
+       )`,
+      [`${NAME_PREFIX}%`],
+    );
     await pool.query("DELETE FROM search_profile WHERE name LIKE $1", [`${NAME_PREFIX}%`]);
   }
   await pool?.end();
@@ -96,15 +109,11 @@ test("searching a place and selecting it sets the profile's coordinates", async 
 
   const firstResult = page.getByTestId("location-search-result").first();
   await expect(firstResult).toBeVisible({ timeout: 10_000 });
-  await firstResult.click();
-
-  // Selecting a result must not re-trigger a search (Opus review, PR #103:
-  // setQuery(result.label) inside selectResult previously re-triggered the
-  // search effect, firing a second Nominatim request behind the scenes).
-  // Wait past the debounce window, then assert the route was only ever hit
-  // once — a direct proof, not just the dropdown-visibility proxy below.
-  await page.waitForTimeout(600);
+  // The first (and only legitimate) geocode request has necessarily already
+  // fired and resolved by now — the result option is only rendered from that
+  // response — so the count is 1 at this point.
   expect(geocodeRequestCount).toBe(1);
+  await firstResult.click();
 
   // The search dropdown closes on selection; open the advanced/manual panel
   // to read back the coordinates the selection actually set, rather than
@@ -117,13 +126,29 @@ test("searching a place and selecting it sets the profile's coordinates", async 
   expect(Number(lon)).toBeCloseTo(STUB_LON, 4);
 
   // Also confirms the dropdown itself stays closed after selection (the
-  // regression's other visible symptom, alongside the extra request above).
+  // regression's other visible symptom): if selecting had re-triggered the
+  // search effect (Opus review, PR #103: setQuery(result.label) inside
+  // selectResult firing a second Nominatim request a debounce-interval
+  // later), that second response would call setShowResults(true) and reopen
+  // this dropdown over the map.
   await expect(page.getByTestId("location-search-results")).not.toBeVisible();
 
   // Submit and confirm the real stored value in Postgres matches what the
   // picker showed — proves the whole path end to end, not just the UI state.
   await page.getByRole("button", { name: "Crear perfil" }).click();
   await expect(page.getByText(name)).toBeVisible({ timeout: 10_000 });
+
+  // #165: selecting a result must not re-trigger a second geocode request.
+  // The old guard was `waitForTimeout(600); expect(count).toBe(1)` — a fixed
+  // real-clock sleep giving only a 200ms margin over the 400ms search
+  // debounce, which could lose the race under load. Assert the count only
+  // now: the profile has been POSTed and rendered back from the list (a real
+  // server + DB round-trip), an observable event that is causally well past
+  // the 400ms window in which a re-triggered debounce would have fired and
+  // bumped the count. This keeps the regression guard strong (a second
+  // request would have landed by now) without racing a fixed sleep against
+  // the debounce.
+  expect(geocodeRequestCount).toBe(1);
 
   const { rows } = await pool.query<{ scope: { geography: { center: [number, number] } } }>(
     "SELECT scope FROM search_profile WHERE name = $1",
@@ -150,6 +175,20 @@ test("clicking the map moves the marker and updates the manual coordinate fields
   // real, interactive Leaflet instance, not a static image.
   const mapContainer = page.locator(".leaflet-container");
   await expect(mapContainer).toBeVisible({ timeout: 10_000 });
+  // #178: the container getting a layout box (visible + a bounding box) does
+  // NOT mean Leaflet has finished initializing the map instance and attaching
+  // its click handler (ClickToMove's useMapEvents in LocationPickerMap.tsx).
+  // react-leaflet only mounts the map's child layers — the marker AND the
+  // click handler, siblings mounted together after the map instance exists —
+  // once init completes, so the marker appearing in the DOM is a real
+  // "Leaflet is initialized and listening for clicks" signal. It is also
+  // network-independent (unlike `.leaflet-tile-loaded`, which needs the OSM
+  // tile server to respond and may never load in CI). Under full-suite load
+  // the window between "container visible" and "Leaflet actually wired up"
+  // widens; waiting on the marker before reading the box and clicking closes
+  // that race deterministically instead of inferring readiness from the
+  // container's visibility alone.
+  await expect(page.locator(".leaflet-marker-icon").first()).toBeVisible({ timeout: 10_000 });
   // page.mouse.click takes VIEWPORT coordinates, so the box must be scrolled
   // into view before it is read. Running alone this test passes either way —
   // the dialog opens at the top of a short page. In a full-suite run earlier

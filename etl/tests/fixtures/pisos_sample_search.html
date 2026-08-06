@@ -1,0 +1,91 @@
+<!--
+  TRIMMED / SYNTHETIC reconstruction of a real pisos.com search-results page
+  (https://www.pisos.com/venta/pisos-madrid/) as observed live 2026-08 during
+  issue #79's feasibility spike. NOT a literal full-page dump: reduced to 3
+  ad-preview cards + their matching per-card JSON-LD blocks, keeping only the
+  markup PisosConnector._parse_search_page actually reads (the card id,
+  data-lnk-href, contact-box[data-ad-price], .ad-preview__char / __price /
+  __title / __subtitle / __description, an img, and the ld+json geo/address).
+  Field values mirror real cards seen on that page (Gaztambide / Alcorcón /
+  Pozuelo), including the HTML entities pisos.com emits inside JSON-LD.
+-->
+<!doctype html>
+<html lang="es">
+<head><title>Casas y pisos en venta en Madrid | pisos.com</title></head>
+<body>
+<div class="results">
+
+  <script type="application/ld+json">
+  {"@context":"https://schema.org/","@type":"SingleFamilyResidence","@id":"65098413759.100500","name":"Piso en calle de la Princesa, 76","url":"/comprar/piso-gaztambide-65098413759_100500/","address":{"@type":"PostalAddress","addressLocality":"Madrid Capital","addressRegion":"Madrid","addressCountry":{"@type":"Country","name":"ES"}},"geo":{"@type":"GeoCoordinates","latitude":"40.4325","longitude":"-3.71735"}}
+  </script>
+  <div id="65098413759.100500" class="ad-preview ad-preview--has-desc" data-lnk-href="/comprar/piso-gaztambide-65098413759_100500/">
+    <div class="ad-preview__top">
+      <img src="https://fotos.imghs.net/mm-wp/1005/101/foto1.jpg" alt="Piso en calle de la Princesa, 76" width="380" height="285">
+    </div>
+    <div class="ad-preview__bottom">
+      <div class="ad-preview__inline ad-preview__inline--has-logo">
+        <span class="ad-preview__price">1.600.000 €</span>
+      </div>
+      <a href="/comprar/piso-gaztambide-65098413759_100500/" class="ad-preview__title">Piso en calle de la Princesa, 76</a>
+      <p class="ad-preview__subtitle">Gaztambide (Distrito Chamber&#xED;. Madrid Capital)</p>
+      <div class="ad-preview__inline">
+        <p class="ad-preview__char p-sm">3 habs.</p>
+        <p class="ad-preview__char p-sm">3 ba&#xF1;os</p>
+        <p class="ad-preview__char p-sm">155 m&#xB2;</p>
+        <p class="ad-preview__char p-sm">4&#xAA; planta</p>
+      </div>
+      <p class="ad-preview__description">Espectacular propiedad de alta gama llave en mano.</p>
+      <div class="contact-box js-contactInfo" data-ad-id="65098413759.100500" data-is-tipology="false" data-is-newdevelopment="false" data-ad-price="1600000"></div>
+    </div>
+  </div>
+
+  <script type="application/ld+json">
+  {"@context":"https://schema.org/","@type":"SingleFamilyResidence","@id":"61748204239.106400","name":"D&#xFA;plex en calle de Juan Ram&#xF3;n Jim&#xE9;nez, 4","url":"/comprar/duplex-las_retamas_prado_santo_domingo_ensanche_sur28922-61748204239_106400/","address":{"@type":"PostalAddress","addressLocality":"Alcorc&#xF3;n","addressRegion":"Madrid","addressCountry":{"@type":"Country","name":"ES"}},"geo":{"@type":"GeoCoordinates","latitude":"40.3397","longitude":"-3.8323"}}
+  </script>
+  <div id="61748204239.106400" class="ad-preview ad-preview--has-desc" data-lnk-href="/comprar/duplex-las_retamas_prado_santo_domingo_ensanche_sur28922-61748204239_106400/">
+    <div class="ad-preview__top">
+      <img src="https://fotos.imghs.net/mm-wp/1064/390/foto1.jpg" alt="Duplex" width="380" height="285">
+    </div>
+    <div class="ad-preview__bottom">
+      <div class="ad-preview__inline ad-preview__inline--has-logo">
+        <span class="ad-preview__price">460.000 €</span>
+      </div>
+      <a href="/comprar/duplex-las_retamas_prado_santo_domingo_ensanche_sur28922-61748204239_106400/" class="ad-preview__title">D&#xFA;plex en calle de Juan Ram&#xF3;n Jim&#xE9;nez, 4</a>
+      <p class="ad-preview__subtitle">Las Retamas-Prado Santo Domingo-Ensanche Sur (Alcorc&#xF3;n)</p>
+      <div class="ad-preview__inline">
+        <p class="ad-preview__char p-sm">3 habs.</p>
+        <p class="ad-preview__char p-sm">3 ba&#xF1;os</p>
+        <p class="ad-preview__char p-sm">110 m&#xB2;</p>
+        <p class="ad-preview__char p-sm">2&#xAA; planta</p>
+      </div>
+      <p class="ad-preview__description">&#xA1;Sin comisiones al comprador!</p>
+      <div class="contact-box js-contactInfo" data-ad-id="61748204239.106400" data-is-tipology="false" data-is-newdevelopment="false" data-ad-price="460000"></div>
+    </div>
+  </div>
+
+  <script type="application/ld+json">
+  {"@context":"https://schema.org/","@type":"SingleFamilyResidence","@id":"64250319294.280500","name":"Casa adosada en calle de Bilbao","url":"/comprar/casa_adosada-somosaguas_humera_los_angeles28223-64250319294_280500/","address":{"@type":"PostalAddress","addressLocality":"Pozuelo de Alarc&#xF3;n","addressRegion":"Madrid","addressCountry":{"@type":"Country","name":"ES"}},"geo":{"@type":"GeoCoordinates","latitude":"40.4065716","longitude":"-3.7807591"}}
+  </script>
+  <div id="64250319294.280500" class="ad-preview" data-lnk-href="/comprar/casa_adosada-somosaguas_humera_los_angeles28223-64250319294_280500/">
+    <div class="ad-preview__top">
+      <img src="https://fotos.imghs.net/mm-wp/2805/foto1.jpg" alt="Casa adosada" width="380" height="285">
+    </div>
+    <div class="ad-preview__bottom">
+      <div class="ad-preview__inline">
+        <span class="ad-preview__price">1.000.000 €</span>
+      </div>
+      <a href="/comprar/casa_adosada-somosaguas_humera_los_angeles28223-64250319294_280500/" class="ad-preview__title">Casa adosada en calle de Bilbao</a>
+      <p class="ad-preview__subtitle">Somosaguas-H&#xFA;mera-Los &#xC1;ngeles (Pozuelo de Alarc&#xF3;n)</p>
+      <div class="ad-preview__inline">
+        <p class="ad-preview__char p-sm">6 habs.</p>
+        <p class="ad-preview__char p-sm">5 ba&#xF1;os</p>
+        <p class="ad-preview__char p-sm">298 m&#xB2;</p>
+      </div>
+      <p class="ad-preview__description">Exclusivo chalet pareado de 298 m&#xB2; construidos.</p>
+      <div class="contact-box js-contactInfo" data-ad-id="64250319294.280500" data-is-tipology="false" data-is-newdevelopment="false" data-ad-price="1000000"></div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
