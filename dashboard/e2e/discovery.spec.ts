@@ -1,13 +1,15 @@
 /**
- * E2E: URL-building discovery admin page (issue #336, D-063).
+ * E2E: URL-building discovery admin page + drift detection (issue #336/#339,
+ * reframed by issue #371, D-089).
  *
- * Per D-041, a new user-facing (here: admin) surface ships a Playwright e2e
- * that loads a seeded Postgres row, navigates the page under a real server, and
- * asserts (1) no error surface renders and (2) real content (not an empty
- * state) renders. The load-bearing assertion is that a discovered
- * `portal_filter_catalog` row is fetched and its property-type options render
- * with the canonical mapping — the exact read path the connector's URL builder
- * later consumes.
+ * Per D-041, an admin surface ships a Playwright e2e that loads a seeded
+ * Postgres row, navigates the page under a real server, and asserts (1) no error
+ * surface renders and (2) real content renders. The load-bearing assertions here
+ * are the DRIFT flag: a captured `portal_filter_catalog` that DIVERGES from the
+ * connector's code mapping raises the flag ("actualiza el mapeo del código"),
+ * and a catalog that MATCHES the code mapping raises no false flag ("sin
+ * deriva"). Discovery no longer drives URL building (that self-healing was
+ * removed in #371) — it only detects drift for the owner to fix in code.
  *
  * Admin-gated (middleware.ts `/etl/:path*` + `/api/etl/:path*`), so the test
  * sets the `ps_admin` cookie the same way /admin/login does. Requires
@@ -33,9 +35,42 @@ function buildPool(): Pool {
 
 const CONNECTOR = "aliseda";
 
+// A catalog that MATCHES the Aliseda code mapping exactly (pisos→36,
+// chalets-adosados→31, plus every non-residential category) → no drift.
+const MATCHING_AXES = {
+  property_type: [
+    { label: "Piso", urlFragment: "/comprar-viviendas/pisos", subtipo: 36 },
+    { label: "Chalet adosado", urlFragment: "/comprar-viviendas/chalets-adosados", subtipo: 31 },
+    { label: "Local", urlFragment: "/comprar-locales" },
+    { label: "Nave", urlFragment: "/comprar-naves" },
+    { label: "Garaje", urlFragment: "/comprar-garajes" },
+    { label: "Terreno", urlFragment: "/comprar-terrenos" },
+    { label: "Edificio", urlFragment: "/comprar-edificios" },
+  ],
+};
+
+// A catalog that DIVERGES: the portal exposes a real `aticos` option the code
+// folds into `pisos`, and omits the non-residential categories the code maps.
+const DRIFTING_AXES = {
+  property_type: [
+    { label: "Piso", urlFragment: "/comprar-viviendas/pisos", subtipo: 36 },
+    { label: "Ático", urlFragment: "/comprar-viviendas/aticos", subtipo: 40 },
+    { label: "Chalet adosado", urlFragment: "/comprar-viviendas/chalets-adosados", subtipo: 31 },
+  ],
+};
+
 let pool: Pool;
 let dbAvailable = false;
 const adminKey = process.env.ADMIN_API_KEY?.trim();
+
+async function seedCatalog(axes: unknown): Promise<void> {
+  await pool.query("DELETE FROM portal_filter_catalog WHERE connector = $1", [CONNECTOR]);
+  await pool.query(
+    `INSERT INTO portal_filter_catalog (connector, source, axes, captured_at)
+       VALUES ($1, $2, $3::jsonb, NOW())`,
+    [CONNECTOR, "embedded-config", JSON.stringify(axes)],
+  );
+}
 
 test.beforeAll(async () => {
   pool = buildPool();
@@ -45,26 +80,7 @@ test.beforeAll(async () => {
   } catch {
     // eslint-disable-next-line no-console
     console.warn("[discovery.spec] Postgres unreachable — skipping");
-    return;
   }
-
-  // Clean slate for this connector, then seed one discovered catalog session.
-  await pool.query("DELETE FROM portal_filter_catalog WHERE connector = $1", [CONNECTOR]);
-  await pool.query(
-    `INSERT INTO portal_filter_catalog (connector, source, axes, captured_at)
-       VALUES ($1, $2, $3::jsonb, NOW())`,
-    [
-      CONNECTOR,
-      "embedded-config",
-      JSON.stringify({
-        property_type: [
-          { label: "Piso", portalValue: "36", urlFragment: "/comprar-viviendas/pisos", subtipo: 36 },
-          { label: "Ático", portalValue: "40", urlFragment: "/comprar-viviendas/aticos", subtipo: 40 },
-          { label: "Chalet adosado", urlFragment: "/comprar-viviendas/chalets-adosados", subtipo: 31 },
-        ],
-      }),
-    ],
-  );
 });
 
 test.afterAll(async () => {
@@ -82,7 +98,8 @@ test.beforeEach(async ({ page, baseURL }) => {
   ]);
 });
 
-test("renders the discovered catalog with no error surface", async ({ page }) => {
+test("renders the discovered catalog and FLAGS drift vs. the code mapping", async ({ page }) => {
+  await seedCatalog(DRIFTING_AXES);
   await page.goto("/etl/discovery");
   await expect(page.getByTestId("discovery-page")).toBeVisible();
 
@@ -90,16 +107,21 @@ test("renders the discovered catalog with no error surface", async ({ page }) =>
   await expect(page.getByTestId("discovery-catalog")).toBeVisible();
   await expect(page.getByTestId("discovery-empty")).toHaveCount(0);
   await expect(page.getByTestId("catalog-source")).toContainText("embedded-config");
-  await expect(page.getByTestId("catalog-options-count")).toContainText("3");
 
   // The property-type options render, mapped to canonical types (real content).
   const table = page.getByTestId("property-type-table");
   await expect(table).toBeVisible();
-  await expect(table).toContainText("Piso");
   await expect(table).toContainText("Ático");
   await expect(table).toContainText("/comprar-viviendas/aticos");
-  await expect(table.getByText("atico", { exact: true })).toBeVisible();
-  await expect(table.getByText("chalet", { exact: true })).toBeVisible();
+
+  // Drift is FLAGGED — the load-bearing assertion for this reframe.
+  const drift = page.getByTestId("discovery-drift");
+  await expect(drift).toBeVisible();
+  await expect(drift).toHaveAttribute("data-drift", "true");
+  await expect(page.getByTestId("discovery-drift-flag")).toBeVisible();
+  // The added `aticos` option and a removed non-residential category are named.
+  await expect(page.getByTestId("drift-added").first()).toContainText("aticos");
+  await expect(page.getByTestId("drift-removed").first()).toBeVisible();
 
   // No error surface — the bar every admin/user-facing page in this repo meets.
   await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
@@ -108,7 +130,27 @@ test("renders the discovered catalog with no error surface", async ({ page }) =>
   await expect(page.getByText("Error al cargar")).toHaveCount(0);
 });
 
+test("shows NO drift flag when the catalog matches the code mapping", async ({ page }) => {
+  await seedCatalog(MATCHING_AXES);
+  await page.goto("/etl/discovery");
+  await expect(page.getByTestId("discovery-catalog")).toBeVisible();
+
+  // The drift panel renders the green "sin deriva" state, no false flag.
+  const drift = page.getByTestId("discovery-drift");
+  await expect(drift).toBeVisible();
+  await expect(drift).toHaveAttribute("data-drift", "false");
+  await expect(page.getByTestId("discovery-drift-none")).toBeVisible();
+  await expect(page.getByTestId("discovery-drift-flag")).toHaveCount(0);
+  await expect(page.getByTestId("drift-added")).toHaveCount(0);
+  await expect(page.getByTestId("drift-removed")).toHaveCount(0);
+
+  // Still no error surface.
+  await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
+  await expect(page.getByText("Error al cargar")).toHaveCount(0);
+});
+
 test("shows the connector picker and the start-discovery action", async ({ page }) => {
+  await seedCatalog(MATCHING_AXES);
   await page.goto("/etl/discovery");
   await expect(page.getByTestId("discovery-connector-select")).toBeVisible();
   await expect(page.getByTestId("start-discovery")).toBeEnabled();

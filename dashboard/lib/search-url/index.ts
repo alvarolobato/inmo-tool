@@ -20,6 +20,7 @@ import type { Scope } from "@/lib/profiles-schema";
 import { CAPTURE_PORTALS } from "@/lib/worklist";
 import { idealistaBuilder } from "./portals/idealista";
 import { alisedaBuilder } from "./portals/aliseda";
+import type { CodeMappingAxes } from "./drift";
 import type {
   CanonicalSearchScope,
   PortalSearchUrlBuilder,
@@ -49,6 +50,16 @@ export const BUILDERS: Record<string, PortalSearchUrlBuilder> = {
 export const SEARCH_URL_PORTALS: readonly string[] = CAPTURE_PORTALS.map(
   (p) => p.portal,
 ).filter((portal) => portal in BUILDERS);
+
+/**
+ * A connector's hard-coded CODE mapping (for drift detection, issue #371 /
+ * D-089), or null if it has no registered builder. The route/page diffs this
+ * against the portal's captured filter catalog via lib/search-url/drift.ts.
+ */
+export function codeMappingForPortal(portal: string): CodeMappingAxes | null {
+  const builder = BUILDERS[portal];
+  return builder ? builder.codeMapping() : null;
+}
 
 /**
  * Reduce a profile `Scope` to the portal-neutral criteria the builders

@@ -18,6 +18,18 @@
  * config JSON where available, else the live <select>/<option> elements. It
  * reads FORM METADATA and URL SHAPES only; it never paginates, fetches, or
  * harvests listing results (scope/robots per docs/skills/connectors.md).
+ *
+ * PLAUSIBILITY GATE (issue #371): a naïve "any array of {label,link}" scan
+ * grabbed JUNK on SPA portals — for Aliseda (Angular) it captured the site
+ * LOGO (`{label:'Aliseda', urlFragment:'/'}`) instead of the property-type
+ * control, because the logo is also a labelled link. Each wired portal now
+ * declares an `isPropertyTypeOption(opt)` predicate that recognises a REAL
+ * search-filter option by its URL SHAPE (Aliseda: a `comprar-<category>` path
+ * segment and/or a numeric `subtipo`; Idealista: a `venta-<section>` segment).
+ * Candidate option arrays are SCORED by how many plausible options they carry,
+ * so the real filter control wins over navigation/branding. When NOTHING
+ * plausible is found we capture NOTHING (return null) rather than junk — a
+ * portal whose form we can't reliably read simply yields no catalog.
  */
 
 (function () {
@@ -32,6 +44,76 @@
     { portal: "aliseda", hostSuffix: "alisedainmobiliaria.com" },
     { portal: "idealista", hostSuffix: "idealista.com" },
   ];
+
+  // ── Per-portal plausibility (issue #371) ───────────────────────────────────
+  //
+  // What a REAL property-type filter option looks like on each portal, by its
+  // URL shape — the gate that rejects branding/nav junk (the Aliseda logo). A
+  // portal with no spec here is not enumerated (buildDiscoveryAxes → null).
+
+  /** Non-empty, non-query path segments of a URL fragment. */
+  function pathSegments(urlFragment) {
+    var path = String(urlFragment || "").split(/[?#]/)[0];
+    var out = [];
+    var parts = path.split("/");
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i]) out.push(parts[i]);
+    }
+    return out;
+  }
+
+  var PORTAL_SPECS = {
+    // Aliseda organises its catalogue as `comprar-<category>[/<subtype-slug>]`
+    // and encodes residential subtypes with a numeric `?subtipo=`. A genuine
+    // property-type option therefore roots under a `comprar-*` segment and/or
+    // carries a `subtipo`; the logo (`urlFragment:'/'`, zero segments) has
+    // neither → rejected.
+    aliseda: {
+      isPropertyTypeOption: function (opt) {
+        if (!opt || typeof opt.urlFragment !== "string") return false;
+        var segs = pathSegments(opt.urlFragment);
+        if (segs.length === 0) return false; // root "/" → the logo, not a filter
+        var hasComprar = false;
+        for (var i = 0; i < segs.length; i++) {
+          if (/^comprar-/.test(segs[i])) {
+            hasComprar = true;
+            break;
+          }
+        }
+        var hasSubtipo = typeof opt.subtipo === "number";
+        return hasComprar || hasSubtipo;
+      },
+    },
+    // Idealista searches one `venta-<section>` operation at a time; a real
+    // section option roots under such a segment. Its form exposes no subtipo,
+    // so the segment is the only signal — anything else is nav/junk and we
+    // capture nothing.
+    idealista: {
+      isPropertyTypeOption: function (opt) {
+        if (!opt || typeof opt.urlFragment !== "string") return false;
+        var segs = pathSegments(opt.urlFragment);
+        for (var i = 0; i < segs.length; i++) {
+          if (/^venta-/.test(segs[i])) return true;
+        }
+        return false;
+      },
+    },
+  };
+
+  /** The plausibility predicate for a portal, or an accept-all default. */
+  function optionPredicateFor(portal) {
+    var spec = PORTAL_SPECS[portal];
+    return spec ? spec.isPropertyTypeOption : function () { return true; };
+  }
+
+  /** Keep only options the portal predicate recognises as real filter options. */
+  function filterPlausible(options, isPlausible) {
+    var out = [];
+    for (var i = 0; i < options.length; i++) {
+      if (isPlausible(options[i])) out.push(options[i]);
+    }
+    return out;
+  }
 
   /** The portal a URL's host belongs to, or null. Pure; null on parse error. */
   function discoverPortalForUrl(url) {
@@ -112,32 +194,26 @@
   }
 
   /**
-   * Deep-scan a parsed JSON value for arrays of option-like objects (each with
-   * a label-ish field AND a url/slug-ish field), returning the normalized
-   * options from the first such array found (breadth-first, largest wins).
-   * Pure; caps recursion depth to stay bounded on huge app bundles.
+   * Deep-scan a parsed JSON value for the array that yields the most PLAUSIBLE
+   * option objects (each normalizable AND accepted by `isPlausible`), returning
+   * that array's normalized options. Scoring by plausible count — not raw
+   * length — is what stops a big navigation/branding array from beating the
+   * real (smaller) filter-option array (issue #371). `isPlausible` defaults to
+   * accept-all so generic callers/tests keep the old behaviour. Pure; caps
+   * recursion depth to stay bounded on huge app bundles.
    */
-  function extractOptionsFromJson(value) {
+  function extractOptionsFromJson(value, isPlausible) {
+    var accept = typeof isPlausible === "function" ? isPlausible : function () { return true; };
     var best = [];
-    function looksLikeOption(o) {
-      if (!o || typeof o !== "object") return false;
-      var hasLabel = firstString(o, ["label", "nombre", "name", "text", "title"]) !== "";
-      var hasLink =
-        firstString(o, ["urlFragment", "url", "href", "path", "link", "slug"]) !== "";
-      return hasLabel && hasLink;
-    }
     function walk(node, depth) {
       if (depth > 6 || node === null || typeof node !== "object") return;
       if (Array.isArray(node)) {
-        var optionish = node.filter(looksLikeOption);
-        if (optionish.length > best.length) {
-          var normalized = [];
-          for (var i = 0; i < optionish.length; i++) {
-            var n = normalizeOption(optionish[i]);
-            if (n) normalized.push(n);
-          }
-          if (normalized.length > best.length) best = normalized;
+        var normalized = [];
+        for (var i = 0; i < node.length; i++) {
+          var n = normalizeOption(node[i]);
+          if (n && accept(n)) normalized.push(n);
         }
+        if (normalized.length > best.length) best = normalized;
         for (var j = 0; j < node.length; j++) walk(node[j], depth + 1);
         return;
       }
@@ -152,14 +228,15 @@
   /**
    * Try to read property-type options from a single <script>'s text: parse it
    * as JSON directly, else pull out the largest `[...]`/`{...}` JSON literal it
-   * contains and parse that. Returns [] when nothing parses. Pure.
+   * contains and parse that. Returns [] when nothing parses. Pure. `isPlausible`
+   * (optional) gates which normalized options count as real filter options.
    */
-  function extractEmbeddedOptions(scriptText) {
+  function extractEmbeddedOptions(scriptText, isPlausible) {
     var text = String(scriptText || "").trim();
     if (!text) return [];
     // Direct JSON (e.g. a <script type="application/json"> facet blob).
     try {
-      return extractOptionsFromJson(JSON.parse(text));
+      return extractOptionsFromJson(JSON.parse(text), isPlausible);
     } catch (e) {
       /* not pure JSON — fall through to literal extraction */
     }
@@ -169,7 +246,7 @@
     var best = [];
     for (var i = 0; i < candidates.length; i++) {
       try {
-        var opts = extractOptionsFromJson(JSON.parse(candidates[i]));
+        var opts = extractOptionsFromJson(JSON.parse(candidates[i]), isPlausible);
         if (opts.length > best.length) best = opts;
       } catch (e2) {
         /* not valid JSON — skip */
@@ -213,13 +290,17 @@
     return out;
   }
 
-  /** Collect embedded options across every <script> in the document. Pure over `doc`. */
-  function collectEmbeddedOptions(doc) {
+  /**
+   * Collect embedded options across every <script> in the document, keeping the
+   * script that yields the most plausible options. Pure over `doc`. `isPlausible`
+   * (optional) gates real filter options.
+   */
+  function collectEmbeddedOptions(doc, isPlausible) {
     if (!doc || typeof doc.querySelectorAll !== "function") return [];
     var scripts = doc.querySelectorAll("script");
     var best = [];
     for (var i = 0; i < scripts.length; i++) {
-      var opts = extractEmbeddedOptions(scripts[i].textContent || "");
+      var opts = extractEmbeddedOptions(scripts[i].textContent || "", isPlausible);
       if (opts.length > best.length) best = opts;
     }
     return best;
@@ -227,20 +308,27 @@
 
   /**
    * Build the discovery catalog for a page: try the least-brittle source first
-   * (embedded config JSON), fall back to the live form's <option> elements.
+   * (embedded config JSON), fall back to the live form's <option> elements. In
+   * BOTH cases only options the portal's plausibility predicate accepts are
+   * kept, so branding/nav junk (the Aliseda logo) never enters the catalog.
    * Returns { source, axes } with the property_type axis populated, or null
-   * when no options could be enumerated. Pure over (portal, doc).
+   * when no PLAUSIBLE options could be enumerated (capture nothing, not junk —
+   * issue #371). Pure over (portal, doc).
    *
-   * Only `property_type` is enumerated today (the axis Aliseda is wired for);
+   * Any portal with a spec in PORTAL_SPECS is enumerated (Aliseda + Idealista);
+   * a portal without one yields null. Only `property_type` is enumerated today;
    * the axes object is open so more axes slot in without a shape change.
    */
   function buildDiscoveryAxes(portal, doc) {
-    if (portal !== "aliseda") return null; // only Aliseda is wired end-to-end
-    var embedded = collectEmbeddedOptions(doc);
+    var spec = PORTAL_SPECS[portal];
+    if (!spec) return null; // portal not wired for discovery
+    var isPlausible = spec.isPropertyTypeOption;
+
+    var embedded = filterPlausible(collectEmbeddedOptions(doc, isPlausible), isPlausible);
     if (embedded.length > 0) {
       return { source: "embedded-config", axes: { property_type: embedded } };
     }
-    var form = extractFormOptions(doc);
+    var form = filterPlausible(extractFormOptions(doc), isPlausible);
     if (form.length > 0) {
       return { source: "form-options", axes: { property_type: form } };
     }
@@ -269,7 +357,11 @@
 
   var api = {
     PORTAL_HOSTS: PORTAL_HOSTS,
+    PORTAL_SPECS: PORTAL_SPECS,
     discoverPortalForUrl: discoverPortalForUrl,
+    optionPredicateFor: optionPredicateFor,
+    filterPlausible: filterPlausible,
+    pathSegments: pathSegments,
     normalizeOption: normalizeOption,
     extractOptionsFromJson: extractOptionsFromJson,
     extractEmbeddedOptions: extractEmbeddedOptions,

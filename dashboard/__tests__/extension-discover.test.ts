@@ -151,9 +151,9 @@ describe("buildDiscoveryAxes / buildDiscoveryPayload", () => {
     expect(built?.source).toBe("form-options");
   });
 
-  it("returns null for a non-wired portal", () => {
+  it("returns null for a portal with no discovery spec", () => {
     const doc = docFrom(`<form><select name="tipo"><option value="1">X</option></select></form>`);
-    expect(buildDiscoveryAxes("idealista", doc)).toBeNull();
+    expect(buildDiscoveryAxes("altamira", doc)).toBeNull();
   });
 
   it("assembles the full POST payload with a deterministic capturedAt", () => {
@@ -171,6 +171,66 @@ describe("buildDiscoveryAxes / buildDiscoveryPayload", () => {
   it("returns null when the page yields no options", () => {
     const doc = docFrom(`<div>nada</div>`);
     expect(buildDiscoveryPayload("https://www.alisedainmobiliaria.com/comprar-viviendas", doc, new Date())).toBeNull();
+  });
+});
+
+describe("plausibility gate — rejects branding/nav junk (issue #371)", () => {
+  it("Aliseda: ignores the logo/nav array and captures the real property-type array", () => {
+    // The regression: a labelled link array for the site logo/nav coexists with
+    // the real filter options. The naïve scan grabbed the (bigger) nav array;
+    // the plausibility gate scores by real filter options, so the smaller
+    // property-type array (comprar-* fragments + subtipo) wins.
+    const doc = docFrom(`
+      <script type="application/json">${JSON.stringify({
+        nav: [
+          { label: "Aliseda", url: "/" },
+          { label: "Contacto", url: "/contacto" },
+          { label: "Oficinas", url: "/oficinas" },
+          { label: "Ayuda", url: "/ayuda" },
+        ],
+        filters: {
+          propertyTypes: [
+            { label: "Piso", slug: "pisos", subtipo: 36 },
+            { label: "Chalet adosado", slug: "chalets-adosados", subtipo: 31 },
+          ],
+        },
+      })}</script>
+    `);
+    const built = buildDiscoveryAxes("aliseda", doc);
+    expect(built).not.toBeNull();
+    expect(built?.axes.property_type).toHaveLength(2);
+    const labels = (built?.axes.property_type as Array<{ label: string }>).map((o) => o.label);
+    expect(labels).toContain("Piso");
+    expect(labels).not.toContain("Aliseda"); // the logo never enters the catalog
+  });
+
+  it("Aliseda: captures NOTHING (null) when only junk is present, never the logo", () => {
+    const doc = docFrom(`
+      <script type="application/json">${JSON.stringify({
+        nav: [
+          { label: "Aliseda", url: "/" },
+          { label: "Contacto", url: "/contacto" },
+        ],
+      })}</script>
+    `);
+    expect(buildDiscoveryAxes("aliseda", doc)).toBeNull();
+  });
+
+  it("Idealista: only accepts venta-<section> options, else captures nothing", () => {
+    const good = docFrom(`
+      <script type="application/json">${JSON.stringify({
+        sections: [
+          { label: "Viviendas", url: "/venta-viviendas" },
+          { label: "Garajes", url: "/venta-garajes" },
+        ],
+        nav: [{ label: "Idealista", url: "/" }],
+      })}</script>
+    `);
+    const built = buildDiscoveryAxes("idealista", good);
+    expect(built?.axes.property_type).toHaveLength(2);
+
+    const junk = docFrom(`<script type="application/json">{"nav":[{"label":"Idealista","url":"/"}]}</script>`);
+    expect(buildDiscoveryAxes("idealista", junk)).toBeNull();
   });
 });
 

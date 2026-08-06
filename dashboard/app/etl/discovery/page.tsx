@@ -8,6 +8,7 @@ import type { ApiErrorResponse } from "@/lib/errors";
 import { withDiscoverSignal } from "@/lib/extension-discover";
 import { canonicalPropertyType } from "@/lib/search-url/discovered-mapping";
 import type { CatalogOption } from "@/lib/search-url/discovered-mapping";
+import type { PortalDriftReport } from "@/lib/search-url/drift";
 
 /**
  * URL-building discovery admin page (issue #336, D-063).
@@ -18,7 +19,11 @@ import type { CatalogOption } from "@/lib/search-url/discovered-mapping";
  * the search form's filter OPTIONS + the URL each produces and POSTs the catalog
  * back (POST /api/extension/filter-catalog). This page then shows the LAST
  * discovered catalog for the connector, with each property-type option mapped to
- * our canonical type so drift vs. the hard-coded seed is visible at a glance.
+ * our canonical type, PLUS a deterministic DRIFT report (issue #371, D-089):
+ * options the portal ADDED that the code doesn't map, options the code maps that
+ * the portal REMOVED, and options whose subtipo/label CHANGED. URL building is
+ * code-driven — this page flags drift so the OWNER updates the code by hand; it
+ * does not self-heal.
  *
  * Admin-gated by middleware (`/etl/:path*` UI + `/api/etl/:path*` API), same as
  * the rest of the ETL tooling — no middleware change.
@@ -44,6 +49,7 @@ interface CatalogResponse {
   axes: Partial<Record<string, CatalogOption[]>>;
   axis_summary: Record<string, number>;
   options_count: number;
+  drift: PortalDriftReport | null;
 }
 
 export default function DiscoveryPage() {
@@ -91,6 +97,7 @@ export default function DiscoveryPage() {
   }, [selected]);
 
   const propertyTypeOptions = catalog?.axes?.property_type ?? [];
+  const drift = catalog?.drift ?? null;
 
   return (
     <div className="mx-auto max-w-4xl space-y-6 p-6" data-testid="discovery-page">
@@ -183,6 +190,8 @@ export default function DiscoveryPage() {
               </div>
             </dl>
 
+            {drift && <DriftReport drift={drift} />}
+
             {propertyTypeOptions.length > 0 && (
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm" data-testid="property-type-table">
@@ -232,6 +241,87 @@ export default function DiscoveryPage() {
           </div>
         )}
       </Card>
+    </div>
+  );
+}
+
+/**
+ * The deterministic drift report (issue #371, D-089): a clear per-portal
+ * "the code needs updating" flag. Green "sin deriva" when the captured catalog
+ * matches the code mapping; a red banner listing ADDED / REMOVED / CHANGED
+ * options otherwise — actionable enough for the owner to edit the code map.
+ */
+function DriftReport({ drift }: { drift: PortalDriftReport }) {
+  const totals = drift.axes.reduce(
+    (acc, a) => ({
+      added: acc.added + a.added.length,
+      removed: acc.removed + a.removed.length,
+      changed: acc.changed + a.changed.length,
+    }),
+    { added: 0, removed: 0, changed: 0 },
+  );
+
+  if (!drift.hasDrift) {
+    return (
+      <div
+        data-testid="discovery-drift"
+        data-drift="false"
+        className="rounded-md border border-emerald-500/40 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-950/40 dark:text-emerald-200"
+      >
+        <span data-testid="discovery-drift-none" className="font-medium">
+          Sin deriva: el catálogo del portal coincide con el mapeo del código.
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      data-testid="discovery-drift"
+      data-drift="true"
+      className="space-y-3 rounded-md border border-rose-500/40 bg-rose-50 px-4 py-3 text-sm text-rose-900 dark:border-rose-400/30 dark:bg-rose-950/40 dark:text-rose-100"
+    >
+      <p data-testid="discovery-drift-flag" className="font-semibold">
+        Deriva detectada — actualiza el mapeo del código de «{drift.connector}» (
+        {totals.added} nuevo(s), {totals.removed} retirado(s), {totals.changed} cambiado(s)).
+      </p>
+      {drift.axes.map((axis) => {
+        if (
+          axis.added.length === 0 &&
+          axis.removed.length === 0 &&
+          axis.changed.length === 0
+        ) {
+          return null;
+        }
+        return (
+          <div key={axis.axis} className="space-y-1" data-testid={`drift-axis-${axis.axis}`}>
+            <p className="font-mono text-xs uppercase tracking-wide opacity-70">{axis.axis}</p>
+            <ul className="list-disc space-y-0.5 pl-5">
+              {axis.added.map((it) => (
+                <li key={`a-${it.slug}`} data-testid="drift-added">
+                  <strong>Nuevo tipo</strong> «{it.portalLabel ?? it.slug}» (
+                  <code className="font-mono text-xs">{it.slug}</code>
+                  {typeof it.portalCode === "number" ? `, subtipo ${it.portalCode}` : ""}) que el
+                  código no mapea.
+                </li>
+              ))}
+              {axis.removed.map((it) => (
+                <li key={`r-${it.slug}`} data-testid="drift-removed">
+                  <strong>Ya no existe</strong> «{it.codeLabel ?? it.slug}» (
+                  <code className="font-mono text-xs">{it.slug}</code>): el código lo mapea pero el
+                  portal ya no lo ofrece.
+                </li>
+              ))}
+              {axis.changed.map((it) => (
+                <li key={`c-${it.slug}`} data-testid="drift-changed">
+                  <strong>Cambiado</strong> «{it.portalLabel ?? it.slug}» (
+                  <code className="font-mono text-xs">{it.slug}</code>): {it.reason}.
+                </li>
+              ))}
+            </ul>
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -1,18 +1,18 @@
 /**
- * Unit tests for the discovered option→fragment mapping layer (issue #336,
- * D-063): the canonical-type resolver, the payload validator, the prime/read
- * cache, and — end to end — the Aliseda builder preferring a discovered slug +
- * subtipo over its hard-coded seed while falling back to the seed when nothing
- * is discovered.
+ * Unit tests for the discovered filter-catalog layer (issue #336, D-063;
+ * reframed detection-only by issue #371, D-089): the canonical-type resolver and
+ * the ingest payload validator. The self-healing "prefer the discovered slug/
+ * subtipo over the seed" path was REMOVED per the owner — URL building is 100%
+ * code-driven — so those tests now assert the Aliseda builder IGNORES any
+ * catalog and always emits its hard-coded map. Drift detection lives in
+ * ./drift.test.ts.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import {
   canonicalPropertyType,
   validateCatalogPayload,
-  primeDiscoveredCatalog,
-  resetDiscoveredCatalogCache,
-  discoveredSegmentFor,
+  lastPathSegment,
 } from "@/lib/search-url/discovered-mapping";
 import { alisedaBuilder } from "@/lib/search-url/portals/aliseda";
 import type { CanonicalSearchScope } from "@/lib/search-url/types";
@@ -35,6 +35,15 @@ describe("canonicalPropertyType", () => {
     expect(canonicalPropertyType("Dúplex")).toBeNull();
     expect(canonicalPropertyType("Estudio")).toBeNull();
     expect(canonicalPropertyType("")).toBeNull();
+  });
+});
+
+describe("lastPathSegment", () => {
+  it("returns the last non-empty path segment, ignoring query/hash", () => {
+    expect(lastPathSegment("/comprar-viviendas/pisos")).toBe("pisos");
+    expect(lastPathSegment("/comprar-locales?x=1")).toBe("comprar-locales");
+    expect(lastPathSegment("/")).toBeNull();
+    expect(lastPathSegment("")).toBeNull();
   });
 });
 
@@ -106,44 +115,7 @@ describe("validateCatalogPayload", () => {
   });
 });
 
-describe("discoveredSegmentFor + cache", () => {
-  beforeEach(() => resetDiscoveredCatalogCache());
-  afterEach(() => resetDiscoveredCatalogCache());
-
-  it("returns null when nothing is primed (seed fallback)", () => {
-    expect(discoveredSegmentFor("aliseda", "property_type", "piso")).toBeNull();
-  });
-
-  it("matches a canonical type by portal label and returns slug + code + category", () => {
-    primeDiscoveredCatalog("aliseda", {
-      property_type: [
-        {
-          label: "Ático",
-          urlFragment: "/comprar-viviendas/aticos",
-          subtipo: 40,
-          category: "comprar-viviendas",
-        },
-      ],
-    });
-    expect(discoveredSegmentFor("aliseda", "property_type", "atico")).toEqual({
-      slug: "aticos",
-      code: 40,
-      category: "comprar-viviendas",
-      label: "Ático",
-    });
-    // A type with no matching discovered option → null (falls back to seed).
-    expect(discoveredSegmentFor("aliseda", "property_type", "garaje")).toBeNull();
-  });
-
-  it("priming null clears the connector's catalog", () => {
-    primeDiscoveredCatalog("aliseda", { property_type: [{ label: "Piso", urlFragment: "/x/pisos" }] });
-    expect(discoveredSegmentFor("aliseda", "property_type", "piso")).not.toBeNull();
-    primeDiscoveredCatalog("aliseda", null);
-    expect(discoveredSegmentFor("aliseda", "property_type", "piso")).toBeNull();
-  });
-});
-
-describe("aliseda builder composes with the discovered mapping", () => {
+describe("aliseda builder is code-driven (no self-healing from any catalog)", () => {
   const ESTEPONA: readonly [number, number] = [36.4268, -5.1468];
   const scope = (types: CanonicalSearchScope["propertyTypes"]): CanonicalSearchScope => ({
     center: ESTEPONA,
@@ -151,34 +123,16 @@ describe("aliseda builder composes with the discovered mapping", () => {
     propertyTypes: types,
   });
 
-  beforeEach(() => resetDiscoveredCatalogCache());
-  afterEach(() => resetDiscoveredCatalogCache());
-
-  it("prefers the discovered slug + subtipo over the seed and drops the guessed-plural flag", () => {
-    // Seed folds atico onto `pisos` (subtipo 36) and flags it as approximate.
-    // Discovery gives the real `aticos-lujo` slug + subtipo=40 → authoritative,
-    // overriding the seed slug/code and dropping the property_types flag.
-    primeDiscoveredCatalog("aliseda", {
-      property_type: [{ label: "Ático", urlFragment: "/comprar-viviendas/aticos-lujo", subtipo: 40 }],
-    });
+  it("folds atico onto the seed `pisos` (subtipo 36) and flags the approximate map", () => {
     const [task] = alisedaBuilder.build(scope(["atico"]));
-    expect(task.url).toContain("/comprar-viviendas/aticos-lujo/");
-    expect(task.url).toContain("subtipo=40");
-    // Only the always-present geography flag remains — no property_types flags.
-    expect(task.loosened.every((l) => l.constraint !== "property_types")).toBe(true);
-  });
-
-  it("falls back to the hard-coded seed (with its flags) when nothing is discovered", () => {
-    const [task] = alisedaBuilder.build(scope(["atico"]));
-    // Seed behaviour on main (#338 / D-062): Aliseda has no ático bucket, so the
-    // seed folds atico onto `pisos` (subtipo 36) and flags the approximate map.
+    // Aliseda has no ático bucket → the code map folds atico onto pisos and
+    // flags it; discovery never overrides this (D-089).
     expect(task.url).toContain("/comprar-viviendas/pisos/");
     expect(task.url).toContain("subtipo=36");
     expect(task.loosened.some((l) => l.constraint === "property_types")).toBe(true);
   });
 
-  it("keeps the confirmed piso seed intact and unflagged whether or not discovery ran", () => {
-    // No discovery: piso is the owner-confirmed seed (slug pisos, subtipo 36).
+  it("keeps the confirmed piso seed intact and unflagged", () => {
     const [seed] = alisedaBuilder.build(scope(["piso"]));
     expect(seed.url).toContain("/comprar-viviendas/pisos/");
     expect(seed.url).toContain("subtipo=36");

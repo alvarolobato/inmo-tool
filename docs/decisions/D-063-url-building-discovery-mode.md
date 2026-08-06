@@ -2,12 +2,22 @@
 id: D-063
 title: URL-building discovery mode — learn a portal's option→URL mapping from the extension, seed as fallback
 date: 2026-08-05
-group: Data / connectors
-rule: 'URL-building discovery: the extension enumerates a portal''s search-form filter OPTIONS + the URL each produces (`#inmo-discover` signal ↔ `discoverSignalPresent`, host-derived connector) and POSTs a catalog to `/api/extension/filter-catalog` → `portal_filter_catalog` (latest-wins). The URL builder reads `discoveredSegmentFor()` and PREFERS the discovered slug/subtipo, FALLING BACK to the hard-coded seed table (never removed). Form metadata only, never listings. Connector-agnostic storage; Aliseda wired first.'
-order: 58
 ---
 
 # D-063: URL-building discovery mode — learn a portal's option→URL mapping via the extension; hard-coded seed is the fallback
+
+## STATUS: retired (2026-08-06) — superseded by [D-089](D-089-discovery-drift-detection-only.md)
+
+The self-healing core of this decision — the URL builder PREFERRING the
+discovered slug/`subtipo` over its hard-coded seed via `discoveredSegmentFor()`
+— was removed per the owner (issue #371). Discovery is now **detection-only**:
+the extension still enumerates a portal's filter options and POSTs a catalog to
+`portal_filter_catalog`, but URL building is 100% code-driven and the catalog
+feeds only a deterministic DRIFT diff surfaced on `/etl/discovery`. The
+enumerator was also hardened with a per-portal plausibility gate (it captured
+the Aliseda logo as a "property type" under this decision). See
+[D-089](D-089-discovery-drift-detection-only.md) for the current design; the
+original rationale below is kept for archaeology.
 
 *Decided: 2026-08-05*
 

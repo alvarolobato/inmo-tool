@@ -73,7 +73,7 @@ import {
   makeCategoryKey,
   PLACEHOLDER,
 } from "../parse-shared";
-import { discoveredSegmentFor } from "../discovered-mapping";
+import type { CodeMappingAxes, CodeMappingOption } from "../drift";
 import type {
   CanonicalSearchScope,
   LoosenableConstraint,
@@ -189,21 +189,13 @@ function buildTask(
   const loosened: LoosenedConstraint[] = [];
   const map = TYPE_MAP[type];
 
-  // URL-building discovery (issue #336, D-063): prefer the option→fragment the
-  // extension discovered from the live portal over the hard-coded TYPE_MAP seed
-  // (#338); fall back to the seed (verified/offline default) when nothing was
-  // discovered. Discovery informs the RESIDENTIAL subtype slot only — the
-  // top-level `comprar-<category>` grammar (#338) is authoritative, so a type
-  // with no `subtype` (non-residential: locales/naves/…) keeps its bare
-  // `comprar-<category>` path with no subtipo and never consults discovery.
-  // When a discovered value IS used it is authoritative, so the seed's
-  // approximate-mapping flag (atico→pisos, chalet→chalets-adosados) is
-  // suppressed. With no catalog, this reduces exactly to #338's buildTask.
-  const discovered = map.subtype
-    ? discoveredSegmentFor(PORTAL, "property_type", type)
-    : null;
-  const slug = discovered?.slug ?? map.subtype?.slug;
-  const code = discovered?.code ?? map.subtype?.code;
+  // URL building is 100% code-driven (D-089, issue #371). The hard-coded
+  // TYPE_MAP is authoritative — discovery no longer overrides the slug/subtipo.
+  // Drift between this map and the portal's live options is DETECTED separately
+  // (lib/search-url/drift.ts, surfaced on /etl/discovery) so a human updates
+  // this map; the builder never self-heals from the discovered catalog.
+  const slug = map.subtype?.slug;
+  const code = map.subtype?.code;
 
   const segments = [map.category];
   if (slug) segments.push(slug);
@@ -211,7 +203,7 @@ function buildTask(
 
   loosened.push(geo.flag);
 
-  if (!discovered && map.approxReason) {
+  if (map.approxReason) {
     loosened.push({ constraint: "property_types", reason: map.approxReason });
   }
 
@@ -299,9 +291,34 @@ function buildAliseda(scope: CanonicalSearchScope): SearchTask[] {
   return tasks;
 }
 
+/**
+ * The Aliseda CODE mapping, per axis (issue #371, D-089) — the property-type
+ * slugs + subtipo codes TYPE_MAP emits, for drift detection against the portal's
+ * captured catalog. Identity is the URL slug the builder emits: the residential
+ * subtype slug (`pisos`, `chalets-adosados`) for viviendas, else the top-level
+ * `comprar-<category>` segment (`comprar-locales`, …). Types that collapse onto
+ * the same slug (piso + atico → `pisos`) are de-duplicated; the first canonical
+ * type in TYPE_MAP order wins that slug's `canonicalType`.
+ */
+function alisedaCodeMapping(): CodeMappingAxes {
+  const bySlug = new Map<string, CodeMappingOption>();
+  for (const [type, map] of Object.entries(TYPE_MAP) as [PropertyType, AlisedaTypeMapping][]) {
+    const slug = map.subtype?.slug ?? map.category;
+    if (bySlug.has(slug)) continue; // first canonical type owns the slug
+    bySlug.set(slug, {
+      slug,
+      label: type,
+      code: map.subtype?.code,
+      canonicalType: type,
+    });
+  }
+  return { property_type: [...bySlug.values()] };
+}
+
 export const alisedaBuilder: PortalSearchUrlBuilder = {
   portal: PORTAL,
   build: buildAliseda,
+  codeMapping: alisedaCodeMapping,
 };
 
 // ─── parse(): the structural inverse of buildAliseda (issue #293 / #336) ─────
