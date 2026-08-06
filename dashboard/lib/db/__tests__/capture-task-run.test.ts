@@ -53,7 +53,25 @@ describe("recordTaskRun", () => {
     const [text, params] = mockQuery.mock.calls[0];
     expect(text).toContain("INSERT INTO capture_task_run");
     expect(text).toContain("ON CONFLICT (profile_id, task_id)");
-    expect(params).toEqual([7, "t1"]);
+    expect(text).toContain("last_result_count");
+    // No count passed → NULL for the 3rd param (issue #376).
+    expect(params).toEqual([7, "t1", null]);
+  });
+
+  it("persists a provided result count (issue #376)", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ last_run_at: "2026-08-05T12:00:00.000Z" }] });
+    await recordTaskRun(7, "t1", 42);
+    const [, params] = mockQuery.mock.calls[0];
+    expect(params).toEqual([7, "t1", 42]);
+  });
+
+  it("floors/clamps a non-integer or negative count to a sane value", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ last_run_at: "2026-08-05T12:00:00.000Z" }] });
+    await recordTaskRun(7, "t1", 12.9);
+    expect(mockQuery.mock.calls[0][1]).toEqual([7, "t1", 12]);
+    mockQuery.mockResolvedValueOnce({ rows: [{ last_run_at: "2026-08-05T12:00:00.000Z" }] });
+    await recordTaskRun(7, "t1", -5);
+    expect(mockQuery.mock.calls[1][1]).toEqual([7, "t1", 0]);
   });
 
   it("normalises a Date return to ISO", async () => {

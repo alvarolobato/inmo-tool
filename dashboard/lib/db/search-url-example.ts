@@ -43,6 +43,7 @@ export type SaveExampleResult =
 export async function saveSearchUrlExample(
   portal: string,
   url: string,
+  resultCount?: number | null,
 ): Promise<SaveExampleResult> {
   const parsed = parseSearchUrl(portal, url);
   if (!parsed) return { stored: false, reason: "unparseable" };
@@ -50,19 +51,40 @@ export async function saveSearchUrlExample(
   const matchKey = worklistMatchKey(url);
   if (!matchKey) return { stored: false, reason: "invalid_url" };
 
+  // Issue #376: the real harvested count `enumerateResultsPages()` computes
+  // (previously discarded). The extension re-POSTs the same search URL WITH
+  // this count at the end of enumeration; keyed by (portal, match_key) =
+  // (connector, resolved scope/filter). A COALESCE on the update preserves an
+  // existing count when a later call omits it (e.g. the batch-start save that
+  // fires before enumeration has a count), so a known count is never wiped by
+  // a countless refresh of the same example.
+  const count =
+    typeof resultCount === "number" && Number.isFinite(resultCount)
+      ? Math.max(0, Math.trunc(resultCount))
+      : null;
+
   // `xmax = 0` is true only for a freshly-inserted row, so `inserted`
   // distinguishes a new example from a refresh of an existing one.
   const rows = await sql<{ id: number; inserted: boolean }>(
-    `INSERT INTO search_url_example (portal, url, match_key, filters, category_key, template)
-       VALUES ($1, $2, $3, $4::jsonb, $5, $6)
+    `INSERT INTO search_url_example (portal, url, match_key, filters, category_key, template, last_result_count)
+       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
      ON CONFLICT (portal, match_key) DO UPDATE
        SET url = EXCLUDED.url,
            filters = EXCLUDED.filters,
            category_key = EXCLUDED.category_key,
            template = EXCLUDED.template,
+           last_result_count = COALESCE(EXCLUDED.last_result_count, search_url_example.last_result_count),
            created_at = NOW()
      RETURNING id, (xmax = 0) AS inserted`,
-    [portal, url, matchKey, JSON.stringify(parsed.filters), parsed.categoryKey, parsed.template],
+    [
+      portal,
+      url,
+      matchKey,
+      JSON.stringify(parsed.filters),
+      parsed.categoryKey,
+      parsed.template,
+      count,
+    ],
   );
 
   return { stored: true, id: rows[0].id, categoryKey: parsed.categoryKey, inserted: rows[0].inserted };

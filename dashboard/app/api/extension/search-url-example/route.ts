@@ -28,6 +28,10 @@ const ALLOWED_URL_SCHEMES = new Set(["http:", "https:"]);
 
 interface Body {
   url?: string;
+  // Issue #376: the real harvested result count `enumerateResultsPages()`
+  // computed for this search URL (was discarded). Optional — the batch-start
+  // save omits it (no count yet); the end-of-enumeration save carries it.
+  resultCount?: unknown;
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -78,8 +82,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ success: true, stored: false, reason: "unknown_portal" });
   }
 
+  const resultCount =
+    typeof body.resultCount === "number" && Number.isFinite(body.resultCount)
+      ? body.resultCount
+      : null;
+
   try {
-    const result = await saveSearchUrlExample(portal, url);
+    const result = await saveSearchUrlExample(portal, url, resultCount);
     if (!result.stored) {
       return NextResponse.json({ success: true, stored: false, reason: result.reason });
     }

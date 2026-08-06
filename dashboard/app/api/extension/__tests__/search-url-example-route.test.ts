@@ -97,6 +97,24 @@ describe("POST /api/extension/search-url-example", () => {
     expect(filters.locationSlug).toBe("estepona-malaga");
   });
 
+  it("persists the harvested resultCount when provided (issue #376)", async () => {
+    mockSql.mockResolvedValue([{ id: 42, inserted: true }]);
+    const res = await POST(
+      req({ url: IDEALISTA_SEARCH, resultCount: 37 }, { adminKey: ADMIN_KEY }),
+    );
+    expect(res.status).toBe(200);
+    const params = mockSql.mock.calls[0][1] as unknown[];
+    // 7th param is last_result_count.
+    expect(params[6]).toBe(37);
+  });
+
+  it("stores NULL last_result_count when no resultCount is provided", async () => {
+    mockSql.mockResolvedValue([{ id: 42, inserted: true }]);
+    await POST(req({ url: IDEALISTA_SEARCH }, { adminKey: ADMIN_KEY }));
+    const params = mockSql.mock.calls[0][1] as unknown[];
+    expect(params[6]).toBeNull();
+  });
+
   it("dedupes: a re-capture of the same URL reports inserted:false", async () => {
     mockSql.mockResolvedValueOnce([{ id: 42, inserted: true }]);
     mockSql.mockResolvedValueOnce([{ id: 42, inserted: false }]);
