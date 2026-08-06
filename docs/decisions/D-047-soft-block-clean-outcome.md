@@ -2,6 +2,9 @@
 id: D-047
 title: Soft-block (rate-throttle) stops are a clean run outcome, not an error
 date: 2026-08-05
+group: Data / connectors
+rule: 'Soft-block (site rate-throttle) errors are a `SoftBlockError` and a CLEAN run outcome, never `failed`/`circuit_open`: they trip the breaker only at a separate looser `soft_block_error_rate_threshold` (`tripped_by` reports fatal vs soft), still count in `error_count` (#291), and a soft-block/budget stop records status `ok` + a `nota:` notice. Only fatal-error trips are `circuit_open`. Fotocasa soft threshold 0.75 (transient); Milanuncios default (hard lockout).'
+order: 50
 ---
 
 # D-047: Soft-block (rate-throttle) stops are a clean run outcome, not an error

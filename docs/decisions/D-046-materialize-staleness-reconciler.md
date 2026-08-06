@@ -2,6 +2,9 @@
 id: D-046
 title: Self-healing staleness reconciler for profile re-materialization
 date: 2026-08-05
+group: Data / connectors
+rule: A sweep-independent ETL poll loop (`etl/materialize_reconciler.py`, default 120s) re-fires `notify_materialize_all` whenever an active profile's `last_materialized_at` is behind the newest listing (or NULL), self-healing a missed best-effort notify (D-044). The connector-path notify also moves into a `finally`. Skips while a sweep is `running`; never re-implements the materializer in Python.
+order: 49
 ---
 
 # D-046: Self-healing staleness reconciler for profile re-materialization

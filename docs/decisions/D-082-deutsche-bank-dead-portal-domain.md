@@ -2,6 +2,9 @@
 id: D-082
 title: Deutsche Bank DB Real Estate not buildable — portal domain is dead
 date: 2026-08-06
+group: Data / connectors
+rule: 'Deutsche Bank DB Inmuebles (#129) not buildable: standalone portal host `inmuebles.db.com` is NXDOMAIN (dead), and `deutsche-bank.es` is the retail bank with no property portal. DB''s REO stock survives only as consumer-portal pro pages (yaencontre/fotocasa). No connector written (same pattern as Ibercaja D-065).'
+order: 24
 ---
 
 # D-082: Deutsche Bank DB Real Estate not buildable — portal domain is dead

@@ -227,7 +227,7 @@ When you fix a non-obvious bug or discover a gotcha, document it. Procedure: [ag
 
 ## Recording decisions
 
-`DECISIONS.md` is loaded into every Claude session in this repo. It must stay terse — one line per binding rule. **Never expand entries in the index.** All rationale, context, alternatives rejected, and incident history lives in per-decision files under `docs/decisions/D-NN-<slug>.md`, which are read on demand and not auto-loaded.
+`DECISIONS.md` is loaded into every Claude session in this repo. It must stay terse — one line per binding rule. **`DECISIONS.md` is generated — never hand-edit it** (D-085, issue #352). It is rendered from each per-decision file's frontmatter by `scripts/build-decisions-index.py`, so recording a decision touches only its own new `docs/decisions/D-NN-<slug>.md` file (no shared-line conflict between parallel PRs). All rationale, context, alternatives rejected, and incident history lives in those per-decision files, which are read on demand and not auto-loaded.
 
 When recording a new decision:
 
@@ -237,12 +237,14 @@ When recording a new decision:
    python3 scripts/next-decision-id.py --verbose  # also lists who reserved what
    ```
    Do this **right before** you write the file (not at the start of the task — other branches land while you work). If the allocator warns it couldn't reach GitHub (`gh` missing/offline), the ID it prints only reflects the local tree and may still collide — re-run once online before committing. The cross-branch check `scripts/tests/test_decision_id_collision.py` runs in the suite and fails if your new ID is already claimed on another open PR (it skips gracefully when offline). Renumber-at-merge remains the backstop for the residual race where two agents allocate in the same second before either pushes.
-2. **Write the full file** at `docs/decisions/D-NN-<short-slug>.md`. Use this template:
+2. **Write the full file** at `docs/decisions/D-NN-<short-slug>.md`. The frontmatter carries the index row: `group:` (which group heading it lives under — reuse an existing one from `DECISIONS.md` or introduce a new group) and `rule:` (the one-line binding rule, imperative "Do X" / "Don't Y", ≤180 chars). Use this template:
    ```markdown
    ---
    id: D-NN
    title: <one-line title>
    date: YYYY-MM-DD
+   group: <existing group heading, e.g. Plumbing / process | Data / connectors | AI layer | Product>
+   rule: <the binding rule one-liner — this becomes the DECISIONS.md row>
    ---
 
    # D-NN: <one-line title>
@@ -255,9 +257,10 @@ When recording a new decision:
    **Rationale**: <why this is the right call>
    **See**: <files, PRs, issues, related decisions>
    ```
-3. **Add one line to `DECISIONS.md`** in the appropriate group, or create a new group if none fits. The line must state the **binding rule** (imperative: "Do X" / "Don't Y"), stay ≤180 characters, and link to the per-decision file.
+   The row appends to the end of its group by id — no `order:` field is needed. (`order:` is optional and exists only to pin a non-default position; the #352 migration stamped it on pre-existing records to preserve the hand-curated sequence.)
+3. **Regenerate the index — never hand-edit `DECISIONS.md`.** Run `python3 scripts/build-decisions-index.py` and commit the result alongside your new file. The drift guard (`scripts/tests/test_decisions_index_fresh.py`, CI equivalent `python3 scripts/build-decisions-index.py && git diff --exit-code DECISIONS.md`) fails if the committed index is stale.
 4. **Cross-link only from places that need it.** Link directly to the per-decision file, not to the index.
-5. **Retire, don't rewrite.** If a decision no longer applies, mark its file with `## STATUS: retired (<date>) — superseded by D-MM` and remove its line from `DECISIONS.md`. Keep the file in git for archaeology.
+5. **Retire, don't rewrite.** If a decision no longer applies, mark its file with `## STATUS: retired (<date>) — superseded by D-MM`, **remove its `group:` and `rule:` frontmatter fields** (that drops its row from the generated index), and regenerate. Keep the file in git for archaeology.
 
 Data-semantics decisions (schema, connectors, dedup thresholds, scoring model choices) belong here too, same as plumbing decisions — there's no separate `data-decisions.md` for this project (the source project's knowledge-bundle-compilation mechanism it fed is currently empty, see below).
 

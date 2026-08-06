@@ -2,6 +2,9 @@
 id: D-061
 title: Diglo (Banco Santander REO) connector — sitemap-driven, publishes coordinates
 date: 2026-08-05
+group: Data / connectors
+rule: 'Diglo (Santander REO, #117) connector targets `digloservicer.com` (NOT `diglo.com` — a hearing-aids retailer); sitemap-driven, `discovers_full_inventory=True` with empty/unrecognised-sitemap guards, `rate=12`, `listing_kind=agency`. First batch REO connector to publish lat/lon; no cadastral/postal.'
+order: 15
 ---
 
 # D-061: Diglo (Banco Santander REO) connector — sitemap-driven, publishes coordinates

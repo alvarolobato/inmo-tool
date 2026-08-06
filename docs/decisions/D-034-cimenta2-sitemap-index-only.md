@@ -2,6 +2,9 @@
 id: D-034
 title: Cimenta2 ships as a sitemap-index-only connector — existence and reference code, never detail
 date: 2026-08-04
+group: Data / connectors
+rule: Cimenta2 discovery reads the public `ga-activo` sitemap only; `national` scope_key; `discovers_full_inventory=True`. Detail-fetch is per D-035.
+order: 41
 ---
 
 # D-034: Cimenta2 ships as a sitemap-index-only connector — existence and reference code, never detail

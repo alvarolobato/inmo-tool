@@ -2,6 +2,9 @@
 id: D-015
 title: Rental connector targets Milanuncios (alquiler-de-pisos), as a subclass — not Servihabitat/Vivantial, not an edit to the sale connector
 date: 2026-08-03
+group: Data / connectors
+rule: Rental connector targets Milanuncios `alquiler-de-pisos`, as a `MilanunciosConnector` subclass (own file, own rate limit) — never an edit to the sale connector.
+order: 12
 ---
 
 # D-015: Rental connector targets Milanuncios (`alquiler-de-pisos`), as a subclass — not Servihabitat/Vivantial, not an edit to the sale connector

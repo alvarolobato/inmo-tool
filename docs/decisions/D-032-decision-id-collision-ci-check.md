@@ -2,6 +2,9 @@
 id: D-032
 title: Decision-record ID collisions are caught by a pytest check, not prevented by a scheme change
 date: 2026-08-04
+group: Plumbing / process
+rule: '`scripts/tests/test_decision_ids.py` enforces unique decision IDs, matching frontmatter, resolvable `DECISIONS.md` links, and no stale cross-references. Sequential IDs stay — no scheme change.'
+order: 6
 ---
 
 # D-032: Decision-record ID collisions are caught by a pytest check, not prevented by a scheme change

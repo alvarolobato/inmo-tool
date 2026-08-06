@@ -2,6 +2,9 @@
 id: D-070
 title: Discovery-time prices are written to listing_price_history, decoupled from the fetch budget
 date: 2026-08-06
+group: Data / connectors
+rule: '`Connector.discovered_prices()` (Fotocasa''s free per-listing search-payload price) is written straight to `listing_price_history` by `_record_discovery_price_observations`, called in `run_connector` AFTER the fetch loop — decoupled from the fetch budget. Appends only when the discovery price `IS DISTINCT FROM` the listing''s latest recorded price (idempotent; dedups against, not double-inserts, a same-run fetched row). `listing.current_price` stays fetch-path-owned (else `_should_skip_fetch`''s price-change re-fetch trigger stops firing). Connector-agnostic; `{}` default = no-op.'
+order: 61
 ---
 
 # D-070: Discovery-time prices are written to listing_price_history, decoupled from the fetch budget

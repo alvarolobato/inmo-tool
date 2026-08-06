@@ -2,6 +2,9 @@
 id: D-053
 title: Batch capture is discoverable — in-page banner + app auto-start signal, no popup hunting
 date: 2026-08-05
+group: Data / connectors
+rule: 'Batch capture must be discoverable on a rendered listing page without popup-hunting: an always-available in-page banner (`buildCaptureBanner`) + the app''s `#inmo-capture` auto-start signal (`withCaptureSignal` ↔ `captureSignalPresent`, byte-for-byte contract). Both reuse the D-043 queue verbatim. Auto-start requires the app signal (human-initiated); direct-opened listings get the banner.'
+order: 55
 ---
 
 # D-053: Batch capture is discoverable — in-page banner + app auto-start signal

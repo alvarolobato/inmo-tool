@@ -2,6 +2,9 @@
 id: D-018
 title: Solvia discover() partitions by municipality via the site's own sitemap
 date: 2026-08-03
+group: Data / connectors
+rule: Solvia `discover()` resolves a scope to a provincia only, then sweeps every municipality page the site's own sitemap lists for it (cached 24h). `discovers_full_inventory` stays `False`.
+order: 25
 ---
 
 # D-018: Solvia discover() partitions by municipality via the site's own sitemap

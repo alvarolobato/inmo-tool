@@ -2,6 +2,9 @@
 id: D-027
 title: Altamira not buildable — Akamai edge WAF returns 403 on every path, including robots.txt itself
 date: 2026-08-04
+group: Data / connectors
+rule: Altamira (`altamirainmuebles.com`) not buildable as a crawler (Akamai WAF 403 on every path); capture-only connector exists (#271). Renders fine for a human — WAF shape doesn't predict human browsing.
+order: 37
 ---
 
 # D-027: Altamira not buildable — Akamai edge WAF returns 403 on every path, including robots.txt itself

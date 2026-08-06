@@ -2,6 +2,9 @@
 id: D-051
 title: Capture-to-infer — learn portal search-URL grammars from real navigated URLs
 date: 2026-08-05
+group: Data / connectors
+rule: 'Capture-to-infer: LEARN portal search-URL grammars from the owner''s real navigated URLs. `parse()` per portal is the literal inverse of the #296 slug `build()` (round-trip byte-for-byte tested); "Capturar todas" piggybacks a save to `search_url_example` (auto-trusted, no review); `resolve()` upgrades each `SearchTask` — exact section+location → confirmed template, same-area ≤25km → reuse with loosened flag, else the hand-written `build()`.'
+order: 54
 ---
 
 # D-051: Capture-to-infer — learn portal search-URL grammars from real navigated URLs

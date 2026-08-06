@@ -2,6 +2,9 @@
 id: D-065
 title: Ibercaja Inmuebles not buildable — served by Solvia
 date: 2026-08-05
+group: Data / connectors
+rule: 'Ibercaja Inmuebles (#127) not buildable: no standalone portal (all `ibercajainmuebles.*` domains have no DNS) — its REO stock is listed on Solvia (`solvia.es?esOrigenProducto=IBERCAJA`, already ingested D-018). No connector written (same pattern as Haya D-021).'
+order: 17
 ---
 
 # D-065: Ibercaja Inmuebles not buildable — served by Solvia

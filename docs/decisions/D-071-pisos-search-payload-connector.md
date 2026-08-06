@@ -2,6 +2,9 @@
 id: D-071
 title: pisos.com is a search-payload-primary connector (no detail fetch)
 date: 2026-08-06
+group: Data / connectors
+rule: 'pisos.com IS buildable: `PisosConnector` is search-payload-primary (no detail fetch) — each `.ad-preview` search card carries price+rooms+baths+m²+floor+type-via-URL and a per-card JSON-LD block with lat/lon+locality. `operation="sale"`, guarded discover() raises on 0 cards, page-1-only (`discovers_full_inventory=False`), born disabled. Reject `es_pisos.json` (0.45, no coords) as a source of truth.'
+order: 27
 ---
 
 # D-071: pisos.com is a search-payload-primary connector (no detail fetch)

@@ -2,6 +2,9 @@
 id: D-084
 title: Per-listing extraction-quality grade in raw_extra, best-across-listings on the property header
 date: 2026-08-06
+group: Product
+rule: 'Per-listing extraction-quality grade computed connector-agnostically from canonical fields at persist time (`etl/extraction_quality.py`, weighted: price/size/location=3), stored in `listing.raw_extra.extraction_quality` (no column, self-heals on next fetch). Dashboard reads-not-recomputes; property header shows the BEST grade across listings.'
+order: 75
 ---
 
 # D-084: Per-listing extraction-quality grade

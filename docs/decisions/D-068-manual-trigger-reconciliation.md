@@ -2,6 +2,9 @@
 id: D-068
 title: Orphaned etl_manual_trigger 'running' rows are age-reconciled to 'failed'
 date: 2026-08-06
+group: Data / connectors
+rule: Orphaned `etl_manual_trigger` rows stuck at `status='running'` (past `etl.manual_trigger_max_runtime_seconds`, default 2h, aged by `picked_up_at`) reconcile to `failed` with a reason at ETL startup + each poll; age-based so a live single-worker run is never stomped. No new status/migration. Mirrors D-036.
+order: 59
 ---
 
 # D-068: Orphaned `etl_manual_trigger` 'running' rows are age-reconciled to 'failed'

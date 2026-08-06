@@ -2,6 +2,9 @@
 id: D-062
 title: Aliseda search-URL grammar — top-level category per type, vivienda subtype via slug+subtipo, no ático
 date: 2026-08-05
+group: Data / connectors
+rule: 'Aliseda search URLs: non-residential types are their OWN top-level `comprar-<category>` path (locales/naves/garajes/terrenos/edificios); residential is `comprar-viviendas/<subtype-slug>?subtipo=<code>` (`pisos=36`, `chalets-adosados=31`). Aliseda has NO ático → ático folds onto `pisos` (broadened+flagged); chalet→`chalets-adosados` (approx+flagged); unverified subtipo codes omitted, never guessed; piso+ático de-duped.'
+order: 57
 ---
 
 # D-062: Aliseda search-URL grammar — category-per-type + vivienda subtype (slug + subtipo), no ático bucket

@@ -2,6 +2,9 @@
 id: D-044
 title: Every listing-ingest path must trigger a dashboard re-materialize
 date: 2026-08-05
+group: Data / connectors
+rule: Every listing-ingest path must trigger a dashboard re-materialize after commit via `notify_materialize_all` — connector sweeps (#94) AND browser-extension captures (`process_pending_captures`). Fire once per batch, only if something was ingested; best-effort; never re-implement the materializer in Python.
+order: 47
 ---
 
 # D-044: Every listing-ingest path must trigger a dashboard re-materialize

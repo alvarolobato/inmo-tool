@@ -2,6 +2,9 @@
 id: D-074
 title: Kutxabank Inmobiliaria not buildable — served by Servihabitat
 date: 2026-08-06
+group: Data / connectors
+rule: 'Kutxabank Inmobiliaria (#137) not buildable: `kutxabankinmobiliaria.com`→`.es` redirects to a Servihabitat-hosted microsite (`servihabitat.com/es/kutxabankinmobiliaria`), and Servihabitat already ingests Kutxabank stock. No connector written (same pattern as Ibercaja D-065 / Haya D-021).'
+order: 19
 ---
 
 # D-074: Kutxabank Inmobiliaria not buildable — served by Servihabitat

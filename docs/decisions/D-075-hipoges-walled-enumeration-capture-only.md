@@ -2,6 +2,9 @@
 id: D-075
 title: Hipoges not respectfully crawlable — enumeration channels walled, capture-only
 date: 2026-08-06
+group: Data / connectors
+rule: 'Hipoges (`realestate.hipoges.com`, #207) not respectfully crawlable: the advertised asset sitemaps AND the GET asset API all return app-level 403 "No tiene permisos suficientes" to an honest client (confirmed from 2 independent egress IPs); only channel is an internal `POST /api/assets/map` DTO the site walls. Capture-only (#75) is the route. No live connector (Cimenta2 stop condition, D-033).'
+order: 20
 ---
 
 # D-075: Hipoges not respectfully crawlable — enumeration channels walled

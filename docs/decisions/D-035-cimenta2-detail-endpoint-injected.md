@@ -2,6 +2,9 @@
 id: D-035
 title: Cimenta2 detail-fetch endpoint is injected via config; connector is discovery-only without it, and owner-contact fields are never stored
 date: 2026-08-04
+group: Data / connectors
+rule: Cimenta2 detail-fetch endpoint is injected via `CIMENTA2_DETAIL_ENDPOINT` (never committed); connector is discovery-only without it. Owner-contact fields are never stored.
+order: 42
 ---
 
 # D-035: Cimenta2 detail-fetch endpoint is injected via config; connector is discovery-only without it, and owner-contact fields are never stored

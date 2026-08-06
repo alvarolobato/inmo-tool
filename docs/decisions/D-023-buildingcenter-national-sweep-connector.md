@@ -2,6 +2,9 @@
 id: D-023
 title: BuildingCenter connector sweeps the entire national catalogue and filters in-memory (no server-side geography/category filter works)
 date: 2026-08-04
+group: Data / connectors
+rule: BuildingCenter talks to `apifrontend.buildingcenter.es` directly; `discover()` sweeps the whole catalogue and filters in-memory — no server-side filter param works.
+order: 33
 ---
 
 # D-023: BuildingCenter connector sweeps the entire national catalogue and filters in-memory

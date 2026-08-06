@@ -2,6 +2,9 @@
 id: D-019
 title: Aliseda not buildable — real listing data served only from a robots.txt-disallowed API host
 date: 2026-08-04
+group: Data / connectors
+rule: 'Aliseda (`alisedainmobiliaria.com`) not buildable: every page is a contentless JS shell; the real data API (`laravel.alisedainmobiliaria.com`) declares `Disallow: /` for all crawlers. No connector written.'
+order: 29
 ---
 
 # D-019: Aliseda not buildable — real listing data served only from a robots.txt-disallowed API host
