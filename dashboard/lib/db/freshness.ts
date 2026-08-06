@@ -39,6 +39,12 @@
  */
 
 import { sql } from "@/lib/db-write";
+import {
+  defaultFreshnessIntervalHours,
+  deriveFreshnessState,
+  freshnessCycleStuckAfterHours,
+} from "@/lib/db/connectors";
+import type { ConnectorFreshnessKind } from "@/lib/connectors-schema";
 
 export const DEFAULT_STALE_THRESHOLD_HOURS = 24;
 
@@ -57,21 +63,39 @@ export interface ConnectorFreshness {
   connector: string;
   /** Operator enable state (connector_config.enabled, default true). */
   enabled: boolean;
-  /** ISO timestamp of the latest status='ok' run, or null if never. */
+  /**
+   * ISO timestamp the connector was last FRESH — `connector_freshness_state.
+   * last_fresh_at`, i.e. when its last full refresh cycle completed (issue
+   * #295, D-050). Named `lastSuccessAt` for backward compatibility with the
+   * TopBar pill / `/api/ready` consumers, but the source is now the freshness
+   * cadence, not "any ok run within 24h". null when it has never completed a
+   * cycle. */
   lastSuccessAt: string | null;
   /** ISO timestamp of the latest run of ANY status, or null if never run. */
   lastRunAt: string | null;
   /** Status of the latest run of any status, or null if never run. */
   lastRunStatus: string | null;
-  /** True when enabled AND (never succeeded OR last success past threshold). */
+  /**
+   * Freshness cadence state (issue #295, D-050): "fresh" / "refreshing" /
+   * "stuck" / "due". `isStale` collapses this to a boolean, but the TopBar can
+   * render "refreshing" distinctly from a flat "stale". */
+  state: ConnectorFreshnessKind;
+  /**
+   * True when enabled AND due-or-stuck. A connector mid-cycle-and-not-stuck is
+   * NOT stale — it is actively refreshing (state="refreshing"). */
   isStale: boolean;
 }
 
 export interface DataHealthResponse {
   /** One entry per registered connector (both enabled and disabled). */
   connectors: ConnectorFreshness[];
-  /** True when any ENABLED connector is stale. */
+  /** True when any ENABLED connector is stale (due or stuck). */
   overallStale: boolean;
+  /**
+   * True when any ENABLED connector is mid-cycle and not stuck (state=
+   * "refreshing") — a distinct signal from stale, so the pill can show
+   * "refreshing" rather than a flat "stale" (issue #295, D-050). */
+  overallRefreshing: boolean;
   /**
    * The enabled connector whose last successful run is oldest (a
    * never-succeeded connector sorts oldest). Drives the TopBar headline
@@ -93,9 +117,19 @@ export interface DataHealthResponse {
 interface FreshnessRow {
   connector: string;
   enabled: boolean;
-  last_success_at: Date | string | null;
+  freshness_interval_hours: number | string | null;
+  last_fresh_at: Date | string | null;
+  cycle_started_at: Date | string | null;
+  cycle_target_scope_count: number | string | null;
+  covered_scope_count: number | string | null;
   last_run_at: Date | string | null;
   last_run_status: string | null;
+}
+
+function numOrNull(value: number | string | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
 }
 
 function toIso(value: Date | string | null): string | null {
@@ -116,19 +150,24 @@ const FRESHNESS_QUERY = `
   SELECT
     g.connector_name AS connector,
     COALESCE(c.enabled, true) AS enabled,
-    s.last_success_at,
+    c.freshness_interval_hours,
+    f.last_fresh_at,
+    f.cycle_started_at,
+    f.cycle_target_scope_count,
+    -- Scopes (re)discovered since the current cycle started; 0 when idle.
+    COALESCE(cov.covered_count, 0) AS covered_scope_count,
     la.last_run_at,
     la.last_run_status
   FROM connector_registry g
   LEFT JOIN connector_config c ON c.connector_name = g.connector_name
+  LEFT JOIN connector_freshness_state f ON f.connector_name = g.connector_name
   LEFT JOIN LATERAL (
-    SELECT COALESCE(r.finished_at, r.started_at) AS last_success_at
-      FROM connector_run_results r
-     WHERE r.connector_name = g.connector_name
-       AND r.status = 'ok'
-     ORDER BY r.run_id DESC
-     LIMIT 1
-  ) s ON true
+    SELECT COUNT(*) AS covered_count
+      FROM connector_scope_state s
+     WHERE s.connector_name = g.connector_name
+       AND f.cycle_started_at IS NOT NULL
+       AND s.last_discovered_at >= f.cycle_started_at
+  ) cov ON true
   LEFT JOIN LATERAL (
     SELECT r.status AS last_run_status,
            COALESCE(r.finished_at, r.started_at) AS last_run_at
@@ -143,45 +182,58 @@ const FRESHNESS_QUERY = `
 
 /**
  * Compute per-connector freshness from `connector_registry` +
- * `connector_config` + `connector_run_results`. Throws on any DB error
- * (including 42P01 when the tables are missing) — callers decide how to
- * degrade.
+ * `connector_config` + `connector_freshness_state` (issue #295, D-050). A
+ * connector is stale when it is DUE or STUCK; a connector mid-cycle-not-stuck is
+ * "refreshing", NOT stale. There is no fallback to the old "any ok run within
+ * 24h" heuristic — a connector with no `connector_freshness_state` row simply
+ * has `last_fresh_at = NULL` = due = stale, same as any never-fresh connector.
+ * Throws on any DB error (including 42P01 when the tables are missing) — callers
+ * decide how to degrade.
  *
  * @param opts.nowMs   Injectable clock for testing (defaults to Date.now()).
- * @param opts.thresholdHours Override the staleness threshold in hours.
+ * @param opts.thresholdHours Override the default freshness interval (hours) —
+ *   applies only to connectors with no per-connector override.
  */
 export async function getConnectorFreshness(opts?: {
   nowMs?: number;
   thresholdHours?: number;
 }): Promise<DataHealthResponse> {
   const nowMs = opts?.nowMs ?? Date.now();
-  const thresholdMs = (opts?.thresholdHours ?? staleThresholdHours()) * 3600 * 1000;
+  const defaultIntervalHours = opts?.thresholdHours ?? defaultFreshnessIntervalHours();
+  const stuckAfterHours = freshnessCycleStuckAfterHours();
 
   const rows = await sql<FreshnessRow>(FRESHNESS_QUERY);
 
   const connectors: ConnectorFreshness[] = rows.map((row) => {
-    const lastSuccessAt = toIso(row.last_success_at);
     const enabled = row.enabled === true;
-    let isStale = false;
-    if (enabled) {
-      if (lastSuccessAt === null) {
-        isStale = true;
-      } else {
-        isStale = nowMs - new Date(lastSuccessAt).getTime() > thresholdMs;
-      }
-    }
+    const f = deriveFreshnessState({
+      intervalHoursOverrideRaw: row.freshness_interval_hours,
+      lastFreshAt: row.last_fresh_at,
+      cycleStartedAt: row.cycle_started_at,
+      targetScopeCount: numOrNull(row.cycle_target_scope_count),
+      coveredScopeCount: numOrNull(row.covered_scope_count),
+      defaultIntervalHours,
+      stuckAfterHours,
+      nowMs,
+    });
+    // Stale = enabled AND (due or stuck). "refreshing" is a live cycle, not
+    // stale; "fresh" is obviously not stale. A disabled connector is never
+    // counted as stale — its silence is intentional (issue #241 precedent).
+    const isStale = enabled && (f.kind === "due" || f.kind === "stuck");
     return {
       connector: row.connector,
       enabled,
-      lastSuccessAt,
+      lastSuccessAt: f.lastFreshAt,
       lastRunAt: toIso(row.last_run_at),
       lastRunStatus: row.last_run_status,
+      state: f.kind,
       isStale,
     };
   });
 
   const enabledConnectors = connectors.filter((c) => c.enabled);
   const overallStale = enabledConnectors.some((c) => c.isStale);
+  const overallRefreshing = enabledConnectors.some((c) => c.state === "refreshing");
 
   // Stalest = oldest last-success among ENABLED connectors; a
   // never-succeeded connector (null) sorts as the oldest of all.
@@ -215,6 +267,7 @@ export async function getConnectorFreshness(opts?: {
   return {
     connectors,
     overallStale,
+    overallRefreshing,
     stalestConnector: stalest
       ? {
           connector: stalest.connector,

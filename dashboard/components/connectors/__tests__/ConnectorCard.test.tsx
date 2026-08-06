@@ -43,6 +43,16 @@ function makeConnector(overrides: Partial<ConnectorView> = {}): ConnectorView {
     derivedFrom: [
       { profile_id: 1, profile_name: "Madrid centro", center: [40.4168, -3.7038], radius_km: 5 },
     ],
+    freshness: {
+      kind: "fresh",
+      intervalHours: null,
+      effectiveIntervalHours: 24,
+      lastFreshAt: "2026-08-01T09:05:00.000Z",
+      cycleStartedAt: null,
+      targetScopeCount: null,
+      coveredScopeCount: null,
+      stuckAfterHours: 168,
+    },
     lastRun: {
       run_id: 10,
       status: "success",
@@ -201,5 +211,78 @@ describe("ConnectorCard — single toggle (issue #319 / D-055)", () => {
     expect(screen.queryByTestId("capture-note-idealista")).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId("expand-idealista"));
     expect(screen.getByTestId("capture-note-idealista")).toHaveTextContent("extensión");
+  });
+});
+
+describe("ConnectorCard — freshness cadence (issue #295 / D-050)", () => {
+  it("shows the freshness state and interval control in the expanded detail", () => {
+    render(<ConnectorCard connector={makeConnector()} onPatch={noop} />);
+    // Freshness lives behind the chevron, like the rest of the detail.
+    expect(screen.queryByTestId("freshness-fotocasa")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("expand-fotocasa"));
+    expect(screen.getByTestId("freshness-state-fotocasa")).toHaveTextContent("fresco");
+    expect(screen.getByTestId("freshness-interval-fotocasa")).toBeInTheDocument();
+  });
+
+  it("renders each cadence state distinctly", () => {
+    const refreshing = makeConnector({
+      freshness: {
+        kind: "refreshing",
+        intervalHours: null,
+        effectiveIntervalHours: 24,
+        lastFreshAt: null,
+        cycleStartedAt: new Date().toISOString(),
+        targetScopeCount: 4,
+        coveredScopeCount: 1,
+        stuckAfterHours: 168,
+      },
+    });
+    const { rerender } = render(<ConnectorCard connector={refreshing} onPatch={noop} />);
+    fireEvent.click(screen.getByTestId("expand-fotocasa"));
+    expect(screen.getByTestId("freshness-state-fotocasa")).toHaveTextContent(
+      "refrescando… (1/4 ámbitos)",
+    );
+
+    const stuck = makeConnector({
+      freshness: { ...refreshing.freshness, kind: "stuck" },
+    });
+    rerender(<ConnectorCard connector={stuck} onPatch={noop} />);
+    expect(screen.getByTestId("freshness-state-fotocasa")).toHaveTextContent(
+      "atascado — lleva más de 168h",
+    );
+
+    const due = makeConnector({
+      freshness: { ...refreshing.freshness, kind: "due", cycleStartedAt: null },
+    });
+    rerender(<ConnectorCard connector={due} onPatch={noop} />);
+    expect(screen.getByTestId("freshness-state-fotocasa")).toHaveTextContent(
+      "obsoleto, sin ciclo iniciado",
+    );
+  });
+
+  it("changing the interval PATCHes freshness_interval_hours (null = default)", () => {
+    const onPatch = vi.fn(async () => {});
+    render(<ConnectorCard connector={makeConnector()} onPatch={onPatch} />);
+    fireEvent.click(screen.getByTestId("expand-fotocasa"));
+
+    fireEvent.change(screen.getByTestId("freshness-interval-fotocasa"), {
+      target: { value: "6" },
+    });
+    expect(onPatch).toHaveBeenCalledWith("fotocasa", { freshness_interval_hours: 6 });
+
+    fireEvent.change(screen.getByTestId("freshness-interval-fotocasa"), {
+      target: { value: "" },
+    });
+    expect(onPatch).toHaveBeenCalledWith("fotocasa", { freshness_interval_hours: null });
+  });
+
+  it("offers the freshness control on capture-only connectors too", () => {
+    // Unlike scope/filters, the cadence is a valid knob for capture-only
+    // portals (it's #289's manual-capture staleness window).
+    render(<ConnectorCard connector={captureOnly()} onPatch={noop} />);
+    fireEvent.click(screen.getByTestId("expand-idealista"));
+    expect(screen.getByTestId("freshness-interval-idealista")).toBeInTheDocument();
+    // …but still no scope/filter controls.
+    expect(screen.queryByTestId("edit-scope-idealista")).not.toBeInTheDocument();
   });
 });

@@ -42,6 +42,12 @@ function registryRow(overrides: Record<string, unknown> = {}) {
     geography_override: null,
     filters: null,
     has_config: false,
+    // Issue #295 (D-050): freshness-cadence columns from the LEFT JOINs.
+    freshness_interval_hours: null,
+    last_fresh_at: null,
+    cycle_started_at: null,
+    cycle_target_scope_count: null,
+    covered_scope_count: 0,
     ...overrides,
   };
 }
@@ -222,6 +228,55 @@ describe("GET /api/etl/connectors", () => {
     expect(c.scopeSource).toBe("capture-only");
   });
 
+  it("resolves the effective freshness interval and derives cadence state (issue #295)", async () => {
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [
+          // No override → effective interval is the 24h default; a cycle in
+          // progress (started recently) → refreshing, with N/M counts.
+          registryRow({
+            has_config: true,
+            enabled: true,
+            freshness_interval_hours: null,
+            cycle_started_at: new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
+            cycle_target_scope_count: 4,
+            covered_scope_count: 1,
+          }),
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const c = (await (await GET()).json()).connectors[0];
+    expect(c.freshness.effectiveIntervalHours).toBe(24);
+    expect(c.freshness.intervalHours).toBeNull();
+    expect(c.freshness.kind).toBe("refreshing");
+    expect(c.freshness.targetScopeCount).toBe(4);
+    expect(c.freshness.coveredScopeCount).toBe(1);
+  });
+
+  it("reports 'fresh' with the override interval when set (issue #295)", async () => {
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [
+          registryRow({
+            has_config: true,
+            enabled: true,
+            freshness_interval_hours: 6,
+            last_fresh_at: new Date(Date.now() - 1 * 3600 * 1000).toISOString(),
+            cycle_started_at: null,
+          }),
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const c = (await (await GET()).json()).connectors[0];
+    expect(c.freshness.effectiveIntervalHours).toBe(6);
+    expect(c.freshness.intervalHours).toBe(6);
+    expect(c.freshness.kind).toBe("fresh");
+  });
+
   it("returns 500 with an error body when the query fails", async () => {
     mockQuery.mockRejectedValue(new Error("boom"));
     const res = await GET();
@@ -295,6 +350,55 @@ describe("PATCH /api/etl/connectors/:name", () => {
     const upsert = mockQuery.mock.calls[1];
     expect(upsert[1][7]).toBe(true); // setCaptureEnabled
     expect(upsert[1][8]).toBe(true); // the new value
+  });
+
+  it("accepts a freshness_interval_hours override on a capture-only connector (issue #295)", async () => {
+    // Unlike geography_override/filters (rejected below for capture-only), the
+    // freshness cadence is a valid knob for capture-only portals too — it's the
+    // staleness window #289's manual-capture UI reads. The capture-only guard
+    // must NOT block it.
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{ connector_name: "idealista", registered: true, supports_discovery: false, supported_filters: [] }],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const res = await PATCH(makeRequest({ freshness_interval_hours: 72 }), {
+      params: { name: "idealista" },
+    });
+    expect(res.status).toBe(200);
+    const upsert = mockQuery.mock.calls[1];
+    // Params: …, setFreshness($10)=index 9, freshnessVal($11)=index 10.
+    expect(upsert[1][9]).toBe(true); // setFreshness supplied
+    expect(upsert[1][10]).toBe(72); // the new value
+  });
+
+  it("clears a freshness override with an explicit null (issue #295)", async () => {
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{ connector_name: "fotocasa", registered: true, supports_discovery: true, supported_filters: ["rooms"] }],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const res = await PATCH(makeRequest({ freshness_interval_hours: null }), {
+      params: { name: "fotocasa" },
+    });
+    expect(res.status).toBe(200);
+    const upsert = mockQuery.mock.calls[1];
+    expect(upsert[1][9]).toBe(true); // supplied (clear)…
+    expect(upsert[1][10]).toBeNull(); // …with null value = back to default
+  });
+
+  it("rejects a non-positive or over-cap freshness interval (issue #295)", async () => {
+    // Zod bounds — no DB call should happen (registry lookup never reached).
+    for (const bad of [0, -1, 24 * 90 + 1, 1.5]) {
+      const res = await PATCH(makeRequest({ freshness_interval_hours: bad }), {
+        params: { name: "fotocasa" },
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("VALIDATION");
+    }
+    expect(mockQuery).not.toHaveBeenCalled();
   });
 
   it("404s for a connector that isn't registered", async () => {
