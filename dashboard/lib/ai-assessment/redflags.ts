@@ -98,8 +98,17 @@ export { NoListingsError, loadPropertyListings };
  * (or none, when the model hesitated to call an auction an embargo) now yields
  * a `subasta_judicial` flag — the prompt reads and labels it differently.
  * #308's batch re-assesses existing rows against the new version.
+ *
+ * Bumped to v5 for #394 (Fase 6 of #385): the prompt now asks the model, when
+ * it emits an `other` flag (nothing in the closed vocabulary fits), to ALSO
+ * propose a `candidate_type` — a short snake_case slug — plus a one-line
+ * definition, so the long tail of `other` flags becomes groupable data instead
+ * of free prose (step 1 of the hybrid dynamic-tagging mechanism). No DB schema
+ * change: `candidate_type` is one more field inside the existing
+ * `redflags.flags[]` JSON. #308's batch re-assesses existing rows so `other`
+ * flags gain their slug.
  */
-export const REDFLAGS_PROMPT_VERSION = "redflags/v4";
+export const REDFLAGS_PROMPT_VERSION = "redflags/v5";
 
 /**
  * Closed type vocabulary (issue #27 technical approach #1, broadened in #361).
@@ -155,6 +164,43 @@ export interface RedFlag {
   evidence: string;
   /** Which portal that quote came from, so the investor can go and check it. */
   evidence_source: string | null;
+  /**
+   * #394 (Fase 6 of #385) — for `other` flags ONLY: a normalized snake_case
+   * slug the model proposes as a name for a problem the closed vocabulary
+   * doesn't cover (step 1 of the hybrid dynamic-tagging mechanism). Present
+   * only when `type === 'other'` and the model returned a usable slug; named
+   * types leave it `undefined`. NOT a filter and never rendered to end users
+   * yet — it exists so the long tail of `other` flags can be grouped by slug
+   * and, once a slug trends, promoted to the closed vocabulary by a human
+   * (Fase 8). Normalized deterministically from what the model returns
+   * (`normalizeCandidateType`), never regex-derived from the advert text — the
+   * detection is still the model's job (cf. D-095).
+   */
+  candidate_type?: string;
+}
+
+/**
+ * #394 — deterministically normalize the model's proposed `other` slug into a
+ * stable snake_case key we can group by. This is a pure string utility over
+ * what the LLM RETURNS — NOT a keyword/regex classifier of the advert text
+ * (that classification stays the model's job; same principle as D-095's
+ * LLM-only detection).
+ *
+ * NFKD accent-fold ("Ático Añadido" → "atico anadido"), lowercase, collapse
+ * every run of non-alphanumerics (spaces, hyphens, punctuation) to a single
+ * `_`, and trim leading/trailing `_`. A slug that normalizes to empty (the
+ * model returned "", whitespace, or pure punctuation) degrades to `undefined`
+ * so the flag stays a valid plain `other` rather than carrying a junk key.
+ */
+export function normalizeCandidateType(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const slug = raw
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "") // strip combining accent marks
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_") // collapse non-alphanumerics to a single _
+    .replace(/^_+|_+$/g, ""); // trim leading/trailing _
+  return slug === "" ? undefined : slug;
 }
 
 export interface RedFlagsResult {
@@ -185,7 +231,14 @@ function parseFlag(node: unknown): RedFlag | null {
       ? o.evidence_source
       : null;
 
-  return { type, description, evidence, evidence_source };
+  // #394: only `other` carries a candidate_type — the model's proposed name for
+  // a problem the closed vocabulary doesn't cover. Normalized deterministically
+  // from what the model returned (never regex-derived from the advert text). A
+  // malformed/empty slug degrades to undefined, leaving a valid plain `other`.
+  const candidate_type =
+    type === "other" ? normalizeCandidateType(o.candidate_type) : undefined;
+
+  return { type, description, evidence, evidence_source, candidate_type };
 }
 
 /** Parse and validate the model's JSON into the red-flags result. */

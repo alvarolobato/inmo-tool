@@ -12,7 +12,12 @@
 import { describe, it, expect } from "vitest";
 import { buildSystemPrompt } from "@/lib/llm-context/system-prompt";
 import type { ListingSnapshot } from "@/lib/llm-context";
-import { parseRedFlagsResult, REDFLAGS_PROMPT_VERSION, REDFLAG_TYPES } from "../redflags";
+import {
+  parseRedFlagsResult,
+  normalizeCandidateType,
+  REDFLAGS_PROMPT_VERSION,
+  REDFLAG_TYPES,
+} from "../redflags";
 
 const SILENT_ADVERT: ListingSnapshot = {
   propertyId: 11,
@@ -75,6 +80,17 @@ describe("redflags prompt — evidence union across merged listings", () => {
     const text = redflagsPromptText([SILENT_ADVERT]);
     expect(text).toContain("subasta_judicial");
     expect(text).toContain("procedimiento de apremio");
+  });
+
+  it("#394: asks the model for a candidate_type slug + definition when it uses `other`, and puts both in the output schema", () => {
+    const text = redflagsPromptText([SILENT_ADVERT]);
+    // The `other` guidance requests a snake_case candidate slug + a one-line
+    // definition alongside the existing free-text description.
+    expect(text).toContain("candidate_type");
+    expect(text).toContain("definition");
+    expect(text).toContain("snake_case");
+    // ...and it must stay scoped to `other` — named types don't carry a slug.
+    expect(text.toLowerCase()).toContain("solo para");
   });
 });
 
@@ -265,13 +281,126 @@ describe("parseRedFlagsResult", () => {
   });
 });
 
+describe("#394 candidate_type on `other` flags", () => {
+  it("normalizeCandidateType folds accents, lowercases, and collapses spaces/punctuation to snake_case", () => {
+    expect(normalizeCandidateType("Servidumbre de Paso")).toBe("servidumbre_de_paso");
+    expect(normalizeCandidateType("Inundación / riesgo")).toBe("inundacion_riesgo");
+    expect(normalizeCandidateType("  Ruido   excesivo  ")).toBe("ruido_excesivo");
+    expect(normalizeCandidateType("ZONA-Ruidosa")).toBe("zona_ruidosa");
+    // Already-normalized slug passes through unchanged.
+    expect(normalizeCandidateType("okupas_vecinos")).toBe("okupas_vecinos");
+  });
+
+  it("normalizeCandidateType degrades a malformed/empty slug to undefined", () => {
+    expect(normalizeCandidateType("")).toBeUndefined();
+    expect(normalizeCandidateType("   ")).toBeUndefined();
+    expect(normalizeCandidateType("///")).toBeUndefined();
+    expect(normalizeCandidateType(undefined)).toBeUndefined();
+    expect(normalizeCandidateType(42)).toBeUndefined();
+  });
+
+  it("parseFlag normalizes the candidate_type slug on an evidenced `other` flag", () => {
+    const r = parseRedFlagsResult(
+      JSON.stringify({
+        flags: [
+          {
+            type: "other",
+            description: "Existe una servidumbre de paso sobre la finca.",
+            candidate_type: "Servidumbre de Paso",
+            definition: "Un tercero tiene derecho de paso por la propiedad.",
+            evidence: "la finca soporta una servidumbre de paso a favor del colindante",
+            evidence_source: "idealista",
+          },
+        ],
+        confidence: 0.6,
+      }),
+    );
+    expect(r.flags).toHaveLength(1);
+    expect(r.flags[0].type).toBe("other");
+    expect(r.flags[0].candidate_type).toBe("servidumbre_de_paso");
+  });
+
+  it("drops an `other` flag with NO evidence even when it carries a candidate_type (evidence guard unchanged)", () => {
+    const r = parseRedFlagsResult(
+      JSON.stringify({
+        flags: [
+          {
+            type: "other",
+            description: "Podría haber una servidumbre.",
+            candidate_type: "servidumbre_de_paso",
+            evidence: "",
+          },
+        ],
+        confidence: 0.5,
+      }),
+    );
+    expect(r.flags).toEqual([]);
+  });
+
+  it("a named type never carries a candidate_type, even if the model sent one", () => {
+    const r = parseRedFlagsResult(
+      JSON.stringify({
+        flags: [
+          {
+            type: "litigio",
+            description: "Procedimiento judicial en curso.",
+            candidate_type: "algo_inventado",
+            evidence: "existe un procedimiento judicial en curso sobre el inmueble",
+          },
+        ],
+        confidence: 0.7,
+      }),
+    );
+    expect(r.flags).toHaveLength(1);
+    expect(r.flags[0].type).toBe("litigio");
+    expect(r.flags[0].candidate_type).toBeUndefined();
+  });
+
+  it("an `other` flag with a malformed/empty slug stays a valid plain `other` (candidate_type undefined)", () => {
+    const r = parseRedFlagsResult(
+      JSON.stringify({
+        flags: [
+          {
+            type: "other",
+            description: "Riesgo no catalogado citado en el anuncio.",
+            candidate_type: "   ",
+            evidence: "cláusula rara en el contrato de arras",
+          },
+        ],
+        confidence: 0.5,
+      }),
+    );
+    expect(r.flags).toHaveLength(1);
+    expect(r.flags[0].type).toBe("other");
+    expect(r.flags[0].candidate_type).toBeUndefined();
+  });
+
+  it("an unrecognised type coerced to `other` picks up no candidate_type unless one was sent", () => {
+    const r = parseRedFlagsResult(
+      JSON.stringify({
+        flags: [
+          {
+            type: "algo_no_previsto",
+            description: "Riesgo no catalogado.",
+            evidence: "cláusula rara en el contrato",
+          },
+        ],
+        confidence: 0.5,
+      }),
+    );
+    expect(r.flags).toHaveLength(1);
+    expect(r.flags[0].type).toBe("other");
+    expect(r.flags[0].candidate_type).toBeUndefined();
+  });
+});
+
 describe("prompt version", () => {
   it("is pinned, so a prompt change forces a new row rather than overwriting", () => {
-    // Bumped to v4 for #389: `subasta_judicial` was split out of `embargo`
-    // into its own closed-vocabulary type, changing what the prompt labels —
-    // so #308's batch re-assesses existing rows rather than serving a v3 cache
-    // row as current. See REDFLAGS_PROMPT_VERSION's doc.
-    expect(REDFLAGS_PROMPT_VERSION).toBe("redflags/v4");
+    // Bumped to v5 for #394: `other` flags now carry a `candidate_type` slug +
+    // one-line definition, so the prompt asks for a new field and #308's batch
+    // re-assesses existing rows rather than serving a v4 cache row as current.
+    // See REDFLAGS_PROMPT_VERSION's doc.
+    expect(REDFLAGS_PROMPT_VERSION).toBe("redflags/v5");
   });
 });
 
