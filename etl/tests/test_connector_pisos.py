@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
+import requests
 
 from etl.connectors.base import ConnectorError, ConnectorScope, ListingUnavailableError
 from etl.connectors.pisos import PisosConnector
@@ -22,6 +23,13 @@ from etl.connectors.pisos_mapping import map_property_type, type_token_from_url
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 _MADRID_IDS = {"65098413759.100500", "61748204239.106400", "64250319294.280500"}
+
+# A real profile scope far from Madrid/Barcelona — the Dos Hermanas (Sevilla)
+# coordinate scope that regressed in issue #369: geography='', only a
+# center/radius, which the connector must resolve to pisos.com's actual
+# underscore slug ("dos_hermanas"), not the hyphen form ("dos-hermanas")
+# that 404s live.
+_DOS_HERMANAS_SCOPE = ConnectorScope(center=(37.283689, -5.9226718), radius_km=7.0)
 
 
 def _read_fixture(name: str) -> str:
@@ -32,6 +40,17 @@ def _mock_response(text: str) -> Mock:
     resp = Mock()
     resp.text = text
     resp.raise_for_status = Mock()
+    return resp
+
+
+def _http_error_response(status_code: int) -> Mock:
+    """A mock response whose raise_for_status() raises the HTTPError requests
+    would for that status, carrying `.response.status_code` — what discover()
+    inspects to treat a 404 as an uncovered (not failed) outcome."""
+    resp = Mock()
+    err = requests.HTTPError(f"{status_code} Client Error")
+    err.response = Mock(status_code=status_code)
+    resp.raise_for_status = Mock(side_effect=err)
     return resp
 
 
@@ -96,6 +115,53 @@ def test_discover_raises_on_empty_page_rather_than_returning_empty():
         pytest.raises(ConnectorError),
     ):
         connector.discover(ConnectorScope(geography="madrid"), throttle=lambda: None)
+
+
+def test_discover_builds_underscore_slug_for_coordinate_scope_dos_hermanas():
+    """Issue #369: a real profile scope (geography='', only center/radius)
+    for Dos Hermanas/Sevilla must resolve to pisos.com's UNDERSCORE slug
+    `pisos-dos_hermanas/`. The pre-fix hyphen slug `pisos-dos-hermanas/`
+    404s live and failed the whole run."""
+    connector = PisosConnector()
+    html = _read_fixture("pisos_sample_search.html")
+    with patch(
+        "etl.connectors.pisos.requests.get", return_value=_mock_response(html)
+    ) as mock_get:
+        connector.discover(_DOS_HERMANAS_SCOPE, throttle=lambda: None)
+    called_url = mock_get.call_args[0][0]
+    assert called_url == "https://www.pisos.com/venta/pisos-dos_hermanas/"
+
+
+def test_scope_key_resolves_coordinate_scope_to_underscore_slug():
+    assert PisosConnector().scope_key(_DOS_HERMANAS_SCOPE) == "dos_hermanas"
+
+
+def test_discover_returns_empty_uncovered_on_http_404():
+    """Issue #369: a city pisos.com has no search page for (HTTP 404) is a
+    clean 'uncovered' result — discover() returns [] so the run stays
+    healthy, never marking the profile 'failed' for a portal that simply
+    doesn't serve that geography. Safe: discovers_full_inventory=False."""
+    connector = PisosConnector()
+    with patch(
+        "etl.connectors.pisos.requests.get",
+        return_value=_http_error_response(404),
+    ):
+        ids = connector.discover(_DOS_HERMANAS_SCOPE, throttle=lambda: None)
+    assert ids == []
+
+
+def test_discover_still_raises_on_non_404_http_error():
+    """A 404 is uncovered; any other HTTP/transport error is still a genuine
+    failure that must surface (fail-loud discipline preserved)."""
+    connector = PisosConnector()
+    with (
+        patch(
+            "etl.connectors.pisos.requests.get",
+            return_value=_http_error_response(503),
+        ),
+        pytest.raises(ConnectorError),
+    ):
+        connector.discover(_DOS_HERMANAS_SCOPE, throttle=lambda: None)
 
 
 def test_discover_raises_when_geography_unresolvable():

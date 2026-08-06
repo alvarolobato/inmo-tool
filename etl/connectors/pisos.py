@@ -78,6 +78,7 @@ from etl.connectors.base import (
     RawListing,
     Throttle,
 )
+from etl.connectors.extraction import underscore_city_slug
 from etl.connectors.geography import (
     UnresolvableGeographyError,
     resolve_place,
@@ -91,31 +92,29 @@ _USER_AGENT = "Mozilla/5.0 (compatible; inmo-tool/0.1; +https://github.com/alvar
 _BASE_URL = "https://www.pisos.com"
 _REQUEST_TIMEOUT_SECONDS = 15
 
-# Municipality name (etl.connectors.geography.Place.name values) -> pisos.com
-# URL location slug. pisos.com's slug is the bare (province/city) name:
-# `/venta/pisos-madrid/`. Live-verified HTTP 200 with real cards for the
-# first four (madrid, malaga, barcelona, sevilla) during issue #79's
-# feasibility spike; the remaining Costa del Sol / greater-Sevilla entries
-# (the owner's stated v1 markets, mirroring fotocasa.py's _CITY_SLUGS) are a
-# mechanical extension of the same bare-name rule, NOT individually
-# HTTP-verified this round — flagged here rather than silently blended in
-# with the verified entries above.
-_CITY_SLUGS: dict[str, str] = {
-    # Live-verified 2026-08 (real HTTP 200 + real cards):
-    "madrid": "madrid",
-    "malaga": "malaga",
-    "barcelona": "barcelona",
-    "sevilla": "sevilla",
-    # Mechanical extension of the bare-name rule (not individually verified):
-    "marbella": "marbella",
-    "estepona": "estepona",
-    "fuengirola": "fuengirola",
-    "torremolinos": "torremolinos",
-    "benalmadena": "benalmadena",
-    "mijas": "mijas",
-    "dos hermanas": "dos-hermanas",
-    "alcala de guadaira": "alcala-de-guadaira",
-    "tomares": "tomares",
+# pisos.com's search-URL slug is the accent-stripped, underscore-joined
+# municipality name (`/venta/pisos-dos_hermanas/`), derived mechanically
+# from the resolved gazetteer name by `underscore_city_slug` — NOT a
+# hand-maintained per-city table. Issue #369: the previous table mapped
+# `dos hermanas` -> `dos-hermanas` (hyphen), but pisos.com serves
+# `pisos-dos_hermanas/` (underscore) and 404s the hyphen form, so every
+# multi-word city the profile scopes actually hit failed a run. The
+# underscore rule was live-verified 2026-08 for dos_hermanas (626 real
+# cards), alcala_de_guadaira and mairena_del_aljarafe (all HTTP 200); see
+# `underscore_city_slug`.
+#
+# Verified per-city exceptions where the naive slug 404s live on pisos.com
+# (the site drops the leading article) go here; anything not listed falls
+# through to `underscore_city_slug(place.name)`. A city whose derived slug
+# pisos.com still doesn't serve is handled by discover() catching the 404 as
+# a clean "not on this portal" result, never a hard failure — so this table
+# stays SMALL (only genuinely live-verified fixes) rather than trying to
+# pre-enumerate coverage.
+_SLUG_OVERRIDES: dict[str, str] = {
+    # Live-verified 2026-08: pisos.com drops the "l'" article ->
+    # `/venta/pisos-hospitalet_de_llobregat/` (HTTP 200); the naive
+    # `l_hospitalet_de_llobregat` 404s.
+    "l'hospitalet de llobregat": "hospitalet_de_llobregat",
 }
 
 _CARD_SELECTOR = "div.ad-preview[id]"
@@ -134,9 +133,15 @@ def _resolve_geography(scope: ConnectorScope) -> str | None:
 
     `scope.geography` (a free-text escape hatch — see ConnectorScope's
     docstring) wins when set, for tests/manual construction. Otherwise
-    resolve `scope.center` via the shared gazetteer and look up its
-    pisos.com slug. No hardcoded default — a scope this connector has no
-    slug for means "nothing to discover", not "assume Madrid".
+    resolve `scope.center` via the shared gazetteer and derive its pisos.com
+    slug mechanically with `underscore_city_slug` (issue #369): every
+    resolved municipality yields a slug, so this covers arbitrary cities
+    rather than only those in a hand-maintained table. `_SLUG_OVERRIDES`
+    supplies the handful of live-verified exceptions where the naive slug
+    404s. Returns None only when there is nothing to resolve at all (no
+    center and no geography string) — a scope whose derived slug pisos.com
+    happens not to serve is NOT None here; discover() turns that into a
+    clean uncovered result via the 404 it gets back.
 
     Can raise `UnresolvableGeographyError` (from `resolve_place`) when
     `scope.center` is set but matches no place in the gazetteer at all —
@@ -147,7 +152,7 @@ def _resolve_geography(scope: ConnectorScope) -> str | None:
     place = resolve_place(scope)
     if place is None:
         return None
-    return _CITY_SLUGS.get(place.name)
+    return _SLUG_OVERRIDES.get(place.name) or underscore_city_slug(place.name)
 
 
 def _to_decimal(value: Any) -> Decimal | None:
@@ -250,12 +255,13 @@ class PisosConnector(Connector):
             # Reachable only if discover() is invoked directly, bypassing
             # scope_key()'s gate (a test, or a future caller) — normally
             # scope_key() already returned None and the orchestrator skipped
-            # this scope.
+            # this scope. Now that the slug is derived mechanically from any
+            # resolved municipality (issue #369), None here means only "no
+            # center and no geography string to resolve at all".
             raise ConnectorError(
                 "pisos discover: scope has neither a resolvable center nor an "
-                "explicit geography string, or resolves to a municipality "
-                "this connector's _CITY_SLUGS table doesn't cover — nothing "
-                "to discover, not defaulting to a hardcoded city"
+                "explicit geography string — nothing to discover, not "
+                "defaulting to a hardcoded city"
             )
 
         url = self._search_url(geography)
@@ -268,6 +274,25 @@ class PisosConnector(Connector):
             )
             response.raise_for_status()
         except requests.RequestException as exc:
+            # Issue #369: an HTTP 404 means pisos.com has no search page for
+            # this city — the city simply isn't on this portal (or the
+            # derived slug isn't the one it uses). That is a CLEAN "uncovered"
+            # outcome, not a connector failure: return [] so the run status
+            # stays healthy instead of marking the whole profile 'failed' for
+            # a geography this portal doesn't serve. Safe because
+            # discovers_full_inventory=False, so an empty sweep never
+            # auto-withdraws anything. Any other transport/HTTP error is a
+            # genuine failure and still raises.
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 404:
+                logger.info(
+                    "pisos discover: %s returned HTTP 404 — pisos.com has no "
+                    "search page for this city (geography=%s); treating as "
+                    "uncovered (empty result), not a failure",
+                    url,
+                    geography,
+                )
+                return []
             raise ConnectorError(
                 f"pisos discover: request failed for {url}: {exc}"
             ) from exc
