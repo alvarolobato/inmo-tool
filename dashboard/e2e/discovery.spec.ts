@@ -113,3 +113,15 @@ test("shows the connector picker and the start-discovery action", async ({ page 
   await expect(page.getByTestId("discovery-connector-select")).toBeVisible();
   await expect(page.getByTestId("start-discovery")).toBeEnabled();
 });
+
+test("is reachable from the admin nav, next to Captura guiada", async ({ page }) => {
+  // The page was unreachable from the UI before this — only by typing the URL.
+  await page.goto("/etl/captura");
+  const nav = page.locator("nav").first();
+  const discovery = nav.getByRole("link", { name: "Descubrimiento" });
+  await expect(discovery).toBeVisible();
+  await expect(discovery).toHaveAttribute("href", "/etl/discovery");
+  await discovery.click();
+  await expect(page).toHaveURL(/\/etl\/discovery$/);
+  await expect(page.getByTestId("discovery-page")).toBeVisible();
+});
