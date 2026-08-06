@@ -63,12 +63,15 @@ let pool: Pool;
 let dbAvailable = false;
 const adminKey = process.env.ADMIN_API_KEY?.trim();
 
+// Aliseda catalogs now come from the SERVER-SIDE static-asset extractor
+// (issue #377, D-093), so the seeded source reflects that. The drift diff +
+// flag surface is source-agnostic — only the axes vs the code mapping matter.
 async function seedCatalog(axes: unknown): Promise<void> {
   await pool.query("DELETE FROM portal_filter_catalog WHERE connector = $1", [CONNECTOR]);
   await pool.query(
     `INSERT INTO portal_filter_catalog (connector, source, axes, captured_at)
        VALUES ($1, $2, $3::jsonb, NOW())`,
-    [CONNECTOR, "embedded-config", JSON.stringify(axes)],
+    [CONNECTOR, "static-asset", JSON.stringify(axes)],
   );
 }
 
@@ -106,7 +109,7 @@ test("renders the discovered catalog and FLAGS drift vs. the code mapping", asyn
   // The seeded catalog loads (not the empty state, not a skeleton).
   await expect(page.getByTestId("discovery-catalog")).toBeVisible();
   await expect(page.getByTestId("discovery-empty")).toHaveCount(0);
-  await expect(page.getByTestId("catalog-source")).toContainText("embedded-config");
+  await expect(page.getByTestId("catalog-source")).toContainText("static-asset");
 
   // The property-type options render, mapped to canonical types (real content).
   const table = page.getByTestId("property-type-table");
@@ -149,11 +152,14 @@ test("shows NO drift flag when the catalog matches the code mapping", async ({ p
   await expect(page.getByText("Error al cargar")).toHaveCount(0);
 });
 
-test("shows the connector picker and the start-discovery action", async ({ page }) => {
+test("shows the connector picker and the static drift-check action (Aliseda)", async ({ page }) => {
   await seedCatalog(MATCHING_AXES);
   await page.goto("/etl/discovery");
   await expect(page.getByTestId("discovery-connector-select")).toBeVisible();
-  await expect(page.getByTestId("start-discovery")).toBeEnabled();
+  // Aliseda uses the server-side static-asset extractor (issue #377), so the
+  // action is "Comprobar deriva (estáticos)", not the passive #inmo-discover open.
+  await expect(page.getByTestId("check-drift-static")).toBeEnabled();
+  await expect(page.getByTestId("start-discovery")).toHaveCount(0);
 });
 
 test("is reachable from the admin nav, next to Captura guiada", async ({ page }) => {
