@@ -20,16 +20,23 @@
  * harvests listing results (scope/robots per docs/skills/connectors.md).
  *
  * PLAUSIBILITY GATE (issue #371): a naïve "any array of {label,link}" scan
- * grabbed JUNK on SPA portals — for Aliseda (Angular) it captured the site
- * LOGO (`{label:'Aliseda', urlFragment:'/'}`) instead of the property-type
- * control, because the logo is also a labelled link. Each wired portal now
- * declares an `isPropertyTypeOption(opt)` predicate that recognises a REAL
- * search-filter option by its URL SHAPE (Aliseda: a `comprar-<category>` path
- * segment and/or a numeric `subtipo`; Idealista: a `venta-<section>` segment).
- * Candidate option arrays are SCORED by how many plausible options they carry,
- * so the real filter control wins over navigation/branding. When NOTHING
- * plausible is found we capture NOTHING (return null) rather than junk — a
- * portal whose form we can't reliably read simply yields no catalog.
+ * grabbed JUNK on SPA portals — the logo (`{label:'Aliseda', urlFragment:'/'}`)
+ * instead of the property-type control. Each wired portal declares an
+ * `isPropertyTypeOption(opt)` predicate that recognises a REAL search-filter
+ * option by its URL SHAPE (Idealista: a `venta-<section>` segment). Candidate
+ * option arrays are SCORED by how many plausible options they carry, so the real
+ * filter control wins over navigation/branding. When NOTHING plausible is found
+ * we capture NOTHING (return null) rather than junk.
+ *
+ * ALISEDA IS RETIRED FROM PASSIVE DISCOVERY (issue #377, D-091). Aliseda is an
+ * Angular Material SPA whose property-type filter is a `mat-select` overlay that
+ * only renders its options on click — the passive DOM pass structurally cannot
+ * read it (it captured nothing or the logo). Aliseda's filter→URL mapping is
+ * instead read SERVER-SIDE from its static, robots-allowed assets (category
+ * sitemap + app bundle) by dashboard/lib/search-url/aliseda-static.ts, diffed via
+ * the same drift.ts flag on /etl/discovery. So Aliseda has NO PORTAL_SPECS entry
+ * here → `buildDiscoveryAxes('aliseda', …)` returns null (nothing enumerated).
+ * Passive discovery is KEPT for Idealista (server-rendered, works).
  */
 
 (function () {
@@ -63,27 +70,11 @@
   }
 
   var PORTAL_SPECS = {
-    // Aliseda organises its catalogue as `comprar-<category>[/<subtype-slug>]`
-    // and encodes residential subtypes with a numeric `?subtipo=`. A genuine
-    // property-type option therefore roots under a `comprar-*` segment and/or
-    // carries a `subtipo`; the logo (`urlFragment:'/'`, zero segments) has
-    // neither → rejected.
-    aliseda: {
-      isPropertyTypeOption: function (opt) {
-        if (!opt || typeof opt.urlFragment !== "string") return false;
-        var segs = pathSegments(opt.urlFragment);
-        if (segs.length === 0) return false; // root "/" → the logo, not a filter
-        var hasComprar = false;
-        for (var i = 0; i < segs.length; i++) {
-          if (/^comprar-/.test(segs[i])) {
-            hasComprar = true;
-            break;
-          }
-        }
-        var hasSubtipo = typeof opt.subtipo === "number";
-        return hasComprar || hasSubtipo;
-      },
-    },
+    // Aliseda is intentionally ABSENT (issue #377, D-091): its Angular Material
+    // `mat-select` filter can't be read by a passive DOM scrape. Its filter→URL
+    // mapping is extracted server-side from the category sitemap + app bundle
+    // (dashboard/lib/search-url/aliseda-static.ts). No spec here → not enumerated.
+    //
     // Idealista searches one `venta-<section>` operation at a time; a real
     // section option roots under such a segment. Its form exposes no subtipo,
     // so the segment is the only signal — anything else is nav/junk and we

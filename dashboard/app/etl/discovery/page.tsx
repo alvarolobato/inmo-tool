@@ -29,16 +29,28 @@ import type { PortalDriftReport } from "@/lib/search-url/drift";
  * the rest of the ETL tooling — no middleware change.
  */
 
-/** Connectors wired for URL-building discovery, with their search-page entry point. */
+/**
+ * Connectors wired for filter drift detection.
+ *
+ * `mode` picks how the portal's live filter catalog is captured:
+ *   - `static`  — SERVER-SIDE extraction of the portal's static assets (category
+ *     sitemap + app bundle). Used for Aliseda (issue #377, D-091): its Angular
+ *     Material SPA can't be read by the passive DOM scrape, so the "Comprobar
+ *     deriva" button POSTs to /api/etl/discovery/:connector/refresh.
+ *   - `passive` — the browser extension enumerates the search form on a tab we
+ *     open with `#inmo-discover`. Used for server-rendered portals (Idealista).
+ */
 const DISCOVERY_CONNECTORS: ReadonlyArray<{
   connector: string;
   label: string;
-  searchUrl: string;
+  mode: "static" | "passive";
+  /** Search-page entry point for the passive (#inmo-discover) pass. */
+  searchUrl?: string;
 }> = [
   {
     connector: "aliseda",
     label: "Aliseda",
-    searchUrl: "https://www.alisedainmobiliaria.com/comprar-viviendas",
+    mode: "static",
   },
 ];
 
@@ -57,6 +69,7 @@ export default function DiscoveryPage() {
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
   const [empty, setEmpty] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [checking, setChecking] = useState(false);
   const [error, setError] = useState<ApiErrorResponse | string | null>(null);
 
   const selected = DISCOVERY_CONNECTORS.find((c) => c.connector === connector);
@@ -90,11 +103,33 @@ export default function DiscoveryPage() {
   }, [connector, fetchCatalog]);
 
   const startDiscovery = useCallback(() => {
-    if (!selected) return;
-    // Open the portal search page tagged with the discovery signal; the
-    // extension picks it up and runs the enumeration pass.
+    if (!selected?.searchUrl) return;
+    // Passive pass: open the portal search page tagged with the discovery signal;
+    // the extension picks it up and enumerates the search form.
     window.open(withDiscoverSignal(selected.searchUrl), "_blank", "noopener");
   }, [selected]);
+
+  // Static pass (issue #377): run the server-side static-asset extractor, then
+  // reload the catalog so the drift report reflects the fresh capture.
+  const checkStaticDrift = useCallback(async () => {
+    setChecking(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/etl/discovery/${encodeURIComponent(connector)}/refresh`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => null);
+        setError(isApiErrorResponse(errBody) ? errBody : "No se pudo comprobar la deriva");
+        return;
+      }
+      await fetchCatalog(connector);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo comprobar la deriva");
+    } finally {
+      setChecking(false);
+    }
+  }, [connector, fetchCatalog]);
 
   const propertyTypeOptions = catalog?.axes?.property_type ?? [];
   const drift = catalog?.drift ?? null;
@@ -135,20 +170,41 @@ export default function DiscoveryPage() {
             </select>
           </label>
 
-          <button
-            type="button"
-            data-testid="start-discovery"
-            onClick={startDiscovery}
-            className="rounded-md bg-tremor-brand px-4 py-2 text-sm font-medium text-tremor-brand-inverted transition hover:bg-tremor-brand-emphasis"
-          >
-            Iniciar descubrimiento
-          </button>
+          {selected?.mode === "static" ? (
+            <button
+              type="button"
+              data-testid="check-drift-static"
+              onClick={checkStaticDrift}
+              disabled={checking}
+              className="rounded-md bg-tremor-brand px-4 py-2 text-sm font-medium text-tremor-brand-inverted transition hover:bg-tremor-brand-emphasis disabled:opacity-60"
+            >
+              {checking ? "Comprobando…" : "Comprobar deriva (estáticos)"}
+            </button>
+          ) : (
+            <button
+              type="button"
+              data-testid="start-discovery"
+              onClick={startDiscovery}
+              className="rounded-md bg-tremor-brand px-4 py-2 text-sm font-medium text-tremor-brand-inverted transition hover:bg-tremor-brand-emphasis"
+            >
+              Iniciar descubrimiento
+            </button>
+          )}
         </div>
-        <p className="mt-3 text-xs text-tremor-content dark:text-dark-tremor-content">
-          Abre la página de búsqueda del portal en una pestaña nueva con la señal{" "}
-          <code>#inmo-discover</code>. La extensión enumera las opciones del
-          formulario y envía el catálogo automáticamente.
-        </p>
+        {selected?.mode === "static" ? (
+          <p className="mt-3 text-xs text-tremor-content dark:text-dark-tremor-content">
+            Lee los activos estáticos del portal en el servidor (mapa de
+            categorías del sitemap + mapa de slugs del bundle de la app) y compara
+            el mapeo tipo→slug con el del código. No usa la extensión: el SPA de{" "}
+            {selected.label} no se puede leer por DOM.
+          </p>
+        ) : (
+          <p className="mt-3 text-xs text-tremor-content dark:text-dark-tremor-content">
+            Abre la página de búsqueda del portal en una pestaña nueva con la señal{" "}
+            <code>#inmo-discover</code>. La extensión enumera las opciones del
+            formulario y envía el catálogo automáticamente.
+          </p>
+        )}
       </Card>
 
       <Card>

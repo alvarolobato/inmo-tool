@@ -33,13 +33,18 @@ export const CATALOG_AXES: readonly CatalogAxis[] = [
   "zone",
 ];
 
-/** Where a catalog was captured from (audit + brittleness ordering). */
-export type CatalogSource = "embedded-config" | "form-options" | "navigated";
+/**
+ * Where a catalog was captured from (audit + brittleness ordering).
+ * `static-asset` (issue #377, D-091) is the server-side Aliseda extractor
+ * reading the category sitemap + app bundle — NOT a browser DOM scrape.
+ */
+export type CatalogSource = "embedded-config" | "form-options" | "navigated" | "static-asset";
 
 export const CATALOG_SOURCES: readonly CatalogSource[] = [
   "embedded-config",
   "form-options",
   "navigated",
+  "static-asset",
 ];
 
 /**

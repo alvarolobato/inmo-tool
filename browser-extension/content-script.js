@@ -252,6 +252,10 @@
   }
 
   function startAutoCaptureLoop() {
+    // A page opened for URL-building DISCOVERY (#inmo-discover) is NOT a capture
+    // target — bail so the listing-capture banner/auto-start never fires there
+    // (issue #377: the /etl/discovery page was still offering "capturar N").
+    if (D.discoverSignalPresent(window.location.href)) return;
     const info = currentDetail();
     if (!info) return; // not a detail page
     if (guard.isDone(info.key)) return; // already captured this listing
@@ -374,6 +378,9 @@
 
   function startListingLoop() {
     if (listingHandled) return;
+    // Discovery-signalled pages (#inmo-discover) run the enumeration pass only —
+    // suppress the "Capturar todas" listing banner/auto-start there (issue #377).
+    if (D.discoverSignalPresent(window.location.href)) return;
     const info = currentListing();
     if (!info) return; // not a listing/search page
     handleListingWhenReady(info, Date.now() + MAX_WAIT_MS);

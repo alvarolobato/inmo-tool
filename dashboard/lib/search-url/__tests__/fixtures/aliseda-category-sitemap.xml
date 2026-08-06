@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Trimmed capture of https://www.alisedainmobiliaria.com/sitemap-category-aliseda-es-0.xml
+  (2026-08-06). One representative <loc> per distinct top-level `comprar-<category>`
+  path (the live sitemap repeats each per region). The extractor only needs the
+  DISTINCT first path segment, so one URL per category is faithful.
+-->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://www.alisedainmobiliaria.com/comprar-viviendas/andalucia/malaga</loc></url>
+  <url><loc>https://www.alisedainmobiliaria.com/comprar-locales/andalucia</loc></url>
+  <url><loc>https://www.alisedainmobiliaria.com/comprar-naves/cataluna</loc></url>
+  <url><loc>https://www.alisedainmobiliaria.com/comprar-garajes/comunidad-de-madrid</loc></url>
+  <url><loc>https://www.alisedainmobiliaria.com/comprar-terrenos/galicia</loc></url>
+  <url><loc>https://www.alisedainmobiliaria.com/comprar-edificios/aragon/zaragoza</loc></url>
+  <url><loc>https://www.alisedainmobiliaria.com/comprar-oficinas/comunidad-valenciana</loc></url>
+  <url><loc>https://www.alisedainmobiliaria.com/comprar-trasteros/castilla-y-leon</loc></url>
+  <url><loc>https://www.alisedainmobiliaria.com/comprar-obras-paradas/canarias</loc></url>
+  <url><loc>https://www.alisedainmobiliaria.com/comprar-negocios/region-de-murcia</loc></url>
+  <url><loc>https://www.alisedainmobiliaria.com/comprar-otros/extremadura</loc></url>
+</urlset>

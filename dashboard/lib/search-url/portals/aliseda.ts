@@ -109,7 +109,7 @@ interface AlisedaTypeMapping {
   approxReason?: string;
 }
 
-const VIVIENDAS = "comprar-viviendas";
+export const VIVIENDAS = "comprar-viviendas";
 
 /** Canonical property type → Aliseda category / subtype (verified 2026-08-05, #336). */
 const TYPE_MAP: Record<PropertyType, AlisedaTypeMapping> = {
@@ -330,7 +330,7 @@ export const alisedaBuilder: PortalSearchUrlBuilder = {
 // tests (parse.test.ts / aliseda.test.ts) fail loudly on any build() drift.
 
 /** Known top-level Aliseda categories (superset of what build() emits). */
-const CATEGORY_SLUGS: ReadonlySet<string> = new Set([
+export const CATEGORY_SLUGS: ReadonlySet<string> = new Set([
   "comprar-viviendas",
   "comprar-locales",
   "comprar-naves",
@@ -346,7 +346,7 @@ const CATEGORY_SLUGS: ReadonlySet<string> = new Set([
 ]);
 
 /** Residential subtype slugs (verified from the app bundle, 2026-08-05). */
-const VIVIENDA_SUBTYPE_SLUGS: ReadonlySet<string> = new Set([
+export const VIVIENDA_SUBTYPE_SLUGS: ReadonlySet<string> = new Set([
   "pisos",
   "duplex",
   "pisos-turisticos",
