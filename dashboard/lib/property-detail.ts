@@ -24,6 +24,7 @@ import {
   parseExtractionQuality,
   type ExtractionQuality,
 } from "@/lib/extraction-quality";
+import { REDFLAG_LABELS } from "@/lib/ai-assessment/redflags";
 
 export interface PropertyListingDetail {
   id: number;
@@ -83,6 +84,23 @@ export interface StatusEventPoint {
   status: string;
 }
 
+/**
+ * One property-problem flag for the detail page (#361), derived from the
+ * latest `redflags` ai_assessment row. `label` is the short Spanish badge
+ * text (from `REDFLAG_LABELS`); `description` is the model's own one-line
+ * explanation and `evidence` the literal advert quote it cited — the detail
+ * page has room to show both, unlike the card's compact badge. `other` and
+ * any type without a label are filtered out server-side (see
+ * `getPropertyDetail`).
+ */
+export interface ProblemFlag {
+  type: string;
+  label: string;
+  description: string;
+  evidence: string;
+  evidence_source: string | null;
+}
+
 export interface PropertyDetail {
   id: number;
   address: string | null;
@@ -102,6 +120,14 @@ export interface PropertyDetail {
   listings: PropertyListingDetail[];
   price_history: PriceHistoryPoint[];
   status_events: StatusEventPoint[];
+  /**
+   * Property problems from the latest `redflags` assessment (#361) — legal,
+   * financial or physical (unfinished/halted construction, structural
+   * damage). Empty when the property has no assessment yet or the latest one
+   * flagged nothing — the detail page renders the block only when non-empty,
+   * the same "absent, not a placeholder" rule the card's flags follow.
+   */
+  problem_flags: ProblemFlag[];
 }
 
 interface RawPropertyRow {
@@ -152,6 +178,11 @@ interface RawStatusEventRow {
   status: string;
 }
 
+interface RawRedflagsRow {
+  /** The redflags assessment `result` JSON — `{ flags: [...], … }`. */
+  result: Record<string, unknown> | null;
+}
+
 /**
  * Returns null if the property doesn't exist. Does NOT check that the
  * property belongs to any particular profile's matched set — the API route
@@ -161,7 +192,7 @@ interface RawStatusEventRow {
  * context too, e.g. Phase 6's deal pipeline).
  */
 export async function getPropertyDetail(propertyId: number): Promise<PropertyDetail | null> {
-  const [propertyRows, listingRows, priceRows, statusRows] = await Promise.all([
+  const [propertyRows, listingRows, priceRows, statusRows, redflagsRows] = await Promise.all([
     sql<RawPropertyRow>(
       `SELECT id, address, lat, lon, property_type, m2_built, m2_useful, rooms,
               bathrooms, floor, has_elevator, year_built, energy_rating
@@ -201,6 +232,18 @@ export async function getPropertyDetail(propertyId: number): Promise<PropertyDet
         ORDER BY e.observed_at`,
       [propertyId],
     ),
+    // Latest redflags assessment (#361). Newest row wins regardless of
+    // prompt_version — a version bump leaves the old row in place (see the
+    // ai_assessment_property_key note in loadFlags), so ORDER BY generated_at
+    // DESC picks the current verdict, same rule the candidate feed uses.
+    sql<RawRedflagsRow>(
+      `SELECT result
+         FROM ai_assessment
+        WHERE property_id = $1 AND assessment_type = 'redflags'
+        ORDER BY generated_at DESC NULLS LAST, id DESC
+        LIMIT 1`,
+      [propertyId],
+    ),
   ]);
 
   const propertyRow = propertyRows[0];
@@ -231,6 +274,36 @@ export async function getPropertyDetail(propertyId: number): Promise<PropertyDet
         photoUrls.push(url);
       }
     }
+  }
+
+  // Problem flags (#361) from the latest redflags row. Same discipline as
+  // lib/candidates.ts's flagsFromAssessments: only closed-vocabulary types
+  // with a label render (drops `other` and any drift), and a flag must carry
+  // both a description and a literal evidence citation — an unevidenced flag
+  // is dropped here too, mirroring parseRedFlagsResult's code-side backstop.
+  const redflagsResult = redflagsRows[0]?.result;
+  const rawFlags =
+    redflagsResult && Array.isArray(redflagsResult.flags) ? redflagsResult.flags : [];
+  const problemFlags: ProblemFlag[] = [];
+  for (const rf of rawFlags) {
+    if (typeof rf !== "object" || rf === null) continue;
+    const o = rf as Record<string, unknown>;
+    const type = typeof o.type === "string" ? o.type : null;
+    if (type === null) continue;
+    const label = REDFLAG_LABELS[type];
+    if (label === undefined) continue;
+    const evidence = typeof o.evidence === "string" ? o.evidence.trim() : "";
+    if (evidence === "") continue;
+    problemFlags.push({
+      type,
+      label,
+      description: typeof o.description === "string" ? o.description : "",
+      evidence,
+      evidence_source:
+        typeof o.evidence_source === "string" && o.evidence_source.trim() !== ""
+          ? o.evidence_source
+          : null,
+    });
   }
 
   return {
@@ -279,6 +352,7 @@ export async function getPropertyDetail(propertyId: number): Promise<PropertyDet
       observed_at: e.observed_at,
       status: e.status,
     })),
+    problem_flags: problemFlags,
   };
 }
 

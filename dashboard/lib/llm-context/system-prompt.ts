@@ -677,15 +677,19 @@ en el resto de casos, \`null\`.)`;
 }
 
 /**
- * #27 — redflags: legal / financial risk extraction, per deduplicated
- * property.
+ * #27 / #361 — redflags: generic property-problem extraction, per
+ * deduplicated property.
  *
  * Same property-level pattern as occupancy/condition — see their doc
- * comments. This flow has the highest cost for a false positive of the
- * three (issue #27, EC-3): a fabricated legal risk erodes trust in the whole
- * tool. The prompt therefore leans harder on "only what's actually stated",
- * and `parseRedFlagsResult` (lib/ai-assessment/redflags.ts) backs it up in
- * code by dropping any flag without a literal citation.
+ * comments. Originally legal/financial only (#27); #361 broadened it to also
+ * flag PHYSICAL problems (`unfinished_construction`, `structural_damage`) that
+ * fall through every other axis — a half-built shell is neither occupancy, nor
+ * `a_reformar`, nor `obra_nueva`. This flow has the highest cost for a false
+ * positive of the three (issue #27, EC-3): a fabricated risk erodes trust in
+ * the whole tool. The prompt therefore leans harder on "only what's actually
+ * stated", and `parseRedFlagsResult` (lib/ai-assessment/redflags.ts) backs it
+ * up in code by dropping any flag without a literal citation — the same
+ * evidence discipline applies to physical flags.
  *
  * Deliberate overlap with #25's `ownership.proindiviso` — see
  * lib/ai-assessment/redflags.ts's module doc for why both flows keep it.
@@ -696,15 +700,17 @@ export function buildRedflagsPrompt(vars: FlowVars): {
 } {
   const stable = `${DOMAIN_PREAMBLE}
 
-## Tarea: señales de alerta legales y financieras
+## Tarea: señales de alerta (problemas legales, financieros y físicos)
 
-Extrae menciones que un inversor debería revisar con un abogado ANTES de hacer
-una oferta. NO estás dando asesoramiento legal ni emitiendo un veredicto legal:
+Extrae menciones que un inversor debería revisar ANTES de hacer una oferta:
+problemas legales/financieros (para revisar con un abogado) Y problemas
+físicos del inmueble (para revisar con un técnico).
+NO estás dando asesoramiento legal ni técnico ni emitiendo un veredicto:
 estás señalando qué hay que comprobar. Cada hallazgo se presentará al usuario
 como "el anuncio menciona X — verifícalo de forma independiente", nunca como
-un hecho legal confirmado.
+un hecho confirmado.
 
-Tipos (\`type\`):
+Tipos (\`type\`) — problemas LEGALES / FINANCIEROS:
 - \`embargo\` — embargo, subasta judicial, deuda con garantía sobre el inmueble.
 - \`herencia_yacente\` — herencia yacente, herencia pendiente de partición,
   varios herederos/propietarios sin repartir. (Nota: si lo que se vende es una
@@ -716,8 +722,22 @@ Tipos (\`type\`):
 - \`construccion_ilegal\` — ampliación o construcción no legalizada, fuera de
   ordenación, sin licencia.
 - \`litigio\` — procedimiento judicial en curso sobre el inmueble.
-- \`other\` — cualquier otro riesgo legal o financiero relevante citado
-  explícitamente, que no encaje en las categorías anteriores.
+
+Tipos (\`type\`) — problemas FÍSICOS del inmueble:
+- \`unfinished_construction\` — obra inacabada, parcialmente ejecutada, obra
+  parada: una construcción o rehabilitación que NO se ha terminado y se vende
+  a medio hacer (p.ej. "en construcción", "parcialmente ejecutada", "obra
+  parada", "a falta de terminar", "estructura levantada sin cerramientos",
+  "algunos tabiques ya levantados", "sin acabados"). Es distinto de:
+  \`a_reformar\` (una vivienda TERMINADA que necesita reforma — flujo #26) y de
+  \`obra_nueva\` (una construcción nueva ya TERMINADA). Aquí lo que importa es
+  que la obra está a medias y el comprador tendría que terminarla.
+- \`structural_damage\` — daños estructurales graves citados explícitamente:
+  grietas estructurales, aluminosis, cimentación o forjado dañado, riesgo de
+  ruina, humedades estructurales. NO uses esto para desgaste normal, "a
+  reformar" o acabados antiguos — eso es condición, no un daño estructural.
+- \`other\` — cualquier otro problema (legal, financiero o físico) relevante
+  citado explícitamente, que no encaje en las categorías anteriores.
 
 ### Regla central: NO especules a partir del silencio
 
@@ -746,7 +766,7 @@ Formato de salida:
 {
   "flags": [
     {
-      "type": "embargo" | "herencia_yacente" | "deuda_comunidad" | "construccion_ilegal" | "litigio" | "other",
+      "type": "embargo" | "herencia_yacente" | "deuda_comunidad" | "construccion_ilegal" | "litigio" | "unfinished_construction" | "structural_damage" | "other",
       "description": "qué debería comprobar el inversor, una frase",
       "evidence": "cita literal del anuncio en la que te apoyas",
       "evidence_source": "portal del que sale la cita, o null"

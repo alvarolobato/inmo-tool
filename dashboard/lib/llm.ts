@@ -184,7 +184,9 @@ export function assessCondition(
 }
 
 /**
- * #27 — Extract legal/financial red flags worth a lawyer's review.
+ * #27 / #361 — Extract property problems worth a review before offering:
+ * legal/financial risks (a lawyer's review) AND physical problems such as
+ * unfinished/halted construction or structural damage (a technician's review).
  *
  * Takes EVERY live listing of one deduplicated property, same reasoning as
  * `assessCondition` above: a disclosure like "pendiente de embargo" made on
@@ -206,7 +208,7 @@ export function extractRedFlags(
   return runPropertyAssessment(
     "redflags",
     listings,
-    "Extrae señales de alerta legales y financieras del inmueble según las instrucciones (redflags).",
+    "Extrae señales de alerta del inmueble (problemas legales, financieros y físicos) según las instrucciones (redflags).",
     opts,
     { areaPriceSignal: opts?.areaPriceSignal },
   );

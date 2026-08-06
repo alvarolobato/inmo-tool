@@ -379,6 +379,71 @@ describe("flagsFromAssessments (#152 review, must-fix 1 and 3)", () => {
     ]);
   });
 
+  it("#361: maps redflags `flags` to warn-toned badges carrying the model's description as a tooltip", () => {
+    const flags = flagsFromAssessments([
+      assessmentRow(1, {
+        flags: [
+          {
+            type: "unfinished_construction",
+            description: "Comprobar cuánto falta por terminar la obra.",
+            evidence: "inmueble en construcción, parcialmente ejecutada",
+            evidence_source: "idealista",
+          },
+          {
+            type: "embargo",
+            description: "Verificar la existencia de un embargo.",
+            evidence: "con embargo pendiente",
+          },
+        ],
+      }),
+    ]);
+    expect(flags).toEqual([
+      {
+        kind: "redflag:unfinished_construction",
+        label: "Obra inacabada",
+        tone: "warn",
+        description: "Comprobar cuánto falta por terminar la obra.",
+      },
+      {
+        kind: "redflag:embargo",
+        label: "Embargo",
+        tone: "warn",
+        description: "Verificar la existencia de un embargo.",
+      },
+    ]);
+  });
+
+  it("#361: drops the `other` catch-all and any unmapped redflag type rather than rendering raw text", () => {
+    const flags = flagsFromAssessments([
+      assessmentRow(1, {
+        flags: [
+          { type: "other", description: "algo raro", evidence: "cita" },
+          { type: "some_future_type", description: "x", evidence: "y" },
+          { type: "litigio", description: "Hay litigio.", evidence: "procedimiento judicial en curso" },
+        ],
+      }),
+    ]);
+    expect(flags).toEqual([
+      { kind: "redflag:litigio", label: "Litigio", tone: "warn", description: "Hay litigio." },
+    ]);
+  });
+
+  it("#361: a redflag badge with no/blank description omits the tooltip field rather than carrying an empty string", () => {
+    const flags = flagsFromAssessments([
+      assessmentRow(1, {
+        flags: [{ type: "structural_damage", description: "  ", evidence: "grietas estructurales" }],
+      }),
+    ]);
+    expect(flags).toEqual([
+      { kind: "redflag:structural_damage", label: "Daño estructural", tone: "warn" },
+    ]);
+  });
+
+  it("#361: ignores a non-array `flags` value defensively rather than throwing", () => {
+    expect(flagsFromAssessments([assessmentRow(1, { flags: "ninguna" })])).toEqual([]);
+    expect(flagsFromAssessments([assessmentRow(1, { flags: [42, null] })])).toEqual([]);
+  });
+
   it("de-dups by kind when given multiple rows that both produce the same flag (defence in depth on top of loadFlags's DISTINCT ON)", () => {
     const flags = flagsFromAssessments([
       assessmentRow(1, { caveats: ["tenanted"] }),
@@ -418,6 +483,8 @@ describe("loadFlags SQL shape (#152 review, must-fix 1 and 2)", () => {
     expect(flagsSql).toContain("DISTINCT ON (property_id, assessment_type)");
     expect(flagsSql).toContain("FROM ai_assessment");
     expect(flagsSql).toContain("WHERE property_id = ANY($1::bigint[])");
+    // #361: redflags joined occupancy/condition as a badge-producing axis.
+    expect(flagsSql).toContain("'redflags'");
     expect(flagsSql).toContain("ORDER BY property_id, assessment_type, generated_at DESC");
     expect(flagsParams).toEqual([[7]]);
   });
