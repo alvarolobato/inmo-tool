@@ -118,6 +118,45 @@ owner decision, not implemented here.
 **Decision-id note**: rebased onto a `main` that has decisions through D-049
 (D-047/#300, D-048/#299, D-049/#302). D-050 is the next free sequential id.
 
+## Phase 2 (delivered, issue #295) — dashboard settings control + observability
+
+Phase 2 consumes the Phase-1 state model; it introduces **no new binding rule**,
+so it stays under this decision rather than getting its own id. What it settles:
+
+- **Config knob, UI.** The connectors page (`/etl/connectors`,
+  `ConnectorCard.tsx`) gets a "frescura deseada" preset control (1h / 6h / 24h /
+  3 días / 7 días / *usar valor por defecto*) that writes
+  `connector_config.freshness_interval_hours` via `PATCH
+  /api/etl/connectors/:name` (`ConnectorConfigPatchSchema.freshness_interval_hours`,
+  nullable positive int ≤ 24·90). Unlike `geography_override`/`filters`, it is
+  **accepted for capture-only connectors** (the capture-only guard does not
+  reject it) — it doubles as #289's manual-capture staleness window.
+- **Derived state, one place.** `dashboard/lib/db/connectors.ts`
+  `deriveFreshnessState()` mirrors `_freshness_decision`/
+  `_finalize_connector_freshness_cycle`: idle+inside-interval → `fresh`;
+  idle+never-or-elapsed → `due`; cycle in progress → `refreshing`, or `stuck`
+  past the horizon. `N/M` counts read live from `connector_scope_state`. The ETL
+  stays the authority on the *decision*; this side only presents.
+- **TopBar pill re-sourced.** `dashboard/lib/db/freshness.ts` derives `isStale`
+  from `connector_freshness_state` (**stale = due OR stuck**); a
+  mid-cycle-not-stuck connector is `refreshing` — a distinct, non-alarming pill
+  state, NOT stale — replacing the old "any `ok` run within 24h" heuristic
+  (#241). No dual path: a connector with no freshness row is `last_fresh_at =
+  NULL` = due = stale, same as any never-fresh connector (AGENTS.md: break it,
+  don't shim it).
+- **Defaults, dashboard side.** `FRESHNESS_DEFAULT_INTERVAL_HOURS` (24h) /
+  `FRESHNESS_CYCLE_STUCK_AFTER_HOURS` (168h) env overrides mirror the ETL's
+  `etl.default_freshness_interval_hours` / `etl.freshness_cycle_stuck_after_hours`
+  — same numbers, presentation-only copy, not a second authority on the decision.
+
+Files: `dashboard/lib/connectors-schema.ts`, `dashboard/lib/db/connectors.ts`,
+`dashboard/lib/db/freshness.ts`, `dashboard/app/api/etl/connectors/[name]/route.ts`,
+`dashboard/components/connectors/ConnectorCard.tsx`,
+`dashboard/components/FreshnessContext.tsx`, `dashboard/components/TopBar.tsx`,
+`dashboard/app/api/data-health/route.ts`; tests incl.
+`dashboard/lib/db/__tests__/connectors-freshness.test.ts` and
+`dashboard/e2e/connectors.spec.ts` (D-041, EC-5/EC-6).
+
 **See**: issue #295 (+ its full spec comment); `etl/schema/init.sql`
 (`connector_freshness_state`, `connector_config.freshness_interval_hours`);
 `etl/orchestrator.py` (`_freshness_decision`, `_finalize_connector_freshness_cycle`,

@@ -28,6 +28,8 @@ const C_FRESH = `${PREFIX}fresh`;
 const C_STALE = `${PREFIX}stale`;
 const C_NEVER = `${PREFIX}never`;
 const C_DISABLED = `${PREFIX}disabled`;
+const C_REFRESHING = `${PREFIX}refreshing`;
+const C_STUCK = `${PREFIX}stuck`;
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -111,6 +113,41 @@ async function seedConfig(
   );
 }
 
+/**
+ * Seed a `connector_freshness_state` row — the new source of truth for
+ * staleness (issue #295, D-050). `lastFreshAgoMs` = when the last cycle
+ * completed (null = never fresh); `cycleStartedAgoMs` = when the in-progress
+ * cycle started (null = idle). Both in ms-ago from NOW().
+ */
+async function seedFreshness(
+  pool: Pool,
+  connector: string,
+  opts: {
+    lastFreshAgoMs?: number | null;
+    cycleStartedAgoMs?: number | null;
+    targetScopeCount?: number | null;
+  } = {},
+): Promise<void> {
+  const { lastFreshAgoMs = null, cycleStartedAgoMs = null, targetScopeCount = null } = opts;
+  await pool.query(
+    `INSERT INTO connector_freshness_state
+        (connector_name, last_fresh_at, cycle_started_at, cycle_target_scope_count)
+     VALUES (
+       $1,
+       CASE WHEN $2::double precision IS NULL THEN NULL
+            ELSE NOW() - ($2::double precision * interval '1 millisecond') END,
+       CASE WHEN $3::double precision IS NULL THEN NULL
+            ELSE NOW() - ($3::double precision * interval '1 millisecond') END,
+       $4::integer
+     )
+     ON CONFLICT (connector_name) DO UPDATE
+        SET last_fresh_at = EXCLUDED.last_fresh_at,
+            cycle_started_at = EXCLUDED.cycle_started_at,
+            cycle_target_scope_count = EXCLUDED.cycle_target_scope_count`,
+    [connector, lastFreshAgoMs, cycleStartedAgoMs, targetScopeCount],
+  );
+}
+
 describe.runIf(dbAvailable)("issue #241 — connector freshness (real Postgres)", () => {
   afterAll(async () => {
     await resetWritePool();
@@ -127,6 +164,9 @@ describe.runIf(dbAvailable)("issue #241 — connector freshness (real Postgres)"
       await pool.query("DELETE FROM connector_run_results WHERE connector_name LIKE $1", [
         `${PREFIX}%`,
       ]);
+      await pool.query("DELETE FROM connector_freshness_state WHERE connector_name LIKE $1", [
+        `${PREFIX}%`,
+      ]);
       await pool.query("DELETE FROM connector_config WHERE connector_name LIKE $1", [
         `${PREFIX}%`,
       ]);
@@ -136,28 +176,29 @@ describe.runIf(dbAvailable)("issue #241 — connector freshness (real Postgres)"
     });
   });
 
-  it("derives per-connector freshness from connector_run_results, not etl_watermarks", async () => {
+  it("derives per-connector staleness from connector_freshness_state (issue #295)", async () => {
     await withRealDb(async (pool) => {
-      // Enabled + a successful run 30 min ago → fresh.
+      // Enabled + last cycle completed 30 min ago, no cycle in progress → fresh.
       await seedRegistry(pool, C_FRESH);
       await seedConfig(pool, C_FRESH, true);
+      await seedFreshness(pool, C_FRESH, { lastFreshAgoMs: 0.5 * HOUR_MS });
       await seedRun(pool, C_FRESH, "ok", 0.5 * HOUR_MS);
 
-      // Enabled + last success 30h ago (> 24h threshold) + a more recent
-      // failed run → stale, and its current state is failing.
+      // Enabled + last fresh 30h ago (> 24h default), no cycle → due → stale.
+      // A more recent failed run drives lastRunStatus, not staleness.
       await seedRegistry(pool, C_STALE);
       await seedConfig(pool, C_STALE, true);
-      await seedRun(pool, C_STALE, "ok", 30 * HOUR_MS);
+      await seedFreshness(pool, C_STALE, { lastFreshAgoMs: 30 * HOUR_MS });
       await seedRun(pool, C_STALE, "failed", 1 * HOUR_MS);
 
-      // Enabled + registered but never ran → stale (never succeeded).
+      // Enabled + registered but no freshness row → never fresh → due → stale.
       await seedRegistry(pool, C_NEVER);
       await seedConfig(pool, C_NEVER, true);
 
-      // Disabled + a stale success → reported but NEVER counted as stale.
+      // Disabled + long-overdue → reported but NEVER counted as stale.
       await seedRegistry(pool, C_DISABLED);
       await seedConfig(pool, C_DISABLED, false);
-      await seedRun(pool, C_DISABLED, "ok", 30 * HOUR_MS);
+      await seedFreshness(pool, C_DISABLED, { lastFreshAgoMs: 30 * HOUR_MS });
     });
 
     const health = await getConnectorFreshness();
@@ -206,6 +247,7 @@ describe.runIf(dbAvailable)("issue #241 — connector freshness (real Postgres)"
     await withRealDb(async (pool) => {
       await seedRegistry(pool, C_FRESH);
       await seedConfig(pool, C_FRESH, true);
+      await seedFreshness(pool, C_FRESH, { lastFreshAgoMs: 0.5 * HOUR_MS });
       await seedRun(pool, C_FRESH, "ok", 0.5 * HOUR_MS);
     });
 
@@ -224,20 +266,43 @@ describe.runIf(dbAvailable)("issue #241 — connector freshness (real Postgres)"
     expect(fresh.isStale).toBe(false);
   });
 
-  it("respects an enabled connector that has only failed runs (stale, current status failed)", async () => {
+  it("a mid-cycle connector is refreshing (not stale); a long-stuck one is stale (issue #295)", async () => {
     await withRealDb(async (pool) => {
-      await seedRegistry(pool, C_STALE);
-      await seedConfig(pool, C_STALE, true);
-      await seedRun(pool, C_STALE, "failed", 0.25 * HOUR_MS);
+      // Cycle in progress, started 1h ago (< 168h stuck horizon) → refreshing.
+      await seedRegistry(pool, C_REFRESHING);
+      await seedConfig(pool, C_REFRESHING, true);
+      await seedFreshness(pool, C_REFRESHING, {
+        lastFreshAgoMs: 30 * HOUR_MS, // last completed a while ago…
+        cycleStartedAgoMs: 1 * HOUR_MS, // …but a fresh cycle is underway now
+        targetScopeCount: 3,
+      });
+
+      // Cycle in progress but started 200h ago (> 168h stuck horizon) → stuck.
+      await seedRegistry(pool, C_STUCK);
+      await seedConfig(pool, C_STUCK, true);
+      await seedFreshness(pool, C_STUCK, {
+        lastFreshAgoMs: null,
+        cycleStartedAgoMs: 200 * HOUR_MS,
+        targetScopeCount: 5,
+      });
     });
 
     const health = await getConnectorFreshness();
-    const c = health.connectors.find((x) => x.connector === C_STALE)!;
-    expect(c).toBeDefined();
-    // No 'ok' run ever → no last success → stale even though it ran recently.
-    expect(c.lastSuccessAt).toBeNull();
-    expect(c.lastRunStatus).toBe("failed");
-    expect(c.isStale).toBe(true);
+    const refreshing = health.connectors.find((x) => x.connector === C_REFRESHING)!;
+    const stuck = health.connectors.find((x) => x.connector === C_STUCK)!;
+
+    // Mid-cycle-not-stuck: a live refresh, NOT a problem.
+    expect(refreshing.state).toBe("refreshing");
+    expect(refreshing.isStale).toBe(false);
+
+    // A cycle that has run far past the stuck horizon reads as stale (needs
+    // attention) but is never falsely marked fresh.
+    expect(stuck.state).toBe("stuck");
+    expect(stuck.isStale).toBe(true);
+
+    // The whole surface distinguishes the two: refreshing is signalled
+    // separately from stale.
+    expect(health.overallRefreshing).toBe(true);
     expect(health.overallStale).toBe(true);
   });
 });

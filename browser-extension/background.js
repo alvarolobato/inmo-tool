@@ -129,6 +129,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true; // async response (host list may need a backend fetch)
   }
 
+  // Guided capture (issue #237): the popup lands on a supported portal on a page
+  // it can't capture (home / saved search / filter form) and asks for that
+  // portal's worklist progress so it can GUIDE the owner — show N/M captured and
+  // open the next pending listing — instead of blind-capturing junk. Needs the
+  // admin key, which only the background worker holds.
+  if (msg.type === 'GET_WORKLIST_PROGRESS') {
+    fetchWorklistProgress(msg.portal)
+      .then((progress) => sendResponse({ success: true, progress }))
+      .catch((err) => sendResponse({ success: false, error: { message: err.message } }));
+    return true; // async response
+  }
+
   // URL-building discovery (issue #336): the content script enumerated a
   // portal's search-form filter options and the URL fragment each produces;
   // persist the catalog via the ingest route so the connector's URL builder can
@@ -338,6 +350,36 @@ async function fetchPendingUrls(portal) {
   return (data.rows || [])
     .filter((r) => r.status === 'pending')
     .map((r) => r.url);
+}
+
+/**
+ * A portal's guided-capture progress for the popup (issue #237): total /
+ * captured / pending counts and the FIRST still-pending URL (the "open next"
+ * target). Reuses the same GET /api/etl/worklist[?portal=] the dashboard
+ * worklist page uses — no new backend surface. Never captures; purely reads.
+ */
+async function fetchWorklistProgress(portal) {
+  const { apiUrl, apiKey } = await getApiConfig();
+  const response = await fetch(
+    `${apiUrl}/api/etl/worklist?portal=${encodeURIComponent(portal)}`,
+    { headers: { 'x-admin-key': apiKey } },
+  );
+  if (!response.ok) throw new Error(`worklist progress: ${response.status}`);
+  const data = await response.json();
+  const rows = Array.isArray(data.rows) ? data.rows : [];
+  const pending = rows.filter((r) => r.status === 'pending').map((r) => r.url);
+  const summary = Array.isArray(data.summaries)
+    ? data.summaries.find((s) => s.source_portal === portal)
+    : null;
+  return {
+    portal,
+    total: summary ? summary.total : rows.length,
+    captured: summary
+      ? summary.captured
+      : rows.filter((r) => r.status === 'captured').length,
+    pending: pending.length,
+    nextUrl: pending.length > 0 ? pending[0] : null,
+  };
 }
 
 /**

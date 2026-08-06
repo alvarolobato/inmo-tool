@@ -44,10 +44,12 @@ describe("FreshnessProvider", () => {
           lastSuccessAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
           lastRunAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
           lastRunStatus: "ok",
+          state: "fresh",
           isStale: false,
         },
       ],
       overallStale: false,
+      overallRefreshing: false,
       stalestConnector: {
         connector: "fotocasa",
         lastSuccessAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
@@ -81,10 +83,12 @@ describe("FreshnessProvider", () => {
           lastSuccessAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
           lastRunAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
           lastRunStatus: "failed",
+          state: "due",
           isStale: true,
         },
       ],
       overallStale: true,
+      overallRefreshing: false,
       stalestConnector: {
         connector: "milanuncios",
         lastSuccessAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
@@ -118,10 +122,12 @@ describe("FreshnessProvider", () => {
           lastSuccessAt: null,
           lastRunAt: null,
           lastRunStatus: null,
+          state: "due",
           isStale: true,
         },
       ],
       overallStale: true,
+      overallRefreshing: false,
       stalestConnector: {
         connector: "solvia",
         lastSuccessAt: null,
@@ -144,6 +150,43 @@ describe("FreshnessProvider", () => {
     expect(screen.getByTestId("tooltip").textContent).toContain(
       "solvia: sin ejecución correcta",
     );
+  });
+
+  it("shows 'Refrescando datos' when a connector is mid-cycle and nothing is stale (issue #295)", async () => {
+    const refreshing: DataHealthResponse = {
+      connectors: [
+        {
+          connector: "fotocasa",
+          enabled: true,
+          lastSuccessAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+          lastRunAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+          lastRunStatus: "ok",
+          state: "refreshing",
+          isStale: false,
+        },
+      ],
+      overallStale: false,
+      overallRefreshing: true,
+      stalestConnector: {
+        connector: "fotocasa",
+        lastSuccessAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+        lastRunStatus: "ok",
+      },
+      freshestSuccessAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+    };
+    globalThis.fetch = mockFetch(refreshing);
+
+    render(
+      <FreshnessProvider>
+        <FreshnessProbe />
+      </FreshnessProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("text").textContent).toMatch(/Refrescando datos · hace/);
+    });
+    // Refreshing is NOT stale — the pill must not read as a problem.
+    expect(screen.getByTestId("stale").textContent).toBe("false");
   });
 
   it("falls back gracefully when fetch fails (defaults remain)", async () => {

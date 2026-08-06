@@ -24,6 +24,8 @@ const {
   createCaptureGuard,
   listingPortalForUrl,
   isListingUrl,
+  supportedPortalForUrl,
+  pageRoleForUrl,
   extractDetailUrls,
   captureSignalPresent,
   stripCaptureSignal,
@@ -43,6 +45,8 @@ const {
   };
   listingPortalForUrl: (u: string) => string | null;
   isListingUrl: (u: string) => boolean;
+  supportedPortalForUrl: (u: string) => string | null;
+  pageRoleForUrl: (u: string) => "detail" | "listing" | "other" | null;
   extractDetailUrls: (hrefs: unknown, portal?: string) => string[];
   captureSignalPresent: (u: string) => boolean;
   stripCaptureSignal: (u: string) => string;
@@ -260,6 +264,73 @@ describe("listingPortalForUrl — only search/results pages", () => {
       if (isDetailUrl(url) || isListingUrl(url)) {
         expect(isDetailUrl(url) && isListingUrl(url)).toBe(false);
       }
+    }
+  });
+});
+
+describe("supportedPortalForUrl — capture portal by host, any page role (#237)", () => {
+  const CASES: [string, string | null][] = [
+    // Any page on a supported portal host resolves (home, detail, search, deep).
+    ["https://www.idealista.com/", "idealista"],
+    ["https://www.idealista.com/inmueble/106387165/", "idealista"],
+    ["https://www.idealista.com/venta-viviendas/madrid-madrid/", "idealista"],
+    ["https://idealista.com/mi-cuenta/favoritos", "idealista"],
+    ["https://www.alisedainmobiliaria.com/", "aliseda"],
+    ["https://www.altamirainmuebles.com/cualquier-pagina", "altamira"],
+    // Unsupported hosts and non-http(s) → null (popup keeps its manual escape hatch).
+    ["https://www.fotocasa.es/", null],
+    ["https://inmuebles.cimenta2.com/inmuebles/s/", null],
+    ["ftp://www.idealista.com/", null],
+    ["not a url", null],
+    ["", null],
+  ];
+
+  it.each(CASES)("%s → %s", (url, expected) => {
+    expect(supportedPortalForUrl(url)).toBe(expected);
+  });
+});
+
+describe("pageRoleForUrl — detail / listing / other / null routing (#237)", () => {
+  const CASES: [string, "detail" | "listing" | "other" | null][] = [
+    // Detail pages.
+    ["https://www.idealista.com/inmueble/106387165/", "detail"],
+    ["https://www.alisedainmobiliaria.com/inmueble/ANT1", "detail"],
+    [
+      "https://www.altamirainmuebles.com/venta-de-atico/pontevedra/sanxenxo/segunda-mano/9186_1001_PE0001/375859/1",
+      "detail",
+    ],
+    // Listing/search pages.
+    ["https://www.idealista.com/venta-viviendas/madrid-madrid/", "listing"],
+    ["https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/malaga", "listing"],
+    ["https://www.altamirainmuebles.com/venta-viviendas/pontevedra", "listing"],
+    // Supported portal, but a page we can't capture → "other" (guidance shown).
+    ["https://www.idealista.com/", "other"],
+    ["https://idealista.com/mi-cuenta/favoritos", "other"],
+    ["https://www.alisedainmobiliaria.com/", "other"],
+    ["https://www.altamirainmuebles.com/", "other"],
+    // Unsupported host / non-http → null (no portal at all).
+    ["https://www.fotocasa.es/", null],
+    ["https://inmuebles.cimenta2.com/", null],
+    ["ftp://www.idealista.com/venta-viviendas/x/", null],
+    ["not a url", null],
+  ];
+
+  it.each(CASES)("%s → %s", (url, expected) => {
+    expect(pageRoleForUrl(url)).toBe(expected);
+  });
+
+  it("role agrees with the detail/listing/supported predicates", () => {
+    for (const [url, expected] of CASES) {
+      const role = pageRoleForUrl(url);
+      expect(role).toBe(expected);
+      if (role === "detail") expect(isDetailUrl(url)).toBe(true);
+      if (role === "listing") expect(isListingUrl(url)).toBe(true);
+      if (role === "other") {
+        expect(isDetailUrl(url)).toBe(false);
+        expect(isListingUrl(url)).toBe(false);
+        expect(supportedPortalForUrl(url)).not.toBeNull();
+      }
+      if (role === null) expect(supportedPortalForUrl(url)).toBeNull();
     }
   });
 });

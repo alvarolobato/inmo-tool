@@ -31,6 +31,8 @@ let profileId: number;
 let dedupedPropertyId: number;
 let singleListingPropertyId: number;
 let fotocasaListingId: number;
+let richQualityPropertyId: number;
+let sparseQualityPropertyId: number;
 
 test.beforeAll(async () => {
   pool = buildPool();
@@ -81,6 +83,37 @@ test.beforeAll(async () => {
       `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, photo_urls, last_seen_at)
        VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7) RETURNING id`,
       [propId, source, `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`, status, price, photoUrls, lastSeenAt],
+    );
+    return result.rows[0].id;
+  }
+
+  // Seeds a listing carrying an `extraction_quality` descriptor in
+  // raw_extra (issue #80) — exactly the shape etl/extraction_quality.py
+  // writes at ingest, so this exercises the read/display path end-to-end.
+  async function insertListingWithQuality(
+    propId: number,
+    source: string,
+    grade: string,
+    score: number,
+    populated: number,
+  ): Promise<number> {
+    const result = await pool.query<{ id: number }>(
+      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, photo_urls, raw_extra)
+       VALUES ($1, $2, $3, 'active', 250000, NOW(), '{}', $4::jsonb) RETURNING id`,
+      [
+        propId,
+        source,
+        `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`,
+        JSON.stringify({
+          extraction_quality: {
+            grade,
+            score,
+            populated_fields: populated,
+            total_fields: 9,
+            weights_version: 1,
+          },
+        }),
+      ],
     );
     return result.rows[0].id;
   }
@@ -139,6 +172,17 @@ test.beforeAll(async () => {
   singleListingPropertyId = await insertProperty(`${NAME_PREFIX}Calle Goya, Madrid`);
   await insertListing(singleListingPropertyId, "fotocasa", 400000, "active", []);
   await markMatched(singleListingPropertyId);
+
+  // Extraction-quality (#80): a richly-extracted property (grade A) vs a
+  // sparsely-extracted one (grade F) — same page, so the badge must show a
+  // visibly different grade for each (acceptance criterion 1).
+  richQualityPropertyId = await insertProperty(`${NAME_PREFIX}Calle Serrano, Madrid`);
+  await insertListingWithQuality(richQualityPropertyId, "fotocasa", "A", 1.0, 9);
+  await markMatched(richQualityPropertyId);
+
+  sparseQualityPropertyId = await insertProperty(`${NAME_PREFIX}Calle Sparse, Madrid`);
+  await insertListingWithQuality(sparseQualityPropertyId, "fotocasa", "F", 0.28, 2);
+  await markMatched(sparseQualityPropertyId);
 });
 
 test.afterAll(async () => {
@@ -239,6 +283,39 @@ test("shows the property-level staleness band from the freshest ACTIVE listing (
   await expect(badge).toBeVisible();
   await expect(badge).toHaveAttribute("data-staleness-band", "stale");
   await expect(badge).toContainText(/visto hace 30 días/i);
+});
+
+test("shows the extraction-quality grade, and a sparse listing grades lower than a rich one (#80)", async ({
+  page,
+}) => {
+  skipIfNoDb(test);
+
+  // Richly-extracted property → grade A badge visible, no error surface.
+  await page.goto(`/profiles/${profileId}/properties/${richQualityPropertyId}`);
+  await expect(page.getByTestId("property-detail-page")).toBeVisible();
+  await assertNoErrorSurface(page);
+  const richBadge = page.getByTestId("property-extraction-quality");
+  await expect(richBadge).toBeVisible();
+  await expect(richBadge).toHaveAttribute("data-extraction-grade", "A");
+
+  // Sparsely-extracted property → a visibly lower grade (F) badge.
+  await page.goto(`/profiles/${profileId}/properties/${sparseQualityPropertyId}`);
+  await expect(page.getByTestId("property-detail-page")).toBeVisible();
+  await assertNoErrorSurface(page);
+  const sparseBadge = page.getByTestId("property-extraction-quality");
+  await expect(sparseBadge).toBeVisible();
+  await expect(sparseBadge).toHaveAttribute("data-extraction-grade", "F");
+});
+
+test("no extraction-quality badge when no listing has been scored yet (#80)", async ({ page }) => {
+  skipIfNoDb(test);
+
+  // The deduped fixture's listings carry no extraction_quality in raw_extra
+  // (they predate the feature / self-heal on next fetch) — the badge must be
+  // absent rather than showing a placeholder grade.
+  await page.goto(`/profiles/${profileId}/properties/${dedupedPropertyId}`);
+  await expect(page.getByTestId("property-detail-page")).toBeVisible();
+  await expect(page.getByTestId("property-extraction-quality")).toHaveCount(0);
 });
 
 test("renders correctly for non-deduplicated property", async ({ page }) => {

@@ -50,6 +50,9 @@ test.beforeAll(async () => {
     return;
   }
 
+  await pool.query("DELETE FROM connector_freshness_state WHERE connector_name = ANY($1)", [
+    [CONNECTOR, CAPTURE_ONLY],
+  ]);
   await pool.query("DELETE FROM connector_config WHERE connector_name = ANY($1)", [
     [CONNECTOR, CAPTURE_ONLY],
   ]);
@@ -66,6 +69,18 @@ test.beforeAll(async () => {
         supports_discovery, supported_filters)
      VALUES ($1, true, 20, false, true, '["rooms"]'::jsonb),
             ($2, true, 20, false, false, '[]'::jsonb)`,
+    [CONNECTOR, CAPTURE_ONLY],
+  );
+
+  // Freshness cadence state (issue #295, D-050): CONNECTOR is fresh (last cycle
+  // 1h ago, no cycle in progress); CAPTURE_ONLY is mid-cycle (started 1h ago) so
+  // the page renders both a "fresco" and a "refrescando…" state — the two states
+  // EC-5/EC-6 require, with no error surface.
+  await pool.query(
+    `INSERT INTO connector_freshness_state
+        (connector_name, last_fresh_at, cycle_started_at, cycle_target_scope_count)
+     VALUES ($1, NOW() - interval '1 hour', NULL, NULL),
+            ($2, NULL, NOW() - interval '1 hour', 3)`,
     [CONNECTOR, CAPTURE_ONLY],
   );
 
@@ -86,6 +101,9 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   if (dbAvailable) {
+    await pool.query("DELETE FROM connector_freshness_state WHERE connector_name = ANY($1)", [
+      [CONNECTOR, CAPTURE_ONLY],
+    ]);
     await pool.query("DELETE FROM connector_config WHERE connector_name = ANY($1)", [
       [CONNECTOR, CAPTURE_ONLY],
     ]);
@@ -299,4 +317,57 @@ test("saving a rooms filter persists exactly what the ETL will read", async ({ p
       return r.rows[0]?.filters?.rooms ?? "absent";
     })
     .toBe("absent");
+});
+
+test("shows freshness state and accepts an interval override (issue #295, EC-5)", async ({
+  page,
+}) => {
+  await page.goto("/etl/connectors");
+  await expect(page.getByTestId("connectors-page")).toBeVisible();
+
+  // The seeded fresh connector reports "fresco" behind the chevron.
+  await page.getByTestId(`expand-${CONNECTOR}`).click();
+  await expect(page.getByTestId(`freshness-state-${CONNECTOR}`)).toContainText("fresco");
+
+  // The mid-cycle capture-only connector reports "refrescando…".
+  await page.getByTestId(`expand-${CAPTURE_ONLY}`).click();
+  await expect(page.getByTestId(`freshness-state-${CAPTURE_ONLY}`)).toContainText(
+    "refrescando",
+  );
+
+  // Set a per-connector "frescura deseada" value — it must land in the exact
+  // column the ETL reads (connector_config.freshness_interval_hours), not just
+  // return 200.
+  await page
+    .getByTestId(`freshness-interval-${CONNECTOR}`)
+    .selectOption("6");
+  await expect
+    .poll(async () => {
+      const r = await pool.query(
+        "SELECT freshness_interval_hours FROM connector_config WHERE connector_name = $1",
+        [CONNECTOR],
+      );
+      return r.rows[0]?.freshness_interval_hours ?? null;
+    })
+    .toBe(6);
+
+  // No error surface — the D-041 bar.
+  await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
+  await expect(page.getByText("Error al cargar")).toHaveCount(0);
+  await expect(page.getByText("HTTP 500")).toHaveCount(0);
+});
+
+test("no error surface with an active or stuck cycle (issue #295, EC-6)", async ({ page }) => {
+  await page.goto("/etl/connectors");
+  await expect(page.getByTestId("connectors-page")).toBeVisible();
+
+  // Both seeded connectors render real content (their identity rows), one
+  // fresh and one mid-cycle, with no error surface anywhere on the page.
+  await expect(page.getByTestId(`connector-${CONNECTOR}`)).toBeVisible();
+  await expect(page.getByTestId(`connector-${CAPTURE_ONLY}`)).toBeVisible();
+
+  await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
+  await expect(page.getByText("Error al cargar")).toHaveCount(0);
+  await expect(page.getByText("there is no parameter")).toHaveCount(0);
+  await expect(page.getByText("HTTP 500")).toHaveCount(0);
 });

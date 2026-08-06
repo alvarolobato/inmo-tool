@@ -2733,6 +2733,135 @@ class TestSchemaSupersetFieldsPersistAcrossRevisit:
             _cleanup(pg_conn, source)
 
 
+class TestExtractionQualityPersisted:
+    """Issue #80: the orchestrator stamps a per-listing extraction-quality
+    descriptor onto `listing.raw_extra.extraction_quality` on both the insert
+    and the update path, computed from the canonical fields (connector-
+    agnostic). A sparse extraction must persist a lower grade than a rich one,
+    and a re-fetch that finally populates fields must refresh the grade."""
+
+    def test_insert_stamps_quality_and_sparse_grades_lower(self, pg_conn):
+        _apply_schema(pg_conn)
+        source = "extraction-quality-insert-test"
+        try:
+            rich = _minimal_canonical(
+                "eq-rich",
+                source,
+                lat=Decimal("40.4168"),
+                lon=Decimal("-3.7038"),
+                m2_built=Decimal(90),
+                rooms=3,
+                bathrooms=2,
+                energy_rating="C",
+                photo_urls=("https://example.test/a.jpg",),
+            )
+            sparse = _minimal_canonical(
+                "eq-sparse",
+                source,
+                # Under-extracted: no size/rooms/type/location/photos.
+                current_price=Decimal(150000),
+                property_type=None,
+                address=None,
+                lat=None,
+                lon=None,
+                photo_urls=(),
+            )
+            orchestrator._upsert_canonical_listing(pg_conn, rich)
+            orchestrator._upsert_canonical_listing(pg_conn, sparse)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT external_id, raw_extra->'extraction_quality' "
+                    "FROM listing WHERE source = %s ORDER BY external_id",
+                    (source,),
+                )
+                rows = dict(cur.fetchall())
+
+            rich_q = rows["eq-rich"]
+            sparse_q = rows["eq-sparse"]
+            assert rich_q is not None and sparse_q is not None
+            assert set(rich_q) >= {
+                "grade",
+                "score",
+                "populated_fields",
+                "total_fields",
+                "weights_version",
+            }
+            assert sparse_q["score"] < rich_q["score"]
+            assert rich_q["grade"] == "A"
+        finally:
+            _cleanup(pg_conn, source)
+
+    def test_revisit_refreshes_quality_when_fields_fill_in(self, pg_conn):
+        _apply_schema(pg_conn)
+        source = "extraction-quality-revisit-test"
+        try:
+            thin = _minimal_canonical(
+                "eq-1",
+                source,
+                property_type=None,
+                lat=None,
+                lon=None,
+                address=None,
+                photo_urls=(),
+            )
+            orchestrator._upsert_canonical_listing(pg_conn, thin)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT raw_extra->'extraction_quality'->>'score' "
+                    "FROM listing WHERE source = %s AND external_id = %s",
+                    (source, "eq-1"),
+                )
+                (before,) = cur.fetchone()
+
+            richer = _minimal_canonical(
+                "eq-1",
+                source,
+                property_type="piso",
+                lat=Decimal("40.4168"),
+                lon=Decimal("-3.7038"),
+                address="Calle Mayor 1",
+                m2_built=Decimal(80),
+                rooms=3,
+                photo_urls=("https://example.test/a.jpg",),
+            )
+            orchestrator._upsert_canonical_listing(pg_conn, richer)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT raw_extra->'extraction_quality'->>'score' "
+                    "FROM listing WHERE source = %s AND external_id = %s",
+                    (source, "eq-1"),
+                )
+                (after,) = cur.fetchone()
+
+            assert float(after) > float(before)
+        finally:
+            _cleanup(pg_conn, source)
+
+    def test_quality_does_not_clobber_existing_raw_extra(self, pg_conn):
+        _apply_schema(pg_conn)
+        source = "extraction-quality-rawextra-test"
+        try:
+            canonical = _minimal_canonical(
+                "eq-re", source, raw_extra={"portal_note": "keep me"}
+            )
+            orchestrator._upsert_canonical_listing(pg_conn, canonical)
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT raw_extra FROM listing WHERE source = %s AND external_id = %s",
+                    (source, "eq-re"),
+                )
+                (raw_extra,) = cur.fetchone()
+
+            assert raw_extra["portal_note"] == "keep me"
+            assert "extraction_quality" in raw_extra
+        finally:
+            _cleanup(pg_conn, source)
+
+
 class TestUniqueViolationHandling:
     """Issue #140 narrowed the UniqueViolation handler by constraint name.
 

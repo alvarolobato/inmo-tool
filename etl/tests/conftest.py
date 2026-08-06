@@ -71,8 +71,8 @@ def _isolated_test_database():
     call, and etl/config_loader.py's `load_config`, which does the same),
     apply schema/init.sql once up front (most test files re-apply it
     idempotently themselves via their own `_apply_schema()` helper, but a
-    few — test_otel_schema.py, the watermark test in test_connections.py —
-    assume it already exists), then drop the database at teardown.
+    few — test_otel_schema.py — assume it already exists), then drop the
+    database at teardown.
     Because the database is unique and freshly created, there is no
     pre-existing state to "detect and fail loudly on" — a fresh CREATE
     DATABASE *is* that guarantee, structurally, rather than a runtime check

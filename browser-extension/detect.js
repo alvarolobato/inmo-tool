@@ -219,6 +219,57 @@
   }
 
   /**
+   * The supported capture portal a URL's HOST belongs to, for ANY page role
+   * (issue #237 guided capture). Unlike detailPortalForUrl / listingPortalForUrl
+   * this ignores the path — it only asks "is this a capture-supported portal at
+   * all". null for unsupported hosts and non-http(s). Pure.
+   */
+  function supportedPortalForUrl(url) {
+    var parsed;
+    try {
+      parsed = new URL(String(url).trim());
+    } catch (e) {
+      return null;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    var cfg = portalConfigForHost(parsed.hostname);
+    return cfg ? cfg.portal : null;
+  }
+
+  /**
+   * The capture ROLE of the page at `url`, used by the popup to pick between
+   * capturing and the guided panel (issue #237). One of:
+   *   "detail"  — a listing-DETAIL page (single/auto capture applies)
+   *   "listing" — a SEARCH/results page (batch capture applies)
+   *   "other"   — a SUPPORTED portal, but a page we can't capture (home, saved
+   *               search, account, filter form) → the popup shows GUIDANCE
+   *               (worklist progress + "open the next pending listing") instead
+   *               of blindly capturing a non-listing page and erroring.
+   *   null      — unsupported host or non-http(s) (the popup keeps its universal
+   *               manual-capture escape hatch there).
+   * Pure — no DOM/chrome — so the routing decision is unit-testable.
+   */
+  function pageRoleForUrl(url) {
+    var parsed;
+    try {
+      parsed = new URL(String(url).trim());
+    } catch (e) {
+      return null;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    var cfg = portalConfigForHost(parsed.hostname);
+    if (!cfg) return null;
+    if (cfg.isDetailPath(parsed.pathname)) return "detail";
+    if (
+      typeof cfg.isListingPath === "function" &&
+      cfg.isListingPath(parsed.pathname)
+    ) {
+      return "listing";
+    }
+    return "other";
+  }
+
+  /**
    * Harvest the detail-page URLs from a rendered listing/search page (issue
    * #262). `hrefs` is the list of anchor hrefs already resolved to absolute
    * URLs (a content script passes `[...document.querySelectorAll('a[href]')]
@@ -535,6 +586,8 @@
     isDetailUrl: isDetailUrl,
     listingPortalForUrl: listingPortalForUrl,
     isListingUrl: isListingUrl,
+    supportedPortalForUrl: supportedPortalForUrl,
+    pageRoleForUrl: pageRoleForUrl,
     extractDetailUrls: extractDetailUrls,
     isRenderReady: isRenderReady,
     createCaptureGuard: createCaptureGuard,

@@ -35,6 +35,7 @@ export const dynamic = "force-dynamic";
 const EMPTY_RESPONSE: DataHealthResponse = {
   connectors: [],
   overallStale: false,
+  overallRefreshing: false,
   stalestConnector: null,
   freshestSuccessAt: null,
 };

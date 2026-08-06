@@ -6,13 +6,114 @@
 
 import { sql } from "@/lib/db-write";
 import {
+  DEFAULT_FRESHNESS_CYCLE_STUCK_AFTER_HOURS,
+  DEFAULT_FRESHNESS_INTERVAL_HOURS,
   type ConnectorConfigPatch,
   type ConnectorFilters,
+  type ConnectorFreshnessState,
   type ConnectorLastRun,
   type ConnectorView,
   type DerivedScopeSource,
   type GeographyOverride,
 } from "@/lib/connectors-schema";
+
+/**
+ * Global freshness-cadence knobs, resolved dashboard-side (issue #295, D-050).
+ *
+ * The ETL is the authority — it reads `etl.default_freshness_interval_hours` /
+ * `etl.freshness_cycle_stuck_after_hours` from config/schema.yaml and is what
+ * actually starts/skips cycles. This side only needs the same numbers to
+ * DISPLAY the resolved interval and DERIVE the observability state, so it reads
+ * an env override (parallel to the pill's `FRESHNESS_STALE_THRESHOLD_HOURS`,
+ * #241) and falls back to the shared default constant. No dual source of truth
+ * for the *decision* — that stays in Python; this is purely presentation.
+ */
+function envHoursOrDefault(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+export function defaultFreshnessIntervalHours(): number {
+  return envHoursOrDefault(
+    "FRESHNESS_DEFAULT_INTERVAL_HOURS",
+    DEFAULT_FRESHNESS_INTERVAL_HOURS,
+  );
+}
+
+export function freshnessCycleStuckAfterHours(): number {
+  return envHoursOrDefault(
+    "FRESHNESS_CYCLE_STUCK_AFTER_HOURS",
+    DEFAULT_FRESHNESS_CYCLE_STUCK_AFTER_HOURS,
+  );
+}
+
+/**
+ * Resolve a stored `freshness_interval_hours` override to an effective
+ * interval, mirroring the ETL's `_resolve_freshness_interval_hours`: a NULL,
+ * non-positive, or non-integral value means "use the global default", never
+ * "disable tracking".
+ */
+export function resolveFreshnessInterval(
+  overrideRaw: unknown,
+  defaultHours: number,
+): { intervalHours: number | null; effectiveIntervalHours: number } {
+  const override = coerceFiniteNumber(overrideRaw);
+  if (override === null || override <= 0 || !Number.isInteger(override)) {
+    return { intervalHours: null, effectiveIntervalHours: defaultHours };
+  }
+  return { intervalHours: override, effectiveIntervalHours: override };
+}
+
+/**
+ * Derive the observability state (issue #295, D-050) from the raw
+ * `connector_freshness_state` row + the effective interval. Binary and
+ * timestamp-driven, exactly like the ETL's `_finalize_connector_freshness_cycle`
+ * (there is deliberately no stored `stuck` column — the age of cycle_started_at
+ * IS the signal):
+ *   - a cycle in progress → "refreshing", or "stuck" once past the horizon;
+ *   - idle → "fresh" while inside the interval, else "due" (incl. never-fresh).
+ */
+export function deriveFreshnessState(params: {
+  intervalHoursOverrideRaw: unknown;
+  lastFreshAt: Date | string | null;
+  cycleStartedAt: Date | string | null;
+  targetScopeCount: number | null;
+  coveredScopeCount: number | null;
+  defaultIntervalHours: number;
+  stuckAfterHours: number;
+  nowMs: number;
+}): ConnectorFreshnessState {
+  const { intervalHours, effectiveIntervalHours } = resolveFreshnessInterval(
+    params.intervalHoursOverrideRaw,
+    params.defaultIntervalHours,
+  );
+  const lastFreshAt = toIso(params.lastFreshAt);
+  const cycleStartedAt = toIso(params.cycleStartedAt);
+
+  let kind: ConnectorFreshnessState["kind"];
+  if (cycleStartedAt !== null) {
+    const ageMs = params.nowMs - new Date(cycleStartedAt).getTime();
+    kind = ageMs > params.stuckAfterHours * 3600 * 1000 ? "stuck" : "refreshing";
+  } else if (lastFreshAt === null) {
+    kind = "due";
+  } else {
+    const ageMs = params.nowMs - new Date(lastFreshAt).getTime();
+    kind = ageMs >= effectiveIntervalHours * 3600 * 1000 ? "due" : "fresh";
+  }
+
+  return {
+    kind,
+    intervalHours,
+    effectiveIntervalHours,
+    lastFreshAt,
+    cycleStartedAt,
+    targetScopeCount: params.targetScopeCount,
+    coveredScopeCount: params.coveredScopeCount,
+    stuckAfterHours: params.stuckAfterHours,
+  };
+}
 
 interface RegistryRow {
   connector_name: string;
@@ -26,6 +127,14 @@ interface RegistryRow {
   geography_override: unknown;
   filters: unknown;
   has_config: boolean;
+  // Issue #295 (D-050): freshness-cadence override + live cycle state.
+  freshness_interval_hours: number | string | null;
+  last_fresh_at: Date | string | null;
+  cycle_started_at: Date | string | null;
+  cycle_target_scope_count: number | string | null;
+  // How many target scopes have been (re)discovered since the current cycle
+  // started — 0 when no cycle is in progress. See the LATERAL below.
+  covered_scope_count: number | string | null;
 }
 
 interface LastRunRow {
@@ -69,6 +178,14 @@ function num(value: number | string | null | undefined): number {
  * it back as "not configured" here would be the UI lying in the opposite
  * direction from the malformed case (issue #100 review).
  */
+/** TIMESTAMPTZ → ISO string. pg hands back a Date; tolerate a string too. */
+function toIso(value: Date | string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) return value.toISOString();
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? String(value) : d.toISOString();
+}
+
 function coerceFiniteNumber(value: unknown): number | null {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value === "string" && value.trim() !== "") {
@@ -251,14 +368,35 @@ export async function listConnectors(): Promise<ConnectorView[]> {
               c.capture_enabled,
               c.geography_override,
               c.filters,
-              (c.connector_name IS NOT NULL) AS has_config
+              c.freshness_interval_hours,
+              (c.connector_name IS NOT NULL) AS has_config,
+              f.last_fresh_at,
+              f.cycle_started_at,
+              f.cycle_target_scope_count,
+              -- Scopes (re)discovered since the current cycle started — the "N"
+              -- in "refrescando N/M". 0 when no cycle is in progress (the AND
+              -- short-circuits on a NULL cycle_started_at). Read live from
+              -- connector_scope_state (D-030), exactly as the ETL computes it.
+              COALESCE(cov.covered_count, 0) AS covered_scope_count
          FROM connector_registry g
          LEFT JOIN connector_config c ON c.connector_name = g.connector_name
+         LEFT JOIN connector_freshness_state f ON f.connector_name = g.connector_name
+         LEFT JOIN LATERAL (
+           SELECT COUNT(*) AS covered_count
+             FROM connector_scope_state s
+            WHERE s.connector_name = g.connector_name
+              AND f.cycle_started_at IS NOT NULL
+              AND s.last_discovered_at >= f.cycle_started_at
+         ) cov ON true
         ORDER BY g.registered DESC, g.connector_name`,
     ),
     fetchLastRuns(),
     fetchDerivedScopeSources(),
   ]);
+
+  const defaultIntervalHours = defaultFreshnessIntervalHours();
+  const stuckAfterHours = freshnessCycleStuckAfterHours();
+  const nowMs = Date.now();
 
   return registryRows.map((row) => {
     const override = parseGeographyOverride(row.geography_override);
@@ -298,6 +436,22 @@ export async function listConnectors(): Promise<ConnectorView[]> {
       scopeSource,
       // Only meaningful when the scope actually comes from profiles.
       derivedFrom: scopeSource === "profiles" ? derivedFrom : [],
+      freshness: deriveFreshnessState({
+        intervalHoursOverrideRaw: row.freshness_interval_hours,
+        lastFreshAt: row.last_fresh_at ?? null,
+        cycleStartedAt: row.cycle_started_at ?? null,
+        targetScopeCount:
+          row.cycle_target_scope_count === null || row.cycle_target_scope_count === undefined
+            ? null
+            : num(row.cycle_target_scope_count),
+        coveredScopeCount:
+          row.covered_scope_count === null || row.covered_scope_count === undefined
+            ? null
+            : num(row.covered_scope_count),
+        defaultIntervalHours,
+        stuckAfterHours,
+        nowMs,
+      }),
       lastRun: lastRuns.get(row.connector_name) ?? null,
     };
   });
@@ -361,10 +515,18 @@ export async function updateConnectorConfig(
   // the override) — `null` is a meaningful value here, not just absence.
   const setGeography = Object.prototype.hasOwnProperty.call(patch, "geography_override");
   const setFilters = patch.filters !== undefined;
+  // Issue #295: distinguish "not supplied" (leave alone) from "explicitly null"
+  // (clear the override, back to the global default) — null is meaningful here,
+  // same as geography_override.
+  const setFreshness = Object.prototype.hasOwnProperty.call(
+    patch,
+    "freshness_interval_hours",
+  );
 
   await sql(
     `INSERT INTO connector_config (
-        connector_name, enabled, capture_enabled, geography_override, filters, updated_at
+        connector_name, enabled, capture_enabled, geography_override, filters,
+        freshness_interval_hours, updated_at
      )
      VALUES (
         $1,
@@ -374,6 +536,7 @@ export async function updateConnectorConfig(
         COALESCE($9::boolean, true),
         $5::jsonb,
         COALESCE($7::jsonb, '{}'::jsonb),
+        $11::integer,
         NOW()
      )
      ON CONFLICT (connector_name) DO UPDATE SET
@@ -385,6 +548,9 @@ export async function updateConnectorConfig(
                                   ELSE connector_config.geography_override END,
         filters = CASE WHEN $6 THEN COALESCE($7::jsonb, '{}'::jsonb)
                        ELSE connector_config.filters END,
+        -- $10 = "was freshness supplied at all"; $11 = the value (null clears).
+        freshness_interval_hours = CASE WHEN $10 THEN $11::integer
+                                        ELSE connector_config.freshness_interval_hours END,
         updated_at = NOW()`,
     [
       name,
@@ -398,6 +564,8 @@ export async function updateConnectorConfig(
       setFilters ? JSON.stringify(patch.filters) : null,
       setCaptureEnabled,
       setCaptureEnabled ? patch.capture_enabled : null,
+      setFreshness,
+      setFreshness ? (patch.freshness_interval_hours ?? null) : null,
     ],
   );
 }
