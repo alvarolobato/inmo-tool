@@ -11,12 +11,14 @@
  */
 import { describe, it, expect } from "vitest";
 import { buildSystemPrompt } from "@/lib/llm-context/system-prompt";
-import type { ListingSnapshot } from "@/lib/llm-context";
+import type { ListingSnapshot, RedflagTrendingCandidate } from "@/lib/llm-context";
 import {
   parseRedFlagsResult,
   normalizeCandidateType,
   REDFLAGS_PROMPT_VERSION,
   REDFLAG_TYPES,
+  REDFLAG_LABELS,
+  REDFLAG_DEFINITIONS,
 } from "../redflags";
 
 const SILENT_ADVERT: ListingSnapshot = {
@@ -396,11 +398,11 @@ describe("#394 candidate_type on `other` flags", () => {
 
 describe("prompt version", () => {
   it("is pinned, so a prompt change forces a new row rather than overwriting", () => {
-    // Bumped to v5 for #394: `other` flags now carry a `candidate_type` slug +
-    // one-line definition, so the prompt asks for a new field and #308's batch
-    // re-assesses existing rows rather than serving a v4 cache row as current.
-    // See REDFLAGS_PROMPT_VERSION's doc.
-    expect(REDFLAGS_PROMPT_VERSION).toBe("redflags/v5");
+    // Bumped to v6 for #396: the closed vocabulary is now rendered from the enum
+    // and the top-N trending `other` candidate slugs are injected, so the prompt
+    // the model reads changed and #308's batch re-assesses existing rows rather
+    // than serving a v5 cache row as current. See REDFLAGS_PROMPT_VERSION's doc.
+    expect(REDFLAGS_PROMPT_VERSION).toBe("redflags/v6");
   });
 });
 
@@ -479,5 +481,83 @@ describe("redflags prompt — derived area-price signal (#184)", () => {
     const text = redflagsPromptText([SILENT_ADVERT]);
     expect(text).toMatch(/NO la uses,? por sí sola/);
     expect(text.toLowerCase()).toContain("explicaciones inocentes");
+  });
+});
+
+describe("#396 — closed vocabulary rendered from the enum (no hardcoded prose)", () => {
+  it("renders EVERY named REDFLAG_TYPES member with its label and definition — so a type added to the enum appears automatically", () => {
+    const text = redflagsPromptText([SILENT_ADVERT]);
+    for (const type of REDFLAG_TYPES) {
+      // The slug itself is always present (named types in the vocab list, `other`
+      // in its own block + the output schema union).
+      expect(text).toContain(`\`${type}\``);
+      if (type === "other") continue;
+      // Named types carry their label AND their one-line definition, both pulled
+      // from the enum maps — proving the render is enum-driven, not a fixed list.
+      expect(text).toContain(REDFLAG_LABELS[type]);
+      // A distinctive fragment of each definition must appear verbatim.
+      expect(text).toContain(REDFLAG_DEFINITIONS[type].slice(0, 40));
+    }
+  });
+
+  it("the output-schema `type` union is also rendered from the enum (every member is an option)", () => {
+    const text = redflagsPromptText([SILENT_ADVERT]);
+    for (const type of REDFLAG_TYPES) {
+      expect(text).toContain(`"${type}"`);
+    }
+  });
+
+  it("instructs: use a named type if it fits, otherwise reuse an existing candidate before coining a new slug", () => {
+    const text = redflagsPromptText([SILENT_ADVERT]).toLowerCase();
+    expect(text).toContain("usa un tipo con nombre");
+    expect(text).toContain("reutiliza");
+  });
+});
+
+describe("#396 — trending `other` candidates injected as prompt context", () => {
+  function redflagsPromptWithTrending(
+    trendingCandidates: RedflagTrendingCandidate[] | undefined,
+  ): string {
+    const { stable, volatile } = buildSystemPrompt("redflags", {
+      listings: [SILENT_ADVERT],
+      trendingCandidates,
+    });
+    return `${stable}\n${volatile ?? ""}`;
+  }
+
+  it("embeds each trending candidate slug AND its count when the orchestrator passes a list", () => {
+    const text = redflagsPromptWithTrending([
+      { candidateType: "servidumbre_paso", count: 7 },
+      { candidateType: "ruido_excesivo", count: 3 },
+    ]);
+    expect(text).toContain("servidumbre_paso");
+    expect(text).toContain("(7)");
+    expect(text).toContain("ruido_excesivo");
+    expect(text).toContain("(3)");
+    // Framed as "already proposed — reuse before inventing a synonym".
+    expect(text.toLowerCase()).toContain("ya se han propuesto");
+  });
+
+  it("empty list → still a valid prompt with an explicit cold-start note (the normal initial state)", () => {
+    const text = redflagsPromptWithTrending([]);
+    expect(text).toContain("Todavía no hay candidatos");
+    // The rest of the task is intact.
+    expect(text).toContain("señales de alerta");
+    expect(text).toContain("candidate_type");
+  });
+
+  it("undefined trendingCandidates behaves like the empty list (undefined is the default)", () => {
+    const withUndefined = redflagsPromptWithTrending(undefined);
+    const withEmpty = redflagsPromptWithTrending([]);
+    expect(withUndefined).toBe(withEmpty);
+  });
+
+  it("the trending block lives in the STABLE prefix (shared across a batch → cache-friendly), not the per-property volatile", () => {
+    const { stable, volatile } = buildSystemPrompt("redflags", {
+      listings: [SILENT_ADVERT],
+      trendingCandidates: [{ candidateType: "servidumbre_paso", count: 5 }],
+    });
+    expect(stable).toContain("servidumbre_paso");
+    expect(volatile ?? "").not.toContain("servidumbre_paso");
   });
 });

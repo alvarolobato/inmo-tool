@@ -68,6 +68,7 @@
 import { sql } from "@/lib/db-write";
 import { extractRedFlags } from "@/lib/llm";
 import type { LlmAgenticContext } from "@/lib/llm-tools/types";
+import type { RedflagTrendingCandidate } from "@/lib/llm-context/types";
 import { NoListingsError, loadPropertyListings, clamp01, stripCodeFence } from "./shared";
 import { getOrCompute, getLatestAssessment, logCacheOutcome, type CachedAssessment } from "./cache";
 import { buildAreaPriceSignal } from "./price-signal";
@@ -107,54 +108,30 @@ export { NoListingsError, loadPropertyListings };
  * change: `candidate_type` is one more field inside the existing
  * `redflags.flags[]` JSON. #308's batch re-assesses existing rows so `other`
  * flags gain their slug.
- */
-export const REDFLAGS_PROMPT_VERSION = "redflags/v5";
-
-/**
- * Closed type vocabulary (issue #27 technical approach #1, broadened in #361).
- * The first block is legal/financial (#27); the second is physical problems
- * (#361). `other` is the catch-all for a real disclosure that doesn't fit the
- * named categories — used both by the model directly and as the coercion
- * target for an unrecognised label (see module doc).
- */
-export const REDFLAG_TYPES = [
-  // Legal / financial (#27)
-  "embargo",
-  "subasta_judicial",
-  "herencia_yacente",
-  "deuda_comunidad",
-  "construccion_ilegal",
-  "litigio",
-  // Physical (#361)
-  "unfinished_construction",
-  "structural_damage",
-  "other",
-] as const;
-
-export type RedFlagType = (typeof REDFLAG_TYPES)[number];
-
-/**
- * Short Spanish badge label per problem type, for the card and the property
- * detail page (#361). The vocabulary lives here, so its display labels do too
- * — both `lib/candidates.ts` (`flagsFromAssessments`) and the detail page's
- * `PropertyProblemFlags` read this one map instead of duplicating it.
  *
- * `other` is deliberately absent: it's the long-tail catch-all with no
- * stable, scannable meaning, so a generic "Problema" badge would carry no
- * information (the same reason `reformado`/`unclear` get no condition badge).
- * A flag whose `type` isn't a key here is dropped by the renderers, never
- * shown as raw text.
+ * Bumped to v6 for #396 (Fase 7 of #385): the redflags prompt now renders the
+ * closed vocabulary FROM the `REDFLAG_TYPES`/`REDFLAG_LABELS`/`REDFLAG_DEFINITIONS`
+ * enum (instead of duplicating it as fixed prose) AND injects the top-N trending
+ * `other`-flag `candidate_type` slugs already seen across stored assessments, so
+ * the model reuses an existing candidate before coining a synonym. Both change
+ * what the model reads, so a v5 cache row must not silently pass as current;
+ * #308's batch re-assesses existing rows against the new version.
  */
-export const REDFLAG_LABELS: Record<string, string> = {
-  embargo: "Embargo",
-  subasta_judicial: "Subasta judicial",
-  herencia_yacente: "Herencia yacente",
-  deuda_comunidad: "Deuda comunidad",
-  construccion_ilegal: "Construcción ilegal",
-  litigio: "Litigio",
-  unfinished_construction: "Obra inacabada",
-  structural_damage: "Daño estructural",
-};
+export const REDFLAGS_PROMPT_VERSION = "redflags/v6";
+
+/**
+ * The closed vocabulary (types, labels, one-line definitions) lives in the leaf
+ * module `redflag-vocabulary.ts` (no `pg`/LLM imports) so the prompt builder can
+ * import it without the system-prompt → redflags → llm → llm-context cycle.
+ * Re-exported here so existing importers keep using `@/lib/ai-assessment/redflags`.
+ */
+export {
+  REDFLAG_TYPES,
+  REDFLAG_LABELS,
+  REDFLAG_DEFINITIONS,
+  type RedFlagType,
+} from "./redflag-vocabulary";
+import { REDFLAG_TYPES, type RedFlagType } from "./redflag-vocabulary";
 
 export interface RedFlag {
   type: RedFlagType;
@@ -346,10 +323,25 @@ export async function getRedFlagsAssessment(
  * `getOrCompute`'s `extraHashInput` (→ folded into the cache's invalidation
  * key). Same variable, same call — the agreement the issue requires can't
  * drift apart because there is only one place either value comes from.
+ *
+ * #396: `opts.trendingCandidates` — the top-N trending `other`-flag
+ * `candidate_type` slugs — is computed ONCE per batch by the orchestrator
+ * (`runAssessmentBatch`, batch.ts) and threaded straight through to the prompt
+ * builder. It is NOT queried here (that would run once per property); this flow
+ * only forwards what it is given. Deliberately NOT folded into
+ * `getOrCompute`'s `extraHashInput`: the trending list is prompt CONTEXT that
+ * changes as the corpus grows, and re-hashing every property whenever any new
+ * candidate appears would needlessly invalidate the whole cache. The
+ * `REDFLAGS_PROMPT_VERSION` bump (v6) is the single, deliberate invalidation
+ * point for this prompt change.
  */
 export async function assessPropertyRedFlags(
   propertyId: number,
-  opts?: { requestId?: string | null; ctx?: LlmAgenticContext },
+  opts?: {
+    requestId?: string | null;
+    ctx?: LlmAgenticContext;
+    trendingCandidates?: RedflagTrendingCandidate[];
+  },
 ): Promise<RedFlagsResult> {
   const listings = await loadPropertyListings(propertyId);
   if (listings.length === 0) throw new NoListingsError(propertyId);
@@ -362,7 +354,10 @@ export async function assessPropertyRedFlags(
     REDFLAGS_PROMPT_VERSION,
     listings,
     async () => {
-      const { text, model } = await extractRedFlags(listings, { ...opts, areaPriceSignal });
+      const { text, model } = await extractRedFlags(listings, {
+        ...opts,
+        areaPriceSignal,
+      });
       return { result: parseRedFlagsResult(text), model };
     },
     saveRedFlagsAssessment,

@@ -36,12 +36,13 @@ describe("runAssessmentBatch", () => {
     const { flows, a, b } = makeFlows();
     const result = await runAssessmentBatch({
       flows,
+      fetchTrendingCandidates: async () => [],
       selectPropertyIds: async () => [42],
       isCurrent: async () => false, // nothing cached → run everything
     });
 
-    expect(a).toHaveBeenCalledWith(42, { requestId: null });
-    expect(b).toHaveBeenCalledWith(42, { requestId: null });
+    expect(a).toHaveBeenCalledWith(42, { requestId: null, trendingCandidates: [] });
+    expect(b).toHaveBeenCalledWith(42, { requestId: null, trendingCandidates: [] });
     expect(result).toMatchObject({
       properties: 1,
       assessed: 2,
@@ -57,6 +58,7 @@ describe("runAssessmentBatch", () => {
 
     const result = await runAssessmentBatch({
       flows,
+      fetchTrendingCandidates: async () => [],
       selectPropertyIds: async () => [7],
       isCurrent,
     });
@@ -72,6 +74,7 @@ describe("runAssessmentBatch", () => {
 
     const result = await runAssessmentBatch({
       flows,
+      fetchTrendingCandidates: async () => [],
       selectPropertyIds: async () => [1, 2, 3],
       isCurrent: async () => false,
     });
@@ -90,6 +93,7 @@ describe("runAssessmentBatch", () => {
 
     const result = await runAssessmentBatch({
       flows,
+      fetchTrendingCandidates: async () => [],
       selectPropertyIds: async () => [1, 2],
       isCurrent: async () => false,
     });
@@ -104,6 +108,7 @@ describe("runAssessmentBatch", () => {
 
     const result = await runAssessmentBatch({
       flows,
+      fetchTrendingCandidates: async () => [],
       selectPropertyIds: async () => [9, 10],
       isCurrent: async () => false,
     });
@@ -124,6 +129,7 @@ describe("runAssessmentBatch", () => {
 
     const result = await runAssessmentBatch({
       flows,
+      fetchTrendingCandidates: async () => [],
       selectPropertyIds: async () => [5],
       isCurrent: async () => false,
     });
@@ -139,6 +145,7 @@ describe("runAssessmentBatch", () => {
     const { flows, a, b } = makeFlows();
     const result = await runAssessmentBatch({
       flows,
+      fetchTrendingCandidates: async () => [],
       selectPropertyIds: async () => [],
       isCurrent: async () => false,
     });
@@ -147,14 +154,60 @@ describe("runAssessmentBatch", () => {
     expect(result).toMatchObject({ properties: 0, assessed: 0, skipped: 0, stopped: null });
   });
 
+  it("#396: fetches the trending candidates ONCE per batch and threads them into every flow call", async () => {
+    const a = vi.fn(async () => undefined);
+    const b = vi.fn(async () => undefined);
+    const flows: BatchFlow[] = [
+      { type: "redflags", promptVersion: "redflags/v6", assess: a },
+      { type: "condition", promptVersion: "condition/v1", assess: b },
+    ];
+    const trending = [{ candidateType: "servidumbre_paso", count: 4 }];
+    const fetchTrendingCandidates = vi.fn(async () => trending);
+
+    await runAssessmentBatch({
+      flows,
+      fetchTrendingCandidates,
+      selectPropertyIds: async () => [1, 2], // two properties
+      isCurrent: async () => false,
+    });
+
+    // Computed ONCE for the whole pass, not once per property (2) or per flow (4).
+    expect(fetchTrendingCandidates).toHaveBeenCalledTimes(1);
+    // The same list is threaded into every flow.assess call (redflags reads it;
+    // the others accept-and-ignore it).
+    expect(a).toHaveBeenCalledWith(1, { requestId: null, trendingCandidates: trending });
+    expect(a).toHaveBeenCalledWith(2, { requestId: null, trendingCandidates: trending });
+    expect(b).toHaveBeenCalledWith(1, { requestId: null, trendingCandidates: trending });
+  });
+
+  it("#396: a failing trending fetch does not sink the batch — flows still run with an empty list", async () => {
+    const { flows, a, b } = makeFlows();
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const result = await runAssessmentBatch({
+      flows,
+      fetchTrendingCandidates: async () => {
+        throw new Error("db down");
+      },
+      selectPropertyIds: async () => [42],
+      isCurrent: async () => false,
+    });
+
+    expect(result).toMatchObject({ properties: 1, assessed: 2, stopped: null });
+    expect(a).toHaveBeenCalledWith(42, { requestId: null, trendingCandidates: [] });
+    expect(b).toHaveBeenCalledWith(42, { requestId: null, trendingCandidates: [] });
+    spy.mockRestore();
+  });
+
   it("threads the requestId into the flows", async () => {
     const { flows, a } = makeFlows();
     await runAssessmentBatch({
       flows,
+      fetchTrendingCandidates: async () => [],
       selectPropertyIds: async () => [3],
       isCurrent: async () => false,
       requestId: "req-abc",
     });
-    expect(a).toHaveBeenCalledWith(3, { requestId: "req-abc" });
+    expect(a).toHaveBeenCalledWith(3, { requestId: "req-abc", trendingCandidates: [] });
   });
 });

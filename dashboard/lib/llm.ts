@@ -42,7 +42,7 @@ import { AgenticRunnerError } from "./llm-tools/runner";
 import { resetClient } from "./llm-client";
 import type { LlmAgenticContext, AgenticProgressEvent } from "./llm-tools/types";
 import { assembleRequest } from "./llm-context";
-import type { FlowVars, ListingSnapshot } from "./llm-context";
+import type { FlowVars, ListingSnapshot, RedflagTrendingCandidate } from "./llm-context";
 
 export { BudgetExceededError } from "./llm-usage";
 export { CircuitBreakerOpenError } from "./llm-circuit-breaker";
@@ -65,6 +65,14 @@ export interface AssessmentOpts {
    * `lib/ai-assessment/price-signal.ts` for why.
    */
   areaPriceSignal?: string;
+  /**
+   * #396 — redflags ONLY: the top-N trending `other`-flag `candidate_type`
+   * slugs, computed ONCE per batch by the orchestrator and forwarded here so
+   * `extractRedFlags` can thread them into the redflags prompt. Other flows
+   * accept the same `AssessmentOpts` shape but never forward it (a silent
+   * no-op), same as `areaPriceSignal`. See `lib/db/redflag-candidates.ts`.
+   */
+  trendingCandidates?: RedflagTrendingCandidate[];
 }
 
 /**
@@ -210,7 +218,10 @@ export function extractRedFlags(
     listings,
     "Extrae señales de alerta del inmueble (problemas legales, financieros y físicos) según las instrucciones (redflags).",
     opts,
-    { areaPriceSignal: opts?.areaPriceSignal },
+    {
+      areaPriceSignal: opts?.areaPriceSignal,
+      trendingCandidates: opts?.trendingCandidates,
+    },
   );
 }
 

@@ -53,6 +53,27 @@ export function isLlmFlow(value: string): value is LlmFlow {
 }
 
 /**
+ * #396 (Fase 7 of #385) — one trending `other`-flag candidate slug, as computed
+ * ONCE per assessment batch by `lib/db/redflag-candidates.ts`
+ * (`getTrendingCandidateTypes`) and threaded into the redflags prompt so the
+ * model sees what problem names have already been proposed before it coins a
+ * new one (reducing synonym slugs like `obra_sin_acabar` vs the existing
+ * `unfinished_construction`).
+ *
+ * Defined here — with `FlowVars` — because the prompt builder is the consumer
+ * and stays pure (it receives the list as data, never queries the DB). The db
+ * module imports this type only (no runtime coupling). NOT a filter and never
+ * shown to end users; promotion of a trending slug to the closed vocabulary is
+ * a separate, human step (Fase 8).
+ */
+export interface RedflagTrendingCandidate {
+  /** Normalized snake_case slug the model previously proposed for an `other` flag. */
+  candidateType: string;
+  /** How many stored `other` flags carry this slug (drives the ORDER BY / threshold). */
+  count: number;
+}
+
+/**
  * A listing as handed to an assessment flow. Deliberately a flat, source-
  * agnostic shape: assessments run identically whether the row arrived via a
  * crawling connector or the browser-extension capture path (#75).
@@ -135,6 +156,17 @@ export interface FlowVars {
    * sites from the same variable.
    */
   areaPriceSignal?: string;
+  /**
+   * #396 (Fase 7 of #385) — redflags ONLY: the top-N trending `other`-flag
+   * candidate slugs already seen across stored redflags assessments, computed
+   * ONCE per batch by the orchestrator (`lib/db/redflag-candidates.ts`) and
+   * passed in so `buildRedflagsPrompt` can show the model "what's already been
+   * proposed" before it invents a new slug. The builder stays pure — it renders
+   * whatever list it is handed and treats an empty/undefined list as the normal
+   * cold-start state (no candidates yet). Never a filter; see
+   * `RedflagTrendingCandidate`.
+   */
+  trendingCandidates?: RedflagTrendingCandidate[];
 
   // ── compare ───────────────────────────────────────────────────────────────
   /** Two or more candidates to compare side by side. */
