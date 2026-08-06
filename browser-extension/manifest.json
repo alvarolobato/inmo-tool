@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Inmo-Tool Listing Capture",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Capture a rendered listing page into inmo-tool, for sites the automated connectors can't reach (Idealista, Aliseda, Altamira).",
   "permissions": ["activeTab", "alarms", "scripting", "storage", "tabs"],
   "host_permissions": [
