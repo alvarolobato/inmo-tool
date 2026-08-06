@@ -2,6 +2,8 @@
 id: D-079
 title: Typed failure classification + resolved geography scope on connector_run_results
 date: 2026-08-06
+group: Data / connectors
+rule: '`connector_run_results` gets two additive columns off the same `_record_connector_result` write site: `failure_classification TEXT` (CHECK: `soft_block\|network\|structure_change\|unresolvable\|uncovered\|empty_result\|other`, NULL=clean; classifier + one-time backfill in `etl/failure_classification.py`, #242) and `geography_scope JSONB` (one entry per resolved scope with per-geography `outcome`, #109). Disabled connectors still emit NO row (D-069). Surfaced in RunDetail + e2e (D-041).'
 ---
 
 # D-079: Typed failure classification + resolved geography scope on connector_run_results
