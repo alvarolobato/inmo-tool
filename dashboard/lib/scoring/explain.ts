@@ -27,6 +27,7 @@ import {
   type RawFeatureVector,
 } from "./features";
 import { normalizeVector, type TrainedModel } from "./model";
+import { preferenceClause } from "./preference";
 
 const TOP_N = 3;
 // A z-scored feature times a near-zero learned weight is "no real signal",
@@ -168,16 +169,38 @@ const FEATURE_LABELS: Record<FeatureName, PhraseFn> = {
  * documented, optional parameter so a future feature (e.g. Phase 5's yield,
  * which would want to reference the listing's own price/rent directly) can
  * use it without another signature change; passing it is a no-op today.
+ *
+ * `preferenceSignalValue` (task 7.2, #40) is the profile's centroid-similarity
+ * preference signal for THIS candidate, when its preference model is active.
+ * When it's meaningfully non-zero the explanation appends an honest,
+ * deliberately non-specific clause ("similar a propiedades que ya has
+ * valorado positivamente") rather than fabricating a precise numeric claim
+ * (#40 EC-4) — a similarity feature IS a vaguer statement than a structured
+ * one. Omitted / 0 / below-threshold → the explanation is unchanged, so every
+ * pre-#40 caller keeps its exact output.
  */
 export function explainScore(
   raw: RawFeatureVector,
   model: Pick<TrainedModel, "weights" | "bias" | "normalization"> | null,
   _listing?: unknown,
+  preferenceSignalValue?: number,
 ): string {
   if (model === null) return COLD_START_EXPLANATION;
 
+  const prefClause =
+    preferenceSignalValue === undefined
+      ? null
+      : preferenceClause(preferenceSignalValue);
+
   const contributions = computeContributions(raw, model);
-  if (contributions.length === 0) return NO_SIGNAL_EXPLANATION;
+  if (contributions.length === 0) {
+    // No structured signal to report, but a real preference lean still is one:
+    // surface it alone rather than the "nothing to highlight" fallback.
+    if (prefClause !== null) {
+      return `Encaja con tu perfil: ${prefClause}.`;
+    }
+    return NO_SIGNAL_EXPLANATION;
+  }
 
   const top = contributions.slice(0, TOP_N);
   // Overall direction from the real total (sum of ALL contributions + bias,
@@ -206,5 +229,9 @@ export function explainScore(
   const phrases = top.map((c) =>
     FEATURE_LABELS[c.name](c.rawValue, c.contribution > 0),
   );
+  // The preference clause is appended as one more phrase (not folded into the
+  // structured top-N), so it reads as the distinct, softer kind of reason it
+  // is — a similarity to past decisions, not a per-feature contribution.
+  if (prefClause !== null) phrases.push(prefClause);
   return prefix + phrases.join("; ") + ".";
 }

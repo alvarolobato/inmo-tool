@@ -29,7 +29,14 @@ import { sql, withTransaction } from "@/lib/db-write";
 import { getProfileById } from "@/lib/db/profiles";
 import { COLD_START_EXPLANATION, explainScore } from "./explain";
 import { extractRaw, fetchScoringInputs, FEATURE_NAMES, type ScoringInputRow } from "./features";
-import { normalizeVector, scoreNormalized, type NormalizationStats } from "./model";
+import { computeNormalization, normalizeVector, scoreNormalized, type NormalizationStats } from "./model";
+import {
+  applyPreferenceSignal,
+  buildPreferenceModelFromStates,
+  fetchLatestFeedbackStates,
+  preferenceSignal,
+  type PreferenceModel,
+} from "./preference";
 import type { Scope } from "@/lib/profiles-schema";
 
 /**
@@ -156,26 +163,55 @@ interface ScoredCandidate {
   explanation: string;
 }
 
-function scoreColdStart(inputs: ScoringInputRow[], scope: Scope): ScoredCandidate[] {
-  const medianPricePerM2 = poolMedianPricePerM2(inputs);
+/**
+ * `inputs` here is the SUBSET being (re)scored, but `poolNormalization` and
+ * `preferenceModel` (task 7.2, #40) are always derived from the WHOLE matched
+ * pool by the caller — the preference signal must z-score a candidate against
+ * the same pool distribution its centroids were built from, never against just
+ * the handful of newly-materialized rows. `preferenceModel` is `null` (a hard
+ * no-op) below MIN_FEEDBACK_TO_LEARN / one-sided feedback, leaving these
+ * cold-start scores/explanations bit-for-bit identical to the pre-#40 behavior.
+ */
+function scoreColdStart(
+  inputs: ScoringInputRow[],
+  scope: Scope,
+  poolMedian: number | null,
+  poolNormalization: NormalizationStats,
+  preferenceModel: PreferenceModel | null,
+): ScoredCandidate[] {
   return inputs.map((row) => {
     const raw = extractRaw(row, scope);
-    const score = computeColdStartScore(raw, {
+    const base = computeColdStartScore(raw, {
       pricePerM2: pricePerM2(row),
-      poolMedianPricePerM2: medianPricePerM2,
+      poolMedianPricePerM2: poolMedian,
     });
-    return { propertyId: row.property_id, score, explanation: COLD_START_EXPLANATION };
+    const signal = preferenceSignal(preferenceModel, normalizeVector(raw, poolNormalization));
+    return {
+      propertyId: row.property_id,
+      score: applyPreferenceSignal(base, signal),
+      explanation: COLD_START_EXPLANATION,
+    };
   });
 }
 
-function scoreWithModel(inputs: ScoringInputRow[], scope: Scope, model: StoredCoefficients): ScoredCandidate[] {
+function scoreWithModel(
+  inputs: ScoringInputRow[],
+  scope: Scope,
+  model: StoredCoefficients,
+  poolNormalization: NormalizationStats,
+  preferenceModel: PreferenceModel | null,
+): ScoredCandidate[] {
   return inputs.map((row) => {
     const raw = extractRaw(row, scope);
     const x = normalizeVector(raw, model.normalization);
+    // Preference signal is normalized against the current pool stats (#40),
+    // not the trained model's frozen normalization — the model's stats can be
+    // stale, but the preference centroids were built from the live pool.
+    const signal = preferenceSignal(preferenceModel, normalizeVector(raw, poolNormalization));
     return {
       propertyId: row.property_id,
-      score: scoreNormalized(model, x),
-      explanation: explainScore(raw, model),
+      score: applyPreferenceSignal(scoreNormalized(model, x), signal),
+      explanation: explainScore(raw, model, undefined, signal),
     };
   });
 }
@@ -222,8 +258,22 @@ export async function scoreNewCandidates(
   const inputs = allInputs.filter((row) => idSet.has(row.property_id));
   if (inputs.length === 0) return null;
 
+  // Preference model (task 7.2, #40) is built from the WHOLE matched pool's
+  // normalization + this profile's own feedback — same inputs the retrain path
+  // uses, computed here inline (reusing `allInputs`, one extra feedback query)
+  // so a candidate scored at materialization time gets the same self-learning
+  // nudge a full retrain would give it. `null` (no-op) below the threshold, so
+  // today's sub-threshold profiles are unaffected.
+  const rawByProperty = new Map(allInputs.map((row) => [row.property_id, extractRaw(row, profile.scope)]));
+  const poolNormalization = computeNormalization([...rawByProperty.values()]);
+  const feedbackStates = await fetchLatestFeedbackStates(profileId);
+  const preferenceModel = buildPreferenceModelFromStates(feedbackStates, rawByProperty, poolNormalization);
+
   const model = await fetchUsableModel(profileId);
-  const scored = model ? scoreWithModel(inputs, profile.scope, model) : scoreColdStart(inputs, profile.scope);
+  const poolMedian = poolMedianPricePerM2(allInputs);
+  const scored = model
+    ? scoreWithModel(inputs, profile.scope, model, poolNormalization, preferenceModel)
+    : scoreColdStart(inputs, profile.scope, poolMedian, poolNormalization, preferenceModel);
 
   await withTransaction(async (client) => {
     // Same per-profile advisory lock as `retrain.ts`'s write transaction —

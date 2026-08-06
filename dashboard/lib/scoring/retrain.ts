@@ -27,12 +27,18 @@
  * in. It does NOT retrain; only a new feedback event retrains here.
  */
 
-import { sql, withTransaction } from "@/lib/db-write";
+import { withTransaction } from "@/lib/db-write";
 import { getProfileById } from "@/lib/db/profiles";
 import { COLD_START_EXPLANATION, explainScore } from "./explain";
 import { extractRaw, fetchScoringInputs, FEATURE_NAMES } from "./features";
 import { computeNormalization, normalizeVector, scoreNormalized, trainLogisticRegression } from "./model";
 import { computeColdStartScore, MIN_TRAINING_EXAMPLES, poolMedianPricePerM2, pricePerM2 } from "./pipeline";
+import {
+  applyPreferenceSignal,
+  buildPreferenceModelFromStates,
+  fetchLatestFeedbackStates,
+  preferenceSignal,
+} from "./preference";
 
 export interface RetrainResult {
   profileId: number;
@@ -40,36 +46,6 @@ export interface RetrainResult {
   trainingExampleCount: number;
   rescoredCount: number;
   reason?: string;
-}
-
-interface LatestStateRow {
-  property_id: number;
-  feedback_type: "accept" | "reject" | "star";
-}
-
-/**
- * The current (latest-wins) accept/reject/star state per property for this
- * profile, in one query — mirrors `lib/db/feedback.ts`'s per-property
- * `getCurrentState` tie-break (`created_at DESC, id DESC`), but for every
- * matched property at once (retraining scores the whole pool, not one
- * property at a time — same reasoning as `fetchScoringInputs`).
- */
-async function fetchLatestStates(profileId: number): Promise<LatestStateRow[]> {
-  // `property_id` is BIGINT — arrives as a real JS number via the
-  // driver-level int8 type parser (db-shared.ts, #155), which is
-  // load-bearing here: without it, `labelByProperty` (string keys) would
-  // never match `rawByProperty` (Number-keyed, from fetchScoringInputs) and
-  // every profile would silently look like it has zero training examples —
-  // this project has hit that exact class of bug repeatedly (task 2.5's
-  // property_id incident among others).
-  const rows = await sql<LatestStateRow>(
-    `SELECT DISTINCT ON (property_id) property_id, feedback_type
-       FROM feedback_event
-      WHERE profile_id = $1 AND feedback_type = ANY($2::text[])
-      ORDER BY property_id, created_at DESC, id DESC`,
-    [profileId, ["accept", "reject", "star"]],
-  );
-  return rows;
 }
 
 /**
@@ -88,13 +64,27 @@ export async function retrainAndRescoreProfile(profileId: number): Promise<Retra
     return { profileId, trained: false, trainingExampleCount: 0, rescoredCount: 0, reason: "profile_not_found" };
   }
 
-  const [inputs, states] = await Promise.all([fetchScoringInputs(profileId), fetchLatestStates(profileId)]);
+  const [inputs, states] = await Promise.all([fetchScoringInputs(profileId), fetchLatestFeedbackStates(profileId)]);
 
   if (inputs.length === 0) {
     return { profileId, trained: false, trainingExampleCount: 0, rescoredCount: 0, reason: "no_matched_candidates" };
   }
 
   const rawByProperty = new Map(inputs.map((row) => [row.property_id, extractRaw(row, profile.scope)]));
+
+  // Pool-wide z-score stats — computed once here (not just in the trained
+  // branch) so the per-profile preference model (task 7.2, #40) can normalize
+  // its labeled vectors against the SAME distribution every candidate is
+  // scored against. Missing values impute to the pool mean consistently.
+  const allRawVectors = inputs.map((row) => rawByProperty.get(row.property_id)!);
+  const normalization = computeNormalization(allRawVectors);
+
+  // The self-learning preference signal. `null` (a hard no-op) below
+  // MIN_FEEDBACK_TO_LEARN labeled examples or when feedback is one-sided — so
+  // at today's ~6-event state this is null and every score below is identical
+  // to the pre-#40 behavior. Turns on automatically, per profile, once a
+  // profile accumulates enough of its own accept/reject history.
+  const preferenceModel = buildPreferenceModelFromStates(states, rawByProperty, normalization);
 
   // Only accept/reject label the classifier (issue #21's Technical approach
   // #1's simplest-v1 choice) — a property whose latest state is 'star', or
@@ -141,13 +131,20 @@ export async function retrainAndRescoreProfile(profileId: number): Promise<Retra
     // tie at 0.5 (Fable review of PR #93). Computed once for the whole
     // pool, not per-row.
     const medianPricePerM2 = poolMedianPricePerM2(inputs);
-    const coldStartScored = inputs.map((row) => ({
-      propertyId: row.property_id,
-      score: computeColdStartScore(rawByProperty.get(row.property_id)!, {
+    const coldStartScored = inputs.map((row) => {
+      const raw = rawByProperty.get(row.property_id)!;
+      const base = computeColdStartScore(raw, {
         pricePerM2: pricePerM2(row),
         poolMedianPricePerM2: medianPricePerM2,
-      }),
-    }));
+      });
+      // Below MIN_TRAINING_EXAMPLES there's no logistic model yet, but a
+      // profile can still clear MIN_FEEDBACK_TO_LEARN (8) — this is exactly
+      // the window the preference signal exists to personalize. When the
+      // model is null (<8 examples / one-sided) the signal is 0 and this is
+      // the unchanged cold-start score.
+      const signal = preferenceSignal(preferenceModel, normalizeVector(raw, normalization));
+      return { propertyId: row.property_id, score: applyPreferenceSignal(base, signal) };
+    });
 
     await withTransaction(async (client) => {
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`scoring_retrain:${profileId}`]);
@@ -181,10 +178,8 @@ export async function retrainAndRescoreProfile(profileId: number): Promise<Retra
   // of the sigmoid, producing a degenerate ranking for exactly the
   // candidates this model exists to rank (Opus review of PR #91, item 1).
   // Missing values are imputed to these same pool-wide stats consistently
-  // at both training and scoring time via `normalizeVector`.
-  const allRawVectors = inputs.map((row) => rawByProperty.get(row.property_id)!);
-  const normalization = computeNormalization(allRawVectors);
-
+  // at both training and scoring time via `normalizeVector`. `normalization`
+  // is computed once above (shared with the preference model).
   const rawVectors = trainingPropertyIds.map((id) => rawByProperty.get(id)!);
   const X = rawVectors.map((v) => normalizeVector(v, normalization));
   const y = trainingPropertyIds.map((id) => labelByProperty.get(id)!);
@@ -201,13 +196,22 @@ export async function retrainAndRescoreProfile(profileId: number): Promise<Retra
   const scored = inputs.map((row) => {
     const raw = rawByProperty.get(row.property_id)!;
     const x = normalizeVector(raw, normalization);
+    // Preference signal augments the trained score too (task 7.2, #40): the
+    // logistic model already learns accept/reject, so this is a modest extra
+    // nudge, weighted the same everywhere. `preferenceModel` is non-null here
+    // whenever the pool has ≥ MIN_FEEDBACK_TO_LEARN labeled examples (always
+    // true once MIN_TRAINING_EXAMPLES=32 is met), so the trained branch is
+    // consistently augmented — never a discontinuity at the 32-example line.
+    const signal = preferenceSignal(preferenceModel, x);
     return {
       propertyId: row.property_id,
-      score: scoreNormalized({ weights, bias }, x),
+      score: applyPreferenceSignal(scoreNormalized({ weights, bias }, x), signal),
       // Task 3.3 (#22): grounded in this same candidate's real feature
       // vector and this same freshly-trained model — never stale relative
       // to the score it's explaining, since both are computed together here.
-      explanation: explainScore(raw, { weights, bias, normalization }),
+      // #40: pass the same preference signal so the explanation honestly
+      // reflects the preference contribution when it's meaningful (EC-4).
+      explanation: explainScore(raw, { weights, bias, normalization }, undefined, signal),
     };
   });
 
