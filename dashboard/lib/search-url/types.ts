@@ -110,7 +110,7 @@ export interface PortalSearchUrlBuilder {
   /**
    * This connector's CODE mapping, per axis — the hard-coded slugs/codes the
    * builder emits, exposed so drift detection (lib/search-url/drift.ts) can diff
-   * them against the portal's captured filter catalog (issue #371, D-089). Pure
+   * them against the portal's captured filter catalog (issue #371, D-090). Pure
    * & static; every URL-building portal implements it.
    */
   codeMapping(): CodeMappingAxes;

@@ -1,6 +1,6 @@
 /**
  * E2E: URL-building discovery admin page + drift detection (issue #336/#339,
- * reframed by issue #371, D-089).
+ * reframed by issue #371, D-090).
  *
  * Per D-041, an admin surface ships a Playwright e2e that loads a seeded
  * Postgres row, navigates the page under a real server, and asserts (1) no error

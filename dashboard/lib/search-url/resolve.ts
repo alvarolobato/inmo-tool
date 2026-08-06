@@ -127,7 +127,7 @@ export async function resolveSearchTasks(scope: Scope): Promise<SearchTask[]> {
     const builder = BUILDERS[portal];
     if (!builder) continue;
 
-    // URL building is 100% code-driven (D-089, issue #371): the builder's
+    // URL building is 100% code-driven (D-090, issue #371): the builder's
     // hard-coded per-portal map is authoritative. Discovery no longer feeds URL
     // construction — the discovered catalog is used only for drift DETECTION
     // (lib/search-url/drift.ts), surfaced on /etl/discovery. This resolver still

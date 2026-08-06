@@ -1,12 +1,12 @@
 ---
-id: D-089
+id: D-090
 title: Portal filter discovery is drift DETECTION only — never self-heals URL building
 date: 2026-08-06
 group: Data / connectors
 rule: 'Portal filter discovery is DETECTION-ONLY (supersedes D-063 self-healing). The extension enumerates a portal''s search-form property-type OPTIONS — plausibility-gated per portal (Aliseda: a `comprar-<category>` segment and/or a `subtipo`; Idealista: a `venta-<section>` segment) so branding/nav junk (the Aliseda logo) is dropped and a portal it can''t read yields NOTHING, not junk — and POSTs a catalog to `portal_filter_catalog`. A deterministic, no-LLM pure diff (`lib/search-url/drift.ts::computePortalDrift`) flags ADDED/REMOVED/CHANGED vs each connector''s hard-coded code mapping (`PortalSearchUrlBuilder.codeMapping()`), surfaced on `/etl/discovery`. URL building stays 100% code-driven from the per-portal map — discovery NEVER feeds URL construction.'
 ---
 
-# D-089: Portal filter discovery is drift DETECTION only — never self-heals URL building
+# D-090: Portal filter discovery is drift DETECTION only — never self-heals URL building
 
 *Decided: 2026-08-06*
 

@@ -1,6 +1,6 @@
 /**
  * Discovered filter catalog — shape, validation, and canonical resolution
- * (issue #336, D-063; reframed detection-only by issue #371, D-089) —
+ * (issue #336, D-063; reframed detection-only by issue #371, D-090) —
  * CLIENT-SAFE.
  *
  * The browser extension enumerates a portal's search-form filter OPTIONS and
@@ -9,7 +9,7 @@
  * `portal_filter_catalog`. This module owns the catalog's TYPES, the ingest
  * PAYLOAD VALIDATOR, and the portal-label → canonical `PropertyType` resolver.
  *
- * IMPORTANT (D-089): the catalog is used ONLY for deterministic DRIFT DETECTION
+ * IMPORTANT (D-090): the catalog is used ONLY for deterministic DRIFT DETECTION
  * (lib/search-url/drift.ts) — it does NOT feed URL construction. URL building
  * is 100% code-driven from each connector's hard-coded per-portal map. The
  * self-healing "prefer the discovered slug/subtipo over the seed" path that

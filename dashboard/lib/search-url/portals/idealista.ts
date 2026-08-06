@@ -210,7 +210,7 @@ function buildIdealista(scope: CanonicalSearchScope): SearchTask[] {
 }
 
 /**
- * The Idealista CODE mapping, per axis (issue #371, D-089) — the `venta-<section>`
+ * The Idealista CODE mapping, per axis (issue #371, D-090) — the `venta-<section>`
  * operations the builder emits, for drift detection against the portal's captured
  * catalog. Identity is the operation segment (`venta-viviendas`, …); Idealista
  * encodes no numeric subtype, and each operation covers several canonical types

@@ -189,7 +189,7 @@ function buildTask(
   const loosened: LoosenedConstraint[] = [];
   const map = TYPE_MAP[type];
 
-  // URL building is 100% code-driven (D-089, issue #371). The hard-coded
+  // URL building is 100% code-driven (D-090, issue #371). The hard-coded
   // TYPE_MAP is authoritative — discovery no longer overrides the slug/subtipo.
   // Drift between this map and the portal's live options is DETECTED separately
   // (lib/search-url/drift.ts, surfaced on /etl/discovery) so a human updates
@@ -292,7 +292,7 @@ function buildAliseda(scope: CanonicalSearchScope): SearchTask[] {
 }
 
 /**
- * The Aliseda CODE mapping, per axis (issue #371, D-089) — the property-type
+ * The Aliseda CODE mapping, per axis (issue #371, D-090) — the property-type
  * slugs + subtipo codes TYPE_MAP emits, for drift detection against the portal's
  * captured catalog. Identity is the URL slug the builder emits: the residential
  * subtype slug (`pisos`, `chalets-adosados`) for viviendas, else the top-level

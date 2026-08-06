@@ -19,7 +19,7 @@ import type { PortalDriftReport } from "@/lib/search-url/drift";
  * the search form's filter OPTIONS + the URL each produces and POSTs the catalog
  * back (POST /api/extension/filter-catalog). This page then shows the LAST
  * discovered catalog for the connector, with each property-type option mapped to
- * our canonical type, PLUS a deterministic DRIFT report (issue #371, D-089):
+ * our canonical type, PLUS a deterministic DRIFT report (issue #371, D-090):
  * options the portal ADDED that the code doesn't map, options the code maps that
  * the portal REMOVED, and options whose subtipo/label CHANGED. URL building is
  * code-driven — this page flags drift so the OWNER updates the code by hand; it
@@ -246,7 +246,7 @@ export default function DiscoveryPage() {
 }
 
 /**
- * The deterministic drift report (issue #371, D-089): a clear per-portal
+ * The deterministic drift report (issue #371, D-090): a clear per-portal
  * "the code needs updating" flag. Green "sin deriva" when the captured catalog
  * matches the code mapping; a red banner listing ADDED / REMOVED / CHANGED
  * options otherwise — actionable enough for the owner to edit the code map.

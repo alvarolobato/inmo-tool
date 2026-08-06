@@ -1,6 +1,6 @@
 /**
  * Unit tests for the discovered filter-catalog layer (issue #336, D-063;
- * reframed detection-only by issue #371, D-089): the canonical-type resolver and
+ * reframed detection-only by issue #371, D-090): the canonical-type resolver and
  * the ingest payload validator. The self-healing "prefer the discovered slug/
  * subtipo over the seed" path was REMOVED per the owner — URL building is 100%
  * code-driven — so those tests now assert the Aliseda builder IGNORES any
@@ -126,7 +126,7 @@ describe("aliseda builder is code-driven (no self-healing from any catalog)", ()
   it("folds atico onto the seed `pisos` (subtipo 36) and flags the approximate map", () => {
     const [task] = alisedaBuilder.build(scope(["atico"]));
     // Aliseda has no ático bucket → the code map folds atico onto pisos and
-    // flags it; discovery never overrides this (D-089).
+    // flags it; discovery never overrides this (D-090).
     expect(task.url).toContain("/comprar-viviendas/pisos/");
     expect(task.url).toContain("subtipo=36");
     expect(task.loosened.some((l) => l.constraint === "property_types")).toBe(true);

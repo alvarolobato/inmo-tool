@@ -6,7 +6,7 @@ date: 2026-08-05
 
 # D-063: URL-building discovery mode — learn a portal's option→URL mapping via the extension; hard-coded seed is the fallback
 
-## STATUS: retired (2026-08-06) — superseded by [D-089](D-089-discovery-drift-detection-only.md)
+## STATUS: retired (2026-08-06) — superseded by [D-090](D-090-discovery-drift-detection-only.md)
 
 The self-healing core of this decision — the URL builder PREFERRING the
 discovered slug/`subtipo` over its hard-coded seed via `discoveredSegmentFor()`
@@ -16,7 +16,7 @@ the extension still enumerates a portal's filter options and POSTs a catalog to
 feeds only a deterministic DRIFT diff surfaced on `/etl/discovery`. The
 enumerator was also hardened with a per-portal plausibility gate (it captured
 the Aliseda logo as a "property type" under this decision). See
-[D-089](D-089-discovery-drift-detection-only.md) for the current design; the
+[D-090](D-090-discovery-drift-detection-only.md) for the current design; the
 original rationale below is kept for archaeology.
 
 *Decided: 2026-08-05*

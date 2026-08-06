@@ -53,7 +53,7 @@ export const SEARCH_URL_PORTALS: readonly string[] = CAPTURE_PORTALS.map(
 
 /**
  * A connector's hard-coded CODE mapping (for drift detection, issue #371 /
- * D-089), or null if it has no registered builder. The route/page diffs this
+ * D-090), or null if it has no registered builder. The route/page diffs this
  * against the portal's captured filter catalog via lib/search-url/drift.ts.
  */
 export function codeMappingForPortal(portal: string): CodeMappingAxes | null {

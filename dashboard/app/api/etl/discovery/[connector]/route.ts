@@ -47,7 +47,7 @@ export async function GET(
       Object.entries(row.axes).map(([axis, opts]) => [axis, opts?.length ?? 0]),
     );
 
-    // Deterministic drift (issue #371, D-089): diff the captured catalog against
+    // Deterministic drift (issue #371, D-090): diff the captured catalog against
     // the connector's hard-coded code mapping so the page can FLAG where the code
     // needs updating. Pure/no-LLM; null when the connector has no builder to diff.
     const codeMapping = codeMappingForPortal(connector);

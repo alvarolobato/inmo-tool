@@ -1,5 +1,5 @@
 /**
- * Deterministic portal filter-DRIFT detection (issue #371, D-089) — CLIENT-SAFE,
+ * Deterministic portal filter-DRIFT detection (issue #371, D-090) — CLIENT-SAFE,
  * pure, NO LLM.
  *
  * URL building is 100% code-driven from each connector's hard-coded per-portal
