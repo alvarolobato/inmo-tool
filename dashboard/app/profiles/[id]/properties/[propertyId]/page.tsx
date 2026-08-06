@@ -9,6 +9,7 @@ import type { ApiErrorResponse } from "@/lib/errors";
 import type { PropertyDetail } from "@/lib/property-detail";
 import type { InvestmentMetrics } from "@/lib/investment-metrics";
 import { PropertyHeader } from "@/components/property/PropertyHeader";
+import { PropertyProblemFlags } from "@/components/property/PropertyProblemFlags";
 import { PhotoGallery } from "@/components/property/PhotoGallery";
 import { LinkedListings } from "@/components/property/LinkedListings";
 import { PriceHistoryChart } from "@/components/property/PriceHistoryChart";
@@ -253,6 +254,9 @@ export default function PropertyDetailPage() {
       {!loading && !error && property && (
         <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 20 }}>
           <PropertyHeader property={property} />
+          {/* #361 problem flags — own component/section, kept separate from
+              where #360 adds the advert description, to minimize conflict. */}
+          <PropertyProblemFlags flags={property.problem_flags} />
           <PhotoGallery photoUrls={property.photo_urls} />
           <DetailSections sections={sections} />
         </div>

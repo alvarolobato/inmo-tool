@@ -62,9 +62,9 @@ const MAP: Record<string, LlmEndpointMetaEs> = {
       "Clasifica si el inmueble está reformado, a reformar o es obra nueva, a partir del texto del anuncio.",
   },
   redflags: {
-    label: "Señales de alerta legales",
+    label: "Señales de alerta",
     detail:
-      "Extrae menciones de embargos, herencias yacentes, deudas de comunidad u otros riesgos que conviene revisar con un abogado.",
+      "Extrae problemas del inmueble que conviene revisar antes de ofertar: legales/financieros (embargos, herencias yacentes, deudas de comunidad) y físicos (obra inacabada o parada, daños estructurales).",
   },
   extract: {
     label: "Extracción de campos",

@@ -127,6 +127,7 @@ export function CandidateCard({ candidate, profileId }: { candidate: CandidateRo
                   key={f.kind}
                   data-testid="candidate-flag"
                   data-flag-kind={f.kind}
+                  title={f.description}
                   style={{
                     fontSize: 10,
                     lineHeight: "14px",

@@ -28,7 +28,7 @@ vi.mock("@/lib/ai-assessment/condition", () => ({
   CONDITION_PROMPT_VERSION: "condition/v2",
 }));
 vi.mock("@/lib/ai-assessment/redflags", () => ({
-  REDFLAGS_PROMPT_VERSION: "redflags/v2",
+  REDFLAGS_PROMPT_VERSION: "redflags/v3",
 }));
 
 import { getLlmHealth } from "../llm-health";

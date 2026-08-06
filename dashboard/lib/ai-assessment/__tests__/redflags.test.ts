@@ -59,6 +59,17 @@ describe("redflags prompt — evidence union across merged listings", () => {
     // The overlap with #25 is explained, not silently ignored.
     expect(text).toContain("proindiviso");
   });
+
+  it("#361: names the physical-problem types and defines unfinished_construction distinctly from a_reformar/obra_nueva", () => {
+    const text = redflagsPromptText([SILENT_ADVERT]);
+    expect(text).toContain("unfinished_construction");
+    expect(text).toContain("structural_damage");
+    // The definition must distinguish a half-built shell from the two
+    // condition axes it must NOT be confused with (#361 acceptance).
+    expect(text).toContain("parcialmente ejecutada");
+    expect(text).toContain("a_reformar");
+    expect(text).toContain("obra_nueva");
+  });
 });
 
 describe("parseRedFlagsResult", () => {
@@ -81,6 +92,45 @@ describe("parseRedFlagsResult", () => {
     expect(r.flags[0].type).toBe("herencia_yacente");
     expect(r.flags[0].evidence).toContain("herencia yacente");
     expect(r.flags[0].evidence_source).toBe("milanuncios");
+  });
+
+  it("#361: an 'en construcción / parcialmente ejecutada' advert produces an unfinished_construction flag with a description and matching evidence", () => {
+    const raw = JSON.stringify({
+      flags: [
+        {
+          type: "unfinished_construction",
+          description: "Comprobar cuánto falta por terminar la obra y si tiene licencia en vigor.",
+          evidence:
+            "inmueble en construcción, parcialmente ejecutada, con algunos tabiques ya levantados",
+          evidence_source: "idealista",
+        },
+      ],
+      confidence: 0.8,
+      reasoning: "El anuncio declara que la obra está a medio ejecutar.",
+    });
+
+    const r = parseRedFlagsResult(raw);
+    expect(r.flags).toHaveLength(1);
+    expect(r.flags[0].type).toBe("unfinished_construction");
+    expect(REDFLAG_TYPES).toContain(r.flags[0].type);
+    expect(r.flags[0].description).not.toBe("");
+    expect(r.flags[0].evidence).toContain("parcialmente ejecutada");
+  });
+
+  it("#361: an unfinished_construction flag with NO evidence is dropped, same manufactured-flag guard as legal flags", () => {
+    const r = parseRedFlagsResult(
+      JSON.stringify({
+        flags: [
+          {
+            type: "unfinished_construction",
+            description: "Parece a medio construir.",
+            evidence: "",
+          },
+        ],
+        confidence: 0.5,
+      }),
+    );
+    expect(r.flags).toEqual([]);
   });
 
   it("EC-2: a clean description yields an empty flags array, not a fabricated flag", () => {
@@ -174,10 +224,12 @@ describe("parseRedFlagsResult", () => {
 
 describe("prompt version", () => {
   it("is pinned, so a prompt change forces a new row rather than overwriting", () => {
-    // Bumped to v2 for #184: the derived area-price signal changed both the
-    // stable rules text and the volatile payload shape — see
+    // Bumped to v3 for #361: the axis was broadened from legal/financial to
+    // generic property problems (physical types added), changing what the
+    // prompt reads and flags — so #308's batch re-assesses existing rows
+    // rather than serving a v2 cache row as current. See
     // REDFLAGS_PROMPT_VERSION's doc.
-    expect(REDFLAGS_PROMPT_VERSION).toBe("redflags/v2");
+    expect(REDFLAGS_PROMPT_VERSION).toBe("redflags/v3");
   });
 });
 

@@ -41,20 +41,15 @@
 import { sql } from "@/lib/db-write";
 import { flagsFromAssessments, type CandidateFlag, type RawAssessmentRow } from "@/lib/candidates";
 import { computeAreaPriceComparison } from "@/lib/analytics/area-price";
-import { REDFLAG_TYPES, type RedFlagType } from "@/lib/ai-assessment/redflags";
+import { REDFLAG_TYPES, REDFLAG_LABELS, type RedFlagType } from "@/lib/ai-assessment/redflags";
 
-/**
- * Spanish labels for the distress red-flag types (#27) surfaced in the
- * digest. Mirrors `REDFLAG_TYPES`; `other` is intentionally omitted — an
- * un-typed flag carries no glanceable meaning in a one-line digest entry.
- */
-const REDFLAG_LABELS: Partial<Record<RedFlagType, string>> = {
-  embargo: "Embargo",
-  herencia_yacente: "Herencia yacente",
-  deuda_comunidad: "Deuda de comunidad",
-  construccion_ilegal: "Construcción ilegal",
-  litigio: "Litigio",
-};
+// Spanish labels for the distress problem types (#27 + #361) surfaced in the
+// digest come from the shared `REDFLAG_LABELS` map (lib/ai-assessment/
+// redflags.ts) — the single home for the vocabulary's display labels, so the
+// digest picks up new problem types (e.g. #361's physical `unfinished_
+// construction`/`structural_damage`) automatically. `other` is absent from
+// that map — an un-typed flag carries no glanceable meaning in a one-line
+// digest entry — so it drops out here the same way it does on the card.
 
 /** One "new matched candidate" item — the primary, ranked section. */
 export interface DigestNewCandidate {

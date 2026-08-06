@@ -1,11 +1,27 @@
 /**
- * #27 — legal/financial red-flag extraction, per deduplicated property.
+ * #27 / #361 — generic property-problem extraction, per deduplicated property.
  *
- * Extracts mentions an investor should check with a lawyer before making an
- * offer (embargoes, unsettled inheritance, community debts, illegal
- * construction, pending litigation). NOT a substitute for real legal due
- * diligence — output is framed as "worth checking", never as a legal
- * verdict (issue #27, scope note).
+ * Extracts mentions an investor should check before making an offer. Two
+ * families of problem live on this one axis:
+ *
+ *   - **Legal / financial** (the original #27 scope): embargoes, unsettled
+ *     inheritance, community debts, illegal construction, pending litigation —
+ *     things to check with a lawyer.
+ *   - **Physical** (broadened in #361): condition problems that fall through
+ *     every other axis — first and foremost `unfinished_construction` (obra
+ *     inacabada / parcialmente ejecutada / obra parada — property 796:
+ *     "inmueble en construcción… parcialmente ejecutada, con algunos tabiques
+ *     ya levantados"), plus clearly-stated structural damage. This is NOT
+ *     occupancy, NOT `a_reformar` (a finished flat needing a refurb), and NOT
+ *     `obra_nueva` (a completed new build) — a half-built shell is its own
+ *     category, which is why #361 broadened this axis rather than adding a
+ *     fifth.
+ *
+ * NOT a substitute for real legal or technical due diligence — output is
+ * framed as "worth checking", never as a verdict (issue #27, scope note).
+ * `other` remains the catch-all for the long tail of problems that fit no
+ * named category. Every flag, legal or physical, still carries a
+ * human-readable `description` and a required literal `evidence` citation.
  *
  * Follows #25's established property-level shape (see
  * `lib/ai-assessment/occupancy.ts` for the full rationale, and
@@ -68,29 +84,63 @@ export { NoListingsError, loadPropertyListings };
  * and the volatile payload can now carry a derived price-comparison line —
  * both change what the model reads, so a v1 cache row must not silently pass
  * as current.
+ *
+ * Bumped to v3 for #361: the axis was broadened from legal/financial only to
+ * generic property problems — the prompt now also reads the advert for
+ * PHYSICAL problems (`unfinished_construction`, `structural_damage`), so its
+ * output changed (a half-built property that used to yield `flags: []` now
+ * yields an `unfinished_construction` flag). #308's batch re-assesses existing
+ * rows against the new version.
  */
-export const REDFLAGS_PROMPT_VERSION = "redflags/v2";
+export const REDFLAGS_PROMPT_VERSION = "redflags/v3";
 
 /**
- * Closed type vocabulary (issue #27 technical approach #1). `other` is the
- * catch-all for a real disclosure that doesn't fit the named categories —
- * used both by the model directly and as the coercion target for an
- * unrecognised label (see module doc).
+ * Closed type vocabulary (issue #27 technical approach #1, broadened in #361).
+ * The first block is legal/financial (#27); the second is physical problems
+ * (#361). `other` is the catch-all for a real disclosure that doesn't fit the
+ * named categories — used both by the model directly and as the coercion
+ * target for an unrecognised label (see module doc).
  */
 export const REDFLAG_TYPES = [
+  // Legal / financial (#27)
   "embargo",
   "herencia_yacente",
   "deuda_comunidad",
   "construccion_ilegal",
   "litigio",
+  // Physical (#361)
+  "unfinished_construction",
+  "structural_damage",
   "other",
 ] as const;
 
 export type RedFlagType = (typeof REDFLAG_TYPES)[number];
 
+/**
+ * Short Spanish badge label per problem type, for the card and the property
+ * detail page (#361). The vocabulary lives here, so its display labels do too
+ * — both `lib/candidates.ts` (`flagsFromAssessments`) and the detail page's
+ * `PropertyProblemFlags` read this one map instead of duplicating it.
+ *
+ * `other` is deliberately absent: it's the long-tail catch-all with no
+ * stable, scannable meaning, so a generic "Problema" badge would carry no
+ * information (the same reason `reformado`/`unclear` get no condition badge).
+ * A flag whose `type` isn't a key here is dropped by the renderers, never
+ * shown as raw text.
+ */
+export const REDFLAG_LABELS: Record<string, string> = {
+  embargo: "Embargo",
+  herencia_yacente: "Herencia yacente",
+  deuda_comunidad: "Deuda comunidad",
+  construccion_ilegal: "Construcción ilegal",
+  litigio: "Litigio",
+  unfinished_construction: "Obra inacabada",
+  structural_damage: "Daño estructural",
+};
+
 export interface RedFlag {
   type: RedFlagType;
-  /** What the investor should check, in the model's own words. */
+  /** What the investor should check (legal OR physical), in the model's own words. */
   description: string;
   /** Literal quote from one advert — never empty; unevidenced flags are dropped. */
   evidence: string;

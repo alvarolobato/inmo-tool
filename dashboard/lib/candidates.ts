@@ -13,6 +13,7 @@
 
 import { sql } from "@/lib/db-write";
 import { DISABLED_SOURCES_CTE, activeSourceClause } from "@/lib/db/source-active";
+import { REDFLAG_LABELS } from "@/lib/ai-assessment/redflags";
 
 export interface CandidateListingSummary {
   id: number;
@@ -33,6 +34,14 @@ export interface CandidateFlag {
   kind: string;
   label: string;
   tone: "neutral" | "warn";
+  /**
+   * Optional longer explanation for a hover/expand tooltip (#361). Set for
+   * problem flags (redflags), where the model's own one-line `description`
+   * ("comprobar si la obra tiene licencia y cuánto falta por terminar") adds
+   * real context the short badge label can't. Occupancy/condition flags leave
+   * this undefined — their label already says everything.
+   */
+  description?: string;
 }
 
 export interface CandidateRow {
@@ -609,6 +618,26 @@ export function flagsFromAssessments(rows: RawAssessmentRow[]): CandidateFlag[] 
         }
       }
     }
+
+    // #27/#361 redflags: a generic problem axis. `result.flags` is an array
+    // of `{ type, description, evidence, … }` (lib/ai-assessment/redflags.ts).
+    // Each evidenced flag becomes a warn-tone badge — a problem (legal,
+    // financial or physical) is always something that changes the buy. The
+    // model's own one-line `description` rides along as the badge's tooltip.
+    // Only closed-vocabulary types with a label below render; `other` (the
+    // long-tail catch-all) and any unmapped drift are dropped rather than
+    // shown as raw text, the same rule occupancy/condition follow above.
+    const redFlags = Array.isArray(result.flags) ? result.flags : [];
+    for (const rf of redFlags) {
+      if (typeof rf !== "object" || rf === null) continue;
+      const o = rf as Record<string, unknown>;
+      const type = typeof o.type === "string" ? o.type : null;
+      if (type === null) continue;
+      const label = REDFLAG_LABELS[type];
+      if (label === undefined) continue;
+      const description = typeof o.description === "string" && o.description.trim() !== "" ? o.description : undefined;
+      flags.push({ kind: `redflag:${type}`, label, tone: "warn", description });
+    }
   }
   const byKind = new Map<string, CandidateFlag>();
   for (const flag of flags) {
@@ -691,7 +720,7 @@ async function loadFlags(propertyIds: number[]): Promise<Map<number, CandidateFl
               property_id, result
          FROM ai_assessment
         WHERE property_id = ANY($1::bigint[])
-          AND assessment_type IN ('occupancy', 'condition')
+          AND assessment_type IN ('occupancy', 'condition', 'redflags')
         ORDER BY property_id, assessment_type, generated_at DESC NULLS LAST, id DESC`,
       [propertyIds],
     );
