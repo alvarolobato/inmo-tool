@@ -53,8 +53,12 @@ URL_TYPE_TOKEN_MAP: dict[str, str] = {
     "edificio": "edificio",
 }
 
-# `/comprar-piso-en_venta_..._-barcelona-i4737003828090.htm` -> "piso".
-_URL_TYPE_RE = re.compile(r"/comprar-([a-z_]+?)-en_", re.IGNORECASE)
+# The type is the FIRST hyphen-delimited token after `comprar-`. The old
+# pattern required a trailing `-en_` (`/comprar-piso-en_venta_...`), but real
+# listing URLs often have no "en_venta" segment at all
+# (`/comprar-piso-castellana-madrid-i…`), so property_type came back None on
+# those live pages (issue #378). Anchoring on the first token matches both.
+_URL_TYPE_RE = re.compile(r"/comprar-([a-z]+)-", re.IGNORECASE)
 # The city token sits right before the `-i<id>.htm` id suffix.
 _URL_CITY_RE = re.compile(r"-([a-z_]+)-i\d+\.htm", re.IGNORECASE)
 
