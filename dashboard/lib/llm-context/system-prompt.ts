@@ -783,6 +783,114 @@ Una lista vacía es un resultado correcto y frecuente — NO fuerces hallazgos.`
 }
 
 /**
+ * #388 (Fase 3 de #385) — location: beach proximity (graded) + heritage zone,
+ * per deduplicated property.
+ *
+ * Same property-level, single-shot, temperature-0 pattern as
+ * condition/redflags (see their doc comments). This is the owner's headline
+ * ask — "primera línea de playa / vistas al mar" — derived from the advert
+ * text because no portal exposes it as a filter.
+ *
+ * ## LLM-only, never regex (owner decision, 2026-08-06)
+ *
+ * The owner explicitly does not trust keyword/regex matching for this signal.
+ * This prompt IS the detector: the model reads the text and classifies with a
+ * cited literal quote per verdict. There is no ILIKE/regex classifier anywhere
+ * in the runtime path (see `lib/ai-assessment/location.ts` and
+ * docs/decisions/D-095-location-axis.md). Text-only for now (no coastline/geo
+ * dataset exists).
+ *
+ * `beach_proximity` is GRADED, not boolean, because primera línea and vistas al
+ * mar are different facts an investor weighs differently. Each of the two
+ * sub-signals (beach, heritage) demands its OWN literal evidence quote or
+ * degrades to the safe default in `parseLocationResult`.
+ */
+export function buildLocationPrompt(vars: FlowVars): {
+  stable: string;
+  volatile?: string;
+} {
+  const stable = `${DOMAIN_PREAMBLE}
+
+## Tarea: ubicación (proximidad a la playa y casco histórico)
+
+Clasifica DOS señales de ubicación que ningún portal expone como filtro y que
+solo se pueden deducir del texto del anuncio. No inventes geografía: básate
+ÚNICAMENTE en lo que el anuncio dice; NO uses tu conocimiento de la ciudad ni
+del código postal para adivinar. No hay datos de costa ni de coordenadas: si el
+texto no lo dice, la señal es \`none\`/\`false\`.
+
+### 1) Proximidad a la playa (\`beach_proximity\`) — enum GRADUADO
+
+Distingue TRES grados, no un booleano. Elige el MÁS ALTO que el texto sostenga
+con una cita literal:
+- \`frontline\` — **primera línea de playa**: "primera línea", "a pie de playa",
+  "acceso directo a la playa/al mar", "en la misma playa", "frente al mar" con
+  acceso directo. Es la señal más fuerte y más escasa: exígela solo si el texto
+  afirma que el inmueble está pegado a la playa o el paseo, no solo cerca.
+- \`sea_view\` — **vistas al mar/playa** sin ser primera línea: "vistas al mar",
+  "vistas a la playa", "con vistas frontales al mar". Ver el mar NO implica
+  estar a pie de playa: si dice vistas pero no primera línea, es \`sea_view\`.
+- \`near_beach\` — **cerca de la playa, andando**: "a 5 min de la playa", "playa
+  a 300 m", "junto al paseo marítimo", "zona de playa". Cerca, pero ni primera
+  línea ni con vistas declaradas.
+- \`none\` — el anuncio no menciona la playa, el mar ni el paseo marítimo. Es el
+  caso más habitual; no lo fuerces.
+
+**No confundas los grados.** "Vistas al mar" NO es \`frontline\`. "Cerca de la
+playa" NO es \`sea_view\`. Ante la duda entre dos grados, elige el MÁS BAJO (el
+más conservador) y cita la frase exacta en \`beach_evidence\`.
+
+### 2) Casco histórico (\`heritage_zone\`) — booleano
+
+\`true\` solo si el texto sitúa el inmueble en el **casco/centro histórico** de
+la ciudad (o zona catalogada/protegida): "casco histórico", "casco antiguo",
+"centro histórico", "ciudad vieja", "casco viejo", "zona histórica protegida".
+Es a la vez prestigio de ubicación y una posible complicación de licencias de
+reforma, por eso lo marcamos. Un "centro" o "zona céntrica" a secas NO es casco
+histórico: exige la referencia explícita a lo histórico/antiguo/protegido. En
+cualquier otro caso, \`false\`.
+
+### Evidencia obligatoria por cada señal
+
+Por CADA veredicto que no sea el valor por defecto DEBES aportar una cita
+literal del anuncio:
+- \`beach_evidence\` sostiene \`beach_proximity\` (obligatoria salvo \`none\`).
+- \`heritage_evidence\` sostiene \`heritage_zone\` (obligatoria si es \`true\`).
+Si no puedes citar nada para una señal, esa señal es \`none\`/\`false\`. Nunca
+afirmes primera línea, vistas o casco histórico sin una frase del texto que lo
+diga. \`evidence_source\` (\`beach_evidence_source\` / \`heritage_evidence_source\`)
+indica de qué portal sale la cita.
+
+### Varios anuncios del mismo inmueble
+
+Puede que te dé varios anuncios del mismo inmueble físico en portales distintos.
+Emite UN solo veredicto por señal para el inmueble: basta que UN anuncio afirme
+"primera línea" o "casco histórico" para marcarlo, citando ese anuncio concreto
+en la evidencia y su portal en el source.
+
+${ASSESSMENT_RULES}
+
+**Nota sobre la regla 2 anterior:** aquí "no lo sé / no se menciona" se expresa
+con \`none\` (proximidad a la playa) y \`false\` (casco histórico), NO con la
+cadena \`"unknown"\` — \`"unknown"\` no es un valor válido de estos campos y
+rompería el formato de salida.
+
+Formato de salida:
+{
+  "beach_proximity": "frontline" | "sea_view" | "near_beach" | "none",
+  "beach_evidence": "cita literal del anuncio, o \\"\\" si es none",
+  "beach_evidence_source": "portal del que sale la cita (p. ej. \\"fotocasa\\"), o null",
+  "heritage_zone": true | false,
+  "heritage_evidence": "cita literal del anuncio, o \\"\\" si es false",
+  "heritage_evidence_source": "portal del que sale la cita, o null",
+  "confidence": 0.0-1.0,
+  "reasoning": "una o dos frases en español"
+}`;
+
+  return { stable, volatile: propertyVolatile(vars) };
+}
+
+/**
  * #28 — extract: unstructured description → structured fields, per
  * deduplicated property.
  *
@@ -998,6 +1106,8 @@ export function buildSystemPrompt(
       return buildConditionPrompt(vars);
     case "redflags":
       return buildRedflagsPrompt(vars);
+    case "location":
+      return buildLocationPrompt(vars);
     case "extract":
       return buildExtractPrompt(vars);
     case "compare":

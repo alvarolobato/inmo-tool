@@ -499,6 +499,43 @@ describe("flagsFromAssessments (#152 review, must-fix 1 and 3)", () => {
     ]);
     expect(flags.map((f) => f.kind).sort()).toEqual(["caveat:occupied_illegally", "caveat:tenanted"]);
   });
+
+  // #388 location axis: graded beach proximity + heritage_zone boolean.
+  it("#388: maps each graded beach_proximity value to its neutral Spanish badge", () => {
+    expect(flagsFromAssessments([assessmentRow(1, { beach_proximity: "frontline" })])).toEqual([
+      { kind: "location:beach:frontline", label: "Primera línea", tone: "neutral" },
+    ]);
+    expect(flagsFromAssessments([assessmentRow(1, { beach_proximity: "sea_view" })])).toEqual([
+      { kind: "location:beach:sea_view", label: "Vistas al mar", tone: "neutral" },
+    ]);
+    expect(flagsFromAssessments([assessmentRow(1, { beach_proximity: "near_beach" })])).toEqual([
+      { kind: "location:beach:near_beach", label: "Cerca playa", tone: "neutral" },
+    ]);
+  });
+
+  it("#388: emits no badge for beach_proximity `none` or an unmapped value", () => {
+    expect(flagsFromAssessments([assessmentRow(1, { beach_proximity: "none" })])).toEqual([]);
+    expect(flagsFromAssessments([assessmentRow(1, { beach_proximity: "some_new_grade" })])).toEqual([]);
+  });
+
+  it("#388: emits the `Casco histórico` badge only when heritage_zone is strictly true", () => {
+    expect(flagsFromAssessments([assessmentRow(1, { heritage_zone: true })])).toEqual([
+      { kind: "location:heritage_zone", label: "Casco histórico", tone: "neutral" },
+    ]);
+    expect(flagsFromAssessments([assessmentRow(1, { heritage_zone: false })])).toEqual([]);
+    // Defensive: a truthy-but-not-`true` value must not manufacture a badge.
+    expect(flagsFromAssessments([assessmentRow(1, { heritage_zone: "true" })])).toEqual([]);
+  });
+
+  it("#388: a beachfront property in the casco histórico shows both location badges", () => {
+    const flags = flagsFromAssessments([
+      assessmentRow(1, { beach_proximity: "frontline", heritage_zone: true }),
+    ]);
+    expect(flags).toEqual([
+      { kind: "location:beach:frontline", label: "Primera línea", tone: "neutral" },
+      { kind: "location:heritage_zone", label: "Casco histórico", tone: "neutral" },
+    ]);
+  });
 });
 
 describe("loadFlags SQL shape (#152 review, must-fix 1 and 2)", () => {

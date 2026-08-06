@@ -1,8 +1,8 @@
 /**
  * Tool catalog lookup by flow.
  *
- * Only `chat` gets tools. The five assessment flows (occupancy, condition,
- * redflags, extract, compare) are single-shot structured-output tasks: they
+ * Only `chat` gets tools. The single-shot assessment flows (occupancy,
+ * condition, redflags, location, extract, compare) are structured-output tasks: they
  * read a listing the caller already loaded and return a fixed JSON shape.
  * Handing them a tool loop would add rounds, cost and non-determinism to a task
  * that has none of the ambiguity a tool loop exists to resolve.
