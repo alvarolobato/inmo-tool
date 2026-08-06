@@ -175,6 +175,58 @@ class TestDiscover:
         assert ids == []
 
 
+class TestLiveCaptureRegression:
+    """Issue #378 flagged Escogecasa as under-fetching ("only 1 listing").
+
+    Verified live 2026-08-06: discover()'s marker parse and pagination are
+    NOT the problem — they return the whole marker set a bbox yields. A
+    Madrid/Levante scope sees ~1-2 because Abanca's REO stock is concentrated
+    in Galicia/the north (a Madrid 30 km box genuinely returned 2 markers, an
+    A Coruna box 5, a wide Galicia box 48, all-Spain the ~100 cap). The low
+    count is real sparsity, not a dropped-results bug.
+
+    This guards that discover() returns EVERY residential marker on a real
+    multi-listing response (the fresh A Coruna capture), so a future regression
+    that silently drops markers is caught. See escogecasa.py's docstring."""
+
+    _EXPECTED = sorted(
+        [
+            "detalle-piso-en-venta-en-a-coruna-en-a-coruna/1017637/50959",
+            "detalle-piso-en-venta-en-a-coruna-en-a-coruna/9314155/50897",
+            "detalle-piso-en-venta-en-ferrol-en-a-coruna/28234/51002",
+            "detalle-vivienda-aislada-en-venta-en-a-capela-en-a-coruna/9310426/50286",
+            "detalle-piso-en-venta-en-valdovino-en-a-coruna/9313373/50901",
+        ]
+    )
+
+    def test_discover_returns_the_full_marker_set_not_one(self):
+        connector = EscogecasaConnector()
+        with patch(
+            "etl.connectors.escogecasa.requests.Session",
+            side_effect=_session_factory(_read("escogecasa_search_multi.html")),
+        ):
+            ids = connector.discover(
+                ConnectorScope(geography="43.36,-8.41,30"), throttle=lambda: None
+            )
+        assert ids == self._EXPECTED
+        assert len(ids) == 5  # not 1 — the whole set for this box
+
+    def test_discovered_prices_populate_for_every_marker(self):
+        connector = EscogecasaConnector()
+        with patch(
+            "etl.connectors.escogecasa.requests.Session",
+            side_effect=_session_factory(_read("escogecasa_search_multi.html")),
+        ):
+            connector.discover(
+                ConnectorScope(geography="43.36,-8.41,30"), throttle=lambda: None
+            )
+        prices = connector.discovered_prices()
+        assert len(prices) == 5
+        assert prices[
+            "detalle-piso-en-venta-en-a-coruna-en-a-coruna/1017637/50959"
+        ] == Decimal(480000)
+
+
 class TestNormalize:
     def test_matches_the_real_listing_values(self):
         n = _normalize_full()

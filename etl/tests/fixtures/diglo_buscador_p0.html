@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<!--
+  Trimmed from a LIVE digloservicer.com buscador page captured 2026-08-06:
+    https://digloservicer.com/venta-pisos/madrid?page=0
+  The province buscador returns the whole province's active stock (all
+  property types) six cards per page, paginated with ?page=N. Only the
+  listing-card anchors are kept, plus a header count, a nav link (no
+  refcode), a non-residential card, and a cross-province "destacados" card —
+  all of which discover() must filter out. Refcodes are real.
+-->
+<html lang="es">
+<head><title>Viviendas de banco en venta en Madrid | Diglo</title></head>
+<body>
+<nav><a href="/venta-pisos/cualquiera">Buscar</a></nav>
+<h1 class="results-count">65 inmuebles de banco en venta en la provincia de Madrid</h1>
+
+<div class="listing-grid views-infinite-scroll-content-wrapper">
+  <div class="item-image">
+    <a href="/venta-pisos/madrid/madrid/efe0000200055" id="enlaceimagen" title="Piso Madrid">
+      <img alt="EFE0000200055" src="/img/a.jpg" />
+    </a>
+  </div>
+  <div class="item-image">
+    <a href="/venta-casas/madrid/villaviciosa-odon/ib00100025555" id="enlaceimagen" title="Casa Villaviciosa">
+      <img alt="IB00100025555" src="/img/b.jpg" />
+    </a>
+  </div>
+  <div class="item-image">
+    <a href="/venta-pisos/madrid/madrid/efe0000200057" id="enlaceimagen" title="Piso Madrid">
+      <img alt="EFE0000200057" src="/img/c.jpg" />
+    </a>
+  </div>
+  <!-- non-residential: a local, must be filtered out -->
+  <div class="item-image">
+    <a href="/venta-locales/madrid/madrid/ib00100026252" id="enlaceimagen" title="Local Madrid">
+      <img alt="IB00100026252" src="/img/d.jpg" />
+    </a>
+  </div>
+  <!-- cross-province "destacados" card: Murcia, out of the Madrid scope -->
+  <div class="item-image destacado">
+    <a href="/venta-pisos/murcia/murcia/ib00100045170" id="enlaceimagen" title="Destacado Murcia">
+      <img alt="IB00100045170" src="/img/e.jpg" />
+    </a>
+  </div>
+</div>
+
+<ul class="pager__items"><li class="pager__item"><a href="?page=1">Siguiente</a></li></ul>
+</body>
+</html>

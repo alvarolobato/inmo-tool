@@ -13,18 +13,28 @@ Santander's portal. Do not point this connector at diglo.com.
 robots.txt (readable, HTTP 200 — no Incapsula/Akamai wall, unlike Sareb
 #121 / Altamira #122): a stock Drupal robots.txt. Only `/core/`,
 `/profiles/` and `/README.txt` are disallowed; every listing path
-(`/venta-pisos/...`, `/venta-casas/...`) is allowed, and it advertises its
-own sitemap:
+(`/venta-pisos/...`, `/venta-casas/...`) is allowed.
 
-    Sitemap: https://digloservicer.com/sitemap.xml
+## Discovery: the province buscador, NOT the sitemap (issue #378, 2026-08-06)
 
-Discovery uses that sitemap — a single national document (2,743 <loc>
-entries, of which ~987 are property detail URLs; the rest are category /
-facet / editorial pages). The province search pages (`/venta-pisos/
-cualquiera`) render only ~6 cards server-side and load the rest via Drupal
-Views AJAX, so the sitemap is both the sanctioned and the far cleaner
-enumeration route — one request yields the whole catalogue with each
-property's type/province/municipality/reference-code already in the URL.
+The original spike (#117) enumerated via `sitemap.xml`, on the belief it was
+the sanctioned, complete, single-request route. **That was wrong, and it is
+why this connector shipped 0 priced / all-grade-F on live data.** Re-verified
+2026-08-06: the sitemap is badly STALE. 5 of 6 randomly sampled residential
+detail URLs from it **302-redirect to the homepage** (the listing was
+withdrawn); the live homepage/buscador, meanwhile, links ~915 currently-active
+listings whose reference codes **do not appear in the sitemap at all**. So a
+sitemap sweep returned a handful of dead URLs; `fetch_detail` silently
+followed each 302 to the homepage and parsed *that* (whose `utag_data` is the
+empty placeholder) — an "active" listing with no price and no fields.
+
+Discovery now walks the **province buscador** (`/venta-pisos/<province>?page=N`,
+paginated with `?page`), which is server-rendered and returns the province's
+whole active stock across every property type (six cards per page). Every
+card links a LIVE detail URL (verified HTTP 200). `fetch_detail` also guards
+the residual case: a URL that 302-redirects to the site root is a listing
+withdrawn between discovery and fetch, raised as `ListingUnavailableError`
+(a clean skip) rather than parsed as a priceless homepage.
 
 A detail URL's shape (see diglo_mapping.parse_listing_path):
     /venta-pisos/<province>/<municipality>/<refcode>
@@ -69,7 +79,6 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import urlsplit
-from xml.etree import ElementTree
 
 import requests
 from bs4 import BeautifulSoup
@@ -79,6 +88,7 @@ from etl.connectors.base import (
     Connector,
     ConnectorError,
     ConnectorScope,
+    ListingUnavailableError,
     RawListing,
     Throttle,
 )
@@ -98,13 +108,27 @@ from etl.connectors.geography import (
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://digloservicer.com"
-_SITEMAP_URL = f"{_BASE_URL}/sitemap.xml"
 _REQUEST_TIMEOUT_SECONDS = 30
 _USER_AGENT = (
     "inmo-tool/0.1 (personal real-estate research tool; "
     "contact via github.com/alvarolobato/inmo-tool)"
 )
-_SITEMAP_NS = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
+
+# The province buscador is the LIVE, sanctioned enumeration route. Its path
+# type-segment (`venta-pisos`) is only an entry point: the server returns the
+# whole province's active stock across every property type (confirmed live
+# 2026-08-06 — a Madrid `venta-pisos` page 0 carries casas/locales/oficinas
+# cards too), six cards per page, paginated with `?page=N`. discover() walks
+# `?page=0,1,2,…` until a page yields no new listings.
+_BUSCADOR_PATH = "/venta-{type_seg}/{province}"
+# One request per page; a province tops out around a dozen pages. This guard
+# only trips on a pathological server that keeps yielding fresh ids forever.
+_MAX_PAGES = 60
+# A Diglo detail/listing anchor: `/venta-<type>/…/<refcode>`. The buscador
+# cards use `<a href="/venta-pisos/madrid/madrid/efe0000200055">`; nav/facet
+# links (`/venta-pisos/cualquiera`) have no trailing refcode and are dropped
+# by parse_listing_path returning refcode=None.
+_HREF_RE = re.compile(r'href="(/venta-[^"?#]+)"')
 
 # The subject property's own print-summary block. It renders the subject's
 # price and "78 m² 2 Hab. 1 Baño/s" icon stats and is NOT part of the
@@ -127,16 +151,32 @@ def _get(url: str, throttle: Throttle) -> requests.Response:
     return response
 
 
-def _sitemap_locs(xml_text: str) -> list[str]:
-    try:
-        root = ElementTree.fromstring(xml_text)
-    except ElementTree.ParseError as exc:
-        raise ConnectorError(f"diglo: sitemap is not valid XML: {exc}") from exc
-    return [
-        el.text.strip()
-        for el in root.iter(f"{_SITEMAP_NS}loc")
-        if el.text and el.text.strip()
-    ]
+def buscador_listing_paths(html: str, province: str) -> list[str]:
+    """Residential in-province listing paths from one buscador results page.
+
+    Reads every `/venta-…` anchor, keeps those whose tail is a real reference
+    code (`parse_listing_path` returns refcode) AND that are residential
+    (`pisos`/`casas`) AND in `province` — so nav/facet links (no refcode),
+    non-residential stock (locales/garajes), and the cross-province
+    "destacados" cards a province page mixes in are all dropped. Order-
+    preserving and de-duplicated within the page. Pure; no I/O.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for href in _HREF_RE.findall(html):
+        parts = parse_listing_path(href)
+        if not parts["refcode"]:
+            continue
+        if not is_residential(parts["type_segment"]):
+            continue
+        if parts["province_slug"] != province:
+            continue
+        path = urlsplit(href).path.lstrip("/")
+        if path in seen:
+            continue
+        seen.add(path)
+        out.append(path)
+    return out
 
 
 def extract_utag_data(html: str) -> dict[str, Any]:
@@ -266,8 +306,14 @@ def _surface_built(text: str) -> int | None:
     match = re.search(r"superficie construida de\s*([\d.,]+)\s*m", text, re.IGNORECASE)
     if match:
         return _es_int(match.group(1))
-    # Fallback: the print-summary "78 m²" figure.
-    match = re.search(r"([\d.,]+)\s*m[²2]", text)
+    # The print-summary icon stat, "239 m²".
+    match = re.search(r"([\d.,]+)\s*m[²2]\b", text)
+    if match:
+        return _es_int(match.group(1))
+    # Description-only pages spell it out ("de 239,00 metros cuadrados") with
+    # no "m²" glyph — the print-sheet is absent on some listings, so this is
+    # the only surface figure there (issue #378).
+    match = re.search(r"([\d.,]+)\s*metros?\s+cuadrados", text, re.IGNORECASE)
     return _es_int(match.group(1)) if match else None
 
 
@@ -297,15 +343,14 @@ class DigloConnector(Connector):
     # servicer portal we want to be a quiet guest on.
     rate_limit_per_minute = 12
 
-    # The national sitemap is the site's own complete, single-request
-    # enumeration and robots.txt is permissive (the buscador even exposes a
-    # cross-checkable per-province count) — the same clean full-sweep shape
-    # BuildingCenter (#118) and Cimenta2 (#136) earned True on. discover()
-    # returns every active property for its scope every sweep, so a listing
-    # absent for the withdrawal threshold is a genuine withdrawal, not a
-    # pagination artefact. Guarded by discover() raising (not returning [])
-    # on an empty or unrecognised sitemap, so a fetch glitch can't read as
-    # "the whole catalogue was withdrawn".
+    # The province buscador is paginated to exhaustion (`?page=0,1,2,…` until
+    # a page yields nothing), so one sweep sees the province's whole active
+    # stock — a listing absent for the withdrawal threshold is a genuine
+    # withdrawal, not a pagination artefact. Guarded by discover() raising
+    # (not returning []) when page 0 carries no recognisable listing cards, so
+    # a fetch glitch / markup change can't read as "the whole catalogue was
+    # withdrawn". (Before #378 this rode on sitemap.xml, which turned out to
+    # be stale — see the module docstring.)
     discovers_full_inventory = True
 
     def scope_key(self, scope: ConnectorScope) -> str | None:
@@ -350,60 +395,64 @@ class DigloConnector(Connector):
                 "defaulting to a hardcoded province (issue #71)"
             )
 
-        response = _get(_SITEMAP_URL, throttle)
-        locs = _sitemap_locs(response.text)
-        if not locs:
-            raise ConnectorError(
-                "diglo discover: sitemap had zero <loc> entries — refusing to "
-                "report an empty catalogue (would read as a mass withdrawal)"
-            )
-
-        recognised_detail_urls = 0
+        base_path = _BUSCADOR_PATH.format(type_seg="pisos", province=province)
         external_ids: list[str] = []
         seen: set[str] = set()
-        skipped_non_residential = 0
-        for loc in locs:
-            parts = parse_listing_path(loc)
-            if not parts["refcode"]:
-                continue
-            recognised_detail_urls += 1
-            if not is_residential(parts["type_segment"]):
-                skipped_non_residential += 1
-                continue
-            if parts["province_slug"] != province:
-                continue
-            # external_id is the URL path, not the bare refcode: the detail
-            # URL needs the full type/province/municipality slug and cannot
-            # be rebuilt from the refcode alone. The refcode is carried
-            # through as reference_code (#72) so a re-slugged listing stays
-            # recoverable by the dedup engine even if its path changes.
-            path = urlsplit(loc).path.lstrip("/")
-            if path in seen:
-                continue
-            seen.add(path)
-            external_ids.append(path)
-
-        if recognised_detail_urls == 0:
-            raise ConnectorError(
-                "diglo discover: sitemap had entries but none matched the "
-                "property-detail URL shape — the URL scheme likely changed; "
-                "refusing to report an empty catalogue"
-            )
+        pages_walked = 0
+        for page in range(_MAX_PAGES):
+            url = f"{_BASE_URL}{base_path}?page={page}"
+            response = _get(url, throttle)
+            pages_walked += 1
+            page_paths = buscador_listing_paths(response.text, province)
+            if page == 0 and not page_paths:
+                # The province's first buscador page carries no residential
+                # listing card. Distinguish "the buscador markup changed / this
+                # isn't a results page" (raise, so an empty result can't read
+                # as a mass withdrawal for a discovers_full_inventory=True
+                # connector) from "a valid results page that is genuinely empty
+                # for this province" (a small province with no Diglo stock —
+                # return []). The results grid / count header is the tell.
+                text = response.text
+                if "views-infinite-scroll" not in text and "inmueble" not in text:
+                    raise ConnectorError(
+                        "diglo discover: first buscador page did not look like a "
+                        f"results page ({url}) — the buscador markup or path "
+                        "scheme likely changed; refusing to report an empty "
+                        "catalogue"
+                    )
+                break
+            new = [p for p in page_paths if p not in seen]
+            if not new:
+                break  # no fresh listings on this page — pagination exhausted
+            for path in new:
+                seen.add(path)
+                external_ids.append(path)
 
         logger.info(
-            "diglo discover: province=%s sitemap had %d entries, %d property "
-            "URLs, %d residential in-province kept, %d non-residential skipped",
+            "diglo discover: province=%s walked %d buscador page(s), %d "
+            "residential in-province listings kept",
             province,
-            len(locs),
-            recognised_detail_urls,
+            pages_walked,
             len(external_ids),
-            skipped_non_residential,
         )
         return sorted(external_ids)
 
     def fetch_detail(self, external_id: str, throttle: Throttle) -> RawListing:
         url = f"{_BASE_URL}/{external_id.lstrip('/')}"
         response = _get(url, throttle)
+        # A withdrawn Diglo listing 302-redirects to the site root; requests
+        # follows it, so `response.url` ends at `/` and `response.text` is the
+        # homepage (empty utag_data placeholder). Parsing that yields a
+        # priceless "active" listing — exactly the 0-priced / grade-F bug this
+        # connector shipped (#378). Treat it as a listing removed between
+        # discovery and fetch: a clean skip, not a broken active listing.
+        final_url = getattr(response, "url", None)
+        if final_url is not None and urlsplit(final_url).path.strip("/") == "":
+            raise ListingUnavailableError(
+                f"diglo fetch_detail: {url} redirected to the site root "
+                f"({final_url}) — the listing was withdrawn between discovery "
+                "and fetch"
+            )
         html = response.text
         soup = BeautifulSoup(html, "html.parser")
         og = _open_graph(soup)
@@ -443,10 +492,22 @@ class DigloConnector(Connector):
             lambda: _decimal_or_none(_first_price(summary_text)),
             field="current_price",
         )
+        # Try BOTH subject sources, not `description or summary_text`: the
+        # `.product-print-sheet` icon-stat ("239 m²") and the description
+        # ("de 239,00 metros cuadrados") each carry the surface on different
+        # listings, and picking only one silently dropped m2_built on pages
+        # where the chosen source lacked it (the 0-priced batch's grade-F
+        # driver, alongside price — issue #378). Both are subject-scoped, so
+        # neither reads the similar-listings carousel.
         m2_built = first_present(
             lambda: (
-                Decimal(_surface_built(desc_for_surface))
-                if _surface_built(desc_for_surface) is not None
+                Decimal(_surface_built(summary_text))
+                if _surface_built(summary_text) is not None
+                else None
+            ),
+            lambda: (
+                Decimal(_surface_built(description))
+                if description and _surface_built(description) is not None
                 else None
             ),
             field="m2_built",
