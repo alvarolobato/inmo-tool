@@ -28,9 +28,10 @@ import { resetPool } from "@/lib/db-write";
 // #310 (D-059) appended five params after WARN_CAVEAT_CODES ($6): occupancy
 // ($7), the occupied-statuses list ($8), condition ($9), renovation ($10), and
 // min-below-market ($11). #379 appends includeRejected ($12), false by default
-// (rejected candidates hidden). This is the "all filters off" tail every
+// (rejected candidates hidden). #386 appends caveat ($13) and redflagType
+// ($14), both null (off) by default. This is the "all filters off" tail every
 // existing listCandidates assertion carries now.
-const NO_FILTER_TAIL = [null, OCCUPIED_STATUSES, null, null, null, false] as const;
+const NO_FILTER_TAIL = [null, OCCUPIED_STATUSES, null, null, null, false, null, null] as const;
 
 /** Builds a cursor the same way `listCandidates` does internally, purely for test setup — tests otherwise treat cursors as opaque and decode `nextCursor` to assert on it. */
 function testCursor(score: number | null, id: number): string {
@@ -143,6 +144,47 @@ describe("listCandidates", () => {
     mockPoolQuery.mockClear();
     await listCandidates(7, { source: "   " });
     expect(mockPoolQuery.mock.calls[0][1]).toEqual([7, null, null, 31, null, WARN_CAVEAT_CODES, ...NO_FILTER_TAIL]);
+  });
+
+  it("passes the caveat filter as $13 and gates on the derived caveats array (#386)", async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [] });
+
+    await listCandidates(7, { caveat: "venta_deuda" });
+    const [sql, params] = mockPoolQuery.mock.calls[0];
+    // $13 carries the caveat code; the outer filter reads ranked.caveats (the
+    // CTE's per-axis column), never a separate JOIN (D-059).
+    expect(params[12]).toBe("venta_deuda");
+    expect(params[13]).toBeNull();
+    expect(sql).toContain("$13 = ANY(ranked.caveats)");
+    // The CTE derives the caveats array itself.
+    expect(sql).toContain("AS caveats");
+  });
+
+  it("passes the redflagType filter as $14 and gates on the derived redflag_types array (#386)", async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [] });
+
+    await listCandidates(7, { redflagType: "unfinished_construction" });
+    const [sql, params] = mockPoolQuery.mock.calls[0];
+    expect(params[12]).toBeNull();
+    expect(params[13]).toBe("unfinished_construction");
+    expect(sql).toContain("$14 = ANY(ranked.redflag_types)");
+    expect(sql).toContain("AS redflag_types");
+  });
+
+  it("combines caveat + redflagType with an existing #310 filter in one param set (#386)", async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [] });
+
+    await listCandidates(7, {
+      occupancy: "occupied",
+      caveat: "nuda_propiedad",
+      redflagType: "embargo",
+    });
+    const params = mockPoolQuery.mock.calls[0][1];
+    // $7 occupancy, $13 caveat, $14 redflagType all set together — the filters
+    // compose, none clobbers another.
+    expect(params[6]).toBe("occupied");
+    expect(params[12]).toBe("nuda_propiedad");
+    expect(params[13]).toBe("embargo");
   });
 
   it("rejects a malformed cursor rather than silently resetting to page 1", async () => {
