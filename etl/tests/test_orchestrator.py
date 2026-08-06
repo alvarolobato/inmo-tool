@@ -351,6 +351,132 @@ class TestOrchestratorEndToEnd:
             pg_conn.commit()
 
 
+class TestExtractionQualitySummary:
+    """Issue #171: the run-level extraction-quality aggregate + degradation trend
+    written onto connector_run_results.extraction_quality_summary, exercised
+    end-to-end against real Postgres (the DummyConnector's listings all populate
+    the same four canonical fields, so each scores exactly grade C / 0.5 — see
+    etl.extraction_quality's weights)."""
+
+    @staticmethod
+    def _summary(row_value):
+        # psycopg2 returns JSONB as a parsed dict; tolerate a str just in case a
+        # future adapter change hands back raw JSON.
+        if isinstance(row_value, str):
+            return json.loads(row_value)
+        return row_value
+
+    def _seed_prior_run(self, conn, connector_name, mean_score, started_at):
+        """A prior healthy connector_run_results row carrying a summary — the
+        trailing baseline the current run is compared against."""
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO connector_runs (trigger, started_at, status) "
+                "VALUES ('test', %s, 'success') RETURNING id",
+                (started_at,),
+            )
+            prior_run_id = cur.fetchone()[0]
+            cur.execute(
+                """
+                INSERT INTO connector_run_results
+                    (run_id, connector_name, started_at, finished_at, status,
+                     discovered_count, fetched_count, error_count,
+                     extraction_quality_summary)
+                VALUES (%s, %s, %s, %s, 'ok', 3, 3, 0, %s)
+                """,
+                (
+                    prior_run_id,
+                    connector_name,
+                    started_at,
+                    started_at,
+                    json.dumps(
+                        {
+                            "n": 3,
+                            "mean_score": mean_score,
+                            "grade_histogram": {"A": 3, "B": 0, "C": 0, "F": 0},
+                            "low_quality_count": 0,
+                            "weights_version": 1,
+                        }
+                    ),
+                ),
+            )
+        conn.commit()
+        return prior_run_id
+
+    def test_run_records_aggregate_and_no_baseline_on_first_run(self, pg_conn):
+        _apply_schema(pg_conn)
+        connector = DummyConnector(name="test-eq-connector")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT extraction_quality_summary FROM connector_run_results "
+                    "WHERE run_id = %s AND connector_name = %s",
+                    (run_id, connector.name),
+                )
+                summary = self._summary(cur.fetchone()[0])
+
+            assert summary is not None
+            assert summary["n"] == 3
+            assert summary["mean_score"] == 0.5
+            assert summary["grade_histogram"] == {"A": 0, "B": 0, "C": 3, "F": 0}
+            assert summary["low_quality_count"] == 3
+            assert summary["weights_version"] == 1
+            # First run for this connector — nothing to compare against yet, so
+            # never flagged degraded despite the low absolute quality.
+            assert summary["trend"]["baseline_n_runs"] == 0
+            assert summary["trend"]["baseline_mean"] is None
+            assert summary["trend"]["degraded"] is False
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+
+    def test_silent_degradation_flagged_against_prior_healthy_runs(self, pg_conn):
+        _apply_schema(pg_conn)
+        connector = DummyConnector(name="test-eq-degrade")
+        # Two prior healthy runs averaging 0.9 — the DummyConnector's 0.5 is a
+        # 40pp drop, well past the degradation threshold, even though this run
+        # ends status='ok' with zero errors (the #171 failure mode).
+        prior_ids = [
+            self._seed_prior_run(
+                pg_conn, connector.name, 0.9, datetime(2026, 8, 1, tzinfo=timezone.utc)
+            ),
+            self._seed_prior_run(
+                pg_conn, connector.name, 0.9, datetime(2026, 8, 2, tzinfo=timezone.utc)
+            ),
+        ]
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, extraction_quality_summary "
+                    "FROM connector_run_results "
+                    "WHERE run_id = %s AND connector_name = %s",
+                    (run_id, connector.name),
+                )
+                status, raw = cur.fetchone()
+                summary = self._summary(raw)
+
+            assert status == "ok"  # nothing failed — the whole point
+            trend = summary["trend"]
+            assert trend["baseline_n_runs"] == 2
+            assert trend["baseline_mean"] == 0.9
+            assert trend["delta"] == -0.4
+            assert trend["degraded"] is True
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM connector_runs WHERE id = ANY(%s)", (prior_ids,)
+                )
+            pg_conn.commit()
+
+
 class TestConnectorConfig:
     """Issue #99: connector_config's disable/override layer on top of #71's
     union-of-active-profiles default."""

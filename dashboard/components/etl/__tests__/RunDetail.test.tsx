@@ -81,6 +81,15 @@ const sampleConnectors = [
     geography_scope: [
       { scope_key: "madrid", center: [40.4, -3.7] as [number, number], radius_km: 10, rooms: null, outcome: "crawled" },
     ],
+    // Healthy run with a stable trend (small +delta, not degraded).
+    extraction_quality_summary: {
+      n: 28,
+      mean_score: 0.88,
+      grade_histogram: { A: 20, B: 6, C: 2, F: 0 },
+      low_quality_count: 2,
+      weights_version: 1,
+      trend: { baseline_mean: 0.86, baseline_n_runs: 4, delta: 0.02, degraded: false },
+    },
   },
   {
     id: 2,
@@ -95,6 +104,16 @@ const sampleConnectors = [
     error_msg: null,
     failure_classification: null,
     geography_scope: null,
+    // status='ok', zero errors — but extraction quality silently dropped vs the
+    // connector's recent baseline: exactly the issue #171 failure mode.
+    extraction_quality_summary: {
+      n: 17,
+      mean_score: 0.6,
+      grade_histogram: { A: 2, B: 3, C: 7, F: 5 },
+      low_quality_count: 12,
+      weights_version: 1,
+      trend: { baseline_mean: 0.9, baseline_n_runs: 5, delta: -0.3, degraded: true },
+    },
   },
   {
     id: 3,
@@ -111,6 +130,8 @@ const sampleConnectors = [
     geography_scope: [
       { scope_key: "sevilla", center: null, radius_km: null, rooms: null, outcome: "failed" },
     ],
+    // A failed run produced no listings — no quality to aggregate.
+    extraction_quality_summary: null,
   },
 ];
 
@@ -129,6 +150,7 @@ const newStatusConnectors = [
     error_msg: "circuit breaker open after 8/10 errors",
     failure_classification: "structure_change",
     geography_scope: null,
+    extraction_quality_summary: null,
   },
   {
     id: 11,
@@ -143,6 +165,7 @@ const newStatusConnectors = [
     error_msg: "disabled via connector_config",
     failure_classification: null,
     geography_scope: null,
+    extraction_quality_summary: null,
   },
 ];
 
@@ -314,6 +337,31 @@ describe("RunDetail component", () => {
     expect(idealistaGeo.textContent).toContain("Error");
     // A connector with no recorded scope shows no geography row.
     expect(screen.queryByTestId("connector-row-milanuncios-geo")).not.toBeInTheDocument();
+  });
+
+  it("flags a silently-degraded connector and leaves a stable one unflagged (#171)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ run: successRun, connectors: sampleConnectors }),
+    });
+    render(<RunDetail runId="1" />);
+    await waitFor(() => { expect(screen.getByTestId("connector-stats")).toBeInTheDocument(); });
+
+    // milanuncios ran status='ok' with zero errors, but its extraction quality
+    // dropped 30pp vs its baseline — the degraded badge is what makes that
+    // visible. This is the whole point of #171.
+    const degraded = screen.getByTestId("connector-quality-trend-milanuncios");
+    expect(degraded.textContent).toContain("Calidad");
+    expect(degraded.textContent).toContain("30 pp");
+
+    // fotocasa is healthy and stable — it must NOT carry the red degraded
+    // badge. Its quality cell still renders (grade + percent).
+    const fotocasaTrend = screen.getByTestId("connector-quality-trend-fotocasa");
+    expect(fotocasaTrend.textContent).not.toContain("Calidad");
+    expect(screen.getByTestId("connector-quality-fotocasa").textContent).toContain("88 %");
+
+    // idealista failed and produced no listings — an em dash, no fabricated 0%.
+    expect(screen.getByTestId("connector-quality-idealista").textContent).toBe("—");
   });
 
   it("renders circuit_open and skipped as distinct states", async () => {

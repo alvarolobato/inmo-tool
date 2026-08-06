@@ -63,6 +63,40 @@ export interface GeographyScopeEntry {
   outcome: string;
 }
 
+/**
+ * Issue #171 (D-086): the run-over-run degradation trend attached to a run's
+ * extraction-quality summary. `baseline_mean` is the trailing average of the
+ * connector's recent healthy runs (null until it has enough history);
+ * `degraded` is true only when this run's mean fell meaningfully below it.
+ */
+export interface ExtractionQualityTrend {
+  baseline_mean: number | null;
+  baseline_n_runs: number;
+  /** current mean_score − baseline_mean; null when there's no baseline yet. */
+  delta: number | null;
+  degraded: boolean;
+}
+
+/**
+ * Issue #171 (D-086): the run-level aggregate of the per-listing
+ * extraction-quality grades (#80/D-084) of the listings THIS run produced —
+ * `connector_run_results.extraction_quality_summary` (JSONB). The signal that
+ * makes a silently-degrading connector (status='ok', zero fetch errors, but
+ * average extraction completeness quietly dropping) visible in the monitor.
+ * Null on a run that produced no scored listings.
+ */
+export interface ExtractionQualitySummary {
+  /** How many scored listings this run produced. */
+  n: number;
+  /** Mean weighted-completeness fraction (0..1) across those listings. */
+  mean_score: number;
+  grade_histogram: { A: number; B: number; C: number; F: number };
+  /** Listings graded C or F — the ones worth an operator's attention. */
+  low_quality_count: number;
+  weights_version: number | null;
+  trend?: ExtractionQualityTrend;
+}
+
 /** One connector's outcome within a run — a row of `connector_run_results`. */
 export interface ConnectorRunResult {
   id: number;
@@ -104,4 +138,9 @@ export interface ConnectorRunResult {
    * ran with zero scopes.
    */
   geography_scope: GeographyScopeEntry[] | null;
+  /**
+   * Issue #171 (D-086): the run-level extraction-quality aggregate + trend, or
+   * null on a run that produced no scored listings.
+   */
+  extraction_quality_summary: ExtractionQualitySummary | null;
 }

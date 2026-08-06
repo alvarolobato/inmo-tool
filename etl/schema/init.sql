@@ -1382,6 +1382,44 @@ UPDATE connector_run_results
    AND status IN ('failed', 'circuit_open');
 
 -- ============================================================
+-- Run-level extraction-quality aggregate + trend (issue #171, D-086)
+-- ============================================================
+--
+-- The per-listing extraction-quality grade (issue #80, D-084) lives on
+-- listing.raw_extra.extraction_quality — the right signal for a human
+-- inspecting ONE property, but it cannot answer the question an operator
+-- watching the monitor has: is a connector's extraction quality DEGRADING in
+-- aggregate, run over run, before it becomes a wall of individually-thin
+-- listings? A connector can partially break (a site renames one JSON key, one
+-- selector goes stale) and — thanks to first_present()'s deliberate
+-- fallback-chain design (#77) — keep reporting status='ok' with zero fetch
+-- errors while more listings quietly fall through to a weaker fallback. Nothing
+-- fails, nothing trips the breaker, nothing is queryable.
+--
+-- This column is that queryable signal. At _record_connector_result time the
+-- orchestrator folds the per-listing scores of exactly the listings THIS run
+-- produced (source = connector, last_fetched_at >= run start) into one summary
+-- and attaches a run-over-run degradation trend vs the connector's trailing
+-- baseline. It REUSES #80's stored scores — it never recomputes or redefines
+-- the scoring. Shape:
+--     {"n": <int>,
+--      "mean_score": <weighted-completeness fraction 0..1>,
+--      "grade_histogram": {"A": n, "B": n, "C": n, "F": n},
+--      "low_quality_count": <int, grades C+F>,
+--      "weights_version": <int | null>,
+--      "trend": {"baseline_mean": <0..1 | null>, "baseline_n_runs": <int>,
+--                "delta": <current - baseline | null>, "degraded": <bool>}}
+-- NULL — not an empty object — on a run that produced no scored listings (a
+-- failed/empty run, or one that only skip-if-seen'd), so
+-- `WHERE extraction_quality_summary IS NOT NULL` stays a usable filter and a
+-- fetch-nothing run never fabricates a quality number. Additive + idempotent
+-- (ADD COLUMN IF NOT EXISTS); old rows stay NULL and are naturally re-populated
+-- as each connector runs again — no backfill query is possible or wanted (the
+-- per-run listing set a historical row aggregated is not reconstructable after
+-- the fact, since listing.last_fetched_at has since moved on).
+ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS extraction_quality_summary JSONB;
+
+-- ============================================================
 -- Connector freshness cadence (issue #295, D-050)
 -- ============================================================
 --
