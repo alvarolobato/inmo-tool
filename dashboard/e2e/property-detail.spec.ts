@@ -25,6 +25,18 @@ function buildPool(): Pool {
 const MADRID_SOL: [number, number] = [40.4168, -3.7038];
 const NAME_PREFIX = "e2e-property-detail-";
 
+// Materially-different advert bodies across two sources (issue #360): the
+// detail page must show BOTH, per-source. Fotocasa is the longer (leads),
+// milanuncios carries genuinely different text (not a substring).
+const FOTOCASA_DESC =
+  "Amplio piso exterior en Chamberí, totalmente reformado, con tres dormitorios, " +
+  "dos baños y una cocina office equipada. Mucha luz natural durante todo el día.";
+const MILANUNCIOS_DESC =
+  "Inmueble en construcción; la edificación se encuentra parcialmente ejecutada. " +
+  "Se vende en su estado actual, pendiente de finalización de obra.";
+// Single-source advert for the not-yet-deduplicated property.
+const SINGLE_DESC = "Estudio luminoso junto a metro Goya, ideal para inversión en alquiler.";
+
 let pool: Pool;
 let dbAvailable = false;
 let profileId: number;
@@ -78,11 +90,21 @@ test.beforeAll(async () => {
     status: string,
     photoUrls: string[],
     lastSeenAt: string | null = null,
+    description: string | null = null,
   ): Promise<number> {
     const result = await pool.query<{ id: number }>(
-      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, photo_urls, last_seen_at)
-       VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7) RETURNING id`,
-      [propId, source, `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`, status, price, photoUrls, lastSeenAt],
+      `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, photo_urls, last_seen_at, description)
+       VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7, $8) RETURNING id`,
+      [
+        propId,
+        source,
+        `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`,
+        status,
+        price,
+        photoUrls,
+        lastSeenAt,
+        description,
+      ],
     );
     return result.rows[0].id;
   }
@@ -146,6 +168,7 @@ test.beforeAll(async () => {
     "active",
     [`https://example.com/${NAME_PREFIX}fotocasa-1.jpg`, `https://example.com/${NAME_PREFIX}fotocasa-2.jpg`],
     staleLastSeen,
+    FOTOCASA_DESC,
   );
   const milanunciosListingId = await insertListing(
     dedupedPropertyId,
@@ -154,6 +177,7 @@ test.beforeAll(async () => {
     "withdrawn",
     [`https://example.com/${NAME_PREFIX}milanuncios-1.jpg`],
     recentWithdrawnSeen,
+    MILANUNCIOS_DESC,
   );
   await pool.query(
     `INSERT INTO listing_price_history (listing_id, observed_at, price) VALUES
@@ -170,7 +194,7 @@ test.beforeAll(async () => {
 
   // Not-yet-deduplicated property: exactly one listing (EC-3).
   singleListingPropertyId = await insertProperty(`${NAME_PREFIX}Calle Goya, Madrid`);
-  await insertListing(singleListingPropertyId, "fotocasa", 400000, "active", []);
+  await insertListing(singleListingPropertyId, "fotocasa", 400000, "active", [], null, SINGLE_DESC);
   await markMatched(singleListingPropertyId);
 
   // Extraction-quality (#80): a richly-extracted property (grade A) vs a
@@ -324,6 +348,52 @@ test("renders correctly for non-deduplicated property", async ({ page }) => {
   await page.goto(`/profiles/${profileId}/properties/${singleListingPropertyId}`);
   await assertNoErrorSurface(page);
   await expect(page.locator('[data-testid="linked-listing-item"]')).toHaveCount(1);
+});
+
+test("shows advert descriptions per-source when they differ materially (#360)", async ({
+  page,
+}) => {
+  skipIfNoDb(test);
+
+  await page.goto(`/profiles/${profileId}/properties/${dedupedPropertyId}`);
+  await expect(page.getByTestId("property-detail-page")).toBeVisible();
+  await assertNoErrorSurface(page);
+
+  const description = page.getByTestId("property-description");
+  await expect(description).toBeVisible();
+  // Both sources' materially-different bodies are shown, each under its
+  // source label (fotocasa is longer → leads).
+  const blocks = page.locator('[data-testid="property-description-source"]');
+  await expect(blocks).toHaveCount(2);
+  await expect(description).toContainText("Amplio piso exterior en Chamberí");
+  await expect(description).toContainText("Inmueble en construcción");
+});
+
+test("shows a single advert description for a non-deduplicated property (#360)", async ({
+  page,
+}) => {
+  skipIfNoDb(test);
+
+  await page.goto(`/profiles/${profileId}/properties/${singleListingPropertyId}`);
+  await expect(page.getByTestId("property-detail-page")).toBeVisible();
+  await assertNoErrorSurface(page);
+
+  const description = page.getByTestId("property-description");
+  await expect(description).toBeVisible();
+  await expect(description).toContainText("Estudio luminoso junto a metro Goya");
+  // Single body → no per-source blocks.
+  await expect(page.locator('[data-testid="property-description-source"]')).toHaveCount(0);
+});
+
+test("omits the description section when no listing has advert text (#360)", async ({ page }) => {
+  skipIfNoDb(test);
+
+  // richQualityProperty's listing was seeded with no description → the
+  // "Descripción" section must be absent, not an empty box.
+  await page.goto(`/profiles/${profileId}/properties/${richQualityPropertyId}`);
+  await expect(page.getByTestId("property-detail-page")).toBeVisible();
+  await assertNoErrorSurface(page);
+  await expect(page.getByTestId("property-description")).toHaveCount(0);
 });
 
 test("no error surface on property detail page", async ({ page }) => {

@@ -11,6 +11,7 @@ import type { InvestmentMetrics } from "@/lib/investment-metrics";
 import { PropertyHeader } from "@/components/property/PropertyHeader";
 import { PhotoGallery } from "@/components/property/PhotoGallery";
 import { LinkedListings } from "@/components/property/LinkedListings";
+import { PropertyDescription, pickDescriptions } from "@/components/property/PropertyDescription";
 import { PriceHistoryChart } from "@/components/property/PriceHistoryChart";
 import { YieldSection } from "@/components/property/sections/YieldSection";
 import { FlipSection } from "@/components/property/sections/FlipSection";
@@ -169,6 +170,20 @@ export default function PropertyDetailPage() {
           order: 10,
           content: <LinkedListings listings={property.listings} />,
         },
+        // Advert description (issue #360 — order 15, between listings and
+        // history). Only added when a listing carries non-empty text, so a
+        // property with no description shows no empty "Descripción" box —
+        // the component and this gate share pickDescriptions().
+        ...(pickDescriptions(property.listings).length > 0
+          ? [
+              {
+                id: "description",
+                title: "Descripción",
+                order: 15,
+                content: <PropertyDescription listings={property.listings} />,
+              },
+            ]
+          : []),
         {
           id: "history",
           title: "Historial de precio y estado",
