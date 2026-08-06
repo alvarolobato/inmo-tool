@@ -12,6 +12,13 @@
  *   occupancy   — #310 hard filter: `occupied` | `free`.
  *   condition   — #310 hard filter: `a_reformar` | `reformado` | `obra_nueva`.
  *   renovation  — #310 hard filter (#313): `leve` | `integral` (a_reformar depth).
+ *   caveat      — #386 hard filter: an occupancy caveat code (`venta_deuda` |
+ *                 `nuda_propiedad` | `usufructo` | `proindiviso` |
+ *                 `derecho_superficie`). Reads AI-assessment data (empty until #316).
+ *   redflagType — #386 hard filter: a redflags problem type
+ *                 (`unfinished_construction` | `embargo` | `litigio` |
+ *                 `construccion_ilegal` | `herencia_yacente` | `deuda_comunidad` |
+ *                 `structural_damage`). Reads AI-assessment data.
  *   minDiscount — #310 hard filter: keep only candidates priced at least this
  *                 PERCENT (0–100) below the pool median price/m². Sent as a
  *                 percent (e.g. `15`); converted to a fraction for the query.
@@ -31,13 +38,17 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import {
+  CAVEAT_FILTERS,
   CONDITION_FILTERS,
   OCCUPANCY_FILTERS,
+  REDFLAG_TYPE_FILTERS,
   RENOVATION_FILTERS,
   decodeCursor,
   listCandidates,
+  type CaveatFilter,
   type ConditionFilter,
   type OccupancyFilter,
+  type RedflagTypeFilter,
   type RenovationFilter,
 } from "@/lib/candidates";
 import { getProfileById } from "@/lib/db/profiles";
@@ -126,6 +137,33 @@ export async function GET(
     renovation = rawRenovation as RenovationFilter;
   }
 
+  // #386 caveat filter (Fase 1 of #385). Closed-vocabulary token — a value
+  // outside CAVEAT_FILTERS is a malformed request (400), not an ignored filter.
+  const rawCaveat = searchParams.get("caveat");
+  let caveat: CaveatFilter | null = null;
+  if (rawCaveat !== null && rawCaveat !== "") {
+    if (!(CAVEAT_FILTERS as readonly string[]).includes(rawCaveat)) {
+      return NextResponse.json(
+        formatApiError("Filtro de gravamen no válido.", "VALIDATION", undefined, requestId),
+        { status: 400 },
+      );
+    }
+    caveat = rawCaveat as CaveatFilter;
+  }
+
+  // #386 redflag-type filter. Closed-vocabulary token (REDFLAG_TYPE_FILTERS).
+  const rawRedflagType = searchParams.get("redflagType");
+  let redflagType: RedflagTypeFilter | null = null;
+  if (rawRedflagType !== null && rawRedflagType !== "") {
+    if (!(REDFLAG_TYPE_FILTERS as readonly string[]).includes(rawRedflagType)) {
+      return NextResponse.json(
+        formatApiError("Filtro de alerta no válido.", "VALIDATION", undefined, requestId),
+        { status: 400 },
+      );
+    }
+    redflagType = rawRedflagType as RedflagTypeFilter;
+  }
+
   // #379: show-rejected toggle. Absent/anything-but-"true" keeps today's
   // behaviour (rejected candidates hidden). Only the exact string "true"
   // opts in — a permissive parse here can't silently surface rejected cards.
@@ -197,6 +235,8 @@ export async function GET(
       condition,
       renovation,
       minBelowMarketPct,
+      caveat,
+      redflagType,
       includeRejected,
     });
     return NextResponse.json(page);

@@ -309,6 +309,46 @@ export type ConditionFilter = (typeof CONDITION_FILTERS)[number];
 export const RENOVATION_FILTERS = ["leve", "integral"] as const;
 export type RenovationFilter = (typeof RENOVATION_FILTERS)[number];
 
+/**
+ * Caveat hard-filter values (#386, Fase 1 of #385). The ownership/transaction
+ * caveats worth sourcing on directly — the closed subset of `CAVEAT_CODES`
+ * (lib/ai-assessment/occupancy.ts) that answers "what do I actually get if I
+ * buy this?". `venta_deuda` is the owner's explicit ask; the rest are the
+ * partial-ownership terms of art already rendered as warn badges by
+ * `CAVEAT_LABELS`. The physical-occupancy codes (`tenanted`,
+ * `occupied_illegally`) are deliberately NOT here — they're covered by the
+ * `occupancy` filter above, so exposing them again as a caveat would be a
+ * second control for the same signal. Kept as a SQL param, never interpolated.
+ */
+export const CAVEAT_FILTERS = [
+  "venta_deuda",
+  "nuda_propiedad",
+  "usufructo",
+  "proindiviso",
+  "derecho_superficie",
+] as const;
+export type CaveatFilter = (typeof CAVEAT_FILTERS)[number];
+
+/**
+ * Red-flag-type hard-filter values (#386). Mirrors the closed vocabulary of
+ * `REDFLAG_LABELS` (lib/ai-assessment/redflags.ts) — every problem type that
+ * earns a badge, so filtering can never target a type the card can't show.
+ * `unfinished_construction` ("obra sin terminar") is the owner's explicit ask;
+ * `other` (the long-tail catch-all with no scannable meaning) is excluded, the
+ * same rule the badge renderer follows. Kept as a SQL param, never interpolated.
+ */
+export const REDFLAG_TYPE_FILTERS = [
+  "embargo",
+  "subasta_judicial",
+  "herencia_yacente",
+  "deuda_comunidad",
+  "construccion_ilegal",
+  "litigio",
+  "unfinished_construction",
+  "structural_damage",
+] as const;
+export type RedflagTypeFilter = (typeof REDFLAG_TYPE_FILTERS)[number];
+
 /** The two physical-occupancy statuses that count as "occupied" (kept as a SQL param, never interpolated). Exported for the route test's param-shape assertion. */
 export const OCCUPIED_STATUSES: string[] = ["tenanted", "occupied_illegally"];
 
@@ -327,6 +367,22 @@ export interface CandidateFilters {
    * pass. `null`/undefined = no below-market filter.
    */
   minBelowMarketPct?: number | null;
+  /**
+   * #386: keep only candidates whose latest occupancy assessment derives this
+   * caveat code (reads the `ranked.caveats` array the CTE builds from the SAME
+   * `caveats[]` the distress boost counts — D-059). Covers `venta_deuda` and
+   * the partial-ownership caveats. A candidate with no occupancy assessment
+   * (null caveats) is EXCLUDED — "unknown", never a false pass. `null` = off.
+   */
+  caveat?: CaveatFilter | null;
+  /**
+   * #386: keep only candidates whose latest redflags assessment carries a flag
+   * of this `type` (reads the `ranked.redflag_types` array the CTE builds from
+   * the SAME `flags[]` the distress boost counts — D-059). Covers
+   * `unfinished_construction`, `embargo`, etc. Null redflag_types (never
+   * assessed) is EXCLUDED. `null` = off.
+   */
+  redflagType?: RedflagTypeFilter | null;
 }
 
 /**
@@ -370,6 +426,13 @@ function rankedCandidatesCte(warnParam: string): string {
          dist.occupancy_status,
          dist.condition_category,
          dist.renovation_severity,
+         -- #386 caveat/redflag-type hard filters. Same derive-once discipline:
+         -- the FULL set of occupancy caveat codes and redflags flag types, read
+         -- off the identical latest-per-axis rows that feed distress_level, so a
+         -- caveat/type the filter keeps is exactly one that could have lifted the
+         -- distress boost (D-059). NULL = that axis unassessed → excluded.
+         dist.caveats,
+         dist.redflag_types,
          -- Current accept/reject/star verdict for this profile (#379),
          -- derived latest-wins over accept/reject/star/clear; a trailing
          -- clear collapses to NULL (neutral). Feeds both the card's marked
@@ -426,7 +489,32 @@ function rankedCandidatesCte(warnParam: string): string {
            -- renovation_severity.
            max(la.result->'occupancy'->>'value') FILTER (WHERE la.assessment_type = 'occupancy') AS occupancy_status,
            max(la.result->>'condition')          FILTER (WHERE la.assessment_type = 'condition') AS condition_category,
-           max(la.result->>'renovation_severity') FILTER (WHERE la.assessment_type = 'condition') AS renovation_severity
+           max(la.result->>'renovation_severity') FILTER (WHERE la.assessment_type = 'condition') AS renovation_severity,
+           -- #386: the FULL caveat-code and redflag-type sets as text[], for the
+           -- caveat/redflagType hard filters. Only the single occupancy row
+           -- produces a non-null caveats array and only the single redflags row a
+           -- non-null types array (max() ignores the NULLs the other axes yield),
+           -- so each aggregate collapses to that one row's value — the same
+           -- latest-per-axis source distress_level reads. An empty array (assessed
+           -- but no caveat/flag) stays non-null and simply matches no filter value;
+           -- NULL means the axis was never assessed (excluded by any filter on it).
+           max(
+             CASE WHEN la.assessment_type = 'occupancy'
+                       AND jsonb_typeof(la.result->'caveats') = 'array'
+                  THEN ARRAY(SELECT jsonb_array_elements_text(la.result->'caveats'))
+                  ELSE NULL END
+           ) AS caveats,
+           max(
+             CASE WHEN la.assessment_type = 'redflags'
+                       AND jsonb_typeof(la.result->'flags') = 'array'
+                  THEN ARRAY(
+                         SELECT rf.value->>'type'
+                           FROM jsonb_array_elements(la.result->'flags') rf
+                          WHERE jsonb_typeof(rf.value) = 'object'
+                            AND rf.value->>'type' IS NOT NULL
+                       )
+                  ELSE NULL END
+           ) AS redflag_types
          FROM (
            SELECT DISTINCT ON (a.assessment_type) a.assessment_type, a.result
              FROM ai_assessment a
@@ -840,6 +928,11 @@ export async function listCandidates(
     typeof opts.minBelowMarketPct === "number" && Number.isFinite(opts.minBelowMarketPct)
       ? opts.minBelowMarketPct
       : null;
+  // #386 caveat / redflag-type filters. Closed-vocabulary tokens validated at
+  // the API boundary; normalise to null ("off") here so an untouched call is
+  // byte-identical to before.
+  const caveat: CaveatFilter | null = opts.caveat ?? null;
+  const redflagType: RedflagTypeFilter | null = opts.redflagType ?? null;
   // Source (portal) filter (#265): isolate one connector's results so the
   // owner can debug a single portal's data quality. A candidate is a
   // deduplicated PROPERTY that may span several listings from different
@@ -1067,6 +1160,15 @@ export async function listCandidates(
        -- true (show-rejected toggle): rejected candidates stay in, rendered
        -- marked. A NULL/accept/star feedback_state always survives.
        AND ($12::boolean = true OR ranked.feedback_state IS DISTINCT FROM 'reject')
+       -- #386 caveat filter ($13). Keep only candidates whose derived occupancy
+       -- caveats include this code. NULL caveats (occupancy never assessed) makes
+       -- the ANY comparison evaluate to NULL, so the row is excluded (unknown,
+       -- never a false pass) — the same graceful degradation the occupancy/
+       -- condition filters give today.
+       AND ($13::text IS NULL OR $13 = ANY(ranked.caveats))
+       -- #386 redflag-type filter ($14). Keep only candidates carrying a redflag
+       -- of this type. NULL redflag_types (redflags never assessed) → excluded.
+       AND ($14::text IS NULL OR $14 = ANY(ranked.redflag_types))
      ORDER BY ranked.effective_score DESC, ranked.property_id DESC
      LIMIT $4`,
     [
@@ -1082,6 +1184,8 @@ export async function listCandidates(
       renovation,
       minBelowMarketPct,
       includeRejected,
+      caveat,
+      redflagType,
     ],
   );
 

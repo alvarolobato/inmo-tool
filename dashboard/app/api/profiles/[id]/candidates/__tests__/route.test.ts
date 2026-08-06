@@ -81,7 +81,8 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
     const candidatesCall = mockQuery.mock.calls[1];
     expect(candidatesCall[0]).toContain("lf.source = $5");
     // #310 appended $7–$11 (occupancy, occupied-statuses list, condition,
-    // renovation, min-below-market); all null/default when only source is set.
+    // renovation, min-below-market); #386 appended $13/$14 (caveat, redflagType);
+    // all null/default when only source is set.
     expect(candidatesCall[1]).toEqual([
       3,
       null,
@@ -95,6 +96,8 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       null,
       null,
       false,
+      null,
+      null,
     ]);
   });
 
@@ -117,6 +120,8 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       null,
       null,
       false,
+      null,
+      null,
     ]);
   });
 });
@@ -191,7 +196,56 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
       "integral",
       0.15, // 15% → fraction
       false,
+      null,
+      null,
     ]);
+  });
+
+  it("rejects an unknown caveat value before touching the DB (400) (#386)", async () => {
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?caveat=hipoteca"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown redflagType value (400) (#386)", async () => {
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?redflagType=goteras"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("passes valid caveat=$13 and redflagType=$14 through to listCandidates (#386)", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await GET(
+      makeRequest(
+        "http://localhost/api/profiles/3/candidates?caveat=venta_deuda&redflagType=unfinished_construction",
+      ),
+      ctx("3"),
+    );
+    expect(res.status).toBe(200);
+    const params = mockQuery.mock.calls[1][1];
+    expect(params[12]).toBe("venta_deuda");
+    expect(params[13]).toBe("unfinished_construction");
+  });
+
+  it("accepts subasta_judicial as a valid redflagType and passes it through (#389)", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?redflagType=subasta_judicial"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(200);
+    const params = mockQuery.mock.calls[1][1];
+    expect(params[13]).toBe("subasta_judicial");
   });
 
   it("passes includeRejected=true to listCandidates as $12 when the show-rejected toggle is on (#379)", async () => {
@@ -204,7 +258,7 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
     );
     expect(res.status).toBe(200);
     const params = mockQuery.mock.calls[1][1];
-    // $12 (last param) is the includeRejected flag.
+    // $12 is the includeRejected flag ($13/$14 caveat/redflagType follow it).
     expect(params[11]).toBe(true);
   });
 

@@ -70,6 +70,12 @@ describe("redflags prompt — evidence union across merged listings", () => {
     expect(text).toContain("a_reformar");
     expect(text).toContain("obra_nueva");
   });
+
+  it("#389: names subasta_judicial as its own type (procedimiento de apremio), distinct from embargo", () => {
+    const text = redflagsPromptText([SILENT_ADVERT]);
+    expect(text).toContain("subasta_judicial");
+    expect(text).toContain("procedimiento de apremio");
+  });
 });
 
 describe("parseRedFlagsResult", () => {
@@ -124,6 +130,43 @@ describe("parseRedFlagsResult", () => {
           {
             type: "unfinished_construction",
             description: "Parece a medio construir.",
+            evidence: "",
+          },
+        ],
+        confidence: 0.5,
+      }),
+    );
+    expect(r.flags).toEqual([]);
+  });
+
+  it("#389: a 'se vende en subasta judicial' advert produces a subasta_judicial flag with matching evidence", () => {
+    const raw = JSON.stringify({
+      flags: [
+        {
+          type: "subasta_judicial",
+          description: "Comprobar el estado del procedimiento de apremio y las condiciones de la subasta.",
+          evidence: "inmueble en subasta judicial, procedimiento de apremio",
+          evidence_source: "idealista",
+        },
+      ],
+      confidence: 0.8,
+      reasoning: "El anuncio declara que el inmueble se vende en subasta judicial.",
+    });
+
+    const r = parseRedFlagsResult(raw);
+    expect(r.flags).toHaveLength(1);
+    expect(r.flags[0].type).toBe("subasta_judicial");
+    expect(REDFLAG_TYPES).toContain(r.flags[0].type);
+    expect(r.flags[0].evidence).toContain("subasta judicial");
+  });
+
+  it("#389: a subasta_judicial flag with NO evidence is dropped, same manufactured-flag guard as every other type", () => {
+    const r = parseRedFlagsResult(
+      JSON.stringify({
+        flags: [
+          {
+            type: "subasta_judicial",
+            description: "Podría estar en subasta.",
             evidence: "",
           },
         ],
@@ -224,12 +267,11 @@ describe("parseRedFlagsResult", () => {
 
 describe("prompt version", () => {
   it("is pinned, so a prompt change forces a new row rather than overwriting", () => {
-    // Bumped to v3 for #361: the axis was broadened from legal/financial to
-    // generic property problems (physical types added), changing what the
-    // prompt reads and flags — so #308's batch re-assesses existing rows
-    // rather than serving a v2 cache row as current. See
-    // REDFLAGS_PROMPT_VERSION's doc.
-    expect(REDFLAGS_PROMPT_VERSION).toBe("redflags/v3");
+    // Bumped to v4 for #389: `subasta_judicial` was split out of `embargo`
+    // into its own closed-vocabulary type, changing what the prompt labels —
+    // so #308's batch re-assesses existing rows rather than serving a v3 cache
+    // row as current. See REDFLAGS_PROMPT_VERSION's doc.
+    expect(REDFLAGS_PROMPT_VERSION).toBe("redflags/v4");
   });
 });
 

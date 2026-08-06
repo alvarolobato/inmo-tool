@@ -1140,6 +1140,145 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
     });
   });
 
+  describe("caveat / redflag-type hard filters (#386, D-059)", () => {
+    // A matched, priced candidate carrying optional occupancy caveats and/or
+    // redflags flag types — seeded through the SAME `ai_assessment` rows the
+    // ranking CTE reads, so the filter and the distress boost agree.
+    async function seedTagged(
+      pool: Pool,
+      profileId: number,
+      opts: { caveats?: string[]; redflagTypes?: string[] },
+    ): Promise<number> {
+      const id = await insertProperty(pool);
+      await insertListing(pool, id, { source: "fotocasa", current_price: 300000 });
+      await markMatched(pool, profileId, id);
+      if (opts.caveats) {
+        await insertAssessment(pool, id, {
+          assessmentType: "occupancy",
+          // occupancy value isn't what the caveat filter reads — the derived
+          // caveats[] is — but keep a plausible nested verdict for realism.
+          result: { occupancy: { value: "vacant" }, caveats: opts.caveats },
+          promptVersion: "occupancy/v2",
+          generatedAt: new Date("2026-02-01T00:00:00Z"),
+        });
+      }
+      if (opts.redflagTypes) {
+        await insertAssessment(pool, id, {
+          assessmentType: "redflags",
+          result: {
+            flags: opts.redflagTypes.map((t) => ({
+              type: t,
+              description: `check ${t}`,
+              evidence: `menciona ${t}`,
+              evidence_source: "fotocasa",
+            })),
+          },
+          promptVersion: "redflags/v3",
+          generatedAt: new Date("2026-02-01T00:00:00Z"),
+        });
+      }
+      return id;
+    }
+
+    it("caveat=venta_deuda keeps only debt-sale candidates (EC: owner's 'venta de deuda' ask)", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const debt = await seedTagged(pool, profileId, { caveats: ["venta_deuda"] });
+        const nuda = await seedTagged(pool, profileId, { caveats: ["nuda_propiedad"] });
+        const clean = await seedTagged(pool, profileId, { caveats: [] });
+
+        const page = await listCandidates(profileId, { caveat: "venta_deuda", limit: 10 });
+        expect(page.items.map((i) => i.property_id)).toEqual([debt]);
+        expect(page.items.map((i) => i.property_id)).not.toContain(nuda);
+        expect(page.items.map((i) => i.property_id)).not.toContain(clean);
+
+        // A different caveat value selects the other one.
+        const nudaPage = await listCandidates(profileId, { caveat: "nuda_propiedad", limit: 10 });
+        expect(nudaPage.items.map((i) => i.property_id)).toEqual([nuda]);
+      });
+    });
+
+    it("redflagType=unfinished_construction keeps only obra-sin-terminar candidates (EC: owner's 'obra sin terminar' ask)", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const unfinished = await seedTagged(pool, profileId, {
+          redflagTypes: ["unfinished_construction"],
+        });
+        const embargo = await seedTagged(pool, profileId, { redflagTypes: ["embargo"] });
+        // A property carrying BOTH types is kept by either filter (array membership).
+        const both = await seedTagged(pool, profileId, {
+          redflagTypes: ["embargo", "unfinished_construction"],
+        });
+
+        const page = await listCandidates(profileId, {
+          redflagType: "unfinished_construction",
+          limit: 10,
+        });
+        expect(page.items.map((i) => i.property_id).sort((a, b) => a - b)).toEqual(
+          [unfinished, both].sort((a, b) => a - b),
+        );
+        expect(page.items.map((i) => i.property_id)).not.toContain(embargo);
+
+        const embargoPage = await listCandidates(profileId, { redflagType: "embargo", limit: 10 });
+        expect(embargoPage.items.map((i) => i.property_id).sort((a, b) => a - b)).toEqual(
+          [embargo, both].sort((a, b) => a - b),
+        );
+      });
+    });
+
+    it("caveat and redflagType compose with each other and with an existing #310 filter", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // Target: debt-sale AND unfinished-construction.
+        const target = await seedTagged(pool, profileId, {
+          caveats: ["venta_deuda"],
+          redflagTypes: ["unfinished_construction"],
+        });
+        // Same caveat, wrong redflag → excluded by the redflag filter.
+        const debtOnly = await seedTagged(pool, profileId, {
+          caveats: ["venta_deuda"],
+          redflagTypes: ["embargo"],
+        });
+        // Right redflag, no caveat → excluded by the caveat filter.
+        const unfinishedOnly = await seedTagged(pool, profileId, {
+          redflagTypes: ["unfinished_construction"],
+        });
+
+        const page = await listCandidates(profileId, {
+          caveat: "venta_deuda",
+          redflagType: "unfinished_construction",
+          limit: 10,
+        });
+        expect(page.items.map((i) => i.property_id)).toEqual([target]);
+        expect(page.items.map((i) => i.property_id)).not.toContain(debtOnly);
+        expect(page.items.map((i) => i.property_id)).not.toContain(unfinishedOnly);
+      });
+    });
+
+    it("degrades cleanly: a caveat/redflagType filter with NO assessment data returns an empty feed, not an error", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // Matched + priced but never assessed — null caveats/redflag_types must
+        // be excluded (unknown), never a false pass and never a throw.
+        await seedTagged(pool, profileId, {});
+        await seedTagged(pool, profileId, {});
+
+        const cav = await listCandidates(profileId, { caveat: "venta_deuda", limit: 10 });
+        expect(cav.items).toEqual([]);
+        const rf = await listCandidates(profileId, {
+          redflagType: "unfinished_construction",
+          limit: 10,
+        });
+        expect(rf.items).toEqual([]);
+
+        // Sanity: unfiltered, both properties come back — the empties above are
+        // the filters' doing, not a broken feed.
+        const unfiltered = await listCandidates(profileId, { limit: 10 });
+        expect(unfiltered.items).toHaveLength(2);
+      });
+    });
+  });
+
   describe("source (portal) filter (#265)", () => {
     it("narrows the feed to properties with an active sale listing from the selected source", async () => {
       await withRealDb(async (pool) => {

@@ -41,6 +41,14 @@ export function CandidateList({ profileId }: { profileId: number }) {
   const [occupancy, setOccupancy] = useState<string>("");
   const [conditionSel, setConditionSel] = useState<string>("");
   const [minDiscount, setMinDiscount] = useState<string>("");
+  // #386 (Fase 1 of #385): expose the already-derived occupancy caveats
+  // (`venta_deuda` etc.) and redflags problem types (`unfinished_construction`
+  // etc.) as hard filters. Both read AI-assessment data (empty until #316), so
+  // they narrow the feed to nothing until that data flows — folded into
+  // `assessmentFilterActive` below so the empty state says "needs assessment"
+  // rather than implying the feed is broken.
+  const [caveat, setCaveat] = useState<string>("");
+  const [redflagType, setRedflagType] = useState<string>("");
   // #379: show-rejected toggle. Default OFF — the feed hides rejected
   // candidates (today's behaviour), so a reject only "removes" a card on the
   // next fetch. ON re-fetches with `includeRejected=true`, surfacing rejected
@@ -48,7 +56,8 @@ export function CandidateList({ profileId }: { profileId: number }) {
   // identity below, so flipping it resets the feed to page 1.
   const [showRejected, setShowRejected] = useState(false);
 
-  const assessmentFilterActive = occupancy !== "" || conditionSel !== "";
+  const assessmentFilterActive =
+    occupancy !== "" || conditionSel !== "" || caveat !== "" || redflagType !== "";
 
   const fetchPage = useCallback(
     async (afterCursor: string | null, replace: boolean) => {
@@ -64,6 +73,9 @@ export function CandidateList({ profileId }: { profileId: number }) {
         if (sev) url.searchParams.set("renovation", sev);
       }
       if (minDiscount !== "") url.searchParams.set("minDiscount", minDiscount);
+      // #386 caveat / redflag-type filters.
+      if (caveat !== "") url.searchParams.set("caveat", caveat);
+      if (redflagType !== "") url.searchParams.set("redflagType", redflagType);
       // #379: opt in to rejected candidates. Omitted (default) keeps them hidden.
       if (showRejected) url.searchParams.set("includeRejected", "true");
       const res = await fetch(url.toString().replace(window.location.origin, ""));
@@ -76,7 +88,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
       setItems((prev) => (replace ? page.items : [...prev, ...page.items]));
       setCursor(page.nextCursor);
     },
-    [profileId, source, occupancy, conditionSel, minDiscount, showRejected],
+    [profileId, source, occupancy, conditionSel, minDiscount, caveat, redflagType, showRejected],
   );
 
   // Load the portal options once per profile (independent of the active
@@ -212,6 +224,47 @@ export function CandidateList({ profileId }: { profileId: number }) {
         <option value="15">≥ 15%</option>
         <option value="20">≥ 20%</option>
         <option value="25">≥ 25%</option>
+      </select>
+
+      {/* #386: occupancy caveat (venta_deuda etc.). Needs assessment data (#316). */}
+      <label htmlFor="candidate-caveat-filter" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+        Situación jurídica
+      </label>
+      <select
+        id="candidate-caveat-filter"
+        data-testid="caveat-filter"
+        value={caveat}
+        onChange={(e) => setCaveat(e.target.value)}
+        style={selectStyle}
+      >
+        <option value="">Cualquiera</option>
+        <option value="venta_deuda">Venta de deuda</option>
+        <option value="nuda_propiedad">Nuda propiedad</option>
+        <option value="usufructo">Usufructo</option>
+        <option value="proindiviso">Proindiviso</option>
+        <option value="derecho_superficie">Derecho de superficie</option>
+      </select>
+
+      {/* #386: redflags problem type (obra sin terminar / embargo / …). Needs assessment data. */}
+      <label htmlFor="candidate-redflag-filter" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+        Alerta
+      </label>
+      <select
+        id="candidate-redflag-filter"
+        data-testid="redflag-filter"
+        value={redflagType}
+        onChange={(e) => setRedflagType(e.target.value)}
+        style={selectStyle}
+      >
+        <option value="">Cualquiera</option>
+        <option value="unfinished_construction">Obra inacabada</option>
+        <option value="embargo">Embargo</option>
+        <option value="subasta_judicial">Subasta judicial</option>
+        <option value="litigio">Litigio</option>
+        <option value="construccion_ilegal">Construcción ilegal</option>
+        <option value="herencia_yacente">Herencia yacente</option>
+        <option value="deuda_comunidad">Deuda comunidad</option>
+        <option value="structural_damage">Daño estructural</option>
       </select>
 
       {/* #379: show/hide rejected candidates. Default off (rejected hidden).
