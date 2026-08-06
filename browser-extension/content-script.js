@@ -62,6 +62,45 @@
       return true;
     }
 
+    // Pagination walk (issue #362): the background enumeration navigates a tab
+    // through each results page and asks THIS content script — running in the
+    // real, authenticated, JS-RENDERED page (the only way to enumerate a
+    // client-side-rendered portal like Aliseda, where a raw fetch returns an
+    // empty SPA shell) — to wait for render, then hand back the detail URLs it
+    // links to AND the URL of the next results page. Pure classification lives
+    // in detect.js; here we just poll render-readiness and read the live DOM.
+    if (msg.type === "HARVEST_LISTING_PAGE") {
+      const D = self.InmoDetect;
+      const url = window.location.href;
+      const portal = D ? D.listingPortalForUrl(url) : null;
+      if (!D || !portal) {
+        sendResponse({ portal: null, detailUrls: [], nextUrl: null });
+        return true;
+      }
+      const HARVEST_POLL_MS = 500;
+      const deadline = Date.now() + 20000;
+      const reply = () => {
+        const hrefs = Array.from(document.querySelectorAll("a[href]")).map(
+          (a) => a.href,
+        );
+        const detailUrls = D.extractDetailUrls(hrefs, portal);
+        // Prefer the portal's clean URL scheme; fall back to the rendered
+        // "siguiente" anchor for client-side-rendered pagination.
+        const nextUrl =
+          D.nextResultsUrl(url) || D.nextResultsUrlFromHrefs(hrefs, url, portal);
+        sendResponse({ portal, detailUrls, nextUrl });
+      };
+      const tick = () => {
+        if (D.isRenderReady(document, portal) || Date.now() > deadline) {
+          reply();
+          return;
+        }
+        setTimeout(tick, HARVEST_POLL_MS);
+      };
+      tick();
+      return true; // async response
+    }
+
     return true; // Keep message channel open for async response
   });
 

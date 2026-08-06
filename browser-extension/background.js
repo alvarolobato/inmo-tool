@@ -14,8 +14,12 @@
  * top the pool back up. See the "Batch capture" section below and D-043.
  */
 
-// Pure queue state machine (makeBatchState/launchNext/recordResultAt/…).
-// Classic MV3 worker → synchronous importScripts at top level.
+// Pure queue state machine (makeBatchState/launchNext/recordResultAt/…) and the
+// pure results-page pagination URL helpers (nextResultsUrl/resultsPageUrl,
+// issue #362). Both are side-effect-free at load (no window/document/chrome),
+// so the classic MV3 worker can synchronously importScripts them and read the
+// URL helpers off self.InmoDetect.
+importScripts("detect.js");
 importScripts("batch.js");
 
 /**
@@ -182,9 +186,27 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     // run is stranded (state running, loop dead), re-attach now rather than
     // waiting for the 30 s watchdog alarm.
     reattachIfStranded();
-    getBatchState().then((s) => sendResponse(InmoBatch.progress(s))).catch(() =>
-      sendResponse(InmoBatch.progress(null)),
-    );
+    (async () => {
+      // The enumeration phase (issue #362) runs before the capture queue exists;
+      // surface it as a distinct 'enumerating' status with the growing count.
+      const enumState = await getEnumState();
+      if (enumState && enumState.status === 'enumerating') {
+        const discovered = enumState.discovered || 0;
+        return {
+          status: 'enumerating',
+          total: discovered,
+          done: 0,
+          captured: 0,
+          failed: 0,
+          inflight: 0,
+          discovered,
+          page: enumState.page || 1,
+        };
+      }
+      return InmoBatch.progress(await getBatchState());
+    })()
+      .then(sendResponse)
+      .catch(() => sendResponse(InmoBatch.progress(null)));
     return true; // async
   }
   if (msg.type === 'PAUSE_BATCH') {
@@ -238,6 +260,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 // in-flight slots back to pending, and restarts the driver.
 
 const BATCH_KEY = 'inmoBatch';
+// Results-page ENUMERATION phase (issue #362). Before the capture queue runs, a
+// batch started from a results page walks every results page (rendered, in the
+// authenticated session — the only way to enumerate a client-side-rendered
+// portal like Aliseda) and seeds each page's detail URLs. This session key
+// holds that phase's progress ({status:'enumerating', portal, discovered,
+// page}) so a reopened popup can render "Descubriendo…" while it runs; it's
+// cleared the moment enumeration finishes and the capture queue takes over.
+const BATCH_ENUM_KEY = 'inmoBatchEnum';
 // The tabs the loop currently has open (an array), persisted so a respawned
 // worker can reconcile (close) them after an eviction rather than leaking them.
 const BATCH_TABS_KEY = 'inmoBatchTabs';
@@ -281,6 +311,22 @@ async function getBatchState() {
 
 async function setBatchState(state) {
   await chrome.storage.session.set({ [BATCH_KEY]: state });
+}
+
+// ── Enumeration-phase state (issue #362) ──────────────────────────────────
+async function getEnumState() {
+  const o = await chrome.storage.session.get(BATCH_ENUM_KEY);
+  return o[BATCH_ENUM_KEY] || null;
+}
+async function setEnumState(state) {
+  await chrome.storage.session.set({ [BATCH_ENUM_KEY]: state });
+}
+async function clearEnumState() {
+  await chrome.storage.session.remove(BATCH_ENUM_KEY);
+}
+/** True once the run was stopped mid-enumeration (enum state cleared). */
+async function enumerationStopped() {
+  return (await getEnumState()) == null;
 }
 
 // Serialize every get-modify-set of the shared batch state (BATCH_KEY). With
@@ -430,21 +476,226 @@ async function postFilterCatalog(payload) {
 }
 
 /**
- * Begin a batch run for one portal. Seeds the harvested URLs, then builds the
- * queue from the portal's current pending set (so already-captured listings are
- * skipped and any pre-existing pending rows are swept too). Fires the loop.
+ * Begin a batch run for one portal (issue #262, pagination #362). Seeds the
+ * harvested page-1 URLs, then ENUMERATES the remaining results pages (rendered,
+ * in-session — see enumerateResultsPages) seeding each page's detail URLs as it
+ * discovers them, and finally builds+runs the capture queue from the portal's
+ * pending set. Enumeration runs async so the popup stays responsive and the
+ * discovered count grows as pages arrive; startBatch returns immediately with
+ * `enumerating: true`.
  */
 async function startBatch({ portal, urls, searchUrl }) {
   // Piggyback capture-to-infer: also learn this search page's URL grammar.
   await saveSearchUrlExample(searchUrl);
-  if (Array.isArray(urls) && urls.length > 0) {
-    await seedWorklist(urls);
+  const page1 = Array.isArray(urls) ? urls : [];
+  if (page1.length > 0) {
+    await seedWorklist(page1);
   }
+  // Enter the enumeration phase so a reopened popup shows discovery progress.
+  await setEnumState({
+    status: 'enumerating',
+    portal,
+    discovered: page1.length,
+    page: 1,
+  });
+  // Walk the remaining results pages, then build + run the capture queue.
+  // Fire-and-forget: on any enumeration failure we still fall through to
+  // capturing whatever was seeded (page 1 at minimum), never leaving the run
+  // wedged in the enumeration phase.
+  runEnumerationThenCapture(portal, searchUrl, page1).catch(async () => {
+    await clearEnumState();
+    await runCaptureQueue(portal);
+  });
+  return { started: true, enumerating: true, total: page1.length };
+}
+
+/** Enumerate every results page, then hand off to the capture queue. */
+async function runEnumerationThenCapture(portal, searchUrl, page1Urls) {
+  try {
+    await enumerateResultsPages(portal, searchUrl, page1Urls);
+  } finally {
+    await clearEnumState();
+    await runCaptureQueue(portal);
+  }
+}
+
+/** Build the capture queue from the portal's pending set and fire the loop. */
+async function runCaptureQueue(portal) {
   const pending = await fetchPendingUrls(portal);
   const state = InmoBatch.makeBatchState(pending, BATCH_CONCURRENCY);
   await setBatchState(state);
   runBatchLoop(); // fire-and-forget; drives tabs until paused/stopped/done
-  return { started: true, total: pending.length };
+}
+
+/**
+ * Wait for tab `tabId` to finish loading (status 'complete'), or time out.
+ * Resolves true on load, false on timeout. The listener is attached by the
+ * caller BEFORE it navigates, so a fast 'complete' is never missed.
+ */
+function waitTabComplete(tabId, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try {
+        chrome.tabs.onUpdated.removeListener(listener);
+      } catch {
+        /* listener already gone */
+      }
+      resolve(ok);
+    };
+    const listener = (id, info) => {
+      if (id === tabId && info.status === 'complete') finish(true);
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+  });
+}
+
+/** Ask the content script on `tabId` to harvest the rendered results page. */
+async function sendHarvestMessage(tabId) {
+  try {
+    return await chrome.tabs.sendMessage(tabId, { type: 'HARVEST_LISTING_PAGE' });
+  } catch {
+    // Content script not injected yet — inject and retry once.
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ['detect.js', 'discover.js', 'content-script.js'],
+      });
+      return await chrome.tabs.sendMessage(tabId, { type: 'HARVEST_LISTING_PAGE' });
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * Render `url` in the (reused) enumeration tab — ACTIVE so Chrome doesn't
+ * throttle the render, the same reason capture activates its tabs (D-043) —
+ * wait for the load, then ask its content script for the rendered detail URLs +
+ * the next-page URL. Returns `{ tabId, result }`; `result` is null when the tab
+ * couldn't be opened/navigated or harvest failed. Reuses one tab across pages.
+ */
+async function renderAndHarvest(url, existingTabId) {
+  let tabId = existingTabId;
+  if (tabId == null) {
+    try {
+      const tab = await chrome.tabs.create({ url, active: true });
+      tabId = tab.id;
+    } catch {
+      return { tabId: null, result: null };
+    }
+    batchTabIds.add(tabId);
+    await persistBatchTabs();
+    if (!(await waitTabComplete(tabId, BATCH_CAPTURE_TIMEOUT_MS))) {
+      return { tabId, result: null };
+    }
+  } else {
+    // Attach the load waiter BEFORE navigating so the 'complete' isn't missed.
+    const loaded = waitTabComplete(tabId, BATCH_CAPTURE_TIMEOUT_MS);
+    try {
+      await chrome.tabs.update(tabId, { url, active: true });
+    } catch {
+      return { tabId, result: null };
+    }
+    if (!(await loaded)) return { tabId, result: null };
+  }
+  let result = null;
+  try {
+    result = await sendHarvestMessage(tabId);
+  } catch {
+    result = null;
+  }
+  return { tabId, result };
+}
+
+/**
+ * Walk every results page of a search, seeding each page's detail URLs into the
+ * worklist as it goes (issue #362). Reuses ONE rendered tab, navigated page to
+ * page in the authenticated session — the only reliable enumeration for a
+ * client-side-rendered portal (Aliseda) or a WAF-gated one (Idealista /
+ * Altamira), where a background fetch returns an empty shell / a 403. Each page
+ * is paced by the same jittered dwell capture uses, so the walk never hammers
+ * the portal.
+ *
+ * Stops when: a page beyond the first yields NO new detail URLs, the next-page
+ * URL is absent (last page / no numbered pagination), RESULTS_PAGE_CAP pages
+ * were walked, or the run was stopped. Page 1's URLs were already seeded by
+ * startBatch and pre-seed the de-dup set, so page 1 is re-rendered only to read
+ * its "next page" anchor reliably.
+ */
+async function enumerateResultsPages(portal, searchUrl, page1Urls) {
+  if (!searchUrl) return;
+  const D = self.InmoDetect;
+  const seen = new Set(
+    (page1Urls || []).map((u) => D.matchKey(u)).filter(Boolean),
+  );
+  let current = D.stripCaptureSignal(searchUrl);
+  let tabId = null;
+  try {
+    for (let page = 1; page <= D.RESULTS_PAGE_CAP; page++) {
+      if (await enumerationStopped()) break;
+      const rendered = await renderAndHarvest(current, tabId);
+      tabId = rendered.tabId;
+      if (tabId != null && !batchTabIds.has(tabId)) {
+        batchTabIds.add(tabId);
+        await persistBatchTabs();
+      }
+      if (!rendered.result) break; // couldn't render/harvest — stop the walk
+
+      const detailUrls = Array.isArray(rendered.result.detailUrls)
+        ? rendered.result.detailUrls
+        : [];
+      const fresh = [];
+      for (const u of detailUrls) {
+        const k = D.matchKey(u);
+        if (!k || seen.has(k)) continue;
+        seen.add(k);
+        fresh.push(u);
+      }
+      if (fresh.length > 0) {
+        await seedWorklist(fresh).catch(() => {
+          /* a page's seed failing must not abort the whole walk */
+        });
+      }
+      await setEnumState({
+        status: 'enumerating',
+        portal,
+        discovered: seen.size,
+        page,
+      });
+
+      // Stop: a page past the first that added nothing new (end of results, or
+      // a portal that renders no navigable pagination — same page re-served).
+      if (page > 1 && fresh.length === 0) break;
+
+      // Advance: the rendered DOM's next-page URL (content script already
+      // prefers the clean URL scheme, then the "siguiente" anchor), with the
+      // clean scheme as a final backstop.
+      const next = rendered.result.nextUrl || D.resultsPageUrl(current, page + 1);
+      if (!next) break;
+      if (D.matchKey(next) === D.matchKey(current)) break; // didn't advance
+      current = next;
+
+      // Polite pacing between results-page loads (mirror the capture jitter).
+      await sleep(
+        InmoBatch.jitterDelay(InmoBatch.paceBaseMs(page - 1), BATCH_PACE_SPREAD_MS),
+      );
+    }
+  } finally {
+    if (tabId != null) {
+      try {
+        await chrome.tabs.remove(tabId);
+      } catch {
+        /* tab already gone */
+      }
+      batchTabIds.delete(tabId);
+      await persistBatchTabs();
+    }
+  }
 }
 
 /** Apply a pure state transition (pause/resume) and return fresh progress. */
@@ -455,6 +706,10 @@ async function mutateBatch(fn) {
 
 /** Stop the run: mark done, unblock every in-flight wait, close all open tabs. */
 async function stopBatch() {
+  // Clearing the enumeration state signals any in-progress results-page walk to
+  // bail on its next iteration (issue #362); its reused tab is in batchTabIds
+  // (and persisted), so the tab close below reaps it.
+  await clearEnumState();
   const next = await updateBatchState((state) => InmoBatch.stop(state));
   // Unblock every outstanding wait (each resolves false → recorded as failed,
   // but recordResultAt ignores a DONE queue, so counts stay put).

@@ -54,7 +54,12 @@ async function init() {
   // immediately — regardless of what tab is active now.
   try {
     const prog = await chrome.runtime.sendMessage({ type: 'GET_BATCH_STATE' });
-    if (prog && (prog.status === 'running' || prog.status === 'paused')) {
+    if (
+      prog &&
+      (prog.status === 'running' ||
+        prog.status === 'paused' ||
+        prog.status === 'enumerating')
+    ) {
       enterBatchMode(null, prog);
       return;
     }
@@ -346,9 +351,23 @@ async function onStartBatch() {
   }
 
   startBtn.classList.add('hidden');
-  $('#batch-sub').textContent = 'Capturando anuncios en varias pestañas…';
   $('#batch-progress').classList.remove('hidden');
-  renderBatchProgress({ total: res.total, done: 0, captured: 0, failed: 0, status: 'running' });
+  // A batch first ENUMERATES every results page (issue #362) before capturing;
+  // reflect that phase so the operator sees discovery, not a frozen 0/0.
+  if (res.enumerating) {
+    $('#batch-sub').textContent = 'Descubriendo anuncios en todas las páginas…';
+    renderBatchProgress({
+      total: res.total || 0,
+      done: 0,
+      captured: 0,
+      failed: 0,
+      status: 'enumerating',
+      discovered: res.total || 0,
+    });
+  } else {
+    $('#batch-sub').textContent = 'Capturando anuncios en varias pestañas…';
+    renderBatchProgress({ total: res.total, done: 0, captured: 0, failed: 0, status: 'running' });
+  }
   startBatchPolling();
 }
 
@@ -396,15 +415,33 @@ function renderBatchProgress(prog) {
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
   $('#batch-progress').classList.remove('hidden');
-  $('#batch-bar-fill').style.width = `${pct}%`;
-
-  const failedNote = prog.failed > 0 ? ` · ${prog.failed} fallida(s)` : '';
-  $('#batch-count').textContent = `${done}/${total} capturadas${failedNote}`;
 
   const startBtn = $('#batch-start-btn');
   const pauseBtn = $('#batch-pause-btn');
   const resumeBtn = $('#batch-resume-btn');
   const stopBtn = $('#batch-stop-btn');
+
+  // Enumeration phase (issue #362): pages are still being discovered, so there
+  // is no total to divide by yet — show the growing discovered count and a
+  // pulsing indeterminate bar. Only Stop is offered (Pause/Resume act on the
+  // capture queue, which hasn't been built yet).
+  if (prog.status === 'enumerating') {
+    const discovered = prog.discovered ?? total;
+    $('#batch-title').textContent = 'Página de resultados';
+    $('#batch-sub').textContent = 'Descubriendo anuncios en todas las páginas…';
+    $('#batch-bar-fill').style.width = '100%';
+    $('#batch-count').textContent = `${discovered} anuncio(s) encontrados…`;
+    startBtn.classList.add('hidden');
+    pauseBtn.classList.add('hidden');
+    resumeBtn.classList.add('hidden');
+    stopBtn.classList.remove('hidden');
+    return;
+  }
+
+  $('#batch-bar-fill').style.width = `${pct}%`;
+
+  const failedNote = prog.failed > 0 ? ` · ${prog.failed} fallida(s)` : '';
+  $('#batch-count').textContent = `${done}/${total} capturadas${failedNote}`;
 
   if (prog.status === 'done') {
     startBtn.classList.add('hidden');
