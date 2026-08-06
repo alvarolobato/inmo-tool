@@ -1,12 +1,12 @@
 ---
-id: D-091
+id: D-092
 title: Zero-results regression monitor flags (connector, scope) that went nonzero→0 for N consecutive runs
 date: 2026-08-06
 group: "Data / connectors"
 rule: A (connector, resolved scope/filter) is flagged as a zero-results regression when it had a prior nonzero result AND its last N consecutive measured runs are all 0 (N=`etl.zero_result_regression_runs`, default 3). Always-0 (sparse) scopes and single transient 0s are NOT flagged; a later nonzero clears it. Server counts come from `connector_run_results.geography_scope[].discovered_count`; only 'crawled'/'empty' outcomes are measurements. Surfaced on `/etl/salud` (data-health), NOT `/etl/discovery`.
 ---
 
-# D-091: Zero-results regression monitor
+# D-092: Zero-results regression monitor
 
 *Decided: 2026-08-06*
 
