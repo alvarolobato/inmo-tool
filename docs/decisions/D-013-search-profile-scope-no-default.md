@@ -2,6 +2,9 @@
 id: D-013
 title: search_profile.scope has no DB-level default
 date: 2026-08-03
+group: Data / connectors
+rule: '`search_profile.scope` has no DB-level default — an INSERT must supply an explicit, validated scope; a missing one fails loudly, not silently.'
+order: 11
 ---
 
 # D-013: search_profile.scope has no DB-level default

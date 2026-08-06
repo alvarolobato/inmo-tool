@@ -2,6 +2,9 @@
 id: D-037
 title: Aliseda is ingested via guided browser-extension capture, not an automated connector
 date: 2026-08-04
+group: Data / connectors
+rule: Aliseda ingests via a capture-only connector + guided `capture_worklist` (`/etl/captura`), correlated by canonical `match_key`. Selectors are a draft, validate vs a real capture.
+order: 44
 ---
 
 # D-037: Aliseda is ingested via guided browser-extension capture, not an automated connector

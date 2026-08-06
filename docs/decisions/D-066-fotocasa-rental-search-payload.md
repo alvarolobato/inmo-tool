@@ -2,6 +2,9 @@
 id: D-066
 title: Rental comps come from Fotocasa's search-payload (coordinates included), not Milanuncios discover-only
 date: 2026-08-05
+group: Data / connectors
+rule: 'Rental comps come from `FotocasaRentalConnector` — Fotocasa''s `/es/alquiler/viviendas/...` SEARCH payload carries lat/lon+price+m2+type per listing (no detail fetch, no wall; one request/run; born disabled). Milanuncios discover-only is RULED OUT: its search payload has price/m2/type but 0 coordinates, and the estimator hard-requires lat/lon.'
+order: 26
 ---
 
 # D-066: Rental comps come from Fotocasa's search-payload (coordinates included), not Milanuncios discover-only

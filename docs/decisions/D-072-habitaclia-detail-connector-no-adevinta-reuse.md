@@ -2,6 +2,9 @@
 id: D-072
 title: habitaclia is a bespoke detail-fetch connector — no Adevinta/Fotocasa reuse
 date: 2026-08-06
+group: Data / connectors
+rule: habitaclia IS buildable but NOT via Adevinta/Fotocasa reuse (hypothesis FALSE — old ASP.NET `.htm` stack, no `__initial_props__`, no JSON-LD; `es_habitaclia.json` jsonLdPath is stale). `HabitacliaConnector` is discover+detail (lat/lon only on the detail page as `VGPSLat`/`VGPSLon`); price scoped away from the `.sim-price` carousel. Page-1-only, born disabled.
+order: 28
 ---
 
 # D-072: habitaclia is a bespoke detail-fetch connector — no Adevinta/Fotocasa reuse

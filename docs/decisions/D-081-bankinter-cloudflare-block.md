@@ -2,6 +2,9 @@
 id: D-081
 title: Bankinter not buildable as a crawler — Cloudflare WAF on every path
 date: 2026-08-06
+group: Data / connectors
+rule: 'Bankinter (`bankinter.com/…/cgi/ebk+inm+home`, #128) not buildable as a crawler: real ~500-listing REO portal, but Cloudflare "Just a moment" JS challenge 403s every path incl. robots.txt + the portal itself. No crawl connector; routes to browser-extension capture (#75) per the batch WAF rule (same as Sareb D-026 / Altamira D-027).'
+order: 23
 ---
 
 # D-081: Bankinter not buildable as a crawler — Cloudflare WAF on every path

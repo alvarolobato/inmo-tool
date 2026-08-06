@@ -2,6 +2,9 @@
 id: D-052
 title: AI-assessment auto-trigger lives dashboard-side, not in the ETL orchestrator
 date: 2026-08-05
+group: AI layer
+rule: The AI-assessment auto-trigger is a dashboard-side in-process scheduled pass (`ai-assessment/{batch,scheduler}.ts`, started from `instrumentation.ts`), NOT an ETL hook — bounded N-oldest-unassessed per tick, skips current-prompt-version verdicts, stops cleanly on budget/circuit errors. Configured via `dashboard.assessment_*`.
+order: 66
 ---
 
 # D-052: AI-assessment auto-trigger lives dashboard-side, not in the ETL orchestrator

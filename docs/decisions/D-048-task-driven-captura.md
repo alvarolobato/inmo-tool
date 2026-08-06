@@ -2,6 +2,9 @@
 id: D-048
 title: Task-driven Captura with per-task staleness window
 date: 2026-08-05
+group: Data / connectors
+rule: '`/captura` is a list of discrete recurring TASKS (one per portal×section from the search-url `tasks[]`), each a button that records a run in `capture_task_run (profile_id, task_id, last_run_at)` then opens the URL. A `capture.staleness_days` window (global + per-portal) grays a done task until it elapses; graying is a visual due-cue, never a block. Headline portal progress = REAL `extension_capture` activity (what landed), not just seeded `capture_worklist`.'
+order: 51
 ---
 
 # D-048: Task-driven Captura with per-task staleness window

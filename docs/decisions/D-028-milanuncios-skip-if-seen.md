@@ -2,6 +2,9 @@
 id: D-028
 title: "Milanuncios keeps detail-fetching; skip-if-seen is what unblocks its coverage"
 date: 2026-08-04
+group: Data / connectors
+rule: Milanuncios (sale) keeps detail-fetching at rate 2; skip-if-seen ON at 24h despite no `discovered_prices()` net; rental subclass explicitly 0. Don't drop, don't go discovery-only.
+order: 38
 ---
 
 # D-028: Milanuncios keeps detail-fetching; skip-if-seen is what unblocks its coverage

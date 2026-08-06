@@ -2,6 +2,9 @@
 id: D-025
 title: Photo hashes persist per URL, in their own connection, and never count as live fetch health
 date: 2026-08-04
+group: Data / connectors
+rule: 'Photo hashes persist keyed on URL alone, failures retried after 7 days, on the store''s OWN autocommit connection. The #206 health rollup counts live fetches only — never store hits.'
+order: 35
 ---
 
 # D-025: Photo hashes persist per URL, in their own connection, and never count as live fetch health

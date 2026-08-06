@@ -2,6 +2,9 @@
 id: D-006
 title: All LLM calls go through `assembleRequest()`
 date: 2026-08-02
+group: AI layer
+rule: All LLM calls go through `assembleRequest()` in `dashboard/lib/llm-context/`. No file outside that directory may import `llmComplete` or `runAgenticChat`; CI enforces it via `check-llm-context.sh`.
+order: 63
 ---
 
 # D-006 — All LLM calls go through `assembleRequest()`

@@ -2,6 +2,9 @@
 id: D-003
 title: Bounded review policy — Opus per task, Fable per phase, until AI-factory workflows land
 date: 2026-08-02
+group: Plumbing / process
+rule: Each task PR gets one fresh review pass; each phase gets one fresh cross-task review pass. Once per checkpoint — no iterating a round until "no more feedback."
+order: 3
 ---
 
 # D-003: Bounded review policy — Opus per task, Fable per phase, until AI-factory workflows land

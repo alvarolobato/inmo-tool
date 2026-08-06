@@ -2,6 +2,9 @@
 id: D-039
 title: Listing staleness surfacing — last_seen_at, day-grained bands
 date: 2026-08-04
+group: Product
+rule: Surface `last_seen_at` (not `last_fetched_at`) staleness on candidate card + property detail; bands fresh ≤7d / aging ≤21d / stale >21d; deduped property = FRESHEST active listing; label is a fact ("visto hace N días"), never "sold".
+order: 70
 ---
 
 # D-039: Listing staleness surfacing — `last_seen_at`, day-grained bands

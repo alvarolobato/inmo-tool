@@ -2,6 +2,9 @@
 id: D-060
 title: Extension zip is staged from post-pull source before every build, guarded by a staleness check
 date: 2026-08-05
+group: Plumbing / process
+rule: Stage the extension zip from POST-pull source right before every `docker compose --build` (`stage_extension()` in `stack.sh`, after `git pull`) — never before. `scripts/check-extension-zip-fresh.sh` fails when the zip is missing/older than `browser-extension/`; runs as post-stage self-check + CI gate.
+order: 8
 ---
 
 # D-060: Extension zip is staged from post-pull source before every build, guarded by a staleness check

@@ -2,6 +2,9 @@
 id: D-007
 title: Keep the knowledge-corpus machinery; test the empty state, don't delete it
 date: 2026-08-03
+group: AI layer
+rule: Keep `lib/knowledge.ts`/`scripts/build-knowledge.ts` (real call sites, intentionally empty pending Phase 4/#5). Test the empty-corpus shape contract, don't delete the machinery or invent placeholder content.
+order: 64
 ---
 
 # D-007 — Keep the knowledge-corpus machinery; test the empty state, don't delete it

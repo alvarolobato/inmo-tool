@@ -2,6 +2,9 @@
 id: D-033
 title: Cimenta2 not buildable — no server-rendered content, and the only data path is an over-permissive guest API leaking confidential and personal fields
 date: 2026-08-04
+group: Data / connectors
+rule: 'Cimenta2 not buildable: no server-rendered content, and its only data path is a guest API leaking confidential/PII fields. Don''t build on it, even scoped. Routes to #75.'
+order: 40
 ---
 
 # D-033: Cimenta2 not buildable — no server-rendered content, and the only data path is an over-permissive guest API leaking confidential and personal fields

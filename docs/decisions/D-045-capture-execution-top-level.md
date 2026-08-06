@@ -2,6 +2,9 @@
 id: D-045
 title: Guided-capture EXECUTION is a top-level page; SETUP stays under /etl (admin)
 date: 2026-08-05
+group: Data / connectors
+rule: Guided-capture EXECUTION is the top-level `/captura` page (nav, next to Perfiles); SETUP stays under `/etl/*` (admin). It composes `/api/profiles/[id]/search-urls` + `/api/etl/worklist` via pure `lib/captura-view.ts`, never re-implements the batch loop, and surfaces loosened pre-filter flags.
+order: 48
 ---
 
 # D-045: Guided-capture EXECUTION is a top-level page; SETUP stays under /etl (admin)

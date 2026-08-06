@@ -2,6 +2,9 @@
 id: D-049
 title: A removed listing (HTTP 404/410) is a clean skip, not a per-scope error
 date: 2026-08-05
+group: Data / connectors
+rule: A `fetch_detail` HTTP 404/410 means the listing was removed between discovery and fetch — raise `ListingUnavailableError`; `run_connector` counts it as a clean skip (`gone`), NOT `error_count`. It still records a FATAL breaker error so a wholesale break trips `circuit_open`; never mark withdrawn on one 404; a 200-no-payload soft-block stays a `SoftBlockError` (D-047), never gone.
+order: 52
 ---
 
 # D-049: A removed listing (HTTP 404/410) is a clean skip, not a per-scope error

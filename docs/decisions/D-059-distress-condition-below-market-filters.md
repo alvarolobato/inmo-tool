@@ -2,6 +2,9 @@
 id: D-059
 title: Hard-filter the candidate feed by occupancy, condition, and below-market discount
 date: 2026-08-05
+group: Product
+rule: The candidate feed hard-filters on `occupancy`/`condition`/`renovation`/`minBelowMarketPct`, applied in the OUTER query on the SAME per-axis columns `rankedCandidatesCte` derives (filter ⇔ rank agree). Below-market filter never touches `pool`. Unassessed axis = excluded (empty, not error); UI flags "needs assessment data".
+order: 73
 ---
 
 # D-059: Hard-filter the candidate feed by occupancy, condition, and below-market discount

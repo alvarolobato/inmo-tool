@@ -2,6 +2,9 @@
 id: D-058
 title: Buy-to-flip renovation cost / ARV / flip margin
 date: 2026-08-05
+group: Product
+rule: Flip metrics gate on `thesis_params.thesis_type="flip"` (unset=rent). Refurb = m²×band keyed off condition+`renovation_severity` (bands configurable in `config/schema.yaml` `flip.refurb_cost_*`); ARV = zone median €/m² (area-price) × m² (v1 un-filtered comps, biased low); margin = ARV−price−refurb−`flip.sale_holding_cost_pct`% buffer, each component shown. Pure calc, unit-tested; degrades to "sin estimación", never a garbage number.
+order: 76
 ---
 
 # D-058: Buy-to-flip renovation cost / ARV / flip margin

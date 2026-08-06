@@ -2,6 +2,9 @@
 id: D-017
 title: Milanuncios rate_limit_per_minute measured at 2, below Fotocasa's 3, not equal to it
 date: 2026-08-03
+group: Data / connectors
+rule: Milanuncios `rate_limit_per_minute = 2` — measured (20 and 6/min both fail identically), kept below Fotocasa's 3, not proven sufficient for a full run.
+order: 14
 ---
 
 # D-017: Milanuncios rate_limit_per_minute measured at 2, below Fotocasa's 3, not equal to it

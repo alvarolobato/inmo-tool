@@ -2,6 +2,9 @@
 id: D-005
 title: Use BIGSERIAL integer primary keys, not UUIDs or NUMERIC
 date: 2026-08-02
+group: Data / connectors
+rule: Real-estate schema tables use `BIGSERIAL` integer PKs, not `NUMERIC` (no source-system precision constraint like the archived project had) or UUIDs (no distributed-write requirement).
+order: 9
 ---
 
 # D-005: Use BIGSERIAL integer primary keys, not UUIDs or NUMERIC

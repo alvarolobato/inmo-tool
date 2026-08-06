@@ -2,6 +2,9 @@
 id: D-016
 title: Rental listings reuse listing.operation='rent' — no separate rental_listing table
 date: 2026-08-03
+group: Data / connectors
+rule: Rentals are `listing` rows with `operation='rent'` — no `rental_listing` table. Every sale-candidate query (materialize, dedup) must filter `operation='sale'` explicitly.
+order: 13
 ---
 
 # D-016: Rental listings reuse `listing.operation='rent'` — no separate `rental_listing` table

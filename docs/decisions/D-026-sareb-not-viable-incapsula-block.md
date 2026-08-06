@@ -2,6 +2,9 @@
 id: D-026
 title: Sareb not buildable — Incapsula WAF returns 403 on every path, including robots.txt itself
 date: 2026-08-04
+group: Data / connectors
+rule: 'Sareb (`sareb.es`) not buildable: Incapsula WAF returns 403 on every path including `robots.txt`. No connector written; routes to browser-extension capture (#75) per the batch''s standing WAF rule.'
+order: 36
 ---
 
 # D-026: Sareb not buildable — Incapsula WAF returns 403 on every path, including robots.txt itself
