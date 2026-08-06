@@ -259,6 +259,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
         <option value="">Cualquiera</option>
         <option value="unfinished_construction">Obra inacabada</option>
         <option value="embargo">Embargo</option>
+        <option value="subasta_judicial">Subasta judicial</option>
         <option value="litigio">Litigio</option>
         <option value="construccion_ilegal">Construcción ilegal</option>
         <option value="herencia_yacente">Herencia yacente</option>

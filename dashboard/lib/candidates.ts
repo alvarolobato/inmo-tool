@@ -338,6 +338,7 @@ export type CaveatFilter = (typeof CAVEAT_FILTERS)[number];
  */
 export const REDFLAG_TYPE_FILTERS = [
   "embargo",
+  "subasta_judicial",
   "herencia_yacente",
   "deuda_comunidad",
   "construccion_ilegal",

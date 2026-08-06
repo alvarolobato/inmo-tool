@@ -235,6 +235,19 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
     expect(params[13]).toBe("unfinished_construction");
   });
 
+  it("accepts subasta_judicial as a valid redflagType and passes it through (#389)", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?redflagType=subasta_judicial"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(200);
+    const params = mockQuery.mock.calls[1][1];
+    expect(params[13]).toBe("subasta_judicial");
+  });
+
   it("passes includeRejected=true to listCandidates as $12 when the show-rejected toggle is on (#379)", async () => {
     mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
     mockQuery.mockResolvedValueOnce({ rows: [] });
