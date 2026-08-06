@@ -64,7 +64,7 @@ let dbAvailable = false;
 const adminKey = process.env.ADMIN_API_KEY?.trim();
 
 // Aliseda catalogs now come from the SERVER-SIDE static-asset extractor
-// (issue #377, D-091), so the seeded source reflects that. The drift diff +
+// (issue #377, D-093), so the seeded source reflects that. The drift diff +
 // flag surface is source-agnostic — only the axes vs the code mapping matter.
 async function seedCatalog(axes: unknown): Promise<void> {
   await pool.query("DELETE FROM portal_filter_catalog WHERE connector = $1", [CONNECTOR]);

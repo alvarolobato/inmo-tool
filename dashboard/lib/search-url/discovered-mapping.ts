@@ -35,7 +35,7 @@ export const CATALOG_AXES: readonly CatalogAxis[] = [
 
 /**
  * Where a catalog was captured from (audit + brittleness ordering).
- * `static-asset` (issue #377, D-091) is the server-side Aliseda extractor
+ * `static-asset` (issue #377, D-093) is the server-side Aliseda extractor
  * reading the category sitemap + app bundle — NOT a browser DOM scrape.
  */
 export type CatalogSource = "embedded-config" | "form-options" | "navigated" | "static-asset";

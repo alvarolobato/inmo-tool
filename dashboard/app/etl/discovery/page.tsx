@@ -34,7 +34,7 @@ import type { PortalDriftReport } from "@/lib/search-url/drift";
  *
  * `mode` picks how the portal's live filter catalog is captured:
  *   - `static`  — SERVER-SIDE extraction of the portal's static assets (category
- *     sitemap + app bundle). Used for Aliseda (issue #377, D-091): its Angular
+ *     sitemap + app bundle). Used for Aliseda (issue #377, D-093): its Angular
  *     Material SPA can't be read by the passive DOM scrape, so the "Comprobar
  *     deriva" button POSTs to /api/etl/discovery/:connector/refresh.
  *   - `passive` — the browser extension enumerates the search form on a tab we

@@ -135,7 +135,7 @@ describe("extractFormOptions", () => {
 });
 
 describe("buildDiscoveryAxes / buildDiscoveryPayload", () => {
-  // Aliseda is RETIRED from passive DOM discovery (issue #377, D-091): its
+  // Aliseda is RETIRED from passive DOM discovery (issue #377, D-093): its
   // Angular Material mat-select overlay can't be read by a DOM scrape, so its
   // filter→URL map is extracted server-side from static assets instead. It has
   // no PORTAL_SPECS entry → the enumerator yields nothing for Aliseda.

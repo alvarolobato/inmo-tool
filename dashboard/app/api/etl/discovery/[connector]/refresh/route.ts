@@ -1,6 +1,6 @@
 /**
  * POST /api/etl/discovery/:connector/refresh — run the SERVER-SIDE static-asset
- * filter extractor for a connector and persist the result (issue #377, D-091).
+ * filter extractor for a connector and persist the result (issue #377, D-093).
  *
  * Aliseda's filter→URL mapping lives in static, robots-allowed assets (the
  * category sitemap + the Angular app bundle's slug map), which are GET-able

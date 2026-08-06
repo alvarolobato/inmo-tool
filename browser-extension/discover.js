@@ -28,7 +28,7 @@
  * filter control wins over navigation/branding. When NOTHING plausible is found
  * we capture NOTHING (return null) rather than junk.
  *
- * ALISEDA IS RETIRED FROM PASSIVE DISCOVERY (issue #377, D-091). Aliseda is an
+ * ALISEDA IS RETIRED FROM PASSIVE DISCOVERY (issue #377, D-093). Aliseda is an
  * Angular Material SPA whose property-type filter is a `mat-select` overlay that
  * only renders its options on click — the passive DOM pass structurally cannot
  * read it (it captured nothing or the logo). Aliseda's filter→URL mapping is
@@ -70,7 +70,7 @@
   }
 
   var PORTAL_SPECS = {
-    // Aliseda is intentionally ABSENT (issue #377, D-091): its Angular Material
+    // Aliseda is intentionally ABSENT (issue #377, D-093): its Angular Material
     // `mat-select` filter can't be read by a passive DOM scrape. Its filter→URL
     // mapping is extracted server-side from the category sitemap + app bundle
     // (dashboard/lib/search-url/aliseda-static.ts). No spec here → not enumerated.
