@@ -46,15 +46,29 @@ export async function getTaskRuns(profileId: number): Promise<Record<string, str
  * Record (upsert) that a capture task was just run: sets `last_run_at = NOW()`
  * for (profile_id, task_id). Idempotent per press — re-running the same task
  * simply bumps the timestamp. Returns the stored `last_run_at` (ISO string).
+ *
+ * `resultCount` (issue #376): the real harvested count for this run, when the
+ * flow knows it (the extension-path counterpart to the server connectors'
+ * per-scope discovered_count). Persisted to `last_result_count`; passing
+ * `null`/`undefined` clears it to NULL so a re-run without a count doesn't
+ * carry a stale one forward.
  */
-export async function recordTaskRun(profileId: number, taskId: string): Promise<string> {
+export async function recordTaskRun(
+  profileId: number,
+  taskId: string,
+  resultCount?: number | null,
+): Promise<string> {
+  const count =
+    typeof resultCount === "number" && Number.isFinite(resultCount)
+      ? Math.max(0, Math.trunc(resultCount))
+      : null;
   const rows = await sql<{ last_run_at: string | Date }>(
-    `INSERT INTO capture_task_run (profile_id, task_id, last_run_at)
-     VALUES ($1, $2, NOW())
+    `INSERT INTO capture_task_run (profile_id, task_id, last_run_at, last_result_count)
+     VALUES ($1, $2, NOW(), $3)
      ON CONFLICT (profile_id, task_id)
-     DO UPDATE SET last_run_at = NOW()
+     DO UPDATE SET last_run_at = NOW(), last_result_count = EXCLUDED.last_result_count
      RETURNING last_run_at`,
-    [profileId, taskId],
+    [profileId, taskId, count],
   );
   const v = rows[0]?.last_run_at;
   if (v instanceof Date) return (v as Date).toISOString();

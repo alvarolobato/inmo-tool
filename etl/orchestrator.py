@@ -2722,9 +2722,20 @@ def run_all_connectors(
             # never depends on the mutating loop variables (ruff B023) — it is
             # only ever called synchronously within the same iteration anyway.
             *,
+            discovered_count: int | None = None,
             _connector: Connector = connector,
             _sink: list[dict] = geography_scope,
         ) -> None:
+            # Issue #376 (zero-results regression monitor): `discovered_count`
+            # is the per-(connector, scope) result count for THIS run — the raw
+            # signal the drift monitor trends across runs to flag a scope that
+            # used to return listings and now returns 0 for N consecutive runs.
+            # Only the 'crawled'/'empty' terminal outcomes carry a real count
+            # (discover() actually ran); every other outcome (uncovered,
+            # unresolvable, budget, duplicate, fresh_this_cycle, failed) leaves
+            # it None so the monitor treats it as "no measurement this run"
+            # rather than a genuine zero — a blocked/skipped scope is NOT a
+            # search that stopped returning results.
             _sink.append(
                 {
                     "scope_key": (
@@ -2736,6 +2747,7 @@ def run_all_connectors(
                     "radius_km": scope.radius_km,
                     "rooms": scope.rooms,
                     "outcome": outcome,
+                    "discovered_count": discovered_count,
                 }
             )
 
@@ -3250,6 +3262,7 @@ def run_all_connectors(
                 scope,
                 "crawled" if result["discovered_count"] > 0 else "empty",
                 scope_key,
+                discovered_count=result["discovered_count"],
             )
             scope_summaries.append(
                 f"{scope_key}: discovered={result['discovered_count']} "

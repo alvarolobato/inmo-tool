@@ -15,6 +15,9 @@
  */
 
 import { CAPTURE_PORTALS } from "./worklist";
+import type { ZeroResultRegression } from "./zero-result-regression";
+
+export type { ZeroResultRegression } from "./zero-result-regression";
 
 // ─── Thresholds ──────────────────────────────────────────────────────────────
 
@@ -101,6 +104,14 @@ export interface DataHealthResponse {
   portals: PortalCaptureHealth[];
   sources: SourceDataQuality[];
   stale_profiles: StaleProfile[];
+  /**
+   * (connector, resolved scope/filter) pairs that used to return listings and
+   * have now returned 0 for N consecutive runs (issue #376) — the "a search
+   * stopped returning results, likely filter/URL drift" signal. Empty is the
+   * healthy state. A scope that was always 0 (sparse area) or dropped to 0 only
+   * once (transient) is deliberately NOT here; a later non-zero run clears it.
+   */
+  zero_result_regressions: ZeroResultRegression[];
   /**
    * True when a connector sweep is currently running. While a sweep runs,
    * `last_seen_at` is bumped incrementally on the mirror before

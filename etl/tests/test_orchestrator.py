@@ -4990,6 +4990,31 @@ class TestFailureClassificationAndGeographyScope:
             assert crawled, f"expected a crawled scope, got {geo}"
             assert crawled[0]["center"] == [40.4168, -3.7038]
             assert crawled[0]["radius_km"] == 10
+            # #376: the crawled scope carries the run's real result count (the
+            # DummyConnector discovers 3 dummy listings) — the raw signal the
+            # zero-results regression monitor trends across runs.
+            assert crawled[0]["discovered_count"] == 3
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            _cleanup_scope_state(pg_conn, connector.name)
+
+    def test_empty_scope_records_zero_discovered_count(self, pg_conn):
+        # #376: a scope that ran cleanly but found nothing records
+        # discovered_count == 0 (not None) — a genuine zero observation the
+        # monitor can trend, distinct from a blocked/skipped scope (None).
+        _apply_schema(pg_conn)
+        connector = DummyConnector(name="test-empty-count", external_ids=())
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            row = _classification_row(pg_conn, run_id, connector.name)
+            empties = [
+                g for g in (row["geography_scope"] or []) if g["outcome"] == "empty"
+            ]
+            assert empties, row["geography_scope"]
+            assert empties[0]["discovered_count"] == 0
         finally:
             orchestrator.CONNECTORS.clear()
             _cleanup(pg_conn, connector.name, run_id)

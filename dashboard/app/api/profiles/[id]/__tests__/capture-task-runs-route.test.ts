@@ -121,14 +121,22 @@ describe("POST /api/profiles/[id]/capture-task-runs", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toEqual({ ok: true, taskId: "t1", lastRunAt: "2026-08-05T12:00:00.000Z" });
-    expect(mockRecord).toHaveBeenCalledWith(7, "t1");
+    // No resultCount in the body → null passed through (issue #376).
+    expect(mockRecord).toHaveBeenCalledWith(7, "t1", null);
   });
 
   it("trims the taskId before recording", async () => {
     mockGetProfile.mockResolvedValue(makeProfile());
     mockRecord.mockResolvedValue("2026-08-05T12:00:00.000Z");
     await POST(postReq("7", { taskId: "  spaced  " }), ctx());
-    expect(mockRecord).toHaveBeenCalledWith(7, "spaced");
+    expect(mockRecord).toHaveBeenCalledWith(7, "spaced", null);
+  });
+
+  it("threads a provided resultCount through to recordTaskRun (issue #376)", async () => {
+    mockGetProfile.mockResolvedValue(makeProfile());
+    mockRecord.mockResolvedValue("2026-08-05T12:00:00.000Z");
+    await POST(postReq("7", { taskId: "t1", resultCount: 25 }), ctx());
+    expect(mockRecord).toHaveBeenCalledWith(7, "t1", 25);
   });
 
   it("400 on a non-numeric id", async () => {
