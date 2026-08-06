@@ -22,7 +22,35 @@ from etl.connectors.extraction import (
     scoped_text,
     strip_price_punctuation,
     text_to_int,
+    underscore_city_slug,
 )
+
+
+class TestUnderscoreCitySlug:
+    """The pisos.com / habitaclia.com search-URL slug rule (issue #369)."""
+
+    @pytest.mark.parametrize(
+        "name,expected",
+        [
+            # Single word passes through unchanged.
+            ("madrid", "madrid"),
+            # Multi-word -> underscore-joined (the regression at the heart of
+            # #369: the old table used hyphens, which 404 live).
+            ("dos hermanas", "dos_hermanas"),
+            ("alcala de guadaira", "alcala_de_guadaira"),
+            ("mairena del aljarafe", "mairena_del_aljarafe"),
+            # Accents folded to ASCII.
+            ("málaga", "malaga"),
+            # Apostrophes collapse to a single underscore like any other
+            # non-alphanumeric run (the caller handles portal-specific
+            # exceptions via a small verified override table).
+            ("l'hospitalet de llobregat", "l_hospitalet_de_llobregat"),
+            # Leading/trailing separators are stripped.
+            (" dos hermanas ", "dos_hermanas"),
+        ],
+    )
+    def test_slug(self, name, expected):
+        assert underscore_city_slug(name) == expected
 
 
 class TestFirstPresent:

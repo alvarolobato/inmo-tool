@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
+import requests
 
 from etl.connectors.base import ConnectorError, ConnectorScope, ListingUnavailableError
 from etl.connectors.habitaclia import HabitacliaConnector
@@ -26,6 +27,12 @@ from etl.connectors.habitaclia_mapping import (
 _FIXTURES = Path(__file__).parent / "fixtures"
 _SAGRADA_ID = "4737003828090"
 
+# A real profile scope far from Madrid/Barcelona — the Dos Hermanas (Sevilla)
+# coordinate scope that regressed in issue #369: geography='', only a
+# center/radius. Before the fix habitaclia had no _CITY_SLUGS entry for it
+# and skipped it as "uncovered" though `viviendas-dos_hermanas.htm` exists.
+_DOS_HERMANAS_SCOPE = ConnectorScope(center=(37.283689, -5.9226718), radius_km=7.0)
+
 
 def _read_fixture(name: str) -> str:
     return (_FIXTURES / name).read_text(encoding="utf-8")
@@ -36,6 +43,17 @@ def _mock_response(text: str, url: str = "https://www.habitaclia.com/x") -> Mock
     resp.text = text
     resp.url = url
     resp.raise_for_status = Mock()
+    return resp
+
+
+def _http_error_response(status_code: int) -> Mock:
+    """A mock response whose raise_for_status() raises the HTTPError requests
+    would for that status, carrying `.response.status_code` — what discover()
+    inspects to treat a 404 as an uncovered (not failed) outcome."""
+    resp = Mock()
+    err = requests.HTTPError(f"{status_code} Client Error")
+    err.response = Mock(status_code=status_code)
+    resp.raise_for_status = Mock(side_effect=err)
     return resp
 
 
@@ -113,6 +131,54 @@ def test_scope_key_resolves_geography_slug():
         HabitacliaConnector().scope_key(ConnectorScope(geography="barcelona"))
         == "barcelona"
     )
+
+
+def test_discover_builds_underscore_slug_for_coordinate_scope_dos_hermanas():
+    """Issue #369: a real profile scope (geography='', only center/radius)
+    for Dos Hermanas/Sevilla must resolve to habitaclia's UNDERSCORE slug
+    `viviendas-dos_hermanas.htm` and actually crawl it — before the fix this
+    city had no coverage-table entry and was skipped as 'uncovered'."""
+    connector = HabitacliaConnector()
+    html = _read_fixture("habitaclia_sample_search.html")
+    with patch(
+        "etl.connectors.habitaclia.requests.get", return_value=_mock_response(html)
+    ) as mock_get:
+        connector.discover(_DOS_HERMANAS_SCOPE, throttle=lambda: None)
+    assert (
+        mock_get.call_args[0][0]
+        == "https://www.habitaclia.com/viviendas-dos_hermanas.htm"
+    )
+
+
+def test_scope_key_resolves_coordinate_scope_to_underscore_slug():
+    assert HabitacliaConnector().scope_key(_DOS_HERMANAS_SCOPE) == "dos_hermanas"
+
+
+def test_discover_returns_empty_uncovered_on_http_404():
+    """Issue #369: a city habitaclia has no search page for (HTTP 404) is a
+    clean 'uncovered' result — discover() returns [] so the run stays
+    healthy instead of a hard 'failed'. Safe: discovers_full_inventory=False."""
+    connector = HabitacliaConnector()
+    with patch(
+        "etl.connectors.habitaclia.requests.get",
+        return_value=_http_error_response(404),
+    ):
+        ids = connector.discover(_DOS_HERMANAS_SCOPE, throttle=lambda: None)
+    assert ids == []
+
+
+def test_discover_still_raises_on_non_404_http_error():
+    """A 404 is uncovered; any other HTTP/transport error is still a genuine
+    failure that must surface (fail-loud discipline preserved)."""
+    connector = HabitacliaConnector()
+    with (
+        patch(
+            "etl.connectors.habitaclia.requests.get",
+            return_value=_http_error_response(503),
+        ),
+        pytest.raises(ConnectorError),
+    ):
+        connector.discover(_DOS_HERMANAS_SCOPE, throttle=lambda: None)
 
 
 # ── fetch_detail ──────────────────────────────────────────────────────

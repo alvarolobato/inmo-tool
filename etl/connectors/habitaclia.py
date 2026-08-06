@@ -78,7 +78,11 @@ from etl.connectors.base import (
     RawListing,
     Throttle,
 )
-from etl.connectors.extraction import strip_price_punctuation, text_to_int
+from etl.connectors.extraction import (
+    strip_price_punctuation,
+    text_to_int,
+    underscore_city_slug,
+)
 from etl.connectors.geography import (
     UnresolvableGeographyError,
     resolve_place,
@@ -92,24 +96,16 @@ _USER_AGENT = "Mozilla/5.0 (compatible; inmo-tool/0.1; +https://github.com/alvar
 _BASE_URL = "https://www.habitaclia.com"
 _REQUEST_TIMEOUT_SECONDS = 15
 
-# Municipality name (etl.connectors.geography.Place.name) -> habitaclia URL
-# slug. habitaclia's search slug is the bare city name
-# (`viviendas-barcelona.htm`). Live-verified HTTP 200 with real listing
-# links for barcelona and madrid (issue #79 spike); the rest mirror
-# fotocasa.py's markets as a mechanical extension of the same bare-name
-# rule, NOT individually verified — flagged rather than silently blended in.
-_CITY_SLUGS: dict[str, str] = {
-    # Live-verified 2026-08:
-    "barcelona": "barcelona",
-    "madrid": "madrid",
-    # Mechanical extension (not individually verified):
-    "sevilla": "sevilla",
-    "malaga": "malaga",
-    "valencia": "valencia",
-    "marbella": "marbella",
-    "estepona": "estepona",
-    "fuengirola": "fuengirola",
-}
+# habitaclia's search-URL slug is the accent-stripped, underscore-joined
+# municipality name (`viviendas-dos_hermanas.htm`), derived mechanically
+# from the resolved gazetteer name by `underscore_city_slug` — NOT a
+# hand-maintained per-city table. Issue #369: the previous table simply had
+# no entry for `dos hermanas` (or most real profile cities), so every such
+# scope resolved to "uncovered" and never crawled habitaclia at all even
+# though `viviendas-dos_hermanas.htm` exists and serves real listings (the
+# hyphenated `viviendas-dos-hermanas.htm` 404s; the underscore form is what
+# habitaclia serves — live-verified 2026-08). pisos.com uses the identical
+# convention, so the slug helper is shared (see `underscore_city_slug`).
 
 # Listing detail links on a search page:
 # `/comprar-piso-en_venta_..._-barcelona-i4737003828090.htm`. The trailing
@@ -133,14 +129,20 @@ _SURFACE_RE = re.compile(r"Superficie\s*([\d.]+)", re.IGNORECASE)
 def _resolve_geography(scope: ConnectorScope) -> str | None:
     """ConnectorScope -> habitaclia URL slug, or None. Same contract as
     fotocasa.py/pisos.py: free-text `scope.geography` wins; else resolve
-    `scope.center` via the gazetteer and look up the slug; raises
-    UnresolvableGeographyError (uncaught) when center matches nothing."""
+    `scope.center` via the gazetteer and derive the slug mechanically with
+    `underscore_city_slug` (issue #369) so any resolved municipality is
+    covered, not only those in a hand-maintained table; raises
+    UnresolvableGeographyError (uncaught) when center matches nothing.
+    Returns None only when there is nothing to resolve at all (no center,
+    no geography string) — a city whose derived slug habitaclia happens not
+    to serve is NOT None here; discover() turns that into a clean uncovered
+    result via the 404 it gets back."""
     if scope.geography:
         return scope.geography
     place = resolve_place(scope)
     if place is None:
         return None
-    return _CITY_SLUGS.get(place.name)
+    return underscore_city_slug(place.name)
 
 
 def _to_decimal(value: Any) -> Decimal | None:
@@ -255,11 +257,13 @@ class HabitacliaConnector(Connector):
 
         geography = _resolve_geography(scope)
         if geography is None:
+            # Now that the slug is derived mechanically from any resolved
+            # municipality (issue #369), None here means only "no center and
+            # no geography string to resolve at all".
             raise ConnectorError(
                 "habitaclia discover: scope has neither a resolvable center "
-                "nor an explicit geography string, or resolves to a "
-                "municipality this connector's _CITY_SLUGS table doesn't "
-                "cover — nothing to discover, not defaulting to a hardcoded city"
+                "nor an explicit geography string — nothing to discover, not "
+                "defaulting to a hardcoded city"
             )
 
         url = self._search_url(geography)
@@ -272,6 +276,25 @@ class HabitacliaConnector(Connector):
             )
             response.raise_for_status()
         except requests.RequestException as exc:
+            # Issue #369: an HTTP 404 means habitaclia has no search page for
+            # this city — it simply isn't on this portal (or the derived slug
+            # isn't the one it uses). That is a CLEAN "uncovered" outcome, not
+            # a connector failure: return [] so the run status stays healthy
+            # instead of marking the whole profile 'failed' for a geography
+            # this portal doesn't serve. Safe because
+            # discovers_full_inventory=False, so an empty sweep never
+            # auto-withdraws anything. Any other transport/HTTP error is a
+            # genuine failure and still raises.
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 404:
+                logger.info(
+                    "habitaclia discover: %s returned HTTP 404 — habitaclia "
+                    "has no search page for this city (geography=%s); treating "
+                    "as uncovered (empty result), not a failure",
+                    url,
+                    geography,
+                )
+                return []
             raise ConnectorError(
                 f"habitaclia discover: request failed for {url}: {exc}"
             ) from exc

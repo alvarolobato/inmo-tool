@@ -16,12 +16,45 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
+import unicodedata
 from collections.abc import Callable, Sequence
 from typing import Any, TypeVar
 
 logger = logging.getLogger("etl.connectors.extraction")
 
 T = TypeVar("T")
+
+
+def underscore_city_slug(name: str) -> str:
+    """Slugify a gazetteer municipality name the way pisos.com AND
+    habitaclia.com both build their search-URL path segment.
+
+    Both portals use the SAME convention: accent-stripped, lowercased, with
+    every run of non-alphanumeric characters (spaces, hyphens, apostrophes)
+    collapsed to a single underscore. Live-verified 2026-08 against both
+    sites (issue #369): `dos hermanas` -> `dos_hermanas`
+    (`https://www.pisos.com/venta/pisos-dos_hermanas/` and
+    `https://www.habitaclia.com/viviendas-dos_hermanas.htm` both HTTP 200
+    with real listings, while the hyphenated `dos-hermanas` 404s on both);
+    `alcala de guadaira` -> `alcala_de_guadaira` and `mairena del aljarafe`
+    -> `mairena_del_aljarafe` likewise HTTP 200 on pisos.com; single-word
+    names (`madrid`) pass through unchanged.
+
+    Shared here rather than duplicated per connector because the convention
+    is genuinely identical across the two connectors that use it — the
+    reason issue #369 existed at all was a hand-maintained per-city slug
+    table drifting from what the sites actually serve, so the fix is to
+    derive the slug mechanically from the resolved gazetteer name instead.
+    A name whose naive slug the portal doesn't serve (e.g. pisos.com drops
+    the leading article of `l'hospitalet de llobregat`) is handled by the
+    caller: an HTTP 404 on that URL is treated as "city not on this portal"
+    (a clean, uncovered result), never a hard failure.
+    """
+    folded = "".join(
+        c for c in unicodedata.normalize("NFKD", name) if not unicodedata.combining(c)
+    )
+    return re.sub(r"[^a-z0-9]+", "_", folded.lower()).strip("_")
 
 
 def first_present(*getters: Callable[[], T | None], field: str) -> T | None:
