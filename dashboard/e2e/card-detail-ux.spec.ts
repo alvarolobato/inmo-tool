@@ -444,25 +444,16 @@ test.describe("#167: touch/coarse-pointer behaviour (iPhone 13 emulation)", () =
   test("action bar and photo ticker are permanently visible without hover on a touch device, and the active status button is visually distinct from a merely-visible one", async ({
     page,
   }) => {
-    // The active status fill is an inline React style reconciled by TWO
-    // independent async setState sources in FeedbackControls: the mount-time
-    // GET (returns null at page load — no feedback exists yet for a freshly
-    // seeded property) and the tap's POST response (returns "accept"). A mount
-    // GET that resolves *after* the tap clobbers the optimistic "accept" back
-    // to null, reverting the button to the muted fill. That's the residual
-    // #167 flake round 1 didn't close: waiting for the colour to *reach* green
-    // can pass on a transient value, then a late GET reverts it before the
-    // sample below. Pin both signals deterministically — await the mount GET
-    // before tapping, await the POST after tapping — so nothing remains in
-    // flight that could revert "accept" when the colours are read.
-    const topFeedbackGet = page.waitForResponse(
-      (r) => r.url().includes(`/candidates/${topId}/feedback`) && r.request().method() === "GET",
-    );
+    // The active status fill is an inline React style set by FeedbackControls.
+    // #379 removed the residual #167 flake at its root: the card now embeds
+    // each row's verdict (candidate feed `feedback_state`) and passes it as
+    // `initialState`, so FeedbackControls no longer issues a per-card mount GET
+    // that could resolve *after* the tap and clobber the optimistic "accept"
+    // back to null. Only the tap's POST remains async, and it's awaited below —
+    // nothing else is in flight to revert "accept" when the colours are read.
     await page.goto(`/profiles/${profileId}`);
     const target = card(page, topId);
     await expect(target).toBeVisible();
-    // Mount GET resolved — it can no longer overwrite the state we set below.
-    await topFeedbackGet;
 
     const actions = target.getByTestId("candidate-card-actions");
     const reject = actions.getByTestId("feedback-reject");
@@ -489,8 +480,8 @@ test.describe("#167: touch/coarse-pointer behaviour (iPhone 13 emulation)", () =
     const rejectBgBefore = await reject.evaluate((el) => getComputedStyle(el).backgroundColor);
     // Await the POST so the state is reconciled server-side to "accept"
     // (terminal), not merely optimistically set, before reading any colour.
-    // Combined with the mount-GET wait above, this leaves no in-flight setState
-    // that could revert the fill after we sample it.
+    // With no mount GET anymore (#379 — state arrives embedded), this is the
+    // only in-flight setState, so nothing can revert the fill after we sample it.
     const topFeedbackPost = page.waitForResponse(
       (r) => r.url().includes(`/candidates/${topId}/feedback`) && r.request().method() === "POST",
     );

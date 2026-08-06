@@ -515,11 +515,22 @@ CREATE TABLE IF NOT EXISTS feedback_event (
     profile_id     BIGINT       REFERENCES search_profile(id),
     property_id    BIGINT       NOT NULL REFERENCES property(id),
     listing_id     BIGINT       REFERENCES listing(id),
-    feedback_type  TEXT         NOT NULL CHECK (feedback_type IN ('accept','reject','star','note','correction')),
+    feedback_type  TEXT         NOT NULL CHECK (feedback_type IN ('accept','reject','star','clear','note','correction')),
     value          JSONB,
     note           TEXT,
     created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+
+-- 'clear' (issue #379): an explicit "un-mark" event that resets the derived
+-- accept/reject/star state back to neutral without deleting history (the table
+-- stays append-only — see data-model.md). Needed so the candidate feed's
+-- show-rejected toggle can un-reject a property. Existing databases created
+-- before #379 carry the inline CHECK from the CREATE TABLE above, which
+-- CREATE TABLE IF NOT EXISTS never revisits — drop it and re-add the widened
+-- one so 'clear' is accepted everywhere (same pattern as ai_assessment above).
+ALTER TABLE feedback_event DROP CONSTRAINT IF EXISTS feedback_event_feedback_type_check;
+ALTER TABLE feedback_event ADD CONSTRAINT feedback_event_feedback_type_check
+    CHECK (feedback_type IN ('accept','reject','star','clear','note','correction'));
 
 CREATE INDEX IF NOT EXISTS idx_feedback_event_profile_property
     ON feedback_event (profile_id, property_id);

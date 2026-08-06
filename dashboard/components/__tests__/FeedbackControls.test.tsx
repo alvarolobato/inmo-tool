@@ -85,6 +85,49 @@ describe("FeedbackControls", () => {
     );
   });
 
+  it("#379: trusts initialState and skips the mount GET (the list already provided the verdict)", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<FeedbackControls profileId={1} propertyId={2} initialState="reject" />);
+
+    // No GET on mount — the button reflects the passed-in state immediately.
+    expect(screen.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "true");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("#379: clicking the already-active reject un-marks it (POSTs a 'clear') and reports the neutral state up", async () => {
+    const onStateChange = vi.fn();
+    const fetchMock = vi
+      .fn()
+      // POST the clear; server derives the neutral state.
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ currentState: null }) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <FeedbackControls
+        profileId={1}
+        propertyId={2}
+        initialState="reject"
+        onStateChange={onStateChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("feedback-reject"));
+
+    // The POST body carries the 'clear' feedback type — the un-reject wire.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init.body as string)).toEqual({ feedbackType: "clear" });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "false"),
+    );
+    // Parent is told the property is now neutral so it can drop the
+    // "Descartada" treatment.
+    expect(onStateChange).toHaveBeenLastCalledWith(null);
+  });
+
   it("#152 review: a failed submit shows the real, visible error message — not a bare '!' only reachable via title", async () => {
     mockGetThenFetch(async () => ({ ok: false }));
     render(<FeedbackControls profileId={1} propertyId={2} />);

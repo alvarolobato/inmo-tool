@@ -19,11 +19,12 @@ interface FeedbackResponse {
  * against the server response — issue #1 §2 frames this as a "queue-clearing
  * session", so per-click round-trip latency shouldn't be visible.
  *
- * Fetches its own current state on mount (rather than requiring the
- * candidate list API to embed it) — keeps this task's changes additive
- * (new files only) instead of reshaping lib/candidates.ts's response, at
- * the cost of one extra request per visible card. Fine at today's list
- * sizes; worth batching later if it becomes a real cost.
+ * State source: when the parent passes `initialState` (the candidate feed now
+ * embeds each row's verdict, #379), this component trusts it and skips the
+ * mount GET — one fewer request per card and no flash of the wrong mark. When
+ * the prop is omitted it self-fetches its current state on mount (the original
+ * behaviour). Clicking the already-active toggle un-marks it (records a
+ * `clear`), which is how the show-rejected view un-rejects a property.
  *
  * Icon-only buttons sized for the card's photo overlay (#152), with the note
  * editor as a popover instead of an inline expander — an inline textarea
@@ -72,22 +73,50 @@ interface FeedbackResponse {
 export function FeedbackControls({
   profileId,
   propertyId,
+  initialState,
+  onStateChange,
 }: {
   profileId: number;
   propertyId: number;
+  /**
+   * #379: the verdict already known from the candidate feed row. When
+   * provided (including `null`), this component trusts it and skips the
+   * per-card GET on mount — the list already told us the state. Omit it and
+   * the component self-fetches (its original behaviour, still used anywhere
+   * that renders it without a server-provided state).
+   */
+  initialState?: StateFeedbackType | null;
+  /**
+   * #379: called whenever the derived state changes (optimistically and after
+   * the server confirms), so a parent (CandidateCard) can drive the
+   * "Descartada" treatment and keep a rejected card visible-but-marked until
+   * the next fetch rather than removing it.
+   */
+  onStateChange?: (state: StateFeedbackType | null) => void;
 }) {
-  const [state, setState] = useState<StateFeedbackType | null>(null);
+  const [state, setState] = useState<StateFeedbackType | null>(initialState ?? null);
   const [noteOpen, setNoteOpen] = useState(false);
   const [noteText, setNoteText] = useState("");
   const [noteStatus, setNoteStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
 
+  // Whether the parent handed us the state (even `null`). Distinguishing
+  // "prop omitted" from "prop is null" is what lets a server-known neutral
+  // state skip the GET too, not just an accept/reject/star one.
+  const hasInitialState = initialState !== undefined;
+
   useEffect(() => {
+    // Skip the self-fetch when the list already provided the state (#379) —
+    // saves one request per card and avoids a flash of the wrong mark.
+    if (hasInitialState) return;
     let cancelled = false;
     fetch(`/api/profiles/${profileId}/candidates/${propertyId}/feedback`)
       .then((res) => (res.ok ? (res.json() as Promise<FeedbackResponse>) : null))
       .then((body) => {
-        if (!cancelled && body) setState(body.currentState);
+        if (!cancelled && body) {
+          setState(body.currentState);
+          onStateChange?.(body.currentState);
+        }
       })
       .catch(() => {
         /* best-effort — leave the toggles unselected rather than erroring on load */
@@ -95,42 +124,63 @@ export function FeedbackControls({
     return () => {
       cancelled = true;
     };
-  }, [profileId, propertyId]);
+    // onStateChange intentionally omitted: parents pass a stable setter and we
+    // don't want an inline arrow to re-run the fetch every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profileId, propertyId, hasInitialState]);
 
-  const submit = async (feedbackType: StateFeedbackType | "note") => {
+  const applyState = (next: StateFeedbackType | null) => {
+    setState(next);
+    onStateChange?.(next);
+  };
+
+  const submitState = async (clicked: StateFeedbackType) => {
     setError(null);
     const previous = state;
-    // Re-clicking the already-active state is a real no-op server-side (no
-    // dedicated "clear" event type in the schema) — don't optimistically
-    // toggle it off locally either, since that used to show a deselect that
-    // immediately snapped back to selected once the (unchanged) server
-    // response arrived. Clicking a *different* state still updates instantly.
-    if (feedbackType !== "note" && feedbackType !== previous) {
-      setState(feedbackType);
-    }
+    // #379: clicking the already-active toggle now UN-marks it (records a
+    // `clear` event) rather than being an inert no-op — this is how the
+    // show-rejected view un-rejects a property. Clicking a different state
+    // switches to it. Both update optimistically, then reconcile against the
+    // server's derived state.
+    const clearing = clicked === previous;
+    const target: StateFeedbackType | null = clearing ? null : clicked;
+    const wireType = clearing ? "clear" : clicked;
+    applyState(target);
     try {
       const res = await fetch(`/api/profiles/${profileId}/candidates/${propertyId}/feedback`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(
-          feedbackType === "note" ? { feedbackType: "note", note: noteText.trim() } : { feedbackType },
-        ),
+        body: JSON.stringify({ feedbackType: wireType }),
       });
       if (!res.ok) {
-        setState(previous);
+        applyState(previous);
         setError("No se pudo guardar el feedback.");
         return;
       }
       const body: FeedbackResponse = await res.json();
-      if (feedbackType !== "note") {
-        setState(body.currentState);
-      } else {
-        setNoteStatus("saved");
-        setNoteText("");
-        setTimeout(() => setNoteStatus("idle"), 2000);
-      }
+      applyState(body.currentState);
     } catch {
-      if (feedbackType !== "note") setState(previous);
+      applyState(previous);
+      setError("No se pudo guardar el feedback.");
+    }
+  };
+
+  const submitNote = async () => {
+    setError(null);
+    try {
+      const res = await fetch(`/api/profiles/${profileId}/candidates/${propertyId}/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ feedbackType: "note", note: noteText.trim() }),
+      });
+      if (!res.ok) {
+        setError("No se pudo guardar el feedback.");
+        return;
+      }
+      setNoteStatus("saved");
+      setNoteText("");
+      setTimeout(() => setNoteStatus("idle"), 2000);
+    } catch {
       setError("No se pudo guardar el feedback.");
     }
   };
@@ -186,7 +236,7 @@ export function FeedbackControls({
           aria-label="Aceptar"
           title="Aceptar"
           style={toggleButtonStyle(state === "accept", ACTIVE_COLORS.accept)}
-          onClick={() => submit("accept")}
+          onClick={() => submitState("accept")}
         >
           ✓
         </button>
@@ -199,7 +249,7 @@ export function FeedbackControls({
           aria-label="Rechazar"
           title="Rechazar"
           style={toggleButtonStyle(state === "reject", ACTIVE_COLORS.reject)}
-          onClick={() => submit("reject")}
+          onClick={() => submitState("reject")}
         >
           ✗
         </button>
@@ -212,7 +262,7 @@ export function FeedbackControls({
           aria-label="Destacar"
           title="Destacar"
           style={toggleButtonStyle(state === "star", ACTIVE_COLORS.star)}
-          onClick={() => submit("star")}
+          onClick={() => submitState("star")}
         >
           ★
         </button>
@@ -272,7 +322,7 @@ export function FeedbackControls({
             type="button"
             data-testid="feedback-note-submit"
             disabled={noteText.trim().length === 0 || noteStatus === "saving"}
-            onClick={() => submit("note")}
+            onClick={() => submitNote()}
             style={{
               padding: "4px 10px",
               borderRadius: 6,

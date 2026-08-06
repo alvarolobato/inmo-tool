@@ -87,6 +87,12 @@
 | [D-092](docs/decisions/D-092-zero-results-regression-monitor.md) | A (connector, resolved scope/filter) is flagged as a zero-results regression when it had a prior nonzero result AND its last N consecutive measured runs are all 0 (N=`etl.zero_result_regression_runs`, default 3). Always-0 (sparse) scopes and single transient 0s are NOT flagged; a later nonzero clears it. Server counts come from `connector_run_results.geography_scope[].discovered_count`; only 'crawled'/'empty' outcomes are measurements. Surfaced on `/etl/salud` (data-health), NOT `/etl/discovery`. |
 | [D-093](docs/decisions/D-093-aliseda-static-drift.md) | Aliseda filter drift is DETECTED server-side from its STATIC, robots-allowed assets (category sitemap `sitemap-category-aliseda-es-0.xml` for top-level `comprar-<category>` paths + the Angular `main-*.js` app-bundle i18n slug map for `comprar-viviendas` residential subtypes) — the passive DOM-scrape discovery (D-090) is RETIRED for Aliseda because its Angular Material `mat-select` overlay is unreadable without a click. `lib/search-url/aliseda-static.ts` fetches+parses them into a `CatalogAxes` (source `static-asset`); `POST /api/etl/discovery/:connector/refresh` persists it and the same `drift.ts` flag on `/etl/discovery` shows ADDED/REMOVED/CHANGED vs `aliseda.ts` `TYPE_MAP`. Passive DOM discovery is KEPT for Idealista (server-rendered). The capture pass bails on any `#inmo-discover` page. URL building stays 100% code-driven (D-090). |
 
+## Product / candidate feed
+
+| ID | Binding rule |
+|----|--------------|
+| [D-094](docs/decisions/D-094-reject-deferred-removal-and-clear.md) | The candidate feed hides 'reject' by default (removal deferred to next fetch); a show-rejected toggle opts them back in. Un-reject appends a 'clear' event (feedback stays append-only) that every latest-state derivation must collapse to neutral. |
+
 ## AI layer
 
 | ID | Binding rule |

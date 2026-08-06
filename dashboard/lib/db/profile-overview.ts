@@ -110,9 +110,12 @@ interface RawOverviewRow extends SearchProfileRawRow {
  * module docstring for the per-LATERAL cost/bound rationale.
  */
 export const OVERVIEW_QUERY_SQL = `WITH feedback_current AS (
+       -- Include 'clear' (#379) so a retracted verdict wins the DISTINCT ON;
+       -- the counts below FILTER on accept/reject/star only, so a property
+       -- whose latest event is 'clear' correctly counts toward none of them.
        SELECT DISTINCT ON (profile_id, property_id) profile_id, property_id, feedback_type
        FROM feedback_event
-       WHERE feedback_type IN ('accept', 'reject', 'star')
+       WHERE feedback_type IN ('accept', 'reject', 'star', 'clear')
        ORDER BY profile_id, property_id, created_at DESC, id DESC
      ),
      feedback_counts AS (

@@ -14,6 +14,7 @@
 import { sql } from "@/lib/db-write";
 import { DISABLED_SOURCES_CTE, activeSourceClause } from "@/lib/db/source-active";
 import { REDFLAG_LABELS } from "@/lib/ai-assessment/redflags";
+import type { StateFeedbackType } from "@/lib/db/feedback";
 
 export interface CandidateListingSummary {
   id: number;
@@ -168,6 +169,17 @@ export interface CandidateRow {
    * Distinct from `rank_explanation`, which explains the learned `score`.
    */
   ranking_boost_reason: string | null;
+  /**
+   * The property's current accept/reject/star verdict for THIS profile
+   * (#379), derived latest-wins over accept/reject/star/clear with a trailing
+   * `clear` collapsing to null. Embedded on the row so the card renders its
+   * marked state (and the "Descartada" treatment for `reject`) immediately,
+   * without FeedbackControls issuing a per-card GET. `null` when the property
+   * has no active verdict. Rejected rows only appear here when the feed was
+   * fetched with `includeRejected` (the show-rejected toggle) — the default
+   * feed excludes them server-side.
+   */
+  feedback_state: StateFeedbackType | null;
 }
 
 export interface CandidatePage {
@@ -356,7 +368,12 @@ function rankedCandidatesCte(warnParam: string): string {
          -- that axis unassessed (excluded by any filter on it, never matched).
          dist.occupancy_status,
          dist.condition_category,
-         dist.renovation_severity
+         dist.renovation_severity,
+         -- Current accept/reject/star verdict for this profile (#379),
+         -- derived latest-wins over accept/reject/star/clear; a trailing
+         -- clear collapses to NULL (neutral). Feeds both the card's marked
+         -- state and the default feed's reject exclusion (outer WHERE).
+         CASE WHEN fb.feedback_type = 'clear' THEN NULL ELSE fb.feedback_type END AS feedback_state
        FROM profile_listing_state pls
        JOIN property p ON p.id = pls.property_id
        -- MIN active-sale price across ENABLED sources only (#322/D-055): the
@@ -417,6 +434,18 @@ function rankedCandidatesCte(warnParam: string): string {
             ORDER BY a.assessment_type, a.generated_at DESC NULLS LAST, a.id DESC
          ) la
        ) dist ON true
+       -- Latest state verdict for (profile, property) (#379). accept/reject/
+       -- star/clear only (note/correction never change the toggle); the outer
+       -- CASE maps a trailing clear to NULL. Index-fed by
+       -- idx_feedback_event_profile_property.
+       LEFT JOIN LATERAL (
+         SELECT fe.feedback_type
+           FROM feedback_event fe
+          WHERE fe.profile_id = $1 AND fe.property_id = p.id
+            AND fe.feedback_type IN ('accept', 'reject', 'star', 'clear')
+          ORDER BY fe.created_at DESC, fe.id DESC
+          LIMIT 1
+       ) fb ON true
        WHERE pls.profile_id = $1
          AND pls.matched = true
          -- Same disabled-source visibility gate as the feed (#319/D-055): a
@@ -544,6 +573,8 @@ interface RawCandidateRow {
   below_market_pct: string | null;
   /** 0–3 distress axes flagged (#309); a plain int. */
   distress_level: number;
+  /** Current verdict (#379), already `clear`-collapsed-to-null in SQL; null when none. */
+  feedback_state: StateFeedbackType | null;
 }
 
 /**
@@ -765,10 +796,18 @@ export async function listCandidates(
     cursor?: string | null;
     limit?: number;
     source?: string | null;
+    /**
+     * #379: include candidates whose current verdict is `reject`. Default
+     * false — the feed hides rejected properties, so a reject "removes" a card
+     * only on the NEXT fetch, not on click. The show-rejected toggle passes
+     * true to surface them (still marked, still un-rejectable).
+     */
+    includeRejected?: boolean;
   } & CandidateFilters = {},
 ): Promise<CandidatePage> {
   const limit = Math.min(Math.max(Math.trunc(opts.limit ?? DEFAULT_LIMIT), 1), MAX_LIMIT);
   const rawCursor = opts.cursor ?? null;
+  const includeRejected = opts.includeRejected === true;
 
   // #310 hard filters (D-059). Each normalises to null ("no filter") when
   // unset, so an untouched call behaves exactly as before. Validation of the
@@ -1003,6 +1042,12 @@ export async function listCandidates(
          $11::double precision IS NULL
          OR (ranked.below_market_pct IS NOT NULL AND ranked.below_market_pct >= $11::double precision)
        )
+       -- Reject exclusion (#379). $12 = false (default): a candidate whose
+       -- current verdict is 'reject' drops out of the feed — so the card the
+       -- user just rejected disappears on the NEXT fetch, not on click. $12 =
+       -- true (show-rejected toggle): rejected candidates stay in, rendered
+       -- marked. A NULL/accept/star feedback_state always survives.
+       AND ($12::boolean = true OR ranked.feedback_state IS DISTINCT FROM 'reject')
      ORDER BY ranked.effective_score DESC, ranked.property_id DESC
      LIMIT $4`,
     [
@@ -1017,6 +1062,7 @@ export async function listCandidates(
       condition,
       renovation,
       minBelowMarketPct,
+      includeRejected,
     ],
   );
 
@@ -1055,6 +1101,7 @@ export async function listCandidates(
       r.below_market_pct != null ? Number(r.below_market_pct) : null,
       r.distress_level ?? 0,
     ),
+    feedback_state: r.feedback_state ?? null,
   }));
 
   // Cursor is derived from the *last row of the SQL result*, which is already
@@ -1168,6 +1215,9 @@ export async function getAdjacentCandidates(
          FROM ranked
         WHERE (effective_score < $2::double precision
                OR (effective_score = $2::double precision AND property_id < $3::bigint))
+          -- Skip rejected neighbours (#379) so prev/next matches the default
+          -- feed the user paged through — never step onto a hidden card.
+          AND feedback_state IS DISTINCT FROM 'reject'
         ORDER BY effective_score DESC, property_id DESC
         LIMIT 1`,
       [profileId, anchorScore, propertyId, WARN_CAVEAT_CODES],
@@ -1178,6 +1228,7 @@ export async function getAdjacentCandidates(
          FROM ranked
         WHERE (effective_score > $2::double precision
                OR (effective_score = $2::double precision AND property_id > $3::bigint))
+          AND feedback_state IS DISTINCT FROM 'reject'
         ORDER BY effective_score ASC, property_id ASC
         LIMIT 1`,
       [profileId, anchorScore, propertyId, WARN_CAVEAT_CODES],

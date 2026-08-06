@@ -122,6 +122,8 @@ Same keying logic as above: `property_id NOT NULL` is what identifies what the f
 
 Append-only — a correction or changed mind is a new row (`feedback_type = 'correction'` or a fresh `accept`/`reject`), never an `UPDATE` of a prior event. The full history is what a future scoring-model retrain (Phase 3) or an audit of "why did the tool think this was a good match three weeks ago" needs.
 
+The derived accept/reject/star toggle (the single "current verdict" a card shows) is the latest event **among `accept`/`reject`/`star`/`clear`**. `clear` (issue #379, D-094) is the explicit "un-mark" — un-rejecting a property appends a `clear` row rather than deleting its `reject`, keeping the table append-only. Every latest-state-wins read must select over all four types and collapse a trailing `clear` to null (neutral): `getCurrentState` and `recordStateFeedbackIfChanged` (`lib/db/feedback.ts`), the scoring pipeline's `fetchLatestFeedbackStates` (`lib/scoring/preference.ts`, which then drops `clear` rows so a retracted verdict trains on nothing), the profile-overview counts, and the candidate feed's `feedback_state` derivation. The feed hides `reject` by default (removal deferred to the next fetch); the show-rejected toggle passes `includeRejected=true` to surface them.
+
 ### `score` / `rank_explanation` / `score_kind` (Phase 3, issues #21–23)
 
 Three columns on `profile_listing_state` that Phase 1's schema created but left unwritten until Phase 3:
