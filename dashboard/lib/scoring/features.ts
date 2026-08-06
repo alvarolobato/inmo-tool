@@ -6,16 +6,17 @@
  * here — they get incorporated as additional model inputs by whichever task
  * lands after Phase 4 ships, not this one.
  *
- * `days_on_market` and `price_drop_pct` depend on task 5.4 (not built yet) —
- * per issue #21's explicit instruction, they degrade to `null` (imputed to
- * the pool mean at training/scoring time, same as any other missing value)
- * until that task lands and actually computes them. They're kept in
- * FEATURE_NAMES now so the model's shape doesn't change out from under
- * `profile_scoring_model.coefficients` once 5.4 exists — only `extractRaw`
- * needs a follow-up then, not this module's structure.
+ * `days_on_market` and `price_drop_pct` are populated by task 5.4 (issue
+ * #34) via lib/analytics/market-signals.ts's per-property batch signal
+ * (`computePropertyScoringSignals`), joined onto the pool in
+ * `fetchScoringInputs`. They still degrade to `null` (imputed to the pool
+ * mean at training/scoring time, same as any other missing value) for any
+ * property with no listing history to measure — the model's shape is
+ * unchanged; only these two slots went from always-null to real-when-known.
  */
 
 import { sql } from "@/lib/db-write";
+import { computePropertyScoringSignals } from "@/lib/analytics/market-signals";
 import type { Scope } from "@/lib/profiles-schema";
 
 /** Fixed, ordered feature list — the order here IS the order of `coefficients` in the trained model. */
@@ -45,6 +46,10 @@ export interface ScoringInputRow {
   year_built: number | null;
   min_price: number | null;
   first_seen_at: string | null;
+  /** Frozen days-on-market for the property's representative listing (task 5.4, #34), or null when unknown. */
+  days_on_market: number | null;
+  /** Net price-drop fraction since first listed for that representative listing (task 5.4, #34), or null when there's no drop data. */
+  price_drop_pct: number | null;
 }
 
 interface RawScoringInputRow {
@@ -63,7 +68,9 @@ interface RawScoringInputRow {
  * profile's whole candidate pool at once (issue #21's Technical approach
  * #4), not one property at a time, so this must not be N+1'd from a loop.
  */
-export async function fetchScoringInputs(profileId: number): Promise<ScoringInputRow[]> {
+export async function fetchScoringInputs(
+  profileId: number,
+): Promise<ScoringInputRow[]> {
   const rows = await sql<RawScoringInputRow>(
     `SELECT
        p.id AS property_id,
@@ -95,16 +102,29 @@ export async function fetchScoringInputs(profileId: number): Promise<ScoringInpu
   // int8 type parser (db-shared.ts, #155). m2_built/min_price are NUMERIC —
   // pg still returns those as strings (a different OID, genuine precision
   // rationale — see #155), so those coercions stay.
-  return rows.map((r) => ({
-    property_id: r.property_id,
-    m2_built: r.m2_built !== null ? Number(r.m2_built) : null,
-    rooms: r.rooms,
-    floor: r.floor,
-    has_elevator: r.has_elevator,
-    year_built: r.year_built,
-    min_price: r.min_price !== null ? Number(r.min_price) : null,
-    first_seen_at: r.first_seen_at,
-  }));
+  //
+  // days_on_market/price_drop_pct (task 5.4, #34) are computed in ONE batch
+  // query over the whole pool's property ids (market-signals.ts) rather than
+  // per candidate — the same no-N+1 discipline this function already follows.
+  const signals = await computePropertyScoringSignals(
+    rows.map((r) => r.property_id),
+  );
+
+  return rows.map((r) => {
+    const s = signals.get(r.property_id);
+    return {
+      property_id: r.property_id,
+      m2_built: r.m2_built !== null ? Number(r.m2_built) : null,
+      rooms: r.rooms,
+      floor: r.floor,
+      has_elevator: r.has_elevator,
+      year_built: r.year_built,
+      min_price: r.min_price !== null ? Number(r.min_price) : null,
+      first_seen_at: r.first_seen_at,
+      days_on_market: s?.days_on_market ?? null,
+      price_drop_pct: s?.price_drop_pct ?? null,
+    };
+  });
 }
 
 /**
@@ -131,15 +151,13 @@ const ATICO_SENTINEL = 50;
  */
 export function parseFloorNumeric(floor: string | null): number | null {
   if (!floor) return null;
-  const normalized = floor
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, ""); // strip accents: "ático" -> "atico", "sótano" -> "sotano"
+  const normalized = floor.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, ""); // strip accents: "ático" -> "atico", "sótano" -> "sotano"
 
   // "bajo"/"baja"/"bajos"/"bajas" as a standalone word also matches inside
   // "planta baja" (feminine agreement with "planta"), so one pattern covers
   // both the bare and "planta baja" forms.
-  if (/\bbaj[oa]s?\b/.test(normalized) || /\bentresuelo\b/.test(normalized)) return 0;
+  if (/\bbaj[oa]s?\b/.test(normalized) || /\bentresuelo\b/.test(normalized))
+    return 0;
   if (/\bentreplanta\b/.test(normalized)) return 0.5;
   // Must be checked before the plain "sotano" pattern below: a hyphenated
   // or spaced "semi-sótano"/"semi sótano" contains "sotano" as its own
@@ -170,7 +188,11 @@ export function parseFloorNumeric(floor: string | null): number | null {
  * - No price band set at all -> null (missing, imputed like any other
  *   feature) — there's no reference point to be "relative to".
  */
-function priceRelativeToBand(price: number | null, m2Built: number | null, scope: Scope): number | null {
+function priceRelativeToBand(
+  price: number | null,
+  m2Built: number | null,
+  scope: Scope,
+): number | null {
   if (price === null) return null;
 
   const { price_min, price_max, size_min, size_max } = scope;
@@ -194,7 +216,11 @@ function priceRelativeToBand(price: number | null, m2Built: number | null, scope
 }
 
 /** Midpoint of a (possibly one-sided) band; falls back to `fallback` when neither bound is set. */
-function midpoint(min: number | undefined, max: number | undefined, fallback: number): number {
+function midpoint(
+  min: number | undefined,
+  max: number | undefined,
+  fallback: number,
+): number {
   if (min !== undefined && max !== undefined) return (min + max) / 2;
   if (min !== undefined) return min;
   if (max !== undefined) return max;
@@ -202,16 +228,25 @@ function midpoint(min: number | undefined, max: number | undefined, fallback: nu
 }
 
 /** Pure: raw (non-normalized) feature vector for one candidate. */
-export function extractRaw(row: ScoringInputRow, scope: Scope): RawFeatureVector {
+export function extractRaw(
+  row: ScoringInputRow,
+  scope: Scope,
+): RawFeatureVector {
   return {
-    price_per_m2_relative: priceRelativeToBand(row.min_price, row.m2_built, scope),
+    price_per_m2_relative: priceRelativeToBand(
+      row.min_price,
+      row.m2_built,
+      scope,
+    ),
     m2_built: row.m2_built,
     rooms: row.rooms,
     floor_numeric: parseFloorNumeric(row.floor),
     has_elevator: row.has_elevator === null ? null : row.has_elevator ? 1 : 0,
     year_built: row.year_built,
-    // Not yet computable — task 5.4 owns this. See module docstring.
-    days_on_market: null,
-    price_drop_pct: null,
+    // Populated by task 5.4 (#34) via market-signals.ts, carried on the row
+    // by fetchScoringInputs; still null for any property with no measurable
+    // listing history (imputed to the pool mean, same as any missing value).
+    days_on_market: row.days_on_market,
+    price_drop_pct: row.price_drop_pct,
   };
 }
