@@ -91,8 +91,15 @@ export { NoListingsError, loadPropertyListings };
  * output changed (a half-built property that used to yield `flags: []` now
  * yields an `unfinished_construction` flag). #308's batch re-assesses existing
  * rows against the new version.
+ *
+ * Bumped to v4 for #389 (Fase 2 of #385): `subasta_judicial` (judicial
+ * auction / procedimiento de apremio) was split out of `embargo` into its own
+ * closed-vocabulary type, so a listing that used to yield an `embargo` flag
+ * (or none, when the model hesitated to call an auction an embargo) now yields
+ * a `subasta_judicial` flag — the prompt reads and labels it differently.
+ * #308's batch re-assesses existing rows against the new version.
  */
-export const REDFLAGS_PROMPT_VERSION = "redflags/v3";
+export const REDFLAGS_PROMPT_VERSION = "redflags/v4";
 
 /**
  * Closed type vocabulary (issue #27 technical approach #1, broadened in #361).
@@ -104,6 +111,7 @@ export const REDFLAGS_PROMPT_VERSION = "redflags/v3";
 export const REDFLAG_TYPES = [
   // Legal / financial (#27)
   "embargo",
+  "subasta_judicial",
   "herencia_yacente",
   "deuda_comunidad",
   "construccion_ilegal",
@@ -130,6 +138,7 @@ export type RedFlagType = (typeof REDFLAG_TYPES)[number];
  */
 export const REDFLAG_LABELS: Record<string, string> = {
   embargo: "Embargo",
+  subasta_judicial: "Subasta judicial",
   herencia_yacente: "Herencia yacente",
   deuda_comunidad: "Deuda comunidad",
   construccion_ilegal: "Construcción ilegal",

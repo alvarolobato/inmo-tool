@@ -711,7 +711,14 @@ como "el anuncio menciona X — verifícalo de forma independiente", nunca como
 un hecho confirmado.
 
 Tipos (\`type\`) — problemas LEGALES / FINANCIEROS:
-- \`embargo\` — embargo, subasta judicial, deuda con garantía sobre el inmueble.
+- \`embargo\` — embargo o deuda con garantía sobre el inmueble (hipoteca
+  ejecutada, anotación de embargo). Si además se menciona explícitamente una
+  subasta, usa \`subasta_judicial\`.
+- \`subasta_judicial\` — el inmueble se vende en subasta judicial o mediante
+  procedimiento de apremio (p.ej. "subasta judicial", "procedimiento de
+  apremio", "adjudicación en subasta", "subasta ante el juzgado"). Es la fase
+  ejecutiva de un embargo; márcalo como \`subasta_judicial\` cuando el texto cite
+  la subasta o el apremio, aunque también mencione el embargo de fondo.
 - \`herencia_yacente\` — herencia yacente, herencia pendiente de partición,
   varios herederos/propietarios sin repartir. (Nota: si lo que se vende es una
   cuota indivisa ya definida, sin mención de un proceso de herencia sin
@@ -766,7 +773,7 @@ Formato de salida:
 {
   "flags": [
     {
-      "type": "embargo" | "herencia_yacente" | "deuda_comunidad" | "construccion_ilegal" | "litigio" | "unfinished_construction" | "structural_damage" | "other",
+      "type": "embargo" | "subasta_judicial" | "herencia_yacente" | "deuda_comunidad" | "construccion_ilegal" | "litigio" | "unfinished_construction" | "structural_damage" | "other",
       "description": "qué debería comprobar el inversor, una frase",
       "evidence": "cita literal del anuncio en la que te apoyas",
       "evidence_source": "portal del que sale la cita, o null"
