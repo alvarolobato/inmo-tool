@@ -21,7 +21,11 @@
  * a broken UI, which is an acceptable interim state, not a fix.
  */
 
-import { FEATURE_NAMES, type FeatureName, type RawFeatureVector } from "./features";
+import {
+  FEATURE_NAMES,
+  type FeatureName,
+  type RawFeatureVector,
+} from "./features";
 import { normalizeVector, type TrainedModel } from "./model";
 
 const TOP_N = 3;
@@ -36,7 +40,8 @@ const NEGLIGIBLE_CONTRIBUTION = 1e-6;
 export { COLD_START_EXPLANATION } from "./cold-start";
 import { COLD_START_EXPLANATION } from "./cold-start";
 
-const NO_SIGNAL_EXPLANATION = "Sin motivos concretos que destacar todavía para este candidato.";
+const NO_SIGNAL_EXPLANATION =
+  "Sin motivos concretos que destacar todavía para este candidato.";
 
 export interface FeatureContribution {
   name: FeatureName;
@@ -70,7 +75,9 @@ export function computeContributions(
     contributions.push({ name, contribution, rawValue });
   });
 
-  return contributions.sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));
+  return contributions.sort(
+    (a, b) => Math.abs(b.contribution) - Math.abs(a.contribution),
+  );
 }
 
 function pct(fraction: number): string {
@@ -104,8 +111,11 @@ const FEATURE_LABELS: Record<FeatureName, PhraseFn> = {
   // con tus preferencias" framing, which correctly is about the model, not
   // the raw price.
   price_per_m2_relative: (v, positive) => {
-    const direction = v < 1 ? `un ${pct(1 - v)} por debajo` : `un ${pct(v - 1)} por encima`;
-    const fit = positive ? "coincide con tus preferencias" : "no coincide con tus preferencias";
+    const direction =
+      v < 1 ? `un ${pct(1 - v)} por debajo` : `un ${pct(v - 1)} por encima`;
+    const fit = positive
+      ? "coincide con tus preferencias"
+      : "no coincide con tus preferencias";
     return `precio ${direction} de tu banda de precio (${fit})`;
   },
   m2_built: (v, positive) =>
@@ -118,25 +128,37 @@ const FEATURE_LABELS: Record<FeatureName, PhraseFn> = {
       : `${Math.round(v)} habitaciones, no es lo habitual en lo que aceptas`,
   floor_numeric: (v, positive) => {
     const label = floorLabel(v);
-    return positive ? `planta ${label}, como en tus aceptaciones` : `planta ${label}, normalmente la rechazas`;
+    return positive
+      ? `planta ${label}, como en tus aceptaciones`
+      : `planta ${label}, normalmente la rechazas`;
   },
   has_elevator: (v, positive) => {
     const hasElevator = v === 1;
-    if (hasElevator) return positive ? "tiene ascensor, como sueles preferir" : "tiene ascensor, pero no coincide con tus preferencias habituales";
-    return positive ? "sin ascensor, como en aceptaciones anteriores" : "sin ascensor (normalmente lo rechazas)";
+    if (hasElevator)
+      return positive
+        ? "tiene ascensor, como sueles preferir"
+        : "tiene ascensor, pero no coincide con tus preferencias habituales";
+    return positive
+      ? "sin ascensor, como en aceptaciones anteriores"
+      : "sin ascensor (normalmente lo rechazas)";
   },
   year_built: (v, positive) =>
     positive
       ? `año de construcción (${Math.round(v)}) similar a tus aceptaciones`
       : `año de construcción (${Math.round(v)}) distinto de tus aceptaciones habituales`,
-  // Not yet computable (task 5.4 owns days_on_market/price_drop_pct — see
-  // features.ts's module docstring): raw is always null today, so
-  // computeContributions always excludes these before a phrase is ever
-  // needed. Kept for type completeness so FEATURE_LABELS stays a total map
-  // over FEATURE_NAMES rather than a partial one a future feature addition
-  // could silently forget to extend.
-  days_on_market: (v, positive) => (positive ? `${v} días en el mercado` : `${v} días en el mercado`),
-  price_drop_pct: (v, positive) => (positive ? `bajada de precio del ${pct(v)}` : `subida de precio del ${pct(v)}`),
+  // Populated by task 5.4 (#34) — real values now flow through here whenever
+  // the trained model ranks them among a candidate's top contributions
+  // (issue #34 EC-3's "references days-on-market or price-drop when notable").
+  // Direction words are keyed off the RAW value's own sign, NOT `positive`
+  // (the learned-contribution sign) — the same distinction price_per_m2's
+  // phrase draws: "how long / which way did the price move" is a fact about
+  // the listing, independent of whether the model happens to weight it up or
+  // down for this profile.
+  days_on_market: (v) => `${Math.round(v)} días en el mercado`,
+  price_drop_pct: (v) =>
+    v >= 0
+      ? `bajada de precio del ${pct(v)}`
+      : `subida de precio del ${pct(v)}`,
 };
 
 /**
@@ -176,9 +198,13 @@ export function explainScore(
   // "ranked high" claim implied more certainty about relative standing
   // than a single-candidate computation actually has, especially in a
   // small/early-life pool where one new listing can reorder everything.
-  const total = contributions.reduce((sum, c) => sum + c.contribution, 0) + model.bias;
-  const prefix = total >= 0 ? "Encaja bien con tu perfil: " : "Encaja mal con tu perfil: ";
+  const total =
+    contributions.reduce((sum, c) => sum + c.contribution, 0) + model.bias;
+  const prefix =
+    total >= 0 ? "Encaja bien con tu perfil: " : "Encaja mal con tu perfil: ";
 
-  const phrases = top.map((c) => FEATURE_LABELS[c.name](c.rawValue, c.contribution > 0));
+  const phrases = top.map((c) =>
+    FEATURE_LABELS[c.name](c.rawValue, c.contribution > 0),
+  );
   return prefix + phrases.join("; ") + ".";
 }
