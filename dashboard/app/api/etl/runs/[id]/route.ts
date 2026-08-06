@@ -117,6 +117,7 @@ export async function GET(
     const resultsResult = await query(
       `SELECT id, connector_name, started_at, finished_at, status,
               discovered_count, fetched_count, error_count, error_msg,
+              failure_classification, geography_scope,
               CASE
                   WHEN started_at IS NULL OR finished_at IS NULL THEN NULL
                   ELSE ROUND(EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000)::bigint
@@ -131,6 +132,8 @@ export async function GET(
     // as real JS numbers via the driver-level int8 type parser
     // (db-shared.ts, #155). discovered_count/fetched_count/error_count are
     // plain INTEGER — those Number() calls are unrelated and stay.
+    // geography_scope (JSONB, #109) arrives already parsed as a JS array by the
+    // pg driver; error_msg/failure_classification are TEXT.
     const connectors: ConnectorRunResult[] = resultsResult.rows.map((row) => ({
       id: row[0] as number,
       connector_name: String(row[1]),
@@ -141,7 +144,9 @@ export async function GET(
       fetched_count: row[6] != null ? Number(row[6]) : 0,
       error_count: row[7] != null ? Number(row[7]) : 0,
       error_msg: row[8] != null ? String(row[8]) : null,
-      duration_ms: row[9] != null ? (row[9] as number) : null,
+      failure_classification: row[9] != null ? String(row[9]) : null,
+      geography_scope: (row[10] as ConnectorRunResult["geography_scope"]) ?? null,
+      duration_ms: row[11] != null ? (row[11] as number) : null,
     }));
 
     const response: EtlRunDetailResponse = { run, connectors };

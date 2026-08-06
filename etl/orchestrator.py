@@ -35,6 +35,7 @@ from etl.connectors.rate_limit import RateLimiter
 from etl.db import postgres
 from etl.dedup import engine as dedup_engine
 from etl.extraction_quality import compute_extraction_quality
+from etl.failure_classification import classify_fatal_exception
 
 # Default bounded lifetime for a single dedup pass (D-036). A run currently
 # takes ~84 min (dropping once issue #226's photo-hash persistence deploys);
@@ -685,8 +686,20 @@ def _record_connector_result(
     finished_at: datetime,
     skipped_count: int = 0,
     skipped_scopes: list[dict[str, str]] | None = None,
+    failure_classification: str | None = None,
+    geography_scope: list[dict] | None = None,
 ) -> None:
-    """`skipped_count` (issue #143) is listings this connector's run left
+    """`failure_classification` (issue #242, D-079) is the typed, queryable
+    counterpart to `error_msg`'s prose — one of the taxonomy values in
+    etl.failure_classification (soft_block / network / structure_change /
+    unresolvable / uncovered / empty_result / other), or `None` for a clean run
+    with no notable failure signal. `geography_scope` (issue #109, D-079) is the
+    resolved scope(s) this run actually ran against — a JSONB array with one
+    entry per ConnectorScope and its per-geography `outcome`, so a run's coverage
+    is auditable instead of buried in `error_msg`. Both are stored as SQL NULL
+    when absent (`None`/empty), keeping `WHERE ... IS NOT NULL` a usable filter.
+
+    `skipped_count` (issue #143) is listings this connector's run left
     unfetched under the skip-if-seen policy — "known, still there per
     discover(), deliberately not re-fetched" — distinct from
     `connector_runs.connectors_skipped` (issue #99), which counts whole
@@ -710,8 +723,9 @@ def _record_connector_result(
             INSERT INTO connector_run_results
                 (run_id, connector_name, started_at, finished_at, status,
                  discovered_count, fetched_count, error_count, error_msg,
-                 skipped_count, skipped_scopes)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 skipped_count, skipped_scopes, failure_classification,
+                 geography_scope)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 run_id,
@@ -725,6 +739,8 @@ def _record_connector_result(
                 error_msg,
                 skipped_count,
                 json.dumps(skipped_scopes) if skipped_scopes else None,
+                failure_classification,
+                json.dumps(geography_scope) if geography_scope else None,
             ),
         )
     conn.commit()
@@ -2569,6 +2585,22 @@ def run_all_connectors(
         # error, parse error, etc.) when deciding this connector's overall
         # status and whether withdrawal reconciliation is safe this run.
         any_scope_unresolvable = False
+        # Issue #242 (D-079): a scope this connector has no coverage for
+        # (scope_key() is None) — tracked so a connector whose ONLY outcome this
+        # run was "resolved but uncovered" (nothing crawled, nothing failed) is
+        # classified 'uncovered' rather than left NULL.
+        any_scope_uncovered = False
+        # Issue #242 (D-079): any soft-block-flavoured event this run (a
+        # SoftBlockError at discover, a soft-block breaker trip, or soft-block
+        # fetch errors) — the 'soft_block' classification is a CLEAN outcome, so
+        # it's recorded even when the final status stays 'ok'.
+        any_soft_block = False
+        # Issue #242 (D-079): the classification of the FIRST genuine fatal
+        # discover() failure this run (network / structure_change / other), used
+        # to give the 'failed'/'circuit_open' rows a typed reason instead of a
+        # generic bucket. First fatal wins — same posture as error_msgs keeping
+        # every message but status reflecting the first/worst signal.
+        fatal_failure_kind: str | None = None
         scope_summaries: list[str] = []
         error_msgs: list[str] = []
         # Issue #217: the structured counterpart to error_msg's prose, so a
@@ -2578,6 +2610,38 @@ def run_all_connectors(
         # connector_run_results.skipped_scopes (JSONB); entries are
         # {"scope": <scope_key or repr(scope)>, "reason": "budget"|"uncovered"}.
         skipped_scopes: list[dict[str, str]] = []
+        # Issue #109 (D-079): the resolved geography this connector actually ran
+        # against this run — one entry per ConnectorScope (in the fairness order
+        # the loop walked them) tagged with its per-geography `outcome`. Persisted
+        # to connector_run_results.geography_scope (JSONB) so a run's coverage is
+        # auditable without reverse-engineering error_msg. Appended at each
+        # per-scope terminal point below via _record_geo.
+        geography_scope: list[dict] = []
+
+        def _record_geo(
+            scope: ConnectorScope,
+            outcome: str,
+            scope_key: str | None = None,
+            # Bind this iteration's connector + sink as defaults so the closure
+            # never depends on the mutating loop variables (ruff B023) — it is
+            # only ever called synchronously within the same iteration anyway.
+            *,
+            _connector: Connector = connector,
+            _sink: list[dict] = geography_scope,
+        ) -> None:
+            _sink.append(
+                {
+                    "scope_key": (
+                        scope_key
+                        if scope_key is not None
+                        else _connector.scope_key(scope)
+                    ),
+                    "center": list(scope.center) if scope.center else None,
+                    "radius_km": scope.radius_km,
+                    "rooms": scope.rooms,
+                    "outcome": outcome,
+                }
+            )
 
         # Issue #71 hardening: one limiter/breaker per connector per RUN,
         # not per scope — shared across every profile-geography this
@@ -2687,6 +2751,9 @@ def run_all_connectors(
                         # this as a distinct third outcome
                         # (`any_scope_unresolvable`) rather than folding it
                         # into either existing bucket.
+                        # Issue #109 (D-079): audit this geography as
+                        # unresolvable regardless of the per-key dedup below.
+                        _record_geo(remaining, "unresolvable", remaining_key)
                         if remaining_key not in classified_keys:
                             classified_keys.add(remaining_key)
                             skipped_scopes.append(
@@ -2704,6 +2771,8 @@ def run_all_connectors(
                         # actively mislead. Recorded under the uncovered
                         # reason instead, matching the `scope_key() is None`
                         # branch below.
+                        any_scope_uncovered = True
+                        _record_geo(remaining, "uncovered", None)
                         skipped_scopes.append(
                             {"scope": repr(remaining), "reason": "uncovered"}
                         )
@@ -2713,6 +2782,7 @@ def run_all_connectors(
                         # equivalent scope (two profiles resolving to one
                         # city). Its data is present, so reporting it as
                         # starved would be wrong.
+                        _record_geo(remaining, "duplicate", remaining_key)
                         continue
                     if remaining_key in already_fresh_this_cycle:
                         # Issue #295 (D-050): already discovered earlier THIS
@@ -2721,13 +2791,16 @@ def run_all_connectors(
                         # blocks completion nor needs a "covered but skipped"
                         # row. Classifying it as budget would misreport a done
                         # scope as waiting.
+                        _record_geo(remaining, "fresh_this_cycle", remaining_key)
                         continue
                     if remaining_key in classified_keys:
                         # A second un-reached scope resolving to a key
                         # already reported as starved — one report, not two.
+                        _record_geo(remaining, "budget", remaining_key)
                         continue
                     classified_keys.add(remaining_key)
                     skipped_for_budget.append(remaining_key)
+                    _record_geo(remaining, "budget", remaining_key)
                     # The row this writes is what lets the dashboard say
                     # "covered, but hasn't had its turn yet" — a
                     # connector_scope_state row with a NULL
@@ -2810,6 +2883,8 @@ def run_all_connectors(
                 # Issue #217: also recorded structurally, so the "uncovered"
                 # half of the distinction this issue asked for doesn't depend
                 # on a consumer parsing the prose below.
+                any_scope_uncovered = True
+                _record_geo(scope, "uncovered", None)
                 skipped_scopes.append({"scope": repr(scope), "reason": "uncovered"})
                 place = None
                 if scope.center is not None:
@@ -2853,6 +2928,7 @@ def run_all_connectors(
                 # counts toward completion — its connector_scope_state row
                 # already has last_discovered_at >= cycle_started_at.
                 seen_scope_keys.add(scope_key)
+                _record_geo(scope, "fresh_this_cycle", scope_key)
                 skipped_scopes.append(
                     {"scope": scope_key, "reason": "fresh_this_cycle"}
                 )
@@ -2870,6 +2946,7 @@ def run_all_connectors(
                 # Two active profiles resolved to the same real target
                 # (e.g. two different Madrid-area profiles both landing on
                 # "madrid-capital") — crawl it once, not once per profile.
+                _record_geo(scope, "duplicate", scope_key)
                 logger.info(
                     "Connector %s: scope=%r resolves to already-crawled "
                     "key=%r this run — skipping redundant crawl",
@@ -2955,6 +3032,7 @@ def run_all_connectors(
                 # dropped just because the rest of the connector's scopes
                 # were fine.
                 any_scope_unresolvable = True
+                _record_geo(scope, "unresolvable", scope_key)
                 logger.error(
                     "Connector %s: scope=%r has an unresolvable geography "
                     "(matches no known place in the gazetteer at all) — "
@@ -3000,6 +3078,8 @@ def run_all_connectors(
                     # notice and, structurally, as a skipped scope with a
                     # soft-block reason so it stops looking like an error in the
                     # health surface.
+                    any_soft_block = True
+                    _record_geo(scope, "soft_block", scope_key)
                     budget_notes.append(
                         f"no se pudo cargar {scope} por bloqueo temporal del "
                         f"sitio (rate-throttling): {exc}"
@@ -3017,6 +3097,12 @@ def run_all_connectors(
                     )
                     continue
                 any_scope_failed = True
+                # Issue #242 (D-079): type this fatal failure (network /
+                # structure_change / other) for the queryable classification.
+                # First fatal wins — later scopes' failures don't overwrite it.
+                if fatal_failure_kind is None:
+                    fatal_failure_kind = classify_fatal_exception(exc)
+                _record_geo(scope, "failed", scope_key)
                 logger.exception(
                     "Connector %s: discover() failed for scope=%r",
                     connector.name,
@@ -3048,6 +3134,11 @@ def run_all_connectors(
                 if result["circuit_open_by"] == "fatal":
                     any_fatal_circuit_open = True
                 else:
+                    # Issue #242 (D-079): a soft-block-driven breaker trip is a
+                    # clean budget stop, but still a soft-block event worth
+                    # classifying so an 'ok' run that hit the rate-throttle wall
+                    # is trend-analyzable.
+                    any_soft_block = True
                     budget_notes.append(
                         f"{scope_key}: se alcanzó el límite por bloqueo temporal "
                         f"del sitio (rate-throttling) tras "
@@ -3056,6 +3147,14 @@ def run_all_connectors(
                     )
             discovered_union |= result["discovered_external_ids"]
             reconcilable_union = reconcilable_union and result["reconcilable"]
+            # Issue #109 (D-079): this geography reached a real crawl. 'empty'
+            # vs 'crawled' distinguishes "ran, found nothing here" from "ran,
+            # ingested" on a per-scope basis for the coverage audit.
+            _record_geo(
+                scope,
+                "crawled" if result["discovered_count"] > 0 else "empty",
+                scope_key,
+            )
             scope_summaries.append(
                 f"{scope_key}: discovered={result['discovered_count']} "
                 f"fetched={result['fetched_count']} "
@@ -3140,6 +3239,36 @@ def run_all_connectors(
         else:
             status = "ok"
 
+        # Issue #242 (D-079): the typed, queryable failure classification,
+        # written alongside status. Precedence mirrors the status precedence
+        # above so the two never disagree, then adds the CLEAN-outcome signals
+        # (soft_block, empty_result) that status can't express because it only
+        # has three values. `None` is reserved for a genuinely clean run that
+        # ingested data.
+        #   1. genuine fatal failure -> its typed kind (network /
+        #      structure_change / other), captured at the raising scope.
+        #   2. fatal circuit trip -> the same fatal kind if we have one, else
+        #      'structure_change' (the "site changed / is down" burst signal).
+        #   3. only-unresolvable run (nothing else succeeded) -> 'unresolvable'.
+        #   4. any soft-block event (even on an 'ok' run) -> 'soft_block'.
+        #   5. nothing crawled and every scope was uncovered -> 'uncovered'.
+        #   6. every scope ran but discovered nothing -> 'empty_result'.
+        #   7. otherwise -> None (clean run with data).
+        if any_scope_failed:
+            failure_classification = fatal_failure_kind or "other"
+        elif any_fatal_circuit_open:
+            failure_classification = fatal_failure_kind or "structure_change"
+        elif any_scope_unresolvable and not scope_summaries:
+            failure_classification = "unresolvable"
+        elif any_soft_block:
+            failure_classification = "soft_block"
+        elif not scope_summaries and any_scope_uncovered:
+            failure_classification = "uncovered"
+        elif scope_summaries and discovered_total == 0:
+            failure_classification = "empty_result"
+        else:
+            failure_classification = None
+
         # Issue #270 (D-047): make explicit that error_count INCLUDES
         # soft-block (rate-throttle) fetch failures — they are genuine failed
         # fetches (counted for #291) even though the run status stays clean.
@@ -3184,6 +3313,8 @@ def run_all_connectors(
             error_count=error_total,
             error_msg="; ".join(error_msgs) or None,
             skipped_scopes=skipped_scopes,
+            failure_classification=failure_classification,
+            geography_scope=geography_scope,
             started_at=started_at,
             finished_at=datetime.now(timezone.utc),
         )

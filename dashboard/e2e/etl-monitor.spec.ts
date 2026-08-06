@@ -66,18 +66,35 @@ test.beforeAll(async () => {
   );
   runId = runResult.rows[0].id;
 
+  // fotocasa carries a resolved geography_scope (issue #109) and no failure
+  // classification (clean); milanuncios carries a typed failure_classification
+  // (issue #242) alongside its circuit_open. Both drive the run-detail UI.
   await pool.query(
     `INSERT INTO connector_run_results
         (run_id, connector_name, started_at, finished_at, status,
-         discovered_count, fetched_count, error_count, error_msg)
+         discovered_count, fetched_count, error_count, error_msg,
+         failure_classification, geography_scope)
      VALUES
         ($1, 'fotocasa',    NOW() - INTERVAL '10 minutes', NOW() - INTERVAL '9 minutes',
-         'ok', 31, 28, 3, NULL),
+         'ok', 31, 28, 3, NULL, NULL,
+         $2::jsonb),
         ($1, 'milanuncios', NOW() - INTERVAL '9 minutes',  NOW() - INTERVAL '8 minutes',
-         'circuit_open', 41, 4, 8, 'circuit breaker open after 8/10 errors'),
+         'circuit_open', 41, 4, 8, 'circuit breaker open after 8/10 errors',
+         'structure_change', NULL),
         ($1, 'idealista',   NOW() - INTERVAL '8 minutes',  NOW() - INTERVAL '8 minutes',
-         'skipped', 0, 0, 0, 'disabled via connector_config')`,
-    [runId],
+         'skipped', 0, 0, 0, 'disabled via connector_config', NULL, NULL)`,
+    [
+      runId,
+      JSON.stringify([
+        {
+          scope_key: "madrid-capital",
+          center: [40.4168, -3.7038],
+          radius_km: 10,
+          rooms: null,
+          outcome: "crawled",
+        },
+      ]),
+    ],
   );
 });
 
@@ -161,6 +178,19 @@ test("run detail shows the per-connector funnel and the two new statuses", async
     .locator("button");
   await expect(skippedReason).toContainText("disabled via connector_config");
   await expect(skippedReason).not.toHaveClass(/text-red-500/);
+
+  // Issue #242: the typed failure classification renders as a human label on
+  // the connector that has one, and is absent on the clean connector.
+  await expect(
+    page.getByTestId("connector-failure-milanuncios"),
+  ).toContainText("Cambio de estructura");
+  await expect(page.getByTestId("connector-failure-fotocasa")).toHaveCount(0);
+
+  // Issue #109: the resolved geography a run actually ran against is shown per
+  // connector, with its per-scope outcome — the audit trail #109 asked for.
+  const geo = page.getByTestId("connector-row-fotocasa-geo");
+  await expect(geo).toContainText("madrid-capital");
+  await expect(geo).toContainText("Rastreada");
 
   await expect(page.getByTestId("error-display")).toHaveCount(0);
 });

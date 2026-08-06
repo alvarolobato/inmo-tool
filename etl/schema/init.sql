@@ -1272,6 +1272,116 @@ CREATE INDEX IF NOT EXISTS idx_connector_scope_state_coverage_center
 ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS skipped_scopes JSONB;
 
 -- ============================================================
+-- Typed failure classification + resolved geography scope
+-- (issues #242 + #109, D-079)
+-- ============================================================
+--
+-- Two columns landed together in one migration window because both hang off
+-- the SAME write site (etl.orchestrator._record_connector_result) and the same
+-- table — the roadmap (docs/roadmap/connector-etl-ops.md §4/§109) explicitly
+-- asked for them to be coordinated so this table isn't migrated twice in a row.
+--
+-- 1. failure_classification (#242): the typed, trend-analyzable counterpart to
+--    error_msg's free text. Today an operator can only tell WHY a connector
+--    result is not clean by string-matching prose; this makes the failure kind
+--    a queryable enum (feeds #171 trend analysis). NULL means "no notable
+--    failure signal" — a clean run that actually ingested data. The taxonomy is
+--    grounded in what the orchestrator already distinguishes at write time (the
+--    SoftBlockError / UnresolvableGeographyError / fatal-ConnectorError /
+--    scope_key()-None / circuit-breaker paths in run_all_connectors), a
+--    superset of #242's proposed soft_block/structure_change/network/uncovered/
+--    other:
+--      'soft_block'       site rate-throttling / bot-mitigation wall
+--                         (SoftBlockError, soft-block breaker trip, or
+--                         soft-block fetch errors) — a clean budget backoff,
+--                         so this is recorded even on an 'ok' status row.
+--      'network'         a fatal ConnectorError whose message looks like a
+--                         connection/timeout/DNS/TLS failure.
+--      'structure_change' a fatal ConnectorError whose message looks like a
+--                         parse/markup/JSON break, OR a circuit_open driven by
+--                         genuine fatal errors ("the site changed / is down").
+--      'unresolvable'    UnresolvableGeographyError — a profile centre that
+--                         matches no place in the gazetteer at all.
+--      'uncovered'       scope_key() returned None — this connector covers no
+--                         target for the scope (issue #177), and nothing else
+--                         this run succeeded.
+--      'empty_result'    every scope ran cleanly but discovered zero listings.
+--      'other'           a fatal failure that matched none of the above.
+--    A CHECK keeps the column honest; NULL is always allowed. Idempotent:
+--    DROP-then-ADD the named constraint so re-applying init.sql is a no-op.
+-- 2. geography_scope (#109): the resolved scope(s) this run actually ran
+--    against — the audit trail #109 asked for so a surprising result can be
+--    traced to the exact geography/filters used, not reverse-engineered from
+--    error_msg. JSONB array, one entry per resolved ConnectorScope (fairness-
+--    ordered as the run walked them), each:
+--      {"scope_key": <site key or null>, "center": [lat, lon] | null,
+--       "radius_km": <n> | null, "rooms": <n> | null, "outcome": <str>}
+--    `outcome` records what happened to that specific geography this run:
+--    'crawled' / 'empty' / 'uncovered' / 'unresolvable' / 'budget' /
+--    'soft_block' / 'fresh_this_cycle' / 'duplicate' / 'failed'. This is what
+--    lets an operator see, per geography, "disabled-scope vs no-resolvable-
+--    scope"-style distinctions (#109 AC): 'uncovered' and 'unresolvable' are
+--    structurally different outcomes for the same city, no longer collapsed
+--    into one label. NULL only when the row somehow ran with zero scopes
+--    (the orchestrator emits no row at all for the disabled / no-scope cases,
+--    per issue #292/#71 — so on any real row this is a non-empty array).
+ALTER TABLE connector_run_results
+    ADD COLUMN IF NOT EXISTS failure_classification TEXT;
+ALTER TABLE connector_run_results
+    DROP CONSTRAINT IF EXISTS connector_run_results_failure_classification_check;
+ALTER TABLE connector_run_results
+    ADD CONSTRAINT connector_run_results_failure_classification_check
+    CHECK (failure_classification IS NULL OR failure_classification IN (
+        'soft_block', 'network', 'structure_change', 'unresolvable',
+        'uncovered', 'empty_result', 'other'
+    ));
+ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS geography_scope JSONB;
+
+-- One-time best-effort backfill (#242): classify pre-existing rows from their
+-- status + error_msg prose so history is trend-analyzable too. Only ever fills
+-- NULLs (idempotent — re-runs to a no-op once every row is classified, and it
+-- never overwrites a value the orchestrator wrote). 'skipped' rows are left
+-- NULL: a disabled/omitted connector is not a failure. Ordered most- to
+-- least-specific; the first matching CASE branch wins. This is deliberately
+-- coarse — the orchestrator writes the precise value going forward.
+UPDATE connector_run_results
+   SET failure_classification = CASE
+       WHEN error_msg ILIKE '%unresolvable geography%' THEN 'unresolvable'
+       WHEN error_msg ILIKE '%resolved but uncovered%'
+            OR error_msg ILIKE '%no known coverage%' THEN 'uncovered'
+       WHEN error_msg ILIKE '%bloqueo temporal%'
+            OR error_msg ILIKE '%rate-throttl%'
+            OR error_msg ILIKE '%soft-block%'
+            OR error_msg ILIKE '%presupuesto%' THEN 'soft_block'
+       WHEN status = 'circuit_open' THEN 'structure_change'
+       WHEN status = 'failed' AND (
+                error_msg ILIKE '%timeout%'
+                OR error_msg ILIKE '%timed out%'
+                OR error_msg ILIKE '%connection%'
+                OR error_msg ILIKE '%could not connect%'
+                OR error_msg ILIKE '%refused%'
+                OR error_msg ILIKE '%unreachable%'
+                OR error_msg ILIKE '%name resolution%'
+                OR error_msg ILIKE '%DNS%'
+                OR error_msg ILIKE '%SSL%'
+            ) THEN 'network'
+       WHEN status = 'failed' AND (
+                error_msg ILIKE '%parse%'
+                OR error_msg ILIKE '%JSON%'
+                OR error_msg ILIKE '%HTML%'
+                OR error_msg ILIKE '%selector%'
+                OR error_msg ILIKE '%marker%'
+                OR error_msg ILIKE '%NoneType%'
+                OR error_msg ILIKE '%KeyError%'
+                OR error_msg ILIKE '%structure%'
+            ) THEN 'structure_change'
+       WHEN status = 'failed' THEN 'other'
+       ELSE NULL
+   END
+ WHERE failure_classification IS NULL
+   AND status IN ('failed', 'circuit_open');
+
+-- ============================================================
 -- Connector freshness cadence (issue #295, D-050)
 -- ============================================================
 --

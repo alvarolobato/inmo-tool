@@ -39,10 +39,11 @@ const MOCK_RUN_ROW = [
 ];
 
 // id, connector_name, started_at, finished_at, status, discovered_count,
-// fetched_count, error_count, error_msg, duration_ms (derived last).
+// fetched_count, error_count, error_msg, failure_classification (#242),
+// geography_scope (#109), duration_ms (derived last).
 const MOCK_CONNECTOR_ROWS = [
-  [1, "fotocasa", new Date("2026-04-10T02:00:00Z"), new Date("2026-04-10T02:15:00Z"), "ok", 31, 28, 3, null, 900000],
-  [2, "milanuncios", new Date("2026-04-10T02:15:00Z"), new Date("2026-04-10T03:00:00Z"), "ok", 41, 17, 0, null, 2700000],
+  [1, "fotocasa", new Date("2026-04-10T02:00:00Z"), new Date("2026-04-10T02:15:00Z"), "ok", 31, 28, 3, null, null, [{ scope_key: "madrid", center: [40.4, -3.7], radius_km: 10, rooms: null, outcome: "crawled" }], 900000],
+  [2, "milanuncios", new Date("2026-04-10T02:15:00Z"), new Date("2026-04-10T03:00:00Z"), "ok", 41, 17, 0, null, null, null, 2700000],
 ];
 
 describe("GET /api/etl/runs/[id]", () => {
@@ -70,7 +71,13 @@ describe("GET /api/etl/runs/[id]", () => {
     expect(body.connectors[0].fetched_count).toBe(28);
     expect(body.connectors[0].error_count).toBe(3);
     expect(body.connectors[0].duration_ms).toBe(900000);
+    // #242 + #109: the typed classification and resolved geography pass through.
+    expect(body.connectors[0].failure_classification).toBeNull();
+    expect(body.connectors[0].geography_scope).toEqual([
+      { scope_key: "madrid", center: [40.4, -3.7], radius_km: 10, rooms: null, outcome: "crawled" },
+    ]);
     expect(body.connectors[1].connector_name).toBe("milanuncios");
+    expect(body.connectors[1].geography_scope).toBeNull();
   });
 
   it("returns 404 when run not found", async () => {
@@ -131,7 +138,7 @@ describe("GET /api/etl/runs/[id]", () => {
   });
 
   it("returns connector with error_msg when status is failed", async () => {
-    const failedConnector = [3, "idealista", new Date("2026-04-10T02:00:00Z"), new Date("2026-04-10T02:01:00Z"), "failed", 0, 0, 1, "Connection timeout", 60000];
+    const failedConnector = [3, "idealista", new Date("2026-04-10T02:00:00Z"), new Date("2026-04-10T02:01:00Z"), "failed", 0, 0, 1, "Connection timeout", "network", [{ scope_key: "madrid", center: null, radius_km: null, rooms: null, outcome: "failed" }], 60000];
     mockQuery
       .mockResolvedValueOnce({ rows: [MOCK_RUN_ROW], columns: [] })
       .mockResolvedValueOnce({ rows: [failedConnector], columns: [] });
@@ -142,6 +149,8 @@ describe("GET /api/etl/runs/[id]", () => {
     expect(res.status).toBe(200);
     expect(body.connectors[0].status).toBe("failed");
     expect(body.connectors[0].error_msg).toBe("Connection timeout");
+    expect(body.connectors[0].failure_classification).toBe("network");
+    expect(body.connectors[0].geography_scope[0].outcome).toBe("failed");
   });
 
   it("passes through the circuit_open and skipped statuses", async () => {
@@ -149,8 +158,8 @@ describe("GET /api/etl/runs/[id]", () => {
     // a route that silently dropped or coerced them would make a tripped
     // breaker and an operator-disabled connector both look like plain 'ok'.
     const rows = [
-      [4, "fotocasa", new Date("2026-04-10T02:00:00Z"), new Date("2026-04-10T02:05:00Z"), "circuit_open", 31, 4, 8, "circuit breaker open after 8/10 errors", 300000],
-      [5, "milanuncios", new Date("2026-04-10T02:05:00Z"), new Date("2026-04-10T02:05:00Z"), "skipped", 0, 0, 0, "disabled via connector_config", 0],
+      [4, "fotocasa", new Date("2026-04-10T02:00:00Z"), new Date("2026-04-10T02:05:00Z"), "circuit_open", 31, 4, 8, "circuit breaker open after 8/10 errors", "structure_change", null, 300000],
+      [5, "milanuncios", new Date("2026-04-10T02:05:00Z"), new Date("2026-04-10T02:05:00Z"), "skipped", 0, 0, 0, "disabled via connector_config", null, null, 0],
     ];
     mockQuery
       .mockResolvedValueOnce({ rows: [MOCK_RUN_ROW], columns: [] })
@@ -166,7 +175,7 @@ describe("GET /api/etl/runs/[id]", () => {
   });
 
   it("tolerates a null duration when a connector never finished", async () => {
-    const unfinished = [6, "fotocasa", new Date("2026-04-10T02:00:00Z"), null, "failed", 0, 0, 0, "killed mid-run", null];
+    const unfinished = [6, "fotocasa", new Date("2026-04-10T02:00:00Z"), null, "failed", 0, 0, 0, "killed mid-run", "other", null, null];
     mockQuery
       .mockResolvedValueOnce({ rows: [MOCK_RUN_ROW], columns: [] })
       .mockResolvedValueOnce({ rows: [unfinished], columns: [] });
