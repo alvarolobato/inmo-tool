@@ -208,12 +208,19 @@ export interface LatestFeedbackState {
 export async function fetchLatestFeedbackStates(
   profileId: number,
 ): Promise<LatestFeedbackState[]> {
-  return sql<LatestFeedbackState>(
+  // Derive over accept/reject/star/clear (#379) so a `clear` that POSTdates a
+  // reject wins the DISTINCT ON — then drop the `clear` rows, leaving the
+  // property with no state at all (excluded from training), rather than
+  // training on a verdict the user has since retracted.
+  const rows = await sql<{ property_id: number; feedback_type: LatestFeedbackState["feedback_type"] | "clear" }>(
     `SELECT DISTINCT ON (property_id) property_id, feedback_type
        FROM feedback_event
       WHERE profile_id = $1 AND feedback_type = ANY($2::text[])
       ORDER BY property_id, created_at DESC, id DESC`,
-    [profileId, ["accept", "reject", "star"]],
+    [profileId, ["accept", "reject", "star", "clear"]],
+  );
+  return rows.filter(
+    (r): r is LatestFeedbackState => r.feedback_type !== "clear",
   );
 }
 

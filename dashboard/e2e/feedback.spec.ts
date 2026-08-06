@@ -33,6 +33,10 @@ let pool: Pool;
 let dbAvailable = false;
 let profileId: number;
 let propertyId: number;
+// A second matched candidate (#379): the feed is never empty after the first
+// is rejected, so the deferred-removal test proves "the rejected one drops out
+// while the others stay" without depending on the zero-candidates diagnostic.
+let bystanderPropertyId: number;
 
 test.beforeAll(async () => {
   pool = buildPool();
@@ -76,21 +80,48 @@ test.beforeAll(async () => {
     `INSERT INTO profile_listing_state (profile_id, property_id, matched) VALUES ($1, $2, true)`,
     [profileId, propertyId],
   );
+
+  // Second candidate — stays in the feed no matter what the first's verdict is.
+  const bystanderResult = await pool.query<{ id: number }>(
+    `INSERT INTO property (lat, lon, property_type, m2_built, address)
+     VALUES ($1, $2, 'piso', 80, $3) RETURNING id`,
+    [COORDS[0], COORDS[1], `${NAME_PREFIX}Calle bystander`],
+  );
+  bystanderPropertyId = bystanderResult.rows[0].id;
+  await pool.query(
+    `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at)
+     VALUES ($1, 'fotocasa', $2, 'active', 260000, NOW())`,
+    [bystanderPropertyId, `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`],
+  );
+  await pool.query(
+    `INSERT INTO profile_listing_state (profile_id, property_id, matched) VALUES ($1, $2, true)`,
+    [profileId, bystanderPropertyId],
+  );
 });
 
 test.afterAll(async () => {
   if (!dbAvailable) return;
+  const propIds = [propertyId, bystanderPropertyId];
   await pool.query("DELETE FROM feedback_event WHERE profile_id = $1", [profileId]);
   await pool.query("DELETE FROM profile_listing_state WHERE profile_id = $1", [profileId]);
   await pool.query("DELETE FROM search_profile WHERE id = $1", [profileId]);
-  await pool.query("DELETE FROM listing WHERE property_id = $1", [propertyId]);
-  await pool.query("DELETE FROM property WHERE id = $1", [propertyId]);
+  await pool.query("DELETE FROM listing WHERE property_id = ANY($1::bigint[])", [propIds]);
+  await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [propIds]);
   await pool.end();
 });
 
 function skipIfNoDb(test_: typeof test) {
   test_.skip(!dbAvailable, "no reachable Postgres");
 }
+
+// Each test should be independently seedable (Playwright doesn't guarantee
+// order/isolation). #379 makes this matter more: a test that ends on 'reject'
+// now HIDES the card from the default feed, so a following test would find no
+// card at all. Reset the verdict before every test so each starts neutral.
+test.beforeEach(async () => {
+  if (!dbAvailable) return;
+  await pool.query("DELETE FROM feedback_event WHERE profile_id = $1", [profileId]);
+});
 
 // Every UI page is admin-gated (middleware.ts) — see e2e/helpers/admin-session.ts.
 test.beforeEach(async ({ page, baseURL }) => {
@@ -102,47 +133,76 @@ async function assertNoErrorSurface(page: Page) {
   await expect(page.getByText(/error|hubo un problema|there is no parameter|http 500/i)).toHaveCount(0);
 }
 
-test("reject persists and survives reload", async ({ page }) => {
+test("reject defers removal: card stays this session, is gone on reload, and the show-rejected toggle un-rejects it (#379)", async ({
+  page,
+}) => {
   skipIfNoDb(test);
 
   await page.goto(`/profiles/${profileId}`);
   await assertNoErrorSurface(page);
 
-  const card = page.locator(`[data-testid="candidate-card"][data-property-id="${propertyId}"]`);
+  const cardSel = `[data-testid="candidate-card"][data-property-id="${propertyId}"]`;
+  const card = page.locator(cardSel);
   await expect(card).toBeVisible();
 
   const rejectButton = card.getByTestId("feedback-reject");
-  await expect(rejectButton).toBeVisible();
   await expect(rejectButton).toHaveAttribute("aria-pressed", "false");
 
-  // Wait for the persistence POST to actually COMPLETE, not just for the
-  // optimistic aria-pressed flip. The button flips to "true" the instant the
-  // click handler runs, before the write has committed; reloading in that
-  // window occasionally re-fetched state the POST hadn't landed yet, and the
-  // reloaded button came back "false". This was a genuine ~1-in-3 flake in CI
-  // and locally — the test's bug, not the app's. Gate the reload on the write.
+  // Reject. Wait for the persistence POST to COMPLETE (not just the optimistic
+  // flip) so the reload below observes committed state — a genuine ~1-in-3
+  // flake otherwise (the test's bug, not the app's).
   const [feedbackResponse] = await Promise.all([
     page.waitForResponse(
-      (r) =>
-        /\/feedback(\?|$)/.test(new URL(r.url()).pathname) &&
-        r.request().method() === "POST",
+      (r) => /\/feedback(\?|$)/.test(new URL(r.url()).pathname) && r.request().method() === "POST",
     ),
     rejectButton.click(),
   ]);
   expect(feedbackResponse.ok()).toBe(true);
-  await expect(rejectButton).toHaveAttribute("aria-pressed", "true");
 
-  // Clicking the reject button must not navigate to the property detail
-  // page — this is the whole reason FeedbackControls sits outside the
-  // card's <Link> rather than nested inside it.
+  // Deferred removal (#379): the card does NOT vanish on click — it stays this
+  // session, visibly marked (reject pressed + the "Descartada" badge), so the
+  // user keeps their place.
+  await expect(rejectButton).toHaveAttribute("aria-pressed", "true");
+  await expect(card).toBeVisible();
+  await expect(card.getByTestId("candidate-rejected-badge")).toBeVisible();
+  // Clicking reject must not navigate (FeedbackControls sits outside the Link).
   await expect(page).toHaveURL(new RegExp(`/profiles/${profileId}$`));
 
+  // Next browse: the reject is now excluded server-side, so the rejected card
+  // is gone from the default feed — while the bystander candidate stays, so
+  // this proves targeted removal, not an emptied feed.
   await page.reload();
   await assertNoErrorSurface(page);
-  const rejectButtonAfterReload = page
-    .locator(`[data-testid="candidate-card"][data-property-id="${propertyId}"]`)
-    .getByTestId("feedback-reject");
-  await expect(rejectButtonAfterReload).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    page.locator(`[data-testid="candidate-card"][data-property-id="${bystanderPropertyId}"]`),
+  ).toBeVisible();
+  await expect(page.locator(cardSel)).toHaveCount(0);
+
+  // Show-rejected toggle: the rejected card reappears, still marked.
+  await page.getByTestId("show-rejected-toggle").check();
+  const cardAgain = page.locator(cardSel);
+  await expect(cardAgain).toBeVisible();
+  await expect(cardAgain.getByTestId("candidate-rejected-badge")).toBeVisible();
+  await expect(cardAgain.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "true");
+
+  // Un-reject: clicking the active reject clears the verdict. The card stays
+  // (show-rejected is on) but is no longer marked.
+  const [unrejectResponse] = await Promise.all([
+    page.waitForResponse(
+      (r) => /\/feedback(\?|$)/.test(new URL(r.url()).pathname) && r.request().method() === "POST",
+    ),
+    cardAgain.getByTestId("feedback-reject").click(),
+  ]);
+  expect(unrejectResponse.ok()).toBe(true);
+  await expect(cardAgain.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "false");
+  await expect(cardAgain.getByTestId("candidate-rejected-badge")).toHaveCount(0);
+
+  // The un-reject persists: with the toggle off, the property is back in the
+  // default feed, unmarked.
+  await page.getByTestId("show-rejected-toggle").uncheck();
+  const cardDefault = page.locator(cardSel);
+  await expect(cardDefault).toBeVisible();
+  await expect(cardDefault.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "false");
 });
 
 test("submitting a note does not change the accept/reject/star toggle state", async ({ page }) => {
@@ -188,10 +248,23 @@ test("accept -> star -> reject transitions replace the active toggle each time",
   await expect(card.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "true");
   await expect(card.getByTestId("feedback-star")).toHaveAttribute("aria-pressed", "false");
 
-  // Survives a reload as the latest of the three transitions, not an
-  // earlier one — proves "current state" really reads the most recent event.
+  // Land on 'accept' (a state the default feed still shows — #379 hides only
+  // 'reject' on reload) and gate the reload on its write committing, so the
+  // reload observes the latest event, not an earlier one.
+  const [acceptResponse] = await Promise.all([
+    page.waitForResponse(
+      (r) => /\/feedback(\?|$)/.test(new URL(r.url()).pathname) && r.request().method() === "POST",
+    ),
+    card.getByTestId("feedback-accept").click(),
+  ]);
+  expect(acceptResponse.ok()).toBe(true);
+  await expect(card.getByTestId("feedback-accept")).toHaveAttribute("aria-pressed", "true");
+  await expect(card.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "false");
+
+  // Survives a reload as the latest of the transitions, not an earlier one —
+  // proves "current state" really reads the most recent event.
   await page.reload();
   await assertNoErrorSurface(page);
   const cardAfterReload = page.locator(`[data-testid="candidate-card"][data-property-id="${propertyId}"]`);
-  await expect(cardAfterReload.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "true");
+  await expect(cardAfterReload.getByTestId("feedback-accept")).toHaveAttribute("aria-pressed", "true");
 });

@@ -1,4 +1,8 @@
+"use client";
+
+import { useState } from "react";
 import type { CandidateRow } from "@/lib/candidates";
+import type { StateFeedbackType } from "@/lib/db/feedback";
 import { PROPERTY_TYPE_LABELS, type PROPERTY_TYPES } from "@/lib/profiles-schema";
 import { fmtEUR0, fmtInt } from "@/components/widgets/format";
 import { FeedbackControls } from "./FeedbackControls";
@@ -39,6 +43,16 @@ function floorLabel(floor: string): string {
 }
 
 export function CandidateCard({ candidate, profileId }: { candidate: CandidateRow; profileId: number }) {
+  // #379: the verdict comes embedded on the row now. Held in local state so a
+  // reject/un-reject click updates the card's "Descartada" treatment in place
+  // — the card is NEVER removed on click; it stays marked until the next fetch
+  // (deferred removal). FeedbackControls reports every change up through
+  // onStateChange.
+  const [feedbackState, setFeedbackState] = useState<StateFeedbackType | null>(
+    candidate.feedback_state ?? null,
+  );
+  const isRejected = feedbackState === "reject";
+
   const sources = [...new Set(candidate.listings.map((l) => l.source))].sort();
   const typeLabel =
     candidate.property_type !== null &&
@@ -77,9 +91,12 @@ export function CandidateCard({ candidate, profileId }: { candidate: CandidateRo
     <div
       data-testid="candidate-card"
       data-property-id={candidate.property_id}
+      data-rejected={isRejected}
       className="candidate-card"
       style={{
-        border: "1px solid var(--border)",
+        // A rejected card stays in the list (deferred removal / show-rejected
+        // view) but reads unmistakably as discarded: a red-tinted border.
+        border: isRejected ? "1px solid var(--down, #d33)" : "1px solid var(--border)",
         borderRadius: 8,
         background: "var(--bg-1)",
         display: "flex",
@@ -89,6 +106,39 @@ export function CandidateCard({ candidate, profileId }: { candidate: CandidateRo
         overflow: "hidden",
       }}
     >
+      {isRejected && (
+        <span
+          data-testid="candidate-rejected-badge"
+          style={{
+            position: "absolute",
+            top: 6,
+            left: 6,
+            zIndex: 2,
+            fontSize: 10,
+            lineHeight: "14px",
+            fontWeight: 700,
+            letterSpacing: 0.3,
+            textTransform: "uppercase",
+            padding: "2px 6px",
+            borderRadius: 4,
+            background: "var(--down, #d33)",
+            color: "var(--bg, #fff)",
+          }}
+        >
+          Descartada
+        </span>
+      )}
+      {/* Only the informational content dims when rejected — the feedback
+          overlay (a sibling below) stays full-opacity and interactive so the
+          card can be un-rejected. */}
+      <div
+        style={{
+          opacity: isRejected ? 0.55 : 1,
+          transition: "opacity 120ms ease",
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
       <CandidatePhotoTicker
         photos={candidate.photos}
         href={`/profiles/${profileId}/properties/${candidate.property_id}`}
@@ -183,6 +233,7 @@ export function CandidateCard({ candidate, profileId }: { candidate: CandidateRo
           )}
         </div>
       </CandidatePhotoTicker>
+      </div>
 
       {/*
         Sibling of CandidatePhotoTicker's <Link>, never a child — a feedback
@@ -193,10 +244,16 @@ export function CandidateCard({ candidate, profileId }: { candidate: CandidateRo
         always visible to keyboard users via :focus-within — and (#167) the
         one button matching the property's current feedback state, if any,
         stays visible unconditionally, so a marked card reads as marked while
-        scanning the list.
+        scanning the list. #379: on a rejected card this overlay is the
+        un-reject control, so it stays full-opacity outside the dimmed content.
       */}
       <div className="candidate-card-actions" data-testid="candidate-card-actions">
-        <FeedbackControls profileId={profileId} propertyId={candidate.property_id} />
+        <FeedbackControls
+          profileId={profileId}
+          propertyId={candidate.property_id}
+          initialState={candidate.feedback_state ?? null}
+          onStateChange={setFeedbackState}
+        />
       </div>
     </div>
   );

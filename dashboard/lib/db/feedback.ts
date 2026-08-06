@@ -11,11 +11,24 @@
 
 import { sql, withTransaction } from "@/lib/db-write";
 
-/** The subset of feedback_type values that participate in the derived "current state" toggle. */
+/** The active toggle states a card can visibly carry (the accept/reject/star buttons). */
 export const STATE_FEEDBACK_TYPES = ["accept", "reject", "star"] as const;
 export type StateFeedbackType = (typeof STATE_FEEDBACK_TYPES)[number];
 
-export const FEEDBACK_TYPES = [...STATE_FEEDBACK_TYPES, "note", "correction"] as const;
+/**
+ * The feedback_type values that DERIVE the current toggle state — the three
+ * active states plus `clear`, an explicit "un-mark" that resets the derived
+ * state back to neutral (null) without deleting history (#379). The table
+ * stays append-only, so un-rejecting a property is a new `clear` row, not a
+ * DELETE of the prior `reject`. Every "latest state wins" read (here, the
+ * scoring pipeline, the profile overview, and the candidate feed) must select
+ * over THIS set and map a trailing `clear` to null, or a cleared property
+ * would keep reading as its last accept/reject/star.
+ */
+export const DERIVED_STATE_FEEDBACK_TYPES = ["accept", "reject", "star", "clear"] as const;
+export type DerivedStateFeedbackType = (typeof DERIVED_STATE_FEEDBACK_TYPES)[number];
+
+export const FEEDBACK_TYPES = [...DERIVED_STATE_FEEDBACK_TYPES, "note", "correction"] as const;
 export type FeedbackType = (typeof FEEDBACK_TYPES)[number];
 
 export interface FeedbackEventRow {
@@ -94,24 +107,32 @@ export async function recordStateFeedbackIfChanged(opts: {
   profileId: number;
   propertyId: number;
   listingId?: number | null;
-  feedbackType: StateFeedbackType;
+  feedbackType: DerivedStateFeedbackType;
 }): Promise<{ event: FeedbackEventRow | null; currentState: StateFeedbackType | null; noop: boolean }> {
   return withTransaction(async (client) => {
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
       `feedback:${opts.profileId}:${opts.propertyId}`,
     ]);
 
-    const currentResult = await client.query<{ feedback_type: StateFeedbackType }>(
+    // Derive the current state over accept/reject/star/clear (#379): a
+    // trailing `clear` means the property is currently neutral, so it must be
+    // read as null here rather than falling back to the previous reject.
+    const currentResult = await client.query<{ feedback_type: DerivedStateFeedbackType }>(
       `SELECT feedback_type
          FROM feedback_event
         WHERE profile_id = $1 AND property_id = $2
           AND feedback_type = ANY($3::text[])
         ORDER BY created_at DESC, id DESC
         LIMIT 1`,
-      [opts.profileId, opts.propertyId, STATE_FEEDBACK_TYPES],
+      [opts.profileId, opts.propertyId, DERIVED_STATE_FEEDBACK_TYPES],
     );
-    const current = currentResult.rows[0]?.feedback_type ?? null;
-    if (current === opts.feedbackType) {
+    const rawCurrent = currentResult.rows[0]?.feedback_type ?? null;
+    const current: StateFeedbackType | null = rawCurrent === "clear" ? null : rawCurrent;
+    // The state this request would leave the property in: `clear` collapses to
+    // neutral (null). Re-clearing an already-neutral property (or re-asserting
+    // the active state) is a real no-op — no redundant event, no retrain.
+    const target: StateFeedbackType | null = opts.feedbackType === "clear" ? null : opts.feedbackType;
+    if (current === target) {
       return { event: null, currentState: current, noop: true };
     }
 
@@ -122,7 +143,7 @@ export async function recordStateFeedbackIfChanged(opts: {
       [opts.profileId, opts.propertyId, opts.listingId ?? null, opts.feedbackType],
     );
     const event = insertResult.rows[0];
-    return { event, currentState: opts.feedbackType, noop: false };
+    return { event, currentState: target, noop: false };
   });
 }
 
@@ -144,21 +165,25 @@ export async function getFeedbackHistory(profileId: number, propertyId: number):
 
 /**
  * The single active toggle state (accept/reject/star), derived as the
- * feedback_type of the most recent event *among those three types* — note
- * and correction events never change this (EC-2). accept/reject/star share
- * one derived state rather than three independent booleans: starring a
- * previously-accepted candidate replaces "accepted" with "starred" as the
- * highlighted button, matching the single-active-toggle UI design.
+ * feedback_type of the most recent event *among accept/reject/star/clear* —
+ * note and correction events never change this (EC-2), and a trailing `clear`
+ * (#379) resets it to neutral (null). accept/reject/star share one derived
+ * state rather than three independent booleans: starring a previously-accepted
+ * candidate replaces "accepted" with "starred" as the highlighted button,
+ * matching the single-active-toggle UI design.
  */
 export async function getCurrentState(profileId: number, propertyId: number): Promise<StateFeedbackType | null> {
-  const rows = await sql<{ feedback_type: StateFeedbackType }>(
+  const rows = await sql<{ feedback_type: DerivedStateFeedbackType }>(
     `SELECT feedback_type
        FROM feedback_event
       WHERE profile_id = $1 AND property_id = $2
         AND feedback_type = ANY($3::text[])
       ORDER BY created_at DESC, id DESC
       LIMIT 1`,
-    [profileId, propertyId, STATE_FEEDBACK_TYPES],
+    [profileId, propertyId, DERIVED_STATE_FEEDBACK_TYPES],
   );
-  return rows[0]?.feedback_type ?? null;
+  // A trailing `clear` (#379) collapses to neutral — the property is no longer
+  // accepted/rejected/starred.
+  const latest = rows[0]?.feedback_type ?? null;
+  return latest === "clear" ? null : latest;
 }

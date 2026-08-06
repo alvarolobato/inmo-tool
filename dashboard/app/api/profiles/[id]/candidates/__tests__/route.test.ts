@@ -94,6 +94,7 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       null,
       null,
       null,
+      false,
     ]);
   });
 
@@ -115,6 +116,7 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       null,
       null,
       null,
+      false,
     ]);
   });
 });
@@ -188,7 +190,36 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
       "a_reformar",
       "integral",
       0.15, // 15% → fraction
+      false,
     ]);
+  });
+
+  it("passes includeRejected=true to listCandidates as $12 when the show-rejected toggle is on (#379)", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?includeRejected=true"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(200);
+    const params = mockQuery.mock.calls[1][1];
+    // $12 (last param) is the includeRejected flag.
+    expect(params[11]).toBe(true);
+  });
+
+  it("keeps rejected hidden ($12 = false) for any includeRejected value other than the exact string 'true' (#379)", async () => {
+    for (const raw of ["", "1", "false", "TRUE", "yes"]) {
+      mockQuery.mockReset();
+      mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
+      mockQuery.mockResolvedValueOnce({ rows: [] });
+      const res = await GET(
+        makeRequest(`http://localhost/api/profiles/3/candidates?includeRejected=${raw}`),
+        ctx("3"),
+      );
+      expect(res.status).toBe(200);
+      expect(mockQuery.mock.calls[1][1][11]).toBe(false);
+    }
   });
 });
 

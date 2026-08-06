@@ -85,6 +85,12 @@
 | [D-090](docs/decisions/D-090-discovery-drift-detection-only.md) | Portal filter discovery is DETECTION-ONLY (supersedes D-063 self-healing). The extension enumerates a portal's search-form property-type OPTIONS — plausibility-gated per portal (Aliseda: a `comprar-<category>` segment and/or a `subtipo`; Idealista: a `venta-<section>` segment) so branding/nav junk (the Aliseda logo) is dropped and a portal it can't read yields NOTHING, not junk — and POSTs a catalog to `portal_filter_catalog`. A deterministic, no-LLM pure diff (`lib/search-url/drift.ts::computePortalDrift`) flags ADDED/REMOVED/CHANGED vs each connector's hard-coded code mapping (`PortalSearchUrlBuilder.codeMapping()`), surfaced on `/etl/discovery`. URL building stays 100% code-driven from the per-portal map — discovery NEVER feeds URL construction. |
 | [D-092](docs/decisions/D-092-zero-results-regression-monitor.md) | A (connector, resolved scope/filter) is flagged as a zero-results regression when it had a prior nonzero result AND its last N consecutive measured runs are all 0 (N=`etl.zero_result_regression_runs`, default 3). Always-0 (sparse) scopes and single transient 0s are NOT flagged; a later nonzero clears it. Server counts come from `connector_run_results.geography_scope[].discovered_count`; only 'crawled'/'empty' outcomes are measurements. Surfaced on `/etl/salud` (data-health), NOT `/etl/discovery`. |
 
+## Product / candidate feed
+
+| ID | Binding rule |
+|----|--------------|
+| [D-094](docs/decisions/D-094-reject-deferred-removal-and-clear.md) | The candidate feed hides 'reject' by default (removal deferred to next fetch); a show-rejected toggle opts them back in. Un-reject appends a 'clear' event (feedback stays append-only) that every latest-state derivation must collapse to neutral. |
+
 ## AI layer
 
 | ID | Binding rule |

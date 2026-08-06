@@ -27,9 +27,10 @@ import { resetPool } from "@/lib/db-write";
 
 // #310 (D-059) appended five params after WARN_CAVEAT_CODES ($6): occupancy
 // ($7), the occupied-statuses list ($8), condition ($9), renovation ($10), and
-// min-below-market ($11). This is the "all filters off" tail every existing
-// listCandidates assertion carries now.
-const NO_FILTER_TAIL = [null, OCCUPIED_STATUSES, null, null, null] as const;
+// min-below-market ($11). #379 appends includeRejected ($12), false by default
+// (rejected candidates hidden). This is the "all filters off" tail every
+// existing listCandidates assertion carries now.
+const NO_FILTER_TAIL = [null, OCCUPIED_STATUSES, null, null, null, false] as const;
 
 /** Builds a cursor the same way `listCandidates` does internally, purely for test setup — tests otherwise treat cursors as opaque and decode `nextCursor` to assert on it. */
 function testCursor(score: number | null, id: number): string {
@@ -80,6 +81,40 @@ describe("listCandidates", () => {
     // keyset key, not a single id, since results are ordered by score
     // globally; source ($5) is null when no portal filter is applied (#265).
     expect(params).toEqual([7, null, null, 31, null, WARN_CAVEAT_CODES, ...NO_FILTER_TAIL]);
+  });
+
+  it("excludes rejected candidates by default and derives feedback_state (#379)", async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [] });
+
+    await listCandidates(7);
+
+    const [sql, params] = mockPoolQuery.mock.calls[0];
+    // The default feed hides rejected candidates ($12 = false), keeping the
+    // reject-exclusion clause gated on the derived feedback_state.
+    expect(sql).toContain("ranked.feedback_state IS DISTINCT FROM 'reject'");
+    expect(sql).toContain("$12::boolean = true");
+    expect(sql).toContain("AS feedback_state");
+    expect(params[11]).toBe(false);
+  });
+
+  it("passes includeRejected=true as $12 when the show-rejected toggle asks for it (#379)", async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [] });
+
+    await listCandidates(7, { includeRejected: true });
+
+    expect(mockPoolQuery.mock.calls[0][1][11]).toBe(true);
+  });
+
+  it("surfaces the row's feedback_state on the mapped candidate (#379)", async () => {
+    mockPoolQuery.mockResolvedValueOnce({
+      rows: [
+        { ...stubRow(9), feedback_state: "reject" },
+        { ...stubRow(8), feedback_state: null },
+      ],
+    });
+    const page = await listCandidates(7, { includeRejected: true });
+    expect(page.items[0].feedback_state).toBe("reject");
+    expect(page.items[1].feedback_state).toBeNull();
   });
 
   it("passes the decoded cursor and clamps limit to [1, 100] (querying limit+1 rows)", async () => {

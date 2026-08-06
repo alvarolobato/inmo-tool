@@ -41,6 +41,12 @@ export function CandidateList({ profileId }: { profileId: number }) {
   const [occupancy, setOccupancy] = useState<string>("");
   const [conditionSel, setConditionSel] = useState<string>("");
   const [minDiscount, setMinDiscount] = useState<string>("");
+  // #379: show-rejected toggle. Default OFF — the feed hides rejected
+  // candidates (today's behaviour), so a reject only "removes" a card on the
+  // next fetch. ON re-fetches with `includeRejected=true`, surfacing rejected
+  // candidates (rendered marked, still un-rejectable). Wired into fetchPage's
+  // identity below, so flipping it resets the feed to page 1.
+  const [showRejected, setShowRejected] = useState(false);
 
   const assessmentFilterActive = occupancy !== "" || conditionSel !== "";
 
@@ -58,6 +64,8 @@ export function CandidateList({ profileId }: { profileId: number }) {
         if (sev) url.searchParams.set("renovation", sev);
       }
       if (minDiscount !== "") url.searchParams.set("minDiscount", minDiscount);
+      // #379: opt in to rejected candidates. Omitted (default) keeps them hidden.
+      if (showRejected) url.searchParams.set("includeRejected", "true");
       const res = await fetch(url.toString().replace(window.location.origin, ""));
       if (!res.ok) {
         const body = await res.json().catch(() => null);
@@ -68,7 +76,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
       setItems((prev) => (replace ? page.items : [...prev, ...page.items]));
       setCursor(page.nextCursor);
     },
-    [profileId, source, occupancy, conditionSel, minDiscount],
+    [profileId, source, occupancy, conditionSel, minDiscount, showRejected],
   );
 
   // Load the portal options once per profile (independent of the active
@@ -205,6 +213,24 @@ export function CandidateList({ profileId }: { profileId: number }) {
         <option value="20">≥ 20%</option>
         <option value="25">≥ 25%</option>
       </select>
+
+      {/* #379: show/hide rejected candidates. Default off (rejected hidden).
+          Turning it on re-fetches with includeRejected=true so the user can
+          review and un-reject past rejections. */}
+      <label
+        htmlFor="show-rejected-toggle"
+        style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--fg-muted)", cursor: "pointer" }}
+      >
+        <input
+          id="show-rejected-toggle"
+          data-testid="show-rejected-toggle"
+          type="checkbox"
+          checked={showRejected}
+          onChange={(e) => setShowRejected(e.target.checked)}
+          style={{ cursor: "pointer" }}
+        />
+        Mostrar descartadas
+      </label>
     </div>
   );
 

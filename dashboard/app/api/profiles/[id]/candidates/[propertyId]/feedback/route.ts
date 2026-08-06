@@ -34,8 +34,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z, ZodError } from "zod";
 import {
+  DERIVED_STATE_FEEDBACK_TYPES,
   FEEDBACK_TYPES,
-  STATE_FEEDBACK_TYPES,
   getCurrentState,
   getFeedbackHistory,
   listingBelongsToProperty,
@@ -200,19 +200,19 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
     }
 
     // accept/reject/star are a single-active-toggle state (lib/db/feedback.ts's
-    // getCurrentState) — re-recording the state that's already active is a
-    // no-op rather than logging a redundant event. There's no dedicated
-    // "clear" feedback_type in the schema's CHECK constraint; clicking an
-    // already-active toggle is deliberately inert rather than adding one.
-    // The check-and-insert is atomic (recordStateFeedbackIfChanged, backed by
-    // a Postgres advisory lock) — a plain check-then-insert here previously
-    // let two rapid clicks both insert (verified live in PR #89's review).
-    if (STATE_FEEDBACK_TYPES.includes(body.feedbackType as (typeof STATE_FEEDBACK_TYPES)[number])) {
+    // getCurrentState); `clear` (#379) is the explicit "un-mark" that resets
+    // that state to neutral. Re-recording the state that's already active — or
+    // clearing an already-neutral property — is a no-op rather than logging a
+    // redundant event. The check-and-insert is atomic
+    // (recordStateFeedbackIfChanged, backed by a Postgres advisory lock) — a
+    // plain check-then-insert here previously let two rapid clicks both insert
+    // (verified live in PR #89's review).
+    if (DERIVED_STATE_FEEDBACK_TYPES.includes(body.feedbackType as (typeof DERIVED_STATE_FEEDBACK_TYPES)[number])) {
       const result = await recordStateFeedbackIfChanged({
         profileId,
         propertyId,
         listingId: body.listingId ?? null,
-        feedbackType: body.feedbackType as (typeof STATE_FEEDBACK_TYPES)[number],
+        feedbackType: body.feedbackType as (typeof DERIVED_STATE_FEEDBACK_TYPES)[number],
       });
 
       if (result.noop) {

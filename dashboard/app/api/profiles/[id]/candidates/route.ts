@@ -15,6 +15,9 @@
  *   minDiscount — #310 hard filter: keep only candidates priced at least this
  *                 PERCENT (0–100) below the pool median price/m². Sent as a
  *                 percent (e.g. `15`); converted to a fraction for the query.
+ *   includeRejected — #379: `true` includes candidates whose current verdict
+ *                 is `reject` (the show-rejected toggle). Absent/anything else
+ *                 keeps them hidden (default).
  *   All #310 filters combine with each other, with `source`, and with
  *   cursor/limit. The occupancy/condition/renovation filters read AI-assessment
  *   data (empty until #316) and correctly return an empty feed until it flows;
@@ -123,6 +126,11 @@ export async function GET(
     renovation = rawRenovation as RenovationFilter;
   }
 
+  // #379: show-rejected toggle. Absent/anything-but-"true" keeps today's
+  // behaviour (rejected candidates hidden). Only the exact string "true"
+  // opts in — a permissive parse here can't silently surface rejected cards.
+  const includeRejected = searchParams.get("includeRejected") === "true";
+
   // minDiscount arrives as a PERCENT (0–100); the query wants a fraction.
   let minBelowMarketPct: number | null = null;
   const rawMinDiscount = searchParams.get("minDiscount");
@@ -189,6 +197,7 @@ export async function GET(
       condition,
       renovation,
       minBelowMarketPct,
+      includeRejected,
     });
     return NextResponse.json(page);
   } catch (err) {
