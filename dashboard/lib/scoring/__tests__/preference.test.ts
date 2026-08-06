@@ -334,4 +334,39 @@ describe.runIf(dbAvailable)("loadProfilePreferenceModel reads real feedback (tas
       expect(forProp[0].feedback_type).toBe("reject");
     });
   }, 20000);
+
+  it("fetchLatestFeedbackStates drops a retracted verdict (trailing 'clear') so it never trains the preference model (#379)", async () => {
+    await withRealDb(async (pool) => {
+      const scope: Scope = {
+        geography: { type: "radius", center: TEST_COORDS, radius_km: 5 },
+        property_types: ["piso"],
+        hard_exclusions: {},
+      };
+      const profile = await createProfile(`pref-clear-${Date.now()}-${Math.random()}`, scope, {});
+      createdProfileIds.push(profile.id);
+
+      const propRes = await pool.query<{ id: string }>(
+        `INSERT INTO property (lat, lon, property_type, m2_built) VALUES ($1, $2, 'piso', 70) RETURNING id`,
+        [TEST_COORDS[0], TEST_COORDS[1]],
+      );
+      const propertyId = Number(propRes.rows[0].id);
+      createdPropertyIds.push(propertyId);
+
+      // reject, then un-reject via a later 'clear' → the property is currently
+      // neutral and must be absent from the training set entirely (neither
+      // positive nor negative), not surface as its retracted 'reject'.
+      await pool.query(
+        `INSERT INTO feedback_event (profile_id, property_id, feedback_type, created_at)
+         VALUES ($1, $2, 'reject', NOW() - INTERVAL '1 hour')`,
+        [profile.id, propertyId],
+      );
+      await pool.query(
+        `INSERT INTO feedback_event (profile_id, property_id, feedback_type, created_at) VALUES ($1, $2, 'clear', NOW())`,
+        [profile.id, propertyId],
+      );
+
+      const states = await fetchLatestFeedbackStates(profile.id);
+      expect(states.filter((s) => s.property_id === propertyId)).toHaveLength(0);
+    });
+  }, 20000);
 });
