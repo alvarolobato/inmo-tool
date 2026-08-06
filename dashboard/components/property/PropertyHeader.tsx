@@ -2,7 +2,9 @@ import type { PropertyDetail } from "@/lib/property-detail";
 import { PROPERTY_TYPE_LABELS, type PROPERTY_TYPES } from "@/lib/profiles-schema";
 import { fmtEUR0, fmtInt } from "@/components/widgets/format";
 import { StalenessBadge } from "@/components/StalenessBadge";
+import { ExtractionQualityBadge } from "@/components/property/ExtractionQualityBadge";
 import { freshestActiveLastSeen } from "@/lib/staleness";
+import { bestExtractionQuality } from "@/lib/extraction-quality";
 
 // A spread this small between two portals' listed prices is routine rounding
 // (e.g. 249.000€ vs 250.000€), not a genuine disagreement worth flagging.
@@ -50,6 +52,15 @@ export function PropertyHeader({ property }: { property: PropertyDetail }) {
   // listings statuses and the status-event timeline, not by a staleness age.
   const freshestLastSeen = freshestActiveLastSeen(property.listings);
 
+  // Best extraction-quality grade across this property's listings (#80). A
+  // deduped property shows the COALESCE-union of every source's fields, so
+  // it's only as under-extracted as its best source — bestExtractionQuality
+  // reflects that. Null (badge renders nothing) until at least one listing
+  // has been scored, i.e. fetched since the feature shipped.
+  const extractionQuality = bestExtractionQuality(
+    property.listings.map((l) => l.extraction_quality),
+  );
+
   const facts: [string, string | null][] = [
     ["Tipo", typeLabel ?? null],
     ["Superficie construida", property.m2_built !== null ? `${fmtInt(property.m2_built)} m²` : null],
@@ -71,10 +82,16 @@ export function PropertyHeader({ property }: { property: PropertyDetail }) {
         <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: "var(--fg)" }}>
           {minPrice !== null ? fmtEUR0(minPrice) : "Precio no disponible"}
         </h1>
-        {/* Staleness of the freshest active listing (#243) — a fact ("visto
-            hace N días"), not a "sold" inference. Absent when no listing is
-            active. */}
-        <StalenessBadge lastSeenAt={freshestLastSeen} testId="property-staleness" />
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {/* Extraction-quality grade (#80) — "genuinely thin listing" vs
+              "our connector under-extracted this one". Absent until a listing
+              has been scored. */}
+          <ExtractionQualityBadge quality={extractionQuality} testId="property-extraction-quality" />
+          {/* Staleness of the freshest active listing (#243) — a fact ("visto
+              hace N días"), not a "sold" inference. Absent when no listing is
+              active. */}
+          <StalenessBadge lastSeenAt={freshestLastSeen} testId="property-staleness" />
+        </div>
       </div>
 
       {isHistorical && minPrice !== null && (

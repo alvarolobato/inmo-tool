@@ -20,6 +20,10 @@
  */
 
 import { sql } from "@/lib/db-write";
+import {
+  parseExtractionQuality,
+  type ExtractionQuality,
+} from "@/lib/extraction-quality";
 
 export interface PropertyListingDetail {
   id: number;
@@ -47,6 +51,13 @@ export interface PropertyListingDetail {
   reference_code: string | null;
   first_seen_at: string | null;
   last_seen_at: string | null;
+  /**
+   * Per-listing extraction-quality grade the ETL stamped on
+   * `raw_extra.extraction_quality` (issue #80). Null for listings that
+   * predate the feature — they self-heal on their next fetch. See
+   * lib/extraction-quality.ts.
+   */
+  extraction_quality: ExtractionQuality | null;
 }
 
 export interface PriceHistoryPoint {
@@ -114,6 +125,8 @@ interface RawListingRow {
   last_seen_at: string | null;
   photo_urls: string[] | null;
   operation: string;
+  /** `raw_extra->'extraction_quality'` — untyped JSON, narrowed on read. */
+  extraction_quality: unknown;
 }
 
 interface RawPriceHistoryRow {
@@ -156,7 +169,8 @@ export async function getPropertyDetail(propertyId: number): Promise<PropertyDet
       // rather than depending on whatever order Postgres happens to return
       // same-source rows in.
       `SELECT id, source, url, listing_kind, status, current_price,
-              reference_code, first_seen_at, last_seen_at, photo_urls, operation
+              reference_code, first_seen_at, last_seen_at, photo_urls, operation,
+              raw_extra->'extraction_quality' AS extraction_quality
          FROM listing
         WHERE property_id = $1
         ORDER BY source, id`,
@@ -240,6 +254,7 @@ export async function getPropertyDetail(propertyId: number): Promise<PropertyDet
       first_seen_at: l.first_seen_at,
       last_seen_at: l.last_seen_at,
       operation: l.operation,
+      extraction_quality: parseExtractionQuality(l.extraction_quality),
     })),
     price_history: priceRows.map((h) => ({
       listing_id: h.listing_id,

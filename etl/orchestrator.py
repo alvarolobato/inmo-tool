@@ -34,6 +34,7 @@ from etl.connectors.geography import (
 from etl.connectors.rate_limit import RateLimiter
 from etl.db import postgres
 from etl.dedup import engine as dedup_engine
+from etl.extraction_quality import compute_extraction_quality
 
 # Default bounded lifetime for a single dedup pass (D-036). A run currently
 # takes ~84 min (dropping once issue #226's photo-hash persistence deploys);
@@ -229,7 +230,7 @@ def _update_existing_listing(
             list(canonical.photo_urls),
             canonical.contact_raw,
             canonical.reference_code,
-            _to_jsonb_param(canonical.raw_extra),
+            _to_jsonb_param(_raw_extra_with_quality(canonical)),
             canonical.operation,
             listing_id,
         ),
@@ -343,7 +344,7 @@ def _upsert_canonical_listing(conn, canonical: CanonicalListingVersion) -> None:
                     list(canonical.photo_urls),
                     canonical.contact_raw,
                     canonical.reference_code,
-                    _to_jsonb_param(canonical.raw_extra),
+                    _to_jsonb_param(_raw_extra_with_quality(canonical)),
                     canonical.operation,
                 ),
             )
@@ -469,6 +470,24 @@ def _reconcile_missed_discoveries(
                     (new_count, listing_id),
                 )
     conn.commit()
+
+
+def _raw_extra_with_quality(canonical: CanonicalListingVersion) -> dict:
+    """`canonical.raw_extra` with a fresh `extraction_quality` descriptor merged in.
+
+    Computed here (once, in the persist path) rather than per-connector so
+    every connector inherits the signal for free and the score stays
+    connector-agnostic — derived only from the canonical fields, never from
+    any site's raw HTML (issue #80). Returns a new dict; the frozen
+    dataclass's `raw_extra` is never mutated. Recomputed on every
+    insert/update, so a re-fetch that finally populates a previously-missing
+    field also refreshes the grade (and back-fills the signal onto rows that
+    predate this feature — no separate migration needed).
+    """
+    return {
+        **canonical.raw_extra,
+        "extraction_quality": compute_extraction_quality(canonical),
+    }
 
 
 def _to_jsonb_param(value: dict) -> str:
