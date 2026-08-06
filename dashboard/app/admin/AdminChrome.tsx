@@ -13,6 +13,10 @@ const ADMIN_NAV = [
   // Guided capture worklist (#237) — the "places to visit one by one" surface
   // for extension-only portals (Aliseda). Same /etl admin gating.
   { href: "/etl/captura", label: "Captura guiada" },
+  // URL-building discovery (#336/#339) — sits next to Captura guiada because it
+  // is the other extension-driven surface: enumerate a portal's filter options
+  // + the URL each produces to teach the connector's URL builder. Same gating.
+  { href: "/etl/discovery", label: "Descubrimiento" },
   // Data-health observability (#272) — read-only capture/ETL health: stuck
   // captures, connector failures, extraction quality, stale profiles. Same
   // /etl admin gating. Health, not config (config lives on Conectores).
