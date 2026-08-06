@@ -94,9 +94,22 @@ class TestNormalize:
         assert canonical.city == "Madrid"
         assert canonical.address == "Goya, Madrid"
         assert canonical.reference_code == "106387165"
-        assert canonical.photo_urls == (
-            "https://img4.idealista.com/blur/WEB_DETAIL/0/id.pro.es.image.master/c0/ac/cc/1382500227.jpg",
+        # Full gallery from config.multimediaCarrousel.multimedias (issue
+        # #282) — all 10 PICTUREs, in page order, NOT just the single
+        # og:image thumbnail; the PLAN group is excluded.
+        assert len(canonical.photo_urls) == 10
+        assert canonical.photo_urls[0] == (
+            "https://img4.idealista.com/blur/WEB_DETAIL/0/id.pro.es.image.master/c0/ac/cc/1382500227.jpg"
         )
+        assert canonical.photo_urls[-1] == (
+            "https://img4.idealista.com/blur/WEB_DETAIL/0/id.pro.es.image.master/c0/ac/cc/1382500236.jpg"
+        )
+        assert all(
+            u.startswith("https://img4.idealista.com/blur/")
+            for u in canonical.photo_urls
+        )
+        # No floor-plan image leaked into the photo gallery.
+        assert not any("id.plan.es.image" in u for u in canonical.photo_urls)
         assert canonical.raw_extra["title"] == "Duplex for sale in Calle de Alcalá"
         # Real coordinates from the embedded Google Static Maps `center`
         # param (see _coordinates_from_staticmap) — an earlier version of
@@ -180,6 +193,77 @@ class TestNormalize:
         assert canonical.photo_urls == ()
         assert canonical.lat is None
         assert canonical.lon is None
+
+    def test_normalize_extracts_full_photo_gallery_not_just_thumbnail(self):
+        """Issue #282: the connector stored only 1 of ~95 photos because it
+        read the og:image thumbnail alone. Every photo lives in the inline
+        `config.multimediaCarrousel.multimedias[].content[].src` array — the
+        same object the coordinates come from. This locks in that the full
+        set is extracted, in order, with the img host prefixed onto the
+        partial paths, and that non-PICTURE (PLAN/MAP) entries are skipped."""
+        html = _read_fixture()
+        raw = RawListing(
+            external_id="106387165",
+            source="idealista",
+            raw={"url": "https://www.idealista.com/inmueble/106387165/", "html": html},
+        )
+        canonical = IdealistaConnector().normalize(raw)
+        assert len(canonical.photo_urls) == 10  # full gallery, not 1
+        # Partial `src` paths get the img host prefixed.
+        assert canonical.photo_urls[0] == (
+            "https://img4.idealista.com/blur/WEB_DETAIL/0/"
+            "id.pro.es.image.master/c0/ac/cc/1382500227.jpg"
+        )
+        # Page order preserved.
+        assert canonical.photo_urls[1].endswith("1382500228.jpg")
+        # The floor-plan (PLAN group) is not a photo.
+        assert all("id.plan.es.image" not in u for u in canonical.photo_urls)
+        # No duplicates.
+        assert len(set(canonical.photo_urls)) == len(canonical.photo_urls)
+
+    def test_gallery_handles_absolute_src_and_dedups(self):
+        """Defensive: a carousel whose `src` is already an absolute URL is
+        kept verbatim (not double-prefixed), and a repeated src collapses to
+        one entry (order-preserving)."""
+        html = (
+            "<html><body>"
+            '<input type="hidden" name="adId" value="1">'
+            "<script>var config = {multimediaCarrousel: "
+            '{"multimedias":[{"type":"PICTURE","content":['
+            '{"src":"https://img4.idealista.com/blur/WEB_DETAIL/0/a/b/c/1.jpg"},'
+            '{"src":"WEB_DETAIL/0/a/b/c/2.jpg"},'
+            '{"src":"WEB_DETAIL/0/a/b/c/2.jpg"}]}]}};</script>'
+            "</body></html>"
+        )
+        raw = RawListing(
+            external_id="1",
+            source="idealista",
+            raw={"url": "https://www.idealista.com/inmueble/1/", "html": html},
+        )
+        canonical = IdealistaConnector().normalize(raw)
+        assert canonical.photo_urls == (
+            "https://img4.idealista.com/blur/WEB_DETAIL/0/a/b/c/1.jpg",
+            "https://img4.idealista.com/blur/WEB_DETAIL/0/a/b/c/2.jpg",
+        )
+
+    def test_gallery_falls_back_to_og_image_when_carousel_absent(self):
+        """If a capture has no multimediaCarrousel object (older markup, or
+        a soft-block page), the single og:image thumbnail is still used —
+        the pre-#282 behaviour, now the explicit fallback."""
+        html = """
+        <html><head>
+        <meta property="og:image" content="https://img4.idealista.com/blur/X/only.jpg">
+        </head><body>
+        <input type="hidden" name="adId" value="1">
+        </body></html>
+        """
+        raw = RawListing(
+            external_id="1",
+            source="idealista",
+            raw={"url": "https://www.idealista.com/inmueble/1/", "html": html},
+        )
+        canonical = IdealistaConnector().normalize(raw)
+        assert canonical.photo_urls == ("https://img4.idealista.com/blur/X/only.jpg",)
 
     def test_normalize_extracts_coordinates_from_staticmap_center_param(self):
         """Real Google Static Maps `center` param, url-encoded comma
