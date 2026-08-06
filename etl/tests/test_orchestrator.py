@@ -14,6 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import ClassVar
 
+import psycopg2
 import pytest
 
 from etl import orchestrator
@@ -4801,6 +4802,158 @@ class TestListingGoneReclassification:
         finally:
             orchestrator.CONNECTORS.clear()
             _cleanup(pg_conn, connector.name, run_id)
+
+
+def _classification_row(conn, run_id: int, connector_name: str) -> dict:
+    """failure_classification + geography_scope for one connector_run_results
+    row (issues #242 + #109, D-079)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT failure_classification, geography_scope, status "
+            "FROM connector_run_results "
+            "WHERE run_id = %s AND connector_name = %s",
+            (run_id, connector_name),
+        )
+        failure_classification, geography_scope, status = cur.fetchone()
+    return {
+        "failure_classification": failure_classification,
+        "geography_scope": geography_scope,
+        "status": status,
+    }
+
+
+class _RaisingDiscoverConnector(DummyConnector):
+    """A connector whose discover() raises a caller-chosen exception on every
+    scope — lets one test parametrise the fatal-classification taxonomy
+    (network / structure_change / other) end-to-end through the orchestrator."""
+
+    def __init__(self, name: str, exc: Exception) -> None:
+        super().__init__(name=name)
+        self._exc = exc
+
+    def discover(self, scope, throttle):
+        self.scopes_seen.append(scope)
+        raise self._exc
+
+
+class TestFailureClassificationAndGeographyScope:
+    """Issues #242 (typed failure_classification) + #109 (geography_scope),
+    D-079 — proven end-to-end into Postgres, since both are written at the
+    _record_connector_result call site and only a real round-trip catches a
+    wrong column order / bad JSON / missing value."""
+
+    def test_clean_run_with_data_has_null_classification_and_crawled_scope(
+        self, pg_conn
+    ):
+        _apply_schema(pg_conn)
+        connector = DummyConnector(name="test-clean-classify")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            row = _classification_row(pg_conn, run_id, connector.name)
+            assert row["status"] == "ok"
+            # A clean run that ingested data carries NO failure signal.
+            assert row["failure_classification"] is None
+            # #109: the geography it actually ran against is auditable, with the
+            # exact center/radius from the fixture profile and a 'crawled'
+            # outcome (it discovered 3 dummy listings).
+            geo = row["geography_scope"]
+            assert geo and isinstance(geo, list)
+            crawled = [g for g in geo if g["outcome"] == "crawled"]
+            assert crawled, f"expected a crawled scope, got {geo}"
+            assert crawled[0]["center"] == [40.4168, -3.7038]
+            assert crawled[0]["radius_km"] == 10
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            _cleanup_scope_state(pg_conn, connector.name)
+
+    def test_empty_result_run_is_classified_empty_result(self, pg_conn):
+        _apply_schema(pg_conn)
+        # Discovers nothing, but the scope resolved and discover() ran cleanly.
+        connector = DummyConnector(name="test-empty-classify", external_ids=())
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            row = _classification_row(pg_conn, run_id, connector.name)
+            assert row["status"] == "ok"
+            assert row["failure_classification"] == "empty_result"
+            outcomes = {g["outcome"] for g in (row["geography_scope"] or [])}
+            assert outcomes == {"empty"}, row["geography_scope"]
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            _cleanup_scope_state(pg_conn, connector.name)
+
+    @pytest.mark.parametrize(
+        "message, expected_kind",
+        [
+            ("Connection timeout after 60s", "network"),
+            ("failed to parse listing HTML", "structure_change"),
+            ("kaboom, something odd", "other"),
+        ],
+    )
+    def test_fatal_discover_failure_is_typed(self, pg_conn, message, expected_kind):
+        _apply_schema(pg_conn)
+        connector = _RaisingDiscoverConnector(
+            f"test-fatal-{expected_kind}", ConnectorError(message)
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            row = _classification_row(pg_conn, run_id, connector.name)
+            assert row["status"] == "failed"
+            assert row["failure_classification"] == expected_kind
+            outcomes = {g["outcome"] for g in (row["geography_scope"] or [])}
+            assert outcomes == {"failed"}, row["geography_scope"]
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            _cleanup_scope_state(pg_conn, connector.name)
+
+    def test_soft_block_at_discover_is_classified_soft_block(self, pg_conn):
+        _apply_schema(pg_conn)
+        connector = DiscoverSoftBlocksConnector()
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            row = _classification_row(pg_conn, run_id, connector.name)
+            # A soft-block is a clean 'ok' status but STILL classified so it is
+            # trend-analyzable (#242) even though it is not a failure.
+            assert row["status"] == "ok"
+            assert row["failure_classification"] == "soft_block"
+            outcomes = {g["outcome"] for g in (row["geography_scope"] or [])}
+            assert outcomes == {"soft_block"}, row["geography_scope"]
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            _cleanup_scope_state(pg_conn, connector.name)
+
+    def test_check_constraint_rejects_an_unknown_classification(self, pg_conn):
+        _apply_schema(pg_conn)
+        run_id = orchestrator._create_connector_run(pg_conn, "test")
+        try:
+            with pytest.raises(psycopg2.errors.CheckViolation):
+                with pg_conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO connector_run_results "
+                        "(run_id, connector_name, status, failure_classification) "
+                        "VALUES (%s, %s, 'failed', 'not-a-real-kind')",
+                        (run_id, "test-bad-kind"),
+                    )
+                pg_conn.commit()
+            pg_conn.rollback()
+        finally:
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM connector_run_results WHERE connector_name = %s",
+                    ("test-bad-kind",),
+                )
+                cur.execute("DELETE FROM connector_runs WHERE id = %s", (run_id,))
 
 
 class TestDiscoveryPriceHistory:

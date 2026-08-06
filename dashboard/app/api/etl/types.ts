@@ -41,6 +41,28 @@ export interface ConnectorRun {
   trigger: string;
 }
 
+/**
+ * One resolved geography a run actually ran against (issue #109, D-079). One
+ * entry per `ConnectorScope` the orchestrator walked, tagged with what happened
+ * to that specific geography — persisted as `connector_run_results.geography_scope`
+ * (JSONB). This is the queryable audit trail that replaces reverse-engineering
+ * `error_msg`: an operator can see, per city, whether it was crawled, found
+ * empty, uncovered, or unresolvable.
+ */
+export interface GeographyScopeEntry {
+  /** The site-specific scope key, or null when the connector resolves none. */
+  scope_key: string | null;
+  /** [lat, lon] of the profile centre, or null for a free-text scope. */
+  center: [number, number] | null;
+  radius_km: number | null;
+  rooms: number | null;
+  /**
+   * crawled | empty | uncovered | unresolvable | budget | soft_block |
+   * fresh_this_cycle | duplicate | failed — what happened to this geography.
+   */
+  outcome: string;
+}
+
 /** One connector's outcome within a run — a row of `connector_run_results`. */
 export interface ConnectorRunResult {
   id: number;
@@ -69,4 +91,17 @@ export interface ConnectorRunResult {
    * the reason (e.g. "disabled via connector_config").
    */
   error_msg: string | null;
+  /**
+   * Issue #242 (D-079): the typed, queryable failure kind — one of
+   * soft_block | network | structure_change | unresolvable | uncovered |
+   * empty_result | other, or null for a clean run with no notable failure
+   * signal. The trend-analyzable counterpart to `error_msg`'s prose.
+   */
+  failure_classification: string | null;
+  /**
+   * Issue #109 (D-079): the resolved geographies this run actually ran
+   * against, each with its per-scope outcome. Null only on rows that somehow
+   * ran with zero scopes.
+   */
+  geography_scope: GeographyScopeEntry[] | null;
 }
