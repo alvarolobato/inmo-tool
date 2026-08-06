@@ -135,20 +135,39 @@ describe("extractFormOptions", () => {
 });
 
 describe("buildDiscoveryAxes / buildDiscoveryPayload", () => {
-  it("prefers embedded config over the form (least brittle) for Aliseda", () => {
-    const doc = docFrom(`
-      <script type="application/json">{"t":[{"label":"Piso","slug":"pisos","subtipo":36}]}</script>
-      <form><select name="tipo"><option value="99">Otro</option></select></form>
+  // Aliseda is RETIRED from passive DOM discovery (issue #377, D-093): its
+  // Angular Material mat-select overlay can't be read by a DOM scrape, so its
+  // filter→URL map is extracted server-side from static assets instead. It has
+  // no PORTAL_SPECS entry → the enumerator yields nothing for Aliseda.
+  it("returns null for Aliseda (retired from passive discovery — #377)", () => {
+    const embedded = docFrom(`
+      <script type="application/json">${JSON.stringify({
+        filters: {
+          propertyTypes: [{ label: "Piso", slug: "pisos", subtipo: 36 }],
+        },
+      })}</script>
     `);
-    const built = buildDiscoveryAxes("aliseda", doc);
-    expect(built?.source).toBe("embedded-config");
-    expect(built?.axes.property_type).toHaveLength(1);
+    expect(buildDiscoveryAxes("aliseda", embedded)).toBeNull();
+    const form = docFrom(`<form><select name="tipo"><option value="36">Piso</option></select></form>`);
+    expect(buildDiscoveryAxes("aliseda", form)).toBeNull();
+    // ...and the full payload for an Aliseda page (even signalled) is null.
+    expect(
+      buildDiscoveryPayload(
+        "https://www.alisedainmobiliaria.com/comprar-viviendas#inmo-discover",
+        embedded,
+        new Date(),
+      ),
+    ).toBeNull();
   });
 
-  it("falls back to the form when no embedded config is present", () => {
-    const doc = docFrom(`<form><select name="tipo"><option value="36">Piso</option></select></form>`);
-    const built = buildDiscoveryAxes("aliseda", doc);
-    expect(built?.source).toBe("form-options");
+  it("prefers embedded config over the form (least brittle) for Idealista", () => {
+    const doc = docFrom(`
+      <script type="application/json">{"t":[{"label":"Viviendas","url":"/venta-viviendas"}]}</script>
+      <form><select name="tipo"><option value="99">Otro</option></select></form>
+    `);
+    const built = buildDiscoveryAxes("idealista", doc);
+    expect(built?.source).toBe("embedded-config");
+    expect(built?.axes.property_type).toHaveLength(1);
   });
 
   it("returns null for a portal with no discovery spec", () => {
@@ -156,12 +175,12 @@ describe("buildDiscoveryAxes / buildDiscoveryPayload", () => {
     expect(buildDiscoveryAxes("altamira", doc)).toBeNull();
   });
 
-  it("assembles the full POST payload with a deterministic capturedAt", () => {
-    const doc = docFrom(`<script type="application/json">{"t":[{"label":"Piso","slug":"pisos","subtipo":36}]}</script>`);
+  it("assembles the full POST payload with a deterministic capturedAt (Idealista)", () => {
+    const doc = docFrom(`<script type="application/json">{"t":[{"label":"Viviendas","url":"/venta-viviendas"}]}</script>`);
     const now = new Date("2026-08-05T10:00:00.000Z");
-    const payload = buildDiscoveryPayload("https://www.alisedainmobiliaria.com/comprar-viviendas#inmo-discover", doc, now);
+    const payload = buildDiscoveryPayload("https://www.idealista.com/venta-viviendas/#inmo-discover", doc, now);
     expect(payload).toMatchObject({
-      pageUrl: "https://www.alisedainmobiliaria.com/comprar-viviendas#inmo-discover",
+      pageUrl: "https://www.idealista.com/venta-viviendas/#inmo-discover",
       source: "embedded-config",
       capturedAt: "2026-08-05T10:00:00.000Z",
     });
@@ -170,52 +189,11 @@ describe("buildDiscoveryAxes / buildDiscoveryPayload", () => {
 
   it("returns null when the page yields no options", () => {
     const doc = docFrom(`<div>nada</div>`);
-    expect(buildDiscoveryPayload("https://www.alisedainmobiliaria.com/comprar-viviendas", doc, new Date())).toBeNull();
+    expect(buildDiscoveryPayload("https://www.idealista.com/venta-viviendas/", doc, new Date())).toBeNull();
   });
 });
 
 describe("plausibility gate — rejects branding/nav junk (issue #371)", () => {
-  it("Aliseda: ignores the logo/nav array and captures the real property-type array", () => {
-    // The regression: a labelled link array for the site logo/nav coexists with
-    // the real filter options. The naïve scan grabbed the (bigger) nav array;
-    // the plausibility gate scores by real filter options, so the smaller
-    // property-type array (comprar-* fragments + subtipo) wins.
-    const doc = docFrom(`
-      <script type="application/json">${JSON.stringify({
-        nav: [
-          { label: "Aliseda", url: "/" },
-          { label: "Contacto", url: "/contacto" },
-          { label: "Oficinas", url: "/oficinas" },
-          { label: "Ayuda", url: "/ayuda" },
-        ],
-        filters: {
-          propertyTypes: [
-            { label: "Piso", slug: "pisos", subtipo: 36 },
-            { label: "Chalet adosado", slug: "chalets-adosados", subtipo: 31 },
-          ],
-        },
-      })}</script>
-    `);
-    const built = buildDiscoveryAxes("aliseda", doc);
-    expect(built).not.toBeNull();
-    expect(built?.axes.property_type).toHaveLength(2);
-    const labels = (built?.axes.property_type as Array<{ label: string }>).map((o) => o.label);
-    expect(labels).toContain("Piso");
-    expect(labels).not.toContain("Aliseda"); // the logo never enters the catalog
-  });
-
-  it("Aliseda: captures NOTHING (null) when only junk is present, never the logo", () => {
-    const doc = docFrom(`
-      <script type="application/json">${JSON.stringify({
-        nav: [
-          { label: "Aliseda", url: "/" },
-          { label: "Contacto", url: "/contacto" },
-        ],
-      })}</script>
-    `);
-    expect(buildDiscoveryAxes("aliseda", doc)).toBeNull();
-  });
-
   it("Idealista: only accepts venta-<section> options, else captures nothing", () => {
     const good = docFrom(`
       <script type="application/json">${JSON.stringify({
@@ -260,5 +238,18 @@ describe("discover signal contract (dashboard opener ↔ extension reader)", () 
 
   it("an untagged URL is not recognized", () => {
     expect(discoverSignalPresent("https://www.alisedainmobiliaria.com/comprar-viviendas")).toBe(false);
+  });
+
+  // Capture-suppression guard (issue #377): content-script.js gates BOTH the
+  // listing-banner and the detail auto-capture passes on `discoverSignalPresent`.
+  // A discovery-signalled page (listing OR detail) must be recognised so the
+  // capture pass bails and the "capturar N" banner never shows on /etl/discovery.
+  it("recognises the signal on both listing and detail URLs so capture is suppressed", () => {
+    const listing = withDiscoverSignal("https://www.idealista.com/venta-viviendas/madrid/");
+    const detail = withDiscoverSignal("https://www.idealista.com/inmueble/98765432/");
+    expect(discoverSignalPresent(listing)).toBe(true);
+    expect(discoverSignalPresent(detail)).toBe(true);
+    // A normal capture page (no signal) is NOT suppressed.
+    expect(discoverSignalPresent("https://www.idealista.com/venta-viviendas/madrid/")).toBe(false);
   });
 });

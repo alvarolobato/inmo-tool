@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<!--
+  Trimmed from a LIVE habitaclia.com detail page captured 2026-08-06 with the
+  connector's honest User-Agent:
+    https://www.habitaclia.com/comprar-piso-castellana-madrid-i24359000011808.htm
+  Only the structures the parser reads are kept. The StreetView VGPS config is
+  reproduced with its real UNICODE-ESCAPED quotes (") — the exact shape
+  that made the old coordinate regex return None on every live page (#378).
+  A `.sim-price` similar-listings card is retained for the carousel-isolation
+  guard. No personal PII (a for-sale property, agency-listed).
+-->
+<html lang="es">
+<head>
+<meta content="//images.habimg.com/imgh/24359-11808/castellana-piso-madrid_8cc88319XL.jpg" property="og:image"/>
+<meta content="Clikalia gestiona la venta de esta exclusiva vivienda de 236 m² en el barrio de Castellana, situada en Calle Diego de León." name="description"/>
+</head>
+<body>
+<div class="price">
+  <span class="tag-opportunity price-opportunity-absolute bg-lilac">Oportunidad</span>
+  <span class="font-2" itemprop="price">3.025.000 €</span>
+  <span class="avisame">Avísame si baja</span>
+</div>
+
+<article class="has-aside">
+  <h3 class="f-left">Distribución</h3>
+  <ul>
+    <li>4 habitaciones</li>
+    <li>Superficie 236 m<sup>2</sup></li>
+    <li>5 Baños</li>
+    <li>Trastero </li>
+  </ul>
+</article>
+
+<p class="reference">Referencia del anuncio habitaclia/CLK00/AM4816: </p>
+
+<!-- Similar-listings carousel: distinct `sim-price` class, must never win. -->
+<section class="similars">
+  <div class="sim-card">
+    <span class="sim-info sim-price">2.300.000 €</span>
+    <span class="sim-info">3 habitaciones</span>
+  </div>
+</section>
+
+<script type="text/javascript">
+  var streetview_config = "{\u0022VGPSLat\u0022:40.4351332000,\u0022VGPSLon\u0022:-3.6842595000,\u0022StreetView\u0022:true}";
+</script>
+</body>
+</html>

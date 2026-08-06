@@ -15,9 +15,14 @@ from unittest.mock import patch
 
 import pytest
 
-from etl.connectors.base import ConnectorError, ConnectorScope
+from etl.connectors.base import (
+    ConnectorError,
+    ConnectorScope,
+    ListingUnavailableError,
+)
 from etl.connectors.diglo import (
     DigloConnector,
+    buscador_listing_paths,
     extract_drupal_settings,
     extract_utag_data,
 )
@@ -46,15 +51,16 @@ def _apply_schema(conn) -> None:
     conn.commit()
 
 
-def _mock_response(text: str):
+def _mock_response(text: str, url: str = "https://digloservicer.com/detail"):
     class _R:
-        def __init__(self, t: str) -> None:
+        def __init__(self, t: str, u: str) -> None:
             self.text = t
+            self.url = u
 
         def raise_for_status(self) -> None:
             return None
 
-    return _R(text)
+    return _R(text, url)
 
 
 def _normalize_fixture(external_id: str = SUBJECT_ID):
@@ -65,6 +71,68 @@ def _normalize_fixture(external_id: str = SUBJECT_ID):
     ):
         raw = connector.fetch_detail(external_id, throttle=lambda: None)
     return connector.normalize(raw)
+
+
+# Fresh live capture (2026-08-06) — the regression guard for issue #378.
+LIVE_ID = "venta-pisos/murcia/murcia/ib00100045170"
+
+
+def _normalize_live():
+    connector = DigloConnector()
+    with patch(
+        "etl.connectors.diglo.requests.get",
+        return_value=_mock_response(
+            _read("diglo_live_detail.html"),
+            url=f"https://digloservicer.com/{LIVE_ID}",
+        ),
+    ):
+        raw = connector.fetch_detail(LIVE_ID, throttle=lambda: None)
+    return connector.normalize(raw)
+
+
+class TestLiveCaptureRegression:
+    """Against a FRESH 2026-08-06 capture of a real live detail page, the core
+    fields the extraction-quality scorer weights must all populate — this is
+    the exact "0 priced / all grade F" symptom #378 reported. The parser was
+    fine; discovery fed it homepages. Here it parses a real page and the price
+    + surface + rooms + coords + type all resolve."""
+
+    def test_price_and_core_fields_populate(self):
+        n = _normalize_live()
+        # utag_data.property_price — the subject's own price.
+        assert n.current_price == Decimal("235000.00")
+        assert n.reference_code == "IB00100045170"
+        assert n.city == "Murcia"
+        assert n.province == "Murcia"
+        assert n.property_type == "piso"
+        assert n.operation == "sale"
+        assert n.status == "active"
+
+    def test_surface_rooms_baths_from_subject_summary(self):
+        n = _normalize_live()
+        # ".product-print-sheet" reads "239 m² 3 Hab. 2 Baño/s".
+        assert n.m2_built == Decimal(239)
+        assert n.rooms == 3
+        assert n.bathrooms == 2
+        # This page carries no "(Y m² útiles)" split — genuinely absent, so
+        # m2_useful stays None (no fabricated precision).
+        assert n.m2_useful is None
+
+    def test_coordinates_and_photos_populate(self):
+        n = _normalize_live()
+        assert n.lat == Decimal("38.048544753943")
+        assert n.lon == Decimal("-1.1033770243198")
+        assert n.photo_urls
+        assert all("IB00100045170" in u for u in n.photo_urls)
+        # The neighbour carousel card (IB00100039582) must not leak in.
+        assert not any("IB00100039582" in u for u in n.photo_urls)
+
+    def test_neighbour_carousel_price_does_not_win(self):
+        n = _normalize_live()
+        # The fixture retains a neighbour card at 99.000 € / 65 m² / 4 Hab.
+        assert n.current_price == Decimal("235000.00")
+        assert n.m2_built == Decimal(239)
+        assert n.rooms == 3
 
 
 class TestNormalize:
@@ -186,48 +254,108 @@ class TestExtractors:
         assert drupal["yera_producto_lat"] == "40.3993774335"
 
 
+class TestBuscadorListingPaths:
+    """The pure page-parser discover() walks each buscador page with.
+
+    Fixture `diglo_buscador_p0.html` is trimmed from a LIVE province buscador
+    page (2026-08-06) and deliberately mixes in the cards discover() must
+    reject: a non-residential local, a cross-province "destacados" card, and a
+    refcode-less nav link.
+    """
+
+    def test_keeps_only_residential_in_province_cards(self):
+        paths = buscador_listing_paths(_read("diglo_buscador_p0.html"), "madrid")
+        assert paths == [
+            "venta-pisos/madrid/madrid/efe0000200055",
+            "venta-casas/madrid/villaviciosa-odon/ib00100025555",
+            "venta-pisos/madrid/madrid/efe0000200057",
+        ]
+
+    def test_drops_nonresidential_crossprovince_and_navlinks(self):
+        paths = buscador_listing_paths(_read("diglo_buscador_p0.html"), "madrid")
+        assert not any("local" in p for p in paths)  # non-residential
+        assert not any("murcia" in p for p in paths)  # cross-province destacado
+        assert not any("cualquiera" in p for p in paths)  # refcode-less nav link
+
+
 class TestDiscover:
-    def test_filters_sitemap_to_residential_in_scope_province(self):
+    """discover() paginates the LIVE buscador (issue #378): page 0 → page 1 →
+    an empty page terminates the sweep. Before #378 it read the stale
+    sitemap and surfaced withdrawn URLs that all parsed as the homepage."""
+
+    @staticmethod
+    def _paginated_get(pages: list[str]):
+        """A requests.get stand-in that returns each fixture in order."""
+        calls = {"i": 0}
+
+        def _get(*_args, **_kwargs):
+            i = calls["i"]
+            calls["i"] += 1
+            page = pages[i] if i < len(pages) else pages[-1]
+            return _mock_response(page)
+
+        return _get
+
+    def test_paginates_across_pages_and_stops_on_empty(self):
         connector = DigloConnector()
         with patch(
             "etl.connectors.diglo.requests.get",
-            return_value=_mock_response(_read("diglo_sample_sitemap.xml")),
+            side_effect=self._paginated_get(
+                [
+                    _read("diglo_buscador_p0.html"),
+                    _read("diglo_buscador_p1.html"),
+                    _read("diglo_buscador_empty.html"),
+                ]
+            ),
         ):
             ids = connector.discover(
                 ConnectorScope(geography="madrid"), throttle=lambda: None
             )
-        # Two Madrid residential (piso + casa); the Huelva casa is out of
-        # scope, the garaje/local are non-residential, and the two
-        # category/facet URLs have no refcode — all dropped.
+        # Three residential from page 0 + two from page 1, deduped and sorted;
+        # the non-residential/out-of-province cards are dropped.
         assert ids == sorted(
             [
-                "venta-pisos/madrid/madrid/efe0000200053",
-                "venta-casas/chalets-adosados/madrid/villaviciosa-odon/ib00100025555",
+                "venta-pisos/madrid/madrid/efe0000200055",
+                "venta-casas/madrid/villaviciosa-odon/ib00100025555",
+                "venta-pisos/madrid/madrid/efe0000200057",
+                "venta-pisos/madrid/madrid/var0000196816",
+                "venta-casas/chalets/madrid/alcorcon/ib00100047065",
             ]
         )
 
-    def test_out_of_province_and_nonresidential_excluded(self):
+    def test_stops_when_a_page_repeats_no_new_listings(self):
+        """A page that yields only already-seen paths ends the sweep (the
+        buscador's page-past-the-end can echo the last page)."""
         connector = DigloConnector()
         with patch(
             "etl.connectors.diglo.requests.get",
-            return_value=_mock_response(_read("diglo_sample_sitemap.xml")),
+            side_effect=self._paginated_get(
+                [_read("diglo_buscador_p0.html"), _read("diglo_buscador_p0.html")]
+            ),
         ):
             ids = connector.discover(
                 ConnectorScope(geography="madrid"), throttle=lambda: None
             )
-        assert not any("huelva" in i for i in ids)
-        assert not any("garaje" in i or "local" in i for i in ids)
+        assert ids == sorted(
+            [
+                "venta-pisos/madrid/madrid/efe0000200055",
+                "venta-casas/madrid/villaviciosa-odon/ib00100025555",
+                "venta-pisos/madrid/madrid/efe0000200057",
+            ]
+        )
 
     def test_scope_resolves_a_different_province(self):
+        """A Huelva scope hits the Huelva buscador; the page-0 fixture is
+        Madrid stock, so nothing in-province matches and it returns []."""
         connector = DigloConnector()
         with patch(
             "etl.connectors.diglo.requests.get",
-            return_value=_mock_response(_read("diglo_sample_sitemap.xml")),
+            return_value=_mock_response(_read("diglo_buscador_empty.html")),
         ):
             ids = connector.discover(
                 ConnectorScope(geography="huelva"), throttle=lambda: None
             )
-        assert ids == ["venta-casas/casas-rurales/huelva/almonte/ib00100180146"]
+        assert ids == []
 
     def test_unresolvable_scope_raises_rather_than_defaulting(self):
         """Issue #71: no hardcoded province fallback."""
@@ -235,41 +363,57 @@ class TestDiscover:
         with pytest.raises(ConnectorError, match="nothing to discover"):
             connector.discover(ConnectorScope(), throttle=lambda: None)
 
-    def test_empty_sitemap_raises_not_returns_empty(self):
-        """discovers_full_inventory=True means an empty discover() reads as a
-        mass withdrawal — guard against a fetch glitch producing it."""
+    def test_empty_valid_buscador_page_returns_empty_not_raises(self):
+        """A genuinely empty (but well-formed) buscador page for a small
+        province returns [] — the results grid marks it as a real page."""
         connector = DigloConnector()
-        empty = '<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>'
+        with patch(
+            "etl.connectors.diglo.requests.get",
+            return_value=_mock_response(_read("diglo_buscador_empty.html")),
+        ):
+            ids = connector.discover(
+                ConnectorScope(geography="madrid"), throttle=lambda: None
+            )
+        assert ids == []
+
+    def test_unrecognised_page_zero_raises_not_returns_empty(self):
+        """discovers_full_inventory=True: a page 0 that isn't the results page
+        (markup changed / block page) must raise, never read as a mass
+        withdrawal."""
+        connector = DigloConnector()
         with (
             patch(
                 "etl.connectors.diglo.requests.get",
-                return_value=_mock_response(empty),
+                return_value=_mock_response(
+                    "<html><body>Acceso denegado</body></html>"
+                ),
             ),
-            pytest.raises(ConnectorError, match="zero <loc>"),
+            pytest.raises(ConnectorError, match="did not look like a results page"),
         ):
             connector.discover(
                 ConnectorScope(geography="madrid"), throttle=lambda: None
             )
 
-    def test_sitemap_with_no_detail_urls_raises(self):
-        """URL-scheme change (entries present, none match the detail shape)
-        must raise, not silently report an empty catalogue."""
+
+class TestWithdrawnRedirect:
+    """A listing withdrawn between discovery and fetch 302-redirects to the
+    site root; requests follows it and `response.url` ends at `/`. Parsing
+    that homepage was the 0-priced / grade-F bug (#378) — fetch_detail must
+    raise ListingUnavailableError instead."""
+
+    def test_redirect_to_root_raises_listing_unavailable(self):
         connector = DigloConnector()
-        nav_only = (
-            '<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
-            "<url><loc>https://digloservicer.com/venta-pisos/cualquiera</loc></url>"
-            "<url><loc>https://digloservicer.com/blog</loc></url>"
-            "</urlset>"
-        )
         with (
             patch(
                 "etl.connectors.diglo.requests.get",
-                return_value=_mock_response(nav_only),
+                return_value=_mock_response(
+                    "<html>homepage</html>", url="https://digloservicer.com/"
+                ),
             ),
-            pytest.raises(ConnectorError, match="none matched"),
+            pytest.raises(ListingUnavailableError, match="withdrawn between"),
         ):
-            connector.discover(
-                ConnectorScope(geography="madrid"), throttle=lambda: None
+            connector.fetch_detail(
+                "venta-pisos/madrid/madrid/var0000196816", throttle=lambda: None
             )
 
 

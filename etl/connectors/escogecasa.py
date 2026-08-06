@@ -36,6 +36,18 @@ map-based search results are injected via an iframe target — the search
     (the Fotocasa lesson: a partial, relevance/zoom-capped sweep must never
     drive withdrawal detection).
 
+    **Under-fetch re-verification (issue #378, 2026-08-06.)** Escogecasa was
+    flagged for ingesting "only 1 listing" for a scoped area. Re-checked
+    against the live search: the marker parse and pagination are correct —
+    they return every marker the bbox yields (a wide Galicia box returned 48,
+    all parsed; all-Spain the 103-marker cap, all parsed). The low count on a
+    Madrid/Levante scope is REAL sparsity, not a bug: Abanca's REO stock is
+    concentrated in Galicia and the north, so a Madrid 30 km box genuinely
+    holds ~2 listings and a Valencia box 0, while an A Coruna box holds 5.
+    `zoom` does not affect the result set (only the bbox does), so the
+    hard-coded `zoom=11` is harmless. No parser/discover change was needed;
+    the coverage a scope sees is the coverage Abanca actually has there.
+
   - **Detail** (`/detalle-<subtipo>-en-venta-en-<municipio>-en-<provincia>/
     <refpublica>/<idinterno>/`): server-rendered. Every SUBJECT field is in
     a `dato_`-prefixed element — `dato_precio`, `dato_habs`, `dato_banos`,

@@ -16,8 +16,13 @@ from unittest.mock import Mock, patch
 import pytest
 import requests
 
-from etl.connectors.base import ConnectorError, ConnectorScope, ListingUnavailableError
-from etl.connectors.habitaclia import HabitacliaConnector
+from etl.connectors.base import (
+    ConnectorError,
+    ConnectorScope,
+    ListingUnavailableError,
+    SoftBlockError,
+)
+from etl.connectors.habitaclia import HabitacliaConnector, _is_bot_interstitial
 from etl.connectors.habitaclia_mapping import (
     city_from_url,
     map_property_type,
@@ -236,6 +241,105 @@ def test_normalize_full_field_coverage_including_latlon():
 def test_normalize_does_not_fabricate_listing_kind():
     canonical = _normalize_sagrada(HabitacliaConnector())
     assert canonical.listing_kind is None
+
+
+# ── live-capture regression (issue #378) ─────────────────────────────
+
+
+_LIVE_ID = "24359000011808"
+_LIVE_URL = (
+    "https://www.habitaclia.com/comprar-piso-castellana-madrid-i24359000011808.htm"
+)
+
+
+def _normalize_live(connector: HabitacliaConnector):
+    """Drive fetch_detail+normalize over the FRESH 2026-08-06 live detail
+    capture (Madrid, Castellana)."""
+    connector._detail_urls = {_LIVE_ID: _LIVE_URL}
+    with patch(
+        "etl.connectors.habitaclia.requests.get",
+        return_value=_mock_response(
+            _read_fixture("habitaclia_live_detail.html"), url=_LIVE_URL
+        ),
+    ):
+        raw = connector.fetch_detail(_LIVE_ID, throttle=lambda: None)
+    return connector.normalize(raw)
+
+
+def test_live_capture_price_and_core_fields_populate():
+    """The under-extraction #378 reported: on the live page price/m²/rooms all
+    populate. (The remaining grade-F/unpriced listings were the bot
+    interstitial being parsed — see the soft-block tests.)"""
+    canonical = _normalize_live(HabitacliaConnector())
+    assert canonical.current_price == Decimal(3025000)
+    assert canonical.rooms == 4
+    assert canonical.bathrooms == 5
+    assert canonical.m2_built == Decimal(236)
+    assert canonical.property_type == "piso"
+
+
+def test_live_capture_coordinates_survive_unicode_escaped_quotes():
+    """The live StreetView config unicode-escapes its quotes
+    (VGPSLat":40.43…). The old regex could not cross the digit-bearing
+    `0022` escape and lat/lon came back None on every real page (#378)."""
+    canonical = _normalize_live(HabitacliaConnector())
+    assert canonical.lat == Decimal("40.4351332000")
+    assert canonical.lon == Decimal("-3.6842595000")
+
+
+def test_live_capture_reference_keeps_slash_joined_servicer_code():
+    """ "Referencia del anuncio habitaclia/CLK00/AM4816" — the `/`-joined
+    servicer code must survive; the old char class truncated it to "CLK00"."""
+    canonical = _normalize_live(HabitacliaConnector())
+    assert canonical.reference_code == "CLK00/AM4816"
+
+
+def test_live_capture_price_is_subject_not_sim_carousel():
+    canonical = _normalize_live(HabitacliaConnector())
+    # The fixture keeps a .sim-price neighbour at 2.300.000 €.
+    assert canonical.current_price == Decimal(3025000)
+
+
+# ── PerimeterX bot interstitial → soft block (issue #378) ─────────────
+
+
+def test_bot_interstitial_is_detected():
+    assert _is_bot_interstitial(_read_fixture("habitaclia_interruption.html"))
+    assert not _is_bot_interstitial(_read_fixture("habitaclia_live_detail.html"))
+
+
+def test_fetch_detail_soft_blocks_on_bot_interstitial():
+    """An HTTP-200 'Pardon Our Interruption' page must raise SoftBlockError,
+    NOT be normalized into a priceless grade-F listing (the batch's grade-F
+    driver — issue #378)."""
+    connector = HabitacliaConnector()
+    connector._detail_urls["24359000011808"] = (
+        "https://www.habitaclia.com/comprar-piso-castellana-madrid-i24359000011808.htm"
+    )
+    with (
+        patch(
+            "etl.connectors.habitaclia.requests.get",
+            return_value=_mock_response(_read_fixture("habitaclia_interruption.html")),
+        ),
+        pytest.raises(SoftBlockError, match="Pardon Our Interruption"),
+    ):
+        connector.fetch_detail("24359000011808", throttle=lambda: None)
+
+
+def test_discover_soft_blocks_on_bot_interstitial():
+    connector = HabitacliaConnector()
+    with (
+        patch(
+            "etl.connectors.habitaclia.requests.get",
+            return_value=_mock_response(_read_fixture("habitaclia_interruption.html")),
+        ),
+        pytest.raises(SoftBlockError, match="Pardon Our Interruption"),
+    ):
+        connector.discover(ConnectorScope(geography="madrid"), throttle=lambda: None)
+
+
+def test_soft_block_error_rate_is_set_for_transient_perimeterx():
+    assert HabitacliaConnector.circuit_breaker_soft_block_error_rate == 0.75
 
 
 # ── mapping unit ──────────────────────────────────────────────────────
