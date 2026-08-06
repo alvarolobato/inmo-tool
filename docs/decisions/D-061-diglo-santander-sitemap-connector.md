@@ -1,13 +1,46 @@
 ---
 id: D-061
-title: Diglo (Banco Santander REO) connector — sitemap-driven, publishes coordinates
+title: Diglo (Banco Santander REO) connector — buscador-driven, publishes coordinates
 date: 2026-08-05
 group: Data / connectors
-rule: 'Diglo (Santander REO, #117) connector targets `digloservicer.com` (NOT `diglo.com` — a hearing-aids retailer); sitemap-driven, `discovers_full_inventory=True` with empty/unrecognised-sitemap guards, `rate=12`, `listing_kind=agency`. First batch REO connector to publish lat/lon; no cadastral/postal.'
+rule: 'Diglo (Santander REO, #117) connector targets `digloservicer.com` (NOT `diglo.com` — a hearing-aids retailer); discovers via the paginated province BUSCADOR (`/venta-pisos/<province>?page=N`), NOT sitemap.xml (found stale — #378); `discovers_full_inventory=True` with an unrecognised-page-0 guard; fetch_detail treats a 302-to-root as withdrawn; `rate=12`, `listing_kind=agency`. First batch REO connector to publish lat/lon; no cadastral/postal.'
 order: 15
 ---
 
-# D-061: Diglo (Banco Santander REO) connector — sitemap-driven, publishes coordinates
+# D-061: Diglo (Banco Santander REO) connector — buscador-driven, publishes coordinates
+
+*Decided: 2026-08-05 · Discovery route corrected 2026-08-06 (issue #378)*
+
+## Correction (2026-08-06, issue #378): sitemap → province buscador
+
+The original decision below made Diglo **sitemap-driven** on the belief that
+`sitemap.xml` was the site's complete, single-request enumeration. A
+connector-health analysis then found Diglo ingesting **0 priced / all grade F**
+on live data, and a re-verification (honest UA, 2026-08-06) showed why: **the
+sitemap is badly STALE.** 5 of 6 randomly-sampled residential detail URLs from
+it **302-redirect to the homepage** (withdrawn listings); the live
+homepage/buscador links ~915 currently-active listings whose reference codes
+**are not in the sitemap at all**. So the sweep returned mostly dead URLs, and
+`fetch_detail` silently followed each 302 to the homepage and parsed *that*
+(whose `utag_data` is the empty placeholder) — a priceless, fieldless "active"
+listing.
+
+**Corrected decision**: discovery now paginates the **province buscador**
+(`/venta-pisos/<province>?page=N`, `?page`-paginated to exhaustion), which is
+server-rendered and returns the province's whole active stock across every
+property type — every card links a LIVE (HTTP 200) detail URL. `fetch_detail`
+additionally guards the residual case: a request that ends up redirected to the
+site root is a listing withdrawn between discovery and fetch, raised as
+`ListingUnavailableError` (a clean skip), never parsed as a homepage. The
+`discovers_full_inventory=True` guard changes from "empty/unrecognised sitemap"
+to "page 0 that doesn't look like a results page". The parsing decision below
+(utag_data / drupalSettings / .product-print-sheet, carousel isolation) was
+verified still correct against a fresh live page and is unchanged — except
+`m2_built` now reads BOTH the print-sheet and the description (a description-only
+"239,00 metros cuadrados" page previously dropped it). Everything below this
+section is the original 2026-08-05 record, kept for archaeology.
+
+---
 
 *Decided: 2026-08-05*
 

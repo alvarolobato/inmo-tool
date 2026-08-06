@@ -76,6 +76,7 @@ from etl.connectors.base import (
     ConnectorScope,
     ListingUnavailableError,
     RawListing,
+    SoftBlockError,
     Throttle,
 )
 from etl.connectors.extraction import (
@@ -112,14 +113,42 @@ _REQUEST_TIMEOUT_SECONDS = 15
 # `i<digits>` is the external id.
 _DETAIL_LINK_RE = re.compile(r"(/comprar-[a-z0-9_-]*-i(\d+)\.htm)", re.IGNORECASE)
 
-# Coordinates live in a StreetView config object as `VGPSLat`/`VGPSLon`,
-# usually unicode-escaped (`"VGPSLat":41.4056`). Match the key then
-# the next signed decimal, tolerant of the escaped-or-plain quoting around it.
-_VGPS_LAT_RE = re.compile(r"VGPSLat\W{0,8}(-?\d+\.\d+)")
-_VGPS_LON_RE = re.compile(r"VGPSLon\W{0,8}(-?\d+\.\d+)")
+# Coordinates live in a StreetView config object as `VGPSLat`/`VGPSLon`. On
+# the LIVE page the JSON quotes are unicode-ESCAPED — the raw bytes between
+# the key and the number are `":` (`VGPSLat":40.4419`). The `0022`
+# of that escape are DIGITS, so the old `\W{0,8}` bridge (and any
+# non-digit char class) stalled on them and coordinates came back None on
+# every real page (issue #378). `_extract_latlon` normalises `"` to a
+# plain quote first, so here the bridge is just a short run of quote/colon/
+# whitespace — which also matches the plain-quote and bare forms.
+_VGPS_LAT_RE = re.compile(r"VGPSLat[\"':\s]{0,6}(-?\d+\.\d+)")
+_VGPS_LON_RE = re.compile(r"VGPSLon[\"':\s]{0,6}(-?\d+\.\d+)")
 
-# "Referencia del anuncio habitaclia/VB2606024" -> "VB2606024".
-_REFERENCE_RE = re.compile(r"Referencia del anuncio\s*(?:habitaclia/)?([A-Za-z0-9_-]+)")
+# "Referencia del anuncio habitaclia/VB2606024" -> "VB2606024". The reference
+# can be a slash-joined servicer path ("habitaclia/CLK00/AM4816" — issue #378),
+# so `/` is part of the captured token; the leading "habitaclia/" portal
+# prefix is still stripped.
+_REFERENCE_RE = re.compile(
+    r"Referencia del anuncio\s*(?:habitaclia/)?([A-Za-z0-9/_-]+)"
+)
+
+# habitaclia sits behind a PerimeterX "Pardon Our Interruption" bot wall that,
+# after a burst of requests, returns a ~10 KB HTTP-200 interstitial INSTEAD of
+# the listing (title "Pardon Our Interruption"). Parsing it as a listing was
+# the batch's grade-F driver: no `.price`, no "Distribución" → a priceless,
+# fieldless "active" listing (issue #378). Detect it and raise SoftBlockError
+# (D-047) so it is a clean "waited for budget" skip, never a stored listing.
+_INTERSTITIAL_MARKERS = (
+    "Pardon Our Interruption",
+    "px-captcha",
+    "as you were browsing something about your browser made us think you were a bot",
+)
+
+
+def _is_bot_interstitial(html: str) -> bool:
+    lowered = html.lower()
+    return any(marker.lower() in lowered for marker in _INTERSTITIAL_MARKERS)
+
 
 _ROOMS_RE = re.compile(r"(\d+)\s*habitaci", re.IGNORECASE)
 _BATHS_RE = re.compile(r"(\d+)\s*ba[nñ]o", re.IGNORECASE)
@@ -162,8 +191,13 @@ def _clean(value: str | None) -> str | None:
 
 
 def _extract_latlon(html: str) -> tuple[Decimal | None, Decimal | None]:
-    lat_m = _VGPS_LAT_RE.search(html)
-    lon_m = _VGPS_LON_RE.search(html)
+    # The live StreetView config unicode-escapes its JSON quotes (`"`);
+    # normalise them to real quotes so the key->number bridge is a short run of
+    # quote/colon chars, not the digit-bearing `0022` escape the regex can't
+    # cross (issue #378). Harmless on pages that already use plain quotes.
+    text = html.replace("\\u0022", '"')
+    lat_m = _VGPS_LAT_RE.search(text)
+    lon_m = _VGPS_LON_RE.search(text)
     return (
         _to_decimal(lat_m.group(1)) if lat_m else None,
         _to_decimal(lon_m.group(1)) if lon_m else None,
@@ -230,6 +264,14 @@ class HabitacliaConnector(Connector):
     # Page-1-only search → never the full inventory for a scope (robots
     # disallows the *pag= pagination param). Gates withdrawal detection.
     discovers_full_inventory = False
+
+    # habitaclia sits behind a PerimeterX wall whose block is TRANSIENT (a
+    # burst that clears after backoff — see _is_bot_interstitial). Tolerate
+    # soft-blocks up to 75% of the rolling window before tripping the breaker
+    # (vs the 30% fatal threshold), so a cluster of interstitials mid-sweep is
+    # ridden through instead of abandoning the connector's other scopes for the
+    # run — the same reasoning Fotocasa's rate carries (D-047, issue #378).
+    circuit_breaker_soft_block_error_rate = 0.75
 
     supported_filters: tuple[str, ...] = ()
 
@@ -299,6 +341,16 @@ class HabitacliaConnector(Connector):
                 f"habitaclia discover: request failed for {url}: {exc}"
             ) from exc
 
+        if _is_bot_interstitial(response.text):
+            # The search page came back as the PerimeterX interstitial — a soft
+            # block, not "zero listings". Raise SoftBlockError so the run stays
+            # clean (D-047) rather than ConnectorError'ing as a markup change.
+            raise SoftBlockError(
+                f"habitaclia discover: {url} returned the 'Pardon Our "
+                "Interruption' bot interstitial (HTTP 200) — soft-blocked, not a "
+                "results page"
+            )
+
         detail_urls = self._parse_search_links(response.text)
         if not detail_urls:
             # A real habitaclia search page always carries listing links.
@@ -355,6 +407,16 @@ class HabitacliaConnector(Connector):
                 f"habitaclia fetch_detail: request failed for "
                 f"external_id={external_id}: {exc}"
             ) from exc
+
+        if _is_bot_interstitial(response.text):
+            # HTTP 200 but the payload is the PerimeterX interstitial, not the
+            # listing — a soft block, not a parseable page. Raising here stops
+            # it being normalized into a priceless grade-F listing (issue #378).
+            raise SoftBlockError(
+                f"habitaclia fetch_detail: external_id={external_id} returned the "
+                "'Pardon Our Interruption' bot interstitial (HTTP 200, no listing "
+                "payload) — soft-blocked, not a real page"
+            )
 
         return RawListing(
             external_id=external_id,
