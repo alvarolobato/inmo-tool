@@ -106,8 +106,10 @@ export default function DiscoveryPage() {
           Descubrimiento de URLs
         </h1>
         <p className="text-tremor-content dark:text-dark-tremor-content">
-          Aprende del propio portal cómo construir las URLs de búsqueda (tipo de
-          inmueble, subtipo, zona…) en lugar de mantener el mapeo a mano.
+          Compara las opciones de filtro del propio portal (tipo de inmueble,
+          subtipo, zona…) con el mapeo del código y avisa cuando hay deriva, para
+          que actualices el mapeo a mano. La construcción de URLs sigue siendo
+          100% del código; el descubrimiento solo detecta cambios.
         </p>
       </header>
 

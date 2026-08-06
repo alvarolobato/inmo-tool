@@ -245,8 +245,8 @@ function buildTask(
   const query = params.toString(); // hyphen + digits are URL-safe, so precio survives verbatim
   const url = query ? `${ORIGIN}${path}?${query}` : `${ORIGIN}${path}`;
 
-  // Section = the URL's discriminating segment: the (possibly discovered)
-  // subtype slug for viviendas, else the category. Two types that collapse onto
+  // Section = the URL's discriminating segment: the code-mapped subtype slug for
+  // viviendas, else the category. Two types that collapse onto
   // the same section+filters (piso + atico → pisos) get the same id and are
   // de-duplicated in build().
   const section = slug ?? map.category;
