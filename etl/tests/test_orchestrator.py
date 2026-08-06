@@ -4672,3 +4672,208 @@ class TestListingGoneReclassification:
         finally:
             orchestrator.CONNECTORS.clear()
             _cleanup(pg_conn, connector.name, run_id)
+
+
+class TestDiscoveryPriceHistory:
+    """Issue #183: a connector's discovery-time prices (Connector.
+    discovered_prices() — Fotocasa's verified per-listing rawPrice, read for
+    free from the same search payload discover() already fetches) are written
+    straight to listing_price_history, **decoupled from the fetch budget**, so
+    price-drop detection (issue #34) is complete for the whole discovered
+    inventory rather than only the subset a run's circuit-breaker/rate-limit/
+    min_refetch budget re-fetches.
+
+    Idempotent: an observation is appended only when the discovery price
+    differs from the listing's most recent recorded price, and
+    `listing.current_price` stays exclusively fetch-path-owned (D-070).
+    """
+
+    def _history_prices(self, conn, source: str, external_id: str) -> list:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT h.price FROM listing_price_history h "
+                "JOIN listing l ON l.id = h.listing_id "
+                "WHERE l.source = %s AND l.external_id = %s "
+                "ORDER BY h.observed_at, h.id",
+                (source, external_id),
+            )
+            return [row[0] for row in cur.fetchall()]
+
+    def _current_price(self, conn, source: str, external_id: str):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT current_price FROM listing "
+                "WHERE source = %s AND external_id = %s",
+                (source, external_id),
+            )
+            return cur.fetchone()[0]
+
+    def test_empty_discovery_prices_is_a_pure_no_op(self):
+        """No discovery-time price signal (every connector but Fotocasa today,
+        whose discovered_prices() returns {}) -> the helper returns 0 without
+        ever touching the database."""
+
+        class _ExplodingConn:
+            def cursor(self, *args, **kwargs):
+                raise AssertionError("must not open a cursor for an empty dict")
+
+        assert (
+            orchestrator._record_discovery_price_observations(
+                _ExplodingConn(), "any-source", {}
+            )
+            == 0
+        )
+
+    def test_discovery_price_for_unknown_listing_is_ignored(self, pg_conn):
+        """A discovered id with no `listing` row yet (never fetched) gets its
+        first price on its first real fetch, exactly as before — the helper
+        FK-safely records nothing for it and never raises."""
+        _apply_schema(pg_conn)
+        recorded = orchestrator._record_discovery_price_observations(
+            pg_conn, "ghost-source-183", {"never-existed-1": Decimal(123456)}
+        )
+        assert recorded == 0
+
+    def test_discovery_price_recorded_without_a_detail_fetch(self, pg_conn):
+        """The core proof: a listing the fetch budget never reaches this run
+        (its turn comes after the circuit breaker has tripped) still gets its
+        discovery-time price appended to the timeline."""
+        _apply_schema(pg_conn)
+        source = "disc-price-no-fetch"
+
+        seed = DummyConnector(name=source, external_ids=("t-1",), price=205000)
+        orchestrator.CONNECTORS[:] = [seed]
+        run_ids: list[int] = []
+        try:
+            # Run 1: a normal fetch seeds the listing row (the price-history FK
+            # target) plus its baseline observation.
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert seed.fetch_calls == ["t-1"]
+            assert self._history_prices(pg_conn, source, "t-1") == [Decimal(205000)]
+
+            # Run 2: a failing id FIRST trips the shared circuit breaker, so the
+            # loop aborts before ever reaching t-1 — exactly the fetch-budget
+            # exhaustion issue #183 is about. t-1's discovery-time price has
+            # dropped and must still land in the timeline.
+            budget_bound = DummyConnector(
+                name=source,
+                external_ids=("bad-1", "t-1"),
+                failing_ids=frozenset({"bad-1"}),
+                circuit_breaker_min_attempts=1,
+                circuit_breaker_error_rate=0.5,
+            )
+            budget_bound.discovery_price_overrides = {"t-1": 195000}
+            orchestrator.CONNECTORS[:] = [budget_bound]
+
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+
+            assert "t-1" not in budget_bound.fetch_calls, (
+                "the circuit breaker must have aborted the loop before t-1 was "
+                "fetched — this is what makes the observation decoupled from "
+                "the fetch budget"
+            )
+            assert self._history_prices(pg_conn, source, "t-1") == [
+                Decimal(205000),
+                Decimal(195000),
+            ], "the discovery-time price drop must be appended to the timeline"
+            assert self._current_price(pg_conn, source, "t-1") == Decimal(205000), (
+                "current_price stays fetch-path-owned (D-070): a discovery-time "
+                "observation must not touch it, or _should_skip_fetch's "
+                "price-change re-fetch trigger would stop firing"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, source, None)
+            with pg_conn.cursor() as cur:
+                for r in run_ids:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+
+    def test_helper_dedups_repeated_and_matching_observations(self, pg_conn):
+        """Idempotency, directly on the write helper: the same price is never
+        double-inserted across re-runs, a discovery price matching the latest
+        recorded row is a no-op, and a further genuine drop IS recorded."""
+        _apply_schema(pg_conn)
+        source = "disc-price-helper-idem"
+        connector = DummyConnector(name=source, external_ids=("h-1",), price=250000)
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            assert self._history_prices(pg_conn, source, "h-1") == [Decimal(250000)]
+
+            drop = {"h-1": Decimal(240000)}
+            first = orchestrator._record_discovery_price_observations(
+                pg_conn, source, drop
+            )
+            second = orchestrator._record_discovery_price_observations(
+                pg_conn, source, drop
+            )
+            assert first == 1, "a newly-seen discovery price is recorded once"
+            assert second == 0, (
+                "the identical observation on the next sweep is deduped against "
+                "the latest recorded price, not inserted a second time"
+            )
+            assert self._history_prices(pg_conn, source, "h-1") == [
+                Decimal(250000),
+                Decimal(240000),
+            ]
+
+            matching = orchestrator._record_discovery_price_observations(
+                pg_conn, source, {"h-1": Decimal(240000)}
+            )
+            assert matching == 0, "a discovery price equal to the latest row is a no-op"
+
+            further = orchestrator._record_discovery_price_observations(
+                pg_conn, source, {"h-1": Decimal(230000)}
+            )
+            assert further == 1, "a further genuine drop is recorded"
+            assert self._history_prices(pg_conn, source, "h-1") == [
+                Decimal(250000),
+                Decimal(240000),
+                Decimal(230000),
+            ]
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, source, run_id)
+
+    def test_refetched_price_change_is_not_double_recorded(self, pg_conn):
+        """When a discovery-time delta forces a real re-fetch (skip-if-seen
+        reason #5), the fetch path already appends the authoritative price;
+        the discovery recorder must dedup against that row, not stack a second
+        identical observation on top in the same run."""
+        _apply_schema(pg_conn)
+        source = "disc-price-refetch-dedup"
+        connector = DummyConnector(
+            name=source,
+            external_ids=("r-1",),
+            price=400000,
+            min_refetch_interval_seconds=24 * 60 * 60,
+        )
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["r-1"]
+
+            connector.discovery_price_overrides = {"r-1": 380000}
+            connector.price = 380000
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["r-1", "r-1"], (
+                "a discovery-time delta must force the re-fetch"
+            )
+
+            assert self._history_prices(pg_conn, source, "r-1") == [
+                Decimal(400000),
+                Decimal(380000),
+            ], (
+                "exactly one new observation for the change — the fetch path's, "
+                "not a discovery-time duplicate stacked on top the same run"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, source, None)
+            with pg_conn.cursor() as cur:
+                for r in run_ids:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
