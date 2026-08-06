@@ -34,8 +34,8 @@ from etl.connectors.geography import (
 from etl.connectors.rate_limit import RateLimiter
 from etl.db import postgres
 from etl.dedup import engine as dedup_engine
-from etl.failure_classification import classify_fatal_exception
 from etl.extraction_quality import compute_extraction_quality
+from etl.failure_classification import classify_fatal_exception
 
 # Default bounded lifetime for a single dedup pass (D-036). A run currently
 # takes ~84 min (dropping once issue #226's photo-hash persistence deploys);
