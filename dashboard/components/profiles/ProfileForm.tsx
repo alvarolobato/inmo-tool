@@ -82,8 +82,15 @@ const colStyle: React.CSSProperties = { flex: 1 };
  * `initial`) and edit (`initial` set, submits a PATCH via the caller's
  * onSubmit) — see app/profiles/page.tsx.
  */
-export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: ProfileFormProps) {
-  const [values, setValues] = useState<ProfileFormValues>(initial ?? DEFAULT_VALUES);
+export function ProfileForm({
+  initial,
+  submitLabel,
+  onSubmit,
+  onCancel,
+}: ProfileFormProps) {
+  const [values, setValues] = useState<ProfileFormValues>(
+    initial ?? DEFAULT_VALUES,
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -108,7 +115,9 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
     try {
       await onSubmit(values);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "No se pudo guardar el perfil.");
+      setError(
+        err instanceof Error ? err.message : "No se pudo guardar el perfil.",
+      );
     } finally {
       setSubmitting(false);
     }
@@ -136,7 +145,12 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
   }
 
   const setFinancingField = (
-    field: "down_payment_pct" | "rate_pct" | "term_years" | "operating_cost_pct" | "maintenance_vacancy_pct",
+    field:
+      | "down_payment_pct"
+      | "rate_pct"
+      | "term_years"
+      | "operating_cost_pct"
+      | "maintenance_vacancy_pct",
     raw: string,
   ) => {
     setValues((v) => {
@@ -156,7 +170,10 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
         const { financing: _drop, ...rest } = v.thesis_params;
         return { ...v, thesis_params: rest };
       }
-      return { ...v, thesis_params: { ...v.thesis_params, financing: updated } };
+      return {
+        ...v,
+        thesis_params: { ...v.thesis_params, financing: updated },
+      };
     });
   };
 
@@ -176,14 +193,22 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
       }
       return {
         ...v,
-        thesis_params: { ...v.thesis_params, rent_assumption: { eur_per_m2_month: num } },
+        thesis_params: {
+          ...v.thesis_params,
+          rent_assumption: { eur_per_m2_month: num },
+        },
       };
     });
   };
 
   return (
-    <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      {error && <p style={{ fontSize: 13, color: "var(--down)", margin: 0 }}>{error}</p>}
+    <form
+      onSubmit={handleSubmit}
+      style={{ display: "flex", flexDirection: "column", gap: 14 }}
+    >
+      {error && (
+        <p style={{ fontSize: 13, color: "var(--down)", margin: 0 }}>{error}</p>
+      )}
 
       <div>
         <label style={labelStyle}>Nombre del perfil</label>
@@ -201,13 +226,20 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
         <legend style={legendStyle}>Zona (radio desde un punto)</legend>
         <div style={{ marginTop: 6 }}>
           <LocationPicker
-            value={{ center: values.scope.geography.center, radiusKm: values.scope.geography.radius_km }}
+            value={{
+              center: values.scope.geography.center,
+              radiusKm: values.scope.geography.radius_km,
+            }}
             onChange={({ center, radiusKm }) =>
               setValues((v) => ({
                 ...v,
                 scope: {
                   ...v.scope,
-                  geography: { ...v.scope.geography, center, radius_km: radiusKm },
+                  geography: {
+                    ...v.scope.geography,
+                    center,
+                    radius_km: radiusKm,
+                  },
                 },
               }))
             }
@@ -217,11 +249,19 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
 
       <fieldset style={fieldsetStyle}>
         <legend style={legendStyle}>Tipo de inmueble</legend>
-        <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 10 }}>
+        <div
+          style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 10 }}
+        >
           {PROPERTY_TYPES.map((pt) => (
             <label
               key={pt}
-              style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 13, color: "var(--fg)" }}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 5,
+                fontSize: 13,
+                color: "var(--fg)",
+              }}
             >
               <input
                 type="checkbox"
@@ -246,7 +286,8 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
                 ...v,
                 scope: {
                   ...v.scope,
-                  price_min: e.target.value === "" ? undefined : Number(e.target.value),
+                  price_min:
+                    e.target.value === "" ? undefined : Number(e.target.value),
                 },
               }))
             }
@@ -264,7 +305,8 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
                 ...v,
                 scope: {
                   ...v.scope,
-                  price_max: e.target.value === "" ? undefined : Number(e.target.value),
+                  price_max:
+                    e.target.value === "" ? undefined : Number(e.target.value),
                 },
               }))
             }
@@ -285,7 +327,8 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
                 ...v,
                 scope: {
                   ...v.scope,
-                  size_min: e.target.value === "" ? undefined : Number(e.target.value),
+                  size_min:
+                    e.target.value === "" ? undefined : Number(e.target.value),
                 },
               }))
             }
@@ -303,7 +346,8 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
                 ...v,
                 scope: {
                   ...v.scope,
-                  size_max: e.target.value === "" ? undefined : Number(e.target.value),
+                  size_max:
+                    e.target.value === "" ? undefined : Number(e.target.value),
                 },
               }))
             }
@@ -314,8 +358,23 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
 
       <fieldset style={fieldsetStyle}>
         <legend style={legendStyle}>Exclusiones</legend>
-        <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 13, color: "var(--fg)" }}>
+        <div
+          style={{
+            marginTop: 6,
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
+          }}
+        >
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 5,
+              fontSize: 13,
+              color: "var(--fg)",
+            }}
+          >
             <input
               type="checkbox"
               checked={values.scope.hard_exclusions?.requires_elevator ?? false}
@@ -334,10 +393,20 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
             />
             Requiere ascensor
           </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 13, color: "var(--fg)" }}>
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 5,
+              fontSize: 13,
+              color: "var(--fg)",
+            }}
+          >
             <input
               type="checkbox"
-              checked={values.scope.hard_exclusions?.excludes_ground_floor ?? false}
+              checked={
+                values.scope.hard_exclusions?.excludes_ground_floor ?? false
+              }
               onChange={(e) =>
                 setValues((v) => ({
                   ...v,
@@ -358,13 +427,22 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
 
       <fieldset style={fieldsetStyle}>
         <legend style={legendStyle}>Objetivo de inversión (opcional)</legend>
-        <p style={{ margin: "6px 0 10px", fontSize: 12, color: "var(--fg-subtle)" }}>
-          Usado a partir de la Fase 3 (puntuación) y la Fase 5 (rentabilidad) — se guarda desde
-          ahora aunque todavía no afecte al filtrado.
+        <p
+          style={{
+            margin: "6px 0 10px",
+            fontSize: 12,
+            color: "var(--fg-subtle)",
+          }}
+        >
+          Usado a partir de la Fase 3 (puntuación) y la Fase 5 (rentabilidad) —
+          se guarda desde ahora aunque todavía no afecte al filtrado.
         </p>
         <div>
-          <label style={labelStyle}>Rentabilidad objetivo (% bruta anual)</label>
+          <label style={labelStyle}>
+            Rentabilidad objetivo (% bruta anual)
+          </label>
           <input
+            data-testid="thesis-target-yield"
             type="number"
             min={0}
             step="0.1"
@@ -374,7 +452,8 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
                 ...v,
                 thesis_params: {
                   ...v.thesis_params,
-                  target_yield_pct: e.target.value === "" ? undefined : Number(e.target.value),
+                  target_yield_pct:
+                    e.target.value === "" ? undefined : Number(e.target.value),
                 },
               }))
             }
@@ -383,14 +462,18 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
         </div>
         <div style={{ ...rowStyle, marginTop: 10 }}>
           <div style={colStyle}>
-            <label style={labelStyle} htmlFor="financing-down-payment-pct">Entrada (%)</label>
+            <label style={labelStyle} htmlFor="financing-down-payment-pct">
+              Entrada (%)
+            </label>
             <input
               id="financing-down-payment-pct"
               type="number"
               min={0}
               max={100}
               value={financing?.down_payment_pct ?? ""}
-              onChange={(e) => setFinancingField("down_payment_pct", e.target.value)}
+              onChange={(e) =>
+                setFinancingField("down_payment_pct", e.target.value)
+              }
               style={inputStyle}
             />
           </div>
@@ -418,7 +501,8 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
         </div>
         <div style={{ marginTop: 10 }}>
           <label style={labelStyle}>
-            Gastos de operación (% del alquiler bruto — IBI, comunidad, mantenimiento, vacío)
+            Gastos de operación (% del alquiler bruto — IBI, comunidad,
+            mantenimiento, vacío)
           </label>
           <input
             type="number"
@@ -427,18 +511,28 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
             step="1"
             placeholder="25 (valor por defecto si se deja en blanco)"
             value={financing?.operating_cost_pct ?? ""}
-            onChange={(e) => setFinancingField("operating_cost_pct", e.target.value)}
+            onChange={(e) =>
+              setFinancingField("operating_cost_pct", e.target.value)
+            }
             style={inputStyle}
           />
-          <p style={{ margin: "4px 0 0", fontSize: 11, color: "var(--fg-subtle)" }}>
-            Se usa solo cuando el anuncio de la propiedad NO publica ni IBI ni gastos de comunidad
-            reales. En cuanto se conoce uno de los dos, este porcentaje se ignora y se usan los datos
-            reales más la asunción de mantenimiento/vacío de abajo (issue #151).
+          <p
+            style={{
+              margin: "4px 0 0",
+              fontSize: 11,
+              color: "var(--fg-subtle)",
+            }}
+          >
+            Se usa solo cuando el anuncio de la propiedad NO publica ni IBI ni
+            gastos de comunidad reales. En cuanto se conoce uno de los dos, este
+            porcentaje se ignora y se usan los datos reales más la asunción de
+            mantenimiento/vacío de abajo (issue #151).
           </p>
         </div>
         <div style={{ marginTop: 10 }}>
           <label style={labelStyle}>
-            Mantenimiento + vacío (% del alquiler bruto, solo cuando SÍ hay IBI/comunidad reales)
+            Mantenimiento + vacío (% del alquiler bruto, solo cuando SÍ hay
+            IBI/comunidad reales)
           </label>
           <input
             type="number"
@@ -447,13 +541,22 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
             step="1"
             placeholder="8 (valor por defecto si se deja en blanco)"
             value={financing?.maintenance_vacancy_pct ?? ""}
-            onChange={(e) => setFinancingField("maintenance_vacancy_pct", e.target.value)}
+            onChange={(e) =>
+              setFinancingField("maintenance_vacancy_pct", e.target.value)
+            }
             style={inputStyle}
           />
-          <p style={{ margin: "4px 0 0", fontSize: 11, color: "var(--fg-subtle)" }}>
-            Ningún anuncio publica mantenimiento o vacío por separado, así que esta asunción SIEMPRE
-            se suma a la cifra real de IBI/comunidad cuando alguna de las dos se conoce — nunca se
-            usa para reemplazar el dato real por completo.
+          <p
+            style={{
+              margin: "4px 0 0",
+              fontSize: 11,
+              color: "var(--fg-subtle)",
+            }}
+          >
+            Ningún anuncio publica mantenimiento o vacío por separado, así que
+            esta asunción SIEMPRE se suma a la cifra real de IBI/comunidad
+            cuando alguna de las dos se conoce — nunca se usa para reemplazar el
+            dato real por completo.
           </p>
         </div>
         {financing && (
@@ -480,8 +583,16 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
           </button>
         )}
 
-        <div style={{ marginTop: 14, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
-          <label style={labelStyle} htmlFor="rent-assumption-eur-per-m2">Asunción de alquiler (€/m²/mes)</label>
+        <div
+          style={{
+            marginTop: 14,
+            paddingTop: 10,
+            borderTop: "1px solid var(--border)",
+          }}
+        >
+          <label style={labelStyle} htmlFor="rent-assumption-eur-per-m2">
+            Asunción de alquiler (€/m²/mes)
+          </label>
           <input
             id="rent-assumption-eur-per-m2"
             // type="text", NOT type="number" (Opus review fix). A native
@@ -503,13 +614,21 @@ export function ProfileForm({ initial, submitLabel, onSubmit, onCancel }: Profil
             onChange={(e) => setRentAssumption(e.target.value)}
             style={inputStyle}
           />
-          <p style={{ margin: "4px 0 0", fontSize: 11, color: "var(--fg-subtle)" }}>
-            Opcional (issue #31): si defines tu propia estimación de alquiler por m² para la zona de
-            este perfil, se usará siempre para calcular el yield, incluso si hay comparables de
-            alquiler ingeridos en la zona — nunca se sustituye en silencio por una cifra medida, aunque
-            ambas se muestran si difieren. Si la dejas en blanco, inmo-tool intentará estimar el
-            alquiler a partir de anuncios de alquiler comparables ya ingeridos en la zona; si no hay
-            suficientes, no se muestra ningún yield (ni se inventa una cifra).
+          <p
+            style={{
+              margin: "4px 0 0",
+              fontSize: 11,
+              color: "var(--fg-subtle)",
+            }}
+          >
+            Opcional (issue #31): si defines tu propia estimación de alquiler
+            por m² para la zona de este perfil, se usará siempre para calcular
+            el yield, incluso si hay comparables de alquiler ingeridos en la
+            zona — nunca se sustituye en silencio por una cifra medida, aunque
+            ambas se muestran si difieren. Si la dejas en blanco, inmo-tool
+            intentará estimar el alquiler a partir de anuncios de alquiler
+            comparables ya ingeridos en la zona; si no hay suficientes, no se
+            muestra ningún yield (ni se inventa una cifra).
           </p>
         </div>
       </fieldset>

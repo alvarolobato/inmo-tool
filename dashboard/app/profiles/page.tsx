@@ -5,11 +5,20 @@ import Link from "next/link";
 import { ErrorDisplay } from "@/components/ErrorDisplay";
 import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
-import { ProfileForm, DEFAULT_VALUES, type ProfileFormValues } from "@/components/profiles/ProfileForm";
+import {
+  ProfileForm,
+  DEFAULT_VALUES,
+  type ProfileFormValues,
+} from "@/components/profiles/ProfileForm";
+import { TemplatePicker } from "@/components/profiles/TemplatePicker";
+import { findTemplate, templateToFormValues } from "@/lib/profile-templates";
 import { ProfileOverviewRow } from "@/components/profiles/ProfileOverviewRow";
 import { NovedadesStrip } from "@/components/profiles/NovedadesStrip";
 import { RefreshIndicator } from "@/components/profiles/RefreshIndicator";
-import type { ProfileRefreshResult, SearchProfileRow } from "@/lib/profiles-schema";
+import type {
+  ProfileRefreshResult,
+  SearchProfileRow,
+} from "@/lib/profiles-schema";
 import type { ProfileOverviewEntry } from "@/lib/profile-overview-types";
 
 type Mode =
@@ -65,11 +74,26 @@ function DegradedProfileRow({ profile }: { profile: SearchProfileRow }) {
       }}
     >
       <div>
-        <p style={{ fontWeight: 500, color: "var(--fg)", margin: 0, fontSize: 14 }}>{profile.name}</p>
-        <p style={{ fontSize: 12, color: "var(--fg-subtle)", margin: "2px 0 0" }}>
-          {profile.scope.property_types.join(", ")} · radio {profile.scope.geography.radius_km} km
+        <p
+          style={{
+            fontWeight: 500,
+            color: "var(--fg)",
+            margin: 0,
+            fontSize: 14,
+          }}
+        >
+          {profile.name}
         </p>
-        <p data-testid="profile-degraded-note" style={{ fontSize: 11, color: "var(--warn)", margin: "4px 0 0" }}>
+        <p
+          style={{ fontSize: 12, color: "var(--fg-subtle)", margin: "2px 0 0" }}
+        >
+          {profile.scope.property_types.join(", ")} · radio{" "}
+          {profile.scope.geography.radius_km} km
+        </p>
+        <p
+          data-testid="profile-degraded-note"
+          style={{ fontSize: 11, color: "var(--warn)", margin: "4px 0 0" }}
+        >
           No se pudieron cargar las métricas.
         </p>
       </div>
@@ -93,11 +117,21 @@ function DegradedProfileRow({ profile }: { profile: SearchProfileRow }) {
 }
 
 export default function ProfilesPage() {
-  const [overviews, setOverviews] = useState<ProfileOverviewEntry[] | null>(null);
-  const [degradedProfiles, setDegradedProfiles] = useState<SearchProfileRow[] | null>(null);
+  const [overviews, setOverviews] = useState<ProfileOverviewEntry[] | null>(
+    null,
+  );
+  const [degradedProfiles, setDegradedProfiles] = useState<
+    SearchProfileRow[] | null
+  >(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<ApiErrorResponse | string | null>(null);
   const [mode, setMode] = useState<Mode>({ kind: "none" });
+  // Issue #39: which profile template seeds the create form. null = "Empezar en
+  // blanco" (the unchanged task-2.3 blank flow — ProfileForm gets no `initial`
+  // and falls back to DEFAULT_VALUES). Picking a template remounts ProfileForm
+  // (via `key`) with the template's plausible starting values, still fully
+  // editable. Reset to null whenever the create panel is (re)opened.
+  const [createTemplateId, setCreateTemplateId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
   // Issue #245: the ad-hoc sweep trigger id from the last create/scope-edit, so
   // <RefreshIndicator> can poll it and show "buscando datos nuevos…". null when
@@ -146,9 +180,17 @@ export default function ProfilesPage() {
         return;
       }
       const errBody = await res.json().catch(() => null);
-      setError(isApiErrorResponse(errBody) ? errBody : "Error al cargar los perfiles de búsqueda");
+      setError(
+        isApiErrorResponse(errBody)
+          ? errBody
+          : "Error al cargar los perfiles de búsqueda",
+      );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Error al cargar los perfiles de búsqueda");
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Error al cargar los perfiles de búsqueda",
+      );
     } finally {
       setLoading(false);
     }
@@ -169,7 +211,9 @@ export default function ProfilesPage() {
   // surfaced as if the save itself failed.
   const triggerMaterialize = async (id: number) => {
     try {
-      const res = await fetch(`/api/profiles/${id}/materialize`, { method: "POST" });
+      const res = await fetch(`/api/profiles/${id}/materialize`, {
+        method: "POST",
+      });
       if (!res.ok) {
         console.error(
           "No se pudieron recalcular los candidatos tras guardar el perfil:",
@@ -178,7 +222,10 @@ export default function ProfilesPage() {
         );
       }
     } catch (err) {
-      console.error("No se pudieron recalcular los candidatos tras guardar el perfil:", err);
+      console.error(
+        "No se pudieron recalcular los candidatos tras guardar el perfil:",
+        err,
+      );
     }
   };
 
@@ -189,7 +236,8 @@ export default function ProfilesPage() {
     if (
       refresh &&
       refresh.crawl.triggerId !== null &&
-      (refresh.crawl.status === "enqueued" || refresh.crawl.status === "already_pending")
+      (refresh.crawl.status === "enqueued" ||
+        refresh.crawl.status === "already_pending")
     ) {
       setRefreshTriggerId(refresh.crawl.triggerId);
     } else {
@@ -205,9 +253,13 @@ export default function ProfilesPage() {
     });
     if (!res.ok) {
       const body = await res.json().catch(() => null);
-      throw new Error(isApiErrorResponse(body) ? body.error : "No se pudo crear el perfil.");
+      throw new Error(
+        isApiErrorResponse(body) ? body.error : "No se pudo crear el perfil.",
+      );
     }
-    const created: SearchProfileRow & { refresh?: ProfileRefreshResult | null } = await res.json();
+    const created: SearchProfileRow & {
+      refresh?: ProfileRefreshResult | null;
+    } = await res.json();
     setMode({ kind: "none" });
     await fetchProfiles();
     applyRefresh(created.refresh);
@@ -221,9 +273,15 @@ export default function ProfilesPage() {
     });
     if (!res.ok) {
       const body = await res.json().catch(() => null);
-      throw new Error(isApiErrorResponse(body) ? body.error : "No se pudo actualizar el perfil.");
+      throw new Error(
+        isApiErrorResponse(body)
+          ? body.error
+          : "No se pudo actualizar el perfil.",
+      );
     }
-    const updated: SearchProfileRow & { refresh?: ProfileRefreshResult | null } = await res.json();
+    const updated: SearchProfileRow & {
+      refresh?: ProfileRefreshResult | null;
+    } = await res.json();
     setMode({ kind: "none" });
     await fetchProfiles();
     applyRefresh(updated.refresh);
@@ -235,7 +293,9 @@ export default function ProfilesPage() {
       const res = await fetch(`/api/profiles/${id}`, { method: "DELETE" });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
-        setError(isApiErrorResponse(body) ? body : "No se pudo archivar el perfil.");
+        setError(
+          isApiErrorResponse(body) ? body : "No se pudo archivar el perfil.",
+        );
         return;
       }
       await fetchProfiles();
@@ -250,7 +310,9 @@ export default function ProfilesPage() {
       const res = await fetch(`/api/profiles/${id}/clone`, { method: "POST" });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
-        setError(isApiErrorResponse(body) ? body : "No se pudo clonar el perfil.");
+        setError(
+          isApiErrorResponse(body) ? body : "No se pudo clonar el perfil.",
+        );
         return;
       }
       const cloned: SearchProfileRow = await res.json();
@@ -265,16 +327,38 @@ export default function ProfilesPage() {
     }
   };
 
-  const hasAnyProfiles = (overviews?.length ?? 0) > 0 || (degradedProfiles?.length ?? 0) > 0;
+  const hasAnyProfiles =
+    (overviews?.length ?? 0) > 0 || (degradedProfiles?.length ?? 0) > 0;
 
   return (
     <main style={{ maxWidth: 720, margin: "0 auto", padding: 24 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <h1 style={{ fontSize: 20, fontWeight: 600, color: "var(--fg)", margin: 0 }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+        }}
+      >
+        <h1
+          style={{
+            fontSize: 20,
+            fontWeight: 600,
+            color: "var(--fg)",
+            margin: 0,
+          }}
+        >
           Perfiles de búsqueda
         </h1>
         <button
-          onClick={() => setMode((m) => (m.kind === "create" ? { kind: "none" } : { kind: "create" }))}
+          onClick={() =>
+            setMode((m) => {
+              if (m.kind === "create") return { kind: "none" };
+              // Fresh create panel always starts on the blank ("Empezar en
+              // blanco") selection so the default flow is unchanged (EC-3).
+              setCreateTemplateId(null);
+              return { kind: "create" };
+            })
+          }
           style={{
             padding: "7px 14px",
             background: "var(--accent)",
@@ -309,7 +393,27 @@ export default function ProfilesPage() {
             background: "var(--bg-1)",
           }}
         >
-          <ProfileForm submitLabel="Crear perfil" onSubmit={handleCreate} onCancel={() => setMode({ kind: "none" })} />
+          {/* Issue #39: template chooser above the (always-rendered) form.
+              Picking a template pre-fills the form; "Empezar en blanco" keeps
+              the original blank flow. */}
+          <TemplatePicker
+            selectedId={createTemplateId}
+            onPick={setCreateTemplateId}
+          />
+          <ProfileForm
+            // Remount on template change so the newly-picked template's values
+            // seed ProfileForm's internal state. Blank → no `initial` →
+            // DEFAULT_VALUES (task 2.3's exact behaviour, EC-3).
+            key={createTemplateId ?? "blank"}
+            initial={
+              createTemplateId
+                ? templateToFormValues(findTemplate(createTemplateId)!)
+                : undefined
+            }
+            submitLabel="Crear perfil"
+            onSubmit={handleCreate}
+            onCancel={() => setMode({ kind: "none" })}
+          />
         </div>
       )}
 
@@ -346,9 +450,15 @@ export default function ProfilesPage() {
             background: "var(--bg-1)",
           }}
         >
-          <p style={{ margin: "0 0 12px", fontSize: 12, color: "var(--fg-muted)" }}>
-            Este perfil tenía una configuración inválida y no se pudo recuperar su ámbito (scope) original —
-            defínelo de nuevo desde cero.
+          <p
+            style={{
+              margin: "0 0 12px",
+              fontSize: 12,
+              color: "var(--fg-muted)",
+            }}
+          >
+            Este perfil tenía una configuración inválida y no se pudo recuperar
+            su ámbito (scope) original — defínelo de nuevo desde cero.
           </p>
           <ProfileForm
             initial={{ ...DEFAULT_VALUES, name: mode.name }}
@@ -369,7 +479,8 @@ export default function ProfilesPage() {
         </div>
       ) : !error && !hasAnyProfiles ? (
         <p style={{ marginTop: 16, fontSize: 13, color: "var(--fg-muted)" }}>
-          No hay perfiles de búsqueda activos. Crea uno para empezar a filtrar candidatos.
+          No hay perfiles de búsqueda activos. Crea uno para empezar a filtrar
+          candidatos.
         </p>
       ) : (
         <div style={{ marginTop: 16 }}>
@@ -377,7 +488,10 @@ export default function ProfilesPage() {
               (candidates first-seen since last visit) into a page-level strip.
               Rendered only for the full overview shape; the degraded plain-list
               fallback has no new_count, so NovedadesStrip returns null there. */}
-          <NovedadesStrip overviews={overviews} onJumpToProfile={jumpToProfile} />
+          <NovedadesStrip
+            overviews={overviews}
+            onJumpToProfile={jumpToProfile}
+          />
           {overviews !== null &&
             overviews.map((entry) => (
               <ProfileOverviewRow
@@ -388,13 +502,22 @@ export default function ProfilesPage() {
                 onEdit={() =>
                   entry.ok
                     ? setMode({ kind: "edit", profile: entry.profile })
-                    : setMode({ kind: "repair", id: entry.id, name: entry.name })
+                    : setMode({
+                        kind: "repair",
+                        id: entry.id,
+                        name: entry.name,
+                      })
                 }
                 onClone={() => entry.ok && handleClone(entry.profile.id)}
-                onArchive={() => handleArchive(entry.ok ? entry.profile.id : entry.id)}
+                onArchive={() =>
+                  handleArchive(entry.ok ? entry.profile.id : entry.id)
+                }
               />
             ))}
-          {degradedProfiles !== null && degradedProfiles.map((p) => <DegradedProfileRow key={p.id} profile={p} />)}
+          {degradedProfiles !== null &&
+            degradedProfiles.map((p) => (
+              <DegradedProfileRow key={p.id} profile={p} />
+            ))}
         </div>
       )}
     </main>
