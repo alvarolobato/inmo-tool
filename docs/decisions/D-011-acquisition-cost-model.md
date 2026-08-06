@@ -2,6 +2,9 @@
 id: D-011
 title: Acquisition-cost model — ITP by CCAA (general rate only), flat notary/registry/gestoría defaults, actual carrying costs ADD to (not replace) the assumed maintenance/vacancy line
 date: 2026-08-03
+group: Product
+rule: ITP by CCAA is general/base rate only (no brackets/reductions, no new-build path). Actual IBI/community fee from `raw_extra` ADDS to a separate assumed maintenance/vacancy %, never fully replaces it.
+order: 68
 ---
 
 # D-011: Acquisition-cost model — ITP by CCAA, flat notary/registry/gestoría, actual carrying costs are additive to a separate maintenance/vacancy assumption

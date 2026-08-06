@@ -2,6 +2,9 @@
 id: D-050
 title: Per-connector freshness cadence — refresh only when due, resume until fresh
 date: 2026-08-05
+group: Data / connectors
+rule: 'Per-connector freshness cadence: a scheduler tick STARTS a refresh cycle only when due (data older than `connector_config.freshness_interval_hours`, else `etl.default_freshness_interval_hours`/24h), CONTINUES an in-flight cycle regardless of interval, and SKIPS (no run row) when fresh. Manual/CLI triggers bypass the gate (D-038). Resume via `connector_scope_state.last_discovered_at >= cycle_started_at` (new skip reason `fresh_this_cycle`); no new per-scope table. Completion when 100% target scopes discovered since cycle start → `last_fresh_at`; a stuck cycle (`>etl.freshness_cycle_stuck_after_hours`/7d) is flagged, NEVER force-completed. State in `connector_freshness_state`.'
+order: 53
 ---
 
 # D-050: Per-connector freshness cadence — refresh only when due, resume until fresh

@@ -2,6 +2,9 @@
 id: D-022
 title: Milanuncios photo-URL backfill migration mirrors the connector's own rule
 date: 2026-08-04
+group: Data / connectors
+rule: '`init.sql`''s Milanuncios photo-URL backfill mirrors `add_photo_rule_if_missing` exactly, pinned by a DB-backed equivalence test — never hand-reimplement the rule in SQL.'
+order: 32
 ---
 
 # D-022: Milanuncios photo-URL backfill migration mirrors the connector's own rule

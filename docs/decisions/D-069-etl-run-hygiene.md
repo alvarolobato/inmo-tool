@@ -2,6 +2,9 @@
 id: D-069
 title: ETL run hygiene — disabled connectors and captured listing pages are neutral, not errors
 date: 2026-08-06
+group: Data / connectors
+rule: 'Run hygiene: a disabled connector emits NO `connector_run_results` row (only the per-run `connectors_skipped` count); a captured SEARCH/listing page is `extension_capture.status=''listing''` (clean — detail links harvested to `capture_worklist` `added_via=''derived''`), never `failed`. Listing-vs-detail detection mirrored server-side in `etl/listing_detect.py` (in lockstep with `detect.js`). Health surface is green unless genuinely broken.'
+order: 60
 ---
 
 # D-069: ETL run hygiene — disabled connectors and captured listing pages are neutral, not errors

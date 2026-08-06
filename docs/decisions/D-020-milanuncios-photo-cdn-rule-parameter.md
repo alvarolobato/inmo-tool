@@ -2,6 +2,9 @@
 id: D-020
 title: Milanuncios photo URLs must carry an explicit ?rule= transform parameter
 date: 2026-08-04
+group: Data / connectors
+rule: Milanuncios `normalize()` appends `?rule=detail_640x480` to any photo URL missing a query string — the CDN 404s "Rule parameter not Found" without it; headers don't help.
+order: 30
 ---
 
 # D-020: Milanuncios photo URLs must carry an explicit ?rule= transform parameter

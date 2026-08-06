@@ -2,6 +2,9 @@
 id: D-001
 title: Bind mount volumes instead of named Docker volumes
 date: 2026-08-02
+group: Plumbing / process
+rule: All container data lives in `./data/<service>/` bind mounts. Never named volumes.
+order: 1
 ---
 
 # D-001: Bind mount volumes instead of named Docker volumes

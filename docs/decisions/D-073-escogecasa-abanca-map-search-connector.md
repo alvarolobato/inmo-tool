@@ -2,6 +2,9 @@
 id: D-073
 title: Escogecasa (Abanca REO) map-search connector on escogecasa.es
 date: 2026-08-06
+group: Data / connectors
+rule: 'Escogecasa (Abanca REO, #135) connector targets `escogecasa.es` (the `.com` the issue named is a dead domain — DNS SERVFAIL). Legacy Java map search: `discover()` POSTs a center/radius bbox to `cargar_resultados.jsp` and parses its `createMarker()` payload (lat/lon+price+m2+subtipo per listing); detail page is `dato_`-scoped (carousel uses un-prefixed classes). Bbox capped ~100 → `discovers_full_inventory=False`. `rate=12`, `listing_kind=agency`. Publishes lat/lon (batch''s 3rd after Diglo/Unicaja) + postal + year built; no cadastral.'
+order: 18
 ---
 
 # D-073: Escogecasa (Abanca REO) map-search connector on escogecasa.es

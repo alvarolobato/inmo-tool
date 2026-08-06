@@ -2,6 +2,9 @@
 id: D-029
 title: The coordinating agent merges its own PRs once an Opus review has passed
 date: 2026-08-04
+group: Plumbing / process
+rule: The coordinating agent merges once a fresh-context Opus review passes; Fable reviews phase boundaries. Escalate on CHANGES REQUIRED you disagree with, irreversible/outward-facing changes, or owner-reserved calls. Supersedes D-002.
+order: 2
 ---
 
 # D-029: The coordinating agent merges its own PRs once an Opus review has passed

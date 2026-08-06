@@ -2,6 +2,9 @@
 id: D-077
 title: Cross-branch decision-id allocation + collision detection
 date: 2026-08-06
+group: Plumbing / process
+rule: Allocate decision IDs with `scripts/next-decision-id.py` (scans local tree + every open PR head) BEFORE writing a record; `test_decision_id_collision.py` fails when a HEAD-vs-`origin/main` new ID is claimed on another open PR. Both skip gracefully offline; sequential IDs kept (extends D-032); renumber-at-merge is the residual-race backstop.
+order: 7
 ---
 
 # D-077: Cross-branch decision-id allocation + collision detection

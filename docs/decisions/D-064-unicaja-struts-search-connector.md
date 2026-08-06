@@ -2,6 +2,9 @@
 id: D-064
 title: Unicaja Inmuebles connector — Struts search pagination + card/detail merge
 date: 2026-08-05
+group: Data / connectors
+rule: 'Unicaja Inmuebles (GIA REO, #119) connector targets `unicajainmuebles.com`; no sitemap — paginate `listadoPromocion.do` (`tipoInmueble=0` VIVIENDA, `tipoOperacion=1` COMPRA, `provincia=<INE code>`) to the last page. Rich search cards carry the postal code; stash them in `discover()` and merge with the detail page (coords/baths/photos). `discovers_full_inventory=True`, `rate=12`, `listing_kind=agency`. Publishes lat/lon; no cadastral/energy.'
+order: 16
 ---
 
 # D-064: Unicaja Inmuebles connector — Struts search pagination + card/detail merge

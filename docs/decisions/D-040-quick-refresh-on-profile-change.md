@@ -2,6 +2,9 @@
 id: D-040
 title: Profile create/scope-edit triggers a quick refresh (server-side materialize + ad-hoc sweep), gated on scope change
 date: 2026-08-05
+group: Product
+rule: 'Profile create / scope-changing edit does a server-side quick refresh: re-materialize + enqueue a full `etl_manual_trigger` sweep (D-038, `triggered_by=''profile-refresh''`). Gated on a semantic scope change (`scopesEqual`) — a rename enqueues nothing. Coalesced by the single-pending index; best-effort.'
+order: 71
 ---
 
 # D-040: Quick refresh on profile create / scope-change

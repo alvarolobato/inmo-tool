@@ -2,6 +2,9 @@
 id: D-056
 title: Renovation severity is an additive sub-axis on the condition verdict, not a wider condition enum
 date: 2026-08-05
+group: AI layer
+rule: 'Renovation depth is an ADDITIVE `renovation_severity` field (`leve`/`integral`/`unknown`/`null`) on the condition result, meaningful only for `a_reformar` (else `null`) — never a wider `condition` enum. `unknown` degrades, never guesses. Bump `CONDITION_PROMPT_VERSION` (v1→v2) to re-trigger #308''s scheduler. Badge refines only leve/integral; pre-severity rows unchanged.'
+order: 67
 ---
 
 # D-056: Renovation severity is an additive sub-axis on the condition verdict, not a wider condition enum

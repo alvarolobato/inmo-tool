@@ -2,6 +2,9 @@
 id: D-057
 title: Blend below-market + distress signals into the candidate feed ranking
 date: 2026-08-05
+group: Product
+rule: The candidate feed sorts on a blended `effective_score` = learned score + a non-negative below-market (pool-median price/m² discount) + distress (`ai_assessment`) boost, computed in `candidates.ts`'s `rankedCandidatesCte`. Augments, never replaces, the model; no-signal candidates keep base score, never-scored stay last. Cursor + adjacency use the same key.
+order: 72
 ---
 
 # D-057: Blend below-market + distress signals into the candidate feed ranking

@@ -2,6 +2,9 @@
 id: D-054
 title: Daily "what's new" digest is a dashboard-side scheduled email job
 date: 2026-08-05
+group: Product
+rule: 'The daily "what''s new" digest is a dashboard-side in-process scheduled pass (`lib/notifications/scheduler.ts` from `instrumentation.ts`, mirroring D-052), emailed via SMTP/`nodemailer`. "New" reuses #195''s matched+first-seen-since-anchor definition (anchor = last `digest_run.sent_at`, else 24h). Ranks by opportunity signal (never rebuilds scoring); 3 distinct item types. No-op when SMTP unconfigured; empty digest advances the watermark but sends nothing; idempotent per-profile daily/weekly via `digest_run`. `relisted_lower`/watchlist alerts are v2 (#34).'
+order: 74
 ---
 
 # D-054: Daily "what's new" digest is a dashboard-side scheduled email job

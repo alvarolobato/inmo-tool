@@ -2,6 +2,9 @@
 id: D-030
 title: Scope order rotates + prioritises never-crawled scopes (fixes permanent starvation)
 date: 2026-08-04
+group: Data / connectors
+rule: Scope order is reordered every run by `connector_scope_state.last_attempted_at` (never-attempted first, then oldest-attempted-first) — never a fixed list order, which let one scope starve every other one forever.
+order: 39
 ---
 
 # D-030: Scope order rotates + prioritises never-crawled scopes (fixes permanent starvation)

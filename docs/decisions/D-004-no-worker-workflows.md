@@ -2,6 +2,9 @@
 id: D-004
 title: AI agents must not push to `.github/workflows/` without explicit `workflow` OAuth scope
 date: 2026-08-02
+group: Plumbing / process
+rule: Don't push to `.github/workflows/` without a credential that has `workflow` OAuth scope. Never bypass via the GitHub API — leave YAML staged for a human to commit.
+order: 4
 ---
 
 # D-004: AI agents must not push to `.github/workflows/` without explicit `workflow` OAuth scope

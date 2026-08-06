@@ -2,6 +2,9 @@
 id: D-008
 title: Skip-if-seen fetch-budget policy defaults to off; opt in per connector with a price-delta safety net
 date: 2026-08-03
+group: Data / connectors
+rule: Skip-if-seen defaults to 0 (always fetch); opt in per connector. Never skip missing/changed discovery price.
+order: 10
 ---
 
 # D-008: Skip-if-seen fetch-budget policy defaults to off; opt in per connector with a price-delta safety net

@@ -2,6 +2,9 @@
 id: D-055
 title: One connector toggle; a disabled source is hidden from the feed
 date: 2026-08-05
+group: Data / connectors
+rule: 'ONE Activar/Desactivar toggle per connector: normal → `enabled`, capture-only → `capture_enabled` (crawl flag hidden; "solo captura" is a badge, not a mode). Disabled reads neutral. A disabled source is HIDDEN from the candidate feed (cards/badges/price/photos/counts/filter) via the shared `disabled_sources` CTE (`lib/db/source-active.ts`); missing registry/config row = active.'
+order: 56
 ---
 
 # D-055: One connector toggle; a disabled source is hidden from the feed

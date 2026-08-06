@@ -2,6 +2,9 @@
 id: D-024
 title: Dedup engine re-evaluates every pending suggestion on every run
 date: 2026-08-04
+group: Data / connectors
+rule: '`engine.run()` re-evaluates every `pending` `suggested_merge` row every run (only `rejected`/`conflict` stay frozen); an in-flight `suggested_merge_action` defers reevaluation one run.'
+order: 34
 ---
 
 # D-024: Dedup engine re-evaluates every pending suggestion on every run

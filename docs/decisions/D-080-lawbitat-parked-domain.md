@@ -2,6 +2,9 @@
 id: D-080
 title: Lawbitat not buildable — parked domain, no standalone portal
 date: 2026-08-06
+group: Data / connectors
+rule: 'Lawbitat (`lawbitat.com`, #133) not buildable: domain is a DonDominio parking page (https doesn''t respond; http shows "Parking del dominio") — no standalone portal. Its listings exist only as idealista/yaencontre pro pages. No connector written (same pattern as Ibercaja D-065).'
+order: 22
 ---
 
 # D-080: Lawbitat not buildable — parked domain, no standalone portal

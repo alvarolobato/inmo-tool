@@ -2,6 +2,9 @@
 id: D-021
 title: Haya not buildable — the domain now redirects entirely to Solvia (already ingested)
 date: 2026-08-04
+group: Data / connectors
+rule: 'Haya (`haya.es`) not buildable: the whole domain 301-redirects to `solvia.es` (already ingested, D-018) — Intrum merged Haya into the Solvia servicer brand. No connector written.'
+order: 31
 ---
 
 # D-021: Haya not buildable — the domain now redirects entirely to Solvia (already ingested)

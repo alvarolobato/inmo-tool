@@ -2,6 +2,9 @@
 id: D-012
 title: Feed the zone-median price comparison into occupancy/redflags as a bucketed derived input, hashed alongside it
 date: 2026-08-03
+group: AI layer
+rule: occupancy/redflags see a bucketed zone-median price comparison (never raw price); the exact string rendered must also be the exact `extraHashInput` passed to `getOrCompute`.
+order: 65
 ---
 
 # D-012: Feed the zone-median price comparison into occupancy/redflags as a bucketed derived input, hashed alongside it

@@ -2,6 +2,9 @@
 id: D-014
 title: Comparable-rent estimator — selection rule, confidence tiers, and precedence vs. a profile's own assumption
 date: 2026-08-03
+group: Product
+rule: 'Rent estimate: profile''s own assumption (if set) is always PRIMARY, never silently replaced; measured comparable is always attached + disagreement surfaced. No assumption → comparable is primary, tiered `high`/`low` by count+dispersion.'
+order: 69
 ---
 
 # D-014: Comparable-rent estimator — selection rule, confidence tiers, and precedence vs. a profile's own assumption

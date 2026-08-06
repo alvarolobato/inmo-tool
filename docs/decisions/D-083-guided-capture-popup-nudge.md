@@ -2,6 +2,9 @@
 id: D-083
 title: Guided-capture popup nudge on supported-portal non-capturable pages
 date: 2026-08-06
+group: Data / connectors
+rule: 'On a SUPPORTED portal page that is neither detail nor listing (home/saved-search/filter form), the popup GUIDES instead of blind-capturing: `pageRoleForUrl` → `{detail,listing,other,null}` routes it; `other` shows worklist progress (`GET_WORKLIST_PROGRESS`, reuses `GET /api/etl/worklist?portal=`) + "Abrir siguiente pendiente", keeping a "Capturar igualmente" escape hatch. `null` (unsupported host) keeps universal manual capture.'
+order: 62
 ---
 
 # D-083: Guided-capture popup nudge on supported-portal non-capturable pages

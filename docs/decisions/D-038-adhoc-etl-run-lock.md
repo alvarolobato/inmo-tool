@@ -2,6 +2,9 @@
 id: D-038
 title: Ad-hoc ETL runs go through etl_manual_trigger + the connector run lock
 date: 2026-08-04
+group: Data / connectors
+rule: Ad-hoc runs enqueue an `etl_manual_trigger` row (`connector_name` NULL=all); `etl/manual_trigger.py` polls it, runs `run_all_connectors` under `RUN_ADVISORY_LOCK_ID` (shared w/ scheduler), skips the D-009 guard.
+order: 45
 ---
 
 # D-038: Ad-hoc ETL runs go through etl_manual_trigger + the connector run lock

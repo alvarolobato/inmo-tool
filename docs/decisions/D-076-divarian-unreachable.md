@@ -2,6 +2,9 @@
 id: D-076
 title: Divarian (ex-Anida) not buildable — host unreachable, REO flows via Haya
 date: 2026-08-06
+group: Data / connectors
+rule: 'Divarian (`divarian.com`, ex-Anida, #134) not buildable (RETRY): host resolves but 443/80 time out here and ECONNREFUSED from Anthropic egress — offline/unreachable from two networks. Ex-Anida book flows through Haya→Solvia (D-021, ingested). No connector written; revisit if the host returns.'
+order: 21
 ---
 
 # D-076: Divarian (ex-Anida) not buildable — host unreachable

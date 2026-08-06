@@ -2,6 +2,9 @@
 id: D-067
 title: Wire #28 extracted structured fields into the hard-filter engine as a confidence-gated COALESCE fallback
 date: 2026-08-05
+group: Product
+rule: The hard-filter engine (`scope-query.ts`) reads `ai_assessment` extract rows (#28) as a query-time `COALESCE(property.<col>, <latest extract value>)` fallback via `extractFallbackExpr`, gated at confidence ≥ 0.6 per field (below = UNKNOWN). `property.<col>` ALWAYS wins (COALESCE order). `requires_elevator` becomes `IS NOT FALSE` (keep unknown/below-threshold, exclude only confidently-known-missing). Stays a pure DB-connectionless string builder; `profile-diagnostics.ts` reuses the same helper.
+order: 77
 ---
 
 # D-067: Extract-row fallback in the hard-filter engine

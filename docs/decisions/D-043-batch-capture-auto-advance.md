@@ -2,6 +2,9 @@
 id: D-043
 title: Batch capture is a fully-automated bounded-concurrency queue in the extension, with jittered pacing
 date: 2026-08-05
+group: Data / connectors
+rule: Batch capture is a fully-automated BOUNDED-CONCURRENCY queue in the extension (open→activate→auto-capture→close, up to N=3 tabs, hard-cap 5), seeded from a listing page. Keep the JITTERED/staggered launches — never fixed-interval, never an unbounded burst. Small N is mandatory (WAF + Chrome background-tab render throttling). Supersedes the human-paced one-tab-per-click design and the original sequential driver.
+order: 46
 ---
 
 # D-043: Batch capture is a fully-automated bounded-concurrency queue in the extension, with jittered pacing

@@ -2,6 +2,9 @@
 id: D-009
 title: Gate full connector sweeps on a minimum interval since the last completed run
 date: 2026-08-03
+group: Plumbing / process
+rule: A full sweep skips if a completed run finished within `etl.min_restart_sweep_interval_seconds` ago (crash-loop guard).
+order: 5
 ---
 
 # D-009: Gate full connector sweeps on a minimum interval since the last completed run

@@ -2,6 +2,9 @@
 id: D-036
 title: Orphaned dedup runs are age-reconciled + a single-runner advisory lock prevents overlap
 date: 2026-08-04
+group: Data / connectors
+rule: Orphaned `dedup_runs` (past `dedup_max_runtime_seconds`, default 2h) reconcile to `failed` with a reason at startup + each pass; a dedup advisory lock skips overlapping passes.
+order: 43
 ---
 
 # D-036: Orphaned dedup runs are age-reconciled + a single-runner advisory lock prevents overlap
