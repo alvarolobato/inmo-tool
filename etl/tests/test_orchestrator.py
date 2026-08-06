@@ -4825,6 +4825,8 @@ class TestFailureClassificationAndGeographyScope:
                     ("test-bad-kind",),
                 )
                 cur.execute("DELETE FROM connector_runs WHERE id = %s", (run_id,))
+
+
 class TestDiscoveryPriceHistory:
     """Issue #183: a connector's discovery-time prices (Connector.
     discovered_prices() — Fotocasa's verified per-listing rawPrice, read for
