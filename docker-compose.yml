@@ -55,9 +55,10 @@ services:
   # OTel Collector — EDOT collector (Elastic Agent in OTel collector mode)
   # Receives OTLP traces/metrics/logs from ETL + Dashboard, applies redaction,
   # exports to Elastic Cloud (when ELASTIC_OTLP_ENDPOINT is set) or falls back
-  # to a local JSONL file under ./otel/local/. No trace sampling currently —
-  # see otel/otelcol-config.yaml for why (task 1.6, #14) and issue #52 for
-  # restoring it.
+  # to a local JSONL file under ./otel/local/. Trace sampling is done at the
+  # SDK (head sampling, parentbased_traceidratio) in the etl/dashboard services
+  # below — the collector build can't compile tail_sampling (issue #52, D-091);
+  # see otel/otelcol-config.yaml for the full history (task 1.6, #14).
   # ---------------------------------------------------------------------------
   otel-collector:
     image: docker.elastic.co/elastic-agent/elastic-agent:8.16.0
@@ -129,7 +130,17 @@ services:
       # OTel SDK env vars — picked up automatically by opentelemetry-instrument
       OTEL_SERVICE_NAME: inmo-tool-etl
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
-      OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_always_on}
+      # Head sampling at the SDK (issue #52, D-091): the pinned
+      # elastic-agent:8.16.0 collector can't compile the tail_sampling
+      # processor, so sampling is done here instead. parentbased_traceidratio
+      # keeps a deterministic OTEL_TRACES_SAMPLER_ARG fraction of root traces
+      # (default 10%) and honors the parent's decision for child spans, so a
+      # trace is kept or dropped as a whole. Set OTEL_TRACES_SAMPLER_ARG=1.0
+      # (or OTEL_TRACES_SAMPLER=parentbased_always_on) to keep every trace in
+      # local dev. Unlike the old tail_sampling policy this cannot preferentially
+      # keep error/slow traces — the decision is made before the outcome is known.
+      OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_traceidratio}
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.1}
       OTEL_LOG_LEVEL: ${OTEL_LOG_LEVEL:-info}
       ENVIRONMENT: ${ENVIRONMENT:-development}
     volumes:
@@ -206,7 +217,11 @@ services:
       # OTel SDK env vars — picked up automatically by the Node SDK
       OTEL_SERVICE_NAME: inmo-tool-dashboard
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
-      OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_always_on}
+      # Head sampling at the SDK (issue #52, D-091) — same rationale as the etl
+      # service above. parentbased_traceidratio keeps OTEL_TRACES_SAMPLER_ARG of
+      # root traces (default 10%); raise to 1.0 to keep everything in local dev.
+      OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_traceidratio}
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-0.1}
       OTEL_LOG_LEVEL: ${OTEL_LOG_LEVEL:-info}
       ENVIRONMENT: ${ENVIRONMENT:-development}
       # Git SHA baked at build time; available to the OTel resource as service.version
