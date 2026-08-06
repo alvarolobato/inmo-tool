@@ -44,6 +44,7 @@ behind a CAPTCHA/bot wall that a burst would trip. Don't remove that pacing.
 
 from __future__ import annotations
 
+import json
 import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -82,6 +83,19 @@ _PROPERTY_ID_FALLBACK_RE = re.compile(r"propertyId:\s*(\d+)")
 _STATICMAP_CENTER_RE = re.compile(
     r"staticmap\?[^\"'\s]*[?&]center=(-?\d+\.\d+)%2C(-?\d+\.\d+)"
 )
+# Idealista's full photo gallery is NOT in the initial DOM (only one <img> /
+# the og:image thumbnail renders before the carousel hydrates — issue #282,
+# where only 1 of ~95 photos was being stored). Every photo lives in the same
+# inline `config.multimediaCarrousel` object this connector already reads the
+# map coordinates from (see _STATICMAP_CENTER_RE / PR #87): its `multimedias`
+# array holds a `{"type":"PICTURE","content":[{"src": "...", ...}]}` group
+# (plus separate PLAN/MAP groups we skip). The `src` values are partial paths
+# like "WEB_DETAIL/0/id.pro.es.image.master/xx/xx/xx/NNNN.jpg" — this exact
+# schema is transcribed from a real captured Idealista page's per-listing
+# `listingMultimediaCarrousels` blob (demo DB extension_capture id 10). We
+# balance-match that JS object literal, json.loads it, and collect every
+# PICTURE src, prefixing the img host onto partial paths.
+_MULTIMEDIA_HOST = "https://img4.idealista.com/blur/"
 
 
 def _to_decimal(value: Any) -> Decimal | None:
@@ -235,8 +249,15 @@ class IdealistaConnector(Connector):
             field="m2_built",
         )
 
-        main_image = _og_meta(soup, "og:image")
-        photo_urls = (main_image,) if main_image else ()
+        # Full gallery from the embedded carousel JSON (issue #282); the
+        # og:image is only the single hydration thumbnail and is used solely
+        # as a fallback when the carousel object is absent/unparseable.
+        gallery = _gallery_from_carousel(html)
+        if gallery:
+            photo_urls: tuple[str, ...] = gallery
+        else:
+            main_image = _og_meta(soup, "og:image")
+            photo_urls = (main_image,) if main_image else ()
 
         coordinates = _coordinates_from_staticmap(html)
         lat, lon = coordinates if coordinates is not None else (None, None)
@@ -321,6 +342,77 @@ def _og_meta(soup: BeautifulSoup, property_name: str) -> str | None:
         return None
     content = el.get("content")
     return content.strip() if isinstance(content, str) and content.strip() else None
+
+
+def _extract_js_object(text: str, key: str) -> str | None:
+    """Return the raw `{...}` object literal assigned to `key:` in an inline
+    <script>, or None. String-aware brace matcher so a `{`/`}` inside a
+    quoted value (a URL's query string, a photo description) can't unbalance
+    the scan. The matched substring is valid JSON (Idealista emits these
+    objects as JSON, e.g. `multimediaCarrousel: {"map":{...}}`)."""
+    match = re.search(re.escape(key) + r"\s*:\s*\{", text)
+    if not match:
+        return None
+    start = text.index("{", match.end() - 1)
+    depth = 0
+    in_str = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
+def _gallery_from_carousel(html: str) -> tuple[str, ...]:
+    """Every PICTURE `src` from `config.multimediaCarrousel.multimedias`, in
+    page order, deduplicated, prefixed with the img host for partial paths
+    (see _MULTIMEDIA_HOST). PLAN/MAP groups are skipped — only real photos
+    become photo_urls. Empty tuple if the object is absent or unparseable
+    (the caller then falls back to the og:image thumbnail).
+
+    `multimediaCarrousel` (singular) is the detail page's own object; the
+    plural `listingMultimediaCarrousels` (a search page's per-listing map,
+    capital-M and trailing 's') is deliberately NOT matched by the key
+    regex, which anchors on the lowercase singular form ending in a colon."""
+    raw = _extract_js_object(html, "multimediaCarrousel")
+    if not raw:
+        return ()
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return ()
+    if not isinstance(data, dict):
+        return ()
+    urls: list[str] = []
+    seen: set[str] = set()
+    for group in data.get("multimedias") or []:
+        if not isinstance(group, dict) or group.get("type") != "PICTURE":
+            continue
+        for item in group.get("content") or []:
+            if not isinstance(item, dict):
+                continue
+            src = item.get("src")
+            if not isinstance(src, str) or not src:
+                continue
+            url = src if src.startswith("http") else _MULTIMEDIA_HOST + src.lstrip("/")
+            if url not in seen:
+                seen.add(url)
+                urls.append(url)
+    return tuple(urls)
 
 
 def _coordinates_from_staticmap(html: str) -> tuple[Decimal, Decimal] | None:

@@ -12,6 +12,17 @@
   `config.multimediaCarrousel.map.src` — real coordinates for this listing,
   not fabricated. An earlier pass trimmed this region out and incorrectly
   concluded Idealista exposes no coordinates at all (Opus review, PR #87).
+
+  config.multimediaCarrousel.multimedias below carries the FULL photo gallery
+  (issue #282). The schema — multimedias[].content[].src partial paths under
+  a PICTURE group, plus separate PLAN/MAP groups — is the real Idealista
+  multimedia embedding, transcribed from a real captured Idealista page's
+  `listingMultimediaCarrousels` blob (extension_capture id 10 in the demo DB,
+  a venta-viviendas search page whose per-listing objects use this exact
+  shape). The `src` values are partial paths (as they really are in that
+  capture); the connector prefixes them with the img host. 10 PICTUREs + 1
+  PLAN here: only PICTUREs become photos, the PLAN (floor plan) is excluded.
+  No PII — image hash paths and generic room labels only.
 -->
 <html lang="en">
 <head>
@@ -79,7 +90,7 @@ This unique and unique home has 14 balconies facing the street.
 
 <script>
     var config = {
-        multimediaCarrousel: {"map":{"src":"https://maps.googleapis.com/maps/api/staticmap?size=720x492&center=40.42569080%2C-3.67632170&maptype=roadmap&channel=map_detail&scale=1&zoom=16&key=AIzaSyAnYQ7HhFNWVPzGf_zFf4nFyuxKE1Al7s0&signature=HZQWd-jVvyvMTJ-QtUirXTIO-oU=","title":"Map of the area","addressVisibility":"HIDDEN","width":720,"height":492}},
+        multimediaCarrousel: {"width":480,"height":360,"multimediasTotalSlides":[{"type":"PICTURE","totalSlides":10},{"type":"PLAN","totalSlides":1},{"type":"MAP","totalSlides":1}],"multimedias":[{"type":"PICTURE","content":[{"id":1382500227,"src":"WEB_DETAIL/0/id.pro.es.image.master/c0/ac/cc/1382500227.jpg","description":"Salón","sources":null},{"id":1382500228,"src":"WEB_DETAIL/0/id.pro.es.image.master/c0/ac/cc/1382500228.jpg","description":"Cocina","sources":null},{"id":1382500229,"src":"WEB_DETAIL/0/id.pro.es.image.master/c0/ac/cc/1382500229.jpg","description":"Dormitorio","sources":null},{"id":1382500230,"src":"WEB_DETAIL/0/id.pro.es.image.master/c0/ac/cc/1382500230.jpg","description":"Baño","sources":null},{"id":1382500231,"src":"WEB_DETAIL/0/id.pro.es.image.master/c0/ac/cc/1382500231.jpg","description":"Terraza","sources":null},{"id":1382500232,"src":"WEB_DETAIL/0/id.pro.es.image.master/c0/ac/cc/1382500232.jpg","description":"Pasillo","sources":null},{"id":1382500233,"src":"WEB_DETAIL/0/id.pro.es.image.master/c0/ac/cc/1382500233.jpg","description":"Vistas","sources":null},{"id":1382500234,"src":"WEB_DETAIL/0/id.pro.es.image.master/c0/ac/cc/1382500234.jpg","description":"Salón","sources":null},{"id":1382500235,"src":"WEB_DETAIL/0/id.pro.es.image.master/c0/ac/cc/1382500235.jpg","description":"Dormitorio","sources":null},{"id":1382500236,"src":"WEB_DETAIL/0/id.pro.es.image.master/c0/ac/cc/1382500236.jpg","description":"Fachada","sources":null}]},{"type":"PLAN","content":[{"id":1382599999,"src":"WEB_DETAIL/0/id.plan.es.image.master/aa/bb/cc/1382599999.jpg","description":"Plano","sources":null}]}],"referencePictures":{"hasReferencePictures":false,"title":""},"map":{"src":"https://maps.googleapis.com/maps/api/staticmap?size=720x492&center=40.42569080%2C-3.67632170&maptype=roadmap&channel=map_detail&scale=1&zoom=16&key=AIzaSyAnYQ7HhFNWVPzGf_zFf4nFyuxKE1Al7s0&signature=HZQWd-jVvyvMTJ-QtUirXTIO-oU=","title":"Map of the area","addressVisibility":"HIDDEN","width":720,"height":492}},
     };
 </script>
 
