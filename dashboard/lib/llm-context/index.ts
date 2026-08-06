@@ -19,6 +19,7 @@ export {
   type LlmFlow,
   type FlowVars,
   type ListingSnapshot,
+  type RedflagTrendingCandidate,
 } from "./types";
 
 export {

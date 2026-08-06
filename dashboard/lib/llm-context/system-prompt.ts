@@ -21,7 +21,12 @@
 import { SCHEMA, RELATIONSHIPS, type TableSchema, type Relationship } from "@/lib/knowledge";
 import { isAgenticToolsEnabled } from "@/lib/llm-tools/config";
 import { formatSchema, formatRelationships } from "./formatters";
-import type { FlowVars, ListingSnapshot } from "./types";
+import type { FlowVars, ListingSnapshot, RedflagTrendingCandidate } from "./types";
+import {
+  REDFLAG_TYPES,
+  REDFLAG_LABELS,
+  REDFLAG_DEFINITIONS,
+} from "@/lib/ai-assessment/redflag-vocabulary";
 
 // ── Shared building blocks ────────────────────────────────────────────────────
 
@@ -677,7 +682,45 @@ en el resto de casos, \`null\`.)`;
 }
 
 /**
- * #27 / #361 — redflags: generic property-problem extraction, per
+ * #396 — render the closed vocabulary from the `REDFLAG_TYPES` enum + its labels
+ * and one-line definitions, so the enum is the single source of truth: adding a
+ * named type makes it appear here automatically, with no prose to edit (the
+ * enum-render test enforces this). `other` is handled separately by the builder
+ * because it also carries the `candidate_type` / trending mechanics, so it is
+ * excluded here — this list covers only the NAMED types.
+ */
+function renderRedflagVocabulary(): string {
+  return REDFLAG_TYPES.filter((t) => t !== "other")
+    .map((t) => `- \`${t}\` (${REDFLAG_LABELS[t] ?? t}) — ${REDFLAG_DEFINITIONS[t]}`)
+    .join("\n");
+}
+
+/**
+ * #396 — render the trending `other` candidate slugs the orchestrator computed
+ * ONCE per batch and passed in (top-N by count). Handles the empty/cold-start
+ * case explicitly: before any slug has been proposed often enough the model is
+ * simply told there are none yet, and the prompt stays valid — that is the
+ * normal initial state, not an error.
+ */
+function renderTrendingCandidates(candidates?: RedflagTrendingCandidate[]): string {
+  if (!candidates || candidates.length === 0) {
+    return (
+      "Todavía no hay candidatos `candidate_type` propuestos con frecuencia " +
+      "suficiente (es lo normal al principio). Si necesitas `other`, acuña un " +
+      "slug nuevo siguiendo las reglas de arriba."
+    );
+  }
+  const lines = candidates.map((c) => `- \`${c.candidateType}\` (${c.count})`).join("\n");
+  return (
+    "Estos slugs `candidate_type` YA se han propuesto antes para problemas " +
+    "fuera del vocabulario cerrado (con su nº de apariciones). Si tu problema " +
+    "encaja en uno de ellos, REUTILÍZALO tal cual en vez de acuñar un sinónimo:\n\n" +
+    lines
+  );
+}
+
+/**
+ * #27 / #361 / #396 — redflags: generic property-problem extraction, per
  * deduplicated property.
  *
  * Same property-level pattern as occupancy/condition — see their doc
@@ -693,11 +736,24 @@ en el resto de casos, \`null\`.)`;
  *
  * Deliberate overlap with #25's `ownership.proindiviso` — see
  * lib/ai-assessment/redflags.ts's module doc for why both flows keep it.
+ *
+ * #396 (Fase 7 of #385): the closed vocabulary is now RENDERED from the
+ * `REDFLAG_TYPES` enum (`renderRedflagVocabulary`) rather than duplicated as
+ * fixed prose, and the top-N trending `other` `candidate_type` slugs seen so
+ * far (`vars.trendingCandidates`, computed once per batch by the orchestrator)
+ * are injected so the model reuses an existing candidate before coining a
+ * synonym. The builder stays PURE: it renders whatever list it is handed and
+ * never queries the DB. The trending block sits in `stable` on purpose — it is
+ * identical for every property in a batch (so OpenRouter prompt caching still
+ * hits within the batch), and it changes only between batches as the corpus
+ * grows.
  */
 export function buildRedflagsPrompt(vars: FlowVars): {
   stable: string;
   volatile?: string;
 } {
+  const typeUnion = REDFLAG_TYPES.map((t) => `"${t}"`).join(" | ");
+
   const stable = `${DOMAIN_PREAMBLE}
 
 ## Tarea: señales de alerta (problemas legales, financieros y físicos)
@@ -710,41 +766,20 @@ estás señalando qué hay que comprobar. Cada hallazgo se presentará al usuari
 como "el anuncio menciona X — verifícalo de forma independiente", nunca como
 un hecho confirmado.
 
-Tipos (\`type\`) — problemas LEGALES / FINANCIEROS:
-- \`embargo\` — embargo o deuda con garantía sobre el inmueble (hipoteca
-  ejecutada, anotación de embargo). Si además se menciona explícitamente una
-  subasta, usa \`subasta_judicial\`.
-- \`subasta_judicial\` — el inmueble se vende en subasta judicial o mediante
-  procedimiento de apremio (p.ej. "subasta judicial", "procedimiento de
-  apremio", "adjudicación en subasta", "subasta ante el juzgado"). Es la fase
-  ejecutiva de un embargo; márcalo como \`subasta_judicial\` cuando el texto cite
-  la subasta o el apremio, aunque también mencione el embargo de fondo.
-- \`herencia_yacente\` — herencia yacente, herencia pendiente de partición,
-  varios herederos/propietarios sin repartir. (Nota: si lo que se vende es una
-  cuota indivisa ya definida, sin mención de un proceso de herencia sin
-  resolver, es \`ownership.proindiviso\` en el flujo de ocupación — #25 — no
-  esto. Aquí lo que importa es si la titularidad está todavía sin resolver.)
-- \`deuda_comunidad\` — derramas pendientes, deudas con la comunidad de
-  propietarios.
-- \`construccion_ilegal\` — ampliación o construcción no legalizada, fuera de
-  ordenación, sin licencia.
-- \`litigio\` — procedimiento judicial en curso sobre el inmueble.
+### Vocabulario cerrado de tipos (\`type\`)
 
-Tipos (\`type\`) — problemas FÍSICOS del inmueble:
-- \`unfinished_construction\` — obra inacabada, parcialmente ejecutada, obra
-  parada: una construcción o rehabilitación que NO se ha terminado y se vende
-  a medio hacer (p.ej. "en construcción", "parcialmente ejecutada", "obra
-  parada", "a falta de terminar", "estructura levantada sin cerramientos",
-  "algunos tabiques ya levantados", "sin acabados"). Es distinto de:
-  \`a_reformar\` (una vivienda TERMINADA que necesita reforma — flujo #26) y de
-  \`obra_nueva\` (una construcción nueva ya TERMINADA). Aquí lo que importa es
-  que la obra está a medias y el comprador tendría que terminarla.
-- \`structural_damage\` — daños estructurales graves citados explícitamente:
-  grietas estructurales, aluminosis, cimentación o forjado dañado, riesgo de
-  ruina, humedades estructurales. NO uses esto para desgaste normal, "a
-  reformar" o acabados antiguos — eso es condición, no un daño estructural.
-- \`other\` — cualquier otro problema (legal, financiero o físico) relevante
-  citado explícitamente, que no encaje en las categorías anteriores.
+Usa uno de estos tipos con nombre SIEMPRE que el problema encaje en su
+definición (cubren problemas legales/financieros Y físicos del inmueble):
+${renderRedflagVocabulary()}
+
+### El tipo \`other\` y su \`candidate_type\`
+
+- \`other\` — ${REDFLAG_DEFINITIONS.other}
+  Primero: usa un tipo con nombre de la lista de arriba si encaja. Solo si
+  NINGUNO encaja, usa \`other\`. Antes de acuñar un slug nuevo, MIRA la lista de
+  "candidatos recientes" de más abajo y reutiliza uno si tu problema es el mismo
+  concepto — así evitamos sinónimos (p.ej. no crear \`obra_sin_acabar\` cuando ya
+  existe \`unfinished_construction\`, ni tres variantes del mismo candidato).
   Cuando uses \`other\`, propón ADEMÁS un \`candidate_type\`: un slug corto en
   \`snake_case\` (2-4 palabras, minúsculas, sin acentos ni espacios; usa \`_\` como
   separador) que nombre ese problema como si fuera un tipo nuevo del vocabulario
@@ -754,6 +789,10 @@ Tipos (\`type\`) — problemas FÍSICOS del inmueble:
   agrupar los \`other\` por concepto. Solo para \`other\`; los tipos con nombre NO
   llevan \`candidate_type\` ni \`definition\`. El guard de evidencia se mantiene:
   un \`other\` sin \`evidence\` se descarta aunque traiga \`candidate_type\`.
+
+### Candidatos recientes (\`other\`) ya propuestos
+
+${renderTrendingCandidates(vars.trendingCandidates)}
 
 ### Regla central: NO especules a partir del silencio
 
@@ -782,7 +821,7 @@ Formato de salida:
 {
   "flags": [
     {
-      "type": "embargo" | "subasta_judicial" | "herencia_yacente" | "deuda_comunidad" | "construccion_ilegal" | "litigio" | "unfinished_construction" | "structural_damage" | "other",
+      "type": ${typeUnion},
       "description": "qué debería comprobar el inversor, una frase",
       "evidence": "cita literal del anuncio en la que te apoyas",
       "evidence_source": "portal del que sale la cita, o null",

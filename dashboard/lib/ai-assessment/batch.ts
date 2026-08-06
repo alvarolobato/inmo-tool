@@ -49,6 +49,10 @@ import { BudgetExceededError, CircuitBreakerOpenError } from "@/lib/llm";
 import type { LlmAgenticContext } from "@/lib/llm-tools/types";
 import { getLatestAssessment, type AssessmentType } from "./cache";
 import { NoListingsError } from "./shared";
+import {
+  getTrendingCandidateTypes,
+  type RedflagTrendingCandidate,
+} from "@/lib/db/redflag-candidates";
 import { assessPropertyOccupancy, OCCUPANCY_PROMPT_VERSION } from "./occupancy";
 import { assessPropertyCondition, CONDITION_PROMPT_VERSION } from "./condition";
 import { assessPropertyRedFlags, REDFLAGS_PROMPT_VERSION } from "./redflags";
@@ -62,7 +66,18 @@ export interface BatchFlow {
   /** The existing `assessProperty*` entry point — return value is ignored. */
   assess: (
     propertyId: number,
-    opts?: { requestId?: string | null; ctx?: LlmAgenticContext },
+    opts?: {
+      requestId?: string | null;
+      ctx?: LlmAgenticContext;
+      /**
+       * #396 — the trending `other` candidate slugs, computed ONCE per batch
+       * (below) and passed to every flow. Only redflags reads it; the others
+       * accept it structurally and ignore it — the same harmless-no-op shape
+       * `areaPriceSignal` already uses. Passing it to every flow keeps this
+       * loop flow-agnostic.
+       */
+      trendingCandidates?: RedflagTrendingCandidate[];
+    },
   ) => Promise<unknown>;
 }
 
@@ -175,6 +190,12 @@ export interface RunAssessmentBatchOptions {
   flows?: BatchFlow[];
   selectPropertyIds?: (batchSize: number) => Promise<number[]>;
   isCurrent?: (propertyId: number, flow: BatchFlow) => Promise<boolean>;
+  /**
+   * #396 — overridable seam for the once-per-batch trending-candidates fetch
+   * (tests inject a stub; production uses `getTrendingCandidateTypes`). Threaded
+   * into every flow's `assess` call, read only by redflags.
+   */
+  fetchTrendingCandidates?: () => Promise<RedflagTrendingCandidate[]>;
 }
 
 const DEFAULT_BATCH_SIZE = 5;
@@ -196,6 +217,8 @@ export async function runAssessmentBatch(
   const flows = opts.flows ?? DEFAULT_BATCH_FLOWS;
   const selectPropertyIds = opts.selectPropertyIds ?? selectPropertiesNeedingAssessment;
   const isCurrent = opts.isCurrent ?? isFlowCurrent;
+  const fetchTrendingCandidates =
+    opts.fetchTrendingCandidates ?? getTrendingCandidateTypes;
   const requestId = opts.requestId ?? null;
 
   const result: AssessmentBatchResult = {
@@ -209,6 +232,22 @@ export async function runAssessmentBatch(
 
   const propertyIds = await selectPropertyIds(batchSize);
 
+  // #396: compute the trending `other` candidate slugs ONCE for the whole pass
+  // (not per property, not per flow) and thread them into every flow's assess
+  // call — only redflags renders them into its prompt. A failure here must never
+  // sink the batch: the injection is pure context, so on error we fall back to
+  // an empty list (the model just sees "no candidates yet").
+  let trendingCandidates: RedflagTrendingCandidate[] = [];
+  try {
+    trendingCandidates = await fetchTrendingCandidates();
+  } catch (err) {
+    console.warn(
+      "[ai-assessment:batch] trending-candidate fetch failed — continuing with an " +
+        "empty list (redflags prompt shows no candidates this pass):",
+      err,
+    );
+  }
+
   for (const propertyId of propertyIds) {
     result.properties += 1;
     for (const flow of flows) {
@@ -220,7 +259,7 @@ export async function runAssessmentBatch(
       }
 
       try {
-        await flow.assess(propertyId, { requestId });
+        await flow.assess(propertyId, { requestId, trendingCandidates });
         result.assessed += 1;
       } catch (err) {
         // EC-3: a budget/circuit stop is a CLEAN halt of the whole batch, not
