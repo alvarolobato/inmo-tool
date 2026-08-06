@@ -130,6 +130,7 @@ export function loadDashboardLlmConfig(): DashboardLlmConfig {
     occupancy: readStr(cfg, "dashboard.llm_model_openrouter_occupancy"),
     condition: readStr(cfg, "dashboard.llm_model_openrouter_condition"),
     redflags: readStr(cfg, "dashboard.llm_model_openrouter_redflags"),
+    location: readStr(cfg, "dashboard.llm_model_openrouter_location"),
     extract: readStr(cfg, "dashboard.llm_model_openrouter_extract"),
     compare: readStr(cfg, "dashboard.llm_model_openrouter_compare"),
     chat: readStr(cfg, "dashboard.llm_model_openrouter_chat"),

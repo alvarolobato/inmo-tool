@@ -14,6 +14,7 @@
 import { sql } from "@/lib/db-write";
 import { DISABLED_SOURCES_CTE, activeSourceClause } from "@/lib/db/source-active";
 import { REDFLAG_LABELS } from "@/lib/ai-assessment/redflags";
+import { BEACH_PROXIMITY_LABELS, HERITAGE_ZONE_LABEL } from "@/lib/ai-assessment/location";
 import type { StateFeedbackType } from "@/lib/db/feedback";
 
 export interface CandidateListingSummary {
@@ -757,6 +758,24 @@ export function flagsFromAssessments(rows: RawAssessmentRow[]): CandidateFlag[] 
       const description = typeof o.description === "string" && o.description.trim() !== "" ? o.description : undefined;
       flags.push({ kind: `redflag:${type}`, label, tone: "warn", description });
     }
+
+    // #388 location: two neutral-tone location signals derived from the advert
+    // text (lib/ai-assessment/location.ts). `beach_proximity` is a graded enum
+    // (`frontline`/`sea_view`/`near_beach`/`none`) — `none` carries no badge,
+    // same "no badge on every card" rule as the axes above. `heritage_zone` is
+    // a boolean → the "Casco histórico" badge only when true. Both are closed
+    // vocabularies validated at the writer; an unmapped value is dropped, never
+    // shown as raw text.
+    const beachProximity = typeof result.beach_proximity === "string" ? result.beach_proximity : null;
+    if (beachProximity !== null) {
+      const label = BEACH_PROXIMITY_LABELS[beachProximity];
+      if (label !== undefined) {
+        flags.push({ kind: `location:beach:${beachProximity}`, label, tone: "neutral" });
+      }
+    }
+    if (result.heritage_zone === true) {
+      flags.push({ kind: "location:heritage_zone", label: HERITAGE_ZONE_LABEL, tone: "neutral" });
+    }
   }
   const byKind = new Map<string, CandidateFlag>();
   for (const flag of flags) {
@@ -839,7 +858,7 @@ async function loadFlags(propertyIds: number[]): Promise<Map<number, CandidateFl
               property_id, result
          FROM ai_assessment
         WHERE property_id = ANY($1::bigint[])
-          AND assessment_type IN ('occupancy', 'condition', 'redflags')
+          AND assessment_type IN ('occupancy', 'condition', 'redflags', 'location')
         ORDER BY property_id, assessment_type, generated_at DESC NULLS LAST, id DESC`,
       [propertyIds],
     );

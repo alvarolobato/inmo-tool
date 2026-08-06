@@ -122,7 +122,7 @@ import { createHash } from "node:crypto";
 import type { ListingSnapshot } from "@/lib/llm-context";
 
 /** Every property-level assessment_type this cache wrapper understands. */
-export type AssessmentType = "occupancy" | "condition" | "redflags" | "extract";
+export type AssessmentType = "occupancy" | "condition" | "redflags" | "location" | "extract";
 
 /**
  * Deterministic content hash over exactly the fields occupancy/condition/

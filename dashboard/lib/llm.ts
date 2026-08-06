@@ -81,7 +81,7 @@ export interface AssessmentOpts {
  * omit it) changing shape at all.
  */
 async function runPropertyAssessment(
-  flow: "condition" | "redflags" | "extract",
+  flow: "condition" | "redflags" | "location" | "extract",
   listings: ListingSnapshot[],
   instruction: string,
   opts?: AssessmentOpts,
@@ -211,6 +211,31 @@ export function extractRedFlags(
     "Extrae señales de alerta del inmueble (problemas legales, financieros y físicos) según las instrucciones (redflags).",
     opts,
     { areaPriceSignal: opts?.areaPriceSignal },
+  );
+}
+
+/**
+ * #388 (Fase 3 de #385) — Assess two location signals derived from the advert
+ * text: beach proximity (graded: frontline/sea_view/near_beach/none) and
+ * whether the property sits in a casco/centro histórico.
+ *
+ * Takes EVERY live listing of one deduplicated property, same reasoning as
+ * `assessCondition`: a "primera línea de playa" disclosure made on one portal
+ * must not be missed because a sibling advert omits it. LLM-only by owner
+ * decision — no regex/keyword classifier anywhere (see
+ * `lib/ai-assessment/location.ts` and D-095).
+ *
+ * Returns the raw JSON text plus the model that produced it.
+ */
+export function assessLocation(
+  listings: ListingSnapshot[],
+  opts?: AssessmentOpts,
+): Promise<{ text: string; model: string }> {
+  return runPropertyAssessment(
+    "location",
+    listings,
+    "Evalúa las señales de ubicación del inmueble (proximidad a la playa y casco histórico) según las instrucciones (location).",
+    opts,
   );
 }
 

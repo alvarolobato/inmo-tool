@@ -10,7 +10,14 @@ export type DashboardCliDriverId = "claude_code";
 /** Logical "flow" of a dashboard LLM call, used to pick a per-flow model
  *  override on the OpenRouter provider. CLI doesn't differentiate (the
  *  flat-rate Claude subscription makes per-flow tuning pointless). */
-export type DashboardLlmFlow = "occupancy" | "condition" | "redflags" | "extract" | "compare" | "chat";
+export type DashboardLlmFlow =
+  | "occupancy"
+  | "condition"
+  | "redflags"
+  | "location"
+  | "extract"
+  | "compare"
+  | "chat";
 
 export interface DashboardLlmConfig {
   provider: DashboardLlmProviderId;
