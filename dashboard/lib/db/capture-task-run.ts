@@ -129,3 +129,68 @@ export async function getPortalCaptureActivity(): Promise<PortalCaptureActivity[
     };
   });
 }
+
+/**
+ * PER-PROFILE × CONNECTOR captured counts (issue #430).
+ *
+ * `getPortalCaptureActivity` above is portal-GLOBAL: it counts every
+ * `extension_capture` row for a portal, regardless of which profile the
+ * property matches. The Captura page's per-profile view wants "how many of
+ * THIS profile's properties were captured on THIS connector", which needs the
+ * property↔profile link that `profile_listing_state(profile_id, property_id,
+ * matched)` provides.
+ *
+ * A successful capture (`extension_capture.status='done'`) carries a
+ * `property_id`; joining that to `profile_listing_state` (matched=true) buckets
+ * the capture under every profile the property matches. We count DISTINCT
+ * `property_id` per (profile_id, connector_name) so a property re-captured
+ * several times still counts once ("this profile has that property captured"),
+ * matching the "N propiedades capturadas" framing of the UI.
+ *
+ * SEMANTIC CAVEAT (documented in the UI too): captures are NOT exclusive to one
+ * profile. A property that matches profiles A and B counts under BOTH — the
+ * correct reading of "this profile has that one captured". So the sum across
+ * profiles can exceed the portal-global count.
+ *
+ * `property_id IS NULL` captures (a 'done' row never resolved to a property)
+ * match no `profile_listing_state` row and therefore count for nobody — exactly
+ * the required behaviour, guaranteed by the INNER JOIN.
+ *
+ * Bounded, params bound: the query is scoped to the profile ids AND connector
+ * names currently on screen (`= ANY($1)` / `= ANY($2)`), never a full-table
+ * scan. Empty inputs short-circuit with no query. Returns a nested map
+ * `profileId → { [connectorName]: count }`; a (profile, connector) pair with no
+ * captures is simply absent (the caller defaults it to 0).
+ */
+export async function getProfileConnectorCaptured(
+  profileIds: readonly number[],
+  connectors: readonly string[],
+): Promise<Map<number, Record<string, number>>> {
+  const out = new Map<number, Record<string, number>>();
+  const ids = Array.from(new Set(profileIds.filter((n) => Number.isFinite(n))));
+  const names = Array.from(new Set(connectors.filter((s) => typeof s === "string" && s.length > 0)));
+  if (ids.length === 0 || names.length === 0) return out;
+
+  const rows = await sql<{ profile_id: number; connector_name: string; captured: number | string }>(
+    `SELECT pls.profile_id,
+            ec.connector_name,
+            COUNT(DISTINCT ec.property_id) AS captured
+       FROM extension_capture ec
+       JOIN profile_listing_state pls ON pls.property_id = ec.property_id
+      WHERE ec.status = 'done'
+        AND ec.property_id IS NOT NULL
+        AND ec.connector_name = ANY($2)
+        AND pls.matched = true
+        AND pls.profile_id = ANY($1)
+      GROUP BY pls.profile_id, ec.connector_name`,
+    [ids, names],
+  );
+
+  for (const r of rows) {
+    const n = typeof r.captured === "number" ? r.captured : Number(r.captured);
+    const bucket = out.get(r.profile_id) ?? {};
+    bucket[r.connector_name] = Number.isFinite(n) ? n : 0;
+    out.set(r.profile_id, bucket);
+  }
+  return out;
+}

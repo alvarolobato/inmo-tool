@@ -304,8 +304,10 @@ export function groupTasksByPortal(tasks: readonly CaptureTask[]): PortalTaskGro
 // timestamp (`capture_task_run.last_run_at`) versus the configured staleness
 // window (the "cycle"). This is the only per-profile capture signal that exists
 // (`capture_worklist` and `extension_capture` have no profile column), so the
-// due/half-done logic is grounded in it; the portal-global captured counts are
-// carried through as secondary context only.
+// due/half-done logic is grounded in it. The "capturados" counter, by contrast,
+// IS split per profile (issue #430) by joining extension_capture →
+// profile_listing_state(matched) on property_id; the portal-global count is kept
+// alongside as secondary context.
 //
 // Per task (existing rule, {@link taskStaleness}):
 //   - never run, or run ≥ window ago → DUE (pending this cycle)
@@ -345,6 +347,17 @@ export interface ConnectorView {
   state: ConnectorState;
   /** Expanded by default when there is anything to do (due OR half-done). */
   defaultExpanded: boolean;
+  /**
+   * PER-PROFILE captured properties on this connector (issue #430): DISTINCT
+   * `extension_capture` (status='done') properties that match THIS profile via
+   * `profile_listing_state`. This is the primary "capturados" figure the page
+   * shows per profile — not `capturedReal` (portal-global).
+   *
+   * CAVEAT: captures are not exclusive to one profile — a property matching two
+   * profiles counts under both, so profiles' `capturedProfile` values can sum to
+   * more than `capturedReal`. Correct reading: "this profile has that captured".
+   */
+  capturedProfile: number;
   /** Portal-global real captures (extension_capture) — secondary context. */
   capturedReal: number;
   /** ISO of the most recent real capture for the portal, or null. */
@@ -373,9 +386,12 @@ export function deriveConnectorState(dueCount: number, mutedCount: number): Conn
 /**
  * Build the per-connector view-model for one profile's tasks. Groups by portal
  * (builder order), computes each task's staleness against its portal's window,
- * and folds those into the connector state + default collapse decision. The
- * portal-global maps (`activityByPortal`, `summaryByPortal`) attach the
- * secondary captured-count context; a portal absent from them yields 0 / null.
+ * and folds those into the connector state + default collapse decision.
+ * `capturedByConnector` (issue #430) carries THIS profile's per-connector
+ * captured counts (connector key → count) as the primary "capturados" figure;
+ * a portal absent from it yields 0. The portal-global maps (`activityByPortal`,
+ * `summaryByPortal`) attach the secondary portal-wide context; a portal absent
+ * from them yields 0 / null.
  */
 export function buildConnectorViews(
   tasks: readonly CaptureTask[],
@@ -383,6 +399,7 @@ export function buildConnectorViews(
   staleness: StalenessConfig,
   activityByPortal: ReadonlyMap<string, PortalCaptureActivity>,
   summaryByPortal: ReadonlyMap<string, WorklistPortalSummary>,
+  capturedByConnector: Readonly<Record<string, number>>,
   now: Date = new Date(),
 ): ConnectorView[] {
   return groupTasksByPortal(tasks).map((g) => {
@@ -412,6 +429,7 @@ export function buildConnectorViews(
       mutedCount,
       state: deriveConnectorState(dueCount, mutedCount),
       defaultExpanded: dueCount > 0,
+      capturedProfile: capturedByConnector[g.portal] ?? 0,
       capturedReal: act?.captured ?? 0,
       lastCapturedAt: act?.lastCapturedAt ?? null,
       summary: summaryByPortal.get(g.portal) ?? null,
@@ -419,7 +437,12 @@ export function buildConnectorViews(
   });
 }
 
-/** Assemble one profile's full stacked-view model from its tasks + runs. */
+/**
+ * Assemble one profile's full stacked-view model from its tasks + runs.
+ * `capturedByProfileConnector` (issue #430) maps profile id → { connector →
+ * captured count }; this profile's slice becomes each connector's primary
+ * per-profile `capturedProfile`. A profile absent from the map contributes 0s.
+ */
 export function buildProfileCaptureView(
   profile: { id: number; name: string },
   tasks: readonly CaptureTask[],
@@ -427,6 +450,7 @@ export function buildProfileCaptureView(
   staleness: StalenessConfig,
   activityByPortal: ReadonlyMap<string, PortalCaptureActivity>,
   summaryByPortal: ReadonlyMap<string, WorklistPortalSummary>,
+  capturedByProfileConnector: ReadonlyMap<number, Record<string, number>>,
   now: Date = new Date(),
 ): ProfileCaptureView {
   const connectors = buildConnectorViews(
@@ -435,6 +459,7 @@ export function buildProfileCaptureView(
     staleness,
     activityByPortal,
     summaryByPortal,
+    capturedByProfileConnector.get(profile.id) ?? {},
     now,
   );
   return {

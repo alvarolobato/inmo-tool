@@ -65,10 +65,15 @@ export function ConnectorSection({
     if (connector.mutedCount > 0 && connector.dueCount > 0) {
       parts.push(`${connector.mutedCount} al día`);
     }
-    if (connector.capturedReal > 0) {
-      parts.push(
-        `${connector.capturedReal} capturada${connector.capturedReal === 1 ? "" : "s"} · última ${relativeAgo(connector.lastCapturedAt)}`,
-      );
+    // Per-profile captured is the headline figure (issue #430); the
+    // portal-global count trails in parentheses as secondary context.
+    if (connector.capturedProfile > 0 || connector.capturedReal > 0) {
+      const perProfile = `${connector.capturedProfile} capturada${connector.capturedProfile === 1 ? "" : "s"} en este perfil`;
+      const global =
+        connector.capturedReal !== connector.capturedProfile
+          ? ` (${connector.capturedReal} en el portal)`
+          : "";
+      parts.push(`${perProfile}${global} · última ${relativeAgo(connector.lastCapturedAt)}`);
     }
     return parts.join(" · ");
   }, [connector]);
@@ -174,17 +179,32 @@ export function ConnectorSection({
               marginBottom: 10,
             }}
           >
+            {/* Per-profile captured is the headline figure (issue #430): DISTINCT
+                properties captured on this connector that match THIS profile,
+                via profile_listing_state. CAVEAT: captures aren't exclusive — a
+                property matching several profiles counts under each, so profiles'
+                counts can sum to more than the portal-global figure shown after
+                it. The title spells this out on hover. */}
             <span
               data-testid={`captura-activity-${profileId}-${connector.portal}`}
+              title="Capturas de propiedades que encajan con este perfil. Una propiedad que encaja con varios perfiles cuenta en cada uno (las capturas no son exclusivas)."
               style={{
                 fontSize: 12,
-                color: connector.capturedReal > 0 ? "var(--up)" : "var(--fg-muted)",
-                fontWeight: connector.capturedReal > 0 ? 600 : 400,
+                color: connector.capturedProfile > 0 ? "var(--up)" : "var(--fg-muted)",
+                fontWeight: connector.capturedProfile > 0 ? 600 : 400,
               }}
             >
+              {connector.capturedProfile > 0
+                ? `${connector.capturedProfile} propiedad${connector.capturedProfile === 1 ? "" : "es"} de este perfil capturada${connector.capturedProfile === 1 ? "" : "s"}`
+                : "sin capturas de este perfil todavía"}
+            </span>
+            <span
+              data-testid={`captura-activity-portal-${profileId}-${connector.portal}`}
+              style={{ fontSize: 12, color: "var(--fg-muted)" }}
+            >
               {connector.capturedReal > 0
-                ? `${connector.capturedReal} propiedad${connector.capturedReal === 1 ? "" : "es"} capturada${connector.capturedReal === 1 ? "" : "s"} · última ${relativeAgo(connector.lastCapturedAt)}`
-                : "sin capturas todavía"}
+                ? `portal: ${connector.capturedReal} en total · última ${relativeAgo(connector.lastCapturedAt)}`
+                : "portal: sin capturas"}
             </span>
             {connector.summary ? (
               <span

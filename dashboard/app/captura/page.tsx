@@ -2,7 +2,11 @@ import Link from "next/link";
 import { CapturaProfiles } from "@/components/captura/CapturaProfiles";
 import { listActiveProfiles } from "@/lib/db/profiles";
 import { resolveSearchTasks } from "@/lib/search-url/resolve";
-import { getTaskRuns, getPortalCaptureActivity } from "@/lib/db/capture-task-run";
+import {
+  getTaskRuns,
+  getPortalCaptureActivity,
+  getProfileConnectorCaptured,
+} from "@/lib/db/capture-task-run";
 import { listWorklist } from "@/lib/db/worklist";
 import { getStalenessConfig } from "@/lib/captura-staleness-config";
 import { buildProfileCaptureView, type ProfileCaptureView } from "@/lib/captura-tasks";
@@ -55,11 +59,34 @@ export default async function CapturaPage() {
       wl.summaries.map((s) => [s.source_portal, s]),
     );
 
-    views = await Promise.all(
+    // Resolve every profile's tasks + run ledger first, so we know exactly which
+    // (profile, connector) pairs are on screen before the per-profile captured
+    // query — it is bounded to those ids/connectors (issue #430), never a
+    // full-table scan.
+    const perProfile = await Promise.all(
       profiles.map(async (p) => {
         const [tasks, runs] = await Promise.all([resolveSearchTasks(p.scope), getTaskRuns(p.id)]);
-        return buildProfileCaptureView(p, tasks, runs, staleness, activityByPortal, summaryByPortal, now);
+        return { profile: p, tasks, runs };
       }),
+    );
+
+    const profileIds = perProfile.map((x) => x.profile.id);
+    const connectors = Array.from(
+      new Set(perProfile.flatMap((x) => x.tasks.map((t) => t.portal))),
+    );
+    const capturedByProfileConnector = await getProfileConnectorCaptured(profileIds, connectors);
+
+    views = perProfile.map(({ profile, tasks, runs }) =>
+      buildProfileCaptureView(
+        profile,
+        tasks,
+        runs,
+        staleness,
+        activityByPortal,
+        summaryByPortal,
+        capturedByProfileConnector,
+        now,
+      ),
     );
   } catch {
     // Never surface a technical error page: the capture ledger is best-effort
