@@ -122,12 +122,14 @@ class TestSkipIfSeenBudget:
 
     def test_has_no_discovery_price_escape_hatch(self):
         """The documented COST of the line above, asserted so it cannot be
-        forgotten. `_should_skip_fetch` rule 5 re-fetches immediately when a
-        discovery-time price disagrees with the stored one — but that rule
-        needs a non-empty discovered_prices(), which this connector cannot
-        supply (its `ad` entries carry no price field, and every live
-        re-check has been bot-blocked). So a price change on an
-        already-fetched listing can go unseen for up to the 24h window.
+        forgotten. `_should_skip_fetch` rule 5 re-fetches when an unconfirmed
+        price observation exists (latest `listing_price_history.observed_at`
+        newer than `last_fetched_at`, re-anchored per issue #432 / D-071) —
+        but such observations only appear between fetches when a connector
+        supplies `discovered_prices()`, which this one cannot (its `ad`
+        entries carry no price field, and every live re-check has been
+        bot-blocked). So a price change on an already-fetched listing can go
+        unseen for up to the 24h window.
         Accepted deliberately: today most discovered listings are never
         fetched at all. If this assertion ever starts failing because a real
         discovery price landed, revisit the trade-off comment on the

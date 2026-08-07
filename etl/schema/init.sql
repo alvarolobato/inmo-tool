@@ -253,6 +253,38 @@ CREATE TABLE IF NOT EXISTS listing_price_history (
 CREATE INDEX IF NOT EXISTS idx_listing_price_history_listing_observed
     ON listing_price_history (listing_id, observed_at);
 
+-- One-time (idempotent) backfill: adopt the most-recent observed price as
+-- listing.current_price (issue #432, D-071). Historically current_price was
+-- fetch-path-owned (D-070), so a discovery/capture-observed price drop could
+-- leave the displayed/deal-math price stale until a confirming re-fetch caught
+-- up (property 1739: header 157000 while history/graph/badge showed 146000).
+-- The most-recent observed price is now authoritative everywhere (header/card,
+-- below-market %, scoring), so this realigns the handful of listings that
+-- diverged before the code change. Idempotent by construction: the phase-2
+-- sanity band (adopt only a move inside [1%, 60%]) is re-evaluated on every
+-- init.sql run, so a >60% suspect latest observation is never backfilled and a
+-- sub-1% noise gap is left untouched — once a listing is realigned there is no
+-- divergence left to act on, and a genuinely suspect one is blocked the same
+-- way every run.
+UPDATE listing l
+   SET current_price = latest.price
+  FROM (
+        SELECT DISTINCT ON (h.listing_id)
+               h.listing_id, h.price
+          FROM listing_price_history h
+         ORDER BY h.listing_id, h.observed_at DESC, h.id DESC
+       ) AS latest
+ WHERE l.id = latest.listing_id
+   AND latest.price IS NOT NULL
+   AND latest.price IS DISTINCT FROM l.current_price
+   AND (
+        l.current_price IS NULL OR l.current_price <= 0
+        OR (
+             abs(latest.price - l.current_price) / l.current_price >= 0.01
+         AND abs(latest.price - l.current_price) / l.current_price <= 0.60
+        )
+   );
+
 CREATE TABLE IF NOT EXISTS listing_status_event (
     id           BIGSERIAL    PRIMARY KEY,
     listing_id   BIGINT       NOT NULL REFERENCES listing(id) ON DELETE CASCADE,

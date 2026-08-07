@@ -395,8 +395,10 @@ class Connector(ABC):
     # fotocasa.py, the first connector to set this non-zero) — and see
     # etl.orchestrator._should_skip_fetch for the full policy, which never
     # skips a listing that has never been fetched, is missing its price,
-    # or whose discovery-time price (see `discovered_prices` below)
-    # disagrees with what's stored, regardless of this window.
+    # or that has an unconfirmed price observation (a
+    # listing_price_history row newer than last_fetched_at — recorded from
+    # `discovered_prices` below; re-anchored per issue #432 / D-071),
+    # regardless of this window.
     #
     # Operator-overridable per connector via `connector_config
     # .min_refetch_interval_seconds` (NULL = no override, use this

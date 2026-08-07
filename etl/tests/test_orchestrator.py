@@ -123,7 +123,7 @@ class TestShouldSkipFetch:
             last_fetched_at=None,
             stored_price=Decimal(100000),
             stored_status="active",
-            discovery_price=Decimal(100000),
+            latest_observed_at=self._ago(1),
             min_refetch_interval_seconds=3600,
             now=self._NOW,
         )
@@ -135,7 +135,7 @@ class TestShouldSkipFetch:
             last_fetched_at=self._ago(1),  # as fresh as it gets
             stored_price=Decimal(100000),
             stored_status="active",
-            discovery_price=None,
+            latest_observed_at=None,
             min_refetch_interval_seconds=0,
             now=self._NOW,
         )
@@ -147,49 +147,65 @@ class TestShouldSkipFetch:
             last_fetched_at=self._ago(1),
             stored_price=None,
             stored_status="active",
-            discovery_price=None,
+            latest_observed_at=None,
             min_refetch_interval_seconds=3600,
             now=self._NOW,
         )
         assert skip is False
         assert "missing" in reason
 
-    def test_discovery_price_delta_forces_a_fetch_despite_freshness(self):
-        """The core guarantee (issue #143's acceptance criteria): a price
-        change detected at discovery time is never silently absorbed by
-        the staleness window, however fresh the listing otherwise is."""
+    def test_unconfirmed_observation_forces_a_fetch_despite_freshness(self):
+        """The re-anchored core guarantee (issue #432, D-071): an observation
+        recorded (by discovery/capture) after the last authoritative fetch —
+        latest observed_at newer than last_fetched_at — is never silently
+        absorbed by the staleness window, however fresh the listing looks."""
         skip, reason = orchestrator._should_skip_fetch(
-            last_fetched_at=self._ago(1),  # 1 second ago — as fresh as possible
+            last_fetched_at=self._ago(60),  # last real fetch a minute ago
             stored_price=Decimal(200000),
             stored_status="active",
-            discovery_price=Decimal(190000),  # a real drop just seen at discovery
+            latest_observed_at=self._ago(1),  # a newer, unconfirmed observation
             min_refetch_interval_seconds=86400,
             now=self._NOW,
         )
         assert skip is False
-        assert "differs" in reason
+        assert "unconfirmed price observation" in reason
 
-    def test_discovery_price_matching_stored_price_is_not_a_reason_to_fetch(self):
-        """The mirror case: a discovery price that agrees with what's
-        stored is NOT itself a signal to skip (that's the age check's job)
-        — it just doesn't force anything."""
+    def test_observation_not_newer_than_fetch_is_not_a_reason_to_fetch(self):
+        """The mirror case: an observation no newer than the last fetch (the
+        authoritative fetch already confirmed it) is NOT a signal to force a
+        fetch — that's the age check's job."""
         skip, reason = orchestrator._should_skip_fetch(
             last_fetched_at=self._ago(1),
             stored_price=Decimal(200000),
             stored_status="active",
-            discovery_price=Decimal(200000),
+            latest_observed_at=self._ago(60),  # older than the last fetch
             min_refetch_interval_seconds=86400,
             now=self._NOW,
         )
         assert skip is True
-        assert "no discovery-time price delta" in reason
+        assert "no unconfirmed price observation" in reason
 
-    def test_no_discovery_price_signal_falls_through_to_age(self):
+    def test_observation_at_same_moment_as_fetch_does_not_loop(self):
+        """A fetch writes its history row and bumps last_fetched_at to the
+        same NOW(); observed_at == last_fetched_at must NOT be treated as
+        'newer', or every just-fetched listing would re-fetch forever."""
+        same = self._ago(30)
+        skip, _reason = orchestrator._should_skip_fetch(
+            last_fetched_at=same,
+            stored_price=Decimal(200000),
+            stored_status="active",
+            latest_observed_at=same,
+            min_refetch_interval_seconds=86400,
+            now=self._NOW,
+        )
+        assert skip is True
+
+    def test_no_observation_signal_falls_through_to_age(self):
         skip, _reason = orchestrator._should_skip_fetch(
             last_fetched_at=self._ago(1),
             stored_price=Decimal(200000),
             stored_status="active",
-            discovery_price=None,
+            latest_observed_at=None,
             min_refetch_interval_seconds=86400,
             now=self._NOW,
         )
@@ -200,7 +216,7 @@ class TestShouldSkipFetch:
             last_fetched_at=self._ago(90000),  # older than the window below
             stored_price=Decimal(200000),
             stored_status="active",
-            discovery_price=None,
+            latest_observed_at=None,
             min_refetch_interval_seconds=86400,
             now=self._NOW,
         )
@@ -214,7 +230,7 @@ class TestShouldSkipFetch:
             last_fetched_at=self._ago(3600),
             stored_price=Decimal(200000),
             stored_status="active",
-            discovery_price=None,
+            latest_observed_at=None,
             min_refetch_interval_seconds=3600,
             now=self._NOW,
         )
@@ -225,7 +241,7 @@ class TestShouldSkipFetch:
             last_fetched_at=self._ago(60),
             stored_price=Decimal(200000),
             stored_status="active",
-            discovery_price=None,
+            latest_observed_at=None,
             min_refetch_interval_seconds=3600,
             now=self._NOW,
         )
@@ -237,17 +253,16 @@ class TestShouldSkipFetch:
     ):
         """Must-fix (Opus review, PR #175): a listing stored as anything
         other than 'active' must always be forced to re-fetch, however
-        fresh it looks and however much its discovery-time price agrees
-        with what's stored — otherwise a withdrawn listing that reappears
-        in discover() at an unchanged price is skipped exactly like a
-        normal active listing, and self-heals only once the staleness
-        window happens to expire (up to 24h for Fotocasa) instead of on
-        the very next sweep."""
+        fresh it looks and however much its price agrees with what's stored
+        — otherwise a withdrawn listing that reappears in discover() at an
+        unchanged price is skipped exactly like a normal active listing, and
+        self-heals only once the staleness window happens to expire (up to
+        24h for Fotocasa) instead of on the very next sweep."""
         skip, reason = orchestrator._should_skip_fetch(
             last_fetched_at=self._ago(1),  # as fresh as possible
             stored_price=Decimal(200000),
             stored_status="withdrawn",
-            discovery_price=Decimal(200000),  # unchanged — no price signal either
+            latest_observed_at=None,  # no unconfirmed observation either
             min_refetch_interval_seconds=86400,
             now=self._NOW,
         )
@@ -258,12 +273,12 @@ class TestShouldSkipFetch:
     def test_active_status_does_not_force_a_fetch_on_its_own(self):
         """Mirror case: an 'active' stored status is not itself a reason
         to fetch — it just doesn't block the normal staleness logic from
-        skipping, same as a matching discovery price."""
+        skipping, same as an already-confirmed observation."""
         skip, _reason = orchestrator._should_skip_fetch(
             last_fetched_at=self._ago(60),
             stored_price=Decimal(200000),
             stored_status="active",
-            discovery_price=None,
+            latest_observed_at=None,
             min_refetch_interval_seconds=3600,
             now=self._NOW,
         )
@@ -279,11 +294,70 @@ class TestShouldSkipFetch:
             last_fetched_at=self._ago(60),
             stored_price=Decimal(200000),
             stored_status=None,
-            discovery_price=None,
+            latest_observed_at=None,
             min_refetch_interval_seconds=3600,
             now=self._NOW,
         )
         assert skip is True
+
+
+class TestPriceSanityBand:
+    """Issue #432 / D-071: the phase-2 sanity band that gates whether a raw
+    observation becomes `listing.current_price` (adoptable) and whether it is
+    worth recording to `listing_price_history` (material). Pure functions — no
+    DB. The band is [1%, 60%]: sub-1% is noise, >60% is a suspect parse."""
+
+    def test_adopt_a_normal_move_inside_the_band(self):
+        # −7% (property 1739's real drop: 157000 -> 146000) is squarely in band.
+        assert orchestrator._observed_price_is_adoptable(
+            Decimal(157000), Decimal(146000)
+        )
+
+    def test_reject_sub_one_percent_noise(self):
+        # 0.5% move: noise, not adopted.
+        assert not orchestrator._observed_price_is_adoptable(
+            Decimal(200000), Decimal(201000)
+        )
+
+    def test_reject_suspect_over_sixty_percent(self):
+        # A >60% collapse is suspect (likely a parse glitch) — never adopted.
+        assert not orchestrator._observed_price_is_adoptable(
+            Decimal(200000), Decimal(50000)
+        )
+
+    def test_boundaries_are_inclusive(self):
+        # Exactly 1% and exactly 60% are both inside the band.
+        assert orchestrator._observed_price_is_adoptable(
+            Decimal(100000), Decimal(101000)
+        )  # +1%
+        assert orchestrator._observed_price_is_adoptable(
+            Decimal(100000), Decimal(160000)
+        )  # +60%
+
+    def test_none_new_price_is_never_adopted(self):
+        assert not orchestrator._observed_price_is_adoptable(Decimal(100000), None)
+
+    def test_no_baseline_adopts_as_backfill(self):
+        # NULL / non-positive stored price: nothing to measure against, adopt.
+        assert orchestrator._observed_price_is_adoptable(None, Decimal(120000))
+        assert orchestrator._observed_price_is_adoptable(Decimal(0), Decimal(120000))
+
+    def test_suspect_is_still_material_even_though_not_adoptable(self):
+        # The >60% suspect is recorded to history (material) so the re-fetch net
+        # can confirm it, even though it must not become current_price.
+        old, new = Decimal(200000), Decimal(50000)
+        assert not orchestrator._observed_price_is_adoptable(old, new)
+        assert orchestrator._observed_price_is_material(old, new)
+
+    def test_noise_is_neither_adoptable_nor_material(self):
+        old, new = Decimal(200000), Decimal(201000)  # +0.5%
+        assert not orchestrator._observed_price_is_adoptable(old, new)
+        assert not orchestrator._observed_price_is_material(old, new)
+
+    def test_unchanged_price_is_not_material(self):
+        assert not orchestrator._observed_price_is_material(
+            Decimal(200000), Decimal(200000)
+        )
 
 
 class TestOrchestratorEndToEnd:
@@ -1691,14 +1765,17 @@ class TestSkipIfSeenIntegration:
                     cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
             pg_conn.commit()
 
-    def test_discovery_time_price_change_forces_a_refetch_despite_freshness(
+    def test_discovery_time_price_change_updates_display_and_reanchors_refetch(
         self, pg_conn
     ):
-        """The mutation-critical proof: skip-if-seen must not be able to
-        silently stop detecting a real price change. A large
-        min_refetch_interval_seconds (far longer than this test could ever
-        run) proves the price delta — not elapsed time — is what triggers
-        the second fetch."""
+        """The mutation-critical proof, revised for issue #432 / D-071: a
+        discovery-time price change must (a) update the displayed/deal-math
+        `current_price` IMMEDIATELY (latest-observed is authoritative) and
+        (b) leave an unconfirmed observation that forces a confirming re-fetch
+        on the NEXT sweep — the re-anchored safety net (latest observed_at >
+        last_fetched_at), not the old discovery-vs-current_price trigger. A
+        large min_refetch_interval_seconds proves the observation, not elapsed
+        time, is what drives the re-fetch."""
         _apply_schema(pg_conn)
         connector = DummyConnector(
             name="skip-seen-price-change",
@@ -1712,24 +1789,34 @@ class TestSkipIfSeenIntegration:
             run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
             assert connector.fetch_calls == ["p-1"]
 
-            # A real price drop, seen at discovery time (Fotocasa's
-            # rawPrice-equivalent) — the fetched price hasn't changed yet
-            # in the connector's own fetch_detail() response, only the
-            # discovery-time signal has, which is exactly what must be
-            # enough to force the re-fetch.
+            # Run 2: a real price drop seen at discovery time (Fotocasa's
+            # rawPrice-equivalent). The listing is nowhere near stale, so the
+            # fetch loop SKIPS it this run — but the discovery recorder both
+            # records the drop AND adopts it as current_price, so the display
+            # is correct immediately without waiting for the confirm.
             connector.discovery_price_overrides = {"p-1": 195000}
             connector.price = 195000
             run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
 
-            assert connector.fetch_calls == ["p-1", "p-1"], (
-                "a discovery-time price delta must force a re-fetch even "
-                "though the listing is nowhere near stale"
+            assert connector.fetch_calls == ["p-1"], (
+                "a fresh listing is skipped by the fetch loop this run — the "
+                "confirming re-fetch is deferred to the next sweep (D-071)"
             )
-
             current_price, _last_seen, _last_fetched = self._listing_row(
                 pg_conn, connector.name, "p-1"
             )
-            assert current_price == Decimal(195000)
+            assert current_price == Decimal(195000), (
+                "the latest observed price is adopted as current_price at "
+                "discovery time — display/deal-math are correct immediately"
+            )
+
+            # Run 3: the unconfirmed observation (observed_at > last_fetched_at)
+            # now forces the authoritative re-fetch, which confirms 195000.
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["p-1", "p-1"], (
+                "the re-anchored trigger forces a confirming re-fetch on the "
+                "next sweep because an observation is newer than last_fetched_at"
+            )
 
             with pg_conn.cursor() as cur:
                 cur.execute(
@@ -1740,7 +1827,9 @@ class TestSkipIfSeenIntegration:
                 )
                 prices = [row[0] for row in cur.fetchall()]
             assert prices == [205000, 195000], (
-                "the price-history append behaviour must survive skip-if-seen"
+                "the drop is recorded exactly once (the discovery observation); "
+                "the confirming re-fetch returns the same 195000 and appends "
+                "nothing new"
             )
         finally:
             orchestrator.CONNECTORS.clear()
@@ -3050,9 +3139,12 @@ class TestUniqueViolationHandling:
                 def __getattr__(self, name):
                     return getattr(self._conn, name)
 
+            # +10% — an in-band move (D-071 sanity band is [1%, 60%]); this
+            # test is about the collision-recovery UPDATE path landing the
+            # losing run's data, not about price-magnitude gating.
             orchestrator._upsert_canonical_listing(
                 _BlindFirstLookup(pg_conn),
-                _minimal_canonical("race-1", source, current_price=Decimal(175000)),
+                _minimal_canonical("race-1", source, current_price=Decimal(110000)),
             )
 
             with pg_conn.cursor() as cur:
@@ -3063,7 +3155,7 @@ class TestUniqueViolationHandling:
                 )
                 count, price = cur.fetchone()
             assert count == 1, "the race must update in place, not duplicate"
-            assert price == Decimal(175000), "the losing run's data must still land"
+            assert price == Decimal(110000), "the losing run's data must still land"
         finally:
             _cleanup(pg_conn, source)
 
@@ -5116,9 +5208,11 @@ class TestDiscoveryPriceHistory:
     inventory rather than only the subset a run's circuit-breaker/rate-limit/
     min_refetch budget re-fetches.
 
-    Idempotent: an observation is appended only when the discovery price
-    differs from the listing's most recent recorded price, and
-    `listing.current_price` stays exclusively fetch-path-owned (D-070).
+    Idempotent: an observation is appended only on a material move (≥1%, the
+    sanity band's noise floor) vs the listing's most recent recorded price.
+    Issue #432 / D-071 (revising D-070): the observation is ALSO adopted as
+    `listing.current_price` when it's an in-band [1%, 60%] move, so the
+    latest-observed price is authoritative for display/deal-math immediately.
     """
 
     def _history_prices(self, conn, source: str, external_id: str) -> list:
@@ -5209,10 +5303,13 @@ class TestDiscoveryPriceHistory:
                 Decimal(205000),
                 Decimal(195000),
             ], "the discovery-time price drop must be appended to the timeline"
-            assert self._current_price(pg_conn, source, "t-1") == Decimal(205000), (
-                "current_price stays fetch-path-owned (D-070): a discovery-time "
-                "observation must not touch it, or _should_skip_fetch's "
-                "price-change re-fetch trigger would stop firing"
+            assert self._current_price(pg_conn, source, "t-1") == Decimal(195000), (
+                "issue #432 / D-071: the latest observed price is authoritative "
+                "— a discovery-time drop (within the [1%, 60%] sanity band) is "
+                "adopted as current_price even for a listing the fetch budget "
+                "never reached, so display/deal-math are correct immediately; "
+                "the re-fetch net (re-anchored to observed_at > last_fetched_at) "
+                "still confirms it on a later sweep"
             )
         finally:
             orchestrator.CONNECTORS.clear()
@@ -5271,10 +5368,11 @@ class TestDiscoveryPriceHistory:
             _cleanup(pg_conn, source, run_id)
 
     def test_refetched_price_change_is_not_double_recorded(self, pg_conn):
-        """When a discovery-time delta forces a real re-fetch (skip-if-seen
-        reason #5), the fetch path already appends the authoritative price;
-        the discovery recorder must dedup against that row, not stack a second
-        identical observation on top in the same run."""
+        """A discovery-time drop must be recorded exactly once across the whole
+        record-then-confirm sequence (issue #432 / D-071). Run 2 records the
+        discovery observation (and adopts it as current_price); run 3's
+        re-anchored trigger forces the confirming re-fetch, which returns the
+        same price and must NOT stack a second identical row on top."""
         _apply_schema(pg_conn)
         source = "disc-price-refetch-dedup"
         connector = DummyConnector(
@@ -5289,19 +5387,32 @@ class TestDiscoveryPriceHistory:
             run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
             assert connector.fetch_calls == ["r-1"]
 
+            # Run 2: discovery-time drop. Fresh listing → fetch loop skips it,
+            # the discovery recorder writes the one new history row and adopts
+            # 380000 as current_price.
             connector.discovery_price_overrides = {"r-1": 380000}
             connector.price = 380000
             run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["r-1"], (
+                "the confirming re-fetch is deferred to the next sweep (D-071)"
+            )
+            assert self._current_price(pg_conn, source, "r-1") == Decimal(380000)
+
+            # Run 3: the unconfirmed observation forces the authoritative
+            # re-fetch, which returns the same 380000 — deduped, no new row.
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
             assert connector.fetch_calls == ["r-1", "r-1"], (
-                "a discovery-time delta must force the re-fetch"
+                "the re-anchored trigger (observed_at > last_fetched_at) forces "
+                "the confirming re-fetch"
             )
 
             assert self._history_prices(pg_conn, source, "r-1") == [
                 Decimal(400000),
                 Decimal(380000),
             ], (
-                "exactly one new observation for the change — the fetch path's, "
-                "not a discovery-time duplicate stacked on top the same run"
+                "exactly one new observation for the change — the discovery "
+                "recorder's; the confirming re-fetch dedups against it rather "
+                "than stacking an identical row"
             )
         finally:
             orchestrator.CONNECTORS.clear()
@@ -5310,3 +5421,181 @@ class TestDiscoveryPriceHistory:
                 for r in run_ids:
                     cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
             pg_conn.commit()
+
+    def test_suspect_discovery_move_is_recorded_but_not_adopted(self, pg_conn):
+        """Issue #432 / D-071 sanity band: a >60% discovery move is a suspect
+        (likely a parse glitch) — it IS recorded to the timeline (so the
+        re-fetch net can confirm it and an operator can see it) but must NOT
+        become current_price."""
+        _apply_schema(pg_conn)
+        source = "disc-price-suspect"
+        connector = DummyConnector(name=source, external_ids=("s-1",), price=400000)
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            assert self._current_price(pg_conn, source, "s-1") == Decimal(400000)
+
+            # A 75% collapse — suspect, over the 60% ceiling.
+            recorded = orchestrator._record_discovery_price_observations(
+                pg_conn, source, {"s-1": Decimal(100000)}
+            )
+            assert recorded == 1, "the suspect observation is still recorded to history"
+            assert self._history_prices(pg_conn, source, "s-1") == [
+                Decimal(400000),
+                Decimal(100000),
+            ]
+            assert self._current_price(pg_conn, source, "s-1") == Decimal(400000), (
+                "a >60% suspect must NOT poison current_price"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, source, run_id)
+
+    def test_sub_one_percent_discovery_noise_is_ignored(self, pg_conn):
+        """A sub-1% move is noise: neither recorded to history nor adopted as
+        current_price, so it can't drive a wasteful confirming re-fetch."""
+        _apply_schema(pg_conn)
+        source = "disc-price-noise"
+        connector = DummyConnector(name=source, external_ids=("n-1",), price=200000)
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+
+            recorded = orchestrator._record_discovery_price_observations(
+                pg_conn,
+                source,
+                {"n-1": Decimal(200500)},  # +0.25%
+            )
+            assert recorded == 0, "sub-1% noise is not recorded"
+            assert self._history_prices(pg_conn, source, "n-1") == [Decimal(200000)]
+            assert self._current_price(pg_conn, source, "n-1") == Decimal(200000), (
+                "sub-1% noise does not move current_price"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, source, run_id)
+
+    def test_discovery_does_not_clobber_a_same_run_authoritative_fetch(self, pg_conn):
+        """The run_started_at guard (D-071): a listing the fetch loop already
+        re-fetched THIS run keeps the authoritative detail-page current_price —
+        the less-authoritative search-payload discovery price must not overwrite
+        it, even though the observation is still recorded to the timeline."""
+        _apply_schema(pg_conn)
+        source = "disc-price-samerun-guard"
+        connector = DummyConnector(
+            name=source,
+            external_ids=("g-1",),
+            price=300000,
+            min_refetch_interval_seconds=0,  # always fetch
+        )
+        # The search payload disagrees with the detail page this same run.
+        connector.discovery_price_overrides = {"g-1": 250000}
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            assert connector.fetch_calls == ["g-1"], "the fetch loop fetched it"
+            assert self._current_price(pg_conn, source, "g-1") == Decimal(300000), (
+                "the authoritative same-run fetch wins over the discovery price"
+            )
+            assert self._history_prices(pg_conn, source, "g-1") == [
+                Decimal(300000),
+                Decimal(250000),
+            ], "the discovery observation is still recorded to the timeline"
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, source, run_id)
+
+
+class TestCurrentPriceBackfill:
+    """Issue #432 / D-071: the one-time idempotent init.sql backfill that
+    realigns `listing.current_price` to the most-recent observed price for the
+    listings that diverged under D-070 (fetch-path-owned current_price)."""
+
+    def _current_price(self, conn, source: str, external_id: str):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT current_price FROM listing "
+                "WHERE source = %s AND external_id = %s",
+                (source, external_id),
+            )
+            return cur.fetchone()[0]
+
+    def _seed_divergence(self, conn, source, external_id, stored, latest_history):
+        """Seed a listing whose current_price (stored) diverges from its latest
+        history row (latest_history), simulating the pre-fix stale state."""
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO property (address, property_type) "
+                "VALUES ('x', 'piso') RETURNING id"
+            )
+            (property_id,) = cur.fetchone()
+            cur.execute(
+                "INSERT INTO listing (property_id, source, external_id, status, "
+                "first_seen_at, last_seen_at, last_fetched_at, current_price) "
+                "VALUES (%s, %s, %s, 'active', NOW(), NOW(), NOW(), %s) RETURNING id",
+                (property_id, source, external_id, stored),
+            )
+            (listing_id,) = cur.fetchone()
+            cur.execute(
+                "INSERT INTO listing_price_history (listing_id, observed_at, price) "
+                "VALUES (%s, NOW() - INTERVAL '1 day', %s), (%s, NOW(), %s)",
+                (listing_id, stored, listing_id, latest_history),
+            )
+        conn.commit()
+        return listing_id
+
+    def test_backfill_realigns_current_price_to_latest_observed(self, pg_conn):
+        # property 1739's real numbers: stored 157000, latest history 146000.
+        _apply_schema(pg_conn)
+        source = "backfill-realign"
+        try:
+            self._seed_divergence(
+                pg_conn, source, "1739", Decimal(157000), Decimal(146000)
+            )
+            assert self._current_price(pg_conn, source, "1739") == Decimal(157000)
+
+            _apply_schema(pg_conn)  # re-runs init.sql, including the backfill
+            assert self._current_price(pg_conn, source, "1739") == Decimal(146000), (
+                "the backfill adopts the latest observed price (property 1739 "
+                "now resolves to 146000, matching graph/badge)"
+            )
+        finally:
+            _cleanup(pg_conn, source, None)
+
+    def test_backfill_is_idempotent(self, pg_conn):
+        _apply_schema(pg_conn)
+        source = "backfill-idem"
+        try:
+            self._seed_divergence(
+                pg_conn, source, "b-1", Decimal(300000), Decimal(270000)
+            )
+            _apply_schema(pg_conn)
+            first = self._current_price(pg_conn, source, "b-1")
+            _apply_schema(pg_conn)
+            second = self._current_price(pg_conn, source, "b-1")
+            assert first == Decimal(270000)
+            assert second == first, "re-running the backfill is a no-op once realigned"
+        finally:
+            _cleanup(pg_conn, source, None)
+
+    def test_backfill_skips_a_suspect_latest_observation(self, pg_conn):
+        # A >60% latest history row is a suspect — the backfill must not adopt it.
+        _apply_schema(pg_conn)
+        source = "backfill-suspect"
+        try:
+            self._seed_divergence(
+                pg_conn,
+                source,
+                "sus-1",
+                Decimal(400000),
+                Decimal(100000),  # -75%
+            )
+            _apply_schema(pg_conn)
+            assert self._current_price(pg_conn, source, "sus-1") == Decimal(400000), (
+                "a >60% suspect latest observation is not backfilled"
+            )
+        finally:
+            _cleanup(pg_conn, source, None)
