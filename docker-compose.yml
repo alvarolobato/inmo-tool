@@ -230,6 +230,14 @@ services:
       # written to files under this dir; the DB stores only the pointer. The dir is
       # a bind-mounted volume (below) so the logs survive container recreation.
       DASHBOARD_CONTEXT_DIR: /app/data/conversations
+      # Automatic AI-assessment batch throughput knobs (#308/#400). Passed
+      # through so the deployed stack can tune the batch without a rebuild;
+      # interpolated defaults mirror the code defaults in
+      # dashboard/lib/ai-assessment/scheduler.ts, so behaviour is unchanged
+      # when these are left unset in .env.
+      DASHBOARD_ASSESSMENT_AUTO_ENABLED: ${DASHBOARD_ASSESSMENT_AUTO_ENABLED:-true}
+      DASHBOARD_ASSESSMENT_BATCH_SIZE: ${DASHBOARD_ASSESSMENT_BATCH_SIZE:-5}
+      DASHBOARD_ASSESSMENT_INTERVAL_SECONDS: ${DASHBOARD_ASSESSMENT_INTERVAL_SECONDS:-900}
     volumes:
       # Mount centralized config directory (read-write; dashboard writes config.yaml)
       - ${INMO_TOOL_CONFIG_DIR:-${HOME}/.config/inmo-tool}:/config:rw
