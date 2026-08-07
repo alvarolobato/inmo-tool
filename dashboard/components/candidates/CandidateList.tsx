@@ -68,6 +68,12 @@ export function CandidateList({ profileId }: { profileId: number }) {
   // candidates (rendered marked, still un-rejectable). Wired into fetchPage's
   // identity below, so flipping it resets the feed to page 1.
   const [showRejected, setShowRejected] = useState(false);
+  // #422: "En seguimiento" preset — restrict the feed to tracked (accepted)
+  // properties, the working set. Sends `state=accept`. Wired into fetchPage's
+  // identity below, so toggling it resets the feed to page 1. Mutually
+  // exclusive with "Mostrar descartadas" (a tracked-only view can't also show
+  // rejects), so turning one on turns the other off.
+  const [trackedOnly, setTrackedOnly] = useState(false);
 
   const assessmentFilterActive =
     occupancy !== "" ||
@@ -102,6 +108,8 @@ export function CandidateList({ profileId }: { profileId: number }) {
       if (isVpo !== "") url.searchParams.set("isVpo", isVpo);
       // #379: opt in to rejected candidates. Omitted (default) keeps them hidden.
       if (showRejected) url.searchParams.set("includeRejected", "true");
+      // #422: "En seguimiento" preset — restrict to tracked (accepted) properties.
+      if (trackedOnly) url.searchParams.set("state", "accept");
       const res = await fetch(url.toString().replace(window.location.origin, ""));
       if (!res.ok) {
         const body = await res.json().catch(() => null);
@@ -124,6 +132,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
       heritageZone,
       isVpo,
       showRejected,
+      trackedOnly,
     ],
   );
 
@@ -358,6 +367,27 @@ export function CandidateList({ profileId }: { profileId: number }) {
         <option value="false">Sin VPO</option>
       </select>
 
+      {/* #422: "En seguimiento" preset — restrict the feed to tracked
+          (accepted) properties, the working set. Mutually exclusive with
+          "Mostrar descartadas" (a tracked-only view can't also show rejects). */}
+      <label
+        htmlFor="tracked-only-toggle"
+        style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--fg-muted)", cursor: "pointer" }}
+      >
+        <input
+          id="tracked-only-toggle"
+          data-testid="tracked-only-toggle"
+          type="checkbox"
+          checked={trackedOnly}
+          onChange={(e) => {
+            setTrackedOnly(e.target.checked);
+            if (e.target.checked) setShowRejected(false);
+          }}
+          style={{ cursor: "pointer" }}
+        />
+        En seguimiento
+      </label>
+
       {/* #379: show/hide rejected candidates. Default off (rejected hidden).
           Turning it on re-fetches with includeRejected=true so the user can
           review and un-reject past rejections. */}
@@ -370,7 +400,10 @@ export function CandidateList({ profileId }: { profileId: number }) {
           data-testid="show-rejected-toggle"
           type="checkbox"
           checked={showRejected}
-          onChange={(e) => setShowRejected(e.target.checked)}
+          onChange={(e) => {
+            setShowRejected(e.target.checked);
+            if (e.target.checked) setTrackedOnly(false);
+          }}
           style={{ cursor: "pointer" }}
         />
         Mostrar descartadas
@@ -414,6 +447,23 @@ export function CandidateList({ profileId }: { profileId: number }) {
             No hay candidatos con estos criterios. Los filtros de ocupación y estado usan datos de
             evaluación de la IA, que aún no están disponibles para estas propiedades. Quita el filtro
             para ver el resto.
+          </p>
+        </div>
+      );
+    }
+    // #422: the "En seguimiento" preset is on but nothing is tracked yet. Not a
+    // broken feed and not a missing-data case — the user simply hasn't accepted
+    // any property. Say so and keep the bar so they can turn the preset off.
+    if (trackedOnly) {
+      return (
+        <div>
+          {filterBar}
+          <p
+            data-testid="no-candidates-tracked"
+            style={{ marginTop: 16, fontSize: 13, color: "var(--fg-muted)", margin: 0 }}
+          >
+            Todavía no sigues ninguna propiedad. Pulsa &quot;Seguir&quot; (✓) en una tarjeta para
+            añadirla a tu seguimiento.
           </p>
         </div>
       );

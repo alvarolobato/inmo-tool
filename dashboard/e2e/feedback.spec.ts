@@ -205,7 +205,7 @@ test("reject defers removal: card stays this session, is gone on reload, and the
   await expect(cardDefault.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "false");
 });
 
-test("submitting a note does not change the accept/reject/star toggle state", async ({ page }) => {
+test("submitting a note does not change the seguir/descartar toggle state", async ({ page }) => {
   skipIfNoDb(test);
 
   await page.goto(`/profiles/${profileId}`);
@@ -227,7 +227,9 @@ test("submitting a note does not change the accept/reject/star toggle state", as
   await expect(card.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "true");
 });
 
-test("accept -> star -> reject transitions replace the active toggle each time", async ({ page }) => {
+test("seguir(accept) <-> descartar(reject) transitions replace the active toggle each time; the star button is gone (#422)", async ({
+  page,
+}) => {
   skipIfNoDb(test);
 
   await page.goto(`/profiles/${profileId}`);
@@ -235,18 +237,20 @@ test("accept -> star -> reject transitions replace the active toggle each time",
 
   const card = page.locator(`[data-testid="candidate-card"][data-property-id="${propertyId}"]`);
 
+  // #422: only two state buttons exist now — accept ("Seguir") and reject.
+  await expect(card.getByTestId("feedback-star")).toHaveCount(0);
+
   await card.getByTestId("feedback-accept").click();
   await expect(card.getByTestId("feedback-accept")).toHaveAttribute("aria-pressed", "true");
-  await expect(card.getByTestId("feedback-star")).toHaveAttribute("aria-pressed", "false");
   await expect(card.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "false");
-
-  await card.getByTestId("feedback-star").click();
-  await expect(card.getByTestId("feedback-star")).toHaveAttribute("aria-pressed", "true");
-  await expect(card.getByTestId("feedback-accept")).toHaveAttribute("aria-pressed", "false");
+  // Accepting a property marks it "en seguimiento".
+  await expect(card.getByTestId("candidate-tracked-badge")).toBeVisible();
+  await expect(card).toHaveAttribute("data-tracked", "true");
 
   await card.getByTestId("feedback-reject").click();
   await expect(card.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "true");
-  await expect(card.getByTestId("feedback-star")).toHaveAttribute("aria-pressed", "false");
+  await expect(card.getByTestId("feedback-accept")).toHaveAttribute("aria-pressed", "false");
+  await expect(card.getByTestId("candidate-tracked-badge")).toHaveCount(0);
 
   // Land on 'accept' (a state the default feed still shows — #379 hides only
   // 'reject' on reload) and gate the reload on its write committing, so the
@@ -267,4 +271,44 @@ test("accept -> star -> reject transitions replace the active toggle each time",
   await assertNoErrorSurface(page);
   const cardAfterReload = page.locator(`[data-testid="candidate-card"][data-property-id="${propertyId}"]`);
   await expect(cardAfterReload.getByTestId("feedback-accept")).toHaveAttribute("aria-pressed", "true");
+});
+
+test("#422: accepting a property adds it to the 'En seguimiento' view; the star button no longer exists", async ({
+  page,
+}) => {
+  skipIfNoDb(test);
+
+  await page.goto(`/profiles/${profileId}`);
+  await assertNoErrorSurface(page);
+
+  const cardSel = `[data-testid="candidate-card"][data-property-id="${propertyId}"]`;
+  const card = page.locator(cardSel);
+  await expect(card).toBeVisible();
+
+  // The star ("destacar") toggle is gone — only seguir/descartar remain.
+  await expect(card.getByTestId("feedback-star")).toHaveCount(0);
+
+  // Follow (accept) the property, waiting for the write to commit so the
+  // seguimiento view below reads committed state.
+  const [acceptResponse] = await Promise.all([
+    page.waitForResponse(
+      (r) => /\/feedback(\?|$)/.test(new URL(r.url()).pathname) && r.request().method() === "POST",
+    ),
+    card.getByTestId("feedback-accept").click(),
+  ]);
+  expect(acceptResponse.ok()).toBe(true);
+  await expect(card.getByTestId("candidate-tracked-badge")).toBeVisible();
+
+  // Turn on the "En seguimiento" preset: only the tracked property remains,
+  // the (untracked) bystander drops out.
+  await page.getByTestId("tracked-only-toggle").check();
+  await assertNoErrorSurface(page);
+  const trackedCard = page.locator(cardSel);
+  await expect(trackedCard).toBeVisible();
+  await expect(trackedCard.getByTestId("candidate-tracked-badge")).toBeVisible();
+  await expect(
+    page.locator(`[data-testid="candidate-card"][data-property-id="${bystanderPropertyId}"]`),
+  ).toHaveCount(0);
+  // Still no star button in the tracked view.
+  await expect(trackedCard.getByTestId("feedback-star")).toHaveCount(0);
 });

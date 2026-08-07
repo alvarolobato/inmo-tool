@@ -85,7 +85,6 @@ interface RawOverviewRow extends SearchProfileRawRow {
   new_count: number;
   accepted_count: number;
   rejected_count: number;
-  starred_count: number;
   min_price: string | null;
   median_price: string | null;
   max_price: string | null;
@@ -110,9 +109,11 @@ interface RawOverviewRow extends SearchProfileRawRow {
  * module docstring for the per-LATERAL cost/bound rationale.
  */
 export const OVERVIEW_QUERY_SQL = `WITH feedback_current AS (
-       -- Include 'clear' (#379) so a retracted verdict wins the DISTINCT ON;
-       -- the counts below FILTER on accept/reject/star only, so a property
-       -- whose latest event is 'clear' correctly counts toward none of them.
+       -- Include the retired 'star' (#422) and 'clear' (#379) so a trailing
+       -- one wins the DISTINCT ON; the counts below FILTER on accept/reject
+       -- only, so a property whose latest event is 'star' or 'clear' correctly
+       -- counts toward none of them (accept = "en seguimiento", reject =
+       -- "descartada" — the only two live states).
        SELECT DISTINCT ON (profile_id, property_id) profile_id, property_id, feedback_type
        FROM feedback_event
        WHERE feedback_type IN ('accept', 'reject', 'star', 'clear')
@@ -121,8 +122,7 @@ export const OVERVIEW_QUERY_SQL = `WITH feedback_current AS (
      feedback_counts AS (
        SELECT profile_id,
               COUNT(*) FILTER (WHERE feedback_type = 'accept') AS accepted_count,
-              COUNT(*) FILTER (WHERE feedback_type = 'reject') AS rejected_count,
-              COUNT(*) FILTER (WHERE feedback_type = 'star')  AS starred_count
+              COUNT(*) FILTER (WHERE feedback_type = 'reject') AS rejected_count
          FROM feedback_current
         GROUP BY profile_id
      )
@@ -133,7 +133,6 @@ export const OVERVIEW_QUERY_SQL = `WITH feedback_current AS (
        COALESCE(match_stats.new_count, 0)         AS new_count,
        COALESCE(fc.accepted_count, 0)             AS accepted_count,
        COALESCE(fc.rejected_count, 0)             AS rejected_count,
-       COALESCE(fc.starred_count, 0)              AS starred_count,
        match_stats.min_price::text                AS min_price,
        match_stats.median_price::text              AS median_price,
        match_stats.max_price::text                AS max_price,
@@ -285,7 +284,6 @@ export async function listProfileOverviews(): Promise<ProfileOverviewEntry[]> {
       new_count: raw.new_count,
       accepted_count: raw.accepted_count,
       rejected_count: raw.rejected_count,
-      starred_count: raw.starred_count,
       min_price: toNum(raw.min_price),
       median_price: toNum(raw.median_price),
       max_price: toNum(raw.max_price),

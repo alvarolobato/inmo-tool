@@ -436,9 +436,9 @@ describe.runIf(dbAvailable)("feedback event API — real Postgres", () => {
     });
   });
 
-  it("starring an accepted property keeps it a positive training example (Opus review of PR #91, item 2)", async () => {
+  it("#422: 'star' is retired — posting it is a 400 and never touches the trained model", async () => {
     await withRealDb(async (pool) => {
-      const acceptedThenStarredId = await insertProperty(pool);
+      const acceptedId = await insertProperty(pool);
       const rejectedId = await insertProperty(pool);
 
       const scope: Scope = {
@@ -452,12 +452,12 @@ describe.runIf(dbAvailable)("feedback event API — real Postgres", () => {
       createdProfileIds.push(profile.id);
       const profileId = profile.id;
 
-      await insertListing(pool, acceptedThenStarredId, "fotocasa");
-      await pool.query("UPDATE listing SET current_price = 200000 WHERE property_id = $1", [acceptedThenStarredId]);
+      await insertListing(pool, acceptedId, "fotocasa");
+      await pool.query("UPDATE listing SET current_price = 200000 WHERE property_id = $1", [acceptedId]);
       await insertListing(pool, rejectedId, "fotocasa");
       await pool.query("UPDATE listing SET current_price = 400000 WHERE property_id = $1", [rejectedId]);
 
-      await markMatched(pool, profileId, acceptedThenStarredId);
+      await markMatched(pool, profileId, acceptedId);
       await markMatched(pool, profileId, rejectedId);
 
       // Task 3.4 (#23): clear MIN_TRAINING_EXAMPLES first — see the EC-3
@@ -465,8 +465,9 @@ describe.runIf(dbAvailable)("feedback event API — real Postgres", () => {
       await fillPastTrainingThreshold(pool, profileId);
 
       // accept + reject: both classes present, threshold cleared, training
-      // succeeds (mirrors the EC-3 test above).
-      await POST(makeRequest({ feedbackType: "accept" }), ctx(profileId, acceptedThenStarredId));
+      // succeeds (mirrors the EC-3 test above). accept IS the follow/track
+      // action now — there is no separate star.
+      await POST(makeRequest({ feedbackType: "accept" }), ctx(profileId, acceptedId));
       await POST(makeRequest({ feedbackType: "reject" }), ctx(profileId, rejectedId));
 
       const afterAccept = await pool.query<{ training_example_count: number }>(
@@ -475,27 +476,27 @@ describe.runIf(dbAvailable)("feedback event API — real Postgres", () => {
       );
       expect(afterAccept.rows[0].training_example_count).toBe(38);
 
-      // Star the same property task 3.1 says this *replaces* the accept as
-      // its current state. If star weren't treated as a positive label,
-      // positiveCount would drop to 0 here ("needs_both_classes"), and the
-      // model would silently stop retraining for this profile forever.
-      const res = await POST(makeRequest({ feedbackType: "star" }), ctx(profileId, acceptedThenStarredId));
-      expect(res.status).toBe(201);
+      // #422: `star` is no longer a writable feedback type — the route rejects
+      // it (400), no event is inserted, and the trained model is untouched.
+      const res = await POST(makeRequest({ feedbackType: "star" }), ctx(profileId, acceptedId));
+      expect(res.status).toBe(400);
 
-      const afterStar = await pool.query<{ training_example_count: number }>(
-        "SELECT training_example_count FROM profile_scoring_model WHERE profile_id = $1",
+      const starRows = await pool.query(
+        "SELECT 1 FROM feedback_event WHERE profile_id = $1 AND feedback_type = 'star'",
         [profileId],
       );
-      expect(afterStar.rows[0].training_example_count).toBe(38);
+      expect(starRows.rows).toHaveLength(0);
 
+      // The accepted property stays a positive example, so it still outscores
+      // the rejected one — the 400 changed nothing.
       const scores = await pool.query<{ property_id: number; score: string | null }>(
         "SELECT property_id, score FROM profile_listing_state WHERE profile_id = $1 AND property_id = ANY($2::bigint[])",
-        [profileId, [acceptedThenStarredId, rejectedId]],
+        [profileId, [acceptedId, rejectedId]],
       );
       expect(scores.rows.every((r) => r.score !== null)).toBe(true);
-      const starredScore = Number(scores.rows.find((r) => Number(r.property_id) === acceptedThenStarredId)!.score);
+      const acceptedScore = Number(scores.rows.find((r) => Number(r.property_id) === acceptedId)!.score);
       const rejectedScore = Number(scores.rows.find((r) => Number(r.property_id) === rejectedId)!.score);
-      expect(starredScore).toBeGreaterThan(rejectedScore);
+      expect(acceptedScore).toBeGreaterThan(rejectedScore);
     });
   });
 

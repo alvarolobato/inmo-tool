@@ -11,25 +11,66 @@
 
 import { sql, withTransaction } from "@/lib/db-write";
 
-/** The active toggle states a card can visibly carry (the accept/reject/star buttons). */
-export const STATE_FEEDBACK_TYPES = ["accept", "reject", "star"] as const;
+/**
+ * The active toggle states a card can visibly carry. Just two after `star`
+ * was retired (#422, owner decision 2026-08-07): `accept` IS the follow/track
+ * ("en seguimiento") action — accepting a property is how you track it, there
+ * is no separate "destacar" — and `reject` is "descartada".
+ */
+export const STATE_FEEDBACK_TYPES = ["accept", "reject"] as const;
 export type StateFeedbackType = (typeof STATE_FEEDBACK_TYPES)[number];
 
 /**
- * The feedback_type values that DERIVE the current toggle state — the three
- * active states plus `clear`, an explicit "un-mark" that resets the derived
- * state back to neutral (null) without deleting history (#379). The table
- * stays append-only, so un-rejecting a property is a new `clear` row, not a
- * DELETE of the prior `reject`. Every "latest state wins" read (here, the
- * scoring pipeline, the profile overview, and the candidate feed) must select
- * over THIS set and map a trailing `clear` to null, or a cleared property
- * would keep reading as its last accept/reject/star.
+ * The feedback_type values that DERIVE the current toggle state on a
+ * latest-wins read: the two active states, the RETIRED `star` (#422), and
+ * `clear` (#379, an explicit "un-mark"). `star` and `clear` both stay in this
+ * derive set even though neither is writable anymore — so a trailing legacy
+ * `star` (from before #422) or an explicit `clear` still WINS the "most recent
+ * event" ordering and then collapses to neutral (null) via
+ * {@link deriveToggleState}, rather than a read falling back to an older
+ * accept/reject underneath it. Every "latest state wins" reader (here, the
+ * scoring pipeline, the profile overview, the candidate feed, the map) must
+ * select over THIS set and collapse a trailing star/clear to null.
  */
 export const DERIVED_STATE_FEEDBACK_TYPES = ["accept", "reject", "star", "clear"] as const;
 export type DerivedStateFeedbackType = (typeof DERIVED_STATE_FEEDBACK_TYPES)[number];
 
-export const FEEDBACK_TYPES = [...DERIVED_STATE_FEEDBACK_TYPES, "note", "correction"] as const;
+/**
+ * State-change events a client may WRITE: the two active states plus the
+ * `clear` un-mark. `star` is retired (#422) — no longer writable, though the
+ * DB enum keeps it inert so historical rows still read back.
+ */
+export const WRITABLE_STATE_FEEDBACK_TYPES = ["accept", "reject", "clear"] as const;
+export type WritableStateFeedbackType = (typeof WRITABLE_STATE_FEEDBACK_TYPES)[number];
+
+/**
+ * Every feedback_type value that can appear in a STORED row (read side),
+ * including the retired `star`. Kept broad so `getFeedbackHistory` and friends
+ * type legacy rows honestly; writes validate against
+ * {@link WRITABLE_FEEDBACK_TYPES} instead.
+ */
+export const FEEDBACK_TYPES = ["accept", "reject", "star", "clear", "note", "correction"] as const;
 export type FeedbackType = (typeof FEEDBACK_TYPES)[number];
+
+/**
+ * feedback_type values a client may WRITE (state changes + note/correction).
+ * `star` is deliberately absent — posting it is a 400 (#422).
+ */
+export const WRITABLE_FEEDBACK_TYPES = ["accept", "reject", "clear", "note", "correction"] as const;
+export type WritableFeedbackType = (typeof WRITABLE_FEEDBACK_TYPES)[number];
+
+/**
+ * Collapse a raw latest-wins feedback_type to the active toggle state a
+ * property currently carries: `clear` and the retired `star` (#422) both mean
+ * "no active mark" (null); accept/reject pass through unchanged. The single
+ * place the star/clear→null rule lives, so every latest-wins reader stays in
+ * agreement by construction.
+ */
+export function deriveToggleState(
+  raw: DerivedStateFeedbackType | null | undefined,
+): StateFeedbackType | null {
+  return raw === "accept" || raw === "reject" ? raw : null;
+}
 
 export interface FeedbackEventRow {
   id: number;
@@ -107,16 +148,17 @@ export async function recordStateFeedbackIfChanged(opts: {
   profileId: number;
   propertyId: number;
   listingId?: number | null;
-  feedbackType: DerivedStateFeedbackType;
+  feedbackType: WritableStateFeedbackType;
 }): Promise<{ event: FeedbackEventRow | null; currentState: StateFeedbackType | null; noop: boolean }> {
   return withTransaction(async (client) => {
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
       `feedback:${opts.profileId}:${opts.propertyId}`,
     ]);
 
-    // Derive the current state over accept/reject/star/clear (#379): a
-    // trailing `clear` means the property is currently neutral, so it must be
-    // read as null here rather than falling back to the previous reject.
+    // Derive the current state over accept/reject/star/clear (#379/#422): a
+    // trailing `clear` OR a legacy `star` means the property is currently
+    // neutral, so it must be read as null here rather than falling back to an
+    // earlier accept/reject underneath it.
     const currentResult = await client.query<{ feedback_type: DerivedStateFeedbackType }>(
       `SELECT feedback_type
          FROM feedback_event
@@ -126,8 +168,7 @@ export async function recordStateFeedbackIfChanged(opts: {
         LIMIT 1`,
       [opts.profileId, opts.propertyId, DERIVED_STATE_FEEDBACK_TYPES],
     );
-    const rawCurrent = currentResult.rows[0]?.feedback_type ?? null;
-    const current: StateFeedbackType | null = rawCurrent === "clear" ? null : rawCurrent;
+    const current: StateFeedbackType | null = deriveToggleState(currentResult.rows[0]?.feedback_type ?? null);
     // The state this request would leave the property in: `clear` collapses to
     // neutral (null). Re-clearing an already-neutral property (or re-asserting
     // the active state) is a real no-op — no redundant event, no retrain.
@@ -164,13 +205,12 @@ export async function getFeedbackHistory(profileId: number, propertyId: number):
 }
 
 /**
- * The single active toggle state (accept/reject/star), derived as the
- * feedback_type of the most recent event *among accept/reject/star/clear* —
- * note and correction events never change this (EC-2), and a trailing `clear`
- * (#379) resets it to neutral (null). accept/reject/star share one derived
- * state rather than three independent booleans: starring a previously-accepted
- * candidate replaces "accepted" with "starred" as the highlighted button,
- * matching the single-active-toggle UI design.
+ * The single active toggle state (accept/reject), derived as the feedback_type
+ * of the most recent event *among accept/reject/star/clear* — note and
+ * correction events never change this (EC-2), and a trailing `clear` (#379) or
+ * a legacy `star` (#422, retired) collapses it to neutral (null). accept and
+ * reject are mutually exclusive: the newer event wins, matching the
+ * single-active-toggle UI design.
  */
 export async function getCurrentState(profileId: number, propertyId: number): Promise<StateFeedbackType | null> {
   const rows = await sql<{ feedback_type: DerivedStateFeedbackType }>(
@@ -182,8 +222,7 @@ export async function getCurrentState(profileId: number, propertyId: number): Pr
       LIMIT 1`,
     [profileId, propertyId, DERIVED_STATE_FEEDBACK_TYPES],
   );
-  // A trailing `clear` (#379) collapses to neutral — the property is no longer
-  // accepted/rejected/starred.
-  const latest = rows[0]?.feedback_type ?? null;
-  return latest === "clear" ? null : latest;
+  // A trailing `clear` (#379) or a legacy `star` (#422) collapses to neutral —
+  // the property is no longer tracked/rejected.
+  return deriveToggleState(rows[0]?.feedback_type ?? null);
 }

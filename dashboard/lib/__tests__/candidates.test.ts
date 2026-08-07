@@ -32,6 +32,7 @@ import { resetPool } from "@/lib/db-write";
 // (rejected candidates hidden). #386 appends caveat ($13) and redflagType
 // ($14), both null (off) by default. #392 appends beachProximity ($15) and
 // heritageZone ($16), both null (off). #398 appends isVpo ($17), null (off).
+// #422 appends the "En seguimiento" state filter ($18), null (off).
 // This is the "all filters off" tail every existing listCandidates assertion
 // carries now.
 const NO_FILTER_TAIL = [
@@ -41,6 +42,7 @@ const NO_FILTER_TAIL = [
   null,
   null,
   false,
+  null,
   null,
   null,
   null,
@@ -218,6 +220,29 @@ describe("listCandidates", () => {
     await listCandidates(7, { includeRejected: true });
 
     expect(mockPoolQuery.mock.calls[0][1][11]).toBe(true);
+  });
+
+  it("passes state='accept' as $18 for the 'En seguimiento' working set, and gates on ranked.feedback_state (#422)", async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [] });
+
+    await listCandidates(7, { state: "accept" });
+
+    const [sql, params] = mockPoolQuery.mock.calls[0];
+    // $18 (index 17) is the seguimiento state filter.
+    expect(params[17]).toBe("accept");
+    expect(sql).toContain("ranked.feedback_state = $18");
+  });
+
+  it("leaves the state filter off ($18 = null) by default, and for any non-'accept' value (#422)", async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [] });
+
+    await listCandidates(7);
+    expect(mockPoolQuery.mock.calls[0][1][17]).toBeNull();
+
+    mockPoolQuery.mockClear();
+    // Only 'accept' is a valid verdict scope today; anything else collapses to off.
+    await listCandidates(7, { state: "reject" as unknown as "accept" });
+    expect(mockPoolQuery.mock.calls[0][1][17]).toBeNull();
   });
 
   it("surfaces the row's feedback_state on the mapped candidate (#379)", async () => {

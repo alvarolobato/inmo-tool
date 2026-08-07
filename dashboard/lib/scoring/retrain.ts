@@ -5,7 +5,7 @@
  * Technical approach #3 — simplest correct v1 behavior; revisit with
  * debouncing/batching only if this measurably becomes a bottleneck, which
  * won't happen at the data volumes this project runs at). Wired from the
- * feedback route (task 3.1) after a real (non-no-op) accept/reject/star
+ * feedback route (task 3.1) after a real (non-no-op) accept/reject
  * event — not from `note`/`correction`, which never change a training label
  * and would just retrain to the identical result.
  *
@@ -51,7 +51,7 @@ export interface RetrainResult {
 /**
  * Retrains the profile's model (if there's enough signal to) and rescores
  * every one of its matched candidates. Safe to call with zero or
- * one-sided feedback (all accepts, no rejects, or vice versa) — logistic
+ * one-sided feedback (all accepts / seguimiento, no rejects, or vice versa) — logistic
  * regression needs both classes to mean anything, so training is skipped
  * (not attempted-and-degenerate) until both exist. That "not enough
  * feedback yet" fallback ranking is issue #23's job, not this one — this
@@ -86,19 +86,15 @@ export async function retrainAndRescoreProfile(profileId: number): Promise<Retra
   // profile accumulates enough of its own accept/reject history.
   const preferenceModel = buildPreferenceModelFromStates(states, rawByProperty, normalization);
 
-  // Only accept/reject label the classifier (issue #21's Technical approach
-  // #1's simplest-v1 choice) — a property whose latest state is 'star', or
-  // that has no state feedback at all, is excluded from the training set
-  // but still gets rescored below once a model exists.
-  // "star" is a stronger positive than "accept" per issue #21 (task 3.1's
-  // feedback toggle makes star *replace* accept as the current state) — it
-  // must still label the classifier as positive, or accepting a property
-  // and later starring it (a natural upgrade, not a retraction) erases the
-  // only positive example and permanently wedges training at
-  // "needs_both_classes" (Opus review of PR #91, item 2).
+  // accept/reject label the classifier (issue #21's Technical approach #1's
+  // simplest-v1 choice) — accept → 1 (positive), reject → 0 (negative). A
+  // property with no state feedback at all is excluded from the training set
+  // but still gets rescored below once a model exists. `star` was retired
+  // (#422): fetchLatestFeedbackStates already drops the retired-star and
+  // cleared rows, so `states` only ever carries accept/reject here.
   const labelByProperty = new Map<number, 0 | 1>();
   for (const row of states) {
-    if (row.feedback_type === "accept" || row.feedback_type === "star") labelByProperty.set(row.property_id, 1);
+    if (row.feedback_type === "accept") labelByProperty.set(row.property_id, 1);
     else if (row.feedback_type === "reject") labelByProperty.set(row.property_id, 0);
   }
 

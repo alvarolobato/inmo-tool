@@ -22,9 +22,9 @@ export interface ProfileOverviewMetrics {
   matched_count: number;
   /** Matched properties with property.created_at >= COALESCE(last_viewed_at, created_at - 1 day) — "seen since your last visit", or "first-seen in the last 24h" for a never-visited profile. */
   new_count: number;
+  /** Properties whose latest verdict is `accept` — i.e. the "en seguimiento" (tracked) working set (#422). */
   accepted_count: number;
   rejected_count: number;
-  starred_count: number;
   /** MIN(listing.current_price) across a matched property's active listings, aggregated across all matched properties. Null when no matched property has a priced active listing. */
   min_price: number | null;
   median_price: number | null;

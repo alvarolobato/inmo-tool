@@ -9,6 +9,7 @@ import {
   buildPreferenceModel,
   buildPreferenceModelFromStates,
   fetchLatestFeedbackStates,
+  labelForFeedback,
   loadProfilePreferenceModel,
   MIN_FEEDBACK_TO_LEARN,
   preferenceClause,
@@ -154,11 +155,14 @@ describe("preference signal — learns per profile from accept/reject (task 7.2,
     expect(applyPreferenceSignal(base, signalGood)).toBeGreaterThan(applyPreferenceSignal(base, signalBad));
   });
 
-  it("a 'star' verdict labels the liked class, same as accept", () => {
+  it("#422: accept labels the liked class, reject the negative (star is retired)", () => {
+    // labelForFeedback now only accepts accept/reject — accept → 1, reject → 0.
+    expect(labelForFeedback("accept")).toBe(1);
+    expect(labelForFeedback("reject")).toBe(0);
+
     const { normalization } = normalizedPool([...GOOD_ROWS, ...BAD_ROWS]);
     const states: LatestFeedbackState[] = [
-      { property_id: GOOD_ROWS[0].property_id, feedback_type: "star" },
-      ...GOOD_ROWS.slice(1).map((r) => ({ property_id: r.property_id, feedback_type: "accept" as const })),
+      ...GOOD_ROWS.map((r) => ({ property_id: r.property_id, feedback_type: "accept" as const })),
       ...BAD_ROWS.map((r) => ({ property_id: r.property_id, feedback_type: "reject" as const })),
     ];
     const rawByProperty = new Map([...GOOD_ROWS, ...BAD_ROWS].map((r) => [r.property_id, extractRaw(r, SCOPE)]));
@@ -362,6 +366,41 @@ describe.runIf(dbAvailable)("loadProfilePreferenceModel reads real feedback (tas
       );
       await pool.query(
         `INSERT INTO feedback_event (profile_id, property_id, feedback_type, created_at) VALUES ($1, $2, 'clear', NOW())`,
+        [profile.id, propertyId],
+      );
+
+      const states = await fetchLatestFeedbackStates(profile.id);
+      expect(states.filter((s) => s.property_id === propertyId)).toHaveLength(0);
+    });
+  }, 20000);
+
+  it("#422: a trailing legacy 'star' is dropped from training (retired — collapsed like 'clear')", async () => {
+    await withRealDb(async (pool) => {
+      const scope: Scope = {
+        geography: { type: "radius", center: TEST_COORDS, radius_km: 5 },
+        property_types: ["piso"],
+        hard_exclusions: {},
+      };
+      const profile = await createProfile(`pref-star-${Date.now()}-${Math.random()}`, scope, {});
+      createdProfileIds.push(profile.id);
+
+      const propRes = await pool.query<{ id: string }>(
+        `INSERT INTO property (lat, lon, property_type, m2_built) VALUES ($1, $2, 'piso', 70) RETURNING id`,
+        [TEST_COORDS[0], TEST_COORDS[1]],
+      );
+      const propertyId = Number(propRes.rows[0].id);
+      createdPropertyIds.push(propertyId);
+
+      // accept, then a later legacy 'star' (pre-#422 data). Star is retired, so
+      // the latest-wins read must WIN on the star row (not fall back to the
+      // accept) and then drop it — leaving the property out of the training set.
+      await pool.query(
+        `INSERT INTO feedback_event (profile_id, property_id, feedback_type, created_at)
+         VALUES ($1, $2, 'accept', NOW() - INTERVAL '1 hour')`,
+        [profile.id, propertyId],
+      );
+      await pool.query(
+        `INSERT INTO feedback_event (profile_id, property_id, feedback_type, created_at) VALUES ($1, $2, 'star', NOW())`,
         [profile.id, propertyId],
       );
 

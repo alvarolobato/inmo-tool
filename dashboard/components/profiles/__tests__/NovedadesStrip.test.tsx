@@ -29,7 +29,6 @@ function metrics(newCount: number): ProfileOverviewMetrics {
     new_count: newCount,
     accepted_count: 0,
     rejected_count: 0,
-    starred_count: 0,
     min_price: null,
     median_price: null,
     max_price: null,

@@ -297,7 +297,8 @@ export default function PropertyDetailPage() {
         <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 20 }}>
           <PropertyHeader property={property} />
           {/*
-            #417: the same accept/reject/star controls the feed card carries,
+            #417: the same seguir(accept)/descartar(reject) controls the feed
+            card carries (#422 retired the star toggle),
             mounted here so you can reject/track from the page you're reading —
             reusing FeedbackControls (no new feedback logic). initialState is
             omitted, so it self-fetches this property's current verdict on mount

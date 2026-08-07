@@ -44,15 +44,19 @@ describe("FeedbackControls", () => {
     return fetchMock;
   }
 
-  it("renders icon-only accept/reject/star/note buttons (no inline-label variant exists anymore)", async () => {
+  it("renders icon-only seguir/descartar/note buttons — the star button is gone (#422)", async () => {
     mockGetThenFetch(async () => ({ ok: true, json: async () => ({ currentState: null }) }));
     render(<FeedbackControls profileId={1} propertyId={2} />);
 
     await waitFor(() => expect(screen.getByTestId("feedback-accept")).toBeInTheDocument());
     expect(screen.getByTestId("feedback-accept")).toHaveTextContent("✓");
     expect(screen.getByTestId("feedback-reject")).toHaveTextContent("✗");
-    expect(screen.getByTestId("feedback-star")).toHaveTextContent("★");
     expect(screen.getByTestId("feedback-note-toggle")).toHaveTextContent("✎");
+    // #422: the star ("destacar") toggle was removed — accept IS the follow
+    // action now, so there is no third state button.
+    expect(screen.queryByTestId("feedback-star")).not.toBeInTheDocument();
+    // Accept is relabelled to the follow/track semantics.
+    expect(screen.getByTestId("feedback-accept")).toHaveAccessibleName("Seguir");
     // The deleted non-compact variant used to render "✓ Aceptar" etc.
     expect(screen.queryByText("✓ Aceptar")).not.toBeInTheDocument();
   });
@@ -158,12 +162,11 @@ describe("FeedbackControls", () => {
     it("marks only the button matching the fetched current state as data-active, so it stays visible without hover (globals.css .feedback-toggle[data-active])", async () => {
       vi.stubGlobal(
         "fetch",
-        vi.fn().mockResolvedValueOnce({ ok: true, json: async () => ({ currentState: "star" }) }),
+        vi.fn().mockResolvedValueOnce({ ok: true, json: async () => ({ currentState: "accept" }) }),
       );
       render(<FeedbackControls profileId={1} propertyId={2} />);
 
-      await waitFor(() => expect(screen.getByTestId("feedback-star")).toHaveAttribute("data-active", "true"));
-      expect(screen.getByTestId("feedback-accept")).toHaveAttribute("data-active", "false");
+      await waitFor(() => expect(screen.getByTestId("feedback-accept")).toHaveAttribute("data-active", "true"));
       expect(screen.getByTestId("feedback-reject")).toHaveAttribute("data-active", "false");
       // The note toggle isn't a state button — it never carries data-active,
       // so it can never accidentally read as "this property's status".
@@ -177,25 +180,24 @@ describe("FeedbackControls", () => {
       await waitFor(() => expect(screen.getByTestId("feedback-accept")).toBeInTheDocument());
       expect(screen.getByTestId("feedback-accept")).toHaveAttribute("data-active", "false");
       expect(screen.getByTestId("feedback-reject")).toHaveAttribute("data-active", "false");
-      expect(screen.getByTestId("feedback-star")).toHaveAttribute("data-active", "false");
     });
 
-    it("moves data-active to the newly-clicked button once the server confirms the switch (accept -> star)", async () => {
+    it("moves data-active to the newly-clicked button once the server confirms the switch (accept -> reject)", async () => {
       vi.stubGlobal(
         "fetch",
         vi
           .fn()
           .mockResolvedValueOnce({ ok: true, json: async () => ({ currentState: "accept" }) })
-          .mockResolvedValueOnce({ ok: true, json: async () => ({ currentState: "star" }) }),
+          .mockResolvedValueOnce({ ok: true, json: async () => ({ currentState: "reject" }) }),
       );
       render(<FeedbackControls profileId={1} propertyId={2} />);
       await waitFor(() => expect(screen.getByTestId("feedback-accept")).toHaveAttribute("data-active", "true"));
 
-      fireEvent.click(screen.getByTestId("feedback-star"));
+      fireEvent.click(screen.getByTestId("feedback-reject"));
 
-      await waitFor(() => expect(screen.getByTestId("feedback-star")).toHaveAttribute("data-active", "true"));
+      await waitFor(() => expect(screen.getByTestId("feedback-reject")).toHaveAttribute("data-active", "true"));
       // Same mutual-exclusivity getCurrentState (lib/db/feedback.ts) derives
-      // server-side: starring replaces accepted, never adds to it.
+      // server-side: rejecting replaces the accept, never adds to it.
       expect(screen.getByTestId("feedback-accept")).toHaveAttribute("data-active", "false");
     });
 
@@ -204,7 +206,7 @@ describe("FeedbackControls", () => {
       render(<FeedbackControls profileId={1} propertyId={2} />);
       await waitFor(() => expect(screen.getByTestId("feedback-accept")).toBeInTheDocument());
 
-      for (const testId of ["feedback-accept", "feedback-reject", "feedback-star", "feedback-note-toggle"]) {
+      for (const testId of ["feedback-accept", "feedback-reject", "feedback-note-toggle"]) {
         expect(screen.getByTestId(testId)).toHaveClass("feedback-toggle");
       }
     });
@@ -214,12 +216,11 @@ describe("FeedbackControls", () => {
     // the right CSS custom-property *name* for each state — it does NOT and
     // CANNOT prove that name resolves to a real, visible colour. jsdom
     // doesn't run a layout/cascade engine, so `.style.background` here is
-    // just the literal string the component wrote; if `--up`/`--down`/
-    // `--warn` were deleted from globals.css entirely, every assertion in
+    // just the literal string the component wrote; if `--up`/`--down` were deleted from globals.css entirely, every assertion in
     // this file would still pass unchanged (a real browser would compute
     // `background-color` from an undefined var() as fully transparent, but
     // jsdom never gets that far). The companion test right below
-    // ("the --up/--down/--warn tokens...") closes that specific gap the only
+    // ("the --up/--down tokens...") closes that specific gap the only
     // way jsdom can: by asserting the tokens are actually *defined* in the
     // stylesheet, as text — not by asserting a resolved colour, which is
     // what card-detail-ux.spec.ts's real-Chromium `getComputedStyle` checks
@@ -246,8 +247,8 @@ describe("FeedbackControls", () => {
       expect(reject.style.background).toBe(INACTIVE_FILL);
     });
 
-    it("each state type gets its own colour token — accept/reject/star don't collapse to one generic 'active' colour", async () => {
-      const colorFor = async (currentState: "accept" | "reject" | "star") => {
+    it("each state type gets its own colour token — accept/reject don't collapse to one generic 'active' colour", async () => {
+      const colorFor = async (currentState: "accept" | "reject") => {
         vi.stubGlobal(
           "fetch",
           vi.fn().mockResolvedValueOnce({ ok: true, json: async () => ({ currentState }) }),
@@ -263,16 +264,14 @@ describe("FeedbackControls", () => {
 
       const accept = await colorFor("accept");
       const reject = await colorFor("reject");
-      const star = await colorFor("star");
 
       expect(accept).toBe("var(--up)");
       expect(reject).toBe("var(--down)");
-      expect(star).toBe("var(--warn)");
-      expect(new Set([accept, reject, star]).size).toBe(3);
+      expect(new Set([accept, reject]).size).toBe(2);
     });
 
     // Closes the gap the two tests above cannot: jsdom can't resolve var(),
-    // so it can't prove --up/--down/--warn actually resolve to a real
+    // so it can't prove --up/--down actually resolve to a real
     // colour. What it CAN prove, as plain text, is that those custom
     // properties are still defined in the stylesheet at all — a deleted
     // token would leave every assertion above passing (a literal
@@ -280,9 +279,9 @@ describe("FeedbackControls", () => {
     // making every active button transparent in a real browser. The
     // resolved-colour check itself lives in card-detail-ux.spec.ts (real
     // Chromium, real getComputedStyle).
-    it("the --up/--down/--warn tokens the fills above rely on are actually defined in globals.css, in both themes", () => {
+    it("the --up/--down tokens the fills above rely on are actually defined in globals.css, in both themes", () => {
       const css = readFileSync(path.join(__dirname, "../../app/globals.css"), "utf8");
-      for (const token of ["--up", "--down", "--warn"]) {
+      for (const token of ["--up", "--down"]) {
         const matches = css.match(new RegExp(`${token}:\\s*#[0-9a-fA-F]{3,8}`, "g")) ?? [];
         // Defined at least twice: this project's light and dark theme blocks
         // each set their own value (globals.css's `:root`/dark-theme

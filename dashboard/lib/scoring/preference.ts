@@ -1,6 +1,6 @@
 /**
  * Per-profile preference signal — a self-learning nudge derived from a
- * profile's OWN accept/reject/star history (task 7.2, #40).
+ * profile's OWN accept/reject history (task 7.2, #40).
  *
  * This is the pragmatic v2 scaffold issue #40 scopes: rather than standing up
  * a text-embedding provider on day one (only ~6 feedback events exist across
@@ -12,7 +12,7 @@
  *
  * How it learns (no hardcoded preferences — everything is derived from the
  * owner's own decisions):
- *   - Take every property this profile has an accept/star (positive) or reject
+ *   - Take every property this profile has an accept (positive) or reject
  *     (negative) verdict on, as its z-scored feature vector.
  *   - The profile's "liked" direction is the centroid of the positive
  *     vectors; the "disliked" direction is the centroid of the negatives.
@@ -48,7 +48,7 @@ import {
 } from "./model";
 
 /**
- * Minimum labeled (accept/reject/star) examples a profile needs before the
+ * Minimum labeled (accept/reject) examples a profile needs before the
  * preference signal contributes anything at all. Deliberately well BELOW
  * `pipeline.ts#MIN_TRAINING_EXAMPLES` (32) — the preference signal's whole
  * reason to exist is to start personalizing in the window where the full
@@ -78,7 +78,7 @@ export const PREFERENCE_SIGNAL_WEIGHT = 0.15;
 export const PREFERENCE_MEANINGFUL_THRESHOLD = 0.05;
 
 export interface PreferenceModel {
-  /** Centroid of the accepted/starred candidates' z-scored feature vectors. */
+  /** Centroid of the accepted candidates' z-scored feature vectors. */
   positiveCentroid: number[];
   /** Centroid of the rejected candidates' z-scored feature vectors. */
   negativeCentroid: number[];
@@ -88,12 +88,12 @@ export interface PreferenceModel {
 
 export interface LabeledVector {
   vector: number[];
-  /** 1 = accept/star (positive), 0 = reject (negative). */
+  /** 1 = accept (positive), 0 = reject (negative). */
   label: 0 | 1;
 }
 
-/** star and accept both label the "liked" class; reject is the only negative — mirrors retrain.ts. */
-export function labelForFeedback(type: "accept" | "reject" | "star"): 0 | 1 {
+/** accept labels the "liked" class, reject the negative (#422: `star` retired — mirrors retrain.ts). */
+export function labelForFeedback(type: "accept" | "reject"): 0 | 1 {
   return type === "reject" ? 0 : 1;
 }
 
@@ -193,12 +193,12 @@ export function preferenceClause(signal: number): string | null {
 
 export interface LatestFeedbackState {
   property_id: number;
-  feedback_type: "accept" | "reject" | "star";
+  feedback_type: "accept" | "reject";
 }
 
 /**
- * Current (latest-wins) accept/reject/star verdict per property for this
- * profile — the single feedback read the preference model learns from. Same
+ * Current (latest-wins) accept/reject verdict per property for this profile —
+ * the single feedback read the preference model learns from. Same
  * `DISTINCT ON (... ORDER BY created_at DESC, id DESC)` tie-break the rest of
  * the scoring pipeline uses, so "what the profile currently thinks of this
  * property" is defined identically everywhere. `property_id` is BIGINT and
@@ -208,11 +208,12 @@ export interface LatestFeedbackState {
 export async function fetchLatestFeedbackStates(
   profileId: number,
 ): Promise<LatestFeedbackState[]> {
-  // Derive over accept/reject/star/clear (#379) so a `clear` that POSTdates a
-  // reject wins the DISTINCT ON — then drop the `clear` rows, leaving the
-  // property with no state at all (excluded from training), rather than
-  // training on a verdict the user has since retracted.
-  const rows = await sql<{ property_id: number; feedback_type: LatestFeedbackState["feedback_type"] | "clear" }>(
+  // Derive over accept/reject/star/clear (#379/#422) so a trailing `clear` or a
+  // legacy `star` that POSTdates a reject wins the DISTINCT ON — then drop the
+  // `clear` AND retired `star` rows, leaving the property with no state at all
+  // (excluded from training), rather than training on a verdict the user has
+  // since retracted or on the retired star signal.
+  const rows = await sql<{ property_id: number; feedback_type: "accept" | "reject" | "star" | "clear" }>(
     `SELECT DISTINCT ON (property_id) property_id, feedback_type
        FROM feedback_event
       WHERE profile_id = $1 AND feedback_type = ANY($2::text[])
@@ -220,7 +221,7 @@ export async function fetchLatestFeedbackStates(
     [profileId, ["accept", "reject", "star", "clear"]],
   );
   return rows.filter(
-    (r): r is LatestFeedbackState => r.feedback_type !== "clear",
+    (r): r is LatestFeedbackState => r.feedback_type === "accept" || r.feedback_type === "reject",
   );
 }
 
