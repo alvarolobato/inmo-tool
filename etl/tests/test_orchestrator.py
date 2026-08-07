@@ -300,6 +300,135 @@ class TestShouldSkipFetch:
         )
         assert skip is True
 
+    # ── Issue #436 (D-099): accepted/'en seguimiento' always full-read ──────
+
+    def test_accepted_property_is_never_skipped_even_when_fresh_and_unchanged(self):
+        """The #436 exemption overrides every skip: a fresh listing whose list
+        price is unchanged (both a skip-if-seen skip AND a #435 unchanged skip
+        would otherwise fire) is STILL fetched because it's accepted."""
+        skip, reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(1),  # as fresh as possible
+            stored_price=Decimal(200000),
+            stored_status="active",
+            latest_observed_at=None,
+            min_refetch_interval_seconds=86400,
+            now=self._NOW,
+            discovered_price=Decimal(200000),  # unchanged — would skip via #435
+            is_accepted=True,
+        )
+        assert skip is False
+        assert "accepted" in reason
+        assert "seguimiento" in reason
+
+    def test_accepted_wins_over_the_unchanged_list_price_skip(self):
+        """Even with only the #435 signal present (no skip-if-seen window), an
+        accepted property is fetched, never skipped as unchanged."""
+        skip, _reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(60),
+            stored_price=Decimal(300000),
+            stored_status="active",
+            latest_observed_at=None,
+            min_refetch_interval_seconds=0,  # skip-if-seen off
+            now=self._NOW,
+            discovered_price=Decimal(300000),  # unchanged
+            is_accepted=True,
+        )
+        assert skip is False
+
+    # ── Issue #435 (D-099): list-price capture optimization ─────────────────
+
+    def test_unchanged_list_price_is_skipped(self):
+        """The core #435 optimization: a list-exposed price unchanged vs stored
+        (sub-1% move) means we already have the detail — skip the deep read,
+        even though the staleness window has elapsed."""
+        skip, reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(90000),  # stale — reason 6 would fetch
+            stored_price=Decimal(200000),
+            stored_status="active",
+            latest_observed_at=None,
+            min_refetch_interval_seconds=86400,
+            now=self._NOW,
+            discovered_price=Decimal(200000),
+        )
+        assert skip is True
+        assert "unchanged" in reason
+        assert "#435" in reason
+
+    def test_changed_list_price_is_deep_captured(self):
+        """A material in-band list-price change forces a same-run deep-capture."""
+        skip, reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(1),  # fresh — reason 6 would skip
+            stored_price=Decimal(200000),
+            stored_status="active",
+            latest_observed_at=None,
+            min_refetch_interval_seconds=86400,
+            now=self._NOW,
+            discovered_price=Decimal(190000),  # −5%, in band
+        )
+        assert skip is False
+        assert "changed" in reason
+
+    def test_suspect_list_price_move_is_still_deep_captured_to_confirm(self):
+        """A >60% list-price move is a suspect — deep-captured so the
+        authoritative fetch (which re-applies the sanity band) can confirm it,
+        same posture as D-098's re-fetch net."""
+        skip, _reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(1),
+            stored_price=Decimal(200000),
+            stored_status="active",
+            latest_observed_at=None,
+            min_refetch_interval_seconds=86400,
+            now=self._NOW,
+            discovered_price=Decimal(50000),  # −75% suspect
+        )
+        assert skip is False
+
+    def test_list_price_present_but_no_stored_price_backfills(self):
+        """A list price with no stored current_price to compare against is a
+        deep-capture (backfill), not an unchanged-skip."""
+        skip, reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(1),
+            stored_price=None,
+            stored_status="active",
+            latest_observed_at=None,
+            min_refetch_interval_seconds=86400,
+            now=self._NOW,
+            discovered_price=Decimal(200000),
+        )
+        assert skip is False
+        assert "backfill" in reason
+
+    def test_new_listing_with_a_list_price_is_always_fully_captured(self):
+        """A never-fetched listing is fully captured first (reason 1), even if a
+        list price is present — the optimization only applies from pass 2 on."""
+        skip, reason = orchestrator._should_skip_fetch(
+            last_fetched_at=None,
+            stored_price=None,
+            stored_status=None,
+            latest_observed_at=None,
+            min_refetch_interval_seconds=86400,
+            now=self._NOW,
+            discovered_price=Decimal(200000),
+        )
+        assert skip is False
+        assert "never fetched" in reason
+
+    def test_withdrawn_wins_over_the_unchanged_list_price_skip(self):
+        """A non-'active' stored status forces a fetch before the #435 branch —
+        a reappearing withdrawn listing at an unchanged list price must still
+        be re-fetched to reconcile it back to active."""
+        skip, reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(1),
+            stored_price=Decimal(200000),
+            stored_status="withdrawn",
+            latest_observed_at=None,
+            min_refetch_interval_seconds=86400,
+            now=self._NOW,
+            discovered_price=Decimal(200000),  # unchanged — 2b would skip
+        )
+        assert skip is False
+        assert "not 'active'" in reason
+
 
 class TestPriceSanityBand:
     """Issue #432 / D-098: the phase-2 sanity band that gates whether a raw
@@ -1765,17 +1894,18 @@ class TestSkipIfSeenIntegration:
                     cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
             pg_conn.commit()
 
-    def test_discovery_time_price_change_updates_display_and_reanchors_refetch(
-        self, pg_conn
-    ):
-        """The mutation-critical proof, revised for issue #432 / D-098: a
-        discovery-time price change must (a) update the displayed/deal-math
-        `current_price` IMMEDIATELY (latest-observed is authoritative) and
-        (b) leave an unconfirmed observation that forces a confirming re-fetch
-        on the NEXT sweep — the re-anchored safety net (latest observed_at >
-        last_fetched_at), not the old discovery-vs-current_price trigger. A
-        large min_refetch_interval_seconds proves the observation, not elapsed
-        time, is what drives the re-fetch."""
+    def test_discovery_price_change_is_deep_captured_the_same_run(self, pg_conn):
+        """Revised for issue #435 (D-099): a list-price connector's discovery-time
+        price change is now caught by the results-page scan and **deep-captured
+        the SAME run** (the #435 capture optimization drives the decision from the
+        list price), rather than recorded-now-confirm-next-sweep as D-098's
+        re-anchored net did. D-098's invariants still hold end-to-end: the latest
+        observed price becomes `current_price` (through the sanity band) and the
+        drop is recorded to history exactly once (the deep-capture's row; the
+        discovery recorder dedups against it). A large min_refetch window proves
+        the list-price change — not elapsed time — is what forces the fetch. The
+        re-anchored reason-#5 net survives for listings WITHOUT a list price — see
+        test_reason5_refetch_net_survives_without_a_list_price."""
         _apply_schema(pg_conn)
         connector = DummyConnector(
             name="skip-seen-price-change",
@@ -1790,32 +1920,33 @@ class TestSkipIfSeenIntegration:
             assert connector.fetch_calls == ["p-1"]
 
             # Run 2: a real price drop seen at discovery time (Fotocasa's
-            # rawPrice-equivalent). The listing is nowhere near stale, so the
-            # fetch loop SKIPS it this run — but the discovery recorder both
-            # records the drop AND adopts it as current_price, so the display
-            # is correct immediately without waiting for the confirm.
+            # rawPrice-equivalent). The #435 list-price scan catches the change
+            # and deep-captures it THIS run, even though the listing is nowhere
+            # near stale — that is the whole optimization: open the detail page
+            # for exactly the new/changed listings.
             connector.discovery_price_overrides = {"p-1": 195000}
             connector.price = 195000
             run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
 
-            assert connector.fetch_calls == ["p-1"], (
-                "a fresh listing is skipped by the fetch loop this run — the "
-                "confirming re-fetch is deferred to the next sweep (D-098)"
+            assert connector.fetch_calls == ["p-1", "p-1"], (
+                "a list-exposed price change is deep-captured the same run "
+                "(#435), not deferred to the next sweep"
             )
             current_price, _last_seen, _last_fetched = self._listing_row(
                 pg_conn, connector.name, "p-1"
             )
             assert current_price == Decimal(195000), (
-                "the latest observed price is adopted as current_price at "
-                "discovery time — display/deal-math are correct immediately"
+                "the deep-captured price is adopted as current_price through "
+                "the sanity band — display/deal-math are correct immediately"
             )
 
-            # Run 3: the unconfirmed observation (observed_at > last_fetched_at)
-            # now forces the authoritative re-fetch, which confirms 195000.
+            # Run 3: nothing changed at the list — the #435 scan now SKIPS the
+            # unchanged listing (no wasteful re-open), and there is no unconfirmed
+            # observation left to force anything either.
             run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
             assert connector.fetch_calls == ["p-1", "p-1"], (
-                "the re-anchored trigger forces a confirming re-fetch on the "
-                "next sweep because an observation is newer than last_fetched_at"
+                "an unchanged list price is skipped by the #435 optimization — "
+                "no third fetch"
             )
 
             with pg_conn.cursor() as cur:
@@ -1827,9 +1958,9 @@ class TestSkipIfSeenIntegration:
                 )
                 prices = [row[0] for row in cur.fetchall()]
             assert prices == [205000, 195000], (
-                "the drop is recorded exactly once (the discovery observation); "
-                "the confirming re-fetch returns the same 195000 and appends "
-                "nothing new"
+                "the drop is recorded exactly once — the deep-capture's row; the "
+                "discovery recorder dedups against it rather than stacking a "
+                "second identical row (D-098 invariant preserved)"
             )
         finally:
             orchestrator.CONNECTORS.clear()
@@ -1973,6 +2104,323 @@ class TestSkipIfSeenIntegration:
             assert connector.fetch_calls == ["mp-1", "mp-1"], (
                 "a missing stored price must force a re-fetch even though "
                 "the listing is fresh by age"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            with pg_conn.cursor() as cur:
+                for r in run_ids:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+
+    def test_unchanged_list_price_listing_is_skipped_and_counted(self, pg_conn):
+        """Issue #435 (D-099): on a list-price connector, a second pass over an
+        unchanged listing does NOT re-open its detail page — it's counted as
+        skipped_unchanged, distinct from fetched (deep-captured)."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="opt-unchanged",
+            external_ids=("u-1",),
+            price=250000,
+            min_refetch_interval_seconds=24 * 60 * 60,
+        )
+        # The connector exposes the same list price on every sweep.
+        connector.discovery_price_overrides = {"u-1": 250000}
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["u-1"], "first pass deep-captures"
+
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["u-1"], (
+                "second pass must NOT re-open the detail — list price unchanged"
+            )
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT fetched_count, skipped_count, skipped_unchanged_count "
+                    "FROM connector_run_results "
+                    "WHERE run_id = %s AND connector_name = %s",
+                    (run_ids[1], connector.name),
+                )
+                fetched, skipped, skipped_unchanged = cur.fetchone()
+            assert (fetched, skipped, skipped_unchanged) == (0, 0, 1), (
+                "the unchanged listing is counted as skipped_unchanged (#435), "
+                "not a skip-if-seen skip and not fetched"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            with pg_conn.cursor() as cur:
+                for r in run_ids:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+
+    def test_accepted_property_is_full_read_even_when_unchanged(self, pg_conn):
+        """Issue #436 (D-099): an accepted/'en seguimiento' property is re-read
+        in FULL on every pass, exempt from the #435 unchanged-skip — even at an
+        unchanged list price and well inside the staleness window."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="accepted-fullread",
+            external_ids=("a-1",),
+            price=250000,
+            min_refetch_interval_seconds=24 * 60 * 60,
+        )
+        connector.discovery_price_overrides = {"a-1": 250000}  # never changes
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["a-1"]
+
+            # Mark the listing's property as accepted in an active profile.
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT property_id FROM listing "
+                    "WHERE source = %s AND external_id = %s",
+                    (connector.name, "a-1"),
+                )
+                (property_id,) = cur.fetchone()
+                cur.execute(
+                    "INSERT INTO search_profile (name, scope) "
+                    "VALUES ('acc-profile', '{}'::jsonb) RETURNING id"
+                )
+                (profile_id,) = cur.fetchone()
+                cur.execute(
+                    "INSERT INTO profile_listing_state (profile_id, property_id, matched) "
+                    "VALUES (%s, %s, true)",
+                    (profile_id, property_id),
+                )
+                cur.execute(
+                    "INSERT INTO feedback_event (profile_id, property_id, feedback_type) "
+                    "VALUES (%s, %s, 'accept')",
+                    (profile_id, property_id),
+                )
+            pg_conn.commit()
+
+            # Second pass: list price unchanged (would be a #435 skip), but the
+            # property is accepted → full detail-read anyway.
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["a-1", "a-1"], (
+                "an accepted property must be full-read even when unchanged"
+            )
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT fetched_count, skipped_unchanged_count "
+                    "FROM connector_run_results "
+                    "WHERE run_id = %s AND connector_name = %s",
+                    (run_ids[1], connector.name),
+                )
+                fetched, skipped_unchanged = cur.fetchone()
+            assert (fetched, skipped_unchanged) == (1, 0), (
+                "accepted property is deep-captured, not counted as unchanged"
+            )
+
+            # An accepted property behind skip-if-seen (no list price) is ALSO
+            # never skipped — flip the connector to expose no list price and
+            # prove the exemption holds at the staleness decision point too.
+            connector.discovery_price_overrides = {}
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["a-1", "a-1", "a-1"], (
+                "accepted exemption also holds against skip-if-seen (no list price)"
+            )
+        finally:
+            orchestrator.CONNECTORS.clear()
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM feedback_event WHERE profile_id IN "
+                    "(SELECT id FROM search_profile WHERE name = 'acc-profile')"
+                )
+                cur.execute(
+                    "DELETE FROM profile_listing_state WHERE profile_id IN "
+                    "(SELECT id FROM search_profile WHERE name = 'acc-profile')"
+                )
+                cur.execute("DELETE FROM search_profile WHERE name = 'acc-profile'")
+            pg_conn.commit()
+            _cleanup(pg_conn, connector.name, None)
+            with pg_conn.cursor() as cur:
+                for r in run_ids:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+
+    def test_accepted_property_ids_derivation(self, pg_conn):
+        """Issue #436 (D-099): `_accepted_property_ids` returns exactly the
+        properties whose LATEST state-defining feedback is 'accept', matched in
+        an ACTIVE profile — latest-wins (a later reject un-accepts), archived
+        profiles excluded, unmatched excluded."""
+        _apply_schema(pg_conn)
+        created: dict[str, int] = {}
+        try:
+            with pg_conn.cursor() as cur:
+
+                def _prop(addr: str) -> int:
+                    cur.execute(
+                        "INSERT INTO property (address, property_type) "
+                        "VALUES (%s, 'piso') RETURNING id",
+                        (addr,),
+                    )
+                    return cur.fetchone()[0]
+
+                cur.execute(
+                    "INSERT INTO search_profile (name, scope) "
+                    "VALUES ('d-active', '{}'::jsonb) RETURNING id"
+                )
+                active_id = cur.fetchone()[0]
+                cur.execute(
+                    "INSERT INTO search_profile (name, scope, archived_at) "
+                    "VALUES ('d-archived', '{}'::jsonb, NOW()) RETURNING id"
+                )
+                archived_id = cur.fetchone()[0]
+
+                p_accept = _prop("accepted")  # latest = accept → IN
+                p_reaccept = _prop("re-accepted")  # accept, reject, accept → IN
+                p_unaccept = _prop("un-accepted")  # accept then reject → OUT
+                p_unmatched = _prop("unmatched")  # accept but matched=false → OUT
+                p_archived = _prop("archived-profile")  # accept in archived → OUT
+                created = {
+                    "active": active_id,
+                    "archived": archived_id,
+                    "props": [
+                        p_accept,
+                        p_reaccept,
+                        p_unaccept,
+                        p_unmatched,
+                        p_archived,
+                    ],
+                }
+
+                for pid, matched in (
+                    (p_accept, True),
+                    (p_reaccept, True),
+                    (p_unaccept, True),
+                    (p_unmatched, False),
+                ):
+                    cur.execute(
+                        "INSERT INTO profile_listing_state (profile_id, property_id, matched) "
+                        "VALUES (%s, %s, %s)",
+                        (active_id, pid, matched),
+                    )
+                cur.execute(
+                    "INSERT INTO profile_listing_state (profile_id, property_id, matched) "
+                    "VALUES (%s, %s, true)",
+                    (archived_id, p_archived),
+                )
+
+                def _fb(profile_id, pid, ftype, ago_seconds):
+                    cur.execute(
+                        "INSERT INTO feedback_event "
+                        "(profile_id, property_id, feedback_type, created_at) "
+                        "VALUES (%s, %s, %s, NOW() - make_interval(secs => %s))",
+                        (profile_id, pid, ftype, ago_seconds),
+                    )
+
+                _fb(active_id, p_accept, "accept", 10)
+                _fb(active_id, p_reaccept, "accept", 30)
+                _fb(active_id, p_reaccept, "reject", 20)
+                _fb(active_id, p_reaccept, "accept", 10)  # latest wins → accept
+                _fb(active_id, p_unaccept, "accept", 30)
+                _fb(active_id, p_unaccept, "reject", 10)  # latest wins → reject
+                _fb(active_id, p_unmatched, "accept", 10)
+                _fb(archived_id, p_archived, "accept", 10)
+            pg_conn.commit()
+
+            accepted = orchestrator._accepted_property_ids(pg_conn)
+            assert p_accept in accepted
+            assert p_reaccept in accepted
+            assert p_unaccept not in accepted
+            assert p_unmatched not in accepted
+            assert p_archived not in accepted
+        finally:
+            with pg_conn.cursor() as cur:
+                if created:
+                    ids = tuple(created["props"])
+                    cur.execute(
+                        "DELETE FROM feedback_event WHERE property_id = ANY(%s)",
+                        (list(ids),),
+                    )
+                    cur.execute(
+                        "DELETE FROM profile_listing_state WHERE property_id = ANY(%s)",
+                        (list(ids),),
+                    )
+                    cur.execute(
+                        "DELETE FROM search_profile WHERE id = ANY(%s)",
+                        ([created["active"], created["archived"]],),
+                    )
+                    cur.execute("DELETE FROM property WHERE id = ANY(%s)", (list(ids),))
+            pg_conn.commit()
+
+    def test_portal_without_list_prices_falls_back_to_full_capture(self, pg_conn):
+        """Issue #435 (D-099): a connector that exposes no list price
+        (discovered_prices() == {}) gets no capture optimization — it fully
+        fetches every discovered listing every pass (subject only to the
+        existing skip-if-seen policy, which is off here)."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="no-listprice",
+            external_ids=("n-1",),
+            price=250000,
+            min_refetch_interval_seconds=0,  # skip-if-seen off (the default)
+        )
+        # No discovery_price_overrides → discovered_prices() == {}.
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["n-1", "n-1"], (
+                "no list price → full capture every pass (no #435 skip)"
+            )
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT skipped_unchanged_count FROM connector_run_results "
+                    "WHERE run_id = %s AND connector_name = %s",
+                    (run_ids[1], connector.name),
+                )
+                (skipped_unchanged,) = cur.fetchone()
+            assert skipped_unchanged == 0
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, None)
+            with pg_conn.cursor() as cur:
+                for r in run_ids:
+                    cur.execute("DELETE FROM connector_runs WHERE id = %s", (r,))
+            pg_conn.commit()
+
+    def test_reason5_refetch_net_survives_without_a_list_price(self, pg_conn):
+        """Issue #432 / D-098 preserved: for a listing with NO list price this
+        run, an unconfirmed observation (history observed_at > last_fetched_at)
+        still forces the re-anchored confirming re-fetch — the #435 branch never
+        short-circuits it because discovered_price is None."""
+        _apply_schema(pg_conn)
+        connector = DummyConnector(
+            name="reason5-survives",
+            external_ids=("x-1",),
+            price=300000,
+            min_refetch_interval_seconds=24 * 60 * 60,
+        )
+        # Deliberately NO discovery_price_overrides — this connector exposes no
+        # list price, so the #435 branch is inert and reason 5 governs.
+        orchestrator.CONNECTORS[:] = [connector]
+        run_ids: list[int] = []
+        try:
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["x-1"]
+
+            # Simulate a capture-path observation recorded after the last fetch.
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO listing_price_history (listing_id, observed_at, price) "
+                    "SELECT id, NOW() + INTERVAL '1 minute', 285000 FROM listing "
+                    "WHERE source = %s AND external_id = %s",
+                    (connector.name, "x-1"),
+                )
+            pg_conn.commit()
+
+            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
+            assert connector.fetch_calls == ["x-1", "x-1"], (
+                "reason 5 (observed_at > last_fetched_at) still forces the "
+                "confirming re-fetch when there is no list price to short-circuit it"
             )
         finally:
             orchestrator.CONNECTORS.clear()
@@ -5368,11 +5816,11 @@ class TestDiscoveryPriceHistory:
             _cleanup(pg_conn, source, run_id)
 
     def test_refetched_price_change_is_not_double_recorded(self, pg_conn):
-        """A discovery-time drop must be recorded exactly once across the whole
-        record-then-confirm sequence (issue #432 / D-098). Run 2 records the
-        discovery observation (and adopts it as current_price); run 3's
-        re-anchored trigger forces the confirming re-fetch, which returns the
-        same price and must NOT stack a second identical row on top."""
+        """A list-price drop must be recorded exactly once (issue #432 / D-098,
+        timing revised by #435 / D-099). Run 2's #435 scan deep-captures the
+        change: the fetch appends the one new history row AND adopts the price,
+        while the discovery recorder — running after the fetch loop, same run —
+        dedups against it rather than stacking a second identical row."""
         _apply_schema(pg_conn)
         source = "disc-price-refetch-dedup"
         connector = DummyConnector(
@@ -5387,32 +5835,24 @@ class TestDiscoveryPriceHistory:
             run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
             assert connector.fetch_calls == ["r-1"]
 
-            # Run 2: discovery-time drop. Fresh listing → fetch loop skips it,
-            # the discovery recorder writes the one new history row and adopts
-            # 380000 as current_price.
+            # Run 2: list-price drop. The #435 scan deep-captures it THIS run;
+            # the deep-capture writes the one new history row and adopts 380000,
+            # and the discovery recorder dedups against that same-run row.
             connector.discovery_price_overrides = {"r-1": 380000}
             connector.price = 380000
             run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
-            assert connector.fetch_calls == ["r-1"], (
-                "the confirming re-fetch is deferred to the next sweep (D-098)"
+            assert connector.fetch_calls == ["r-1", "r-1"], (
+                "the list-exposed change is deep-captured the same run (#435)"
             )
             assert self._current_price(pg_conn, source, "r-1") == Decimal(380000)
-
-            # Run 3: the unconfirmed observation forces the authoritative
-            # re-fetch, which returns the same 380000 — deduped, no new row.
-            run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
-            assert connector.fetch_calls == ["r-1", "r-1"], (
-                "the re-anchored trigger (observed_at > last_fetched_at) forces "
-                "the confirming re-fetch"
-            )
 
             assert self._history_prices(pg_conn, source, "r-1") == [
                 Decimal(400000),
                 Decimal(380000),
             ], (
-                "exactly one new observation for the change — the discovery "
-                "recorder's; the confirming re-fetch dedups against it rather "
-                "than stacking an identical row"
+                "exactly one new observation for the change — the deep-capture's "
+                "row; the discovery recorder dedups against it rather than "
+                "stacking an identical row"
             )
         finally:
             orchestrator.CONNECTORS.clear()

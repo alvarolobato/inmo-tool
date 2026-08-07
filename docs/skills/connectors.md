@@ -49,8 +49,10 @@ Only set `discovers_full_inventory = True` (or rely on the default) when your co
 1. Never fetched before → always fetch. A `listing` row without a real detail fetch yet (the browser-extension capture path, issue #75) must not be mistaken for "recently fetched".
 2. `min_refetch_interval_seconds <= 0` → always fetch. **This is the default for every connector.** Skip-if-seen is opt-in per connector, not a global switch — see below for why.
 3. Stored `current_price` is `NULL` → always fetch. A core field never captured is worth backfilling, not leaving empty behind a staleness window.
-4. Discovery-time price disagrees with the stored price → always fetch, however fresh the listing otherwise looks. This is the guard against skip-if-seen's central risk: silently no longer detecting a price drop (issue #1 §10's value proposition, issue #34's trend feature). See `Connector.discovered_prices()` below.
+4. An unconfirmed price observation exists (the latest `listing_price_history.observed_at` is newer than `last_fetched_at`) → always fetch, however fresh the listing otherwise looks. This is the re-anchored (D-098) guard against skip-if-seen's central risk: silently no longer detecting a price drop (issue #1 §10, issue #34). It supersedes D-070's old "discovery price ≠ stored price" trigger, which went silent once the observed price became `current_price`. See `Connector.discovered_prices()` below.
 5. Otherwise: skip only once `min_refetch_interval_seconds` has genuinely elapsed since the last real fetch.
+
+Two further checks sit *before* the numbered list above (they override every reason): the **accepted-property exemption** (#436, always fetch) and the **list-price capture optimization** (#435, decide from the list price) — both documented in their own subsections below.
 
 **Per-connector, not global — because the economics are per-connector.** `Connector.min_refetch_interval_seconds` (class attribute, default `0` = always fetch, same as every connector's original behaviour) is the lever. A connector opts in by setting it non-zero, with a documented reason for the chosen window — see `fotocasa.py`, the first (and, as of this issue, only) connector to do so. Operators can override it per connector without a code change via `connector_config.min_refetch_interval_seconds` (`NULL` = no override, falls back to the class attribute) — same override-vs-class-default pattern issue #99 established for `filters.rooms`.
 
@@ -62,6 +64,30 @@ Only set `discovers_full_inventory = True` (or rely on the default) when your co
 **Never assume a reference connector's price-reliability finding transfers to a new site.** Verify independently, the same feasibility-spike discipline this file already asks for at the discover()/fetch_detail() level — a discovery-page price field existing on one site says nothing about whether another site has one, or whether it's accurate if it does.
 
 **Observability**: `connector_run_results.skipped_count` (a run row's listings left unfetched this run — distinct from `connector_runs.connectors_skipped`, issue #99's *whole-connector* disabled count) plus a per-listing INFO log line (`"Connector %s: skipping fetch_detail for external_id=%s — %s"`, reason included) is what lets an operator tell "skipped, unchanged" apart from "never fetched" by inspection. That per-listing line is real but not, on its own, something an operator actually reads line-by-line at scale — a full Fotocasa sweep can emit up to ~1,300 of them in one run. What's actually skimmable in a log stream is the per-scope aggregate INFO line `run_connector` also emits (`"Connector %s: skip-if-seen skipped %d/%d discovered listings this scope (fetched %d, errors %d)"`, PR #175); the per-listing lines remain for when someone needs to grep a specific `external_id`'s reason, not as the primary observability signal.
+
+## List-price capture optimization: deep-capture only new/changed (issue #435, D-099)
+
+Built on `discovered_prices()`: where a connector exposes a live-verified list-page price, don't re-open the detail page for a listing whose price the list already confirms is unchanged. `_should_skip_fetch` (before the numbered skip-if-seen checks) decides, for any listing carrying a list price this run:
+
+- **NEW** (never fetched) → always deep-capture (the first pass is always a full detail read — description, photos, all fields).
+- **price CHANGED** — a material move (≥1%) vs stored `current_price`, *including* a >60% suspect — → deep-capture this same pass, recording the authoritative price (a suspect is confirmed by the authoritative fetch, which re-applies D-098's sanity band).
+- **price UNCHANGED** (sub-1% move) → **skip the deep read** — we already have the detail, and the list confirms the price is stable. This supersedes the staleness window (reason 5) and the history-anchored net (reason 4) for list-price listings; reason 4 still governs listings with no list price (e.g. a capture-path observation the fetch budget never reached).
+
+The big win is Auto continuous mode (#434): a cycle no longer re-opens hundreds of unchanged detail pages.
+
+**Per-connector coverage** (opt-in by construction — mirrors `discovered_prices()`):
+
+| Connector | List price exposed? | Capture optimization |
+|-----------|---------------------|----------------------|
+| **Fotocasa** (sale) | Yes — `rawPrice`, live-verified (D-070/D-098) | **Active** — unchanged listings skipped, new/changed deep-captured |
+| Milanuncios, pisos.com, Habitaclia, Unicaja, Cimenta2, BuildingCenter, bank portals, … | No (`discovered_prices()` == `{}`) | **Falls back to full capture** every pass |
+| Browser-extension / worklist capture path | No per-listing list price (sitemap-driven) | Full capture |
+
+**Counters**: `connector_run_results.skipped_unchanged_count` (list-price optimization skips) sits next to `fetched_count` (deep-captured new/changed) and `skipped_count` (skip-if-seen staleness) — the "sin-cambio vs deep-capturados" split. A per-scope INFO line (`"#435 capture optimization skipped %d/%d discovered listings this scope as unchanged (deep-captured %d new/changed)"`) is the skimmable signal.
+
+## Accepted/'en seguimiento' properties are always full-read (issue #436, D-099)
+
+An accepted property (latest feedback = `accept`, matched in an active profile — D-096's tracked working set) is **never skipped** — not by skip-if-seen, not by the #435 optimization. `_should_skip_fetch` checks `is_accepted` first and always fetches. The run materialises the exempt set once via `_accepted_property_ids(conn)` (a cheap, few-row query, keyed on `property_id`, shared across every connector/scope) and threads it into `run_connector`. This keeps the properties the owner is actively tracking maximally up to date (price, status, every field) on every pass, at the cost of a handful of extra fetches per run.
 
 **`listing.last_seen_at` vs `listing.last_fetched_at`**: these used to be the same moment by construction (every discovered id was always fetched). Skip-if-seen breaks that equivalence — `last_seen_at` now means "last confirmed present in a `discover()` sweep" (updated for every discovered id, fetched or skipped, via `etl.orchestrator._update_last_seen_for_discovered`), while `last_fetched_at` means "last time `fetch_detail()`+`normalize()` actually ran" (what `_should_skip_fetch` gates on). Don't conflate them when adding a new consumer of either column.
 

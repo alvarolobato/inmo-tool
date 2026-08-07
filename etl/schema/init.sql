@@ -1032,6 +1032,17 @@ ALTER TABLE connector_runs ADD COLUMN IF NOT EXISTS connectors_skipped INTEGER;
 -- min_refetch_interval_seconds > 0 (today's default for every connector).
 ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS skipped_count INTEGER NOT NULL DEFAULT 0;
 
+-- Issue #435 (D-099): listings this run did NOT deep-capture because the
+-- connector's list page already exposed the price and it was unchanged
+-- (etl.orchestrator._should_skip_fetch's list-price capture optimization) —
+-- "we already have the detail, and the list confirms the price is stable".
+-- Distinct from skipped_count above (skip-if-seen staleness): this is the
+-- Auto-continuous-mode saving of not re-opening unchanged detail pages every
+-- cycle. Always 0 for a connector that exposes no list price (discovered_prices
+-- == {}), which falls back to full capture. Reported alongside fetched_count
+-- (deep-captured new/changed) as the "sin-cambio vs deep-capturados" counters.
+ALTER TABLE connector_run_results ADD COLUMN IF NOT EXISTS skipped_unchanged_count INTEGER NOT NULL DEFAULT 0;
+
 CREATE INDEX IF NOT EXISTS idx_connector_run_results_run_id ON connector_run_results (run_id);
 -- Recent-runs lookups (dashboards, `ps connector status`-style queries)
 -- filter/sort on started_at; unindexed, that's a seq scan once this table

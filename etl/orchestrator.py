@@ -848,6 +848,7 @@ def _record_connector_result(
     started_at: datetime,
     finished_at: datetime,
     skipped_count: int = 0,
+    skipped_unchanged_count: int = 0,
     skipped_scopes: list[dict[str, str]] | None = None,
     failure_classification: str | None = None,
     geography_scope: list[dict] | None = None,
@@ -869,6 +870,13 @@ def _record_connector_result(
     *connectors* skipped via `connector_config.enabled = false`. The two
     are skip in different senses at different granularities; see each
     column's comment in etl/schema/init.sql.
+
+    `skipped_unchanged_count` (issue #435, D-099) is a further, distinct sense:
+    listings this run did NOT deep-capture because the connector's list page
+    already exposed the price and it was unchanged (the #435 capture
+    optimization). Reported alongside `fetched_count` (deep-captured new/changed)
+    as the "sin-cambio vs deep-capturados" counters; always 0 for a connector
+    that exposes no list price.
 
     `skipped_scopes` (issue #217) is a THIRD, again-different sense of
     "skipped": whole *geographies* this connector never looked at this run,
@@ -893,9 +901,10 @@ def _record_connector_result(
             INSERT INTO connector_run_results
                 (run_id, connector_name, started_at, finished_at, status,
                  discovered_count, fetched_count, error_count, error_msg,
-                 skipped_count, skipped_scopes, failure_classification,
+                 skipped_count, skipped_unchanged_count, skipped_scopes,
+                 failure_classification,
                  geography_scope, extraction_quality_summary)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 run_id,
@@ -908,6 +917,7 @@ def _record_connector_result(
                 error_count,
                 error_msg,
                 skipped_count,
+                skipped_unchanged_count,
                 json.dumps(skipped_scopes) if skipped_scopes else None,
                 failure_classification,
                 json.dumps(geography_scope) if geography_scope else None,
@@ -1314,8 +1324,12 @@ def _record_discovery_price_observations(
 
 def _fetch_freshness_map(
     conn, source: str, external_ids: list[str]
-) -> dict[str, tuple[datetime | None, Decimal | None, str | None, datetime | None]]:
-    """Batched (last_fetched_at, current_price, status, latest_observed_at) lookup.
+) -> dict[
+    str,
+    tuple[datetime | None, Decimal | None, str | None, datetime | None, int | None],
+]:
+    """Batched (last_fetched_at, current_price, status, latest_observed_at,
+    property_id) lookup.
 
     One query per (connector, scope) rather than one per listing — issue
     #143 exists because per-listing framework overhead was already the
@@ -1334,6 +1348,12 @@ def _fetch_freshness_map(
     recorded after the last authoritative fetch means an unconfirmed price
     exists, so a real fetch must re-confirm it. Left-joined so a listing with
     no history rows yet is simply NULL (no trigger).
+
+    `property_id` (issue #436, D-099) is what the accepted/'en seguimiento'
+    exemption is keyed on: `_should_skip_fetch` never skips a listing whose
+    property is in the run's accepted set, so the loop needs each discovered
+    external_id's property_id to consult that set. Carried in this same batched
+    lookup rather than a second per-listing query.
     """
     if not external_ids:
         return {}
@@ -1343,13 +1363,58 @@ def _fetch_freshness_map(
             SELECT l.external_id, l.last_fetched_at, l.current_price, l.status,
                    (SELECT max(h.observed_at)
                       FROM listing_price_history h
-                     WHERE h.listing_id = l.id) AS latest_observed_at
+                     WHERE h.listing_id = l.id) AS latest_observed_at,
+                   l.property_id
               FROM listing l
              WHERE l.source = %s AND l.external_id = ANY(%s)
             """,
             (source, external_ids),
         )
-        return {row[0]: (row[1], row[2], row[3], row[4]) for row in cur.fetchall()}
+        return {
+            row[0]: (row[1], row[2], row[3], row[4], row[5]) for row in cur.fetchall()
+        }
+
+
+def _accepted_property_ids(conn) -> set[int]:
+    """Property ids whose latest feedback is `accept`, matched in an active profile.
+
+    Issue #436 (D-099): accepted / 'en seguimiento' properties are the working
+    set — they must be re-read in FULL on every update pass, never skipped by
+    the skip-if-seen policy (`_should_skip_fetch`) nor by the #435 list-price
+    capture optimization. This materializes that set once per run (cheap — a
+    handful of rows) so both decision points can force a full fetch for them.
+
+    "Accepted" is derived identically to the candidate feed (dashboard/lib/
+    candidates.ts, D-096): the LATEST state-defining feedback event
+    (`accept`/`reject`/`star`/`clear`, ordered by created_at then id) for a
+    (profile, property) is `accept`. `star` is retired (D-096) but kept in the
+    derive set so a trailing legacy star still wins the ordering and correctly
+    reads as NOT accept. "Active profile" = `search_profile.archived_at IS NULL`
+    (same predicate as `_active_profile_scopes`); the property must be a live
+    match in it (`profile_listing_state.matched = true`). A property accepted in
+    ANY active profile is exempt everywhere — the set is source-agnostic (keyed
+    on property_id), so a connector consults it via each listing's property_id.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT pls.property_id
+              FROM profile_listing_state pls
+              JOIN search_profile sp
+                ON sp.id = pls.profile_id AND sp.archived_at IS NULL
+             WHERE pls.matched = true
+               AND (
+                    SELECT fe.feedback_type
+                      FROM feedback_event fe
+                     WHERE fe.profile_id = pls.profile_id
+                       AND fe.property_id = pls.property_id
+                       AND fe.feedback_type IN ('accept', 'reject', 'star', 'clear')
+                     ORDER BY fe.created_at DESC, fe.id DESC
+                     LIMIT 1
+               ) = 'accept'
+            """
+        )
+        return {row[0] for row in cur.fetchall()}
 
 
 def _should_skip_fetch(
@@ -1360,15 +1425,27 @@ def _should_skip_fetch(
     latest_observed_at: datetime | None,
     min_refetch_interval_seconds: int,
     now: datetime,
+    discovered_price: Decimal | None = None,
+    is_accepted: bool = False,
 ) -> tuple[bool, str]:
-    """Skip-if-seen policy (issue #143): should fetch_detail() run for this
-    already-known external_id, or is it safe to skip this run?
+    """Skip-if-seen policy (issue #143) + list-price capture optimization
+    (issue #435) + accepted-always-full-read exemption (issue #436): should
+    fetch_detail() run for this already-known external_id, or is it safe to skip
+    this run?
 
     Each check below is a reason to force a re-fetch regardless of how
     "fresh" the listing otherwise looks — staleness age is the last
     resort, not the primary signal, because the things skip-if-seen must
     never silently break (price-drop detection, #34; withdrawal
     detection, EC-5) are both driven by data this function can see:
+
+    0. **Accepted / 'en seguimiento' (issue #436, D-099) -> always fetch.**
+       An accepted property is the working set — it must be re-read in FULL on
+       every update pass, exempt from BOTH the skip-if-seen policy below and the
+       #435 list-price optimization. Checked first so it overrides every skip
+       outcome unconditionally. `is_accepted` is computed by the caller from
+       the run's `_accepted_property_ids` set (latest feedback = accept, matched
+       in an active profile).
 
     1. Never fetched before -> always fetch. A `listing` row can exist
        without a real detail fetch ever having happened for it (the
@@ -1396,6 +1473,29 @@ def _should_skip_fetch(
        and "missing price" branches below so this reason always wins the
        moment status disagrees, independent of whether skip-if-seen is
        even turned on for this connector.
+    2b. **List-price capture optimization (issue #435, D-099).** Only when
+       the connector exposed a list-page price for this listing this run
+       (`discovered_price is not None` — e.g. Fotocasa's search-payload
+       `rawPrice`, {} for a connector without one). The list already tells us
+       the price without opening the detail page, so:
+         * price UNCHANGED (sub-1% move vs stored `current_price`, i.e. not
+           `_observed_price_is_material`) -> **SKIP the deep detail read** —
+           we already captured this listing's detail and the list confirms its
+           price is stable. This is the whole optimization: in Auto continuous
+           mode, don't re-open hundreds of unchanged detail pages per cycle.
+         * price CHANGED (a material move ≥1%, including a >60% suspect) ->
+           always fetch, deep-capturing to record the authoritative price this
+           same pass (a suspect is confirmed by the authoritative fetch, which
+           re-applies the sanity band — same posture as D-098's re-fetch net).
+         * stored `current_price` NULL -> always fetch (backfill; nothing to
+           compare against).
+       Placed BEFORE the skip-if-seen branches below so it owns the decision
+       for any listing carrying a list price — superseding both the staleness
+       window (reason 6) and the history-anchored re-fetch net (reason 5),
+       which still govern listings with NO list price this run (reason 5 in
+       particular still covers a capture-path observation the fetch budget
+       never confirmed). A NEW listing (reason 1) is always fully captured
+       first — this optimization only ever applies from the second pass on.
     3. `min_refetch_interval_seconds <= 0` -> always fetch. The feature is
        off for this connector (the default for every connector unless it
        opts in — see `Connector.min_refetch_interval_seconds`); this is
@@ -1425,7 +1525,23 @@ def _should_skip_fetch(
     only why one didn't (the issue's "record what it skipped and why"
     requirement applies just as much to "and why NOT" for an operator
     trying to understand a run).
+
+    Counter invariant the caller relies on (issue #435): the ONLY path that
+    returns `skip=True` while `discovered_price is not None` is the 2b
+    unchanged-list-price skip — the staleness skip (reason 6) is unreachable
+    once a list price is present (2b short-circuits first). So the caller can
+    categorise a skip as "unchanged (#435)" vs "skip-if-seen (staleness)"
+    purely from whether `discovered_price` was set, with no extra return field.
     """
+    if is_accepted:
+        return (
+            False,
+            (
+                "accepted/'en seguimiento' property — always full detail-read "
+                "(D-099); exempt from skip-if-seen and the list-price capture "
+                "optimization"
+            ),
+        )
     if last_fetched_at is None:
         return False, "never fetched before"
     if stored_status is not None and stored_status != "active":
@@ -1436,6 +1552,34 @@ def _should_skip_fetch(
                 "a re-fetch so a reappearing listing can be reconciled back "
                 "to 'active' promptly rather than waiting out the staleness "
                 "window"
+            ),
+        )
+    if discovered_price is not None:
+        # Issue #435 (D-099): the connector exposed a list-page price for this
+        # listing — decide from it whether the deep detail read is worth it.
+        if stored_price is None:
+            return (
+                False,
+                (
+                    "stored current_price is missing — deep-capturing to "
+                    "backfill it (list price available, #435)"
+                ),
+            )
+        if _observed_price_is_material(stored_price, discovered_price):
+            return (
+                False,
+                (
+                    f"list-exposed price changed ({stored_price} -> "
+                    f"{discovered_price}) — deep-capturing to record the "
+                    "authoritative price this pass (#435)"
+                ),
+            )
+        return (
+            True,
+            (
+                f"list-exposed price unchanged ({discovered_price}) — skipping "
+                "the deep detail read; already captured, list confirms the "
+                "price is stable (#435 capture optimization)"
             ),
         )
     if min_refetch_interval_seconds <= 0:
@@ -1483,6 +1627,7 @@ def run_connector(
     breaker: CircuitBreaker,
     *,
     min_refetch_interval_seconds: int = 0,
+    accepted_property_ids: set[int] | None = None,
 ) -> dict:
     """Run one connector's discover -> fetch_detail -> normalize -> store cycle
     for a single scope, against a `limiter`/`breaker` shared across every
@@ -1499,11 +1644,20 @@ def run_connector(
     state — and therefore the breaker's protection and the limiter's
     pacing — actually carries across scopes.
 
+    `accepted_property_ids` (issue #436, D-099) is the run's set of accepted /
+    'en seguimiento' property ids (materialised once by `_accepted_property_ids`
+    and shared across every scope/connector). A discovered listing whose
+    property is in this set is NEVER skipped — not by skip-if-seen, not by the
+    #435 list-price optimization — so the working set stays fully up to date.
+    None (the default, for direct/test callers) means "no accepted set" → the
+    exemption simply never triggers.
+
     Returns a summary dict; never raises for per-listing failures (those
     count toward the circuit breaker and get logged) — only raises if
     discover() itself fails, since without a target list there's nothing
     to run.
     """
+    accepted_property_ids = accepted_property_ids or set()
     # Issue #432 / D-098: captured before the fetch loop so the discovery-time
     # current_price adopter can tell which listings this run's fetch loop
     # already re-fetched (last_fetched_at >= run_started_at) and must not be
@@ -1582,6 +1736,11 @@ def run_connector(
 
     fetched = 0
     skipped = 0
+    # Issue #435 (D-099): the subset of skips that were the list-price capture
+    # optimization ("list confirms the price is unchanged — don't re-open the
+    # detail page"), tracked apart from `skipped` (skip-if-seen staleness) so
+    # the run reports "saltados por sin-cambio vs deep-capturados" (#435 task).
+    skipped_unchanged = 0
     errors = 0
     # Issue #270 (D-047): soft-block (site rate-throttling) fetch failures,
     # tracked separately from `errors` (which stays the count of ALL failed
@@ -1618,9 +1777,19 @@ def run_connector(
     # its own docstring for why) — Opus review, PR #175: don't read this
     # comment as "skip-if-seen has no cost for non-opted-in connectors"
     # overall, only that this specific freshness lookup is free for them.
+    #
+    # Issue #435/#436 (D-099): the freshness lookup is ALSO needed when the
+    # connector exposed list-page prices this run (the #435 optimization has to
+    # compare each discovered price against the stored one) or whenever an
+    # accepted-property exemption might apply (it carries each listing's
+    # property_id). So the gate widens from "skip-if-seen on" to "any skip/
+    # optimization decision is possible this run". When none is possible
+    # (min_refetch off AND no list prices), every listing still fetches exactly
+    # as before — and accepted properties are then fetched trivially.
+    skip_logic_active = min_refetch_interval_seconds > 0 or bool(discovery_prices)
     freshness = (
         _fetch_freshness_map(conn, connector.name, external_ids)
-        if min_refetch_interval_seconds > 0
+        if skip_logic_active
         else {}
     )
 
@@ -1641,14 +1810,30 @@ def run_connector(
                 breaker.errors,
                 breaker.attempts,
                 breaker.soft_block_errors,
-                len(external_ids) - fetched - errors - skipped - gone,
+                len(external_ids)
+                - fetched
+                - errors
+                - skipped
+                - skipped_unchanged
+                - gone,
                 len(external_ids),
             )
             break
 
-        last_fetched_at, stored_price, stored_status, latest_observed_at = (
-            freshness.get(external_id, (None, None, None, None))
-        )
+        (
+            last_fetched_at,
+            stored_price,
+            stored_status,
+            latest_observed_at,
+            property_id,
+        ) = freshness.get(external_id, (None, None, None, None, None))
+        # Issue #435: the list-page price for this listing, if the connector
+        # surfaced one this run (None otherwise → the #435 branch is inert).
+        discovered_price = discovery_prices.get(external_id)
+        # Issue #436: an accepted/'en seguimiento' property is exempt from
+        # every skip. property_id is only populated when the freshness lookup
+        # ran (skip_logic_active); when it didn't, nothing skips anyway.
+        is_accepted = property_id is not None and property_id in accepted_property_ids
         skip, reason = _should_skip_fetch(
             last_fetched_at=last_fetched_at,
             stored_price=stored_price,
@@ -1656,9 +1841,18 @@ def run_connector(
             latest_observed_at=latest_observed_at,
             min_refetch_interval_seconds=min_refetch_interval_seconds,
             now=datetime.now(timezone.utc),
+            discovered_price=discovered_price,
+            is_accepted=is_accepted,
         )
         if skip:
-            skipped += 1
+            # Categorise the skip for the #435 counters without an extra return
+            # field: a skip while a list price was present can ONLY be the 2b
+            # unchanged-list-price optimization (see _should_skip_fetch's
+            # counter invariant); anything else is a skip-if-seen staleness skip.
+            if discovered_price is not None:
+                skipped_unchanged += 1
+            else:
+                skipped += 1
             logger.info(
                 "Connector %s: skipping fetch_detail for external_id=%s — %s",
                 connector.name,
@@ -1780,6 +1974,20 @@ def run_connector(
             errors,
         )
 
+    if skipped_unchanged:
+        # Issue #435: the skimmable per-scope counterpart for the list-price
+        # capture optimization — how many detail pages we DIDN'T re-open because
+        # the list confirmed the price was unchanged, vs how many we did
+        # deep-capture (fetched). The big win in Auto continuous mode.
+        logger.info(
+            "Connector %s: #435 capture optimization skipped %d/%d discovered "
+            "listings this scope as unchanged (deep-captured %d new/changed)",
+            connector.name,
+            skipped_unchanged,
+            len(external_ids),
+            fetched,
+        )
+
     if gone:
         # Issue #291: expected inventory churn — logged at INFO (not an
         # error) so a run reports it without treating removed listings as
@@ -1835,6 +2043,10 @@ def run_connector(
         "discovered_count": len(external_ids),
         "fetched_count": fetched,
         "skipped_count": skipped,
+        # Issue #435 (D-099): list-price capture-optimization skips (unchanged
+        # listings whose detail we deliberately did NOT re-open), distinct from
+        # `skipped_count` (skip-if-seen staleness skips).
+        "skipped_unchanged_count": skipped_unchanged,
         "error_count": errors,
         "soft_block_error_count": soft_block_errors,
         "gone_count": gone,
@@ -2685,6 +2897,19 @@ def run_all_connectors(
     # now evaluated per connector, same place enabled/disabled is.
     profile_scopes = _active_profile_scopes(conn)
 
+    # Issue #436 (D-099): materialise the accepted / 'en seguimiento' property
+    # set ONCE for the whole run — a cheap (few-row) query — and share it across
+    # every connector/scope. An accepted property is never skipped (skip-if-seen
+    # or #435), so both decision points consult this set to force a full fetch.
+    accepted_property_ids = _accepted_property_ids(conn)
+    if accepted_property_ids:
+        logger.info(
+            "Run %s: %d accepted/'en seguimiento' property(ies) will be "
+            "full-read (never skipped) this run (D-099)",
+            run_id,
+            len(accepted_property_ids),
+        )
+
     for connector in connectors_to_run:
         scopes, enabled, min_refetch_override = _scopes_for_connector(
             conn, connector.name, profile_scopes
@@ -2821,6 +3046,9 @@ def run_all_connectors(
         discovered_total = 0
         fetched_total = 0
         skipped_fetch_total = 0
+        # Issue #435 (D-099): list-price capture-optimization skips this
+        # connector, summed across scopes (distinct from skip-if-seen skips).
+        skipped_unchanged_fetch_total = 0
         error_total = 0
         # Issue #270 (D-047): the subset of error_total that was soft-block
         # (rate-throttle), for the informational notice. error_total still
@@ -3258,6 +3486,7 @@ def run_all_connectors(
                     limiter,
                     breaker,
                     min_refetch_interval_seconds=effective_min_refetch_interval_seconds,
+                    accepted_property_ids=accepted_property_ids,
                 )
             except UnresolvableGeographyError as exc:
                 # Issue #177 (M4): this is the sentinel path
@@ -3396,6 +3625,7 @@ def run_all_connectors(
             discovered_total += result["discovered_count"]
             fetched_total += result["fetched_count"]
             skipped_fetch_total += result["skipped_count"]
+            skipped_unchanged_fetch_total += result["skipped_unchanged_count"]
             error_total += result["error_count"]
             soft_block_error_total += result["soft_block_error_count"]
             # Issue #270 (D-047): route a breaker trip by its cause. A fatal
@@ -3433,6 +3663,7 @@ def run_all_connectors(
                 f"{scope_key}: discovered={result['discovered_count']} "
                 f"fetched={result['fetched_count']} "
                 f"skipped={result['skipped_count']} "
+                f"skipped_unchanged={result['skipped_unchanged_count']} "
                 f"gone={result['gone_count']} errors={result['error_count']}"
             )
 
@@ -3584,6 +3815,7 @@ def run_all_connectors(
             discovered_count=discovered_total,
             fetched_count=fetched_total,
             skipped_count=skipped_fetch_total,
+            skipped_unchanged_count=skipped_unchanged_fetch_total,
             error_count=error_total,
             error_msg="; ".join(error_msgs) or None,
             skipped_scopes=skipped_scopes,
