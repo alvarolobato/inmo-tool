@@ -96,6 +96,15 @@ describe("redflags prompt — evidence union across merged listings", () => {
     expect(text).toContain("procedimiento de apremio");
   });
 
+  it("#408: names sin_financiacion_hipotecaria and cambio_uso_pendiente as their own promoted types", () => {
+    const text = redflagsPromptText([SILENT_ADVERT]);
+    expect(text).toContain("sin_financiacion_hipotecaria");
+    expect(text).toContain("cambio_uso_pendiente");
+    // Both appear in the enum-driven output-schema `type` union too.
+    expect(text).toContain('"sin_financiacion_hipotecaria"');
+    expect(text).toContain('"cambio_uso_pendiente"');
+  });
+
   it("#394: asks the model for a candidate_type slug + definition when it uses `other`, and puts both in the output schema", () => {
     const text = redflagsPromptText([SILENT_ADVERT]);
     // The `other` guidance requests a snake_case candidate slug + a one-line
@@ -204,6 +213,48 @@ describe("parseRedFlagsResult", () => {
       }),
     );
     expect(r.flags).toEqual([]);
+  });
+
+  it("#408: a 'no admite hipoteca, sólo al contado' advert produces a sin_financiacion_hipotecaria flag with matching evidence", () => {
+    const raw = JSON.stringify({
+      flags: [
+        {
+          type: "sin_financiacion_hipotecaria",
+          description: "Confirmar con la entidad si el inmueble admite hipoteca o exige compra al contado.",
+          evidence: "no admite financiación hipotecaria, sólo compra al contado",
+          evidence_source: "idealista",
+        },
+      ],
+      confidence: 0.8,
+      reasoning: "El anuncio declara que la compra debe ser al contado.",
+    });
+
+    const r = parseRedFlagsResult(raw);
+    expect(r.flags).toHaveLength(1);
+    expect(r.flags[0].type).toBe("sin_financiacion_hipotecaria");
+    expect(REDFLAG_TYPES).toContain(r.flags[0].type);
+    expect(r.flags[0].evidence).toContain("al contado");
+  });
+
+  it("#408: a 'pendiente de cambio de uso (local a vivienda)' advert produces a cambio_uso_pendiente flag with matching evidence", () => {
+    const raw = JSON.stringify({
+      flags: [
+        {
+          type: "cambio_uso_pendiente",
+          description: "Comprobar el estado del expediente de cambio de uso ante el ayuntamiento.",
+          evidence: "local pendiente de cambio de uso a vivienda",
+          evidence_source: "milanuncios",
+        },
+      ],
+      confidence: 0.75,
+      reasoning: "El anuncio declara un cambio de uso sin resolver.",
+    });
+
+    const r = parseRedFlagsResult(raw);
+    expect(r.flags).toHaveLength(1);
+    expect(r.flags[0].type).toBe("cambio_uso_pendiente");
+    expect(REDFLAG_TYPES).toContain(r.flags[0].type);
+    expect(r.flags[0].evidence).toContain("cambio de uso");
   });
 
   it("EC-2: a clean description yields an empty flags array, not a fabricated flag", () => {
@@ -410,12 +461,13 @@ describe("#394 candidate_type on `other` flags", () => {
 
 describe("prompt version", () => {
   it("is pinned, so a prompt change forces a new row rather than overwriting", () => {
-    // Bumped to v7 for #407: the prompt now injects the FULL cross-axis
-    // vocabulary (rendered from each axis's enum) and the human-dismissed
-    // candidate slugs, so the prompt the model reads changed and #308's batch
-    // re-assesses existing rows rather than serving a v6 cache row as current.
-    // See REDFLAGS_PROMPT_VERSION's doc.
-    expect(REDFLAGS_PROMPT_VERSION).toBe("redflags/v7");
+    // Bumped to v8 for #408: two owner-approved candidate slugs
+    // (sin_financiacion_hipotecaria, cambio_uso_pendiente) are promoted into the
+    // closed vocabulary as named types, so they now appear in the prompt's
+    // described types + output-schema `type` union and the model reads a changed
+    // prompt; #308's batch re-assesses existing rows rather than serving a v7
+    // cache row as current. See REDFLAGS_PROMPT_VERSION's doc.
+    expect(REDFLAGS_PROMPT_VERSION).toBe("redflags/v8");
   });
 });
 

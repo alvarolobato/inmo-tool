@@ -387,6 +387,8 @@ export const REDFLAG_TYPE_FILTERS = [
   "deuda_comunidad",
   "construccion_ilegal",
   "litigio",
+  "sin_financiacion_hipotecaria",
+  "cambio_uso_pendiente",
   "unfinished_construction",
   "structural_damage",
 ] as const;

@@ -300,6 +300,8 @@ export function CandidateList({ profileId }: { profileId: number }) {
         <option value="construccion_ilegal">Construcción ilegal</option>
         <option value="herencia_yacente">Herencia yacente</option>
         <option value="deuda_comunidad">Deuda comunidad</option>
+        <option value="sin_financiacion_hipotecaria">Sin financiación hipotecaria</option>
+        <option value="cambio_uso_pendiente">Cambio de uso pendiente</option>
         <option value="structural_damage">Daño estructural</option>
       </select>
 

@@ -126,8 +126,16 @@ export { NoListingsError, loadPropertyListings };
  * "previously reviewed and rejected — do NOT propose these again". Both change
  * what the model reads, so a v6 cache row must not silently pass as current;
  * #308's batch re-assesses existing rows against the new version.
+ *
+ * Bumped to v8 for #408: two owner-approved candidate slugs are promoted into
+ * the closed vocabulary as real named types (hard filters) —
+ * `sin_financiacion_hipotecaria` and `cambio_uso_pendiente`. They now appear in
+ * the prompt's described types + output-schema `type` union (both enum-driven),
+ * so the model classifies them directly instead of routing through `other`; a v7
+ * cache row must not silently pass as current. #308's batch re-assesses existing
+ * rows against the new version.
  */
-export const REDFLAGS_PROMPT_VERSION = "redflags/v7";
+export const REDFLAGS_PROMPT_VERSION = "redflags/v8";
 
 /**
  * The closed vocabulary (types, labels, one-line definitions) lives in the leaf

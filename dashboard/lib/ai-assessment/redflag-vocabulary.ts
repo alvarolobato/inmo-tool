@@ -30,6 +30,8 @@ export const REDFLAG_TYPES = [
   "deuda_comunidad",
   "construccion_ilegal",
   "litigio",
+  "sin_financiacion_hipotecaria",
+  "cambio_uso_pendiente",
   // Physical (#361)
   "unfinished_construction",
   "structural_damage",
@@ -57,6 +59,8 @@ export const REDFLAG_LABELS: Record<string, string> = {
   deuda_comunidad: "Deuda comunidad",
   construccion_ilegal: "Construcción ilegal",
   litigio: "Litigio",
+  sin_financiacion_hipotecaria: "Sin financiación hipotecaria",
+  cambio_uso_pendiente: "Cambio de uso pendiente",
   unfinished_construction: "Obra inacabada",
   structural_damage: "Daño estructural",
 };
@@ -89,6 +93,10 @@ export const REDFLAG_DEFINITIONS: Record<RedFlagType, string> = {
   construccion_ilegal:
     "ampliación o construcción no legalizada, fuera de ordenación, sin licencia.",
   litigio: "procedimiento judicial en curso sobre el inmueble.",
+  sin_financiacion_hipotecaria:
+    "la vivienda no admite financiación hipotecaria / sólo compra al contado (típico de adjudicados/deuda). Es una restricción de FINANCIACIÓN, distinta de `subasta_judicial` (fase ejecutiva) y de `embargo` (garantía/deuda): úsalo cuando el texto diga que no cabe hipoteca o que la compra debe ser al contado.",
+  cambio_uso_pendiente:
+    "el inmueble requiere/está pendiente de un cambio de uso (p.ej. local a vivienda) no resuelto. Es un trámite urbanístico PENDIENTE, distinto de `construccion_ilegal` (obra sin legalizar/fuera de ordenación): aquí el uso actual es legal pero se necesita reclasificarlo y ese cambio aún no está concedido.",
   unfinished_construction:
     'obra inacabada, parcialmente ejecutada, obra parada: una construcción o rehabilitación que NO se ha terminado y se vende a medio hacer (p.ej. "en construcción", "parcialmente ejecutada", "obra parada", "a falta de terminar", "estructura levantada sin cerramientos", "algunos tabiques ya levantados", "sin acabados"). Es distinto de `a_reformar` (una vivienda TERMINADA que necesita reforma, flujo #26) y de `obra_nueva` (una construcción nueva ya TERMINADA).',
   structural_damage:
