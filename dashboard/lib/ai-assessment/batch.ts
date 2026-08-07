@@ -57,6 +57,7 @@ import { assessPropertyOccupancy, OCCUPANCY_PROMPT_VERSION } from "./occupancy";
 import { assessPropertyCondition, CONDITION_PROMPT_VERSION } from "./condition";
 import { assessPropertyRedFlags, REDFLAGS_PROMPT_VERSION } from "./redflags";
 import { assessPropertyLocation, LOCATION_PROMPT_VERSION } from "./location";
+import { assessPropertyOpportunity, OPPORTUNITY_PROMPT_VERSION } from "./opportunity";
 import { assessPropertyExtract, EXTRACT_PROMPT_VERSION } from "./extract";
 
 /** One flow the batch runs, in a uniform shape so the loop is flow-agnostic. */
@@ -82,17 +83,18 @@ export interface BatchFlow {
 }
 
 /**
- * The five flows, in run order. Occupancy first because it is the highest-
- * value signal (issue #1 §9). `location` (#388) self-gates a `terreno` plot
- * (`locationApplies`) — the axis doesn't apply — and is cheap in that case.
- * `extract` is included but is self-gating (`needsExtraction`) and cheap when
- * there is nothing to fill.
+ * The six flows, in run order. Occupancy first because it is the highest-
+ * value signal (issue #1 §9). `location` (#388) and `opportunity` (#398) each
+ * self-gate a `terreno` plot (`locationApplies` / `opportunityApplies`) — the
+ * axis doesn't apply — and are cheap in that case. `extract` is included but is
+ * self-gating (`needsExtraction`) and cheap when there is nothing to fill.
  */
 export const DEFAULT_BATCH_FLOWS: BatchFlow[] = [
   { type: "occupancy", promptVersion: OCCUPANCY_PROMPT_VERSION, assess: assessPropertyOccupancy },
   { type: "condition", promptVersion: CONDITION_PROMPT_VERSION, assess: assessPropertyCondition },
   { type: "redflags", promptVersion: REDFLAGS_PROMPT_VERSION, assess: assessPropertyRedFlags },
   { type: "location", promptVersion: LOCATION_PROMPT_VERSION, assess: assessPropertyLocation },
+  { type: "opportunity", promptVersion: OPPORTUNITY_PROMPT_VERSION, assess: assessPropertyOpportunity },
   { type: "extract", promptVersion: EXTRACT_PROMPT_VERSION, assess: assessPropertyExtract },
 ];
 

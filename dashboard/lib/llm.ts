@@ -89,7 +89,7 @@ export interface AssessmentOpts {
  * omit it) changing shape at all.
  */
 async function runPropertyAssessment(
-  flow: "condition" | "redflags" | "location" | "extract",
+  flow: "condition" | "redflags" | "location" | "opportunity" | "extract",
   listings: ListingSnapshot[],
   instruction: string,
   opts?: AssessmentOpts,
@@ -246,6 +246,32 @@ export function assessLocation(
     "location",
     listings,
     "Evalúa las señales de ubicación del inmueble (proximidad a la playa y casco histórico) según las instrucciones (location).",
+    opts,
+  );
+}
+
+/**
+ * #398 (Fase 5 de #385) — Assess two investor-opportunity signals derived from
+ * the advert text: whether the property is VPO / vivienda protegida (`is_vpo`,
+ * a hard filter downstream) and whether a licencia turística / VUT is already
+ * granted (`tourist_license`, a soft ranking boost).
+ *
+ * Takes EVERY live listing of one deduplicated property, same reasoning as
+ * `assessCondition`: a "VPO" disclosure made on one portal must not be missed
+ * because a sibling advert omits it. LLM-only by owner decision — no
+ * regex/keyword classifier anywhere (see `lib/ai-assessment/opportunity.ts` and
+ * D-095's LLM-not-regex principle).
+ *
+ * Returns the raw JSON text plus the model that produced it.
+ */
+export function assessOpportunity(
+  listings: ListingSnapshot[],
+  opts?: AssessmentOpts,
+): Promise<{ text: string; model: string }> {
+  return runPropertyAssessment(
+    "opportunity",
+    listings,
+    "Evalúa las señales de oportunidad del inmueble (VPO y licencia turística) según las instrucciones (opportunity).",
     opts,
   );
 }

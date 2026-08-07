@@ -57,6 +57,11 @@ export function CandidateList({ profileId }: { profileId: number }) {
   // below — an empty feed says "needs assessment", not "broken".
   const [beachProximity, setBeachProximity] = useState<string>("");
   const [heritageZone, setHeritageZone] = useState(false);
+  // #398 (Fase 5 of #385): VPO / vivienda protegida as a BIDIRECTIONAL hard
+  // filter — "" = off, "true" = only VPO, "false" = exclude VPO. Reads the
+  // `opportunity` assessment axis (empty until the LLM populates it), so it's
+  // folded into `assessmentFilterActive` for the "needs assessment" empty state.
+  const [isVpo, setIsVpo] = useState<string>("");
   // #379: show-rejected toggle. Default OFF — the feed hides rejected
   // candidates (today's behaviour), so a reject only "removes" a card on the
   // next fetch. ON re-fetches with `includeRejected=true`, surfacing rejected
@@ -70,7 +75,8 @@ export function CandidateList({ profileId }: { profileId: number }) {
     caveat !== "" ||
     redflagType !== "" ||
     beachProximity !== "" ||
-    heritageZone;
+    heritageZone ||
+    isVpo !== "";
 
   const fetchPage = useCallback(
     async (afterCursor: string | null, replace: boolean) => {
@@ -92,6 +98,8 @@ export function CandidateList({ profileId }: { profileId: number }) {
       // #392 beach-proximity (min grade) + casco-histórico toggle.
       if (beachProximity !== "") url.searchParams.set("beachProximity", beachProximity);
       if (heritageZone) url.searchParams.set("heritageZone", "true");
+      // #398 VPO (bidirectional): "true" only VPO, "false" exclude VPO.
+      if (isVpo !== "") url.searchParams.set("isVpo", isVpo);
       // #379: opt in to rejected candidates. Omitted (default) keeps them hidden.
       if (showRejected) url.searchParams.set("includeRejected", "true");
       const res = await fetch(url.toString().replace(window.location.origin, ""));
@@ -114,6 +122,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
       redflagType,
       beachProximity,
       heritageZone,
+      isVpo,
       showRejected,
     ],
   );
@@ -329,6 +338,23 @@ export function CandidateList({ profileId }: { profileId: number }) {
         />
         Casco histórico
       </label>
+
+      {/* #398: VPO / vivienda protegida as a BIDIRECTIONAL hard filter — only
+          VPO or exclude VPO. Needs the `opportunity` assessment axis. */}
+      <label htmlFor="candidate-vpo-filter" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+        VPO
+      </label>
+      <select
+        id="candidate-vpo-filter"
+        data-testid="vpo-filter"
+        value={isVpo}
+        onChange={(e) => setIsVpo(e.target.value)}
+        style={selectStyle}
+      >
+        <option value="">Cualquiera</option>
+        <option value="true">Solo VPO</option>
+        <option value="false">Sin VPO</option>
+      </select>
 
       {/* #379: show/hide rejected candidates. Default off (rejected hidden).
           Turning it on re-fetches with includeRejected=true so the user can

@@ -30,8 +30,9 @@ import { resetPool } from "@/lib/db-write";
 // min-below-market ($11). #379 appends includeRejected ($12), false by default
 // (rejected candidates hidden). #386 appends caveat ($13) and redflagType
 // ($14), both null (off) by default. #392 appends beachProximity ($15) and
-// heritageZone ($16), both null (off). This is the "all filters off" tail every
-// existing listCandidates assertion carries now.
+// heritageZone ($16), both null (off). #398 appends isVpo ($17), null (off).
+// This is the "all filters off" tail every existing listCandidates assertion
+// carries now.
 const NO_FILTER_TAIL = [
   null,
   OCCUPIED_STATUSES,
@@ -39,6 +40,7 @@ const NO_FILTER_TAIL = [
   null,
   null,
   false,
+  null,
   null,
   null,
   null,
@@ -248,6 +250,44 @@ describe("listCandidates", () => {
     expect(sql).toContain("WHEN 'sea_view' THEN 2");
     expect(sql).toContain("WHEN 'near_beach' THEN 1");
     expect(sql).toContain("* 0.03");
+  });
+
+  it("passes isVpo=true as $17 and gates bidirectionally on ranked.is_vpo (#398)", async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [] });
+
+    await listCandidates(7, { isVpo: true });
+    const [sql, params] = mockPoolQuery.mock.calls[0];
+    // $17 carries the boolean; the outer filter reads ranked.is_vpo (the CTE's
+    // per-axis column from the latest opportunity row), never a JOIN (D-059).
+    expect(params[16]).toBe(true);
+    expect(sql).toContain("$17::boolean IS NULL OR ranked.is_vpo = $17::boolean");
+    // The CTE derives is_vpo itself from the opportunity axis.
+    expect(sql).toContain("AS is_vpo");
+    expect(sql).toContain("'occupancy', 'condition', 'redflags', 'location', 'opportunity'");
+  });
+
+  it("passes isVpo=false as $17 (exclude-VPO direction) (#398)", async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [] });
+
+    await listCandidates(7, { isVpo: false });
+    expect(mockPoolQuery.mock.calls[0][1][16]).toBe(false);
+  });
+
+  it("normalises an omitted isVpo to null so the off-tail stays uniform (#398)", async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [] });
+
+    await listCandidates(7);
+    expect(mockPoolQuery.mock.calls[0][1][16]).toBeNull();
+  });
+
+  it("emits the soft tourist-licence boost in effective_score (soft, non-filtering — #398)", async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [] });
+
+    await listCandidates(7);
+    const [sql] = mockPoolQuery.mock.calls[0];
+    // A single-boolean CASE on base.tourist_license added to effective_score.
+    expect(sql).toContain("CASE WHEN base.tourist_license = true THEN 0.04 ELSE 0 END");
+    expect(sql).toContain("AS tourist_license");
   });
 
   it("rejects a malformed cursor rather than silently resetting to page 1", async () => {
@@ -641,6 +681,34 @@ describe("flagsFromAssessments (#152 review, must-fix 1 and 3)", () => {
       { kind: "location:heritage_zone", label: "Casco histórico", tone: "neutral" },
     ]);
   });
+
+  // #398 opportunity axis: is_vpo (warn) + tourist_license (neutral) badges.
+  it("#398: emits the warn-tone `VPO` badge only when is_vpo is strictly true", () => {
+    expect(flagsFromAssessments([assessmentRow(1, { is_vpo: true })])).toEqual([
+      { kind: "opportunity:is_vpo", label: "VPO", tone: "warn" },
+    ]);
+    expect(flagsFromAssessments([assessmentRow(1, { is_vpo: false })])).toEqual([]);
+    // Defensive: a truthy-but-not-`true` value must not manufacture a badge.
+    expect(flagsFromAssessments([assessmentRow(1, { is_vpo: "true" })])).toEqual([]);
+  });
+
+  it("#398: emits the neutral-tone `Licencia turística` badge only when tourist_license is strictly true", () => {
+    expect(flagsFromAssessments([assessmentRow(1, { tourist_license: true })])).toEqual([
+      { kind: "opportunity:tourist_license", label: "Licencia turística", tone: "neutral" },
+    ]);
+    expect(flagsFromAssessments([assessmentRow(1, { tourist_license: false })])).toEqual([]);
+    expect(flagsFromAssessments([assessmentRow(1, { tourist_license: "true" })])).toEqual([]);
+  });
+
+  it("#398: a VPO with a granted tourist licence shows both opportunity badges", () => {
+    const flags = flagsFromAssessments([
+      assessmentRow(1, { is_vpo: true, tourist_license: true }),
+    ]);
+    expect(flags).toEqual([
+      { kind: "opportunity:is_vpo", label: "VPO", tone: "warn" },
+      { kind: "opportunity:tourist_license", label: "Licencia turística", tone: "neutral" },
+    ]);
+  });
 });
 
 describe("loadFlags SQL shape (#152 review, must-fix 1 and 2)", () => {
@@ -819,5 +887,20 @@ describe("describeRankingBoost (#309)", () => {
     expect(reason).toContain("20%");
     expect(reason).toContain("señales de oportunidad");
     expect(reason).toContain("proximidad a la playa");
+  });
+
+  it("names a granted tourist licence as a boost reason, but never is_vpo (#398)", () => {
+    const withLicence = describeRankingBoost(null, 0, null, true)!;
+    expect(withLicence).toContain("licencia turística concedida");
+    // Absent licence carries no boost, so no clause; default arg keeps every
+    // existing 3-arg caller unchanged.
+    expect(describeRankingBoost(null, 0, null, false)).toBeNull();
+    expect(describeRankingBoost(null, 0, null)).toBeNull();
+  });
+
+  it("joins the tourist-licence reason with the other signals as a fourth clause (#398)", () => {
+    const reason = describeRankingBoost(0.2, 1, "sea_view", true)!;
+    expect(reason.split(";")).toHaveLength(4);
+    expect(reason).toContain("licencia turística concedida");
   });
 });

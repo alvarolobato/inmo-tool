@@ -24,6 +24,10 @@
  *                 (any beach signal). Reads the `location` AI-assessment axis.
  *   heritageZone — #392 hard filter: `true` keeps only casco-histórico
  *                 candidates. Reads the `location` axis. Any other value = off.
+ *   isVpo       — #398 hard filter (BIDIRECTIONAL): `true` keeps only VPO /
+ *                 vivienda protegida candidates; `false` keeps only non-VPO
+ *                 candidates; absent/empty = off. Any other value → 400. Reads
+ *                 the `opportunity` AI-assessment axis.
  *   minDiscount — #310 hard filter: keep only candidates priced at least this
  *                 PERCENT (0–100) below the pool median price/m². Sent as a
  *                 percent (e.g. `15`); converted to a fraction for the query.
@@ -192,6 +196,23 @@ export async function GET(
   // permissive parse here can't silently narrow the feed.
   const heritageZone = searchParams.get("heritageZone") === "true";
 
+  // #398 VPO filter — BIDIRECTIONAL, so it needs a strict tri-state parse
+  // (unlike the boolean toggles above): "true" = only VPO, "false" = exclude
+  // VPO, absent/empty = off. Any other value is a malformed request (400), never
+  // silently ignored — an unvalidated parse could show an unfiltered feed the
+  // user didn't ask for.
+  const rawIsVpo = searchParams.get("isVpo");
+  let isVpo: boolean | null = null;
+  if (rawIsVpo !== null && rawIsVpo !== "") {
+    if (rawIsVpo !== "true" && rawIsVpo !== "false") {
+      return NextResponse.json(
+        formatApiError("Filtro de VPO no válido.", "VALIDATION", undefined, requestId),
+        { status: 400 },
+      );
+    }
+    isVpo = rawIsVpo === "true";
+  }
+
   // #379: show-rejected toggle. Absent/anything-but-"true" keeps today's
   // behaviour (rejected candidates hidden). Only the exact string "true"
   // opts in — a permissive parse here can't silently surface rejected cards.
@@ -267,6 +288,7 @@ export async function GET(
       redflagType,
       beachProximity,
       heritageZone,
+      isVpo,
       includeRejected,
     });
     return NextResponse.json(page);

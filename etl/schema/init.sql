@@ -576,7 +576,7 @@ CREATE TABLE IF NOT EXISTS profile_scoring_model (
 CREATE TABLE IF NOT EXISTS ai_assessment (
     id              BIGSERIAL    PRIMARY KEY,
     property_id     BIGINT       NOT NULL REFERENCES property(id),
-    assessment_type TEXT         NOT NULL CHECK (assessment_type IN ('occupancy','condition','redflags','location','extract','compare')),
+    assessment_type TEXT         NOT NULL CHECK (assessment_type IN ('occupancy','condition','redflags','location','opportunity','extract','compare')),
     result          JSONB        NOT NULL,
     confidence      NUMERIC(4,3),
     model           TEXT,
@@ -595,14 +595,15 @@ CREATE TABLE IF NOT EXISTS ai_assessment (
         UNIQUE NULLS NOT DISTINCT (property_id, assessment_type, prompt_version)
 );
 
--- The flow catalog gained `compare` in #24 (Phase 4.1) and `location` in #388
--- (Fase 3 de #385). Re-stated as an ALTER because the CREATE TABLE above is a
--- no-op against a database that already has ai_assessment — an inline edit
--- alone would leave existing installs (incl. the persistent demo DB) rejecting
--- every 'location' row at runtime. Idempotent named DROP/ADD.
+-- The flow catalog gained `compare` in #24 (Phase 4.1), `location` in #388
+-- (Fase 3 de #385) and `opportunity` in #398 (Fase 5 de #385). Re-stated as an
+-- ALTER because the CREATE TABLE above is a no-op against a database that
+-- already has ai_assessment — an inline edit alone would leave existing installs
+-- (incl. the persistent demo DB) rejecting every 'opportunity' row at runtime.
+-- Idempotent named DROP/ADD.
 ALTER TABLE ai_assessment DROP CONSTRAINT IF EXISTS ai_assessment_assessment_type_check;
 ALTER TABLE ai_assessment ADD CONSTRAINT ai_assessment_assessment_type_check
-    CHECK (assessment_type IN ('occupancy','condition','redflags','location','extract','compare'));
+    CHECK (assessment_type IN ('occupancy','condition','redflags','location','opportunity','extract','compare'));
 
 -- #25: re-key listing_id → property_id on databases that already have the
 -- old shape. The CREATE TABLE above is a no-op for them, so without this

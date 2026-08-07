@@ -369,6 +369,16 @@
   requires_restart: []
   components: [dashboard]
 
+- key: dashboard.llm_model_openrouter_opportunity
+  env: DASHBOARD_LLM_MODEL_OPENROUTER_OPPORTUNITY
+  type: string
+  sensitive: false
+  default: null
+  section: "Dashboard LLM"
+  description: "Modelo OpenRouter para la evaluación de oportunidad (VPO / vivienda protegida y licencia turística). Si está vacío, cae en dashboard.llm_model_openrouter."
+  requires_restart: []
+  components: [dashboard]
+
 - key: dashboard.llm_model_openrouter_extract
   env: DASHBOARD_LLM_MODEL_OPENROUTER_EXTRACT
   type: string

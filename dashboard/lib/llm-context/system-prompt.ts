@@ -948,6 +948,99 @@ Formato de salida:
 }
 
 /**
+ * #398 (Fase 5 de #385) — opportunity: is_vpo (hard filter downstream) +
+ * tourist_license (soft ranking boost), per deduplicated property.
+ *
+ * Same property-level, single-shot, temperature-0 pattern as
+ * condition/redflags/location (see their doc comments). Mining the descriptions
+ * showed both signals are under-exposed by the portals: VPO shows up in the
+ * text 3.6× more than the portal checkbox, and a granted licencia turística is
+ * text-only. So both are derived from the advert text.
+ *
+ * ## LLM-only, never regex (owner decision, 2026-08-06)
+ *
+ * The owner explicitly does not trust keyword/regex matching for text-derived
+ * signals. This prompt IS the detector: the model reads the text and answers
+ * with a cited literal quote per boolean. There is no ILIKE/regex classifier
+ * anywhere in the runtime path (see `lib/ai-assessment/opportunity.ts` and
+ * docs/decisions/D-095-location-axis.md — the same LLM-not-regex principle).
+ *
+ * Each of the two booleans demands its OWN literal evidence quote or degrades
+ * to `false` in `parseOpportunityResult`.
+ */
+export function buildOpportunityPrompt(vars: FlowVars): {
+  stable: string;
+  volatile?: string;
+} {
+  const stable = `${DOMAIN_PREAMBLE}
+
+## Tarea: oportunidad (VPO y licencia turística)
+
+Clasifica DOS señales de oportunidad para el inversor que muchas veces no
+aparecen en los campos estructurados del portal y que se deducen del texto del
+anuncio. No inventes: básate ÚNICAMENTE en lo que el anuncio dice. Si el texto
+no lo dice, la señal es \`false\`.
+
+### 1) VPO / vivienda protegida (\`is_vpo\`) — booleano
+
+\`true\` solo si el texto afirma que la vivienda es de **Protección Oficial** o
+**protegida**: "VPO", "V.P.O.", "vivienda de protección oficial", "vivienda
+protegida", "VPP", "vivienda con protección pública", "precio tasado/máximo de
+venta por ser protegida", "sujeta a régimen de protección". Es una restricción
+material (tope de precio de reventa y/o restricción del comprador), por eso el
+inversor filtra por ella. En cualquier otro caso, \`false\`. Un anuncio que solo
+diga "buen precio" o "protegido de miradas/del sol" NO es VPO.
+
+### 2) Licencia turística / VUT (\`tourist_license\`) — booleano
+
+\`true\` solo si el texto afirma que la vivienda **ya tiene concedida** una
+licencia turística o de vivienda de uso turístico: "licencia turística",
+"licencia VUT", "vivienda de uso turístico con licencia", "apto turístico con
+licencia", "número de registro turístico". Marca \`true\` únicamente cuando la
+licencia YA existe/está concedida. Un anuncio que diga "ideal para alquiler
+turístico", "posibilidad de licencia turística" o "apto para uso turístico" SIN
+afirmar que la licencia está concedida NO cuenta como \`true\` — eso es un
+potencial, no una licencia. Ante la duda, \`false\`.
+
+### Evidencia obligatoria por cada señal
+
+Por CADA booleano que marques \`true\` DEBES aportar una cita literal del anuncio:
+- \`vpo_evidence\` sostiene \`is_vpo\` (obligatoria si es \`true\`).
+- \`tourist_license_evidence\` sostiene \`tourist_license\` (obligatoria si es \`true\`).
+Si no puedes citar nada para una señal, esa señal es \`false\`. Nunca afirmes VPO
+ni licencia turística sin una frase del texto que lo diga. \`evidence_source\`
+(\`vpo_evidence_source\` / \`tourist_license_evidence_source\`) indica de qué portal
+sale la cita.
+
+### Varios anuncios del mismo inmueble
+
+Puede que te dé varios anuncios del mismo inmueble físico en portales distintos.
+Emite UN solo veredicto por señal para el inmueble: basta que UN anuncio afirme
+"VPO" o "licencia turística concedida" para marcarlo, citando ese anuncio
+concreto en la evidencia y su portal en el source.
+
+${ASSESSMENT_RULES}
+
+**Nota sobre la regla 2 anterior:** aquí "no lo sé / no se menciona" se expresa
+con \`false\` en ambos campos, NO con la cadena \`"unknown"\` — \`"unknown"\` no es un
+valor válido de estos campos booleanos y rompería el formato de salida.
+
+Formato de salida:
+{
+  "is_vpo": true | false,
+  "vpo_evidence": "cita literal del anuncio, o \\"\\" si es false",
+  "vpo_evidence_source": "portal del que sale la cita (p. ej. \\"fotocasa\\"), o null",
+  "tourist_license": true | false,
+  "tourist_license_evidence": "cita literal del anuncio, o \\"\\" si es false",
+  "tourist_license_evidence_source": "portal del que sale la cita, o null",
+  "confidence": 0.0-1.0,
+  "reasoning": "una o dos frases en español"
+}`;
+
+  return { stable, volatile: propertyVolatile(vars) };
+}
+
+/**
  * #28 — extract: unstructured description → structured fields, per
  * deduplicated property.
  *
@@ -1165,6 +1258,8 @@ export function buildSystemPrompt(
       return buildRedflagsPrompt(vars);
     case "location":
       return buildLocationPrompt(vars);
+    case "opportunity":
+      return buildOpportunityPrompt(vars);
     case "extract":
       return buildExtractPrompt(vars);
     case "compare":
