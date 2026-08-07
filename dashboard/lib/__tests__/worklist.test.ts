@@ -16,6 +16,8 @@ import {
   firstPendingUrl,
   pendingUrls,
   selectNextPendingUrls,
+  isPortalDue,
+  PORTAL_RANK_NOT_DUE,
 } from "@/lib/worklist";
 import type {
   WorklistRow,
@@ -175,5 +177,47 @@ describe("selectNextPendingUrls — auto-driver next batch (issue #424)", () => 
       { url: "good", portal: "idealista", createdAt: "2026-02-01T00:00:00Z" },
     ];
     expect(selectNextPendingUrls(withBad, { idealista: 0 }, 99)).toEqual(["good", "bad"]);
+  });
+
+  // ── due-only vs force (issue #434) ─────────────────────────────────────────
+  it("dueOnly keeps only due/half-done portals; drops not-due and unknown", () => {
+    // altamira not-due (2), cimenta2 unknown (absent) — both excluded.
+    const withNotDue: PendingSelectionItem[] = [
+      ...items,
+      { url: "u-cim", portal: "cimenta2", createdAt: "2026-01-10T00:00:00Z" },
+    ];
+    const dueRanks = { idealista: 0, aliseda: 1, altamira: 2 };
+    expect(selectNextPendingUrls(withNotDue, dueRanks, 99, true)).toEqual([
+      "u-ide-old",
+      "u-ide-new",
+      "u-ali",
+    ]);
+  });
+
+  it("force (dueOnly=false) includes not-due and unknown portals", () => {
+    const dueRanks = { idealista: 0, aliseda: 1, altamira: 2 };
+    expect(selectNextPendingUrls(items, dueRanks, 99, false)).toHaveLength(items.length);
+  });
+
+  it("dueOnly returns [] when nothing is due (signals the driver to idle)", () => {
+    const notDue: PendingSelectionItem[] = [
+      { url: "u-alt", portal: "altamira", createdAt: "2026-01-01T00:00:00Z" },
+    ];
+    expect(selectNextPendingUrls(notDue, { altamira: 2 }, 99, true)).toEqual([]);
+  });
+
+  it("mirrors batch.js: default (flag omitted) is NOT due-only", () => {
+    expect(selectNextPendingUrls(items, due, 99)).toHaveLength(items.length);
+  });
+});
+
+describe("isPortalDue — due when rank < not-due (issue #434)", () => {
+  it("is due for rank 0/1, not for not-due/unknown/absent", () => {
+    expect(isPortalDue(0)).toBe(true);
+    expect(isPortalDue(1)).toBe(true);
+    expect(isPortalDue(PORTAL_RANK_NOT_DUE)).toBe(false);
+    expect(isPortalDue(99)).toBe(false);
+    expect(isPortalDue(undefined)).toBe(false);
+    expect(isPortalDue(NaN)).toBe(false);
   });
 });

@@ -175,3 +175,62 @@ describe("GET /api/etl/worklist?pending — auto-driver next batch (issue #424)"
     expect(res.status).toBe(500);
   });
 });
+
+describe("GET /api/etl/worklist?pending — dueOnly filter vs Forzar (issue #434)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const items = [
+    { url: "u-ide", portal: "idealista", createdAt: "2026-02-01T00:00:00Z" }, // due (0)
+    { url: "u-alt", portal: "altamira", createdAt: "2026-01-01T00:00:00Z" }, // not-due (2)
+    { url: "u-cim", portal: "cimenta2", createdAt: "2026-01-05T00:00:00Z" }, // unknown
+  ];
+
+  it("defaults to due-only: excludes not-due and unknown portals", async () => {
+    mockPending.mockResolvedValue(items);
+    mockDue.mockResolvedValue({ idealista: 0, altamira: 2 });
+    const res = await GET(
+      new NextRequest("http://localhost:4000/api/etl/worklist?pending=1"),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.urls).toEqual(["u-ide"]); // only the due portal survives
+    expect(body.dueOnly).toBe(true);
+    expect(body.totalPending).toBe(3); // count is all pending, for display
+  });
+
+  it("dueOnly=0 (Forzar) returns the full pending set", async () => {
+    mockPending.mockResolvedValue(items);
+    mockDue.mockResolvedValue({ idealista: 0, altamira: 2 });
+    const res = await GET(
+      new NextRequest("http://localhost:4000/api/etl/worklist?pending=1&dueOnly=0"),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.urls).toEqual(["u-ide", "u-alt", "u-cim"]); // due (0), not-due (2), unknown (99)
+    expect(body.dueOnly).toBe(false);
+  });
+
+  it("dueOnly=1 explicit behaves like the default", async () => {
+    mockPending.mockResolvedValue(items);
+    mockDue.mockResolvedValue({ idealista: 0, altamira: 2 });
+    const res = await GET(
+      new NextRequest("http://localhost:4000/api/etl/worklist?pending=1&dueOnly=1"),
+    );
+    const body = await res.json();
+    expect(body.urls).toEqual(["u-ide"]);
+    expect(body.dueOnly).toBe(true);
+  });
+
+  it("due-only returns [] when nothing is due — driver idles, no spin", async () => {
+    mockPending.mockResolvedValue([
+      { url: "u-alt", portal: "altamira", createdAt: "2026-01-01T00:00:00Z" },
+    ]);
+    mockDue.mockResolvedValue({ altamira: 2 });
+    const res = await GET(
+      new NextRequest("http://localhost:4000/api/etl/worklist?pending=1"),
+    );
+    const body = await res.json();
+    expect(body.urls).toEqual([]);
+    expect(body.totalPending).toBe(1);
+  });
+});

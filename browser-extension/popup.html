@@ -57,6 +57,13 @@
     <div class="actions batch-auto">
       <button id="batch-auto-btn" class="btn btn-primary">Auto: capturar toda la lista</button>
     </div>
+    <!-- "Forzar" (issue #434): OFF (default) → Auto captura solo lo que toca
+         (due, vencido el timeout del conector); ON → re-captura también lo
+         no-due / ya hecho. Se recuerda en chrome.storage. -->
+    <label class="batch-force" for="batch-force-chk">
+      <input type="checkbox" id="batch-force-chk" />
+      Forzar: re-capturar también las ya hechas
+    </label>
     <p id="batch-auto-status" class="state-sub batch-auto-status hidden"></p>
 
     <p class="state-sub batch-hint">

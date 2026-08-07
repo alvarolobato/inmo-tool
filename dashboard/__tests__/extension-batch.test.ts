@@ -78,6 +78,9 @@ const {
   MAX_AUTO_TIMEOUT_SEC,
   clampAutoBatchSize,
   clampAutoTimeoutSec,
+  PORTAL_RANK_NOT_DUE,
+  AUTO_PORTAL_RANK_UNKNOWN,
+  isPortalDue,
   makeAutoState,
   shouldContinueAuto,
   selectNextPending,
@@ -133,12 +136,16 @@ const {
   MAX_AUTO_TIMEOUT_SEC: number;
   clampAutoBatchSize: (n: unknown) => number;
   clampAutoTimeoutSec: (n: unknown) => number;
+  PORTAL_RANK_NOT_DUE: number;
+  AUTO_PORTAL_RANK_UNKNOWN: number;
+  isPortalDue: (rank: unknown) => boolean;
   makeAutoState: (opts: unknown) => AutoState;
   shouldContinueAuto: (s: AutoState | null, pendingCount: number) => boolean;
   selectNextPending: (
     items: unknown,
     duePriority: Record<string, number>,
     limit: number,
+    dueOnly?: boolean,
   ) => PendingItem[];
   nextAutoAction: (
     s: AutoState | null,
@@ -155,6 +162,7 @@ interface AutoState {
   batchesDone: number;
   lastBatchAt: number | null;
   totalPending: number | null;
+  force: boolean;
 }
 interface PendingItem {
   url: string;
@@ -802,6 +810,79 @@ describe("selectNextPending — cap N, due-priority then oldest", () => {
     }
     expect(inflightCount(s)).toBeLessThanOrEqual(2);
     expect(launched).toBe(2); // never more than the cap in flight at once
+  });
+});
+
+describe("isPortalDue — due when rank < not-due (issue #434)", () => {
+  it("is due for rank 0 (due) and 1 (half-done)", () => {
+    expect(isPortalDue(0)).toBe(true);
+    expect(isPortalDue(1)).toBe(true);
+  });
+  it("is NOT due for not-due (2), unknown (99), or a non-finite/absent rank", () => {
+    expect(isPortalDue(PORTAL_RANK_NOT_DUE)).toBe(false);
+    expect(isPortalDue(2)).toBe(false);
+    expect(isPortalDue(AUTO_PORTAL_RANK_UNKNOWN)).toBe(false);
+    expect(isPortalDue(undefined)).toBe(false);
+    expect(isPortalDue(NaN)).toBe(false);
+    expect(isPortalDue("0" as unknown)).toBe(false);
+  });
+});
+
+describe("selectNextPending — dueOnly filter vs force (issue #434)", () => {
+  const items: PendingItem[] = [
+    { url: "u-ide-old", portal: "idealista", createdAt: "2026-02-01T00:00:00Z" }, // due (0)
+    { url: "u-ide-new", portal: "idealista", createdAt: "2026-03-01T00:00:00Z" }, // due (0)
+    { url: "u-ali-old", portal: "aliseda", createdAt: "2026-01-15T00:00:00Z" }, // half-done (1)
+    { url: "u-alt-old", portal: "altamira", createdAt: "2026-01-01T00:00:00Z" }, // not-due (2)
+    { url: "u-cim-old", portal: "cimenta2", createdAt: "2026-01-05T00:00:00Z" }, // unknown (absent)
+  ];
+  const due = { idealista: 0, aliseda: 1, altamira: 2 };
+
+  it("due-only keeps only due/half-done portals; drops not-due and unknown", () => {
+    const urls = selectNextPending(items, due, 99, true).map((x) => x.url);
+    // idealista (0, oldest first), then aliseda (1); altamira (2) and
+    // cimenta2 (unknown) are filtered out entirely.
+    expect(urls).toEqual(["u-ide-old", "u-ide-new", "u-ali-old"]);
+  });
+
+  it("force (dueOnly=false) includes not-due and unknown portals", () => {
+    const urls = selectNextPending(items, due, 99, false).map((x) => x.url);
+    expect(urls).toContain("u-alt-old"); // not-due included under force
+    expect(urls).toContain("u-cim-old"); // unknown included under force
+    expect(urls).toHaveLength(items.length);
+  });
+
+  it("defaults to NOT due-only when the flag is omitted (back-compat)", () => {
+    const urls = selectNextPending(items, due, 99).map((x) => x.url);
+    expect(urls).toHaveLength(items.length);
+  });
+
+  it("returns [] when nothing is due — the driver then idles (no spin)", () => {
+    const notDue = [
+      { url: "a", portal: "altamira", createdAt: "2026-01-01T00:00:00Z" }, // not-due (2)
+      { url: "b", portal: "cimenta2", createdAt: "2026-01-02T00:00:00Z" }, // unknown
+    ];
+    const selected = selectNextPending(notDue, { altamira: 2 }, 99, true);
+    expect(selected).toEqual([]);
+    // Empty selection → shouldContinueAuto false → alarm-scheduled idle, no spin.
+    const on = makeAutoState({ enabled: true });
+    expect(shouldContinueAuto(on, selected.length)).toBe(false);
+  });
+
+  it("due-only still caps at N and orders due-first then oldest", () => {
+    expect(selectNextPending(items, due, 2, true).map((x) => x.url)).toEqual([
+      "u-ide-old",
+      "u-ide-new",
+    ]);
+  });
+});
+
+describe("makeAutoState — force flag (issue #434)", () => {
+  it("defaults force to false and only sets it for an explicit true", () => {
+    expect(makeAutoState({ enabled: true }).force).toBe(false);
+    expect(makeAutoState({ enabled: true, force: false }).force).toBe(false);
+    expect(makeAutoState({ enabled: true, force: "yes" as unknown }).force).toBe(false);
+    expect(makeAutoState({ enabled: true, force: true }).force).toBe(true);
   });
 });
 

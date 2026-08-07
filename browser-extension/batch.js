@@ -475,7 +475,10 @@
   /**
    * Build the durable auto-mode state (persisted in chrome.storage.session so it
    * survives MV3 eviction). `portal` null means "drain every portal". `batchSize`
-   * / `timeoutSec` are clamped. Starts IDLE with no batches done.
+   * / `timeoutSec` are clamped. `force` (issue #434, default false) is the
+   * "Forzar" toggle: when true, auto re-captures even not-due / already-done
+   * listings (the driver requests `dueOnly=0`); when false it captures only due
+   * work. Starts IDLE with no batches done.
    */
   function makeAutoState(opts) {
     opts = opts || {};
@@ -485,6 +488,7 @@
         typeof opts.portal === "string" && opts.portal ? opts.portal : null,
       batchSize: clampAutoBatchSize(opts.batchSize),
       timeoutSec: clampAutoTimeoutSec(opts.timeoutSec),
+      force: opts.force === true,
       status:
         typeof opts.status === "string" ? opts.status : AUTO_STATUS.IDLE,
       batchesDone:
@@ -514,6 +518,25 @@
   // connector rank (due=0 / half-done=1 / not-due=2, see worklist-priority.ts).
   var AUTO_PORTAL_RANK_UNKNOWN = 99;
 
+  // Rank AT OR ABOVE which a portal is NOT due this cycle (issue #434). The
+  // #414 ranks are due=0 < half-done=1 < not-due=2 < unknown=99; a portal is
+  // "due" (auto should capture it now) only when it has at least one due task
+  // — i.e. rank 0 (due) or 1 (half-done). not-due (2, al día within the
+  // staleness window) and unknown (99, no connector/profile → no staleness
+  // window to respect) are NOT due, so due-only mode skips them (the operator
+  // uses "Forzar" or a manual batch to re-capture those). Mirror of
+  // lib/worklist.ts PORTAL_RANK_NOT_DUE.
+  var PORTAL_RANK_NOT_DUE = 2;
+
+  /**
+   * Is this portal DUE this cycle, given its #414 due-rank? Pure. A due portal
+   * has rank < PORTAL_RANK_NOT_DUE (0 due, or 1 half-done). Anything else — al
+   * día (2), unknown/no-connector (99), or a non-finite rank — is NOT due.
+   */
+  function isPortalDue(rank) {
+    return typeof rank === "number" && isFinite(rank) && rank < PORTAL_RANK_NOT_DUE;
+  }
+
   function rankForItem(item, duePriorityByPortal) {
     if (!item) return AUTO_PORTAL_RANK_UNKNOWN;
     var r =
@@ -539,11 +562,25 @@
    * STABLE — the original input order breaks any remaining tie. Each item is
    * `{ url, portal, createdAt }`; the returned slice preserves that shape so the
    * caller reads `.url`.
+   *
+   * `dueOnly` (issue #434, default false): when true, FILTER OUT items whose
+   * portal is not due this cycle ({@link isPortalDue}) BEFORE ranking/slicing —
+   * so auto captures only work whose connector's staleness window has elapsed.
+   * When it filters everything out the result is `[]`, which the driver reads as
+   * "nothing due" → it idles until the next tick (never spins). `dueOnly=false`
+   * (the "Forzar" toggle) keeps the full pending set so already-done / not-due
+   * listings are re-captured. This is the SERVER-mirror of
+   * lib/worklist.ts `selectNextPendingUrls`; the two must stay in step.
    */
-  function selectNextPending(items, duePriorityByPortal, limit) {
+  function selectNextPending(items, duePriorityByPortal, limit, dueOnly) {
     var lim = typeof limit === "number" && limit > 0 ? Math.floor(limit) : 0;
     if (lim === 0) return [];
     var list = Array.isArray(items) ? items : [];
+    if (dueOnly === true) {
+      list = list.filter(function (it) {
+        return isPortalDue(rankForItem(it, duePriorityByPortal));
+      });
+    }
     var indexed = list.map(function (it, i) {
       return { it: it, i: i };
     });
@@ -632,6 +669,9 @@
     MAX_AUTO_TIMEOUT_SEC: MAX_AUTO_TIMEOUT_SEC,
     clampAutoBatchSize: clampAutoBatchSize,
     clampAutoTimeoutSec: clampAutoTimeoutSec,
+    PORTAL_RANK_NOT_DUE: PORTAL_RANK_NOT_DUE,
+    AUTO_PORTAL_RANK_UNKNOWN: AUTO_PORTAL_RANK_UNKNOWN,
+    isPortalDue: isPortalDue,
     makeAutoState: makeAutoState,
     shouldContinueAuto: shouldContinueAuto,
     selectNextPending: selectNextPending,
