@@ -3,13 +3,13 @@ id: D-043
 title: Batch capture is a fully-automated bounded-concurrency queue in the extension, with jittered pacing
 date: 2026-08-05
 group: Data / connectors
-rule: Batch capture is a fully-automated BOUNDED-CONCURRENCY queue in the extension (open→activate→auto-capture→close, up to N=3 tabs, hard-cap 5), seeded from a listing page. Keep the JITTERED/staggered launches — never fixed-interval, never an unbounded burst. Small N is mandatory (WAF + Chrome background-tab render throttling). Supersedes the human-paced one-tab-per-click design and the original sequential driver.
+rule: Batch capture is a fully-automated BOUNDED-CONCURRENCY queue in the extension (open→auto-capture→close), seeded from a listing page. Concurrency + stagger base/spread are operator-configurable (options, clamped): default N=3, hard-cap 8, default stagger base 2 s. Keep the JITTERED/staggered launches — never fixed-interval, never an unbounded burst. Active-tab mode is the safe default; a background-tab (no-focus-steal) mode is opt-in. Supersedes the human-paced one-tab-per-click and sequential designs.
 order: 46
 ---
 
 # D-043: Batch capture is a fully-automated bounded-concurrency queue in the extension, with jittered pacing
 
-*Decided: 2026-08-05 — revised 2026-08-05 (#318): sequential → bounded concurrency*
+*Decided: 2026-08-05 — revised 2026-08-05 (#318): sequential → bounded concurrency — revised 2026-08-07 (#410): dials made configurable, cap 5→8, default stagger base 4 s→2 s, opt-in background-tab mode*
 
 **Context**: Issue #262. The guided-capture worklist (#237/#254/#260/#261) was
 built around a deliberately human-paced flow: `lib/worklist.ts firstPendingUrl`
@@ -49,28 +49,54 @@ advance, showing live N/M progress with stop/resume.
    long idealista sweeps and asked for several tabs at once with random waits.
    A future agent must not "restore" the one-at-a-time driver: N>1 is the
    point. Equally, N must stay small and capped — see below.)*
-2. **N is small and CAPPED, and launches stay jittered.** Two hard constraints
-   bound the concurrency:
+2. **N is bounded and CAPPED, and launches stay jittered.** Two hard
+   constraints bound the concurrency:
    - **WAF safety.** Idealista (CAPTCHA wall) and Aliseda (`Disallow: /` data
      host, D-019) punish bursts. Launches are STAGGERED by a randomised delay
-     (`batch.js jitterDelay`, 4–9 s minimum) — this is what keeps the N tabs
-     from opening simultaneously. Never a fixed metronome, never an unbounded
-     simultaneous burst. Do **not** remove or fixed-interval-ise the stagger,
-     and do **not** raise the cap to make it "faster".
-   - **Chrome background-tab render throttling.** Only the ACTIVE tab renders
-     reliably; unfocused tabs' JS/rendering is deferred. Each launch activates
-     its new tab, so the jittered stagger gives every tab a foreground window
-     to render+capture before the next launch steals focus. Past a small N,
-     later in-flight tabs sit throttled in the background and time out — MORE
-     concurrency HURTS reliability rather than helping. **N=3 (cap 5)** is the
-     balance between throughput and capture reliability.
+     (`batch.js jitterDelay`) — this is what keeps the N tabs from opening
+     simultaneously. Never a fixed metronome, never an unbounded simultaneous
+     burst. Do **not** remove or fixed-interval-ise the stagger. The clamps
+     (`clampConcurrency`/`clampPaceBase`/`clampSpread`) keep even a hostile
+     config from turning the run into a burst or removing the stagger floor.
+   - **Chrome background-tab render throttling.** In the default ACTIVE mode only
+     the focused tab renders reliably; unfocused tabs' JS/rendering is deferred.
+     Each launch activates its new tab, so the jittered stagger gives every tab a
+     foreground window to render+capture before the next launch steals focus.
+     Past a point, later in-flight tabs sit throttled in the background and time
+     out — MORE concurrency HURTS reliability. **Default N=3** is the safe
+     balance; the operator may push up to the **hard cap of 8** (#410) and owns
+     the speed/reliability/WAF trade-off.
 
    For long sweeps the launch-stagger BASE lengthens stepwise (`batch.js
    paceBaseMs`: +2 s every 25 pages, capped at +12 s) — a 100+ listing run is
    10–15 min of steady navigation, the most likely rate-trip, so late launches
-   space out while the 4–9 s minimum still holds at the start. Chosen over
-   capping a run, because "click once" means the operator shouldn't have to
+   space out while the configured minimum base still holds at the start. Chosen
+   over capping a run, because "click once" means the operator shouldn't have to
    re-trigger.
+   - **Revised for #410 (2026-08-07).** The owner found the conservative
+     defaults too slow. Concurrency, stagger base, and stagger spread are now
+     **operator-configurable** from the extension options
+     (`chrome.storage.sync`, read + clamped via `getBatchConfig()`). The hard cap
+     was raised **5→8** and the default stagger base lowered **4 s→2 s** (default
+     opening cadence now [2 s, 7 s) with the default 5 s spread). This does NOT
+     reopen "raise the cap blindly": the cap is still a hard clamp, the jitter is
+     still mandatory, and the defaults stay conservative — #410 gives the owner a
+     validated dial, not an unbounded burst. A future agent must not lower the
+     cap back to 5 or remove the config surface; the configurability is the
+     decision now.
+   - **Opt-in background-tab mode (#410).** A toggle
+     (`batchBackgroundTabs`, default OFF) opens capture tabs with
+     `chrome.tabs.create({active:false})` — no focus theft, so the operator can
+     keep working. A new tab's INITIAL load + first paint generally still happen
+     unfocused (Chrome throttles long-running background TIMERS, not necessarily
+     the first render), so for fast-rendering portals this can lift real
+     parallelism. It is **opt-in and clearly labelled experimental** because
+     reliability on JS-heavy SPAs (idealista) can't be guaranteed from the Chrome
+     APIs alone and could not be verified in a real browser during
+     implementation; the safe ACTIVE mode remains the default. The operator
+     enables it and watches the N/M captured ratio. Enumeration
+     (`renderAndHarvest`) always stays ACTIVE regardless — it must render to
+     harvest the DOM.
 3. **The run survives MV3 worker eviction.** The driver loop is in-memory but
    the queue *state* — including the per-URL slots and the ids of the tabs
    currently open (an array now, since several can be open at once) — persist in
@@ -97,10 +123,11 @@ advance, showing live N/M progress with stop/resume.
   middle ground between this and one-at-a-time.
 - *Strict one-tab-at-a-time (the original #262 design).* Too slow on long
   idealista sweeps; the owner (#318) explicitly asked for several tabs at once.
-- *A large / unbounded / user-uncapped N.* Rejected: past a small N, background
+- *A large / unbounded / user-uncapped N.* Rejected: past a point, background
   render throttling makes later tabs time out, and the burst risk to the WAF
-  grows. `clampConcurrency` hard-caps at 5 so no config can turn the run into a
-  tab bomb.
+  grows. `clampConcurrency` hard-caps at **8** (#410, was 5) so no config can
+  turn the run into a tab bomb — the operator gets a validated dial, not an
+  unbounded burst.
 - *Server-side automated fetch of the portal.* Never — the whole capture path
   exists because these portals wall off automated crawling (D-019/D-026/D-027).
   Every page load must be the extension driving a real browser the human asked
@@ -117,12 +144,16 @@ becoming "a bot burst that gets us CAPTCHA-walled" or "tabs that never render".
 This is stated as the target automation level for ALL capture-based connectors.
 
 **See**: issue #262 (incl. the review requesting the eviction-recovery
-watchdog + long-run backoff), #318 (sequential → bounded concurrency);
-`browser-extension/batch.js` (`clampConcurrency`, `launchNext`,
-`recordResultAt`, `resetInflightToPending`, `paceBaseMs`, `shouldReattach`,
-`orphanTabsToClose`), `browser-extension/background.js` (Batch capture +
-`runBatchLoop` bounded-concurrency driver + `reattachIfStranded` / watchdog
-alarm, `BATCH_CONCURRENCY`), `browser-extension/detect.js` (`isListingPath` /
+watchdog + long-run backoff), #318 (sequential → bounded concurrency), #410
+(configurable dials, cap 5→8, background-tab mode);
+`browser-extension/batch.js` (`clampConcurrency`, `clampPaceBase`,
+`clampSpread`, `launchNext`, `recordResultAt`, `resetInflightToPending`,
+`paceBaseMs`, `shouldReattach`, `orphanTabsToClose`),
+`browser-extension/background.js` (Batch capture + `runBatchLoop`
+bounded-concurrency driver + `getBatchConfig` + `captureOnePage` active/background
+mode + `reattachIfStranded` / watchdog alarm),
+`browser-extension/options.{html,js}` (the capture-tuning knobs),
+`browser-extension/detect.js` (`isListingPath` /
 `extractDetailUrls`), `browser-extension/manifest.json` (`alarms` permission,
 version 0.7.0), `dashboard/lib/worklist.ts` (`firstPendingUrl` / `pendingUrls`),
 `dashboard/app/etl/captura/page.tsx`; D-037 (Aliseda guided capture),

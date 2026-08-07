@@ -29,13 +29,34 @@
  *      punish bursts. Bounded + jittered launches read as human-ish browsing,
  *      an unbounded wall of tabs reads as a bot.
  *   2. Chrome background-tab render throttling. Only the ACTIVE tab renders
- *      reliably; unfocused tabs' JS/rendering is deferred. Each launch
- *      activates its new tab (`chrome.tabs.create({active:true})`), so the
- *      jittered stagger gives every tab a foreground window to render+capture
- *      before the next launch steals focus. Too-high N means later in-flight
- *      tabs sit throttled in the background and time out — MORE concurrency
- *      past a small N HURTS reliability rather than helping. N=3 (cap 5)
- *      balances throughput against that.
+ *      reliably; unfocused tabs' JS/rendering is deferred. In the default
+ *      (safe) mode each launch activates its new tab
+ *      (`chrome.tabs.create({active:true})`), so the jittered stagger gives
+ *      every tab a foreground window to render+capture before the next launch
+ *      steals focus. Too-high N means later in-flight tabs sit throttled in the
+ *      background and time out — MORE concurrency past a small N HURTS
+ *      reliability rather than helping. N=3 balances throughput against that.
+ *
+ * ── Making the dials configurable (issue #410) ──────────────────────────────
+ * The owner found the conservative defaults too slow on idealista sweeps and
+ * asked for a faster cadence WITHOUT removing the safety. So:
+ *   • Concurrency, stagger base, and stagger spread are now user-tunable
+ *     (extension options → chrome.storage.sync), still validated/clamped here.
+ *   • The ceiling was raised (MAX_CONCURRENCY 5→8) and the default stagger base
+ *     lowered (4000→2000 ms) for a faster out-of-the-box cadence. The
+ *     speed/reliability/WAF trade-off: higher N + shorter stagger = faster, but
+ *     each in-flight tab gets a shorter foreground window before the next launch
+ *     steals focus, so past a point later tabs sit throttled and time out, AND a
+ *     denser launch cadence is more bot-like to a WAF. The jitter/spread and the
+ *     long-run backoff below are always kept — they are the WAF guarantee.
+ *   • A "background-tab" mode (`chrome.tabs.create({active:false})`) is exposed
+ *     as an OPT-IN toggle (default OFF = the safe active mode). A new tab's
+ *     INITIAL load + render generally still happens even unfocused (Chrome
+ *     throttles long-running background TIMERS, not necessarily the first paint),
+ *     so for fast-rendering portals this can lift real parallelism without
+ *     stealing focus. It is opt-in because reliability on JS-heavy SPAs can't be
+ *     guaranteed from the Chrome APIs alone — the owner enables it and watches
+ *     the N/M captured ratio. See background.js captureOnePage + D-043.
  *
  * State model — a per-URL slot array (so out-of-order settlement and MV3
  * eviction recovery are both exact):
@@ -65,7 +86,11 @@
   // header / D-043). DEFAULT is the balanced pick; MAX is a hard clamp so a
   // bad/hostile config can never turn the run into an unbounded tab burst.
   var DEFAULT_CONCURRENCY = 3;
-  var MAX_CONCURRENCY = 5;
+  // Ceiling raised 5→8 for issue #410 so the owner can push throughput. It stays
+  // a HARD clamp: even a hostile/garbage config can never turn the run into an
+  // unbounded tab burst. Past this, background-tab throttling + WAF risk make
+  // more concurrency counter-productive — see the module header trade-off note.
+  var MAX_CONCURRENCY = 8;
 
   /** Clamp a requested concurrency to [1, MAX_CONCURRENCY]; default when absent/garbage. */
   function clampConcurrency(n) {
@@ -73,6 +98,42 @@
     if (c < 1) c = 1;
     if (c > MAX_CONCURRENCY) c = MAX_CONCURRENCY;
     return c;
+  }
+
+  // ── User-tunable pacing bounds (issue #410) ────────────────────────────────
+  // The stagger BASE and SPREAD are configurable from the extension options, but
+  // always validated/clamped here so a bad value can never remove the WAF-safety
+  // stagger entirely or set an absurd dwell. DEFAULT_PACE_BASE_MS was lowered
+  // 4000→2000 for a faster default cadence (with the default 5000 spread the
+  // opening launches land in [2000, 7000) ms instead of [4000, 9000)).
+  var DEFAULT_PACE_BASE_MS = 2000;
+  var MIN_PACE_BASE_MS = 500; // floor: never fully remove the stagger (WAF)
+  var MAX_PACE_BASE_MS = 30000;
+  var DEFAULT_PACE_SPREAD_MS = 5000; // jitter width — unchanged default
+  var MIN_PACE_SPREAD_MS = 0;
+  var MAX_PACE_SPREAD_MS = 30000;
+
+  /** Clamp an integer into [lo, hi], falling back to `dflt` for absent/garbage. */
+  function clampInt(n, lo, hi, dflt) {
+    var v = typeof n === "number" && isFinite(n) ? Math.floor(n) : dflt;
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    return v;
+  }
+
+  /** Clamp a requested stagger base (ms) to [MIN,MAX]; default when absent/garbage. */
+  function clampPaceBase(n) {
+    return clampInt(n, MIN_PACE_BASE_MS, MAX_PACE_BASE_MS, DEFAULT_PACE_BASE_MS);
+  }
+
+  /** Clamp a requested stagger spread (ms) to [MIN,MAX]; default when absent/garbage. */
+  function clampSpread(n) {
+    return clampInt(
+      n,
+      MIN_PACE_SPREAD_MS,
+      MAX_PACE_SPREAD_MS,
+      DEFAULT_PACE_SPREAD_MS,
+    );
   }
 
   /**
@@ -269,24 +330,27 @@
   // A 100+ listing sweep is 10–15 min of steady automated navigation — the most
   // likely rate-trip scenario. Rather than cap the run (and make the operator
   // click again), the launch-stagger BASE lengthens as the run gets long, so
-  // late launches are spaced further apart. The mandatory 4–9 s minimum is
-  // preserved: at processed=0 the base is PACE_MIN_BASE_MS and
-  // jitterDelay(base, 5000) is [4000, 9000). The extra is stepwise and capped.
-  var PACE_MIN_BASE_MS = 4000;
+  // late launches are spaced further apart. The configured minimum base is
+  // preserved: at processed=0 the base is `minBase` (the user's stagger base,
+  // default DEFAULT_PACE_BASE_MS=2000) and jitterDelay(base, spread) is
+  // [minBase, minBase+spread). The extra is stepwise and capped.
   var PACE_STEP_EVERY = 25; // add one step per this many processed pages
   var PACE_STEP_MS = 2000; // size of each step
-  var PACE_MAX_EXTRA_MS = 12000; // cap: base never exceeds MIN + this
+  var PACE_MAX_EXTRA_MS = 12000; // cap: base never exceeds minBase + this
 
   /**
-   * The launch-stagger BASE (ms) given how many pages have already settled.
-   * `jitterDelay(paceBaseMs(done), spread)` gives the actual pause between
-   * launches. Pure; never below PACE_MIN_BASE_MS, never above MIN + MAX_EXTRA.
+   * The launch-stagger BASE (ms) given how many pages have already settled and
+   * the configured minimum base `minBase` (issue #410 — user-tunable; clamped,
+   * defaults to DEFAULT_PACE_BASE_MS when absent). `jitterDelay(paceBaseMs(done,
+   * base), spread)` gives the actual pause between launches. Pure; never below
+   * the clamped minBase, never above minBase + MAX_EXTRA.
    */
-  function paceBaseMs(processed) {
+  function paceBaseMs(processed, minBase) {
+    var base = clampPaceBase(minBase);
     var n = processed > 0 ? Math.floor(processed) : 0;
     var extra = Math.floor(n / PACE_STEP_EVERY) * PACE_STEP_MS;
     if (extra > PACE_MAX_EXTRA_MS) extra = PACE_MAX_EXTRA_MS;
-    return PACE_MIN_BASE_MS + extra;
+    return base + extra;
   }
 
   // ── MV3 eviction recovery (issue #262 review) ──────────────────────────────
@@ -355,7 +419,15 @@
     SLOT: SLOT,
     DEFAULT_CONCURRENCY: DEFAULT_CONCURRENCY,
     MAX_CONCURRENCY: MAX_CONCURRENCY,
+    DEFAULT_PACE_BASE_MS: DEFAULT_PACE_BASE_MS,
+    MIN_PACE_BASE_MS: MIN_PACE_BASE_MS,
+    MAX_PACE_BASE_MS: MAX_PACE_BASE_MS,
+    DEFAULT_PACE_SPREAD_MS: DEFAULT_PACE_SPREAD_MS,
+    MIN_PACE_SPREAD_MS: MIN_PACE_SPREAD_MS,
+    MAX_PACE_SPREAD_MS: MAX_PACE_SPREAD_MS,
     clampConcurrency: clampConcurrency,
+    clampPaceBase: clampPaceBase,
+    clampSpread: clampSpread,
     makeBatchState: makeBatchState,
     countSlot: countSlot,
     inflightCount: inflightCount,
