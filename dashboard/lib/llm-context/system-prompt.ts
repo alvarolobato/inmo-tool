@@ -21,12 +21,29 @@
 import { SCHEMA, RELATIONSHIPS, type TableSchema, type Relationship } from "@/lib/knowledge";
 import { isAgenticToolsEnabled } from "@/lib/llm-tools/config";
 import { formatSchema, formatRelationships } from "./formatters";
-import type { FlowVars, ListingSnapshot, RedflagTrendingCandidate } from "./types";
+import type {
+  FlowVars,
+  ListingSnapshot,
+  RedflagTrendingCandidate,
+  DismissedCandidate,
+} from "./types";
 import {
   REDFLAG_TYPES,
   REDFLAG_LABELS,
   REDFLAG_DEFINITIONS,
 } from "@/lib/ai-assessment/redflag-vocabulary";
+// #407 — cross-axis vocabularies, imported from LEAF modules (no `pg`/LLM
+// imports) so rendering them into the redflags prompt does not create the
+// system-prompt → axis → llm → llm-context cycle. These arrays are the single
+// source of truth: adding a value makes it appear in the prompt automatically.
+import {
+  OCCUPANCY_STATUSES,
+  TRANSACTION_KINDS,
+  OWNERSHIP_EXTENTS,
+} from "@/lib/ai-assessment/occupancy-vocabulary";
+import { CONDITION_CATEGORIES } from "@/lib/ai-assessment/condition-vocabulary";
+import { BEACH_PROXIMITIES } from "@/lib/ai-assessment/location-vocabulary";
+import { OPPORTUNITY_SIGNALS } from "@/lib/ai-assessment/opportunity-vocabulary";
 
 // ── Shared building blocks ────────────────────────────────────────────────────
 
@@ -720,6 +737,82 @@ function renderTrendingCandidates(candidates?: RedflagTrendingCandidate[]): stri
 }
 
 /**
+ * #407 — sentinel values that are NOT mappable concepts, just "we don't know /
+ * nothing here" system state on their axis. Excluded from the cross-axis
+ * vocabulary render so the model is only pointed at real concepts to map to.
+ */
+const CROSS_AXIS_SENTINELS = new Set(["unknown", "unclear", "none"]);
+
+/** Render an axis enum's mappable values (sentinels dropped) as a comma list. */
+function renderAxisValues(values: readonly string[]): string {
+  return values
+    .filter((v) => !CROSS_AXIS_SENTINELS.has(v))
+    .map((v) => `\`${v}\``)
+    .join(", ");
+}
+
+/**
+ * #407 — the FULL cross-axis vocabulary, rendered from every axis's enum (the
+ * single source of truth — no duplicated prose). The owner saw the model coin
+ * candidates (`sin_posesion`, `regimen_vpo`, `venta_deuda`, `nuda_propiedad`)
+ * for concepts that ALREADY exist on their own axes, because the redflags prompt
+ * only knew the redflags vocabulary. This block tells the model: if a finding
+ * matches one of these existing concepts, it is captured by its own axis — do
+ * NOT coin a `candidate_type` for it.
+ *
+ * Pure: renders whatever the enum arrays contain, so adding a value to any axis
+ * makes it appear here automatically (the enum-render test enforces this).
+ */
+function renderCrossAxisVocabulary(): string {
+  return `### Conceptos que YA existen en OTROS ejes de evaluación
+
+Estos hallazgos NO son \`other\`: ya se capturan en su propio eje. Si tu hallazgo
+encaja con uno de estos conceptos ya existentes, **NO acuñes un \`candidate_type\`**
+— se registra en su eje, no como redflag. Reserva \`other\` + \`candidate_type\`
+SOLO para un problema que no encaje ni en el vocabulario cerrado de redflags de
+arriba ni en ninguno de estos ejes.
+
+- **Ocupación** (eje \`occupancy.status\` — ¿se puede poseer?): ${renderAxisValues(OCCUPANCY_STATUSES)}
+- **Transacción** (eje \`transaction.kind\` — ¿qué se transmite?): ${renderAxisValues(TRANSACTION_KINDS)}
+- **Propiedad** (eje \`ownership.extent\` — ¿cuánto derecho se transmite?): ${renderAxisValues(OWNERSHIP_EXTENTS)}
+- **Estado / conservación** (eje \`condition\`): ${renderAxisValues(CONDITION_CATEGORIES)}
+- **Ubicación** (eje \`location\`): ${renderAxisValues(BEACH_PROXIMITIES)}, \`heritage_zone\`
+- **Oportunidad** (eje \`opportunity\`): ${renderAxisValues(OPPORTUNITY_SIGNALS)}
+
+**Distinción clave en ocupación (no la confundas):** \`occupied_illegally\`
+(okupas, ocupación sin título) es el caso GRAVE; \`tenanted\` (alquilado, con un
+inquilino que paga renta y contrato vigente) también es "sin posesión inmediata"
+pero es MUCHO menos malo — es una rentabilidad, no un problema legal. Los dos ya
+están cubiertos por el eje de ocupación: elige el valor correcto en ese eje en
+vez de inventar un \`candidate_type\` como \`sin_posesion\`. Lo mismo con VPO
+(\`is_vpo\`, eje oportunidad — no \`regimen_vpo\`), venta de deuda
+(\`transaction.venta_deuda\`) y nuda propiedad (\`ownership.nuda_propiedad\`).`;
+}
+
+/**
+ * #407 — render the `candidate_type` slugs a human reviewed on
+ * `/admin/candidatos` and explicitly DISMISSED, so the model is told not to
+ * propose them again. Handles the empty case explicitly (nothing dismissed yet
+ * is the normal initial state, not an error). The reason, when present, is shown
+ * so the model understands WHY it was rejected.
+ */
+function renderDismissedCandidates(dismissed?: DismissedCandidate[]): string {
+  if (!dismissed || dismissed.length === 0) {
+    return "Todavía no se ha rechazado ningún candidato.";
+  }
+  const lines = dismissed
+    .map((d) => (d.reason ? `- \`${d.slug}\` — ${d.reason}` : `- \`${d.slug}\``))
+    .join("\n");
+  return (
+    "Un humano YA revisó estos slugs `candidate_type` y decidió que NO son " +
+    "categorías reales. NO los vuelvas a proponer como `candidate_type` (ni un " +
+    "sinónimo de ellos): si tu hallazgo es ese mismo concepto rechazado, no lo " +
+    "incluyas como `other`.\n\n" +
+    lines
+  );
+}
+
+/**
  * #27 / #361 / #396 — redflags: generic property-problem extraction, per
  * deduplicated property.
  *
@@ -772,6 +865,8 @@ Usa uno de estos tipos con nombre SIEMPRE que el problema encaje en su
 definición (cubren problemas legales/financieros Y físicos del inmueble):
 ${renderRedflagVocabulary()}
 
+${renderCrossAxisVocabulary()}
+
 ### El tipo \`other\` y su \`candidate_type\`
 
 - \`other\` — ${REDFLAG_DEFINITIONS.other}
@@ -793,6 +888,10 @@ ${renderRedflagVocabulary()}
 ### Candidatos recientes (\`other\`) ya propuestos
 
 ${renderTrendingCandidates(vars.trendingCandidates)}
+
+### Candidatos ya revisados y RECHAZADOS por un humano
+
+${renderDismissedCandidates(vars.dismissedCandidates)}
 
 ### Regla central: NO especules a partir del silencio
 

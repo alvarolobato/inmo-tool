@@ -51,6 +51,31 @@ import { buildAreaPriceSignal } from "./price-signal";
 export { NoListingsError, loadPropertyListings };
 export type { Verdict };
 
+// The three occupancy-axis vocabularies (+ derived caveat codes) live in the
+// leaf module `occupancy-vocabulary.ts` (no `pg`/LLM imports) so the redflags
+// prompt builder can render them without the system-prompt → occupancy → llm →
+// llm-context cycle (#407). Re-exported here so existing importers keep using
+// `@/lib/ai-assessment/occupancy` unchanged.
+export {
+  OCCUPANCY_STATUSES,
+  TRANSACTION_KINDS,
+  OWNERSHIP_EXTENTS,
+  CAVEAT_CODES,
+  type OccupancyStatus,
+  type TransactionKind,
+  type OwnershipExtent,
+  type CaveatCode,
+} from "./occupancy-vocabulary";
+import {
+  OCCUPANCY_STATUSES,
+  TRANSACTION_KINDS,
+  OWNERSHIP_EXTENTS,
+  type OccupancyStatus,
+  type TransactionKind,
+  type OwnershipExtent,
+  type CaveatCode,
+} from "./occupancy-vocabulary";
+
 /**
  * Prompt version. Bump when the occupancy prompt changes in a way that could
  * change a verdict, so `ai_assessment`'s unique key treats the new output as a
@@ -64,50 +89,6 @@ export type { Verdict };
  * as current.
  */
 export const OCCUPANCY_PROMPT_VERSION = "occupancy/v2";
-
-/** Occupancy status vocabulary — see the enum-language note in system-prompt.ts. */
-export const OCCUPANCY_STATUSES = [
-  "vacant",
-  "tenanted",
-  "occupied_illegally",
-  "unknown",
-] as const;
-
-export type OccupancyStatus = (typeof OCCUPANCY_STATUSES)[number];
-
-/** What legal instrument is being transferred (#145). */
-export const TRANSACTION_KINDS = ["compraventa", "venta_deuda", "unknown"] as const;
-
-export type TransactionKind = (typeof TRANSACTION_KINDS)[number];
-
-/** How much of the right is being transferred (#145). */
-export const OWNERSHIP_EXTENTS = [
-  "pleno_dominio",
-  "nuda_propiedad",
-  "usufructo",
-  "proindiviso",
-  "derecho_superficie",
-  "unknown",
-] as const;
-
-export type OwnershipExtent = (typeof OWNERSHIP_EXTENTS)[number];
-
-/**
- * Every non-standard condition found, as flat codes for cheap filtering and
- * badging. Derived from the three axes in `deriveCaveats()` — never taken from
- * the model — so a badge can never disagree with the verdict it summarises.
- */
-export const CAVEAT_CODES = [
-  "tenanted",
-  "occupied_illegally",
-  "venta_deuda",
-  "nuda_propiedad",
-  "usufructo",
-  "proindiviso",
-  "derecho_superficie",
-] as const;
-
-export type CaveatCode = (typeof CAVEAT_CODES)[number];
 
 /**
  * The three axes of "what do I actually get if I buy this?" (#25 + #145).

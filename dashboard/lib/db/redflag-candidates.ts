@@ -22,9 +22,9 @@
 
 import { sql } from "@/lib/db-write";
 import { getSystemConfig } from "@/lib/system-config/loader";
-import type { RedflagTrendingCandidate } from "@/lib/llm-context/types";
+import type { RedflagTrendingCandidate, DismissedCandidate } from "@/lib/llm-context/types";
 
-export type { RedflagTrendingCandidate };
+export type { RedflagTrendingCandidate, DismissedCandidate };
 
 /**
  * Config for the trending query, surfaced via env so ops can tune it without a
@@ -86,6 +86,12 @@ export async function getTrendingCandidateTypes(opts?: {
       WHERE a.assessment_type = 'redflags'
         AND flag->>'type' = 'other'
         AND COALESCE(flag->>'candidate_type', '') <> ''
+        -- #407: a slug a human dismissed on /admin/candidatos must stop
+        -- resurfacing in the prompt's "recent candidates" block.
+        AND NOT EXISTS (
+          SELECT 1 FROM dismissed_candidate_type d
+           WHERE d.slug = flag->>'candidate_type'
+        )
       GROUP BY flag->>'candidate_type'
      HAVING COUNT(*) >= $1
       ORDER BY count DESC, candidate_type ASC
@@ -94,6 +100,50 @@ export async function getTrendingCandidateTypes(opts?: {
   );
 
   return rows.map((r) => ({ candidateType: r.candidate_type, count: Number(r.count) }));
+}
+
+// ─── #407: dismissed candidate slugs (human review, rejected) ────────────────
+
+/**
+ * Every `candidate_type` slug a human explicitly dismissed on
+ * `/admin/candidatos`, newest first, with the reason they gave (or null).
+ *
+ * Two consumers:
+ *  - the assessment orchestrator (`batch.ts`), which injects them into the
+ *    redflags prompt as "previously reviewed and rejected — do NOT propose
+ *    these again" so the model stops re-coining a rejected concept;
+ *  - the admin page, indirectly (dismissed slugs are excluded from the
+ *    promotion list — see `getPromotionCandidates`).
+ *
+ * Returns `[]` when nothing has been dismissed — the normal initial state.
+ */
+export async function getDismissedCandidateTypes(): Promise<DismissedCandidate[]> {
+  const rows = await sql<{ slug: string; reason: string | null }>(
+    `SELECT slug, reason
+       FROM dismissed_candidate_type
+      ORDER BY dismissed_at DESC, slug ASC`,
+  );
+  return rows.map((r) => ({ slug: r.slug, reason: r.reason ?? null }));
+}
+
+/**
+ * Mark a `candidate_type` slug as reviewed-and-rejected. Idempotent: dismissing
+ * the same slug again updates the reason and the timestamp rather than erroring
+ * on the primary key. The slug is normalized by the caller (the route) before it
+ * reaches here — this is the raw persistence step.
+ */
+export async function dismissCandidateType(
+  slug: string,
+  reason: string | null,
+): Promise<void> {
+  await sql(
+    `INSERT INTO dismissed_candidate_type (slug, reason, dismissed_at)
+     VALUES ($1, $2, now())
+     ON CONFLICT (slug)
+     DO UPDATE SET reason = EXCLUDED.reason,
+                   dismissed_at = EXCLUDED.dismissed_at`,
+    [slug, reason],
+  );
 }
 
 // ─── Fase 8 (#399): promotion candidates for the admin review page ───────────
@@ -206,6 +256,12 @@ export async function getPromotionCandidates(opts?: {
       WHERE a.assessment_type = 'redflags'
         AND flag->>'type' = 'other'
         AND COALESCE(flag->>'candidate_type', '') <> ''
+        -- #407: a slug a human dismissed on /admin/candidatos must drop out of
+        -- the promotion list too, not just the prompt.
+        AND NOT EXISTS (
+          SELECT 1 FROM dismissed_candidate_type d
+           WHERE d.slug = flag->>'candidate_type'
+        )
      ),
      latest_def AS (
        SELECT DISTINCT ON (candidate_type) candidate_type, definition

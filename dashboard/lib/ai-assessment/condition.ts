@@ -57,20 +57,13 @@ export { NoListingsError, loadPropertyListings };
  */
 export const CONDITION_PROMPT_VERSION = "condition/v2";
 
-/**
- * Renovation-state vocabulary (issue #26 technical approach #1). Kept to
- * exactly these four — no `buen_estado`/`a_rehabilitar` granularity beyond
- * what the issue specifies, so the badge vocabulary in `lib/candidates.ts`
- * stays a closed set that matches what this flow can actually emit.
- */
-export const CONDITION_CATEGORIES = [
-  "reformado",
-  "a_reformar",
-  "obra_nueva",
-  "unclear",
-] as const;
-
-export type ConditionCategory = (typeof CONDITION_CATEGORIES)[number];
+// The renovation-state vocabulary lives in the leaf module
+// `condition-vocabulary.ts` (no `pg`/LLM imports) so the redflags prompt builder
+// can render it without the system-prompt → condition → llm → llm-context cycle
+// (#407). Re-exported here so existing importers keep using
+// `@/lib/ai-assessment/condition` unchanged.
+export { CONDITION_CATEGORIES, type ConditionCategory } from "./condition-vocabulary";
+import { CONDITION_CATEGORIES, type ConditionCategory } from "./condition-vocabulary";
 
 /**
  * Renovation severity — the sub-axis on `a_reformar` (#313, D-056).

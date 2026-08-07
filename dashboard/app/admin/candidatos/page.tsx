@@ -4,6 +4,7 @@ import {
   getCandidatePromotionThreshold,
   type PromotionCandidate,
 } from "@/lib/db/redflag-candidates";
+import { DismissButton } from "./DismissButton";
 
 export const metadata = {
   title: "Candidatos a promoción — inmo-tool",
@@ -68,8 +69,8 @@ function CandidateCard({ c }: { c: PromotionCandidate }) {
         gap: 12,
       }}
     >
-      {/* Header: slug + count */}
-      <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+      {/* Header: slug + count + dismiss */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <code
           style={{
             fontSize: 14,
@@ -93,6 +94,9 @@ function CandidateCard({ c }: { c: PromotionCandidate }) {
         >
           {c.count} apariciones
         </span>
+        <div style={{ marginLeft: "auto" }}>
+          <DismissButton slug={c.candidateType} />
+        </div>
       </div>
 
       {/* Definition */}

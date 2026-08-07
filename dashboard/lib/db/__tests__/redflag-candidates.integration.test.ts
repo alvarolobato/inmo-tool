@@ -18,7 +18,12 @@ import { describe, it, expect, afterAll, beforeEach, afterEach } from "vitest";
 import { Pool } from "pg";
 import { buildPgPoolConfig } from "@/lib/db-shared";
 import { resetPool } from "@/lib/db-write";
-import { getTrendingCandidateTypes, getPromotionCandidates } from "../redflag-candidates";
+import {
+  getTrendingCandidateTypes,
+  getPromotionCandidates,
+  getDismissedCandidateTypes,
+  dismissCandidateType,
+} from "../redflag-candidates";
 
 async function withRealDb(fn: (pool: Pool) => Promise<void>) {
   const pool = new Pool(buildPgPoolConfig({ max: 2 }));
@@ -310,6 +315,112 @@ describe.runIf(dbAvailable)("getPromotionCandidates — real Postgres", () => {
       await seedRow(pool, otherFlagsRich(P_SV, 6, "def"), `Calle X ${PNONCE}`);
       const rows = await getPromotionCandidates({ threshold: 999999, limit: 100 });
       expect(mine(rows)).toEqual([]);
+    });
+  });
+});
+
+// ─── #407: dismissed candidates — persistence + exclusion, real Postgres ─────
+
+const DNONCE = `d${Date.now().toString(36)}`;
+const D_KEEP = `mantener_${DNONCE}`; // stays in both lists
+const D_DROP = `descartar_${DNONCE}`; // dismissed → excluded from both
+
+describe.runIf(dbAvailable)("dismissed candidates — real Postgres", () => {
+  afterAll(async () => {
+    await resetPool();
+  });
+
+  let createdPropertyIds: number[] = [];
+  let dismissedSlugs: string[] = [];
+
+  beforeEach(() => {
+    createdPropertyIds = [];
+    dismissedSlugs = [];
+  });
+
+  afterEach(async () => {
+    await withRealDb(async (pool) => {
+      if (createdPropertyIds.length > 0) {
+        await pool.query("DELETE FROM ai_assessment WHERE property_id = ANY($1::bigint[])", [
+          createdPropertyIds,
+        ]);
+        await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [createdPropertyIds]);
+      }
+      if (dismissedSlugs.length > 0) {
+        await pool.query("DELETE FROM dismissed_candidate_type WHERE slug = ANY($1::text[])", [
+          dismissedSlugs,
+        ]);
+      }
+    });
+  });
+
+  async function seedRedflags(pool: Pool, flags: unknown[]): Promise<number> {
+    const { rows } = await pool.query<{ id: number }>(
+      `INSERT INTO property (address, property_type) VALUES ($1, 'piso') RETURNING id`,
+      [`Calle Dismiss ${createdPropertyIds.length}`],
+    );
+    const propertyId = Number(rows[0].id);
+    createdPropertyIds.push(propertyId);
+    await pool.query(
+      `INSERT INTO ai_assessment
+          (property_id, assessment_type, result, confidence, model, prompt_version, generated_at)
+       VALUES ($1, 'redflags', $2::jsonb, 0.8, 'test-model', 'redflags/v7', NOW())`,
+      [propertyId, JSON.stringify({ flags, confidence: 0.8, reasoning: "x" })],
+    );
+    return propertyId;
+  }
+
+  it("dismissCandidateType persists a slug with its reason; getDismissedCandidateTypes reads it back", async () => {
+    await withRealDb(async () => {
+      dismissedSlugs.push(D_DROP);
+      await dismissCandidateType(D_DROP, "duplicado de occupancy");
+      const rows = await getDismissedCandidateTypes();
+      const mine = rows.find((r) => r.slug === D_DROP);
+      expect(mine).toBeDefined();
+      expect(mine!.reason).toBe("duplicado de occupancy");
+    });
+  });
+
+  it("dismissCandidateType is idempotent — re-dismissing updates the reason, no PK error", async () => {
+    await withRealDb(async () => {
+      dismissedSlugs.push(D_DROP);
+      await dismissCandidateType(D_DROP, "primer motivo");
+      await dismissCandidateType(D_DROP, "motivo corregido");
+      const rows = await getDismissedCandidateTypes();
+      const matches = rows.filter((r) => r.slug === D_DROP);
+      expect(matches).toHaveLength(1);
+      expect(matches[0].reason).toBe("motivo corregido");
+    });
+  });
+
+  it("a dismissed slug is excluded from BOTH getTrendingCandidateTypes and getPromotionCandidates", async () => {
+    await withRealDb(async (pool) => {
+      dismissedSlugs.push(D_DROP);
+      // Both slugs appear enough times to clear the thresholds we query with.
+      await seedRedflags(pool, otherFlags(D_KEEP, 8));
+      await seedRedflags(pool, otherFlags(D_DROP, 8));
+
+      // Before dismissal: both are present in both queries.
+      const trendingBefore = (await getTrendingCandidateTypes({ limit: 100, minCount: 2 })).map(
+        (r) => r.candidateType,
+      );
+      expect(trendingBefore).toContain(D_KEEP);
+      expect(trendingBefore).toContain(D_DROP);
+
+      // Dismiss one.
+      await dismissCandidateType(D_DROP, null);
+
+      const trendingAfter = (await getTrendingCandidateTypes({ limit: 100, minCount: 2 })).map(
+        (r) => r.candidateType,
+      );
+      expect(trendingAfter).toContain(D_KEEP);
+      expect(trendingAfter).not.toContain(D_DROP);
+
+      const promotionAfter = (await getPromotionCandidates({ threshold: 5, limit: 100 })).map(
+        (r) => r.candidateType,
+      );
+      expect(promotionAfter).toContain(D_KEEP);
+      expect(promotionAfter).not.toContain(D_DROP);
     });
   });
 });

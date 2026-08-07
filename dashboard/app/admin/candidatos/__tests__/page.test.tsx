@@ -22,6 +22,11 @@ vi.mock("next/link", () => ({
   ),
 }));
 
+// The DismissButton (client component) calls useRouter() at render.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ refresh: vi.fn() }),
+}));
+
 import AdminCandidatosPage from "../page";
 
 /** Render the async server component: await it, then mount the returned tree. */
@@ -69,6 +74,15 @@ describe("AdminCandidatosPage", () => {
 
     // The manual-promotion guarantee is always shown.
     expect(screen.getByText(/La promoción es manual/)).toBeInTheDocument();
+  });
+
+  it("renders a dismiss ('descartar') button per candidate", async () => {
+    getPromotionCandidates.mockResolvedValue(SAMPLE);
+    await renderPage();
+
+    const btn = screen.getByTestId("dismiss-servidumbre_de_paso");
+    expect(btn).toBeInTheDocument();
+    expect(btn).toHaveTextContent("Descartar");
   });
 
   it("renders a clear empty state when nothing clears the threshold", async () => {

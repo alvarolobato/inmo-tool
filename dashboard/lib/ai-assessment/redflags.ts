@@ -68,7 +68,7 @@
 import { sql } from "@/lib/db-write";
 import { extractRedFlags } from "@/lib/llm";
 import type { LlmAgenticContext } from "@/lib/llm-tools/types";
-import type { RedflagTrendingCandidate } from "@/lib/llm-context/types";
+import type { RedflagTrendingCandidate, DismissedCandidate } from "@/lib/llm-context/types";
 import { NoListingsError, loadPropertyListings, clamp01, stripCodeFence } from "./shared";
 import { getOrCompute, getLatestAssessment, logCacheOutcome, type CachedAssessment } from "./cache";
 import { buildAreaPriceSignal } from "./price-signal";
@@ -116,8 +116,18 @@ export { NoListingsError, loadPropertyListings };
  * the model reuses an existing candidate before coining a synonym. Both change
  * what the model reads, so a v5 cache row must not silently pass as current;
  * #308's batch re-assesses existing rows against the new version.
+ *
+ * Bumped to v7 for #407: the redflags prompt now (a) injects the FULL cross-axis
+ * vocabulary (occupancy/transaction/ownership/condition/location/opportunity),
+ * rendered from each axis's enum, so the model maps a finding to an existing
+ * concept instead of coining a duplicate `candidate_type` (the owner saw
+ * `sin_posesion`, `regimen_vpo`, `venta_deuda`, `nuda_propiedad` invented as new
+ * candidates), and (b) injects the human-dismissed candidate slugs as
+ * "previously reviewed and rejected — do NOT propose these again". Both change
+ * what the model reads, so a v6 cache row must not silently pass as current;
+ * #308's batch re-assesses existing rows against the new version.
  */
-export const REDFLAGS_PROMPT_VERSION = "redflags/v6";
+export const REDFLAGS_PROMPT_VERSION = "redflags/v7";
 
 /**
  * The closed vocabulary (types, labels, one-line definitions) lives in the leaf
@@ -360,6 +370,7 @@ export async function assessPropertyRedFlags(
     requestId?: string | null;
     ctx?: LlmAgenticContext;
     trendingCandidates?: RedflagTrendingCandidate[];
+    dismissedCandidates?: DismissedCandidate[];
   },
 ): Promise<RedFlagsResult> {
   const listings = await loadPropertyListings(propertyId);

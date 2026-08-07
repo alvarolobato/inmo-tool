@@ -37,12 +37,13 @@ describe("runAssessmentBatch", () => {
     const result = await runAssessmentBatch({
       flows,
       fetchTrendingCandidates: async () => [],
+      fetchDismissedCandidates: async () => [],
       selectPropertyIds: async () => [42],
       isCurrent: async () => false, // nothing cached → run everything
     });
 
-    expect(a).toHaveBeenCalledWith(42, { requestId: null, trendingCandidates: [] });
-    expect(b).toHaveBeenCalledWith(42, { requestId: null, trendingCandidates: [] });
+    expect(a).toHaveBeenCalledWith(42, { requestId: null, trendingCandidates: [], dismissedCandidates: [] });
+    expect(b).toHaveBeenCalledWith(42, { requestId: null, trendingCandidates: [], dismissedCandidates: [] });
     expect(result).toMatchObject({
       properties: 1,
       assessed: 2,
@@ -59,6 +60,7 @@ describe("runAssessmentBatch", () => {
     const result = await runAssessmentBatch({
       flows,
       fetchTrendingCandidates: async () => [],
+      fetchDismissedCandidates: async () => [],
       selectPropertyIds: async () => [7],
       isCurrent,
     });
@@ -75,6 +77,7 @@ describe("runAssessmentBatch", () => {
     const result = await runAssessmentBatch({
       flows,
       fetchTrendingCandidates: async () => [],
+      fetchDismissedCandidates: async () => [],
       selectPropertyIds: async () => [1, 2, 3],
       isCurrent: async () => false,
     });
@@ -94,6 +97,7 @@ describe("runAssessmentBatch", () => {
     const result = await runAssessmentBatch({
       flows,
       fetchTrendingCandidates: async () => [],
+      fetchDismissedCandidates: async () => [],
       selectPropertyIds: async () => [1, 2],
       isCurrent: async () => false,
     });
@@ -109,6 +113,7 @@ describe("runAssessmentBatch", () => {
     const result = await runAssessmentBatch({
       flows,
       fetchTrendingCandidates: async () => [],
+      fetchDismissedCandidates: async () => [],
       selectPropertyIds: async () => [9, 10],
       isCurrent: async () => false,
     });
@@ -130,6 +135,7 @@ describe("runAssessmentBatch", () => {
     const result = await runAssessmentBatch({
       flows,
       fetchTrendingCandidates: async () => [],
+      fetchDismissedCandidates: async () => [],
       selectPropertyIds: async () => [5],
       isCurrent: async () => false,
     });
@@ -146,6 +152,7 @@ describe("runAssessmentBatch", () => {
     const result = await runAssessmentBatch({
       flows,
       fetchTrendingCandidates: async () => [],
+      fetchDismissedCandidates: async () => [],
       selectPropertyIds: async () => [],
       isCurrent: async () => false,
     });
@@ -167,6 +174,7 @@ describe("runAssessmentBatch", () => {
     await runAssessmentBatch({
       flows,
       fetchTrendingCandidates,
+      fetchDismissedCandidates: async () => [],
       selectPropertyIds: async () => [1, 2], // two properties
       isCurrent: async () => false,
     });
@@ -175,9 +183,69 @@ describe("runAssessmentBatch", () => {
     expect(fetchTrendingCandidates).toHaveBeenCalledTimes(1);
     // The same list is threaded into every flow.assess call (redflags reads it;
     // the others accept-and-ignore it).
-    expect(a).toHaveBeenCalledWith(1, { requestId: null, trendingCandidates: trending });
-    expect(a).toHaveBeenCalledWith(2, { requestId: null, trendingCandidates: trending });
-    expect(b).toHaveBeenCalledWith(1, { requestId: null, trendingCandidates: trending });
+    expect(a).toHaveBeenCalledWith(1, { requestId: null, trendingCandidates: trending, dismissedCandidates: [] });
+    expect(a).toHaveBeenCalledWith(2, { requestId: null, trendingCandidates: trending, dismissedCandidates: [] });
+    expect(b).toHaveBeenCalledWith(1, { requestId: null, trendingCandidates: trending, dismissedCandidates: [] });
+  });
+
+  it("#407: fetches the dismissed candidates ONCE per batch and threads them into every flow call", async () => {
+    const a = vi.fn(async () => undefined);
+    const b = vi.fn(async () => undefined);
+    const flows: BatchFlow[] = [
+      { type: "redflags", promptVersion: "redflags/v7", assess: a },
+      { type: "condition", promptVersion: "condition/v1", assess: b },
+    ];
+    const dismissed = [{ slug: "sin_posesion", reason: "duplicado de occupancy" }];
+    const fetchDismissedCandidates = vi.fn(async () => dismissed);
+
+    await runAssessmentBatch({
+      flows,
+      fetchTrendingCandidates: async () => [],
+      fetchDismissedCandidates,
+      selectPropertyIds: async () => [1, 2],
+      isCurrent: async () => false,
+    });
+
+    // Computed ONCE for the whole pass, not per property or per flow.
+    expect(fetchDismissedCandidates).toHaveBeenCalledTimes(1);
+    expect(a).toHaveBeenCalledWith(1, {
+      requestId: null,
+      trendingCandidates: [],
+      dismissedCandidates: dismissed,
+    });
+    expect(b).toHaveBeenCalledWith(2, {
+      requestId: null,
+      trendingCandidates: [],
+      dismissedCandidates: dismissed,
+    });
+  });
+
+  it("#407: a failing dismissed fetch does not sink the batch — flows still run with an empty list", async () => {
+    const { flows, a, b } = makeFlows();
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const result = await runAssessmentBatch({
+      flows,
+      fetchTrendingCandidates: async () => [],
+      fetchDismissedCandidates: async () => {
+        throw new Error("db down");
+      },
+      selectPropertyIds: async () => [42],
+      isCurrent: async () => false,
+    });
+
+    expect(result).toMatchObject({ properties: 1, assessed: 2, stopped: null });
+    expect(a).toHaveBeenCalledWith(42, {
+      requestId: null,
+      trendingCandidates: [],
+      dismissedCandidates: [],
+    });
+    expect(b).toHaveBeenCalledWith(42, {
+      requestId: null,
+      trendingCandidates: [],
+      dismissedCandidates: [],
+    });
+    spy.mockRestore();
   });
 
   it("#396: a failing trending fetch does not sink the batch — flows still run with an empty list", async () => {
@@ -189,13 +257,14 @@ describe("runAssessmentBatch", () => {
       fetchTrendingCandidates: async () => {
         throw new Error("db down");
       },
+      fetchDismissedCandidates: async () => [],
       selectPropertyIds: async () => [42],
       isCurrent: async () => false,
     });
 
     expect(result).toMatchObject({ properties: 1, assessed: 2, stopped: null });
-    expect(a).toHaveBeenCalledWith(42, { requestId: null, trendingCandidates: [] });
-    expect(b).toHaveBeenCalledWith(42, { requestId: null, trendingCandidates: [] });
+    expect(a).toHaveBeenCalledWith(42, { requestId: null, trendingCandidates: [], dismissedCandidates: [] });
+    expect(b).toHaveBeenCalledWith(42, { requestId: null, trendingCandidates: [], dismissedCandidates: [] });
     spy.mockRestore();
   });
 
@@ -204,10 +273,11 @@ describe("runAssessmentBatch", () => {
     await runAssessmentBatch({
       flows,
       fetchTrendingCandidates: async () => [],
+      fetchDismissedCandidates: async () => [],
       selectPropertyIds: async () => [3],
       isCurrent: async () => false,
       requestId: "req-abc",
     });
-    expect(a).toHaveBeenCalledWith(3, { requestId: "req-abc", trendingCandidates: [] });
+    expect(a).toHaveBeenCalledWith(3, { requestId: "req-abc", trendingCandidates: [], dismissedCandidates: [] });
   });
 });

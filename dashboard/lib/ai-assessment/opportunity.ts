@@ -58,14 +58,17 @@ export { NoListingsError, loadPropertyListings };
  */
 export const OPPORTUNITY_PROMPT_VERSION = "opportunity/v1";
 
-/** Spanish badge label for the `is_vpo` boolean when true (#398). A material
- *  restriction on what you can buy and at what resale price, so it is a warn-
- *  tone badge in `candidates.ts`, alongside the ownership/transaction caveats. */
-export const IS_VPO_LABEL = "VPO";
-
-/** Spanish badge label for the `tourist_license` boolean when true (#398). A
- *  positive, neutral-tone fact (the property can already operate as a VUT). */
-export const TOURIST_LICENSE_LABEL = "Licencia turística";
+// The opportunity signal names + badge labels live in the leaf module
+// `opportunity-vocabulary.ts` (no `pg`/LLM imports) so the redflags prompt
+// builder can render them without the system-prompt → opportunity → llm →
+// llm-context cycle (#407). Re-exported here so existing importers
+// (`lib/candidates.ts`) keep using `@/lib/ai-assessment/opportunity` unchanged.
+export {
+  OPPORTUNITY_SIGNALS,
+  IS_VPO_LABEL,
+  TOURIST_LICENSE_LABEL,
+  type OpportunitySignal,
+} from "./opportunity-vocabulary";
 
 /**
  * Single-property opportunity result. Flattened (no nested `verdict` object),

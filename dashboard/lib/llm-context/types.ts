@@ -77,6 +77,22 @@ export interface RedflagTrendingCandidate {
 }
 
 /**
+ * #407 — one `candidate_type` slug a human reviewed on `/admin/candidatos` and
+ * explicitly DISMISSED (rejected as a real category). Threaded into the redflags
+ * prompt so the model is told "previously reviewed and rejected — do NOT propose
+ * these again", and excluded from the trending block and the promotion list so a
+ * rejected slug stops resurfacing. Computed ONCE per batch by the orchestrator
+ * (`lib/db/redflag-candidates.ts` → `getDismissedCandidateTypes`) and passed to
+ * the pure prompt builder as data; never a filter on the advert text.
+ */
+export interface DismissedCandidate {
+  /** The normalized snake_case slug the owner dismissed. */
+  slug: string;
+  /** The owner's optional one-line reason for dismissing it, or null. */
+  reason: string | null;
+}
+
+/**
  * A listing as handed to an assessment flow. Deliberately a flat, source-
  * agnostic shape: assessments run identically whether the row arrived via a
  * crawling connector or the browser-extension capture path (#75).
@@ -170,6 +186,16 @@ export interface FlowVars {
    * `RedflagTrendingCandidate`.
    */
   trendingCandidates?: RedflagTrendingCandidate[];
+  /**
+   * #407 — redflags ONLY: the `candidate_type` slugs a human explicitly
+   * dismissed on `/admin/candidatos`, computed ONCE per batch by the
+   * orchestrator and passed in so `buildRedflagsPrompt` can tell the model
+   * "previously reviewed and rejected — do NOT propose these again". The builder
+   * stays pure — it renders whatever list it is handed and treats an
+   * empty/undefined list as "nothing dismissed yet". Never a filter; see
+   * `DismissedCandidate`.
+   */
+  dismissedCandidates?: DismissedCandidate[];
 
   // ── compare ───────────────────────────────────────────────────────────────
   /** Two or more candidates to compare side by side. */
