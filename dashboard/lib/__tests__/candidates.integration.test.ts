@@ -1828,6 +1828,13 @@ describe.runIf(dbAvailable)("getAdjacentCandidates — real Postgres", () => {
 
   afterEach(async () => {
     await withRealDb(async (pool) => {
+      // feedback_event has a NOT NULL FK to property(id), so it must be deleted
+      // before the properties it references (#417 adjacency tests seed rejects).
+      if (createdPropertyIds.length > 0) {
+        await pool.query("DELETE FROM feedback_event WHERE property_id = ANY($1::bigint[])", [
+          createdPropertyIds,
+        ]);
+      }
       if (createdProfileIds.length > 0) {
         await pool.query("DELETE FROM profile_listing_state WHERE profile_id = ANY($1::bigint[])", [
           createdProfileIds,
@@ -1857,6 +1864,13 @@ describe.runIf(dbAvailable)("getAdjacentCandidates — real Postgres", () => {
     const id = Number(result.rows[0].id);
     createdPropertyIds.push(id);
     return id;
+  }
+
+  async function rejectProperty(pool: Pool, profileId: number, propertyId: number): Promise<void> {
+    await pool.query(
+      `INSERT INTO feedback_event (profile_id, property_id, feedback_type) VALUES ($1, $2, 'reject')`,
+      [profileId, propertyId],
+    );
   }
 
   async function makeProfile(): Promise<number> {
@@ -1992,6 +2006,43 @@ describe.runIf(dbAvailable)("getAdjacentCandidates — real Postgres", () => {
 
       const result = await getAdjacentCandidates(profileA, aOnly);
       expect(result).toEqual({ prevPropertyId: null, nextPropertyId: null });
+    });
+  });
+
+  // #417: prev/next must honour the feed's includeRejected escape hatch so it
+  // never desyncs from the show-rejected list the user is paging through.
+  it("skips a rejected neighbour by default, so prev/next matches the default feed", async () => {
+    await withRealDb(async (pool) => {
+      const profileId = await makeProfile();
+      const [top, middle, bottom] = await seedRanked(pool, profileId, [0.9, 0.5, 0.1]);
+      await rejectProperty(pool, profileId, middle);
+
+      // Default (includeRejected omitted): the rejected middle is invisible, so
+      // top's next jumps straight to bottom — exactly what the default feed shows.
+      const topResult = await getAdjacentCandidates(profileId, top);
+      expect(topResult.nextPropertyId).toBe(bottom);
+      const bottomResult = await getAdjacentCandidates(profileId, bottom);
+      expect(bottomResult.prevPropertyId).toBe(top);
+    });
+  });
+
+  it("includes a rejected neighbour with includeRejected=true, in the same order as the show-rejected list", async () => {
+    await withRealDb(async (pool) => {
+      const profileId = await makeProfile();
+      const [top, middle, bottom] = await seedRanked(pool, profileId, [0.9, 0.5, 0.1]);
+      await rejectProperty(pool, profileId, middle);
+
+      // includeRejected=true: prev/next steps ONTO the rejected middle, matching
+      // the order the show-rejected feed pages through (top → middle → bottom).
+      const topResult = await getAdjacentCandidates(profileId, top, true);
+      expect(topResult.nextPropertyId).toBe(middle);
+
+      const middleResult = await getAdjacentCandidates(profileId, middle, true);
+      expect(middleResult.prevPropertyId).toBe(top);
+      expect(middleResult.nextPropertyId).toBe(bottom);
+
+      const bottomResult = await getAdjacentCandidates(profileId, bottom, true);
+      expect(bottomResult.prevPropertyId).toBe(middle);
     });
   });
 });

@@ -35,11 +35,15 @@ function parsePositiveInt(raw: string): number | null {
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
-export async function GET(_request: NextRequest, context: RouteContext): Promise<NextResponse> {
+export async function GET(request: NextRequest, context: RouteContext): Promise<NextResponse> {
   const requestId = generateRequestId();
   const { id: rawId, propertyId: rawPropertyId } = await context.params;
   const profileId = parsePositiveInt(rawId);
   const propertyId = parsePositiveInt(rawPropertyId);
+  // #417: with the feed's "Mostrar descartadas" toggle ON, prev/next must step
+  // through rejected candidates in the same order as that list — the detail
+  // page forwards the flag from its own URL.
+  const includeRejected = request.nextUrl.searchParams.get("includeRejected") === "true";
 
   if (profileId === null || propertyId === null) {
     return NextResponse.json(
@@ -57,7 +61,11 @@ export async function GET(_request: NextRequest, context: RouteContext): Promise
       );
     }
 
-    const { prevPropertyId, nextPropertyId } = await getAdjacentCandidates(profileId, propertyId);
+    const { prevPropertyId, nextPropertyId } = await getAdjacentCandidates(
+      profileId,
+      propertyId,
+      includeRejected,
+    );
     return NextResponse.json({ prevPropertyId, nextPropertyId });
   } catch (err) {
     console.error(`[${requestId}] Error al calcular los candidatos adyacentes:`, err);

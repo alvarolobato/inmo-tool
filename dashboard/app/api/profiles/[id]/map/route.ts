@@ -24,12 +24,15 @@ function parsePositiveInt(raw: string): number | null {
 }
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   context: RouteContext,
 ): Promise<NextResponse> {
   const requestId = generateRequestId();
   const { id: rawId } = await context.params;
   const id = parsePositiveInt(rawId);
+  // Escape hatch mirroring the feed's "Mostrar descartadas" toggle (#417): by
+  // default the map hides rejected pins; ?includeRejected=true keeps them.
+  const includeRejected = request.nextUrl.searchParams.get("includeRejected") === "true";
   if (id === null) {
     return NextResponse.json(
       formatApiError("Id de perfil no válido.", "VALIDATION", undefined, requestId),
@@ -51,7 +54,7 @@ export async function GET(
       );
     }
 
-    const result = await listMapCandidates(id);
+    const result = await listMapCandidates(id, includeRejected);
     return NextResponse.json(result);
   } catch (err) {
     console.error(`[${requestId}] Error al cargar el mapa de candidatos:`, err);

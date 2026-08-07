@@ -42,7 +42,18 @@ function floorLabel(floor: string): string {
   return /^\d+$/.test(trimmed) ? `Planta ${trimmed}` : trimmed;
 }
 
-export function CandidateCard({ candidate, profileId }: { candidate: CandidateRow; profileId: number }) {
+export function CandidateCard({
+  candidate,
+  profileId,
+  includeRejected = false,
+}: {
+  candidate: CandidateRow;
+  profileId: number;
+  // #417: when the "Mostrar descartadas" toggle is on, carry the flag into the
+  // detail link so the detail page's prev/next steps through rejected
+  // candidates in the same order as this (show-rejected) list.
+  includeRejected?: boolean;
+}) {
   // #379: the verdict comes embedded on the row now. Held in local state so a
   // reject/un-reject click updates the card's "Descartada" treatment in place
   // — the card is NEVER removed on click; it stays marked until the next fetch
@@ -141,7 +152,9 @@ export function CandidateCard({ candidate, profileId }: { candidate: CandidateRo
       >
       <CandidatePhotoTicker
         photos={candidate.photos}
-        href={`/profiles/${profileId}/properties/${candidate.property_id}`}
+        href={`/profiles/${profileId}/properties/${candidate.property_id}${
+          includeRejected ? "?includeRejected=true" : ""
+        }`}
         priceLabel={priceLabel}
       >
         <div style={{ padding: "8px 10px 10px", display: "flex", flexDirection: "column", gap: 4 }}>
