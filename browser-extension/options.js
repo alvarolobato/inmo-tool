@@ -8,8 +8,22 @@
 
 const $ = (sel) => document.querySelector(sel);
 
+// batch.js (loaded before this script in options.html) publishes its pure
+// scheduler API — including the defaults and the same clamp helpers the service
+// worker uses — on `self.InmoBatch`. Using them here means the options page and
+// the background loop validate the capture-tuning knobs identically (issue #410).
+const IB = self.InmoBatch || {};
+
 async function load() {
-  const config = await chrome.storage.sync.get(['apiUrl', 'apiKey', 'autoCaptureEnabled']);
+  const config = await chrome.storage.sync.get([
+    'apiUrl',
+    'apiKey',
+    'autoCaptureEnabled',
+    'batchConcurrency',
+    'batchPaceBaseMs',
+    'batchPaceSpreadMs',
+    'batchBackgroundTabs',
+  ]);
   $('#api-url').value = config.apiUrl || 'http://localhost:4000';
   $('#api-key').value = config.apiKey || '';
   // Auto-capture defaults ON (issue #254): the human already installed a
@@ -19,6 +33,21 @@ async function load() {
   $('#auto-capture').checked = config.autoCaptureEnabled === undefined
     ? true
     : !!config.autoCaptureEnabled;
+
+  // Capture-tuning knobs (issue #410). Show the clamped value (or the default
+  // when never saved) so the field always reflects what the loop will actually
+  // use.
+  $('#batch-concurrency').value = IB.clampConcurrency
+    ? IB.clampConcurrency(config.batchConcurrency)
+    : (config.batchConcurrency || 3);
+  $('#batch-pace-base').value = IB.clampPaceBase
+    ? IB.clampPaceBase(config.batchPaceBaseMs)
+    : (config.batchPaceBaseMs || 2000);
+  $('#batch-pace-spread').value = IB.clampSpread
+    ? IB.clampSpread(config.batchPaceSpreadMs)
+    : (config.batchPaceSpreadMs ?? 5000);
+  // Background-tab mode is opt-in: default OFF (safe active mode).
+  $('#batch-background-tabs').checked = config.batchBackgroundTabs === true;
 }
 
 function showStatus(msg, kind) {
@@ -82,6 +111,49 @@ $('#save-btn').addEventListener('click', async () => {
 $('#auto-capture').addEventListener('change', async (e) => {
   await chrome.storage.sync.set({ autoCaptureEnabled: e.target.checked });
   showStatus(e.target.checked ? 'Captura automática activada' : 'Captura automática desactivada', 'success');
+});
+
+// ── Capture-tuning knobs (issue #410) ──────────────────────────────────────
+// Like auto-capture, these need no host-permission prompt, so persist on
+// change. Each value is CLAMPED through the same batch.js helper the loop uses
+// (so a hostile/garbage input can never burst tabs or remove the WAF stagger),
+// and the field is written back to the clamped value so the UI never lies about
+// what will run.
+$('#batch-concurrency').addEventListener('change', async (e) => {
+  const clamped = IB.clampConcurrency
+    ? IB.clampConcurrency(Number(e.target.value))
+    : Number(e.target.value);
+  e.target.value = clamped;
+  await chrome.storage.sync.set({ batchConcurrency: clamped });
+  showStatus(`Concurrencia: ${clamped}`, 'success');
+});
+
+$('#batch-pace-base').addEventListener('change', async (e) => {
+  const clamped = IB.clampPaceBase
+    ? IB.clampPaceBase(Number(e.target.value))
+    : Number(e.target.value);
+  e.target.value = clamped;
+  await chrome.storage.sync.set({ batchPaceBaseMs: clamped });
+  showStatus(`Espera base: ${clamped} ms`, 'success');
+});
+
+$('#batch-pace-spread').addEventListener('change', async (e) => {
+  const clamped = IB.clampSpread
+    ? IB.clampSpread(Number(e.target.value))
+    : Number(e.target.value);
+  e.target.value = clamped;
+  await chrome.storage.sync.set({ batchPaceSpreadMs: clamped });
+  showStatus(`Aleatoriedad: ${clamped} ms`, 'success');
+});
+
+$('#batch-background-tabs').addEventListener('change', async (e) => {
+  await chrome.storage.sync.set({ batchBackgroundTabs: e.target.checked });
+  showStatus(
+    e.target.checked
+      ? 'Modo segundo plano activado (experimental)'
+      : 'Modo segundo plano desactivado',
+    'success',
+  );
 });
 
 load();

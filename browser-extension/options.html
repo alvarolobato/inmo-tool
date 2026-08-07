@@ -49,7 +49,8 @@
       margin-bottom: 6px;
     }
 
-    input[type="text"] {
+    input[type="text"],
+    input[type="number"] {
       width: 100%;
       padding: 10px 14px;
       font-size: 14px;
@@ -183,12 +184,64 @@
     </div>
 
     <div class="portals-section">
+      <h3>Velocidad de captura masiva</h3>
+      <p class="hint" style="margin-bottom: 14px;">
+        Ajusta cuántos anuncios se capturan a la vez y el ritmo de apertura. Más
+        concurrencia y menos espera = más rápido, pero un ritmo demasiado
+        agresivo puede disparar el anti-bot del portal o dejar pestañas sin
+        renderizar (Chrome ralentiza las pestañas en segundo plano). Si notas
+        capturas fallidas, baja la concurrencia o sube la espera.
+      </p>
+
+      <div class="field">
+        <label for="batch-concurrency">Pestañas simultáneas (concurrencia)</label>
+        <input type="number" id="batch-concurrency" min="1" max="8" step="1" />
+        <p class="hint">Cuántos anuncios se abren a la vez. Recomendado 3. Máximo 8.</p>
+      </div>
+
+      <div class="field">
+        <label for="batch-pace-base">Espera base entre aperturas (ms)</label>
+        <input type="number" id="batch-pace-base" min="500" max="30000" step="500" />
+        <p class="hint">
+          Pausa mínima entre abrir una pestaña y la siguiente. Por defecto 2000 ms.
+          Se le suma una parte aleatoria (abajo) para no parecer un metrónomo.
+        </p>
+      </div>
+
+      <div class="field">
+        <label for="batch-pace-spread">Aleatoriedad de la espera (ms)</label>
+        <input type="number" id="batch-pace-spread" min="0" max="30000" step="500" />
+        <p class="hint">
+          Se añade una espera aleatoria de 0 a este valor sobre la base. Por
+          defecto 5000 ms (con base 2000 → aperturas cada 2–7 s). Mantén algo de
+          aleatoriedad por seguridad anti-bot.
+        </p>
+      </div>
+
+      <div class="field toggle-field">
+        <input type="checkbox" id="batch-background-tabs" />
+        <label for="batch-background-tabs" style="text-transform: none; letter-spacing: normal;">
+          <span class="toggle-label">Modo pestaña en segundo plano (experimental)</span>
+          <span class="toggle-sub">
+            Abre las pestañas de captura SIN robarte el foco, para que puedas
+            seguir trabajando. Funciona bien en portales que renderizan rápido,
+            pero Chrome ralentiza las pestañas en segundo plano: en webs muy
+            pesadas algunas capturas pueden fallar. Actívalo y vigila el
+            contador N/M — si fallan muchas, desactívalo. Por defecto: desactivado
+            (modo activo, más fiable).
+          </span>
+        </label>
+      </div>
+    </div>
+
+    <div class="portals-section">
       <h3>Sitios soportados</h3>
       <span class="portal-tag">🇪🇸 Idealista</span>
       <span class="portal-tag">🇪🇸 Aliseda</span>
     </div>
   </div>
 
+  <script src="batch.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

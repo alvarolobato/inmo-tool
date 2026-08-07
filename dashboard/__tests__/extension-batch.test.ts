@@ -43,7 +43,15 @@ const {
   SLOT,
   DEFAULT_CONCURRENCY,
   MAX_CONCURRENCY,
+  DEFAULT_PACE_BASE_MS,
+  MIN_PACE_BASE_MS,
+  MAX_PACE_BASE_MS,
+  DEFAULT_PACE_SPREAD_MS,
+  MIN_PACE_SPREAD_MS,
+  MAX_PACE_SPREAD_MS,
   clampConcurrency,
+  clampPaceBase,
+  clampSpread,
   makeBatchState,
   inflightCount,
   firstPendingIndex,
@@ -66,7 +74,15 @@ const {
   SLOT: { PENDING: string; INFLIGHT: string; CAPTURED: string; FAILED: string };
   DEFAULT_CONCURRENCY: number;
   MAX_CONCURRENCY: number;
+  DEFAULT_PACE_BASE_MS: number;
+  MIN_PACE_BASE_MS: number;
+  MAX_PACE_BASE_MS: number;
+  DEFAULT_PACE_SPREAD_MS: number;
+  MIN_PACE_SPREAD_MS: number;
+  MAX_PACE_SPREAD_MS: number;
   clampConcurrency: (n: unknown) => number;
+  clampPaceBase: (n: unknown) => number;
+  clampSpread: (n: unknown) => number;
   makeBatchState: (urls: unknown, concurrency?: number) => BatchState;
   inflightCount: (s: BatchState | null) => number;
   firstPendingIndex: (s: BatchState | null) => number;
@@ -80,7 +96,7 @@ const {
   isActive: (s: BatchState | null) => boolean;
   progress: (s: BatchState | null) => Progress;
   jitterDelay: (base: number, spread: number, rnd?: () => number) => number;
-  paceBaseMs: (processed: number) => number;
+  paceBaseMs: (processed: number, minBase?: number) => number;
   shouldReattach: (s: BatchState | null, looping: boolean) => boolean;
   orphanTabsToClose: (
     s: BatchState | null,
@@ -115,9 +131,46 @@ describe("clampConcurrency — small, capped, safe default", () => {
     expect(clampConcurrency(MAX_CONCURRENCY + 1)).toBe(MAX_CONCURRENCY);
   });
 
-  it("default is small (3) and the cap is bounded (≤5) — WAF safety", () => {
+  it("default is small (3) and the raised cap is bounded (8) — issue #410", () => {
+    // #410 raised the ceiling 5→8 to give the operator headroom, while keeping
+    // the safe default small. The cap stays a HARD bound so config can't burst.
     expect(DEFAULT_CONCURRENCY).toBe(3);
-    expect(MAX_CONCURRENCY).toBeLessThanOrEqual(5);
+    expect(MAX_CONCURRENCY).toBe(8);
+    expect(clampConcurrency(8)).toBe(8); // the new ceiling is reachable
+    expect(clampConcurrency(9)).toBe(8); // but never exceeded
+  });
+});
+
+describe("clampPaceBase / clampSpread — user-tunable pacing (issue #410)", () => {
+  it("defaults when absent/garbage/non-finite", () => {
+    expect(clampPaceBase(undefined)).toBe(DEFAULT_PACE_BASE_MS);
+    expect(clampPaceBase("x")).toBe(DEFAULT_PACE_BASE_MS);
+    expect(clampPaceBase(NaN)).toBe(DEFAULT_PACE_BASE_MS);
+    expect(clampSpread(undefined)).toBe(DEFAULT_PACE_SPREAD_MS);
+    expect(clampSpread("x")).toBe(DEFAULT_PACE_SPREAD_MS);
+  });
+
+  it("the new lower default base is 2000 ms, spread stays 5000 ms", () => {
+    expect(DEFAULT_PACE_BASE_MS).toBe(2000);
+    expect(DEFAULT_PACE_SPREAD_MS).toBe(5000);
+  });
+
+  it("keeps a valid value and floors fractions", () => {
+    expect(clampPaceBase(3000)).toBe(3000);
+    expect(clampPaceBase(2500.9)).toBe(2500);
+    expect(clampSpread(1000)).toBe(1000);
+    expect(clampSpread(0)).toBe(0); // spread may be disabled entirely
+  });
+
+  it("clamps base into [MIN,MAX] — never removes the stagger, never runs away", () => {
+    expect(clampPaceBase(0)).toBe(MIN_PACE_BASE_MS); // floor keeps WAF stagger
+    expect(clampPaceBase(-100)).toBe(MIN_PACE_BASE_MS);
+    expect(clampPaceBase(999999)).toBe(MAX_PACE_BASE_MS);
+  });
+
+  it("clamps spread into [MIN,MAX]", () => {
+    expect(clampSpread(-5)).toBe(MIN_PACE_SPREAD_MS);
+    expect(clampSpread(999999)).toBe(MAX_PACE_SPREAD_MS);
   });
 });
 
@@ -215,6 +268,28 @@ describe("launchNext — never exceeds the concurrency cap", () => {
     expect(progress(s).captured).toBe(7);
     // every URL was launched exactly once
     expect([...launched].sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+  });
+
+  it("at the raised ceiling (N=8) still never exceeds `concurrency` in flight", () => {
+    const N = MAX_CONCURRENCY; // 8 (issue #410)
+    const many = Array.from({ length: 30 }, (_, i) => `https://a/inmueble/${i}`);
+    let s = makeBatchState(many, N);
+    expect(s.concurrency).toBe(8);
+    let maxSeen = 0;
+    let guard = 0;
+    while (isActive(s) && guard++ < 1000) {
+      while (canLaunch(s)) {
+        s = launchNext(s).state;
+        maxSeen = Math.max(maxSeen, inflightCount(s));
+        expect(inflightCount(s)).toBeLessThanOrEqual(N); // the hard invariant
+      }
+      const idx = s.slots.findIndex((x) => x === SLOT.INFLIGHT);
+      if (idx === -1) break;
+      s = recordResultAt(s, idx, true);
+    }
+    expect(s.status).toBe(STATUSES.DONE);
+    expect(progress(s).captured).toBe(30);
+    expect(maxSeen).toBe(8); // the pool really did fill to the raised ceiling
   });
 });
 
@@ -369,26 +444,39 @@ describe("jitterDelay — jittered launch spacing (never a metronome)", () => {
 });
 
 describe("paceBaseMs — gentle backoff for long sweeps", () => {
-  it("keeps the 4–9 s minimum at the start of a run", () => {
-    expect(paceBaseMs(0)).toBe(4000);
-    expect(paceBaseMs(24)).toBe(4000);
-    expect(jitterDelay(paceBaseMs(0), 5000, () => 0)).toBe(4000);
-    expect(jitterDelay(paceBaseMs(0), 5000, () => 0.9999)).toBeLessThan(9000);
+  it("uses the (lowered) default base of 2000 ms at the start of a run", () => {
+    // #410 lowered the default base 4000→2000, so with the default 5000 spread
+    // the opening launches land in [2000, 7000) instead of [4000, 9000).
+    expect(paceBaseMs(0)).toBe(2000);
+    expect(paceBaseMs(24)).toBe(2000);
+    expect(jitterDelay(paceBaseMs(0), 5000, () => 0)).toBe(2000);
+    expect(jitterDelay(paceBaseMs(0), 5000, () => 0.9999)).toBeLessThan(7000);
   });
 
-  it("lengthens the base stepwise as the run gets long", () => {
-    expect(paceBaseMs(25)).toBe(6000);
-    expect(paceBaseMs(50)).toBe(8000);
-    expect(paceBaseMs(100)).toBe(12000);
+  it("lengthens the base stepwise as the run gets long (on top of the default)", () => {
+    expect(paceBaseMs(25)).toBe(4000);
+    expect(paceBaseMs(50)).toBe(6000);
+    expect(paceBaseMs(100)).toBe(10000);
   });
 
-  it("caps the base so it never runs away (MIN + 12 s)", () => {
-    expect(paceBaseMs(150)).toBe(16000);
-    expect(paceBaseMs(100000)).toBe(16000);
+  it("caps the base so it never runs away (default + 12 s)", () => {
+    expect(paceBaseMs(150)).toBe(14000);
+    expect(paceBaseMs(100000)).toBe(14000);
   });
 
   it("treats a negative/garbage processed count as 0", () => {
-    expect(paceBaseMs(-5)).toBe(4000);
+    expect(paceBaseMs(-5)).toBe(2000);
+  });
+
+  it("honours a configured minimum base (issue #410), still clamped", () => {
+    // The operator's stagger base becomes the floor; the backoff builds on top.
+    expect(paceBaseMs(0, 3000)).toBe(3000);
+    expect(paceBaseMs(25, 3000)).toBe(5000); // +1 step
+    expect(paceBaseMs(0, 1000)).toBe(1000); // faster than default
+    // A garbage/out-of-range configured base is clamped, never trusted raw.
+    expect(paceBaseMs(0, 0)).toBe(MIN_PACE_BASE_MS);
+    expect(paceBaseMs(0, 999999)).toBe(MAX_PACE_BASE_MS);
+    expect(paceBaseMs(0, "x" as unknown as number)).toBe(DEFAULT_PACE_BASE_MS);
   });
 });
 

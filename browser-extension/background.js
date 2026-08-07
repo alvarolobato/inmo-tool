@@ -234,23 +234,28 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 // worker:
 //   1. seeds the harvested detail URLs into capture_worklist (added_via
 //      'derived'), then loads the portal's PENDING set as the queue,
-//   2. opens up to BATCH_CONCURRENCY URLs at a time, each in a NEW tab it
-//      ACTIVATES itself — an active tab renders normally (background tabs are
-//      throttled, which is why an unbounded wall of tabs never works, see the
-//      issue), so the content script's existing auto-capture (issue #254) fires
-//      and posts the capture,
+//   2. opens up to `concurrency` URLs at a time (operator-configured, clamped to
+//      [1, 8] — issue #410), each in a NEW tab. By default it ACTIVATES the tab
+//      — an active tab renders normally (background tabs are throttled, which is
+//      why an unbounded wall of tabs never works, see the issue) — so the content
+//      script's existing auto-capture (issue #254) fires and posts the capture.
+//      An opt-in "background-tab" mode opens the tab UNFOCUSED instead (no focus
+//      theft) for fast-rendering portals — see captureOnePage,
 //   3. STAGGERS launches by a JITTERED delay (WAF safety — never a simultaneous
-//      burst), waits for each tab's AUTO_CAPTURE_DONE (or a timeout), closes the
-//      tab, and keeps the in-flight pool topped up to the cap.
+//      burst; base+spread are operator dials), waits for each tab's
+//      AUTO_CAPTURE_DONE (or a timeout), closes the tab, and keeps the in-flight
+//      pool topped up to the cap.
 // Progress lives in chrome.storage.session so a reopened popup (or a respawned
 // worker) can render N/M with stop/resume.
 //
-// Why the cap is small (see D-043): WAF safety (idealista CAPTCHA / aliseda
-// `Disallow: /`) AND Chrome background-tab render throttling — only the ACTIVE
-// tab renders reliably, so the jittered stagger gives each tab a foreground
-// window to render+capture before the next launch steals focus. Past a small N,
-// later in-flight tabs sit throttled in the background and time out, so MORE
-// concurrency HURTS reliability. N=3 (cap 5) is the balance.
+// Why concurrency stays bounded (see D-043): WAF safety (idealista CAPTCHA /
+// aliseda `Disallow: /`) AND Chrome background-tab render throttling — in the
+// default ACTIVE mode only the focused tab renders reliably, so the jittered
+// stagger gives each tab a foreground window to render+capture before the next
+// launch steals focus. Past a point, later in-flight tabs sit throttled in the
+// background and time out, so MORE concurrency HURTS reliability. Default N=3;
+// the hard cap is 8 (raised from 5 in #410 to give the owner headroom). The
+// speed/reliability/WAF trade-off is the operator's to tune.
 //
 // MV3 eviction: the driver loop is in-memory. Chrome can evict the worker
 // mid-run (e.g. a slow/CAPTCHA page emitting no events for ~30 s). The queue
@@ -277,16 +282,20 @@ const BATCH_ALARM = 'inmoBatchWatchdog';
 // recover an unattended run promptly, long enough not to churn. (A popup open
 // recovers instantly via GET_BATCH_STATE; this is the no-user-present net.)
 const BATCH_ALARM_PERIOD_MIN = 0.5;
-// How many detail tabs may be open at once. Kept small and CAPPED (batch.js
-// clamps to MAX_CONCURRENCY) — WAF safety + Chrome background-tab render
-// throttling. See D-043 for why more isn't better.
-const BATCH_CONCURRENCY = 3;
-// Stagger between one tab LAUNCH and the next: a randomised dwell whose BASE
-// lengthens as the run gets long (InmoBatch.paceBaseMs) — the mandatory 4–9 s
-// minimum holds at the start, and 100+ listing sweeps space out. The spread
-// stays constant. This is the pacing guarantee that keeps the N tabs from
-// opening simultaneously. See D-043 for the tradeoff.
-const BATCH_PACE_SPREAD_MS = 5000;
+// Capture tuning is USER-CONFIGURABLE (issue #410) via chrome.storage.sync,
+// read through getBatchConfig() and clamped by batch.js. These consts are only
+// the fallbacks used when a value is absent (getBatchConfig applies the same
+// clamps, which default to these).
+//   • concurrency — how many detail tabs may be open at once (clamped to
+//     [1, InmoBatch.MAX_CONCURRENCY=8]). Kept small by default (3) — WAF safety
+//     + Chrome background-tab render throttling. See D-043 for why more isn't
+//     always better.
+//   • stagger BASE/SPREAD — a randomised dwell between launches whose BASE
+//     lengthens as the run gets long (InmoBatch.paceBaseMs); the jitter/spread
+//     is the WAF pacing guarantee that keeps the N tabs from opening at once.
+// The enumeration phase (one reused tab) still uses these default constants.
+const BATCH_PACE_SPREAD_MS = InmoBatch.DEFAULT_PACE_SPREAD_MS;
+const BATCH_PACE_BASE_MS = InmoBatch.DEFAULT_PACE_BASE_MS;
 // Give one page this long to render + auto-capture before counting it failed
 // and moving on (mirrors the content script's own MAX_WAIT_MS, plus slack for
 // tab creation).
@@ -302,6 +311,34 @@ let batchLooping = false;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Read the operator's capture-tuning knobs (issue #410) from chrome.storage.sync
+ * and clamp every value through batch.js so a bad/garbage config can never burst
+ * tabs or remove the WAF-safety stagger:
+ *   • concurrency   — [1, MAX_CONCURRENCY=8]         (default 3)
+ *   • paceBaseMs    — [MIN, MAX] stagger base ms      (default 2000)
+ *   • paceSpreadMs  — [MIN, MAX] stagger spread ms    (default 5000)
+ *   • backgroundTabs — open detail tabs unfocused     (default false = active)
+ * Defaults reproduce the previous behaviour, so an operator who never touches
+ * options gets the (now faster) out-of-the-box cadence with no surprises.
+ */
+async function getBatchConfig() {
+  const c = await chrome.storage.sync.get([
+    'batchConcurrency',
+    'batchPaceBaseMs',
+    'batchPaceSpreadMs',
+    'batchBackgroundTabs',
+  ]);
+  return {
+    concurrency: InmoBatch.clampConcurrency(c.batchConcurrency),
+    paceBaseMs: InmoBatch.clampPaceBase(c.batchPaceBaseMs),
+    paceSpreadMs: InmoBatch.clampSpread(c.batchPaceSpreadMs),
+    // Opt-in: only true when explicitly enabled. The safe default is the ACTIVE
+    // (focus-stealing) mode that renders reliably (D-043).
+    backgroundTabs: c.batchBackgroundTabs === true,
+  };
 }
 
 async function getBatchState() {
@@ -532,7 +569,9 @@ async function runEnumerationThenCapture(portal, searchUrl, page1Urls) {
 /** Build the capture queue from the portal's pending set and fire the loop. */
 async function runCaptureQueue(portal) {
   const pending = await fetchPendingUrls(portal);
-  const state = InmoBatch.makeBatchState(pending, BATCH_CONCURRENCY);
+  // Concurrency comes from the operator's config (clamped), issue #410.
+  const { concurrency } = await getBatchConfig();
+  const state = InmoBatch.makeBatchState(pending, concurrency);
   await setBatchState(state);
   runBatchLoop(); // fire-and-forget; drives tabs until paused/stopped/done
 }
@@ -699,8 +738,13 @@ async function enumerateResultsPages(portal, searchUrl, page1Urls) {
       current = next;
 
       // Polite pacing between results-page loads (mirror the capture jitter).
+      // Enumeration is a single reused tab, so it keeps the default pace rather
+      // than the operator's capture-concurrency dials.
       await sleep(
-        InmoBatch.jitterDelay(InmoBatch.paceBaseMs(page - 1), BATCH_PACE_SPREAD_MS),
+        InmoBatch.jitterDelay(
+          InmoBatch.paceBaseMs(page - 1, BATCH_PACE_BASE_MS),
+          BATCH_PACE_SPREAD_MS,
+        ),
       );
     }
   } finally {
@@ -772,11 +816,24 @@ function waitForCaptureSignal(tabId, timeoutMs) {
   });
 }
 
-/** Open+activate one detail URL, wait for its capture, then close the tab. */
-async function captureOnePage(url) {
+/**
+ * Open one detail URL, wait for its capture, then close the tab.
+ *
+ * `backgroundTabs` (issue #410, opt-in, default false) decides focus:
+ *   • false → `active:true`  — the SAFE default. The tab is focused, so Chrome
+ *     never throttles its render and the content script's auto-capture fires
+ *     reliably. The cost is that each launch steals the operator's focus.
+ *   • true  → `active:false` — the tab opens UNFOCUSED (no focus theft). A new
+ *     tab's initial load + render generally still happens, and Chrome throttles
+ *     long-running background TIMERS rather than the first paint, so for
+ *     fast-rendering portals this lifts real parallelism. It is opt-in because
+ *     reliability on JS-heavy SPAs can't be guaranteed from the APIs alone — the
+ *     operator enables it and watches the N/M captured ratio. See D-043.
+ */
+async function captureOnePage(url, backgroundTabs) {
   let tab;
   try {
-    tab = await chrome.tabs.create({ url, active: true });
+    tab = await chrome.tabs.create({ url, active: !backgroundTabs });
   } catch {
     return false;
   }
@@ -797,14 +854,15 @@ async function captureOnePage(url) {
 }
 
 /**
- * Drive ONE page end to end: open+activate its tab, wait for the capture (or
- * timeout), close it, then record the outcome against that exact slot. Settles
+ * Drive ONE page end to end: open its tab (active or background per config),
+ * wait for the capture (or timeout), close it, then record the outcome against
+ * that exact slot. Settles
  * may land OUT OF ORDER across the concurrent tabs, so we address the slot by
  * `index` rather than a moving pointer. recordResultAt ignores a stopped queue
  * and flips to `done` only when nothing is left pending or in flight.
  */
-async function driveOnePage(index, url) {
-  const ok = await captureOnePage(url);
+async function driveOnePage(index, url, backgroundTabs) {
+  const ok = await captureOnePage(url, backgroundTabs);
   // Atomic: two tabs settling in the same tick would otherwise interleave this
   // get-modify-set and lose one's slot flip (issue #321).
   await updateBatchState((state) => InmoBatch.recordResultAt(state, index, ok));
@@ -812,17 +870,23 @@ async function driveOnePage(index, url) {
 
 /**
  * The bounded-concurrency driver. Re-entrancy-guarded so PAUSE→RESUME (or a
- * duplicate START) never runs two loops. Keeps up to BATCH_CONCURRENCY tabs in
- * flight: it launches the next pending URL, STAGGERS by a jittered delay, and
+ * duplicate START) never runs two loops. Keeps up to `state.concurrency` tabs in
+ * flight (the operator-configured value, clamped — issue #410): it launches the
+ * next pending URL, STAGGERS by a jittered delay (base+spread from config), and
  * tops the pool back up whenever a tab settles. Re-reads the persisted state
  * around every launch so a pause/stop takes effect promptly — in-flight pages
  * always finish cleanly (their tabs close in `captureOnePage`), we never orphan
  * a half-captured tab. The `finally` drains any still-open tabs so none leak
  * past the loop's exit (e.g. after a pause with tabs mid-capture).
+ *
+ * The pacing config (base/spread) and background-tab mode are read ONCE per
+ * loop attach; a PAUSE/RESUME re-enters the loop and re-reads them, so a config
+ * change takes effect on the next run without a mid-run surprise.
  */
 async function runBatchLoop() {
   if (batchLooping) return;
   batchLooping = true;
+  const cfg = await getBatchConfig();
   const inflight = new Map(); // index -> Promise (the driveOnePage in progress)
   try {
     for (;;) {
@@ -845,13 +909,21 @@ async function runBatchLoop() {
         if (launch.index === -1) break; // nothing pending / cap reached
         state = launch.state;
         const idx = launch.index;
-        const p = driveOnePage(idx, launch.url).finally(() => inflight.delete(idx));
+        const p = driveOnePage(idx, launch.url, cfg.backgroundTabs).finally(() =>
+          inflight.delete(idx),
+        );
         inflight.set(idx, p);
         // Jittered stagger (WAF safety — never a simultaneous burst). BASE grows
-        // with how many pages have settled so long sweeps space out (4–9 s
-        // minimum preserved at the start). D-043.
+        // with how many pages have settled so long sweeps space out; the
+        // configured minimum base is preserved at the start (default 2s + spread
+        // → [2s, 7s)). Base+spread are the operator's dials (issue #410). D-043.
         const done = InmoBatch.progress(state).done;
-        await sleep(InmoBatch.jitterDelay(InmoBatch.paceBaseMs(done), BATCH_PACE_SPREAD_MS));
+        await sleep(
+          InmoBatch.jitterDelay(
+            InmoBatch.paceBaseMs(done, cfg.paceBaseMs),
+            cfg.paceSpreadMs,
+          ),
+        );
         state = await getBatchState(); // re-read for a pause/stop landing mid-stagger
       }
 
