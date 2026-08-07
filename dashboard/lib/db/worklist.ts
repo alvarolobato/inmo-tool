@@ -75,6 +75,44 @@ export async function listWorklist(
   return { rows, summaries };
 }
 
+/** One pending worklist entry, for the auto-driver's next-batch selection (#424). */
+export interface PendingWorklistItem {
+  url: string;
+  portal: string;
+  /** ISO timestamp the row was added — the oldest-first tiebreak. */
+  createdAt: string;
+}
+
+/**
+ * The still-`pending` worklist entries (optionally one portal), OLDEST FIRST, as
+ * `{ url, portal, createdAt }`. Backs the auto-capture continuous driver (issue
+ * #424): the API route re-ranks these due-first then hands the extension the next
+ * ≤N to drain. Oldest-first here is the stable tiebreak once due-priority ties.
+ */
+export async function listPendingWorklist(
+  portal?: string,
+): Promise<PendingWorklistItem[]> {
+  const rows = portal
+    ? await sql<{ url: string; source_portal: string; created_at: string }>(
+        `SELECT url, source_portal, created_at
+           FROM capture_worklist
+          WHERE status = 'pending' AND source_portal = $1
+          ORDER BY created_at ASC, id ASC`,
+        [portal],
+      )
+    : await sql<{ url: string; source_portal: string; created_at: string }>(
+        `SELECT url, source_portal, created_at
+           FROM capture_worklist
+          WHERE status = 'pending'
+          ORDER BY created_at ASC, id ASC`,
+      );
+  return rows.map((r) => ({
+    url: r.url,
+    portal: r.source_portal,
+    createdAt: r.created_at,
+  }));
+}
+
 /** How a batch of URLs entered the worklist. */
 export type WorklistAddedVia = "manual" | "derived";
 

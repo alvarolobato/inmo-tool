@@ -154,3 +154,54 @@ export function firstPendingUrl(rows: readonly WorklistRow[]): string | null {
 export function pendingUrls(rows: readonly WorklistRow[]): string[] {
   return rows.filter((r) => r.status === "pending").map((r) => r.url);
 }
+
+/** A pending worklist entry for the auto-driver's next-batch selection (#424). */
+export interface PendingSelectionItem {
+  url: string;
+  portal: string;
+  /** ISO timestamp (oldest-first tiebreak); null/invalid sorts last. */
+  createdAt: string | null;
+}
+
+// Portal not covered by any profile task → back of the queue, still eligible.
+// Mirrors browser-extension/batch.js AUTO_PORTAL_RANK_UNKNOWN.
+const PORTAL_RANK_UNKNOWN = 99;
+
+/**
+ * Select the next ≤`limit` pending URLs, prioritised by portal due-rank (asc —
+ * from {@link getPortalDuePriority}: due 0 < half-done 1 < not-due 2 < unknown)
+ * then oldest `createdAt` (asc). Pure and STABLE (input order breaks remaining
+ * ties). This is the SERVER mirror of browser-extension/batch.js
+ * `selectNextPending`; the two must stay in step so the endpoint and the
+ * extension agree on ordering. Backs GET /api/etl/worklist?pending=1&limit=N.
+ */
+export function selectNextPendingUrls(
+  items: readonly PendingSelectionItem[],
+  duePriorityByPortal: Readonly<Record<string, number>>,
+  limit: number,
+): string[] {
+  const lim = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 0;
+  if (lim === 0) return [];
+  const rankFor = (portal: string): number => {
+    const r = duePriorityByPortal[portal];
+    return typeof r === "number" && Number.isFinite(r) ? r : PORTAL_RANK_UNKNOWN;
+  };
+  const tsOf = (createdAt: string | null): number => {
+    if (createdAt == null) return Number.MAX_SAFE_INTEGER;
+    const t = Date.parse(createdAt);
+    return Number.isFinite(t) ? t : Number.MAX_SAFE_INTEGER;
+  };
+  return items
+    .map((it, i) => ({ it, i }))
+    .sort((a, b) => {
+      const ra = rankFor(a.it.portal);
+      const rb = rankFor(b.it.portal);
+      if (ra !== rb) return ra - rb;
+      const ta = tsOf(a.it.createdAt);
+      const tb = tsOf(b.it.createdAt);
+      if (ta !== tb) return ta - tb;
+      return a.i - b.i;
+    })
+    .slice(0, lim)
+    .map((x) => x.it.url);
+}

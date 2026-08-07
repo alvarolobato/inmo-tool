@@ -67,6 +67,19 @@ async function init() {
     /* no worker / no state — fall through to per-tab detection */
   }
 
+  // If Auto mode is ON (draining the worklist unattended), show its panel
+  // regardless of the active tab so the operator can watch progress / turn it off.
+  try {
+    const auto = await chrome.runtime.sendMessage({ type: 'GET_AUTO_STATE' });
+    if (auto && auto.enabled) {
+      enterBatchMode(null, auto.batch || null);
+      renderAutoStatus(auto);
+      return;
+    }
+  } catch {
+    /* no worker / no state — fall through */
+  }
+
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.url) {
     showError('No se pudo acceder a la pestaña actual');
@@ -103,9 +116,52 @@ async function init() {
     return;
   }
 
+  // On the Inmo-Tool dashboard itself (e.g. the /captura page) there is nothing
+  // to single-capture — this is the natural home for the Auto toggle (issue
+  // #424: "leave the capture page open"). Show the auto hub instead of trying to
+  // capture the dashboard page.
+  if (await isDashboardTab(tab)) {
+    await enterAutoHub();
+    return;
+  }
+
   // Unsupported host (a portal not yet wired, or Cimenta2's SPA) keeps the
   // universal manual-capture escape hatch: capture whatever tab we're on.
   await runSingleCapture(tab);
+}
+
+/** True when `tab` is on the configured Inmo-Tool dashboard origin. */
+async function isDashboardTab(tab) {
+  try {
+    const { apiUrl } = await chrome.storage.sync.get(['apiUrl']);
+    const dashOrigin = new URL(apiUrl || 'http://localhost:4000').origin;
+    return new URL(tab.url).origin === dashOrigin;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The Auto hub (issue #424): a home for the Auto toggle when the operator opens
+ * the popup on the dashboard rather than a portal listing page. No single-batch
+ * context — just start/stop Auto and watch its progress.
+ */
+async function enterAutoHub() {
+  enterBatchMode(null, null);
+  $('#batch-title').textContent = 'Captura automática';
+  $('#batch-sub').textContent =
+    'Activa el modo Auto para vaciar toda la lista de captura, lote a lote.';
+  $('#batch-start-btn').classList.add('hidden');
+  $('#batch-progress').classList.add('hidden');
+  hideBatchControls();
+  let auto = null;
+  try {
+    auto = await chrome.runtime.sendMessage({ type: 'GET_AUTO_STATE' });
+  } catch {
+    /* no worker */
+  }
+  renderAutoStatus(auto);
+  if (auto && auto.enabled) startBatchPolling();
 }
 
 // ─── Guided capture (supported portal, non-capturable page) ─────
@@ -301,6 +357,7 @@ function enterBatchMode(ctx, existingProgress) {
   $('#batch-pause-btn').onclick = () => sendBatchControl('PAUSE_BATCH');
   $('#batch-resume-btn').onclick = () => sendBatchControl('RESUME_BATCH');
   $('#batch-stop-btn').onclick = () => sendBatchControl('STOP_BATCH');
+  $('#batch-auto-btn').onclick = onToggleAuto;
 
   if (existingProgress) {
     renderBatchProgress(existingProgress);
@@ -385,6 +442,23 @@ async function sendBatchControl(type) {
 function startBatchPolling() {
   stopBatchPolling();
   batchPollTimer = setInterval(async () => {
+    // Read the auto state first: it carries the current-batch progress AND the
+    // auto counters (N lotes hechos, pendientes), so one message covers both.
+    let auto;
+    try {
+      auto = await chrome.runtime.sendMessage({ type: 'GET_AUTO_STATE' });
+    } catch {
+      auto = null;
+    }
+    renderAutoStatus(auto);
+
+    // While Auto is ON keep polling even between batches (status may be
+    // 'waiting'/'empty' with no live batch). Otherwise fall back to the plain
+    // batch-progress read and stop once the manual batch is done.
+    if (auto && auto.enabled) {
+      if (auto.batch) renderBatchProgress(auto.batch);
+      return;
+    }
     let prog;
     try {
       prog = await chrome.runtime.sendMessage({ type: 'GET_BATCH_STATE' });
@@ -394,6 +468,80 @@ function startBatchPolling() {
     if (prog) renderBatchProgress(prog);
     if (prog && prog.status === 'done') stopBatchPolling();
   }, BATCH_POLL_MS);
+}
+
+// ─── Auto mode (issue #424) ─────────────────────────────────────
+
+/** Human label for each auto status. */
+const AUTO_STATUS_LABELS = {
+  running: 'capturando lote',
+  waiting: 'esperando al siguiente lote',
+  empty: 'lista vacía — esperando trabajo nuevo',
+  stopped: 'deteniéndose tras el lote en curso',
+  idle: 'iniciando…',
+};
+
+/**
+ * Render the Auto toggle + status line from a GET_AUTO_STATE response. When Auto
+ * is ON the button offers to stop and the line shows the counters (batches done,
+ * total pending, phase); when OFF it offers to start and the line hides.
+ */
+function renderAutoStatus(auto) {
+  const btn = $('#batch-auto-btn');
+  const line = $('#batch-auto-status');
+  if (!btn || !line) return;
+
+  if (auto && auto.enabled) {
+    btn.textContent = 'Auto: detener';
+    btn.classList.remove('btn-primary');
+    btn.classList.add('btn-secondary');
+    const phase = AUTO_STATUS_LABELS[auto.status] || auto.status || '';
+    const batches = auto.batchesDone || 0;
+    const pending =
+      typeof auto.totalPending === 'number' ? auto.totalPending : '—';
+    const batchLine =
+      auto.batch && auto.batch.total > 0
+        ? ` · lote ${auto.batch.done || 0}/${auto.batch.total}`
+        : '';
+    line.textContent =
+      `Auto activo · ${batches} lote(s) hechos · ${pending} pendientes` +
+      `${batchLine} · ${phase}`;
+    line.classList.remove('hidden');
+  } else {
+    btn.textContent = 'Auto: capturar toda la lista';
+    btn.classList.remove('btn-secondary');
+    btn.classList.add('btn-primary');
+    line.classList.add('hidden');
+  }
+}
+
+/** Toggle Auto mode on/off. */
+async function onToggleAuto() {
+  const btn = $('#batch-auto-btn');
+  btn.disabled = true;
+  let auto;
+  try {
+    auto = await chrome.runtime.sendMessage({ type: 'GET_AUTO_STATE' });
+  } catch {
+    auto = null;
+  }
+  const enabled = !!(auto && auto.enabled);
+  try {
+    if (enabled) {
+      auto = await chrome.runtime.sendMessage({ type: 'STOP_AUTO' });
+    } else {
+      // Drain the WHOLE worklist (all portals) — portal:null. The start button
+      // and per-batch controls are irrelevant in auto mode.
+      auto = await chrome.runtime.sendMessage({ type: 'START_AUTO', portal: null });
+      $('#batch-start-btn').classList.add('hidden');
+      $('#batch-progress').classList.remove('hidden');
+      startBatchPolling();
+    }
+  } catch {
+    /* ignore — next poll refreshes state */
+  }
+  btn.disabled = false;
+  renderAutoStatus(auto);
 }
 
 function stopBatchPolling() {

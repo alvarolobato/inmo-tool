@@ -12,13 +12,20 @@ import { NextRequest } from "next/server";
 vi.mock("@/lib/db/worklist", () => ({
   addWorklistUrls: vi.fn(),
   listWorklist: vi.fn(),
+  listPendingWorklist: vi.fn(),
+}));
+vi.mock("@/lib/db/worklist-priority", () => ({
+  getPortalDuePriority: vi.fn(),
 }));
 
 import { GET, POST } from "../route";
 import * as db from "@/lib/db/worklist";
+import * as prio from "@/lib/db/worklist-priority";
 
 const mockAdd = vi.mocked(db.addWorklistUrls);
 const mockList = vi.mocked(db.listWorklist);
+const mockPending = vi.mocked(db.listPendingWorklist);
+const mockDue = vi.mocked(prio.getPortalDuePriority);
 
 function post(body: unknown): NextRequest {
   return new NextRequest("http://localhost:4000/api/etl/worklist", {
@@ -115,5 +122,56 @@ describe("GET /api/etl/worklist", () => {
     const body = await res.json();
     expect(body.summaries[0].captured).toBe(2);
     expect(mockList).toHaveBeenCalledWith("aliseda");
+  });
+});
+
+describe("GET /api/etl/worklist?pending — auto-driver next batch (issue #424)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("returns the next ≤N pending URLs prioritised due-first then oldest", async () => {
+    mockPending.mockResolvedValue([
+      { url: "u-alt", portal: "altamira", createdAt: "2026-01-01T00:00:00Z" },
+      { url: "u-ide-new", portal: "idealista", createdAt: "2026-03-01T00:00:00Z" },
+      { url: "u-ide-old", portal: "idealista", createdAt: "2026-02-01T00:00:00Z" },
+    ]);
+    mockDue.mockResolvedValue({ idealista: 0 }); // idealista due; altamira unknown
+
+    const req = new NextRequest("http://localhost:4000/api/etl/worklist?pending=1&limit=2");
+    const res = await GET(req);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // due idealista (oldest first), capped at 2 → excludes altamira.
+    expect(body.urls).toEqual(["u-ide-old", "u-ide-new"]);
+    expect(body.totalPending).toBe(3);
+  });
+
+  it("clamps limit to the server max and defaults when absent", async () => {
+    mockPending.mockResolvedValue([]);
+    mockDue.mockResolvedValue({});
+    const res = await GET(
+      new NextRequest("http://localhost:4000/api/etl/worklist?pending=1&limit=99999"),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.urls).toEqual([]);
+    expect(body.totalPending).toBe(0);
+  });
+
+  it("passes a portal filter through to the pending query", async () => {
+    mockPending.mockResolvedValue([]);
+    mockDue.mockResolvedValue({});
+    await GET(
+      new NextRequest("http://localhost:4000/api/etl/worklist?pending=1&portal=idealista"),
+    );
+    expect(mockPending).toHaveBeenCalledWith("idealista");
+  });
+
+  it("500s when the pending query throws", async () => {
+    mockPending.mockRejectedValue(new Error("db down"));
+    mockDue.mockResolvedValue({});
+    const res = await GET(
+      new NextRequest("http://localhost:4000/api/etl/worklist?pending=1"),
+    );
+    expect(res.status).toBe(500);
   });
 });

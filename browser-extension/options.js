@@ -23,6 +23,8 @@ async function load() {
     'batchPaceBaseMs',
     'batchPaceSpreadMs',
     'batchBackgroundTabs',
+    'autoBatchSize',
+    'autoBatchTimeoutSec',
   ]);
   $('#api-url').value = config.apiUrl || 'http://localhost:4000';
   $('#api-key').value = config.apiKey || '';
@@ -48,6 +50,15 @@ async function load() {
     : (config.batchPaceSpreadMs ?? 5000);
   // Background-tab mode is opt-in: default OFF (safe active mode).
   $('#batch-background-tabs').checked = config.batchBackgroundTabs === true;
+
+  // Auto-mode knobs (issue #424) — clamped through the same batch.js helpers the
+  // driver uses, so the field always reflects what the loop will actually use.
+  $('#auto-batch-size').value = IB.clampAutoBatchSize
+    ? IB.clampAutoBatchSize(config.autoBatchSize)
+    : (config.autoBatchSize || 100);
+  $('#auto-batch-timeout').value = IB.clampAutoTimeoutSec
+    ? IB.clampAutoTimeoutSec(config.autoBatchTimeoutSec)
+    : (config.autoBatchTimeoutSec || 60);
 }
 
 function showStatus(msg, kind) {
@@ -154,6 +165,28 @@ $('#batch-background-tabs').addEventListener('change', async (e) => {
       : 'Modo segundo plano desactivado',
     'success',
   );
+});
+
+// ── Auto-mode knobs (issue #424) ────────────────────────────────────────────
+// Clamped through the same batch.js helpers the driver uses (a value below the
+// 30 s alarm floor or above the caps can never take effect), and written back so
+// the UI never lies about what will run.
+$('#auto-batch-size').addEventListener('change', async (e) => {
+  const clamped = IB.clampAutoBatchSize
+    ? IB.clampAutoBatchSize(Number(e.target.value))
+    : Number(e.target.value);
+  e.target.value = clamped;
+  await chrome.storage.sync.set({ autoBatchSize: clamped });
+  showStatus(`Anuncios por lote: ${clamped}`, 'success');
+});
+
+$('#auto-batch-timeout').addEventListener('change', async (e) => {
+  const clamped = IB.clampAutoTimeoutSec
+    ? IB.clampAutoTimeoutSec(Number(e.target.value))
+    : Number(e.target.value);
+  e.target.value = clamped;
+  await chrome.storage.sync.set({ autoBatchTimeoutSec: clamped });
+  showStatus(`Espera entre lotes: ${clamped} s`, 'success');
 });
 
 load();

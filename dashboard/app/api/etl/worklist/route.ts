@@ -15,14 +15,54 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { addWorklistUrls, listWorklist, type WorklistAddedVia } from "@/lib/db/worklist";
+import {
+  addWorklistUrls,
+  listWorklist,
+  listPendingWorklist,
+  type WorklistAddedVia,
+} from "@/lib/db/worklist";
+import { getPortalDuePriority } from "@/lib/db/worklist-priority";
+import { selectNextPendingUrls } from "@/lib/worklist";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
 const MAX_URLS_PER_REQUEST = 5000;
+// Hard cap on the auto-driver's next-batch size, independent of the extension's
+// own clamp (issue #424) — N is bounded on both sides.
+const MAX_PENDING_LIMIT = 500;
+const DEFAULT_PENDING_LIMIT = 100;
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const requestId = generateRequestId();
   const portal = request.nextUrl.searchParams.get("portal")?.trim() || undefined;
+
+  // Auto-capture continuous driver (issue #424): the extension asks for the next
+  // ≤N pending URLs, prioritised due-first then oldest, to drain in one batch.
+  if (request.nextUrl.searchParams.get("pending") != null) {
+    const rawLimit = Number(request.nextUrl.searchParams.get("limit"));
+    const limit =
+      Number.isFinite(rawLimit) && rawLimit > 0
+        ? Math.min(Math.floor(rawLimit), MAX_PENDING_LIMIT)
+        : DEFAULT_PENDING_LIMIT;
+    try {
+      const items = await listPendingWorklist(portal);
+      // Best-effort due-ranking (never throws): a failure falls back to oldest-first.
+      const duePriority = await getPortalDuePriority();
+      const urls = selectNextPendingUrls(items, duePriority, limit);
+      return NextResponse.json({ urls, totalPending: items.length });
+    } catch (err) {
+      console.error(`[${requestId}] Error al seleccionar pendientes de la worklist:`, err);
+      return NextResponse.json(
+        formatApiError(
+          "No se pudieron seleccionar las URLs pendientes. Inténtalo de nuevo.",
+          "DB_QUERY",
+          sanitizeErrorMessage(err),
+          requestId,
+        ),
+        { status: 500 },
+      );
+    }
+  }
+
   try {
     const { rows, summaries } = await listWorklist(portal);
     return NextResponse.json({ rows, summaries });
