@@ -154,6 +154,16 @@ export interface RedFlag {
    * detection is still the model's job (cf. D-095).
    */
   candidate_type?: string;
+  /**
+   * #399 (Fase 8 of #385) — for `other` flags ONLY: the model's one-line
+   * definition of the `candidate_type` it just coined (the prompt asks for it
+   * alongside the slug). Persisted so the promotion page (`/admin/candidatos`)
+   * can show the owner what each recurring slug is supposed to mean before they
+   * decide whether to promote it. Present only when `type === 'other'` and the
+   * model returned a non-empty string; named types leave it `undefined`. Like
+   * `candidate_type` it is descriptive metadata, never a filter.
+   */
+  candidate_definition?: string;
 }
 
 /**
@@ -215,7 +225,16 @@ function parseFlag(node: unknown): RedFlag | null {
   const candidate_type =
     type === "other" ? normalizeCandidateType(o.candidate_type) : undefined;
 
-  return { type, description, evidence, evidence_source, candidate_type };
+  // #399: only `other` carries a candidate_definition — the model's one-line
+  // gloss for the slug it coined. Kept only when the slug survived normalization
+  // (a definition without a usable slug has nothing to attach to). Descriptive
+  // metadata for the promotion page, never a filter.
+  const candidate_definition =
+    type === "other" && candidate_type !== undefined && typeof o.definition === "string"
+      ? o.definition.trim() || undefined
+      : undefined;
+
+  return { type, description, evidence, evidence_source, candidate_type, candidate_definition };
 }
 
 /** Parse and validate the model's JSON into the red-flags result. */
