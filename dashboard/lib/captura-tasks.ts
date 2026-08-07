@@ -26,6 +26,7 @@
  */
 
 import type { LoosenedConstraint } from "@/lib/search-url";
+import type { WorklistPortalSummary } from "@/lib/worklist";
 
 /**
  * One openable capture task as the Captura page renders it. Mirrors the
@@ -292,4 +293,155 @@ export function groupTasksByPortal(tasks: readonly CaptureTask[]): PortalTaskGro
     label: portalTitle(portal),
     tasks: byPortal.get(portal)!,
   }));
+}
+
+// ─── Per-profile connector view-model (issue #413) ────────────────────────────
+//
+// The redesigned Captura page stacks ALL active profiles; under each profile its
+// connectors (portals), each collapsible. The collapse/expand decision and the
+// per-connector "toca / a-medias / al-día" state are derived here — purely from
+// the SAME per-profile signal the task rows already use: each task's last-run
+// timestamp (`capture_task_run.last_run_at`) versus the configured staleness
+// window (the "cycle"). This is the only per-profile capture signal that exists
+// (`capture_worklist` and `extension_capture` have no profile column), so the
+// due/half-done logic is grounded in it; the portal-global captured counts are
+// carried through as secondary context only.
+//
+// Per task (existing rule, {@link taskStaleness}):
+//   - never run, or run ≥ window ago → DUE (pending this cycle)
+//   - run < window ago               → MUTED ("al día" / done this cycle)
+//
+// Per connector (profile × portal):
+//   - not-due  → dueCount === 0                      (every task al día)   → COLLAPSED
+//   - half-done→ dueCount > 0 AND mutedCount > 0     (some done, some not) → EXPANDED
+//   - due      → dueCount > 0 AND mutedCount === 0   (nothing done yet)    → EXPANDED
+
+/** A connector's actionable state within one profile. */
+export type ConnectorState = "due" | "half-done" | "not-due";
+
+/** One task with its computed staleness, ready to render. */
+export interface ConnectorTaskView {
+  task: CaptureTask;
+  /** Done within its window → greyed / not due. */
+  muted: boolean;
+  /** Never run, or window elapsed → full colour / due. */
+  due: boolean;
+  /** ISO of the last run, or null when never run. */
+  lastRunAt: string | null;
+  /** Spanish "last done" label ('nunca' / 'hecho hace 3 días'). */
+  lastDone: string;
+}
+
+/** One connector (portal) under a profile, with its tasks and state. */
+export interface ConnectorView {
+  portal: string;
+  label: string;
+  taskViews: ConnectorTaskView[];
+  totalTasks: number;
+  /** Tasks pending this cycle (never run or window elapsed). */
+  dueCount: number;
+  /** Tasks done this cycle (run within the window). */
+  mutedCount: number;
+  state: ConnectorState;
+  /** Expanded by default when there is anything to do (due OR half-done). */
+  defaultExpanded: boolean;
+  /** Portal-global real captures (extension_capture) — secondary context. */
+  capturedReal: number;
+  /** ISO of the most recent real capture for the portal, or null. */
+  lastCapturedAt: string | null;
+  /** Portal-global seeded-worklist roll-up — secondary context, may be null. */
+  summary: WorklistPortalSummary | null;
+}
+
+/** One active profile with its connectors (the stacked-page unit). */
+export interface ProfileCaptureView {
+  id: number;
+  name: string;
+  connectors: ConnectorView[];
+  totalTasks: number;
+  /** Connectors needing action (state !== 'not-due') — for the profile header. */
+  actionableConnectors: number;
+}
+
+/** The connector state from its due/muted task counts. Pure — see block above. */
+export function deriveConnectorState(dueCount: number, mutedCount: number): ConnectorState {
+  if (dueCount === 0) return "not-due";
+  if (mutedCount > 0) return "half-done";
+  return "due";
+}
+
+/**
+ * Build the per-connector view-model for one profile's tasks. Groups by portal
+ * (builder order), computes each task's staleness against its portal's window,
+ * and folds those into the connector state + default collapse decision. The
+ * portal-global maps (`activityByPortal`, `summaryByPortal`) attach the
+ * secondary captured-count context; a portal absent from them yields 0 / null.
+ */
+export function buildConnectorViews(
+  tasks: readonly CaptureTask[],
+  runs: Record<string, string>,
+  staleness: StalenessConfig,
+  activityByPortal: ReadonlyMap<string, PortalCaptureActivity>,
+  summaryByPortal: ReadonlyMap<string, WorklistPortalSummary>,
+  now: Date = new Date(),
+): ConnectorView[] {
+  return groupTasksByPortal(tasks).map((g) => {
+    const windowDays = resolveStalenessDays(g.portal, staleness);
+    let dueCount = 0;
+    let mutedCount = 0;
+    const taskViews: ConnectorTaskView[] = g.tasks.map((task) => {
+      const lastRunAt = runs[task.id] ?? null;
+      const st = taskStaleness(lastRunAt, windowDays, now);
+      if (st.due) dueCount += 1;
+      if (st.muted) mutedCount += 1;
+      return {
+        task,
+        muted: st.muted,
+        due: st.due,
+        lastRunAt,
+        lastDone: lastDoneLabel(lastRunAt, now),
+      };
+    });
+    const act = activityByPortal.get(g.portal) ?? null;
+    return {
+      portal: g.portal,
+      label: g.label,
+      taskViews,
+      totalTasks: g.tasks.length,
+      dueCount,
+      mutedCount,
+      state: deriveConnectorState(dueCount, mutedCount),
+      defaultExpanded: dueCount > 0,
+      capturedReal: act?.captured ?? 0,
+      lastCapturedAt: act?.lastCapturedAt ?? null,
+      summary: summaryByPortal.get(g.portal) ?? null,
+    };
+  });
+}
+
+/** Assemble one profile's full stacked-view model from its tasks + runs. */
+export function buildProfileCaptureView(
+  profile: { id: number; name: string },
+  tasks: readonly CaptureTask[],
+  runs: Record<string, string>,
+  staleness: StalenessConfig,
+  activityByPortal: ReadonlyMap<string, PortalCaptureActivity>,
+  summaryByPortal: ReadonlyMap<string, WorklistPortalSummary>,
+  now: Date = new Date(),
+): ProfileCaptureView {
+  const connectors = buildConnectorViews(
+    tasks,
+    runs,
+    staleness,
+    activityByPortal,
+    summaryByPortal,
+    now,
+  );
+  return {
+    id: profile.id,
+    name: profile.name,
+    connectors,
+    totalTasks: connectors.reduce((a, c) => a + c.totalTasks, 0),
+    actionableConnectors: connectors.filter((c) => c.state !== "not-due").length,
+  };
 }

@@ -1,238 +1,250 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
-import CapturaPage from "../captura/page";
-import { fallbackTaskId } from "@/lib/captura-tasks";
+import { CapturaProfiles } from "@/components/captura/CapturaProfiles";
+import {
+  deriveConnectorState,
+  buildConnectorViews,
+  type CaptureTask,
+  type ConnectorTaskView,
+  type ConnectorView,
+  type ProfileCaptureView,
+  type StalenessConfig,
+} from "@/lib/captura-tasks";
 
-// next/link → plain <a> so hrefs are assertable.
-vi.mock("next/link", () => ({
-  default: ({
-    href,
-    children,
-    style,
-  }: {
-    href: string;
-    children: React.ReactNode;
-    style?: React.CSSProperties;
-  }) => (
-    <a href={href} style={style}>
-      {children}
-    </a>
-  ),
-}));
+/**
+ * #413 redesign — the page is now a SERVER component that fans out DB reads and
+ * hands a fully-computed view-model to the client `CapturaProfiles`. So the
+ * component test drives `CapturaProfiles` with an explicit view-model (no fetch
+ * fan-out to mock), and the pure due/collapse math is covered directly against
+ * `buildConnectorViews` / `deriveConnectorState`.
+ */
 
-const PROFILES = [
-  { id: 1, name: "Madrid centro", scope: {}, thesis_params: {} },
-  { id: 2, name: "Costa", scope: {}, thesis_params: {} },
-];
-
-// Legacy `urls[]` shape — exercises the normaliser's fallback branch (the page
-// must work before the search-url `tasks[]` restructure lands).
-const IDEALISTA_URL = "https://www.idealista.com/venta-viviendas/madrid/";
-const ALISEDA_URL = "https://www.alisedainmobiliaria.com/venta?precioMax=200000";
-const SEARCH_URLS = {
-  profileId: 1,
-  name: "Madrid centro",
-  urls: [
-    { portal: "idealista", url: IDEALISTA_URL, loosened: [] },
-    {
-      portal: "aliseda",
-      url: ALISEDA_URL,
-      loosened: [{ constraint: "geography", reason: "Aliseda no busca por radio." }],
-    },
-  ],
-};
-
-const ALISEDA_TASK_ID = fallbackTaskId("aliseda", ALISEDA_URL);
-const IDEALISTA_TASK_ID = fallbackTaskId("idealista", IDEALISTA_URL);
-
-const WORKLIST = {
-  rows: [],
-  summaries: [{ source_portal: "aliseda", total: 10, pending: 4, captured: 5, failed: 1, skipped: 0 }],
-};
-
-const STALENESS = { defaultDays: 7, byPortal: {} };
-
-// REAL capture activity from extension_capture: idealista has 10 captures even
-// though NOTHING seeded its worklist (the owner opened detail pages one by one).
-const ACTIVITY = [
-  { portal: "idealista", captured: 10, lastCapturedAt: new Date(Date.now() - 3600000).toISOString() },
-  { portal: "aliseda", captured: 0, lastCapturedAt: null },
-];
-
-function mockFetch(
-  opts: {
-    profilesOk?: boolean;
-    urlsOk?: boolean;
-    wlOk?: boolean;
-    runsOk?: boolean;
-    runs?: Record<string, string>;
-    activity?: typeof ACTIVITY;
-  } = {},
-) {
-  const { profilesOk = true, urlsOk = true, wlOk = true, runsOk = true, runs = {}, activity = ACTIVITY } = opts;
-  return vi.fn().mockImplementation((url: string, init?: RequestInit) => {
-    if (url === "/api/profiles") {
-      return Promise.resolve({
-        ok: profilesOk,
-        json: () => Promise.resolve(profilesOk ? PROFILES : { error: "boom" }),
-      });
-    }
-    if (url.includes("/search-urls")) {
-      return Promise.resolve({ ok: urlsOk, json: () => Promise.resolve(urlsOk ? SEARCH_URLS : { error: "boom" }) });
-    }
-    if (url.startsWith("/api/etl/worklist")) {
-      return Promise.resolve({ ok: wlOk, json: () => Promise.resolve(wlOk ? WORKLIST : { error: "boom" }) });
-    }
-    if (url.includes("/capture-task-runs")) {
-      if (init?.method === "POST") {
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve({ ok: true, taskId: "x", lastRunAt: new Date().toISOString() }),
-        });
-      }
-      return Promise.resolve({
-        ok: runsOk,
-        json: () =>
-          Promise.resolve(runsOk ? { profileId: 1, runs, staleness: STALENESS, activity } : { error: "boom" }),
-      });
-    }
-    return Promise.resolve({ ok: false, json: () => Promise.resolve({}) });
-  });
+function mkTask(id: string, portal: string, url: string): CaptureTask {
+  return { id, portal, label: `${portal} · ${id}`, url, loosened: [] };
 }
 
-describe("CapturaPage (task-driven)", () => {
-  const originalFetch = globalThis.fetch;
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-    vi.restoreAllMocks();
+function mkTaskView(task: CaptureTask, opts: { muted: boolean }): ConnectorTaskView {
+  return {
+    task,
+    muted: opts.muted,
+    due: !opts.muted,
+    lastRunAt: opts.muted ? new Date().toISOString() : null,
+    lastDone: opts.muted ? "hecho hace unos segundos" : "nunca",
+  };
+}
+
+function mkConnector(
+  portal: string,
+  taskViews: ConnectorTaskView[],
+  extra: Partial<ConnectorView> = {},
+): ConnectorView {
+  const dueCount = taskViews.filter((t) => t.due).length;
+  const mutedCount = taskViews.filter((t) => t.muted).length;
+  const state = deriveConnectorState(dueCount, mutedCount);
+  return {
+    portal,
+    label: portal[0].toUpperCase() + portal.slice(1),
+    taskViews,
+    totalTasks: taskViews.length,
+    dueCount,
+    mutedCount,
+    state,
+    defaultExpanded: dueCount > 0,
+    capturedReal: 0,
+    lastCapturedAt: null,
+    summary: null,
+    ...extra,
+  };
+}
+
+const IDEALISTA_URL = "https://www.idealista.com/venta-viviendas/madrid/";
+const ALISEDA_URL = "https://www.alisedainmobiliaria.com/venta?precioMax=200000";
+
+// Profile 1: idealista DUE (expanded), aliseda NOT-DUE (collapsed).
+// Profile 2: idealista HALF-DONE (expanded, one task done + one pending).
+const IDEA_DUE = mkTask("idea-due", "idealista", IDEALISTA_URL);
+const ALI_DONE = mkTask("ali-done", "aliseda", ALISEDA_URL);
+const IDEA_HALF_DONE = mkTask("idea-half-done", "idealista", IDEALISTA_URL + "?a=1");
+const IDEA_HALF_PENDING = mkTask("idea-half-pending", "idealista", IDEALISTA_URL + "?a=2");
+
+function buildViews(): ProfileCaptureView[] {
+  const p1Idealista = mkConnector("idealista", [mkTaskView(IDEA_DUE, { muted: false })], {
+    capturedReal: 10,
+    lastCapturedAt: new Date(Date.now() - 3600_000).toISOString(),
   });
-  beforeEach(() => {
-    vi.restoreAllMocks();
+  const p1Aliseda = mkConnector("aliseda", [mkTaskView(ALI_DONE, { muted: true })], {
+    summary: { source_portal: "aliseda", total: 10, pending: 4, captured: 5, failed: 1, skipped: 0, stale: 0 },
+  });
+  const p2Idealista = mkConnector("idealista", [
+    mkTaskView(IDEA_HALF_DONE, { muted: true }),
+    mkTaskView(IDEA_HALF_PENDING, { muted: false }),
+  ]);
+  return [
+    {
+      id: 1,
+      name: "Madrid centro",
+      connectors: [p1Idealista, p1Aliseda],
+      totalTasks: 2,
+      actionableConnectors: 1,
+    },
+    {
+      id: 2,
+      name: "Costa",
+      connectors: [p2Idealista],
+      totalTasks: 2,
+      actionableConnectors: 1,
+    },
+  ];
+}
+
+describe("deriveConnectorState", () => {
+  it("is not-due when nothing is due (collapsed)", () => {
+    expect(deriveConnectorState(0, 3)).toBe("not-due");
+  });
+  it("is half-done when some tasks are due and some done (expanded)", () => {
+    expect(deriveConnectorState(2, 1)).toBe("half-done");
+  });
+  it("is due when everything is pending this cycle (expanded)", () => {
+    expect(deriveConnectorState(2, 0)).toBe("due");
+  });
+});
+
+describe("buildConnectorViews (due/collapse derivation)", () => {
+  const STALENESS: StalenessConfig = { defaultDays: 7, byPortal: {} };
+  const now = new Date("2026-08-07T12:00:00Z");
+  const recent = new Date("2026-08-06T12:00:00Z").toISOString(); // 1 day ago (< 7 → muted)
+  const old = new Date("2026-07-01T12:00:00Z").toISOString(); // > 7 days → due
+
+  it("collapses a connector where every task ran within the window", () => {
+    const tasks = [mkTask("a", "idealista", IDEALISTA_URL), mkTask("b", "idealista", IDEALISTA_URL + "?x")];
+    const [conn] = buildConnectorViews(
+      tasks,
+      { a: recent, b: recent },
+      STALENESS,
+      new Map(),
+      new Map(),
+      now,
+    );
+    expect(conn.state).toBe("not-due");
+    expect(conn.defaultExpanded).toBe(false);
+    expect(conn.dueCount).toBe(0);
   });
 
-  it("auto-selects the first profile and renders its tasks grouped by portal, each with a run button", async () => {
-    globalThis.fetch = mockFetch();
-    render(<CapturaPage />);
+  it("marks a connector half-done (expanded) when one task is pending and one recent", () => {
+    const tasks = [mkTask("a", "idealista", IDEALISTA_URL), mkTask("b", "idealista", IDEALISTA_URL + "?x")];
+    const [conn] = buildConnectorViews(tasks, { a: recent }, STALENESS, new Map(), new Map(), now);
+    expect(conn.state).toBe("half-done");
+    expect(conn.defaultExpanded).toBe(true);
+    expect(conn.dueCount).toBe(1);
+    expect(conn.mutedCount).toBe(1);
+  });
 
-    await waitFor(() => expect(screen.getByTestId("captura-profile-select")).toBeInTheDocument());
+  it("marks a connector due (expanded) when every task is pending or stale", () => {
+    const tasks = [mkTask("a", "idealista", IDEALISTA_URL), mkTask("b", "idealista", IDEALISTA_URL + "?x")];
+    const [conn] = buildConnectorViews(tasks, { b: old }, STALENESS, new Map(), new Map(), now);
+    expect(conn.state).toBe("due");
+    expect(conn.defaultExpanded).toBe(true);
+  });
+});
 
-    // Both portals render as task groups.
-    await waitFor(() => expect(screen.getByTestId("captura-portal-idealista")).toBeInTheDocument());
-    expect(screen.getByTestId("captura-portal-aliseda")).toBeInTheDocument();
+describe("CapturaProfiles (stacked per-profile)", () => {
+  afterEach(() => vi.restoreAllMocks());
+  beforeEach(() => vi.restoreAllMocks());
 
-    // Aliseda task: a run button + loosened flag inline + 'nunca' last-done, active.
-    const alisedaRow = screen.getByTestId(`captura-task-${ALISEDA_TASK_ID}`);
-    expect(alisedaRow).toHaveAttribute("data-muted", "false");
-    expect(within(alisedaRow).getByTestId(`captura-task-run-${ALISEDA_TASK_ID}`)).toHaveTextContent("Abrir búsqueda");
-    expect(within(alisedaRow).getByTestId(`captura-task-loosened-${ALISEDA_TASK_ID}`)).toHaveTextContent("ampliada");
-    expect(within(alisedaRow).getByTestId(`captura-task-lastdone-${ALISEDA_TASK_ID}`)).toHaveTextContent("nunca");
-
-    // REAL capture activity is the headline: idealista shows 10 captured even
-    // though NOTHING seeded its worklist (regression guard for "reads empty
-    // while captures are working").
-    expect(screen.getByTestId("captura-activity-idealista")).toHaveTextContent("10 propiedades capturadas");
-    expect(screen.getByTestId("captura-nolist-idealista")).toBeInTheDocument();
-    // Aliseda: worklist roll-up present but no real captures yet.
-    expect(screen.getByTestId("captura-captured-aliseda")).toHaveTextContent("5/10");
-    expect(screen.getByTestId("captura-activity-aliseda")).toHaveTextContent("sin capturas todavía");
-
-    // Totals strip: 2 tasks, 0 done, and the REAL captured count (10).
-    expect(screen.getByTestId("captura-totals")).toHaveTextContent("2 de 2 tareas por hacer en 2 portales");
-    expect(screen.getByTestId("captura-totals")).toHaveTextContent("10 propiedades capturadas");
-
+  it("stacks every profile with its connectors", () => {
+    render(<CapturaProfiles profiles={buildViews()} />);
+    expect(screen.getByTestId("captura-profile-1")).toBeInTheDocument();
+    expect(screen.getByTestId("captura-profile-2")).toBeInTheDocument();
+    expect(within(screen.getByTestId("captura-profile-1")).getByRole("heading", { name: "Madrid centro" })).toBeInTheDocument();
+    expect(within(screen.getByTestId("captura-profile-2")).getByRole("heading", { name: "Costa" })).toBeInTheDocument();
     // No error surface.
     expect(screen.queryByText("Detalles técnicos")).not.toBeInTheDocument();
   });
 
-  it("renders a done task grayed with a 'hecho' last-done when a recent run exists", async () => {
-    const recent = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
-    globalThis.fetch = mockFetch({ runs: { [ALISEDA_TASK_ID]: recent } });
-    render(<CapturaPage />);
+  it("expands due & half-done connectors by default, collapses not-due ones", () => {
+    render(<CapturaProfiles profiles={buildViews()} />);
 
-    await waitFor(() => expect(screen.getByTestId(`captura-task-${ALISEDA_TASK_ID}`)).toBeInTheDocument());
-    const alisedaRow = screen.getByTestId(`captura-task-${ALISEDA_TASK_ID}`);
-    // Within the 7-day window → muted + 'hecho' + Repetir button; still enabled.
-    expect(alisedaRow).toHaveAttribute("data-muted", "true");
-    expect(within(alisedaRow).getByTestId(`captura-task-lastdone-${ALISEDA_TASK_ID}`)).toHaveTextContent("hecho");
-    expect(within(alisedaRow).getByTestId(`captura-task-run-${ALISEDA_TASK_ID}`)).toBeEnabled();
-    // The other task stays active.
-    expect(screen.getByTestId(`captura-task-${IDEALISTA_TASK_ID}`)).toHaveAttribute("data-muted", "false");
+    // Profile 1 idealista is DUE → expanded, its run button visible.
+    const p1Idea = screen.getByTestId("captura-connector-1-idealista");
+    expect(p1Idea).toHaveAttribute("data-state", "due");
+    expect(p1Idea).toHaveAttribute("data-expanded", "true");
+    expect(screen.getByTestId(`captura-task-run-${IDEA_DUE.id}`)).toBeVisible();
+
+    // Profile 1 aliseda is NOT-DUE → collapsed: a stats line, no task rows.
+    const p1Ali = screen.getByTestId("captura-connector-1-aliseda");
+    expect(p1Ali).toHaveAttribute("data-state", "not-due");
+    expect(p1Ali).toHaveAttribute("data-expanded", "false");
+    expect(screen.getByTestId("captura-connector-stats-1-aliseda")).toBeInTheDocument();
+    expect(screen.queryByTestId(`captura-task-run-${ALI_DONE.id}`)).not.toBeInTheDocument();
+
+    // Profile 2 idealista is HALF-DONE → expanded with an "A medias" badge.
+    const p2Idea = screen.getByTestId("captura-connector-2-idealista");
+    expect(p2Idea).toHaveAttribute("data-state", "half-done");
+    expect(p2Idea).toHaveAttribute("data-expanded", "true");
+    expect(screen.getByTestId("captura-connector-badge-2-idealista")).toHaveTextContent("A medias");
   });
 
-  it("records the run and grays the row optimistically when a task button is clicked", async () => {
-    const fetchSpy = mockFetch();
-    globalThis.fetch = fetchSpy;
+  it("expands a collapsed connector manually", () => {
+    render(<CapturaProfiles profiles={buildViews()} />);
+    const toggle = screen.getByTestId("captura-connector-toggle-1-aliseda");
+    // Collapsed: no task row yet.
+    expect(screen.queryByTestId(`captura-task-run-${ALI_DONE.id}`)).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(screen.getByTestId("captura-connector-1-aliseda")).toHaveAttribute("data-expanded", "true");
+    expect(screen.getByTestId(`captura-task-run-${ALI_DONE.id}`)).toBeVisible();
+  });
+
+  it("records the run and grays the row optimistically when a launch button is clicked", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ ok: true, taskId: IDEA_DUE.id, lastRunAt: new Date().toISOString() }),
+    });
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
     const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
-    render(<CapturaPage />);
 
-    await waitFor(() => expect(screen.getByTestId(`captura-task-${ALISEDA_TASK_ID}`)).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId(`captura-task-run-${ALISEDA_TASK_ID}`));
+    render(<CapturaProfiles profiles={buildViews()} />);
+    fireEvent.click(screen.getByTestId(`captura-task-run-${IDEA_DUE.id}`));
 
-    // POSTs the run then opens the URL.
+    // POSTs the run to the OWNING profile's endpoint.
     await waitFor(() =>
       expect(
         fetchSpy.mock.calls.some(
-          (c) => String(c[0]).includes("/capture-task-runs") && (c[1] as RequestInit)?.method === "POST",
+          (c) =>
+            String(c[0]) === "/api/profiles/1/capture-task-runs" &&
+            (c[1] as RequestInit)?.method === "POST",
         ),
       ).toBe(true),
     );
-    // Opens the search tagged with the auto-start signal (#inmo-capture, #297)
-    // so the extension starts the batch without a popup/banner click.
+    // Opens the URL tagged with the auto-start signal.
     await waitFor(() =>
       expect(openSpy).toHaveBeenCalledWith(
-        `${ALISEDA_URL}#inmo-capture`,
+        `${IDEALISTA_URL}#inmo-capture`,
         "_blank",
         expect.any(String),
       ),
     );
-    // Optimistic grey-out.
-    await waitFor(() =>
-      expect(screen.getByTestId(`captura-task-${ALISEDA_TASK_ID}`)).toHaveAttribute("data-muted", "true"),
-    );
-  });
-
-  it("shows an empty state with a link to Perfiles when there are no profiles", async () => {
-    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
-      if (url === "/api/profiles") return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
-      return Promise.resolve({ ok: false, json: () => Promise.resolve({}) });
-    });
-    render(<CapturaPage />);
-    await waitFor(() => expect(screen.getByTestId("captura-no-profiles")).toBeInTheDocument());
-    expect(screen.getByTestId("captura-no-profiles")).toHaveTextContent("No hay perfiles");
-  });
-
-  it("surfaces an error when the profile list fails to load", async () => {
-    globalThis.fetch = mockFetch({ profilesOk: false });
-    render(<CapturaPage />);
-    await waitFor(() => expect(screen.getByText(/No se pudieron cargar los perfiles/)).toBeInTheDocument());
-  });
-
-  it("surfaces an error when the worklist roll-up fails", async () => {
-    globalThis.fetch = mockFetch({ wlOk: false });
-    render(<CapturaPage />);
-    await waitFor(() => expect(screen.getByText(/No se pudo cargar el progreso de captura/)).toBeInTheDocument());
-  });
-
-  it("surfaces an error when the task-run history fails", async () => {
-    globalThis.fetch = mockFetch({ runsOk: false });
-    render(<CapturaPage />);
-    await waitFor(() => expect(screen.getByText(/No se pudo cargar el histórico de tareas/)).toBeInTheDocument());
-  });
-
-  it("re-fetches when 'Actualizar' is clicked", async () => {
-    const fetchSpy = mockFetch();
-    globalThis.fetch = fetchSpy;
-    render(<CapturaPage />);
-    await waitFor(() => expect(screen.getByTestId("captura-refresh")).toBeInTheDocument());
-    await waitFor(() => expect(screen.getByTestId("captura-portal-aliseda")).toBeInTheDocument());
-
-    const before = fetchSpy.mock.calls.filter((c) => String(c[0]).startsWith("/api/etl/worklist")).length;
-    fireEvent.click(screen.getByTestId("captura-refresh"));
+    // Optimistic grey-out of the launched task's row.
     await waitFor(() => {
-      const after = fetchSpy.mock.calls.filter((c) => String(c[0]).startsWith("/api/etl/worklist")).length;
-      expect(after).toBeGreaterThan(before);
+      const row = screen.getByTestId(`captura-task-${IDEA_DUE.id}`);
+      expect(row).toHaveAttribute("data-muted", "true");
     });
+  });
+
+  it("filters to a single profile when the optional filter is used", () => {
+    render(<CapturaProfiles profiles={buildViews()} />);
+    expect(screen.getByTestId("captura-profile-2")).toBeInTheDocument();
+    fireEvent.change(screen.getByTestId("captura-profile-filter"), { target: { value: "1" } });
+    expect(screen.getByTestId("captura-profile-1")).toBeInTheDocument();
+    expect(screen.queryByTestId("captura-profile-2")).not.toBeInTheDocument();
+  });
+
+  it("shows a per-profile empty note when a profile has no connectors", () => {
+    const views: ProfileCaptureView[] = [
+      { id: 5, name: "Vacío", connectors: [], totalTasks: 0, actionableConnectors: 0 },
+    ];
+    render(<CapturaProfiles profiles={views} />);
+    expect(within(screen.getByTestId("captura-profile-5")).getByTestId("captura-profile-empty-5")).toBeInTheDocument();
   });
 });
