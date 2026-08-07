@@ -80,6 +80,10 @@ async function seedRow(flags: unknown[], address: string): Promise<number> {
 }
 
 async function purge(): Promise<void> {
+  // #407: also clear any dismissal rows this spec created.
+  await pool.query("DELETE FROM dismissed_candidate_type WHERE slug = ANY($1::text[])", [
+    [HIT, NOISE],
+  ]);
   if (createdPropertyIds.length === 0) return;
   await pool.query("DELETE FROM ai_assessment WHERE property_id = ANY($1::bigint[])", [
     createdPropertyIds,
@@ -128,6 +132,38 @@ test("lists recurring candidate_types over the threshold with evidence (D-041)",
 
   // The below-threshold noise slug must NOT appear (threshold filter works e2e).
   await expect(page.getByTestId(`candidato-${NOISE}`)).toHaveCount(0);
+
+  // ── D-041 bar: no error surface anywhere on the page. ──
+  await expect(page.getByTestId("error-display")).toHaveCount(0);
+  const body = page.locator("body");
+  await expect(body).not.toContainText("Detalles técnicos");
+  await expect(body).not.toContainText("there is no parameter");
+  await expect(body).not.toContainText("HTTP 500");
+  await expect(body).not.toContainText("Error al cargar");
+});
+
+test("#407: dismissing a candidate removes it from the list, no error surface (D-041)", async ({
+  page,
+}) => {
+  // Accept the optional-reason window.prompt the dismiss button opens.
+  page.on("dialog", (dialog) => dialog.accept("duplicado de otro eje"));
+
+  await page.goto("/admin/candidatos");
+  await expect(page.getByTestId("candidatos-page")).toBeVisible();
+
+  // The candidate is present before dismissal.
+  const card = page.getByTestId(`candidato-${HIT}`);
+  await expect(card).toBeVisible();
+
+  // Click "Descartar"; the page refreshes and the now-dismissed candidate is
+  // excluded by getPromotionCandidates, so its card disappears.
+  await page.getByTestId(`dismiss-${HIT}`).click();
+  await expect(page.getByTestId(`candidato-${HIT}`)).toHaveCount(0);
+
+  // The dismissal really persisted — a reload still shows it gone.
+  await page.reload();
+  await expect(page.getByTestId("candidatos-page")).toBeVisible();
+  await expect(page.getByTestId(`candidato-${HIT}`)).toHaveCount(0);
 
   // ── D-041 bar: no error surface anywhere on the page. ──
   await expect(page.getByTestId("error-display")).toHaveCount(0);

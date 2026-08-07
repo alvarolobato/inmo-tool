@@ -42,7 +42,12 @@ import { AgenticRunnerError } from "./llm-tools/runner";
 import { resetClient } from "./llm-client";
 import type { LlmAgenticContext, AgenticProgressEvent } from "./llm-tools/types";
 import { assembleRequest } from "./llm-context";
-import type { FlowVars, ListingSnapshot, RedflagTrendingCandidate } from "./llm-context";
+import type {
+  FlowVars,
+  ListingSnapshot,
+  RedflagTrendingCandidate,
+  DismissedCandidate,
+} from "./llm-context";
 
 export { BudgetExceededError } from "./llm-usage";
 export { CircuitBreakerOpenError } from "./llm-circuit-breaker";
@@ -73,6 +78,15 @@ export interface AssessmentOpts {
    * no-op), same as `areaPriceSignal`. See `lib/db/redflag-candidates.ts`.
    */
   trendingCandidates?: RedflagTrendingCandidate[];
+  /**
+   * #407 — redflags ONLY: the `candidate_type` slugs a human dismissed on
+   * `/admin/candidatos`, computed ONCE per batch by the orchestrator and
+   * forwarded here so `extractRedFlags` threads them into the redflags prompt
+   * ("previously reviewed and rejected — do NOT propose these again"). Other
+   * flows accept the same shape but never forward it (a silent no-op), same as
+   * `trendingCandidates`. See `lib/db/redflag-candidates.ts`.
+   */
+  dismissedCandidates?: DismissedCandidate[];
 }
 
 /**
@@ -221,6 +235,7 @@ export function extractRedFlags(
     {
       areaPriceSignal: opts?.areaPriceSignal,
       trendingCandidates: opts?.trendingCandidates,
+      dismissedCandidates: opts?.dismissedCandidates,
     },
   );
 }

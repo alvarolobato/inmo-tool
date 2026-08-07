@@ -11,7 +11,19 @@
  */
 import { describe, it, expect } from "vitest";
 import { buildSystemPrompt } from "@/lib/llm-context/system-prompt";
-import type { ListingSnapshot, RedflagTrendingCandidate } from "@/lib/llm-context";
+import type {
+  ListingSnapshot,
+  RedflagTrendingCandidate,
+  DismissedCandidate,
+} from "@/lib/llm-context";
+import {
+  OCCUPANCY_STATUSES,
+  TRANSACTION_KINDS,
+  OWNERSHIP_EXTENTS,
+} from "../occupancy-vocabulary";
+import { CONDITION_CATEGORIES } from "../condition-vocabulary";
+import { BEACH_PROXIMITIES } from "../location-vocabulary";
+import { OPPORTUNITY_SIGNALS } from "../opportunity-vocabulary";
 import {
   parseRedFlagsResult,
   normalizeCandidateType,
@@ -398,11 +410,12 @@ describe("#394 candidate_type on `other` flags", () => {
 
 describe("prompt version", () => {
   it("is pinned, so a prompt change forces a new row rather than overwriting", () => {
-    // Bumped to v6 for #396: the closed vocabulary is now rendered from the enum
-    // and the top-N trending `other` candidate slugs are injected, so the prompt
-    // the model reads changed and #308's batch re-assesses existing rows rather
-    // than serving a v5 cache row as current. See REDFLAGS_PROMPT_VERSION's doc.
-    expect(REDFLAGS_PROMPT_VERSION).toBe("redflags/v6");
+    // Bumped to v7 for #407: the prompt now injects the FULL cross-axis
+    // vocabulary (rendered from each axis's enum) and the human-dismissed
+    // candidate slugs, so the prompt the model reads changed and #308's batch
+    // re-assesses existing rows rather than serving a v6 cache row as current.
+    // See REDFLAGS_PROMPT_VERSION's doc.
+    expect(REDFLAGS_PROMPT_VERSION).toBe("redflags/v7");
   });
 });
 
@@ -559,5 +572,86 @@ describe("#396 — trending `other` candidates injected as prompt context", () =
     });
     expect(stable).toContain("servidumbre_paso");
     expect(volatile ?? "").not.toContain("servidumbre_paso");
+  });
+});
+
+describe("#407 — full cross-axis vocabulary injected, rendered from each axis enum", () => {
+  // Every mappable (non-sentinel) value of every axis enum must appear in the
+  // prompt, rendered from the enum itself — so adding a value to an axis makes
+  // it appear here automatically (no prose to edit). These are the exact enums
+  // the prompt builder imports from the leaf vocabulary modules.
+  const SENTINELS = new Set(["unknown", "unclear", "none"]);
+  const AXES: Array<[string, readonly string[]]> = [
+    ["occupancy", OCCUPANCY_STATUSES],
+    ["transaction", TRANSACTION_KINDS],
+    ["ownership", OWNERSHIP_EXTENTS],
+    ["condition", CONDITION_CATEGORIES],
+    ["location", BEACH_PROXIMITIES],
+    ["opportunity", OPPORTUNITY_SIGNALS],
+  ];
+
+  it.each(AXES)("renders every mappable %s value from its enum", (_axis, values) => {
+    const text = redflagsPromptText([SILENT_ADVERT]);
+    for (const v of values) {
+      if (SENTINELS.has(v)) continue;
+      expect(text).toContain(v);
+    }
+  });
+
+  it("names the axes as existing concepts the model must map to instead of coining a candidate", () => {
+    const text = redflagsPromptText([SILENT_ADVERT]);
+    // The load-bearing owner examples that triggered #407.
+    expect(text).toContain("venta_deuda");
+    expect(text).toContain("nuda_propiedad");
+    expect(text).toContain("is_vpo");
+    expect(text).toContain("occupied_illegally");
+    expect(text).toContain("tenanted");
+    // Explicit "don't coin a candidate for these" instruction + the
+    // occupied_illegally-vs-tenanted severity distinction the owner asked for.
+    expect(text).toContain("NO acuñes un `candidate_type`");
+    expect(text.toLowerCase()).toContain("okupas");
+    expect(text).toContain("sin_posesion");
+  });
+});
+
+describe("#407 — human-dismissed candidates injected as 'do not propose again'", () => {
+  function redflagsPromptWithDismissed(
+    dismissedCandidates: DismissedCandidate[] | undefined,
+  ): string {
+    const { stable, volatile } = buildSystemPrompt("redflags", {
+      listings: [SILENT_ADVERT],
+      dismissedCandidates,
+    });
+    return `${stable}\n${volatile ?? ""}`;
+  }
+
+  it("embeds each dismissed slug AND its reason when passed a list", () => {
+    const text = redflagsPromptWithDismissed([
+      { slug: "sin_posesion", reason: "ya cubierto por occupancy" },
+      { slug: "regimen_vpo", reason: null },
+    ]);
+    expect(text).toContain("sin_posesion");
+    expect(text).toContain("ya cubierto por occupancy");
+    expect(text).toContain("regimen_vpo");
+    expect(text.toLowerCase()).toContain("rechaz");
+  });
+
+  it("empty list → still a valid prompt with an explicit 'nothing dismissed yet' note", () => {
+    const text = redflagsPromptWithDismissed([]);
+    expect(text).toContain("Todavía no se ha rechazado ningún candidato");
+    expect(text).toContain("señales de alerta");
+  });
+
+  it("undefined dismissedCandidates behaves like the empty list (undefined is the default)", () => {
+    expect(redflagsPromptWithDismissed(undefined)).toBe(redflagsPromptWithDismissed([]));
+  });
+
+  it("the dismissed block lives in the STABLE prefix (cache-friendly across a batch)", () => {
+    const { stable, volatile } = buildSystemPrompt("redflags", {
+      listings: [SILENT_ADVERT],
+      dismissedCandidates: [{ slug: "sin_posesion", reason: "duplicado" }],
+    });
+    expect(stable).toContain("sin_posesion");
+    expect(volatile ?? "").not.toContain("sin_posesion");
   });
 });

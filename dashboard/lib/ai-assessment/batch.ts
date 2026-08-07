@@ -51,7 +51,9 @@ import { getLatestAssessment, type AssessmentType } from "./cache";
 import { NoListingsError } from "./shared";
 import {
   getTrendingCandidateTypes,
+  getDismissedCandidateTypes,
   type RedflagTrendingCandidate,
+  type DismissedCandidate,
 } from "@/lib/db/redflag-candidates";
 import { assessPropertyOccupancy, OCCUPANCY_PROMPT_VERSION } from "./occupancy";
 import { assessPropertyCondition, CONDITION_PROMPT_VERSION } from "./condition";
@@ -78,6 +80,12 @@ export interface BatchFlow {
        * loop flow-agnostic.
        */
       trendingCandidates?: RedflagTrendingCandidate[];
+      /**
+       * #407 — the human-dismissed candidate slugs, computed ONCE per batch
+       * (below) and passed to every flow. Only redflags reads it; the others
+       * ignore it — same harmless-no-op shape as `trendingCandidates`.
+       */
+      dismissedCandidates?: DismissedCandidate[];
     },
   ) => Promise<unknown>;
 }
@@ -198,6 +206,12 @@ export interface RunAssessmentBatchOptions {
    * into every flow's `assess` call, read only by redflags.
    */
   fetchTrendingCandidates?: () => Promise<RedflagTrendingCandidate[]>;
+  /**
+   * #407 — overridable seam for the once-per-batch dismissed-candidates fetch
+   * (tests inject a stub; production uses `getDismissedCandidateTypes`).
+   * Threaded into every flow's `assess` call, read only by redflags.
+   */
+  fetchDismissedCandidates?: () => Promise<DismissedCandidate[]>;
 }
 
 const DEFAULT_BATCH_SIZE = 5;
@@ -221,6 +235,8 @@ export async function runAssessmentBatch(
   const isCurrent = opts.isCurrent ?? isFlowCurrent;
   const fetchTrendingCandidates =
     opts.fetchTrendingCandidates ?? getTrendingCandidateTypes;
+  const fetchDismissedCandidates =
+    opts.fetchDismissedCandidates ?? getDismissedCandidateTypes;
   const requestId = opts.requestId ?? null;
 
   const result: AssessmentBatchResult = {
@@ -250,6 +266,20 @@ export async function runAssessmentBatch(
     );
   }
 
+  // #407: same once-per-batch treatment for the human-dismissed slugs. A failure
+  // here must never sink the batch — the injection is pure context, so on error
+  // we fall back to an empty list (the model just sees "nothing dismissed yet").
+  let dismissedCandidates: DismissedCandidate[] = [];
+  try {
+    dismissedCandidates = await fetchDismissedCandidates();
+  } catch (err) {
+    console.warn(
+      "[ai-assessment:batch] dismissed-candidate fetch failed — continuing with an " +
+        "empty list (redflags prompt shows no dismissed slugs this pass):",
+      err,
+    );
+  }
+
   for (const propertyId of propertyIds) {
     result.properties += 1;
     for (const flow of flows) {
@@ -261,7 +291,7 @@ export async function runAssessmentBatch(
       }
 
       try {
-        await flow.assess(propertyId, { requestId, trendingCandidates });
+        await flow.assess(propertyId, { requestId, trendingCandidates, dismissedCandidates });
         result.assessed += 1;
       } catch (err) {
         // EC-3: a budget/circuit stop is a CLEAN halt of the whole batch, not

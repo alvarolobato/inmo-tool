@@ -20,6 +20,7 @@ export {
   type FlowVars,
   type ListingSnapshot,
   type RedflagTrendingCandidate,
+  type DismissedCandidate,
 } from "./types";
 
 export {

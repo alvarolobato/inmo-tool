@@ -702,6 +702,22 @@ DROP INDEX IF EXISTS idx_ai_assessment_property_type;
 -- against a table that already exists.
 ALTER TABLE ai_assessment ADD COLUMN IF NOT EXISTS content_hash TEXT;
 
+-- #407: candidate_type slugs a human reviewed on /admin/candidatos and
+-- explicitly DISMISSED (rejected as a real category). Two effects:
+--   1. excluded from the promotion list (getPromotionCandidates) and the
+--      prompt's "recent candidates" trending block (getTrendingCandidateTypes)
+--      so a rejected slug stops resurfacing;
+--   2. injected into the redflags prompt as "previously reviewed and rejected —
+--      do NOT propose these again" so the model stops re-coining the concept.
+-- `slug` is the normalized snake_case candidate_type (same shape
+-- normalizeCandidateType produces). `reason` is the owner's optional one-line
+-- note. Idempotent CREATE TABLE IF NOT EXISTS — safe to re-run.
+CREATE TABLE IF NOT EXISTS dismissed_candidate_type (
+    slug         TEXT PRIMARY KEY,
+    reason       TEXT,
+    dismissed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- ============================================================
 -- Deduplication audit trail (Phase 2 task 2.2, issue #16, writes here)
 -- ============================================================
