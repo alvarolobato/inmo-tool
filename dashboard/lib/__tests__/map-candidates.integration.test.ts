@@ -63,6 +63,13 @@ describe.runIf(dbAvailable)("listMapCandidates — real Postgres", () => {
 
   afterEach(async () => {
     await withRealDb(async (pool) => {
+      // feedback_event FK-references property(id) NOT NULL — delete it first
+      // (#417 reject-exclusion test seeds rejects).
+      if (createdPropertyIds.length > 0) {
+        await pool.query("DELETE FROM feedback_event WHERE property_id = ANY($1::bigint[])", [
+          createdPropertyIds,
+        ]);
+      }
       if (createdProfileIds.length > 0) {
         await pool.query("DELETE FROM profile_listing_state WHERE profile_id = ANY($1::bigint[])", [
           createdProfileIds,
@@ -221,6 +228,60 @@ describe.runIf(dbAvailable)("listMapCandidates — real Postgres", () => {
       const result = await listMapCandidates(profileId);
       expect(result.items).toHaveLength(0);
       expect(result.unplottableCount).toBe(0);
+    });
+  });
+
+  // #417: the map is the same candidate feed as the list — a rejected property
+  // must drop its pin (and its count) by default, matching the feed and
+  // prev/next, with the includeRejected escape hatch bringing it back.
+  it("excludes a rejected property's pin (and its count) by default, keeps it with includeRejected=true", async () => {
+    await withRealDb(async (pool) => {
+      const profileId = await makeProfile(SCOPE);
+      const rejected = await insertProperty(pool, TEST_COORDS);
+      await insertListing(pool, rejected);
+      await markMatched(pool, profileId, rejected);
+
+      const kept = await insertProperty(pool, TEST_COORDS);
+      await insertListing(pool, kept);
+      await markMatched(pool, profileId, kept);
+
+      // Reject one property (latest-wins verdict = reject).
+      await pool.query(
+        `INSERT INTO feedback_event (profile_id, property_id, feedback_type) VALUES ($1, $2, 'reject')`,
+        [profileId, rejected],
+      );
+
+      // Default: no pin, no count for the rejected property.
+      const def = await listMapCandidates(profileId);
+      expect(def.items.map((i) => i.property_id).sort()).toEqual([kept]);
+
+      // Escape hatch: includeRejected=true brings the rejected pin back.
+      const withRejected = await listMapCandidates(profileId, true);
+      expect(withRejected.items.map((i) => i.property_id).sort((a, b) => a - b)).toEqual(
+        [kept, rejected].sort((a, b) => a - b),
+      );
+    });
+  });
+
+  it("keeps a property whose latest verdict is 'clear' (un-rejected) on the map", async () => {
+    await withRealDb(async (pool) => {
+      const profileId = await makeProfile(SCOPE);
+      const propertyId = await insertProperty(pool, TEST_COORDS);
+      await insertListing(pool, propertyId);
+      await markMatched(pool, profileId, propertyId);
+
+      // reject, then clear — latest-wins is 'clear' → neutral, so it shows.
+      await pool.query(
+        `INSERT INTO feedback_event (profile_id, property_id, feedback_type) VALUES ($1, $2, 'reject')`,
+        [profileId, propertyId],
+      );
+      await pool.query(
+        `INSERT INTO feedback_event (profile_id, property_id, feedback_type) VALUES ($1, $2, 'clear')`,
+        [profileId, propertyId],
+      );
+
+      const result = await listMapCandidates(profileId);
+      expect(result.items.map((i) => i.property_id)).toEqual([propertyId]);
     });
   });
 

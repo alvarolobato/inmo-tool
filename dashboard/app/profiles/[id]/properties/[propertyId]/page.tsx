@@ -17,6 +17,7 @@ import { PriceHistoryChart } from "@/components/property/PriceHistoryChart";
 import { YieldSection } from "@/components/property/sections/YieldSection";
 import { FlipSection } from "@/components/property/sections/FlipSection";
 import { DetailSections, type DetailSection } from "@/components/property/DetailSections";
+import { FeedbackControls } from "@/components/candidates/FeedbackControls";
 
 interface Adjacent {
   prevPropertyId: number | null;
@@ -43,11 +44,17 @@ function AdjacentLink({
   propertyId,
   testId,
   label,
+  includeRejected,
 }: {
   profileId: number;
   propertyId: number | null;
   testId: string;
   label: string;
+  // #417: carry the show-rejected flag into the neighbour link so the flag
+  // survives the whole prev/next chain — otherwise the second hop would drop
+  // it and revert to the default (rejected-excluded) ordering, desyncing from
+  // the list the user is paging through.
+  includeRejected: boolean;
 }) {
   if (propertyId === null) {
     return (
@@ -63,7 +70,9 @@ function AdjacentLink({
   return (
     <Link
       data-testid={testId}
-      href={`/profiles/${profileId}/properties/${propertyId}`}
+      href={`/profiles/${profileId}/properties/${propertyId}${
+        includeRejected ? "?includeRejected=true" : ""
+      }`}
       style={{ ...adjacentStyle, color: "var(--fg)" }}
     >
       {label}
@@ -81,6 +90,17 @@ export default function PropertyDetailPage() {
   const [error, setError] = useState<ApiErrorResponse | string | null>(null);
   const [adjacent, setAdjacent] = useState<Adjacent>({ prevPropertyId: null, nextPropertyId: null });
   const [investmentMetrics, setInvestmentMetrics] = useState<InvestmentMetrics | null>(null);
+  // #417: the feed's "Mostrar descartadas" flag, carried in this page's URL
+  // when the user arrived from the show-rejected list. Read from window in a
+  // mount effect (SSR-safe — starts false, corrected on the client) rather
+  // than useSearchParams, which would force a Suspense boundary. Drives both
+  // the prev/next fetch and the neighbour link hrefs so the flag survives the
+  // whole chain.
+  const [includeRejected, setIncludeRejected] = useState(false);
+
+  useEffect(() => {
+    setIncludeRejected(new URLSearchParams(window.location.search).get("includeRejected") === "true");
+  }, []);
 
   useEffect(() => {
     if (profileId === null || propertyId === null) return;
@@ -117,7 +137,12 @@ export default function PropertyDetailPage() {
     if (profileId === null || propertyId === null) return;
     let cancelled = false;
     setAdjacent({ prevPropertyId: null, nextPropertyId: null });
-    fetch(`/api/profiles/${profileId}/properties/${propertyId}/adjacent`)
+    // #417: forward the show-rejected flag so prev/next steps through rejected
+    // candidates in the same order as the list the user is paging through.
+    const adjacentUrl = `/api/profiles/${profileId}/properties/${propertyId}/adjacent${
+      includeRejected ? "?includeRejected=true" : ""
+    }`;
+    fetch(adjacentUrl)
       .then((res) => (res.ok ? (res.json() as Promise<Adjacent>) : null))
       .then((data) => {
         if (!cancelled && data) setAdjacent(data);
@@ -128,7 +153,7 @@ export default function PropertyDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [profileId, propertyId]);
+  }, [profileId, propertyId, includeRejected]);
 
   // Separate, non-blocking request (task 5.3, #33 — same pattern as
   // `adjacent` above): this is a heavier, multi-query computation (area
@@ -250,12 +275,14 @@ export default function PropertyDetailPage() {
             propertyId={adjacent.prevPropertyId}
             testId="candidate-prev"
             label="← Anterior"
+            includeRejected={includeRejected}
           />
           <AdjacentLink
             profileId={profileId}
             propertyId={adjacent.nextPropertyId}
             testId="candidate-next"
             label="Siguiente →"
+            includeRejected={includeRejected}
           />
         </nav>
       </div>
@@ -269,6 +296,32 @@ export default function PropertyDetailPage() {
       {!loading && !error && property && (
         <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 20 }}>
           <PropertyHeader property={property} />
+          {/*
+            #417: the same accept/reject/star controls the feed card carries,
+            mounted here so you can reject/track from the page you're reading —
+            reusing FeedbackControls (no new feedback logic). initialState is
+            omitted, so it self-fetches this property's current verdict on mount
+            (its original behaviour). Deferred-removal semantics are unchanged:
+            a reject writes the event and the card drops out of the feed on the
+            NEXT fetch, not here. Wrapped so the overlay-styled buttons read as
+            an intentional control row on the detail page.
+          */}
+          <div
+            data-testid="detail-feedback-controls"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              padding: "6px 8px",
+              borderRadius: 8,
+              background: "var(--bg-1)",
+              border: "1px solid var(--border)",
+              alignSelf: "flex-start",
+            }}
+          >
+            <span style={{ fontSize: 13, color: "var(--fg-muted)" }}>Tu valoración:</span>
+            <FeedbackControls profileId={profileId} propertyId={propertyId} />
+          </div>
           {/* #361 problem flags — own component/section, kept separate from
               where #360 adds the advert description, to minimize conflict. */}
           <PropertyProblemFlags flags={property.problem_flags} />

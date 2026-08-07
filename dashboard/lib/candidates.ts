@@ -1544,6 +1544,11 @@ export interface AdjacentCandidates {
 export async function getAdjacentCandidates(
   profileId: number,
   propertyId: number,
+  // #417: mirrors the feed's "Mostrar descartadas" toggle. Default false hides
+  // rejected neighbours (so prev/next matches the default feed). true keeps
+  // them, so prev/next steps through rejected cards in the SAME order as the
+  // show-rejected list the user is paging through — no desync.
+  includeRejected = false,
 ): Promise<AdjacentCandidates> {
   // #309: neighbours are computed under the SAME blended `effective_score`
   // ordering the list uses (rankedCandidatesCte), not the raw `score` — so the
@@ -1569,12 +1574,14 @@ export async function getAdjacentCandidates(
          FROM ranked
         WHERE (effective_score < $2::double precision
                OR (effective_score = $2::double precision AND property_id < $3::bigint))
-          -- Skip rejected neighbours (#379) so prev/next matches the default
-          -- feed the user paged through — never step onto a hidden card.
-          AND feedback_state IS DISTINCT FROM 'reject'
+          -- Skip rejected neighbours by default (#379) so prev/next matches the
+          -- default feed the user paged through — never step onto a hidden card.
+          -- $5 = true (show-rejected, #417) keeps them, so prev/next honours the
+          -- same escape hatch as the feed and the two never desync.
+          AND ($5::boolean = true OR feedback_state IS DISTINCT FROM 'reject')
         ORDER BY effective_score DESC, property_id DESC
         LIMIT 1`,
-      [profileId, anchorScore, propertyId, WARN_CAVEAT_CODES],
+      [profileId, anchorScore, propertyId, WARN_CAVEAT_CODES, includeRejected],
     ),
     sql<{ property_id: number }>(
       `WITH ${rankedCandidatesCte("$4")}
@@ -1582,10 +1589,10 @@ export async function getAdjacentCandidates(
          FROM ranked
         WHERE (effective_score > $2::double precision
                OR (effective_score = $2::double precision AND property_id > $3::bigint))
-          AND feedback_state IS DISTINCT FROM 'reject'
+          AND ($5::boolean = true OR feedback_state IS DISTINCT FROM 'reject')
         ORDER BY effective_score ASC, property_id ASC
         LIMIT 1`,
-      [profileId, anchorScore, propertyId, WARN_CAVEAT_CODES],
+      [profileId, anchorScore, propertyId, WARN_CAVEAT_CODES, includeRejected],
     ),
   ]);
 

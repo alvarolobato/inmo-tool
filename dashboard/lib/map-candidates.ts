@@ -71,7 +71,10 @@ interface RawCountRow {
   unplottable_count: number;
 }
 
-export async function listMapCandidates(profileId: number): Promise<MapCandidates> {
+export async function listMapCandidates(
+  profileId: number,
+  includeRejected = false,
+): Promise<MapCandidates> {
   const [rows, counts] = await Promise.all([
     sql<RawMapRow>(
       // Issue #319 / D-055: the map is the SAME candidate feed as the list, so
@@ -116,10 +119,29 @@ export async function listMapCandidates(profileId: number): Promise<MapCandidate
          ) AS listings
        FROM profile_listing_state pls
        JOIN property p ON p.id = pls.property_id
+       -- Latest accept/reject/star verdict for this profile/property (#379/#417),
+       -- derived latest-wins exactly like the feed's fb LATERAL in
+       -- lib/candidates.ts. Feeds the reject exclusion below so the map hides the
+       -- same pins the feed and prev/next hide. Index-fed by
+       -- idx_feedback_event_profile_property.
+       LEFT JOIN LATERAL (
+         SELECT fe.feedback_type
+           FROM feedback_event fe
+          WHERE fe.profile_id = $1 AND fe.property_id = p.id
+            AND fe.feedback_type IN ('accept', 'reject', 'star', 'clear')
+          ORDER BY fe.created_at DESC, fe.id DESC
+          LIMIT 1
+       ) fb ON true
        WHERE pls.profile_id = $1
          AND pls.matched = true
          AND p.lat IS NOT NULL
          AND p.lon IS NOT NULL
+         -- Reject exclusion (#417) mirroring the feed's identical clause in
+         -- candidates.ts ($N = true OR feedback_state IS DISTINCT FROM 'reject'):
+         -- a property whose latest verdict is 'reject' drops no pin by default,
+         -- so map, feed and prev/next agree. $3 = true (the show-rejected escape
+         -- hatch) keeps it. A trailing 'clear' or a NULL verdict always shows.
+         AND ($3::boolean = true OR fb.feedback_type IS DISTINCT FROM 'reject')
          -- Issue #319 / D-055: drop a property whose active-sale listings are
          -- ALL from disabled sources (identical to listCandidates); a property
          -- with no active-sale listing at all keeps its prior behaviour.
@@ -136,7 +158,7 @@ export async function listMapCandidates(profileId: number): Promise<MapCandidate
          )
        ORDER BY p.id DESC
        LIMIT $2`,
-      [profileId, MAX_MAP_CANDIDATES],
+      [profileId, MAX_MAP_CANDIDATES, includeRejected],
     ),
     sql<RawCountRow>(
       // Issue #319 / D-055: the counts must match what's plotted — a property
@@ -149,8 +171,20 @@ export async function listMapCandidates(profileId: number): Promise<MapCandidate
          COUNT(*) FILTER (WHERE p.lat IS NULL OR p.lon IS NULL) AS unplottable_count
        FROM profile_listing_state pls
        JOIN property p ON p.id = pls.property_id
+       -- Same latest-verdict LATERAL + reject exclusion as the rows query, so
+       -- the counts never include a rejected property the map doesn't plot
+       -- (#417). $2 = true keeps rejected (the show-rejected escape hatch).
+       LEFT JOIN LATERAL (
+         SELECT fe.feedback_type
+           FROM feedback_event fe
+          WHERE fe.profile_id = $1 AND fe.property_id = p.id
+            AND fe.feedback_type IN ('accept', 'reject', 'star', 'clear')
+          ORDER BY fe.created_at DESC, fe.id DESC
+          LIMIT 1
+       ) fb ON true
        WHERE pls.profile_id = $1
          AND pls.matched = true
+         AND ($2::boolean = true OR fb.feedback_type IS DISTINCT FROM 'reject')
          AND (
            NOT EXISTS (
              SELECT 1 FROM listing ld
@@ -162,7 +196,7 @@ export async function listMapCandidates(profileId: number): Promise<MapCandidate
                 AND ${activeSourceClause("lv")}
            )
          )`,
-      [profileId],
+      [profileId, includeRejected],
     ),
   ]);
 
