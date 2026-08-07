@@ -368,12 +368,24 @@ interface RawPriceDropRow {
  */
 async function loadPriceDrops(profileId: number, since: string, limit: number): Promise<DigestPriceDrop[]> {
   const rows = await sql<RawPriceDropRow>(
+    // #420: BOUND the LAG() window to this profile's matched listings before it
+    // scans — the same fix the feed's price_moves CTE applies. Previously the
+    // window ran over the ENTIRE listing_price_history with no WHERE and only
+    // then joined down to the profile; invisible at demo scale, a real cost on
+    // the hot path at production scale (plan #415 §3.3 calls this out by name).
     `WITH drops AS (
        SELECT h.listing_id,
               h.observed_at,
               h.price AS new_price,
               LAG(h.price) OVER (PARTITION BY h.listing_id ORDER BY h.observed_at) AS prev_price
          FROM listing_price_history h
+        WHERE h.listing_id IN (
+                SELECT l0.id
+                  FROM listing l0
+                  JOIN profile_listing_state pls0
+                    ON pls0.property_id = l0.property_id
+                 WHERE pls0.profile_id = $1 AND pls0.matched = true
+              )
      )
      SELECT p.id AS property_id, p.address, l.source, l.url,
             d.prev_price AS old_price, d.new_price, d.observed_at
