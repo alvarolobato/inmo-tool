@@ -107,6 +107,12 @@ describe("listCandidates", () => {
     expect(sql).toContain("ranked.feedback_state IS DISTINCT FROM 'reject'");
     expect(sql).toContain("$12::boolean = true");
     expect(sql).toContain("AS feedback_state");
+    // #404 regression guard: the verdict must also be PROJECTED by the outer
+    // SELECT, not only derived in the CTE and used by the reject-exclusion
+    // WHERE. It was missing here, so every fetched row omitted the column and
+    // the card rendered unmarked after a reload (no "Descartada" badge, no
+    // pressed toggle) even though the reject exclusion read the same value fine.
+    expect(sql).toContain("ranked.feedback_state,");
     expect(params[11]).toBe(false);
   });
 
