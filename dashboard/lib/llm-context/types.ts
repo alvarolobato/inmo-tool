@@ -10,6 +10,7 @@
  *     condition  — renovation state (obra nueva / reformado / a reformar)
  *     redflags   — legal & financial risk mentions (embargo, herencia, …)
  *     location   — beach proximity (graded) + heritage zone, from ad text (#388)
+ *     opportunity — is_vpo (hard filter) + tourist_license (boost), from ad text (#398)
  *     extract    — pull structured fields out of a free-text description
  *     compare    — side-by-side comparison of N candidate properties
  *
@@ -27,6 +28,7 @@ export const LLM_FLOWS = [
   "condition",
   "redflags",
   "location",
+  "opportunity",
   "extract",
   "compare",
   "chat",
@@ -44,6 +46,7 @@ export const SINGLE_SHOT_FLOWS: ReadonlySet<string> = new Set<string>([
   "condition",
   "redflags",
   "location",
+  "opportunity",
   "extract",
   "compare",
 ]);

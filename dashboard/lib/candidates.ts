@@ -15,6 +15,7 @@ import { sql } from "@/lib/db-write";
 import { DISABLED_SOURCES_CTE, activeSourceClause } from "@/lib/db/source-active";
 import { REDFLAG_LABELS } from "@/lib/ai-assessment/redflags";
 import { BEACH_PROXIMITY_LABELS, HERITAGE_ZONE_LABEL } from "@/lib/ai-assessment/location";
+import { IS_VPO_LABEL, TOURIST_LICENSE_LABEL } from "@/lib/ai-assessment/opportunity";
 import type { StateFeedbackType } from "@/lib/db/feedback";
 
 export interface CandidateListingSummary {
@@ -238,12 +239,14 @@ const NO_SCORE_SENTINEL = -1;
 //                   + below_market_boost   (0 … BELOW_MARKET_DISCOUNT_CAP·WEIGHT)
 //                   + distress_boost        (0 … DISTRESS_MAX_UNITS·UNIT_WEIGHT)
 //                   + beach_boost           (0 … 3·BEACH_UNIT_WEIGHT, #392)
+//                   + tourist_license_boost (0 … TOURIST_LICENSE_BOOST, #398)
 //
 // Because all boosts are ≥ 0, a candidate with no assessment and no discount
 // keeps its base score EXACTLY (graceful degradation — it never sinks or
 // errors), and a never-scored candidate (score NULL → −1 sentinel) still sorts
-// last: even the maximum boost (0.25 + 0.15 + 0.09 = 0.49) leaves it at −0.51,
-// below any real sigmoid score. The learned model is augmented, never replaced.
+// last: even the maximum boost (0.25 + 0.15 + 0.09 + 0.04 = 0.53) leaves it at
+// −0.47, below any real sigmoid score (which is in (0,1)). The learned model is
+// augmented, never replaced.
 
 /** Below-market discount is capped at 50% below the pool median — beyond that is almost always a data error (wrong m²) or a different asset class, not a real deal worth over-weighting. */
 const BELOW_MARKET_DISCOUNT_CAP = 0.5;
@@ -274,6 +277,23 @@ const BEACH_PROXIMITY_BOOST_UNITS: Record<string, number> = {
   near_beach: 1,
 };
 const BEACH_UNIT_WEIGHT = 0.03;
+/**
+ * Tourist-licence ranking boost (#398, Fase 5 of #385). A SOFT, single-boolean
+ * lift — NOT a filter: a property that ALREADY carries a licencia turística /
+ * VUT rises in the order without excluding the rest. Its absence is deliberately
+ * never a filter (the owner's decision): most adverts simply don't mention a
+ * licence, so filtering on it would manufacture false negatives — the signal
+ * only PRIORITISES a property whose licence is already granted.
+ *
+ * Weighted 0.04 — above nothing, but below the beach frontline max (0.09), the
+ * distress max (0.15) and the below-market max (0.25): price and distress stay
+ * the harder signals. The combined max boost is now
+ * 0.25 + 0.15 + 0.09 + 0.04 = 0.53, which still leaves a never-scored candidate
+ * (−1 sentinel) at −0.47, below any real sigmoid score in (0,1) — so #309's
+ * "augment, never replace" invariant holds. `is_vpo` is deliberately NOT a boost
+ * (it is a bidirectional hard filter, not a value signal to lift).
+ */
+const TOURIST_LICENSE_BOOST = 0.04;
 /**
  * Minimum number of priced candidates in the pool before a below-market
  * discount is trusted for ranking — a "median" of one or two listings is
@@ -438,6 +458,19 @@ export interface CandidateFilters {
    * (D-059).
    */
   heritageZone?: boolean | null;
+  /**
+   * #398: VPO / vivienda protegida HARD filter — BIDIRECTIONAL, unlike the
+   * beach/heritage filters. `true` keeps ONLY VPO candidates (buscarla); `false`
+   * keeps ONLY non-VPO candidates (excluirla); `null`/undefined = off. Reads the
+   * derived `ranked.is_vpo` boolean off the SAME latest `opportunity` row the
+   * badge reads (D-059), never a separate JOIN. A NULL is_vpo (opportunity never
+   * assessed) is EXCLUDED in BOTH directions — "unknown, never a false pass":
+   * keeping an unassessed property under `false` would assert "this is not VPO"
+   * when we don't know. Same graceful-degradation-to-empty as the other
+   * assessment filters until the LLM populates the axis. Note `tourist_license`
+   * is deliberately NOT a filter (soft boost only — see TOURIST_LICENSE_BOOST).
+   */
+  isVpo?: boolean | null;
 }
 
 /**
@@ -473,6 +506,11 @@ function rankedCandidatesCte(warnParam: string): string {
   const beachBoostCase = `CASE base.beach_proximity ${Object.entries(BEACH_PROXIMITY_BOOST_UNITS)
     .map(([grade, units]) => `WHEN '${grade}' THEN ${units}`)
     .join(" ")} ELSE 0 END`;
+  // #398 tourist-licence soft boost: a single boolean lift. base.tourist_license
+  // is a derived boolean (TRUE only when the opportunity axis found a granted
+  // licence); false/NULL add 0. TOURIST_LICENSE_BOOST is a numeric constant,
+  // never user input.
+  const touristBoostCase = `CASE WHEN base.tourist_license = true THEN ${TOURIST_LICENSE_BOOST} ELSE 0 END`;
   return `${DISABLED_SOURCES_CTE},
      base AS (
        SELECT
@@ -503,6 +541,13 @@ function rankedCandidatesCte(warnParam: string): string {
          -- heritage_zone NULL likewise excluded when the toggle is on.
          dist.beach_proximity,
          dist.heritage_zone,
+         -- #398 opportunity axis: is_vpo (bidirectional hard filter) and
+         -- tourist_license (soft boost). Same derive-once discipline (D-059):
+         -- read off the identical latest-per-axis opportunity row, never a
+         -- separate JOIN. NULL = opportunity never assessed (is_vpo excluded by
+         -- either direction of the VPO filter; tourist_license adds no boost).
+         dist.is_vpo,
+         dist.tourist_license,
          -- Current accept/reject/star verdict for this profile (#379),
          -- derived latest-wins over accept/reject/star/clear; a trailing
          -- clear collapses to NULL (neutral). Feeds both the card's marked
@@ -595,12 +640,23 @@ function rankedCandidatesCte(warnParam: string): string {
            max(la.result->>'beach_proximity')
              FILTER (WHERE la.assessment_type = 'location') AS beach_proximity,
            bool_or(la.result->>'heritage_zone' = 'true')
-             FILTER (WHERE la.assessment_type = 'location') AS heritage_zone
+             FILTER (WHERE la.assessment_type = 'location') AS heritage_zone,
+           -- #398 opportunity axis: is_vpo + tourist_license booleans, read off
+           -- the SAME latest opportunity row. bool_or(... = 'true') FILTER on the
+           -- single opportunity row collapses to that row's boolean; FILTER
+           -- yields NULL when no opportunity row exists (never assessed) — the
+           -- graceful-degradation case both the VPO filter (excluded in either
+           -- direction) and the tourist boost (no lift) treat correctly. Neither
+           -- is a distress axis, so nothing above counts them.
+           bool_or(la.result->>'is_vpo' = 'true')
+             FILTER (WHERE la.assessment_type = 'opportunity') AS is_vpo,
+           bool_or(la.result->>'tourist_license' = 'true')
+             FILTER (WHERE la.assessment_type = 'opportunity') AS tourist_license
          FROM (
            SELECT DISTINCT ON (a.assessment_type) a.assessment_type, a.result
              FROM ai_assessment a
             WHERE a.property_id = p.id
-              AND a.assessment_type IN ('occupancy', 'condition', 'redflags', 'location')
+              AND a.assessment_type IN ('occupancy', 'condition', 'redflags', 'location', 'opportunity')
             ORDER BY a.assessment_type, a.generated_at DESC NULLS LAST, a.id DESC
          ) la
        ) dist ON true
@@ -663,6 +719,9 @@ function rankedCandidatesCte(warnParam: string): string {
            -- #392 soft beach boost (graded, non-negative → augments, never
            -- filters). frontline/sea_view/near_beach lift; none/NULL add 0.
            + (${beachBoostCase}) * ${BEACH_UNIT_WEIGHT}
+           -- #398 soft tourist-licence boost (single boolean, non-negative →
+           -- augments, never filters). A granted licence lifts; false/NULL add 0.
+           + (${touristBoostCase})
          ) AS effective_score
        FROM base CROSS JOIN pool
      )`;
@@ -678,6 +737,7 @@ export function describeRankingBoost(
   belowMarketPct: number | null,
   distressLevel: number,
   beachProximity: string | null = null,
+  touristLicense: boolean = false,
 ): string | null {
   const parts: string[] = [];
   if (belowMarketPct !== null && belowMarketPct >= MIN_NOTABLE_DISCOUNT) {
@@ -694,6 +754,13 @@ export function describeRankingBoost(
   // the reason and the card's badge read consistently.
   if (beachProximity !== null && BEACH_PROXIMITY_LABELS[beachProximity] !== undefined) {
     parts.push(`proximidad a la playa (${BEACH_PROXIMITY_LABELS[beachProximity].toLowerCase()})`);
+  }
+  // #398: a granted tourist licence lifts the ranking, so name it too (its
+  // absence carries no boost and earns no mention — same "no reason on every
+  // card" discipline). is_vpo is a hard filter, not a boost, so it never
+  // appears here.
+  if (touristLicense) {
+    parts.push("licencia turística concedida");
   }
   if (parts.length === 0) return null;
   return `Destacado: ${parts.join("; ")}.`;
@@ -756,6 +823,8 @@ interface RawCandidateRow {
   distress_level: number;
   /** #392: graded beach proximity from the latest `location` row; null when unassessed or `none`. Feeds the ranking-boost reason (the badge itself comes from loadFlags). */
   beach_proximity: string | null;
+  /** #398: whether the latest `opportunity` row found a granted tourist licence; null when unassessed. Feeds the ranking-boost reason (the badge itself comes from loadFlags). */
+  tourist_license: boolean | null;
   /** Current verdict (#379), already `clear`-collapsed-to-null in SQL; null when none. */
   feedback_state: StateFeedbackType | null;
 }
@@ -870,6 +939,23 @@ export function flagsFromAssessments(rows: RawAssessmentRow[]): CandidateFlag[] 
     if (result.heritage_zone === true) {
       flags.push({ kind: "location:heritage_zone", label: HERITAGE_ZONE_LABEL, tone: "neutral" });
     }
+
+    // #398 opportunity: two booleans derived from the advert text
+    // (lib/ai-assessment/opportunity.ts). `is_vpo` is a MATERIAL restriction on
+    // what you can buy and at what resale price → a warn-tone badge, like the
+    // ownership/transaction caveats above. `tourist_license` is a positive fact
+    // (the property can already operate as a VUT) → neutral. Both render only
+    // when strictly true (evidence-guarded at the writer); anything else drops.
+    if (result.is_vpo === true) {
+      flags.push({ kind: "opportunity:is_vpo", label: IS_VPO_LABEL, tone: "warn" });
+    }
+    if (result.tourist_license === true) {
+      flags.push({
+        kind: "opportunity:tourist_license",
+        label: TOURIST_LICENSE_LABEL,
+        tone: "neutral",
+      });
+    }
   }
   const byKind = new Map<string, CandidateFlag>();
   for (const flag of flags) {
@@ -952,7 +1038,7 @@ async function loadFlags(propertyIds: number[]): Promise<Map<number, CandidateFl
               property_id, result
          FROM ai_assessment
         WHERE property_id = ANY($1::bigint[])
-          AND assessment_type IN ('occupancy', 'condition', 'redflags', 'location')
+          AND assessment_type IN ('occupancy', 'condition', 'redflags', 'location', 'opportunity')
         ORDER BY property_id, assessment_type, generated_at DESC NULLS LAST, id DESC`,
       [propertyIds],
     );
@@ -1033,6 +1119,10 @@ export async function listCandidates(
   // and the SQL `IS NOT TRUE` guard treats it as off.
   const beachProximity: BeachProximityFilter | null = opts.beachProximity ?? null;
   const heritageZone: true | null = opts.heritageZone === true ? true : null;
+  // #398 VPO filter — BIDIRECTIONAL, so a strict boolean/null tri-state: true =
+  // only VPO, false = exclude VPO, null = off. Only an explicit boolean turns it
+  // on; undefined collapses to null so the "all filters off" tail stays uniform.
+  const isVpo: boolean | null = typeof opts.isVpo === "boolean" ? opts.isVpo : null;
   // Source (portal) filter (#265): isolate one connector's results so the
   // owner can debug a single portal's data quality. A candidate is a
   // deduplicated PROPERTY that may span several listings from different
@@ -1196,6 +1286,7 @@ export async function listCandidates(
        -- r.feedback_state is undefined, and every card reads as unmarked even
        -- though the reject-exclusion WHERE below reads the same value correctly.
        ranked.feedback_state,
+       ranked.tourist_license,
        COALESCE(
          (SELECT json_agg(
                    json_build_object(
@@ -1295,6 +1386,13 @@ export async function listCandidates(
        -- on, a NULL heritage_zone (location unassessed) or false is excluded
        -- (unknown, never a false pass).
        AND ($16::boolean IS NOT TRUE OR ranked.heritage_zone = true)
+       -- #398 VPO hard filter ($17) — BIDIRECTIONAL. NULL param = off. true →
+       -- keep only VPO (ranked.is_vpo = true); false → keep only non-VPO
+       -- (ranked.is_vpo = false). A NULL is_vpo (opportunity unassessed) yields
+       -- NULL from the equality in EITHER direction, so it is excluded (unknown,
+       -- never a false pass) — the same graceful degradation the other
+       -- assessment filters give until the LLM populates the axis.
+       AND ($17::boolean IS NULL OR ranked.is_vpo = $17::boolean)
      ORDER BY ranked.effective_score DESC, ranked.property_id DESC
      LIMIT $4`,
     [
@@ -1314,6 +1412,7 @@ export async function listCandidates(
       redflagType,
       beachProximity,
       heritageZone,
+      isVpo,
     ],
   );
 
@@ -1352,6 +1451,7 @@ export async function listCandidates(
       r.below_market_pct != null ? Number(r.below_market_pct) : null,
       r.distress_level ?? 0,
       r.beach_proximity ?? null,
+      r.tourist_license === true,
     ),
     feedback_state: r.feedback_state ?? null,
   }));

@@ -15,6 +15,7 @@ export type DashboardLlmFlow =
   | "condition"
   | "redflags"
   | "location"
+  | "opportunity"
   | "extract"
   | "compare"
   | "chat";

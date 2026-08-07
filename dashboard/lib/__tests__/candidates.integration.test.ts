@@ -1410,6 +1410,121 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
     });
   });
 
+  describe("VPO hard filter + tourist-licence soft boost (#398, Fase 5 of #385)", () => {
+    // A matched, priced candidate carrying an optional `opportunity` assessment —
+    // seeded through the SAME ai_assessment row the ranking CTE reads for both the
+    // VPO hard filter and the soft tourist-licence boost (D-059).
+    async function seedOpportunity(
+      pool: Pool,
+      profileId: number,
+      opts: { vpo?: boolean; tourist?: boolean; score?: number | null; assessed?: boolean },
+    ): Promise<number> {
+      const id = await insertProperty(pool);
+      await insertListing(pool, id, { source: "fotocasa", current_price: 300000 });
+      await markMatched(pool, profileId, id);
+      if (opts.score !== undefined) await setScore(pool, profileId, id, opts.score);
+      // `assessed` defaults true; pass assessed:false to seed NO opportunity row.
+      if (opts.assessed !== false) {
+        await insertAssessment(pool, id, {
+          assessmentType: "opportunity",
+          result: {
+            is_vpo: opts.vpo ?? false,
+            vpo_evidence: opts.vpo ? "vivienda de protección oficial" : "",
+            tourist_license: opts.tourist ?? false,
+            tourist_license_evidence: opts.tourist ? "licencia turística concedida" : "",
+          },
+          promptVersion: "opportunity/v1",
+          generatedAt: new Date("2026-03-01T00:00:00Z"),
+        });
+      }
+      return id;
+    }
+
+    it("isVpo=true keeps ONLY VPO candidates (owner's buscar-VPO direction)", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const vpo = await seedOpportunity(pool, profileId, { vpo: true });
+        const notVpo = await seedOpportunity(pool, profileId, { vpo: false });
+        const unassessed = await seedOpportunity(pool, profileId, { assessed: false });
+
+        const page = await listCandidates(profileId, { isVpo: true, limit: 10 });
+        expect(page.items.map((i) => i.property_id)).toEqual([vpo]);
+        expect(page.items.map((i) => i.property_id)).not.toContain(notVpo);
+        // NULL is_vpo (never assessed) is excluded — unknown, never a false pass.
+        expect(page.items.map((i) => i.property_id)).not.toContain(unassessed);
+      });
+    });
+
+    it("isVpo=false keeps ONLY non-VPO candidates (excluir-VPO direction), excluding unassessed too", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const vpo = await seedOpportunity(pool, profileId, { vpo: true });
+        const notVpo = await seedOpportunity(pool, profileId, { vpo: false });
+        const unassessed = await seedOpportunity(pool, profileId, { assessed: false });
+
+        const page = await listCandidates(profileId, { isVpo: false, limit: 10 });
+        expect(page.items.map((i) => i.property_id)).toEqual([notVpo]);
+        expect(page.items.map((i) => i.property_id)).not.toContain(vpo);
+        // Excluding VPO must NOT smuggle in an unassessed property as "not VPO":
+        // we don't know, so it stays out (unknown, never a false pass).
+        expect(page.items.map((i) => i.property_id)).not.toContain(unassessed);
+      });
+    });
+
+    it("degrades cleanly: a VPO filter with NO opportunity assessment returns an empty feed, not an error", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        await seedOpportunity(pool, profileId, { assessed: false });
+        await seedOpportunity(pool, profileId, { assessed: false });
+
+        expect((await listCandidates(profileId, { isVpo: true, limit: 10 })).items).toEqual([]);
+        expect((await listCandidates(profileId, { isVpo: false, limit: 10 })).items).toEqual([]);
+        // Sanity: unfiltered, both come back — the empties are the filter's doing.
+        expect((await listCandidates(profileId, { limit: 10 })).items).toHaveLength(2);
+      });
+    });
+
+    it("SOFT boost: a tourist-licence candidate floats above an equal-base one, which keeps its base score (no filtering)", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // Two candidates → pool below MIN_POOL_SIZE (no below-market boost); same
+        // price + base score, so ONLY the tourist-licence boolean differs.
+        const plain = await seedOpportunity(pool, profileId, { tourist: false, score: 0.5 });
+        const licensed = await seedOpportunity(pool, profileId, { tourist: true, score: 0.5 });
+
+        const page = await listCandidates(profileId, { limit: 10 });
+        const order = page.items.map((i) => i.property_id);
+        // Licensed candidate is lifted above the equal-base plain one, but the
+        // plain one is NOT filtered out (soft boost, both still present).
+        expect(order.indexOf(licensed)).toBeLessThan(order.indexOf(plain));
+        expect(order).toContain(plain);
+
+        const licRow = page.items.find((i) => i.property_id === licensed)!;
+        const plainRow = page.items.find((i) => i.property_id === plain)!;
+        // tourist_license = +0.04 over the base 0.5.
+        expect(licRow.effective_score!).toBeCloseTo(0.54, 5);
+        expect(licRow.ranking_boost_reason).toContain("licencia turística concedida");
+        // The unlicensed candidate keeps EXACTLY its base score (augment, never sink).
+        expect(plainRow.effective_score!).toBeCloseTo(0.5, 5);
+        expect(plainRow.ranking_boost_reason).toBeNull();
+      });
+    });
+
+    it("tourist_license is NEVER a filter: an unlicensed candidate is never dropped by any opportunity control", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const licensed = await seedOpportunity(pool, profileId, { tourist: true });
+        const unlicensed = await seedOpportunity(pool, profileId, { tourist: false });
+
+        // No isVpo filter → both present regardless of licence (boost lifts, never filters).
+        const page = await listCandidates(profileId, { limit: 10 });
+        expect(page.items.map((i) => i.property_id).sort((a, b) => a - b)).toEqual(
+          [licensed, unlicensed].sort((a, b) => a - b),
+        );
+      });
+    });
+  });
+
   describe("source (portal) filter (#265)", () => {
     it("narrows the feed to properties with an active sale listing from the selected source", async () => {
       await withRealDb(async (pool) => {

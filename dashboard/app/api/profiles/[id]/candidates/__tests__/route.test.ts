@@ -101,6 +101,7 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       null,
       null,
       null,
+      null,
     ]);
   });
 
@@ -123,6 +124,7 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       null,
       null,
       false,
+      null,
       null,
       null,
       null,
@@ -201,6 +203,7 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
       "integral",
       0.15, // 15% → fraction
       false,
+      null,
       null,
       null,
       null,
@@ -305,6 +308,51 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
       );
       expect(off.status).toBe(200);
       expect(mockQuery.mock.calls[1][1][15]).toBeNull();
+    }
+  });
+
+  it("rejects an invalid isVpo value before touching the DB (400) (#398)", async () => {
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?isVpo=maybe"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("passes isVpo bidirectionally as $17 (true/false), and absent/empty as null (#398)", async () => {
+    // true = only VPO.
+    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const only = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?isVpo=true"),
+      ctx("3"),
+    );
+    expect(only.status).toBe(200);
+    expect(mockQuery.mock.calls[1][1][16]).toBe(true);
+
+    // false = exclude VPO.
+    mockQuery.mockReset();
+    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    const exclude = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?isVpo=false"),
+      ctx("3"),
+    );
+    expect(exclude.status).toBe(200);
+    expect(mockQuery.mock.calls[1][1][16]).toBe(false);
+
+    // absent/empty = off (null).
+    for (const url of [
+      "http://localhost/api/profiles/3/candidates",
+      "http://localhost/api/profiles/3/candidates?isVpo=",
+    ]) {
+      mockQuery.mockReset();
+      mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
+      mockQuery.mockResolvedValueOnce({ rows: [] });
+      const off = await GET(makeRequest(url), ctx("3"));
+      expect(off.status).toBe(200);
+      expect(mockQuery.mock.calls[1][1][16]).toBeNull();
     }
   });
 
