@@ -586,6 +586,36 @@
   requires_restart: [dashboard]
   components: [dashboard]
 
+- key: notifications.seguimiento_auto_enabled
+  env: NOTIFICATIONS_SEGUIMIENTO_AUTO_ENABLED
+  type: bool
+  sensitive: false
+  default: true
+  section: "Notificaciones"
+  description: "Interruptor del pase de watchlist 'En seguimiento' (#428). Gated INDEPENDIENTEMENTE de la cadencia del digest: corre en cada tick horario, revisa solo propiedades en seguimiento (accept) por bajadas de precio sanas y cambios sold/withdrawn, y manda su propia alerta pequeña. Con false, el pase no corre (el digest cadenciado sigue igual)."
+  requires_restart: []
+  components: [dashboard]
+
+- key: notifications.seguimiento_lookback_hours
+  env: NOTIFICATIONS_SEGUIMIENTO_LOOKBACK_HOURS
+  type: int
+  sensitive: false
+  default: 24
+  section: "Notificaciones"
+  description: "Ventana (horas) que mira el primer pase 'En seguimiento' de un perfil que nunca ha tenido uno. Tras el primer pase, el ancla es el último digest_run kind='seguimiento', así que una bajada alerta como mucho una vez. Debe ser positivo."
+  requires_restart: []
+  components: [dashboard]
+
+- key: notifications.seguimiento_recent_days
+  env: NOTIFICATIONS_SEGUIMIENTO_RECENT_DAYS
+  type: int
+  sensitive: false
+  default: 7
+  section: "Notificaciones"
+  description: "Ventana (días) del indicador in-app 'seguidas con bajada reciente' (#428): cuenta propiedades en seguimiento (accept) con una bajada sana en los últimos N días. Independiente del watermark del pase horario (que avanzaría a cero tras alertar). Debe ser positivo."
+  requires_restart: []
+  components: [dashboard]
+
 - key: notifications.digest_to
   env: NOTIFICATIONS_DIGEST_TO
   type: string

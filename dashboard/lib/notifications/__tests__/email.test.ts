@@ -31,6 +31,8 @@ function content(overrides: Partial<DigestContent> = {}): DigestContent {
     profileName: "Madrid",
     since: "2026-08-04T00:00:00.000Z",
     generatedAt: "2026-08-05T07:00:00.000Z",
+    seguimientoDrops: [],
+    relistedLower: [],
     newCandidates: [
       {
         propertyId: 1,
@@ -87,6 +89,31 @@ describe("renderDigestEmail", () => {
     expect(html).toContain("a=1&amp;b=2");
     expect(html).not.toContain("Bajadas de precio");
     expect(text).not.toContain("BAJADAS DE PRECIO");
+  });
+
+  it("#428: renders the 'En seguimiento' section at the TOP and in the subject", () => {
+    const c = content({
+      seguimientoDrops: [
+        { propertyId: 9, zone: "Triana", source: "idealista", url: "https://x/9", oldPrice: 300000, newPrice: 274200, dropPct: 0.086, observedAt: "t" },
+      ],
+    });
+    const { subject, text, html } = renderDigestEmail(c);
+    expect(subject).toContain("1 en seguimiento");
+    expect(text).toContain("EN SEGUIMIENTO — BAJADAS (1)");
+    // The seguimiento heading precedes the generic "Nuevos candidatos" one.
+    expect(html.indexOf("En seguimiento — bajadas")).toBeLessThan(html.indexOf("Nuevos candidatos"));
+  });
+
+  it("#428 (EC-4): renders the 'Rebajas tras retirada' relisted-lower section", () => {
+    const c = content({
+      relistedLower: [
+        { propertyId: 12, zone: "Nervión", withdrawnPrice: 200000, relistedPrice: 170000, dropPct: 0.15, withdrawnAt: "a", relistedAt: "b" },
+      ],
+    });
+    const { subject, text, html } = renderDigestEmail(c);
+    expect(subject).toContain("1 rebajas tras retirada");
+    expect(text).toContain("REBAJAS TRAS RETIRADA (1)");
+    expect(html).toContain("Rebajas tras retirada (1)");
   });
 });
 

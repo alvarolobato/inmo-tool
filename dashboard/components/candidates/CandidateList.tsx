@@ -78,6 +78,12 @@ export function CandidateList({ profileId }: { profileId: number }) {
   // exclusive with "Mostrar descartadas" (a tracked-only view can't also show
   // rejects), so turning one on turns the other off.
   const [trackedOnly, setTrackedOnly] = useState(false);
+  // #428: in-app "En seguimiento" indicator — count of tracked (accept)
+  // properties with a sanity-banded price DROP in the recent window
+  // (GET .../seguimiento-alerts). Backs the small count next to the toggle so
+  // the owner sees at a glance that something he tracks has moved. Best-effort:
+  // a failed fetch leaves the count at 0 (no badge), never surfaces an error.
+  const [seguimientoAlertCount, setSeguimientoAlertCount] = useState(0);
 
   const assessmentFilterActive =
     occupancy !== "" ||
@@ -172,6 +178,25 @@ export function CandidateList({ profileId }: { profileId: number }) {
       })
       .catch(() => {
         /* non-fatal: filter simply won't render */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [profileId]);
+
+  // #428: fetch the in-app "En seguimiento" alert count once per profile.
+  // Best-effort — a failure leaves the count at 0 (no badge shown).
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/profiles/${profileId}/seguimiento-alerts`)
+      .then(async (res) => (res.ok ? res.json() : null))
+      .then((body: { count?: number } | null) => {
+        if (!cancelled && body && typeof body.count === "number") {
+          setSeguimientoAlertCount(body.count);
+        }
+      })
+      .catch(() => {
+        /* non-fatal: the indicator simply won't show */
       });
     return () => {
       cancelled = true;
@@ -455,6 +480,31 @@ export function CandidateList({ profileId }: { profileId: number }) {
           style={{ cursor: "pointer" }}
         />
         En seguimiento
+        {/* #428: in-app indicator — count of tracked properties with a recent
+            price drop. Only shown when > 0. The BAJADA badge on each card
+            (#420) is the drill-down; this is the at-a-glance count. */}
+        {seguimientoAlertCount > 0 && (
+          <span
+            data-testid="seguimiento-alert-count"
+            title={`${seguimientoAlertCount} en seguimiento con bajada reciente`}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              minWidth: 16,
+              height: 16,
+              padding: "0 5px",
+              borderRadius: 8,
+              fontSize: 10,
+              lineHeight: "16px",
+              fontWeight: 600,
+              color: "var(--up-fg, #fff)",
+              background: "var(--up, #16a34a)",
+            }}
+          >
+            {seguimientoAlertCount}
+          </span>
+        )}
       </label>
 
       {/* #379: show/hide rejected candidates. Default off (rejected hidden).

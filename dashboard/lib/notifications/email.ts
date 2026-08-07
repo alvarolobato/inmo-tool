@@ -98,16 +98,32 @@ function candidateLine(c: DigestNewCandidate): string {
  * kind of thing happened. New candidates come pre-ranked by the builder.
  */
 export function renderDigestEmail(content: DigestContent): { subject: string; text: string; html: string } {
+  const nSeg = content.seguimientoDrops.length;
   const nNew = content.newCandidates.length;
   const nDrop = content.priceDrops.length;
   const nStatus = content.statusChanges.length;
-  const subject = `Novedades ${content.profileName}: ${nNew} nuevas · ${nDrop} bajadas · ${nStatus} cambios`;
+  const nRelist = content.relistedLower.length;
+  // #428: seguimiento drops lead the subject — a drop on a tracked property is
+  // the single most actionable event this digest can carry.
+  const segPart = nSeg > 0 ? `${nSeg} en seguimiento · ` : "";
+  const relistPart = nRelist > 0 ? ` · ${nRelist} rebajas tras retirada` : "";
+  const subject = `Novedades ${content.profileName}: ${segPart}${nNew} nuevas · ${nDrop} bajadas · ${nStatus} cambios${relistPart}`;
 
   // ── Plain text ──
   const lines: string[] = [];
   lines.push(`Novedades — ${content.profileName}`);
   lines.push(`Desde ${content.since}`);
   lines.push("");
+  // #428: top-placed "En seguimiento" section — separate from, and above, the
+  // generic price-drops section below.
+  if (nSeg > 0) {
+    lines.push(`EN SEGUIMIENTO — BAJADAS (${nSeg})`);
+    content.seguimientoDrops.forEach((d) => {
+      lines.push(`  ${eur(d.oldPrice)} → ${eur(d.newPrice)} (−${pct(d.dropPct)}) · ${d.source}${d.zone ? ` · ${d.zone}` : ""}`);
+      if (d.url) lines.push(`     ${d.url}`);
+    });
+    lines.push("");
+  }
   if (nNew > 0) {
     lines.push(`NUEVOS CANDIDATOS (${nNew})`);
     content.newCandidates.forEach((c, i) => {
@@ -133,6 +149,14 @@ export function renderDigestEmail(content: DigestContent): { subject: string; te
     });
     lines.push("");
   }
+  // #428 (EC-4): withdrawn-then-relisted-lower — motivated-seller signal.
+  if (nRelist > 0) {
+    lines.push(`REBAJAS TRAS RETIRADA (${nRelist})`);
+    content.relistedLower.forEach((r) => {
+      lines.push(`  ${eur(r.withdrawnPrice)} → ${eur(r.relistedPrice)} (−${pct(r.dropPct)})${r.zone ? ` · ${r.zone}` : ""}`);
+    });
+    lines.push("");
+  }
   const text = lines.join("\n");
 
   // ── HTML ──
@@ -143,6 +167,16 @@ export function renderDigestEmail(content: DigestContent): { subject: string; te
   const html: string[] = [];
   html.push(`<h2>Novedades — ${esc(content.profileName)}</h2>`);
   html.push(`<p style="color:#666">Desde ${esc(content.since)}</p>`);
+  // #428: top-placed "En seguimiento" section, visually distinct from the
+  // generic bajadas below.
+  if (nSeg > 0) {
+    html.push(`<h3 style="border-left:3px solid #16a34a;padding-left:8px">En seguimiento — bajadas (${nSeg})</h3><ul>`);
+    for (const d of content.seguimientoDrops) {
+      const label = `${eur(d.oldPrice)} → ${eur(d.newPrice)} (−${pct(d.dropPct)}) · ${d.source}${d.zone ? ` · ${d.zone}` : ""}`;
+      html.push(`<li>${link(d.url, label)}</li>`);
+    }
+    html.push("</ul>");
+  }
   if (nNew > 0) {
     html.push(`<h3>Nuevos candidatos (${nNew})</h3><ul>`);
     for (const c of content.newCandidates) html.push(`<li>${link(c.url, candidateLine(c))}</li>`);
@@ -162,6 +196,14 @@ export function renderDigestEmail(content: DigestContent): { subject: string; te
       const statusLabel = s.status === "sold" ? "Vendido" : "Retirado";
       const label = `${statusLabel} · ${s.source}${s.zone ? ` · ${s.zone}` : ""}`;
       html.push(`<li>${link(s.url, label)}</li>`);
+    }
+    html.push("</ul>");
+  }
+  if (nRelist > 0) {
+    html.push(`<h3>Rebajas tras retirada (${nRelist})</h3><ul>`);
+    for (const r of content.relistedLower) {
+      const label = `${eur(r.withdrawnPrice)} → ${eur(r.relistedPrice)} (−${pct(r.dropPct)})${r.zone ? ` · ${r.zone}` : ""}`;
+      html.push(`<li>${esc(label)}</li>`);
     }
     html.push("</ul>");
   }

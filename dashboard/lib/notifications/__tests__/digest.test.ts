@@ -17,6 +17,14 @@ vi.mock("@/lib/analytics/area-price", () => ({
   computeAreaPriceComparison: (id: number) => computeAreaPriceComparison(id),
 }));
 
+// #428 (EC-4): computeRelistedLower is exercised by its own unit tests; here we
+// stub it so buildDigestForProfile's wiring (candidate scan → per-property call
+// → item mapping) can be asserted without the real cross-listing query.
+const computeRelistedLower = vi.fn(async (_id: number) => null as unknown);
+vi.mock("@/lib/analytics/market-signals", () => ({
+  computeRelistedLower: (id: number) => computeRelistedLower(id),
+}));
+
 import {
   rankNewCandidates,
   isDigestEmpty,
@@ -51,9 +59,11 @@ function emptyContent(): DigestContent {
     profileName: "P",
     since: "2026-08-01T00:00:00.000Z",
     generatedAt: "2026-08-05T07:00:00.000Z",
+    seguimientoDrops: [],
     newCandidates: [],
     priceDrops: [],
     statusChanges: [],
+    relistedLower: [],
   };
 }
 
@@ -104,6 +114,8 @@ describe("buildDigestForProfile", () => {
     sql.mockReset();
     computeAreaPriceComparison.mockReset();
     computeAreaPriceComparison.mockResolvedValue(null);
+    computeRelistedLower.mockReset();
+    computeRelistedLower.mockResolvedValue(null);
   });
 
   function wireSql(rows: {
@@ -113,6 +125,10 @@ describe("buildDigestForProfile", () => {
     redflags?: unknown[];
     drops?: unknown[];
     status?: unknown[];
+    /** #428 seguimiento (tracked-only) price drops section. */
+    seguimientoDrops?: unknown[];
+    /** #428 (EC-4) matched properties with a recent withdrawal (relist-candidate scan). */
+    relistCandidates?: unknown[];
   }) {
     sql.mockImplementation(async (text: string) => {
       if (text.includes("AS anchor")) return [{ anchor: rows.anchor ?? "2026-08-04T00:00:00.000Z" }];
@@ -120,7 +136,13 @@ describe("buildDigestForProfile", () => {
         return rows.candidates ?? [];
       if (text.includes("assessment_type IN ('occupancy', 'condition')")) return rows.flags ?? [];
       if (text.includes("assessment_type = 'redflags'")) return rows.redflags ?? [];
+      // #428 seguimiento drops — WITH tracked AS (...), drops AS (...). Checked
+      // before the generic matched-drops branch (which is `WITH drops AS`).
+      if (text.includes("tracked AS")) return rows.seguimientoDrops ?? [];
       if (text.includes("WITH drops AS")) return rows.drops ?? [];
+      // #428 (EC-4) relist-candidate scan — distinguished from the generic
+      // status-change query by its withdrawn/expired predicate.
+      if (text.includes("status IN ('withdrawn', 'expired')")) return rows.relistCandidates ?? [];
       if (text.includes("FROM listing_status_event")) return rows.status ?? [];
       throw new Error(`unexpected query: ${text.slice(0, 60)}`);
     });
@@ -181,5 +203,58 @@ describe("buildDigestForProfile", () => {
     expect(content.priceDrops).toHaveLength(1);
     expect(content.priceDrops[0].dropPct).toBeCloseTo(0.1);
     expect(content.statusChanges[0].status).toBe("withdrawn");
+  });
+
+  it("#428: builds the top-placed 'En seguimiento' (tracked-only) drops section, banded in SQL", async () => {
+    wireSql({
+      seguimientoDrops: [
+        { property_id: 9, address: "Triana", source: "idealista", url: "https://x/9", old_price: "300000", new_price: "274200", observed_at: "2026-08-04T12:00:00Z" },
+      ],
+    });
+    const content = await buildDigestForProfile(
+      { id: 1, name: "P" },
+      { since: "2026-08-04T00:00:00.000Z", band: { minFrac: 0.01, maxFrac: 0.6 } },
+    );
+    expect(content.seguimientoDrops).toHaveLength(1);
+    expect(content.seguimientoDrops[0].propertyId).toBe(9);
+    expect(content.seguimientoDrops[0].dropPct).toBeCloseTo(0.086, 2);
+    // The band fractions are passed as bound params to the tracked-drops query,
+    // so the drops-only + sanity-band filter runs in SQL (not re-derived in TS).
+    const call = sql.mock.calls.find((c) => (c[0] as string).includes("tracked AS"));
+    expect(call).toBeDefined();
+    expect(call![1]).toEqual([1, "2026-08-04T00:00:00.000Z", 0.01, 0.6, 25]);
+  });
+
+  it("#428 (EC-4): wires computeRelistedLower for matched properties with a recent withdrawal", async () => {
+    wireSql({
+      relistCandidates: [
+        { property_id: 21, address: "Nervión" },
+        { property_id: 22, address: "Los Remedios" },
+      ],
+    });
+    computeRelistedLower.mockImplementation(async (id: number) =>
+      id === 21
+        ? { withdrawn_at: "2026-07-01T00:00:00Z", withdrawn_price: 200000, relisted_at: "2026-07-20T00:00:00Z", relisted_price: 170000, drop_pct: 0.15 }
+        : null,
+    );
+    const content = await buildDigestForProfile({ id: 1, name: "P" }, { since: "2026-08-04T00:00:00.000Z" });
+    // Only property 21 produced a relisted-lower event; 22 returned null.
+    expect(content.relistedLower).toHaveLength(1);
+    expect(content.relistedLower[0].propertyId).toBe(21);
+    expect(content.relistedLower[0].dropPct).toBeCloseTo(0.15);
+    expect(content.relistedLower[0].withdrawnPrice).toBe(200000);
+    expect(content.relistedLower[0].relistedPrice).toBe(170000);
+    expect(computeRelistedLower).toHaveBeenCalledTimes(2);
+  });
+
+  it("#428 (EC-4): a per-property computeRelistedLower failure is skipped, not fatal", async () => {
+    wireSql({ relistCandidates: [{ property_id: 30, address: "X" }, { property_id: 31, address: "Y" }] });
+    computeRelistedLower.mockImplementation(async (id: number) => {
+      if (id === 30) throw new Error("boom");
+      return { withdrawn_at: "a", withdrawn_price: 100000, relisted_at: "b", relisted_price: 80000, drop_pct: 0.2 };
+    });
+    const content = await buildDigestForProfile({ id: 1, name: "P" }, { since: "2026-08-04T00:00:00.000Z" });
+    expect(content.relistedLower).toHaveLength(1);
+    expect(content.relistedLower[0].propertyId).toBe(31);
   });
 });
