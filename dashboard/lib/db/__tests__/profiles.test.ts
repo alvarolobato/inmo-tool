@@ -130,14 +130,24 @@ describe("listActiveProfiles (backward-compatible plain shape)", () => {
   });
 });
 
-describe("touchProfileViewedAt (issue #191)", () => {
-  it("issues an UPDATE setting last_viewed_at = NOW() for the given id", async () => {
+describe("touchProfileViewedAt (issue #191 + #416 two-slot anchor)", () => {
+  it("#416: SHIFTS previous_viewed_at (debounced) and sets last_viewed_at = NOW()", async () => {
     mockQuery.mockResolvedValue({ rows: [] });
     await touchProfileViewedAt(5);
-    expect(mockQuery).toHaveBeenCalledWith(
-      expect.stringContaining("SET last_viewed_at = NOW()"),
-      [5],
-    );
+    const [sqlText, params] = mockQuery.mock.calls[0];
+    // Still stamps the arrival timestamp…
+    expect(sqlText).toContain("last_viewed_at = NOW()");
+    // …but the OLD last_viewed_at now shifts into previous_viewed_at (the feed's
+    // novelty anchor) instead of being overwritten, so novelty survives the
+    // visit and expires on the NEXT one.
+    expect(sqlText).toContain("previous_viewed_at = CASE");
+    expect(sqlText).toContain("previous_viewed_at");
+    // Debounce: only advance the anchor when the prior visit is outside the
+    // session window (make_interval on the debounce-minutes parameter).
+    expect(sqlText).toContain("make_interval(mins => $2::int)");
+    expect(sqlText).toContain("THEN last_viewed_at");
+    // id + debounce-minutes (default 30, env/config-overridable).
+    expect(params).toEqual([5, 30]);
   });
 
   it("propagates a DB failure to the caller (callers are responsible for best-effort catch)", async () => {

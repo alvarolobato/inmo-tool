@@ -259,7 +259,10 @@ describe("GET /api/profiles/[id] — last_viewed_at touch (issue #191)", () => {
     expect(res.status).toBe(200);
     const touchCall = mockQuery.mock.calls.find((c) => String(c[0]).includes("last_viewed_at = NOW()"));
     expect(touchCall).toBeDefined();
-    expect(touchCall?.[1]).toEqual([1]);
+    // #416: the touch now also shifts previous_viewed_at (the novelty anchor)
+    // and carries the session-debounce minutes ($2, default 30) alongside the id.
+    expect(touchCall?.[1]).toEqual([1, 30]);
+    expect(String(touchCall?.[0])).toContain("previous_viewed_at = CASE");
   });
 
   it("still returns 200 with the profile even when the last_viewed_at write fails (best-effort, must never fail the page)", async () => {

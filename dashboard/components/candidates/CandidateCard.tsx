@@ -103,6 +103,11 @@ export function CandidateCard({
       data-testid="candidate-card"
       data-property-id={candidate.property_id}
       data-rejected={isRejected}
+      // #416 novelty mark. Mirrors the data-rejected convention: a stable hook
+      // for e2e ("marked → survives reload/filter/Cargar más → gone next
+      // visit") and CSS, set only when the property is new since the profile's
+      // last visit. Presentation only — the feed order is unchanged in phase 1.
+      data-novelty={candidate.is_new ? "new" : undefined}
       className="candidate-card"
       style={{
         // A rejected card stays in the list (deferred removal / show-rejected
@@ -178,12 +183,41 @@ export function CandidateCard({
             {facts.length > 0 ? facts.join(" · ") : "Sin datos estructurados"}
           </p>
 
-          {(candidate.flags.length > 0 || sources.length > 0 || candidate.last_seen_at !== null) && (
+          {(candidate.is_new ||
+            candidate.flags.length > 0 ||
+            sources.length > 0 ||
+            candidate.last_seen_at !== null) && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 2 }}>
+              {/* #416 NUEVO mark — new since the profile's last visit. Leads the
+                  badge row so it can't be missed while skimming. Follows the
+                  house inline-badge pattern exactly (same 10px / lineHeight 14px
+                  / padding 1px 5px / borderRadius 3 as StalenessBadge and
+                  candidate-flag) — no shared <Badge> component (plan §3.6). Uses
+                  the accent token so it reads as a positive attention mark, not
+                  a warn/danger one. Static (no animation), so prefers-reduced-
+                  motion needs no special handling. */}
+              {candidate.is_new && (
+                <span
+                  data-testid="candidate-novelty"
+                  data-novelty="new"
+                  title="Nuevo desde tu última visita a este perfil."
+                  style={{
+                    fontSize: 10,
+                    lineHeight: "14px",
+                    padding: "1px 5px",
+                    borderRadius: 3,
+                    fontWeight: 700,
+                    letterSpacing: 0.3,
+                    textTransform: "uppercase",
+                    background: "var(--accent-soft)",
+                    color: "var(--accent)",
+                  }}
+                >
+                  Nuevo
+                </span>
+              )}
               {/* Listing staleness (#243): "visto hace N días", escalating by
-                  band. Leads the badge row so a stale card reads as stale while
-                  scanning the list. Renders nothing when last_seen_at is
-                  unknown. */}
+                  band. Renders nothing when last_seen_at is unknown. */}
               <StalenessBadge lastSeenAt={candidate.last_seen_at} testId="candidate-staleness" />
               {candidate.flags.map((f) => (
                 <span

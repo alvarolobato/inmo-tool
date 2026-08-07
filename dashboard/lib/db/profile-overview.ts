@@ -147,8 +147,18 @@ export const OVERVIEW_QUERY_SQL = `WITH feedback_current AS (
      LEFT JOIN LATERAL (
        SELECT
          COUNT(*) AS matched_count,
+         -- #416: aligned with the feed's novelty mark (lib/candidates.ts). Two
+         -- deliberate changes from the original #191 definition, both so the
+         -- /perfiles "N nuevos" strip and the feed's NUEVO badge can never
+         -- disagree (the invariant novedades.ts was built to protect):
+         --   (1) Anchor on previous_viewed_at (the shifted two-slot anchor —
+         --       see touchProfileViewedAt), NOT last_viewed_at, which the
+         --       profile GET stamps to NOW() on arrival.
+         --   (2) Measure listing.first_seen_at (when the *listing* appeared —
+         --       the investable event), NOT property.created_at. See newness
+         --       CROSS JOIN LATERAL below. Fallback matches the feed exactly.
          COUNT(*) FILTER (
-           WHERE p.created_at >= COALESCE(sp.last_viewed_at, sp.created_at - interval '1 day')
+           WHERE newness.first_seen_at >= COALESCE(sp.previous_viewed_at, sp.created_at - interval '1 day')
          ) AS new_count,
          MIN(cand.min_price) AS min_price,
          MAX(cand.min_price) AS max_price,
@@ -179,6 +189,18 @@ export const OVERVIEW_QUERY_SQL = `WITH feedback_current AS (
            FROM listing l
           WHERE l.property_id = p.id AND l.status = 'active' AND l.operation = 'sale'
        ) cand
+       CROSS JOIN LATERAL (
+         -- #416: earliest listing first_seen_at for this property, the basis
+         -- for new_count above. MIN over ALL the property's listings (no
+         -- status/operation filter) — first_seen_at is stamped at discovery
+         -- and does not change when a listing later goes inactive, so this is
+         -- "when did this property first appear to us", matching
+         -- CandidateRow.first_seen_at's "earliest across all listings" and the
+         -- feed's novelty CTE (lib/candidates.ts).
+         SELECT MIN(l.first_seen_at) AS first_seen_at
+           FROM listing l
+          WHERE l.property_id = p.id
+       ) newness
        WHERE pls.profile_id = sp.id AND pls.matched = true
      ) match_stats ON true
      LEFT JOIN feedback_counts fc ON fc.profile_id = sp.id
