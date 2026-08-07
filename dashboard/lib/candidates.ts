@@ -1189,6 +1189,13 @@ export async function listCandidates(
        ranked.below_market_pct,
        ranked.distress_level,
        ranked.beach_proximity,
+       -- Current accept/reject/star verdict (#379), derived in the base CTE
+       -- (clear already collapsed to NULL). Projected here so the card renders
+       -- its marked state (accept pressed, or the "Descartada" treatment for
+       -- reject) after a reload/fetch. Without this the row omits the column,
+       -- r.feedback_state is undefined, and every card reads as unmarked even
+       -- though the reject-exclusion WHERE below reads the same value correctly.
+       ranked.feedback_state,
        COALESCE(
          (SELECT json_agg(
                    json_build_object(
