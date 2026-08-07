@@ -3,7 +3,7 @@ id: D-089
 title: Per-profile preference-similarity signal augments scoring, gated on a low feedback threshold
 date: 2026-08-06
 group: AI layer
-rule: The per-profile preference signal (`scoring/preference.ts`) nudges the written `profile_listing_state.score` by ±`PREFERENCE_SIGNAL_WEIGHT` (0.15) via centroid cosine-similarity over the SAME z-scored feature space, learned only from that profile's own accept/reject/star history. It is a hard no-op (`buildPreferenceModel` → `null`, signal exactly 0) below `MIN_FEEDBACK_TO_LEARN` (8) labeled examples or when one-sided; augments, never replaces, the cold-start/trained score.
+rule: The per-profile preference signal (`scoring/preference.ts`) nudges the written `profile_listing_state.score` by ±`PREFERENCE_SIGNAL_WEIGHT` (0.15) via centroid cosine-similarity over the SAME z-scored feature space, learned only from that profile's own accept/reject history (D-096 retired `star`). It is a hard no-op (`buildPreferenceModel` → `null`, signal exactly 0) below `MIN_FEEDBACK_TO_LEARN` (8) labeled examples or when one-sided; augments, never replaces, the cold-start/trained score.
 order: 89
 ---
 
@@ -29,7 +29,7 @@ automatically, per profile, as that profile's own feedback accumulates —
 without hardcoding any preferences.
 
 - **Signal** (`scoring/preference.ts`): for a profile, take every property with
-  a current accept/star (positive) or reject (negative) verdict as its z-scored
+  a current accept (positive) or reject (negative) verdict as its z-scored
   feature vector (the exact `features.ts#extractRaw` →
   `model.ts#normalizeVector` pipeline the trained model uses, normalized against
   the whole matched pool). The "liked" direction is the centroid of positives,

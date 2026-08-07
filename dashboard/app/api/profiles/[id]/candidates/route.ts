@@ -34,6 +34,9 @@
  *   includeRejected — #379: `true` includes candidates whose current verdict
  *                 is `reject` (the show-rejected toggle). Absent/anything else
  *                 keeps them hidden (default).
+ *   state       — #422: `accept` restricts the feed to the "En seguimiento"
+ *                 working set (tracked/accepted properties only). Absent/empty
+ *                 = off (default feed). Any other value → 400.
  *   All #310 filters combine with each other, with `source`, and with
  *   cursor/limit. The occupancy/condition/renovation filters read AI-assessment
  *   data (empty until #316) and correctly return an empty feed until it flows;
@@ -218,6 +221,22 @@ export async function GET(
   // opts in — a permissive parse here can't silently surface rejected cards.
   const includeRejected = searchParams.get("includeRejected") === "true";
 
+  // #422 "En seguimiento" working-set filter. Only the exact string "accept"
+  // restricts the feed to tracked (accepted) properties; absent/anything else
+  // = off (default feed). Any other non-empty value is a malformed request
+  // (400), never silently ignored — mirrors the closed-vocabulary filters above.
+  const rawState = searchParams.get("state");
+  let state: "accept" | null = null;
+  if (rawState !== null && rawState !== "") {
+    if (rawState !== "accept") {
+      return NextResponse.json(
+        formatApiError("Filtro de estado de seguimiento no válido.", "VALIDATION", undefined, requestId),
+        { status: 400 },
+      );
+    }
+    state = "accept";
+  }
+
   // minDiscount arrives as a PERCENT (0–100); the query wants a fraction.
   let minBelowMarketPct: number | null = null;
   const rawMinDiscount = searchParams.get("minDiscount");
@@ -290,6 +309,7 @@ export async function GET(
       heritageZone,
       isVpo,
       includeRejected,
+      state,
     });
     return NextResponse.json(page);
   } catch (err) {

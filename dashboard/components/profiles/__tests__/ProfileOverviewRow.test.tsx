@@ -30,7 +30,6 @@ function metrics(overrides: Partial<ProfileOverviewMetrics> = {}): ProfileOvervi
     new_count: 3,
     accepted_count: 0,
     rejected_count: 0,
-    starred_count: 0,
     min_price: 142000,
     median_price: 198000,
     max_price: 310000,

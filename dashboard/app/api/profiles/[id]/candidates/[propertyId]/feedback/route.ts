@@ -1,10 +1,11 @@
 /**
  * POST /api/profiles/[id]/candidates/[propertyId]/feedback — record a
- * feedback event (accept/reject/star/note/correction) for a candidate
- * (task 3.1, #20).
+ * feedback event (accept/reject/clear/note/correction) for a candidate
+ * (task 3.1, #20). `star` is retired (#422) — accept now IS the follow/track
+ * action, so posting `star` is a 400.
  * GET  /api/profiles/[id]/candidates/[propertyId]/feedback — full feedback
  * history for this candidate in this profile, plus the derived current
- * accept/reject/star state.
+ * accept/reject state.
  *
  * Feedback is keyed on `property_id` (task 1.2's design), with an optional
  * `listingId` recording which specific site listing was on screen — never
@@ -12,7 +13,7 @@
  * viewing either of a deduplicated property's linked listings lands on the
  * same state (EC-5).
  *
- * A real (non-no-op) accept/reject/star event also retrains and rescores
+ * A real (non-no-op) accept/reject event also retrains and rescores
  * this profile's model (task 3.2, #21) before the response returns — awaited
  * synchronously, not fire-and-forget, so a client reading candidate scores
  * immediately after this POST sees the update (issue #21's EC-3). A retrain
@@ -34,8 +35,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z, ZodError } from "zod";
 import {
-  DERIVED_STATE_FEEDBACK_TYPES,
-  FEEDBACK_TYPES,
+  WRITABLE_FEEDBACK_TYPES,
+  WRITABLE_STATE_FEEDBACK_TYPES,
   getCurrentState,
   getFeedbackHistory,
   listingBelongsToProperty,
@@ -57,7 +58,9 @@ function parsePositiveInt(raw: string): number | null {
 }
 
 const FeedbackBodySchema = z.object({
-  feedbackType: z.enum(FEEDBACK_TYPES as unknown as [string, ...string[]]),
+  // #422: `star` is retired and NOT in WRITABLE_FEEDBACK_TYPES — posting it now
+  // fails validation (400), while legacy `star` rows still read back fine.
+  feedbackType: z.enum(WRITABLE_FEEDBACK_TYPES as unknown as [string, ...string[]]),
   listingId: z.number().int().positive().optional(),
   note: z.string().trim().min(1).max(4000).optional(),
   value: z.unknown().optional(),
@@ -161,7 +164,7 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
   }
 
   // 'note' requires actual text; 'correction' requires structured value.
-  // accept/reject/star carry neither — they're pure state signals.
+  // accept/reject/clear carry neither — they're pure state signals.
   if (body.feedbackType === "note" && !body.note) {
     return NextResponse.json(
       formatApiError("El campo 'note' es obligatorio para feedback de tipo 'note'.", "VALIDATION", undefined, requestId),
@@ -199,7 +202,7 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
       }
     }
 
-    // accept/reject/star are a single-active-toggle state (lib/db/feedback.ts's
+    // accept/reject are a single-active-toggle state (lib/db/feedback.ts's
     // getCurrentState); `clear` (#379) is the explicit "un-mark" that resets
     // that state to neutral. Re-recording the state that's already active — or
     // clearing an already-neutral property — is a no-op rather than logging a
@@ -207,12 +210,12 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
     // (recordStateFeedbackIfChanged, backed by a Postgres advisory lock) — a
     // plain check-then-insert here previously let two rapid clicks both insert
     // (verified live in PR #89's review).
-    if (DERIVED_STATE_FEEDBACK_TYPES.includes(body.feedbackType as (typeof DERIVED_STATE_FEEDBACK_TYPES)[number])) {
+    if (WRITABLE_STATE_FEEDBACK_TYPES.includes(body.feedbackType as (typeof WRITABLE_STATE_FEEDBACK_TYPES)[number])) {
       const result = await recordStateFeedbackIfChanged({
         profileId,
         propertyId,
         listingId: body.listingId ?? null,
-        feedbackType: body.feedbackType as (typeof DERIVED_STATE_FEEDBACK_TYPES)[number],
+        feedbackType: body.feedbackType as (typeof WRITABLE_STATE_FEEDBACK_TYPES)[number],
       });
 
       if (result.noop) {
@@ -237,7 +240,7 @@ export async function POST(request: NextRequest, context: RouteContext): Promise
       profileId,
       propertyId,
       listingId: body.listingId ?? null,
-      feedbackType: body.feedbackType as (typeof FEEDBACK_TYPES)[number],
+      feedbackType: body.feedbackType as (typeof WRITABLE_FEEDBACK_TYPES)[number],
       note: body.note ?? null,
       value: body.value,
     });

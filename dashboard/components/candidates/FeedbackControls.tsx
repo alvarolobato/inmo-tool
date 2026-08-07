@@ -8,8 +8,10 @@ interface FeedbackResponse {
 }
 
 /**
- * Inline accept/reject/star toggle + note input for one candidate (task 3.1,
- * #20). Deliberately rendered as a sibling of CandidateCard's <Link>, not
+ * Inline seguir(accept)/descartar(reject) toggle + note input for one
+ * candidate (task 3.1, #20; #422 retired the third `star` toggle — accept IS
+ * the follow/track action now). Deliberately rendered as a sibling of
+ * CandidateCard's <Link>, not
  * nested inside it — these are buttons a user clicks *instead of* navigating
  * to the property detail page, and relying on stopPropagation to suppress
  * Link navigation from inside an anchor is a common source of subtle bugs
@@ -40,7 +42,7 @@ interface FeedbackResponse {
  * per this project's "no dual code paths" default (#152 review) rather than
  * fixed in place, since nothing exercises it.
  *
- * #167: whichever accept/reject/star button matches `state` must stay
+ * #167: whichever accept/reject button matches `state` must stay
  * visible even when the card isn't hovered/focused, so a marked property
  * reads as marked while scanning the list — but "visible" alone isn't a
  * strong enough signal, for two reasons this component handles directly
@@ -50,9 +52,9 @@ interface FeedbackResponse {
  *     row permanently visible (globals.css) — so "is it visible" carries no
  *     information there at all. The active button needs a treatment that
  *     doesn't depend on visibility: it gets a solid, semantically-coloured
- *     fill (`--up` green for accept, `--down` red for reject, `--warn` amber
- *     for star — the same tokens the rest of the app already uses for
- *     positive/negative/attention state) instead of the muted translucent
+ *     fill (`--up` green for accept/seguir, `--down` red for reject — the same
+ *     tokens the rest of the app already uses for positive/negative state)
+ *     instead of the muted translucent
  *     `rgba(0,0,0,0.35)` every other (inactive, hover-revealed) button gets.
  *     That contrast holds regardless of hover/touch/visibility state, so it
  *     reads as *this property's status*, not as "a button someone is
@@ -63,12 +65,11 @@ interface FeedbackResponse {
  *     of a child's own opacity, so the always-visible exception has to live
  *     on the button, not the row.
  *
- * `getCurrentState` (lib/db/feedback.ts) already collapses accept/reject/star
- * into one mutually-exclusive derived state — "starring a previously-accepted
- * candidate replaces 'accepted' with 'starred'" — so there is never a
- * property with two of these three simultaneously active; the "which one
- * wins" ambiguity #167 flagged as a possible design question doesn't actually
- * arise given how `state` is derived here.
+ * `getCurrentState` (lib/db/feedback.ts) collapses accept/reject into one
+ * mutually-exclusive derived state (the newer event wins), so there is never a
+ * property with both simultaneously active; the "which one wins" ambiguity
+ * #167 flagged as a possible design question doesn't actually arise given how
+ * `state` is derived here.
  */
 export function FeedbackControls({
   profileId,
@@ -102,7 +103,7 @@ export function FeedbackControls({
 
   // Whether the parent handed us the state (even `null`). Distinguishing
   // "prop omitted" from "prop is null" is what lets a server-known neutral
-  // state skip the GET too, not just an accept/reject/star one.
+  // state skip the GET too, not just an accept/reject one.
   const hasInitialState = initialState !== undefined;
 
   useEffect(() => {
@@ -186,14 +187,13 @@ export function FeedbackControls({
   };
 
   // Active fill colour is per-type (#167): reusing the app's existing
-  // positive/negative/attention design tokens means the active button reads
-  // as "what happened" (accepted vs. rejected vs. starred) at a glance, not
-  // just as "the highlighted one" — relevant once it's the only thing
-  // visible without hovering.
+  // positive/negative design tokens means the active button reads as "what
+  // happened" (en seguimiento vs. descartada) at a glance, not just as "the
+  // highlighted one" — relevant once it's the only thing visible without
+  // hovering.
   const ACTIVE_COLORS: Record<StateFeedbackType, string> = {
     accept: "var(--up)",
     reject: "var(--down)",
-    star: "var(--warn)",
   };
 
   const toggleButtonStyle = (active: boolean, activeColor = "var(--accent)"): React.CSSProperties => ({
@@ -233,8 +233,8 @@ export function FeedbackControls({
           className="feedback-toggle"
           data-active={state === "accept"}
           aria-pressed={state === "accept"}
-          aria-label="Aceptar"
-          title="Aceptar"
+          aria-label="Seguir"
+          title="Seguir (en seguimiento)"
           style={toggleButtonStyle(state === "accept", ACTIVE_COLORS.accept)}
           onClick={() => submitState("accept")}
         >
@@ -246,25 +246,12 @@ export function FeedbackControls({
           className="feedback-toggle"
           data-active={state === "reject"}
           aria-pressed={state === "reject"}
-          aria-label="Rechazar"
-          title="Rechazar"
+          aria-label="Descartar"
+          title="Descartar"
           style={toggleButtonStyle(state === "reject", ACTIVE_COLORS.reject)}
           onClick={() => submitState("reject")}
         >
           ✗
-        </button>
-        <button
-          type="button"
-          data-testid="feedback-star"
-          className="feedback-toggle"
-          data-active={state === "star"}
-          aria-pressed={state === "star"}
-          aria-label="Destacar"
-          title="Destacar"
-          style={toggleButtonStyle(state === "star", ACTIVE_COLORS.star)}
-          onClick={() => submitState("star")}
-        >
-          ★
         </button>
         <button
           type="button"

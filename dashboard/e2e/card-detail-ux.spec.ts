@@ -247,25 +247,28 @@ test("#167: the button matching the property's current feedback state stays visi
   await expect(target).toBeVisible();
 
   const actions = target.getByTestId("candidate-card-actions");
-  const star = actions.getByTestId("feedback-star");
+  // #422: the star toggle is gone — accept ("Seguir") is now the tracked
+  // positive state whose active button stays visible. reject is the unmarked
+  // sibling that stays hover-only.
+  const accept = actions.getByTestId("feedback-accept");
   const reject = actions.getByTestId("feedback-reject");
 
   // Unmarked: both hidden without hover (baseline, unchanged by #167).
-  await expect(star).toHaveCSS("opacity", "0");
+  await expect(accept).toHaveCSS("opacity", "0");
   await expect(reject).toHaveCSS("opacity", "0");
 
   // Mark it, then move the mouse fully away so no hover/focus-within path
   // is active — this is the state the feature is actually for.
   await target.hover();
-  await star.click();
-  await expect(star).toHaveAttribute("aria-pressed", "true");
+  await accept.click();
+  await expect(accept).toHaveAttribute("aria-pressed", "true");
   // Move the mouse fully away AND blur the just-clicked button — a real
   // click leaves it focused, and :focus-within would otherwise reveal the
   // whole row exactly like :hover does, masking the thing this test exists
   // to prove. Neither hover nor focus-within may be active for this
   // assertion to mean anything.
   await page.mouse.move(0, 0);
-  await star.evaluate((el) => (el as HTMLElement).blur());
+  await accept.evaluate((el) => (el as HTMLElement).blur());
   // globals.css transitions .feedback-toggle's opacity over 120ms — reading
   // it immediately after the hover/focus state clears can catch a transient,
   // still-decaying value (e.g. still "1" a few ms into an animation *toward*
@@ -277,22 +280,22 @@ test("#167: the button matching the property's current feedback state stays visi
   // final, settled value.
   await page.waitForTimeout(200);
 
-  await expect(star).toHaveCSS("opacity", "1");
+  await expect(accept).toHaveCSS("opacity", "1");
   // The un-marked reject button on the SAME card stays hover-only — this is
   // "only that one button", not "the whole row once anything is marked".
   await expect(reject).toHaveCSS("opacity", "0");
 
   // Distinguishable from a hover-revealed unset button, not just "visible":
-  // the active button gets a solid, semantically-coloured fill (--warn for
-  // star) rather than the muted rgba(0,0,0,0.35) every hover-revealed
+  // the active button gets a solid, semantically-coloured fill (--up for
+  // accept) rather than the muted rgba(0,0,0,0.35) every hover-revealed
   // inactive button uses. Both checks are required — "not muted" alone
-  // passed even for a deleted --warn token (an undefined var() resolves to
+  // passed even for a deleted --up token (an undefined var() resolves to
   // fully transparent, rgba(0, 0, 0, 0), which is also "not the muted
   // fill" without being a real colour at all) until this second assertion
   // was added.
-  const starBg = await star.evaluate((el) => getComputedStyle(el).backgroundColor);
-  expect(starBg).not.toBe("rgba(0, 0, 0, 0.35)");
-  expect(starBg).not.toBe("rgba(0, 0, 0, 0)");
+  const acceptBg = await accept.evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(acceptBg).not.toBe("rgba(0, 0, 0, 0.35)");
+  expect(acceptBg).not.toBe("rgba(0, 0, 0, 0)");
 });
 
 test("lightbox walks the photo union with buttons and arrow keys", async ({ page }) => {

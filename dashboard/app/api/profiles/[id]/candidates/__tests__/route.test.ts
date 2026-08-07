@@ -102,6 +102,7 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       null,
       null,
       null,
+      null,
     ]);
   });
 
@@ -124,6 +125,7 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       null,
       null,
       false,
+      null,
       null,
       null,
       null,
@@ -203,6 +205,7 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
       "integral",
       0.15, // 15% → fraction
       false,
+      null,
       null,
       null,
       null,
@@ -409,6 +412,41 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
       );
       expect(res.status).toBe(200);
       expect(mockQuery.mock.calls[1][1][11]).toBe(false);
+    }
+  });
+
+  it("passes state=accept to listCandidates as $18 (the 'En seguimiento' working set, #422)", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?state=accept"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(200);
+    // $18 (index 17) is the seguimiento state filter.
+    expect(mockQuery.mock.calls[1][1][17]).toBe("accept");
+  });
+
+  it("leaves the state filter off ($18 = null) when the param is absent (#422)", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await GET(makeRequest("http://localhost/api/profiles/3/candidates"), ctx("3"));
+    expect(res.status).toBe(200);
+    expect(mockQuery.mock.calls[1][1][17]).toBeNull();
+  });
+
+  it("rejects an unknown state value with 400 (#422)", async () => {
+    for (const raw of ["reject", "star", "accepted", "yes"]) {
+      mockQuery.mockReset();
+      mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
+      mockQuery.mockResolvedValueOnce({ rows: [] });
+      const res = await GET(
+        makeRequest(`http://localhost/api/profiles/3/candidates?state=${raw}`),
+        ctx("3"),
+      );
+      expect(res.status).toBe(400);
     }
   });
 });

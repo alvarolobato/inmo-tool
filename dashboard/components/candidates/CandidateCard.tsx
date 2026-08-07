@@ -63,6 +63,10 @@ export function CandidateCard({
     candidate.feedback_state ?? null,
   );
   const isRejected = feedbackState === "reject";
+  // #422: an accepted property is "en seguimiento" (tracked) — accept IS the
+  // follow action now. Drives the EN SEGUIMIENTO mark and the `data-tracked`
+  // hook below.
+  const isTracked = feedbackState === "accept";
 
   const sources = [...new Set(candidate.listings.map((l) => l.source))].sort();
   const typeLabel =
@@ -103,6 +107,12 @@ export function CandidateCard({
       data-testid="candidate-card"
       data-property-id={candidate.property_id}
       data-rejected={isRejected}
+      // #422: stable hook for the "en seguimiento" (tracked) working set —
+      // mirrors data-rejected. Phase 3 reads this to EXEMPT a tracked property
+      // from novelty-tier suppression (a property you're following must never
+      // be hidden by a tier), and e2e uses it to assert the seguimiento view /
+      // card mark. Presentation + hook only; feed order is unchanged here.
+      data-tracked={isTracked}
       // #416/#420 novelty mark. Mirrors the data-rejected convention: a stable
       // hook for e2e and CSS. NUEVO leads (it is the stronger "look at this"
       // signal), so a card that is both new and price-changed reads "new" here;
@@ -120,8 +130,14 @@ export function CandidateCard({
       className="candidate-card"
       style={{
         // A rejected card stays in the list (deferred removal / show-rejected
-        // view) but reads unmistakably as discarded: a red-tinted border.
-        border: isRejected ? "1px solid var(--down, #d33)" : "1px solid var(--border)",
+        // view) but reads unmistakably as discarded: a red-tinted border. A
+        // tracked (en seguimiento) card gets a positive green-tinted border so
+        // the working set reads at a glance (#422).
+        border: isRejected
+          ? "1px solid var(--down, #d33)"
+          : isTracked
+            ? "1px solid var(--up, #2e7d32)"
+            : "1px solid var(--border)",
         borderRadius: 8,
         background: "var(--bg-1)",
         display: "flex",
@@ -151,6 +167,28 @@ export function CandidateCard({
           }}
         >
           Descartada
+        </span>
+      )}
+      {isTracked && (
+        <span
+          data-testid="candidate-tracked-badge"
+          style={{
+            position: "absolute",
+            top: 6,
+            left: 6,
+            zIndex: 2,
+            fontSize: 10,
+            lineHeight: "14px",
+            fontWeight: 700,
+            letterSpacing: 0.3,
+            textTransform: "uppercase",
+            padding: "2px 6px",
+            borderRadius: 4,
+            background: "var(--up, #2e7d32)",
+            color: "var(--bg, #fff)",
+          }}
+        >
+          En seguimiento
         </span>
       )}
       {/* Only the informational content dims when rejected — the feedback

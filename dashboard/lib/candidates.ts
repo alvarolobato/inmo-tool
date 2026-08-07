@@ -225,8 +225,8 @@ export interface CandidateRow {
    */
   ranking_boost_reason: string | null;
   /**
-   * The property's current accept/reject/star verdict for THIS profile
-   * (#379), derived latest-wins over accept/reject/star/clear with a trailing
+   * The property's current accept/reject verdict for THIS profile
+   * (#379/#422), derived latest-wins over accept/reject/star/clear with a trailing
    * `clear` collapsing to null. Embedded on the row so the card renders its
    * marked state (and the "Descartada" treatment for `reject`) immediately,
    * without FeedbackControls issuing a per-card GET. `null` when the property
@@ -603,11 +603,13 @@ function rankedCandidatesCte(warnParam: string): string {
          -- either direction of the VPO filter; tourist_license adds no boost).
          dist.is_vpo,
          dist.tourist_license,
-         -- Current accept/reject/star verdict for this profile (#379),
+         -- Current accept/reject verdict for this profile (#379/#422),
          -- derived latest-wins over accept/reject/star/clear; a trailing
-         -- clear collapses to NULL (neutral). Feeds both the card's marked
-         -- state and the default feed's reject exclusion (outer WHERE).
-         CASE WHEN fb.feedback_type = 'clear' THEN NULL ELSE fb.feedback_type END AS feedback_state
+         -- clear OR a legacy star (#422, retired) collapses to NULL (neutral).
+         -- Feeds the card's marked state ("en seguimiento" for accept), the
+         -- default feed's reject exclusion, and the #422 seguimiento filter
+         -- (all in the outer WHERE).
+         CASE WHEN fb.feedback_type IN ('clear', 'star') THEN NULL ELSE fb.feedback_type END AS feedback_state
        FROM profile_listing_state pls
        JOIN property p ON p.id = pls.property_id
        -- MIN active-sale price across ENABLED sources only (#322/D-055): the
@@ -715,10 +717,11 @@ function rankedCandidatesCte(warnParam: string): string {
             ORDER BY a.assessment_type, a.generated_at DESC NULLS LAST, a.id DESC
          ) la
        ) dist ON true
-       -- Latest state verdict for (profile, property) (#379). accept/reject/
-       -- star/clear only (note/correction never change the toggle); the outer
-       -- CASE maps a trailing clear to NULL. Index-fed by
-       -- idx_feedback_event_profile_property.
+       -- Latest state verdict for (profile, property) (#379/#422). accept/
+       -- reject/star/clear only (note/correction never change the toggle);
+       -- keeping the retired star in the IN list lets a legacy star still WIN
+       -- the latest-wins ordering, then the outer CASE collapses star AND clear
+       -- to NULL. Index-fed by idx_feedback_event_profile_property.
        LEFT JOIN LATERAL (
          SELECT fe.feedback_type
            FROM feedback_event fe
@@ -1288,11 +1291,22 @@ export async function listCandidates(
      * true to surface them (still marked, still un-rejectable).
      */
     includeRejected?: boolean;
+    /**
+     * #422: restrict the feed to a single verdict — the "En seguimiento"
+     * working set. `"accept"` keeps ONLY tracked (accepted) properties; `null`
+     * / omitted = no verdict filter (default feed). Mirrors the
+     * `includeRejected` convention (a verdict-scoped view, opt-in from the UI).
+     */
+    state?: StateFeedbackType | null;
   } & CandidateFilters = {},
 ): Promise<CandidatePage> {
   const limit = Math.min(Math.max(Math.trunc(opts.limit ?? DEFAULT_LIMIT), 1), MAX_LIMIT);
   const rawCursor = opts.cursor ?? null;
   const includeRejected = opts.includeRejected === true;
+  // #422 "En seguimiento" working-set filter. Only 'accept' is a valid verdict
+  // scope today (reject has its own includeRejected path); anything else
+  // collapses to null ("off"), so an untouched call is byte-identical to before.
+  const stateFilter: StateFeedbackType | null = opts.state === "accept" ? "accept" : null;
 
   // #310 hard filters (D-059). Each normalises to null ("no filter") when
   // unset, so an untouched call behaves exactly as before. Validation of the
@@ -1485,7 +1499,7 @@ export async function listCandidates(
        ranked.below_market_pct,
        ranked.distress_level,
        ranked.beach_proximity,
-       -- Current accept/reject/star verdict (#379), derived in the base CTE
+       -- Current accept/reject verdict (#379/#422), derived in the base CTE
        -- (clear already collapsed to NULL). Projected here so the card renders
        -- its marked state (accept pressed, or the "Descartada" treatment for
        -- reject) after a reload/fetch. Without this the row omits the column,
@@ -1563,8 +1577,15 @@ export async function listCandidates(
        -- current verdict is 'reject' drops out of the feed — so the card the
        -- user just rejected disappears on the NEXT fetch, not on click. $12 =
        -- true (show-rejected toggle): rejected candidates stay in, rendered
-       -- marked. A NULL/accept/star feedback_state always survives.
+       -- marked. A NULL/accept feedback_state always survives.
        AND ($12::boolean = true OR ranked.feedback_state IS DISTINCT FROM 'reject')
+       -- #422 "En seguimiento" working-set filter ($18). NULL = off (default
+       -- feed, all verdicts). 'accept' = keep ONLY tracked (accepted)
+       -- properties — the follow/track working set. Reads the same
+       -- ranked.feedback_state the reject exclusion above uses (star/clear
+       -- already collapsed to NULL in the base CTE), so a legacy-starred or
+       -- cleared property is correctly excluded from the seguimiento view.
+       AND ($18::text IS NULL OR ranked.feedback_state = $18::text)
        -- #386 caveat filter ($13). Keep only candidates whose derived occupancy
        -- caveats include this code. NULL caveats (occupancy never assessed) makes
        -- the ANY comparison evaluate to NULL, so the row is excluded (unknown,
@@ -1619,6 +1640,7 @@ export async function listCandidates(
       beachProximity,
       heritageZone,
       isVpo,
+      stateFilter,
     ],
   );
 
