@@ -92,6 +92,7 @@
 |----|--------------|
 | [D-094](docs/decisions/D-094-reject-deferred-removal-and-clear.md) | The candidate feed hides 'reject' by default (removal deferred to next fetch); a show-rejected toggle opts them back in. Un-reject appends a 'clear' event (feedback stays append-only) that every latest-state derivation must collapse to neutral. |
 | [D-096](docs/decisions/D-096-feedback-two-states-accept-is-seguimiento.md) | Candidate feedback has exactly two active states — accept (which IS the follow/track "en seguimiento" action) and reject. `star` is retired — not writable (POST → 400) and collapsed to neutral (null) like `clear` in every latest-wins read. The DB enum keeps `star` inert for legacy rows; no migration. |
+| [D-097](docs/decisions/D-097-seguimiento-watchlist-pass.md) | Price-drop alerts on tracked (accept / "en seguimiento") properties run as an independent pass on the SAME hourly digest tick — gated by its own kill switch (`notifications.seguimiento_auto_enabled`), NOT by `digest_cadence` — with its own `digest_run.kind='seguimiento'` watermark (one table, two series), advanced every pass so a drop alerts at most once. Drops only; email reuses the digest sender (inert until SMTP). |
 
 ## AI layer
 

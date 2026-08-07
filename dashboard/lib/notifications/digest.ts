@@ -41,7 +41,13 @@
 import { sql } from "@/lib/db-write";
 import { flagsFromAssessments, type CandidateFlag, type RawAssessmentRow } from "@/lib/candidates";
 import { computeAreaPriceComparison } from "@/lib/analytics/area-price";
+import { computeRelistedLower } from "@/lib/analytics/market-signals";
 import { REDFLAG_TYPES, REDFLAG_LABELS, type RedFlagType } from "@/lib/ai-assessment/redflags";
+import {
+  loadSeguimientoPriceDrops,
+  readPriceChangeBand,
+  type PriceChangeBand,
+} from "./seguimiento";
 
 // Spanish labels for the distress problem types (#27 + #361) surfaced in the
 // digest come from the shared `REDFLAG_LABELS` map (lib/ai-assessment/
@@ -104,15 +110,41 @@ export interface DigestStatusChange {
   observedAt: string;
 }
 
+/**
+ * One "withdrawn-then-relisted-lower" cross-listing item (issue #35 EC-4, wired
+ * via `computeRelistedLower` — #428). The single strongest motivated-seller
+ * signal in the codebase: a property that was withdrawn/expired on one listing
+ * and reappeared cheaper (possibly on a different source) within the window.
+ */
+export interface DigestRelistedLower {
+  propertyId: number;
+  zone: string | null;
+  withdrawnPrice: number;
+  relistedPrice: number;
+  /** Positive fraction: (withdrawn - relisted) / withdrawn. */
+  dropPct: number;
+  withdrawnAt: string;
+  relistedAt: string;
+}
+
 export interface DigestContent {
   profileId: number;
   profileName: string;
   /** ISO anchor — the lower bound of "what's new" (previous digest, or 24h ago). */
   since: string;
   generatedAt: string;
+  /**
+   * #428 top-placed "En seguimiento" section: sanity-banded price DROPS on the
+   * profile's TRACKED (accept) properties. Rendered FIRST and separately from
+   * the generic `priceDrops` — a drop on something the owner is actively
+   * tracking is categorically more actionable (plan §3.5).
+   */
+  seguimientoDrops: DigestPriceDrop[];
   newCandidates: DigestNewCandidate[];
   priceDrops: DigestPriceDrop[];
   statusChanges: DigestStatusChange[];
+  /** #428 (EC-4): withdrawn-then-relisted-lower motivated-seller items. */
+  relistedLower: DigestRelistedLower[];
 }
 
 /**
@@ -120,7 +152,13 @@ export interface DigestContent {
  * `digest_run.candidate_count` and the value `isDigestEmpty` keys on.
  */
 export function digestItemCount(content: DigestContent): number {
-  return content.newCandidates.length + content.priceDrops.length + content.statusChanges.length;
+  return (
+    content.seguimientoDrops.length +
+    content.newCandidates.length +
+    content.priceDrops.length +
+    content.statusChanges.length +
+    content.relistedLower.length
+  );
 }
 
 /**
@@ -178,16 +216,22 @@ interface RawRedFlagRow {
  * 24h fallback the novedades strip uses for a never-visited profile). Returns
  * an ISO string.
  */
-export async function resolveDigestAnchor(profileId: number): Promise<string> {
+export async function resolveDigestAnchor(
+  profileId: number,
+  kind: "digest" | "seguimiento" = "digest",
+): Promise<string> {
   const rows = await sql<{ anchor: string }>(
+    // #428: anchor on this profile's most recent run OF THE SAME KIND. The
+    // cadenced digest and the seguimiento watchlist pass keep independent
+    // watermarks (digest_run.kind), so neither swallows the other's window.
     `SELECT COALESCE(
               (SELECT sent_at FROM digest_run
-                WHERE profile_id = $1
+                WHERE profile_id = $1 AND kind = $2
                 ORDER BY sent_at DESC
                 LIMIT 1),
               NOW() - INTERVAL '1 day'
             ) AS anchor`,
-    [profileId],
+    [profileId, kind],
   );
   return rows[0].anchor;
 }
@@ -454,6 +498,74 @@ async function loadStatusChanges(profileId: number, since: string, limit: number
   }));
 }
 
+interface RawRelistCandidateRow {
+  property_id: number;
+  address: string | null;
+}
+
+/**
+ * Withdrawn-then-relisted-lower items (issue #35 EC-4) for the profile's
+ * matched properties, since `since`. `computeRelistedLower` (market-signals.ts)
+ * was written + unit-tested but had ZERO production callers (#34 was only
+ * half-wired) — this wires it in for real.
+ *
+ * Bounded by design: it only calls `computeRelistedLower` for matched
+ * properties that actually had a `withdrawn`/`expired` transition since the
+ * anchor (withdrawals are rare), so it never N+1s the whole matched pool.
+ * Best-effort — a per-property failure is skipped, never fails the digest.
+ */
+async function loadRelistedLower(
+  profileId: number,
+  since: string,
+  limit: number,
+): Promise<DigestRelistedLower[]> {
+  let candidates: RawRelistCandidateRow[];
+  try {
+    candidates = await sql<RawRelistCandidateRow>(
+      // Matched properties with a recent withdrawal/expiry — the only ones that
+      // could possibly relist lower. The relist itself is detected by
+      // computeRelistedLower over the property's full listing history.
+      `SELECT DISTINCT p.id AS property_id, p.address
+         FROM listing_status_event e
+         JOIN listing l ON l.id = e.listing_id
+         JOIN property p ON p.id = l.property_id
+         JOIN profile_listing_state pls
+           ON pls.property_id = p.id AND pls.profile_id = $1 AND pls.matched = true
+        WHERE e.status IN ('withdrawn', 'expired')
+          AND e.observed_at >= $2::timestamptz
+        ORDER BY p.id
+        LIMIT $3`,
+      [profileId, since, limit],
+    );
+  } catch (err) {
+    console.warn("[digest] relisted-lower candidate scan failed, skipping section:", err);
+    return [];
+  }
+
+  const items: DigestRelistedLower[] = [];
+  for (const c of candidates) {
+    try {
+      const ev = await computeRelistedLower(c.property_id);
+      if (ev) {
+        items.push({
+          propertyId: c.property_id,
+          zone: c.address,
+          withdrawnPrice: ev.withdrawn_price,
+          relistedPrice: ev.relisted_price,
+          dropPct: ev.drop_pct,
+          withdrawnAt: ev.withdrawn_at,
+          relistedAt: ev.relisted_at,
+        });
+      }
+    } catch (err) {
+      console.warn(`[digest] computeRelistedLower failed for property ${c.property_id}:`, err);
+    }
+  }
+  // Strongest signal first.
+  items.sort((a, b) => b.dropPct - a.dropPct);
+  return items;
+}
+
 /** How many items of each type a single digest carries at most (a glance, not a feed). */
 export const DIGEST_SECTION_LIMIT = 25;
 
@@ -462,6 +574,8 @@ export interface BuildDigestOptions {
   since?: string;
   /** Per-section cap. Defaults to `DIGEST_SECTION_LIMIT`. */
   sectionLimit?: number;
+  /** Price-change sanity band for the seguimiento section. Defaults to `readPriceChangeBand()`. */
+  band?: PriceChangeBand;
 }
 
 /**
@@ -476,18 +590,23 @@ export async function buildDigestForProfile(
 ): Promise<DigestContent> {
   const since = opts.since ?? (await resolveDigestAnchor(profile.id));
   const limit = opts.sectionLimit ?? DIGEST_SECTION_LIMIT;
-  const [newCandidates, priceDrops, statusChanges] = await Promise.all([
+  const band = opts.band ?? readPriceChangeBand();
+  const [seguimientoDrops, newCandidates, priceDrops, statusChanges, relistedLower] = await Promise.all([
+    loadSeguimientoPriceDrops(profile.id, since, band, limit),
     loadNewCandidates(profile.id, since, limit),
     loadPriceDrops(profile.id, since, limit),
     loadStatusChanges(profile.id, since, limit),
+    loadRelistedLower(profile.id, since, limit),
   ]);
   return {
     profileId: profile.id,
     profileName: profile.name,
     since,
     generatedAt: new Date().toISOString(),
+    seguimientoDrops,
     newCandidates,
     priceDrops,
     statusChanges,
+    relistedLower,
   };
 }

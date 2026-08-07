@@ -417,10 +417,27 @@ CREATE TABLE IF NOT EXISTS digest_run (
     sent            BOOLEAN      NOT NULL DEFAULT false
 );
 
--- The scheduler's due-check reads the most recent digest_run per profile
--- (ORDER BY sent_at DESC LIMIT 1) — index the (profile_id, sent_at DESC) path.
-CREATE INDEX IF NOT EXISTS idx_digest_run_profile_sent
-    ON digest_run (profile_id, sent_at DESC);
+-- Issue #428 (Feed phase 5): `kind` distinguishes the cadenced daily/weekly
+-- digest ('digest') from the independent per-hour "En seguimiento" watchlist
+-- pass ('seguimiento'). One watermark table, two independent series per
+-- profile: each pass reads and advances ONLY its own kind's most-recent row,
+-- so a price drop on a tracked property alerts at most once per channel.
+-- Idempotent migration (append-a-column house style) — pre-#428 rows default
+-- to 'digest', which is exactly what they were.
+ALTER TABLE digest_run ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'digest';
+ALTER TABLE digest_run DROP CONSTRAINT IF EXISTS digest_run_kind_check;
+ALTER TABLE digest_run ADD CONSTRAINT digest_run_kind_check
+    CHECK (kind IN ('digest', 'seguimiento'));
+
+-- The scheduler's due-check reads the most recent digest_run per profile FOR A
+-- GIVEN KIND (ORDER BY sent_at DESC LIMIT 1) — index the (profile_id, kind,
+-- sent_at DESC) path. Supersedes the old (profile_id, sent_at DESC) index:
+-- every read is now per-kind (listDigestProfiles + resolveDigestAnchor both
+-- filter `kind = ...`), so the old index has no remaining consumer. Drop it on
+-- an existing DB (init.sql re-runs idempotently) so no redundant index lingers.
+CREATE INDEX IF NOT EXISTS idx_digest_run_profile_kind_sent
+    ON digest_run (profile_id, kind, sent_at DESC);
+DROP INDEX IF EXISTS idx_digest_run_profile_sent;
 
 -- profile_listing_state is keyed on (profile_id, property_id), NOT
 -- listing_id. This is load-bearing: once dedup (task 2.2) unions two

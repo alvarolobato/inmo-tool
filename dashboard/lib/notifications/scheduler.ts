@@ -32,8 +32,13 @@
 
 import { readBool, readPositiveInt, readIntInRange } from "./config-read";
 import { listDigestProfiles, recordDigestRun, type DigestCadence } from "@/lib/db/digest";
-import { buildDigestForProfile, digestItemCount, isDigestEmpty } from "./digest";
+import { buildDigestForProfile, digestItemCount, isDigestEmpty, type DigestContent } from "./digest";
 import { sendDigestEmail } from "./email";
+import {
+  loadSeguimientoPriceDrops,
+  loadSeguimientoStatusChanges,
+  readPriceChangeBand,
+} from "./seguimiento";
 
 interface SchedulerConfig {
   enabled: boolean;
@@ -56,6 +61,28 @@ export function loadDigestSchedulerConfig(): SchedulerConfig {
       DEFAULTS.intervalSeconds,
     ),
     sendHour: readIntInRange("notifications.digest_send_hour", "NOTIFICATIONS_DIGEST_SEND_HOUR", DEFAULTS.sendHour, 0, 23),
+  };
+}
+
+interface SeguimientoConfig {
+  /** Independent kill switch for the watchlist pass (default true). */
+  enabled: boolean;
+  /** Fallback window (hours) for a profile that has never had a seguimiento run yet (default 24). */
+  lookbackHours: number;
+}
+
+export function loadSeguimientoConfig(): SeguimientoConfig {
+  return {
+    enabled: readBool(
+      "notifications.seguimiento_auto_enabled",
+      "NOTIFICATIONS_SEGUIMIENTO_AUTO_ENABLED",
+      true,
+    ),
+    lookbackHours: readPositiveInt(
+      "notifications.seguimiento_lookback_hours",
+      "NOTIFICATIONS_SEGUIMIENTO_LOOKBACK_HOURS",
+      24,
+    ),
   };
 }
 
@@ -132,16 +159,100 @@ export async function runDigestPass(opts: { now?: Date } = {}): Promise<DigestPa
       const count = digestItemCount(content);
       if (isDigestEmpty(content)) {
         // EC-2: nothing new — advance the watermark, send nothing.
-        await recordDigestRun(profile.id, count, false);
+        await recordDigestRun(profile.id, count, false, "digest");
         result.empty += 1;
         continue;
       }
       const send = await sendDigestEmail(content, { to: profile.email });
-      await recordDigestRun(profile.id, count, send.sent);
+      await recordDigestRun(profile.id, count, send.sent, "digest");
       if (send.sent) result.sent += 1;
       else result.noop += 1;
     } catch (err) {
       console.error(`[digest:scheduler] failed for profile ${profile.id} (${profile.name}):`, err);
+      result.errors += 1;
+    }
+  }
+  return result;
+}
+
+// ─── Independent "En seguimiento" watchlist pass (#428, plan #415 §3.5) ─────
+
+export interface SeguimientoPassResult {
+  /** Active profiles inspected. */
+  profiles: number;
+  /** Profiles that carried at least one tracked drop / status change this pass. */
+  withChanges: number;
+  /** Alerts that actually sent an email. */
+  sent: number;
+  /** Profiles whose watermark advanced with nothing to report (no email). */
+  empty: number;
+  /** Profiles with changes whose email was a no-op (SMTP not configured / no recipient / send failure). */
+  noop: number;
+  /** Profiles that threw during build/send (isolated — the pass continued). */
+  errors: number;
+}
+
+/**
+ * One "En seguimiento" watchlist pass — checks ONLY tracked (accept)
+ * properties for price DROPS + sold/withdrawn status changes and sends its own
+ * small alert. Gated INDEPENDENTLY of `digest_cadence`: it runs on every tick
+ * (worst-case latency ~1h, which is effectively instant for a purchase
+ * decision) and keeps its own `digest_run` watermark (kind='seguimiento'), so a
+ * drop alerts at most once and never collides with the cadenced digest.
+ *
+ * Advances the watermark on EVERY processed profile — including the empty case
+ * — exactly like the cadenced pass, so re-running a tick (or a second process)
+ * can't re-alert the same drop. Injectable clock for deterministic tests.
+ */
+export async function runSeguimientoPass(opts: { now?: Date } = {}): Promise<SeguimientoPassResult> {
+  const now = opts.now ?? new Date();
+  const cfg = loadSeguimientoConfig();
+  const band = readPriceChangeBand();
+  const result: SeguimientoPassResult = { profiles: 0, withChanges: 0, sent: 0, empty: 0, noop: 0, errors: 0 };
+
+  const profiles = await listDigestProfiles();
+  result.profiles = profiles.length;
+
+  for (const profile of profiles) {
+    // Anchor on this profile's own last seguimiento run; a never-run profile
+    // falls back to `now - lookbackHours`. Independent of digest_cadence — a
+    // profile with `digest_cadence='off'` is STILL watched (owner explicitly
+    // tracked those properties).
+    const anchor =
+      profile.lastSeguimientoAt ??
+      new Date(now.getTime() - cfg.lookbackHours * 60 * 60 * 1000).toISOString();
+    try {
+      const [drops, statusChanges] = await Promise.all([
+        loadSeguimientoPriceDrops(profile.id, anchor, band, 25),
+        loadSeguimientoStatusChanges(profile.id, anchor, 25),
+      ]);
+      const count = drops.length + statusChanges.length;
+      if (count === 0) {
+        // Nothing tracked moved — advance the watermark, send nothing.
+        await recordDigestRun(profile.id, 0, false, "seguimiento");
+        result.empty += 1;
+        continue;
+      }
+      result.withChanges += 1;
+      // Reuse the digest email path (inert until SMTP is configured — D-025's
+      // no-op). Only the seguimiento + status sections carry content.
+      const content: DigestContent = {
+        profileId: profile.id,
+        profileName: profile.name,
+        since: anchor,
+        generatedAt: now.toISOString(),
+        seguimientoDrops: drops,
+        newCandidates: [],
+        priceDrops: [],
+        statusChanges,
+        relistedLower: [],
+      };
+      const send = await sendDigestEmail(content, { to: profile.email });
+      await recordDigestRun(profile.id, count, send.sent, "seguimiento");
+      if (send.sent) result.sent += 1;
+      else result.noop += 1;
+    } catch (err) {
+      console.error(`[seguimiento:scheduler] failed for profile ${profile.id} (${profile.name}):`, err);
       result.errors += 1;
     }
   }
@@ -164,6 +275,21 @@ async function tick(): Promise<void> {
       console.info(
         `[digest:scheduler] tick: profiles=${r.profiles} due=${r.due} sent=${r.sent} empty=${r.empty} noop=${r.noop} errors=${r.errors}`,
       );
+    }
+    // #428: the independent "En seguimiento" watchlist pass runs on the SAME
+    // tick but is gated by its own kill switch and its own watermark — a
+    // failure here is isolated and never aborts the digest pass above.
+    if (loadSeguimientoConfig().enabled) {
+      try {
+        const s = await runSeguimientoPass();
+        if (s.withChanges > 0) {
+          console.info(
+            `[seguimiento:scheduler] tick: profiles=${s.profiles} withChanges=${s.withChanges} sent=${s.sent} empty=${s.empty} noop=${s.noop} errors=${s.errors}`,
+          );
+        }
+      } catch (err) {
+        console.error("[seguimiento:scheduler] pass failed:", err);
+      }
     }
   } catch (err) {
     console.error("[digest:scheduler] tick failed:", err);
