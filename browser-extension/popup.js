@@ -358,6 +358,7 @@ function enterBatchMode(ctx, existingProgress) {
   $('#batch-resume-btn').onclick = () => sendBatchControl('RESUME_BATCH');
   $('#batch-stop-btn').onclick = () => sendBatchControl('STOP_BATCH');
   $('#batch-auto-btn').onclick = onToggleAuto;
+  $('#batch-force-chk').onchange = onToggleForce;
 
   if (existingProgress) {
     renderBatchProgress(existingProgress);
@@ -491,6 +492,14 @@ function renderAutoStatus(auto) {
   const line = $('#batch-auto-status');
   if (!btn || !line) return;
 
+  // Reflect the persisted "Forzar" preference (issue #434) — the background
+  // always surfaces `force` (from the live auto state or, when Auto is off, the
+  // stored preference), so the checkbox stays in sync across popup opens.
+  const forceChk = $('#batch-force-chk');
+  if (forceChk && auto && typeof auto.force === 'boolean') {
+    forceChk.checked = auto.force;
+  }
+
   if (auto && auto.enabled) {
     btn.textContent = 'Auto: detener';
     btn.classList.remove('btn-primary');
@@ -513,6 +522,26 @@ function renderAutoStatus(auto) {
     btn.classList.add('btn-primary');
     line.classList.add('hidden');
   }
+}
+
+/**
+ * Toggle "Forzar" (issue #434): persist the preference in the background
+ * (chrome.storage.sync) and, if Auto is running, update the live state so the
+ * next batch respects it. Re-renders from the returned progress.
+ */
+async function onToggleForce() {
+  const chk = $('#batch-force-chk');
+  if (!chk) return;
+  let auto = null;
+  try {
+    auto = await chrome.runtime.sendMessage({
+      type: 'SET_AUTO_FORCE',
+      force: chk.checked,
+    });
+  } catch {
+    /* ignore — next poll refreshes state */
+  }
+  if (auto) renderAutoStatus(auto);
 }
 
 /** Toggle Auto mode on/off. */

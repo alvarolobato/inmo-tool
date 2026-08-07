@@ -167,6 +167,26 @@ export interface PendingSelectionItem {
 // Mirrors browser-extension/batch.js AUTO_PORTAL_RANK_UNKNOWN.
 const PORTAL_RANK_UNKNOWN = 99;
 
+// Rank AT OR ABOVE which a portal is NOT due this cycle (issue #434). The #414
+// ranks are due=0 < half-done=1 < not-due=2 < unknown=99; a portal is "due"
+// (auto should capture it now) only when it has at least one due task — rank 0
+// (due) or 1 (half-done). not-due (2, al día within the staleness window) and
+// unknown (99, no connector/profile → no staleness window to respect) are NOT
+// due, so due-only mode skips them. Mirror of browser-extension/batch.js
+// PORTAL_RANK_NOT_DUE.
+export const PORTAL_RANK_NOT_DUE = 2;
+
+/**
+ * Is a portal DUE this cycle, given its #414 due-rank (or `undefined` when the
+ * portal has no connector/profile)? Pure. Due ⇔ rank is finite and
+ * < {@link PORTAL_RANK_NOT_DUE} (0 due, or 1 half-done). Anything else — al día
+ * (2), unknown/no-connector, or a non-finite rank — is NOT due. Mirror of
+ * browser-extension/batch.js `isPortalDue`.
+ */
+export function isPortalDue(rank: number | undefined): boolean {
+  return typeof rank === "number" && Number.isFinite(rank) && rank < PORTAL_RANK_NOT_DUE;
+}
+
 /**
  * Select the next ≤`limit` pending URLs, prioritised by portal due-rank (asc —
  * from {@link getPortalDuePriority}: due 0 < half-done 1 < not-due 2 < unknown)
@@ -174,11 +194,19 @@ const PORTAL_RANK_UNKNOWN = 99;
  * ties). This is the SERVER mirror of browser-extension/batch.js
  * `selectNextPending`; the two must stay in step so the endpoint and the
  * extension agree on ordering. Backs GET /api/etl/worklist?pending=1&limit=N.
+ *
+ * `dueOnly` (issue #434, default false): when true, FILTER OUT items whose
+ * portal is not due this cycle ({@link isPortalDue}) BEFORE ranking/slicing, so
+ * auto captures only work whose connector's staleness window has elapsed. An
+ * empty result then signals the driver "nothing due" → it idles until the next
+ * tick (never spins). `dueOnly=false` (the "Forzar" toggle) keeps the full
+ * pending set so already-done / not-due listings are re-captured.
  */
 export function selectNextPendingUrls(
   items: readonly PendingSelectionItem[],
   duePriorityByPortal: Readonly<Record<string, number>>,
   limit: number,
+  dueOnly = false,
 ): string[] {
   const lim = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 0;
   if (lim === 0) return [];
@@ -186,12 +214,15 @@ export function selectNextPendingUrls(
     const r = duePriorityByPortal[portal];
     return typeof r === "number" && Number.isFinite(r) ? r : PORTAL_RANK_UNKNOWN;
   };
+  const eligible = dueOnly
+    ? items.filter((it) => isPortalDue(duePriorityByPortal[it.portal]))
+    : items;
   const tsOf = (createdAt: string | null): number => {
     if (createdAt == null) return Number.MAX_SAFE_INTEGER;
     const t = Date.parse(createdAt);
     return Number.isFinite(t) ? t : Number.MAX_SAFE_INTEGER;
   };
-  return items
+  return eligible
     .map((it, i) => ({ it, i }))
     .sort((a, b) => {
       const ra = rankFor(a.it.portal);

@@ -241,6 +241,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     getAutoProgress().then(sendResponse).catch(() => sendResponse(null));
     return true; // async
   }
+  if (msg.type === 'SET_AUTO_FORCE') {
+    setAutoForce(msg.force === true)
+      .then(sendResponse)
+      .catch(() => sendResponse(null));
+    return true; // async
+  }
 });
 
 // ═══ Batch capture ══════════════════════════════════════════════════════════
@@ -1030,7 +1036,12 @@ reattachIfStranded();
 // Auto mode leaves the capture page open and drains the WHOLE worklist without
 // the operator clicking per batch:
 //   1. fetch the next ≤N pending URLs, prioritised (due-first then oldest) by
-//      GET /api/etl/worklist?pending=1&limit=N — see runAutoBatch / the route,
+//      GET /api/etl/worklist?pending=1&limit=N&dueOnly=1 — see runAutoBatch /
+//      the route. By default (`dueOnly=1`, issue #434) only portals whose
+//      connector staleness window has elapsed are returned; the "Forzar" toggle
+//      requests `dueOnly=0` to re-capture even not-due / already-done listings.
+//      When nothing is due the set is empty → Auto idles until the next tick
+//      (respecting the inter-batch timeout), it never spins,
 //   2. run the EXISTING bounded-concurrency capture queue over them (so the
 //      concurrency cap + WAF-safe jittered stagger are unchanged),
 //   3. on completion, schedule the NEXT batch via chrome.alarms after the
@@ -1064,12 +1075,19 @@ async function setAutoState(state) {
   await chrome.storage.session.set({ [AUTO_KEY]: state });
 }
 
-/** Operator's auto knobs (issue #424) from chrome.storage.sync, clamped by batch.js. */
+/** Operator's auto knobs (issue #424/#434) from chrome.storage.sync, clamped by batch.js. */
 async function getAutoConfig() {
-  const c = await chrome.storage.sync.get(['autoBatchSize', 'autoBatchTimeoutSec']);
+  const c = await chrome.storage.sync.get([
+    'autoBatchSize',
+    'autoBatchTimeoutSec',
+    'autoForce',
+  ]);
   return {
     batchSize: InmoBatch.clampAutoBatchSize(c.autoBatchSize),
     timeoutSec: InmoBatch.clampAutoTimeoutSec(c.autoBatchTimeoutSec),
+    // "Forzar" (issue #434): re-capture even not-due / already-done listings.
+    // Opt-in — only true when explicitly enabled; default is due-only capture.
+    force: c.autoForce === true,
   };
 }
 
@@ -1098,10 +1116,19 @@ async function isBatchActive() {
   return InmoBatch.isActive(s) || (!!s && s.status === InmoBatch.STATUSES.PAUSED);
 }
 
-/** Fetch the next ≤N pending URLs (prioritised) from the worklist endpoint. */
-async function fetchNextPending(portal, limit) {
+/**
+ * Fetch the next ≤N pending URLs (prioritised) from the worklist endpoint.
+ * `force` (issue #434): false → `dueOnly=1` (only portals whose staleness window
+ * has elapsed — the default); true → `dueOnly=0` (the whole pending set, so
+ * already-done / not-due listings are re-captured).
+ */
+async function fetchNextPending(portal, limit, force) {
   const { apiUrl, apiKey } = await getApiConfig();
-  const params = new URLSearchParams({ pending: '1', limit: String(limit) });
+  const params = new URLSearchParams({
+    pending: '1',
+    limit: String(limit),
+    dueOnly: force ? '0' : '1',
+  });
   if (portal) params.set('portal', portal);
   const response = await fetch(`${apiUrl}/api/etl/worklist?${params.toString()}`, {
     headers: { 'x-admin-key': apiKey },
@@ -1117,12 +1144,13 @@ async function fetchNextPending(portal, limit) {
 
 /** Turn Auto ON: persist enabled state, then kick the first batch immediately. */
 async function startAuto(portal) {
-  const { batchSize, timeoutSec } = await getAutoConfig();
+  const { batchSize, timeoutSec, force } = await getAutoConfig();
   const state = InmoBatch.makeAutoState({
     enabled: true,
     portal,
     batchSize,
     timeoutSec,
+    force,
     status: InmoBatch.AUTO_STATUS.IDLE,
   });
   await setAutoState(state);
@@ -1150,7 +1178,12 @@ async function stopAuto() {
 async function getAutoProgress() {
   const auto = await getAutoState();
   const batch = InmoBatch.progress(await getBatchState());
-  if (!auto) return { enabled: false, status: InmoBatch.AUTO_STATUS.IDLE, batch };
+  if (!auto) {
+    // No live auto state: surface the persisted "Forzar" preference so the
+    // popup's checkbox reflects it even before Auto is turned on (issue #434).
+    const { force } = await getAutoConfig();
+    return { enabled: false, status: InmoBatch.AUTO_STATUS.IDLE, force, batch };
+  }
   return {
     enabled: auto.enabled === true,
     status: auto.status,
@@ -1159,8 +1192,23 @@ async function getAutoProgress() {
     totalPending: auto.totalPending,
     batchSize: auto.batchSize,
     timeoutSec: auto.timeoutSec,
+    force: auto.force === true,
     batch,
   };
+}
+
+/**
+ * Set the "Forzar" preference (issue #434): persist it in chrome.storage.sync
+ * (survives everything, like the other auto knobs) AND, if Auto is currently
+ * running, update the live state so the very next batch respects it without
+ * needing a stop/start. Returns fresh progress.
+ */
+async function setAutoForce(force) {
+  const f = force === true;
+  await chrome.storage.sync.set({ autoForce: f });
+  const auto = await getAutoState();
+  if (auto) await setAutoState({ ...auto, force: f });
+  return getAutoProgress();
 }
 
 /**
@@ -1176,7 +1224,7 @@ async function runAutoBatch() {
 
   let next;
   try {
-    next = await fetchNextPending(auto.portal, auto.batchSize);
+    next = await fetchNextPending(auto.portal, auto.batchSize, auto.force === true);
   } catch {
     // Backend hiccup: back off one timeout and try again (Auto stays ON).
     await setAutoState({

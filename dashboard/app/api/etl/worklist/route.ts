@@ -35,20 +35,28 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const requestId = generateRequestId();
   const portal = request.nextUrl.searchParams.get("portal")?.trim() || undefined;
 
-  // Auto-capture continuous driver (issue #424): the extension asks for the next
-  // ≤N pending URLs, prioritised due-first then oldest, to drain in one batch.
+  // Auto-capture continuous driver (issue #424, due-only #434): the extension
+  // asks for the next ≤N pending URLs, prioritised due-first then oldest, to
+  // drain in one batch. `dueOnly` (default TRUE — the auto loop's default)
+  // returns ONLY items whose portal's connector is DUE this cycle (its staleness
+  // window has elapsed); `dueOnly=0` (the popup "Forzar" toggle) returns the full
+  // pending set so already-done / not-due listings are re-captured. When nothing
+  // is due, `urls` is empty and the driver idles until the next tick (no spin).
   if (request.nextUrl.searchParams.get("pending") != null) {
     const rawLimit = Number(request.nextUrl.searchParams.get("limit"));
     const limit =
       Number.isFinite(rawLimit) && rawLimit > 0
         ? Math.min(Math.floor(rawLimit), MAX_PENDING_LIMIT)
         : DEFAULT_PENDING_LIMIT;
+    // Default TRUE; only an explicit `dueOnly=0` (or `=false`) forces the full set.
+    const dueOnlyParam = request.nextUrl.searchParams.get("dueOnly");
+    const dueOnly = dueOnlyParam !== "0" && dueOnlyParam !== "false";
     try {
       const items = await listPendingWorklist(portal);
       // Best-effort due-ranking (never throws): a failure falls back to oldest-first.
       const duePriority = await getPortalDuePriority();
-      const urls = selectNextPendingUrls(items, duePriority, limit);
-      return NextResponse.json({ urls, totalPending: items.length });
+      const urls = selectNextPendingUrls(items, duePriority, limit, dueOnly);
+      return NextResponse.json({ urls, totalPending: items.length, dueOnly });
     } catch (err) {
       console.error(`[${requestId}] Error al seleccionar pendientes de la worklist:`, err);
       return NextResponse.json(
