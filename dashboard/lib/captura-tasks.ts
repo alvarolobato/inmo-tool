@@ -376,6 +376,49 @@ export interface ProfileCaptureView {
   actionableConnectors: number;
 }
 
+/**
+ * Per-profile capture-progress summary for one connector's line (issue #433):
+ * "capturados / total esperado · restantes". The owner wants the raw capture
+ * count to sit next to how much is still expected, not float alone.
+ *
+ * The three numbers are kept in ONE basis so they RECONCILE by construction
+ * (`captured + remaining === total`), which is what makes the line trustworthy:
+ *   - captured  = `capturedProfile` — DISTINCT properties captured on this
+ *                 connector that match THIS profile (issue #430/#431), the same
+ *                 headline "capturados" figure the rest of the page shows;
+ *   - remaining = `dueCount`        — tasks still pending this cycle (the "por
+ *                 hacer" figure the due/half-done logic already derives — this
+ *                 is display only, it never changes that logic);
+ *   - total     = captured + remaining (the "pending+captured basis").
+ * An empty connector (nothing captured, nothing due) reads 0 / 0 · 0. Both
+ * inputs are floored at 0 defensively so the numbers can never go negative.
+ */
+export interface CaptureSummary {
+  /** Per-profile captured properties on this connector (`capturedProfile`). */
+  captured: number;
+  /** Total expected = captured + remaining (pending+captured basis). */
+  total: number;
+  /** Still pending this cycle (`dueCount`). */
+  remaining: number;
+}
+
+/** Compute the reconciling capture summary for a connector line (issue #433). */
+export function captureSummary(
+  connector: Pick<ConnectorView, "capturedProfile" | "dueCount">,
+): CaptureSummary {
+  const captured = Math.max(0, connector.capturedProfile);
+  const remaining = Math.max(0, connector.dueCount);
+  return { captured, total: captured + remaining, remaining };
+}
+
+/** Render the summary as the compact "12 / 40 · 28 restantes" line (issue #433). */
+export function formatCaptureSummary(
+  connector: Pick<ConnectorView, "capturedProfile" | "dueCount">,
+): string {
+  const { captured, total, remaining } = captureSummary(connector);
+  return `${captured} / ${total} · ${remaining} restantes`;
+}
+
 /** The connector state from its due/muted task counts. Pure — see block above. */
 export function deriveConnectorState(dueCount: number, mutedCount: number): ConnectorState {
   if (dueCount === 0) return "not-due";

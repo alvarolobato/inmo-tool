@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { CaptureTaskRow } from "@/components/captura/CaptureTaskRow";
-import { lastDoneLabel, relativeAgo, type ConnectorView } from "@/lib/captura-tasks";
+import { formatCaptureSummary, lastDoneLabel, relativeAgo, type ConnectorView } from "@/lib/captura-tasks";
 import type { CaptureTask } from "@/lib/captura-tasks";
 import { withCaptureSignal } from "@/lib/extension-capture";
 
@@ -55,25 +55,24 @@ export function ConnectorSection({
 
   const colors = useMemo(() => stateColors(connector.state), [connector.state]);
 
-  const collapsedLine = useMemo(() => {
-    const parts = [
-      `${connector.totalTasks} tarea${connector.totalTasks === 1 ? "" : "s"}`,
-      connector.dueCount > 0
-        ? `${connector.dueCount} por hacer`
-        : "todo al día",
-    ];
+  // Headline capture-progress summary (issue #433): "capturados / total · N
+  // restantes", the three numbers reconciling by construction. Shown on both the
+  // collapsed and the expanded line.
+  const summaryLine = useMemo(() => formatCaptureSummary(connector), [connector]);
+
+  // Secondary context that trails the summary on the collapsed line: how many
+  // tasks are already al-día this cycle, and the portal-global capture recency.
+  const contextLine = useMemo(() => {
+    const parts: string[] = [];
     if (connector.mutedCount > 0 && connector.dueCount > 0) {
       parts.push(`${connector.mutedCount} al día`);
     }
-    // Per-profile captured is the headline figure (issue #430); the
-    // portal-global count trails in parentheses as secondary context.
     if (connector.capturedProfile > 0 || connector.capturedReal > 0) {
-      const perProfile = `${connector.capturedProfile} capturada${connector.capturedProfile === 1 ? "" : "s"} en este perfil`;
       const global =
         connector.capturedReal !== connector.capturedProfile
           ? ` (${connector.capturedReal} en el portal)`
           : "";
-      parts.push(`${perProfile}${global} · última ${relativeAgo(connector.lastCapturedAt)}`);
+      parts.push(`última ${relativeAgo(connector.lastCapturedAt)}${global}`);
     }
     return parts.join(" · ");
   }, [connector]);
@@ -160,9 +159,22 @@ export function ConnectorSection({
         {!expanded && (
           <span
             data-testid={`captura-connector-stats-${profileId}-${connector.portal}`}
-            style={{ fontSize: 12, color: "var(--fg-muted)", marginLeft: "auto" }}
+            style={{
+              marginLeft: "auto",
+              display: "inline-flex",
+              alignItems: "baseline",
+              gap: 8,
+              fontSize: 12,
+              color: "var(--fg-muted)",
+            }}
           >
-            {collapsedLine}
+            <span
+              data-testid={`captura-connector-summary-${profileId}-${connector.portal}`}
+              style={{ color: "var(--fg)", fontWeight: 600 }}
+            >
+              {summaryLine}
+            </span>
+            {contextLine && <span>{contextLine}</span>}
           </span>
         )}
       </button>
@@ -179,6 +191,14 @@ export function ConnectorSection({
               marginBottom: 10,
             }}
           >
+            {/* Capture-progress summary (issue #433): capturados / total · N
+                restantes — the same reconciling headline shown when collapsed. */}
+            <span
+              data-testid={`captura-connector-summary-${profileId}-${connector.portal}`}
+              style={{ fontSize: 12, fontWeight: 600, color: "var(--fg)" }}
+            >
+              {summaryLine}
+            </span>
             {/* Per-profile captured is the headline figure (issue #430): DISTINCT
                 properties captured on this connector that match THIS profile,
                 via profile_listing_state. CAVEAT: captures aren't exclusive — a
