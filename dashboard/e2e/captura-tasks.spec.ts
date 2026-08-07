@@ -87,8 +87,11 @@ async function purge(): Promise<void> {
         .catch(() => undefined);
     }
   }
+  // extension_capture rows must go before the property they reference (FK).
   await pool.query("DELETE FROM extension_capture WHERE url LIKE '%E2E-CAP413-%'");
   await pool.query("DELETE FROM capture_worklist WHERE url LIKE '%E2E-CAP413-%'");
+  // The per-profile captured property (issue #430) — after its FK children above.
+  await pool.query("DELETE FROM property WHERE address LIKE 'E2E-CAP413-%'");
   await pool.query("DELETE FROM search_profile WHERE name = ANY($1)", [[PROFILE_A, PROFILE_B]]);
 }
 
@@ -139,6 +142,26 @@ test.beforeAll(async () => {
       [url],
     );
   }
+
+  // Per-profile captured split (issue #430): a single captured idealista
+  // property that matches profile A (profile_listing_state matched=true) but
+  // NOT profile B. A's idealista connector must count it; B's must not. The two
+  // EC_SEED captures above have NULL property_id, so they count for NOBODY —
+  // exercising that arm too. (extension_capture.property_id → property.id.)
+  const prop = await pool.query<{ id: number }>(
+    `INSERT INTO property (address) VALUES ('E2E-CAP413-PROP') RETURNING id`,
+  );
+  const propId = prop.rows[0].id;
+  await pool.query(
+    `INSERT INTO extension_capture (url, status, connector_name, property_id)
+     VALUES ($1, 'done', 'idealista', $2)`,
+    ["https://www.idealista.com/inmueble/E2E-CAP413-MATCHED/", propId],
+  );
+  await pool.query(
+    `INSERT INTO profile_listing_state (profile_id, property_id, matched)
+     VALUES ($1, $2, true)`,
+    [profileAId, propId],
+  );
 });
 
 test.afterAll(async () => {
@@ -212,6 +235,16 @@ test("stacks both profiles; expands due/half-done, collapses not-due; manual exp
   await page.getByTestId(`captura-connector-toggle-${profileBId}-idealista`).click();
   await expect(bIdeaConn).toHaveAttribute("data-expanded", "true");
   await expect(bIdeaConn.locator('[data-testid^="captura-task-run-"]').first()).toBeVisible();
+
+  // Per-profile captured split (issue #430): the one matched idealista property
+  // belongs to profile A only. A's idealista activity line shows its per-profile
+  // count; B's shows none — the portal-global figure is NOT used per profile.
+  await expect(page.getByTestId(`captura-activity-${profileAId}-idealista`)).toContainText(
+    "1 propiedad de este perfil capturada",
+  );
+  await expect(page.getByTestId(`captura-activity-${profileBId}-idealista`)).toContainText(
+    "sin capturas de este perfil todavía",
+  );
 
   // Launch a capture from an expanded connector: records the run + opens the URL.
   const aliButton = bAliConn.locator('[data-testid^="captura-task-run-"]').first();

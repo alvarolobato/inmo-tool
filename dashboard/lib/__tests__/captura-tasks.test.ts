@@ -8,9 +8,14 @@ import {
   relativeAgo,
   resolveStalenessDays,
   groupTasksByPortal,
+  deriveConnectorState,
+  buildConnectorViews,
+  buildProfileCaptureView,
   DEFAULT_STALENESS_DAYS,
   type CaptureTask,
+  type PortalCaptureActivity,
 } from "@/lib/captura-tasks";
+import type { WorklistPortalSummary } from "@/lib/worklist";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -208,5 +213,103 @@ describe("groupTasksByPortal", () => {
 
   it("returns [] for no tasks", () => {
     expect(groupTasksByPortal([])).toEqual([]);
+  });
+});
+
+describe("per-profile × connector captured counts (issue #430)", () => {
+  const t = (id: string, portal: string): CaptureTask => ({
+    id,
+    portal,
+    label: portalTitle(portal),
+    url: `https://${portal}/${id}`,
+    loosened: [],
+  });
+  const staleness = { defaultDays: 7, byPortal: {} };
+  const emptyActivity = new Map<string, PortalCaptureActivity>();
+  const emptySummary = new Map<string, WorklistPortalSummary>();
+
+  it("uses the per-connector map for capturedProfile, independent of portal-global", () => {
+    const activity = new Map<string, PortalCaptureActivity>([
+      ["idealista", { portal: "idealista", captured: 10, lastCapturedAt: "2026-08-01T00:00:00.000Z" }],
+    ]);
+    const [connector] = buildConnectorViews(
+      [t("a", "idealista")],
+      {},
+      staleness,
+      activity,
+      emptySummary,
+      { idealista: 3 },
+    );
+    // Per-profile figure comes from the map; portal-global is carried alongside.
+    expect(connector.capturedProfile).toBe(3);
+    expect(connector.capturedReal).toBe(10);
+  });
+
+  it("defaults capturedProfile to 0 for a connector absent from the map", () => {
+    const [connector] = buildConnectorViews(
+      [t("a", "aliseda")],
+      {},
+      staleness,
+      emptyActivity,
+      emptySummary,
+      { idealista: 5 }, // no aliseda entry
+    );
+    expect(connector.capturedProfile).toBe(0);
+  });
+
+  it("counts a property matching MULTIPLE profiles under EACH (captures not exclusive)", () => {
+    // The same captured idealista property matches profiles 1 AND 2, so the
+    // per-profile map (the shape getProfileConnectorCaptured returns) carries a
+    // count of 1 for BOTH — the correct 'this profile has that captured' reading.
+    const capturedByProfileConnector = new Map<number, Record<string, number>>([
+      [1, { idealista: 1 }],
+      [2, { idealista: 1 }],
+    ]);
+    const tasks = [t("a", "idealista")];
+    const viewA = buildProfileCaptureView(
+      { id: 1, name: "A" },
+      tasks,
+      {},
+      staleness,
+      emptyActivity,
+      emptySummary,
+      capturedByProfileConnector,
+    );
+    const viewB = buildProfileCaptureView(
+      { id: 2, name: "B" },
+      tasks,
+      {},
+      staleness,
+      emptyActivity,
+      emptySummary,
+      capturedByProfileConnector,
+    );
+    expect(viewA.connectors[0].capturedProfile).toBe(1);
+    expect(viewB.connectors[0].capturedProfile).toBe(1);
+  });
+
+  it("gives a profile absent from the captured map all-zero per-profile counts", () => {
+    const view = buildProfileCaptureView(
+      { id: 99, name: "Z" },
+      [t("a", "idealista")],
+      {},
+      staleness,
+      emptyActivity,
+      emptySummary,
+      new Map(), // profile 99 not present
+    );
+    expect(view.connectors[0].capturedProfile).toBe(0);
+  });
+});
+
+describe("deriveConnectorState", () => {
+  it("not-due when nothing is due", () => {
+    expect(deriveConnectorState(0, 3)).toBe("not-due");
+  });
+  it("half-done when some due and some muted", () => {
+    expect(deriveConnectorState(2, 1)).toBe("half-done");
+  });
+  it("due when everything is pending", () => {
+    expect(deriveConnectorState(2, 0)).toBe("due");
   });
 });

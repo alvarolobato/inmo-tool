@@ -13,7 +13,12 @@ vi.mock("pg", () => ({
   types: { setTypeParser: vi.fn(), builtins: { INT8: 20 } },
 }));
 
-import { getTaskRuns, recordTaskRun, getPortalCaptureActivity } from "../capture-task-run";
+import {
+  getTaskRuns,
+  recordTaskRun,
+  getPortalCaptureActivity,
+  getProfileConnectorCaptured,
+} from "../capture-task-run";
 import { resetPool } from "@/lib/db-write";
 
 beforeEach(async () => {
@@ -131,5 +136,48 @@ describe("getPortalCaptureActivity", () => {
     });
     const out = await getPortalCaptureActivity();
     for (const a of out) expect(a.captured).toBe(0);
+  });
+});
+
+describe("getProfileConnectorCaptured (issue #430)", () => {
+  it("builds a profileId → { connector: count } map from grouped rows", async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [
+        { profile_id: 1, connector_name: "idealista", captured: 3 },
+        { profile_id: 1, connector_name: "aliseda", captured: 1 },
+        // pg may hand back COUNT() as a string — must be coerced to a number.
+        { profile_id: 2, connector_name: "idealista", captured: "5" },
+      ],
+    });
+    const out = await getProfileConnectorCaptured([1, 2], ["idealista", "aliseda"]);
+    expect(out.get(1)).toEqual({ idealista: 3, aliseda: 1 });
+    expect(out.get(2)).toEqual({ idealista: 5 });
+  });
+
+  it("scopes the query to the given profile ids and connectors, params bound", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    await getProfileConnectorCaptured([7, 9], ["idealista"]);
+    const [text, params] = mockQuery.mock.calls[0];
+    // Joins captures to the profile link and counts DISTINCT properties.
+    expect(text).toContain("FROM extension_capture");
+    expect(text).toContain("JOIN profile_listing_state");
+    expect(text).toContain("COUNT(DISTINCT ec.property_id)");
+    expect(text).toContain("status = 'done'");
+    expect(text).toContain("matched = true");
+    expect(text).toContain("property_id IS NOT NULL");
+    // $1 = profile ids, $2 = connector names — de-duplicated, bounded.
+    expect(params).toEqual([[7, 9], ["idealista"]]);
+  });
+
+  it("de-duplicates ids/connectors and short-circuits on empty inputs", async () => {
+    const emptyIds = await getProfileConnectorCaptured([], ["idealista"]);
+    const emptyConns = await getProfileConnectorCaptured([1], []);
+    expect(emptyIds.size).toBe(0);
+    expect(emptyConns.size).toBe(0);
+    expect(mockQuery).not.toHaveBeenCalled();
+
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    await getProfileConnectorCaptured([1, 1, 2], ["idealista", "idealista"]);
+    expect(mockQuery.mock.calls[0][1]).toEqual([[1, 2], ["idealista"]]);
   });
 });
