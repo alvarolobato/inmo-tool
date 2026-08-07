@@ -14,6 +14,7 @@ vi.mock("pg", () => ({
 }));
 
 import {
+  classifyPriceChange,
   decodeCursor,
   describeRankingBoost,
   flagsFromAssessments,
@@ -137,6 +138,58 @@ describe("listCandidates", () => {
     });
     const page = await listCandidates(1);
     expect(page.items.map((i) => i.is_new)).toEqual([true, false, false]);
+  });
+
+  it("#420: builds a bounded, pre-aggregated price_moves CTE joined once, WITHOUT touching the sort", async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [] });
+
+    await listCandidates(7);
+
+    const [sql, params] = mockPoolQuery.mock.calls[0];
+    // A pre-aggregated CTE (one row per property via rn=1), BOUNDED to base's
+    // property set through the JOIN — never a LAG() over the whole
+    // listing_price_history (the digest loadPriceDrops anti-pattern §3.3 warns
+    // about), and never a correlated subquery in base.
+    expect(sql).toContain("price_moves AS (");
+    expect(sql).toContain("JOIN base b ON b.property_id = l.property_id");
+    expect(sql).toContain(
+      "LAG(h.price) OVER (PARTITION BY b.property_id\n                                     ORDER BY h.observed_at, h.id) AS prev_price",
+    );
+    expect(sql).toContain("ROW_NUMBER() OVER (PARTITION BY b.property_id");
+    expect(sql).toContain("(curr_price - prev_price) / prev_price AS delta_pct");
+    // Change SINCE the visit anchor (same anchor as is_new), latest move only.
+    expect(sql).toContain("WHERE rn = 1");
+    expect(sql).toContain("observed_at > (SELECT ts FROM anchor)");
+    // Joined once into ranked and surfaced as a raw delta; the sanity band is a
+    // TS concern, so no threshold literal appears in the SQL.
+    expect(sql).toContain("LEFT JOIN price_moves pm ON pm.property_id = base.property_id");
+    expect(sql).toContain("pm.delta_pct AS price_delta_pct");
+    expect(sql).toContain("ranked.price_delta_pct");
+    // No ordering change (phase 2, like phase 1): the FINAL sort key is still the
+    // blend + id — price movement is presentation-only, never a sort tier.
+    const rankedOrderBys = sql.match(/ORDER BY ranked\.[^\n]*/g) ?? [];
+    expect(rankedOrderBys).toEqual(["ORDER BY ranked.effective_score DESC, ranked.property_id DESC"]);
+    // No new positional parameter — thresholds are read from config in TS, not
+    // passed to SQL, so the param list is unchanged.
+    expect(params).toEqual([7, null, null, 31, null, WARN_CAVEAT_CODES, ...NO_FILTER_TAIL]);
+  });
+
+  it("#420: applies the sanity band when mapping price_delta_pct → price_changed/direction", async () => {
+    mockPoolQuery.mockResolvedValueOnce({
+      rows: [
+        { ...stubRow(2), price_delta_pct: "-0.086" }, // -8.6% drop → BAJADA
+        { ...stubRow(3), price_delta_pct: "0.077" }, // +7.7% rise → SUBIDA
+        { ...stubRow(4), price_delta_pct: "-0.001" }, // -0.1% noise → no badge
+        { ...stubRow(5), price_delta_pct: "-0.96" }, // -96% suspect → no badge
+        { ...stubRow(6) }, // no move (LEFT JOIN default) → no badge
+      ],
+    });
+    const page = await listCandidates(1);
+    expect(page.items.map((i) => i.price_changed)).toEqual([true, true, false, false, false]);
+    expect(page.items.map((i) => i.price_direction)).toEqual(["drop", "up", null, null, null]);
+    // Raw delta is carried through even for suspects (for a data-health view),
+    // null only when there was no move.
+    expect(page.items.map((i) => i.price_delta_pct)).toEqual([-0.086, 0.077, -0.001, -0.96, null]);
   });
 
   it("excludes rejected candidates by default and derives feedback_state (#379)", async () => {
@@ -877,6 +930,60 @@ describe("getAdjacentCandidates", () => {
     // "prev" (ranked better) reverses both the sort and the comparison.
     expect(prevSql).toContain("ORDER BY effective_score ASC, property_id ASC");
     expect(prevSql).toContain("> $2::double precision");
+  });
+});
+
+describe("classifyPriceChange (#420 sanity band)", () => {
+  // Defaults as fractions: 1% .. 60%.
+  const MIN = 0.01;
+  const MAX = 0.6;
+
+  it("badges a mid-range drop as BAJADA (direction 'drop')", () => {
+    expect(classifyPriceChange(-0.086, MIN, MAX)).toEqual({
+      price_changed: true,
+      price_delta_pct: -0.086,
+      price_direction: "drop",
+    });
+  });
+
+  it("badges a mid-range rise as SUBIDA (direction 'up')", () => {
+    expect(classifyPriceChange(0.077, MIN, MAX)).toEqual({
+      price_changed: true,
+      price_delta_pct: 0.077,
+      price_direction: "up",
+    });
+  });
+
+  it("does NOT badge a just-under-1% move (noise) but keeps the raw delta", () => {
+    expect(classifyPriceChange(-0.009, MIN, MAX)).toEqual({
+      price_changed: false,
+      price_delta_pct: -0.009,
+      price_direction: null,
+    });
+  });
+
+  it("does NOT badge a just-over-60% move (suspect) but keeps the raw delta for data-health", () => {
+    expect(classifyPriceChange(-0.62, MIN, MAX)).toEqual({
+      price_changed: false,
+      price_delta_pct: -0.62,
+      price_direction: null,
+    });
+    // The demo's −96% artifact — excluded from the badge, delta preserved.
+    expect(classifyPriceChange(-0.96, MIN, MAX)).toMatchObject({ price_changed: false });
+  });
+
+  it("treats both band edges as inclusive (exactly 1% and exactly 60% badge)", () => {
+    expect(classifyPriceChange(0.01, MIN, MAX).price_changed).toBe(true);
+    expect(classifyPriceChange(-0.6, MIN, MAX).price_changed).toBe(true);
+  });
+
+  it("returns a clean no-change signal for null / non-finite input", () => {
+    expect(classifyPriceChange(null, MIN, MAX)).toEqual({
+      price_changed: false,
+      price_delta_pct: null,
+      price_direction: null,
+    });
+    expect(classifyPriceChange(Number.NaN, MIN, MAX).price_changed).toBe(false);
   });
 });
 

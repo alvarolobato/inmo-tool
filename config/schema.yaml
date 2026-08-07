@@ -742,6 +742,26 @@
   requires_restart: []
   components: [dashboard]
 
+- key: feed.price_change_min_pct
+  env: FEED_PRICE_CHANGE_MIN_PCT
+  type: int
+  sensitive: false
+  default: 1
+  section: "Dashboard App"
+  description: "Banda de cordura del badge de cambio de precio del feed (#420, plan #415 §3.3), umbral MÍNIMO en %. Un cambio de precio desde tu última visita cuyo |delta| sea menor que este porcentaje se considera ruido y NO muestra badge BAJADA/SUBIDA (dato: 1 de cada 10 cambios de la demo es un −0,1% sin valor). Rango 0–100."
+  requires_restart: []
+  components: [dashboard]
+
+- key: feed.price_change_max_pct
+  env: FEED_PRICE_CHANGE_MAX_PCT
+  type: int
+  sensitive: false
+  default: 60
+  section: "Dashboard App"
+  description: "Banda de cordura del badge de cambio de precio del feed (#420, plan #415 §3.3), umbral MÁXIMO en %. Un cambio cuyo |delta| supere este porcentaje se trata como sospechoso (artefacto de datos, p.ej. el −96% de la demo) y NO muestra badge — el delta se conserva para una vista de calidad de datos, pero no marca ni alerta. Rango 1–100."
+  requires_restart: []
+  components: [dashboard]
+
 - key: dashboard.app_public_url
   env: APP_PUBLIC_URL
   type: string

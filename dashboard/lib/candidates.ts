@@ -12,6 +12,7 @@
  */
 
 import { sql } from "@/lib/db-write";
+import { readIntInRange } from "@/lib/notifications/config-read";
 import { DISABLED_SOURCES_CTE, activeSourceClause } from "@/lib/db/source-active";
 import { REDFLAG_LABELS } from "@/lib/ai-assessment/redflags";
 import { BEACH_PROXIMITY_LABELS, HERITAGE_ZONE_LABEL } from "@/lib/ai-assessment/location";
@@ -119,6 +120,40 @@ export interface CandidateRow {
    * (fresh-first ordering is phase 3).
    */
   is_new: boolean;
+  /**
+   * Price-change signal (#420, plan #415 §3.2/§3.3): true when this property's
+   * price MOVED since the profile's last visit AND the move clears the sanity
+   * band (`|delta_pct|` within `[feed.price_change_min_pct, price_change_max_pct]`,
+   * default 1%–60%). Same visit anchor as `is_new` (`previous_viewed_at`, with the
+   * `created_at - 1 day` fallback), so "cambió desde mi última visita" and NUEVO
+   * expire together on the next visit — this is a change SINCE the anchor, NOT the
+   * cumulative-from-first-price drop `computePropertyScoringSignals` returns.
+   *
+   * A sub-1% move (noise) and a >60% move (a data artifact — the demo has a −96%
+   * one) both leave this `false` while `price_delta_pct` still carries the raw
+   * figure, so a data-health view can surface suspects without the feed badging
+   * them. Presentation only — never folded into `effective_score` or the sort
+   * (fresh-first ordering is phase 3). Direction lives in `price_direction`; the
+   * signed `price_delta_pct` is the single source both derive from.
+   */
+  price_changed: boolean;
+  /**
+   * Signed change fraction of the latest price move since the visit anchor
+   * (#420): negative = price fell (a BAJADA, good for a buyer), positive = rose
+   * (SUBIDA). `(curr - prev) / prev` over the property's `listing_price_history`,
+   * latest consecutive pair only. Null when no move happened since the anchor.
+   * Carried raw (band NOT applied here) so `price_changed=false` suspects still
+   * expose their delta for data-health; the card reads it only when
+   * `price_changed` is true.
+   */
+  price_delta_pct: number | null;
+  /**
+   * Direction of a badge-worthy price move (#420): `"drop"` (BAJADA, `--up`
+   * token) / `"up"` (SUBIDA, `--down` token) / null when nothing badge-worthy.
+   * Derived from `sign(price_delta_pct)` and gated by the same sanity band as
+   * `price_changed`, so it is non-null exactly when `price_changed` is true.
+   */
+  price_direction: "drop" | "up" | null;
   /**
    * FRESHEST `last_seen_at` across the property's *active* sale listings —
    * "last time discover() re-confirmed this property is still live" (issue
@@ -738,6 +773,46 @@ function rankedCandidatesCte(warnParam: string): string {
         WHERE ${activeSourceClause("l")}
         GROUP BY b.property_id
      ),
+     -- #420 price-change signal (plan #415 §3.3): the property's LATEST
+     -- consecutive price move, and its signed delta, when that move happened
+     -- after the visit anchor. BOUNDED to base's property set via the JOIN —
+     -- NEVER a LAG() over the whole listing_price_history (the digest.ts
+     -- loadPriceDrops anti-pattern §3.3 calls out). Pre-aggregated to one row
+     -- per property (rn=1 keeps only the most recent observation), joined once
+     -- into ranked — mirroring novelty's shape, not a correlated subquery in
+     -- base (the D-057 cost). PARTITION BY property_id per the plan: a
+     -- deduplicated property has a single price stream at the card level.
+     --
+     -- Copies computePropertyScoringSignals' set-based SHAPE, not its predicate:
+     -- that helper measures the cumulative drop from the FIRST-ever price; this
+     -- measures the change since the visit anchor ("cambió desde mi última
+     -- visita"). The sanity band (min/max %) is applied in TS (classifyPriceChange)
+     -- so the raw delta stays available for a data-health surface; delta_pct is
+     -- carried through ranked.* and read only by listCandidates (getAdjacentCandidates
+     -- selects only property_id/effective_score, so this is harmless there — same
+     -- as novelty). prev_price is guaranteed non-null, non-zero and distinct, so
+     -- the division is safe.
+     price_moves AS (
+       SELECT property_id,
+              (curr_price - prev_price) / prev_price AS delta_pct
+         FROM (
+           SELECT b.property_id,
+                  h.price AS curr_price,
+                  h.observed_at,
+                  LAG(h.price) OVER (PARTITION BY b.property_id
+                                     ORDER BY h.observed_at, h.id) AS prev_price,
+                  ROW_NUMBER() OVER (PARTITION BY b.property_id
+                                     ORDER BY h.observed_at DESC, h.id DESC) AS rn
+             FROM listing_price_history h
+             JOIN listing l ON l.id = h.listing_id
+             JOIN base b ON b.property_id = l.property_id
+         ) w
+        WHERE rn = 1
+          AND prev_price IS NOT NULL
+          AND prev_price <> 0
+          AND curr_price IS DISTINCT FROM prev_price
+          AND observed_at > (SELECT ts FROM anchor)
+     ),
      pool AS (
        SELECT
          percentile_cont(0.5) WITHIN GROUP (ORDER BY ppm2) AS median_ppm2,
@@ -754,6 +829,11 @@ function rankedCandidatesCte(warnParam: string): string {
          -- effective_score or the ORDER BY — novelty is presentation only in
          -- phase 1 (fresh-first ordering is phase 3).
          COALESCE(nov.is_new, false) AS is_new,
+         -- #420: the signed price-change fraction since the visit anchor, or NULL
+         -- when the property's price did not move since then. Presentation only —
+         -- deliberately NOT part of effective_score or the ORDER BY (fresh-first
+         -- ordering is phase 3). The sanity band is applied downstream in TS.
+         pm.delta_pct AS price_delta_pct,
          CASE
            WHEN base.ppm2 IS NOT NULL AND pool.n >= ${MIN_POOL_SIZE}
                 AND pool.median_ppm2 IS NOT NULL AND pool.median_ppm2 > 0
@@ -781,6 +861,7 @@ function rankedCandidatesCte(warnParam: string): string {
          ) AS effective_score
        FROM base CROSS JOIN pool
        LEFT JOIN novelty nov ON nov.property_id = base.property_id
+       LEFT JOIN price_moves pm ON pm.property_id = base.property_id
      )`;
 }
 
@@ -821,6 +902,62 @@ export function describeRankingBoost(
   }
   if (parts.length === 0) return null;
   return `Destacado: ${parts.join("; ")}.`;
+}
+
+/**
+ * The three price-change presentation fields the card renders, all derived from
+ * one signed delta and the configured sanity band (#420, plan #415 §3.3).
+ */
+export interface PriceChangeSignal {
+  /** Badge-worthy: a real move whose `|delta|` is within the sanity band. */
+  price_changed: boolean;
+  /** Signed change fraction, carried RAW (band not applied) so suspects keep it for data-health; null when no move since the anchor. */
+  price_delta_pct: number | null;
+  /** `"drop"` (BAJADA) / `"up"` (SUBIDA) / null — non-null exactly when `price_changed`. */
+  price_direction: "drop" | "up" | null;
+}
+
+/**
+ * Applies the mandatory sanity band (plan §3.3, grounded in §2.0a: 1 of 10 demo
+ * changes is a −96% artifact, 1 is a −0,1% non-event) to a raw price-change
+ * delta from the `price_moves` CTE. Pure and exported so the "just-under 1% /
+ * just-over 60% / mid-range" behaviour is unit-testable directly (the SQL only
+ * measures the move; this decides whether it badges).
+ *
+ * `minFrac`/`maxFrac` are FRACTIONS (0.01 / 0.60 for the 1%/60% defaults). A
+ * move is badge-worthy when `|delta|` is within `[minFrac, maxFrac]` inclusive:
+ * below `minFrac` is noise (no badge), above `maxFrac` is a suspect data
+ * artifact (no badge, excluded from alerts too — phase 5). The raw `delta` is
+ * always carried through so a data-health view can surface suspects instead of
+ * dropping them silently. Direction is `sign(delta)`: negative = BAJADA (a drop,
+ * good for a buyer), positive = SUBIDA.
+ */
+export function classifyPriceChange(
+  delta: number | null,
+  minFrac: number,
+  maxFrac: number,
+): PriceChangeSignal {
+  if (delta === null || !Number.isFinite(delta)) {
+    return { price_changed: false, price_delta_pct: null, price_direction: null };
+  }
+  const abs = Math.abs(delta);
+  const withinBand = abs >= minFrac && abs <= maxFrac;
+  return {
+    price_changed: withinBand,
+    price_delta_pct: delta,
+    price_direction: withinBand ? (delta < 0 ? "drop" : "up") : null,
+  };
+}
+
+/**
+ * Reads the feed price-change sanity band from config (env > config.yaml >
+ * default), as FRACTIONS ready for {@link classifyPriceChange}. Defaults 1%/60%
+ * (`feed.price_change_min_pct` / `feed.price_change_max_pct`).
+ */
+function readPriceChangeBand(): { minFrac: number; maxFrac: number } {
+  const minPct = readIntInRange("feed.price_change_min_pct", "FEED_PRICE_CHANGE_MIN_PCT", 1, 0, 100);
+  const maxPct = readIntInRange("feed.price_change_max_pct", "FEED_PRICE_CHANGE_MAX_PCT", 60, 1, 100);
+  return { minFrac: minPct / 100, maxFrac: maxPct / 100 };
 }
 
 interface CandidateCursor {
@@ -870,6 +1007,8 @@ interface RawCandidateRow {
   last_seen_at: string | null;
   /** #416 novelty mark — boolean straight from the `ranked` CTE. */
   is_new: boolean;
+  /** #420 raw signed price-change fraction since the visit anchor (NUMERIC → string); null when the price did not move since then. Sanity band applied in TS (classifyPriceChange). */
+  price_delta_pct: string | null;
   listings: CandidateListingSummary[];
   score: string | null;
   rank_explanation: string | null;
@@ -1324,6 +1463,10 @@ export async function listCandidates(
        -- (same first_seen_at basis as the column just above). Projected here so
        -- the card can render its NUEVO badge from the row directly.
        ranked.is_new,
+       -- #420 raw price-change delta since the visit anchor, derived in the
+       -- price_moves CTE (same anchor as is_new). The sanity band that decides
+       -- whether it badges is applied in TS below (classifyPriceChange).
+       ranked.price_delta_pct,
        -- FRESHEST last_seen_at across active SALE listings (issue #243): the
        -- staleness age the card renders. MAX, not MIN — the property is only
        -- as stale as its most-recently-re-confirmed listing. Same
@@ -1484,6 +1627,10 @@ export async function listCandidates(
 
   const flagsByProperty = await loadFlags(pageRows.map((r) => r.property_id));
 
+  // #420 sanity band read once per page (env > config.yaml > default 1%/60%),
+  // applied per row by classifyPriceChange below.
+  const priceBand = readPriceChangeBand();
+
   const items: CandidateRow[] = pageRows.map((r) => ({
     // property_id (bigint) arrives as a real JS number via the driver-level
     // int8 type parser (db-shared.ts, #155) — no per-site Number() needed.
@@ -1504,6 +1651,12 @@ export async function listCandidates(
     first_seen_at: r.first_seen_at,
     last_seen_at: r.last_seen_at,
     is_new: r.is_new === true,
+    // #420 price-change signal + BAJADA/SUBIDA direction, sanity band applied.
+    ...classifyPriceChange(
+      r.price_delta_pct != null ? Number(r.price_delta_pct) : null,
+      priceBand.minFrac,
+      priceBand.maxFrac,
+    ),
     listings: r.listings,
     score: r.score !== null ? Number(r.score) : null,
     rank_explanation: r.rank_explanation,

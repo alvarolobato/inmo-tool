@@ -27,6 +27,9 @@ function candidate(overrides: Partial<CandidateRow> = {}): CandidateRow {
     // with dates relative to Date.now().
     last_seen_at: null,
     is_new: false,
+    price_changed: false,
+    price_delta_pct: null,
+    price_direction: null,
     listings: [{ id: 10, source: "fotocasa", url: "https://x", current_price: 285000 }],
     score: null,
     rank_explanation: null,
@@ -48,6 +51,40 @@ describe("CandidateCard", () => {
     rerender(<CandidateCard candidate={candidate({ is_new: false })} profileId={5} />);
     expect(screen.getByTestId("candidate-card")).not.toHaveAttribute("data-novelty");
     expect(screen.queryByTestId("candidate-novelty")).toBeNull();
+  });
+
+  it("#420: renders a BAJADA badge for a drop and a SUBIDA badge for a rise, with the right tone hook", () => {
+    const { rerender } = render(
+      <CandidateCard
+        candidate={candidate({ price_changed: true, price_delta_pct: -0.086, price_direction: "drop" })}
+        profileId={5}
+      />,
+    );
+    const drop = screen.getByTestId("candidate-price-change");
+    expect(drop).toHaveTextContent(/BAJADA/);
+    expect(drop).toHaveTextContent(/8,6\s*%/);
+    expect(drop).toHaveAttribute("data-novelty", "price_drop");
+
+    rerender(
+      <CandidateCard
+        candidate={candidate({ price_changed: true, price_delta_pct: 0.077, price_direction: "up" })}
+        profileId={5}
+      />,
+    );
+    const rise = screen.getByTestId("candidate-price-change");
+    expect(rise).toHaveTextContent(/SUBIDA/);
+    expect(rise).toHaveTextContent(/7,7\s*%/);
+    expect(rise).toHaveAttribute("data-novelty", "price_up");
+  });
+
+  it("#420: renders no price-change badge when the move did not clear the sanity band", () => {
+    render(
+      <CandidateCard
+        candidate={candidate({ price_changed: false, price_delta_pct: -0.001, price_direction: null })}
+        profileId={5}
+      />,
+    );
+    expect(screen.queryByTestId("candidate-price-change")).toBeNull();
   });
 
   it("renders address, price, the full fact line, and a single source badge", () => {

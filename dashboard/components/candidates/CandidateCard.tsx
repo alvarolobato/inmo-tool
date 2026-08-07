@@ -103,11 +103,20 @@ export function CandidateCard({
       data-testid="candidate-card"
       data-property-id={candidate.property_id}
       data-rejected={isRejected}
-      // #416 novelty mark. Mirrors the data-rejected convention: a stable hook
-      // for e2e ("marked → survives reload/filter/Cargar más → gone next
-      // visit") and CSS, set only when the property is new since the profile's
-      // last visit. Presentation only — the feed order is unchanged in phase 1.
-      data-novelty={candidate.is_new ? "new" : undefined}
+      // #416/#420 novelty mark. Mirrors the data-rejected convention: a stable
+      // hook for e2e and CSS. NUEVO leads (it is the stronger "look at this"
+      // signal), so a card that is both new and price-changed reads "new" here;
+      // the price-change badge below carries its own data-novelty hook for e2e.
+      // Presentation only — the feed order is unchanged (fresh-first is phase 3).
+      data-novelty={
+        candidate.is_new
+          ? "new"
+          : candidate.price_direction === "drop"
+            ? "price_drop"
+            : candidate.price_direction === "up"
+              ? "price_up"
+              : undefined
+      }
       className="candidate-card"
       style={{
         // A rejected card stays in the list (deferred removal / show-rejected
@@ -184,6 +193,7 @@ export function CandidateCard({
           </p>
 
           {(candidate.is_new ||
+            candidate.price_changed ||
             candidate.flags.length > 0 ||
             sources.length > 0 ||
             candidate.last_seen_at !== null) && (
@@ -214,6 +224,44 @@ export function CandidateCard({
                   }}
                 >
                   Nuevo
+                </span>
+              )}
+              {/* #420 price-change mark — the property's price MOVED since the
+                  profile's last visit and cleared the sanity band (1%–60% by
+                  default). BAJADA (a drop) is good for a buyer, so it borrows the
+                  positive --up token; SUBIDA (a rise) uses --down. Both are shown
+                  in-feed (alerts are phase 5). Same inline-badge house pattern as
+                  NUEVO/StalenessBadge (10px / lineHeight 14px / padding 1px 5px /
+                  borderRadius 3), no shared <Badge> component (plan §3.6). Static,
+                  so prefers-reduced-motion needs no handling. */}
+              {candidate.price_changed && candidate.price_delta_pct !== null && (
+                <span
+                  data-testid="candidate-price-change"
+                  data-novelty={candidate.price_direction === "drop" ? "price_drop" : "price_up"}
+                  title={
+                    candidate.price_direction === "drop"
+                      ? "El precio ha bajado desde tu última visita a este perfil."
+                      : "El precio ha subido desde tu última visita a este perfil."
+                  }
+                  style={{
+                    fontSize: 10,
+                    lineHeight: "14px",
+                    padding: "1px 5px",
+                    borderRadius: 3,
+                    fontWeight: 700,
+                    letterSpacing: 0.3,
+                    textTransform: "uppercase",
+                    background:
+                      candidate.price_direction === "drop" ? "var(--up-bg)" : "var(--down-bg)",
+                    color: candidate.price_direction === "drop" ? "var(--up)" : "var(--down)",
+                  }}
+                >
+                  {candidate.price_direction === "drop" ? "BAJADA −" : "SUBIDA +"}
+                  {(Math.abs(candidate.price_delta_pct) * 100).toLocaleString("es-ES", {
+                    minimumFractionDigits: 1,
+                    maximumFractionDigits: 1,
+                  })}
+                  {" %"}
                 </span>
               )}
               {/* Listing staleness (#243): "visto hace N días", escalating by
