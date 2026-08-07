@@ -518,6 +518,22 @@
   requires_restart: [dashboard]
   components: [dashboard]
 
+# Umbral de promoción de candidate_type (#399, Fase 8 de #385). La página admin
+# /admin/candidatos lista los slugs `candidate_type` (propuestos por el modelo en
+# los redflags `other`) que se han visto al menos este número de veces, para que el
+# owner los revise y decida cuáles promover al vocabulario cerrado (PR manual, flujo
+# D-087). Es solo el filtro de "recurrente vs. ruido" de la página; NO promociona
+# nada de forma automática.
+- key: redflags.candidate_promotion_threshold
+  env: CANDIDATE_PROMOTION_THRESHOLD
+  type: int
+  sensitive: false
+  default: 5
+  section: "Evaluación IA"
+  description: "Umbral mínimo de apariciones para que un `candidate_type` (redflags `other`) aparezca en la página admin de promoción (#399). Debe ser positivo. La promoción a filtro sigue siendo manual (PR humano); este valor solo decide qué candidatos son suficientemente recurrentes para revisarse."
+  requires_restart: []
+  components: [dashboard]
+
 # -----------------------------------------------------------------------------
 # Notificaciones / Digest diario (issue #35, Phase 5.5, D-054)
 # -----------------------------------------------------------------------------

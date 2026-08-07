@@ -18,7 +18,7 @@ import { describe, it, expect, afterAll, beforeEach, afterEach } from "vitest";
 import { Pool } from "pg";
 import { buildPgPoolConfig } from "@/lib/db-shared";
 import { resetPool } from "@/lib/db-write";
-import { getTrendingCandidateTypes } from "../redflag-candidates";
+import { getTrendingCandidateTypes, getPromotionCandidates } from "../redflag-candidates";
 
 async function withRealDb(fn: (pool: Pool) => Promise<void>) {
   const pool = new Pool(buildPgPoolConfig({ max: 2 }));
@@ -179,6 +179,137 @@ describe.runIf(dbAvailable)("getTrendingCandidateTypes — real Postgres", () =>
       await seedStandardMix(pool);
       const rows = await getTrendingCandidateTypes({ limit: 50, minCount: 999999 });
       expect(rows).toEqual([]);
+    });
+  });
+});
+
+// ─── Fase 8 (#399): getPromotionCandidates — real Postgres ───────────────────
+
+const PNONCE = `p${Date.now().toString(36)}`;
+const P_SV = `servidumbre_${PNONCE}`; // over threshold, has definition + evidence
+const P_HU = `humedad_${PNONCE}`; // exactly at threshold
+const P_ONCE = `una_vez_${PNONCE}`; // below threshold
+
+/** Build N `other` flags with candidate_type, candidate_definition and evidence. */
+function otherFlagsRich(slug: string, n: number, definition: string) {
+  return Array.from({ length: n }, (_, i) => ({
+    type: "other",
+    description: `problema ${i}`,
+    evidence: `${slug} cita ${i}`,
+    evidence_source: "fotocasa",
+    candidate_type: slug,
+    candidate_definition: definition,
+  }));
+}
+
+describe.runIf(dbAvailable)("getPromotionCandidates — real Postgres", () => {
+  afterAll(async () => {
+    await resetPool();
+  });
+
+  let createdPropertyIds: number[] = [];
+  let createdProfileIds: number[] = [];
+
+  beforeEach(() => {
+    createdPropertyIds = [];
+    createdProfileIds = [];
+  });
+
+  afterEach(async () => {
+    await withRealDb(async (pool) => {
+      if (createdPropertyIds.length > 0) {
+        await pool.query("DELETE FROM profile_listing_state WHERE property_id = ANY($1::bigint[])", [
+          createdPropertyIds,
+        ]);
+        await pool.query("DELETE FROM ai_assessment WHERE property_id = ANY($1::bigint[])", [
+          createdPropertyIds,
+        ]);
+        await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [createdPropertyIds]);
+      }
+      if (createdProfileIds.length > 0) {
+        await pool.query("DELETE FROM search_profile WHERE id = ANY($1::bigint[])", [
+          createdProfileIds,
+        ]);
+      }
+    });
+  });
+
+  async function seedRow(
+    pool: Pool,
+    flags: unknown[],
+    address: string,
+  ): Promise<number> {
+    const { rows } = await pool.query<{ id: number }>(
+      `INSERT INTO property (address, property_type) VALUES ($1, 'piso') RETURNING id`,
+      [address],
+    );
+    const propertyId = Number(rows[0].id);
+    createdPropertyIds.push(propertyId);
+    await pool.query(
+      `INSERT INTO ai_assessment
+          (property_id, assessment_type, result, confidence, model, prompt_version, generated_at)
+       VALUES ($1, 'redflags', $2::jsonb, 0.8, 'test-model', 'redflags/v8', NOW())`,
+      [propertyId, JSON.stringify({ flags, confidence: 0.8, reasoning: "x" })],
+    );
+    return propertyId;
+  }
+
+  const mine = (rows: { candidateType: string }[]) =>
+    rows.filter((r) => r.candidateType.endsWith(PNONCE));
+
+  it("groups by slug, threshold-filters, and returns count + definition + evidence + properties", async () => {
+    await withRealDb(async (pool) => {
+      // A profile so the property ref can carry a deep-link profileId.
+      const { rows: pr } = await pool.query<{ id: number }>(
+        `INSERT INTO search_profile (name, scope, thesis_params) VALUES ($1, '{}'::jsonb, '{}'::jsonb) RETURNING id`,
+        [`Perfil ${PNONCE}`],
+      );
+      const profileId = Number(pr[0].id);
+      createdProfileIds.push(profileId);
+
+      const svProp = await seedRow(
+        pool,
+        otherFlagsRich(P_SV, 6, "Un tercero tiene derecho de paso por la finca."),
+        `Calle Servidumbre ${PNONCE}`,
+      );
+      await pool.query(
+        `INSERT INTO profile_listing_state (profile_id, property_id) VALUES ($1, $2)`,
+        [profileId, svProp],
+      );
+      await seedRow(pool, otherFlagsRich(P_HU, 5, "Manchas de humedad estructural."), `Calle Humedad ${PNONCE}`);
+      await seedRow(pool, otherFlagsRich(P_ONCE, 1, "algo raro"), `Calle Una Vez ${PNONCE}`);
+
+      const rows = await getPromotionCandidates({ threshold: 5, limit: 100 });
+      const ours = mine(rows);
+
+      // P_SV(6) and P_HU(5) clear threshold 5; P_ONCE(1) is filtered out.
+      expect(ours.map((r) => r.candidateType)).toEqual([P_SV, P_HU]);
+
+      const sv = ours.find((r) => r.candidateType === P_SV)!;
+      expect(sv.count).toBe(6);
+      expect(sv.definition).toBe("Un tercero tiene derecho de paso por la finca.");
+      // Up to 3 example evidence quotes, all belonging to this slug.
+      expect(sv.evidence.length).toBeGreaterThan(0);
+      expect(sv.evidence.length).toBeLessThanOrEqual(3);
+      for (const q of sv.evidence) expect(q).toContain(P_SV);
+      // The single property, deep-linkable via the seeded profile.
+      expect(sv.properties).toHaveLength(1);
+      expect(sv.properties[0].id).toBe(svProp);
+      expect(sv.properties[0].address).toBe(`Calle Servidumbre ${PNONCE}`);
+      expect(sv.properties[0].profileId).toBe(profileId);
+
+      // P_HU has no profile_listing_state → profileId null (page shows no link).
+      const hu = ours.find((r) => r.candidateType === P_HU)!;
+      expect(hu.count).toBe(5);
+      expect(hu.properties[0].profileId).toBeNull();
+    });
+  });
+
+  it("empty case: an unreachable threshold yields [] (cold-start empty state)", async () => {
+    await withRealDb(async (pool) => {
+      await seedRow(pool, otherFlagsRich(P_SV, 6, "def"), `Calle X ${PNONCE}`);
+      const rows = await getPromotionCandidates({ threshold: 999999, limit: 100 });
+      expect(mine(rows)).toEqual([]);
     });
   });
 });

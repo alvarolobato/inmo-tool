@@ -21,6 +21,7 @@
  */
 
 import { sql } from "@/lib/db-write";
+import { getSystemConfig } from "@/lib/system-config/loader";
 import type { RedflagTrendingCandidate } from "@/lib/llm-context/types";
 
 export type { RedflagTrendingCandidate };
@@ -93,4 +94,153 @@ export async function getTrendingCandidateTypes(opts?: {
   );
 
   return rows.map((r) => ({ candidateType: r.candidate_type, count: Number(r.count) }));
+}
+
+// ─── Fase 8 (#399): promotion candidates for the admin review page ───────────
+
+/** A property where a candidate slug appeared, for the "go and check" links. */
+export interface PromotionCandidateProperty {
+  id: number;
+  address: string | null;
+  /**
+   * A profile that has this property in its listing state, so the admin page
+   * can deep-link to the profile-scoped property detail
+   * (`/profiles/{profileId}/properties/{id}`). `null` when the property is in
+   * no profile's worklist yet — the page then shows the ref without a link.
+   */
+  profileId: number | null;
+}
+
+/**
+ * One recurring `candidate_type` surfaced for the owner to review and (manually)
+ * promote — the read model behind `/admin/candidatos`.
+ */
+export interface PromotionCandidate {
+  /** The normalized snake_case slug the model coined for an `other` flag. */
+  candidateType: string;
+  /** How many `other` flags across all stored redflags rows carry this slug. */
+  count: number;
+  /** The model's one-line definition of the slug (most recent non-empty), or null. */
+  definition: string | null;
+  /** Up to 3 example evidence quotes drawn from the flags that coined the slug. */
+  evidence: string[];
+  /** Up to 12 distinct properties where the slug appeared. */
+  properties: PromotionCandidateProperty[];
+}
+
+/**
+ * The promotion threshold (`redflags.candidate_promotion_threshold`, env
+ * `CANDIDATE_PROMOTION_THRESHOLD`, default 5): the minimum number of times a
+ * `candidate_type` must have been proposed before it is worth the owner's
+ * review. Read through the central config loader (env > config.yaml > default);
+ * falls back to the default if the loader is unavailable. A non-positive or
+ * unparseable value degrades to the default rather than surfacing everything.
+ */
+export const DEFAULT_CANDIDATE_PROMOTION_THRESHOLD = 5;
+
+export function getCandidatePromotionThreshold(): number {
+  try {
+    const raw = getSystemConfig()["redflags.candidate_promotion_threshold"]?.value;
+    const n = typeof raw === "number" ? raw : Number(raw);
+    return Number.isInteger(n) && n > 0 ? n : DEFAULT_CANDIDATE_PROMOTION_THRESHOLD;
+  } catch {
+    return DEFAULT_CANDIDATE_PROMOTION_THRESHOLD;
+  }
+}
+
+/**
+ * Aggregate the `candidate_type` slugs proposed in redflags `other` flags into
+ * promotion candidates seen at least `threshold` times, richest first. Unlike
+ * {@link getTrendingCandidateTypes} (which anchors the prompt with just
+ * slug+count), this carries the evidence the owner needs to judge each slug:
+ * the model's one-line definition, up to 3 example quotes, and up to 12 of the
+ * properties where it appeared (with a profile id for a deep link when known).
+ *
+ * Everything is aggregated in one query, params bound (no injection). Evidence
+ * and property refs are built server-side as JSONB arrays so node-pg returns
+ * them already parsed. Returns `[]` when nothing clears the threshold — the
+ * normal cold-start state, rendered as an empty state, never an error.
+ *
+ * Read-only and descriptive: promotion to the closed vocabulary is always a
+ * manual human PR (D-087 flow). Nothing here mutates the vocabulary or turns a
+ * slug into a filter.
+ */
+export async function getPromotionCandidates(opts?: {
+  threshold?: number;
+  limit?: number;
+}): Promise<PromotionCandidate[]> {
+  const threshold = opts?.threshold ?? getCandidatePromotionThreshold();
+  const limit = opts?.limit ?? 200;
+  if (threshold <= 0 || limit <= 0) return [];
+
+  const rows = await sql<{
+    candidate_type: string;
+    count: number;
+    definition: string | null;
+    evidence: string[] | null;
+    properties: PromotionCandidateProperty[] | null;
+  }>(
+    `WITH exploded AS (
+       SELECT
+         a.property_id,
+         p.address,
+         pls.profile_id,
+         flag->>'candidate_type'                       AS candidate_type,
+         NULLIF(TRIM(flag->>'candidate_definition'), '') AS definition,
+         NULLIF(TRIM(flag->>'evidence'), '')             AS evidence,
+         a.generated_at
+       FROM ai_assessment a
+       JOIN property p ON p.id = a.property_id
+       LEFT JOIN LATERAL (
+         SELECT s.profile_id
+           FROM profile_listing_state s
+          WHERE s.property_id = a.property_id
+          ORDER BY s.profile_id
+          LIMIT 1
+       ) pls ON TRUE
+       CROSS JOIN LATERAL jsonb_array_elements(
+         CASE WHEN jsonb_typeof(a.result->'flags') = 'array'
+              THEN a.result->'flags'
+              ELSE '[]'::jsonb END
+       ) AS flag
+      WHERE a.assessment_type = 'redflags'
+        AND flag->>'type' = 'other'
+        AND COALESCE(flag->>'candidate_type', '') <> ''
+     ),
+     latest_def AS (
+       SELECT DISTINCT ON (candidate_type) candidate_type, definition
+         FROM exploded
+        WHERE definition IS NOT NULL
+        ORDER BY candidate_type, generated_at DESC
+     )
+     SELECT
+       e.candidate_type,
+       COUNT(*)::int AS count,
+       ld.definition AS definition,
+       to_jsonb((array_remove(array_agg(DISTINCT e.evidence), NULL))[1:3]) AS evidence,
+       to_jsonb(
+         (array_agg(DISTINCT jsonb_build_object(
+            'id', e.property_id, 'address', e.address, 'profileId', e.profile_id
+          )))[1:12]
+       ) AS properties
+     FROM exploded e
+     LEFT JOIN latest_def ld ON ld.candidate_type = e.candidate_type
+     GROUP BY e.candidate_type, ld.definition
+     HAVING COUNT(*) >= $1
+     ORDER BY count DESC, e.candidate_type ASC
+     LIMIT $2`,
+    [threshold, limit],
+  );
+
+  return rows.map((r) => ({
+    candidateType: r.candidate_type,
+    count: Number(r.count),
+    definition: r.definition ?? null,
+    evidence: r.evidence ?? [],
+    properties: (r.properties ?? []).map((p) => ({
+      id: Number(p.id),
+      address: p.address ?? null,
+      profileId: p.profileId === null || p.profileId === undefined ? null : Number(p.profileId),
+    })),
+  }));
 }

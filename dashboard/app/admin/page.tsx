@@ -16,6 +16,12 @@ const ADMIN_LINKS = [
     description: "Cola de sugerencias de fusión de propiedades pendientes de confirmar o rechazar.",
   },
   {
+    href: "/admin/candidatos",
+    label: "Candidatos a promoción",
+    description:
+      "Slugs candidate_type recurrentes propuestos en los redflags para revisar y promover manualmente al vocabulario cerrado.",
+  },
+  {
     href: "/admin/slow-queries",
     label: "Consultas lentas",
     description: "Consultas SQL lentas registradas en los últimos días.",
