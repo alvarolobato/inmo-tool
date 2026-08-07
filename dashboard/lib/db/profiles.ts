@@ -7,6 +7,7 @@
  */
 
 import { sql } from "@/lib/db-write";
+import { readPositiveInt } from "@/lib/notifications/config-read";
 import {
   ScopeSchema,
   ThesisParamsSchema,
@@ -167,9 +168,50 @@ export async function getProfileById(id: number): Promise<SearchProfileRow | nul
  * every time the profile detail page is opened. Never throws — a failure to
  * record "last viewed" must not turn into a page error; callers should
  * `.catch()`/log rather than let this reject into a 500.
+ *
+ * ## Two-slot novelty anchor (issue #416, plan #415 §3.1)
+ *
+ * This is a SHIFT, not a plain overwrite. The feed's "new since I last looked"
+ * mark (`is_new`) cannot anchor on `last_viewed_at`, because this very call
+ * stamps `last_viewed_at = NOW()` the moment the profile page opens — so by the
+ * time the feed query runs, `last_viewed_at ≈ NOW()` and nothing is ever new.
+ * The fix (same philosophy as D-094's deferred-removal on the *departure*
+ * side, applied to *arrival*) is a two-slot anchor: the OLD `last_viewed_at`
+ * shifts into `previous_viewed_at`, which is what the feed anchors novelty on,
+ * before `last_viewed_at` is overwritten with NOW(). The NUEVO mark then
+ * survives the whole visit (reload / filter / "Cargar más" / detail-and-back
+ * all keep it) and expires on the NEXT visit.
+ *
+ * ### Session debounce
+ *
+ * A shift on *every* GET would collapse the window to minutes if the profile
+ * is reopened repeatedly in one browse session. So `previous_viewed_at` only
+ * advances when the previous visit was more than
+ * `dashboard.novelty_visit_debounce_minutes` (default 30) ago — one browse
+ * *session* (a >30-min idle gap) counts as one visit. Within the debounce
+ * window, `previous_viewed_at` is held and only `last_viewed_at` moves.
+ *
+ * On a never-visited profile (`last_viewed_at IS NULL`) the CASE's `<`
+ * comparison is NULL (not true), so `previous_viewed_at` stays NULL — the feed
+ * falls back to `created_at - interval '1 day'`, matching `new_count`.
  */
 export async function touchProfileViewedAt(id: number): Promise<void> {
-  await sql(`UPDATE search_profile SET last_viewed_at = NOW() WHERE id = $1`, [id]);
+  const debounceMinutes = readPositiveInt(
+    "dashboard.novelty_visit_debounce_minutes",
+    "DASHBOARD_NOVELTY_VISIT_DEBOUNCE_MINUTES",
+    30,
+  );
+  await sql(
+    `UPDATE search_profile
+        SET previous_viewed_at = CASE
+              WHEN last_viewed_at < NOW() - make_interval(mins => $2::int)
+                THEN last_viewed_at
+              ELSE previous_viewed_at
+            END,
+            last_viewed_at = NOW()
+      WHERE id = $1`,
+    [id, debounceMinutes],
+  );
 }
 
 export async function createProfile(

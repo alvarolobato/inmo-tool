@@ -732,6 +732,16 @@
 # -----------------------------------------------------------------------------
 # Dashboard App
 # -----------------------------------------------------------------------------
+- key: dashboard.novelty_visit_debounce_minutes
+  env: DASHBOARD_NOVELTY_VISIT_DEBOUNCE_MINUTES
+  type: int
+  sensitive: false
+  default: 30
+  section: "Dashboard App"
+  description: "Ventana de 'sesión' (minutos) del ancla de novedad del feed (#416). Al abrir un perfil, previous_viewed_at solo se desplaza si la última visita fue hace más de este intervalo — así reabrir un perfil varias veces en una misma sesión no colapsa la ventana 'nuevo desde mi última visita'. La marca NUEVO sobrevive toda la visita y expira en la siguiente. Debe ser positivo."
+  requires_restart: []
+  components: [dashboard]
+
 - key: dashboard.app_public_url
   env: APP_PUBLIC_URL
   type: string

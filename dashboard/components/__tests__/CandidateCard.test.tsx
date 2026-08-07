@@ -26,6 +26,7 @@ function candidate(overrides: Partial<CandidateRow> = {}): CandidateRow {
     // time passes) — the dedicated staleness tests below set it explicitly
     // with dates relative to Date.now().
     last_seen_at: null,
+    is_new: false,
     listings: [{ id: 10, source: "fotocasa", url: "https://x", current_price: 285000 }],
     score: null,
     rank_explanation: null,
@@ -35,6 +36,20 @@ function candidate(overrides: Partial<CandidateRow> = {}): CandidateRow {
 }
 
 describe("CandidateCard", () => {
+  it("#416: marks a new candidate — NUEVO badge + data-novelty hook — and stays unmarked otherwise", () => {
+    const { rerender } = render(<CandidateCard candidate={candidate({ is_new: true })} profileId={5} />);
+    const card = screen.getByTestId("candidate-card");
+    expect(card).toHaveAttribute("data-novelty", "new");
+    const badge = screen.getByTestId("candidate-novelty");
+    expect(badge).toHaveTextContent(/nuevo/i);
+    expect(badge).toHaveAttribute("data-novelty", "new");
+
+    // Not new → no badge and no root hook (mirrors the data-rejected default).
+    rerender(<CandidateCard candidate={candidate({ is_new: false })} profileId={5} />);
+    expect(screen.getByTestId("candidate-card")).not.toHaveAttribute("data-novelty");
+    expect(screen.queryByTestId("candidate-novelty")).toBeNull();
+  });
+
   it("renders address, price, the full fact line, and a single source badge", () => {
     render(<CandidateCard candidate={candidate()} profileId={5} />);
     expect(screen.getByText("Calle Trafalgar, Chamberí, Madrid")).toBeInTheDocument();

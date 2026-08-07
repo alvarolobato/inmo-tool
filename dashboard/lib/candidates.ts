@@ -102,6 +102,24 @@ export interface CandidateRow {
   /** Earliest first_seen_at across all of the property's listings. */
   first_seen_at: string | null;
   /**
+   * Novelty mark (#416, plan #415 §3.1): true when this property is NEW since
+   * the profile's last visit — its earliest listing `first_seen_at` is after
+   * the visit anchor (`search_profile.previous_viewed_at`, falling back to
+   * `created_at - interval '1 day'` for a never-visited profile). Computed on
+   * the SAME `first_seen_at` basis as the field above and as `new_count` in
+   * profile-overview.ts, so the feed's NUEVO badge and the /perfiles
+   * "N nuevos" strip can never disagree.
+   *
+   * Because the anchor is `previous_viewed_at` (shifted by
+   * `touchProfileViewedAt` only when the prior visit was outside the session
+   * debounce), this stays STABLE for the whole visit — a reload, filter
+   * change, "Cargar más", or a detail-and-back all keep the same marks; they
+   * expire on the NEXT visit. Phase 1 does NOT reorder on this — novelty is a
+   * presentation mark only, never folded into `effective_score` or the sort
+   * (fresh-first ordering is phase 3).
+   */
+  is_new: boolean;
+  /**
    * FRESHEST `last_seen_at` across the property's *active* sale listings —
    * "last time discover() re-confirmed this property is still live" (issue
    * #243, roadmap §6.1). MAX, not MIN: a deduplicated property is only as
@@ -691,6 +709,35 @@ function rankedCandidatesCte(warnParam: string): string {
            )
          )
      ),
+     -- #416 novelty anchor (plan #415 §3.1): the timestamp the feed measures
+     -- "new since I last looked" against. previous_viewed_at is the shifted
+     -- two-slot anchor (see touchProfileViewedAt) — NOT last_viewed_at, which
+     -- this same page GET stamps to NOW() on arrival. Fallback matches the
+     -- exact expression new_count already uses in profile-overview.ts. One row.
+     anchor AS (
+       SELECT COALESCE(sp.previous_viewed_at, sp.created_at - interval '1 day') AS ts
+         FROM search_profile sp
+        WHERE sp.id = $1
+     ),
+     -- #416 pre-aggregated novelty signal: exactly ONE row per candidate
+     -- property, bounded to base's property set (never a scan of the whole
+     -- listing table, and never a correlated subquery inside base — the
+     -- per-row-subquery cost D-057 explicitly rejects). is_new = the
+     -- property's EARLIEST listing first_seen_at is after the visit anchor.
+     -- The first_seen_at basis and activeSourceClause here match the outer
+     -- SELECT's first_seen_at column verbatim, so the NUEVO badge and that
+     -- timestamp can never disagree. Joined once into ranked below, so it also
+     -- reaches getAdjacentCandidates' shared CTE — harmless there (that query
+     -- selects only property_id/effective_score) and free of any ORDER BY
+     -- impact (phase 1 does not tier on novelty; that is phase 3).
+     novelty AS (
+       SELECT b.property_id,
+              MIN(l.first_seen_at) > (SELECT ts FROM anchor) AS is_new
+         FROM base b
+         JOIN listing l ON l.property_id = b.property_id
+        WHERE ${activeSourceClause("l")}
+        GROUP BY b.property_id
+     ),
      pool AS (
        SELECT
          percentile_cont(0.5) WITHIN GROUP (ORDER BY ppm2) AS median_ppm2,
@@ -700,6 +747,13 @@ function rankedCandidatesCte(warnParam: string): string {
      ranked AS (
        SELECT
          base.*,
+         -- #416: carried through ranked.* onto CandidateRow. LEFT JOIN + the
+         -- COALESCE default means a property with no active-source listing row
+         -- (shouldn't happen for a matched candidate, but degrade safely)
+         -- reads as "not new" rather than NULL. Deliberately NOT part of
+         -- effective_score or the ORDER BY — novelty is presentation only in
+         -- phase 1 (fresh-first ordering is phase 3).
+         COALESCE(nov.is_new, false) AS is_new,
          CASE
            WHEN base.ppm2 IS NOT NULL AND pool.n >= ${MIN_POOL_SIZE}
                 AND pool.median_ppm2 IS NOT NULL AND pool.median_ppm2 > 0
@@ -726,6 +780,7 @@ function rankedCandidatesCte(warnParam: string): string {
            + (${touristBoostCase})
          ) AS effective_score
        FROM base CROSS JOIN pool
+       LEFT JOIN novelty nov ON nov.property_id = base.property_id
      )`;
 }
 
@@ -813,6 +868,8 @@ interface RawCandidateRow {
   min_price: string | null;
   first_seen_at: string | null;
   last_seen_at: string | null;
+  /** #416 novelty mark — boolean straight from the `ranked` CTE. */
+  is_new: boolean;
   listings: CandidateListingSummary[];
   score: string | null;
   rank_explanation: string | null;
@@ -1263,6 +1320,10 @@ export async function listCandidates(
           FROM listing l3
          WHERE l3.property_id = ranked.property_id
            AND ${activeSourceClause("l3")}) AS first_seen_at,
+       -- #416 novelty mark, derived in the ranked CTE against the visit anchor
+       -- (same first_seen_at basis as the column just above). Projected here so
+       -- the card can render its NUEVO badge from the row directly.
+       ranked.is_new,
        -- FRESHEST last_seen_at across active SALE listings (issue #243): the
        -- staleness age the card renders. MAX, not MIN — the property is only
        -- as stale as its most-recently-re-confirmed listing. Same
@@ -1442,6 +1503,7 @@ export async function listCandidates(
     min_price: r.min_price !== null ? Number(r.min_price) : null,
     first_seen_at: r.first_seen_at,
     last_seen_at: r.last_seen_at,
+    is_new: r.is_new === true,
     listings: r.listings,
     score: r.score !== null ? Number(r.score) : null,
     rank_explanation: r.rank_explanation,

@@ -98,6 +98,47 @@ describe("listCandidates", () => {
     expect(params).toEqual([7, null, null, 31, null, WARN_CAVEAT_CODES, ...NO_FILTER_TAIL]);
   });
 
+  it("#416: computes novelty against previous_viewed_at, joined once, WITHOUT touching the sort", async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [] });
+
+    await listCandidates(7);
+
+    const [sql, params] = mockPoolQuery.mock.calls[0];
+    // Anchor is the shifted two-slot marker (previous_viewed_at), NOT
+    // last_viewed_at (which the profile GET stamps to NOW() on arrival), with
+    // the same created_at-1day fallback new_count uses.
+    expect(sql).toContain("previous_viewed_at");
+    expect(sql).toContain("sp.created_at - interval '1 day'");
+    // A pre-aggregated novelty CTE (one row per property), joined once — never a
+    // correlated subquery inside base (the D-057 anti-pattern).
+    expect(sql).toContain("novelty AS (");
+    expect(sql).toContain("MIN(l.first_seen_at) > (SELECT ts FROM anchor) AS is_new");
+    expect(sql).toContain("LEFT JOIN novelty nov ON nov.property_id = base.property_id");
+    expect(sql).toContain("COALESCE(nov.is_new, false) AS is_new");
+    expect(sql).toContain("ranked.is_new");
+    // No ordering change (phase 1): the FINAL sort key is still the blend + id
+    // (novelty is presentation-only, never a sort tier — that is phase 3). The
+    // outer query has exactly one ORDER BY over `ranked`, and it is unchanged.
+    expect(sql).toContain("ORDER BY ranked.effective_score DESC, ranked.property_id DESC");
+    const rankedOrderBys = sql.match(/ORDER BY ranked\.[^\n]*/g) ?? [];
+    expect(rankedOrderBys).toEqual(["ORDER BY ranked.effective_score DESC, ranked.property_id DESC"]);
+    // No new positional parameter — the anchor is resolved via a scalar
+    // subquery on $1 (the profile id), so the param list is unchanged.
+    expect(params).toEqual([7, null, null, 31, null, WARN_CAVEAT_CODES, ...NO_FILTER_TAIL]);
+  });
+
+  it("#416: maps is_new true/false straight from the ranked row onto the candidate", async () => {
+    mockPoolQuery.mockResolvedValueOnce({
+      rows: [
+        { ...stubRow(2), is_new: true },
+        { ...stubRow(3), is_new: false },
+        { ...stubRow(4) }, // absent (LEFT JOIN default) → not new
+      ],
+    });
+    const page = await listCandidates(1);
+    expect(page.items.map((i) => i.is_new)).toEqual([true, false, false]);
+  });
+
   it("excludes rejected candidates by default and derives feedback_state (#379)", async () => {
     mockPoolQuery.mockResolvedValue({ rows: [] });
 

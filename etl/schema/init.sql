@@ -370,6 +370,20 @@ ALTER TABLE search_profile ALTER COLUMN scope DROP DEFAULT;
 ALTER TABLE search_profile ADD COLUMN IF NOT EXISTS last_materialized_at TIMESTAMPTZ;
 ALTER TABLE search_profile ADD COLUMN IF NOT EXISTS last_viewed_at TIMESTAMPTZ;
 
+-- Issue #416 (feed novelty, plan #415 §3.1). The novelty anchor: "new since I
+-- last looked" cannot be anchored on last_viewed_at, because GET
+-- /api/profiles/[id] stamps last_viewed_at = NOW() on arrival — so by the time
+-- the feed query runs, last_viewed_at ≈ NOW() and nothing is ever new. This is
+-- a two-slot anchor (same philosophy as D-094's deferred-removal on the
+-- departure side, applied to arrival): touchProfileViewedAt SHIFTS the old
+-- last_viewed_at into previous_viewed_at (with a session debounce) before
+-- overwriting last_viewed_at, and the feed anchors novelty on
+-- previous_viewed_at. The mark then survives the entire visit and expires on
+-- the NEXT one. Nullable, no backfill — NULL is the real "never had a prior
+-- visit" state, for which the feed falls back to created_at - interval '1 day'
+-- (the exact fallback new_count already uses).
+ALTER TABLE search_profile ADD COLUMN IF NOT EXISTS previous_viewed_at TIMESTAMPTZ;
+
 -- Issue #35 (Phase 5.5, D-054): per-profile daily/weekly "what's new" digest.
 --   - digest_cadence: how often this profile's digest is assembled and sent.
 --     'daily' by default so a fresh install produces digests immediately; the

@@ -65,6 +65,12 @@ interface SeedPropertyOpts {
   m2Built?: number | null;
   createdAt?: string;
   price?: number | null;
+  /**
+   * #416: the listing's first_seen_at, the basis new_count now measures
+   * novelty on (previously property.created_at). Defaults to NOW(). Only
+   * applied when a listing is actually seeded (`price !== null`).
+   */
+  firstSeenAt?: string;
 }
 
 async function seedProperty(pool: Pool, opts: SeedPropertyOpts = {}): Promise<number> {
@@ -80,8 +86,8 @@ async function seedProperty(pool: Pool, opts: SeedPropertyOpts = {}): Promise<nu
   if (opts.price !== null) {
     await pool.query(
       `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at)
-       VALUES ($1, 'test', $2, 'active', $3, NOW())`,
-      [propertyId, `ext-${propertyId}-${Math.random()}`, opts.price ?? 200000],
+       VALUES ($1, 'test', $2, 'active', $3, COALESCE($4::timestamptz, NOW()))`,
+      [propertyId, `ext-${propertyId}-${Math.random()}`, opts.price ?? 200000, opts.firstSeenAt ?? null],
     );
   }
   return propertyId;
@@ -398,15 +404,20 @@ describe.runIf(dbAvailable)("listProfileOverviews — real Postgres (issue #192)
     if (entry?.ok) expect(entry.metrics.flagged_count).toBe(1);
   });
 
-  it("new_count: matched properties first-seen since last_viewed_at (or created_at-1day for a never-viewed profile)", async () => {
+  it("new_count: matched properties whose LISTING first-seen is since the anchor (#416: previous_viewed_at, or created_at-1day for a never-visited profile; measured on listing.first_seen_at, not property.created_at)", async () => {
     const profile = await createProfile("Con nuevos", scope(), {});
     createdProfileIds = [profile.id];
     let recent!: number, old!: number;
     await withRealDb(async (pool) => {
-      recent = await seedProperty(pool, { price: null, createdAt: new Date().toISOString() });
+      // #416: novelty is now measured on the LISTING's first_seen_at (the
+      // investable event — when the listing appeared), not property.created_at.
+      // A never-visited profile (previous_viewed_at NULL) falls back to
+      // created_at - 1 day, so a listing first-seen today is new and one
+      // first-seen 30 days ago is not.
+      recent = await seedProperty(pool, { price: 200000, firstSeenAt: new Date().toISOString() });
       old = await seedProperty(pool, {
-        price: null,
-        createdAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+        price: 200000,
+        firstSeenAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
       });
       createdPropertyIds.push(recent, old);
       await matchProperty(pool, profile.id, recent);
