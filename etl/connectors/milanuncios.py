@@ -471,7 +471,7 @@ class MilanunciosConnector(Connector):
     #
     # The cost, stated plainly: _should_skip_fetch's rule 5 (an unconfirmed
     # price observation — a listing_price_history row newer than
-    # last_fetched_at — forces a re-fetch; re-anchored per issue #432 / D-071)
+    # last_fetched_at — forces a re-fetch; re-anchored per issue #432 / D-098)
     # CANNOT fire for this connector, because it never records such
     # observations between fetches: discovered_prices() is empty, so nothing
     # writes to the timeline outside the fetch path — see the paragraph below.
@@ -499,7 +499,7 @@ class MilanunciosConnector(Connector):
     #
     # Revisit the moment a live search-page fetch succeeds and the `ad`
     # shape can be checked for a price field (see below) — that would let
-    # discovery record observations (feeding rule 5 and, per D-071, the
+    # discovery record observations (feeding rule 5 and, per D-098, the
     # displayed current_price) and remove the asymmetry entirely.
     min_refetch_interval_seconds = 24 * 60 * 60
 

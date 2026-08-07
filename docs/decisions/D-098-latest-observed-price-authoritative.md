@@ -1,12 +1,12 @@
 ---
-id: D-097
+id: D-098
 title: Most-recent observed price is authoritative for current_price; re-fetch net re-anchored
 date: 2026-08-07
 group: Data / connectors
 rule: 'The most-recent OBSERVED price is authoritative everywhere (header/card, below-market %, scoring): every price-history write site (discovery `_record_discovery_price_observations`, capture/fetch `_update_existing_listing`) adopts it as `listing.current_price` through a sanity band (`_observed_price_is_adoptable`: adopt a move inside [1%, 60%]; a >60% suspect is still recorded to history but never adopted; sub-1% noise is ignored). Revises D-070 (`current_price` no longer fetch-path-owned). The price-change re-fetch net is preserved but re-anchored: `_should_skip_fetch` reason #5 fires when the latest `listing_price_history.observed_at > last_fetched_at` (an unconfirmed observation), not when discovery price ≠ stored price. init.sql carries an idempotent backfill.'
 ---
 
-# D-097: Most-recent observed price is authoritative for `current_price`; re-fetch net re-anchored
+# D-098: Most-recent observed price is authoritative for `current_price`; re-fetch net re-anchored
 
 *Decided: 2026-08-07*
 

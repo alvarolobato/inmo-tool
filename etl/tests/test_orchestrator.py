@@ -155,7 +155,7 @@ class TestShouldSkipFetch:
         assert "missing" in reason
 
     def test_unconfirmed_observation_forces_a_fetch_despite_freshness(self):
-        """The re-anchored core guarantee (issue #432, D-071): an observation
+        """The re-anchored core guarantee (issue #432, D-098): an observation
         recorded (by discovery/capture) after the last authoritative fetch —
         latest observed_at newer than last_fetched_at — is never silently
         absorbed by the staleness window, however fresh the listing looks."""
@@ -302,7 +302,7 @@ class TestShouldSkipFetch:
 
 
 class TestPriceSanityBand:
-    """Issue #432 / D-071: the phase-2 sanity band that gates whether a raw
+    """Issue #432 / D-098: the phase-2 sanity band that gates whether a raw
     observation becomes `listing.current_price` (adoptable) and whether it is
     worth recording to `listing_price_history` (material). Pure functions — no
     DB. The band is [1%, 60%]: sub-1% is noise, >60% is a suspect parse."""
@@ -1768,7 +1768,7 @@ class TestSkipIfSeenIntegration:
     def test_discovery_time_price_change_updates_display_and_reanchors_refetch(
         self, pg_conn
     ):
-        """The mutation-critical proof, revised for issue #432 / D-071: a
+        """The mutation-critical proof, revised for issue #432 / D-098: a
         discovery-time price change must (a) update the displayed/deal-math
         `current_price` IMMEDIATELY (latest-observed is authoritative) and
         (b) leave an unconfirmed observation that forces a confirming re-fetch
@@ -1800,7 +1800,7 @@ class TestSkipIfSeenIntegration:
 
             assert connector.fetch_calls == ["p-1"], (
                 "a fresh listing is skipped by the fetch loop this run — the "
-                "confirming re-fetch is deferred to the next sweep (D-071)"
+                "confirming re-fetch is deferred to the next sweep (D-098)"
             )
             current_price, _last_seen, _last_fetched = self._listing_row(
                 pg_conn, connector.name, "p-1"
@@ -3139,7 +3139,7 @@ class TestUniqueViolationHandling:
                 def __getattr__(self, name):
                     return getattr(self._conn, name)
 
-            # +10% — an in-band move (D-071 sanity band is [1%, 60%]); this
+            # +10% — an in-band move (D-098 sanity band is [1%, 60%]); this
             # test is about the collision-recovery UPDATE path landing the
             # losing run's data, not about price-magnitude gating.
             orchestrator._upsert_canonical_listing(
@@ -5210,7 +5210,7 @@ class TestDiscoveryPriceHistory:
 
     Idempotent: an observation is appended only on a material move (≥1%, the
     sanity band's noise floor) vs the listing's most recent recorded price.
-    Issue #432 / D-071 (revising D-070): the observation is ALSO adopted as
+    Issue #432 / D-098 (revising D-070): the observation is ALSO adopted as
     `listing.current_price` when it's an in-band [1%, 60%] move, so the
     latest-observed price is authoritative for display/deal-math immediately.
     """
@@ -5304,7 +5304,7 @@ class TestDiscoveryPriceHistory:
                 Decimal(195000),
             ], "the discovery-time price drop must be appended to the timeline"
             assert self._current_price(pg_conn, source, "t-1") == Decimal(195000), (
-                "issue #432 / D-071: the latest observed price is authoritative "
+                "issue #432 / D-098: the latest observed price is authoritative "
                 "— a discovery-time drop (within the [1%, 60%] sanity band) is "
                 "adopted as current_price even for a listing the fetch budget "
                 "never reached, so display/deal-math are correct immediately; "
@@ -5369,7 +5369,7 @@ class TestDiscoveryPriceHistory:
 
     def test_refetched_price_change_is_not_double_recorded(self, pg_conn):
         """A discovery-time drop must be recorded exactly once across the whole
-        record-then-confirm sequence (issue #432 / D-071). Run 2 records the
+        record-then-confirm sequence (issue #432 / D-098). Run 2 records the
         discovery observation (and adopts it as current_price); run 3's
         re-anchored trigger forces the confirming re-fetch, which returns the
         same price and must NOT stack a second identical row on top."""
@@ -5394,7 +5394,7 @@ class TestDiscoveryPriceHistory:
             connector.price = 380000
             run_ids.append(orchestrator.run_all_connectors(pg_conn, trigger="test"))
             assert connector.fetch_calls == ["r-1"], (
-                "the confirming re-fetch is deferred to the next sweep (D-071)"
+                "the confirming re-fetch is deferred to the next sweep (D-098)"
             )
             assert self._current_price(pg_conn, source, "r-1") == Decimal(380000)
 
@@ -5423,7 +5423,7 @@ class TestDiscoveryPriceHistory:
             pg_conn.commit()
 
     def test_suspect_discovery_move_is_recorded_but_not_adopted(self, pg_conn):
-        """Issue #432 / D-071 sanity band: a >60% discovery move is a suspect
+        """Issue #432 / D-098 sanity band: a >60% discovery move is a suspect
         (likely a parse glitch) — it IS recorded to the timeline (so the
         re-fetch net can confirm it and an operator can see it) but must NOT
         become current_price."""
@@ -5478,7 +5478,7 @@ class TestDiscoveryPriceHistory:
             _cleanup(pg_conn, source, run_id)
 
     def test_discovery_does_not_clobber_a_same_run_authoritative_fetch(self, pg_conn):
-        """The run_started_at guard (D-071): a listing the fetch loop already
+        """The run_started_at guard (D-098): a listing the fetch loop already
         re-fetched THIS run keeps the authoritative detail-page current_price —
         the less-authoritative search-payload discovery price must not overwrite
         it, even though the observation is still recorded to the timeline."""
@@ -5510,7 +5510,7 @@ class TestDiscoveryPriceHistory:
 
 
 class TestCurrentPriceBackfill:
-    """Issue #432 / D-071: the one-time idempotent init.sql backfill that
+    """Issue #432 / D-098: the one-time idempotent init.sql backfill that
     realigns `listing.current_price` to the most-recent observed price for the
     listings that diverged under D-070 (fetch-path-owned current_price)."""
 

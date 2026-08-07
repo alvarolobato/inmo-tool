@@ -254,7 +254,7 @@ CREATE INDEX IF NOT EXISTS idx_listing_price_history_listing_observed
     ON listing_price_history (listing_id, observed_at);
 
 -- One-time (idempotent) backfill: adopt the most-recent observed price as
--- listing.current_price (issue #432, D-071). Historically current_price was
+-- listing.current_price (issue #432, D-098). Historically current_price was
 -- fetch-path-owned (D-070), so a discovery/capture-observed price drop could
 -- leave the displayed/deal-math price stale until a confirming re-fetch caught
 -- up (property 1739: header 157000 while history/graph/badge showed 146000).

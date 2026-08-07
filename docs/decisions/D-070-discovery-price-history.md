@@ -3,16 +3,16 @@ id: D-070
 title: Discovery-time prices are written to listing_price_history, decoupled from the fetch budget
 date: 2026-08-06
 group: Data / connectors
-rule: '`Connector.discovered_prices()` (Fotocasa''s free per-listing search-payload price) is written straight to `listing_price_history` by `_record_discovery_price_observations`, called in `run_connector` AFTER the fetch loop — decoupled from the fetch budget. Appends only on a material move (≥1%) vs the listing''s latest recorded price (idempotent; dedups against, not double-inserts, a same-run fetched row). Connector-agnostic; `{}` default = no-op. REVISED by D-097: `current_price` is NO LONGER fetch-path-owned — the latest observed price is adopted (through a sanity band) at discovery/capture/fetch, and the price-change re-fetch net is re-anchored to history-`observed_at`-vs-`last_fetched_at`.'
+rule: '`Connector.discovered_prices()` (Fotocasa''s free per-listing search-payload price) is written straight to `listing_price_history` by `_record_discovery_price_observations`, called in `run_connector` AFTER the fetch loop — decoupled from the fetch budget. Appends only on a material move (≥1%) vs the listing''s latest recorded price (idempotent; dedups against, not double-inserts, a same-run fetched row). Connector-agnostic; `{}` default = no-op. REVISED by D-098: `current_price` is NO LONGER fetch-path-owned — the latest observed price is adopted (through a sanity band) at discovery/capture/fetch, and the price-change re-fetch net is re-anchored to history-`observed_at`-vs-`last_fetched_at`.'
 order: 61
 ---
 
 # D-070: Discovery-time prices are written to listing_price_history, decoupled from the fetch budget
 
-> ## REVISED (2026-08-07) — see [D-097](D-097-latest-observed-price-authoritative.md)
+> ## REVISED (2026-08-07) — see [D-098](D-098-latest-observed-price-authoritative.md)
 >
 > Decision point 4 below (**`listing.current_price` stays exclusively
-> fetch-path-owned**) is **overturned** by D-097 (issue #432). The
+> fetch-path-owned**) is **overturned** by D-098 (issue #432). The
 > most-recent *observed* price is now authoritative for display and deal-math,
 > so `_record_discovery_price_observations` also adopts the discovery price as
 > `current_price` (through a 1%–60% sanity band), and `_update_existing_listing`

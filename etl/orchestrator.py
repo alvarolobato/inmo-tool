@@ -138,7 +138,7 @@ def _constraint_name(exc: Exception) -> str | None:
     return getattr(diag, "constraint_name", None) if diag is not None else None
 
 
-# ── Phase-2 price sanity band (issue #432, D-071) ──────────────────────────
+# ── Phase-2 price sanity band (issue #432, D-098) ──────────────────────────
 #
 # The most-recent observed price is authoritative for display and deal-math
 # (header/card, below-market %, scoring). But a raw observation can be junk (a
@@ -236,7 +236,7 @@ def _update_existing_listing(
     see `etl.orchestrator._update_last_seen_for_discovered`) and is
     updated even when this function is never called for a given run.
 
-    `current_price` (issue #432, D-071): the fetched price is the newest
+    `current_price` (issue #432, D-098): the fetched price is the newest
     observation, so it becomes `current_price` — but only through the phase-2
     sanity band (`_observed_price_is_adoptable`), so a sub-1% noise move or a
     >60% suspect parse doesn't poison the authoritative display/deal-math
@@ -1201,7 +1201,7 @@ def _record_discovery_price_observations(
        equals the latest row and is deduped away. Across runs: once recorded, a
        price is the latest row, so re-seeing it is a no-op.
 
-    2. **Display (`listing.current_price`)** — issue #432 / D-071: the most
+    2. **Display (`listing.current_price`)** — issue #432 / D-098: the most
        recent observed price is authoritative for header/card, below-market %
        and scoring, so a genuine discovery-time drop is reflected immediately
        rather than waiting for a confirming re-fetch. Adopted only through the
@@ -1213,7 +1213,7 @@ def _record_discovery_price_observations(
        search-payload one, so discovery never clobbers a same-run fetch. When
        `run_started_at` is None (direct callers/tests) that guard is off.
 
-    Re-fetch safety net (D-071, re-anchored from D-070): because discovery
+    Re-fetch safety net (D-098, re-anchored from D-070): because discovery
     writes history at NOW() without touching `last_fetched_at`,
     `_should_skip_fetch` reason #5 — now keyed on
     `latest observed_at > last_fetched_at` — fires on the *next* sweep and the
@@ -1305,7 +1305,7 @@ def _record_discovery_price_observations(
     if adopted:
         logger.info(
             "Connector %s: %d discovery-time price(s) adopted as current_price "
-            "(latest-observed authoritative, D-071)",
+            "(latest-observed authoritative, D-098)",
             source,
             adopted,
         )
@@ -1328,7 +1328,7 @@ def _fetch_freshness_map(
     go un-refetched: see `_should_skip_fetch`'s docstring for why a
     non-'active' stored status must always force a real fetch.
 
-    `latest_observed_at` (issue #432, D-071) is the newest
+    `latest_observed_at` (issue #432, D-098) is the newest
     `listing_price_history.observed_at` for the listing — the re-anchored
     price-change re-fetch trigger (reason #5): a discovery/capture observation
     recorded after the last authoritative fetch means an unconfirmed price
@@ -1407,7 +1407,7 @@ def _should_skip_fetch(
     5. An unconfirmed price observation exists — the latest
        `listing_price_history.observed_at` is newer than `last_fetched_at`
        -> always fetch, however recently the staleness window says it was
-       fetched. This is the re-anchored (issue #432, D-071) price-change
+       fetched. This is the re-anchored (issue #432, D-098) price-change
        safety net. It replaces the old "discovery price vs stored
        current_price" trigger (D-070): now that the most-recent observed
        price IS `current_price` (adopted at discovery/capture time so the
@@ -1454,7 +1454,7 @@ def _should_skip_fetch(
             (
                 f"unconfirmed price observation at {latest_observed_at.isoformat()} "
                 f"is newer than last fetch {last_fetched_at.isoformat()} — forcing "
-                "a re-fetch to confirm the authoritative price (D-071)"
+                "a re-fetch to confirm the authoritative price (D-098)"
             ),
         )
     age_seconds = (now - last_fetched_at).total_seconds()
@@ -1504,7 +1504,7 @@ def run_connector(
     discover() itself fails, since without a target list there's nothing
     to run.
     """
-    # Issue #432 / D-071: captured before the fetch loop so the discovery-time
+    # Issue #432 / D-098: captured before the fetch loop so the discovery-time
     # current_price adopter can tell which listings this run's fetch loop
     # already re-fetched (last_fetched_at >= run_started_at) and must not be
     # clobbered by the less-authoritative search-payload price.
@@ -1740,7 +1740,7 @@ def run_connector(
         fetched += 1
         breaker.record_success()
 
-    # Issue #183 / #432 (D-071): persist every discovery-time price observation
+    # Issue #183 / #432 (D-098): persist every discovery-time price observation
     # to listing_price_history AND adopt it as listing.current_price (through
     # the sanity band), decoupled from the fetch budget. Runs AFTER the fetch
     # loop on purpose: a listing the loop re-fetched has already had its

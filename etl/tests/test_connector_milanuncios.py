@@ -124,7 +124,7 @@ class TestSkipIfSeenBudget:
         """The documented COST of the line above, asserted so it cannot be
         forgotten. `_should_skip_fetch` rule 5 re-fetches when an unconfirmed
         price observation exists (latest `listing_price_history.observed_at`
-        newer than `last_fetched_at`, re-anchored per issue #432 / D-071) —
+        newer than `last_fetched_at`, re-anchored per issue #432 / D-098) —
         but such observations only appear between fetches when a connector
         supplies `discovered_prices()`, which this one cannot (its `ad`
         entries carry no price field, and every live re-check has been

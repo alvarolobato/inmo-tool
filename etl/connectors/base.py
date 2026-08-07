@@ -397,7 +397,7 @@ class Connector(ABC):
     # skips a listing that has never been fetched, is missing its price,
     # or that has an unconfirmed price observation (a
     # listing_price_history row newer than last_fetched_at — recorded from
-    # `discovered_prices` below; re-anchored per issue #432 / D-071),
+    # `discovered_prices` below; re-anchored per issue #432 / D-098),
     # regardless of this window.
     #
     # Operator-overridable per connector via `connector_config
