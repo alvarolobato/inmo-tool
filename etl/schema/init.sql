@@ -431,9 +431,13 @@ ALTER TABLE digest_run ADD CONSTRAINT digest_run_kind_check
 
 -- The scheduler's due-check reads the most recent digest_run per profile FOR A
 -- GIVEN KIND (ORDER BY sent_at DESC LIMIT 1) — index the (profile_id, kind,
--- sent_at DESC) path. Supersedes the old (profile_id, sent_at DESC) index.
+-- sent_at DESC) path. Supersedes the old (profile_id, sent_at DESC) index:
+-- every read is now per-kind (listDigestProfiles + resolveDigestAnchor both
+-- filter `kind = ...`), so the old index has no remaining consumer. Drop it on
+-- an existing DB (init.sql re-runs idempotently) so no redundant index lingers.
 CREATE INDEX IF NOT EXISTS idx_digest_run_profile_kind_sent
     ON digest_run (profile_id, kind, sent_at DESC);
+DROP INDEX IF EXISTS idx_digest_run_profile_sent;
 
 -- profile_listing_state is keyed on (profile_id, property_id), NOT
 -- listing_id. This is load-bearing: once dedup (task 2.2) unions two
