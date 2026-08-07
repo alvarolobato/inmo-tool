@@ -1,29 +1,22 @@
 /**
- * E2E: task-driven guided-capture EXECUTION page (issue #289, D-041, D-045).
+ * E2E: redesigned guided-capture page — stacked per-profile with collapsible
+ * connectors (issue #413, D-041).
  *
- * Drives a real Next.js server against a real Postgres. Seeds one search
- * profile (so `GET /api/profiles/[id]/search-urls` returns real pre-filtered
- * task URLs for idealista + aliseda) plus a couple of `capture_worklist` rows
- * for aliseda (so the per-portal progress header has real content), then on the
- * NEW task-driven `/captura` page:
- *   - asserts the profile's tasks render, grouped by portal, each with a run
- *     BUTTON and a last-done note ('nunca' initially = active/not muted);
- *   - clicks a task's button, which records the run (POST /capture-task-runs,
- *     a real DB write) and opens the URL (window.open is stubbed so the test
- *     stays hermetic — no external navigation), then asserts the row flips to
- *     GRAYED (data-muted="true") with a 'hecho …' last-done label — a DONE task
- *     shown muted;
- *   - asserts a DIFFERENT task stays ACTIVE (data-muted="false");
- *   - seeds `extension_capture` (status='done') rows for idealista — the REAL
- *     capture activity that lands when the owner opens detail pages one by one,
- *     seeding NO worklist — and asserts the idealista group shows non-zero
- *     "propiedades capturadas" progress (not "sin capturas todavía"), the fix
- *     for "the page reads empty even though captures are working";
- *   - asserts the D-041 no-error-surface bar.
+ * Drives a real Next.js server against a real Postgres. Seeds TWO search
+ * profiles so the page (`/captura`, now a server component) stacks both, one
+ * under another. Then, by reading each profile's real task ids from
+ * `GET /api/profiles/[id]/search-urls` and writing `capture_task_run` rows, it
+ * puts connectors into the three states the redesign hinges on and asserts:
+ *   - DUE (nothing run this cycle)            → EXPANDED, launch buttons shown;
+ *   - HALF-DONE (some tasks run, some pending)→ EXPANDED, "A medias" badge;
+ *   - NOT-DUE (every task run within window)  → COLLAPSED to a stats line;
+ *   - manual expand of a collapsed connector reveals its launch buttons;
+ *   - a launch button in an expanded connector records the run + opens the URL
+ *     (window.open stubbed so the test stays hermetic);
+ *   - the D-041 no-error-surface bar.
  *
- * Admin-gated like every page (middleware.ts). Sets the `ps_admin` cookie the
- * way /admin/login does, and skips cleanly when Postgres is unreachable or
- * ADMIN_API_KEY is unset — matching the other specs.
+ * Admin-gated like every page (middleware.ts). Skips cleanly when Postgres is
+ * unreachable or ADMIN_API_KEY is unset — matching the other specs.
  */
 import { test, expect } from "@playwright/test";
 import { Pool } from "pg";
@@ -42,37 +35,79 @@ function buildPool(): Pool {
   });
 }
 
-const PROFILE_NAME = "E2E-CAPTURA-289";
-const SCOPE = {
+// Profile A → idealista fans out into TWO sections (piso=venta-viviendas,
+// local=venta-locales) so it can be put HALF-DONE (one task run, one pending).
+const PROFILE_A = "E2E-CAP413-A";
+const SCOPE_A = {
   geography: { type: "radius", center: [40.4168, -3.7038], radius_km: 10 },
-  property_types: ["piso"],
+  property_types: ["piso", "local"],
   price_max: 200000,
 };
+// Profile B → idealista is a single section, marked run → NOT-DUE (collapsed);
+// aliseda left unrun → DUE (expanded).
+const PROFILE_B = "E2E-CAP413-B";
+const SCOPE_B = {
+  geography: { type: "radius", center: [40.4168, -3.7038], radius_km: 10 },
+  property_types: ["piso"],
+  price_max: 300000,
+};
 
-const WL_SEED = [
-  { path: "/inmueble/E2E-CAP289-PENDING", status: "pending" },
-  { path: "/inmueble/E2E-CAP289-CAPTURED", status: "captured" },
-];
-
-// REAL captures landing for IDEALISTA with NO worklist seed — the case that
-// made the page read empty. These are the ground truth (extension_capture done).
+// A little real context so the secondary lines render (portal-global).
 const EC_SEED = [
-  "https://www.idealista.com/inmueble/E2E-CAP289-EC-1/",
-  "https://www.idealista.com/inmueble/E2E-CAP289-EC-2/",
-  "https://www.idealista.com/inmueble/E2E-CAP289-EC-3/",
+  "https://www.idealista.com/inmueble/E2E-CAP413-EC-1/",
+  "https://www.idealista.com/inmueble/E2E-CAP413-EC-2/",
+];
+const WL_SEED = [
+  { path: "/inmueble/E2E-CAP413-PENDING", status: "pending" },
+  { path: "/inmueble/E2E-CAP413-CAPTURED", status: "captured" },
 ];
 
 let pool: Pool;
 let dbAvailable = false;
-let profileId: number | null = null;
+let profileAId: number | null = null;
+let profileBId: number | null = null;
 
 async function purge(): Promise<void> {
-  if (profileId !== null) {
-    await pool.query("DELETE FROM capture_task_run WHERE profile_id = $1", [profileId]);
+  // Resolve any leftover test-profile ids (a prior aborted run) so we can clear
+  // their FK children — the running dev server may have materialized listing
+  // state / feedback for them, which blocks a bare DELETE on search_profile.
+  const existing = await pool.query<{ id: number }>(
+    "SELECT id FROM search_profile WHERE name = ANY($1)",
+    [[PROFILE_A, PROFILE_B]],
+  );
+  const ids = existing.rows.map((r) => r.id);
+  for (const id of [profileAId, profileBId]) if (id !== null && !ids.includes(id)) ids.push(id);
+
+  for (const id of ids) {
+    await pool.query("DELETE FROM capture_task_run WHERE profile_id = $1", [id]);
+    // Best-effort: FK children that a background materialization may have created.
+    for (const table of ["profile_listing_state", "feedback_event"]) {
+      await pool
+        .query(`DELETE FROM ${table} WHERE profile_id = $1`, [id])
+        .catch(() => undefined);
+    }
   }
-  await pool.query("DELETE FROM extension_capture WHERE url LIKE '%E2E-CAP289-%'");
-  await pool.query("DELETE FROM capture_worklist WHERE url LIKE '%E2E-CAP289-%'");
-  await pool.query("DELETE FROM search_profile WHERE name = $1", [PROFILE_NAME]);
+  await pool.query("DELETE FROM extension_capture WHERE url LIKE '%E2E-CAP413-%'");
+  await pool.query("DELETE FROM capture_worklist WHERE url LIKE '%E2E-CAP413-%'");
+  await pool.query("DELETE FROM search_profile WHERE name = ANY($1)", [[PROFILE_A, PROFILE_B]]);
+}
+
+async function insertProfile(name: string, scope: unknown): Promise<number> {
+  const r = await pool.query<{ id: number }>(
+    `INSERT INTO search_profile (name, scope, thesis_params)
+     VALUES ($1, $2, '{}'::jsonb) RETURNING id`,
+    [name, JSON.stringify(scope)],
+  );
+  return r.rows[0].id;
+}
+
+async function markRun(profileId: number, taskId: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO capture_task_run (profile_id, task_id, last_run_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (profile_id, task_id) DO UPDATE SET last_run_at = NOW()`,
+    [profileId, taskId],
+  );
 }
 
 test.beforeAll(async () => {
@@ -86,24 +121,17 @@ test.beforeAll(async () => {
     return;
   }
   await purge();
-
-  const prof = await pool.query<{ id: number }>(
-    `INSERT INTO search_profile (name, scope, thesis_params)
-     VALUES ($1, $2, '{}'::jsonb) RETURNING id`,
-    [PROFILE_NAME, JSON.stringify(SCOPE)],
-  );
-  profileId = prof.rows[0].id;
+  profileAId = await insertProfile(PROFILE_A, SCOPE_A);
+  profileBId = await insertProfile(PROFILE_B, SCOPE_B);
 
   for (const { path, status } of WL_SEED) {
     const url = `https://www.alisedainmobiliaria.com${path}`;
-    const matchKey = `alisedainmobiliaria.com${path}`;
     await pool.query(
       `INSERT INTO capture_worklist (url, match_key, source_portal, status)
        VALUES ($1, $2, $3, $4)`,
-      [url, matchKey, "aliseda", status],
+      [url, `alisedainmobiliaria.com${path}`, "aliseda", status],
     );
   }
-
   for (const url of EC_SEED) {
     await pool.query(
       `INSERT INTO extension_capture (url, status, connector_name)
@@ -121,8 +149,7 @@ test.afterAll(async () => {
 test.beforeEach(async ({ page, baseURL }) => {
   test.skip(!dbAvailable, "Postgres unavailable");
   test.skip(!adminKey, "ADMIN_API_KEY not set for the server under test");
-  // Stub window.open so executing a task never navigates to a real portal —
-  // record the URLs it would have opened for assertion instead.
+  // Stub window.open so launching a task never navigates to a real portal.
   await page.addInitScript(() => {
     (window as unknown as { __opened: string[] }).__opened = [];
     window.open = ((url?: string | URL) => {
@@ -133,69 +160,66 @@ test.beforeEach(async ({ page, baseURL }) => {
   await seedAdminSession(page, baseURL);
 });
 
-test("renders discrete capture tasks with buttons, grays a done task, keeps an undone task active — no error surface", async ({
+async function idealistaTaskIds(page: import("@playwright/test").Page, profileId: number): Promise<string[]> {
+  const res = await page.request.get(`/api/profiles/${profileId}/search-urls`);
+  expect(res.ok()).toBeTruthy();
+  const body = (await res.json()) as { tasks: { id: string; portal: string }[] };
+  return body.tasks.filter((t) => t.portal === "idealista").map((t) => t.id);
+}
+
+test("stacks both profiles; expands due/half-done, collapses not-due; manual expand + launch — no error surface", async ({
   page,
 }) => {
+  // Put connectors into the three states via real task-run writes.
+  const aIdealista = await idealistaTaskIds(page, profileAId!);
+  expect(aIdealista.length).toBeGreaterThanOrEqual(2); // piso + local → two sections
+  // HALF-DONE: run all but one of profile A's idealista tasks.
+  for (const id of aIdealista.slice(0, aIdealista.length - 1)) await markRun(profileAId!, id);
+
+  const bIdealista = await idealistaTaskIds(page, profileBId!);
+  expect(bIdealista.length).toBeGreaterThanOrEqual(1);
+  // NOT-DUE: run every idealista task of profile B (aliseda left unrun = DUE).
+  for (const id of bIdealista) await markRun(profileBId!, id);
+
   await page.goto("/captura");
   await expect(page.getByTestId("captura-page")).toBeVisible();
 
-  // Select our seeded profile explicitly (the page auto-selects the first).
-  await expect(page.getByTestId("captura-profile-select")).toBeVisible();
-  await page.getByTestId("captura-profile-select").selectOption({ label: PROFILE_NAME });
+  // Both profiles render, stacked.
+  await expect(page.getByTestId(`captura-profile-${profileAId}`)).toBeVisible();
+  await expect(page.getByTestId(`captura-profile-${profileBId}`)).toBeVisible();
 
-  // Both capture portals render as task groups.
-  await expect(page.getByTestId("captura-portal-idealista")).toBeVisible();
-  await expect(page.getByTestId("captura-portal-aliseda")).toBeVisible();
+  // Profile A idealista → HALF-DONE, expanded, "A medias" badge, launch buttons.
+  const aIdeaConn = page.getByTestId(`captura-connector-${profileAId}-idealista`);
+  await expect(aIdeaConn).toHaveAttribute("data-state", "half-done");
+  await expect(aIdeaConn).toHaveAttribute("data-expanded", "true");
+  await expect(page.getByTestId(`captura-connector-badge-${profileAId}-idealista`)).toContainText("A medias");
+  await expect(aIdeaConn.locator('[data-testid^="captura-task-run-"]').first()).toBeVisible();
 
-  // REAL capture activity: idealista shows non-zero captured progress from the
-  // seeded extension_capture rows, even though NOTHING seeded its worklist —
-  // the fix for "reads empty while captures are working".
-  const idealistaActivity = page.getByTestId("captura-activity-idealista");
-  await expect(idealistaActivity).toContainText("propiedades capturadas");
-  await expect(idealistaActivity).not.toContainText("sin capturas todavía");
+  // Profile B idealista → NOT-DUE, collapsed (stats line, no task rows yet).
+  const bIdeaConn = page.getByTestId(`captura-connector-${profileBId}-idealista`);
+  await expect(bIdeaConn).toHaveAttribute("data-state", "not-due");
+  await expect(bIdeaConn).toHaveAttribute("data-expanded", "false");
+  await expect(page.getByTestId(`captura-connector-stats-${profileBId}-idealista`)).toBeVisible();
+  await expect(bIdeaConn.locator('[data-testid^="captura-task-run-"]')).toHaveCount(0);
 
-  // Aliseda's worklist progress header (1 of 2 captured from the seed).
-  await expect(page.getByTestId("captura-captured-aliseda")).toContainText("1/2");
+  // Profile B aliseda → DUE, expanded, launch button available.
+  const bAliConn = page.getByTestId(`captura-connector-${profileBId}-aliseda`);
+  await expect(bAliConn).toHaveAttribute("data-state", "due");
+  await expect(bAliConn).toHaveAttribute("data-expanded", "true");
+  await expect(bAliConn.locator('[data-testid^="captura-task-run-"]').first()).toBeVisible();
 
-  // Totals strip renders.
-  await expect(page.getByTestId("captura-totals")).toBeVisible();
+  // Manual expand of the collapsed idealista connector reveals its launch button.
+  await page.getByTestId(`captura-connector-toggle-${profileBId}-idealista`).click();
+  await expect(bIdeaConn).toHaveAttribute("data-expanded", "true");
+  await expect(bIdeaConn.locator('[data-testid^="captura-task-run-"]').first()).toBeVisible();
 
-  // Each portal group has at least one task ROW with a run BUTTON.
-  const idealistaTask = page.locator('[data-portal="idealista"][data-testid^="captura-task-"]').first();
-  const alisedaTask = page.locator('[data-portal="aliseda"][data-testid^="captura-task-"]').first();
-  await expect(idealistaTask).toBeVisible();
-  await expect(alisedaTask).toBeVisible();
-
-  const alisedaButton = alisedaTask.locator('[data-testid^="captura-task-run-"]');
-  const alisedaLastDone = alisedaTask.locator('[data-testid^="captura-task-lastdone-"]');
-  await expect(alisedaButton).toBeVisible();
-
-  // Initially: never run → active (not muted) → last-done "nunca".
-  await expect(alisedaTask).toHaveAttribute("data-muted", "false");
-  await expect(alisedaLastDone).toHaveText("nunca");
-  await expect(idealistaTask).toHaveAttribute("data-muted", "false");
-
-  // Execute the aliseda task: records the run (real POST) + stubbed open.
-  await alisedaButton.click();
-
-  // The row flips to grayed (done within its staleness window) with a 'hecho …'
-  // last-done label — a DONE task shown muted.
-  await expect(alisedaTask).toHaveAttribute("data-muted", "true");
-  await expect(alisedaLastDone).toContainText("hecho");
-  await expect(alisedaTask.locator('[data-testid^="captura-task-done-badge-"]')).toBeVisible();
-
-  // window.open was invoked with the aliseda search URL (stubbed, no nav).
-  const opened = await page.evaluate(() => (window as unknown as { __opened: string[] }).__opened);
-  expect(opened.some((u) => u.includes("alisedainmobiliaria.com"))).toBe(true);
-
-  // The OTHER (idealista) task stays ACTIVE — one task at a time.
-  await expect(idealistaTask).toHaveAttribute("data-muted", "false");
-
-  // The run was persisted: a fresh reload still shows the aliseda task grayed.
-  await page.reload();
-  await page.getByTestId("captura-profile-select").selectOption({ label: PROFILE_NAME });
-  const alisedaAfter = page.locator('[data-portal="aliseda"][data-testid^="captura-task-"]').first();
-  await expect(alisedaAfter).toHaveAttribute("data-muted", "true");
+  // Launch a capture from an expanded connector: records the run + opens the URL.
+  const aliButton = bAliConn.locator('[data-testid^="captura-task-run-"]').first();
+  await aliButton.click();
+  // onExecute records the run (awaited POST) before window.open fires, so poll.
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __opened: string[] }).__opened))
+    .toEqual(expect.arrayContaining([expect.stringContaining("alisedainmobiliaria.com")]));
 
   // No error surface — the D-041 bar.
   await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
