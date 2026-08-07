@@ -225,6 +225,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     stopBatch().then(sendResponse);
     return true; // async
   }
+
+  // ── Auto-capture continuous driver (issue #424) ────────────────────────────
+  if (msg.type === 'START_AUTO') {
+    startAuto(msg.portal || null)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ enabled: false, error: { message: err.message } }));
+    return true; // async
+  }
+  if (msg.type === 'STOP_AUTO') {
+    stopAuto().then(sendResponse);
+    return true; // async
+  }
+  if (msg.type === 'GET_AUTO_STATE') {
+    getAutoProgress().then(sendResponse).catch(() => sendResponse(null));
+    return true; // async
+  }
 });
 
 // ═══ Batch capture ══════════════════════════════════════════════════════════
@@ -984,20 +1000,273 @@ function ensureBatchWatchdog() {
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === BATCH_ALARM) reattachIfStranded();
+  // The periodic watchdog both re-attaches a stranded batch AND ticks the auto
+  // driver (its eviction-safe net); the one-shot AUTO_ALARM ticks it promptly
+  // after the inter-batch cooldown. Both funnel into the same idempotent tick.
+  if (alarm.name === BATCH_ALARM) {
+    reattachIfStranded();
+    autoTick();
+  }
+  if (alarm.name === AUTO_ALARM) autoTick();
 });
 chrome.runtime.onStartup.addListener(() => {
   ensureBatchWatchdog();
   reattachIfStranded();
+  autoTick();
 });
 chrome.runtime.onInstalled.addListener(() => {
   ensureBatchWatchdog();
   reattachIfStranded();
+  autoTick();
 });
 // Top-level: fires whenever the worker (re)spawns, including after an eviction
-// that no lifecycle event covers.
+// that no lifecycle event covers. The auto driver's top-level tick is at the end
+// of the auto block below (its state consts must be initialised first).
 ensureBatchWatchdog();
 reattachIfStranded();
+
+// ═══ Auto-capture continuous driver (issue #424) ════════════════════════════
+//
+// Auto mode leaves the capture page open and drains the WHOLE worklist without
+// the operator clicking per batch:
+//   1. fetch the next ≤N pending URLs, prioritised (due-first then oldest) by
+//      GET /api/etl/worklist?pending=1&limit=N — see runAutoBatch / the route,
+//   2. run the EXISTING bounded-concurrency capture queue over them (so the
+//      concurrency cap + WAF-safe jittered stagger are unchanged),
+//   3. on completion, schedule the NEXT batch via chrome.alarms after the
+//      configured cooldown (NOT setTimeout — that dies with an evicted worker),
+//   4. repeat until Auto is turned off or the worklist empties (then it
+//      slow-polls in case new work arrives).
+//
+// MV3 survival: the whole loop is data-driven. The auto state (enabled, status,
+// batchesDone, lastBatchAt) lives in chrome.storage.session (survives eviction);
+// scheduling is entirely alarm-driven. If the worker is evicted mid-batch, the
+// top-level reattach restarts the capture loop and the periodic BATCH_ALARM tick
+// detects the finished batch and schedules the next one — the same discipline as
+// reattachIfStranded. The single-driver guard (batchLooping / batch state) means
+// Auto and a manual batch never double-run.
+
+const AUTO_KEY = 'inmoAuto';
+// One-shot alarm that fires after the inter-batch cooldown to start the next
+// batch. Chrome clamps any alarm sooner than ~30 s up to 30 s, which is why the
+// configured timeout floor (batch.js MIN_AUTO_TIMEOUT_SEC) is 30 s — a smaller
+// value would silently become 30 s and misrepresent the real wait.
+const AUTO_ALARM = 'inmoAutoNext';
+// In-memory re-entrancy guard so the periodic and one-shot alarms (or a rapid
+// START_AUTO) can't run two ticks at once.
+let autoTicking = false;
+
+async function getAutoState() {
+  const o = await chrome.storage.session.get(AUTO_KEY);
+  return o[AUTO_KEY] || null;
+}
+async function setAutoState(state) {
+  await chrome.storage.session.set({ [AUTO_KEY]: state });
+}
+
+/** Operator's auto knobs (issue #424) from chrome.storage.sync, clamped by batch.js. */
+async function getAutoConfig() {
+  const c = await chrome.storage.sync.get(['autoBatchSize', 'autoBatchTimeoutSec']);
+  return {
+    batchSize: InmoBatch.clampAutoBatchSize(c.autoBatchSize),
+    timeoutSec: InmoBatch.clampAutoTimeoutSec(c.autoBatchTimeoutSec),
+  };
+}
+
+/** Arm the one-shot next-batch alarm `timeoutSec` from now (idempotent overwrite). */
+function scheduleAutoAlarm(timeoutSec) {
+  try {
+    const secs = InmoBatch.clampAutoTimeoutSec(timeoutSec);
+    chrome.alarms.create(AUTO_ALARM, { when: Date.now() + secs * 1000 });
+  } catch {
+    /* alarms unavailable — the periodic BATCH_ALARM tick still drives auto */
+  }
+}
+async function disarmAutoAlarm() {
+  try {
+    await chrome.alarms.clear(AUTO_ALARM);
+  } catch {
+    /* nothing armed */
+  }
+}
+
+/** True while a capture batch (auto or manual) is in flight — the single-driver guard. */
+async function isBatchActive() {
+  if (batchLooping) return true;
+  if ((await getEnumState()) != null) return true;
+  const s = await getBatchState();
+  return InmoBatch.isActive(s) || (!!s && s.status === InmoBatch.STATUSES.PAUSED);
+}
+
+/** Fetch the next ≤N pending URLs (prioritised) from the worklist endpoint. */
+async function fetchNextPending(portal, limit) {
+  const { apiUrl, apiKey } = await getApiConfig();
+  const params = new URLSearchParams({ pending: '1', limit: String(limit) });
+  if (portal) params.set('portal', portal);
+  const response = await fetch(`${apiUrl}/api/etl/worklist?${params.toString()}`, {
+    headers: { 'x-admin-key': apiKey },
+  });
+  if (!response.ok) throw new Error(`worklist pending: ${response.status}`);
+  const data = await response.json();
+  return {
+    urls: Array.isArray(data.urls) ? data.urls.filter((u) => typeof u === 'string') : [],
+    totalPending:
+      typeof data.totalPending === 'number' ? data.totalPending : undefined,
+  };
+}
+
+/** Turn Auto ON: persist enabled state, then kick the first batch immediately. */
+async function startAuto(portal) {
+  const { batchSize, timeoutSec } = await getAutoConfig();
+  const state = InmoBatch.makeAutoState({
+    enabled: true,
+    portal,
+    batchSize,
+    timeoutSec,
+    status: InmoBatch.AUTO_STATUS.IDLE,
+  });
+  await setAutoState(state);
+  await disarmAutoAlarm();
+  // Fire-and-forget so the popup gets a prompt response; autoTick guards re-entry.
+  autoTick();
+  return getAutoProgress();
+}
+
+/**
+ * Turn Auto OFF. Deliberately does NOT stop the in-flight batch — "OFF = parar
+ * tras el lote en curso" (issue #424). The current batch drains normally; no new
+ * batch is scheduled. Clears the one-shot alarm.
+ */
+async function stopAuto() {
+  const auto = await getAutoState();
+  if (auto) {
+    await setAutoState({ ...auto, enabled: false, status: InmoBatch.AUTO_STATUS.STOPPED });
+  }
+  await disarmAutoAlarm();
+  return getAutoProgress();
+}
+
+/** Combined auto + current-batch progress for the popup. */
+async function getAutoProgress() {
+  const auto = await getAutoState();
+  const batch = InmoBatch.progress(await getBatchState());
+  if (!auto) return { enabled: false, status: InmoBatch.AUTO_STATUS.IDLE, batch };
+  return {
+    enabled: auto.enabled === true,
+    status: auto.status,
+    portal: auto.portal,
+    batchesDone: auto.batchesDone,
+    totalPending: auto.totalPending,
+    batchSize: auto.batchSize,
+    timeoutSec: auto.timeoutSec,
+    batch,
+  };
+}
+
+/**
+ * Start one auto batch: fetch the next ≤N pending URLs, build + run the
+ * bounded-concurrency queue, then (inline, fast path) begin the cooldown. Guards
+ * against starting on top of a live batch. On an empty worklist it keeps Auto ON
+ * and slow-polls; on a backend error it backs off for one timeout.
+ */
+async function runAutoBatch() {
+  const auto = await getAutoState();
+  if (!auto || auto.enabled !== true) return;
+  if (await isBatchActive()) return; // single-driver guard
+
+  let next;
+  try {
+    next = await fetchNextPending(auto.portal, auto.batchSize);
+  } catch {
+    // Backend hiccup: back off one timeout and try again (Auto stays ON).
+    await setAutoState({
+      ...auto,
+      status: InmoBatch.AUTO_STATUS.WAITING,
+      lastBatchAt: Date.now(),
+    });
+    scheduleAutoAlarm(auto.timeoutSec);
+    return;
+  }
+
+  const urls = next.urls || [];
+  if (!InmoBatch.shouldContinueAuto(auto, urls.length)) {
+    // Worklist drained (or Auto turned off mid-fetch). Keep Auto ON and
+    // slow-poll for new work — re-check on the next cooldown alarm.
+    await setAutoState({
+      ...auto,
+      status: InmoBatch.AUTO_STATUS.EMPTY,
+      lastBatchAt: Date.now(),
+      totalPending: next.totalPending ?? 0,
+    });
+    scheduleAutoAlarm(auto.timeoutSec);
+    return;
+  }
+
+  // Build + run the capture queue over this batch. Concurrency + pacing come
+  // from the SAME operator config (#410/#411) the manual path uses.
+  const { concurrency } = await getBatchConfig();
+  await setBatchState(InmoBatch.makeBatchState(urls, concurrency));
+  await setAutoState({
+    ...auto,
+    status: InmoBatch.AUTO_STATUS.RUNNING,
+    totalPending: next.totalPending ?? auto.totalPending,
+  });
+  await runBatchLoop(); // resolves when the batch finishes (or was paused/stopped)
+  await onAutoBatchComplete();
+}
+
+/**
+ * A batch finished under Auto: count it and begin the cooldown before the next.
+ * Idempotent — only acts while status is RUNNING, so the inline call and a
+ * watchdog-detected completion can't double-count. No-op once Auto is off.
+ */
+async function onAutoBatchComplete() {
+  const auto = await getAutoState();
+  if (!auto || auto.enabled !== true) return;
+  if (auto.status !== InmoBatch.AUTO_STATUS.RUNNING) return;
+  await setAutoState({
+    ...auto,
+    status: InmoBatch.AUTO_STATUS.WAITING,
+    batchesDone: auto.batchesDone + 1,
+    lastBatchAt: Date.now(),
+  });
+  scheduleAutoAlarm(auto.timeoutSec);
+}
+
+/**
+ * The alarm-driven heartbeat of the auto loop. Reads the pure decision
+ * (InmoBatch.nextAutoAction) from the persisted state + live facts and performs
+ * the side effect. Re-entrancy-guarded; safe to call from both alarms and every
+ * lifecycle event.
+ */
+async function autoTick() {
+  if (autoTicking) return;
+  autoTicking = true;
+  try {
+    const auto = await getAutoState();
+    if (!auto || auto.enabled !== true) {
+      await disarmAutoAlarm();
+      return;
+    }
+    const batchActive = await isBatchActive();
+    const action = InmoBatch.nextAutoAction(auto, { batchActive, now: Date.now() });
+    if (action === 'idle') {
+      await disarmAutoAlarm();
+    } else if (action === 'complete') {
+      await onAutoBatchComplete();
+    } else if (action === 'start') {
+      await runAutoBatch();
+    }
+    // 'defer' / 'wait': nothing to do — the periodic BATCH_ALARM (and the armed
+    // AUTO_ALARM) will re-tick.
+  } finally {
+    autoTicking = false;
+  }
+}
+
+// Top-level auto tick: resumes an in-progress auto run after a worker respawn
+// (its state consts above are now initialised, so no TDZ).
+autoTick();
 
 async function getApiConfig() {
   const config = await chrome.storage.sync.get(['apiUrl', 'apiKey']);

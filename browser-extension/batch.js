@@ -413,8 +413,186 @@
     };
   }
 
+  // ═══ Auto-capture continuous driver (issue #424) ══════════════════════════
+  //
+  // "Auto" mode drains the WHOLE worklist unattended: fetch the next ≤N pending
+  // URLs (prioritised), run the existing bounded-concurrency batch over them,
+  // wait a configured timeout, then repeat — until the operator turns Auto off
+  // or the worklist empties (it then slow-polls in case new work arrives). The
+  // SCHEDULING is alarm-driven in background.js — a `setTimeout` in an MV3
+  // service worker dies with the worker — so this file holds only the PURE
+  // decisions, unit-testable outside a browser:
+  //   • how big a batch may be / how long to wait between batches (clamped)
+  //   • which pending URLs go in the next batch  → selectNextPending
+  //   • whether to keep going or stop            → shouldContinueAuto
+  //   • what the alarm tick should do next        → nextAutoAction
+  // The actual tab-driving reuses the SAME bounded-concurrency queue above
+  // (makeBatchState/launchNext/…), so Auto never exceeds `concurrency` and keeps
+  // the WAF-safe jittered stagger; the inter-batch timeout is the extra cooldown.
+
+  var AUTO_STATUS = {
+    IDLE: "idle", // never started / freshly created
+    RUNNING: "running", // a batch is in flight right now
+    WAITING: "waiting", // between batches, cooling down for the timeout
+    EMPTY: "empty", // worklist drained; slow-polling for new work
+    STOPPED: "stopped", // operator turned Auto off
+  };
+
+  // Batch size (N): how many pending URLs one auto batch drains. Default 100
+  // (issue #424). Bounded so a bad config can never open an unbounded run; the
+  // server endpoint clamps `limit` independently, so N is capped on both sides.
+  var DEFAULT_AUTO_BATCH_SIZE = 100;
+  var MIN_AUTO_BATCH_SIZE = 1;
+  var MAX_AUTO_BATCH_SIZE = 500;
+  // Timeout between batches (seconds): the WAF-friendly cooldown on top of the
+  // per-launch jittered stagger. Default 60 s. The floor is 30 s because Chrome
+  // clamps alarms shorter than ~30 s up to 30 s anyway — a smaller value would
+  // lie about the real wait (documented in background.js scheduleAutoAlarm).
+  var DEFAULT_AUTO_TIMEOUT_SEC = 60;
+  var MIN_AUTO_TIMEOUT_SEC = 30;
+  var MAX_AUTO_TIMEOUT_SEC = 3600;
+
+  /** Clamp a requested auto batch size (N) to [MIN,MAX]; default when absent/garbage. */
+  function clampAutoBatchSize(n) {
+    return clampInt(
+      n,
+      MIN_AUTO_BATCH_SIZE,
+      MAX_AUTO_BATCH_SIZE,
+      DEFAULT_AUTO_BATCH_SIZE,
+    );
+  }
+
+  /** Clamp a requested inter-batch timeout (s) to [MIN,MAX]; default when absent/garbage. */
+  function clampAutoTimeoutSec(n) {
+    return clampInt(
+      n,
+      MIN_AUTO_TIMEOUT_SEC,
+      MAX_AUTO_TIMEOUT_SEC,
+      DEFAULT_AUTO_TIMEOUT_SEC,
+    );
+  }
+
+  /**
+   * Build the durable auto-mode state (persisted in chrome.storage.session so it
+   * survives MV3 eviction). `portal` null means "drain every portal". `batchSize`
+   * / `timeoutSec` are clamped. Starts IDLE with no batches done.
+   */
+  function makeAutoState(opts) {
+    opts = opts || {};
+    return {
+      enabled: opts.enabled === true,
+      portal:
+        typeof opts.portal === "string" && opts.portal ? opts.portal : null,
+      batchSize: clampAutoBatchSize(opts.batchSize),
+      timeoutSec: clampAutoTimeoutSec(opts.timeoutSec),
+      status:
+        typeof opts.status === "string" ? opts.status : AUTO_STATUS.IDLE,
+      batchesDone:
+        typeof opts.batchesDone === "number" && opts.batchesDone > 0
+          ? Math.floor(opts.batchesDone)
+          : 0,
+      lastBatchAt:
+        typeof opts.lastBatchAt === "number" ? opts.lastBatchAt : null,
+      totalPending:
+        typeof opts.totalPending === "number" && opts.totalPending >= 0
+          ? Math.floor(opts.totalPending)
+          : null,
+    };
+  }
+
+  /**
+   * Continue-or-stop decision for the auto loop: keep going only while Auto is
+   * enabled AND there is at least one pending URL. Pure. When this is false the
+   * driver either stops (disabled) or slow-polls for new work (drained).
+   */
+  function shouldContinueAuto(state, pendingCount) {
+    return !!state && state.enabled === true && pendingCount > 0;
+  }
+
+  // Portal not covered by any profile task → back of the queue, but still
+  // eligible (sitemap-seeded / derived URLs). Kept well above any real
+  // connector rank (due=0 / half-done=1 / not-due=2, see worklist-priority.ts).
+  var AUTO_PORTAL_RANK_UNKNOWN = 99;
+
+  function rankForItem(item, duePriorityByPortal) {
+    if (!item) return AUTO_PORTAL_RANK_UNKNOWN;
+    var r =
+      duePriorityByPortal && typeof duePriorityByPortal === "object"
+        ? duePriorityByPortal[item.portal]
+        : undefined;
+    return typeof r === "number" && isFinite(r) ? r : AUTO_PORTAL_RANK_UNKNOWN;
+  }
+
+  function tsForItem(item) {
+    if (!item || item.createdAt == null) return Number.MAX_SAFE_INTEGER;
+    var t =
+      typeof item.createdAt === "number"
+        ? item.createdAt
+        : Date.parse(item.createdAt);
+    return isFinite(t) ? t : Number.MAX_SAFE_INTEGER;
+  }
+
+  /**
+   * Choose the next auto batch: the first `limit` pending items ordered by portal
+   * due-priority (asc — a due portal drains before a half-done one before an "al
+   * día" one, mirroring the #414 logic) then oldest `createdAt` (asc). Pure and
+   * STABLE — the original input order breaks any remaining tie. Each item is
+   * `{ url, portal, createdAt }`; the returned slice preserves that shape so the
+   * caller reads `.url`.
+   */
+  function selectNextPending(items, duePriorityByPortal, limit) {
+    var lim = typeof limit === "number" && limit > 0 ? Math.floor(limit) : 0;
+    if (lim === 0) return [];
+    var list = Array.isArray(items) ? items : [];
+    var indexed = list.map(function (it, i) {
+      return { it: it, i: i };
+    });
+    indexed.sort(function (a, b) {
+      var ra = rankForItem(a.it, duePriorityByPortal);
+      var rb = rankForItem(b.it, duePriorityByPortal);
+      if (ra !== rb) return ra - rb;
+      var ta = tsForItem(a.it);
+      var tb = tsForItem(b.it);
+      if (ta !== tb) return ta - tb;
+      return a.i - b.i; // stable
+    });
+    return indexed.slice(0, lim).map(function (x) {
+      return x.it;
+    });
+  }
+
+  /**
+   * Decide what the alarm tick should do, from the persisted auto state plus the
+   * live runtime facts. Pure — background.js performs the side effects. Both the
+   * one-shot inter-batch alarm and the periodic watchdog call this, so it must be
+   * idempotent about ordering.
+   *
+   *   opts.batchActive : is a capture batch (auto OR manual) in flight right now?
+   *   opts.now         : Date.now() ms (defaults to real now)
+   *
+   * Returns one of:
+   *   'idle'     — Auto is off; disarm the alarm.
+   *   'defer'    — a batch is running; do nothing, re-check next tick.
+   *   'complete' — our batch just finished (was RUNNING, now nothing active) →
+   *                record it and begin the cooldown.
+   *   'wait'     — cooling down; the timeout has not elapsed yet.
+   *   'start'    — never ran, or the timeout has elapsed → start the next batch.
+   */
+  function nextAutoAction(state, opts) {
+    opts = opts || {};
+    if (!state || state.enabled !== true) return "idle";
+    if (opts.batchActive === true) return "defer";
+    if (state.status === AUTO_STATUS.RUNNING) return "complete";
+    var now = typeof opts.now === "number" ? opts.now : Date.now();
+    var timeoutMs = clampAutoTimeoutSec(state.timeoutSec) * 1000;
+    if (state.lastBatchAt == null) return "start";
+    if (now - state.lastBatchAt >= timeoutMs) return "start";
+    return "wait";
+  }
+
   var api = {
     STATUSES: STATUSES,
+    AUTO_STATUS: AUTO_STATUS,
     makeSerializer: makeSerializer,
     SLOT: SLOT,
     DEFAULT_CONCURRENCY: DEFAULT_CONCURRENCY,
@@ -445,6 +623,19 @@
     paceBaseMs: paceBaseMs,
     shouldReattach: shouldReattach,
     orphanTabsToClose: orphanTabsToClose,
+    // Auto-capture continuous driver (issue #424)
+    DEFAULT_AUTO_BATCH_SIZE: DEFAULT_AUTO_BATCH_SIZE,
+    MIN_AUTO_BATCH_SIZE: MIN_AUTO_BATCH_SIZE,
+    MAX_AUTO_BATCH_SIZE: MAX_AUTO_BATCH_SIZE,
+    DEFAULT_AUTO_TIMEOUT_SEC: DEFAULT_AUTO_TIMEOUT_SEC,
+    MIN_AUTO_TIMEOUT_SEC: MIN_AUTO_TIMEOUT_SEC,
+    MAX_AUTO_TIMEOUT_SEC: MAX_AUTO_TIMEOUT_SEC,
+    clampAutoBatchSize: clampAutoBatchSize,
+    clampAutoTimeoutSec: clampAutoTimeoutSec,
+    makeAutoState: makeAutoState,
+    shouldContinueAuto: shouldContinueAuto,
+    selectNextPending: selectNextPending,
+    nextAutoAction: nextAutoAction,
   };
 
   if (typeof self !== "undefined") {

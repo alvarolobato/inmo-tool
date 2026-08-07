@@ -69,6 +69,19 @@ const {
   shouldReattach,
   orphanTabsToClose,
   makeSerializer,
+  AUTO_STATUS,
+  DEFAULT_AUTO_BATCH_SIZE,
+  MIN_AUTO_BATCH_SIZE,
+  MAX_AUTO_BATCH_SIZE,
+  DEFAULT_AUTO_TIMEOUT_SEC,
+  MIN_AUTO_TIMEOUT_SEC,
+  MAX_AUTO_TIMEOUT_SEC,
+  clampAutoBatchSize,
+  clampAutoTimeoutSec,
+  makeAutoState,
+  shouldContinueAuto,
+  selectNextPending,
+  nextAutoAction,
 } = B as {
   STATUSES: { RUNNING: string; PAUSED: string; DONE: string };
   SLOT: { PENDING: string; INFLIGHT: string; CAPTURED: string; FAILED: string };
@@ -104,7 +117,50 @@ const {
     persistedTabIds: unknown,
   ) => number[];
   makeSerializer: () => <T>(fn: () => Promise<T> | T) => Promise<T>;
+  // Auto-capture continuous driver (issue #424)
+  AUTO_STATUS: {
+    IDLE: string;
+    RUNNING: string;
+    WAITING: string;
+    EMPTY: string;
+    STOPPED: string;
+  };
+  DEFAULT_AUTO_BATCH_SIZE: number;
+  MIN_AUTO_BATCH_SIZE: number;
+  MAX_AUTO_BATCH_SIZE: number;
+  DEFAULT_AUTO_TIMEOUT_SEC: number;
+  MIN_AUTO_TIMEOUT_SEC: number;
+  MAX_AUTO_TIMEOUT_SEC: number;
+  clampAutoBatchSize: (n: unknown) => number;
+  clampAutoTimeoutSec: (n: unknown) => number;
+  makeAutoState: (opts: unknown) => AutoState;
+  shouldContinueAuto: (s: AutoState | null, pendingCount: number) => boolean;
+  selectNextPending: (
+    items: unknown,
+    duePriority: Record<string, number>,
+    limit: number,
+  ) => PendingItem[];
+  nextAutoAction: (
+    s: AutoState | null,
+    opts: { batchActive?: boolean; now?: number },
+  ) => string;
 };
+
+interface AutoState {
+  enabled: boolean;
+  portal: string | null;
+  batchSize: number;
+  timeoutSec: number;
+  status: string;
+  batchesDone: number;
+  lastBatchAt: number | null;
+  totalPending: number | null;
+}
+interface PendingItem {
+  url: string;
+  portal: string;
+  createdAt: string | number | null;
+}
 
 const URLS = [
   "https://www.idealista.com/inmueble/1/",
@@ -624,5 +680,165 @@ describe("makeSerializer — serialize the storage get-modify-set", () => {
     await expect(boom).rejects.toThrow("boom");
     // A rejected section must not stall or break later sections.
     await expect(ok2).resolves.toBe("two");
+  });
+});
+
+// ═══ Auto-capture continuous driver (issue #424) ════════════════════════════
+
+describe("clampAutoBatchSize / clampAutoTimeoutSec — bounded, safe defaults", () => {
+  it("defaults when absent/garbage (non-numeric)", () => {
+    expect(clampAutoBatchSize(undefined)).toBe(DEFAULT_AUTO_BATCH_SIZE);
+    expect(clampAutoBatchSize("x")).toBe(DEFAULT_AUTO_BATCH_SIZE);
+    expect(clampAutoBatchSize(NaN)).toBe(DEFAULT_AUTO_BATCH_SIZE);
+    expect(clampAutoTimeoutSec(undefined)).toBe(DEFAULT_AUTO_TIMEOUT_SEC);
+    expect(clampAutoTimeoutSec("x")).toBe(DEFAULT_AUTO_TIMEOUT_SEC);
+  });
+
+  it("clamps an in-range-but-too-small numeric value up to MIN (not the default)", () => {
+    // A finite number below MIN is clamped up (like clampSpread), not defaulted.
+    expect(clampAutoBatchSize(0)).toBe(MIN_AUTO_BATCH_SIZE);
+    expect(clampAutoTimeoutSec(-9)).toBe(MIN_AUTO_TIMEOUT_SEC);
+  });
+
+  it("hard-caps both so a bad config can't run away", () => {
+    expect(clampAutoBatchSize(99999)).toBe(MAX_AUTO_BATCH_SIZE);
+    expect(clampAutoBatchSize(MIN_AUTO_BATCH_SIZE)).toBe(MIN_AUTO_BATCH_SIZE);
+    expect(clampAutoTimeoutSec(99999)).toBe(MAX_AUTO_TIMEOUT_SEC);
+    // Below the 30 s Chrome-alarm floor is clamped up.
+    expect(clampAutoTimeoutSec(1)).toBe(MIN_AUTO_TIMEOUT_SEC);
+    expect(MIN_AUTO_TIMEOUT_SEC).toBe(30);
+  });
+
+  it("keeps a valid in-range value and floors fractions", () => {
+    expect(clampAutoBatchSize(100)).toBe(100);
+    expect(clampAutoBatchSize(50.9)).toBe(50);
+    expect(clampAutoTimeoutSec(60)).toBe(60);
+  });
+
+  it("default batch size is 100 (issue #424)", () => {
+    expect(DEFAULT_AUTO_BATCH_SIZE).toBe(100);
+  });
+});
+
+describe("makeAutoState — clamped, sane initial shape", () => {
+  it("clamps knobs and defaults status/counters", () => {
+    const s = makeAutoState({ enabled: true, portal: "idealista", batchSize: 9999, timeoutSec: 1 });
+    expect(s.enabled).toBe(true);
+    expect(s.portal).toBe("idealista");
+    expect(s.batchSize).toBe(MAX_AUTO_BATCH_SIZE);
+    expect(s.timeoutSec).toBe(MIN_AUTO_TIMEOUT_SEC);
+    expect(s.status).toBe(AUTO_STATUS.IDLE);
+    expect(s.batchesDone).toBe(0);
+    expect(s.lastBatchAt).toBeNull();
+  });
+
+  it("null portal means 'drain every portal'", () => {
+    expect(makeAutoState({ enabled: true }).portal).toBeNull();
+    expect(makeAutoState({ enabled: true, portal: "" }).portal).toBeNull();
+  });
+});
+
+describe("shouldContinueAuto — flag on AND pending > 0", () => {
+  const on = makeAutoState({ enabled: true });
+  const off = makeAutoState({ enabled: false });
+  it("continues only when enabled and there is work", () => {
+    expect(shouldContinueAuto(on, 5)).toBe(true);
+    expect(shouldContinueAuto(on, 1)).toBe(true);
+  });
+  it("stops when the flag is off, even with pending work", () => {
+    expect(shouldContinueAuto(off, 5)).toBe(false);
+  });
+  it("stops when the worklist is empty, even while enabled", () => {
+    expect(shouldContinueAuto(on, 0)).toBe(false);
+  });
+  it("is false for a null/absent state", () => {
+    expect(shouldContinueAuto(null, 5)).toBe(false);
+  });
+});
+
+describe("selectNextPending — cap N, due-priority then oldest", () => {
+  const items: PendingItem[] = [
+    { url: "u-alt-old", portal: "altamira", createdAt: "2026-01-01T00:00:00Z" },
+    { url: "u-ide-new", portal: "idealista", createdAt: "2026-03-01T00:00:00Z" },
+    { url: "u-ide-old", portal: "idealista", createdAt: "2026-02-01T00:00:00Z" },
+    { url: "u-ali-old", portal: "aliseda", createdAt: "2026-01-15T00:00:00Z" },
+  ];
+  // idealista due (0), aliseda half-done (1); altamira absent → unknown (last).
+  const due = { idealista: 0, aliseda: 1 };
+
+  it("caps the result at N", () => {
+    expect(selectNextPending(items, due, 2)).toHaveLength(2);
+    expect(selectNextPending(items, due, 0)).toEqual([]);
+    expect(selectNextPending(items, due, 99)).toHaveLength(items.length);
+  });
+
+  it("orders by portal due-rank, then oldest createdAt", () => {
+    const urls = selectNextPending(items, due, 99).map((x) => x.url);
+    // idealista (rank 0): oldest first → u-ide-old before u-ide-new;
+    // then aliseda (rank 1); then altamira (unknown rank) last.
+    expect(urls).toEqual(["u-ide-old", "u-ide-new", "u-ali-old", "u-alt-old"]);
+  });
+
+  it("the capped batch takes the most-due first", () => {
+    expect(selectNextPending(items, due, 1).map((x) => x.url)).toEqual(["u-ide-old"]);
+  });
+
+  it("with no due map, falls back to pure oldest-first", () => {
+    const urls = selectNextPending(items, {}, 99).map((x) => x.url);
+    expect(urls).toEqual(["u-alt-old", "u-ali-old", "u-ide-old", "u-ide-new"]);
+  });
+
+  it("is stable and never exceeds the concurrency cap when fed to the queue", () => {
+    // The selected batch drives makeBatchState; launchNext must still respect
+    // the concurrency cap (the auto path reuses the SAME bounded queue).
+    const picked = selectNextPending(items, due, 3).map((x) => x.url);
+    let s = makeBatchState(picked, 2);
+    let launched = 0;
+    for (;;) {
+      const r = launchNext(s);
+      if (r.index === -1) break;
+      s = r.state;
+      launched += 1;
+    }
+    expect(inflightCount(s)).toBeLessThanOrEqual(2);
+    expect(launched).toBe(2); // never more than the cap in flight at once
+  });
+});
+
+describe("nextAutoAction — the alarm-tick decision", () => {
+  const base = makeAutoState({ enabled: true, timeoutSec: 60 });
+
+  it("idle when Auto is off", () => {
+    expect(nextAutoAction(makeAutoState({ enabled: false }), {})).toBe("idle");
+    expect(nextAutoAction(null, {})).toBe("idle");
+  });
+
+  it("defers while any batch is in flight", () => {
+    expect(nextAutoAction(base, { batchActive: true })).toBe("defer");
+    expect(nextAutoAction({ ...base, status: AUTO_STATUS.RUNNING }, { batchActive: true })).toBe("defer");
+  });
+
+  it("marks complete when a running batch is no longer active", () => {
+    expect(
+      nextAutoAction({ ...base, status: AUTO_STATUS.RUNNING }, { batchActive: false }),
+    ).toBe("complete");
+  });
+
+  it("starts immediately when never run", () => {
+    expect(nextAutoAction({ ...base, lastBatchAt: null }, { batchActive: false })).toBe("start");
+  });
+
+  it("waits during the cooldown, starts once the timeout elapsed", () => {
+    const now = 1_000_000;
+    const waiting = { ...base, status: AUTO_STATUS.WAITING, lastBatchAt: now - 10_000 };
+    expect(nextAutoAction(waiting, { batchActive: false, now })).toBe("wait");
+    const elapsed = { ...base, status: AUTO_STATUS.WAITING, lastBatchAt: now - 60_000 };
+    expect(nextAutoAction(elapsed, { batchActive: false, now })).toBe("start");
+  });
+
+  it("re-checks (start) after the cooldown even when the list was empty", () => {
+    const now = 1_000_000;
+    const empty = { ...base, status: AUTO_STATUS.EMPTY, lastBatchAt: now - 61_000 };
+    expect(nextAutoAction(empty, { batchActive: false, now })).toBe("start");
   });
 });

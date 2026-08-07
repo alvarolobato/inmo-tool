@@ -235,6 +235,32 @@
     </div>
 
     <div class="portals-section">
+      <h3>Modo automático (vaciar la lista)</h3>
+      <p class="hint" style="margin-bottom: 14px;">
+        El modo Auto (botón en el popup) deja la captura corriendo sola: vacía
+        toda la lista pendiente en lotes, esperando entre uno y otro. Sobrevive a
+        que Chrome apague la extensión en segundo plano (usa alarmas). Estos dos
+        ajustes controlan el tamaño de cada lote y la espera entre lotes.
+      </p>
+
+      <div class="field">
+        <label for="auto-batch-size">Anuncios por lote (N)</label>
+        <input type="number" id="auto-batch-size" min="1" max="500" step="10" />
+        <p class="hint">Cuántos anuncios se capturan en cada lote. Por defecto 100. Máximo 500.</p>
+      </div>
+
+      <div class="field">
+        <label for="auto-batch-timeout">Espera entre lotes (segundos)</label>
+        <input type="number" id="auto-batch-timeout" min="30" max="3600" step="30" />
+        <p class="hint">
+          Pausa entre el fin de un lote y el comienzo del siguiente. Por defecto
+          60 s. Mínimo 30 s (Chrome no permite alarmas más cortas). Subirla es más
+          seguro frente al anti-bot en barridos largos.
+        </p>
+      </div>
+    </div>
+
+    <div class="portals-section">
       <h3>Sitios soportados</h3>
       <span class="portal-tag">🇪🇸 Idealista</span>
       <span class="portal-tag">🇪🇸 Aliseda</span>

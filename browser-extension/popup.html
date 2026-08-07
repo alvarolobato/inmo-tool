@@ -50,9 +50,19 @@
       <button id="batch-resume-btn" class="btn btn-primary hidden">Reanudar</button>
       <button id="batch-stop-btn" class="btn btn-secondary hidden">Detener</button>
     </div>
+
+    <!-- Auto mode (issue #424): drain the WHOLE worklist unattended, in capped
+         batches with a cooldown between them. Alarm-driven so it survives the
+         MV3 service worker being evicted. -->
+    <div class="actions batch-auto">
+      <button id="batch-auto-btn" class="btn btn-primary">Auto: capturar toda la lista</button>
+    </div>
+    <p id="batch-auto-status" class="state-sub batch-auto-status hidden"></p>
+
     <p class="state-sub batch-hint">
       La extensión abre cada anuncio, lo captura y lo cierra sola, con una pausa
-      entre cada uno. No cierres esta ventana del navegador.
+      entre cada uno. En modo Auto sigue vaciando la lista lote a lote aunque
+      cierres el popup. No cierres la ventana del navegador.
     </p>
   </div>
 
