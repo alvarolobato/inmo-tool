@@ -11,6 +11,8 @@ import {
   deriveConnectorState,
   buildConnectorViews,
   buildProfileCaptureView,
+  captureSummary,
+  formatCaptureSummary,
   DEFAULT_STALENESS_DAYS,
   type CaptureTask,
   type PortalCaptureActivity,
@@ -299,6 +301,43 @@ describe("per-profile × connector captured counts (issue #430)", () => {
       new Map(), // profile 99 not present
     );
     expect(view.connectors[0].capturedProfile).toBe(0);
+  });
+});
+
+describe("captureSummary / formatCaptureSummary (issue #433)", () => {
+  it("captured + remaining reconcile to total (pending+captured basis)", () => {
+    const s = captureSummary({ capturedProfile: 12, dueCount: 28 });
+    expect(s).toEqual({ captured: 12, total: 40, remaining: 28 });
+    expect(s.captured + s.remaining).toBe(s.total);
+  });
+
+  it("reads 0 / 0 · 0 for an empty connector", () => {
+    expect(captureSummary({ capturedProfile: 0, dueCount: 0 })).toEqual({
+      captured: 0,
+      total: 0,
+      remaining: 0,
+    });
+    expect(formatCaptureSummary({ capturedProfile: 0, dueCount: 0 })).toBe("0 / 0 · 0 restantes");
+  });
+
+  it("all captured, nothing pending → total equals captured, 0 remaining", () => {
+    expect(formatCaptureSummary({ capturedProfile: 5, dueCount: 0 })).toBe("5 / 5 · 0 restantes");
+  });
+
+  it("nothing captured yet, all pending → 0 / N · N restantes", () => {
+    expect(formatCaptureSummary({ capturedProfile: 0, dueCount: 3 })).toBe("0 / 3 · 3 restantes");
+  });
+
+  it("floors negative inputs at 0 defensively (never negative numbers)", () => {
+    expect(captureSummary({ capturedProfile: -4, dueCount: -2 })).toEqual({
+      captured: 0,
+      total: 0,
+      remaining: 0,
+    });
+  });
+
+  it("formats the compact '12 / 40 · 28 restantes' line", () => {
+    expect(formatCaptureSummary({ capturedProfile: 12, dueCount: 28 })).toBe("12 / 40 · 28 restantes");
   });
 });
 

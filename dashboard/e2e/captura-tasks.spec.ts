@@ -246,6 +246,29 @@ test("stacks both profiles; expands due/half-done, collapses not-due; manual exp
     "sin capturas de este perfil todavía",
   );
 
+  // Capture-progress summary (issue #433): each connector line shows the three
+  // reconciling numbers "capturados / total · N restantes". Profile A idealista
+  // is HALF-DONE with one matched capture (capturedProfile=1) and one pending
+  // task (dueCount=1) → "1 / 2 · 1 restantes"; the collapsed NOT-DUE profile B
+  // idealista connector (nothing captured, nothing due) reads "0 / 0 · 0".
+  const aSummary = page.getByTestId(`captura-connector-summary-${profileAId}-idealista`);
+  await expect(aSummary).toBeVisible();
+  await expect(aSummary).toContainText("1 / 2 · 1 restantes");
+  const bSummary = page.getByTestId(`captura-connector-summary-${profileBId}-idealista`);
+  await expect(bSummary).toBeVisible();
+  await expect(bSummary).toContainText("0 / 0 · 0 restantes");
+
+  // The three numbers must reconcile (captured + remaining === total) on every
+  // rendered connector summary — the property that makes the line trustworthy.
+  const summaries = await page.locator('[data-testid^="captura-connector-summary-"]').allInnerTexts();
+  expect(summaries.length).toBeGreaterThan(0);
+  for (const text of summaries) {
+    const m = text.match(/(\d+)\s*\/\s*(\d+)\s*·\s*(\d+)\s+restantes/);
+    expect(m, `summary "${text}" must match the "a / b · c restantes" format`).not.toBeNull();
+    const [captured, total, remaining] = [Number(m![1]), Number(m![2]), Number(m![3])];
+    expect(captured + remaining).toBe(total);
+  }
+
   // Launch a capture from an expanded connector: records the run + opens the URL.
   const aliButton = bAliConn.locator('[data-testid^="captura-task-run-"]').first();
   await aliButton.click();
