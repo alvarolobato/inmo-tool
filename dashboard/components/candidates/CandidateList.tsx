@@ -20,6 +20,10 @@ import { ZeroCandidatesDiagnostic } from "@/components/profiles/ZeroCandidatesDi
 export function CandidateList({ profileId }: { profileId: number }) {
   const [items, setItems] = useState<CandidateRow[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
+  // #425: when the novelty tier was suppressed for this session (profile never
+  // visited, or the tier would cover >60% of the matched pool), show one line
+  // instead of painting the whole feed as "new" (plan #415 §3.2 cold-start).
+  const [noveltyColdStart, setNoveltyColdStart] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<ApiErrorResponse | string | null>(null);
@@ -86,7 +90,10 @@ export function CandidateList({ profileId }: { profileId: number }) {
 
   const fetchPage = useCallback(
     async (afterCursor: string | null, replace: boolean) => {
-      const url = new URL(`/api/profiles/${profileId}/candidates`, window.location.origin);
+      const url = new URL(
+        `/api/profiles/${profileId}/candidates`,
+        window.location.origin,
+      );
       if (afterCursor !== null) url.searchParams.set("cursor", afterCursor);
       // Combines with pagination (cursor) rather than replacing it (#265).
       if (source !== null) url.searchParams.set("source", source);
@@ -102,7 +109,8 @@ export function CandidateList({ profileId }: { profileId: number }) {
       if (caveat !== "") url.searchParams.set("caveat", caveat);
       if (redflagType !== "") url.searchParams.set("redflagType", redflagType);
       // #392 beach-proximity (min grade) + casco-histórico toggle.
-      if (beachProximity !== "") url.searchParams.set("beachProximity", beachProximity);
+      if (beachProximity !== "")
+        url.searchParams.set("beachProximity", beachProximity);
       if (heritageZone) url.searchParams.set("heritageZone", "true");
       // #398 VPO (bidirectional): "true" only VPO, "false" exclude VPO.
       if (isVpo !== "") url.searchParams.set("isVpo", isVpo);
@@ -110,15 +118,28 @@ export function CandidateList({ profileId }: { profileId: number }) {
       if (showRejected) url.searchParams.set("includeRejected", "true");
       // #422: "En seguimiento" preset — restrict to tracked (accepted) properties.
       if (trackedOnly) url.searchParams.set("state", "accept");
-      const res = await fetch(url.toString().replace(window.location.origin, ""));
+      const res = await fetch(
+        url.toString().replace(window.location.origin, ""),
+      );
       if (!res.ok) {
         const body = await res.json().catch(() => null);
-        setError(isApiErrorResponse(body) ? body : "Error al cargar los candidatos.");
+        setError(
+          isApiErrorResponse(body) ? body : "Error al cargar los candidatos.",
+        );
         return;
       }
-      const page: { items: CandidateRow[]; nextCursor: string | null } = await res.json();
+      const page: {
+        items: CandidateRow[];
+        nextCursor: string | null;
+        coldStart?: boolean;
+      } = await res.json();
       setItems((prev) => (replace ? page.items : [...prev, ...page.items]));
       setCursor(page.nextCursor);
+      // #425: the novelty cold-start suppression decision is session-fixed
+      // (resolved on page 1, threaded through the cursor), so only the page-1
+      // (replace) response carries the authoritative value — a "Cargar más"
+      // append must not clobber it.
+      if (replace) setNoveltyColdStart(page.coldStart === true);
     },
     [
       profileId,
@@ -194,18 +215,29 @@ export function CandidateList({ profileId }: { profileId: number }) {
   const filterBar = (
     <div
       data-testid="candidate-filter-bar"
-      style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, flexWrap: "wrap" }}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        marginTop: 16,
+        flexWrap: "wrap",
+      }}
     >
       {availableSources.length > 0 && (
         <>
-          <label htmlFor="candidate-source-filter" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+          <label
+            htmlFor="candidate-source-filter"
+            style={{ fontSize: 12, color: "var(--fg-muted)" }}
+          >
             Fuente
           </label>
           <select
             id="candidate-source-filter"
             data-testid="source-filter"
             value={source ?? ""}
-            onChange={(e) => setSource(e.target.value === "" ? null : e.target.value)}
+            onChange={(e) =>
+              setSource(e.target.value === "" ? null : e.target.value)
+            }
             style={{ ...selectStyle, textTransform: "capitalize" }}
           >
             <option value="">Todas las fuentes</option>
@@ -219,7 +251,10 @@ export function CandidateList({ profileId }: { profileId: number }) {
       )}
 
       {/* #310: occupancy (occupied vs free). Needs assessment data (#316). */}
-      <label htmlFor="candidate-occupancy-filter" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+      <label
+        htmlFor="candidate-occupancy-filter"
+        style={{ fontSize: 12, color: "var(--fg-muted)" }}
+      >
         Ocupación
       </label>
       <select
@@ -235,7 +270,10 @@ export function CandidateList({ profileId }: { profileId: number }) {
       </select>
 
       {/* #310: condition + renovation severity (#313), combined. Needs assessment data. */}
-      <label htmlFor="candidate-condition-filter" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+      <label
+        htmlFor="candidate-condition-filter"
+        style={{ fontSize: 12, color: "var(--fg-muted)" }}
+      >
         Estado
       </label>
       <select
@@ -254,7 +292,10 @@ export function CandidateList({ profileId }: { profileId: number }) {
       </select>
 
       {/* #310: below-market discount threshold. Works today (computed from price). */}
-      <label htmlFor="candidate-discount-filter" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+      <label
+        htmlFor="candidate-discount-filter"
+        style={{ fontSize: 12, color: "var(--fg-muted)" }}
+      >
         Bajo mercado
       </label>
       <select
@@ -272,7 +313,10 @@ export function CandidateList({ profileId }: { profileId: number }) {
       </select>
 
       {/* #386: occupancy caveat (venta_deuda etc.). Needs assessment data (#316). */}
-      <label htmlFor="candidate-caveat-filter" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+      <label
+        htmlFor="candidate-caveat-filter"
+        style={{ fontSize: 12, color: "var(--fg-muted)" }}
+      >
         Situación jurídica
       </label>
       <select
@@ -291,7 +335,10 @@ export function CandidateList({ profileId }: { profileId: number }) {
       </select>
 
       {/* #386: redflags problem type (obra sin terminar / embargo / …). Needs assessment data. */}
-      <label htmlFor="candidate-redflag-filter" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+      <label
+        htmlFor="candidate-redflag-filter"
+        style={{ fontSize: 12, color: "var(--fg-muted)" }}
+      >
         Alerta
       </label>
       <select
@@ -309,7 +356,9 @@ export function CandidateList({ profileId }: { profileId: number }) {
         <option value="construccion_ilegal">Construcción ilegal</option>
         <option value="herencia_yacente">Herencia yacente</option>
         <option value="deuda_comunidad">Deuda comunidad</option>
-        <option value="sin_financiacion_hipotecaria">Sin financiación hipotecaria</option>
+        <option value="sin_financiacion_hipotecaria">
+          Sin financiación hipotecaria
+        </option>
         <option value="cambio_uso_pendiente">Cambio de uso pendiente</option>
         <option value="structural_damage">Daño estructural</option>
       </select>
@@ -317,7 +366,10 @@ export function CandidateList({ profileId }: { profileId: number }) {
       {/* #392: beach proximity as a MINIMUM-grade filter (owner's headline ask).
           frontline = only primera línea; sea_view = frontline or vistas al mar;
           near_beach = any beach signal. Needs the `location` assessment axis. */}
-      <label htmlFor="candidate-beach-filter" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+      <label
+        htmlFor="candidate-beach-filter"
+        style={{ fontSize: 12, color: "var(--fg-muted)" }}
+      >
         Playa
       </label>
       <select
@@ -337,7 +389,14 @@ export function CandidateList({ profileId }: { profileId: number }) {
           the `location` assessment axis. */}
       <label
         htmlFor="candidate-heritage-toggle"
-        style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--fg-muted)", cursor: "pointer" }}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          fontSize: 12,
+          color: "var(--fg-muted)",
+          cursor: "pointer",
+        }}
       >
         <input
           id="candidate-heritage-toggle"
@@ -352,7 +411,10 @@ export function CandidateList({ profileId }: { profileId: number }) {
 
       {/* #398: VPO / vivienda protegida as a BIDIRECTIONAL hard filter — only
           VPO or exclude VPO. Needs the `opportunity` assessment axis. */}
-      <label htmlFor="candidate-vpo-filter" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+      <label
+        htmlFor="candidate-vpo-filter"
+        style={{ fontSize: 12, color: "var(--fg-muted)" }}
+      >
         VPO
       </label>
       <select
@@ -372,7 +434,14 @@ export function CandidateList({ profileId }: { profileId: number }) {
           "Mostrar descartadas" (a tracked-only view can't also show rejects). */}
       <label
         htmlFor="tracked-only-toggle"
-        style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--fg-muted)", cursor: "pointer" }}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          fontSize: 12,
+          color: "var(--fg-muted)",
+          cursor: "pointer",
+        }}
       >
         <input
           id="tracked-only-toggle"
@@ -393,7 +462,14 @@ export function CandidateList({ profileId }: { profileId: number }) {
           review and un-reject past rejections. */}
       <label
         htmlFor="show-rejected-toggle"
-        style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--fg-muted)", cursor: "pointer" }}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          fontSize: 12,
+          color: "var(--fg-muted)",
+          cursor: "pointer",
+        }}
       >
         <input
           id="show-rejected-toggle"
@@ -415,7 +491,9 @@ export function CandidateList({ profileId }: { profileId: number }) {
     return (
       <div>
         {filterBar}
-        <p style={{ marginTop: 16, fontSize: 13, color: "var(--fg-muted)" }}>Cargando candidatos…</p>
+        <p style={{ marginTop: 16, fontSize: 13, color: "var(--fg-muted)" }}>
+          Cargando candidatos…
+        </p>
       </div>
     );
   }
@@ -442,11 +520,17 @@ export function CandidateList({ profileId }: { profileId: number }) {
           {filterBar}
           <p
             data-testid="no-candidates-needs-assessment"
-            style={{ marginTop: 16, fontSize: 13, color: "var(--fg-muted)", margin: 0 }}
+            style={{
+              marginTop: 16,
+              fontSize: 13,
+              color: "var(--fg-muted)",
+              margin: 0,
+            }}
           >
-            No hay candidatos con estos criterios. Los filtros de ocupación y estado usan datos de
-            evaluación de la IA, que aún no están disponibles para estas propiedades. Quita el filtro
-            para ver el resto.
+            No hay candidatos con estos criterios. Los filtros de ocupación y
+            estado usan datos de evaluación de la IA, que aún no están
+            disponibles para estas propiedades. Quita el filtro para ver el
+            resto.
           </p>
         </div>
       );
@@ -460,10 +544,15 @@ export function CandidateList({ profileId }: { profileId: number }) {
           {filterBar}
           <p
             data-testid="no-candidates-tracked"
-            style={{ marginTop: 16, fontSize: 13, color: "var(--fg-muted)", margin: 0 }}
+            style={{
+              marginTop: 16,
+              fontSize: 13,
+              color: "var(--fg-muted)",
+              margin: 0,
+            }}
           >
-            Todavía no sigues ninguna propiedad. Pulsa &quot;Seguir&quot; (✓) en una tarjeta para
-            añadirla a tu seguimiento.
+            Todavía no sigues ninguna propiedad. Pulsa &quot;Seguir&quot; (✓) en
+            una tarjeta para añadirla a tu seguimiento.
           </p>
         </div>
       );
@@ -477,9 +566,15 @@ export function CandidateList({ profileId }: { profileId: number }) {
           {filterBar}
           <p
             data-testid="no-candidates-for-filter"
-            style={{ marginTop: 16, fontSize: 13, color: "var(--fg-muted)", margin: 0 }}
+            style={{
+              marginTop: 16,
+              fontSize: 13,
+              color: "var(--fg-muted)",
+              margin: 0,
+            }}
           >
-            No hay candidatos con estos criterios. Cambia o quita los filtros para ver el resto.
+            No hay candidatos con estos criterios. Cambia o quita los filtros
+            para ver el resto.
           </p>
         </div>
       );
@@ -491,7 +586,9 @@ export function CandidateList({ profileId }: { profileId: number }) {
     return (
       <div style={{ marginTop: 16 }}>
         {filterBar}
-        <p style={{ fontSize: 13, color: "var(--fg-muted)", margin: 0 }}>Este perfil no tiene candidatos.</p>
+        <p style={{ fontSize: 13, color: "var(--fg-muted)", margin: 0 }}>
+          Este perfil no tiene candidatos.
+        </p>
         <ZeroCandidatesDiagnostic profileId={profileId} />
       </div>
     );
@@ -512,6 +609,26 @@ export function CandidateList({ profileId }: { profileId: number }) {
   return (
     <div>
       {filterBar}
+      {/* #425 cold-start: a brand-new profile (or one where >60% of the pool
+          would tier as new) says so once instead of highlighting every card.
+          Tracked (accept) properties are still surfaced normally — the
+          suppression only turns off the fresh-first highlight/reorder. */}
+      {noveltyColdStart && (
+        <p
+          data-testid="novelty-cold-start-note"
+          style={{
+            marginTop: 16,
+            padding: "8px 10px",
+            borderRadius: 6,
+            border: "1px solid var(--border)",
+            background: "var(--bg-1)",
+            fontSize: 12,
+            color: "var(--fg-muted)",
+          }}
+        >
+          Perfil nuevo: todo es reciente.
+        </p>
+      )}
       <div
         style={{
           display: "grid",

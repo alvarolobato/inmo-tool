@@ -59,8 +59,16 @@ test.beforeAll(async () => {
   }
 
   const profileResult = await pool.query<{ id: number }>(
-    `INSERT INTO search_profile (name, scope, thesis_params)
-     VALUES ($1, $2::jsonb, '{}'::jsonb) RETURNING id`,
+    // #425: this spec tests prev/next MECHANICS on a pure score ordering, so it
+    // must stay off the fresh-first tier. Seed the profile as already-visited
+    // (previous_viewed_at 2 days ago) and its listings as old (below) so no row
+    // is "new" — otherwise a never-visited profile with fresh listings is a
+    // cold-start flood whose tracked-exemption would float the accepted cards
+    // (the feedback tests here accept two) above the higher-scored top card,
+    // reordering the ranking this test walks. Fresh-first ordering has its own
+    // dedicated coverage in fresh-first-order.spec.ts.
+    `INSERT INTO search_profile (name, scope, thesis_params, previous_viewed_at, last_viewed_at)
+     VALUES ($1, $2::jsonb, '{}'::jsonb, NOW() - interval '2 days', NOW() - interval '2 days') RETURNING id`,
     [
       `${NAME_PREFIX}${Date.now()}`,
       JSON.stringify({
@@ -85,9 +93,16 @@ test.beforeAll(async () => {
     );
     const propertyId = property.rows[0].id;
     await pool.query(
+      // #425: first-seen well before the profile's 2-day-ago visit anchor, so
+      // no candidate is "new" and the ranking is pure score order (see the
+      // profile INSERT comment above).
       `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, photo_urls)
-       VALUES ($1, 'fotocasa', $2, 'active', 289000, NOW(), $3)`,
-      [propertyId, `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`, photoUrls],
+       VALUES ($1, 'fotocasa', $2, 'active', 289000, NOW() - interval '10 days', $3)`,
+      [
+        propertyId,
+        `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`,
+        photoUrls,
+      ],
     );
     await pool.query(
       `INSERT INTO profile_listing_state (profile_id, property_id, matched, score, rank_explanation)
@@ -100,21 +115,34 @@ test.beforeAll(async () => {
   // Three photos on the top candidate so lightbox prev/next has somewhere to
   // go; distinct scores so the ranking (and therefore prev/next) is
   // deterministic rather than falling back to the id tiebreak.
-  topId = await insertCandidate(`${NAME_PREFIX}Calle Trafalgar, Madrid`, 0.91, "Rentabilidad bruta estimada del 6,2%, por encima de la media de la zona.", [
-    `https://example.com/${NAME_PREFIX}1.jpg`,
-    `https://example.com/${NAME_PREFIX}2.jpg`,
-    `https://example.com/${NAME_PREFIX}3.jpg`,
-  ]);
-  middleId = await insertCandidate(`${NAME_PREFIX}Calle Goya, Madrid`, 0.55, "Precio en línea con tu banda objetivo.", []);
+  topId = await insertCandidate(
+    `${NAME_PREFIX}Calle Trafalgar, Madrid`,
+    0.91,
+    "Rentabilidad bruta estimada del 6,2%, por encima de la media de la zona.",
+    [
+      `https://example.com/${NAME_PREFIX}1.jpg`,
+      `https://example.com/${NAME_PREFIX}2.jpg`,
+      `https://example.com/${NAME_PREFIX}3.jpg`,
+    ],
+  );
+  middleId = await insertCandidate(
+    `${NAME_PREFIX}Calle Goya, Madrid`,
+    0.55,
+    "Precio en línea con tu banda objetivo.",
+    [],
+  );
   // Exactly one photo (not zero) — the other real boundary case #167's
   // ticker gating needs covering: a lone photo still shows as the lead
   // image, but must not grow ticker controls (only 2+ photos do). Doesn't
   // disturb bottomId's other use (the "stays visible without hovering" test
   // below, which doesn't touch photos) or its ranking position (only the
   // score matters there, not the photo count).
-  bottomId = await insertCandidate(`${NAME_PREFIX}Calle Alcalá, Madrid`, 0.21, "Superficie por debajo de lo que sueles aceptar.", [
-    `https://example.com/${NAME_PREFIX}bottom1.jpg`,
-  ]);
+  bottomId = await insertCandidate(
+    `${NAME_PREFIX}Calle Alcalá, Madrid`,
+    0.21,
+    "Superficie por debajo de lo que sueles aceptar.",
+    [`https://example.com/${NAME_PREFIX}bottom1.jpg`],
+  );
 });
 
 test.afterAll(async () => {
@@ -129,9 +157,15 @@ test.afterAll(async () => {
     "DELETE FROM profile_listing_state WHERE profile_id IN (SELECT id FROM search_profile WHERE name LIKE $1)",
     [`${NAME_PREFIX}%`],
   );
-  await pool.query("DELETE FROM search_profile WHERE name LIKE $1", [`${NAME_PREFIX}%`]);
-  await pool.query("DELETE FROM listing WHERE external_id LIKE $1", [`${NAME_PREFIX}%`]);
-  await pool.query("DELETE FROM property WHERE address LIKE $1", [`${NAME_PREFIX}%`]);
+  await pool.query("DELETE FROM search_profile WHERE name LIKE $1", [
+    `${NAME_PREFIX}%`,
+  ]);
+  await pool.query("DELETE FROM listing WHERE external_id LIKE $1", [
+    `${NAME_PREFIX}%`,
+  ]);
+  await pool.query("DELETE FROM property WHERE address LIKE $1", [
+    `${NAME_PREFIX}%`,
+  ]);
   await pool.end();
 });
 
@@ -142,16 +176,21 @@ test.beforeEach(async ({ page, baseURL }) => {
 });
 
 async function assertNoErrorSurface(page: Page) {
-  await expect(page.getByText(/error|hubo un problema|there is no parameter|http 500/i)).toHaveCount(0);
+  await expect(
+    page.getByText(/error|hubo un problema|there is no parameter|http 500/i),
+  ).toHaveCount(0);
   await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
 }
 
 function card(page: Page, propertyId: number) {
-  return page.locator(`[data-testid="candidate-card"][data-property-id="${propertyId}"]`);
+  return page.locator(
+    `[data-testid="candidate-card"][data-property-id="${propertyId}"]`,
+  );
 }
 
-test("cards render photo-first with price, facts and no per-card cold-start noise", async ({ page }) => {
-
+test("cards render photo-first with price, facts and no per-card cold-start noise", async ({
+  page,
+}) => {
   await page.goto(`/profiles/${profileId}`);
   await assertNoErrorSurface(page);
 
@@ -206,8 +245,9 @@ test("cards render photo-first with price, facts and no per-card cold-start nois
 // this profile, which would then race the prev/next test below. Keep
 // deliberate multi-class/high-volume feedback scenarios in a separate spec
 // file (e.g. feedback.spec.ts) rather than adding them here.
-test("the action bar is reachable on hover and acting on it does not navigate", async ({ page }) => {
-
+test("the action bar is reachable on hover and acting on it does not navigate", async ({
+  page,
+}) => {
   await page.goto(`/profiles/${profileId}`);
   const target = card(page, middleId);
   await expect(target).toBeVisible();
@@ -227,7 +267,10 @@ test("the action bar is reachable on hover and acting on it does not navigate", 
   await expect(reject).toHaveCSS("opacity", "1");
 
   await actions.getByTestId("feedback-accept").click();
-  await expect(actions.getByTestId("feedback-accept")).toHaveAttribute("aria-pressed", "true");
+  await expect(actions.getByTestId("feedback-accept")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   // The whole point of keeping the controls a sibling of the <Link>.
   await expect(page).toHaveURL(new RegExp(`/profiles/${profileId}$`));
   await assertNoErrorSurface(page);
@@ -293,13 +336,16 @@ test("#167: the button matching the property's current feedback state stays visi
   // fully transparent, rgba(0, 0, 0, 0), which is also "not the muted
   // fill" without being a real colour at all) until this second assertion
   // was added.
-  const acceptBg = await accept.evaluate((el) => getComputedStyle(el).backgroundColor);
+  const acceptBg = await accept.evaluate(
+    (el) => getComputedStyle(el).backgroundColor,
+  );
   expect(acceptBg).not.toBe("rgba(0, 0, 0, 0.35)");
   expect(acceptBg).not.toBe("rgba(0, 0, 0, 0)");
 });
 
-test("lightbox walks the photo union with buttons and arrow keys", async ({ page }) => {
-
+test("lightbox walks the photo union with buttons and arrow keys", async ({
+  page,
+}) => {
   await page.goto(`/profiles/${profileId}/properties/${topId}`);
   await expect(page.getByTestId("property-detail-page")).toBeVisible();
   await assertNoErrorSurface(page);
@@ -362,7 +408,9 @@ test("#167: locally-scoped arrow keys cycle the focused card's ticker without a 
   await page.goto(`/profiles/${profileId}`);
   const target = card(page, topId);
   const img = target.getByTestId("candidate-photo-img");
-  const next = target.getByTestId("candidate-photo-ticker").getByTestId("candidate-photo-next");
+  const next = target
+    .getByTestId("candidate-photo-ticker")
+    .getByTestId("candidate-photo-next");
 
   await next.focus();
   await expect(img).toHaveAttribute("src", /1\.jpg$/);
@@ -373,13 +421,19 @@ test("#167: locally-scoped arrow keys cycle the focused card's ticker without a 
   await expect(img).toHaveAttribute("src", /1\.jpg$/);
 });
 
-test("#167: a property with zero or one photo shows no ticker controls", async ({ page }) => {
+test("#167: a property with zero or one photo shows no ticker controls", async ({
+  page,
+}) => {
   await page.goto(`/profiles/${profileId}`);
 
   // middleId was seeded with photoUrls: [] — the existing placeholder, no
   // ticker (an empty photo array is not the same as "one photo").
-  await expect(card(page, middleId).getByTestId("candidate-photo-placeholder")).toBeVisible();
-  await expect(card(page, middleId).getByTestId("candidate-photo-ticker")).toHaveCount(0);
+  await expect(
+    card(page, middleId).getByTestId("candidate-photo-placeholder"),
+  ).toBeVisible();
+  await expect(
+    card(page, middleId).getByTestId("candidate-photo-ticker"),
+  ).toHaveCount(0);
 
   // bottomId was seeded with exactly ONE photo — the test's title claimed
   // this case but nothing here actually exercised it until now (the seed
@@ -388,13 +442,19 @@ test("#167: a property with zero or one photo shows no ticker controls", async (
   // placeholder), but must still grow no ticker (`hasTicker = photos.length
   // > 1` in CandidatePhotoTicker.tsx).
   const bottom = card(page, bottomId);
-  await expect(bottom.getByTestId("candidate-photo-img")).toHaveAttribute("src", /bottom1\.jpg$/);
-  await expect(bottom.getByTestId("candidate-photo-placeholder")).toHaveCount(0);
+  await expect(bottom.getByTestId("candidate-photo-img")).toHaveAttribute(
+    "src",
+    /bottom1\.jpg$/,
+  );
+  await expect(bottom.getByTestId("candidate-photo-placeholder")).toHaveCount(
+    0,
+  );
   await expect(bottom.getByTestId("candidate-photo-ticker")).toHaveCount(0);
 });
 
-test("detail page walks the ranking with prev/next, disabled at the ends", async ({ page }) => {
-
+test("detail page walks the ranking with prev/next, disabled at the ends", async ({
+  page,
+}) => {
   // Middle of the ranking: both directions available.
   await page.goto(`/profiles/${profileId}/properties/${middleId}`);
   await expect(page.getByTestId("property-detail-page")).toBeVisible();
@@ -405,11 +465,16 @@ test("detail page walks the ranking with prev/next, disabled at the ends", async
     `/profiles/${profileId}/properties/${bottomId}`,
   );
   await page.getByTestId("candidate-prev").click();
-  await expect(page).toHaveURL(new RegExp(`/profiles/${profileId}/properties/${topId}$`));
+  await expect(page).toHaveURL(
+    new RegExp(`/profiles/${profileId}/properties/${topId}$`),
+  );
 
   // Top of the ranking: "previous" is present but inert, so the controls
   // don't shift position as you move through the queue.
-  await expect(page.getByTestId("candidate-prev")).toHaveAttribute("aria-disabled", "true");
+  await expect(page.getByTestId("candidate-prev")).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
   await expect(page.getByTestId("candidate-next")).toHaveAttribute(
     "href",
     `/profiles/${profileId}/properties/${middleId}`,
@@ -418,7 +483,10 @@ test("detail page walks the ranking with prev/next, disabled at the ends", async
 
   // Bottom of the ranking: the mirror case.
   await page.goto(`/profiles/${profileId}/properties/${bottomId}`);
-  await expect(page.getByTestId("candidate-next")).toHaveAttribute("aria-disabled", "true");
+  await expect(page.getByTestId("candidate-next")).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
   await expect(page.getByTestId("candidate-prev")).toHaveAttribute(
     "href",
     `/profiles/${profileId}/properties/${middleId}`,
@@ -441,7 +509,8 @@ test.describe("#167: touch/coarse-pointer behaviour (iPhone 13 emulation)", () =
   // browser engines requires a new worker, not just new context options.
   // Chromium's mobile emulation (viewport/isMobile/hasTouch below) is what
   // actually flips `@media (hover: none)`, independent of engine choice.
-  const { defaultBrowserType: _defaultBrowserType, ...iPhone13 } = devices["iPhone 13"];
+  const { defaultBrowserType: _defaultBrowserType, ...iPhone13 } =
+    devices["iPhone 13"];
   test.use({ ...iPhone13 });
 
   test("action bar and photo ticker are permanently visible without hover on a touch device, and the active status button is visually distinct from a merely-visible one", async ({
@@ -480,13 +549,17 @@ test.describe("#167: touch/coarse-pointer behaviour (iPhone 13 emulation)", () =
     // Mark this card, then prove the active button reads as active even
     // though every button here was already opacity: 1 before the tap —
     // "visible" alone can't be the signal on this device.
-    const rejectBgBefore = await reject.evaluate((el) => getComputedStyle(el).backgroundColor);
+    const rejectBgBefore = await reject.evaluate(
+      (el) => getComputedStyle(el).backgroundColor,
+    );
     // Await the POST so the state is reconciled server-side to "accept"
     // (terminal), not merely optimistically set, before reading any colour.
     // With no mount GET anymore (#379 — state arrives embedded), this is the
     // only in-flight setState, so nothing can revert the fill after we sample it.
     const topFeedbackPost = page.waitForResponse(
-      (r) => r.url().includes(`/candidates/${topId}/feedback`) && r.request().method() === "POST",
+      (r) =>
+        r.url().includes(`/candidates/${topId}/feedback`) &&
+        r.request().method() === "POST",
     );
     await accept.tap();
     await topFeedbackPost;
@@ -498,13 +571,20 @@ test.describe("#167: touch/coarse-pointer behaviour (iPhone 13 emulation)", () =
     // transition on background-color (only opacity/transform animate —
     // globals.css), so this resolves directly to the final colour, and with
     // both async setState sources now resolved nothing can revert it.
-    await expect(accept).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0.35)");
+    await expect(accept).not.toHaveCSS(
+      "background-color",
+      "rgba(0, 0, 0, 0.35)",
+    );
     // Reject is never tapped — assert it holds the muted inactive fill so the
     // rejectBgBefore/After comparison below is against a deterministic value.
     await expect(reject).toHaveCSS("background-color", "rgba(0, 0, 0, 0.35)");
 
-    const acceptBg = await accept.evaluate((el) => getComputedStyle(el).backgroundColor);
-    const rejectBgAfter = await reject.evaluate((el) => getComputedStyle(el).backgroundColor);
+    const acceptBg = await accept.evaluate(
+      (el) => getComputedStyle(el).backgroundColor,
+    );
+    const rejectBgAfter = await reject.evaluate(
+      (el) => getComputedStyle(el).backgroundColor,
+    );
     // The now-active accept button gets a distinct, semantically-coloured
     // fill (--up, green) — not the muted rgba(0,0,0,0.35) every
     // visible-but-inactive button (reject, unchanged before/after) keeps.
@@ -518,10 +598,14 @@ test.describe("#167: touch/coarse-pointer behaviour (iPhone 13 emulation)", () =
     expect(acceptBg).not.toBe("rgba(0, 0, 0, 0)");
   });
 
-  test("a property with zero photos shows the placeholder, not a ticker, on touch too", async ({ page }) => {
+  test("a property with zero photos shows the placeholder, not a ticker, on touch too", async ({
+    page,
+  }) => {
     await page.goto(`/profiles/${profileId}`);
     const target = card(page, middleId);
-    await expect(target.getByTestId("candidate-photo-placeholder")).toBeVisible();
+    await expect(
+      target.getByTestId("candidate-photo-placeholder"),
+    ).toBeVisible();
     await expect(target.getByTestId("candidate-photo-ticker")).toHaveCount(0);
   });
 });

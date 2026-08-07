@@ -762,6 +762,16 @@
   requires_restart: []
   components: [dashboard]
 
+- key: feed.cold_start_coverage_pct
+  env: FEED_COLD_START_COVERAGE_PCT
+  type: int
+  sensitive: false
+  default: 60
+  section: "Dashboard App"
+  description: "Umbral de supresión cold-start del orden fresh-first (#425, plan #415 §3.2). Si el tier de novedad (nuevo/cambio de precio) cubriría MÁS de este porcentaje del pool de candidatos emparejados del perfil, o el perfil no se ha visitado nunca, se suprime el tier (todo pasa a tier 0, sin resaltar) y se muestra la línea 'Perfil nuevo: todo es reciente' en vez de pintar el feed entero (dato §2.0b: el perfil 347 recién creado marcaría 429 de 431 filas). Las propiedades en seguimiento (accept) nunca las suprime esta regla. Rango 1–100."
+  requires_restart: []
+  components: [dashboard]
+
 - key: dashboard.app_public_url
   env: APP_PUBLIC_URL
   type: string
