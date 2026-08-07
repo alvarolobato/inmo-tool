@@ -3,11 +3,27 @@ id: D-070
 title: Discovery-time prices are written to listing_price_history, decoupled from the fetch budget
 date: 2026-08-06
 group: Data / connectors
-rule: '`Connector.discovered_prices()` (Fotocasa''s free per-listing search-payload price) is written straight to `listing_price_history` by `_record_discovery_price_observations`, called in `run_connector` AFTER the fetch loop — decoupled from the fetch budget. Appends only when the discovery price `IS DISTINCT FROM` the listing''s latest recorded price (idempotent; dedups against, not double-inserts, a same-run fetched row). `listing.current_price` stays fetch-path-owned (else `_should_skip_fetch`''s price-change re-fetch trigger stops firing). Connector-agnostic; `{}` default = no-op.'
+rule: '`Connector.discovered_prices()` (Fotocasa''s free per-listing search-payload price) is written straight to `listing_price_history` by `_record_discovery_price_observations`, called in `run_connector` AFTER the fetch loop — decoupled from the fetch budget. Appends only on a material move (≥1%) vs the listing''s latest recorded price (idempotent; dedups against, not double-inserts, a same-run fetched row). Connector-agnostic; `{}` default = no-op. REVISED by D-098: `current_price` is NO LONGER fetch-path-owned — the latest observed price is adopted (through a sanity band) at discovery/capture/fetch, and the price-change re-fetch net is re-anchored to history-`observed_at`-vs-`last_fetched_at`.'
 order: 61
 ---
 
 # D-070: Discovery-time prices are written to listing_price_history, decoupled from the fetch budget
+
+> ## REVISED (2026-08-07) — see [D-098](D-098-latest-observed-price-authoritative.md)
+>
+> Decision point 4 below (**`listing.current_price` stays exclusively
+> fetch-path-owned**) is **overturned** by D-098 (issue #432). The
+> most-recent *observed* price is now authoritative for display and deal-math,
+> so `_record_discovery_price_observations` also adopts the discovery price as
+> `current_price` (through a 1%–60% sanity band), and `_update_existing_listing`
+> applies the same band. The price-change re-fetch safety net this decision
+> protected is **preserved but re-anchored**: `_should_skip_fetch` reason #5 now
+> fires on `latest listing_price_history.observed_at > last_fetched_at` instead
+> of "discovery price ≠ stored `current_price`" (which would go silent once
+> `current_price` = observed). Everything else in D-070 — discovery prices
+> written to history, decoupled from the fetch budget, dedup vs the latest
+> recorded row, connector-agnostic no-op default — **still holds**. Read the
+> rest of this file with that one substitution in mind.
 
 *Decided: 2026-08-06*
 

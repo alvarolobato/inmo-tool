@@ -138,6 +138,68 @@ def _constraint_name(exc: Exception) -> str | None:
     return getattr(diag, "constraint_name", None) if diag is not None else None
 
 
+# ── Phase-2 price sanity band (issue #432, D-098) ──────────────────────────
+#
+# The most-recent observed price is authoritative for display and deal-math
+# (header/card, below-market %, scoring). But a raw observation can be junk (a
+# parse glitch, a "consultar precio" placeholder, a missing digit), and letting
+# it become `listing.current_price` would poison every downstream number. Two
+# thresholds guard the current_price update at every write site:
+#
+#   * NOISE FLOOR (1%): a move smaller than this is treated as rounding/noise —
+#     it neither updates current_price nor gets recorded to the history
+#     timeline, so it can't trigger a wasteful confirming re-fetch either.
+#   * SUSPECT CEILING (60%): a move larger than this is "suspect" — it is STILL
+#     recorded to listing_price_history (so the re-fetch net can confirm it and
+#     an operator can see the discrepancy) but is NOT allowed to become
+#     current_price. A real >60% move is confirmed by the authoritative fetch
+#     path, which applies the same band; a genuinely huge one stays visible in
+#     history without corrupting the displayed/deal-math price.
+_PRICE_NOISE_FLOOR = Decimal("0.01")  # <1% move: ignore entirely
+_PRICE_SUSPECT_CEILING = Decimal("0.60")  # >60% move: record but never adopt
+
+
+def _price_move_fraction(old_price, new_price):
+    """Fractional magnitude of a price move, or None when incomparable.
+
+    None means "no sane baseline to measure against" (either side missing, or a
+    non-positive stored price) — callers decide what to do with that case.
+    """
+    if old_price is None or new_price is None or old_price <= 0:
+        return None
+    return abs(new_price - old_price) / old_price
+
+
+def _observed_price_is_adoptable(old_price, new_price) -> bool:
+    """Whether `new_price` should become `listing.current_price` (issue #432).
+
+    Adopt only a move inside the sanity band [1%, 60%]. With no comparable
+    baseline (`old_price` NULL/≤0) the new price is adopted as a backfill. A
+    None observation never adopts.
+    """
+    if new_price is None:
+        return False
+    frac = _price_move_fraction(old_price, new_price)
+    if frac is None:
+        return True
+    return _PRICE_NOISE_FLOOR <= frac <= _PRICE_SUSPECT_CEILING
+
+
+def _observed_price_is_material(old_price, new_price) -> bool:
+    """Whether an observation is worth recording to `listing_price_history`.
+
+    Ignores sub-1% noise; a >60% suspect IS material (recorded so the re-fetch
+    net can confirm it), unlike `_observed_price_is_adoptable`. With no
+    comparable baseline, any distinct value is material.
+    """
+    if new_price is None:
+        return False
+    frac = _price_move_fraction(old_price, new_price)
+    if frac is None:
+        return new_price != old_price
+    return frac >= _PRICE_NOISE_FLOOR
+
+
 def _update_existing_listing(
     cur,
     canonical: CanonicalListingVersion,
@@ -173,7 +235,22 @@ def _update_existing_listing(
     something weaker now ("last confirmed present in a discover() sweep",
     see `etl.orchestrator._update_last_seen_for_discovered`) and is
     updated even when this function is never called for a given run.
+
+    `current_price` (issue #432, D-098): the fetched price is the newest
+    observation, so it becomes `current_price` — but only through the phase-2
+    sanity band (`_observed_price_is_adoptable`), so a sub-1% noise move or a
+    >60% suspect parse doesn't poison the authoritative display/deal-math
+    price. A >60% move is still appended to `listing_price_history`
+    (`_observed_price_is_material`) so the discrepancy is visible and the
+    re-fetch net can re-confirm it.
     """
+    # Gate current_price on the sanity band: pass the fetched price through only
+    # when it's an adoptable move, else None so COALESCE keeps the stored value.
+    adopt_price = (
+        canonical.current_price
+        if _observed_price_is_adoptable(prev_price, canonical.current_price)
+        else None
+    )
     cur.execute(
         """
         UPDATE property
@@ -231,7 +308,7 @@ def _update_existing_listing(
             canonical.url,
             canonical.listing_kind,
             canonical.status,
-            canonical.current_price,
+            adopt_price,
             canonical.description,
             list(canonical.photo_urls),
             canonical.contact_raw,
@@ -241,7 +318,7 @@ def _update_existing_listing(
             listing_id,
         ),
     )
-    if canonical.current_price is not None and canonical.current_price != prev_price:
+    if _observed_price_is_material(prev_price, canonical.current_price):
         cur.execute(
             "INSERT INTO listing_price_history (listing_id, observed_at, price) "
             "VALUES (%s, NOW(), %s)",
@@ -1094,92 +1171,151 @@ def _update_last_seen_for_discovered(
 
 
 def _record_discovery_price_observations(
-    conn, source: str, discovery_prices: dict[str, Decimal]
+    conn,
+    source: str,
+    discovery_prices: dict[str, Decimal],
+    run_started_at: datetime | None = None,
 ) -> int:
-    """Append every discovery-time price to `listing_price_history` (issue #183).
+    """Persist discovery-time prices to the timeline + display (issue #183, #432).
 
     Fotocasa's `discovered_prices()` yields a verified, detail-accurate price
     for *every* discovered listing on *every* sweep, at zero extra request
     cost (it's read out of the same `__initial_props__` JSON blob `discover()`
-    already fetches — see `etl.connectors.fotocasa`). Before this, that signal
-    was used only as a boolean gate in `_should_skip_fetch` and then thrown
-    away: a price change seen at discovery time was lost unless the listing
-    also happened to win a slot in this run's fetch budget (circuit breaker /
-    rate limit / `min_refetch_interval_seconds`). During Fotocasa's initial
+    already fetches — see `etl.connectors.fotocasa`). During Fotocasa's initial
     backfill the fetch front only advances ~40 ids/run, so a verified price for
-    the whole ~1,358-listing inventory was sitting unused every sweep while
-    price-drop detection (issue #34) stayed stale for days.
+    the whole ~1,358-listing inventory would otherwise sit unused every sweep
+    while price-drop detection (issue #34) stayed stale for days.
 
     This writes those prices straight to the price-history timeline,
     **decoupled entirely from the fetch budget** — a discovered listing the
     budget never reaches this run still gets its observation recorded.
 
-    Dedup / idempotency mirrors the fetch-path write in
-    `_update_existing_listing`: that path appends a row only when the newly
-    fetched price differs from what's stored, and updates the stored anchor in
-    the same transaction so the same price is never re-inserted on the next
-    run. Here the anchor is the listing's **most recent recorded price**
-    (the latest `listing_price_history` row), and a row is inserted only when
-    the discovery price `IS DISTINCT FROM` it. That gives the same guarantees
-    without touching `listing.current_price`:
+    **Two set-based writes, both dedup-safe (no N+1):**
 
-    * Same run: a listing the fetch loop DID re-fetch (a discovery-time price
-      delta forces exactly that, `_should_skip_fetch` reason #5) already had
-      its authoritative fetched price appended by `_update_existing_listing`,
-      so the discovery price equals the latest row and is deduped away — no
-      double-insert of the same observation.
-    * Across runs: once a discovery price is recorded it becomes the latest
-      row, so re-seeing the same price on the next sweep is a no-op.
+    1. **History (`listing_price_history`)** — append one row per listing whose
+       discovery price is a *material* move (`_observed_price_is_material`: the
+       sanity band's 1% noise floor) versus its most recent recorded price (the
+       latest history row, via an `IS DISTINCT FROM` correlated subquery). Same
+       run: a listing the fetch loop re-fetched already had its authoritative
+       price appended by `_update_existing_listing`, so the discovery price
+       equals the latest row and is deduped away. Across runs: once recorded, a
+       price is the latest row, so re-seeing it is a no-op.
 
-    `listing.current_price` is deliberately left **fetch-path-owned** (D-070):
-    updating it from a discovery price would make `_should_skip_fetch`'s
-    "discovery price disagrees with stored price -> force a re-fetch" trigger
-    (its central price-change safety net) stop firing, since stored would then
-    already equal the discovered value. `listing_price_history` is the only
-    consumer of the discovery-time signal.
+    2. **Display (`listing.current_price`)** — issue #432 / D-098: the most
+       recent observed price is authoritative for header/card, below-market %
+       and scoring, so a genuine discovery-time drop is reflected immediately
+       rather than waiting for a confirming re-fetch. Adopted only through the
+       phase-2 sanity band (adopt a move inside [1%, 60%]) so a >60% suspect or
+       sub-1% noise can't poison it — the >60% suspect is still recorded to
+       history (write #1) so the re-fetch net can confirm it. A listing this
+       run's fetch loop already re-fetched (`last_fetched_at >= run_started_at`)
+       is skipped here: the authoritative detail-page price wins over the
+       search-payload one, so discovery never clobbers a same-run fetch. When
+       `run_started_at` is None (direct callers/tests) that guard is off.
+
+    Re-fetch safety net (D-098, re-anchored from D-070): because discovery
+    writes history at NOW() without touching `last_fetched_at`,
+    `_should_skip_fetch` reason #5 — now keyed on
+    `latest observed_at > last_fetched_at` — fires on the *next* sweep and the
+    authoritative fetch confirms the price. The old trigger (discovery price vs
+    stored `current_price`) would go silent once current_price = observed; the
+    history/last_fetched_at anchor keeps confirming.
 
     Connector-agnostic by construction: drives off whatever
     `Connector.discovered_prices()` returns, which is `{}` for every connector
     that hasn't verified a discovery-time price field — so this is a cheap
     early-return no-op for all but Fotocasa today. Only listings that already
-    have a `listing` row can get an observation (the FK requires it); a
-    brand-new discovered id with no row yet gets its first price on its first
-    real fetch, exactly as before. Commits its own transaction, like the other
-    discovery-time helper `_update_last_seen_for_discovered`. Returns the
-    number of observations written.
+    have a `listing` row can get an observation (the FK requires it). Commits
+    its own transaction, like the sibling `_update_last_seen_for_discovered`.
+    Returns the number of history observations written.
     """
     if not discovery_prices:
         return 0
     external_ids = list(discovery_prices.keys())
     prices = [discovery_prices[external_id] for external_id in external_ids]
+    noise_floor = _PRICE_NOISE_FLOOR
+    suspect_ceiling = _PRICE_SUSPECT_CEILING
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO listing_price_history (listing_id, observed_at, price)
-            SELECT l.id, NOW(), incoming.price
-              FROM unnest(%s::text[], %s::numeric[])
-                       AS incoming(external_id, price)
-              JOIN listing l
-                ON l.source = %s AND l.external_id = incoming.external_id
-             WHERE incoming.price IS DISTINCT FROM (
-                       SELECT h.price
-                         FROM listing_price_history h
-                        WHERE h.listing_id = l.id
-                        ORDER BY h.observed_at DESC, h.id DESC
-                        LIMIT 1
+            WITH incoming AS (
+                SELECT l.id                AS listing_id,
+                       l.current_price     AS current_price,
+                       l.last_fetched_at   AS last_fetched_at,
+                       u.price             AS price,
+                       (SELECT h.price
+                          FROM listing_price_history h
+                         WHERE h.listing_id = l.id
+                         ORDER BY h.observed_at DESC, h.id DESC
+                         LIMIT 1)          AS latest_price
+                  FROM unnest(%(ids)s::text[], %(prices)s::numeric[])
+                           AS u(external_id, price)
+                  JOIN listing l
+                    ON l.source = %(source)s AND l.external_id = u.external_id
+                 WHERE u.price IS NOT NULL
+            ),
+            inserted AS (
+                INSERT INTO listing_price_history (listing_id, observed_at, price)
+                SELECT listing_id, NOW(), price
+                  FROM incoming
+                 WHERE price IS DISTINCT FROM latest_price
+                   AND (
+                        latest_price IS NULL OR latest_price <= 0
+                        OR abs(price - latest_price) / latest_price >= %(floor)s
                    )
+                RETURNING listing_id
+            ),
+            updated AS (
+                UPDATE listing l
+                   SET current_price = i.price
+                  FROM incoming i
+                 WHERE l.id = i.listing_id
+                   AND i.price IS DISTINCT FROM i.current_price
+                   AND (
+                        %(started)s::timestamptz IS NULL
+                        OR i.last_fetched_at IS NULL
+                        OR i.last_fetched_at < %(started)s::timestamptz
+                   )
+                   AND (
+                        i.current_price IS NULL OR i.current_price <= 0
+                        OR (
+                             abs(i.price - i.current_price) / i.current_price
+                                 >= %(floor)s
+                         AND abs(i.price - i.current_price) / i.current_price
+                                 <= %(ceiling)s
+                        )
+                   )
+                RETURNING l.id
+            )
+            SELECT
+                (SELECT count(*) FROM inserted),
+                (SELECT count(*) FROM updated)
             """,
-            (external_ids, prices, source),
+            {
+                "ids": external_ids,
+                "prices": prices,
+                "source": source,
+                "started": run_started_at,
+                "floor": noise_floor,
+                "ceiling": suspect_ceiling,
+            },
         )
-        recorded = cur.rowcount
+        recorded, adopted = cur.fetchone()
     conn.commit()
+    if adopted:
+        logger.info(
+            "Connector %s: %d discovery-time price(s) adopted as current_price "
+            "(latest-observed authoritative, D-098)",
+            source,
+            adopted,
+        )
     return recorded
 
 
 def _fetch_freshness_map(
     conn, source: str, external_ids: list[str]
-) -> dict[str, tuple[datetime | None, Decimal | None, str | None]]:
-    """Batched (last_fetched_at, current_price, status) lookup for skip-if-seen.
+) -> dict[str, tuple[datetime | None, Decimal | None, str | None, datetime | None]]:
+    """Batched (last_fetched_at, current_price, status, latest_observed_at) lookup.
 
     One query per (connector, scope) rather than one per listing — issue
     #143 exists because per-listing framework overhead was already the
@@ -1191,16 +1327,29 @@ def _fetch_freshness_map(
     `withdrawn` listing reappearing in `discover()` at an unchanged price
     go un-refetched: see `_should_skip_fetch`'s docstring for why a
     non-'active' stored status must always force a real fetch.
+
+    `latest_observed_at` (issue #432, D-098) is the newest
+    `listing_price_history.observed_at` for the listing — the re-anchored
+    price-change re-fetch trigger (reason #5): a discovery/capture observation
+    recorded after the last authoritative fetch means an unconfirmed price
+    exists, so a real fetch must re-confirm it. Left-joined so a listing with
+    no history rows yet is simply NULL (no trigger).
     """
     if not external_ids:
         return {}
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT external_id, last_fetched_at, current_price, status FROM listing "
-            "WHERE source = %s AND external_id = ANY(%s)",
+            """
+            SELECT l.external_id, l.last_fetched_at, l.current_price, l.status,
+                   (SELECT max(h.observed_at)
+                      FROM listing_price_history h
+                     WHERE h.listing_id = l.id) AS latest_observed_at
+              FROM listing l
+             WHERE l.source = %s AND l.external_id = ANY(%s)
+            """,
             (source, external_ids),
         )
-        return {row[0]: (row[1], row[2], row[3]) for row in cur.fetchall()}
+        return {row[0]: (row[1], row[2], row[3], row[4]) for row in cur.fetchall()}
 
 
 def _should_skip_fetch(
@@ -1208,7 +1357,7 @@ def _should_skip_fetch(
     last_fetched_at: datetime | None,
     stored_price: Decimal | None,
     stored_status: str | None,
-    discovery_price: Decimal | None,
+    latest_observed_at: datetime | None,
     min_refetch_interval_seconds: int,
     now: datetime,
 ) -> tuple[bool, str]:
@@ -1255,12 +1404,19 @@ def _should_skip_fetch(
     4. Stored `current_price` is NULL -> always fetch. A core field never
        having been captured is worth paying to backfill rather than
        leaving silently empty forever behind a staleness window.
-    5. Discovery-time price disagrees with the stored price -> always
-       fetch, however recently it was last fetched. This is the guard
-       against issue #143's central risk: a connector that supplies a
-       discovery-time price (`Connector.discovered_prices`) gets a real
-       price change detected on the very next sweep, not after the
-       staleness window happens to expire.
+    5. An unconfirmed price observation exists — the latest
+       `listing_price_history.observed_at` is newer than `last_fetched_at`
+       -> always fetch, however recently the staleness window says it was
+       fetched. This is the re-anchored (issue #432, D-098) price-change
+       safety net. It replaces the old "discovery price vs stored
+       current_price" trigger (D-070): now that the most-recent observed
+       price IS `current_price` (adopted at discovery/capture time so the
+       display is correct immediately), that old comparison would go silent.
+       Anchoring on history-vs-last_fetched_at instead keeps the
+       authoritative confirm-by-refetch firing until a real detail fetch
+       (which bumps `last_fetched_at` to match the observation) catches up —
+       covering exactly the listings the fetch budget never reached, whose
+       discovery observation is recorded but never confirmed.
     6. Otherwise, skip only once `min_refetch_interval_seconds` has
        genuinely elapsed since the last real fetch.
 
@@ -1292,12 +1448,13 @@ def _should_skip_fetch(
         )
     if stored_price is None:
         return False, "stored current_price is missing — backfilling"
-    if discovery_price is not None and discovery_price != stored_price:
+    if latest_observed_at is not None and latest_observed_at > last_fetched_at:
         return (
             False,
             (
-                f"discovery-time price {discovery_price} differs from stored "
-                f"price {stored_price} — forcing a re-fetch regardless of staleness"
+                f"unconfirmed price observation at {latest_observed_at.isoformat()} "
+                f"is newer than last fetch {last_fetched_at.isoformat()} — forcing "
+                "a re-fetch to confirm the authoritative price (D-098)"
             ),
         )
     age_seconds = (now - last_fetched_at).total_seconds()
@@ -1313,7 +1470,7 @@ def _should_skip_fetch(
         True,
         (
             f"fetched {age_seconds:.0f}s ago (< {min_refetch_interval_seconds}s "
-            f"window), current_price present, no discovery-time price delta"
+            f"window), current_price present, no unconfirmed price observation"
         ),
     )
 
@@ -1347,6 +1504,11 @@ def run_connector(
     discover() itself fails, since without a target list there's nothing
     to run.
     """
+    # Issue #432 / D-098: captured before the fetch loop so the discovery-time
+    # current_price adopter can tell which listings this run's fetch loop
+    # already re-fetched (last_fetched_at >= run_started_at) and must not be
+    # clobbered by the less-authoritative search-payload price.
+    run_started_at = datetime.now(timezone.utc)
     limiter.acquire()
     external_ids = connector.discover(scope, throttle=limiter.acquire)
 
@@ -1484,14 +1646,14 @@ def run_connector(
             )
             break
 
-        last_fetched_at, stored_price, stored_status = freshness.get(
-            external_id, (None, None, None)
+        last_fetched_at, stored_price, stored_status, latest_observed_at = (
+            freshness.get(external_id, (None, None, None, None))
         )
         skip, reason = _should_skip_fetch(
             last_fetched_at=last_fetched_at,
             stored_price=stored_price,
             stored_status=stored_status,
-            discovery_price=discovery_prices.get(external_id),
+            latest_observed_at=latest_observed_at,
             min_refetch_interval_seconds=min_refetch_interval_seconds,
             now=datetime.now(timezone.utc),
         )
@@ -1578,17 +1740,20 @@ def run_connector(
         fetched += 1
         breaker.record_success()
 
-    # Issue #183: persist every discovery-time price observation straight to
-    # listing_price_history, decoupled from the fetch budget. Runs AFTER the
-    # fetch loop on purpose: a listing the loop re-fetched has already had its
+    # Issue #183 / #432 (D-098): persist every discovery-time price observation
+    # to listing_price_history AND adopt it as listing.current_price (through
+    # the sanity band), decoupled from the fetch budget. Runs AFTER the fetch
+    # loop on purpose: a listing the loop re-fetched has already had its
     # authoritative price appended by _update_existing_listing, so deduping
-    # against the latest recorded price (see the helper) collapses the
-    # discovery observation into that row rather than double-inserting it,
-    # while a listing the budget never reached this run still gets its
-    # verified discovery-time price recorded. No-op ({} early return) for every
-    # connector that hasn't verified a discovery-time price field.
+    # against the latest recorded price collapses the discovery observation
+    # into that row rather than double-inserting it, and the run_started_at
+    # guard keeps the search-payload price from clobbering that same-run
+    # authoritative fetch's current_price — while a listing the budget never
+    # reached this run still gets its verified discovery-time price recorded
+    # and displayed. No-op ({} early return) for every connector that hasn't
+    # verified a discovery-time price field.
     discovery_price_observations = _record_discovery_price_observations(
-        conn, connector.name, discovery_prices
+        conn, connector.name, discovery_prices, run_started_at
     )
     if discovery_price_observations:
         logger.info(

@@ -469,12 +469,15 @@ class MilanunciosConnector(Connector):
     # budget was not the limit — re-fetching was. Same pathology and same
     # fix as Fotocasa (#175), reached from a different cause.
     #
-    # The cost, stated plainly: _should_skip_fetch's rule 5 (a discovery-time
-    # price that disagrees with the stored one forces an immediate re-fetch)
-    # CANNOT fire for this connector, because discovered_prices() is empty —
-    # see the paragraph below. So a price change on an already-fetched
-    # Milanuncios listing can go unnoticed for up to 24h, where the same
-    # change on Fotocasa is caught on the next sweep.
+    # The cost, stated plainly: _should_skip_fetch's rule 5 (an unconfirmed
+    # price observation — a listing_price_history row newer than
+    # last_fetched_at — forces a re-fetch; re-anchored per issue #432 / D-098)
+    # CANNOT fire for this connector, because it never records such
+    # observations between fetches: discovered_prices() is empty, so nothing
+    # writes to the timeline outside the fetch path — see the paragraph below.
+    # So a price change on an already-fetched Milanuncios listing can go
+    # unnoticed for up to 24h, where the same change on Fotocasa is recorded
+    # (and displayed) at discovery time and confirmed on the next sweep.
     #
     # That is NOT a strict improvement and this comment used to claim it was
     # (Opus review, PR #225 — the word is wrong and it's now gone from here,
@@ -495,8 +498,9 @@ class MilanunciosConnector(Connector):
     # listing_price_history is lost data, not lagged data.
     #
     # Revisit the moment a live search-page fetch succeeds and the `ad`
-    # shape can be checked for a price field (see below) — that would
-    # restore rule 5 and remove the asymmetry entirely.
+    # shape can be checked for a price field (see below) — that would let
+    # discovery record observations (feeding rule 5 and, per D-098, the
+    # displayed current_price) and remove the asymmetry entirely.
     min_refetch_interval_seconds = 24 * 60 * 60
 
     # Issue #143: does NOT override discovered_prices(). Investigated, not
