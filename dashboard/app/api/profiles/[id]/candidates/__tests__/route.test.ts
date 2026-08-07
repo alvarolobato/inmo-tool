@@ -25,6 +25,37 @@ function makeRequest(url: string): NextRequest {
 
 const ctx = (id: string) => ({ params: { id } });
 
+// #425: listCandidates now issues a novelty-context RESOLVE query (detected by
+// its `never_visited` column) before its main query. The mock routes that
+// transparently to a fixed row so tests keep queueing only profile + main +
+// (loadFlags/sources) results, in order, via `queue`.
+const FIXED_ANCHOR = "2020-01-01T00:00:00.000Z";
+const RESOLVE_ROW = {
+  anchor_ts: FIXED_ANCHOR,
+  never_visited: false,
+  total: 0,
+  fresh: 0,
+};
+// #425 param threading appended after the #422 state filter ($18): tier ($19,
+// null on page 1), anchor ($20), sanity band ($21/$22), cold start ($23).
+const NOVELTY_TAIL_PAGE1 = [null, FIXED_ANCHOR, 0.01, 0.6, false] as const;
+let queue: Array<{ rows: unknown[] } | Error>;
+function enqueue(...vals: Array<{ rows: unknown[] } | Error>): void {
+  queue.push(...vals);
+}
+/** The main candidate-list query (carrying the fresh-first ORDER BY). */
+function candidatesCall(): [string, unknown[]] {
+  const call = mockQuery.mock.calls.find(
+    (c) =>
+      typeof c[0] === "string" && c[0].includes("ORDER BY ranked.novelty_tier"),
+  );
+  if (!call) throw new Error("no main candidate query was issued");
+  return call as [string, unknown[]];
+}
+function candidatesParams(): unknown[] {
+  return candidatesCall()[1];
+}
+
 const profileRow = (overrides: Record<string, unknown> = {}) => ({
   id: 3,
   name: "Perfil",
@@ -43,13 +74,23 @@ const profileRow = (overrides: Record<string, unknown> = {}) => ({
 beforeEach(async () => {
   mockQuery.mockReset();
   mockEnd.mockClear();
+  queue = [];
+  mockQuery.mockImplementation((text: unknown) => {
+    if (typeof text === "string" && text.includes("never_visited")) {
+      return Promise.resolve({ rows: [RESOLVE_ROW] });
+    }
+    const next = queue.length > 0 ? queue.shift()! : { rows: [] };
+    return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
+  });
   await resetPool();
 });
 
 describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", () => {
   it("rejects a malformed source before touching the DB (400)", async () => {
     const res = await GET(
-      makeRequest("http://localhost/api/profiles/3/candidates?source=Idealista!"),
+      makeRequest(
+        "http://localhost/api/profiles/3/candidates?source=Idealista!",
+      ),
       ctx("3"),
     );
     expect(res.status).toBe(400);
@@ -58,7 +99,9 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
 
   it("rejects an uppercase source (slugs are lowercase) (400)", async () => {
     const res = await GET(
-      makeRequest("http://localhost/api/profiles/3/candidates?source=IDEALISTA"),
+      makeRequest(
+        "http://localhost/api/profiles/3/candidates?source=IDEALISTA",
+      ),
       ctx("3"),
     );
     expect(res.status).toBe(400);
@@ -68,23 +111,29 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
   it("accepts a valid slug and passes it as $5 to listCandidates", async () => {
     // 1st query: getProfileById. 2nd: listCandidates main query (empty result
     // → loadFlags issues no further query).
-    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
-    mockQuery.mockResolvedValueOnce({ rows: [] });
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
 
     const res = await GET(
-      makeRequest("http://localhost/api/profiles/3/candidates?source=milanuncios_rental"),
+      makeRequest(
+        "http://localhost/api/profiles/3/candidates?source=milanuncios_rental",
+      ),
       ctx("3"),
     );
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ items: [], nextCursor: null });
+    expect(await res.json()).toEqual({
+      items: [],
+      nextCursor: null,
+      coldStart: false,
+    });
 
-    const candidatesCall = mockQuery.mock.calls[1];
-    expect(candidatesCall[0]).toContain("lf.source = $5");
+    const candidatesCallArr = candidatesCall();
+    expect(candidatesCallArr[0]).toContain("lf.source = $5");
     // #310 appended $7–$11 (occupancy, occupied-statuses list, condition,
     // renovation, min-below-market); #386 appended $13/$14 (caveat, redflagType);
     // #392 appended $15/$16 (beachProximity, heritageZone); all null/default when
     // only source is set.
-    expect(candidatesCall[1]).toEqual([
+    expect(candidatesCallArr[1]).toEqual([
       3,
       null,
       null,
@@ -103,16 +152,20 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       null,
       null,
       null,
+      ...NOVELTY_TAIL_PAGE1,
     ]);
   });
 
   it("treats an absent source as no filter ($5 = null)", async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
-    mockQuery.mockResolvedValueOnce({ rows: [] });
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
 
-    const res = await GET(makeRequest("http://localhost/api/profiles/3/candidates"), ctx("3"));
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates"),
+      ctx("3"),
+    );
     expect(res.status).toBe(200);
-    expect(mockQuery.mock.calls[1][1]).toEqual([
+    expect(candidatesParams()).toEqual([
       3,
       null,
       null,
@@ -131,6 +184,7 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       null,
       null,
       null,
+      ...NOVELTY_TAIL_PAGE1,
     ]);
   });
 });
@@ -156,7 +210,9 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
 
   it("rejects an unknown renovation value (400)", async () => {
     const res = await GET(
-      makeRequest("http://localhost/api/profiles/3/candidates?renovation=media"),
+      makeRequest(
+        "http://localhost/api/profiles/3/candidates?renovation=media",
+      ),
       ctx("3"),
     );
     expect(res.status).toBe(400);
@@ -174,7 +230,9 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
 
   it("rejects a non-numeric minDiscount (400)", async () => {
     const res = await GET(
-      makeRequest("http://localhost/api/profiles/3/candidates?minDiscount=cheap"),
+      makeRequest(
+        "http://localhost/api/profiles/3/candidates?minDiscount=cheap",
+      ),
       ctx("3"),
     );
     expect(res.status).toBe(400);
@@ -182,8 +240,8 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
   });
 
   it("passes valid filters through: occupancy=$7, condition=$9, renovation=$10, minDiscount(pct→fraction)=$11", async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
-    mockQuery.mockResolvedValueOnce({ rows: [] });
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
 
     const res = await GET(
       makeRequest(
@@ -192,7 +250,7 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
       ctx("3"),
     );
     expect(res.status).toBe(200);
-    expect(mockQuery.mock.calls[1][1]).toEqual([
+    expect(candidatesParams()).toEqual([
       3,
       null,
       null,
@@ -211,6 +269,7 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
       null,
       null,
       null,
+      ...NOVELTY_TAIL_PAGE1,
     ]);
   });
 
@@ -225,7 +284,9 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
 
   it("rejects an unknown redflagType value (400) (#386)", async () => {
     const res = await GET(
-      makeRequest("http://localhost/api/profiles/3/candidates?redflagType=goteras"),
+      makeRequest(
+        "http://localhost/api/profiles/3/candidates?redflagType=goteras",
+      ),
       ctx("3"),
     );
     expect(res.status).toBe(400);
@@ -233,8 +294,8 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
   });
 
   it("passes valid caveat=$13 and redflagType=$14 through to listCandidates (#386)", async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
-    mockQuery.mockResolvedValueOnce({ rows: [] });
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
 
     const res = await GET(
       makeRequest(
@@ -243,27 +304,29 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
       ctx("3"),
     );
     expect(res.status).toBe(200);
-    const params = mockQuery.mock.calls[1][1];
+    const params = candidatesParams();
     expect(params[12]).toBe("venta_deuda");
     expect(params[13]).toBe("unfinished_construction");
   });
 
   it("accepts subasta_judicial as a valid redflagType and passes it through (#389)", async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
-    mockQuery.mockResolvedValueOnce({ rows: [] });
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
 
     const res = await GET(
-      makeRequest("http://localhost/api/profiles/3/candidates?redflagType=subasta_judicial"),
+      makeRequest(
+        "http://localhost/api/profiles/3/candidates?redflagType=subasta_judicial",
+      ),
       ctx("3"),
     );
     expect(res.status).toBe(200);
-    const params = mockQuery.mock.calls[1][1];
+    const params = candidatesParams();
     expect(params[13]).toBe("subasta_judicial");
   });
 
   it("accepts sin_financiacion_hipotecaria as a valid redflagType and passes it through (#408)", async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
-    mockQuery.mockResolvedValueOnce({ rows: [] });
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
 
     const res = await GET(
       makeRequest(
@@ -272,26 +335,30 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
       ctx("3"),
     );
     expect(res.status).toBe(200);
-    const params = mockQuery.mock.calls[1][1];
+    const params = candidatesParams();
     expect(params[13]).toBe("sin_financiacion_hipotecaria");
   });
 
   it("accepts cambio_uso_pendiente as a valid redflagType and passes it through (#408)", async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
-    mockQuery.mockResolvedValueOnce({ rows: [] });
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
 
     const res = await GET(
-      makeRequest("http://localhost/api/profiles/3/candidates?redflagType=cambio_uso_pendiente"),
+      makeRequest(
+        "http://localhost/api/profiles/3/candidates?redflagType=cambio_uso_pendiente",
+      ),
       ctx("3"),
     );
     expect(res.status).toBe(200);
-    const params = mockQuery.mock.calls[1][1];
+    const params = candidatesParams();
     expect(params[13]).toBe("cambio_uso_pendiente");
   });
 
   it("rejects an unknown beachProximity value before touching the DB (400) (#392)", async () => {
     const res = await GET(
-      makeRequest("http://localhost/api/profiles/3/candidates?beachProximity=oceanfront"),
+      makeRequest(
+        "http://localhost/api/profiles/3/candidates?beachProximity=oceanfront",
+      ),
       ctx("3"),
     );
     expect(res.status).toBe(400);
@@ -300,7 +367,9 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
 
   it("rejects `none` as a beachProximity value — it is not a filter target (400) (#392)", async () => {
     const res = await GET(
-      makeRequest("http://localhost/api/profiles/3/candidates?beachProximity=none"),
+      makeRequest(
+        "http://localhost/api/profiles/3/candidates?beachProximity=none",
+      ),
       ctx("3"),
     );
     expect(res.status).toBe(400);
@@ -308,37 +377,44 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
   });
 
   it("passes a valid beachProximity=$15 through to listCandidates (#392)", async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
-    mockQuery.mockResolvedValueOnce({ rows: [] });
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
 
     const res = await GET(
-      makeRequest("http://localhost/api/profiles/3/candidates?beachProximity=frontline"),
+      makeRequest(
+        "http://localhost/api/profiles/3/candidates?beachProximity=frontline",
+      ),
       ctx("3"),
     );
     expect(res.status).toBe(200);
-    expect(mockQuery.mock.calls[1][1][14]).toBe("frontline");
+    expect(candidatesParams()[14]).toBe("frontline");
   });
 
   it("passes heritageZone=true through as $16=true, and any other value as null (#392)", async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
-    mockQuery.mockResolvedValueOnce({ rows: [] });
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
     const on = await GET(
-      makeRequest("http://localhost/api/profiles/3/candidates?heritageZone=true"),
+      makeRequest(
+        "http://localhost/api/profiles/3/candidates?heritageZone=true",
+      ),
       ctx("3"),
     );
     expect(on.status).toBe(200);
-    expect(mockQuery.mock.calls[1][1][15]).toBe(true);
+    expect(candidatesParams()[15]).toBe(true);
 
     for (const raw of ["", "1", "false", "yes"]) {
-      mockQuery.mockReset();
-      mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
-      mockQuery.mockResolvedValueOnce({ rows: [] });
+      mockQuery.mockClear();
+      queue = [];
+      enqueue({ rows: [profileRow()] });
+      enqueue({ rows: [] });
       const off = await GET(
-        makeRequest(`http://localhost/api/profiles/3/candidates?heritageZone=${raw}`),
+        makeRequest(
+          `http://localhost/api/profiles/3/candidates?heritageZone=${raw}`,
+        ),
         ctx("3"),
       );
       expect(off.status).toBe(200);
-      expect(mockQuery.mock.calls[1][1][15]).toBeNull();
+      expect(candidatesParams()[15]).toBeNull();
     }
   });
 
@@ -353,71 +429,78 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
 
   it("passes isVpo bidirectionally as $17 (true/false), and absent/empty as null (#398)", async () => {
     // true = only VPO.
-    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
-    mockQuery.mockResolvedValueOnce({ rows: [] });
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
     const only = await GET(
       makeRequest("http://localhost/api/profiles/3/candidates?isVpo=true"),
       ctx("3"),
     );
     expect(only.status).toBe(200);
-    expect(mockQuery.mock.calls[1][1][16]).toBe(true);
+    expect(candidatesParams()[16]).toBe(true);
 
     // false = exclude VPO.
-    mockQuery.mockReset();
-    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
-    mockQuery.mockResolvedValueOnce({ rows: [] });
+    mockQuery.mockClear();
+    queue = [];
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
     const exclude = await GET(
       makeRequest("http://localhost/api/profiles/3/candidates?isVpo=false"),
       ctx("3"),
     );
     expect(exclude.status).toBe(200);
-    expect(mockQuery.mock.calls[1][1][16]).toBe(false);
+    expect(candidatesParams()[16]).toBe(false);
 
     // absent/empty = off (null).
     for (const url of [
       "http://localhost/api/profiles/3/candidates",
       "http://localhost/api/profiles/3/candidates?isVpo=",
     ]) {
-      mockQuery.mockReset();
-      mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
-      mockQuery.mockResolvedValueOnce({ rows: [] });
+      mockQuery.mockClear();
+      queue = [];
+      enqueue({ rows: [profileRow()] });
+      enqueue({ rows: [] });
       const off = await GET(makeRequest(url), ctx("3"));
       expect(off.status).toBe(200);
-      expect(mockQuery.mock.calls[1][1][16]).toBeNull();
+      expect(candidatesParams()[16]).toBeNull();
     }
   });
 
   it("passes includeRejected=true to listCandidates as $12 when the show-rejected toggle is on (#379)", async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
-    mockQuery.mockResolvedValueOnce({ rows: [] });
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
 
     const res = await GET(
-      makeRequest("http://localhost/api/profiles/3/candidates?includeRejected=true"),
+      makeRequest(
+        "http://localhost/api/profiles/3/candidates?includeRejected=true",
+      ),
       ctx("3"),
     );
     expect(res.status).toBe(200);
-    const params = mockQuery.mock.calls[1][1];
+    const params = candidatesParams();
     // $12 is the includeRejected flag ($13/$14 caveat/redflagType follow it).
     expect(params[11]).toBe(true);
   });
 
   it("keeps rejected hidden ($12 = false) for any includeRejected value other than the exact string 'true' (#379)", async () => {
     for (const raw of ["", "1", "false", "TRUE", "yes"]) {
-      mockQuery.mockReset();
-      mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
-      mockQuery.mockResolvedValueOnce({ rows: [] });
+      mockQuery.mockClear();
+      queue = [];
+      enqueue({ rows: [profileRow()] });
+      enqueue({ rows: [] });
       const res = await GET(
-        makeRequest(`http://localhost/api/profiles/3/candidates?includeRejected=${raw}`),
+        makeRequest(
+          `http://localhost/api/profiles/3/candidates?includeRejected=${raw}`,
+        ),
         ctx("3"),
       );
       expect(res.status).toBe(200);
-      expect(mockQuery.mock.calls[1][1][11]).toBe(false);
+      expect(candidatesParams()[11]).toBe(false);
     }
   });
 
   it("passes state=accept to listCandidates as $18 (the 'En seguimiento' working set, #422)", async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
-    mockQuery.mockResolvedValueOnce({ rows: [] });
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
 
     const res = await GET(
       makeRequest("http://localhost/api/profiles/3/candidates?state=accept"),
@@ -425,23 +508,27 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
     );
     expect(res.status).toBe(200);
     // $18 (index 17) is the seguimiento state filter.
-    expect(mockQuery.mock.calls[1][1][17]).toBe("accept");
+    expect(candidatesParams()[17]).toBe("accept");
   });
 
   it("leaves the state filter off ($18 = null) when the param is absent (#422)", async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
-    mockQuery.mockResolvedValueOnce({ rows: [] });
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
 
-    const res = await GET(makeRequest("http://localhost/api/profiles/3/candidates"), ctx("3"));
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates"),
+      ctx("3"),
+    );
     expect(res.status).toBe(200);
-    expect(mockQuery.mock.calls[1][1][17]).toBeNull();
+    expect(candidatesParams()[17]).toBeNull();
   });
 
   it("rejects an unknown state value with 400 (#422)", async () => {
     for (const raw of ["reject", "star", "accepted", "yes"]) {
-      mockQuery.mockReset();
-      mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
-      mockQuery.mockResolvedValueOnce({ rows: [] });
+      mockQuery.mockClear();
+      queue = [];
+      enqueue({ rows: [profileRow()] });
+      enqueue({ rows: [] });
       const res = await GET(
         makeRequest(`http://localhost/api/profiles/3/candidates?state=${raw}`),
         ctx("3"),
@@ -462,7 +549,7 @@ describe("GET /api/profiles/[id]/candidate-sources (#265)", () => {
   });
 
   it("returns 404 for an archived profile", async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [profileRow({ archived_at: "2026-08-01T00:00:00Z" })] });
+    enqueue({ rows: [profileRow({ archived_at: "2026-08-01T00:00:00Z" })] });
     const res = await SOURCES_GET(
       makeRequest("http://localhost/api/profiles/3/candidate-sources"),
       ctx("3"),
@@ -471,9 +558,13 @@ describe("GET /api/profiles/[id]/candidate-sources (#265)", () => {
   });
 
   it("returns the distinct sources for an active profile", async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ source: "aliseda" }, { source: "fotocasa" }, { source: "idealista" }],
+    enqueue({ rows: [profileRow()] });
+    enqueue({
+      rows: [
+        { source: "aliseda" },
+        { source: "fotocasa" },
+        { source: "idealista" },
+      ],
     });
 
     const res = await SOURCES_GET(
@@ -481,6 +572,8 @@ describe("GET /api/profiles/[id]/candidate-sources (#265)", () => {
       ctx("3"),
     );
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ sources: ["aliseda", "fotocasa", "idealista"] });
+    expect(await res.json()).toEqual({
+      sources: ["aliseda", "fotocasa", "idealista"],
+    });
   });
 });

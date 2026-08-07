@@ -13,10 +13,19 @@
 
 import { sql } from "@/lib/db-write";
 import { readIntInRange } from "@/lib/notifications/config-read";
-import { DISABLED_SOURCES_CTE, activeSourceClause } from "@/lib/db/source-active";
+import {
+  DISABLED_SOURCES_CTE,
+  activeSourceClause,
+} from "@/lib/db/source-active";
 import { REDFLAG_LABELS } from "@/lib/ai-assessment/redflags";
-import { BEACH_PROXIMITY_LABELS, HERITAGE_ZONE_LABEL } from "@/lib/ai-assessment/location";
-import { IS_VPO_LABEL, TOURIST_LICENSE_LABEL } from "@/lib/ai-assessment/opportunity";
+import {
+  BEACH_PROXIMITY_LABELS,
+  HERITAGE_ZONE_LABEL,
+} from "@/lib/ai-assessment/location";
+import {
+  IS_VPO_LABEL,
+  TOURIST_LICENSE_LABEL,
+} from "@/lib/ai-assessment/opportunity";
 import type { StateFeedbackType } from "@/lib/db/feedback";
 
 export interface CandidateListingSummary {
@@ -241,13 +250,22 @@ export interface CandidatePage {
   items: CandidateRow[];
   /**
    * Opaque cursor string — pass back as `cursor` to fetch the next page; null
-   * when this is the last page. Encodes both `score` and `property_id` (a
-   * compound keyset key), not just an id, because results are ordered
-   * globally by score (see `listCandidates`) — a single-id cursor can't
-   * resume a score-ordered scan correctly. Callers must not parse this
-   * themselves; treat it as opaque.
+   * when this is the last page. Encodes the 3-column keyset key `novelty_tier`
+   * + `effective_score` + `property_id` (#425), plus the session-fixed novelty
+   * anchor and cold-start decision, not just an id — results are ordered
+   * globally by (tier, score, id), so a shorter cursor can't resume the scan
+   * correctly. Callers must not parse this themselves; treat it as opaque.
    */
   nextCursor: string | null;
+  /**
+   * #425 (plan #415 §3.2): the novelty tier was suppressed for this session —
+   * the profile was never visited, or the tier would cover >60% of the matched
+   * pool. Every row renders at tier 0 (no fresh-first reordering) and the UI
+   * shows a single "Perfil nuevo: todo es reciente" line instead of highlighting
+   * the whole feed. Stable across pages (folded into the cursor). Tracked
+   * (accept) rows are exempt from the suppression regardless of this flag.
+   */
+  coldStart: boolean;
 }
 
 const DEFAULT_LIMIT = 30;
@@ -398,7 +416,11 @@ export const OCCUPANCY_FILTERS = ["occupied", "free"] as const;
 export type OccupancyFilter = (typeof OCCUPANCY_FILTERS)[number];
 
 /** Condition hard-filter values — the `ConditionCategory` set worth sourcing on (`unclear` is not a filter target). */
-export const CONDITION_FILTERS = ["a_reformar", "reformado", "obra_nueva"] as const;
+export const CONDITION_FILTERS = [
+  "a_reformar",
+  "reformado",
+  "obra_nueva",
+] as const;
 export type ConditionFilter = (typeof CONDITION_FILTERS)[number];
 
 /** Renovation-severity hard-filter values (#313). Only meaningful within `a_reformar`; a non-null value implies that category. */
@@ -458,7 +480,11 @@ export type RedflagTypeFilter = (typeof REDFLAG_TYPE_FILTERS)[number];
  * source on (same rule the badge vocabulary follows). A subset of the axis's
  * `BEACH_PROXIMITIES`. Kept as a SQL param, never interpolated.
  */
-export const BEACH_PROXIMITY_FILTERS = ["frontline", "sea_view", "near_beach"] as const;
+export const BEACH_PROXIMITY_FILTERS = [
+  "frontline",
+  "sea_view",
+  "near_beach",
+] as const;
 export type BeachProximityFilter = (typeof BEACH_PROXIMITY_FILTERS)[number];
 
 /** The two physical-occupancy statuses that count as "occupied" (kept as a SQL param, never interpolated). Exported for the route test's param-shape assertion. */
@@ -552,13 +578,69 @@ export interface CandidateFilters {
  * scoring pass (see D-057), not to move the Haversine zone-median into this
  * per-row expression.
  */
-function rankedCandidatesCte(warnParam: string): string {
+/**
+ * Placeholders the shared `ranked` CTE injects into its SQL. All are caller-
+ * supplied because their `$N` position differs per call site (and two are not
+ * `$N` at all in the resolve query — see `anchorParam`).
+ *
+ * `anchorParam` / `coldStartParam` are the load-bearing #425 threading: the
+ * novelty anchor and the cold-start suppression decision are resolved ONCE per
+ * paging session and passed in as bound values, never re-read per request, so
+ * a mid-session anchor shift (a re-visit crossing the 30-min debounce) can't
+ * re-tier rows and land the keyset cursor in the wrong partition (plan §3.2).
+ * `anchorParam` is normally a `$N` placeholder, but the resolve query passes a
+ * scalar sub-select (`(SELECT anchor_ts FROM sp)`) so it can compute the anchor
+ * and the tier coverage in one round-trip.
+ */
+interface RankedCteParams {
+  /** `$N` for the warn-caveat text[] (distress occupancy caveats). */
+  warnParam: string;
+  /** SQL expression yielding the visit anchor timestamp (a `$N` bound value, or a scalar sub-select in the resolve query). */
+  anchorParam: string;
+  /** `$N` for the price-change sanity-band MIN fraction (tier mirrors the badge). */
+  bandMinParam: string;
+  /** `$N` for the price-change sanity-band MAX fraction. */
+  bandMaxParam: string;
+  /** SQL boolean expression: when true, cold-start suppresses the novelty tier (except tracked rows). A `$N` bound value on the page/adjacency queries; the literal `false` on the resolve query so it measures the RAW tier coverage. */
+  coldStartParam: string;
+}
+
+/**
+ * #425 (plan #415 §3.2): the leading sort TIER. Fresh-first ordering puts new
+ * and price-moved candidates above everything else, but as a SEPARATE key —
+ * `effective_score` is NEVER touched, so the #309/D-057 non-negativity,
+ * graceful-degradation and never-scored-floor invariants hold by construction
+ * (clauses 1–3 are about an unchanged expression). The tier's `price_changed`
+ * arm mirrors `classifyPriceChange`'s sanity band exactly (|delta| within
+ * [min,max]) so a row tiers up iff it also badges. Cold-start suppression
+ * (`coldStartParam`) zeroes the tier for everyone EXCEPT tracked (accept) rows,
+ * which the owner's working set must never lose (#425 "seguimiento nunca
+ * suprimido"). Injected into `ranked` so all THREE call sites (list ORDER BY,
+ * keyset cursor, getAdjacentCandidates) inherit ONE definition (derive-once,
+ * D-059) — the clause-4 constraint that makes prev/next agree with the feed.
+ */
+function noveltyTierExpr(p: RankedCteParams): string {
+  return `CASE
+           WHEN (${p.coldStartParam}) AND base.feedback_state IS DISTINCT FROM 'accept' THEN 0
+           WHEN COALESCE(nov.is_new, false)
+                OR (pm.delta_pct IS NOT NULL
+                    AND ABS(pm.delta_pct) >= ${p.bandMinParam}::double precision
+                    AND ABS(pm.delta_pct) <= ${p.bandMaxParam}::double precision)
+             THEN 1
+           ELSE 0
+         END`;
+}
+
+function rankedCandidatesCte(params: RankedCteParams): string {
+  const { warnParam } = params;
   // #392 graded beach boost, built from BEACH_PROXIMITY_BOOST_UNITS. Keys are
   // hardcoded enum values and values are numeric constants — never user input —
   // so interpolating them into the CASE is safe. `none`/NULL fall through to
   // ELSE 0 (no lift). frontline earns the top units (see the constant's doc for
   // why the hard-filter target is still boosted).
-  const beachBoostCase = `CASE base.beach_proximity ${Object.entries(BEACH_PROXIMITY_BOOST_UNITS)
+  const beachBoostCase = `CASE base.beach_proximity ${Object.entries(
+    BEACH_PROXIMITY_BOOST_UNITS,
+  )
     .map(([grade, units]) => `WHEN '${grade}' THEN ${units}`)
     .join(" ")} ELSE 0 END`;
   // #398 tourist-licence soft boost: a single boolean lift. base.tourist_license
@@ -753,9 +835,14 @@ function rankedCandidatesCte(warnParam: string): string {
      -- this same page GET stamps to NOW() on arrival. Fallback matches the
      -- exact expression new_count already uses in profile-overview.ts. One row.
      anchor AS (
-       SELECT COALESCE(sp.previous_viewed_at, sp.created_at - interval '1 day') AS ts
-         FROM search_profile sp
-        WHERE sp.id = $1
+       -- #425: the visit anchor is RESOLVED ONCE per paging session and passed
+       -- in (anchorParam), never re-read from search_profile per request, so a
+       -- mid-session shift of previous_viewed_at can't re-tier rows and misplace
+       -- the keyset cursor (plan §3.2). The resolve query threads the shifted
+       -- two-slot anchor (COALESCE(previous_viewed_at, created_at - 1 day) — the
+       -- exact fallback new_count uses); page 2+ threads the value folded into
+       -- the cursor. novelty/price_moves both read (SELECT ts FROM anchor).
+       SELECT (${params.anchorParam})::timestamptz AS ts
      ),
      -- #416 pre-aggregated novelty signal: exactly ONE row per candidate
      -- property, bounded to base's property set (never a scan of the whole
@@ -837,6 +924,12 @@ function rankedCandidatesCte(warnParam: string): string {
          -- deliberately NOT part of effective_score or the ORDER BY (fresh-first
          -- ordering is phase 3). The sanity band is applied downstream in TS.
          pm.delta_pct AS price_delta_pct,
+         -- #425 (plan #415 §3.2): the LEADING sort tier. See noveltyTierExpr —
+         -- effective_score is untouched, the tier is a separate key. Carried
+         -- through ranked.* so all three call sites (list ORDER BY + cursor,
+         -- getAdjacentCandidates) order on the SAME (novelty_tier, effective_
+         -- score, property_id) key and prev/next can never desync from the feed.
+         ${noveltyTierExpr(params)} AS novelty_tier,
          CASE
            WHEN base.ppm2 IS NOT NULL AND pool.n >= ${MIN_POOL_SIZE}
                 AND pool.median_ppm2 IS NOT NULL AND pool.median_ppm2 > 0
@@ -887,14 +980,21 @@ export function describeRankingBoost(
     );
   }
   if (distressLevel > 0) {
-    parts.push("señales de oportunidad detectadas (ocupación / estado / cargas)");
+    parts.push(
+      "señales de oportunidad detectadas (ocupación / estado / cargas)",
+    );
   }
   // #392: a positive beach grade lifts the ranking, so name it too (`none`/null
   // carries no boost, so it earns no mention — same "no reason on every card"
   // discipline as the signals above). Uses the axis's own Spanish badge label so
   // the reason and the card's badge read consistently.
-  if (beachProximity !== null && BEACH_PROXIMITY_LABELS[beachProximity] !== undefined) {
-    parts.push(`proximidad a la playa (${BEACH_PROXIMITY_LABELS[beachProximity].toLowerCase()})`);
+  if (
+    beachProximity !== null &&
+    BEACH_PROXIMITY_LABELS[beachProximity] !== undefined
+  ) {
+    parts.push(
+      `proximidad a la playa (${BEACH_PROXIMITY_LABELS[beachProximity].toLowerCase()})`,
+    );
   }
   // #398: a granted tourist licence lifts the ranking, so name it too (its
   // absence carries no boost and earns no mention — same "no reason on every
@@ -941,7 +1041,11 @@ export function classifyPriceChange(
   maxFrac: number,
 ): PriceChangeSignal {
   if (delta === null || !Number.isFinite(delta)) {
-    return { price_changed: false, price_delta_pct: null, price_direction: null };
+    return {
+      price_changed: false,
+      price_delta_pct: null,
+      price_direction: null,
+    };
   }
   const abs = Math.abs(delta);
   const withinBand = abs >= minFrac && abs <= maxFrac;
@@ -958,19 +1062,63 @@ export function classifyPriceChange(
  * (`feed.price_change_min_pct` / `feed.price_change_max_pct`).
  */
 function readPriceChangeBand(): { minFrac: number; maxFrac: number } {
-  const minPct = readIntInRange("feed.price_change_min_pct", "FEED_PRICE_CHANGE_MIN_PCT", 1, 0, 100);
-  const maxPct = readIntInRange("feed.price_change_max_pct", "FEED_PRICE_CHANGE_MAX_PCT", 60, 1, 100);
+  const minPct = readIntInRange(
+    "feed.price_change_min_pct",
+    "FEED_PRICE_CHANGE_MIN_PCT",
+    1,
+    0,
+    100,
+  );
+  const maxPct = readIntInRange(
+    "feed.price_change_max_pct",
+    "FEED_PRICE_CHANGE_MAX_PCT",
+    60,
+    1,
+    100,
+  );
   return { minFrac: minPct / 100, maxFrac: maxPct / 100 };
 }
 
 interface CandidateCursor {
+  /** #425: leading sort tier (0/1), the FIRST keyset column. */
+  tier: number;
   score: number;
   id: number;
+  /**
+   * #425: the visit anchor resolved on page 1, threaded so every later page
+   * re-tiers against the SAME timestamp — a mid-session shift can't move the
+   * cursor's partition (plan §3.2). ISO-8601 UTC string.
+   */
+  anchorTs: string;
+  /**
+   * #425: the cold-start suppression decision resolved on page 1, threaded so
+   * it can't flip mid-pagination (which would re-tier rows and duplicate/skip
+   * across the boundary).
+   */
+  coldStart: boolean;
 }
 
-function encodeCursor(score: number | null, id: number): string {
+/**
+ * #425: the keyset cursor is now a THREE-column lexicographic key
+ * `(novelty_tier, effective_score, property_id)` (was two: score, id), because
+ * the feed's leading sort key is the novelty tier. It additionally carries the
+ * session-fixed `anchorTs` + `coldStart` so page 2+ re-runs the ranking against
+ * the exact same anchor and suppression decision page 1 used (plan §3.2 anchor
+ * stability). A cursor from the old 2-element shape decodes to null (rejected as
+ * invalid → 400), which is correct: the sort key changed, so an old cursor can't
+ * resume the new scan (no back-compat needed per the single-deployment rule).
+ */
+function encodeCursor(
+  tier: number,
+  score: number | null,
+  id: number,
+  anchorTs: string,
+  coldStart: boolean,
+): string {
   const effectiveScore = score ?? NO_SCORE_SENTINEL;
-  return Buffer.from(JSON.stringify([effectiveScore, id])).toString("base64url");
+  return Buffer.from(
+    JSON.stringify([tier, effectiveScore, id, anchorTs, coldStart]),
+  ).toString("base64url");
 }
 
 /** Returns null on any malformed input — callers should treat that as an invalid cursor (400), not silently fall back to page 1. */
@@ -979,19 +1127,101 @@ export function decodeCursor(raw: string): CandidateCursor | null {
     const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
     if (
       Array.isArray(parsed) &&
-      parsed.length === 2 &&
+      parsed.length === 5 &&
       typeof parsed[0] === "number" &&
-      Number.isFinite(parsed[0]) &&
+      Number.isInteger(parsed[0]) &&
       typeof parsed[1] === "number" &&
-      Number.isInteger(parsed[1]) &&
-      parsed[1] > 0
+      Number.isFinite(parsed[1]) &&
+      typeof parsed[2] === "number" &&
+      Number.isInteger(parsed[2]) &&
+      parsed[2] > 0 &&
+      typeof parsed[3] === "string" &&
+      !Number.isNaN(Date.parse(parsed[3])) &&
+      typeof parsed[4] === "boolean"
     ) {
-      return { score: parsed[0], id: parsed[1] };
+      return {
+        tier: parsed[0],
+        score: parsed[1],
+        id: parsed[2],
+        anchorTs: parsed[3],
+        coldStart: parsed[4],
+      };
     }
     return null;
   } catch {
     return null;
   }
+}
+
+/**
+ * #425 (plan #415 §3.2): resolves the two session-fixed values the fresh-first
+ * ordering needs — the visit anchor timestamp and the cold-start suppression
+ * decision — in ONE round-trip. Resolved once per paging session (page 1 of
+ * `listCandidates`, and every `getAdjacentCandidates` call) and then threaded
+ * as bound values so the tier is stable across pages and the detail page's
+ * prev/next tiers identically to the list it was paged from.
+ *
+ * Cold-start is on when the profile was NEVER visited (previous_viewed_at NULL)
+ * OR the RAW novelty tier would cover more than `coverage_pct` of the matched
+ * pool (default 60%) — the "brand-new profile where everything is new" flood the
+ * plan (§2.0b) grounds in profile 347 marking 429/431 rows. The coverage count
+ * runs the shared ranked CTE with the tier UN-suppressed (coldStartParam=false)
+ * so it measures what the tier WOULD cover; the `sp` CTE feeds the anchor into
+ * that same query via a scalar sub-select, avoiding a second round-trip.
+ */
+async function resolveNoveltyContext(
+  profileId: number,
+  minFrac: number,
+  maxFrac: number,
+): Promise<{ anchorTs: string; coldStart: boolean }> {
+  const coveragePct = readIntInRange(
+    "feed.cold_start_coverage_pct",
+    "FEED_COLD_START_COVERAGE_PCT",
+    60,
+    1,
+    100,
+  );
+  const rows = await sql<{
+    anchor_ts: string;
+    never_visited: boolean;
+    total: number;
+    fresh: number;
+  }>(
+    `WITH sp AS (
+       SELECT COALESCE(previous_viewed_at, created_at - interval '1 day') AS anchor_ts,
+              (previous_viewed_at IS NULL) AS never_visited
+         FROM search_profile
+        WHERE id = $1
+     ),
+     ${rankedCandidatesCte({
+       warnParam: "$2",
+       anchorParam: "(SELECT anchor_ts FROM sp)",
+       bandMinParam: "$3",
+       bandMaxParam: "$4",
+       // Measure the RAW tier: no suppression, so `fresh` is what the tier WOULD
+       // cover before this very decision is made.
+       coldStartParam: "false",
+     })}
+     SELECT
+       (SELECT anchor_ts FROM sp) AS anchor_ts,
+       (SELECT never_visited FROM sp) AS never_visited,
+       COUNT(*)::int AS total,
+       COUNT(*) FILTER (WHERE novelty_tier = 1)::int AS fresh
+     FROM ranked`,
+    [profileId, WARN_CAVEAT_CODES, minFrac, maxFrac],
+  );
+  // Profile missing (shouldn't happen — callers check first) → safe defaults:
+  // anchor "now" (nothing new) and no suppression.
+  if (rows.length === 0) {
+    return { anchorTs: new Date().toISOString(), coldStart: false };
+  }
+  const { anchor_ts, never_visited, total, fresh } = rows[0];
+  const coverage = total > 0 ? fresh / total : 0;
+  const coldStart = never_visited === true || coverage > coveragePct / 100;
+  return {
+    anchorTs: new Date(anchor_ts).toISOString(),
+    coldStart,
+  };
 }
 
 interface RawCandidateRow {
@@ -1010,6 +1240,8 @@ interface RawCandidateRow {
   last_seen_at: string | null;
   /** #416 novelty mark — boolean straight from the `ranked` CTE. */
   is_new: boolean;
+  /** #425 leading sort tier (0/1) from the `ranked` CTE — the first keyset column, folded into the cursor. Not surfaced on `CandidateRow` (the card renders novelty from `is_new`/price fields); this is purely the pagination key. */
+  novelty_tier: number;
   /** #420 raw signed price-change fraction since the visit anchor (NUMERIC → string); null when the price did not move since then. Sanity band applied in TS (classifyPriceChange). */
   price_delta_pct: string | null;
   listings: CandidateListingSummary[];
@@ -1055,7 +1287,9 @@ interface RawCandidateRow {
  * dedup keeps `flagsFromAssessments` safe to call with un-deduplicated input
  * too (e.g. from a future caller), rather than depending on that invariant.
  */
-export function flagsFromAssessments(rows: RawAssessmentRow[]): CandidateFlag[] {
+export function flagsFromAssessments(
+  rows: RawAssessmentRow[],
+): CandidateFlag[] {
   const flags: CandidateFlag[] = [];
   for (const row of rows) {
     const result = row.result ?? {};
@@ -1071,7 +1305,8 @@ export function flagsFromAssessments(rows: RawAssessmentRow[]): CandidateFlag[] 
     for (const code of caveats) {
       if (typeof code !== "string") continue;
       const label = CAVEAT_LABELS[code];
-      if (label !== undefined) flags.push({ kind: `caveat:${code}`, label, tone: "warn" });
+      if (label !== undefined)
+        flags.push({ kind: `caveat:${code}`, label, tone: "warn" });
     }
 
     // #26's condition assessment (lib/ai-assessment/condition.ts) writes a
@@ -1079,7 +1314,8 @@ export function flagsFromAssessments(rows: RawAssessmentRow[]): CandidateFlag[] 
     // object like occupancy's three). `reformado`/`unclear` are the
     // unremarkable/no-info defaults and intentionally have no label below,
     // same as occupancy's `pleno_dominio` getting no caveat badge.
-    const condition = typeof result.condition === "string" ? result.condition : null;
+    const condition =
+      typeof result.condition === "string" ? result.condition : null;
     if (condition !== null) {
       const label = CONDITION_LABELS[condition];
       if (label !== undefined) {
@@ -1090,7 +1326,9 @@ export function flagsFromAssessments(rows: RawAssessmentRow[]): CandidateFlag[] 
         // "A reformar" badge (and stable `condition:a_reformar` kind), so a
         // pre-#313 row with no severity field is unchanged.
         const severity =
-          condition === "a_reformar" ? RENOVATION_SEVERITY_LABELS[String(result.renovation_severity)] : undefined;
+          condition === "a_reformar"
+            ? RENOVATION_SEVERITY_LABELS[String(result.renovation_severity)]
+            : undefined;
         if (severity !== undefined) {
           flags.push({
             kind: `condition:a_reformar:${result.renovation_severity}`,
@@ -1098,7 +1336,11 @@ export function flagsFromAssessments(rows: RawAssessmentRow[]): CandidateFlag[] 
             tone: "neutral",
           });
         } else {
-          flags.push({ kind: `condition:${condition}`, label, tone: "neutral" });
+          flags.push({
+            kind: `condition:${condition}`,
+            label,
+            tone: "neutral",
+          });
         }
       }
     }
@@ -1119,7 +1361,10 @@ export function flagsFromAssessments(rows: RawAssessmentRow[]): CandidateFlag[] 
       if (type === null) continue;
       const label = REDFLAG_LABELS[type];
       if (label === undefined) continue;
-      const description = typeof o.description === "string" && o.description.trim() !== "" ? o.description : undefined;
+      const description =
+        typeof o.description === "string" && o.description.trim() !== ""
+          ? o.description
+          : undefined;
       flags.push({ kind: `redflag:${type}`, label, tone: "warn", description });
     }
 
@@ -1130,15 +1375,26 @@ export function flagsFromAssessments(rows: RawAssessmentRow[]): CandidateFlag[] 
     // a boolean → the "Casco histórico" badge only when true. Both are closed
     // vocabularies validated at the writer; an unmapped value is dropped, never
     // shown as raw text.
-    const beachProximity = typeof result.beach_proximity === "string" ? result.beach_proximity : null;
+    const beachProximity =
+      typeof result.beach_proximity === "string"
+        ? result.beach_proximity
+        : null;
     if (beachProximity !== null) {
       const label = BEACH_PROXIMITY_LABELS[beachProximity];
       if (label !== undefined) {
-        flags.push({ kind: `location:beach:${beachProximity}`, label, tone: "neutral" });
+        flags.push({
+          kind: `location:beach:${beachProximity}`,
+          label,
+          tone: "neutral",
+        });
       }
     }
     if (result.heritage_zone === true) {
-      flags.push({ kind: "location:heritage_zone", label: HERITAGE_ZONE_LABEL, tone: "neutral" });
+      flags.push({
+        kind: "location:heritage_zone",
+        label: HERITAGE_ZONE_LABEL,
+        tone: "neutral",
+      });
     }
 
     // #398 opportunity: two booleans derived from the advert text
@@ -1148,7 +1404,11 @@ export function flagsFromAssessments(rows: RawAssessmentRow[]): CandidateFlag[] 
     // (the property can already operate as a VUT) → neutral. Both render only
     // when strictly true (evidence-guarded at the writer); anything else drops.
     if (result.is_vpo === true) {
-      flags.push({ kind: "opportunity:is_vpo", label: IS_VPO_LABEL, tone: "warn" });
+      flags.push({
+        kind: "opportunity:is_vpo",
+        label: IS_VPO_LABEL,
+        tone: "warn",
+      });
     }
     if (result.tourist_license === true) {
       flags.push({
@@ -1228,7 +1488,9 @@ export interface RawAssessmentRow {
  * simultaneously) — the exact bug the #152 review reproduced (#152 review,
  * must-fix 1).
  */
-async function loadFlags(propertyIds: number[]): Promise<Map<number, CandidateFlag[]>> {
+async function loadFlags(
+  propertyIds: number[],
+): Promise<Map<number, CandidateFlag[]>> {
   const byProperty = new Map<number, CandidateFlag[]>();
   if (propertyIds.length === 0) return byProperty;
 
@@ -1244,7 +1506,10 @@ async function loadFlags(propertyIds: number[]): Promise<Map<number, CandidateFl
       [propertyIds],
     );
   } catch (err) {
-    console.warn("[candidates] ai_assessment unavailable, rendering without flags:", err);
+    console.warn(
+      "[candidates] ai_assessment unavailable, rendering without flags:",
+      err,
+    );
     return byProperty;
   }
 
@@ -1262,8 +1527,9 @@ async function loadFlags(propertyIds: number[]): Promise<Map<number, CandidateFl
 }
 
 /**
- * Keyset (cursor) pagination on `(effective_score DESC, property.id DESC)`,
- * not OFFSET — this table is expected to grow into the thousands (issue #19
+ * Keyset (cursor) pagination on `(novelty_tier DESC, effective_score DESC,
+ * property.id DESC)` (#425 fresh-first — the tier leads; #309 blended score
+ * within a tier), not OFFSET — this table is expected to grow into the thousands (issue #19
  * Technical approach #3: "don't fetch-all-and-filter-client-side"), and
  * OFFSET pagination degrades linearly with page depth while keyset
  * pagination stays O(limit) regardless of how deep the caller pages.
@@ -1300,13 +1566,17 @@ export async function listCandidates(
     state?: StateFeedbackType | null;
   } & CandidateFilters = {},
 ): Promise<CandidatePage> {
-  const limit = Math.min(Math.max(Math.trunc(opts.limit ?? DEFAULT_LIMIT), 1), MAX_LIMIT);
+  const limit = Math.min(
+    Math.max(Math.trunc(opts.limit ?? DEFAULT_LIMIT), 1),
+    MAX_LIMIT,
+  );
   const rawCursor = opts.cursor ?? null;
   const includeRejected = opts.includeRejected === true;
   // #422 "En seguimiento" working-set filter. Only 'accept' is a valid verdict
   // scope today (reject has its own includeRejected path); anything else
   // collapses to null ("off"), so an untouched call is byte-identical to before.
-  const stateFilter: StateFeedbackType | null = opts.state === "accept" ? "accept" : null;
+  const stateFilter: StateFeedbackType | null =
+    opts.state === "accept" ? "accept" : null;
 
   // #310 hard filters (D-059). Each normalises to null ("no filter") when
   // unset, so an untouched call behaves exactly as before. Validation of the
@@ -1317,7 +1587,8 @@ export async function listCandidates(
   const condition: ConditionFilter | null = opts.condition ?? null;
   const renovation: RenovationFilter | null = opts.renovation ?? null;
   const minBelowMarketPct: number | null =
-    typeof opts.minBelowMarketPct === "number" && Number.isFinite(opts.minBelowMarketPct)
+    typeof opts.minBelowMarketPct === "number" &&
+    Number.isFinite(opts.minBelowMarketPct)
       ? opts.minBelowMarketPct
       : null;
   // #386 caveat / redflag-type filters. Closed-vocabulary tokens validated at
@@ -1329,12 +1600,14 @@ export async function listCandidates(
   // boundary; normalise to null ("off") here. heritageZone is a toggle — false/
   // undefined collapse to null so the "all filters off" param tail stays uniform
   // and the SQL `IS NOT TRUE` guard treats it as off.
-  const beachProximity: BeachProximityFilter | null = opts.beachProximity ?? null;
+  const beachProximity: BeachProximityFilter | null =
+    opts.beachProximity ?? null;
   const heritageZone: true | null = opts.heritageZone === true ? true : null;
   // #398 VPO filter — BIDIRECTIONAL, so a strict boolean/null tri-state: true =
   // only VPO, false = exclude VPO, null = off. Only an explicit boolean turns it
   // on; undefined collapses to null so the "all filters off" tail stays uniform.
-  const isVpo: boolean | null = typeof opts.isVpo === "boolean" ? opts.isVpo : null;
+  const isVpo: boolean | null =
+    typeof opts.isVpo === "boolean" ? opts.isVpo : null;
   // Source (portal) filter (#265): isolate one connector's results so the
   // owner can debug a single portal's data quality. A candidate is a
   // deduplicated PROPERTY that may span several listings from different
@@ -1347,17 +1620,43 @@ export async function listCandidates(
   // null/empty means "all sources" (no filter). Trimmed so a stray blank
   // can't become a source that matches nothing.
   const sourceRaw = opts.source ?? null;
-  const source = sourceRaw !== null && sourceRaw.trim() !== "" ? sourceRaw.trim() : null;
+  const source =
+    sourceRaw !== null && sourceRaw.trim() !== "" ? sourceRaw.trim() : null;
 
+  // #420/#425 price-change sanity band, read once (env > config.yaml > default
+  // 1%/60%). Feeds BOTH the TS classifier (per-row badge) and the SQL tier's
+  // price_changed arm, so a row tiers up exactly when it also badges.
+  const priceBand = readPriceChangeBand();
+
+  // #425 keyset key is now (novelty_tier, effective_score, property_id). The
+  // cursor also carries the session-fixed anchor + cold-start decision (plan
+  // §3.2): resolved ONCE on page 1 and threaded, so a mid-session anchor shift
+  // can't re-tier rows and land the cursor in the wrong partition.
+  let cursorTier: number | null = null;
   let cursorScore: number | null = null;
   let cursorId: number | null = null;
+  let anchorTs: string;
+  let coldStart: boolean;
   if (rawCursor !== null) {
     const decoded = decodeCursor(rawCursor);
     if (decoded === null) {
       throw new Error("Cursor no válido.");
     }
+    cursorTier = decoded.tier;
     cursorScore = decoded.score;
     cursorId = decoded.id;
+    // Page 2+: reuse the anchor + suppression decision page 1 resolved.
+    anchorTs = decoded.anchorTs;
+    coldStart = decoded.coldStart;
+  } else {
+    // Page 1: resolve the anchor + cold-start decision once for this session.
+    const ctx = await resolveNoveltyContext(
+      profileId,
+      priceBand.minFrac,
+      priceBand.maxFrac,
+    );
+    anchorTs = ctx.anchorTs;
+    coldStart = ctx.coldStart;
   }
 
   // Fetch one extra row so we can tell whether a next page truly exists
@@ -1374,7 +1673,13 @@ export async function listCandidates(
     // sources drops out entirely (inside the CTE's `base` WHERE). The heavy
     // photo/listing aggregation stays here in the outer SELECT so it runs only
     // for the LIMITed page, not for every matched row the CTE ranks.
-    `WITH ${rankedCandidatesCte("$6")}
+    `WITH ${rankedCandidatesCte({
+      warnParam: "$6",
+      anchorParam: "$20",
+      bandMinParam: "$21",
+      bandMaxParam: "$22",
+      coldStartParam: "$23::boolean",
+    })}
      SELECT
        ranked.property_id,
        ranked.address,
@@ -1477,6 +1782,9 @@ export async function listCandidates(
        -- (same first_seen_at basis as the column just above). Projected here so
        -- the card can render its NUEVO badge from the row directly.
        ranked.is_new,
+       -- #425 leading sort tier — projected so the cursor can carry the last
+       -- row's tier for the 3-column keyset resume (not rendered on the card).
+       ranked.novelty_tier,
        -- #420 raw price-change delta since the visit anchor, derived in the
        -- price_moves CTE (same anchor as is_new). The sanity band that decides
        -- whether it badges is applied in TS below (classifyPriceChange).
@@ -1523,10 +1831,19 @@ export async function listCandidates(
          '[]'
        ) AS listings
      FROM ranked
+     -- #425 THREE-column keyset resume on (novelty_tier, effective_score,
+     -- property_id) — the same key the ORDER BY sorts on and the cursor carries.
+     -- $19 (tier) NULL = page 1 (no cursor). Lexicographic: a strictly-lower
+     -- tier, or equal tier + lower score, or equal tier+score + lower id.
      WHERE (
-         $2::double precision IS NULL
-         OR ranked.effective_score < $2::double precision
-         OR (ranked.effective_score = $2::double precision AND ranked.property_id < $3::bigint)
+         $19::int IS NULL
+         OR ranked.novelty_tier < $19::int
+         OR (ranked.novelty_tier = $19::int AND ranked.effective_score < $2::double precision)
+         OR (
+              ranked.novelty_tier = $19::int
+              AND ranked.effective_score = $2::double precision
+              AND ranked.property_id < $3::bigint
+            )
        )
        -- Source (portal) filter (#265). $5 NULL = all sources. Uses the
        -- idx_listing_source_status index; the same active+sale predicate as
@@ -1620,7 +1937,10 @@ export async function listCandidates(
        -- never a false pass) — the same graceful degradation the other
        -- assessment filters give until the LLM populates the axis.
        AND ($17::boolean IS NULL OR ranked.is_vpo = $17::boolean)
-     ORDER BY ranked.effective_score DESC, ranked.property_id DESC
+     -- #425 fresh-first: novelty tier leads, then the #309 blended score, then
+     -- id as the deterministic tiebreak. MUST match the keyset WHERE above AND
+     -- getAdjacentCandidates' ordering, or prev/next silently desyncs (D-057 cl.4).
+     ORDER BY ranked.novelty_tier DESC, ranked.effective_score DESC, ranked.property_id DESC
      LIMIT $4`,
     [
       profileId,
@@ -1641,6 +1961,15 @@ export async function listCandidates(
       heritageZone,
       isVpo,
       stateFilter,
+      // #425 keyset tier ($19) + the session-fixed threading: anchor ($20),
+      // sanity band ($21/$22 — same fractions the TS classifier uses), and the
+      // cold-start suppression decision ($23). All resolved once (page 1) and
+      // carried in the cursor thereafter.
+      cursorTier,
+      anchorTs,
+      priceBand.minFrac,
+      priceBand.maxFrac,
+      coldStart,
     ],
   );
 
@@ -1649,51 +1978,62 @@ export async function listCandidates(
 
   const flagsByProperty = await loadFlags(pageRows.map((r) => r.property_id));
 
-  // #420 sanity band read once per page (env > config.yaml > default 1%/60%),
-  // applied per row by classifyPriceChange below.
-  const priceBand = readPriceChangeBand();
-
-  const items: CandidateRow[] = pageRows.map((r) => ({
-    // property_id (bigint) arrives as a real JS number via the driver-level
-    // int8 type parser (db-shared.ts, #155) — no per-site Number() needed.
-    // lat/lon/m2_built/min_price/score below are NUMERIC, a different OID
-    // with a genuine precision rationale — those coercions stay.
-    property_id: r.property_id,
-    address: r.address,
-    lat: r.lat !== null ? Number(r.lat) : null,
-    lon: r.lon !== null ? Number(r.lon) : null,
-    property_type: r.property_type,
-    m2_built: r.m2_built !== null ? Number(r.m2_built) : null,
-    rooms: r.rooms,
-    bathrooms: r.bathrooms,
-    floor: r.floor,
-    photos: r.photos ?? [],
-    flags: flagsByProperty.get(r.property_id) ?? [],
-    min_price: r.min_price !== null ? Number(r.min_price) : null,
-    first_seen_at: r.first_seen_at,
-    last_seen_at: r.last_seen_at,
-    is_new: r.is_new === true,
-    // #420 price-change signal + BAJADA/SUBIDA direction, sanity band applied.
-    ...classifyPriceChange(
-      r.price_delta_pct != null ? Number(r.price_delta_pct) : null,
-      priceBand.minFrac,
-      priceBand.maxFrac,
-    ),
-    listings: r.listings,
-    score: r.score !== null ? Number(r.score) : null,
-    rank_explanation: r.rank_explanation,
-    score_kind: r.score_kind ?? null,
-    effective_score: r.effective_score != null ? Number(r.effective_score) : null,
-    below_market_pct: r.below_market_pct != null ? Number(r.below_market_pct) : null,
-    distress_level: r.distress_level ?? 0,
-    ranking_boost_reason: describeRankingBoost(
-      r.below_market_pct != null ? Number(r.below_market_pct) : null,
-      r.distress_level ?? 0,
-      r.beach_proximity ?? null,
-      r.tourist_license === true,
-    ),
-    feedback_state: r.feedback_state ?? null,
-  }));
+  const items: CandidateRow[] = pageRows.map((r) => {
+    // #425 cold-start: when the tier is suppressed (profile never visited, or
+    // >60% of the pool would tier as new), don't highlight the whole feed —
+    // suppress the per-card NUEVO / BAJADA-SUBIDA marks too and let the
+    // "Perfil nuevo: todo es reciente" note stand in (plan §1.1 / §3.2). Tracked
+    // (accept) properties are exempt, exactly as they are from the tier itself.
+    const suppressNovelty = coldStart && r.feedback_state !== "accept";
+    return {
+      // property_id (bigint) arrives as a real JS number via the driver-level
+      // int8 type parser (db-shared.ts, #155) — no per-site Number() needed.
+      // lat/lon/m2_built/min_price/score below are NUMERIC, a different OID
+      // with a genuine precision rationale — those coercions stay.
+      property_id: r.property_id,
+      address: r.address,
+      lat: r.lat !== null ? Number(r.lat) : null,
+      lon: r.lon !== null ? Number(r.lon) : null,
+      property_type: r.property_type,
+      m2_built: r.m2_built !== null ? Number(r.m2_built) : null,
+      rooms: r.rooms,
+      bathrooms: r.bathrooms,
+      floor: r.floor,
+      photos: r.photos ?? [],
+      flags: flagsByProperty.get(r.property_id) ?? [],
+      min_price: r.min_price !== null ? Number(r.min_price) : null,
+      first_seen_at: r.first_seen_at,
+      last_seen_at: r.last_seen_at,
+      is_new: !suppressNovelty && r.is_new === true,
+      // #420 price-change signal + BAJADA/SUBIDA direction, sanity band applied
+      // (suppressed under cold-start alongside is_new, above).
+      ...classifyPriceChange(
+        suppressNovelty
+          ? null
+          : r.price_delta_pct != null
+            ? Number(r.price_delta_pct)
+            : null,
+        priceBand.minFrac,
+        priceBand.maxFrac,
+      ),
+      listings: r.listings,
+      score: r.score !== null ? Number(r.score) : null,
+      rank_explanation: r.rank_explanation,
+      score_kind: r.score_kind ?? null,
+      effective_score:
+        r.effective_score != null ? Number(r.effective_score) : null,
+      below_market_pct:
+        r.below_market_pct != null ? Number(r.below_market_pct) : null,
+      distress_level: r.distress_level ?? 0,
+      ranking_boost_reason: describeRankingBoost(
+        r.below_market_pct != null ? Number(r.below_market_pct) : null,
+        r.distress_level ?? 0,
+        r.beach_proximity ?? null,
+        r.tourist_license === true,
+      ),
+      feedback_state: r.feedback_state ?? null,
+    };
+  });
 
   // Cursor is derived from the *last row of the SQL result*, which is already
   // in final (effective_score, id) DESC order (#309) — there is no separate
@@ -1704,10 +2044,21 @@ export async function listCandidates(
   // `effective_score`, matching the ORDER BY above.
   const lastRow = pageRows[pageRows.length - 1];
   const nextCursor = hasMore
-    ? encodeCursor(lastRow.effective_score != null ? Number(lastRow.effective_score) : null, lastRow.property_id)
+    ? encodeCursor(
+        // #425: the last row's tier + score + id (the 3-column keyset key), plus
+        // the session-fixed anchor + cold-start decision so the next page tiers
+        // against the exact same values (plan §3.2 anchor stability).
+        lastRow.novelty_tier,
+        lastRow.effective_score != null
+          ? Number(lastRow.effective_score)
+          : null,
+        lastRow.property_id,
+        anchorTs,
+        coldStart,
+      )
     : null;
 
-  return { items, nextCursor };
+  return { items, nextCursor, coldStart };
 }
 
 /**
@@ -1725,7 +2076,9 @@ export async function listCandidates(
  *
  * Alphabetical, matching the card's own `sources.sort()` badge order.
  */
-export async function listCandidateSources(profileId: number): Promise<string[]> {
+export async function listCandidateSources(
+  profileId: number,
+): Promise<string[]> {
   const rows = await sql<{ source: string }>(
     // Issue #319 / D-055: exclude sources whose connector is OFF — a disabled
     // source produces no visible candidate, so it must not be offered as a
@@ -1759,7 +2112,7 @@ export interface AdjacentCandidates {
  * **Recomputed live, not snapshotted.** Both are defensible; this picks live
  * deliberately:
  *
- *   - It reuses the exact `(effective_score DESC, id DESC)` ordering (the same
+ *   - It reuses the exact `(novelty_tier DESC, effective_score DESC, id DESC)` ordering (the same
  *     `rankedCandidatesCte` blend `listCandidates` sorts on, #309) and keyset
  *     comparison, so the sequence can't silently diverge from the list the
  *     user is paging through. A snapshot would need
@@ -1787,49 +2140,110 @@ export async function getAdjacentCandidates(
   // show-rejected list the user is paging through — no desync.
   includeRejected = false,
 ): Promise<AdjacentCandidates> {
-  // #309: neighbours are computed under the SAME blended `effective_score`
-  // ordering the list uses (rankedCandidatesCte), not the raw `score` — so the
-  // detail page's prev/next never diverges from the feed the user is paging
-  // through. The anchor's own effective_score is read from the same CTE.
-  const anchor = await sql<{ effective_score: string | null }>(
-    `WITH ${rankedCandidatesCte("$3")}
-     SELECT effective_score FROM ranked WHERE property_id = $2`,
-    [profileId, propertyId, WARN_CAVEAT_CODES],
+  // #425 (D-057 clause 4 — the call site "most likely to be forgotten"):
+  // prev/next MUST order on the SAME 3-column key the feed does
+  // (novelty_tier, effective_score, property_id), or the detail page steps
+  // through candidates in a different order than the list — a SILENT desync.
+  // So the novelty context (anchor + cold-start) is resolved live here exactly
+  // as listCandidates resolves it on page 1; within a browse session
+  // previous_viewed_at is debounce-stable and the coverage doesn't move, so
+  // this yields the same tiering the list used. This is the same "recomputed
+  // live, not snapshotted" contract this function already documents for
+  // effective_score (a retrain can move scores mid-browse either way).
+  const priceBand = readPriceChangeBand();
+  const { anchorTs, coldStart } = await resolveNoveltyContext(
+    profileId,
+    priceBand.minFrac,
+    priceBand.maxFrac,
+  );
+
+  // The anchor's own tier + blended effective_score, read from the same CTE the
+  // neighbours use — so the comparison key is byte-identical to the list's.
+  const anchor = await sql<{
+    novelty_tier: number;
+    effective_score: string | null;
+  }>(
+    `WITH ${rankedCandidatesCte({
+      warnParam: "$3",
+      anchorParam: "$4",
+      bandMinParam: "$5",
+      bandMaxParam: "$6",
+      coldStartParam: "$7::boolean",
+    })}
+     SELECT novelty_tier, effective_score FROM ranked WHERE property_id = $2`,
+    [
+      profileId,
+      propertyId,
+      WARN_CAVEAT_CODES,
+      anchorTs,
+      priceBand.minFrac,
+      priceBand.maxFrac,
+      coldStart,
+    ],
   );
   if (anchor.length === 0) {
     return { prevPropertyId: null, nextPropertyId: null };
   }
+  const anchorTier = anchor[0].novelty_tier;
   const anchorScore =
-    anchor[0].effective_score != null ? Number(anchor[0].effective_score) : NO_SCORE_SENTINEL;
+    anchor[0].effective_score != null
+      ? Number(anchor[0].effective_score)
+      : NO_SCORE_SENTINEL;
 
   // "next" = ranked after the anchor under the list's DESC ordering; "prev"
-  // reverses both the comparison and the sort, then takes the nearest row.
+  // reverses both the comparison and the sort, then takes the nearest row. Both
+  // use the 3-column lexicographic key ($6=anchorTier, $2=anchorScore,
+  // $3=propertyId) and share one param array; the CTE params ($7 anchorTs,
+  // $8/$9 band, $10 coldStart) thread the same tiering the anchor query used.
+  const cteParams = {
+    warnParam: "$4",
+    anchorParam: "$7",
+    bandMinParam: "$8",
+    bandMaxParam: "$9",
+    coldStartParam: "$10::boolean",
+  };
+  const adjacencyParams = [
+    profileId,
+    anchorScore,
+    propertyId,
+    WARN_CAVEAT_CODES,
+    includeRejected,
+    anchorTier,
+    anchorTs,
+    priceBand.minFrac,
+    priceBand.maxFrac,
+    coldStart,
+  ];
   const [nextRows, prevRows] = await Promise.all([
     sql<{ property_id: number }>(
-      `WITH ${rankedCandidatesCte("$4")}
+      `WITH ${rankedCandidatesCte(cteParams)}
        SELECT property_id
          FROM ranked
-        WHERE (effective_score < $2::double precision
-               OR (effective_score = $2::double precision AND property_id < $3::bigint))
+        WHERE (novelty_tier < $6::int
+               OR (novelty_tier = $6::int AND effective_score < $2::double precision)
+               OR (novelty_tier = $6::int AND effective_score = $2::double precision
+                   AND property_id < $3::bigint))
           -- Skip rejected neighbours by default (#379) so prev/next matches the
           -- default feed the user paged through — never step onto a hidden card.
           -- $5 = true (show-rejected, #417) keeps them, so prev/next honours the
           -- same escape hatch as the feed and the two never desync.
           AND ($5::boolean = true OR feedback_state IS DISTINCT FROM 'reject')
-        ORDER BY effective_score DESC, property_id DESC
+        ORDER BY novelty_tier DESC, effective_score DESC, property_id DESC
         LIMIT 1`,
-      [profileId, anchorScore, propertyId, WARN_CAVEAT_CODES, includeRejected],
+      adjacencyParams,
     ),
     sql<{ property_id: number }>(
-      `WITH ${rankedCandidatesCte("$4")}
+      `WITH ${rankedCandidatesCte(cteParams)}
        SELECT property_id
          FROM ranked
-        WHERE (effective_score > $2::double precision
-               OR (effective_score = $2::double precision AND property_id > $3::bigint))
+        WHERE (novelty_tier > $6::int
+               OR (novelty_tier = $6::int AND effective_score > $2::double precision)
+               OR (novelty_tier = $6::int AND effective_score = $2::double precision
+                   AND property_id > $3::bigint))
           AND ($5::boolean = true OR feedback_state IS DISTINCT FROM 'reject')
-        ORDER BY effective_score ASC, property_id ASC
+        ORDER BY novelty_tier ASC, effective_score ASC, property_id ASC
         LIMIT 1`,
-      [profileId, anchorScore, propertyId, WARN_CAVEAT_CODES, includeRejected],
+      adjacencyParams,
     ),
   ]);
 
