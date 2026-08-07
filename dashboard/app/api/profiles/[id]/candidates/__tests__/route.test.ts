@@ -258,6 +258,34 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
     expect(params[13]).toBe("subasta_judicial");
   });
 
+  it("accepts sin_financiacion_hipotecaria as a valid redflagType and passes it through (#408)", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await GET(
+      makeRequest(
+        "http://localhost/api/profiles/3/candidates?redflagType=sin_financiacion_hipotecaria",
+      ),
+      ctx("3"),
+    );
+    expect(res.status).toBe(200);
+    const params = mockQuery.mock.calls[1][1];
+    expect(params[13]).toBe("sin_financiacion_hipotecaria");
+  });
+
+  it("accepts cambio_uso_pendiente as a valid redflagType and passes it through (#408)", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [profileRow()] });
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?redflagType=cambio_uso_pendiente"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(200);
+    const params = mockQuery.mock.calls[1][1];
+    expect(params[13]).toBe("cambio_uso_pendiente");
+  });
+
   it("rejects an unknown beachProximity value before touching the DB (400) (#392)", async () => {
     const res = await GET(
       makeRequest("http://localhost/api/profiles/3/candidates?beachProximity=oceanfront"),
