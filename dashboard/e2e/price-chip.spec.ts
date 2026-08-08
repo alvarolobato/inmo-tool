@@ -155,17 +155,32 @@ test("#460: the below-market chip sits next to the price, is green/red with a si
   await expect(dealRating).toContainText(/−\d+%/);
   await expect(dealRating).not.toContainText(/bajo mercado/i);
 
-  // (1): the chip is on the SAME line as the price — their bounding boxes share
-  // a vertical band (y-centres within one line height), not stacked one above
-  // the other, and the chip sits to the RIGHT of the price.
+  // (1): the chip is on the SAME line, immediately after the price. We encode
+  // that INTENT robustly rather than pinning a brittle exact pixel gap (a tight
+  // x-gap threshold flaked under CI render/font timing — seen ~39.5 vs a ~25px
+  // bound). Both the price (<p>) and the chip live in one `alignItems:center`
+  // flex row that wraps only when they truly don't fit, so "same line" means
+  // their vertical centres coincide; a stacked/wrapped chip would sit a full
+  // line-height below and fail. The chip must also sit to the RIGHT of the
+  // price and be reasonably close (a generous gap, not an exact pixel value).
+  await expect(dealRating).toBeVisible();
   const priceBox = await deal.getByTestId("candidate-price").boundingBox();
   const ratingBox = await dealRating.boundingBox();
   expect(priceBox).not.toBeNull();
   expect(ratingBox).not.toBeNull();
   const priceMidY = priceBox!.y + priceBox!.height / 2;
   const ratingMidY = ratingBox!.y + ratingBox!.height / 2;
-  expect(Math.abs(priceMidY - ratingMidY)).toBeLessThan(priceBox!.height);
+  // Same line: vertical centres aligned (well within half the price height — a
+  // wrapped-below chip would be ~a full line-height away and fail this).
+  expect(Math.abs(priceMidY - ratingMidY)).toBeLessThan(priceBox!.height / 2);
+  // To the RIGHT of the price, starting at/after its right edge (small epsilon
+  // for sub-pixel rounding) and within a generous horizontal gap — "next to the
+  // price", not an exact pixel distance.
+  const EPSILON = 4;
+  const gap = ratingBox!.x - (priceBox!.x + priceBox!.width);
   expect(ratingBox!.x).toBeGreaterThan(priceBox!.x);
+  expect(gap).toBeGreaterThan(-EPSILON);
+  expect(gap).toBeLessThan(120);
 
   // (4): the #452 investor-score chip coexists on the same card.
   await expect(deal.getByTestId("investor-score-chip")).toBeVisible();
