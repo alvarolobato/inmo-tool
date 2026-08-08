@@ -1,0 +1,66 @@
+{
+  "_generated_by": "etl/tests/grammar_contract.py::grammar_fixture_payload (issue #491) — do not edit by hand; regenerate with REGEN_FIXTURES=1 pytest etl/tests/test_url_grammar_fixture.py",
+  "connectors": [
+    {
+      "cases": [
+        {
+          "expected": {
+            "geography": "madrid"
+          },
+          "url": "https://www.pisos.com/venta/pisos-madrid/"
+        },
+        {
+          "expected": {
+            "geography": "barcelona"
+          },
+          "url": "https://www.pisos.com/venta/pisos-barcelona/"
+        },
+        {
+          "expected": {
+            "geography": "dos_hermanas"
+          },
+          "url": "https://www.pisos.com/venta/pisos-dos_hermanas/"
+        },
+        {
+          "expected": {
+            "geography": "alcala_de_guadaira"
+          },
+          "url": "https://www.pisos.com/venta/pisos-alcala_de_guadaira/"
+        },
+        {
+          "expected": {
+            "geography": "hospitalet_de_llobregat"
+          },
+          "url": "https://www.pisos.com/venta/pisos-hospitalet_de_llobregat/"
+        },
+        {
+          "expected": null,
+          "url": "https://www.habitaclia.com/viviendas-madrid.htm"
+        },
+        {
+          "expected": null,
+          "url": "https://www.idealista.com/venta-viviendas/madrid/"
+        },
+        {
+          "expected": null,
+          "url": "https://www.pisos.com/comprar/piso-madrid-123/"
+        },
+        {
+          "expected": null,
+          "url": "https://www.pisos.com/venta/pisos-sevilla/1-habitacion/"
+        }
+      ],
+      "connector": "pisos",
+      "grammar": {
+        "build_template": "https://www.pisos.com/venta/pisos-{geography}/",
+        "params": {
+          "geography": {
+            "label": "Municipio",
+            "source": "profile"
+          }
+        },
+        "parse_pattern": "^https?://(?:www\\.)?pisos\\.com/venta/pisos-(?<geography>[^/]+)/?$"
+      }
+    }
+  ]
+}

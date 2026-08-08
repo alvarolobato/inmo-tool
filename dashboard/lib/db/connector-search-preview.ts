@@ -14,6 +14,24 @@
  */
 
 import { sql } from "@/lib/db-write";
+import { parseGrammar, type SearchUrlGrammar } from "@/lib/connector-url/parse";
+
+/** Where a search param came from — mirrors Python's SearchParam.source. */
+export type SearchParamSource = "profile" | "connector_config" | "constant" | "derived";
+
+/**
+ * One resolved parameter a connector's discover() uses for a scope (issue
+ * #491), camelCased from the JSONB the ETL serialises (SearchParam in Python).
+ */
+export interface SearchParamView {
+  key: string;
+  label: string;
+  value: string | null;
+  source: SearchParamSource;
+  /** Whether this param travels in the search URL (so the grammar round-trips it). */
+  inUrl: boolean;
+  notes: string | null;
+}
 
 /** One preview row as serialised by the ETL (list[SearchPreview] in Python). */
 export interface SearchPreview {
@@ -22,6 +40,8 @@ export interface SearchPreview {
   kind: "search_page" | "sitemap" | "api";
   tunable: boolean;
   notes: string | null;
+  /** The resolved params this URL is built from (issue #491); [] on old rows. */
+  params: SearchParamView[];
 }
 
 /** A registered ETL connector's previews + override metadata for a profile. */
@@ -31,6 +51,8 @@ export interface EtlConnectorPreview {
   overrideHostSuffix: string | null;
   /** Whether discover() actually consumes a pinned URL yet (Phase 5). */
   supportsSearchOverride: boolean;
+  /** The connector's URL grammar (issue #491), or null when it publishes none. */
+  searchUrlGrammar: SearchUrlGrammar | null;
   /** Parsed previews; [] when the ETL hasn't computed any for this profile yet. */
   previews: SearchPreview[];
   /** When the previews were computed (ISO), or null when none exist yet. */
@@ -41,6 +63,7 @@ interface RawRow {
   connector: string;
   override_host_suffix: string | null;
   supports_search_override: boolean;
+  search_url_grammar: unknown;
   previews: unknown;
   computed_at: Date | string | null;
 }
@@ -53,6 +76,42 @@ function toIso(value: Date | string | null): string | null {
 }
 
 const VALID_KINDS = new Set(["search_page", "sitemap", "api"]);
+const VALID_SOURCES = new Set<SearchParamSource>([
+  "profile",
+  "connector_config",
+  "constant",
+  "derived",
+]);
+
+/**
+ * Defensively parse a stored `params` array (snake_case, as Python's asdict
+ * serialises SearchParam) into typed SearchParamView[]. Old preview rows
+ * predate this field and have no `params` key → []. A bad source coerces to
+ * "derived" (the neutral "computed, origin unknown" bucket) rather than
+ * dropping the chip.
+ */
+function parseParams(raw: unknown): SearchParamView[] {
+  if (!Array.isArray(raw)) return [];
+  const out: SearchParamView[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const r = item as Record<string, unknown>;
+    if (typeof r.key !== "string") continue;
+    const source =
+      typeof r.source === "string" && VALID_SOURCES.has(r.source as SearchParamSource)
+        ? (r.source as SearchParamSource)
+        : "derived";
+    out.push({
+      key: r.key,
+      label: typeof r.label === "string" ? r.label : r.key,
+      value: typeof r.value === "string" ? r.value : null,
+      source,
+      inUrl: r.in_url === true,
+      notes: typeof r.notes === "string" ? r.notes : null,
+    });
+  }
+  return out;
+}
 
 /** Defensively parse a stored `previews` JSONB into typed SearchPreview[]. */
 function parsePreviews(raw: unknown): SearchPreview[] {
@@ -68,6 +127,7 @@ function parsePreviews(raw: unknown): SearchPreview[] {
       kind: kind as SearchPreview["kind"],
       tunable: r.tunable === true,
       notes: typeof r.notes === "string" ? r.notes : null,
+      params: parseParams(r.params),
     });
   }
   return out;
@@ -91,6 +151,7 @@ export async function getEtlConnectorPreviews(
       `SELECT g.connector_name AS connector,
               g.override_host_suffix,
               g.supports_search_override,
+              g.search_url_grammar,
               p.previews,
               p.computed_at
          FROM connector_registry g
@@ -113,6 +174,7 @@ export async function getEtlConnectorPreviews(
     connector: row.connector,
     overrideHostSuffix: row.override_host_suffix,
     supportsSearchOverride: row.supports_search_override,
+    searchUrlGrammar: parseGrammar(row.search_url_grammar),
     previews: parsePreviews(row.previews),
     computedAt: toIso(row.computed_at),
   }));

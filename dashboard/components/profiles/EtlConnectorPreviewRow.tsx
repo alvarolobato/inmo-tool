@@ -3,7 +3,20 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import type { ProfileConnectorFilterSource } from "@/lib/db/profile-connector-filter";
-import type { SearchPreview } from "@/lib/db/connector-search-preview";
+import type {
+  SearchPreview,
+  SearchParamSource,
+  SearchParamView,
+} from "@/lib/db/connector-search-preview";
+import { inferParams, type SearchUrlGrammar } from "@/lib/connector-url/parse";
+
+/** Human label for a param's origin (issue #491) — shown as the chip badge. */
+const SOURCE_LABEL: Record<SearchParamSource, string> = {
+  profile: "perfil",
+  connector_config: "config",
+  constant: "constante",
+  derived: "derivada",
+};
 
 /**
  * One ETL-connector row on the "Validar filtros" page (issue #478 P4).
@@ -24,6 +37,7 @@ export function EtlConnectorPreviewRow({
   connector,
   preview,
   tunable,
+  grammar,
   computedAt,
   overridden,
   pinnedUrl,
@@ -35,6 +49,8 @@ export function EtlConnectorPreviewRow({
   preview: SearchPreview | null;
   /** Whether the connector accepts a pinned URL (has an override_host_suffix). */
   tunable: boolean;
+  /** The connector's URL grammar (issue #491), or null when it publishes none. */
+  grammar: SearchUrlGrammar | null;
   /** When the ETL last computed this connector's previews (ISO), or null. */
   computedAt: string | null;
   /** True when an owner override is pinned for this connector (section ''). */
@@ -55,6 +71,25 @@ export function EtlConnectorPreviewRow({
   const label = preview?.label ?? connector;
   const kind = preview?.kind ?? "search_page";
   const notes = preview?.notes ?? null;
+
+  // Issue #491: the resolved params this connector uses for the profile.
+  const params: SearchParamView[] = preview?.params ?? [];
+  // The derived values of the params that DO travel in the URL, keyed by grammar
+  // key — the baseline the live inference is diffed against.
+  const derivedByKey = new Map<string, string | null>(
+    params.filter((p) => p.inUrl).map((p) => [p.key, p.value]),
+  );
+
+  // Live inference (only for a tunable connector with a published grammar, and
+  // only once the draft URL diverges from what the ETL derived). `null` inferred
+  // = the URL doesn't fit the grammar → it's saved verbatim with a warning
+  // (Guardar is NOT blocked — consistent with #478 P5's verbatim-pin policy).
+  const canInfer = tunable && grammar !== null;
+  const draftTrimmed = draft.trim();
+  const inferable = canInfer && draftTrimmed !== "";
+  const inferred = inferable ? inferParams(grammar as SearchUrlGrammar, draftTrimmed) : null;
+  const unparseable = inferable && inferred === null;
+  const paramMeta = grammar?.params ?? {};
 
   async function onSave() {
     setBusy("save");
@@ -207,6 +242,65 @@ export function EtlConnectorPreviewRow({
         </p>
       )}
 
+      {/* Issue #491: the exact params this connector receives, each with its
+          origin badge (perfil / config / constante / derivada). Rendered for
+          EVERY connector that has params, tunable or not. */}
+      {params.length > 0 && (
+        <div
+          data-testid="etl-params"
+          style={{ display: "flex", flexWrap: "wrap", gap: 6 }}
+        >
+          {params.map((p) => (
+            <span
+              key={p.key}
+              data-testid="etl-param-chip"
+              data-param-key={p.key}
+              data-param-source={p.source}
+              title={p.notes ?? undefined}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                fontSize: 11,
+                color: "var(--fg)",
+                background: "var(--bg-2)",
+                border: "1px solid var(--border)",
+                borderRadius: 999,
+                padding: "2px 8px",
+              }}
+            >
+              <span style={{ color: "var(--fg-muted)" }}>{p.label}</span>
+              <strong>{p.value ?? "—"}</strong>
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 600,
+                  color: "var(--fg-muted)",
+                  background: "var(--bg-1)",
+                  borderRadius: 999,
+                  padding: "1px 6px",
+                }}
+              >
+                {SOURCE_LABEL[p.source]}
+              </span>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Issue #491 ground truth: the profile's price/size/type filters are NOT
+          sent to the connector — they are applied downstream by data. Say so
+          honestly wherever this connector actually receives params. */}
+      {params.length > 0 && (
+        <p
+          data-testid="etl-downstream-note"
+          style={{ fontSize: 11, color: "var(--fg-muted)", margin: 0, lineHeight: 1.5 }}
+        >
+          Los filtros de precio/tamaño/tipo del perfil no viajan en esta búsqueda; se aplican
+          después por datos.
+        </p>
+      )}
+
       {/* Honest note (why non-tunable, or how the sweep works). */}
       {notes && (
         <p data-testid="etl-notes" style={{ fontSize: 11, color: "var(--fg-muted)", margin: 0 }}>
@@ -272,6 +366,82 @@ export function EtlConnectorPreviewRow({
               Abrir ↗
             </button>
           </div>
+
+          {/* Issue #491: live "Esta URL significa…" — re-infer params from the
+              edited URL using the published grammar (in the browser). Params
+              that differ from the derived baseline are highlighted in amber. */}
+          {canInfer && inferred !== null && (
+            <div
+              data-testid="etl-inference-panel"
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+                border: "1px solid var(--border)",
+                borderRadius: 8,
+                background: "var(--bg-2)",
+                padding: "8px 10px",
+              }}
+            >
+              <span style={{ fontSize: 11, fontWeight: 600, color: "var(--fg-muted)" }}>
+                Esta URL significa:
+              </span>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {Object.entries(inferred).map(([key, value]) => {
+                  const derived = derivedByKey.get(key);
+                  const differs = derivedByKey.has(key) && derived !== value;
+                  const metaLabel =
+                    (paramMeta[key] && paramMeta[key].label) || key;
+                  return (
+                    <span
+                      key={key}
+                      data-testid="etl-inferred-chip"
+                      data-param-key={key}
+                      data-differs={differs ? "true" : "false"}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 6,
+                        fontSize: 11,
+                        color: differs ? "var(--warn)" : "var(--fg)",
+                        background: differs ? "var(--warn-bg)" : "var(--bg-1)",
+                        border: "1px solid var(--border)",
+                        borderRadius: 999,
+                        padding: "2px 8px",
+                      }}
+                    >
+                      <span style={{ color: "var(--fg-muted)" }}>{metaLabel}</span>
+                      <strong>{value}</strong>
+                      {differs && (
+                        <span style={{ fontSize: 10 }}>
+                          ≠ {derived ?? "—"}
+                        </span>
+                      )}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Unparseable edit: kept verbatim with a warning; Guardar stays
+              enabled (consistent with #478 P5's verbatim pin policy). */}
+          {unparseable && (
+            <p
+              data-testid="etl-inference-warning"
+              style={{
+                fontSize: 11,
+                color: "var(--warn)",
+                background: "var(--warn-bg)",
+                borderRadius: 6,
+                padding: "4px 8px",
+                margin: 0,
+                lineHeight: 1.5,
+              }}
+            >
+              No se pueden inferir parámetros de esta URL; se usará tal cual.
+            </p>
+          )}
         </>
       )}
 

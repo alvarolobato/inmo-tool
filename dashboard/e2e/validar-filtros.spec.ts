@@ -111,23 +111,35 @@ test.beforeAll(async () => {
     [profileId, PINNED_IDEALISTA],
   );
 
-  // P4: stand in for what the ETL publishes — the pisos (tunable) + cimenta2
-  // (non-tunable) registry rows and their per-profile previews.
+  // P4/#491: stand in for what the ETL publishes — the pisos (tunable, with a
+  // URL grammar) + cimenta2 (non-tunable, no grammar) registry rows and their
+  // per-profile previews (now carrying params).
   await pool.query(
     `INSERT INTO connector_registry
        (connector_name, registered, rate_limit_per_minute, discovers_full_inventory,
-        supports_discovery, supported_filters, override_host_suffix, supports_search_override)
-     VALUES ('pisos', true, 20, false, true, '[]'::jsonb, 'pisos.com', false),
-            ('cimenta2', true, 20, true, true, '[]'::jsonb, NULL, false)
+        supports_discovery, supported_filters, override_host_suffix, supports_search_override,
+        search_url_grammar)
+     VALUES ('pisos', true, 20, false, true, '[]'::jsonb, 'pisos.com', false, $1::jsonb),
+            ('cimenta2', true, 20, true, true, '[]'::jsonb, NULL, false, NULL)
      ON CONFLICT (connector_name) DO UPDATE SET
        registered = true, supports_discovery = true,
        override_host_suffix = EXCLUDED.override_host_suffix,
-       supports_search_override = EXCLUDED.supports_search_override`,
+       supports_search_override = EXCLUDED.supports_search_override,
+       search_url_grammar = EXCLUDED.search_url_grammar`,
+    [JSON.stringify(PISOS_GRAMMAR)],
   );
   await seedEtlPreviews();
 });
 
-/** (Re)seed the pisos + cimenta2 previews for the profile (P4). */
+// The pisos search-URL grammar exactly as etl.orchestrator.sync_connector_registry
+// publishes it (ECMAScript-canonical parse pattern — the browser's RegExp uses it).
+const PISOS_GRAMMAR = {
+  build_template: "https://www.pisos.com/venta/pisos-{geography}/",
+  parse_pattern: "^https?://(?:www\\.)?pisos\\.com/venta/pisos-(?<geography>[^/]+)/?$",
+  params: { geography: { label: "Municipio", source: "profile" } },
+};
+
+/** (Re)seed the pisos + cimenta2 previews for the profile (P4/#491). */
 async function seedEtlPreviews(): Promise<void> {
   await pool.query(
     `INSERT INTO connector_search_preview (profile_id, connector, previews)
@@ -137,7 +149,17 @@ async function seedEtlPreviews(): Promise<void> {
     [
       profileId,
       JSON.stringify([
-        { label: "Pisos.com — sevilla", url: PISOS_PREVIEW_URL, kind: "search_page", tunable: true, notes: null },
+        {
+          label: "Pisos.com — sevilla",
+          url: PISOS_PREVIEW_URL,
+          kind: "search_page",
+          tunable: true,
+          notes: null,
+          params: [
+            { key: "geography", label: "Municipio", value: "sevilla", source: "profile", in_url: true, notes: null },
+            { key: "operation", label: "Operación", value: "venta", source: "constant", in_url: true, notes: null },
+          ],
+        },
       ]),
       JSON.stringify([
         {
@@ -146,6 +168,11 @@ async function seedEtlPreviews(): Promise<void> {
           kind: "sitemap",
           tunable: false,
           notes: "Barrido nacional del sitemap; el scope no entra en la URL — el filtrado es por datos.",
+          // Even a non-tunable connector exposes its params (EC-1): here just
+          // the constant operation, which does NOT travel in the sitemap URL.
+          params: [
+            { key: "operation", label: "Operación", value: "venta", source: "constant", in_url: false, notes: null },
+          ],
         },
       ]),
     ],
@@ -275,6 +302,87 @@ test("ETL section: cimenta2 read-only with its note; pisos tunable and saves (P4
 
   // Clean the pin so the suite can be re-run against a persistent dev DB.
   await pool.query("DELETE FROM profile_connector_filter WHERE profile_id = $1 AND connector = 'pisos'", [profileId]);
+});
+
+test("params chips render for every ETL connector row (issue #491 EC-1)", async ({
+  page,
+}) => {
+  await seedEtlPreviews();
+  await page.goto(`/profiles/${profileId}/filtros`);
+  await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
+  await assertNoErrorSurface(page);
+
+  // Tunable connector (pisos): geography (perfil) + operation (constante) chips.
+  const pisos = page.locator('[data-testid="etl-connector-row"][data-connector="pisos"]');
+  await expect(pisos.getByTestId("etl-params")).toBeVisible();
+  const geoChip = pisos.locator('[data-testid="etl-param-chip"][data-param-key="geography"]');
+  await expect(geoChip).toContainText("Municipio");
+  await expect(geoChip).toContainText("sevilla");
+  await expect(geoChip).toContainText("perfil");
+  await expect(
+    pisos.locator('[data-testid="etl-param-chip"][data-param-key="operation"]'),
+  ).toContainText("constante");
+  // The honest downstream-filter note is present.
+  await expect(pisos.getByTestId("etl-downstream-note")).toContainText(
+    "se aplican después por datos",
+  );
+
+  // Non-tunable connector (cimenta2) ALSO shows its params (EC-1: "incluso en
+  // los no afinables").
+  const cimenta2 = page.locator('[data-testid="etl-connector-row"][data-connector="cimenta2"]');
+  await expect(
+    cimenta2.locator('[data-testid="etl-param-chip"][data-param-key="operation"]'),
+  ).toContainText("constante");
+});
+
+test("editing the URL infers params live, amber for a changed geography (issue #491 EC-2)", async ({
+  page,
+}) => {
+  await seedEtlPreviews();
+  await page.goto(`/profiles/${profileId}/filtros`);
+  await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
+  const pisos = page.locator('[data-testid="etl-connector-row"][data-connector="pisos"]');
+  await expect(pisos).toBeVisible();
+
+  // Edit to a valid pisos.com search URL for a DIFFERENT municipality.
+  await pisos.getByTestId("etl-url-input").fill("https://www.pisos.com/venta/pisos-malaga/");
+  const panel = pisos.getByTestId("etl-inference-panel");
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText("Esta URL significa:");
+  const inferred = pisos.locator('[data-testid="etl-inferred-chip"][data-param-key="geography"]');
+  await expect(inferred).toContainText("malaga");
+  // Differs from the profile-derived 'sevilla' → flagged amber.
+  await expect(inferred).toHaveAttribute("data-differs", "true");
+  await expect(pisos.getByTestId("etl-inference-warning")).toHaveCount(0);
+  await assertNoErrorSurface(page);
+});
+
+test("unparseable URL saves verbatim with a warning (issue #491 EC-3)", async ({ page }) => {
+  await seedEtlPreviews();
+  await page.goto(`/profiles/${profileId}/filtros`);
+  await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
+  const pisos = page.locator('[data-testid="etl-connector-row"][data-connector="pisos"]');
+  await expect(pisos).toBeVisible();
+
+  // A pisos.com search URL with an extra native-filter segment the grammar does
+  // not model → unparseable; the page warns but does NOT block Guardar.
+  await pisos.getByTestId("etl-url-input").fill(NEW_PISOS);
+  await expect(pisos.getByTestId("etl-inference-warning")).toContainText(
+    "se usará tal cual",
+  );
+  await expect(pisos.getByTestId("etl-inference-panel")).toHaveCount(0);
+  await expect(pisos.getByTestId("etl-save")).toBeEnabled();
+
+  // Host validation is intact and the verbatim URL persists.
+  await pisos.getByTestId("etl-save").click();
+  await expect(pisos.getByTestId("etl-source-badge")).toHaveText("URL fijada");
+  await expect(pisos.getByTestId("etl-url")).toHaveText(NEW_PISOS);
+  await assertNoErrorSurface(page);
+
+  await pool.query(
+    "DELETE FROM profile_connector_filter WHERE profile_id = $1 AND connector = 'pisos'",
+    [profileId],
+  );
 });
 
 test("ETL section renders with no seeded previews — pending, no error surface (P4)", async ({
