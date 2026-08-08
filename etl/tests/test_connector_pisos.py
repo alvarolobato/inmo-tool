@@ -136,6 +136,44 @@ def test_scope_key_resolves_coordinate_scope_to_underscore_slug():
     assert PisosConnector().scope_key(_DOS_HERMANAS_SCOPE) == "dos_hermanas"
 
 
+# ── issue #478 P5 (D-101): owner-pinned URL as recall source ───────────
+
+
+def test_discover_uses_pinned_override_url_as_entry_page():
+    """With supports_search_override=True and a scope carrying override_url,
+    discover()'s request hits the pinned URL verbatim — the derived
+    /venta/pisos-<slug>/ URL is bypassed entirely."""
+    pinned = "https://www.pisos.com/venta/pisos-madrid/?zona=centro"
+    html = _read_fixture("pisos_sample_search.html")
+    with patch(
+        "etl.connectors.pisos.requests.get", return_value=_mock_response(html)
+    ) as mock_get:
+        PisosConnector().discover(
+            ConnectorScope(
+                center=(40.4168, -3.7038), radius_km=10, override_url=pinned
+            ),
+            throttle=lambda: None,
+        )
+    assert mock_get.call_args[0][0] == pinned
+
+
+def test_discover_without_override_is_byte_identical():
+    """The retrofit's regression guard: no override → exactly the derived URL."""
+    _, mock_get = _discover(PisosConnector(), geography="malaga")
+    assert mock_get.call_args[0][0] == "https://www.pisos.com/venta/pisos-malaga/"
+
+
+def test_scope_key_keys_off_override_url_when_pinned():
+    connector = PisosConnector()
+    pinned = "https://www.pisos.com/venta/pisos-madrid/?zona=centro"
+    over = ConnectorScope(
+        center=(37.283689, -5.9226718), radius_km=7.0, override_url=pinned
+    )
+    assert connector.scope_key(over) == f"override:{pinned}"
+    # Distinct from the twin (would resolve to "dos_hermanas") — never deduped.
+    assert connector.scope_key(over) != connector.scope_key(_DOS_HERMANAS_SCOPE)
+
+
 def test_discover_returns_empty_uncovered_on_http_404():
     """Issue #369: a city pisos.com has no search page for (HTTP 404) is a
     clean 'uncovered' result — discover() returns [] so the run stays

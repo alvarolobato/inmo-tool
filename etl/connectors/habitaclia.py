@@ -286,15 +286,24 @@ class HabitacliaConnector(Connector):
     def scope_key(self, scope: ConnectorScope) -> str | None:
         """Resolved slug IS the dedup/coverage key. Must never raise: an
         UnresolvableGeographyError becomes a sentinel key (discover() runs
-        and fails as a real result); a plain None (no slug) skips the scope."""
+        and fails as a real result); a plain None (no slug) skips the scope.
+
+        Issue #478 P5 (D-101): an owner-pinned `override_url` keys purely off
+        the URL — distinct from the twin scope (so the orchestrator never
+        dedupes them) and always resolvable (discover() hits the pinned URL
+        directly, geography resolution aside)."""
+        if scope.override_url:
+            return f"override:{scope.override_url}"
         try:
             return _resolve_geography(scope)
         except UnresolvableGeographyError:
             return unresolvable_scope_key(scope)
 
-    # Issue #478: an owner-pinned habitaclia search URL may become this
-    # connector's recall source for a profile (discover() wiring is Phase 5).
+    # Issue #478: an owner-pinned habitaclia search URL is this connector's
+    # recall source for a profile. Since Phase 5 (D-101) discover() consumes it
+    # (`scope.override_url`) as its entry page.
     override_host_suffix = "habitaclia.com"
+    supports_search_override = True
 
     def _search_url(self, geography: str) -> str:
         return f"{_BASE_URL}/viviendas-{geography}.htm"
@@ -327,18 +336,26 @@ class HabitacliaConnector(Connector):
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         self._detail_urls = {}
 
-        geography = _resolve_geography(scope)
-        if geography is None:
-            # Now that the slug is derived mechanically from any resolved
-            # municipality (issue #369), None here means only "no center and
-            # no geography string to resolve at all".
-            raise ConnectorError(
-                "habitaclia discover: scope has neither a resolvable center "
-                "nor an explicit geography string — nothing to discover, not "
-                "defaulting to a hardcoded city"
-            )
-
-        url = self._search_url(geography)
+        # Issue #478 P5 (D-101): an owner-pinned URL is this profile's recall
+        # source — hit it verbatim as the entry page (geography left None: it
+        # plays no part, and the log/404 branches below tolerate it). Without an
+        # override the code path is byte-identical to before.
+        override_url = scope.override_url if self.supports_search_override else None
+        if override_url:
+            geography = None
+            url = override_url
+        else:
+            geography = _resolve_geography(scope)
+            if geography is None:
+                # Now that the slug is derived mechanically from any resolved
+                # municipality (issue #369), None here means only "no center and
+                # no geography string to resolve at all".
+                raise ConnectorError(
+                    "habitaclia discover: scope has neither a resolvable center "
+                    "nor an explicit geography string — nothing to discover, not "
+                    "defaulting to a hardcoded city"
+                )
+            url = self._search_url(geography)
         throttle()
         try:
             response = requests.get(

@@ -1112,6 +1112,133 @@ class TestConnectorConfig:
             _cleanup(pg_conn, connector.name, run_id)
 
 
+class TestSearchOverrideScopes:
+    """Issue #478 P5 (D-101): an owner-pinned URL in profile_connector_filter
+    becomes a dedicated override scope for a connector that supports it — never
+    deduped against the twin (non-override) scope, and ignored entirely by a
+    connector that does not support overrides."""
+
+    _PINNED_URL = "https://www.pisos.com/venta/pisos-madrid/?zona=centro"
+
+    def _pin(self, conn, connector_name: str, url: str, section_key: str = "") -> int:
+        """Pin *url* for the fixture profile × *connector_name*; return its id."""
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM search_profile WHERE name = %s", (_TEST_PROFILE_NAME,)
+            )
+            (profile_id,) = cur.fetchone()
+            cur.execute(
+                "INSERT INTO profile_connector_filter "
+                "(profile_id, connector, section_key, url, source) "
+                "VALUES (%s, %s, %s, %s, 'manual')",
+                (profile_id, connector_name, section_key, url),
+            )
+        conn.commit()
+        return profile_id
+
+    def _cleanup_pins(self, conn, connector_name: str) -> None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM profile_connector_filter WHERE connector = %s",
+                (connector_name,),
+            )
+        conn.commit()
+
+    def test_override_scope_is_added_and_not_deduped_against_its_twin(self, pg_conn):
+        _apply_schema(pg_conn)
+        name = "test-override-recall-supported"
+        self._pin(pg_conn, name, self._PINNED_URL)
+        try:
+            base = orchestrator._active_profile_scopes(pg_conn)
+            scopes, enabled, _ = orchestrator._scopes_for_connector(
+                pg_conn, name, base, supports_search_override=True
+            )
+            assert enabled is True
+            # The twin (profile-derived, no override) scope AND the override
+            # scope both survive — the pin is ADDED, not replacing.
+            assert len(scopes) == 2
+            override_scopes = [s for s in scopes if s.override_url is not None]
+            twin_scopes = [s for s in scopes if s.override_url is None]
+            assert len(override_scopes) == 1
+            assert len(twin_scopes) == 1
+            override = override_scopes[0]
+            assert override.override_url == self._PINNED_URL
+            # It carries the pinning profile's own geography (fixture: Madrid).
+            assert override.center == (40.4168, -3.7038)
+            assert override.radius_km == 10.0
+
+            # The DummyConnector's default scope_key incorporates override_url,
+            # so the two scopes resolve to DIFFERENT keys — the orchestrator's
+            # per-run dedup (seen_scope_keys) can never collapse them.
+            connector = DummyConnector(name=name)
+            keys = {connector.scope_key(s) for s in scopes}
+            assert len(keys) == 2
+        finally:
+            self._cleanup_pins(pg_conn, name)
+
+    def test_unsupported_connector_ignores_the_pin_without_error(self, pg_conn):
+        _apply_schema(pg_conn)
+        name = "test-override-recall-unsupported"
+        self._pin(pg_conn, name, self._PINNED_URL)
+        try:
+            base = orchestrator._active_profile_scopes(pg_conn)
+            # supports_search_override defaults to False — the pin must be
+            # silently ignored (no override scope, no error).
+            scopes, enabled, _ = orchestrator._scopes_for_connector(pg_conn, name, base)
+            assert enabled is True
+            assert all(s.override_url is None for s in scopes)
+            assert len(scopes) == len(base)
+        finally:
+            self._cleanup_pins(pg_conn, name)
+
+    def test_run_crawls_both_the_twin_and_the_override_scope(self, pg_conn):
+        """End-to-end: a connector advertising override support reaches
+        discover() for BOTH its profile-derived scope and the pinned-URL
+        override scope in a single run (they are never deduped)."""
+        _apply_schema(pg_conn)
+        name = "test-override-recall-run"
+        self._pin(pg_conn, name, self._PINNED_URL)
+        connector = DummyConnector(name=name)
+        connector.supports_search_override = True
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            assert len(connector.scopes_seen) == 2
+            assert any(
+                s.override_url == self._PINNED_URL for s in connector.scopes_seen
+            )
+            assert any(s.override_url is None for s in connector.scopes_seen)
+        finally:
+            orchestrator.CONNECTORS.clear()
+            self._cleanup_pins(pg_conn, name)
+            _cleanup(pg_conn, name, run_id)
+
+    def test_archived_profile_pin_is_not_resolved(self, pg_conn):
+        """A pin owned by a soft-archived profile must not produce an override
+        scope — the JOIN filters on archived_at IS NULL."""
+        _apply_schema(pg_conn)
+        name = "test-override-recall-archived"
+        self._pin(pg_conn, name, self._PINNED_URL)
+        try:
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE search_profile SET archived_at = NOW() WHERE name = %s",
+                    (_TEST_PROFILE_NAME,),
+                )
+            pg_conn.commit()
+            scopes = orchestrator._override_scopes_for_connector(pg_conn, name)
+            assert scopes == []
+        finally:
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE search_profile SET archived_at = NULL WHERE name = %s",
+                    (_TEST_PROFILE_NAME,),
+                )
+            pg_conn.commit()
+            self._cleanup_pins(pg_conn, name)
+
+
 class TestConnectorNameFilter:
     """Backs `ps connector run <name>` (task 1.5, #13)."""
 

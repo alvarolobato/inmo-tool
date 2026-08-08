@@ -227,6 +227,19 @@ class MilanunciosRentalConnector(MilanunciosConnector):
     # connector's evidence.
     min_refetch_interval_seconds = 0
 
+    # Issue #478 P5 (D-101): recall-override CONSUMPTION stays OFF here, stated
+    # explicitly rather than inherited — same "a per-connector behaviour must
+    # never silently ride on a parent class's value" discipline as
+    # discovers_full_inventory / min_refetch_interval_seconds above. The sale
+    # MilanunciosConnector turned this on and wired its discover() to consume
+    # `scope.override_url`; this subclass's discover() has NOT been wired for it,
+    # so advertising support would let the orchestrator hand it an override scope
+    # its discover() would silently ignore. It is a documented next candidate
+    # (own mini-issue). `override_host_suffix` ("milanuncios.com") is still
+    # inherited so the Validar filtros page can render/pin it (P4), consistent
+    # with the "advertise pinnable before discover() honours it" split.
+    supports_search_override = False
+
     def _rental_search_url(self, geography: str) -> str:
         """The rental sale-category entry URL — the same "-en-<geo>-<geo>"
         convention as the sale connector, with the `alquiler-de-pisos`
