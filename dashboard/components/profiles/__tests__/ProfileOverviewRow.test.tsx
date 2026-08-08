@@ -6,6 +6,24 @@ import { ProfileOverviewRow } from "../ProfileOverviewRow";
 import type { ProfileOverviewEntry, ProfileOverviewMetrics } from "@/lib/profile-overview-types";
 import type { SearchProfileRow } from "@/lib/profiles-schema";
 
+const mockPush = vi.fn();
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: mockPush }),
+}));
+
+// jsdom has no ResizeObserver; Headless UI's Menu machine calls it when a menu
+// item is clicked (menu-close re-measures). Stub it so clicking a menu item
+// (the "Validar filtros" navigate test) doesn't raise an unhandled error.
+// Assigned directly (not via vi.stubGlobal) so afterEach's unstubAllGlobals
+// leaves it in place.
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+(globalThis as unknown as { ResizeObserver: typeof ResizeObserverStub }).ResizeObserver =
+  ResizeObserverStub;
+
 function profile(overrides: Partial<SearchProfileRow> = {}): SearchProfileRow {
   return {
     id: 1,
@@ -200,6 +218,27 @@ describe("ProfileOverviewRow (issue #193)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Más acciones para este perfil" }));
     const cloneItem = screen.getByRole("menuitem", { name: "Clonar" });
     expect(cloneItem).toBeDisabled();
+  });
+
+  it("kebab menu 'Validar filtros' navigates to the profile's filters page (#478 P2)", () => {
+    mockPush.mockClear();
+    const entry: ProfileOverviewEntry = { ok: true, profile: profile({ id: 55 }), metrics: metrics() };
+    render(<ProfileOverviewRow entry={entry} onEdit={noop} onClone={noop} onArchive={noop} busy={false} />);
+    fireEvent.click(screen.getByRole("button", { name: "Más acciones para este perfil" }));
+    const item = screen.getByRole("menuitem", { name: "Validar filtros" });
+    expect(item).toBeEnabled();
+    fireEvent.click(item);
+    expect(mockPush).toHaveBeenCalledWith("/profiles/55/filtros");
+  });
+
+  it("kebab menu disables 'Validar filtros' on a broken-scope row, with a reason (#478 P2)", () => {
+    const entry: ProfileOverviewEntry = { ok: false, id: 99, name: "Perfil roto", issues: [] };
+    render(<ProfileOverviewRow entry={entry} onEdit={noop} onClone={noop} onArchive={noop} busy={false} />);
+    fireEvent.click(screen.getByRole("button", { name: "Más acciones para este perfil" }));
+    const item = screen.getByRole("menuitem", { name: "Validar filtros" });
+    expect(item.tagName).toBe("BUTTON");
+    expect(item).toBeDisabled();
+    expect(item).toHaveAttribute("title", expect.stringContaining("configuración inválida"));
   });
 
   it("kebab menu is keyboard-reachable and labelled for screen readers", () => {

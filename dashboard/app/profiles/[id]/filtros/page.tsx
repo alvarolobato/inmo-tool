@@ -1,0 +1,189 @@
+import Link from "next/link";
+import { notFound } from "next/navigation";
+import { getProfileById } from "@/lib/db/profiles";
+import { resolveSearchTasks } from "@/lib/search-url/resolve";
+import { findOverridesForProfile } from "@/lib/db/profile-connector-filter";
+import { CAPTURE_PORTALS } from "@/lib/worklist";
+import { portalTitle } from "@/lib/captura-tasks";
+import { decodeFilterUrl } from "@/lib/filter-validation";
+import { FilterValidationRow } from "@/components/profiles/FilterValidationRow";
+import type { LoosenedConstraint } from "@/lib/search-url";
+import type { ProfileConnectorFilterSource } from "@/lib/db/profile-connector-filter";
+
+/**
+ * "Validar filtros" — per-profile connector search-URL preview / pin page
+ * (issue #478 P2).
+ *
+ * Reached from a profile's ⋮ menu. Lists, for extension capture portals, the
+ * search TASK each one will run for this profile ({@link resolveSearchTasks},
+ * which already folds in the tier-0 owner override from Phase 1): a source
+ * badge, the copyable URL, decoded filter chips + mismatch warnings, the
+ * resolver's loosened flags, and owner controls to pin (PUT) / unpin (DELETE) /
+ * open the URL. altamira (a capture portal with no builder) always gets a row
+ * so its first URL can be pasted in even though nothing is derived.
+ *
+ * Phase 2 interim: "Abrir" opens the URL WITHOUT any extension signal — no
+ * batch autostart. Banner + detail-capture suppression (true validation mode)
+ * lands in Phase 3; a transient note says so. The ETL-connector section is a
+ * degraded Phase-4 placeholder.
+ *
+ * `force-dynamic`: every load reflects the live override table + resolver.
+ * Admin-gated by middleware.ts like every page.
+ */
+export const dynamic = "force-dynamic";
+
+interface FilterRowModel {
+  connector: string;
+  label: string;
+  url: string;
+  sectionKey: string;
+  overridden: boolean;
+  source?: ProfileConnectorFilterSource;
+  loosened: LoosenedConstraint[];
+  chips: string[];
+  warnings: string[];
+  unparseable: boolean;
+}
+
+export default async function ValidarFiltrosPage({
+  params,
+}: {
+  params: Promise<{ id: string }> | { id: string };
+}) {
+  const { id: rawId } = await params;
+  const id = Number(rawId);
+  if (!Number.isInteger(id) || id <= 0) notFound();
+
+  const profile = await getProfileById(id);
+  if (!profile || profile.archived_at !== null) notFound();
+
+  const [tasks, overrides] = await Promise.all([
+    resolveSearchTasks(profile.scope, id),
+    findOverridesForProfile(id),
+  ]);
+
+  const rows: FilterRowModel[] = tasks.map((task) => {
+    const decoded = decodeFilterUrl(task.portal, task.url, profile.scope);
+    // A pinned task keeps the stored override's section_key + source so
+    // Quitar/Guardar target the exact row (its categoryKey may be '' for an
+    // unparseable pinned URL, which is what it was stored under).
+    const pin = task.overridden
+      ? overrides.find((o) => o.connector === task.portal && o.url === task.url)
+      : undefined;
+    return {
+      connector: task.portal,
+      label: task.label,
+      url: task.url,
+      sectionKey: pin ? pin.section_key : decoded.sectionKey,
+      overridden: Boolean(task.overridden),
+      source: pin?.source,
+      loosened: task.loosened,
+      chips: decoded.chips,
+      warnings: decoded.warnings,
+      unparseable: decoded.unparseable,
+    };
+  });
+
+  // Ensure every extension capture portal is represented, even one with no
+  // builder and no pin (altamira) — an empty manual row so its first URL can be
+  // pasted in.
+  for (const { portal } of CAPTURE_PORTALS) {
+    if (rows.some((r) => r.connector === portal)) continue;
+    rows.push({
+      connector: portal,
+      label: portalTitle(portal),
+      url: "",
+      sectionKey: "",
+      overridden: false,
+      loosened: [],
+      chips: [],
+      warnings: [],
+      unparseable: false,
+    });
+  }
+
+  return (
+    <main style={{ padding: 24, maxWidth: 860, margin: "0 auto" }} data-testid="validar-filtros-page">
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <h1 style={{ fontSize: 22, fontWeight: 700, color: "var(--fg)", margin: 0 }}>Validar filtros</h1>
+        <Link
+          href={`/profiles/${id}`}
+          style={{ fontSize: 13, color: "var(--accent)", textDecoration: "none", marginLeft: "auto" }}
+        >
+          ← Volver al perfil
+        </Link>
+      </div>
+      <p style={{ fontSize: 13, color: "var(--fg-muted)", marginTop: 8, lineHeight: 1.5 }}>
+        Perfil <strong>{profile.name}</strong>. Aquí ves, por conector, la URL de búsqueda que se va a
+        usar para este perfil. Puedes fijar una URL afinada a mano (será la fuente de recall de ese
+        conector, sustituyendo a la derivada) y los filtros de datos se seguirán aplicando igual que
+        ahora.
+      </p>
+
+      {/* Phase 2 transient note: Abrir opens without the extension signal. */}
+      <p
+        data-testid="validar-filtros-open-note"
+        style={{
+          marginTop: 12,
+          fontSize: 12,
+          color: "var(--fg-muted)",
+          border: "1px solid var(--border)",
+          borderRadius: 10,
+          padding: "10px 12px",
+          background: "var(--bg-1)",
+          lineHeight: 1.5,
+        }}
+      >
+        Nota (temporal): «Abrir» abre la página del portal <strong>sin</strong> ninguna señal para la
+        extensión, así que no se arranca ninguna captura por lotes. La extensión todavía puede mostrar
+        su banner manual o auto-capturar páginas de detalle — el modo de validación que suprime todo
+        eso llega en la Fase 3.
+      </p>
+
+      <section style={{ marginTop: 20 }}>
+        <h2 style={{ fontSize: 15, fontWeight: 600, color: "var(--fg)", margin: "0 0 10px" }}>
+          Portales de captura (extensión)
+        </h2>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {rows.map((row) => (
+            <FilterValidationRow
+              key={`${row.connector}-${row.sectionKey || "all"}`}
+              profileId={id}
+              connector={row.connector}
+              label={row.label}
+              url={row.url}
+              sectionKey={row.sectionKey}
+              overridden={row.overridden}
+              source={row.source}
+              loosened={row.loosened}
+              chips={row.chips}
+              warnings={row.warnings}
+              unparseable={row.unparseable}
+            />
+          ))}
+        </div>
+      </section>
+
+      <section style={{ marginTop: 24 }}>
+        <h2 style={{ fontSize: 15, fontWeight: 600, color: "var(--fg)", margin: "0 0 10px" }}>
+          Conectores ETL
+        </h2>
+        <p
+          data-testid="validar-filtros-etl-placeholder"
+          style={{
+            fontSize: 12,
+            color: "var(--fg-muted)",
+            border: "1px dashed var(--border)",
+            borderRadius: 10,
+            padding: "12px 14px",
+            background: "var(--bg-1)",
+          }}
+        >
+          Previsualización de conectores ETL: Fase 4. Aquí aparecerá, por cada conector HTTP, la
+          petición real que va a ejecutar (URL / sitemap / endpoint) y la opción de fijar su filtro
+          cuando sea afinable.
+        </p>
+      </section>
+    </main>
+  );
+}
