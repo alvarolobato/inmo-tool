@@ -47,7 +47,8 @@ let richQualityPropertyId: number;
 let sparseQualityPropertyId: number;
 // #448 F: a property priced clearly below the profile pool's median price/m²
 // (low price, same 70 m²) AND with a recent price drop — so its detail header
-// must show a GREEN "bajo mercado" rating chip and a BAJADA direction chip.
+// must show a GREEN below-market rating chip (#460: signed %, no words) and a
+// BAJADA direction chip, on the same line as the price.
 let belowMarketPropertyId: number;
 // #448 I: a matched candidate with NO coordinates — its detail gallery must
 // omit the map tile cleanly (no broken cell, no error surface).
@@ -480,7 +481,9 @@ test("#448 F: a below-market property shows a GREEN rating + a BAJADA chip next 
   const rating = page.getByTestId("price-rating");
   await expect(rating).toBeVisible();
   await expect(rating).toHaveAttribute("data-rating", "below");
-  await expect(rating).toContainText(/bajo mercado/i);
+  // #460: short form — signed percent, no "bajo mercado" words.
+  await expect(rating).toContainText(/−\d+%/);
+  await expect(rating).not.toContainText(/bajo mercado/i);
 
   const direction = page.getByTestId("price-direction");
   await expect(direction).toBeVisible();
