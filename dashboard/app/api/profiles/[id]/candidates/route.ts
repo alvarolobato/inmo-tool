@@ -41,6 +41,11 @@
  *   state       — #422: `accept` restricts the feed to the "En seguimiento"
  *                 working set (tracked/accepted properties only). Absent/empty
  *                 = off (default feed). Any other value → 400.
+ *   q           — #470 free-text search across the ad description AND every other
+ *                 searchable field (address/refs, portal, assessment codes/labels
+ *                 — the materialized property_search_doc). Trimmed; empty = off;
+ *                 >200 chars → 400. A FILTER, not a re-sort: composes with every
+ *                 other filter and leaves the keyset ordering intact.
  *   All #310 filters combine with each other, with `source`, and with
  *   cursor/limit. The occupancy/condition/renovation filters read AI-assessment
  *   data (empty until #316) and correctly return an empty feed until it flows;
@@ -258,6 +263,29 @@ export async function GET(
     state = "accept";
   }
 
+  // #470 free-text search. Trim; empty → off (null). A length cap (200 chars)
+  // is the only validation — websearch_to_tsquery digests any input without
+  // error and the value travels as a bound parameter, never interpolated; the
+  // cap just keeps a pathological tsquery out. Over the cap is a malformed
+  // request (400), mirroring the strict-parse discipline of the other filters.
+  let q: string | null = null;
+  const rawQ = searchParams.get("q");
+  if (rawQ !== null) {
+    const trimmed = rawQ.trim();
+    if (trimmed.length > 200) {
+      return NextResponse.json(
+        formatApiError(
+          "Búsqueda demasiado larga (máx. 200 caracteres).",
+          "VALIDATION",
+          undefined,
+          requestId,
+        ),
+        { status: 400 },
+      );
+    }
+    q = trimmed === "" ? null : trimmed;
+  }
+
   // minDiscount arrives as a PERCENT (0–100); the query wants a fraction.
   let minBelowMarketPct: number | null = null;
   const rawMinDiscount = searchParams.get("minDiscount");
@@ -332,6 +360,7 @@ export async function GET(
       hasAlerts,
       includeRejected,
       state,
+      q,
     });
     return NextResponse.json(page);
   } catch (err) {

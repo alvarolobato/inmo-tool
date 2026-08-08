@@ -601,24 +601,44 @@ describe.runIf(dbAvailable)("EXPLAIN ANALYZE — profile overview query (issue #
         const NOISE_LAT_MAX = 44.3;
         const NOISE_LON_MIN = -2.8;
         const NOISE_LON_MAX = -0.8;
-        await pool.query(
-          `INSERT INTO property (lat, lon, property_type, m2_built, created_at)
-           SELECT $2::float8 + (random() * ($3::float8 - $2::float8)),
-                  $4::float8 + (random() * ($5::float8 - $4::float8)),
-                  'piso', 60 + (random() * 60)::int, NOW()
-           FROM generate_series(1, $1::int)`,
-          [NOISE_COUNT, NOISE_LAT_MIN, NOISE_LAT_MAX, NOISE_LON_MIN, NOISE_LON_MAX],
-        );
-        await pool.query(
-          `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at)
-           SELECT p.id, 'noise', 'noise-' || p.id, CASE WHEN random() < 0.7 THEN 'active' ELSE 'withdrawn' END,
-                  100000 + (random() * 400000)::int, NOW()
-           FROM property p
-           WHERE p.lat BETWEEN $1::float8 AND $2::float8 AND p.lon BETWEEN $3::float8 AND $4::float8
-           ORDER BY p.id DESC
-           LIMIT $5::int`,
-          [NOISE_LAT_MIN, NOISE_LAT_MAX, NOISE_LON_MIN, NOISE_LON_MAX, NOISE_COUNT],
-        );
+        // The two bulk `INSERT ... SELECT`s below insert 20k properties + 20k
+        // listings in single statements. Since #470 the property/listing
+        // AFTER-INSERT triggers recompute `property_search_doc` PER ROW, so
+        // firing them 40k times inside one statement would blow this test's
+        // timeout — and this test measures the profile-overview aggregate, which
+        // never reads `property_search_doc`, so the noise rows need no search doc
+        // at all. Suppress the triggers with `session_replication_role=replica`
+        // on a DEDICATED connection (not the shared pool), so the suppression is
+        // scoped to this connection's statements only and can't race the other
+        // integration test files vitest runs in parallel against the same DB
+        // (a table-wide `ALTER TABLE ... DISABLE TRIGGER` would). The matched-
+        // candidate loop below stays on the pool with triggers live — 900 rows
+        // is a trivial per-row cost and keeps the setup faithful.
+        const bulkClient = await pool.connect();
+        try {
+          await bulkClient.query("SET session_replication_role = replica");
+          await bulkClient.query(
+            `INSERT INTO property (lat, lon, property_type, m2_built, created_at)
+             SELECT $2::float8 + (random() * ($3::float8 - $2::float8)),
+                    $4::float8 + (random() * ($5::float8 - $4::float8)),
+                    'piso', 60 + (random() * 60)::int, NOW()
+             FROM generate_series(1, $1::int)`,
+            [NOISE_COUNT, NOISE_LAT_MIN, NOISE_LAT_MAX, NOISE_LON_MIN, NOISE_LON_MAX],
+          );
+          await bulkClient.query(
+            `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at)
+             SELECT p.id, 'noise', 'noise-' || p.id, CASE WHEN random() < 0.7 THEN 'active' ELSE 'withdrawn' END,
+                    100000 + (random() * 400000)::int, NOW()
+             FROM property p
+             WHERE p.lat BETWEEN $1::float8 AND $2::float8 AND p.lon BETWEEN $3::float8 AND $4::float8
+             ORDER BY p.id DESC
+             LIMIT $5::int`,
+            [NOISE_LAT_MIN, NOISE_LAT_MAX, NOISE_LON_MIN, NOISE_LON_MAX, NOISE_COUNT],
+          );
+          await bulkClient.query("SET session_replication_role = origin");
+        } finally {
+          bulkClient.release();
+        }
 
         // 3 profiles, ~300 matched candidates each (900 total) — a
         // representative "hundreds of matched candidates" volume per the

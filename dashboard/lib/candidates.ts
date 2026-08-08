@@ -584,6 +584,22 @@ export interface CandidateFilters {
    * other assessment filters. Composes (AND) with `redflagType` and the rest.
    */
   hasAlerts?: boolean | null;
+  /**
+   * #470 free-text search — the owner's "search that includes the description
+   * but also all the other fields". A non-empty `q` narrows the feed to
+   * properties whose materialized search document (`property_search_doc.doc`,
+   * built by triggers from address/refs + active-listing descriptions + the
+   * latest per-axis assessment codes/labels — see etl/schema/init.sql) matches
+   * `websearch_to_tsquery('es_unaccent', q)`: Spanish stemming + unaccent
+   * ("malaga" ≈ "málaga"), quoted phrases / OR / -exclusion for free, and never
+   * an error on arbitrary input. It is a FILTER, applied in the OUTER WHERE like
+   * `source`/occupancy/etc. (owner decision 1) — the `(novelty_tier,
+   * effective_score, property_id)` keyset key and cursor are UNTOUCHED, so the
+   * best opportunities that mention the term still come first. Always bound as a
+   * parameter, never interpolated. `null`/empty/whitespace = off. Relevance
+   * ordering (`ts_rank_cd`) is a deliberately deferred optional phase.
+   */
+  q?: string | null;
 }
 
 /**
@@ -1867,6 +1883,13 @@ export async function listCandidates(
   // turns it on; false/undefined collapse to null ("off") so the SQL `IS NOT
   // TRUE` guard treats it as off and the param tail stays uniform.
   const hasAlerts: true | null = opts.hasAlerts === true ? true : null;
+  // #470 free-text search term. Trimmed; empty/whitespace collapses to null
+  // ("off") so an untouched call is byte-identical to before and the SQL guard
+  // ($25 IS NULL) skips the FTS EXISTS entirely. Length is bounded at the API
+  // boundary (>200 → 400); here we only normalise. The value is always bound as
+  // a parameter to websearch_to_tsquery, never interpolated.
+  const q: string | null =
+    typeof opts.q === "string" && opts.q.trim() !== "" ? opts.q.trim() : null;
   // Source (portal) filter (#265): isolate one connector's results so the
   // owner can debug a single portal's data quality. A candidate is a
   // deduplicated PROPERTY that may span several listings from different
@@ -2223,6 +2246,25 @@ export async function listCandidates(
          OR cardinality(COALESCE(ranked.redflag_types, '{}')) > 0
          OR ranked.caveats && $6::text[]
        )
+       -- #470 free-text search ($25). NULL = off (default feed, byte-identical to
+       -- before). When set, keep only candidates whose materialized search
+       -- document matches the query. Applied in the OUTER query (like source/#310
+       -- filters — never inside pool, so it can't move the below-market median);
+       -- the (novelty_tier, effective_score, property_id) keyset key and cursor
+       -- are untouched — this is a FILTER, not a re-sort (owner decision 1). The
+       -- term is bound to websearch_to_tsquery, NEVER interpolated (it digests any
+       -- input without error); the GIN index on property_search_doc serves the
+       -- @@ probe. The doc is GLOBAL per property (all active listings, all
+       -- sources); per-source visibility stays governed by the ranked CTE (D-055).
+       AND (
+         $25::text IS NULL
+         OR EXISTS (
+           SELECT 1
+             FROM property_search_doc psd
+            WHERE psd.property_id = ranked.property_id
+              AND psd.doc @@ websearch_to_tsquery('es_unaccent', $25::text)
+         )
+       )
      -- #425 fresh-first: novelty tier leads, then the #309 blended score, then
      -- id as the deterministic tiebreak. MUST match the keyset WHERE above AND
      -- getAdjacentCandidates' ordering, or prev/next silently desyncs (D-057 cl.4).
@@ -2259,6 +2301,9 @@ export async function listCandidates(
       // #466 "Con alertas" UNION toggle ($24). Reuses the $6 WARN_CAVEAT_CODES
       // array in its predicate — only this boolean is new.
       hasAlerts,
+      // #470 free-text search term ($25). NULL = off; otherwise bound verbatim
+      // to websearch_to_tsquery in the OUTER WHERE's FTS EXISTS (never interpolated).
+      q,
     ],
   );
 
@@ -2423,6 +2468,15 @@ export interface AdjacentCandidates {
  * tool whose whole point is learning your preferences is the more honest
  * behaviour. A snapshot would page you through a ranking the model has
  * already moved on from.
+ *
+ * **Content filters (incl. #470 `q`) are NOT threaded here.** prev/next already
+ * ignores every content filter the feed applies — `source`, occupancy,
+ * condition, playa, the #386/#392/#398 assessment filters — and honours only
+ * `includeRejected`; a user who filters the list and opens a card navigates the
+ * GLOBAL ordering. The #470 free-text `q` follows that exact precedent and is
+ * deliberately not applied to the adjacency. If this ever grates in practice,
+ * the correct fix is a follow-up that threads ALL filters through the adjacency
+ * uniformly (owner decision 5), not `q` in isolation.
  */
 export async function getAdjacentCandidates(
   profileId: number,
