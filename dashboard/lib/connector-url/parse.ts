@@ -17,6 +17,14 @@
  * `(?P<name>…)` translation instead).
  */
 
+/** One robots-forbidden URL shape and the message key that explains it (#493). */
+export interface RejectReason {
+  /** Start-anchored, ECMAScript regex fragment matching the forbidden shape. */
+  pattern: string;
+  /** Message key the UI maps to a concrete explanation (blocks saving). */
+  reason: string;
+}
+
 /** A connector's declarative search-URL grammar, camelCased from the JSONB. */
 export interface SearchUrlGrammar {
   /** `str.format`-style template with `{placeholder}` slots. */
@@ -25,6 +33,12 @@ export interface SearchUrlGrammar {
   parsePattern: string;
   /** Per-placeholder metadata (label, source) mirroring SearchParam fields. */
   params: Record<string, { label?: string; source?: string }>;
+  /**
+   * Robots-forbidden shapes this portal serves but discover() could never open
+   * (issue #493) — a URL matching one is a HARD, reasoned block, distinct from a
+   * plain no-match (kept verbatim). Empty for connectors with no such bans.
+   */
+  rejectReasons: RejectReason[];
 }
 
 /**
@@ -54,7 +68,18 @@ export function parseGrammar(raw: unknown): SearchUrlGrammar | null {
       }
     }
   }
-  return { buildTemplate, parsePattern, params };
+  const rejectReasons: RejectReason[] = [];
+  if (Array.isArray(r.reject_reasons)) {
+    for (const entry of r.reject_reasons) {
+      if (typeof entry === "object" && entry !== null) {
+        const e = entry as Record<string, unknown>;
+        if (typeof e.pattern === "string" && typeof e.reason === "string") {
+          rejectReasons.push({ pattern: e.pattern, reason: e.reason });
+        }
+      }
+    }
+  }
+  return { buildTemplate, parsePattern, params, rejectReasons };
 }
 
 /**
@@ -94,4 +119,30 @@ export function buildUrl(grammar: SearchUrlGrammar, params: Record<string, strin
   return grammar.buildTemplate.replace(/\{(\w+)\}/g, (_, key: string) =>
     params[key] !== undefined ? params[key] : "",
   );
+}
+
+/**
+ * The reject-reason KEY of the first {@link SearchUrlGrammar.rejectReasons}
+ * pattern that matches `url`, or null (issue #493). Mirrors Python
+ * `SearchUrlGrammar.rejection`.
+ *
+ * A rejected URL is one this portal serves but discover() could never open (a
+ * robots.txt-forbidden shape) — the caller must BLOCK saving it with the reason,
+ * distinct from a plain no-match (`inferParams` → null → kept verbatim).
+ * Rejection takes precedence over parsing: a URL that both parses and is
+ * rejected is still rejected (e.g. a bare-geography slug). Patterns are stored
+ * ECMAScript-canonical, so `RegExp` consumes them verbatim (no translation).
+ */
+export function rejection(grammar: SearchUrlGrammar, url: string): string | null {
+  for (const { pattern, reason } of grammar.rejectReasons) {
+    let re: RegExp;
+    try {
+      re = new RegExp(pattern);
+    } catch {
+      // A malformed published reject pattern must not crash the page — skip it.
+      continue;
+    }
+    if (re.test(url)) return reason;
+  }
+  return null;
 }

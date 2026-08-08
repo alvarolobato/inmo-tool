@@ -8,7 +8,7 @@ import type {
   SearchParamSource,
   SearchParamView,
 } from "@/lib/db/connector-search-preview";
-import { inferParams, type SearchUrlGrammar } from "@/lib/connector-url/parse";
+import { inferParams, rejection, type SearchUrlGrammar } from "@/lib/connector-url/parse";
 
 /** Human label for a param's origin (issue #491) — shown as the chip badge. */
 const SOURCE_LABEL: Record<SearchParamSource, string> = {
@@ -17,6 +17,26 @@ const SOURCE_LABEL: Record<SearchParamSource, string> = {
   constant: "constante",
   derived: "derivada",
 };
+
+/**
+ * Concrete explanation for each grammar reject-reason key (issue #493). Keyed by
+ * the reason the grammar publishes — a generic, portal-agnostic catalogue (no
+ * per-connector TypeScript): a rejected URL is one discover() could never open
+ * (robots.txt-forbidden), so saving it is BLOCKED with the matching message.
+ */
+const REJECT_REASON_MESSAGE: Record<string, string> = {
+  "robots-query-params":
+    "Este portal prohíbe por robots.txt los filtros en la query (?…) de las URLs de búsqueda; esta URL no puede usarse como filtro (el ETL nunca podría abrirla).",
+  "robots-bare-geography":
+    "Este portal prohíbe por robots.txt el segmento de ciudad «desnudo» (p. ej. /madrid/); usa el slug con guion (p. ej. madrid-capital).",
+};
+
+function rejectReasonMessage(reason: string): string {
+  return (
+    REJECT_REASON_MESSAGE[reason] ??
+    "Esta URL infringe una restricción de robots.txt del portal y no puede usarse como filtro."
+  );
+}
 
 /**
  * One ETL-connector row on the "Validar filtros" page (issue #478 P4).
@@ -87,8 +107,17 @@ export function EtlConnectorPreviewRow({
   const canInfer = tunable && grammar !== null;
   const draftTrimmed = draft.trim();
   const inferable = canInfer && draftTrimmed !== "";
-  const inferred = inferable ? inferParams(grammar as SearchUrlGrammar, draftTrimmed) : null;
-  const unparseable = inferable && inferred === null;
+  // Issue #493: a reasoned rejection (a robots-forbidden shape) takes precedence
+  // over parsing — it BLOCKS Guardar, distinct from an unparseable URL (kept
+  // verbatim). Checked first so a rejected URL never shows an inference panel.
+  const rejectedReason = inferable
+    ? rejection(grammar as SearchUrlGrammar, draftTrimmed)
+    : null;
+  const inferred =
+    inferable && rejectedReason === null
+      ? inferParams(grammar as SearchUrlGrammar, draftTrimmed)
+      : null;
+  const unparseable = inferable && rejectedReason === null && inferred === null;
   const paramMeta = grammar?.params ?? {};
 
   async function onSave() {
@@ -339,8 +368,18 @@ export function EtlConnectorPreviewRow({
               type="button"
               data-testid="etl-save"
               onClick={onSave}
-              disabled={busy !== null || draft.trim() === "" || draft === effectiveUrl}
-              style={primaryButtonStyle(busy !== null || draft.trim() === "" || draft === effectiveUrl)}
+              disabled={
+                busy !== null ||
+                draft.trim() === "" ||
+                draft === effectiveUrl ||
+                rejectedReason !== null
+              }
+              style={primaryButtonStyle(
+                busy !== null ||
+                  draft.trim() === "" ||
+                  draft === effectiveUrl ||
+                  rejectedReason !== null,
+              )}
             >
               {busy === "save" ? "Guardando…" : "Guardar como filtro"}
             </button>
@@ -366,6 +405,27 @@ export function EtlConnectorPreviewRow({
               Abrir ↗
             </button>
           </div>
+
+          {/* Issue #493: a robots-forbidden URL is a HARD, reasoned block —
+              Guardar is disabled and this explains why (distinct from the
+              verbatim-kept "unparseable" note below). */}
+          {rejectedReason !== null && (
+            <p
+              data-testid="etl-inference-rejected"
+              data-reject-reason={rejectedReason}
+              style={{
+                fontSize: 11,
+                color: "var(--down)",
+                background: "var(--warn-bg)",
+                borderRadius: 6,
+                padding: "6px 8px",
+                margin: 0,
+                lineHeight: 1.5,
+              }}
+            >
+              {rejectReasonMessage(rejectedReason)}
+            </p>
+          )}
 
           {/* Issue #491: live "Esta URL significa…" — re-infer params from the
               edited URL using the published grammar (in the browser). Params
