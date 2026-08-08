@@ -55,6 +55,7 @@
  */
 
 import { sql } from "@/lib/db-write";
+import { DISABLED_SOURCES_CTE, activeSourceClause } from "./source-active";
 import { toProfileListEntry, type ProfileListEntry, type SearchProfileRawRow } from "./profiles";
 import { MIN_TRAINING_EXAMPLES } from "@/lib/scoring/pipeline";
 import type { ProfileThumbnail, ProfileOverviewMetrics, ProfileOverviewEntry } from "@/lib/profile-overview-types";
@@ -108,7 +109,8 @@ interface RawOverviewRow extends SearchProfileRawRow {
  * second whole-table round trip for the base profile list either). See
  * module docstring for the per-LATERAL cost/bound rationale.
  */
-export const OVERVIEW_QUERY_SQL = `WITH feedback_current AS (
+export const OVERVIEW_QUERY_SQL = `WITH ${DISABLED_SOURCES_CTE},
+     feedback_current AS (
        -- Include the retired 'star' (#422) and 'clear' (#379) so a trailing
        -- one wins the DISTINCT ON; the counts below FILTER on accept/reject
        -- only, so a property whose latest event is 'star' or 'clear' correctly
@@ -156,8 +158,16 @@ export const OVERVIEW_QUERY_SQL = `WITH feedback_current AS (
          --   (2) Measure listing.first_seen_at (when the *listing* appeared —
          --       the investable event), NOT property.created_at. See newness
          --       CROSS JOIN LATERAL below. Fallback matches the feed exactly.
+         --   (3) #447: STRICT '>' (not '>='), and the newness MIN is taken over
+         --       ACTIVE-SOURCE listings only (activeSourceClause / D-055), both
+         --       verbatim from the feed's novelty CTE (lib/candidates.ts:
+         --       'MIN(l.first_seen_at) > (SELECT ts FROM anchor)' WHERE
+         --       activeSourceClause). Without these two, the "N nuevos" count
+         --       double-counted properties whose only recent first_seen came
+         --       from a disabled portal (never shown as NUEVO in the feed) and
+         --       off-by-one'd the exact-anchor boundary — the ~400-vs-7 drift.
          COUNT(*) FILTER (
-           WHERE newness.first_seen_at >= COALESCE(sp.previous_viewed_at, sp.created_at - interval '1 day')
+           WHERE newness.first_seen_at > COALESCE(sp.previous_viewed_at, sp.created_at - interval '1 day')
          ) AS new_count,
          MIN(cand.min_price) AS min_price,
          MAX(cand.min_price) AS max_price,
@@ -196,9 +206,17 @@ export const OVERVIEW_QUERY_SQL = `WITH feedback_current AS (
          -- "when did this property first appear to us", matching
          -- CandidateRow.first_seen_at's "earliest across all listings" and the
          -- feed's novelty CTE (lib/candidates.ts).
+         --
+         -- #447: bounded to ACTIVE-SOURCE listings (activeSourceClause / D-055),
+         -- exactly as the feed's novelty CTE is. A property whose only recent
+         -- listing is from a disabled portal is HIDDEN from the feed and never
+         -- tagged NUEVO, so it must not inflate new_count either. If every one
+         -- of the property's listings is on a disabled source, MIN is NULL and
+         -- the '>' FILTER above is false — the same as the feed's
+         -- COALESCE(nov.is_new, false).
          SELECT MIN(l.first_seen_at) AS first_seen_at
            FROM listing l
-          WHERE l.property_id = p.id
+          WHERE l.property_id = p.id AND ${activeSourceClause("l")}
        ) newness
        WHERE pls.profile_id = sp.id AND pls.matched = true
      ) match_stats ON true
