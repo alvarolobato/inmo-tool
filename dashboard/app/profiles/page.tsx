@@ -13,6 +13,7 @@ import {
 import { TemplatePicker } from "@/components/profiles/TemplatePicker";
 import { findTemplate, templateToFormValues } from "@/lib/profile-templates";
 import { ProfileOverviewRow } from "@/components/profiles/ProfileOverviewRow";
+import { Modal } from "@/components/Modal";
 import { NovedadesStrip } from "@/components/profiles/NovedadesStrip";
 import { RefreshIndicator } from "@/components/profiles/RefreshIndicator";
 import type {
@@ -417,16 +418,20 @@ export default function ProfilesPage() {
         </div>
       )}
 
-      {mode.kind === "edit" && (
-        <div
-          style={{
-            marginTop: 16,
-            padding: 16,
-            border: "1px solid var(--border)",
-            borderRadius: 8,
-            background: "var(--bg-1)",
-          }}
-        >
+      {/* Issue #446: the row-triggered edit/repair forms open in a focus-managed
+          modal instead of appearing inline at the top of the page (where, with
+          the row far down the list, they went unnoticed). The modal centers in
+          the viewport, autofocuses the first field, traps Tab, and closes on
+          Escape / backdrop — the save/validation flow inside ProfileForm is
+          unchanged. */}
+      <Modal
+        open={mode.kind === "edit"}
+        onClose={() => setMode({ kind: "none" })}
+        title="Editar perfil"
+        testId="profile-edit-modal"
+        maxWidth={620}
+      >
+        {mode.kind === "edit" && (
           <ProfileForm
             initial={{
               name: mode.profile.name,
@@ -437,37 +442,37 @@ export default function ProfilesPage() {
             onSubmit={(values) => handleUpdate(mode.profile.id, values)}
             onCancel={() => setMode({ kind: "none" })}
           />
-        </div>
-      )}
+        )}
+      </Modal>
 
-      {mode.kind === "repair" && (
-        <div
-          style={{
-            marginTop: 16,
-            padding: 16,
-            border: "1px solid var(--down)",
-            borderRadius: 8,
-            background: "var(--bg-1)",
-          }}
-        >
-          <p
-            style={{
-              margin: "0 0 12px",
-              fontSize: 12,
-              color: "var(--fg-muted)",
-            }}
-          >
-            Este perfil tenía una configuración inválida y no se pudo recuperar
-            su ámbito (scope) original — defínelo de nuevo desde cero.
-          </p>
-          <ProfileForm
-            initial={{ ...DEFAULT_VALUES, name: mode.name }}
-            submitLabel="Guardar y reparar"
-            onSubmit={(values) => handleUpdate(mode.id, values)}
-            onCancel={() => setMode({ kind: "none" })}
-          />
-        </div>
-      )}
+      <Modal
+        open={mode.kind === "repair"}
+        onClose={() => setMode({ kind: "none" })}
+        title="Reparar perfil"
+        testId="profile-repair-modal"
+        maxWidth={620}
+      >
+        {mode.kind === "repair" && (
+          <>
+            <p
+              style={{
+                margin: "0 0 12px",
+                fontSize: 12,
+                color: "var(--fg-muted)",
+              }}
+            >
+              Este perfil tenía una configuración inválida y no se pudo recuperar
+              su ámbito (scope) original — defínelo de nuevo desde cero.
+            </p>
+            <ProfileForm
+              initial={{ ...DEFAULT_VALUES, name: mode.name }}
+              submitLabel="Guardar y reparar"
+              onSubmit={(values) => handleUpdate(mode.id, values)}
+              onCancel={() => setMode({ kind: "none" })}
+            />
+          </>
+        )}
+      </Modal>
 
       {error && <ErrorDisplay error={error} className="mt-4" />}
 
