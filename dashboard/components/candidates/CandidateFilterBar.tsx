@@ -556,14 +556,15 @@ export function CandidateFilterBar({
           </PopoverButton>
           <PopoverPanel
             data-testid="more-filters-panel"
+            anchor={{ to: "bottom end", gap: 6 }}
             style={{
-              position: "absolute",
-              left: 0,
-              top: "calc(100% + 6px)",
               zIndex: 30,
-              width: 300,
-              maxWidth: "calc(100vw - 32px)",
-              maxHeight: "70vh",
+              width: "min(300px, 92vw)",
+              maxWidth: "92vw",
+              // Never taller than the viewport (mobile) — scroll internally
+              // instead of spilling below the fold. Floating UI (via `anchor`)
+              // also caps this against the available space.
+              maxHeight: "min(70vh, var(--anchor-max-height, 70vh))",
               overflow: "auto",
               padding: 14,
               display: "flex",
@@ -669,25 +670,29 @@ export function CandidateFilterBar({
           </PopoverPanel>
         </Popover>
 
-        {anyActive && (
-          <button
-            type="button"
-            data-testid="clear-all-filters"
-            onClick={() => onChange({ ...DEFAULT_CANDIDATE_FILTERS })}
-            style={{
-              marginLeft: "auto",
-              padding: "5px 10px",
-              fontSize: 13,
-              color: "var(--fg-muted)",
-              background: "transparent",
-              border: "1px solid var(--border)",
-              borderRadius: 6,
-              cursor: "pointer",
-            }}
-          >
-            Limpiar todo
-          </button>
-        )}
+        {/* Always rendered so the bar layout never shifts when filters come and
+            go (the owner reported the screen "jumping"). When nothing is active
+            it stays visible but disabled/muted rather than being removed. */}
+        <button
+          type="button"
+          data-testid="clear-all-filters"
+          disabled={!anyActive}
+          aria-disabled={!anyActive}
+          onClick={() => onChange({ ...DEFAULT_CANDIDATE_FILTERS })}
+          style={{
+            marginLeft: "auto",
+            padding: "5px 10px",
+            fontSize: 13,
+            color: anyActive ? "var(--fg-muted)" : "var(--fg-subtle)",
+            background: "transparent",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            cursor: anyActive ? "pointer" : "not-allowed",
+            opacity: anyActive ? 1 : 0.5,
+          }}
+        >
+          Limpiar todo
+        </button>
       </div>
 
       {/* Active-filter chips: nothing active is ever invisible in the popover. */}
