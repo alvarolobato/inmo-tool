@@ -6,6 +6,24 @@ import { ProfileOverviewRow } from "../ProfileOverviewRow";
 import type { ProfileOverviewEntry, ProfileOverviewMetrics } from "@/lib/profile-overview-types";
 import type { SearchProfileRow } from "@/lib/profiles-schema";
 
+const mockPush = vi.fn();
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: mockPush }),
+}));
+
+// jsdom has no ResizeObserver; Headless UI's Menu machine calls it when a menu
+// item is clicked (menu-close re-measures). Stub it so clicking a menu item
+// (the "Validar filtros" navigate test) doesn't raise an unhandled error.
+// Assigned directly (not via vi.stubGlobal) so afterEach's unstubAllGlobals
+// leaves it in place.
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+(globalThis as unknown as { ResizeObserver: typeof ResizeObserverStub }).ResizeObserver =
+  ResizeObserverStub;
+
 function profile(overrides: Partial<SearchProfileRow> = {}): SearchProfileRow {
   return {
     id: 1,
@@ -202,14 +220,15 @@ describe("ProfileOverviewRow (issue #193)", () => {
     expect(cloneItem).toBeDisabled();
   });
 
-  it("kebab menu exposes 'Validar filtros' linking to the profile's filters page (#478 P2)", () => {
+  it("kebab menu 'Validar filtros' navigates to the profile's filters page (#478 P2)", () => {
+    mockPush.mockClear();
     const entry: ProfileOverviewEntry = { ok: true, profile: profile({ id: 55 }), metrics: metrics() };
     render(<ProfileOverviewRow entry={entry} onEdit={noop} onClone={noop} onArchive={noop} busy={false} />);
     fireEvent.click(screen.getByRole("button", { name: "Más acciones para este perfil" }));
     const item = screen.getByRole("menuitem", { name: "Validar filtros" });
-    // Real <a> so navigation is native and the href is inspectable.
-    expect(item.tagName).toBe("A");
-    expect(item).toHaveAttribute("href", "/profiles/55/filtros");
+    expect(item).toBeEnabled();
+    fireEvent.click(item);
+    expect(mockPush).toHaveBeenCalledWith("/profiles/55/filtros");
   });
 
   it("kebab menu disables 'Validar filtros' on a broken-scope row, with a reason (#478 P2)", () => {

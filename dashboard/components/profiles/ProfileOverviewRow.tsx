@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Menu, MenuButton, MenuItem, MenuItems } from "@headlessui/react";
 import type { ProfileOverviewEntry } from "@/lib/profile-overview-types";
 import { PROPERTY_TYPE_LABELS, type PROPERTY_TYPES } from "@/lib/profiles-schema";
@@ -129,8 +130,9 @@ function OverflowMenu({
   cloneDisabledReason?: string;
   /**
    * When set (valid profiles), "Validar filtros" navigates here
-   * (`/profiles/[id]/filtros`). Rendered as a real <Link> so the href is
-   * inspectable and navigation is native.
+   * (`/profiles/[id]/filtros`) via `router.push` — the same in-menu navigation
+   * pattern the rest of the app uses (ConversationRowActions); a Link inside a
+   * Headless UI MenuItem does not reliably follow its href on click.
    */
   validateFiltersHref?: string;
   /**
@@ -139,6 +141,7 @@ function OverflowMenu({
    */
   validateFiltersDisabledReason?: string;
 }) {
+  const router = useRouter();
   return (
     <Menu as="div" style={{ position: "absolute", top: 10, right: 10 }}>
       <MenuButton
@@ -159,24 +162,20 @@ function OverflowMenu({
             Editar
           </button>
         </MenuItem>
-        {/* "Validar filtros" (issue #478): a valid profile links to its filters
-            page; a broken-scope one is disabled with a reason (no derivable
-            search URLs). Sits between Editar and Clonar per the issue. */}
+        {/* "Validar filtros" (issue #478): a valid profile navigates to its
+            filters page; a broken-scope one is disabled with a reason (no
+            derivable search URLs). Sits between Editar and Clonar per the
+            issue. */}
         <MenuItem>
-          {validateFiltersHref && !busy ? (
-            <Link href={validateFiltersHref} style={menuItemStyle(false)}>
-              Validar filtros
-            </Link>
-          ) : (
-            <button
-              type="button"
-              disabled
-              title={validateFiltersDisabledReason}
-              style={menuItemStyle(true)}
-            >
-              Validar filtros
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => validateFiltersHref && router.push(validateFiltersHref)}
+            disabled={busy || !validateFiltersHref}
+            title={validateFiltersHref ? undefined : validateFiltersDisabledReason}
+            style={menuItemStyle(busy || !validateFiltersHref)}
+          >
+            Validar filtros
+          </button>
         </MenuItem>
         <MenuItem>
           <button
