@@ -29,6 +29,7 @@ describe("candidate-filters: state ↔ URL round-trip", () => {
 
   it("round-trips every filter through the URL (parse ∘ serialize = id)", () => {
     const full: CandidateFilters = {
+      q: "terraza con vistas",
       source: "fotocasa",
       occupancy: "occupied",
       conditionSel: "a_reformar:integral",
@@ -55,6 +56,27 @@ describe("candidate-filters: state ↔ URL round-trip", () => {
     // hasActiveFilters picks up the primary-row toggle.
     expect(hasActiveFilters(f)).toBe(true);
     // …but it is NOT one of the "Más filtros" popover group (primary row).
+    expect(moreFiltersActiveCount(f)).toBe(0);
+  });
+
+  it("#470: the free-text search maps to the `q` URL param", () => {
+    const f: CandidateFilters = { ...DEFAULT_CANDIDATE_FILTERS, q: "terraza" };
+    const p = candidateFiltersToParams(f);
+    expect(p.get("q")).toBe("terraza");
+    // Round-trips, and an empty search emits nothing.
+    expect(parseCandidateFilters("?q=terraza").q).toBe("terraza");
+    expect(candidateFiltersToParams(DEFAULT_CANDIDATE_FILTERS).get("q")).toBeNull();
+    // Absent `q` parses back to the empty-string default.
+    expect(parseCandidateFilters("").q).toBe("");
+    // A search term with spaces round-trips (URL-encoded on the way out).
+    expect(parseCandidateFilters(candidateFiltersToSearch(f)).q).toBe("terraza");
+    const phrase = { ...DEFAULT_CANDIDATE_FILTERS, q: "primera línea de playa" };
+    expect(parseCandidateFilters(candidateFiltersToSearch(phrase)).q).toBe(
+      "primera línea de playa",
+    );
+    // hasActiveFilters picks up the primary-row search…
+    expect(hasActiveFilters(f)).toBe(true);
+    // …but it is NOT one of the "Más filtros" popover group.
     expect(moreFiltersActiveCount(f)).toBe(0);
   });
 
