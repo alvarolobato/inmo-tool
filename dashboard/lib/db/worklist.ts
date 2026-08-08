@@ -6,6 +6,7 @@
 
 import { sql } from "@/lib/db-write";
 import {
+  CAPTURE_PORTAL_NAMES,
   portalForUrl,
   worklistMatchKey,
   type WorklistPortalSummary,
@@ -23,23 +24,32 @@ export interface AddWorklistResult {
 /**
  * List worklist rows (optionally filtered to one portal), newest first, plus
  * per-portal status roll-ups for the page header. One round trip each.
+ *
+ * The guided-capture surface is scoped to extension-capturable portals
+ * (`CAPTURE_PORTAL_NAMES`, issue #454): rows for an ETL-fetched connector (e.g.
+ * cimenta2) are vestigial — the extension never drains them — so they are
+ * filtered out here rather than shown as a misleading "0/N pending forever".
  */
 export async function listWorklist(
   portal?: string,
 ): Promise<{ rows: WorklistRow[]; summaries: WorklistPortalSummary[] }> {
+  const capturePortals = [...CAPTURE_PORTAL_NAMES];
   const rows = portal
     ? await sql<WorklistRow>(
         `SELECT id, url, source_portal, status, added_via, external_id, note,
                 matched_capture_id, created_at, updated_at
-           FROM capture_worklist WHERE source_portal = $1
+           FROM capture_worklist
+          WHERE source_portal = $1 AND source_portal = ANY($2)
           ORDER BY created_at DESC, id DESC`,
-        [portal],
+        [portal, capturePortals],
       )
     : await sql<WorklistRow>(
         `SELECT id, url, source_portal, status, added_via, external_id, note,
                 matched_capture_id, created_at, updated_at
            FROM capture_worklist
+          WHERE source_portal = ANY($1)
           ORDER BY created_at DESC, id DESC`,
+        [capturePortals],
       );
 
   const summaryRows = await sql<{
@@ -48,7 +58,10 @@ export async function listWorklist(
     n: string;
   }>(
     `SELECT source_portal, status, COUNT(*)::text AS n
-       FROM capture_worklist GROUP BY source_portal, status`,
+       FROM capture_worklist
+      WHERE source_portal = ANY($1)
+      GROUP BY source_portal, status`,
+    [capturePortals],
   );
 
   const byPortal = new Map<string, WorklistPortalSummary>();
@@ -92,19 +105,25 @@ export interface PendingWorklistItem {
 export async function listPendingWorklist(
   portal?: string,
 ): Promise<PendingWorklistItem[]> {
+  // Scope to extension-capturable portals (issue #454): the auto-capture driver
+  // must never be handed a vestigial ETL-connector URL (e.g. cimenta2) that the
+  // extension cannot capture.
+  const capturePortals = [...CAPTURE_PORTAL_NAMES];
   const rows = portal
     ? await sql<{ url: string; source_portal: string; created_at: string }>(
         `SELECT url, source_portal, created_at
            FROM capture_worklist
           WHERE status = 'pending' AND source_portal = $1
+            AND source_portal = ANY($2)
           ORDER BY created_at ASC, id ASC`,
-        [portal],
+        [portal, capturePortals],
       )
     : await sql<{ url: string; source_portal: string; created_at: string }>(
         `SELECT url, source_portal, created_at
            FROM capture_worklist
-          WHERE status = 'pending'
+          WHERE status = 'pending' AND source_portal = ANY($1)
           ORDER BY created_at ASC, id ASC`,
+        [capturePortals],
       );
   return rows.map((r) => ({
     url: r.url,

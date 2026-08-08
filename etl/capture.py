@@ -49,6 +49,17 @@ _CAPTURE_CONNECTORS: dict[str, tuple[object, type]] = {
     "altamirainmuebles.com": (_altamira, AltamiraConnector),
 }
 
+# The extension-capturable portal *names* — the Python mirror of
+# dashboard/lib/worklist.ts's CAPTURE_PORTAL_NAMES. `capture_worklist` is the
+# extension's queue, so only these portals may be seeded into it (issue #454).
+# A connector fetched over HTTP by the ETL (e.g. cimenta2, via aura) is NOT
+# here: the extension never drains its worklist, so seeding it just accrues
+# vestigial "0/N pending forever" rows. Keep in step with _CAPTURE_CONNECTORS
+# when adding a portal.
+EXTENSION_CAPTURE_PORTALS: frozenset[str] = frozenset(
+    {"idealista", "aliseda", "altamira"}
+)
+
 _BATCH_LIMIT = 10
 
 

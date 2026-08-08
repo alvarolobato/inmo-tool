@@ -36,7 +36,11 @@ import { SITEMAP_SEEDABLE_PORTALS } from "@/lib/worklist";
 // Writes Postgres per request; never prerender at build (no DB then).
 export const dynamic = "force-dynamic";
 
-const DEFAULT_PORTAL = "cimenta2";
+// The default portal to seed when the body omits one: the first
+// extension-capturable sitemap-seedable portal, or undefined when none qualify
+// (issue #454 — cimenta2 moved to ETL fetch, so today the list is empty and a
+// bodyless request is a 400 rather than silently seeding a stale portal).
+const DEFAULT_PORTAL: string | undefined = SITEMAP_SEEDABLE_PORTALS[0];
 
 interface SeedBody {
   portal?: unknown;
@@ -81,11 +85,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     portal = body.portal.trim();
   }
 
-  if (!SITEMAP_SEEDABLE_PORTALS.includes(portal)) {
+  if (portal === undefined || !SITEMAP_SEEDABLE_PORTALS.includes(portal)) {
+    const admitted =
+      SITEMAP_SEEDABLE_PORTALS.length > 0
+        ? `Portales admitidos: ${SITEMAP_SEEDABLE_PORTALS.join(", ")}.`
+        : "Ningún portal admite siembra por sitemap actualmente " +
+          "(los conectores fetch-por-ETL como cimenta2 no se siembran en la " +
+          "lista de la extensión, #454).";
     return NextResponse.json(
       formatApiError(
-        `El portal "${portal}" no admite siembra por sitemap. ` +
-          `Portales admitidos: ${SITEMAP_SEEDABLE_PORTALS.join(", ")}.`,
+        `El portal "${portal ?? ""}" no admite siembra por sitemap. ${admitted}`,
         "VALIDATION",
         undefined,
         requestId,
