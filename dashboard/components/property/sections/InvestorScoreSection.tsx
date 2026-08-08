@@ -97,6 +97,20 @@ export function InvestorScoreSection({ score }: { score: PropertyInvestorScore }
                       (sin datos)
                     </span>
                   )}
+                  {/* #461: explain which comparison base drove the below-market
+                      discount — a like-for-like segment vs the whole-profile
+                      median — so the number is auditable, not a black box. */}
+                  {t.key === "below_market" && t.hasData && score.below_market_base !== null && (
+                    <span
+                      data-testid="below-market-base-note"
+                      data-base={score.below_market_base}
+                      style={{ marginLeft: 6, fontSize: 11, color: "var(--fg-subtle)" }}
+                    >
+                      {score.below_market_base === "segment"
+                        ? `(vs ${score.below_market_comparables ?? 0} similares)`
+                        : "(vs mediana del perfil)"}
+                    </span>
+                  )}
                 </span>
                 <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>
                   +{t.points}
