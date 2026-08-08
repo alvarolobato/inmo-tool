@@ -38,10 +38,24 @@ describe("candidate-filters: state ↔ URL round-trip", () => {
       beachProximity: "frontline",
       heritageZone: true,
       isVpo: "false",
+      hasAlerts: true,
       view: "descartadas",
     };
     const search = candidateFiltersToSearch(full);
     expect(parseCandidateFilters(search)).toEqual(full);
+  });
+
+  it("#466: the 'Con alertas' toggle maps to the alerts=1 URL param", () => {
+    const f: CandidateFilters = { ...DEFAULT_CANDIDATE_FILTERS, hasAlerts: true };
+    const p = candidateFiltersToParams(f);
+    expect(p.get("alerts")).toBe("1");
+    // Round-trips, and a default (off) emits nothing.
+    expect(parseCandidateFilters("?alerts=1").hasAlerts).toBe(true);
+    expect(candidateFiltersToParams(DEFAULT_CANDIDATE_FILTERS).get("alerts")).toBeNull();
+    // hasActiveFilters picks up the primary-row toggle.
+    expect(hasActiveFilters(f)).toBe(true);
+    // …but it is NOT one of the "Más filtros" popover group (primary row).
+    expect(moreFiltersActiveCount(f)).toBe(0);
   });
 
   it("maps state keys to the spec'd URL param names (cond/redflag/beach/heritage/vpo)", () => {

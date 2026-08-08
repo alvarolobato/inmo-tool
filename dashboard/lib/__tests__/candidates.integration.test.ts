@@ -1245,6 +1245,47 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
       });
     });
 
+    it("#474: 'bajo cubierta' (ático under the roof) is NOT classed as ground floor", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // Three genuine ground-floor `Bajo` comps at 2.857 €/m² (200.000 / 70).
+        for (let i = 0; i < 3; i++) {
+          await seedSeg(pool, profileId, { price: 200000, rooms: 3, m2: 70, floor: "Bajo" });
+        }
+        // A plain `Bajo` target at 2.142 €/m² → joins the ground segment (itself +
+        // the 3 comps = 4 like-for-like comparables), base='segment'.
+        const plainBajo = await seedSeg(pool, profileId, {
+          price: 150000,
+          rooms: 3,
+          m2: 70,
+          floor: "Bajo",
+        });
+        // A `bajo cubierta` target — an ático UNDER THE ROOF, an UPPER floor. The
+        // substring `bajo` used to drag it into the ground-floor segment (#474);
+        // it must NOT be. Its own upper segment has only itself (< MIN_POOL_SIZE),
+        // so it correctly falls back to the whole-pool median (base='pool') over
+        // ALL 5 priced candidates — proving it was never grouped with the bajos.
+        const bajoCubierta = await seedSeg(pool, profileId, {
+          price: 150000,
+          rooms: 3,
+          m2: 70,
+          floor: "Bajo cubierta",
+        });
+
+        const page = await listCandidates(profileId, { limit: 50 });
+        const plainRow = page.items.find((i) => i.property_id === plainBajo)!;
+        const cubiertaRow = page.items.find((i) => i.property_id === bajoCubierta)!;
+
+        // The genuine bajo forms its ground segment (target + 3 ground comps).
+        expect(plainRow.below_market_base).toBe("segment");
+        expect(plainRow.below_market_comparables).toBe(4);
+        // The bajo cubierta is excluded from that segment → whole-pool fallback
+        // over all 5 priced candidates, NOT the 4-unit ground segment.
+        expect(cubiertaRow.below_market_base).toBe("pool");
+        expect(cubiertaRow.below_market_comparables).toBe(5);
+      });
+    });
+
     it("recomputes below_market_pct on the segment but keeps the 50% boost cap intact", async () => {
       await withRealDb(async (pool) => {
         const profileId = await makeProfile(SCOPE);
@@ -1605,6 +1646,133 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
         // the filters' doing, not a broken feed.
         const unfiltered = await listCandidates(profileId, { limit: 10 });
         expect(unfiltered.items).toHaveLength(2);
+      });
+    });
+  });
+
+  describe("'Con alertas' UNION filter (#466, D-059)", () => {
+    // Matched, priced candidate carrying optional occupancy caveats and/or
+    // redflags flag types — seeded through the SAME `ai_assessment` rows the
+    // ranking CTE reads, so the UNION filter and the warn badges agree.
+    async function seedTagged(
+      pool: Pool,
+      profileId: number,
+      opts: { caveats?: string[]; redflagTypes?: string[] },
+    ): Promise<number> {
+      const id = await insertProperty(pool);
+      await insertListing(pool, id, { source: "fotocasa", current_price: 300000 });
+      await markMatched(pool, profileId, id);
+      if (opts.caveats) {
+        await insertAssessment(pool, id, {
+          assessmentType: "occupancy",
+          result: { occupancy: { value: "vacant" }, caveats: opts.caveats },
+          promptVersion: "occupancy/v2",
+          generatedAt: new Date("2026-02-01T00:00:00Z"),
+        });
+      }
+      if (opts.redflagTypes) {
+        await insertAssessment(pool, id, {
+          assessmentType: "redflags",
+          result: {
+            flags: opts.redflagTypes.map((t) => ({
+              type: t,
+              description: `check ${t}`,
+              evidence: `menciona ${t}`,
+              evidence_source: "fotocasa",
+            })),
+          },
+          promptVersion: "redflags/v3",
+          generatedAt: new Date("2026-02-01T00:00:00Z"),
+        });
+      }
+      return id;
+    }
+
+    it("keeps candidates with ≥1 redflag OR ≥1 warn caveat; excludes clean + never-assessed", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // Warn caveat only (no redflag).
+        const caveatOnly = await seedTagged(pool, profileId, {
+          caveats: ["venta_deuda"],
+        });
+        // Redflag only (no caveat).
+        const redflagOnly = await seedTagged(pool, profileId, {
+          redflagTypes: ["embargo"],
+        });
+        // Both.
+        const both = await seedTagged(pool, profileId, {
+          caveats: ["nuda_propiedad"],
+          redflagTypes: ["litigio"],
+        });
+        // Assessed but clean: empty caveats, empty flags → NO alert.
+        const clean = await seedTagged(pool, profileId, {
+          caveats: [],
+          redflagTypes: [],
+        });
+        // Never assessed at all → excluded (unknown, never a false pass).
+        const neverAssessed = await seedTagged(pool, profileId, {});
+
+        const page = await listCandidates(profileId, { hasAlerts: true, limit: 50 });
+        const ids = page.items.map((i) => i.property_id).sort((a, b) => a - b);
+        expect(ids).toEqual([caveatOnly, redflagOnly, both].sort((a, b) => a - b));
+        expect(ids).not.toContain(clean);
+        expect(ids).not.toContain(neverAssessed);
+
+        // Sanity: unfiltered, all five come back — the exclusions are the
+        // filter's doing, not a broken feed.
+        const unfiltered = await listCandidates(profileId, { limit: 50 });
+        expect(unfiltered.items).toHaveLength(5);
+      });
+    });
+
+    it("a NON-warn caveat alone does not count as an alert", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // `pleno_dominio` is not in WARN_CAVEAT_CODES (and carries no warn badge),
+        // so an occupancy assessment whose only caveat is that must NOT surface.
+        const nonWarn = await seedTagged(pool, profileId, {
+          caveats: ["pleno_dominio"],
+        });
+        const warn = await seedTagged(pool, profileId, { caveats: ["usufructo"] });
+
+        const page = await listCandidates(profileId, { hasAlerts: true, limit: 50 });
+        expect(page.items.map((i) => i.property_id)).toEqual([warn]);
+        expect(page.items.map((i) => i.property_id)).not.toContain(nonWarn);
+      });
+    });
+
+    it("composes (AND) with redflagType", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // Has the specific redflag → survives both hasAlerts and the type filter.
+        const target = await seedTagged(pool, profileId, {
+          redflagTypes: ["unfinished_construction"],
+        });
+        // Has an alert (a warn caveat) but NOT that redflag type → dropped by the
+        // composed redflagType filter even though hasAlerts alone would keep it.
+        const otherAlert = await seedTagged(pool, profileId, {
+          caveats: ["venta_deuda"],
+        });
+
+        const page = await listCandidates(profileId, {
+          hasAlerts: true,
+          redflagType: "unfinished_construction",
+          limit: 50,
+        });
+        expect(page.items.map((i) => i.property_id)).toEqual([target]);
+        expect(page.items.map((i) => i.property_id)).not.toContain(otherAlert);
+      });
+    });
+
+    it("off (default / false) does not narrow the feed", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        await seedTagged(pool, profileId, { caveats: ["venta_deuda"] });
+        await seedTagged(pool, profileId, {}); // never assessed
+        const off = await listCandidates(profileId, { hasAlerts: false, limit: 50 });
+        const absent = await listCandidates(profileId, { limit: 50 });
+        expect(off.items).toHaveLength(2);
+        expect(absent.items).toHaveLength(2);
       });
     });
   });

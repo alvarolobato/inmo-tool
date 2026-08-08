@@ -571,6 +571,19 @@ export interface CandidateFilters {
    * is deliberately NOT a filter (soft boost only — see TOURIST_LICENSE_BOOST).
    */
   isVpo?: boolean | null;
+  /**
+   * #466 "Con alertas" UNION filter — the owner's "muéstrame las que tienen
+   * alertas" (2026-08-08): keep only candidates the operator sees a warn badge
+   * on. `true` keeps candidates with ≥1 red flag (of ANY type) OR ≥1 warn-tone
+   * occupancy caveat (the `WARN_CAVEAT_CODES` set); `false`/`null`/undefined =
+   * off. A UNION of the #386 `redflagType`/`caveat` axes rather than a single
+   * code, so it matches exactly the warn badges the card renders and the "N con
+   * alertas" glance. Reads the SAME `ranked.redflag_types` / `ranked.caveats`
+   * arrays those filters read (D-059, no new JOIN). A never-assessed property
+   * (both arrays NULL) is EXCLUDED — "unknown", never a false pass, matching the
+   * other assessment filters. Composes (AND) with `redflagType` and the rest.
+   */
+  hasAlerts?: boolean | null;
 }
 
 /**
@@ -694,11 +707,20 @@ function rankedCandidatesCte(params: RankedCteParams): string {
   // numeric parse. NULL/unknown floors collapse to `false` (treated as "not
   // ground floor") — the same class matches the same class, so two unknowns
   // still compare together, and a real `bajo` is never mixed with an upper floor.
+  //
+  // #474: "bajo cubierta"/"bajocubierta" is an ático UNDER THE ROOF — an UPPER
+  // floor, not a `bajo` — but the substring `bajo` used to match it into the
+  // ground-floor segment (which the market prices lower), manufacturing a phantom
+  // discount/premium. Excluding any floor text containing `cubierta` up front
+  // keeps that ático out of the ground-floor class while leaving a plain `bajo`
+  // untouched — the minimal tidy the #473 review flagged.
   const isGroundFloorSql = `CASE
-        WHEN p.floor IS NOT NULL AND (
-             lower(p.floor) ~ '(bajo|baja|entresuelo|entreplanta|planta baja|semisotano|semisótano)'
-             OR btrim(lower(p.floor)) IN ('0', 'pb', 'bj')
-        ) THEN true ELSE false END`;
+        WHEN p.floor IS NOT NULL
+             AND lower(p.floor) !~ 'cubierta'
+             AND (
+                  lower(p.floor) ~ '(bajo|baja|entresuelo|entreplanta|planta baja|semisotano|semisótano)'
+                  OR btrim(lower(p.floor)) IN ('0', 'pb', 'bj')
+             ) THEN true ELSE false END`;
   return `${DISABLED_SOURCES_CTE},
      base AS (
        SELECT
@@ -1841,6 +1863,10 @@ export async function listCandidates(
   // on; undefined collapses to null so the "all filters off" tail stays uniform.
   const isVpo: boolean | null =
     typeof opts.isVpo === "boolean" ? opts.isVpo : null;
+  // #466 "Con alertas" UNION toggle. Like heritageZone, only an explicit true
+  // turns it on; false/undefined collapse to null ("off") so the SQL `IS NOT
+  // TRUE` guard treats it as off and the param tail stays uniform.
+  const hasAlerts: true | null = opts.hasAlerts === true ? true : null;
   // Source (portal) filter (#265): isolate one connector's results so the
   // owner can debug a single portal's data quality. A candidate is a
   // deduplicated PROPERTY that may span several listings from different
@@ -2181,6 +2207,22 @@ export async function listCandidates(
        -- never a false pass) — the same graceful degradation the other
        -- assessment filters give until the LLM populates the axis.
        AND ($17::boolean IS NULL OR ranked.is_vpo = $17::boolean)
+       -- #466 "Con alertas" UNION hard filter ($24). Keep only candidates the
+       -- operator sees a warn badge on: ≥1 red flag (of ANY type) OR ≥1 warn-tone
+       -- occupancy caveat. Reads the SAME per-axis arrays the #386 caveat/
+       -- redflagType filters read (D-059, no new JOIN); the warn-caveat set reuses
+       -- the $6 array the distress boost already reads, so the two can't drift.
+       -- IS NOT TRUE passes when the toggle is off (NULL). When on, a never-
+       -- assessed property (both arrays NULL) is EXCLUDED: cardinality(COALESCE(
+       -- redflag_types,'{}'))=0 is false and the NULL-array overlap is NULL, so
+       -- the OR is false/NULL and the row is excluded, never a false pass (same
+       -- graceful degradation as the other assessment filters, coherent with
+       -- #310/#386). Composes (AND) with redflagType and every other filter.
+       AND (
+         $24::boolean IS NOT TRUE
+         OR cardinality(COALESCE(ranked.redflag_types, '{}')) > 0
+         OR ranked.caveats && $6::text[]
+       )
      -- #425 fresh-first: novelty tier leads, then the #309 blended score, then
      -- id as the deterministic tiebreak. MUST match the keyset WHERE above AND
      -- getAdjacentCandidates' ordering, or prev/next silently desyncs (D-057 cl.4).
@@ -2214,6 +2256,9 @@ export async function listCandidates(
       priceBand.minFrac,
       priceBand.maxFrac,
       coldStart,
+      // #466 "Con alertas" UNION toggle ($24). Reuses the $6 WARN_CAVEAT_CODES
+      // array in its predicate — only this boolean is new.
+      hasAlerts,
     ],
   );
 

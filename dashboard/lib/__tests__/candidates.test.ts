@@ -212,6 +212,7 @@ describe("listCandidates", () => {
       WARN_CAVEAT_CODES,
       ...NO_FILTER_TAIL,
       ...NOVELTY_TAIL_PAGE1,
+      null, // #466 hasAlerts ($24), off by default
     ]);
   });
 
@@ -257,6 +258,7 @@ describe("listCandidates", () => {
       WARN_CAVEAT_CODES,
       ...NO_FILTER_TAIL,
       ...NOVELTY_TAIL_PAGE1,
+      null, // #466 hasAlerts ($24), off by default
     ]);
   });
 
@@ -315,6 +317,7 @@ describe("listCandidates", () => {
       WARN_CAVEAT_CODES,
       ...NO_FILTER_TAIL,
       ...NOVELTY_TAIL_PAGE1,
+      null, // #466 hasAlerts ($24), off by default
     ]);
   });
 
@@ -420,6 +423,7 @@ describe("listCandidates", () => {
       WARN_CAVEAT_CODES,
       ...NO_FILTER_TAIL,
       ...NOVELTY_TAIL_PAGE2,
+      null, // #466 hasAlerts ($24), off by default
     ]);
 
     mockPoolQuery.mockClear();
@@ -433,6 +437,7 @@ describe("listCandidates", () => {
       WARN_CAVEAT_CODES,
       ...NO_FILTER_TAIL,
       ...NOVELTY_TAIL_PAGE1,
+      null, // #466 hasAlerts ($24), off by default
     ]);
   });
 
@@ -450,6 +455,7 @@ describe("listCandidates", () => {
       WARN_CAVEAT_CODES,
       ...NO_FILTER_TAIL,
       ...NOVELTY_TAIL_PAGE1,
+      null, // #466 hasAlerts ($24), off by default
     ]);
     expect(sql).toContain("EXISTS");
     expect(sql).toContain("lf.source = $5");
@@ -466,6 +472,7 @@ describe("listCandidates", () => {
       WARN_CAVEAT_CODES,
       ...NO_FILTER_TAIL,
       ...NOVELTY_TAIL_PAGE1,
+      null, // #466 hasAlerts ($24), off by default
     ]);
   });
 
@@ -569,6 +576,26 @@ describe("listCandidates", () => {
   it("normalises an omitted isVpo to null so the off-tail stays uniform (#398)", async () => {
     await listCandidates(7);
     expect(mainParams()[16]).toBeNull();
+  });
+
+  it("passes hasAlerts=true as $24 and gates on the UNION of redflag_types + warn caveats (#466)", async () => {
+    await listCandidates(7, { hasAlerts: true });
+    const [sql, params] = mainCall();
+    // $24 is the new toggle; the warn-caveat array reuses the $6 param (D-059,
+    // same array the distress boost reads), so only the boolean is new.
+    expect(params[23]).toBe(true);
+    expect(sql).toContain(
+      "cardinality(COALESCE(ranked.redflag_types, '{}')) > 0",
+    );
+    expect(sql).toContain("ranked.caveats && $6::text[]");
+    expect(sql).toContain("$24::boolean IS NOT TRUE");
+  });
+
+  it("normalises a falsy/omitted hasAlerts to null so the off-tail stays uniform (#466)", async () => {
+    await listCandidates(7, { hasAlerts: false });
+    expect(mainParams()[23]).toBeNull();
+    await listCandidates(7);
+    expect(mainParams()[23]).toBeNull();
   });
 
   it("emits the soft tourist-licence boost in effective_score (soft, non-filtering — #398)", async () => {

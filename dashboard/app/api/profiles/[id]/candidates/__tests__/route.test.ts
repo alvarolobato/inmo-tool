@@ -153,6 +153,7 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       null,
       null,
       ...NOVELTY_TAIL_PAGE1,
+      null, // #466 hasAlerts ($24), off by default
     ]);
   });
 
@@ -185,6 +186,7 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       null,
       null,
       ...NOVELTY_TAIL_PAGE1,
+      null, // #466 hasAlerts ($24), off by default
     ]);
   });
 });
@@ -270,6 +272,7 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
       null,
       null,
       ...NOVELTY_TAIL_PAGE1,
+      null, // #466 hasAlerts ($24), off by default
     ]);
   });
 
@@ -534,6 +537,43 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
         ctx("3"),
       );
       expect(res.status).toBe(400);
+    }
+  });
+
+  it("passes hasAlerts=true to listCandidates as $24 (the 'Con alertas' UNION filter, #466)", async () => {
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
+
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?hasAlerts=true"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(200);
+    // $24 (index 23) is the new UNION toggle.
+    expect(candidatesParams()[23]).toBe(true);
+  });
+
+  it("leaves hasAlerts off ($24 = null) when absent, and rejects any value other than 'true' with 400 (#466)", async () => {
+    // Absent → off (null), DB touched.
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
+    const off = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates"),
+      ctx("3"),
+    );
+    expect(off.status).toBe(200);
+    expect(candidatesParams()[23]).toBeNull();
+
+    // Any non-empty value other than the exact "true" → 400 before the DB.
+    for (const raw of ["1", "false", "TRUE", "yes"]) {
+      mockQuery.mockClear();
+      queue = [];
+      const res = await GET(
+        makeRequest(`http://localhost/api/profiles/3/candidates?hasAlerts=${raw}`),
+        ctx("3"),
+      );
+      expect(res.status).toBe(400);
+      expect(mockQuery).not.toHaveBeenCalled();
     }
   });
 });

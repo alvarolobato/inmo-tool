@@ -66,6 +66,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
     beachProximity,
     heritageZone,
     isVpo,
+    hasAlerts,
     view,
   } = filters;
   // Derived from the segmented `view`: what the fetch layer / card rendering
@@ -111,7 +112,11 @@ export function CandidateList({ profileId }: { profileId: number }) {
     redflagType !== "" ||
     beachProximity !== "" ||
     heritageZone ||
-    isVpo !== "";
+    isVpo !== "" ||
+    // #466: "Con alertas" reads the same AI-assessment axes (redflags +
+    // occupancy caveats), so an empty result under it is the "needs assessment"
+    // case too — fold it in so the empty state explains that, not "broken".
+    hasAlerts;
 
   const fetchPage = useCallback(
     async (afterCursor: string | null, replace: boolean) => {
@@ -139,6 +144,8 @@ export function CandidateList({ profileId }: { profileId: number }) {
       if (heritageZone) url.searchParams.set("heritageZone", "true");
       // #398 VPO (bidirectional): "true" only VPO, "false" exclude VPO.
       if (isVpo !== "") url.searchParams.set("isVpo", isVpo);
+      // #466 "Con alertas" UNION toggle → the API's hasAlerts=true.
+      if (hasAlerts) url.searchParams.set("hasAlerts", "true");
       // #379: opt in to rejected candidates. Omitted (default) keeps them hidden.
       if (showRejected) url.searchParams.set("includeRejected", "true");
       // #422: "En seguimiento" preset — restrict to tracked (accepted) properties.
@@ -177,6 +184,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
       beachProximity,
       heritageZone,
       isVpo,
+      hasAlerts,
       showRejected,
       trackedOnly,
     ],

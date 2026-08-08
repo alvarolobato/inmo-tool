@@ -260,6 +260,12 @@ export function CandidateFilterBar({
       label: `VPO: ${labelOf(VPO_OPTS, values.isVpo)}`,
       clear: () => set("isVpo", ""),
     });
+  if (values.hasAlerts)
+    chips.push({
+      key: "alerts",
+      label: "Con alertas",
+      clear: () => set("hasAlerts", false),
+    });
 
   return (
     <div data-testid="candidate-filter-bar">
@@ -367,27 +373,28 @@ export function CandidateFilterBar({
           ))}
         </select>
 
-        {/* Fase-3 (#466) placeholder slot for the "⚠ Con alertas" toggle. Kept
-            here so the primary row's layout settles now; NOT wired to any
-            filter/backend in this phase. */}
+        {/* #466 "⚠ Con alertas" UNION toggle — keep only candidates with ≥1 red
+            flag OR ≥1 warn occupancy caveat (the warn badges the card shows).
+            Toggles the `alerts=1` URL param (drives the API `hasAlerts=true`);
+            composes (AND) with every other filter. */}
         <button
           type="button"
-          data-testid="alerts-toggle-placeholder"
-          disabled
-          aria-disabled="true"
-          title="Disponible próximamente"
+          data-testid="alerts-toggle"
+          aria-pressed={values.hasAlerts}
+          onClick={() => set("hasAlerts", !values.hasAlerts)}
+          title="Solo propiedades con alertas (alertas rojas u ocupación)"
           style={{
             display: "inline-flex",
             alignItems: "center",
             gap: 6,
             padding: "5px 10px",
             fontSize: 13,
-            color: "var(--fg-subtle)",
-            background: "transparent",
-            border: "1px dashed var(--border)",
+            fontWeight: values.hasAlerts ? 600 : 400,
+            color: values.hasAlerts ? "#fff" : "var(--fg)",
+            background: values.hasAlerts ? "var(--accent)" : "var(--bg-1)",
+            border: `1px solid ${values.hasAlerts ? "var(--accent)" : "var(--border)"}`,
             borderRadius: 6,
-            cursor: "not-allowed",
-            opacity: 0.6,
+            cursor: "pointer",
           }}
         >
           ⚠ Con alertas
