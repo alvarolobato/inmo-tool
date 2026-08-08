@@ -119,4 +119,17 @@ describe("idealistaBuilder", () => {
     expect(task.url).toBe("https://www.idealista.com/venta-viviendas/con-precio-hasta_200000/");
     expect(task.loosened.some((l) => l.constraint === "geography")).toBe(true);
   });
+
+  // issue #444: each real profile centre must pin its OWN municipio slug — no
+  // profile may resolve to a neighbouring town (Sevilla ≠ Dos Hermanas).
+  it.each([
+    ["Sevilla", [37.3891, -5.9845], "sevilla-sevilla"],
+    ["Dos Hermanas", [37.2836, -5.9222], "dos-hermanas-sevilla"],
+    ["Estepona", [36.4268, -5.1468], "estepona-malaga"],
+    ["Málaga", [36.7213, -4.4214], "malaga-malaga"],
+  ] as const)("maps the %s profile centre to /%s/ with no geography flag", (_name, center, slug) => {
+    const task = one({ center: center as [number, number] });
+    expect(task.url).toBe(`https://www.idealista.com/venta-viviendas/${slug}/`);
+    expect(task.loosened.some((l) => l.constraint === "geography")).toBe(false);
+  });
 });

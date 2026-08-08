@@ -29,6 +29,7 @@ import type { Scope } from "@/lib/profiles-schema";
 import { CAPTURE_PORTALS } from "@/lib/worklist";
 import { findExamplesForPortal, type SearchUrlExampleRow } from "@/lib/db/search-url-example";
 import { BUILDERS, canonicalScopeFromProfile } from "./index";
+import { municipioForPoint } from "./municipios";
 import { haversineKm } from "./parse-shared";
 import { PARSERS } from "./parsers";
 import type {
@@ -93,6 +94,23 @@ function resolveTask(
     const { url, unfilled } = parser.substitute(exact.template, canonical);
     return { ...baseTask, url, loosened: unfilledFlags(unfilled) };
   }
+
+  // Tier 2 is DELIBERATELY gated on the geography being uncertain (issue #444).
+  //
+  // Idealista search URLs are deterministic: the path carries a real
+  // `<municipio>-<provincia>` slug (e.g. `sevilla-sevilla`), which the code
+  // builder resolves from the profile centre via municipioForPoint(). When the
+  // builder DID pin a concrete municipio, that slug is authoritative (D-090:
+  // URL building is code-driven) and a learned example from a *different* nearby
+  // town must NEVER move the search there. The old tier-2 "same rough area"
+  // reuse (AREA_MATCH_KM = 25 km) crossed municipality lines: Sevilla ↔ Dos
+  // Hermanas are ~13 km apart, so a single Dos Hermanas capture silently
+  // rewrote the Sevilla profile's URL to `dos-hermanas-sevilla`. Skip tier-2
+  // whenever the builder resolved a concrete municipio; tier-1 (exact same-slug
+  // filter-grammar refinement) above still applies. Tier-2 survives only for the
+  // province/national FALLBACK case, where the builder itself could not name a
+  // town and a nearby learned example is a legitimate (flagged) narrowing.
+  if (municipioForPoint(canonical.center)) return baseTask;
 
   // Tier 2 — same section, an example centroid within AREA_MATCH_KM of the
   // profile's own centre (from the scope, not a URL). Nearest wins.
