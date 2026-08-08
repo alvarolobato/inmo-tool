@@ -56,14 +56,18 @@ const CIMENTA2_PREVIEW_URL = "https://inmuebles.cimenta2.com/inmuebles/s/sitemap
 // A hand-tuned pisos URL the test pins on the ETL section.
 const NEW_PISOS = "https://www.pisos.com/venta/pisos-sevilla/1-habitacion/";
 
+// A second profile so the ProfileSwitcher has somewhere to switch TO.
+const PROFILE_NAME_2 = "E2E-478P2 Validar filtros (segundo)";
+
 let pool: Pool;
 let dbAvailable = false;
 let profileId: number;
+let profileId2: number;
 
 async function purge(): Promise<void> {
   const existing = await pool.query<{ id: number }>(
-    "SELECT id FROM search_profile WHERE name = $1",
-    [PROFILE_NAME],
+    "SELECT id FROM search_profile WHERE name = ANY($1)",
+    [[PROFILE_NAME, PROFILE_NAME_2]],
   );
   for (const { id } of existing.rows) {
     // profile_connector_filter cascades on profile delete, but clear the other
@@ -73,7 +77,7 @@ async function purge(): Promise<void> {
       await pool.query(`DELETE FROM ${table} WHERE profile_id = $1`, [id]).catch(() => undefined);
     }
   }
-  await pool.query("DELETE FROM search_profile WHERE name = $1", [PROFILE_NAME]);
+  await pool.query("DELETE FROM search_profile WHERE name = ANY($1)", [[PROFILE_NAME, PROFILE_NAME_2]]);
 }
 
 test.beforeAll(async () => {
@@ -93,6 +97,12 @@ test.beforeAll(async () => {
     [PROFILE_NAME, JSON.stringify(SCOPE)],
   );
   profileId = r.rows[0].id;
+  const r2 = await pool.query<{ id: number }>(
+    `INSERT INTO search_profile (name, scope, thesis_params)
+     VALUES ($1, $2::jsonb, '{}'::jsonb) RETURNING id`,
+    [PROFILE_NAME_2, JSON.stringify(SCOPE)],
+  );
+  profileId2 = r2.rows[0].id;
   // Seed a whole-connector ('') idealista override so the idealista task is
   // governed by it (tier 0) — the "URL fijada" case.
   await pool.query(
@@ -181,6 +191,8 @@ test("navigate from ⋮ menu; pinned + derived rows; save persists; captura uses
   await expect(ideaRow).toBeVisible();
   await expect(ideaRow.getByTestId("filter-source-badge")).toHaveText("URL fijada");
   await expect(ideaRow.getByTestId("filter-url")).toHaveText(PINNED_IDEALISTA);
+  // The URL field is a single line (no wrap) — the Copiar button gives the full value.
+  await expect(ideaRow.getByTestId("filter-url")).toHaveCSS("white-space", "nowrap");
 
   // 2b) Aliseda row → derived (no pin yet).
   const aliRow = page.locator('[data-testid="filter-validation-row"][data-connector="aliseda"]');
@@ -283,4 +295,22 @@ test("ETL section renders with no seeded previews — pending, no error surface 
 
   // Restore for any later ordering.
   await seedEtlPreviews();
+});
+
+test("profile switcher on the filtros page navigates to the other profile's filtros page", async ({
+  page,
+}) => {
+  await page.goto(`/profiles/${profileId}/filtros`);
+  await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
+
+  const switcher = page.getByLabel("Cambiar de perfil de búsqueda");
+  await expect(switcher).toBeVisible();
+  // Starts on the current profile.
+  await expect(switcher).toHaveValue(String(profileId));
+
+  // Selecting the second profile keeps us on the filtros page (not the feed).
+  await switcher.selectOption(String(profileId2));
+  await expect(page).toHaveURL(new RegExp(`/profiles/${profileId2}/filtros`), { timeout: 30_000 });
+  await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
+  await assertNoErrorSurface(page);
 });

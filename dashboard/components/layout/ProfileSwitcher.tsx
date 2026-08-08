@@ -12,7 +12,19 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { SearchProfileRow } from "@/lib/profiles-schema";
 
-export function ProfileSwitcher({ currentId }: { currentId: number }) {
+export function ProfileSwitcher({
+  currentId,
+  subpath = "",
+}: {
+  currentId: number;
+  /**
+   * Path segment appended after `/profiles/[id]` on select. Default "" goes to
+   * that profile's candidate feed; the "Validar filtros" page passes
+   * "/filtros" so the switcher keeps you on that page. A string (not a
+   * function) so it can cross the server→client component boundary.
+   */
+  subpath?: string;
+}) {
   const router = useRouter();
   const [profiles, setProfiles] = useState<SearchProfileRow[] | null>(null);
 
@@ -48,7 +60,7 @@ export function ProfileSwitcher({ currentId }: { currentId: number }) {
   return (
     <select
       value={currentId}
-      onChange={(e) => router.push(`/profiles/${e.target.value}`)}
+      onChange={(e) => router.push(`/profiles/${e.target.value}${subpath}`)}
       style={{
         padding: "6px 10px",
         background: "var(--bg-1)",

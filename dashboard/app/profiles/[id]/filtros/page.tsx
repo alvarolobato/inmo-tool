@@ -7,6 +7,7 @@ import { CAPTURE_PORTALS } from "@/lib/worklist";
 import { portalTitle } from "@/lib/captura-tasks";
 import { decodeFilterUrl } from "@/lib/filter-validation";
 import { FilterValidationRow } from "@/components/profiles/FilterValidationRow";
+import { ProfileSwitcher } from "@/components/layout/ProfileSwitcher";
 import { EtlConnectorPreviewRow } from "@/components/profiles/EtlConnectorPreviewRow";
 import { RecalcularPreviewsButton } from "@/components/profiles/RecalcularPreviewsButton";
 import { getEtlConnectorPreviews } from "@/lib/db/connector-search-preview";
@@ -111,6 +112,8 @@ export default async function ValidarFiltrosPage({
     <main style={{ padding: 24, maxWidth: 860, margin: "0 auto" }} data-testid="validar-filtros-page">
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <h1 style={{ fontSize: 22, fontWeight: 700, color: "var(--fg)", margin: 0 }}>Validar filtros</h1>
+        {/* Profile switcher — stays on this page for the newly selected profile. */}
+        <ProfileSwitcher currentId={id} subpath="/filtros" />
         <Link
           href={`/profiles/${id}`}
           style={{ fontSize: 13, color: "var(--accent)", textDecoration: "none", marginLeft: "auto" }}

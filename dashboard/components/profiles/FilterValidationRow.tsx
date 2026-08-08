@@ -169,13 +169,17 @@ export function FilterValidationRow({
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <code
             data-testid="filter-url"
+            title={url}
             style={{
               fontSize: 12,
               color: "var(--fg-muted)",
               background: "var(--bg-2)",
               borderRadius: 6,
               padding: "4px 8px",
-              wordBreak: "break-all",
+              // Single line — never wrap; the Copiar button gives the full value.
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
               flex: 1,
               minWidth: 0,
             }}
