@@ -81,6 +81,26 @@
     </p>
   </div>
 
+  <!-- Validation mode (issue #478 P3): shown when the active tab was opened from
+       the dashboard's "Validar filtros" page. The owner tunes the search on the
+       portal (e.g. draws a zone) and pins the resulting URL as this connector's
+       filter for the profile — no capture runs while validating. -->
+  <div id="state-validation" class="state hidden">
+    <div class="state-icon">🎯</div>
+    <p id="validation-title" class="state-text">Modo validación</p>
+    <p id="validation-sub" class="state-sub"></p>
+    <div class="actions">
+      <button id="validation-save-btn" class="btn btn-primary">Usar esta URL como filtro</button>
+      <button id="validation-exit-btn" class="btn btn-secondary">Salir del modo validación</button>
+    </div>
+    <p id="validation-status" class="state-sub hidden"></p>
+    <p class="state-sub">
+      Afina los filtros de la búsqueda en el portal (por ejemplo, dibuja la zona)
+      y pulsa «Usar esta URL como filtro» para fijarla como fuente de este
+      conector. La captura está suspendida mientras validas.
+    </p>
+  </div>
+
   <!-- Guided capture (issue #237): shown on a SUPPORTED portal page that is
        neither a detail nor a search page (home, saved search, filter form).
        Instead of blind-capturing junk, guide the owner: show worklist progress
