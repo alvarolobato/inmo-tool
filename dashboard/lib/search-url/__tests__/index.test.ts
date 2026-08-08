@@ -62,7 +62,7 @@ describe("buildSearchUrl", () => {
     // piso + chalet share the venta-viviendas section → a single idealista task.
     expect(result).toHaveLength(1);
     expect(result![0].portal).toBe("idealista");
-    expect(result![0].url).toContain("idealista.com/venta-viviendas");
+    expect(result![0].url).toContain("idealista.com/areas/venta-viviendas");
   });
 
   it("returns null for a portal with no builder", () => {

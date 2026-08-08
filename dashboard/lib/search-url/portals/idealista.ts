@@ -1,49 +1,56 @@
 /**
- * Idealista pre-filtered search-URL builder (issue #277; owner-reported grammar
- * fix 2026-08-05; task-list restructure).
+ * Idealista pre-filtered search-URL builder + parser.
  *
- * The original #277 builder emitted a map-draw grammar (`/areas/…?shape=<enc>`)
- * that was reverse-engineered and WRONG. The owner tested "Abrir búsqueda" and
- * supplied the real path grammar:
+ * GEOGRAPHY = DRAWN POLYGON (issue #471). The profile scope carries
+ * geography as a radius around a geocoded point. Idealista's "dibuja tu zona"
+ * search takes that area as a polygon in a `shape` query param, so the builder
+ * renders the profile's circle as a regular polygon and emits the confirmed
+ * drawn-area grammar:
  *
- *   /<operation>/<municipio>-<provincia>/con-<f1>[,<f2>,…]/
+ *   /areas/<operation>[/con-<f1>,<f2>,…]/mapa-google?shape=((<polyline>))
  *
- * Confirmed real examples (Estepona piso, ≤ 200 000 €):
+ * Owner-captured specimen (Dos Hermanas, 2026-08-08 — issue #471):
  *
- *   https://www.idealista.com/venta-viviendas/estepona-malaga/con-precio-hasta_200000/
- *   …with 4+ rooms:
- *   https://www.idealista.com/venta-viviendas/estepona-malaga/con-precio-hasta_200000,de-cuatro-cinco-habitaciones-o-mas/
+ *   https://www.idealista.com/areas/venta-viviendas/con-precio-hasta_700000/mapa-google?shape=%28%28…%29%29
  *
- * Idealista searches ONE operation section at a time (venta-viviendas /
- * venta-locales / venta-garajes / …), so a multi-section profile fans out into
- * ONE TASK PER SECTION — not one merged URL with a "types widened" note.
- * Property types within a section (piso/chalet/atico all → venta-viviendas) are
- * NOT further narrowed: the owner's confirmed URL carries no home-subtype token,
- * so the section IS the granularity.
+ * The `shape` value is a Google Encoded Polyline (precision 5, lat,lng),
+ * URL-encoded and wrapped in `((…))`. Filters (`con-…`) ride in the PATH before
+ * `/mapa-google`, exactly as captured. See lib/search-url/geo.ts for the pinned
+ * round-trip encoder/decoder.
+ *
+ * WHY, not the old slug grammar: the previous builder resolved the point to the
+ * nearest of 12 hard-coded `<municipio>-<provincia>` slugs and DISCARDED the
+ * radius — a 5 km and a 30 km circle produced the same URL, sub-municipality and
+ * cross-municipality circles were inexpressible, and Idealista's zone
+ * mis-parenting (Montequinto filed under "Sevilla") was invisible. A polygon
+ * over the real area sidesteps the whole taxonomy. Per break-by-default the slug
+ * grammar is retired as the builder's output; it survives only inside the PARSER
+ * so owner-navigated / historical slug URLs are still learnable (D-051).
  *
  * CONFIRMED vs. GUESSED (guessed items are flagged as loosened):
- *   - path `/<operation>/<municipio>-<provincia>/con-…/` ...... confirmed
- *   - `<municipio>-<provincia>` (e.g. `estepona-malaga`) resolved from the
- *     profile lat/lng via ../municipios.ts (nearest-town). A town match is the
- *     accepted representation (owner-confirmed) → NOT flagged. No town within
- *     range → province fallback (`<provincia>-provincia`, slug inferred) + flag,
- *     or a national search + flag when no province matches either.
- *   - price `con-precio-hasta_<max>` / `con-precio-desde_<min>` ... confirmed
- *   - rooms `de-cuatro-cinco-habitaciones-o-mas` (min ≥ 4) ... owner-confirmed;
+ *   - path `/areas/<operation>[/con-…]/mapa-google?shape=((<polyline>))` ... confirmed (specimen)
+ *   - circle → 24-gon CIRCUMSCRIBING the circle (faithful, slightly broader) ... geo.ts
+ *   - price `con-precio-hasta_<max>` / `con-precio-desde_<min>` ............... confirmed
+ *   - rooms `de-cuatro-cinco-habitaciones-o-mas` (min ≥ 4) .................... owner-confirmed;
  *     a lower minimum has no confirmed token → omit + flag.
- *   - size `metros-cuadrados-mas-de_ / menos-de_` ............ standard idealista
- *     tokens (kept; not owner-re-confirmed but long-established).
+ *   - size `metros-cuadrados-mas-de_ / menos-de_` ............................. standard idealista tokens
  *
- * These path/token spellings are the volatile part; they live in this one file.
- * The profile scope has NO rooms field today (CanonicalSearchScope.roomsMin is
- * reserved), so the rooms token only fires when a caller supplies roomsMin.
+ * Geography carries NO loosened flag: a polygon is a faithful (~0.9% broader)
+ * rendering of the circle, and the feed-side haversine (scope-query.ts) trims
+ * the over-coverage — the shape URL only governs RECALL.
  */
 
 import { PROPERTY_TYPES } from "@/lib/profiles-schema";
 import { municipioForPoint } from "../municipios";
 import { provinceForPoint } from "../provinces";
 import { stableTaskId } from "../task-id";
-import { taskLabel } from "../labels";
+import { shapeTaskLabel } from "../labels";
+import {
+  circlePolygon,
+  decodeShapeValue,
+  polygonCentroid,
+  shapeUrl,
+} from "../geo";
 import {
   centerForLocationSlug,
   makeCategoryKey,
@@ -98,52 +105,35 @@ function sectionsInOrder(
   return [...bySection.entries()].map(([operation, ts]) => ({ operation, types: ts }));
 }
 
-/** Geography resolved once per profile (same location for every section task). */
-interface GeoResolution {
-  /** The `<municipio>-<provincia>` / `<provincia>-provincia` slug, or "" (national). */
-  locationSegment: string;
-  /** Location key for the deterministic task id. */
-  idLocation: string;
-  /** Slug used for the human label. */
-  labelSlug: string;
-  /** A geography loosened flag when the location was broadened, else null. */
-  flag: LoosenedConstraint | null;
+/** Title-case a URL slug like `dos-hermanas` → "Dos Hermanas" (for labels). */
+function titleCaseSlug(slug: string): string {
+  return slug
+    .split("-")
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(" ");
 }
 
-function resolveGeo(scope: CanonicalSearchScope): GeoResolution {
+/**
+ * A human name for the shape task's area — the nearest known municipio, else the
+ * containing province, else "zona". Cosmetic only (the polygon is authoritative).
+ */
+function nearestAreaName(scope: CanonicalSearchScope): string {
   const muni = municipioForPoint(scope.center);
-  if (muni) {
-    const seg = `${muni.municipio}-${muni.provincia}`;
-    // A town match is the owner-accepted representation → not a loosening.
-    return { locationSegment: seg, idLocation: seg, labelSlug: muni.municipio, flag: null };
-  }
-  const province = provinceForPoint(scope.center);
-  if (province) {
-    const seg = `${province.provincia}-provincia`;
-    return {
-      locationSegment: seg,
-      idLocation: seg,
-      labelSlug: province.provincia,
-      flag: {
-        constraint: "geography",
-        reason:
-          `Idealista: sin municipio cercano conocido; se aproxima a la provincia entera ` +
-          `("${seg}", slug inferido), más amplia que el radio de ${scope.radiusKm} km. ` +
-          `Verifica el slug y acota la zona a mano.`,
-      },
-    };
-  }
-  return {
-    locationSegment: "",
-    idLocation: "",
-    labelSlug: "",
-    flag: {
-      constraint: "geography",
-      reason:
-        `Idealista: zona no determinada a partir de las coordenadas ` +
-        `(${scope.center[0]}, ${scope.center[1]}); búsqueda nacional aproximada — acota la zona a mano.`,
-    },
-  };
+  if (muni) return titleCaseSlug(muni.municipio);
+  const prov = provinceForPoint(scope.center);
+  if (prov) return titleCaseSlug(prov.provincia);
+  return "zona";
+}
+
+/**
+ * A stable, canonical geometry key for the task id — rounded centre + radius so
+ * the SAME profile geometry always yields the SAME task id (capture_task_run
+ * staleness ledger survives), and TWO DIFFERENT radii around one centre yield
+ * DIFFERENT ids (the old slug builder's counterexample).
+ */
+function geometryKey(scope: CanonicalSearchScope): string {
+  const [lat, lng] = scope.center;
+  return `shape:${lat.toFixed(4)},${lng.toFixed(4)}:${scope.radiusKm}`;
 }
 
 /** The confirmed idealista token for a minimum-rooms filter, or null (+ flag). */
@@ -159,17 +149,11 @@ function roomsToken(roomsMin: number | undefined, loosened: LoosenedConstraint[]
   return null;
 }
 
-function buildTask(
-  operation: string,
-  types: PropertyType[],
-  geo: GeoResolution,
+/** The comma-joined `con-` filter tokens for a scope, in the confirmed order. */
+function conTokensFor(
   scope: CanonicalSearchScope,
-): SearchTask {
-  const loosened: LoosenedConstraint[] = [];
-  if (geo.flag) loosened.push(geo.flag);
-
-  // Comma-joined `con-` filter tokens, in the owner-confirmed order
-  // (price, then rooms), followed by the standard size tokens.
+  loosened: LoosenedConstraint[],
+): string[] {
   const tokens: string[] = [];
   if (scope.priceMin !== undefined) tokens.push(`precio-desde_${Math.round(scope.priceMin)}`);
   if (scope.priceMax !== undefined) tokens.push(`precio-hasta_${Math.round(scope.priceMax)}`);
@@ -177,15 +161,26 @@ function buildTask(
   if (rooms) tokens.push(rooms);
   if (scope.sizeMin !== undefined) tokens.push(`metros-cuadrados-mas-de_${Math.round(scope.sizeMin)}`);
   if (scope.sizeMax !== undefined) tokens.push(`metros-cuadrados-menos-de_${Math.round(scope.sizeMax)}`);
+  return tokens;
+}
 
-  const locationPart = geo.locationSegment ? `/${geo.locationSegment}` : "";
-  const conPart = tokens.length > 0 ? `/con-${tokens.join(",")}` : "";
-  const url = `${ORIGIN}/${operation}${locationPart}${conPart}/`;
+function buildTask(
+  operation: string,
+  types: PropertyType[],
+  scope: CanonicalSearchScope,
+): SearchTask {
+  const loosened: LoosenedConstraint[] = [];
+  const tokens = conTokensFor(scope, loosened);
+
+  // Geography = the profile circle as a drawn polygon (no loosened flag — the
+  // polygon faithfully renders the circle, ~0.9% broader, trimmed by the feed).
+  const ring = circlePolygon(scope.center[0], scope.center[1], scope.radiusKm);
+  const url = shapeUrl(operation, tokens, ring, ORIGIN);
 
   const id = stableTaskId({
     portal: PORTAL,
     section: operation,
-    location: geo.idLocation,
+    location: geometryKey(scope),
     priceMin: scope.priceMin,
     priceMax: scope.priceMax,
     sizeMin: scope.sizeMin,
@@ -196,26 +191,29 @@ function buildTask(
   return {
     id,
     portal: PORTAL,
-    label: taskLabel(PORTAL, types, geo.labelSlug, scope.priceMin, scope.priceMax),
+    label: shapeTaskLabel(
+      PORTAL,
+      types,
+      nearestAreaName(scope),
+      scope.radiusKm,
+      scope.priceMin,
+      scope.priceMax,
+    ),
     url,
     loosened,
   };
 }
 
 function buildIdealista(scope: CanonicalSearchScope): SearchTask[] {
-  const geo = resolveGeo(scope);
   return sectionsInOrder(scope.propertyTypes).map(({ operation, types }) =>
-    buildTask(operation, types, geo, scope),
+    buildTask(operation, types, scope),
   );
 }
 
 /**
  * The Idealista CODE mapping, per axis (issue #371, D-090) — the `venta-<section>`
  * operations the builder emits, for drift detection against the portal's captured
- * catalog. Identity is the operation segment (`venta-viviendas`, …); Idealista
- * encodes no numeric subtype, and each operation covers several canonical types
- * (viviendas → piso/chalet/atico), so there is no single `canonicalType` per
- * slug — label-drift is not asserted for Idealista, only ADDED / REMOVED sections.
+ * catalog. Unchanged by the shape work: geography is not a code axis.
  */
 function idealistaCodeMapping(): CodeMappingAxes {
   const bySlug = new Map<string, CodeMappingOption>();
@@ -232,12 +230,13 @@ export const idealistaBuilder: PortalSearchUrlBuilder = {
   codeMapping: idealistaCodeMapping,
 };
 
-// ─── parse(): the structural inverse of buildIdealista (issue #293) ──────────
+// ─── parse(): recognise the shape, multi and legacy slug grammars (#293/#471) ─
 //
-// build() emits `/<operation>[/<location>][/con-<t1>,<t2>,…]/`; parse() walks
-// that exact grammar backwards. It mirrors the CURRENT owner-confirmed builder
-// (#296); the round-trip tests (idealista.test.ts) fail loudly the day build()'s
-// grammar changes, which is precisely how this stops us getting the URL wrong.
+// build() now emits `/areas/<operation>[/con-…]/mapa-google?shape=((…))`, so
+// parse() recognises THAT (the round-trip contract), plus the `/multi/…`
+// multi-zone grammar (recognised as an opaque, verbatim pinned-override shape —
+// never generated), plus the legacy `/<operation>/<municipio>-<provincia>/con-…/`
+// slug grammar so owner-navigated and historical URLs are still learnable.
 
 /** The property types each operation section maps back to (build is 1 task/section). */
 const TYPES_BY_OPERATION: Record<string, readonly PropertyType[]> = {
@@ -263,56 +262,42 @@ const NUM_TOKEN_SPECS = [
   placeholderToken: string;
 }>;
 
-// origin | operation | location (a segment NOT starting with "con-") | con tokens
-const PARSE_RE =
-  /^(https?:\/\/(?:www\.)?idealista\.com)\/([^/?#]+)(?:\/((?!con-)[^/?#]+))?(?:\/con-([^/?#]+))?\/?$/;
-
-function parseIdealista(url: string): ParsedSearchUrl | null {
-  const m = PARSE_RE.exec(url.trim());
-  if (!m) return null;
-  const [, origin, operation, location, tokensStr] = m;
-  if (!(operation in TYPES_BY_OPERATION)) return null;
-
-  const filters: ParsedSearchFilters = {
-    section: operation,
-    propertyTypes: [...TYPES_BY_OPERATION[operation]],
-    locationSlug: location ?? "",
-  };
-
+/**
+ * Decode a comma-joined `con-` token string into numeric filters (mutating
+ * `filters`) and return the TEMPLATE tokens — each recognised numeric token
+ * swapped for its named placeholder, categorical/unknown tokens kept verbatim.
+ * Shared by the shape, multi and slug parsers.
+ */
+function parseConTokens(tokensStr: string | undefined, filters: ParsedSearchFilters): string[] {
   const templateTokens: string[] = [];
-  if (tokensStr) {
-    for (const token of tokensStr.split(",")) {
-      if (token === ROOMS_TOKEN) {
-        filters.roomsMin = 4; // build only emits this token for roomsMin ≥ 4
-        templateTokens.push(token); // categorical → literal in template
-        continue;
-      }
-      const spec = NUM_TOKEN_SPECS.find((s) => s.re.test(token));
-      if (spec) {
-        filters[spec.field] = Number(spec.re.exec(token)![1]);
-        templateTokens.push(spec.placeholderToken);
-        continue;
-      }
-      templateTokens.push(token); // unrecognised → keep verbatim, no filter
+  if (!tokensStr) return templateTokens;
+  for (const token of tokensStr.split(",")) {
+    if (token === ROOMS_TOKEN) {
+      filters.roomsMin = 4; // build only emits this token for roomsMin ≥ 4
+      templateTokens.push(token); // categorical → literal in template
+      continue;
     }
+    const spec = NUM_TOKEN_SPECS.find((s) => s.re.test(token));
+    if (spec) {
+      filters[spec.field] = Number(spec.re.exec(token)![1]);
+      templateTokens.push(spec.placeholderToken);
+      continue;
+    }
+    templateTokens.push(token); // unrecognised → keep verbatim, no filter
   }
-
-  filters.center = centerForLocationSlug(filters.locationSlug);
-
-  const locationPart = filters.locationSlug ? `/${filters.locationSlug}` : "";
-  const conPart = templateTokens.length > 0 ? `/con-${templateTokens.join(",")}` : "";
-  const template = `${origin}/${operation}${locationPart}${conPart}/`;
-  return { filters, categoryKey: makeCategoryKey(operation), template };
+  return templateTokens;
 }
 
-function substituteIdealista(
-  template: string,
+/**
+ * Substitute a profile scope's numeric values into placeholdered `con-` template
+ * tokens (shared by all three substitute paths). Returns the rebuilt `/con-…`
+ * path part ("" when no tokens) and the constraints the template had no
+ * placeholder for (broadened → flagged like build() does).
+ */
+function substituteConTokens(
+  tokensStr: string | undefined,
   scope: CanonicalSearchScope,
-): { url: string; unfilled: LoosenableConstraint[] } {
-  const m = PARSE_RE.exec(template);
-  if (!m) return { url: template, unfilled: [] };
-  const [, origin, operation, location, tokensStr] = m;
-
+): { conPart: string; unfilled: LoosenableConstraint[] } {
   const outTokens: string[] = [];
   if (tokensStr) {
     for (const token of tokensStr.split(",")) {
@@ -326,18 +311,122 @@ function substituteIdealista(
       outTokens.push(token.replace(field.placeholder, String(Math.round(value))));
     }
   }
-
-  // Profile numerics the template has NO placeholder for → the learned example
-  // never filtered on them, so results are broader: flag each.
   const unfilled: LoosenableConstraint[] = [];
   for (const f of NUMERIC_FIELDS) {
     if (scope[f.key] !== undefined && !(tokensStr ?? "").includes(f.placeholder)) {
       unfilled.push(f.constraint);
     }
   }
+  return { conPart: outTokens.length > 0 ? `/con-${outTokens.join(",")}` : "", unfilled };
+}
 
+// origin | operation | con tokens | shape value
+const SHAPE_RE =
+  /^(https?:\/\/(?:www\.)?idealista\.com)\/areas\/([^/?#]+)(?:\/con-([^/?#]+))?\/mapa-google\?shape=(.+)$/;
+// origin | operation | zone codes (a segment NOT starting with con-) | con tokens
+const MULTI_RE =
+  /^(https?:\/\/(?:www\.)?idealista\.com)\/multi\/([^/?#]+)\/((?!con-)[^/?#]+)(?:\/con-([^/?#]+))?\/?$/;
+// origin | operation | location (a segment NOT starting with con-) | con tokens
+const SLUG_RE =
+  /^(https?:\/\/(?:www\.)?idealista\.com)\/([^/?#]+)(?:\/((?!con-)[^/?#]+))?(?:\/con-([^/?#]+))?\/?$/;
+
+/** Parse the drawn-polygon `?shape=` grammar (the builder's output), or null. */
+function parseShape(url: string): ParsedSearchUrl | null {
+  const m = SHAPE_RE.exec(url);
+  if (!m) return null;
+  const [, origin, operation, tokensStr, shapeRaw] = m;
+  if (!(operation in TYPES_BY_OPERATION)) return null;
+  const ring = decodeShapeValue(shapeRaw);
+  if (!ring) return null; // `shape=` present but not the `((<polyline>))` grammar
+
+  const filters: ParsedSearchFilters = {
+    section: operation,
+    propertyTypes: [...TYPES_BY_OPERATION[operation]],
+    locationSlug: "", // geometry, not a named slug
+    geoKind: "shape",
+    shapeVertexCount: ring.length,
+    center: polygonCentroid(ring),
+  };
+  const templateTokens = parseConTokens(tokensStr, filters);
+  const conPart = templateTokens.length > 0 ? `/con-${templateTokens.join(",")}` : "";
+  // Keep the shape value verbatim in the template so substitute() reproduces the
+  // URL byte-for-byte (the geometry is code-pinned; only numerics substitute).
+  const template = `${origin}/areas/${operation}${conPart}/mapa-google?shape=${shapeRaw}`;
+  return { filters, categoryKey: makeCategoryKey(operation), template };
+}
+
+/** Parse the multi-zone `/multi/<operation>/<zones>/…` grammar, or null. */
+function parseMulti(url: string): ParsedSearchUrl | null {
+  const m = MULTI_RE.exec(url);
+  if (!m) return null;
+  const [, origin, operation, zoneCodes, tokensStr] = m;
+  if (!(operation in TYPES_BY_OPERATION)) return null;
+
+  const filters: ParsedSearchFilters = {
+    section: operation,
+    propertyTypes: [...TYPES_BY_OPERATION[operation]],
+    locationSlug: zoneCodes, // opaque Idealista neighbourhood codes
+    geoKind: "multi",
+  };
+  const templateTokens = parseConTokens(tokensStr, filters);
+  const conPart = templateTokens.length > 0 ? `/con-${templateTokens.join(",")}` : "";
+  const template = `${origin}/multi/${operation}/${zoneCodes}${conPart}/`;
+  return { filters, categoryKey: makeCategoryKey(operation), template };
+}
+
+/** Parse the legacy `<operation>/<municipio>-<provincia>/con-…` slug grammar. */
+function parseSlug(url: string): ParsedSearchUrl | null {
+  const m = SLUG_RE.exec(url);
+  if (!m) return null;
+  const [, origin, operation, location, tokensStr] = m;
+  if (!(operation in TYPES_BY_OPERATION)) return null;
+
+  const filters: ParsedSearchFilters = {
+    section: operation,
+    propertyTypes: [...TYPES_BY_OPERATION[operation]],
+    locationSlug: location ?? "",
+  };
+  const templateTokens = parseConTokens(tokensStr, filters);
+  // Lazy import avoided: centerForLocationSlug lives in parse-shared.
+  filters.center = centerForLocationSlug(filters.locationSlug);
+
+  const locationPart = filters.locationSlug ? `/${filters.locationSlug}` : "";
+  const conPart = templateTokens.length > 0 ? `/con-${templateTokens.join(",")}` : "";
+  const template = `${origin}/${operation}${locationPart}${conPart}/`;
+  return { filters, categoryKey: makeCategoryKey(operation), template };
+}
+
+function parseIdealista(url: string): ParsedSearchUrl | null {
+  const trimmed = url.trim();
+  return parseShape(trimmed) ?? parseMulti(trimmed) ?? parseSlug(trimmed);
+}
+
+function substituteIdealista(
+  template: string,
+  scope: CanonicalSearchScope,
+): { url: string; unfilled: LoosenableConstraint[] } {
+  // Shape template: geometry stays verbatim; only con- numerics substitute.
+  const shape = SHAPE_RE.exec(template);
+  if (shape) {
+    const [, origin, operation, tokensStr, shapeRaw] = shape;
+    const { conPart, unfilled } = substituteConTokens(tokensStr, scope);
+    return { url: `${origin}/areas/${operation}${conPart}/mapa-google?shape=${shapeRaw}`, unfilled };
+  }
+
+  // Multi template: zone codes stay verbatim; only con- numerics substitute.
+  const multi = MULTI_RE.exec(template);
+  if (multi) {
+    const [, origin, operation, zoneCodes, tokensStr] = multi;
+    const { conPart, unfilled } = substituteConTokens(tokensStr, scope);
+    return { url: `${origin}/multi/${operation}/${zoneCodes}${conPart}/`, unfilled };
+  }
+
+  // Legacy slug template.
+  const slug = SLUG_RE.exec(template);
+  if (!slug) return { url: template, unfilled: [] };
+  const [, origin, operation, location, tokensStr] = slug;
+  const { conPart, unfilled } = substituteConTokens(tokensStr, scope);
   const locationPart = location ? `/${location}` : "";
-  const conPart = outTokens.length > 0 ? `/con-${outTokens.join(",")}` : "";
   return { url: `${origin}/${operation}${locationPart}${conPart}/`, unfilled };
 }
 

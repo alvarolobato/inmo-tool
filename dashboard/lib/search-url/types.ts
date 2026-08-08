@@ -151,6 +151,20 @@ export interface ParsedSearchFilters {
   roomsMin?: number;
   /** Approximate `[lat, lng]` centroid of `locationSlug`, when resolvable. */
   center?: [number, number];
+  /**
+   * How the URL expresses geography (issue #471):
+   *   - undefined → the legacy `<municipio>-<provincia>` slug in the path;
+   *   - `"shape"` → an `/areas/…?shape=((<polyline>))` drawn polygon (the
+   *     builder's new default). `shapeVertexCount` carries the ring size and
+   *     `center` the polygon centroid;
+   *   - `"multi"` → a `/multi/venta-viviendas/<zone-codes>/…` multi-zone URL
+   *     (recognised as an opaque, verbatim pinned-override shape — not generated).
+   * Both `"shape"` and `"multi"` are CONCRETE, code-pinned geometry: the
+   * resolver never lets a learned example relocate them (see resolve.ts, #444).
+   */
+  geoKind?: "shape" | "multi";
+  /** Vertex count of a decoded `shape` polygon (geoKind === "shape"). */
+  shapeVertexCount?: number;
 }
 
 /**

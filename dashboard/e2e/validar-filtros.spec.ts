@@ -41,8 +41,11 @@ const SCOPE = {
   price_max: 200000,
 };
 // A hand-tuned idealista URL pinned as this profile's idealista filter (tier 0).
+// A real DRAWN-POLYGON (`shape=`) URL (#471): the owner-captured Dos Hermanas
+// specimen (10-vertex ring). Before #471 this grammar decoded to "no se pudo
+// validar"; now the Validar filtros page decodes it into a vertex-count chip.
 const PINNED_IDEALISTA =
-  "https://www.idealista.com/venta-viviendas/sevilla-sevilla/con-precio-hasta_175000/";
+  "https://www.idealista.com/areas/venta-viviendas/con-precio-hasta_175000/mapa-google?shape=%28%28%7DhpbFl%7Clc%40asJia%40unDijBl_%40coElp%40glA%7C%7EFslCpvJmTpp%40vuFurA%7CdHobCjp%40%29%29";
 // A hand-tuned aliseda URL the test pins during the run.
 const NEW_ALISEDA =
   "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/andalucia/sevilla/?precio=0-175000";
@@ -193,6 +196,10 @@ test("navigate from ⋮ menu; pinned + derived rows; save persists; captura uses
   await expect(ideaRow.getByTestId("filter-url")).toHaveText(PINNED_IDEALISTA);
   // The URL field is a single line (no wrap) — the Copiar button gives the full value.
   await expect(ideaRow.getByTestId("filter-url")).toHaveCSS("white-space", "nowrap");
+  // #471: the drawn-polygon (shape=) URL is now DECODED, not "unparseable" —
+  // the row shows a vertex-count chip instead of "no se pudo validar".
+  await expect(ideaRow.getByTestId("filter-unparseable")).toHaveCount(0);
+  await expect(ideaRow.getByTestId("filter-chips")).toContainText("polígono dibujado");
 
   // 2b) Aliseda row → derived (no pin yet).
   const aliRow = page.locator('[data-testid="filter-validation-row"][data-connector="aliseda"]');

@@ -14,9 +14,8 @@ import { alisedaBuilder, alisedaParser } from "@/lib/search-url/portals/aliseda"
 import { haversineKm } from "@/lib/search-url/parse-shared";
 import type { CanonicalSearchScope } from "@/lib/search-url/types";
 
-const ESTEPONA: [number, number] = [36.4268, -5.1468]; // owner-confirmed → estepona-malaga
-const INLAND_MALAGA: [number, number] = [37.0, -4.5]; // in málaga bbox, far from any town → province fallback
-const MADRID: [number, number] = [40.4168, -3.7038]; // outside both known markets → national / no geo
+const ESTEPONA: [number, number] = [36.4268, -5.1468]; // owner-confirmed area centre
+const MADRID: [number, number] = [40.4168, -3.7038]; // outside both known markets → aliseda national / no geo
 
 /** The idealista task for a single-section profile (build → exactly one task here). */
 function idealistaOne(scope: CanonicalSearchScope): string {
@@ -30,8 +29,8 @@ function alisedaOne(scope: CanonicalSearchScope): string {
   return tasks[0].url;
 }
 
-describe("idealistaParser round-trips buildIdealista (#296 slug grammar)", () => {
-  it("Estepona piso with a full price/size band", () => {
+describe("idealistaParser round-trips buildIdealista (#471 shape grammar)", () => {
+  it("Estepona piso shape URL with a full price/size band (build → parse → substitute)", () => {
     const scope: CanonicalSearchScope = {
       center: ESTEPONA,
       radiusKm: 8,
@@ -41,18 +40,20 @@ describe("idealistaParser round-trips buildIdealista (#296 slug grammar)", () =>
       sizeMax: 120,
     };
     const url = idealistaOne(scope);
-    expect(url).toBe(
-      "https://www.idealista.com/venta-viviendas/estepona-malaga/con-precio-hasta_200000,metros-cuadrados-mas-de_60,metros-cuadrados-menos-de_120/",
-    );
+    expect(url).toContain("/areas/venta-viviendas/");
+    expect(url).toContain("/mapa-google?shape=%28%28");
     const parsed = idealistaParser.parse(url)!;
     expect(parsed.categoryKey).toBe("venta-viviendas");
     expect(parsed.filters.section).toBe("venta-viviendas");
-    expect(parsed.filters.locationSlug).toBe("estepona-malaga");
+    expect(parsed.filters.geoKind).toBe("shape");
+    expect(parsed.filters.locationSlug).toBe(""); // geometry, not a slug
+    expect(parsed.filters.shapeVertexCount).toBe(25); // 24-gon + closing vertex
     // Section IS the granularity → all home subtypes recovered.
     expect(parsed.filters.propertyTypes).toEqual(["piso", "chalet", "atico"]);
     expect(parsed.filters.priceMax).toBe(200000);
     expect(parsed.filters.sizeMin).toBe(60);
     expect(parsed.filters.sizeMax).toBe(120);
+    // Centre recovered from the polygon centroid.
     expect(parsed.filters.center).toBeDefined();
     expect(haversineKm(parsed.filters.center!, ESTEPONA)).toBeLessThan(1);
 
@@ -61,41 +62,54 @@ describe("idealistaParser round-trips buildIdealista (#296 slug grammar)", () =>
     expect(unfilled).toEqual([]);
   });
 
-  it("garaje section (single type per section)", () => {
+  it("garaje shape URL (single type per section)", () => {
     const scope: CanonicalSearchScope = { center: ESTEPONA, radiusKm: 8, propertyTypes: ["garaje"], priceMax: 30000 };
     const url = idealistaOne(scope);
     const parsed = idealistaParser.parse(url)!;
     expect(parsed.filters.section).toBe("venta-garajes");
     expect(parsed.filters.propertyTypes).toEqual(["garaje"]);
+    expect(parsed.filters.geoKind).toBe("shape");
     expect(idealistaParser.substitute(parsed.template, scope).url).toBe(url);
   });
 
-  it("province fallback slug (<provincia>-provincia) resolves a centroid", () => {
-    const scope: CanonicalSearchScope = { center: INLAND_MALAGA, radiusKm: 8, propertyTypes: ["piso"], priceMax: 150000 };
-    const url = idealistaOne(scope);
-    expect(url).toContain("/venta-viviendas/malaga-provincia/con-");
+  it("still parses a LEGACY slug URL (owner-navigated / historical) for learning", () => {
+    // The builder no longer emits this, but the parser must keep understanding it
+    // so owner-navigated and historical slug URLs are still learnable (D-051).
+    const url =
+      "https://www.idealista.com/venta-viviendas/estepona-malaga/con-precio-hasta_200000/";
     const parsed = idealistaParser.parse(url)!;
-    expect(parsed.filters.locationSlug).toBe("malaga-provincia");
-    expect(parsed.filters.center).toBeDefined(); // province bbox centre
+    expect(parsed.filters.section).toBe("venta-viviendas");
+    expect(parsed.filters.geoKind).toBeUndefined(); // slug, not shape/multi
+    expect(parsed.filters.locationSlug).toBe("estepona-malaga");
+    expect(parsed.filters.priceMax).toBe(200000);
+    expect(parsed.filters.center).toBeDefined();
+    const scope: CanonicalSearchScope = { center: ESTEPONA, radiusKm: 8, propertyTypes: ["piso"], priceMax: 200000 };
     expect(idealistaParser.substitute(parsed.template, scope).url).toBe(url);
   });
 
-  it("national search (no known location) → empty slug, no centroid", () => {
-    const scope: CanonicalSearchScope = { center: MADRID, radiusKm: 8, propertyTypes: ["piso"], priceMax: 250000 };
-    const url = idealistaOne(scope);
-    expect(url).toBe("https://www.idealista.com/venta-viviendas/con-precio-hasta_250000/");
+  it("parses a MULTI-zone URL as an opaque, verbatim pinned-override shape (#471)", () => {
+    const url =
+      "https://www.idealista.com/multi/venta-viviendas/ac0,ac2,acY,acZ,adb,cuZ/con-precio-hasta_700000/";
     const parsed = idealistaParser.parse(url)!;
-    expect(parsed.filters.locationSlug).toBe("");
-    expect(parsed.filters.center).toBeUndefined();
+    expect(parsed.categoryKey).toBe("venta-viviendas");
+    expect(parsed.filters.geoKind).toBe("multi");
+    expect(parsed.filters.locationSlug).toBe("ac0,ac2,acY,acZ,adb,cuZ");
+    expect(parsed.filters.priceMax).toBe(700000);
+    // Zone codes stay verbatim; only numerics substitute.
+    const scope: CanonicalSearchScope = { center: ESTEPONA, radiusKm: 8, propertyTypes: ["piso"], priceMax: 700000 };
     expect(idealistaParser.substitute(parsed.template, scope).url).toBe(url);
   });
 
-  it("returns null for a non-search / non-idealista URL", () => {
+  it("returns null for a non-search / non-idealista / malformed-shape URL", () => {
     expect(idealistaParser.parse("https://www.idealista.com/inmueble/123/")).toBeNull();
     expect(idealistaParser.parse("https://example.com/venta-viviendas/estepona-malaga/")).toBeNull();
+    // shape= present but not the ((<polyline>)) grammar → not a shape URL.
+    expect(
+      idealistaParser.parse("https://www.idealista.com/areas/venta-viviendas/mapa-google?shape=abc123"),
+    ).toBeNull();
   });
 
-  it("substitute drops a token the profile omits and flags a missing placeholder", () => {
+  it("substitute drops a token the profile omits and flags a missing placeholder (slug template)", () => {
     const template =
       "https://www.idealista.com/venta-viviendas/estepona-malaga/con-precio-hasta_{price_max}/";
     const { url, unfilled } = idealistaParser.substitute(template, {

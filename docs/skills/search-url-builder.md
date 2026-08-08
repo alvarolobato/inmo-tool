@@ -64,16 +64,17 @@ The profile `Scope` carries geography as a **radius around a geocoded point**
 `property_types`, `price_min/max`, `size_min/max`. **There is no rooms field**
 in the scope today, so `roomsMin` on `CanonicalSearchScope` is reserved and only
 fires when a caller supplies it (idealista maps it to a rooms token). Geography
-is resolved to admin-area slugs by two small lat/lng tables:
+is resolved by two small lat/lng tables:
 - `provinces.ts` — `provinceForPoint` → `<comunidad>/<provincia>` (bounding
-  boxes; málaga + sevilla, both andalucía). Used by aliseda.
-- `municipios.ts` — `municipioForPoint` → nearest-town `<municipio>-<provincia>`
-  within `MAX_MATCH_KM` (centroids for Costa del Sol + greater Sevilla towns).
-  Used by idealista, which falls back to the province table then national.
+  boxes; málaga + sevilla, both andalucía). Used by aliseda for its path slug.
+- `municipios.ts` — `municipioForPoint` → nearest-town within `MAX_MATCH_KM`
+  (centroids for Costa del Sol + greater Sevilla towns). Idealista now renders
+  geography as a **drawn polygon** (`geo.ts`, #471) and uses this table only for
+  the human task LABEL ("~Dos Hermanas (r=5 km)"), not the URL.
 
 | Portal | Geography | Property types (→ tasks) | Price / rooms / size |
 |--------|-----------|--------------------------|----------------------|
-| **idealista** | `<municipio>-<provincia>` path slug from `municipios.ts` (nearest town). Town match = accepted (not flagged). No town → `<provincia>-provincia` fallback + flag; no province → national + flag. | One task per **operation section** (`venta-viviendas` / `venta-locales` / `venta-garajes` / …). Home subtypes are NOT narrowed (the section is the granularity — owner's confirmed URL carries no subtype token). | price `con-precio-desde_/precio-hasta_`; rooms `de-cuatro-cinco-habitaciones-o-mas` (min ≥ 4 confirmed; lower → omit + flag); size `con-metros-cuadrados-mas-de_/menos-de_`. Comma-joined after `con-`. |
+| **idealista** | **Drawn polygon (`shape=`), #471.** The profile circle is rendered as a 24-gon (circumscribing → faithful, ~0.9% broader) and encoded as a Google polyline in `/areas/<operation>[/con-…]/mapa-google?shape=((<polyline>))`. The radius is expressed faithfully → geography is **never flagged**; two radii around one centre give two URLs. `municipios.ts` is used only for the human LABEL (nearest town). | One task per **operation section** (`venta-viviendas` / `venta-locales` / `venta-garajes` / …). Home subtypes are NOT narrowed (the section is the granularity — owner's confirmed URL carries no subtype token). | price `con-precio-desde_/precio-hasta_`; rooms `de-cuatro-cinco-habitaciones-o-mas` (min ≥ 4 confirmed; lower → omit + flag); size `con-metros-cuadrados-mas-de_/menos-de_`. Comma-joined after `con-`, in the PATH before `/mapa-google`. |
 | **aliseda** | `<comunidad>/<provincia>` path slugs from `provinces.ts`. Radius→province is **always broader** → geography **always loosened**. Point outside every box → drop geo segments + flag. | One task per **canonical type**, mapped to Aliseda's own taxonomy (#336): residential types are `comprar-viviendas/<subtype-slug>` (`pisos`, `chalets-adosados`, …); **non-residential types are their OWN top-level category** (`comprar-locales`/`comprar-naves`/`comprar-garajes`/`comprar-terrenos`/`comprar-edificios`), **not** nested under viviendas. Aliseda has **no `ático`** → ático folds onto `pisos` (broadened + flagged); chalet → `chalets-adosados` only (approx + flagged). Types collapsing to one URL (piso+ático) are de-duped. | `precio=<min>-<max>` (hyphen range, min defaults to 0), plus `subtipo=<code>` on viviendas (`pisos=36`, `chalets-adosados=31` confirmed; others omitted + flagged). Size has no confirmed grammar → dropped + flagged. |
 
 ## Adding a portal
@@ -118,15 +119,38 @@ local edit; the tests pin current behaviour.
   codes for chalet-pareados/casas/lofts/… (omitted). Province slugs come from
   `provinces.ts` (bounding boxes for málaga and sevilla, both `andalucia`). See
   [D-062](../decisions/D-062-aliseda-category-subtype-url-grammar.md).
-- **Idealista** — path grammar **owner-confirmed 2026-08-05** (issue #277 fix).
-  The builder emits `/<operation>/<municipio>-<provincia>/con-<f1>[,<f2>,…]/`.
-  Confirmed examples (Estepona piso ≤ 200 000 €):
-  `https://www.idealista.com/venta-viviendas/estepona-malaga/con-precio-hasta_200000/`
-  and with 4+ rooms `…/con-precio-hasta_200000,de-cuatro-cinco-habitaciones-o-mas/`.
-  Confirmed tokens: the path shape, `con-precio-hasta_/desde_`, the 4-5+ rooms
-  token, and the `<municipio>-<provincia>` slug for a town match. **Guessed /
-  best-effort** (flagged when used): the `<provincia>-provincia` and national
-  fallbacks when no town is near, a rooms minimum below 4 (omitted), and the
-  standard `metros-cuadrados-*` size tokens (long-established, not re-confirmed).
-  The previous `/areas/…?shape=…` map-polygon grammar was WRONG and has been
-  removed (along with `geo.ts`).
+- **Idealista** — geography is a **drawn polygon (`shape=`)**, grammar
+  **owner-confirmed from a real captured specimen 2026-08-08** (issue #471; the
+  earlier #277 shape builder was reverted because it was reverse-engineered
+  without a real URL — this one is pinned to one). The builder emits
+
+  `/areas/<operation>[/con-<f1>,<f2>,…]/mapa-google?shape=((<polyline>))`
+
+  where `<polyline>` is a **Google Encoded Polyline (precision 5, lat,lng)** of
+  the profile circle as a **closed, circumscribing 24-gon**, URL-encoded and
+  wrapped in `((…))`. Filters (`con-…`) ride in the PATH before `/mapa-google`.
+  Captured specimen (Dos Hermanas, ≤ 700 000 €):
+  `https://www.idealista.com/areas/venta-viviendas/con-precio-hasta_700000/mapa-google?shape=%28%28}hpbFl|lc@…%29%29`
+  → a 10-vertex ring, centroid ≈ Dos Hermanas. `geo.ts` (`encodePolyline` /
+  `decodePolyline` / `circlePolygon` / `shapeUrl`) is pinned to it byte-for-byte
+  in `geo.test.ts`.
+
+  **Why drawn-polygon, not the old slug:** the slug grammar resolved the point
+  to the nearest of 12 hard-coded `<municipio>-<provincia>` towns and DISCARDED
+  the radius (5 km ≡ 30 km ≡ same URL), couldn't express sub-/cross-municipality
+  circles, and was blind to Idealista's zone mis-parenting (Montequinto filed
+  under "Sevilla"). A polygon over the real area sidesteps the whole taxonomy and
+  renders the radius faithfully (no geography flag). Per break-by-default the slug
+  grammar is **retired as the builder's output**; it survives only inside the
+  **parser** so owner-navigated / historical slug URLs stay learnable (D-051).
+
+  **Parser also recognises** (never generated): the multi-zone grammar
+  `/multi/<operation>/<zone-codes>/[con-…]/` (opaque Idealista neighbourhood
+  codes — usable verbatim as a tier-0 override). Confirmed tokens elsewhere:
+  `con-precio-hasta_/desde_`, the 4-5+ rooms token. **Best-effort** (flagged when
+  used): a rooms minimum below 4 (omitted), the standard `metros-cuadrados-*`
+  size tokens.
+
+  **Resolver:** shape/multi are CONCRETE, code-pinned geometry — `resolve.ts`
+  never lets a learned example relocate them (only a tier-0 owner override wins),
+  which makes the #444 municipality-crossing rewrite structurally impossible.

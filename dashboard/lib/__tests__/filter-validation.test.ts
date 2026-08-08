@@ -32,12 +32,31 @@ describe("decodeFilterUrl (issue #478 P2)", () => {
     expect(d.warnings.some((w) => /precio máximo/i.test(w))).toBe(false);
   });
 
-  it("flags an unparseable URL (unknown grammar / shape=) with an empty sectionKey", () => {
+  it("flags a malformed shape URL (not the ((polyline)) grammar) as unparseable", () => {
     const url = "https://www.idealista.com/areas/venta-viviendas/?shape=abc123";
     const d = decodeFilterUrl("idealista", url, scope());
     expect(d.unparseable).toBe(true);
     expect(d.chips).toEqual([]);
     expect(d.sectionKey).toBe("");
+  });
+
+  it("decodes a drawn-polygon (shape=) URL into a vertex-count chip (#471)", () => {
+    // The owner-captured Dos Hermanas specimen: 10-vertex closed ring.
+    const url =
+      "https://www.idealista.com/areas/venta-viviendas/con-precio-hasta_700000/mapa-google?shape=%28%28%7DhpbFl%7Clc%40asJia%40unDijBl_%40coElp%40glA%7C%7EFslCpvJmTpp%40vuFurA%7CdHobCjp%40%29%29";
+    const d = decodeFilterUrl("idealista", url, scope());
+    expect(d.unparseable).toBe(false);
+    expect(d.sectionKey).toBe("venta-viviendas");
+    expect(d.chips.some((c) => /polígono dibujado \(10 vértices\)/.test(c))).toBe(true);
+  });
+
+  it("decodes a multi-zone URL into a zone-count chip (#471)", () => {
+    const url =
+      "https://www.idealista.com/multi/venta-viviendas/ac0,ac2,acY,acZ,adb,cuZ/con-precio-hasta_700000/";
+    const d = decodeFilterUrl("idealista", url, scope());
+    expect(d.unparseable).toBe(false);
+    expect(d.sectionKey).toBe("venta-viviendas");
+    expect(d.chips.some((c) => /6 zonas Idealista \(multi\)/.test(c))).toBe(true);
   });
 
   it("treats an empty URL as nothing to decode (not unparseable)", () => {

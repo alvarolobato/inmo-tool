@@ -19,6 +19,8 @@ vi.mock("@/lib/db/profile-connector-filter", () => ({
 import { resolveSearchTasks, AREA_MATCH_KM } from "@/lib/search-url/resolve";
 import { idealistaBuilder, idealistaParser } from "@/lib/search-url/portals/idealista";
 import { alisedaBuilder, alisedaParser } from "@/lib/search-url/portals/aliseda";
+import { decodeShapeValue, polygonCentroid } from "@/lib/search-url/geo";
+import { haversineKm } from "@/lib/search-url/parse-shared";
 import { fallbackTaskId } from "@/lib/captura-tasks";
 import * as exampleDb from "@/lib/db/search-url-example";
 import * as overrideDb from "@/lib/db/profile-connector-filter";
@@ -52,14 +54,14 @@ function overrideRow(
 }
 
 const ESTEPONA: [number, number] = [36.4268, -5.1468];
-const MANILVA: [number, number] = [36.3766, -5.2493]; // ~10 km from Estepona
-const MADRID: [number, number] = [40.4168, -3.7038];
 const SEVILLA: [number, number] = [37.3891, -5.9845];
 const DOS_HERMANAS: [number, number] = [37.2836, -5.9222]; // ~13 km from Sevilla
-const MALAGA: [number, number] = [36.7213, -4.4214];
-// ~16 km north of Málaga: too far for a concrete municipio (MAX_MATCH_KM 12) so
-// the builder falls back to the province, but still inside AREA_MATCH_KM (25).
-const MALAGA_PROVINCE_FALLBACK: [number, number] = [36.8713, -4.4214];
+
+/** Decode the polygon centroid of an idealista shape-task URL. */
+function shapeCentroid(url: string): [number, number] {
+  const ring = decodeShapeValue(/shape=(.+)$/.exec(url)![1])!;
+  return polygonCentroid(ring);
+}
 
 /** Craft a learned example row from a single-section scope via build + parse. */
 function exampleRow(
@@ -100,15 +102,16 @@ function idealistaTask(tasks: Awaited<ReturnType<typeof resolveSearchTasks>>) {
   return tasks.find((t) => t.portal === "idealista")!;
 }
 
-describe("resolveSearchTasks — capture-to-infer tiers (slug grammar)", () => {
+describe("resolveSearchTasks — capture-to-infer tiers", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // Default: no owner-pinned overrides (tier 0 inert) — tiers 1-3 unchanged.
     mockOverrides.mockResolvedValue([]);
   });
 
-  it("tier 1: exact section + exact location slug → substitute profile values, NO reuse flag", async () => {
-    // Learned: Estepona piso at 200k. Profile: Estepona piso at 180k.
+  it("#471: an idealista shape task ignores a matching learned example (geometry is code-pinned)", async () => {
+    // Even an exact-section learned example must NOT alter the profile's own
+    // polygon — the builder pins concrete geometry; only a tier-0 override wins.
     const ex = exampleRow(idealistaBuilder, idealistaParser, {
       center: ESTEPONA,
       radiusKm: 8,
@@ -119,33 +122,15 @@ describe("resolveSearchTasks — capture-to-infer tiers (slug grammar)", () => {
 
     const tasks = await resolveSearchTasks(scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>), PROFILE_ID);
     const t = idealistaTask(tasks);
-    // Confirmed template used + the PROFILE's price substituted in.
-    expect(t.url).toBe("https://www.idealista.com/venta-viviendas/estepona-malaga/con-precio-hasta_180000/");
+    const base = idealistaBuilder.build({ center: ESTEPONA, radiusKm: 8, propertyTypes: ["piso"], priceMax: 180000 })[0];
+    expect(t.url).toBe(base.url); // the builder's own shape, unchanged
     expect(t.loosened.find((l) => l.reason.includes("reutilizada"))).toBeUndefined();
   });
 
-  it("issue #444: a concrete-municipio profile NEVER borrows a different town's slug", async () => {
-    // Learned: piso in MANILVA (manilva-malaga). Profile: piso in ESTEPONA (~10 km).
-    // Estepona resolves to a concrete municipio, so the deterministic slug wins
-    // and the nearby Manilva example must NOT move the search there.
-    const ex = exampleRow(idealistaBuilder, idealistaParser, {
-      center: MANILVA,
-      radiusKm: 8,
-      propertyTypes: ["piso"],
-      priceMax: 150000,
-    }, 2);
-    withExamples({ idealista: [ex] });
-
-    const tasks = await resolveSearchTasks(scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>), PROFILE_ID);
-    const t = idealistaTask(tasks);
-    // Deterministic Estepona slug, NOT the reused manilva-malaga.
-    expect(t.url).toBe("https://www.idealista.com/venta-viviendas/estepona-malaga/con-precio-hasta_180000/");
-    expect(t.loosened.find((l) => l.reason.includes("reutilizada"))).toBeUndefined();
-  });
-
-  it("issue #444: the Sevilla profile does NOT open Dos Hermanas listings", async () => {
+  it("#444/#471: a Sevilla profile never opens a Dos Hermanas polygon", async () => {
     // The original bug: a single Dos Hermanas capture rewrote the Sevilla
-    // profile's Idealista URL, because the two towns are ~13 km apart (≤ 25 km).
+    // profile's Idealista URL (the towns are ~13 km apart). With code-pinned
+    // shape geometry that relocation is now structurally impossible.
     const ex = exampleRow(idealistaBuilder, idealistaParser, {
       center: DOS_HERMANAS,
       radiusKm: 8,
@@ -156,32 +141,13 @@ describe("resolveSearchTasks — capture-to-infer tiers (slug grammar)", () => {
 
     const tasks = await resolveSearchTasks(scope(SEVILLA, { price_max: 180000 } as Partial<Scope>), PROFILE_ID);
     const t = idealistaTask(tasks);
-    expect(t.url).toBe("https://www.idealista.com/venta-viviendas/sevilla-sevilla/con-precio-hasta_180000/");
-    expect(t.url).not.toContain("dos-hermanas");
+    const base = idealistaBuilder.build({ center: SEVILLA, radiusKm: 8, propertyTypes: ["piso"], priceMax: 180000 })[0];
+    expect(t.url).toBe(base.url);
+    // The polygon is centred on Sevilla, not on the learned Dos Hermanas example.
+    const centroid = shapeCentroid(t.url);
+    expect(haversineKm(centroid, SEVILLA)).toBeLessThan(1);
+    expect(haversineKm(centroid, DOS_HERMANAS)).toBeGreaterThan(5);
     expect(t.loosened.find((l) => l.reason.includes("reutilizada"))).toBeUndefined();
-  });
-
-  it("tier 2 still reuses a nearby town ONLY when the builder found no concrete municipio", async () => {
-    // Learned: piso in MALAGA (malaga-malaga). Profile centre is ~16 km north of
-    // Málaga → outside MAX_MATCH_KM (province fallback), inside AREA_MATCH_KM.
-    const ex = exampleRow(idealistaBuilder, idealistaParser, {
-      center: MALAGA,
-      radiusKm: 8,
-      propertyTypes: ["piso"],
-      priceMax: 150000,
-    }, 7);
-    withExamples({ idealista: [ex] });
-
-    const tasks = await resolveSearchTasks(
-      scope(MALAGA_PROVINCE_FALLBACK, { price_max: 180000 } as Partial<Scope>),
-      PROFILE_ID,
-    );
-    const t = idealistaTask(tasks);
-    // Reused the nearby example's concrete slug (malaga-malaga), profile's price.
-    expect(t.url).toBe("https://www.idealista.com/venta-viviendas/malaga-malaga/con-precio-hasta_180000/");
-    const flag = t.loosened.find((l) => l.reason.includes("reutilizada"));
-    expect(flag).toBeDefined();
-    expect(flag!.constraint).toBe("geography");
   });
 
   it("tier 3: only a DIFFERENT-section example exists → hand-written task unchanged", async () => {
