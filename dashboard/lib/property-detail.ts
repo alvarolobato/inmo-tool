@@ -128,6 +128,20 @@ export interface PropertyDetail {
    * the same "absent, not a placeholder" rule the card's flags follow.
    */
   problem_flags: ProblemFlag[];
+  /**
+   * #448 F — profile-scoped price signals shown next to the header price.
+   * These are NOT computed by `getPropertyDetail` (which is deliberately
+   * profile-agnostic — see this file's doc comment); the detail API route
+   * merges them in from `getPropertyMarketSignals(profileId, propertyId)`
+   * (lib/candidates.ts), which reuses the exact ranked-CTE `below_market_pct`
+   * and price-change logic the feed card renders. Undefined when the route
+   * couldn't compute them (best-effort — never fails the page); the same
+   * "absent, not a placeholder" rule the rest of the detail follows.
+   */
+  below_market_pct?: number | null;
+  price_changed?: boolean;
+  price_delta_pct?: number | null;
+  price_direction?: "drop" | "up" | null;
 }
 
 interface RawPropertyRow {

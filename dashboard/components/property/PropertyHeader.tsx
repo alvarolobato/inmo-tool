@@ -3,6 +3,7 @@ import { PROPERTY_TYPE_LABELS, type PROPERTY_TYPES } from "@/lib/profiles-schema
 import { fmtEUR0, fmtInt } from "@/components/widgets/format";
 import { StalenessBadge } from "@/components/StalenessBadge";
 import { ExtractionQualityBadge } from "@/components/property/ExtractionQualityBadge";
+import { PriceSignals } from "@/components/property/PriceSignals";
 import { freshestActiveLastSeen } from "@/lib/staleness";
 import { bestExtractionQuality } from "@/lib/extraction-quality";
 
@@ -79,9 +80,18 @@ export function PropertyHeader({ property }: { property: PropertyDetail }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
-        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: "var(--fg)" }}>
-          {minPrice !== null ? fmtEUR0(minPrice) : "Precio no disponible"}
-        </h1>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: "var(--fg)" }}>
+            {minPrice !== null ? fmtEUR0(minPrice) : "Precio no disponible"}
+          </h1>
+          {/* #448 F: below-market rating (green/red) + price up/down, next to the price. */}
+          <PriceSignals
+            belowMarketPct={property.below_market_pct}
+            priceChanged={property.price_changed}
+            priceDirection={property.price_direction}
+            priceDeltaPct={property.price_delta_pct}
+          />
+        </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           {/* Extraction-quality grade (#80) — "genuinely thin listing" vs
               "our connector under-extracted this one". Absent until a listing

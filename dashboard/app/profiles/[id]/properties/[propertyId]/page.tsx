@@ -309,6 +309,13 @@ export default function PropertyDetailPage() {
           */}
           <div
             data-testid="detail-feedback-controls"
+            // #448 H: the feedback toggles default to opacity:0 (revealed by
+            // `.candidate-card:hover` on the feed). This detail-page row has no
+            // such card ancestor, so without this class the buttons stayed
+            // invisible until a click set an active state — the "empty block
+            // until you click" bug. `.detail-feedback-controls` (globals.css)
+            // forces them visible from the start.
+            className="detail-feedback-controls"
             style={{
               display: "flex",
               alignItems: "center",
@@ -326,7 +333,7 @@ export default function PropertyDetailPage() {
           {/* #361 problem flags — own component/section, kept separate from
               where #360 adds the advert description, to minimize conflict. */}
           <PropertyProblemFlags flags={property.problem_flags} />
-          <PhotoGallery photoUrls={property.photo_urls} />
+          <PhotoGallery photoUrls={property.photo_urls} lat={property.lat} lon={property.lon} />
           <DetailSections sections={sections} />
         </div>
       )}

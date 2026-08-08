@@ -1,6 +1,35 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
+
+/**
+ * Leaflet touches `window` at import time — the location-map tile (#448 I)
+ * must be loaded client-only, exactly like the profile candidate map
+ * (components/map/MapView.tsx). Rendering it in an SSR pass throws.
+ */
+const PropertyLocationMap = dynamic(
+  () => import("./PropertyLocationMap").then((mod) => mod.PropertyLocationMap),
+  {
+    ssr: false,
+    loading: () => (
+      <div
+        style={{
+          width: "100%",
+          height: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: 12,
+          color: "var(--fg-subtle)",
+          background: "var(--bg-2)",
+        }}
+      >
+        Cargando mapa…
+      </div>
+    ),
+  },
+);
 
 /**
  * Photo gallery for the property detail page (task 2.8, #44, EC-2): the
@@ -38,7 +67,17 @@ const navButtonStyle: React.CSSProperties = {
   zIndex: 1001,
 };
 
-export function PhotoGallery({ photoUrls }: { photoUrls: string[] }) {
+export function PhotoGallery({
+  photoUrls,
+  lat = null,
+  lon = null,
+}: {
+  photoUrls: string[];
+  /** #448 I: property coordinates for the leading map tile. Omitted/null → no map tile (rendered cleanly, never a broken cell). */
+  lat?: number | null;
+  lon?: number | null;
+}) {
+  const hasCoords = lat !== null && lon !== null;
   const [openIndex, setOpenIndex] = useState<number | null>(null);
   const thumbRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -81,7 +120,9 @@ export function PhotoGallery({ photoUrls }: { photoUrls: string[] }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- closeLightbox/step read the live index through openIndexRef and the functional setter; adding them would reintroduce the per-index re-run this effect exists to avoid.
   }, [isOpen, photoUrls.length]);
 
-  if (photoUrls.length === 0) {
+  // With neither photos nor coordinates there is nothing to show — the map
+  // tile is omitted cleanly (#448 I) rather than rendered as a broken cell.
+  if (photoUrls.length === 0 && !hasCoords) {
     return (
       <p style={{ margin: 0, fontSize: 13, color: "var(--fg-muted)" }}>
         No hay fotos disponibles para esta propiedad.
@@ -99,6 +140,24 @@ export function PhotoGallery({ photoUrls }: { photoUrls: string[] }) {
           gap: 8,
         }}
       >
+        {hasCoords && (
+          // #448 I: the map is the FIRST tile of the gallery — a "where is
+          // this" glance before the photos. Not a <button> (it opens no
+          // lightbox) and outside `thumbRefs`, so photo indices/lightbox
+          // navigation are unaffected.
+          <div
+            data-testid="photo-gallery-map-tile"
+            style={{
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              overflow: "hidden",
+              aspectRatio: "4 / 3",
+              position: "relative",
+            }}
+          >
+            <PropertyLocationMap lat={lat as number} lon={lon as number} />
+          </div>
+        )}
         {photoUrls.map((url, i) => (
           <button
             key={url}

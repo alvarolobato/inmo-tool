@@ -7,6 +7,7 @@ import { PROPERTY_TYPE_LABELS, type PROPERTY_TYPES } from "@/lib/profiles-schema
 import { fmtEUR0, fmtInt } from "@/components/widgets/format";
 import { FeedbackControls } from "./FeedbackControls";
 import { CandidatePhotoTicker } from "./CandidatePhotoTicker";
+import { PriceSignals } from "@/components/property/PriceSignals";
 import { StalenessBadge } from "@/components/StalenessBadge";
 
 /**
@@ -208,6 +209,14 @@ export function CandidateCard({
           includeRejected ? "?includeRejected=true" : ""
         }`}
         priceLabel={priceLabel}
+        priceSignals={
+          <PriceSignals
+            belowMarketPct={candidate.below_market_pct}
+            priceChanged={candidate.price_changed}
+            priceDirection={candidate.price_direction}
+            priceDeltaPct={candidate.price_delta_pct}
+          />
+        }
       >
         <div style={{ padding: "8px 10px 10px", display: "flex", flexDirection: "column", gap: 4 }}>
           <p
