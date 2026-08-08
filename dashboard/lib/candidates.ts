@@ -237,6 +237,24 @@ export interface CandidateRow {
    */
   below_market_pct: number | null;
   /**
+   * #461: WHICH comparison base produced `below_market_pct` — `"segment"` when a
+   * like-for-like segment (similar habitaciones / m² / floor class) had enough
+   * priced comparables (≥ `MIN_POOL_SIZE`), `"pool"` when it fell back to the
+   * whole-profile median, `null` when there was no comparison at all (no
+   * price/m², or even the pool was too small). Lets the card chip and the detail
+   * breakdown explain the number ("comparado con N similares" vs "mediana del
+   * perfil") without recomputing anything.
+   */
+  below_market_base: "segment" | "pool" | null;
+  /**
+   * #461: the number of priced comparables backing `below_market_pct` — the
+   * segment size when `below_market_base === "segment"`, the whole-pool count
+   * when `"pool"`, `null` when there was no comparison. Includes the property
+   * itself (the median is computed over a set that contains it, exactly as the
+   * whole-pool median always has).
+   */
+  below_market_comparables: number | null;
+  /**
    * Count of distinct distress axes the latest AI assessments flag for this
    * property (0–3): a warn-tone occupancy caveat, any red flag, and/or an
    * `a_reformar` condition (#308 populates these; empty in this deployment
@@ -349,6 +367,33 @@ const MAX_CARD_PHOTOS = 8;
 const MIN_POOL_SIZE = 3;
 /** A discount only worth NAMING in the explanation once it clears this — smaller than this reads as noise, not a "deal". */
 const MIN_NOTABLE_DISCOUNT = 0.05;
+
+// ── Like-for-like below-market segmentation (#461) ──────────────────────────
+//
+// The below-market discount used to compare a property's €/m² against the
+// median €/m² of the WHOLE profile pool (normalized by m² only). That over-
+// or under-states the discount for anything atypical: a 4-bed penthouse
+// compared against a pool dominated by 1-bed flats, or a ground-floor `bajo`
+// (which the market prices lower) compared against upper floors. #461 makes
+// the comparison LIKE-FOR-LIKE: each property's discount is measured against a
+// SEGMENT of the pool with similar rooms, m² and floor position, falling back
+// to the whole-pool median when that segment is too small to be trustworthy
+// (so coverage is preserved rather than fabricating precision from 1–2 comps).
+//
+// The segment predicate (all three must hold, plus a priced comparable):
+//   - habitaciones within ±SEG_ROOMS_TOLERANCE of the target (both non-null);
+//   - m² built within ±SEG_M2_BAND of the target (a proportional band);
+//   - the SAME ground-floor class — a `bajo`/`entresuelo` is only ever compared
+//     against other ground-floor units, never against upper floors, because the
+//     market discounts them (comparing the two ways round would manufacture a
+//     phantom discount or premium).
+// The segment INCLUDES the target itself (exactly as the whole-pool median
+// does), so `MIN_POOL_SIZE` counts comparables the same way in both bases.
+
+/** Rooms tolerance for the like-for-like segment: habitaciones within ±1. */
+const SEG_ROOMS_TOLERANCE = 1;
+/** m²-built band for the like-for-like segment: ±25% around the target's m². */
+const SEG_M2_BAND = 0.25;
 
 /**
  * Occupancy caveat codes that count as a distress/opportunity signal for
@@ -643,11 +688,24 @@ function rankedCandidatesCte(params: RankedCteParams): string {
   // market-signals.ts TERMINAL_STATUSES). Hardcoded constants → safe to inline
   // as a literal array, avoiding a new param threaded through all four callers.
   const terminalStatusesLiteral = `ARRAY['sold','withdrawn','expired']::text[]`;
+  // #461 ground-floor class for the like-for-like segment. `floor` is free text
+  // as the portals publish it ("Bajo", "Entreplanta", "1ª", "3", "Ático"), so a
+  // ground-floor unit is detected by the market's own vocabulary rather than a
+  // numeric parse. NULL/unknown floors collapse to `false` (treated as "not
+  // ground floor") — the same class matches the same class, so two unknowns
+  // still compare together, and a real `bajo` is never mixed with an upper floor.
+  const isGroundFloorSql = `CASE
+        WHEN p.floor IS NOT NULL AND (
+             lower(p.floor) ~ '(bajo|baja|entresuelo|entreplanta|planta baja|semisotano|semisótano)'
+             OR btrim(lower(p.floor)) IN ('0', 'pb', 'bj')
+        ) THEN true ELSE false END`;
   return `${DISABLED_SOURCES_CTE},
      base AS (
        SELECT
          p.id AS property_id,
          p.address, p.lat, p.lon, p.property_type, p.m2_built, p.rooms, p.bathrooms, p.floor,
+         -- #461: ground-floor class for the like-for-like below-market segment.
+         ${isGroundFloorSql} AS is_ground_floor,
          pls.score, pls.rank_explanation, pls.score_kind,
          mp.min_price,
          CASE WHEN p.m2_built IS NOT NULL AND p.m2_built > 0 AND mp.min_price IS NOT NULL
@@ -956,6 +1014,80 @@ function rankedCandidatesCte(params: RankedCteParams): string {
          COUNT(ppm2) AS n
        FROM base
      ),
+     -- #461 like-for-like below-market base: for EACH candidate, the median EUR/m2
+     -- over the SEGMENT of the pool with similar rooms (+/-${SEG_ROOMS_TOLERANCE}),
+     -- m2 (+/-${Math.round(SEG_M2_BAND * 100)}%) and the same ground-floor class,
+     -- with a graceful fallback to the whole-pool median (the pool CTE above)
+     -- when that segment has fewer than ${MIN_POOL_SIZE} priced comparables. The
+     -- chosen median, its comparable count, and which base was used (segment vs
+     -- pool) are resolved here ONCE per property so the ranked below-market
+     -- field, the boost, and the detail/breakdown all derive from ONE decision
+     -- (derive-once). The self-join over base is O(matched^2) per profile --
+     -- acceptable at the current per-profile matched-set size, the same envelope
+     -- the ORDER BY sort already accepts (see the CTE-chain doc above); if a
+     -- profile's pool grows large enough for it to hurt, materialize the segment
+     -- median in the scoring pass rather than move it into a per-row correlated
+     -- scan of the whole listing table.
+     segmented AS (
+       SELECT
+         b.property_id,
+         seg.seg_n,
+         -- Which base actually drove the discount, so the card chip and the
+         -- detail breakdown can explain it ("comparado con N similares" vs
+         -- "mediana del perfil"). NULL when neither base qualifies (no price/m²,
+         -- or even the whole pool is below MIN_POOL_SIZE) — a genuine "no
+         -- comparison", never a fabricated "at market".
+         CASE
+           WHEN b.ppm2 IS NOT NULL AND seg.seg_n >= ${MIN_POOL_SIZE}
+                AND seg.seg_median_ppm2 IS NOT NULL AND seg.seg_median_ppm2 > 0
+             THEN 'segment'
+           WHEN b.ppm2 IS NOT NULL AND pool.n >= ${MIN_POOL_SIZE}
+                AND pool.median_ppm2 IS NOT NULL AND pool.median_ppm2 > 0
+             THEN 'pool'
+           ELSE NULL
+         END AS below_market_base,
+         -- The comparable count backing the chosen base (segment size, or the
+         -- whole-pool count) — surfaced so the chip can say "N similares".
+         CASE
+           WHEN b.ppm2 IS NOT NULL AND seg.seg_n >= ${MIN_POOL_SIZE}
+                AND seg.seg_median_ppm2 IS NOT NULL AND seg.seg_median_ppm2 > 0
+             THEN seg.seg_n
+           WHEN b.ppm2 IS NOT NULL AND pool.n >= ${MIN_POOL_SIZE}
+                AND pool.median_ppm2 IS NOT NULL AND pool.median_ppm2 > 0
+             THEN pool.n
+           ELSE NULL
+         END AS comp_n,
+         -- The chosen comparison median: the segment's when it qualifies, else
+         -- the whole-pool's, else NULL. Both the below_market_pct field and the
+         -- boost in ranked read THIS single value.
+         CASE
+           WHEN b.ppm2 IS NOT NULL AND seg.seg_n >= ${MIN_POOL_SIZE}
+                AND seg.seg_median_ppm2 IS NOT NULL AND seg.seg_median_ppm2 > 0
+             THEN seg.seg_median_ppm2
+           WHEN b.ppm2 IS NOT NULL AND pool.n >= ${MIN_POOL_SIZE}
+                AND pool.median_ppm2 IS NOT NULL AND pool.median_ppm2 > 0
+             THEN pool.median_ppm2
+           ELSE NULL
+         END AS comp_median_ppm2
+       FROM base b
+       CROSS JOIN pool
+       LEFT JOIN LATERAL (
+         SELECT
+           percentile_cont(0.5) WITHIN GROUP (ORDER BY s.ppm2) AS seg_median_ppm2,
+           COUNT(s.ppm2) AS seg_n
+         FROM base s
+         WHERE s.ppm2 IS NOT NULL
+           -- habitaciones ±${SEG_ROOMS_TOLERANCE} (both sides must know rooms).
+           AND b.rooms IS NOT NULL AND s.rooms IS NOT NULL
+           AND s.rooms BETWEEN b.rooms - ${SEG_ROOMS_TOLERANCE} AND b.rooms + ${SEG_ROOMS_TOLERANCE}
+           -- m² band ±${Math.round(SEG_M2_BAND * 100)}% (both sides must know m²).
+           AND b.m2_built IS NOT NULL AND b.m2_built > 0
+           AND s.m2_built IS NOT NULL
+           AND s.m2_built BETWEEN b.m2_built * ${1 - SEG_M2_BAND} AND b.m2_built * ${1 + SEG_M2_BAND}
+           -- ground floor only ever compares against ground floor.
+           AND s.is_ground_floor = b.is_ground_floor
+       ) seg ON true
+     ),
      ranked AS (
        SELECT
          base.*,
@@ -983,19 +1115,33 @@ function rankedCandidatesCte(params: RankedCteParams): string {
          -- breakdown reading the SAME values that fed the boost (derive-once).
          tim.days_on_market,
          tim.price_drop_pct,
+         -- #461: which comparison base drove the discount (segment vs pool), and
+         -- the comparable count behind it — carried through ranked.* so the card
+         -- chip tooltip and the detail breakdown can explain the number.
+         seg.below_market_base,
+         seg.comp_n AS below_market_comparables,
+         -- #461: the signed discount vs the CHOSEN comparison median (the
+         -- like-for-like segment's when it qualifies, else the whole-pool's —
+         -- resolved once in segmented). Positive = cheaper than comparables.
+         -- Uncapped/signed as before; the 50% cap (likely-m²-error guard) still
+         -- lives in the boost below, unchanged.
          CASE
-           WHEN base.ppm2 IS NOT NULL AND pool.n >= ${MIN_POOL_SIZE}
-                AND pool.median_ppm2 IS NOT NULL AND pool.median_ppm2 > 0
-           THEN (pool.median_ppm2 - base.ppm2) / pool.median_ppm2
+           WHEN base.ppm2 IS NOT NULL
+                AND seg.comp_median_ppm2 IS NOT NULL AND seg.comp_median_ppm2 > 0
+           THEN (seg.comp_median_ppm2 - base.ppm2) / seg.comp_median_ppm2
            ELSE NULL
          END AS below_market_pct,
          (
            COALESCE(base.score, ${NO_SCORE_SENTINEL})
+           -- #461: below-market boost now reads the CHOSEN comparison median
+           -- (segment or pool). The cap (${BELOW_MARKET_DISCOUNT_CAP}) and weight
+           -- (${BELOW_MARKET_WEIGHT}) are UNCHANGED — only the underlying median
+           -- improved, so MAX_TOTAL_BOOST and the never-scored floor still hold.
            + CASE
-               WHEN base.ppm2 IS NOT NULL AND pool.n >= ${MIN_POOL_SIZE}
-                    AND pool.median_ppm2 IS NOT NULL AND pool.median_ppm2 > 0
+               WHEN base.ppm2 IS NOT NULL
+                    AND seg.comp_median_ppm2 IS NOT NULL AND seg.comp_median_ppm2 > 0
                THEN LEAST(
-                      GREATEST((pool.median_ppm2 - base.ppm2) / pool.median_ppm2, 0),
+                      GREATEST((seg.comp_median_ppm2 - base.ppm2) / seg.comp_median_ppm2, 0),
                       ${BELOW_MARKET_DISCOUNT_CAP}
                     ) * ${BELOW_MARKET_WEIGHT}
                ELSE 0
@@ -1013,7 +1159,11 @@ function rankedCandidatesCte(params: RankedCteParams): string {
            -- above for the recomputed ceiling).
            + (${timingBoostSql})
          ) AS effective_score
-       FROM base CROSS JOIN pool
+       -- pool is no longer joined here: the whole-pool median is now consumed
+       -- only inside segmented (as the fallback base), which projects the
+       -- chosen median/base/count per property. ranked reads that instead.
+       FROM base
+       LEFT JOIN segmented seg ON seg.property_id = base.property_id
        LEFT JOIN novelty nov ON nov.property_id = base.property_id
        LEFT JOIN price_moves pm ON pm.property_id = base.property_id
        LEFT JOIN timing tim ON tim.property_id = base.property_id
@@ -1325,8 +1475,12 @@ interface RawCandidateRow {
   score_kind: "cold_start" | "trained" | null;
   /** Blended sort key (#309) — pg NUMERIC/double, arrives as a string. */
   effective_score: string | null;
-  /** Signed discount fraction vs the pool median price/m² (#309), NUMERIC as a string; null when the pool is too small or price/m² is unknown. */
+  /** Signed discount fraction vs the CHOSEN comparison median price/m² (#309/#461), NUMERIC as a string; null when there was no comparison (no price/m², or even the pool too small). */
   below_market_pct: string | null;
+  /** #461: which base produced below_market_pct — 'segment' / 'pool' / null. */
+  below_market_base: "segment" | "pool" | null;
+  /** #461: comparable count behind below_market_pct (segment size or pool count); a plain int, null when no comparison. */
+  below_market_comparables: number | null;
   /** 0–3 distress axes flagged (#309); a plain int. */
   distress_level: number;
   /** #392: graded beach proximity from the latest `location` row; null when unassessed or `none`. Feeds the ranking-boost reason (the badge itself comes from loadFlags). */
@@ -1884,6 +2038,11 @@ export async function listCandidates(
        ranked.score_kind,
        ranked.effective_score,
        ranked.below_market_pct,
+       -- #461: the like-for-like comparison base + comparable count, so the
+       -- card's price chip can explain "comparado con N similares" vs "mediana
+       -- del perfil" without re-querying.
+       ranked.below_market_base,
+       ranked.below_market_comparables,
        ranked.distress_level,
        ranked.beach_proximity,
        -- #452 timing signals derived in the timing CTE — carried onto the row
@@ -2109,6 +2268,8 @@ export async function listCandidates(
         r.effective_score != null ? Number(r.effective_score) : null,
       below_market_pct:
         r.below_market_pct != null ? Number(r.below_market_pct) : null,
+      below_market_base: r.below_market_base ?? null,
+      below_market_comparables: r.below_market_comparables ?? null,
       distress_level: r.distress_level ?? 0,
       ranking_boost_reason: describeRankingBoost(
         r.below_market_pct != null ? Number(r.below_market_pct) : null,
@@ -2363,6 +2524,10 @@ export async function getAdjacentCandidates(
  */
 export interface PropertyMarketSignals {
   below_market_pct: number | null;
+  /** #461: which base produced below_market_pct — 'segment' / 'pool' / null. */
+  below_market_base: "segment" | "pool" | null;
+  /** #461: comparable count behind below_market_pct (segment size or pool count); null when no comparison. */
+  below_market_comparables: number | null;
   price_changed: boolean;
   price_delta_pct: number | null;
   price_direction: "drop" | "up" | null;
@@ -2375,6 +2540,8 @@ export async function getPropertyMarketSignals(
   const { minFrac, maxFrac } = readPriceChangeBand();
   const rows = await sql<{
     below_market_pct: string | null;
+    below_market_base: "segment" | "pool" | null;
+    below_market_comparables: number | null;
     price_delta_pct: string | null;
   }>(
     `WITH sp AS (
@@ -2389,7 +2556,7 @@ export async function getPropertyMarketSignals(
        bandMaxParam: "$4",
        coldStartParam: "false",
      })}
-     SELECT below_market_pct, price_delta_pct
+     SELECT below_market_pct, below_market_base, below_market_comparables, price_delta_pct
        FROM ranked
       WHERE property_id = $5::bigint`,
     [profileId, WARN_CAVEAT_CODES, minFrac, maxFrac, propertyId],
@@ -2402,6 +2569,8 @@ export async function getPropertyMarketSignals(
   const change = classifyPriceChange(rawDelta, minFrac, maxFrac);
   return {
     below_market_pct: belowMarket,
+    below_market_base: rows[0].below_market_base ?? null,
+    below_market_comparables: rows[0].below_market_comparables ?? null,
     price_changed: change.price_changed,
     price_delta_pct: change.price_delta_pct,
     price_direction: change.price_direction,
@@ -2432,6 +2601,10 @@ export interface PropertyInvestorScore {
   base_score: number | null;
   effective_score: number | null;
   below_market_pct: number | null;
+  /** #461: which base produced below_market_pct — 'segment' / 'pool' / null (explained in the breakdown). */
+  below_market_base: "segment" | "pool" | null;
+  /** #461: comparable count behind below_market_pct; null when no comparison. */
+  below_market_comparables: number | null;
   distress_level: number;
   beach_proximity: string | null;
   tourist_license: boolean;
@@ -2450,6 +2623,8 @@ export async function getPropertyInvestorScore(
     base_score: string | null;
     effective_score: string | null;
     below_market_pct: string | null;
+    below_market_base: "segment" | "pool" | null;
+    below_market_comparables: number | null;
     distress_level: number;
     beach_proximity: string | null;
     tourist_license: boolean | null;
@@ -2472,6 +2647,8 @@ export async function getPropertyInvestorScore(
        score AS base_score,
        effective_score,
        below_market_pct,
+       below_market_base,
+       below_market_comparables,
        distress_level,
        beach_proximity,
        tourist_license,
@@ -2498,6 +2675,8 @@ export async function getPropertyInvestorScore(
       r.effective_score !== null ? Number(r.effective_score) : null,
     below_market_pct:
       r.below_market_pct !== null ? Number(r.below_market_pct) : null,
+    below_market_base: r.below_market_base ?? null,
+    below_market_comparables: r.below_market_comparables ?? null,
     distress_level: r.distress_level ?? 0,
     beach_proximity: r.beach_proximity ?? null,
     tourist_license: r.tourist_license === true,

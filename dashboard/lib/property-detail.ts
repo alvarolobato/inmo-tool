@@ -139,6 +139,10 @@ export interface PropertyDetail {
    * "absent, not a placeholder" rule the rest of the detail follows.
    */
   below_market_pct?: number | null;
+  /** #461: which base produced below_market_pct — 'segment' (like-for-like comparables) / 'pool' (whole-profile median) / null. Lets the header chip explain the number. */
+  below_market_base?: "segment" | "pool" | null;
+  /** #461: comparable count behind below_market_pct (segment size or pool count); null when no comparison. */
+  below_market_comparables?: number | null;
   price_changed?: boolean;
   price_delta_pct?: number | null;
   price_direction?: "drop" | "up" | null;

@@ -1119,6 +1119,186 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
     });
   });
 
+  describe("like-for-like below-market segmentation (#461)", () => {
+    // Seed a matched, scored candidate with FULL control over the segmentation
+    // axes: rooms, m² built and floor (free text as the portals publish it).
+    // Unlike the shared insertProperty (which hardcodes m2=70, rooms/floor NULL —
+    // so segments never form and everything falls back to the pool), this lets a
+    // test build a real like-for-like segment and contrast it with the pool.
+    async function seedSeg(
+      pool: Pool,
+      profileId: number,
+      opts: {
+        price: number;
+        rooms: number;
+        m2: number;
+        floor?: string | null;
+        score?: number | null;
+      },
+    ): Promise<number> {
+      const res = await pool.query<{ id: number }>(
+        `INSERT INTO property (lat, lon, property_type, m2_built, rooms, floor, address)
+         VALUES ($1, $2, 'piso', $3, $4, $5, 'Calle Trafalgar, Chamberí, Madrid') RETURNING id`,
+        [TEST_COORDS[0], TEST_COORDS[1], opts.m2, opts.rooms, opts.floor ?? null],
+      );
+      const id = Number(res.rows[0].id);
+      createdPropertyIds.push(id);
+      await insertListing(pool, id, { source: "fotocasa", current_price: opts.price });
+      await markMatched(pool, profileId, id);
+      await setScore(pool, profileId, id, opts.score ?? 0.4);
+      return id;
+    }
+
+    it("measures the discount against the like-for-like segment, not the whole-pool median, and records base='segment'", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // A cluster of small, cheap 1-hab/40m² flats drags the WHOLE-pool median
+        // down — comparing an atypical unit against it manufactures a phantom
+        // discount. Seed 5 of them at 2.500 €/m².
+        for (let i = 0; i < 5; i++) {
+          await seedSeg(pool, profileId, { price: 100000, rooms: 1, m2: 40, floor: "2" });
+        }
+        // The target's own segment: 4-hab / 100 m² / upper floor, comparables at
+        // 6.000 €/m². The target is at 4.000 €/m² → 33% below its LIKE-FOR-LIKE
+        // segment, but ABOVE the (small-flat-dominated) whole-pool median.
+        for (let i = 0; i < 3; i++) {
+          await seedSeg(pool, profileId, { price: 600000, rooms: 4, m2: 100, floor: "5" });
+        }
+        const target = await seedSeg(pool, profileId, {
+          price: 400000,
+          rooms: 4,
+          m2: 100,
+          floor: "5",
+        });
+
+        const page = await listCandidates(profileId, { limit: 50 });
+        const row = page.items.find((i) => i.property_id === target)!;
+
+        // Segment median 6.000, target 4.000 → 33% below, NOT the negative
+        // (above-market) figure the whole-pool median would give.
+        expect(row.below_market_base).toBe("segment");
+        expect(row.below_market_pct!).toBeCloseTo(1 / 3, 2);
+        expect(row.below_market_pct!).toBeGreaterThan(0);
+        // Segment includes the target itself + its 3 comps.
+        expect(row.below_market_comparables).toBe(4);
+      });
+    });
+
+    it("falls back to the whole-pool median (base='pool') when the segment has fewer than MIN_POOL_SIZE comparables", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // Whole pool is large enough (≥ 3 priced), but the target's segment is
+        // not: only the target + ONE like-for-like comp (seg_n = 2 < 3).
+        for (let i = 0; i < 3; i++) {
+          await seedSeg(pool, profileId, { price: 200000, rooms: 1, m2: 45, floor: "3" });
+        }
+        await seedSeg(pool, profileId, { price: 500000, rooms: 5, m2: 130, floor: "6" });
+        const target = await seedSeg(pool, profileId, {
+          price: 300000,
+          rooms: 5,
+          m2: 130,
+          floor: "6",
+        });
+
+        const page = await listCandidates(profileId, { limit: 50 });
+        const row = page.items.find((i) => i.property_id === target)!;
+
+        // Segment too small (2 < 3) → graceful fallback to the whole-pool median.
+        expect(row.below_market_base).toBe("pool");
+        // A real, non-null discount is still produced (coverage preserved).
+        expect(row.below_market_pct).not.toBeNull();
+      });
+    });
+
+    it("never compares a ground-floor (bajo) unit against upper floors", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // Upper-floor comps priced HIGH (5.714 €/m²) — 5 of them, so they'd
+        // dominate the whole-pool median if a bajo were compared against the pool.
+        for (let i = 0; i < 5; i++) {
+          await seedSeg(pool, profileId, { price: 400000, rooms: 3, m2: 70, floor: "4" });
+        }
+        // Ground-floor comps priced LOW (2.857 €/m²) — the market prices bajos
+        // lower. 3 of them, so a bajo target forms its own ground segment.
+        for (let i = 0; i < 3; i++) {
+          await seedSeg(pool, profileId, { price: 200000, rooms: 3, m2: 70, floor: "Bajo" });
+        }
+        // Target: a bajo at 2.142 €/m² (150.000 / 70). vs the GROUND segment
+        // (median 2.857) it is ~25% below; vs the upper-dominated whole pool it
+        // would look ~62% below — a phantom discount the segmentation must avoid.
+        const target = await seedSeg(pool, profileId, {
+          price: 150000,
+          rooms: 3,
+          m2: 70,
+          floor: "Bajo",
+        });
+
+        const page = await listCandidates(profileId, { limit: 50 });
+        const row = page.items.find((i) => i.property_id === target)!;
+
+        expect(row.below_market_base).toBe("segment");
+        // Compared only against the 4 ground-floor units (target + 3 comps).
+        expect(row.below_market_comparables).toBe(4);
+        expect(row.below_market_pct!).toBeCloseTo(0.25, 2);
+        // NOT the ~62% phantom discount the upper-floor pool would fabricate.
+        expect(row.below_market_pct!).toBeLessThan(0.4);
+      });
+    });
+
+    it("recomputes below_market_pct on the segment but keeps the 50% boost cap intact", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // A like-for-like segment at 4.000 €/m²; the target at 1.000 €/m² → a 75%
+        // discount vs its segment (well past the 50% cap that guards likely-m²-
+        // error data).
+        for (let i = 0; i < 3; i++) {
+          await seedSeg(pool, profileId, { price: 400000, rooms: 3, m2: 100, floor: "3", score: 0.4 });
+        }
+        const target = await seedSeg(pool, profileId, {
+          price: 100000,
+          rooms: 3,
+          m2: 100,
+          floor: "3",
+          score: 0.4,
+        });
+
+        const page = await listCandidates(profileId, { limit: 50 });
+        const row = page.items.find((i) => i.property_id === target)!;
+
+        // The RAW segment discount is surfaced uncapped (~0.75)…
+        expect(row.below_market_base).toBe("segment");
+        expect(row.below_market_pct!).toBeCloseTo(0.75, 2);
+        // …but the BOOST it contributes is capped at 0.5 × 0.5 = 0.25, so the
+        // effective_score lifts the 0.4 base by no more than 0.25.
+        expect(row.effective_score!).toBeCloseTo(0.4 + 0.25, 4);
+      });
+    });
+
+    it("degrades to the whole-pool median unchanged when rooms/floor are unknown (existing behaviour preserved)", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // insertProperty leaves rooms/floor NULL — so no segment can form and the
+        // discount is computed against the whole pool exactly as before #461.
+        for (let i = 0; i < 3; i++) {
+          const id = await insertProperty(pool);
+          await insertListing(pool, id, { current_price: 300000 });
+          await markMatched(pool, profileId, id);
+          await setScore(pool, profileId, id, 0.3);
+        }
+        const deal = await insertProperty(pool);
+        await insertListing(pool, deal, { current_price: 180000 });
+        await markMatched(pool, profileId, deal);
+        await setScore(pool, profileId, deal, 0.3);
+
+        const page = await listCandidates(profileId, { limit: 50 });
+        const row = page.items.find((i) => i.property_id === deal)!;
+        expect(row.below_market_base).toBe("pool");
+        // (300k − 180k)/300k = 0.4 vs the whole-pool median, unchanged by #461.
+        expect(row.below_market_pct!).toBeCloseTo(0.4, 2);
+      });
+    });
+  });
+
   describe("hard filters — occupancy / condition / below-market (#310, D-059)", () => {
     // A matched, priced candidate with optional occupancy + condition
     // assessments. Reuses the SAME signals the ranking blend reads (the
