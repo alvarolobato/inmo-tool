@@ -18,6 +18,19 @@ EXCEPTION WHEN OTHERS THEN
 END
 $$;
 
+-- unaccent powers the free-text search config (#470): "malaga" ≈ "málaga",
+-- "atico" ≈ "ático" for portal descriptions. Guarded like pgcrypto above so a
+-- role without CREATE EXTENSION privilege (or an image lacking contrib) falls
+-- back with a notice; the es_unaccent config created later degrades to exact
+-- accents in that case (see the Free-text search section below).
+DO $$
+BEGIN
+  CREATE EXTENSION IF NOT EXISTS unaccent;
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'unaccent not available — free-text search will degrade to exact accents';
+END
+$$;
+
 -- PostgreSQL DDL for the inmo-tool canonical real-estate data model.
 -- See docs/architecture/data-model.md for the full ER description and
 -- design rationale (especially the property_id-vs-listing_id keying
@@ -1992,6 +2005,297 @@ CREATE TRIGGER trg_profile_connector_filter_set_updated_at
     EXECUTE FUNCTION set_updated_at();
 
 
+-- ============================================================
+-- Free-text search over the candidate feed (issue #470, Phase 1)
+-- ============================================================
+--
+-- The feed's structured filters (source, occupancy, condition, gravamen,
+-- alerta, playa, casco, VPO, descuento) can't answer "show me the ones whose
+-- ad or evaluation mentions terraza / okupado / herencia / Calle Larios". That
+-- text lives across THREE tables — listing.description/reference_code/
+-- contact_raw, property.address/city/…/features, and the latest ai_assessment
+-- row per axis — so an on-the-fly ILIKE across all of it would seq-scan every
+-- feed request. Instead we materialize a per-property tsvector (property_search_doc)
+-- kept fresh by triggers, and the feed composes it as one more filter in the
+-- OUTER WHERE (see listCandidates in dashboard/lib/candidates.ts): the keyset
+-- cursor on (novelty_tier, effective_score, property_id) is untouched — this is
+-- a filter, not a re-sort (owner decision 1: FILTER, not rank). Relevance
+-- ordering is a later optional phase.
+--
+-- Everything below is idempotent (CREATE ... IF NOT EXISTS / CREATE OR REPLACE /
+-- DROP TRIGGER IF EXISTS + a WHERE NOT EXISTS backfill): re-running init.sql on
+-- every ETL container startup is a no-op.
+
+-- Spanish text-search config with unaccent folding. Guarded on pg_ts_config so
+-- a re-run is a no-op. If the unaccent dictionary is unavailable (extension
+-- failed to create above), the ALTER MAPPING degrades to spanish stemming only
+-- (accents become exact) rather than aborting — the config still EXISTS, so the
+-- refresh function's to_tsvector('es_unaccent', …) never errors at runtime.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_ts_config WHERE cfgname = 'es_unaccent') THEN
+    CREATE TEXT SEARCH CONFIGURATION es_unaccent (COPY = spanish);
+    BEGIN
+      ALTER TEXT SEARCH CONFIGURATION es_unaccent
+        ALTER MAPPING FOR hword, hword_part, word
+        WITH unaccent, spanish_stem;
+    EXCEPTION WHEN OTHERS THEN
+      RAISE NOTICE 'unaccent dictionary unavailable — es_unaccent uses spanish stemming only (accents exact)';
+    END;
+  END IF;
+END
+$$;
+
+-- The materialized search document — one tsvector per property. A separate
+-- table, not a GENERATED column on property: the document crosses listing +
+-- ai_assessment, which a STORED generated column may not reference. ON DELETE
+-- CASCADE removes the doc when a property is deleted (e.g. an orphan dropped
+-- after a dedup merge).
+CREATE TABLE IF NOT EXISTS property_search_doc (
+    property_id BIGINT       PRIMARY KEY REFERENCES property(id) ON DELETE CASCADE,
+    doc         TSVECTOR     NOT NULL,
+    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_property_search_doc_gin
+    ON property_search_doc USING GIN (doc);
+
+-- Recompose the document for ONE property from property + its active listings +
+-- the latest ai_assessment row per axis (same DISTINCT ON ... generated_at DESC
+-- rule loadFlags/the ranked CTE use). Weighted:
+--   A — location identity: address, city, province, postal_code, cadastral_ref,
+--       and every listing reference_code.
+--   B — the big text: description of each ACTIVE listing (any operation, all
+--       sources — the doc is GLOBAL per property, not per profile; per-source
+--       visibility stays governed by the feed's ranked CTE, D-055 nuance).
+--   C — structured attributes (source, property_type, floor, features,
+--       contact_raw) + assessment-derived codes AND their Spanish labels, so
+--       both "nuda_propiedad"/"nuda propiedad" and English codes with their
+--       card labels ("tenanted"→alquilado, "frontline"→primera línea de playa)
+--       match. The CASE vocabulary mirrors the TS label maps (CAVEAT_LABELS /
+--       REDFLAG_LABELS in lib/candidates.ts + lib/ai-assessment/redflags.ts,
+--       BEACH_PROXIMITY_LABELS/HERITAGE_ZONE_LABEL in location-vocabulary.ts) —
+--       keep them in sync (same closed-vocabulary discipline as WARN_CAVEAT_CODES).
+-- Numbers (price/rooms/m²/bathrooms) are deliberately OUT — the profile's range
+-- filters + the discount filter own them (owner decision 2). Evidence quotes are
+-- out too (redundant with weight B). CREATE OR REPLACE so a re-run just updates.
+CREATE OR REPLACE FUNCTION refresh_property_search_doc(p_property_id BIGINT)
+RETURNS void AS $$
+DECLARE
+  v_prop      property%ROWTYPE;
+  v_a_text    TEXT;
+  v_b_text    TEXT;
+  v_c_text    TEXT;
+  v_ref       TEXT;
+  v_sources   TEXT;
+  v_contacts  TEXT;
+  v_assess    TEXT;
+BEGIN
+  SELECT * INTO v_prop FROM property WHERE id = p_property_id;
+  IF NOT FOUND THEN
+    -- Property gone (deleted after a merge). ON DELETE CASCADE already removed
+    -- the doc row, but delete defensively in case this is called mid-transaction.
+    DELETE FROM property_search_doc WHERE property_id = p_property_id;
+    RETURN;
+  END IF;
+
+  -- Weight A: property location identity + listing reference codes.
+  SELECT string_agg(l.reference_code, ' ')
+    INTO v_ref
+    FROM listing l
+   WHERE l.property_id = p_property_id AND l.reference_code IS NOT NULL;
+  v_a_text := concat_ws(' ',
+    v_prop.address, v_prop.city, v_prop.province, v_prop.postal_code,
+    v_prop.cadastral_ref, v_ref);
+
+  -- Weight B: descriptions of active listings (all sources, all operations).
+  SELECT string_agg(l.description, ' ')
+    INTO v_b_text
+    FROM listing l
+   WHERE l.property_id = p_property_id
+     AND l.status = 'active'
+     AND l.description IS NOT NULL;
+
+  -- Weight C, part 1: active listings' source slugs + agency contact.
+  SELECT string_agg(DISTINCT l.source, ' ')
+    INTO v_sources
+    FROM listing l
+   WHERE l.property_id = p_property_id AND l.status = 'active';
+  SELECT string_agg(l.contact_raw, ' ')
+    INTO v_contacts
+    FROM listing l
+   WHERE l.property_id = p_property_id AND l.status = 'active'
+     AND l.contact_raw IS NOT NULL;
+
+  -- Weight C, part 2: assessment-derived codes + Spanish labels, from the
+  -- latest row per axis. Codes already Spanish (nuda_propiedad, a_reformar) get
+  -- replace('_',' '); English codes add their card label via a small CASE.
+  WITH latest AS (
+    SELECT DISTINCT ON (a.assessment_type) a.assessment_type, a.result
+      FROM ai_assessment a
+     WHERE a.property_id = p_property_id
+       AND a.assessment_type IN ('occupancy','condition','redflags','location','opportunity')
+     ORDER BY a.assessment_type, a.generated_at DESC NULLS LAST, a.id DESC
+  )
+  SELECT concat_ws(' ',
+    -- occupancy caveats: raw code + label for the English ones.
+    (SELECT string_agg(
+              replace(cv, '_', ' ') ||
+              CASE cv
+                WHEN 'tenanted'           THEN ' alquilado'
+                WHEN 'occupied_illegally' THEN ' ocupado okupado'
+                ELSE '' END, ' ')
+       FROM latest lo
+       CROSS JOIN LATERAL jsonb_array_elements_text(lo.result->'caveats') cv
+      WHERE lo.assessment_type = 'occupancy'
+        AND jsonb_typeof(lo.result->'caveats') = 'array'),
+    -- condition category + renovation depth (both flat text on the row).
+    (SELECT concat_ws(' ',
+              replace(lc.result->>'condition', '_', ' '),
+              replace(lc.result->>'renovation_severity', '_', ' '),
+              CASE lc.result->>'condition'
+                WHEN 'a_reformar' THEN 'a reformar reformar'
+                WHEN 'obra_nueva' THEN 'obra nueva'
+                ELSE '' END)
+       FROM latest lc WHERE lc.assessment_type = 'condition'),
+    -- redflags: each flag's type + description + label, plus any proposed
+    -- candidate_type + its definition. Evidence quotes excluded (weight B).
+    (SELECT string_agg(concat_ws(' ',
+              replace(rf.value->>'type', '_', ' '),
+              rf.value->>'description',
+              CASE rf.value->>'type'
+                WHEN 'unfinished_construction' THEN 'obra inacabada obra sin terminar'
+                WHEN 'structural_damage'       THEN 'dano estructural danos estructurales'
+                ELSE '' END,
+              replace(rf.value->>'candidate_type', '_', ' '),
+              rf.value->>'candidate_definition'), ' ')
+       FROM latest lr
+       CROSS JOIN LATERAL jsonb_array_elements(lr.result->'flags') rf
+      WHERE lr.assessment_type = 'redflags'
+        AND jsonb_typeof(lr.result->'flags') = 'array'
+        AND jsonb_typeof(rf.value) = 'object'
+        AND rf.value->>'type' IS NOT NULL),
+    -- location: beach proximity grade (code + label) + heritage zone.
+    (SELECT concat_ws(' ',
+              CASE ll.result->>'beach_proximity'
+                WHEN 'frontline'  THEN 'frontline primera linea de playa'
+                WHEN 'sea_view'   THEN 'sea_view vistas al mar'
+                WHEN 'near_beach' THEN 'near_beach cerca de la playa'
+                ELSE '' END,
+              CASE WHEN ll.result->>'heritage_zone' = 'true'
+                   THEN 'casco historico zona patrimonio' ELSE '' END)
+       FROM latest ll WHERE ll.assessment_type = 'location'),
+    -- opportunity: VPO + tourist licence flags → the labels the card shows.
+    (SELECT concat_ws(' ',
+              CASE WHEN lop.result->>'is_vpo' = 'true'
+                   THEN 'vpo vivienda protegida' ELSE '' END,
+              CASE WHEN lop.result->>'tourist_license' = 'true'
+                   THEN 'licencia turistica vut' ELSE '' END)
+       FROM latest lop WHERE lop.assessment_type = 'opportunity')
+  ) INTO v_assess;
+
+  v_c_text := concat_ws(' ',
+    v_sources, v_prop.property_type, v_prop.floor,
+    array_to_string(v_prop.features, ' '), v_contacts, v_assess);
+
+  INSERT INTO property_search_doc (property_id, doc, updated_at)
+  VALUES (
+    p_property_id,
+         setweight(to_tsvector('es_unaccent', coalesce(v_a_text, '')), 'A')
+      || setweight(to_tsvector('es_unaccent', coalesce(v_b_text, '')), 'B')
+      || setweight(to_tsvector('es_unaccent', coalesce(v_c_text, '')), 'C'),
+    NOW()
+  )
+  ON CONFLICT (property_id) DO UPDATE
+    SET doc = EXCLUDED.doc, updated_at = NOW();
+END;
+$$ LANGUAGE plpgsql;
+
+-- Shared trigger function: recompute the affected property's doc AFTER any write
+-- that could change searchable text. Heterogeneous writers (ETL connectors, the
+-- browser-capture path, dashboard assessment saves, dedup merges) are ALL
+-- covered without touching app code. RETURN NULL — these are AFTER triggers.
+CREATE OR REPLACE FUNCTION trg_refresh_property_search_doc()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_TABLE_NAME = 'property' THEN
+    PERFORM refresh_property_search_doc(NEW.id);
+  ELSIF TG_TABLE_NAME = 'listing' THEN
+    -- A dedup merge reassigns listing.property_id: refresh BOTH the property
+    -- the listing left (its text shrinks) and the one it joined.
+    IF TG_OP = 'UPDATE' AND OLD.property_id IS DISTINCT FROM NEW.property_id THEN
+      PERFORM refresh_property_search_doc(OLD.property_id);
+    END IF;
+    PERFORM refresh_property_search_doc(NEW.property_id);
+  ELSIF TG_TABLE_NAME = 'ai_assessment' THEN
+    PERFORM refresh_property_search_doc(NEW.property_id);
+  END IF;
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+-- property: refresh on insert, and on updates to any searchable column only —
+-- an UPDATE OF list so unrelated column bumps don't fire a recompute.
+DROP TRIGGER IF EXISTS trg_property_search_doc_ins ON property;
+CREATE TRIGGER trg_property_search_doc_ins
+    AFTER INSERT ON property
+    FOR EACH ROW EXECUTE FUNCTION trg_refresh_property_search_doc();
+DROP TRIGGER IF EXISTS trg_property_search_doc_upd ON property;
+CREATE TRIGGER trg_property_search_doc_upd
+    AFTER UPDATE OF address, city, province, postal_code, cadastral_ref,
+                    property_type, floor, features
+    ON property
+    FOR EACH ROW EXECUTE FUNCTION trg_refresh_property_search_doc();
+
+-- listing: the UPDATE OF list + WHEN guard is what stops the nightly last_seen_at
+-- / missed_discovery_count sweep (a bulk UPDATE of those unrelated columns) from
+-- firing a recompute for every active listing — only a real change to searchable
+-- text (or a property_id reassignment) refreshes. INSERT has no WHEN (no OLD).
+DROP TRIGGER IF EXISTS trg_listing_search_doc_ins ON listing;
+CREATE TRIGGER trg_listing_search_doc_ins
+    AFTER INSERT ON listing
+    FOR EACH ROW EXECUTE FUNCTION trg_refresh_property_search_doc();
+DROP TRIGGER IF EXISTS trg_listing_search_doc_upd ON listing;
+CREATE TRIGGER trg_listing_search_doc_upd
+    AFTER UPDATE OF description, property_id, status, source, reference_code, contact_raw
+    ON listing
+    FOR EACH ROW
+    WHEN (
+         OLD.description    IS DISTINCT FROM NEW.description
+      OR OLD.property_id    IS DISTINCT FROM NEW.property_id
+      OR OLD.status         IS DISTINCT FROM NEW.status
+      OR OLD.source         IS DISTINCT FROM NEW.source
+      OR OLD.reference_code IS DISTINCT FROM NEW.reference_code
+      OR OLD.contact_raw    IS DISTINCT FROM NEW.contact_raw
+    )
+    EXECUTE FUNCTION trg_refresh_property_search_doc();
+
+-- ai_assessment: low write frequency, so refresh unconditionally on insert/update.
+DROP TRIGGER IF EXISTS trg_ai_assessment_search_doc ON ai_assessment;
+CREATE TRIGGER trg_ai_assessment_search_doc
+    AFTER INSERT OR UPDATE ON ai_assessment
+    FOR EACH ROW EXECUTE FUNCTION trg_refresh_property_search_doc();
+
+-- One-time migration: backfill the doc for every existing property that has none
+-- yet. Idempotent via WHERE NOT EXISTS + reuse of refresh_property_search_doc, so
+-- the backfill produces byte-identical docs to the triggers and re-running does
+-- nothing once populated. The table is permanent — no post-backfill cleanup.
+DO $$
+DECLARE
+  r RECORD;
+BEGIN
+  FOR r IN
+    SELECT p.id
+      FROM property p
+     WHERE NOT EXISTS (
+             SELECT 1 FROM property_search_doc d WHERE d.property_id = p.id)
+  LOOP
+    PERFORM refresh_property_search_doc(r.id);
+  END LOOP;
+END
+$$;
+
+
 -- URL-building discovery catalog (issue #336, D-063).
 --
 -- One row per connector × discovery session. The browser extension enumerates a
@@ -2594,3 +2898,4 @@ ANALYZE capture_task_run;
 ANALYZE search_url_example;
 ANALYZE captured_search_urls;
 ANALYZE profile_connector_filter;
+ANALYZE property_search_doc;

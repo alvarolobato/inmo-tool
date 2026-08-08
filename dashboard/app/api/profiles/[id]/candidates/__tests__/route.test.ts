@@ -154,6 +154,7 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       null,
       ...NOVELTY_TAIL_PAGE1,
       null, // #466 hasAlerts ($24), off by default
+      null, // #470 q ($25), off by default
     ]);
   });
 
@@ -187,6 +188,7 @@ describe("GET /api/profiles/[id]/candidates — source (portal) filter (#265)", 
       null,
       ...NOVELTY_TAIL_PAGE1,
       null, // #466 hasAlerts ($24), off by default
+      null, // #470 q ($25), off by default
     ]);
   });
 });
@@ -273,6 +275,7 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
       null,
       ...NOVELTY_TAIL_PAGE1,
       null, // #466 hasAlerts ($24), off by default
+      null, // #470 q ($25), off by default
     ]);
   });
 
@@ -575,6 +578,84 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
       expect(res.status).toBe(400);
       expect(mockQuery).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe("GET /api/profiles/[id]/candidates — free-text search q (#470)", () => {
+  it("passes a trimmed q to listCandidates as $25", async () => {
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
+
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?q=%20terraza%20"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(200);
+    // $25 (index 24) is the free-text term, trimmed.
+    expect(candidatesParams()[24]).toBe("terraza");
+    // The SQL binds it to websearch_to_tsquery, never interpolates it.
+    expect(candidatesCall()[0]).toContain(
+      "websearch_to_tsquery('es_unaccent', $25::text)",
+    );
+  });
+
+  it("leaves q off ($25 = null) when absent or empty/whitespace-only", async () => {
+    for (const url of [
+      "http://localhost/api/profiles/3/candidates",
+      "http://localhost/api/profiles/3/candidates?q=",
+      "http://localhost/api/profiles/3/candidates?q=%20%20",
+    ]) {
+      mockQuery.mockClear();
+      queue = [];
+      enqueue({ rows: [profileRow()] });
+      enqueue({ rows: [] });
+      const res = await GET(makeRequest(url), ctx("3"));
+      expect(res.status).toBe(200);
+      expect(candidatesParams()[24]).toBeNull();
+    }
+  });
+
+  it("rejects a q longer than 200 chars before touching the DB (400)", async () => {
+    const long = "a".repeat(201);
+    const res = await GET(
+      makeRequest(
+        `http://localhost/api/profiles/3/candidates?q=${encodeURIComponent(long)}`,
+      ),
+      ctx("3"),
+    );
+    expect(res.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("accepts a q at exactly the 200-char boundary and passes it through", async () => {
+    const boundary = "a".repeat(200);
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
+    const res = await GET(
+      makeRequest(
+        `http://localhost/api/profiles/3/candidates?q=${encodeURIComponent(boundary)}`,
+      ),
+      ctx("3"),
+    );
+    expect(res.status).toBe(200);
+    expect(candidatesParams()[24]).toBe(boundary);
+  });
+
+  it("passes q as a bound parameter even when it contains SQL/tsquery metacharacters (never interpolated)", async () => {
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
+    const nasty = "'; DROP TABLE property; -- & | ! :* \"quoted\"";
+    const res = await GET(
+      makeRequest(
+        `http://localhost/api/profiles/3/candidates?q=${encodeURIComponent(nasty)}`,
+      ),
+      ctx("3"),
+    );
+    expect(res.status).toBe(200);
+    // Verbatim in the param array (websearch_to_tsquery digests it safely);
+    // the SQL text carries only the $25 placeholder, not the value.
+    expect(candidatesParams()[24]).toBe(nasty);
+    expect(candidatesCall()[0]).not.toContain("DROP TABLE");
   });
 });
 
