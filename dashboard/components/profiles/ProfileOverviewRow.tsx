@@ -118,6 +118,8 @@ function OverflowMenu({
   busy,
   cloneDisabled,
   cloneDisabledReason,
+  validateFiltersHref,
+  validateFiltersDisabledReason,
 }: {
   onEdit: () => void;
   onClone: () => void;
@@ -125,6 +127,17 @@ function OverflowMenu({
   busy: boolean;
   cloneDisabled?: boolean;
   cloneDisabledReason?: string;
+  /**
+   * When set (valid profiles), "Validar filtros" navigates here
+   * (`/profiles/[id]/filtros`). Rendered as a real <Link> so the href is
+   * inspectable and navigation is native.
+   */
+  validateFiltersHref?: string;
+  /**
+   * When set (broken-scope profiles), "Validar filtros" is disabled with this
+   * reason — a scope that can't be parsed has no search URLs to derive.
+   */
+  validateFiltersDisabledReason?: string;
 }) {
   return (
     <Menu as="div" style={{ position: "absolute", top: 10, right: 10 }}>
@@ -145,6 +158,25 @@ function OverflowMenu({
           <button type="button" onClick={onEdit} disabled={busy} style={menuItemStyle(busy)}>
             Editar
           </button>
+        </MenuItem>
+        {/* "Validar filtros" (issue #478): a valid profile links to its filters
+            page; a broken-scope one is disabled with a reason (no derivable
+            search URLs). Sits between Editar and Clonar per the issue. */}
+        <MenuItem>
+          {validateFiltersHref && !busy ? (
+            <Link href={validateFiltersHref} style={menuItemStyle(false)}>
+              Validar filtros
+            </Link>
+          ) : (
+            <button
+              type="button"
+              disabled
+              title={validateFiltersDisabledReason}
+              style={menuItemStyle(true)}
+            >
+              Validar filtros
+            </button>
+          )}
         </MenuItem>
         <MenuItem>
           <button
@@ -258,6 +290,7 @@ function BrokenProfileRow({
         busy={busy}
         cloneDisabled
         cloneDisabledReason="No se puede clonar un perfil con configuración inválida."
+        validateFiltersDisabledReason="No se pueden validar filtros de un perfil con configuración inválida (sin ámbito válido no hay URLs que derivar)."
       />
     </div>
   );
@@ -440,7 +473,13 @@ function ValidProfileRow({
         </Link>
       </div>
 
-      <OverflowMenu onEdit={onEdit} onClone={onClone} onArchive={onArchive} busy={busy} />
+      <OverflowMenu
+        onEdit={onEdit}
+        onClone={onClone}
+        onArchive={onArchive}
+        busy={busy}
+        validateFiltersHref={`/profiles/${profile.id}/filtros`}
+      />
       </div>
 
       {metrics.matched_count === 0 && showZeroDiagnostic && (

@@ -202,6 +202,26 @@ describe("ProfileOverviewRow (issue #193)", () => {
     expect(cloneItem).toBeDisabled();
   });
 
+  it("kebab menu exposes 'Validar filtros' linking to the profile's filters page (#478 P2)", () => {
+    const entry: ProfileOverviewEntry = { ok: true, profile: profile({ id: 55 }), metrics: metrics() };
+    render(<ProfileOverviewRow entry={entry} onEdit={noop} onClone={noop} onArchive={noop} busy={false} />);
+    fireEvent.click(screen.getByRole("button", { name: "Más acciones para este perfil" }));
+    const item = screen.getByRole("menuitem", { name: "Validar filtros" });
+    // Real <a> so navigation is native and the href is inspectable.
+    expect(item.tagName).toBe("A");
+    expect(item).toHaveAttribute("href", "/profiles/55/filtros");
+  });
+
+  it("kebab menu disables 'Validar filtros' on a broken-scope row, with a reason (#478 P2)", () => {
+    const entry: ProfileOverviewEntry = { ok: false, id: 99, name: "Perfil roto", issues: [] };
+    render(<ProfileOverviewRow entry={entry} onEdit={noop} onClone={noop} onArchive={noop} busy={false} />);
+    fireEvent.click(screen.getByRole("button", { name: "Más acciones para este perfil" }));
+    const item = screen.getByRole("menuitem", { name: "Validar filtros" });
+    expect(item.tagName).toBe("BUTTON");
+    expect(item).toBeDisabled();
+    expect(item).toHaveAttribute("title", expect.stringContaining("configuración inválida"));
+  });
+
   it("kebab menu is keyboard-reachable and labelled for screen readers", () => {
     const entry: ProfileOverviewEntry = { ok: true, profile: profile(), metrics: metrics() };
     render(<ProfileOverviewRow entry={entry} onEdit={noop} onClone={noop} onArchive={noop} busy={false} />);
