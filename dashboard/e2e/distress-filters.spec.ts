@@ -25,6 +25,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { Pool } from "pg";
 import { adminKey, seedAdminSession } from "./helpers/admin-session";
+import { openMoreFilters } from "./helpers/filter-bar";
 
 function buildPool(): Pool {
   const dsn = process.env.POSTGRES_DSN;
@@ -198,12 +199,9 @@ test("distress filters render, narrow the feed, and reset", async ({ page }) => 
   const cards = page.locator('[data-testid="candidate-card"]');
   await expect(cards).toHaveCount(5);
 
-  // The three #310 controls are present.
-  const occupancy = page.getByTestId("occupancy-filter");
-  const condition = page.getByTestId("condition-filter");
+  // Below-market lives in the primary row (#465); the AI-gated occupancy /
+  // condition controls moved into the "Más filtros" popover.
   const discount = page.getByTestId("discount-filter");
-  await expect(occupancy).toBeVisible();
-  await expect(condition).toBeVisible();
   await expect(discount).toBeVisible();
 
   // Below-market ≥15% (computed from price — works with no assessment data):
@@ -216,6 +214,13 @@ test("distress filters render, narrow the feed, and reset", async ({ page }) => 
   await expect(page.locator(card(p2Reformado))).toHaveCount(0);
   await discount.selectOption(""); // reset
   await expect(cards).toHaveCount(5);
+
+  // Open the popover to reach the occupancy / condition controls (#465).
+  await openMoreFilters(page);
+  const occupancy = page.getByTestId("occupancy-filter");
+  const condition = page.getByTestId("condition-filter");
+  await expect(occupancy).toBeVisible();
+  await expect(condition).toBeVisible();
 
   // Occupancy = Ocupado (from ai_assessment): the two tenanted properties.
   await occupancy.selectOption("occupied");

@@ -27,6 +27,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { Pool } from "pg";
 import { adminKey, seedAdminSession } from "./helpers/admin-session";
+import { openMoreFilters } from "./helpers/filter-bar";
 
 function buildPool(): Pool {
   const dsn = process.env.POSTGRES_DSN;
@@ -196,7 +197,8 @@ test("caveat + redflag filters render, narrow the feed, and reset", async ({ pag
   const cards = page.locator('[data-testid="candidate-card"]');
   await expect(cards).toHaveCount(4);
 
-  // Both new controls are present.
+  // Both controls live in the "Más filtros" popover (#465) — open it first.
+  await openMoreFilters(page);
   const caveat = page.getByTestId("caveat-filter");
   const redflag = page.getByTestId("redflag-filter");
   await expect(caveat).toBeVisible();

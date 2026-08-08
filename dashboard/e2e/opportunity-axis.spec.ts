@@ -24,6 +24,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { Pool } from "pg";
 import { adminKey, seedAdminSession } from "./helpers/admin-session";
+import { openMoreFilters } from "./helpers/filter-bar";
 
 function buildPool(): Pool {
   const dsn = process.env.POSTGRES_DSN;
@@ -205,6 +206,8 @@ test("VPO filter narrows bidirectionally, the tourist boost lifts without filter
   const cards = page.locator('[data-testid="candidate-card"]');
   await expect(cards).toHaveCount(4);
 
+  // The VPO control lives in the "Más filtros" popover (#465) — open it first.
+  await openMoreFilters(page);
   const vpo = page.getByTestId("vpo-filter");
   await expect(vpo).toBeVisible();
 
