@@ -429,7 +429,7 @@ export default function ProfilesPage() {
         onClose={() => setMode({ kind: "none" })}
         title="Editar perfil"
         testId="profile-edit-modal"
-        maxWidth={620}
+        maxWidth={700}
       >
         {mode.kind === "edit" && (
           <ProfileForm
@@ -450,7 +450,7 @@ export default function ProfilesPage() {
         onClose={() => setMode({ kind: "none" })}
         title="Reparar perfil"
         testId="profile-repair-modal"
-        maxWidth={620}
+        maxWidth={700}
       >
         {mode.kind === "repair" && (
           <>

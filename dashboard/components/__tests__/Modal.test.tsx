@@ -62,4 +62,31 @@ describe("Modal", () => {
     expect(screen.getByTestId("profile-edit-modal")).toBeInTheDocument();
     expect(screen.getByTestId("profile-edit-modal-backdrop")).toBeInTheDocument();
   });
+
+  // #459: the panel must sit on a different surface token than the inputs it
+  // contains. Form inputs use --bg-2 (see ProfileForm); the panel uses --bg-1
+  // so fields read as distinct, recessed boxes in both light and dark themes
+  // instead of blending into the panel (which was also --bg-2 before #459).
+  it("gives the panel a surface (--bg-1) distinct from the --bg-2 inputs", () => {
+    renderModal();
+    const panel = screen.getByRole("dialog");
+    const inputSurface = "var(--bg-2)"; // the token ProfileForm uses for inputs
+    expect(panel).toHaveStyle({ background: "var(--bg-1)" });
+    expect(panel.style.background).not.toBe(inputSurface);
+  });
+
+  // #459: the modal was widened. Default panel width tracks the wider max.
+  it("uses the widened default max width", () => {
+    renderModal();
+    expect(screen.getByRole("dialog")).toHaveStyle({
+      width: "min(640px, 95vw)",
+    });
+  });
+
+  it("honors a custom maxWidth override", () => {
+    renderModal({ maxWidth: 700 });
+    expect(screen.getByRole("dialog")).toHaveStyle({
+      width: "min(700px, 95vw)",
+    });
+  });
 });
