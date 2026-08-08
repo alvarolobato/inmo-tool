@@ -67,6 +67,7 @@ from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
     RawListing,
+    SearchPreview,
     Throttle,
 )
 from etl.connectors.extraction import first_present
@@ -288,6 +289,10 @@ class UnicajaConnector(Connector):
     # a fetch glitch can't read as "the whole province was withdrawn".
     discovers_full_inventory = True
 
+    # Issue #478: an owner-pinned unicaja URL may become this connector's recall
+    # source for a profile (discover() wiring is Phase 5).
+    override_host_suffix = "unicajainmuebles.com"
+
     def __init__(self) -> None:
         # Card data captured during the most recent discover(), keyed by
         # reference. fetch_detail() reads it to recover the postal code (and
@@ -324,6 +329,32 @@ class UnicajaConnector(Connector):
         if place is None:
             return None
         return province_to_ine_code(place.province)
+
+    def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
+        """Reuses the module-level `_search_url()` — the exact helper discover()
+        builds its first search page (`pagina=1`) from."""
+        try:
+            ine_code = self._scope_ine_code(scope)
+        except UnresolvableGeographyError:
+            ine_code = None
+        if ine_code is None:
+            return [
+                SearchPreview(
+                    label="Unicaja",
+                    url=None,
+                    kind="search_page",
+                    tunable=True,
+                    notes="El perfil no resuelve a una provincia que este conector cubra.",
+                )
+            ]
+        return [
+            SearchPreview(
+                label=f"Unicaja — provincia INE {ine_code}",
+                url=_search_url(ine_code, 1),
+                kind="search_page",
+                tunable=True,
+            )
+        ]
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         ine_code = self._scope_ine_code(scope)

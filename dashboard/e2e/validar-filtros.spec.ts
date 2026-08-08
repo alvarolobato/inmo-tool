@@ -46,15 +46,28 @@ const PINNED_IDEALISTA =
 // A hand-tuned aliseda URL the test pins during the run.
 const NEW_ALISEDA =
   "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/andalucia/sevilla/?precio=0-175000";
+// P4: the ETL-connector previews section. `pisos` is a tunable HTTP connector
+// (a real search page + an override_host_suffix); `cimenta2` is non-tunable
+// (national sitemap sweep). Both are seeded into the registry + preview tables
+// exactly as etl.orchestrator.sync_connector_registry / publish_search_previews
+// would publish them.
+const PISOS_PREVIEW_URL = "https://www.pisos.com/venta/pisos-sevilla/";
+const CIMENTA2_PREVIEW_URL = "https://inmuebles.cimenta2.com/inmuebles/s/sitemap.xml";
+// A hand-tuned pisos URL the test pins on the ETL section.
+const NEW_PISOS = "https://www.pisos.com/venta/pisos-sevilla/1-habitacion/";
+
+// A second profile so the ProfileSwitcher has somewhere to switch TO.
+const PROFILE_NAME_2 = "E2E-478P2 Validar filtros (segundo)";
 
 let pool: Pool;
 let dbAvailable = false;
 let profileId: number;
+let profileId2: number;
 
 async function purge(): Promise<void> {
   const existing = await pool.query<{ id: number }>(
-    "SELECT id FROM search_profile WHERE name = $1",
-    [PROFILE_NAME],
+    "SELECT id FROM search_profile WHERE name = ANY($1)",
+    [[PROFILE_NAME, PROFILE_NAME_2]],
   );
   for (const { id } of existing.rows) {
     // profile_connector_filter cascades on profile delete, but clear the other
@@ -64,7 +77,7 @@ async function purge(): Promise<void> {
       await pool.query(`DELETE FROM ${table} WHERE profile_id = $1`, [id]).catch(() => undefined);
     }
   }
-  await pool.query("DELETE FROM search_profile WHERE name = $1", [PROFILE_NAME]);
+  await pool.query("DELETE FROM search_profile WHERE name = ANY($1)", [[PROFILE_NAME, PROFILE_NAME_2]]);
 }
 
 test.beforeAll(async () => {
@@ -84,6 +97,12 @@ test.beforeAll(async () => {
     [PROFILE_NAME, JSON.stringify(SCOPE)],
   );
   profileId = r.rows[0].id;
+  const r2 = await pool.query<{ id: number }>(
+    `INSERT INTO search_profile (name, scope, thesis_params)
+     VALUES ($1, $2::jsonb, '{}'::jsonb) RETURNING id`,
+    [PROFILE_NAME_2, JSON.stringify(SCOPE)],
+  );
+  profileId2 = r2.rows[0].id;
   // Seed a whole-connector ('') idealista override so the idealista task is
   // governed by it (tier 0) — the "URL fijada" case.
   await pool.query(
@@ -91,7 +110,47 @@ test.beforeAll(async () => {
      VALUES ($1, 'idealista', '', $2, 'manual')`,
     [profileId, PINNED_IDEALISTA],
   );
+
+  // P4: stand in for what the ETL publishes — the pisos (tunable) + cimenta2
+  // (non-tunable) registry rows and their per-profile previews.
+  await pool.query(
+    `INSERT INTO connector_registry
+       (connector_name, registered, rate_limit_per_minute, discovers_full_inventory,
+        supports_discovery, supported_filters, override_host_suffix, supports_search_override)
+     VALUES ('pisos', true, 20, false, true, '[]'::jsonb, 'pisos.com', false),
+            ('cimenta2', true, 20, true, true, '[]'::jsonb, NULL, false)
+     ON CONFLICT (connector_name) DO UPDATE SET
+       registered = true, supports_discovery = true,
+       override_host_suffix = EXCLUDED.override_host_suffix,
+       supports_search_override = EXCLUDED.supports_search_override`,
+  );
+  await seedEtlPreviews();
 });
+
+/** (Re)seed the pisos + cimenta2 previews for the profile (P4). */
+async function seedEtlPreviews(): Promise<void> {
+  await pool.query(
+    `INSERT INTO connector_search_preview (profile_id, connector, previews)
+     VALUES ($1, 'pisos', $2::jsonb), ($1, 'cimenta2', $3::jsonb)
+     ON CONFLICT (profile_id, connector) DO UPDATE SET
+       previews = EXCLUDED.previews, computed_at = NOW()`,
+    [
+      profileId,
+      JSON.stringify([
+        { label: "Pisos.com — sevilla", url: PISOS_PREVIEW_URL, kind: "search_page", tunable: true, notes: null },
+      ]),
+      JSON.stringify([
+        {
+          label: "Cimenta2 (Cajamar) — barrido nacional",
+          url: CIMENTA2_PREVIEW_URL,
+          kind: "sitemap",
+          tunable: false,
+          notes: "Barrido nacional del sitemap; el scope no entra en la URL — el filtrado es por datos.",
+        },
+      ]),
+    ],
+  );
+}
 
 test.afterAll(async () => {
   if (dbAvailable) await purge();
@@ -132,6 +191,8 @@ test("navigate from ⋮ menu; pinned + derived rows; save persists; captura uses
   await expect(ideaRow).toBeVisible();
   await expect(ideaRow.getByTestId("filter-source-badge")).toHaveText("URL fijada");
   await expect(ideaRow.getByTestId("filter-url")).toHaveText(PINNED_IDEALISTA);
+  // The URL field is a single line (no wrap) — the Copiar button gives the full value.
+  await expect(ideaRow.getByTestId("filter-url")).toHaveCSS("white-space", "nowrap");
 
   // 2b) Aliseda row → derived (no pin yet).
   const aliRow = page.locator('[data-testid="filter-validation-row"][data-connector="aliseda"]');
@@ -172,4 +233,84 @@ test("navigate from ⋮ menu; pinned + derived rows; save persists; captura uses
   const ideaConn = page.getByTestId(`captura-connector-${profileId}-idealista`);
   await expect(ideaConn).toBeVisible();
   await expect(ideaConn.locator(`[title="${PINNED_IDEALISTA}"]`).first()).toBeVisible();
+});
+
+test("ETL section: cimenta2 read-only with its note; pisos tunable and saves (P4)", async ({
+  page,
+}) => {
+  await seedEtlPreviews();
+  await page.goto(`/profiles/${profileId}/filtros`);
+  await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
+  const etl = page.getByTestId("validar-filtros-etl-section");
+  await expect(etl).toBeVisible();
+  await assertNoErrorSurface(page);
+
+  // cimenta2 → non-tunable: shows its URL + honest note, read-only (no input).
+  const cimenta2 = page.locator('[data-testid="etl-connector-row"][data-connector="cimenta2"]');
+  await expect(cimenta2).toBeVisible();
+  await expect(cimenta2).toHaveAttribute("data-tunable", "false");
+  await expect(cimenta2.getByTestId("etl-url")).toHaveText(CIMENTA2_PREVIEW_URL);
+  await expect(cimenta2.getByTestId("etl-notes")).toBeVisible();
+  await expect(cimenta2.getByTestId("etl-readonly")).toBeVisible();
+  await expect(cimenta2.getByTestId("etl-url-input")).toHaveCount(0);
+
+  // pisos → tunable: shows the derived URL + a save affordance; pin persists.
+  const pisos = page.locator('[data-testid="etl-connector-row"][data-connector="pisos"]');
+  await expect(pisos).toBeVisible();
+  await expect(pisos).toHaveAttribute("data-tunable", "true");
+  await expect(pisos.getByTestId("etl-source-badge")).toHaveText("derivada del perfil");
+  await expect(pisos.getByTestId("etl-url")).toHaveText(PISOS_PREVIEW_URL);
+
+  await pisos.getByTestId("etl-url-input").fill(NEW_PISOS);
+  await pisos.getByTestId("etl-save").click();
+  await expect(pisos.getByTestId("etl-source-badge")).toHaveText("URL fijada");
+  await expect(pisos.getByTestId("etl-url")).toHaveText(NEW_PISOS);
+  await assertNoErrorSurface(page);
+
+  // The pin is a real profile_connector_filter row for the HTTP connector.
+  const res = await page.request.get(`/api/profiles/${profileId}/connector-filters`);
+  expect(res.ok()).toBeTruthy();
+  const body = (await res.json()) as { rows: { connector: string; url: string }[] };
+  expect(body.rows.some((r) => r.connector === "pisos" && r.url === NEW_PISOS)).toBe(true);
+
+  // Clean the pin so the suite can be re-run against a persistent dev DB.
+  await pool.query("DELETE FROM profile_connector_filter WHERE profile_id = $1 AND connector = 'pisos'", [profileId]);
+});
+
+test("ETL section renders with no seeded previews — pending, no error surface (P4)", async ({
+  page,
+}) => {
+  // Remove this profile's computed previews; the registered connectors still
+  // render (LEFT JOIN) in a pending state, and there must be no error surface.
+  await pool.query("DELETE FROM connector_search_preview WHERE profile_id = $1", [profileId]);
+  await page.goto(`/profiles/${profileId}/filtros`);
+  await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId("validar-filtros-etl-section")).toBeVisible();
+  await assertNoErrorSurface(page);
+
+  // pisos still appears (it's registered), now pending its next ETL computation.
+  const pisos = page.locator('[data-testid="etl-connector-row"][data-connector="pisos"]');
+  await expect(pisos).toBeVisible();
+  await expect(pisos.getByTestId("etl-pending")).toBeVisible();
+
+  // Restore for any later ordering.
+  await seedEtlPreviews();
+});
+
+test("profile switcher on the filtros page navigates to the other profile's filtros page", async ({
+  page,
+}) => {
+  await page.goto(`/profiles/${profileId}/filtros`);
+  await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
+
+  const switcher = page.getByLabel("Cambiar de perfil de búsqueda");
+  await expect(switcher).toBeVisible();
+  // Starts on the current profile.
+  await expect(switcher).toHaveValue(String(profileId));
+
+  // Selecting the second profile keeps us on the filtros page (not the feed).
+  await switcher.selectOption(String(profileId2));
+  await expect(page).toHaveURL(new RegExp(`/profiles/${profileId2}/filtros`), { timeout: 30_000 });
+  await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
+  await assertNoErrorSurface(page);
 });

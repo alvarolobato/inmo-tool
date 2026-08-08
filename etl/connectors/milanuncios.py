@@ -125,6 +125,7 @@ from etl.connectors.base import (
     ConnectorScope,
     ListingUnavailableError,
     RawListing,
+    SearchPreview,
     SoftBlockError,
     Throttle,
 )
@@ -455,6 +456,10 @@ class MilanunciosConnector(Connector):
     # honestly claim full coverage.
     discovers_full_inventory = False
 
+    # Issue #478: an owner-pinned milanuncios search URL may become this
+    # connector's recall source for a profile (discover() wiring is Phase 5).
+    override_host_suffix = "milanuncios.com"
+
     # Issue #179: skip-if-seen IS on, at Fotocasa's 24h precedent, and it is
     # turned on WITHOUT the discovery-time price safety net that Fotocasa
     # has. That asymmetry is deliberate; here is the evidence and the cost.
@@ -534,6 +539,39 @@ class MilanunciosConnector(Connector):
         except UnresolvableGeographyError:
             return unresolvable_scope_key(scope)
 
+    def _search_url(self, geography: str) -> str:
+        # "-en-<geo>-<geo>" matches the canonical sale-category URL observed
+        # live (e.g. "venta-de-pisos-en-madrid-madrid") — the province/city
+        # slug repeated. Confirmed during the feasibility spike this returns
+        # *only* the sale category (no rentals/shared-rooms mixed in), unlike
+        # the shorter "/pisos-en-<geo>/" category-overview URL.
+        return f"{_BASE_URL}/venta-de-pisos-en-{geography}-{geography}/"
+
+    def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
+        """Reuses `_search_url()` — the exact helper discover()'s entry URL uses."""
+        try:
+            geography = _resolve_geography(scope)
+        except UnresolvableGeographyError:
+            geography = None
+        if geography is None:
+            return [
+                SearchPreview(
+                    label="Milanuncios",
+                    url=None,
+                    kind="search_page",
+                    tunable=True,
+                    notes="El perfil no resuelve a una geografía que este conector cubra.",
+                )
+            ]
+        return [
+            SearchPreview(
+                label=f"Milanuncios — {geography}",
+                url=self._search_url(geography),
+                kind="search_page",
+                tunable=True,
+            )
+        ]
+
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         # _resolve_geography can raise UnresolvableGeographyError, left to
         # propagate uncaught (issue #169) — see fotocasa.py's discover() for
@@ -549,12 +587,7 @@ class MilanunciosConnector(Connector):
                 "cover — nothing to discover, not defaulting to a "
                 "hardcoded city (see issue #71)"
             )
-        # "-en-<geo>-<geo>" matches the canonical sale-category URL observed
-        # live (e.g. "venta-de-pisos-en-madrid-madrid") — the province/city
-        # slug repeated. Confirmed during the feasibility spike this returns
-        # *only* the sale category (no rentals/shared-rooms mixed in), unlike
-        # the shorter "/pisos-en-<geo>/" category-overview URL.
-        url = f"{_BASE_URL}/venta-de-pisos-en-{geography}-{geography}/"
+        url = self._search_url(geography)
         throttle()
         try:
             response = requests.get(

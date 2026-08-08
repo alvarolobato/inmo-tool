@@ -76,6 +76,7 @@ from etl.connectors.base import (
     ConnectorScope,
     ListingUnavailableError,
     RawListing,
+    SearchPreview,
     SoftBlockError,
     Throttle,
 )
@@ -291,8 +292,37 @@ class HabitacliaConnector(Connector):
         except UnresolvableGeographyError:
             return unresolvable_scope_key(scope)
 
+    # Issue #478: an owner-pinned habitaclia search URL may become this
+    # connector's recall source for a profile (discover() wiring is Phase 5).
+    override_host_suffix = "habitaclia.com"
+
     def _search_url(self, geography: str) -> str:
         return f"{_BASE_URL}/viviendas-{geography}.htm"
+
+    def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
+        """Reuses `_search_url()` — the same helper discover()'s entry URL uses."""
+        try:
+            geography = _resolve_geography(scope)
+        except UnresolvableGeographyError:
+            geography = None
+        if geography is None:
+            return [
+                SearchPreview(
+                    label="Habitaclia",
+                    url=None,
+                    kind="search_page",
+                    tunable=True,
+                    notes="El perfil no resuelve a una geografía que este conector cubra.",
+                )
+            ]
+        return [
+            SearchPreview(
+                label=f"Habitaclia — {geography}",
+                url=self._search_url(geography),
+                kind="search_page",
+                tunable=True,
+            )
+        ]
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         self._detail_urls = {}

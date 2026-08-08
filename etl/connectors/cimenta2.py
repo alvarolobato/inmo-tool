@@ -136,6 +136,7 @@ from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
     RawListing,
+    SearchPreview,
     SoftBlockError,
     Throttle,
 )
@@ -292,6 +293,24 @@ class Cimenta2Connector(Connector):
         except UnresolvableGeographyError:
             return unresolvable_scope_key(scope)
         return _NATIONAL_SCOPE_KEY
+
+    def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
+        """Non-tunable: the sweep is a NATIONAL sitemap enumeration identical
+        for every scope (the asset URLs carry no geography), so there is no
+        per-profile URL to tune — the filtering is by data. `_SITEMAP_INDEX_URL`
+        is exactly discover()'s first request."""
+        return [
+            SearchPreview(
+                label="Cimenta2 (Cajamar) — barrido nacional",
+                url=_SITEMAP_INDEX_URL,
+                kind="sitemap",
+                tunable=False,
+                notes=(
+                    "Barrido nacional del sitemap; el scope no entra en la URL "
+                    "— el filtrado es por datos."
+                ),
+            )
+        ]
 
     def _fetch(self, url: str, throttle: Throttle) -> str:
         throttle()

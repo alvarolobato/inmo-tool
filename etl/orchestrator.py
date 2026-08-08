@@ -1067,15 +1067,18 @@ def sync_connector_registry(conn) -> None:
                 INSERT INTO connector_registry (
                     connector_name, registered, rate_limit_per_minute,
                     discovers_full_inventory, supports_discovery,
-                    supported_filters, updated_at
+                    supported_filters, override_host_suffix,
+                    supports_search_override, updated_at
                 )
-                VALUES (%s, true, %s, %s, %s, %s::jsonb, NOW())
+                VALUES (%s, true, %s, %s, %s, %s::jsonb, %s, %s, NOW())
                 ON CONFLICT (connector_name) DO UPDATE SET
                     registered = true,
                     rate_limit_per_minute = EXCLUDED.rate_limit_per_minute,
                     discovers_full_inventory = EXCLUDED.discovers_full_inventory,
                     supports_discovery = EXCLUDED.supports_discovery,
                     supported_filters = EXCLUDED.supported_filters,
+                    override_host_suffix = EXCLUDED.override_host_suffix,
+                    supports_search_override = EXCLUDED.supports_search_override,
                     updated_at = NOW()
                 """,
                 (
@@ -1084,6 +1087,8 @@ def sync_connector_registry(conn) -> None:
                     connector.discovers_full_inventory,
                     connector.supports_discovery,
                     json.dumps(list(connector.supported_filters)),
+                    connector.override_host_suffix,
+                    connector.supports_search_override,
                 ),
             )
             cur.execute(
@@ -2150,6 +2155,111 @@ def _active_profile_scopes(conn) -> list[ConnectorScope]:
         seen.setdefault(dedup_key, ConnectorScope(center=(lat, lon), radius_km=radius))
 
     return list(seen.values())
+
+
+def _active_profiles_with_scope(conn) -> list[tuple[int, ConnectorScope]]:
+    """(profile_id, ConnectorScope) for every active profile — for per-profile
+    search-preview publishing (issue #478 P4).
+
+    Unlike `_active_profile_scopes`, this KEEPS the profile id and does NOT
+    dedupe by geography: the Validar filtros page shows previews per profile, so
+    two profiles resolving to the same area still each need their own rows. The
+    same malformed-geography guards apply — one bad profile is skipped, not
+    fatal to the whole publish.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, scope FROM search_profile WHERE archived_at IS NULL ORDER BY id"
+        )
+        rows = cur.fetchall()
+
+    result: list[tuple[int, ConnectorScope]] = []
+    for profile_id, scope_json in rows:
+        geography = (scope_json or {}).get("geography")
+        if not isinstance(geography, dict) or geography.get("type") != "radius":
+            continue
+        center = geography.get("center")
+        radius_km = geography.get("radius_km")
+        if (
+            not isinstance(center, list)
+            or len(center) != 2
+            or isinstance(radius_km, bool)
+            or not isinstance(radius_km, (int, float))
+        ):
+            continue
+        try:
+            lat, lon, radius = float(center[0]), float(center[1]), float(radius_km)
+        except (TypeError, ValueError):
+            continue
+        result.append((profile_id, ConnectorScope(center=(lat, lon), radius_km=radius)))
+    return result
+
+
+def publish_search_previews(conn) -> None:
+    """Upsert each active profile × registered connector's offline search
+    preview into `connector_search_preview` (issue #478 P4).
+
+    Called at the end of every `run_all_connectors` sweep — so both the
+    scheduler cycle AND a manual/profile quick-refresh (both go through
+    run_all_connectors) refresh the previews. Pure/offline: `search_previews()`
+    resolves geography against the local gazetteer and reuses each connector's
+    own `_search_url()`, issuing no network request, so this is cheap enough to
+    run every sweep. Rows for a profile that is no longer active (soft-archived —
+    which does NOT fire the FK cascade — or deleted) are pruned here, so the
+    Validar filtros page never renders a stale profile's previews.
+
+    Best-effort at the call site (wrapped in try/except there): a failure to
+    publish previews must never turn an already-committed connector sweep into a
+    failed run.
+    """
+    profiles = _active_profiles_with_scope(conn)
+    active_ids = [pid for pid, _ in profiles]
+    with conn.cursor() as cur:
+        for profile_id, scope in profiles:
+            for connector in CONNECTORS:
+                try:
+                    previews = connector.search_previews(scope)
+                except Exception:
+                    # A single connector's preview builder must not sink the
+                    # whole publish — record an empty list and carry on.
+                    logger.exception(
+                        "search_previews failed for connector %s / profile %s — "
+                        "recording an empty preview list",
+                        connector.name,
+                        profile_id,
+                    )
+                    previews = []
+                cur.execute(
+                    """
+                    INSERT INTO connector_search_preview
+                        (profile_id, connector, previews, computed_at)
+                    VALUES (%s, %s, %s::jsonb, NOW())
+                    ON CONFLICT (profile_id, connector) DO UPDATE SET
+                        previews = EXCLUDED.previews,
+                        computed_at = NOW()
+                    """,
+                    (
+                        profile_id,
+                        connector.name,
+                        json.dumps([dataclasses.asdict(p) for p in previews]),
+                    ),
+                )
+        # Prune rows for profiles no longer active. A hard DELETE cascades via
+        # the FK, but a soft archive (archived_at = NOW()) does not — so drop
+        # any preview whose profile isn't in the active set.
+        if active_ids:
+            cur.execute(
+                "DELETE FROM connector_search_preview WHERE profile_id <> ALL(%s)",
+                (active_ids,),
+            )
+        else:
+            cur.execute("DELETE FROM connector_search_preview")
+    conn.commit()
+    logger.info(
+        "connector_search_preview published for %d active profile(s) × %d connector(s)",
+        len(profiles),
+        len(CONNECTORS),
+    )
 
 
 def _scopes_for_connector(
@@ -3923,6 +4033,22 @@ def run_all_connectors(
             logger.warning(
                 "materialize-all notification raised unexpectedly — ingest is "
                 "committed and the run record is final; continuing",
+                exc_info=True,
+            )
+
+        # Issue #478 P4: refresh the per-(profile × connector) search previews
+        # the Validar filtros page reads. Offline and cheap; here so every sweep
+        # (scheduler cycle AND manual/profile quick-refresh — both call
+        # run_all_connectors) keeps them current. Best-effort: a preview-publish
+        # failure must not retroactively fail an already-committed sweep.
+        try:
+            publish_search_previews(conn)
+        except Exception:
+            conn.rollback()
+            logger.warning(
+                "publish_search_previews raised unexpectedly — the connector "
+                "sweep is committed and final; Validar filtros previews will "
+                "refresh on the next sweep",
                 exc_info=True,
             )
 

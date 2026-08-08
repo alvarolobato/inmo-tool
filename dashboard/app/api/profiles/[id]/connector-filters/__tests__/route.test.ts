@@ -19,15 +19,20 @@ vi.mock("@/lib/db/profile-connector-filter", () => ({
   upsertProfileConnectorFilter: vi.fn(),
   deleteProfileConnectorFilter: vi.fn(),
 }));
+vi.mock("@/lib/db/connector-search-preview", () => ({
+  getConnectorOverrideHostSuffix: vi.fn(),
+}));
 
 import { GET, PUT, DELETE } from "../route";
 import * as profilesDb from "@/lib/db/profiles";
 import * as overridesDb from "@/lib/db/profile-connector-filter";
+import * as registryDb from "@/lib/db/connector-search-preview";
 
 const mockGetProfile = vi.mocked(profilesDb.getProfileById);
 const mockFind = vi.mocked(overridesDb.findOverridesForProfile);
 const mockUpsert = vi.mocked(overridesDb.upsertProfileConnectorFilter);
 const mockDelete = vi.mocked(overridesDb.deleteProfileConnectorFilter);
+const mockOverrideHostSuffix = vi.mocked(registryDb.getConnectorOverrideHostSuffix);
 
 const ADMIN_KEY = "test-admin-key";
 const IDEALISTA_URL =
@@ -71,6 +76,9 @@ function deleteReq(qs: string, opts: { adminKey?: string } = {}): NextRequest {
 beforeEach(() => {
   vi.stubEnv("ADMIN_API_KEY", ADMIN_KEY);
   vi.clearAllMocks();
+  // Default: an HTTP connector the registry doesn't know / can't pin. Extension
+  // portals (idealista) never consult this — CAPTURE_PORTALS short-circuits.
+  mockOverrideHostSuffix.mockResolvedValue(null);
 });
 afterEach(() => vi.unstubAllEnvs());
 
@@ -104,13 +112,43 @@ describe("PUT /api/profiles/[id]/connector-filters", () => {
     expect(mockUpsert).not.toHaveBeenCalled();
   });
 
-  it("400 for a non-extension connector (todavía no soportado)", async () => {
+  it("400 for a connector that admits no pinned URL (registry override_host_suffix NULL)", async () => {
+    // Default mock returns null → not a capture portal and not a tunable HTTP
+    // connector (e.g. cimenta2, or an unknown name).
     const res = await PUT(
-      putReq({ connector: "fotocasa", url: "https://www.fotocasa.es/x" }, { adminKey: ADMIN_KEY }),
+      putReq({ connector: "cimenta2", url: "https://inmuebles.cimenta2.com/x" }, { adminKey: ADMIN_KEY }),
       ctx,
     );
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toContain("todavía no soporta");
+    expect((await res.json()).error).toContain("no admite fijar");
+    expect(mockUpsert).not.toHaveBeenCalled();
+  });
+
+  it("accepts a tunable HTTP connector validated against the registry host suffix", async () => {
+    mockOverrideHostSuffix.mockResolvedValue("fotocasa.es");
+    mockGetProfile.mockResolvedValue(ACTIVE_PROFILE);
+    const url = "https://www.fotocasa.es/es/comprar/viviendas/sevilla-capital/todas-las-zonas/l";
+    const stored = { id: 2, profile_id: 7, connector: "fotocasa", section_key: "", url, source: "manual", created_at: "x", updated_at: "x" };
+    mockUpsert.mockResolvedValue(stored as never);
+    const res = await PUT(putReq({ connector: "fotocasa", url }, { adminKey: ADMIN_KEY }), ctx);
+    expect(res.status).toBe(200);
+    expect(mockOverrideHostSuffix).toHaveBeenCalledWith("fotocasa");
+    expect(mockUpsert).toHaveBeenCalledWith({
+      profileId: 7,
+      connector: "fotocasa",
+      sectionKey: "",
+      url,
+      source: "manual",
+    });
+  });
+
+  it("400 when a tunable HTTP connector's URL host is foreign to its registry suffix", async () => {
+    mockOverrideHostSuffix.mockResolvedValue("fotocasa.es");
+    const res = await PUT(
+      putReq({ connector: "fotocasa", url: "https://www.pisos.com/venta/pisos-sevilla/" }, { adminKey: ADMIN_KEY }),
+      ctx,
+    );
+    expect(res.status).toBe(400);
     expect(mockUpsert).not.toHaveBeenCalled();
   });
 

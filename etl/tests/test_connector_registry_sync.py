@@ -50,6 +50,14 @@ class _FilteredConnector(DummyConnector):
     supported_filters = ("rooms",)
 
 
+class _OverrideConnector(DummyConnector):
+    """A tunable HTTP connector that advertises an override host suffix
+    (issue #478 P4) — the pin-a-URL affordance the dashboard validates against."""
+
+    override_host_suffix = "example.com"
+    supports_search_override = False
+
+
 def _registry_rows(conn, names: list[str]) -> dict[str, tuple]:
     with conn.cursor() as cur:
         cur.execute(
@@ -99,6 +107,36 @@ class TestSyncConnectorRegistry:
             # controls that silently do nothing (issue #100).
             assert c[4] is False
             assert c[5] == []
+        finally:
+            orchestrator.CONNECTORS[:] = original
+            _cleanup(pg_conn, names)
+
+    def test_publishes_override_host_suffix_and_search_override(self, pg_conn):
+        """Issue #478 P4: the pin-a-URL affordance must reach the dashboard —
+        override_host_suffix (a tunable connector's host) and
+        supports_search_override are mirrored into connector_registry, and a
+        connector that declares neither leaves them at NULL/false."""
+        _apply_schema(pg_conn)
+        tunable = _OverrideConnector(name="test-registry-override")
+        plain = DummyConnector(name="test-registry-plain")
+        names = [tunable.name, plain.name]
+        original = list(orchestrator.CONNECTORS)
+        orchestrator.CONNECTORS[:] = [tunable, plain]
+        try:
+            orchestrator.sync_connector_registry(pg_conn)
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT connector_name, override_host_suffix, "
+                    "       supports_search_override "
+                    "  FROM connector_registry WHERE connector_name = ANY(%s)",
+                    (names,),
+                )
+                rows = {r[0]: r for r in cur.fetchall()}
+            assert rows[tunable.name][1] == "example.com"
+            assert rows[tunable.name][2] is False
+            # A connector that declares no override: NULL host, false override.
+            assert rows[plain.name][1] is None
+            assert rows[plain.name][2] is False
         finally:
             orchestrator.CONNECTORS[:] = original
             _cleanup(pg_conn, names)

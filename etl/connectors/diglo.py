@@ -90,6 +90,7 @@ from etl.connectors.base import (
     ConnectorScope,
     ListingUnavailableError,
     RawListing,
+    SearchPreview,
     Throttle,
 )
 from etl.connectors.diglo_mapping import (
@@ -353,6 +354,10 @@ class DigloConnector(Connector):
     # be stale — see the module docstring.)
     discovers_full_inventory = True
 
+    # Issue #478: an owner-pinned diglo URL may become this connector's recall
+    # source for a profile (discover() wiring is Phase 5).
+    override_host_suffix = "digloservicer.com"
+
     def scope_key(self, scope: ConnectorScope) -> str | None:
         """The resolved province slug IS the coverage key: two scopes in the
         same province filter the identical national sitemap.
@@ -386,6 +391,39 @@ class DigloConnector(Connector):
             return None
         return province_slug(place.province)
 
+    @staticmethod
+    def _search_url(province: str, page: int) -> str:
+        """The province buscador page discover() paginates over. Shared by
+        discover() and search_previews() so the preview can't drift."""
+        base_path = _BUSCADOR_PATH.format(type_seg="pisos", province=province)
+        return f"{_BASE_URL}{base_path}?page={page}"
+
+    def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
+        """Reuses `_search_url()` — the exact helper discover()'s entry page
+        (`page=0`) is built from."""
+        try:
+            province = self._scope_province(scope)
+        except UnresolvableGeographyError:
+            province = None
+        if province is None:
+            return [
+                SearchPreview(
+                    label="Diglo",
+                    url=None,
+                    kind="search_page",
+                    tunable=True,
+                    notes="El perfil no resuelve a una provincia que este conector cubra.",
+                )
+            ]
+        return [
+            SearchPreview(
+                label=f"Diglo — {province}",
+                url=self._search_url(province, 0),
+                kind="search_page",
+                tunable=True,
+            )
+        ]
+
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         province = self._scope_province(scope)
         if province is None:
@@ -395,12 +433,11 @@ class DigloConnector(Connector):
                 "defaulting to a hardcoded province (issue #71)"
             )
 
-        base_path = _BUSCADOR_PATH.format(type_seg="pisos", province=province)
         external_ids: list[str] = []
         seen: set[str] = set()
         pages_walked = 0
         for page in range(_MAX_PAGES):
-            url = f"{_BASE_URL}{base_path}?page={page}"
+            url = self._search_url(province, page)
             response = _get(url, throttle)
             pages_walked += 1
             page_paths = buscador_listing_paths(response.text, province)

@@ -101,6 +101,7 @@ from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
     RawListing,
+    SearchPreview,
     Throttle,
 )
 from etl.connectors.extraction import (
@@ -193,6 +194,12 @@ def _resolve_geography(scope: ConnectorScope) -> str | None:
     return _PROVINCE_SITEMAP_SLUGS.get(place.province)
 
 
+def _sitemap_url(province: str) -> str:
+    """The province sitemap discover() sweeps for `province`. Shared by
+    discover() and search_previews() so the preview can't drift."""
+    return f"{_BASE_URL}/es/sitemap-es-{province}.xml"
+
+
 def _get(url: str, throttle: Throttle) -> requests.Response:
     throttle()
     try:
@@ -281,6 +288,41 @@ class ServihabitatConnector(Connector):
         except UnresolvableGeographyError:
             return unresolvable_scope_key(scope)
 
+    # Issue #478: an owner-pinned servihabitat URL may become this connector's
+    # recall source for a profile (discover() wiring is Phase 5).
+    override_host_suffix = "servihabitat.com"
+
+    def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
+        """Reuses `_sitemap_url()` — the exact province sitemap discover()
+        enters from. `kind="sitemap"`: discovery enumerates the province's
+        listings from that sitemap."""
+        try:
+            province = _resolve_geography(scope)
+        except UnresolvableGeographyError:
+            province = None
+        if province is None:
+            return [
+                SearchPreview(
+                    label="Servihabitat",
+                    url=None,
+                    kind="sitemap",
+                    tunable=True,
+                    notes="El perfil no resuelve a una provincia que este conector cubra.",
+                )
+            ]
+        return [
+            SearchPreview(
+                label=f"Servihabitat — {province}",
+                url=_sitemap_url(province),
+                kind="sitemap",
+                tunable=True,
+                notes=(
+                    "La búsqueda enumera el sitemap de la provincia; el filtrado "
+                    "fino es por datos."
+                ),
+            )
+        ]
+
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         # _resolve_geography can raise UnresolvableGeographyError, left to
         # propagate uncaught (issue #169) — see fotocasa.py's discover() for
@@ -297,7 +339,7 @@ class ServihabitatConnector(Connector):
                 "a hardcoded province (issue #71)"
             )
 
-        url = f"{_BASE_URL}/es/sitemap-es-{province}.xml"
+        url = _sitemap_url(province)
         response = _get(url, throttle)
         locs = _sitemap_locs(response.text)
 

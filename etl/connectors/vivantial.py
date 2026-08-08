@@ -58,6 +58,7 @@ from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
     RawListing,
+    SearchPreview,
     Throttle,
 )
 from etl.connectors.geography import (
@@ -201,6 +202,23 @@ class VivantialConnector(Connector):
             return _resolve_geography(scope)
         except UnresolvableGeographyError:
             return unresolvable_scope_key(scope)
+
+    def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
+        """Non-tunable: discover() reads a single NATIONAL sitemap and filters
+        in memory, so there is no per-profile URL to tune — the filtering is by
+        data. `_SITEMAP_URL` is exactly discover()'s request."""
+        return [
+            SearchPreview(
+                label="Vivantial — barrido nacional",
+                url=_SITEMAP_URL,
+                kind="sitemap",
+                tunable=False,
+                notes=(
+                    "Barrido nacional del sitemap; el scope no entra en la URL "
+                    "— el filtrado es por datos."
+                ),
+            )
+        ]
 
     def _fetch(self, url: str, throttle: Throttle) -> str:
         throttle()

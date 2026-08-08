@@ -96,6 +96,7 @@ from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
     RawListing,
+    SearchPreview,
     Throttle,
 )
 from etl.connectors.buildingcenter_mapping import (
@@ -300,6 +301,24 @@ class BuildingCenterConnector(Connector):
             else _DEFAULT_RADIUS_KM
         )
         return f"radius:{scope.center}:{radius}"
+
+    def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
+        """Non-tunable: discover() POSTs to the catalogue search API and
+        filters the full catalogue in memory, so there is no per-profile GET
+        URL to tune — the filtering is by data. `_SEARCH_URL` is the API
+        endpoint discover() calls."""
+        return [
+            SearchPreview(
+                label="BuildingCenter — catálogo completo",
+                url=_SEARCH_URL,
+                kind="api",
+                tunable=False,
+                notes=(
+                    "Catálogo completo vía API; se filtra en memoria — no hay "
+                    "URL de búsqueda afinable."
+                ),
+            )
+        ]
 
     def discovered_prices(self) -> dict[str, Decimal]:
         """Live-verified real signal (buildingcenter_mapping.extract_price's

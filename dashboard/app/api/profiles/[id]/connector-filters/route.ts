@@ -7,9 +7,12 @@
  *         connector's recall source for this profile (tier 0 in the resolver,
  *         superseding the derived URL). Validates the profile exists and is not
  *         archived, that the URL is an http(s) URL whose host belongs to the
- *         connector, and that the connector is an extension capture portal (HTTP
- *         connectors are "todavía no soportado" until Phase 4). URL stored
- *         VERBATIM (shape= intact) — never re-substituted.
+ *         connector — either an extension capture portal (CAPTURE_PORTALS) or an
+ *         HTTP connector whose host suffix the ETL published to
+ *         connector_registry.override_host_suffix (issue #478 P4). Saving is
+ *         allowed for tunable HTTP connectors but has NO recall effect yet — the
+ *         override_url → discover() wiring lands in Phase 5. URL stored VERBATIM
+ *         (shape= intact) — never re-substituted.
  * DELETE: remove an override, reverting to the derived URL. `connector` (and
  *         optional `sectionKey`) come from the query string.
  *
@@ -30,6 +33,7 @@ import {
   deleteProfileConnectorFilter,
   type ProfileConnectorFilterSource,
 } from "@/lib/db/profile-connector-filter";
+import { getConnectorOverrideHostSuffix } from "@/lib/db/connector-search-preview";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
 type RouteContext = { params: Promise<{ id: string }> | { id: string } };
@@ -47,12 +51,16 @@ function parseId(raw: string): number | null {
 
 /**
  * The host suffix an override URL must fall under for `connector`, or null when
- * the connector is not (yet) supported. Phase 1 supports only the extension
- * capture portals (CAPTURE_PORTALS); HTTP connectors arrive in Phase 4 with
- * their own `override_host_suffix` from the connector registry.
+ * the connector doesn't accept a pinned URL at all. Extension capture portals
+ * carry their suffix in CAPTURE_PORTALS; every other (HTTP) connector's suffix
+ * is published to `connector_registry.override_host_suffix` by the ETL (issue
+ * #478 P4) — a NULL there (the non-tunable sitemap/API connectors, or a
+ * connector removed from the registry) means "not supported".
  */
-function hostSuffixForConnector(connector: string): string | null {
-  return CAPTURE_PORTALS.find((p) => p.portal === connector)?.hostSuffix ?? null;
+async function hostSuffixForConnector(connector: string): Promise<string | null> {
+  const capture = CAPTURE_PORTALS.find((p) => p.portal === connector)?.hostSuffix;
+  if (capture) return capture;
+  return getConnectorOverrideHostSuffix(connector);
 }
 
 /** True when `host` is exactly `suffix` or a subdomain of it (rejects look-alikes). */
@@ -135,11 +143,11 @@ export async function PUT(
     );
   }
 
-  const hostSuffix = hostSuffixForConnector(connector);
+  const hostSuffix = await hostSuffixForConnector(connector);
   if (hostSuffix === null) {
     return NextResponse.json(
       formatApiError(
-        `El conector '${connector}' todavía no soporta filtros fijados (llega en la Fase 4).`,
+        `El conector '${connector}' no admite fijar una URL de búsqueda.`,
         "VALIDATION",
         undefined,
         requestId,
