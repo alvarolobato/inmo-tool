@@ -682,8 +682,8 @@ export function CandidateList({ profileId }: { profileId: number }) {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
-          gap: 12,
+          gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+          gap: 14,
           marginTop: 16,
         }}
       >
