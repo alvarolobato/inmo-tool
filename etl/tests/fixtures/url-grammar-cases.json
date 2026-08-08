@@ -7,46 +7,55 @@
           "expected": {
             "geography": "madrid"
           },
+          "reject": null,
           "url": "https://www.pisos.com/venta/pisos-madrid/"
         },
         {
           "expected": {
             "geography": "barcelona"
           },
+          "reject": null,
           "url": "https://www.pisos.com/venta/pisos-barcelona/"
         },
         {
           "expected": {
             "geography": "dos_hermanas"
           },
+          "reject": null,
           "url": "https://www.pisos.com/venta/pisos-dos_hermanas/"
         },
         {
           "expected": {
             "geography": "alcala_de_guadaira"
           },
+          "reject": null,
           "url": "https://www.pisos.com/venta/pisos-alcala_de_guadaira/"
         },
         {
           "expected": {
             "geography": "hospitalet_de_llobregat"
           },
+          "reject": null,
           "url": "https://www.pisos.com/venta/pisos-hospitalet_de_llobregat/"
         },
         {
           "expected": null,
+          "reject": null,
           "url": "https://www.habitaclia.com/viviendas-madrid.htm"
         },
         {
           "expected": null,
+          "reject": null,
           "url": "https://www.idealista.com/venta-viviendas/madrid/"
         },
         {
           "expected": null,
+          "reject": null,
           "url": "https://www.pisos.com/comprar/piso-madrid-123/"
         },
         {
           "expected": null,
+          "reject": null,
           "url": "https://www.pisos.com/venta/pisos-sevilla/1-habitacion/"
         }
       ],
@@ -59,7 +68,8 @@
             "source": "profile"
           }
         },
-        "parse_pattern": "^https?://(?:www\\.)?pisos\\.com/venta/pisos-(?<geography>[^/]+)/?$"
+        "parse_pattern": "^https?://(?:www\\.)?pisos\\.com/venta/pisos-(?<geography>[^/]+)/?$",
+        "reject_reasons": []
       }
     },
     {
@@ -68,44 +78,53 @@
           "expected": {
             "geography": "madrid"
           },
+          "reject": null,
           "url": "https://www.habitaclia.com/viviendas-madrid.htm"
         },
         {
           "expected": {
             "geography": "barcelona"
           },
+          "reject": null,
           "url": "https://www.habitaclia.com/viviendas-barcelona.htm"
         },
         {
           "expected": {
             "geography": "dos_hermanas"
           },
+          "reject": null,
           "url": "https://www.habitaclia.com/viviendas-dos_hermanas.htm"
         },
         {
           "expected": {
             "geography": "alcala_de_guadaira"
           },
+          "reject": null,
           "url": "https://www.habitaclia.com/viviendas-alcala_de_guadaira.htm"
         },
         {
           "expected": null,
+          "reject": null,
           "url": "https://www.pisos.com/venta/pisos-madrid/"
         },
         {
           "expected": null,
+          "reject": null,
           "url": "https://www.idealista.com/venta-viviendas/madrid/"
         },
         {
           "expected": null,
+          "reject": null,
           "url": "https://www.milanuncios.com/venta-de-pisos-en-madrid-madrid/"
         },
         {
           "expected": null,
+          "reject": null,
           "url": "https://www.habitaclia.com/viviendas-madrid.htm?pag=2"
         },
         {
           "expected": null,
+          "reject": null,
           "url": "https://www.habitaclia.com/viviendas-madrid.htm\n"
         }
       ],
@@ -118,7 +137,8 @@
             "source": "profile"
           }
         },
-        "parse_pattern": "^https?://(?:www\\.)?habitaclia\\.com/viviendas-(?<geography>[^/?#]+)\\.htm$"
+        "parse_pattern": "^https?://(?:www\\.)?habitaclia\\.com/viviendas-(?<geography>[^/?#]+)\\.htm$",
+        "reject_reasons": []
       }
     },
     {
@@ -127,50 +147,60 @@
           "expected": {
             "geography": "madrid"
           },
+          "reject": null,
           "url": "https://www.milanuncios.com/venta-de-pisos-en-madrid-madrid/"
         },
         {
           "expected": {
             "geography": "sevilla"
           },
+          "reject": null,
           "url": "https://www.milanuncios.com/venta-de-pisos-en-sevilla-sevilla/"
         },
         {
           "expected": {
             "geography": "barcelona"
           },
+          "reject": null,
           "url": "https://www.milanuncios.com/venta-de-pisos-en-barcelona-barcelona/"
         },
         {
           "expected": {
             "geography": "valencia"
           },
+          "reject": null,
           "url": "https://www.milanuncios.com/venta-de-pisos-en-valencia-valencia/"
         },
         {
           "expected": {
             "geography": "malaga"
           },
+          "reject": null,
           "url": "https://www.milanuncios.com/venta-de-pisos-en-malaga-malaga/"
         },
         {
           "expected": null,
+          "reject": null,
           "url": "https://www.habitaclia.com/viviendas-madrid.htm"
         },
         {
           "expected": null,
+          "reject": null,
           "url": "https://www.pisos.com/venta/pisos-madrid/"
         },
         {
           "expected": null,
+          "reject": null,
           "url": "https://www.milanuncios.com/alquiler-de-pisos-en-madrid-madrid/"
         },
         {
           "expected": null,
+          "reject": null,
           "url": "https://www.milanuncios.com/venta-de-pisos-en-madrid-toledo/"
         },
         {
           "expected": null,
+          "reject": null,
           "url": "https://www.milanuncios.com/venta-de-pisos-en-madrid/"
         }
       ],
@@ -183,7 +213,8 @@
             "source": "profile"
           }
         },
-        "parse_pattern": "^https?://(?:www\\.)?milanuncios\\.com/venta-de-pisos-en-(?<geography>[^/]+)-\\k<geography>/?$"
+        "parse_pattern": "^https?://(?:www\\.)?milanuncios\\.com/venta-de-pisos-en-(?<geography>[^/]+)-\\k<geography>/?$",
+        "reject_reasons": []
       }
     },
     {
@@ -192,30 +223,36 @@
           "expected": {
             "geography": "madrid"
           },
+          "reject": null,
           "url": "https://www.milanuncios.com/alquiler-de-pisos-en-madrid-madrid/"
         },
         {
           "expected": {
             "geography": "sevilla"
           },
+          "reject": null,
           "url": "https://www.milanuncios.com/alquiler-de-pisos-en-sevilla-sevilla/"
         },
         {
           "expected": {
             "geography": "barcelona"
           },
+          "reject": null,
           "url": "https://www.milanuncios.com/alquiler-de-pisos-en-barcelona-barcelona/"
         },
         {
           "expected": null,
+          "reject": null,
           "url": "https://www.habitaclia.com/viviendas-madrid.htm"
         },
         {
           "expected": null,
+          "reject": null,
           "url": "https://www.milanuncios.com/venta-de-pisos-en-madrid-madrid/"
         },
         {
           "expected": null,
+          "reject": null,
           "url": "https://www.milanuncios.com/alquiler-de-pisos-en-madrid-toledo/"
         }
       ],
@@ -228,7 +265,182 @@
             "source": "profile"
           }
         },
-        "parse_pattern": "^https?://(?:www\\.)?milanuncios\\.com/alquiler-de-pisos-en-(?<geography>[^/]+)-\\k<geography>/?$"
+        "parse_pattern": "^https?://(?:www\\.)?milanuncios\\.com/alquiler-de-pisos-en-(?<geography>[^/]+)-\\k<geography>/?$",
+        "reject_reasons": []
+      }
+    },
+    {
+      "cases": [
+        {
+          "expected": {
+            "geography": "madrid-capital",
+            "rooms_segment": "",
+            "zone": "todas-las-zonas"
+          },
+          "reject": null,
+          "url": "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital/todas-las-zonas/l"
+        },
+        {
+          "expected": {
+            "geography": "madrid-capital",
+            "rooms_segment": "",
+            "zone": "chamberi"
+          },
+          "reject": null,
+          "url": "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital/chamberi/l"
+        },
+        {
+          "expected": {
+            "geography": "madrid-capital",
+            "rooms_segment": "2-habitaciones/",
+            "zone": "chamberi"
+          },
+          "reject": null,
+          "url": "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital/chamberi/2-habitaciones/l"
+        },
+        {
+          "expected": {
+            "geography": "sevilla-capital",
+            "rooms_segment": "3-habitaciones/",
+            "zone": "todas-las-zonas"
+          },
+          "reject": null,
+          "url": "https://www.fotocasa.es/es/comprar/viviendas/sevilla-capital/todas-las-zonas/3-habitaciones/l"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://www.habitaclia.com/viviendas-madrid.htm"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://www.pisos.com/venta/pisos-madrid/"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://www.idealista.com/venta-viviendas/madrid/"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://www.fotocasa.es/es/alquiler/viviendas/madrid-capital/todas-las-zonas/l"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital/todas-las-zonas/l\n"
+        },
+        {
+          "expected": null,
+          "reject": "robots-query-params",
+          "url": "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital/todas-las-zonas/l?minPrice=100000"
+        },
+        {
+          "expected": {
+            "geography": "madrid",
+            "rooms_segment": "",
+            "zone": "todas-las-zonas"
+          },
+          "reject": "robots-bare-geography",
+          "url": "https://www.fotocasa.es/es/comprar/viviendas/madrid/todas-las-zonas/l"
+        }
+      ],
+      "connector": "fotocasa",
+      "grammar": {
+        "build_template": "https://www.fotocasa.es/es/comprar/viviendas/{geography}/{zone}/{rooms_segment}l",
+        "params": {
+          "geography": {
+            "label": "Municipio",
+            "source": "profile"
+          },
+          "rooms_segment": {
+            "label": "Habitaciones (segmento URL)",
+            "source": "connector_config"
+          },
+          "zone": {
+            "label": "Zona",
+            "source": "derived"
+          }
+        },
+        "parse_pattern": "^https?://(?:www\\.)?fotocasa\\.es/es/comprar/viviendas/(?<geography>[^/]+)/(?<zone>[^/]+)/(?<rooms_segment>(?:[0-9]+-habitaciones/)?)l$",
+        "reject_reasons": [
+          {
+            "pattern": "^https?://(?:www\\.)?fotocasa\\.es/[^?]*\\?",
+            "reason": "robots-query-params"
+          },
+          {
+            "pattern": "^https?://(?:www\\.)?fotocasa\\.es/es/comprar/viviendas/(?:barcelona|madrid|valencia)/",
+            "reason": "robots-bare-geography"
+          }
+        ]
+      }
+    },
+    {
+      "cases": [
+        {
+          "expected": {
+            "geography": "madrid-capital"
+          },
+          "reject": null,
+          "url": "https://www.fotocasa.es/es/alquiler/viviendas/madrid-capital/todas-las-zonas/l"
+        },
+        {
+          "expected": {
+            "geography": "sevilla-capital"
+          },
+          "reject": null,
+          "url": "https://www.fotocasa.es/es/alquiler/viviendas/sevilla-capital/todas-las-zonas/l"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://www.habitaclia.com/viviendas-madrid.htm"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital/todas-las-zonas/l"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://www.fotocasa.es/es/alquiler/viviendas/madrid-capital/todas-las-zonas/l\n"
+        },
+        {
+          "expected": null,
+          "reject": "robots-query-params",
+          "url": "https://www.fotocasa.es/es/alquiler/viviendas/madrid-capital/todas-las-zonas/l?maxPrice=1200"
+        },
+        {
+          "expected": {
+            "geography": "barcelona"
+          },
+          "reject": "robots-bare-geography",
+          "url": "https://www.fotocasa.es/es/alquiler/viviendas/barcelona/todas-las-zonas/l"
+        }
+      ],
+      "connector": "fotocasa_rental",
+      "grammar": {
+        "build_template": "https://www.fotocasa.es/es/alquiler/viviendas/{geography}/todas-las-zonas/l",
+        "params": {
+          "geography": {
+            "label": "Municipio",
+            "source": "profile"
+          }
+        },
+        "parse_pattern": "^https?://(?:www\\.)?fotocasa\\.es/es/alquiler/viviendas/(?<geography>[^/]+)/todas-las-zonas/l$",
+        "reject_reasons": [
+          {
+            "pattern": "^https?://(?:www\\.)?fotocasa\\.es/[^?]*\\?",
+            "reason": "robots-query-params"
+          },
+          {
+            "pattern": "^https?://(?:www\\.)?fotocasa\\.es/es/alquiler/viviendas/(?:barcelona|madrid|valencia)/",
+            "reason": "robots-bare-geography"
+          }
+        ]
       }
     }
   ]

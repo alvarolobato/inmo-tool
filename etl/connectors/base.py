@@ -180,11 +180,24 @@ class SearchUrlGrammar:
     `params` carries per-placeholder metadata (label, source) mirroring the
     `SearchParam` fields, so the UI can label the inferred groups without a
     second source of truth.
+
+    `reject_reasons` (issue #493) makes a URL the connector's OWN portal serves
+    but that `discover()` could never open — a robots.txt-forbidden shape — a
+    HARD, reasoned block rather than a silent no-match. Each entry is
+    `{"pattern": <ECMAScript regex fragment>, "reason": <message key>}`; the
+    first whose `pattern` matches `url` is that URL's rejection (see
+    `rejection()`). Unlike `parse_pattern` a reject pattern matches a forbidden
+    FRAGMENT (e.g. `…?minPrice=` — any query string), so it is start-anchored
+    (`^`, portal-scoped) but must NOT use the end anchor `$`. The dashboard reads
+    the same list (one implementation, no per-connector TypeScript) to explain
+    WHY a pasted URL is unusable and to block saving it — distinct from a plain
+    unparseable URL, which is kept verbatim.
     """
 
     build_template: str
     parse_pattern: str
     params: dict[str, dict] = field(default_factory=dict)
+    reject_reasons: tuple[dict[str, str], ...] = ()
 
     def placeholders(self) -> set[str]:
         """The `{name}` slots in `build_template`."""
@@ -210,6 +223,55 @@ class SearchUrlGrammar:
         if match is None:
             return None
         return dict(match.groupdict())
+
+    def rejection(self, url: str) -> str | None:
+        """Return the reject-reason KEY of the first `reject_reasons` pattern
+        that matches `url`, or None (issue #493).
+
+        A rejected URL is one this portal serves but `discover()` could never
+        open (a robots.txt-forbidden shape) — the caller must BLOCK saving it
+        with the reason, distinct from a plain no-match (`parse` returns None →
+        kept verbatim). Rejection takes precedence over `parse`: a URL that both
+        parses and is rejected is still rejected (e.g. a bare-geography slug
+        parses to a geography group yet is robots-disallowed)."""
+        for entry in self.reject_reasons:
+            pattern = _ecma_pattern_to_python(entry["pattern"])
+            if re.compile(pattern).search(url):
+                return entry["reason"]
+        return None
+
+
+def _assert_ecma_portable(name: str, pattern: str, what: str) -> None:
+    r"""Shared-subset portability checks common to `parse_pattern` and every
+    reject-reason pattern (issues #492/#493): no inline flags, no lookbehind, no
+    shorthand classes (`\d \w \s` and negations), no Python-only group spellings.
+    Each of these would make the SAME stored pattern accept different URLs — or
+    fail to compile — in the browser's `RegExp`. `what` names the offending
+    pattern in the error so a reject pattern's failure is distinguishable from
+    the parse pattern's."""
+    if re.search(r"\(\?[aiLmsux]", pattern):
+        raise ValueError(
+            f"{name}: grammar {what} uses inline flags — not ECMAScript-safe"
+        )
+    if "(?<=" in pattern or "(?<!" in pattern:
+        raise ValueError(
+            f"{name}: grammar {what} uses lookbehind — outside the "
+            "shared regex subset (issue #491)"
+        )
+    shorthand = re.search(r"\\[dDwWsS]", pattern)
+    if shorthand:
+        raise ValueError(
+            f"{name}: grammar {what} uses the shorthand class "
+            f"{shorthand.group(0)!r} — it means different things in Python "
+            "(Unicode) and JS RegExp (ASCII); use an explicit char class "
+            "([0-9], [^/], …) from the shared subset (issue #492)"
+        )
+    if "(?P<" in pattern or "(?P=" in pattern:
+        raise ValueError(
+            f"{name}: grammar {what} uses a Python-only group spelling "
+            "((?P<…>/(?P=…)) — store it in ECMAScript form ((?<name>…) / "
+            "\\k<name>); the Python side translates it (issue #492)"
+        )
 
 
 def validate_grammar(connector: type[Connector] | Connector) -> None:
@@ -241,35 +303,18 @@ def validate_grammar(connector: type[Connector] | Connector) -> None:
        parameter the other doesn't. (A `\k<name>` backreference is NOT a group,
        so a repeated-slug grammar still has one `geography` group == one
        `{geography}` placeholder.)
+    8. Every `reject_reasons` entry (issue #493) is a `{pattern, reason}` mapping
+       whose pattern passes the same shared-subset checks (1–4), is start-anchored
+       (`^`, so it only matches this portal), uses NO end anchor `$` (a reject
+       pattern matches a forbidden fragment, not the whole URL, so the `$`→`\Z`
+       translation never applies to it), and compiles.
     """
     grammar = connector.search_url_grammar
     if grammar is None:
         return
     name = getattr(connector, "name", connector.__class__.__name__)
     ecma = grammar.parse_pattern
-    if re.search(r"\(\?[aiLmsux]", ecma):
-        raise ValueError(
-            f"{name}: grammar parse_pattern uses inline flags — not ECMAScript-safe"
-        )
-    if "(?<=" in ecma or "(?<!" in ecma:
-        raise ValueError(
-            f"{name}: grammar parse_pattern uses lookbehind — outside the "
-            "shared regex subset (issue #491)"
-        )
-    shorthand = re.search(r"\\[dDwWsS]", ecma)
-    if shorthand:
-        raise ValueError(
-            f"{name}: grammar parse_pattern uses the shorthand class "
-            f"{shorthand.group(0)!r} — it means different things in Python "
-            "(Unicode) and JS RegExp (ASCII); use an explicit char class "
-            "([0-9], [^/], …) from the shared subset (issue #492)"
-        )
-    if "(?P<" in ecma or "(?P=" in ecma:
-        raise ValueError(
-            f"{name}: grammar parse_pattern uses a Python-only group spelling "
-            "((?P<…>/(?P=…)) — store it in ECMAScript form ((?<name>…) / "
-            "\\k<name>); the Python side translates it (issue #492)"
-        )
+    _assert_ecma_portable(name, ecma, "parse_pattern")
     if not ecma.startswith("^") or not ecma.endswith("$"):
         raise ValueError(
             f"{name}: grammar parse_pattern must be fully anchored (^…$) (issue #492)"
@@ -294,6 +339,43 @@ def validate_grammar(connector: type[Connector] | Connector) -> None:
             f"{name}: grammar named groups {sorted(groups)} != build template "
             f"placeholders {sorted(placeholders)}"
         )
+    for i, entry in enumerate(grammar.reject_reasons):
+        what = f"reject_reasons[{i}].pattern"
+        if not isinstance(entry, Mapping):
+            # ValueError (not TypeError) for consistency: every validate_grammar
+            # failure is a ValueError describing an invalid grammar, and callers
+            # / tests catch that one type.
+            raise ValueError(  # noqa: TRY004
+                f"{name}: grammar reject_reasons[{i}] must be a mapping with "
+                "'pattern' and 'reason' keys (issue #493)"
+            )
+        rp = entry.get("pattern")
+        reason = entry.get("reason")
+        if not isinstance(rp, str) or not rp:
+            raise ValueError(
+                f"{name}: grammar reject_reasons[{i}] has no 'pattern' string (issue #493)"
+            )
+        if not isinstance(reason, str) or not reason:
+            raise ValueError(
+                f"{name}: grammar reject_reasons[{i}] has no 'reason' key string (issue #493)"
+            )
+        _assert_ecma_portable(name, rp, what)
+        if not rp.startswith("^"):
+            raise ValueError(
+                f"{name}: grammar {what} must be start-anchored (^) so it only "
+                "matches this portal's URLs (issue #493)"
+            )
+        if re.search(r"(?<!\\)\$", rp):
+            raise ValueError(
+                f"{name}: grammar {what} must not use the end anchor `$` — a "
+                "reject pattern matches a forbidden URL fragment, not the whole "
+                "URL, and a `$` would diverge between Python and JS on a "
+                "trailing newline (issue #493)"
+            )
+        try:
+            re.compile(_ecma_pattern_to_python(rp))
+        except re.error as exc:
+            raise ValueError(f"{name}: grammar {what} does not compile: {exc}") from exc
 
 
 @dataclass(frozen=True)

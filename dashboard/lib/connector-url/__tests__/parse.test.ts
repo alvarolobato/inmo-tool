@@ -14,11 +14,13 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, it, expect } from "vitest";
-import { inferParams, buildUrl, parseGrammar, type SearchUrlGrammar } from "../parse";
+import { inferParams, buildUrl, parseGrammar, rejection, type SearchUrlGrammar } from "../parse";
 
 interface FixtureCase {
   url: string;
   expected: Record<string, string> | null;
+  /** Reject-reason key (issue #493), or null/absent for a non-rejected URL. */
+  reject?: string | null;
 }
 interface FixtureConnector {
   connector: string;
@@ -57,12 +59,22 @@ describe("URL grammar parity with Python (fixture-driven)", () => {
       });
 
       for (const [i, testCase] of c.cases.entries()) {
+        const rej = testCase.reject ?? null;
         it(`case ${i}: ${testCase.url} → ${testCase.expected === null ? "null" : JSON.stringify(testCase.expected)}`, () => {
           const got = inferParams(grammar, testCase.url);
           expect(got).toEqual(testCase.expected);
         });
 
-        if (testCase.expected !== null) {
+        // Rejection parity (issue #493): the browser and Python agree on which
+        // URLs are robots-forbidden reasoned blocks vs plain no-matches.
+        it(`case ${i}: rejection ${testCase.url} → ${rej === null ? "null" : rej}`, () => {
+          expect(rejection(grammar, testCase.url)).toBe(rej);
+        });
+
+        // Only round-trip a genuinely usable URL: not a no-match, and not a
+        // reasoned rejection (a bare-geography URL parses but must never be
+        // rebuilt/pinned).
+        if (testCase.expected !== null && rej === null) {
           it(`case ${i}: buildUrl round-trips ${testCase.url}`, () => {
             // build(params) reconstructs the exact URL the grammar parsed.
             expect(buildUrl(grammar, testCase.expected as Record<string, string>)).toBe(
@@ -95,6 +107,7 @@ describe("inferParams", () => {
     buildTemplate: "https://www.pisos.com/venta/pisos-{geography}/",
     parsePattern: "^https?://(?:www\\.)?pisos\\.com/venta/pisos-(?<geography>[^/]+)/?$",
     params: { geography: { label: "Municipio", source: "profile" } },
+    rejectReasons: [],
   };
 
   it("returns null for a URL that doesn't match", () => {
@@ -108,7 +121,59 @@ describe("inferParams", () => {
   });
 
   it("returns null for a malformed pattern instead of throwing", () => {
-    const bad: SearchUrlGrammar = { buildTemplate: "", parsePattern: "(?<a>[", params: {} };
+    const bad: SearchUrlGrammar = {
+      buildTemplate: "",
+      parsePattern: "(?<a>[",
+      params: {},
+      rejectReasons: [],
+    };
     expect(inferParams(bad, "anything")).toBeNull();
+  });
+});
+
+describe("rejection (issue #493)", () => {
+  const grammar: SearchUrlGrammar = {
+    buildTemplate:
+      "https://www.fotocasa.es/es/comprar/viviendas/{geography}/{zone}/{rooms_segment}l",
+    parsePattern:
+      "^https?://(?:www\\.)?fotocasa\\.es/es/comprar/viviendas/(?<geography>[^/]+)/(?<zone>[^/]+)/(?<rooms_segment>(?:[0-9]+-habitaciones/)?)l$",
+    params: {},
+    rejectReasons: [
+      { pattern: "^https?://(?:www\\.)?fotocasa\\.es/[^?]*\\?", reason: "robots-query-params" },
+      {
+        pattern:
+          "^https?://(?:www\\.)?fotocasa\\.es/es/comprar/viviendas/(?:barcelona|madrid|valencia)/",
+        reason: "robots-bare-geography",
+      },
+    ],
+  };
+
+  it("rejects a query string with the robots-query-params reason", () => {
+    expect(
+      rejection(
+        grammar,
+        "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital/todas-las-zonas/l?minPrice=100000",
+      ),
+    ).toBe("robots-query-params");
+  });
+
+  it("rejects a bare city-name slug even though it parses (precedence)", () => {
+    const url = "https://www.fotocasa.es/es/comprar/viviendas/madrid/todas-las-zonas/l";
+    expect(inferParams(grammar, url)).not.toBeNull();
+    expect(rejection(grammar, url)).toBe("robots-bare-geography");
+  });
+
+  it("does not reject a valid URL", () => {
+    expect(
+      rejection(
+        grammar,
+        "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital/todas-las-zonas/2-habitaciones/l",
+      ),
+    ).toBeNull();
+  });
+
+  it("returns null when the grammar declares no reject reasons", () => {
+    const g: SearchUrlGrammar = { ...grammar, rejectReasons: [] };
+    expect(rejection(g, "https://www.fotocasa.es/x?y=1")).toBeNull();
   });
 });

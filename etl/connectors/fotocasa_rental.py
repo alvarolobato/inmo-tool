@@ -134,10 +134,13 @@ from etl.connectors.base import (
     ConnectorScope,
     ListingUnavailableError,
     RawListing,
+    SearchParam,
     SearchPreview,
+    SearchUrlGrammar,
     Throttle,
 )
 from etl.connectors.fotocasa import (
+    _BARE_GEO_ALTERNATION,
     _BASE_URL,
     _REQUEST_TIMEOUT_SECONDS,
     _ROBOTS_DISALLOWED_BARE_GEOGRAPHIES,
@@ -156,6 +159,37 @@ from etl.connectors.geography import (
 )
 
 logger = logging.getLogger("etl.connectors.fotocasa_rental")
+
+# Issue #493: the rental connector's own invertible grammar. Unlike the sale
+# grammar it models ONLY `geography` — the zone is always the fixed
+# `todas-las-zonas` entry page and the `-habitaciones/` room token is
+# deliberately ignored for rental (discover() never appends it), so neither is a
+# round-tripped placeholder. `_rental_search_url()` delegates to build() (same
+# anti-drift contract as the sale connector). The two reject_reasons mirror the
+# sale grammar's robots guards, scoped to the `/es/alquiler/` path.
+_RENTAL_SEARCH_URL_GRAMMAR = SearchUrlGrammar(
+    build_template=(
+        f"{_BASE_URL}/es/alquiler/viviendas/{{geography}}/{_ZONE_SLUG_ALL}/l"
+    ),
+    parse_pattern=(
+        r"^https?://(?:www\.)?fotocasa\.es/es/alquiler/viviendas/"
+        r"(?<geography>[^/]+)/todas-las-zonas/l$"
+    ),
+    params={"geography": {"label": "Municipio", "source": "profile"}},
+    reject_reasons=(
+        {
+            "pattern": r"^https?://(?:www\.)?fotocasa\.es/[^?]*\?",
+            "reason": "robots-query-params",
+        },
+        {
+            "pattern": (
+                r"^https?://(?:www\.)?fotocasa\.es/es/alquiler/viviendas/"
+                rf"(?:{_BARE_GEO_ALTERNATION})/"
+            ),
+            "reason": "robots-bare-geography",
+        },
+    ),
+)
 
 
 class FotocasaRentalConnector(FotocasaConnector):
@@ -211,10 +245,18 @@ class FotocasaRentalConnector(FotocasaConnector):
         except UnresolvableGeographyError:
             return unresolvable_scope_key(scope)
 
+    # Issue #493: override the inherited sale grammar with the rental one
+    # (different operation path, no rooms token). Published to
+    # connector_registry.search_url_grammar; `_rental_search_url()` delegates to
+    # its build() so the two can never drift.
+    search_url_grammar = _RENTAL_SEARCH_URL_GRAMMAR
+
     def _rental_search_url(self, geography: str) -> str:
         """The single unfiltered rental search page discover() enters from —
-        distinct signature from the sale connector's `_search_url()`."""
-        return f"{_BASE_URL}/es/alquiler/viviendas/{geography}/{_ZONE_SLUG_ALL}/l"
+        distinct signature from the sale connector's `_search_url()`. Delegates
+        to `search_url_grammar.build()` (issue #493) so it can never drift from
+        the published grammar."""
+        return self.search_url_grammar.build({"geography": geography})
 
     def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
         """Reuses `_rental_search_url()` — the exact helper discover() uses."""
@@ -232,12 +274,44 @@ class FotocasaRentalConnector(FotocasaConnector):
                     notes="El perfil no resuelve a una geografía que este conector cubra.",
                 )
             ]
+        # Issue #493: geography (profile) + operation (constant) + the fixed
+        # entry zone (derived). `rooms` is deliberately ABSENT — rental
+        # discover() ignores the room filter on purpose (always todas-las-zonas,
+        # no -habitaciones token). Price/size/type never reach the connector.
+        params = (
+            SearchParam(
+                key="geography",
+                label="Municipio",
+                value=geography,
+                source="profile",
+                in_url=True,
+            ),
+            SearchParam(
+                key="operation",
+                label="Operación",
+                value="alquiler",
+                source="constant",
+                in_url=True,
+            ),
+            SearchParam(
+                key="zone",
+                label="Zona de entrada",
+                value=_ZONE_SLUG_ALL,
+                source="derived",
+                in_url=True,
+                notes=(
+                    "Alquiler entra por 'todas-las-zonas'; el filtro de "
+                    "habitaciones no aplica en alquiler (se ignora a propósito)."
+                ),
+            ),
+        )
         return [
             SearchPreview(
                 label=f"Fotocasa (alquiler) — {geography}",
                 url=self._rental_search_url(geography),
                 kind="search_page",
                 tunable=True,
+                params=params,
             )
         ]
 

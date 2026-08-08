@@ -70,7 +70,9 @@ from etl.connectors.base import (
     ConnectorScope,
     ListingUnavailableError,
     RawListing,
+    SearchParam,
     SearchPreview,
+    SearchUrlGrammar,
     SoftBlockError,
     Throttle,
 )
@@ -181,6 +183,63 @@ _CITY_SLUGS: dict[str, str] = {
     "mairena del aljarafe": "mairena-del-aljarafe",
     "san juan de aznalfarache": "san-juan-de-aznalfarache",
 }
+
+# Issue #493: the invertible search-URL grammar for the sale connector. Fotocasa's
+# search path has THREE segments — `/es/comprar/viviendas/<geography>/<zone>/
+# [<N>-habitaciones/]l` — the last being the optional EXACT-match room-count token
+# (issue #99). `_search_url()` delegates to `build()` so the grammar IS the URL
+# builder and can never drift; the per-connector round-trip contract pins them.
+#
+# `rooms_segment` captures the WHOLE optional `<N>-habitaciones/` token (or empty)
+# rather than just the digits: the surrounding literal is itself optional, so a
+# plain `str.format` build template can only round-trip if the placeholder carries
+# the entire segment. It maps 1:1 onto `_search_url`'s existing `rooms_segment`
+# argument (built from `scope.rooms` in discover()). The human "2 habitaciones"
+# chip is surfaced separately via `search_previews().params` (a `rooms` param,
+# source `connector_config`) — see search_previews().
+#
+# `reject_reasons` encode the two robots.txt bans as REASONED blocks the dashboard
+# explains and refuses to save (distinct from a plain no-match kept verbatim):
+#   1. ANY query string — Fotocasa disallows every filter query param
+#      (minPrice/maxPrice/minRooms/maxRooms/propertySubtypeIds/filter=*), so a
+#      URL discover() could never open must be rejected, not silently accepted.
+#   2. A bare city-name path segment (`/madrid/`, `/barcelona/`, `/valencia/`) —
+#      disallowed; the hyphenated slug (`madrid-capital`) is the fix.
+# Both patterns are start-anchored and portal-scoped, and match a FRAGMENT (no
+# `$`) — they flag a forbidden shape anywhere in the URL.
+_BARE_GEO_ALTERNATION = "|".join(sorted(_ROBOTS_DISALLOWED_BARE_GEOGRAPHIES))
+
+_SEARCH_URL_GRAMMAR = SearchUrlGrammar(
+    build_template=(
+        f"{_BASE_URL}/es/comprar/viviendas/{{geography}}/{{zone}}/{{rooms_segment}}l"
+    ),
+    parse_pattern=(
+        r"^https?://(?:www\.)?fotocasa\.es/es/comprar/viviendas/"
+        r"(?<geography>[^/]+)/(?<zone>[^/]+)/"
+        r"(?<rooms_segment>(?:[0-9]+-habitaciones/)?)l$"
+    ),
+    params={
+        "geography": {"label": "Municipio", "source": "profile"},
+        "zone": {"label": "Zona", "source": "derived"},
+        "rooms_segment": {
+            "label": "Habitaciones (segmento URL)",
+            "source": "connector_config",
+        },
+    },
+    reject_reasons=(
+        {
+            "pattern": r"^https?://(?:www\.)?fotocasa\.es/[^?]*\?",
+            "reason": "robots-query-params",
+        },
+        {
+            "pattern": (
+                r"^https?://(?:www\.)?fotocasa\.es/es/comprar/viviendas/"
+                rf"(?:{_BARE_GEO_ALTERNATION})/"
+            ),
+            "reason": "robots-bare-geography",
+        },
+    ),
+)
 
 
 def _resolve_geography(scope: ConnectorScope) -> str | None:
@@ -563,6 +622,12 @@ class FotocasaConnector(Connector):
     # connector's recall source for a profile (discover() wiring is Phase 5).
     override_host_suffix = "fotocasa.es"
 
+    # Issue #493: published to connector_registry.search_url_grammar so the
+    # dashboard infers params from an owner-edited URL in the browser with the
+    # same grammar (one implementation, zero per-connector TS). `_search_url()`
+    # delegates to its build() so the two can never drift.
+    search_url_grammar = _SEARCH_URL_GRAMMAR
+
     # Issue #143: this is the connector the fetch-budget problem was written
     # about (see the issue — a single sweep at 3 req/min was ~8h even before
     # zone partitioning made discover() itself heavier). 24h is a documented
@@ -890,15 +955,20 @@ class FotocasaConnector(Connector):
     def _search_url(self, geography: str, zone_slug: str, rooms_segment: str) -> str:
         """Build a search URL from path segments only.
 
+        Delegates to `search_url_grammar.build()` (issue #493) so the derived URL
+        and the published grammar can never drift apart; the per-connector
+        round-trip contract pins the two together.
+
         Deliberately takes no query-string parameters: Fotocasa's robots.txt
         disallows the filter query params (`minPrice`, `maxPrice`, `minRooms`,
         `maxRooms`, `propertySubtypeIds`, `filter=*` bar one carve-out) while
         leaving these path segments allowed. Keeping URL construction funnelled
         through one query-string-free helper is what makes that boundary
-        testable — see test_every_constructed_url_is_robots_allowed.
+        testable — see test_every_constructed_url_is_robots_allowed — and the
+        grammar's `reject_reasons` mirror that same ban for owner-pasted URLs.
         """
-        return (
-            f"{_BASE_URL}/es/comprar/viviendas/{geography}/{zone_slug}/{rooms_segment}l"
+        return self.search_url_grammar.build(
+            {"geography": geography, "zone": zone_slug, "rooms_segment": rooms_segment}
         )
 
     def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
@@ -922,12 +992,63 @@ class FotocasaConnector(Connector):
         rooms_segment = (
             f"{scope.rooms}-habitaciones/" if scope.rooms is not None else ""
         )
+        # Issue #493: the exact params discover() uses for this scope, built from
+        # the SAME resolved values the URL is (anti-drift). `geography` (profile)
+        # and `zone`/`operation` travel in the path; `rooms` (from
+        # connector_config, only when set) is an EXACT-match filter, not a
+        # minimum. The profile's price/size/type filters are deliberately ABSENT:
+        # they never reach the connector (Fotocasa's query params for them are
+        # robots-disallowed — see the grammar's reject_reasons) and are applied
+        # downstream by data instead.
+        params: list[SearchParam] = [
+            SearchParam(
+                key="geography",
+                label="Municipio",
+                value=geography,
+                source="profile",
+                in_url=True,
+            ),
+            SearchParam(
+                key="operation",
+                label="Operación",
+                value="comprar",
+                source="constant",
+                in_url=True,
+            ),
+            SearchParam(
+                key="zone",
+                label="Zona de entrada",
+                value=_ZONE_SLUG_ALL,
+                source="derived",
+                in_url=True,
+                notes=(
+                    "La página de entrada usa la zona 'todas-las-zonas'; el "
+                    "barrido interno recorre ~160 zonas del municipio (detalle "
+                    "del discover, no un parámetro editable)."
+                ),
+            ),
+        ]
+        if scope.rooms is not None:
+            params.append(
+                SearchParam(
+                    key="rooms",
+                    label="Habitaciones",
+                    value=str(scope.rooms),
+                    source="connector_config",
+                    in_url=True,
+                    notes=(
+                        "Filtro EXACTO (no mínimo): viaja en la URL como "
+                        f"'{scope.rooms}-habitaciones/'."
+                    ),
+                )
+            )
         return [
             SearchPreview(
                 label=f"Fotocasa — {geography}",
                 url=self._search_url(geography, _ZONE_SLUG_ALL, rooms_segment),
                 kind="search_page",
                 tunable=True,
+                params=tuple(params),
             )
         ]
 

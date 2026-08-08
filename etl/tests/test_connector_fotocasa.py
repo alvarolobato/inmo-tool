@@ -1497,3 +1497,107 @@ class TestPriceChangeHistory:
         assert price_before == Decimal(205000)
         assert price_after == Decimal(195000)
         assert price_before != price_after
+
+
+# ── search URL grammar (issue #493) ───────────────────────────────────
+
+
+def test_search_url_delegates_to_the_grammar():
+    """_search_url() IS the grammar's build() — so the derived URL and the
+    published grammar can never drift apart (issue #493)."""
+    c = FotocasaConnector()
+    assert c.search_url_grammar is not None
+    for geo, zone, rooms in (
+        ("madrid-capital", "todas-las-zonas", ""),
+        ("sevilla-capital", "chamberi", "2-habitaciones/"),
+    ):
+        assert c._search_url(geo, zone, rooms) == c.search_url_grammar.build(
+            {"geography": geo, "zone": zone, "rooms_segment": rooms}
+        )
+
+
+def test_grammar_validates():
+    from etl.connectors.base import validate_grammar
+
+    validate_grammar(FotocasaConnector())  # no raise
+
+
+def test_grammar_round_trip_with_and_without_rooms_and_robots_rejects():
+    """parse(build(x)) == x with and without the rooms token (EC-2), foreign and
+    cross-operation URLs are no-match, and the two robots bans are REASONED
+    rejections (EC-3/EC-4) — query string and bare city-name slug."""
+    from etl.tests.grammar_contract import assert_grammar_roundtrip
+
+    c = FotocasaConnector()
+    cases = [
+        {"geography": "madrid-capital", "zone": "todas-las-zonas", "rooms_segment": ""},
+        {
+            "geography": "madrid-capital",
+            "zone": "chamberi",
+            "rooms_segment": "3-habitaciones/",
+        },
+    ]
+    foreign = [
+        "https://www.pisos.com/venta/pisos-madrid/",
+        # The rental sibling's URL — sale grammar must not parse it.
+        "https://www.fotocasa.es/es/alquiler/viviendas/madrid-capital/todas-las-zonas/l",
+        # Trailing newline rejected on both engines (the $→\Z parity).
+        "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital/todas-las-zonas/l\n",
+    ]
+    rejects = [
+        (
+            (
+                "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital"
+                "/todas-las-zonas/l?minPrice=100000"
+            ),
+            "robots-query-params",
+        ),
+        (
+            "https://www.fotocasa.es/es/comprar/viviendas/madrid/todas-las-zonas/l",
+            "robots-bare-geography",
+        ),
+    ]
+    assert_grammar_roundtrip(
+        c.search_url_grammar,
+        cases,
+        foreign,
+        build_real=lambda p: c._search_url(
+            p["geography"], p["zone"], p["rooms_segment"]
+        ),
+        rejects=rejects,
+    )
+
+
+def test_grammar_rejection_takes_precedence_over_a_successful_parse():
+    """A bare-geography URL DOES parse (geography=madrid) yet must still be a
+    hard rejection — the UI blocks saving it (issue #493, EC-4)."""
+    c = FotocasaConnector()
+    url = "https://www.fotocasa.es/es/comprar/viviendas/madrid/todas-las-zonas/l"
+    assert c.search_url_grammar.parse(url) is not None
+    assert c.search_url_grammar.rejection(url) == "robots-bare-geography"
+
+
+def test_search_previews_expose_geography_operation_and_rooms_params():
+    """The preview publishes geography (profile), operation (constant), the
+    derived entry zone, and — only when configured — rooms (connector_config,
+    EXACT), all built from the SAME resolved values the URL is (issue #493)."""
+    c = FotocasaConnector()
+
+    without = c.search_previews(ConnectorScope(geography="madrid-capital"))
+    params = {p.key: p for p in without[0].params}
+    assert params["geography"].value == "madrid-capital"
+    assert params["geography"].source == "profile"
+    assert params["operation"].value == "comprar"
+    assert params["operation"].source == "constant"
+    assert params["zone"].source == "derived"
+    assert "rooms" not in params  # absent when scope has no room filter
+    # Honesty: the profile's price/size/type never travel in this search.
+    assert not any(p.key in {"price", "size", "type"} for p in without[0].params)
+
+    with_rooms = c.search_previews(ConnectorScope(geography="madrid-capital", rooms=2))
+    rparams = {p.key: p for p in with_rooms[0].params}
+    assert rparams["rooms"].value == "2"
+    assert rparams["rooms"].source == "connector_config"
+    assert rparams["rooms"].in_url is True
+    assert "EXACTO" in (rparams["rooms"].notes or "")
+    assert with_rooms[0].url.endswith("/2-habitaciones/l")

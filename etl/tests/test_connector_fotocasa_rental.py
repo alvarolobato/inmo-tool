@@ -232,3 +232,73 @@ class TestNormalizeProducesEstimatorFields:
     def test_status_is_active(self):
         cv = _normalize_one(FotocasaRentalConnector(), "190014264")
         assert cv.status == "active"
+
+
+# ── search URL grammar (issue #493) ───────────────────────────────────
+
+
+def test_rental_search_url_delegates_to_the_grammar():
+    """_rental_search_url() IS the rental grammar's build() (anti-drift), and the
+    rental connector publishes its OWN grammar, not the inherited sale one."""
+    c = FotocasaRentalConnector()
+    assert c.search_url_grammar is not FotocasaConnector.search_url_grammar
+    for geo in ("madrid-capital", "sevilla-capital"):
+        assert c._rental_search_url(geo) == c.search_url_grammar.build(
+            {"geography": geo}
+        )
+
+
+def test_rental_grammar_validates():
+    from etl.connectors.base import validate_grammar
+
+    validate_grammar(FotocasaRentalConnector())  # no raise
+
+
+def test_rental_grammar_round_trip_and_cross_operation_and_robots_rejects():
+    """Round-trip on geography, the SALE sibling's URL is a no-match, and the two
+    robots bans are reasoned rejections (issue #493)."""
+    from etl.tests.grammar_contract import assert_grammar_roundtrip
+
+    c = FotocasaRentalConnector()
+    cases = [{"geography": "madrid-capital"}, {"geography": "sevilla-capital"}]
+    foreign = [
+        "https://www.habitaclia.com/viviendas-madrid.htm",
+        # The sale sibling's URL — the rental grammar must not parse it.
+        "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital/todas-las-zonas/l",
+        "https://www.fotocasa.es/es/alquiler/viviendas/madrid-capital/todas-las-zonas/l\n",
+    ]
+    rejects = [
+        (
+            (
+                "https://www.fotocasa.es/es/alquiler/viviendas/madrid-capital"
+                "/todas-las-zonas/l?maxPrice=1200"
+            ),
+            "robots-query-params",
+        ),
+        (
+            "https://www.fotocasa.es/es/alquiler/viviendas/valencia/todas-las-zonas/l",
+            "robots-bare-geography",
+        ),
+    ]
+    assert_grammar_roundtrip(
+        c.search_url_grammar,
+        cases,
+        foreign,
+        build_real=lambda p: c._rental_search_url(p["geography"]),
+        rejects=rejects,
+    )
+
+
+def test_rental_search_previews_expose_geography_and_operation_no_rooms():
+    """Rental exposes geography (profile), operation=alquiler (constant) and the
+    fixed entry zone (derived); rooms is deliberately ABSENT (rental ignores the
+    room filter), and price/size/type never travel in the URL (issue #493)."""
+    c = FotocasaRentalConnector()
+    previews = c.search_previews(ConnectorScope(geography="madrid-capital", rooms=2))
+    params = {p.key: p for p in previews[0].params}
+    assert params["geography"].value == "madrid-capital"
+    assert params["operation"].value == "alquiler"
+    assert params["operation"].source == "constant"
+    assert params["zone"].source == "derived"
+    assert "rooms" not in params  # ignored on purpose for rental
+    assert not any(p.key in {"price", "size", "type"} for p in previews[0].params)

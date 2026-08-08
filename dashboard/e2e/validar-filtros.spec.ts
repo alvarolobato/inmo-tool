@@ -124,13 +124,18 @@ test.beforeAll(async () => {
         search_url_grammar)
      VALUES ('pisos', true, 20, false, true, '[]'::jsonb, 'pisos.com', false, $1::jsonb),
             ('habitaclia', true, 20, false, true, '[]'::jsonb, 'habitaclia.com', true, $2::jsonb),
+            ('fotocasa', true, 3, false, true, '["rooms"]'::jsonb, 'fotocasa.es', true, $3::jsonb),
             ('cimenta2', true, 20, true, true, '[]'::jsonb, NULL, false, NULL)
      ON CONFLICT (connector_name) DO UPDATE SET
        registered = true, supports_discovery = true,
        override_host_suffix = EXCLUDED.override_host_suffix,
        supports_search_override = EXCLUDED.supports_search_override,
        search_url_grammar = EXCLUDED.search_url_grammar`,
-    [JSON.stringify(PISOS_GRAMMAR), JSON.stringify(HABITACLIA_GRAMMAR)],
+    [
+      JSON.stringify(PISOS_GRAMMAR),
+      JSON.stringify(HABITACLIA_GRAMMAR),
+      JSON.stringify(FOTOCASA_GRAMMAR),
+    ],
   );
   await seedEtlPreviews();
 });
@@ -154,11 +159,39 @@ const HABITACLIA_GRAMMAR = {
 };
 const HABITACLIA_PREVIEW_URL = "https://www.habitaclia.com/viviendas-sevilla.htm";
 
+// The fotocasa grammar exactly as sync_connector_registry publishes it (issue
+// #493): a 3-segment path (geography / zone / optional -habitaciones token) plus
+// two robots reject_reasons — ANY query string and a bare city-name slug — that
+// the browser turns into a HARD block, not a verbatim pin.
+const FOTOCASA_GRAMMAR = {
+  build_template:
+    "https://www.fotocasa.es/es/comprar/viviendas/{geography}/{zone}/{rooms_segment}l",
+  parse_pattern:
+    "^https?://(?:www\\.)?fotocasa\\.es/es/comprar/viviendas/(?<geography>[^/]+)/(?<zone>[^/]+)/(?<rooms_segment>(?:[0-9]+-habitaciones/)?)l$",
+  params: {
+    geography: { label: "Municipio", source: "profile" },
+    zone: { label: "Zona", source: "derived" },
+    rooms_segment: { label: "Habitaciones (segmento URL)", source: "connector_config" },
+  },
+  reject_reasons: [
+    { pattern: "^https?://(?:www\\.)?fotocasa\\.es/[^?]*\\?", reason: "robots-query-params" },
+    {
+      pattern:
+        "^https?://(?:www\\.)?fotocasa\\.es/es/comprar/viviendas/(?:barcelona|madrid|valencia)/",
+      reason: "robots-bare-geography",
+    },
+  ],
+};
+// A rooms-filtered fotocasa entry URL (EXACT filter, issue #99).
+const FOTOCASA_PREVIEW_URL =
+  "https://www.fotocasa.es/es/comprar/viviendas/sevilla-capital/todas-las-zonas/2-habitaciones/l";
+
 /** (Re)seed the pisos + cimenta2 previews for the profile (P4/#491). */
 async function seedEtlPreviews(): Promise<void> {
   await pool.query(
     `INSERT INTO connector_search_preview (profile_id, connector, previews)
-     VALUES ($1, 'pisos', $2::jsonb), ($1, 'cimenta2', $3::jsonb), ($1, 'habitaclia', $4::jsonb)
+     VALUES ($1, 'pisos', $2::jsonb), ($1, 'cimenta2', $3::jsonb), ($1, 'habitaclia', $4::jsonb),
+            ($1, 'fotocasa', $5::jsonb)
      ON CONFLICT (profile_id, connector) DO UPDATE SET
        previews = EXCLUDED.previews, computed_at = NOW()`,
     [
@@ -209,6 +242,38 @@ async function seedEtlPreviews(): Promise<void> {
               source: "constant",
               in_url: true,
               notes: "Solo página 1 — habitaclia bloquea la paginación (*pag=) en robots.txt, así que no viaja en la URL.",
+            },
+          ],
+        },
+      ]),
+      JSON.stringify([
+        {
+          // issue #493: fotocasa — a tunable connector with a 3-segment grammar
+          // and robots reject_reasons. geography (perfil) + operation
+          // (constante) + zone de entrada (derivada) + rooms (config, EXACTO).
+          label: "Fotocasa — sevilla-capital",
+          url: FOTOCASA_PREVIEW_URL,
+          kind: "search_page",
+          tunable: true,
+          notes: null,
+          params: [
+            { key: "geography", label: "Municipio", value: "sevilla-capital", source: "profile", in_url: true, notes: null },
+            { key: "operation", label: "Operación", value: "comprar", source: "constant", in_url: true, notes: null },
+            {
+              key: "zone",
+              label: "Zona de entrada",
+              value: "todas-las-zonas",
+              source: "derived",
+              in_url: true,
+              notes: "La página de entrada usa 'todas-las-zonas'; el barrido recorre ~160 zonas.",
+            },
+            {
+              key: "rooms",
+              label: "Habitaciones",
+              value: "2",
+              source: "connector_config",
+              in_url: true,
+              notes: "Filtro EXACTO (no mínimo): viaja como '2-habitaciones/'.",
             },
           ],
         },
@@ -466,6 +531,61 @@ test("habitaclia: params chips + live inference + `?pag=2` verbatim (issue #492)
   await expect(habi.getByTestId("etl-inference-warning")).toContainText("se usará tal cual");
   await expect(habi.getByTestId("etl-inference-panel")).toHaveCount(0);
   await expect(habi.getByTestId("etl-save")).toBeEnabled();
+  await assertNoErrorSurface(page);
+});
+
+test("fotocasa: rooms params + live inference + query-string robots reject blocks Guardar (issue #493)", async ({
+  page,
+}) => {
+  await seedEtlPreviews();
+  await page.goto(`/profiles/${profileId}/filtros`);
+  await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
+  await assertNoErrorSurface(page);
+
+  const foto = page.locator('[data-testid="etl-connector-row"][data-connector="fotocasa"]');
+  await expect(foto).toBeVisible();
+  await expect(foto).toHaveAttribute("data-tunable", "true");
+  await expect(foto.getByTestId("etl-url")).toHaveText(FOTOCASA_PREVIEW_URL);
+
+  // EC-1: geography (perfil) + operation (constante) + rooms (config, EXACTO).
+  const geoChip = foto.locator('[data-testid="etl-param-chip"][data-param-key="geography"]');
+  await expect(geoChip).toContainText("sevilla-capital");
+  await expect(geoChip).toContainText("perfil");
+  await expect(
+    foto.locator('[data-testid="etl-param-chip"][data-param-key="operation"]'),
+  ).toContainText("constante");
+  const roomsChip = foto.locator('[data-testid="etl-param-chip"][data-param-key="rooms"]');
+  await expect(roomsChip).toContainText("Habitaciones");
+  await expect(roomsChip).toContainText("config");
+
+  // EC-2: editing the URL to a different rooms token infers it live (the
+  // -habitaciones segment round-trips through the grammar in the browser).
+  await foto
+    .getByTestId("etl-url-input")
+    .fill(
+      "https://www.fotocasa.es/es/comprar/viviendas/sevilla-capital/todas-las-zonas/3-habitaciones/l",
+    );
+  const panel = foto.getByTestId("etl-inference-panel");
+  await expect(panel).toBeVisible();
+  await expect(
+    foto.locator('[data-testid="etl-inferred-chip"][data-param-key="rooms_segment"]'),
+  ).toContainText("3-habitaciones");
+  await expect(foto.getByTestId("etl-inference-rejected")).toHaveCount(0);
+  await assertNoErrorSurface(page);
+
+  // EC-3: a query string is a robots-forbidden shape — a HARD, reasoned block
+  // (not a verbatim pin). The rejection message shows and Guardar is disabled.
+  await foto
+    .getByTestId("etl-url-input")
+    .fill(
+      "https://www.fotocasa.es/es/comprar/viviendas/sevilla-capital/todas-las-zonas/l?minPrice=100000",
+    );
+  const rejected = foto.getByTestId("etl-inference-rejected");
+  await expect(rejected).toBeVisible();
+  await expect(rejected).toHaveAttribute("data-reject-reason", "robots-query-params");
+  await expect(rejected).toContainText("robots.txt");
+  await expect(foto.getByTestId("etl-inference-panel")).toHaveCount(0);
+  await expect(foto.getByTestId("etl-save")).toBeDisabled();
   await assertNoErrorSurface(page);
 });
 
