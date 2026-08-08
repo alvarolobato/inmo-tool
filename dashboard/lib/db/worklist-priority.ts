@@ -45,7 +45,7 @@ export async function getPortalDuePriority(): Promise<Record<string, number>> {
     const now = new Date();
     for (const p of profiles) {
       const [tasks, runs] = await Promise.all([
-        resolveSearchTasks(p.scope),
+        resolveSearchTasks(p.scope, p.id),
         getTaskRuns(p.id),
       ]);
       // The per-profile captured counts are irrelevant to the due state, so pass

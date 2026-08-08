@@ -58,7 +58,7 @@ export async function GET(
       // Learned-aware: a confirmed template wins over the hand-written builder
       // per (portal × section) when one has been captured for this profile's
       // section/area (#293); otherwise the hand-written task stands unchanged.
-      tasks: await resolveSearchTasks(profile.scope),
+      tasks: await resolveSearchTasks(profile.scope, profile.id),
     });
   } catch (error) {
     return NextResponse.json(

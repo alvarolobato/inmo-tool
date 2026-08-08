@@ -96,6 +96,12 @@ export interface SearchTask {
   url: string;
   /** Constraints the portal's URL grammar had to broaden (never narrow). */
   loosened: LoosenedConstraint[];
+  /**
+   * True when the URL came from a `profile_connector_filter` override — the
+   * owner pinned it by hand (tier 0, issue #478). Verbatim, `loosened: []`.
+   * Undefined/false for a derived (builder or learned-example) task.
+   */
+  overridden?: boolean;
 }
 
 /** A per-portal search-URL builder. One per capture-capable portal. */

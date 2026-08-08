@@ -48,7 +48,7 @@ export default async function CapturaPage() {
     // full-table scan.
     const perProfile = await Promise.all(
       profiles.map(async (p) => {
-        const [tasks, runs] = await Promise.all([resolveSearchTasks(p.scope), getTaskRuns(p.id)]);
+        const [tasks, runs] = await Promise.all([resolveSearchTasks(p.scope, p.id), getTaskRuns(p.id)]);
         return { profile: p, tasks, runs };
       }),
     );

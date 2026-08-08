@@ -1933,6 +1933,65 @@ CREATE INDEX IF NOT EXISTS idx_captured_search_urls_recent
     ON captured_search_urls (captured_at DESC);
 
 
+-- Owner-pinned search URL per (profile × connector × section) — issue #478 P1.
+--
+-- This is the FIXED search URL the owner chose for a connector on a specific
+-- profile: it becomes that connector's RECALL SOURCE for that profile,
+-- SUPERSEDING the derived URL (the TS builder for extension portals, or the
+-- Python _search_url() for HTTP connectors). Stored VERBATIM — its numeric
+-- values are NEVER re-substituted the way tier-1 learned templates are: the
+-- owner tuned it by hand ("this will be the source"), and a `shape=` drawn-zone
+-- URL may not even parse. Per D-090, URL building is code-driven; an
+-- owner-pinned URL is the maximal "owner-confirmed" case and therefore beats
+-- everything derived.
+--
+-- Precedence in the resolver (dashboard/lib/search-url/resolve.ts):
+--   tier 0  THIS override (profile × portal × section)  → url verbatim, loosened []
+--   tier 1  exact learned example (D-051)               → substitute in template
+--   tier 2  same-area example ≤25 km, capped by #444    → reuse nearby template
+--   tier 3  the hand-written builder                    → derived default
+--
+-- Keyed by `section_key` (the parser's categoryKey: section + sorted property
+-- types), NOT by task_id. The task id is an FNV hash of the profile's filters
+-- (dashboard/lib/search-url/task-id.ts) and would ORPHAN the moment the owner
+-- edits the profile; section_key is stable across scope edits. Default '' applies
+-- the override to every task of the connector (single-search / cover-all case).
+--
+-- FK ON DELETE CASCADE: archiving a profile is a soft delete (archived_at) so
+-- the override survives an archive, but a hard profile delete drops its pinned
+-- filters with it. Idempotent (CREATE ... IF NOT EXISTS + DROP TRIGGER IF
+-- EXISTS) — applying this file twice is a no-op.
+CREATE TABLE IF NOT EXISTS profile_connector_filter (
+    id           BIGSERIAL    PRIMARY KEY,
+    profile_id   BIGINT       NOT NULL REFERENCES search_profile(id) ON DELETE CASCADE,
+    -- Connector/portal name ('idealista', 'aliseda', 'altamira', 'fotocasa', …).
+    connector    TEXT         NOT NULL,
+    -- The task section/category this replaces ('' = all / single-search connector).
+    -- For extension portals it is the parser's categoryKey (section + sorted
+    -- types); NEVER the task id (a hash of the filters — orphans on profile edit).
+    section_key  TEXT         NOT NULL DEFAULT '',
+    -- The pinned URL, verbatim (shape= intact); never re-substituted.
+    url          TEXT         NOT NULL,
+    source       TEXT         NOT NULL CHECK (source IN ('manual', 'extension')),
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    UNIQUE (profile_id, connector, section_key)
+);
+
+-- The resolver loads every override for a profile in one shot
+-- (findOverridesForProfile → WHERE profile_id = $1); index that lookup.
+CREATE INDEX IF NOT EXISTS idx_profile_connector_filter_profile
+    ON profile_connector_filter (profile_id);
+
+-- Reuse the generic set_updated_at() trigger (defined near the top of this file)
+-- so updated_at tracks every upsert.
+DROP TRIGGER IF EXISTS trg_profile_connector_filter_set_updated_at ON profile_connector_filter;
+CREATE TRIGGER trg_profile_connector_filter_set_updated_at
+    BEFORE UPDATE ON profile_connector_filter
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
+
+
 -- URL-building discovery catalog (issue #336, D-063).
 --
 -- One row per connector × discovery session. The browser extension enumerates a
@@ -2534,3 +2593,4 @@ ANALYZE capture_worklist_seed_trigger;
 ANALYZE capture_task_run;
 ANALYZE search_url_example;
 ANALYZE captured_search_urls;
+ANALYZE profile_connector_filter;
