@@ -360,6 +360,10 @@ function enterBatchMode(ctx, existingProgress) {
   $('#batch-auto-btn').onclick = onToggleAuto;
   $('#batch-force-chk').onchange = onToggleForce;
 
+  // Capturar URL de búsqueda (issue #475): only meaningful on an Idealista
+  // results page, where "Dibuja tu zona" encodes the polygon into `shape=`.
+  setupSearchUrlCapture(ctx?.tab || null);
+
   if (existingProgress) {
     renderBatchProgress(existingProgress);
     startBatchPolling();
@@ -584,6 +588,66 @@ function hideBatchControls() {
   $('#batch-pause-btn').classList.add('hidden');
   $('#batch-resume-btn').classList.add('hidden');
   $('#batch-stop-btn').classList.add('hidden');
+}
+
+// ─── Capturar URL de búsqueda (issue #475, part of #471) ────────
+
+/**
+ * Reveal + wire the "Capturar URL de búsqueda" button when `tab` is an
+ * Idealista results page (the drawn-zone `shape=` grammar is Idealista's). On
+ * any other page (or none) the button stays hidden — nothing to capture. Uses
+ * the shared pure helper (self.InmoSearchUrl) so the host check is identical to
+ * the background worker's re-validation.
+ */
+function setupSearchUrlCapture(tab) {
+  const wrap = $('#capture-search-url-wrap');
+  const status = $('#capture-search-url-status');
+  const btn = $('#capture-search-url-btn');
+  status.classList.add('hidden');
+  status.textContent = '';
+  const isIdealista =
+    !!tab && !!tab.url && self.InmoSearchUrl.isIdealistaUrl(tab.url);
+  if (!isIdealista) {
+    wrap.classList.add('hidden');
+    return;
+  }
+  wrap.classList.remove('hidden');
+  btn.disabled = false;
+  btn.textContent = 'Capturar URL de búsqueda';
+  btn.onclick = () => onCaptureSearchUrl(tab);
+}
+
+/** Send the active tab's Idealista results URL to the dashboard to persist. */
+async function onCaptureSearchUrl(tab) {
+  const btn = $('#capture-search-url-btn');
+  const status = $('#capture-search-url-status');
+  const payload = self.InmoSearchUrl.buildSearchUrlCapture({
+    url: tab.url,
+    title: tab.title,
+  });
+  if (!payload) {
+    status.textContent = 'La pestaña activa no es una URL de búsqueda de Idealista.';
+    status.classList.remove('hidden');
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = 'Capturando…';
+  status.classList.add('hidden');
+  let res;
+  try {
+    res = await chrome.runtime.sendMessage({ type: 'CAPTURE_SEARCH_URL', payload });
+  } catch (err) {
+    res = { success: false, error: { message: err.message } };
+  }
+  if (res && res.success) {
+    status.textContent = 'URL capturada ✓';
+    btn.textContent = 'Capturar de nuevo';
+  } else {
+    status.textContent = (res && res.error && res.error.message) || 'No se pudo capturar la URL';
+    btn.textContent = 'Capturar URL de búsqueda';
+  }
+  status.classList.remove('hidden');
+  btn.disabled = false;
 }
 
 function renderBatchProgress(prog) {
