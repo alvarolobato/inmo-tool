@@ -1,6 +1,8 @@
 "use client";
 
-import { MapContainer, TileLayer, Circle } from "react-leaflet";
+import { useEffect } from "react";
+import { MapContainer, TileLayer, Circle, useMap } from "react-leaflet";
+import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 
 /**
@@ -21,10 +23,50 @@ import "leaflet/dist/leaflet.css";
  * it never steals scroll or focus from the surrounding gallery grid — it's a
  * "where is this" glance, not an interactive map (that lives at
  * /profiles/[id]/map). The circle radius is a fixed approximation.
+ *
+ * The zoom is derived from the circle, not hard-coded (#459): `FitToRadius`
+ * fits the map to the circle's bounds so the whole approximate-location circle
+ * is framed with a little context regardless of the radius, instead of an
+ * arbitrary fixed zoom that could crop the circle or leave it a tiny dot.
  */
 
 /** Approximate-location circle radius, in metres. */
 const APPROX_RADIUS_METERS = 300;
+
+/**
+ * Bounds that exactly contain the approximate-location circle — the same square
+ * a Leaflet `Circle` reports from `getBounds()` (side = diameter = 2 * radius).
+ * Pure geometry (no map/DOM), so it is unit-testable on its own.
+ */
+export function radiusBounds(
+  lat: number,
+  lon: number,
+  radiusMeters: number,
+): L.LatLngBounds {
+  return L.latLng(lat, lon).toBounds(radiusMeters * 2);
+}
+
+/**
+ * Fits the map viewport to the circle's bounds (with a little padding for
+ * context) once the map is ready. Lives as a child of <MapContainer> so it can
+ * grab the live map instance via useMap(); programmatic fitBounds works even
+ * though all interaction handlers are disabled on the container.
+ */
+function FitToRadius({
+  lat,
+  lon,
+  radiusMeters,
+}: {
+  lat: number;
+  lon: number;
+  radiusMeters: number;
+}) {
+  const map = useMap();
+  useEffect(() => {
+    map.fitBounds(radiusBounds(lat, lon, radiusMeters), { padding: [24, 24] });
+  }, [map, lat, lon, radiusMeters]);
+  return null;
+}
 
 export function PropertyLocationMap({
   lat,
@@ -42,6 +84,8 @@ export function PropertyLocationMap({
     >
       <MapContainer
         center={[lat, lon]}
+        // Initial zoom is a placeholder — FitToRadius reframes to the circle's
+        // bounds on mount, so the final zoom always frames the radius (#459).
         zoom={14}
         style={{ width: "100%", height: "100%" }}
         // Static preview: no interaction affordances, so it never fights the
@@ -74,6 +118,7 @@ export function PropertyLocationMap({
             fillOpacity: 0.15,
           }}
         />
+        <FitToRadius lat={lat} lon={lon} radiusMeters={radiusMeters} />
       </MapContainer>
     </div>
   );

@@ -12,7 +12,7 @@ interface ModalProps {
   busy?: boolean;
   /** Test id for the panel (backdrop gets `${testId}-backdrop`). */
   testId?: string;
-  /** Max panel width; defaults to a comfortable form width. */
+  /** Max panel width; defaults to a comfortable form width (issue #459 widened it). */
   maxWidth?: number;
 }
 
@@ -38,7 +38,7 @@ export function Modal({
   children,
   busy = false,
   testId = "modal",
-  maxWidth = 560,
+  maxWidth = 640,
 }: ModalProps) {
   const panelRef = useRef<HTMLDivElement | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
@@ -131,7 +131,12 @@ export function Modal({
           left: "50%",
           transform: "translate(-50%, -50%)",
           zIndex: 101,
-          background: "var(--bg-2)",
+          // Panel sits on --bg-1 (the app's raised "card" surface) so that form
+          // inputs — which use --bg-2 with a --border (see ProfileForm) — read as
+          // a distinct, recessed tone against it in BOTH light and dark themes.
+          // Before #459 the panel was also --bg-2, so fields blended into the
+          // panel and were hard to tell apart.
+          background: "var(--bg-1)",
           border: "1px solid var(--border)",
           borderRadius: 10,
           padding: "20px 20px 18px",
