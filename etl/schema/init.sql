@@ -1970,6 +1970,40 @@ CREATE INDEX IF NOT EXISTS idx_captured_search_urls_recent
     ON captured_search_urls (captured_at DESC);
 
 
+-- Passively-OBSERVED Idealista search URLs (issue #488, part of #471).
+--
+-- Distinct from captured_search_urls above: those are the owner's INTENTIONAL
+-- captures ("Capturar URL de búsqueda"), while these are forwarded PASSIVELY by
+-- the extension's observer as the owner browses Idealista search/results pages,
+-- so the drawn-zone/filtering grammar can be analysed in bulk. Kept in its own
+-- table so the passive noise never drowns the deliberate captures.
+--
+-- De-dup is by norm_key (host + path + sorted query, derived server-side): a
+-- re-observation UPSERTs, bumping seen_count + last_seen rather than inserting a
+-- duplicate. url is kept VERBATIM (shape= and all) — never decoded/normalised.
+CREATE TABLE IF NOT EXISTS observed_search_urls (
+    id           BIGSERIAL    PRIMARY KEY,
+    -- Portal derived server-side from the URL host (never client-claimed).
+    -- Today always 'idealista' (the only portal with a drawn-zone grammar).
+    portal       TEXT         NOT NULL,
+    -- The search URL exactly as observed (shape= and all), latest sighting.
+    url          TEXT         NOT NULL,
+    -- Canonical de-dup key (host + path + sorted query). UNIQUE → UPSERT target.
+    norm_key     TEXT         NOT NULL UNIQUE,
+    -- The results page's document.title at observation time (may be empty).
+    title        TEXT,
+    -- How many times this distinct search was observed (across sessions).
+    seen_count   INTEGER      NOT NULL DEFAULT 1,
+    first_seen   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    last_seen    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- The review surface reads newest-sighting-first; a last_seen index keeps that
+-- cheap as observations accumulate.
+CREATE INDEX IF NOT EXISTS idx_observed_search_urls_recent
+    ON observed_search_urls (last_seen DESC);
+
+
 -- Owner-pinned search URL per (profile × connector × section) — issue #478 P1.
 --
 -- This is the FIXED search URL the owner chose for a connector on a specific
@@ -2945,5 +2979,6 @@ ANALYZE capture_worklist_seed_trigger;
 ANALYZE capture_task_run;
 ANALYZE search_url_example;
 ANALYZE captured_search_urls;
+ANALYZE observed_search_urls;
 ANALYZE profile_connector_filter;
 ANALYZE property_search_doc;

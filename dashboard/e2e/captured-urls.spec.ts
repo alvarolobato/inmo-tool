@@ -33,6 +33,15 @@ const SHAPE_URL =
 const PLAIN_URL =
   "https://www.idealista.com/venta-viviendas/estepona-malaga/E2E-475-plain/";
 
+// Observed URLs (issue #488): a plain listado + an areas/shape drawn zone.
+// The shape encodes Google's documented 3-vertex example polyline.
+const OBS_SHAPE_ENC = "_p~iF~ps|U_ulLnnqC_mqNvxq`@";
+const OBS_SHAPE_URL = `https://www.idealista.com/areas/venta-viviendas/E2E-488-obs/?shape=${encodeURIComponent(
+  `((${OBS_SHAPE_ENC}))`,
+)}`;
+const OBS_PLAIN_URL =
+  "https://www.idealista.com/venta-viviendas/malaga/E2E-488-obs-plain/";
+
 let pool: Pool;
 let dbAvailable = false;
 const adminKey = process.env.ADMIN_API_KEY?.trim();
@@ -40,6 +49,7 @@ const seededIds: number[] = [];
 
 async function purge(): Promise<void> {
   await pool.query("DELETE FROM captured_search_urls WHERE url LIKE '%E2E-475-%'");
+  await pool.query("DELETE FROM observed_search_urls WHERE url LIKE '%E2E-488-%'");
 }
 
 test.beforeAll(async () => {
@@ -63,6 +73,18 @@ test.beforeAll(async () => {
       [url, title],
     );
     seededIds.push(res.rows[0].id);
+  }
+
+  // Observed URLs (issue #488) — a shape/areas row (3 vertices) + a plain row.
+  for (const { url, norm, title } of [
+    { url: OBS_SHAPE_URL, norm: "idealista.com/areas/venta-viviendas/e2e-488-obs?shape=obs-a", title: "Zona observada E2E" },
+    { url: OBS_PLAIN_URL, norm: "idealista.com/venta-viviendas/malaga/e2e-488-obs-plain", title: "Listado observado E2E" },
+  ]) {
+    await pool.query(
+      `INSERT INTO observed_search_urls (portal, url, norm_key, title, seen_count)
+       VALUES ('idealista', $1, $2, $3, 4)`,
+      [url, norm, title],
+    );
   }
 });
 
@@ -96,6 +118,35 @@ test("lists captured URLs with the shape badge and no error surface", async ({ p
 
   // The empty state is NOT shown when there is data.
   await expect(page.getByTestId("captured-urls-empty")).toHaveCount(0);
+
+  // No error surface — the D-041 bar.
+  await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
+  await expect(page.getByText("Error al cargar")).toHaveCount(0);
+  await expect(page.getByText("there is no parameter")).toHaveCount(0);
+  await expect(page.getByText("HTTP 500")).toHaveCount(0);
+});
+
+test("lists observed URLs with type badge and decoded vertex count (#488)", async ({ page }) => {
+  await page.goto("/admin/captured-urls");
+  await expect(page.getByTestId("observed-urls-section")).toBeVisible();
+
+  // Real content: at least the two seeded observed rows and a non-empty total.
+  const rows = page.getByTestId("observed-url-row");
+  await expect(rows.first()).toBeVisible();
+  const total = Number((await page.getByTestId("observed-urls-total").textContent())?.trim());
+  expect(total).toBeGreaterThanOrEqual(2);
+
+  // The areas/shape row renders its type badge and the decoded vertex count (3).
+  const shapeRow = rows.filter({ hasText: "E2E-488-obs/" }).first();
+  await expect(shapeRow.getByTestId("observed-url-type")).toHaveText("areas");
+  await expect(shapeRow.getByTestId("observed-url-vertices")).toHaveText("3");
+
+  // The plain listado row is badged "plana" with no vertex count.
+  const plainRow = rows.filter({ hasText: "E2E-488-obs-plain" }).first();
+  await expect(plainRow.getByTestId("observed-url-type")).toHaveText("plana");
+
+  // The empty state is NOT shown when there is data.
+  await expect(page.getByTestId("observed-urls-empty")).toHaveCount(0);
 
   // No error surface — the D-041 bar.
   await expect(page.getByText("Detalles técnicos")).toHaveCount(0);

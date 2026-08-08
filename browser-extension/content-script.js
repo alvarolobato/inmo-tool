@@ -413,6 +413,7 @@
       removeBanner();
       startAutoCaptureLoop();
       startListingLoop();
+      startObserveLoop();
     }
   }
 
@@ -467,6 +468,57 @@
     runDiscoveryWhenReady(url, Date.now() + DISCOVER_MAX_WAIT_MS);
   }
 
+  // ── 3b. Passive search-URL observer (issue #488, part of #471) ────────────
+  //
+  // As the owner browses Idealista SEARCH/RESULTS pages, forward each distinct
+  // URL to the dashboard so the drawn-zone/filtering grammar can be analysed in
+  // bulk (#471). This is OBSERVE-ONLY: it never captures a listing, never
+  // navigates, and never interferes with the capture/validation flows. It is:
+  //   - gated by the popup toggle "modo observación" (chrome.storage.sync
+  //     `observeMode`, default ON) so the owner can silence it if noisy;
+  //   - suppressed entirely in validation mode (#478 P3);
+  //   - de-duped twice: an in-memory guard so a single page load forwards once,
+  //     and a per-session set in the background worker so the same search isn't
+  //     re-sent across reloads/tabs (see background.js postObservedSearchUrl).
+  // Pure detection lives in observe-search-url.js (self.InmoObserve); this only
+  // decides WHEN to forward and reads document.title off the live page.
+  const OBSERVE_DEFAULT = true;
+  let observedThisLoad = null; // normalised key already forwarded for this URL
+
+  async function observeModeEnabled() {
+    try {
+      const cfg = await chrome.storage.sync.get("observeMode");
+      return cfg.observeMode === undefined ? OBSERVE_DEFAULT : !!cfg.observeMode;
+    } catch {
+      return OBSERVE_DEFAULT;
+    }
+  }
+
+  async function startObserveLoop() {
+    const O = self.InmoObserve;
+    if (!O) return; // observe-search-url.js failed to load — nothing to do
+    // Never observe while validating (#478 P3): observe-only, but stay out of
+    // the way of the owner tuning a search URL.
+    if (D.inValidationMode(window.location.href, validationActive)) return;
+    const url = window.location.href;
+    if (!O.isObservableIdealistaUrl(url)) return; // not a search/results page
+    const key = O.normalizeObservedUrl(url);
+    if (!key || observedThisLoad === key) return; // already forwarded this URL
+    if (!(await observeModeEnabled())) return; // toggle off
+    const payload = O.buildObservedCapture({ url, title: document.title });
+    if (!payload) return;
+    observedThisLoad = key;
+    try {
+      chrome.runtime.sendMessage({ type: "OBSERVE_SEARCH_URL", payload }, () => {
+        // Best-effort: swallow "receiving end does not exist" when the worker is
+        // asleep — a later navigation re-arms the observer.
+        void chrome.runtime.lastError;
+      });
+    } catch {
+      /* worker unavailable — observation is passive, never surface an error */
+    }
+  }
+
   // ── 4. Validation mode bootstrap (issue #478 P3) ──────────────────────────
   //
   // On load, decide whether this tab is validating a search URL. Two entry
@@ -518,6 +570,9 @@
     // the detail auto-capture kill switch.
     startListingLoop();
     startDiscoveryLoop();
+    // Passive search-URL observer (#488) — observe-only, suppressed in
+    // validation mode, gated by the "modo observación" toggle.
+    startObserveLoop();
     if (await autoCaptureEnabled()) startAutoCaptureLoop();
     try {
       const navObs = new MutationObserver(onMaybeNavigated);

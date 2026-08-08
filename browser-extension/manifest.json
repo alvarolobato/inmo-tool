@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Inmo-Tool Listing Capture",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Capture a rendered listing page into inmo-tool, for sites the automated connectors can't reach (Idealista, Aliseda, Altamira).",
   "permissions": ["activeTab", "alarms", "scripting", "storage", "tabs"],
   "host_permissions": [
@@ -30,7 +30,7 @@
         "*://*.alisedainmobiliaria.com/*",
         "*://*.altamirainmuebles.com/*"
       ],
-      "js": ["detect.js", "discover.js", "content-script.js"],
+      "js": ["detect.js", "discover.js", "observe-search-url.js", "content-script.js"],
       "run_at": "document_idle"
     }
   ],
