@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ErrorDisplay } from "@/components/ErrorDisplay";
 import { isApiErrorResponse } from "@/lib/errors";
@@ -85,6 +85,17 @@ export function CandidateList({ profileId }: { profileId: number }) {
   // Best-effort: a failed fetch leaves the count at 0 (no badge).
   const [seguimientoAlertCount, setSeguimientoAlertCount] = useState(0);
 
+  // #467: out-of-order guard for the page-1 (replace) fetch. On mount the feed
+  // fires one fetch with the default filters, then the URL-read effect below
+  // corrects the filters (e.g. hasAlerts=true when landing on `?alerts=1` from
+  // the /perfiles "N con alertas" link) and fires a second, narrower fetch.
+  // These two page-1 requests race; without a guard the slower stale response
+  // (the unfiltered, wider one) can resolve last and clobber the correct
+  // filtered result — the feed then shows MORE cards than the active chip/toggle
+  // claim. Each replace fetch bumps this seq; a response only applies if it is
+  // still the latest replace request.
+  const pageOneSeq = useRef(0);
+
   // Read the filters out of the URL once on mount (SSR-safe: starts at the
   // defaults, corrected on the client) — same window.location precedent as the
   // property-detail page (avoids the useSearchParams Suspense boundary).
@@ -120,6 +131,9 @@ export function CandidateList({ profileId }: { profileId: number }) {
 
   const fetchPage = useCallback(
     async (afterCursor: string | null, replace: boolean) => {
+      // #467: claim a sequence number for page-1 fetches so a stale (slower)
+      // response can't overwrite a newer one — see pageOneSeq above.
+      const seq = replace ? ++pageOneSeq.current : pageOneSeq.current;
       const url = new URL(
         `/api/profiles/${profileId}/candidates`,
         window.location.origin,
@@ -153,6 +167,10 @@ export function CandidateList({ profileId }: { profileId: number }) {
       const res = await fetch(
         url.toString().replace(window.location.origin, ""),
       );
+      // #467: a newer page-1 fetch started while this one was in flight — drop
+      // this stale response entirely (status, error, and body) so it can't
+      // clobber the newer, correct result.
+      if (replace && seq !== pageOneSeq.current) return;
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         setError(

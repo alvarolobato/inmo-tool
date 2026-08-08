@@ -20,6 +20,7 @@ import { buildPgPoolConfig } from "@/lib/db-shared";
 import { resetPool } from "@/lib/db-write";
 import { createProfile } from "@/lib/db/profiles";
 import { listProfileOverviews, OVERVIEW_QUERY_SQL, WARN_CAVEAT_CODES } from "../profile-overview";
+import { listCandidates } from "@/lib/candidates";
 import { MIN_TRAINING_EXAMPLES } from "@/lib/scoring/pipeline";
 import type { Scope, ThesisParams } from "@/lib/profiles-schema";
 
@@ -411,38 +412,73 @@ describe.runIf(dbAvailable)("listProfileOverviews — real Postgres (issue #192)
     }
   });
 
-  it("flagged_count: counts matched properties with a tone='warn' occupancy caveat, not 'condition' assessments", async () => {
-    const profile = await createProfile("Con alertas", scope(), {});
+  it("flagged_count (#467): counts the UNION (caveat-only + redflags-only + both), excludes condition/never-assessed, and EQUALS the hasAlerts feed filter for the same seed", async () => {
+    const profile = await createProfile("Con alertas unión", scope(), {});
     createdProfileIds = [profile.id];
-    let tenanted!: number, reformar!: number, clean!: number;
-    await withRealDb(async (pool) => {
-      tenanted = await seedProperty(pool, { price: null });
-      reformar = await seedProperty(pool, { price: null });
-      clean = await seedProperty(pool, { price: null });
-      createdPropertyIds.push(tenanted, reformar, clean);
-      await matchProperty(pool, profile.id, tenanted);
-      await matchProperty(pool, profile.id, reformar);
-      await matchProperty(pool, profile.id, clean);
+    let caveatOnly!: number, redflagOnly!: number, both!: number, conditionOnly!: number, clean!: number;
 
-      await pool.query(
-        `INSERT INTO ai_assessment (property_id, assessment_type, result, generated_at)
-         VALUES ($1, 'occupancy', $2::jsonb, NOW())`,
-        [tenanted, JSON.stringify({ caveats: ["tenanted"] })],
-      );
-      // 'condition' assessments never contribute to flagged_count, even
-      // though this one is a real, non-trivial finding — CONDITION_LABELS
-      // is all tone='neutral' (lib/candidates.ts).
-      await pool.query(
-        `INSERT INTO ai_assessment (property_id, assessment_type, result, generated_at)
-         VALUES ($1, 'condition', $2::jsonb, NOW())`,
-        [reformar, JSON.stringify({ condition: "a_reformar" })],
-      );
+    // #467: the overview count was broadened from occupancy-caveats-only to the
+    // SAME UNION predicate the feed's "Con alertas" filter uses (≥1 redflag OR
+    // ≥1 warn caveat). Each property needs an ACTIVE SALE listing to be
+    // feed-eligible (the hasAlerts filter runs over the feed), so seed those
+    // explicitly with operation='sale' rather than seedProperty's price helper
+    // (which does not set operation). Uniform price so nothing but the alert
+    // predicate distinguishes the rows.
+    await withRealDb(async (pool) => {
+      const seedWithSaleListing = async (): Promise<number> => {
+        const res = await pool.query<{ id: number }>(
+          `INSERT INTO property (lat, lon, property_type, m2_built, created_at)
+           VALUES ($1, $2, 'piso', 70, NOW()) RETURNING id`,
+          [VALENCIA[0], VALENCIA[1]],
+        );
+        const id = res.rows[0].id;
+        await pool.query(
+          `INSERT INTO listing (property_id, source, external_id, status, operation, current_price, first_seen_at)
+           VALUES ($1, 'test', $2, 'active', 'sale', 250000, NOW())`,
+          [id, `ext-${id}-${Math.random()}`],
+        );
+        return id;
+      };
+      caveatOnly = await seedWithSaleListing();
+      redflagOnly = await seedWithSaleListing();
+      both = await seedWithSaleListing();
+      conditionOnly = await seedWithSaleListing();
+      clean = await seedWithSaleListing();
+      createdPropertyIds.push(caveatOnly, redflagOnly, both, conditionOnly, clean);
+      for (const id of [caveatOnly, redflagOnly, both, conditionOnly, clean]) {
+        await matchProperty(pool, profile.id, id);
+      }
+
+      const insertAssessment = (propertyId: number, type: string, result: Record<string, unknown>) =>
+        pool.query(
+          `INSERT INTO ai_assessment (property_id, assessment_type, result, generated_at)
+           VALUES ($1, $2, $3::jsonb, NOW())`,
+          [propertyId, type, JSON.stringify(result)],
+        );
+      const WARN = WARN_CAVEAT_CODES[0]; // a real warn-tone occupancy caveat code
+      const redflag = { flags: [{ type: "embargo", description: "x", evidence: "y" }] };
+
+      await insertAssessment(caveatOnly, "occupancy", { caveats: [WARN] }); // caveat → alert
+      await insertAssessment(redflagOnly, "redflags", redflag); // redflag → alert (was UNCOUNTED before #467)
+      await insertAssessment(both, "occupancy", { caveats: [WARN] }); // both axes → still one property
+      await insertAssessment(both, "redflags", redflag);
+      // 'condition' is all tone='neutral' (lib/candidates.ts) → never an alert.
+      await insertAssessment(conditionOnly, "condition", { condition: "a_reformar" });
+      // clean: no assessment at all → not an alert (unknown, never a false pass).
     });
 
     const overviews = await listProfileOverviews();
     const entry = overviews.find((e) => e.ok && e.profile.id === profile.id);
     expect(entry?.ok).toBe(true);
-    if (entry?.ok) expect(entry.metrics.flagged_count).toBe(1);
+    // caveatOnly + redflagOnly + both = 3; conditionOnly + clean excluded.
+    if (entry?.ok) expect(entry.metrics.flagged_count).toBe(3);
+
+    // Count⇔filter invariant (#467): the feed's hasAlerts filter returns
+    // EXACTLY the set the overview counts — same profile, same predicate.
+    const filtered = await listCandidates(profile.id, { hasAlerts: true, limit: 100 });
+    const filteredIds = filtered.items.map((c) => c.property_id).sort((a, b) => a - b);
+    expect(filteredIds).toEqual([caveatOnly, redflagOnly, both].sort((a, b) => a - b));
+    if (entry?.ok) expect(filtered.items.length).toBe(entry.metrics.flagged_count);
   });
 
   it("new_count: matched properties whose LISTING first-seen is since the anchor (#416: previous_viewed_at, or created_at-1day for a never-visited profile; measured on listing.first_seen_at, not property.created_at)", async () => {

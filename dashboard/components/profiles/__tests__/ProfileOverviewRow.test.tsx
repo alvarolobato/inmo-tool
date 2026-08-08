@@ -92,10 +92,19 @@ describe("ProfileOverviewRow (issue #193)", () => {
     expect(screen.queryByTestId("profile-metric-flags")).not.toBeInTheDocument();
   });
 
-  it("renders the alertas chip when flagged_count > 0", () => {
-    const entry: ProfileOverviewEntry = { ok: true, profile: profile(), metrics: metrics({ flagged_count: 2 }) };
+  it("renders the alertas chip when flagged_count > 0, as a link to the ?alerts=1 filtered feed (#467)", () => {
+    const entry: ProfileOverviewEntry = {
+      ok: true,
+      profile: profile({ id: 13 }),
+      metrics: metrics({ flagged_count: 2 }),
+    };
     render(<ProfileOverviewRow entry={entry} onEdit={noop} onClone={noop} onArchive={noop} busy={false} />);
-    expect(screen.getByTestId("profile-metric-flags")).toHaveTextContent("2");
+    const flags = screen.getByTestId("profile-metric-flags");
+    expect(flags).toHaveTextContent("2");
+    // #467: the count is clickable and lands on the profile's feed with the
+    // "Con alertas" filter already active (F2 URL-state reads ?alerts=1).
+    expect(flags.tagName).toBe("A");
+    expect(flags).toHaveAttribute("href", "/profiles/13?alerts=1");
   });
 
   it("omits the price chip entirely when no matched property has a priced active listing (absence, not 0 EUR)", () => {
