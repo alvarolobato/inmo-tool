@@ -40,8 +40,12 @@
  *   - `profile_scoring_model`: plain join on its primary key (profile_id) —
  *     O(1) per profile.
  *   - `flag_stats`: one LATERAL per profile, bounded to that profile's
- *     matched properties, reusing the same `DISTINCT ON (property_id)`
- *     most-recent-assessment rule as `lib/candidates.ts`'s `loadFlags`.
+ *     matched properties, counting those matching the SAME "Con alertas"
+ *     UNION predicate the feed filter uses (#467/#466): ≥1 redflag (latest
+ *     redflags axis) OR ≥1 warn-tone occupancy caveat (latest occupancy
+ *     axis) — same most-recent-per-axis rule as `lib/candidates.ts`'s
+ *     `loadFlags`. This keeps `flagged_count` == what the `hasAlerts` filter
+ *     returns for the same profile (count⇔filter invariant, exact).
  *   - `thumbnails`: one LATERAL per profile bounded to `LIMIT 4`
  *     (top-4-by-score), each resolving exactly one lead photo via a bounded
  *     `unnest(...) WITH ORDINALITY ... LIMIT 1` with no ORDER BY inside that
@@ -63,10 +67,13 @@ import type { ProfileThumbnail, ProfileOverviewMetrics, ProfileOverviewEntry } f
 
 export type { ProfileThumbnail, ProfileOverviewMetrics, ProfileOverviewEntry } from "@/lib/profile-overview-types";
 
-// #466: the warn-tone occupancy caveat codes for the "N con alertas" aggregate
-// are now the single `WARN_CAVEAT_CODES` exported from lib/candidates.ts (the
-// same array the feed's "Con alertas" filter and the distress boost read), so
-// the count and the filter can never disagree about which caveats are warns.
+// #466/#467: the warn-tone occupancy caveat codes for the "N con alertas"
+// aggregate are the single `WARN_CAVEAT_CODES` exported from lib/candidates.ts
+// (the same array the feed's "Con alertas" UNION filter and the distress boost
+// read). #467 broadened the aggregate from occupancy-caveats-only to the full
+// UNION (redflags OR warn caveat), so `flagged_count` now equals exactly what
+// the feed's `hasAlerts` filter returns for the same profile — the operator
+// clicking "N con alertas" lands on a feed with the same N cards.
 // Re-exported below for the callers/tests that import it from this module.
 
 interface RawOverviewRow extends SearchProfileRawRow {
@@ -211,20 +218,60 @@ export const OVERVIEW_QUERY_SQL = `WITH ${DISABLED_SOURCES_CTE},
      LEFT JOIN feedback_counts fc ON fc.profile_id = sp.id
      LEFT JOIN profile_scoring_model psm ON psm.profile_id = sp.id
      LEFT JOIN LATERAL (
+       -- #467: broadened to the SAME "Con alertas" UNION predicate the feed's
+       -- hasAlerts filter uses (lib/candidates.ts / #466). A matched property
+       -- counts as flagged when its LATEST redflags assessment carries ≥1 flag
+       -- OR its LATEST occupancy assessment carries ≥1 warn-tone caveat (the
+       -- shared WARN_CAVEAT_CODES = $1). Before #467 this counted occupancy
+       -- caveats ONLY, so a redflags-only property was silently uncounted and
+       -- the /perfiles number disagreed with the feed the "?alerts=1" link
+       -- lands on. Now flagged_count == the hasAlerts filter's result for the
+       -- same profile (count⇔filter invariant, exact). Latest-per-axis via
+       -- ORDER BY generated_at DESC NULLS LAST, id DESC — the same most-recent
+       -- rule loadFlags and the ranking CTE use. A never-assessed property
+       -- (both axes NULL) is excluded (unknown, never a false pass), matching
+       -- the filter's graceful degradation.
        SELECT COUNT(*) AS flagged_count
        FROM (
-         SELECT DISTINCT ON (aa.property_id) aa.property_id, aa.result
-           FROM ai_assessment aa
-           JOIN profile_listing_state pls3
-             ON pls3.property_id = aa.property_id AND pls3.profile_id = sp.id AND pls3.matched = true
-          WHERE aa.assessment_type = 'occupancy'
-          ORDER BY aa.property_id, aa.generated_at DESC NULLS LAST, aa.id DESC
-       ) latest_occupancy
-       WHERE EXISTS (
-         SELECT 1
-           FROM jsonb_array_elements_text(COALESCE(latest_occupancy.result -> 'caveats', '[]'::jsonb)) AS code
-          WHERE code.value = ANY($1::text[])
-       )
+         SELECT DISTINCT pls3.property_id
+           FROM profile_listing_state pls3
+          WHERE pls3.profile_id = sp.id AND pls3.matched = true
+       ) mp
+       LEFT JOIN LATERAL (
+         SELECT occ.result -> 'caveats' AS caveats
+           FROM ai_assessment occ
+          WHERE occ.property_id = mp.property_id AND occ.assessment_type = 'occupancy'
+          ORDER BY occ.generated_at DESC NULLS LAST, occ.id DESC
+          LIMIT 1
+       ) latest_occ ON true
+       LEFT JOIN LATERAL (
+         SELECT rf.result -> 'flags' AS flags
+           FROM ai_assessment rf
+          WHERE rf.property_id = mp.property_id AND rf.assessment_type = 'redflags'
+          ORDER BY rf.generated_at DESC NULLS LAST, rf.id DESC
+          LIMIT 1
+       ) latest_rf ON true
+       WHERE
+         -- ≥1 warn-tone occupancy caveat (overlaps WARN_CAVEAT_CODES).
+         EXISTS (
+           SELECT 1
+             FROM jsonb_array_elements_text(
+                    CASE WHEN jsonb_typeof(latest_occ.caveats) = 'array'
+                         THEN latest_occ.caveats ELSE '[]'::jsonb END
+                  ) AS code
+            WHERE code.value = ANY($1::text[])
+         )
+         -- OR ≥1 redflag of ANY type (mirrors the filter's cardinality(
+         -- redflag_types) > 0: an object flag with a non-null type value).
+         OR EXISTS (
+           SELECT 1
+             FROM jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(latest_rf.flags) = 'array'
+                         THEN latest_rf.flags ELSE '[]'::jsonb END
+                  ) AS flag
+            WHERE jsonb_typeof(flag.value) = 'object'
+              AND flag.value ->> 'type' IS NOT NULL
+         )
      ) flag_stats ON true
      LEFT JOIN LATERAL (
        SELECT json_agg(

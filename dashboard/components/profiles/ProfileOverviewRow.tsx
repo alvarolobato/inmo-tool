@@ -336,45 +336,64 @@ function ValidProfileRow({
           <p style={{ fontSize: 12, color: "var(--fg-subtle)", margin: "2px 0 0" }}>
             {typeLabels} · radio {profile.scope.geography.radius_km} km
           </p>
-
-          <div
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              gap: "4px 14px",
-              marginTop: 8,
-              fontSize: 12,
-              color: "var(--fg-muted)",
-            }}
-          >
-            <span data-testid="profile-metric-matched">
-              <strong style={{ color: "var(--fg)" }}>{fmtInt(metrics.matched_count)}</strong> candidatos
-            </span>
-            <span data-testid="profile-metric-new">
-              <strong style={{ color: metrics.new_count > 0 ? "var(--up)" : "var(--fg)" }}>
-                {fmtInt(metrics.new_count)}
-              </strong>{" "}
-              nuevos
-            </span>
-            {priceRange !== null && <span data-testid="profile-metric-price">{priceRange}</span>}
-            <span data-testid="profile-metric-model">{modelLabel}</span>
-            {metrics.gross_yield_median_pct !== null && (
-              <span data-testid="profile-metric-yield">
-                yield bruto ~
-                {metrics.gross_yield_median_pct.toLocaleString("es-ES", {
-                  minimumFractionDigits: 1,
-                  maximumFractionDigits: 1,
-                })}
-                % (estimado)
-              </span>
-            )}
-            {metrics.flagged_count > 0 && (
-              <span data-testid="profile-metric-flags" style={{ color: "var(--warn)" }}>
-                {fmtInt(metrics.flagged_count)} con alertas
-              </span>
-            )}
-          </div>
         </Link>
+
+        {/*
+          #467: the metrics row is a SIBLING of the row-wide <Link> above, not
+          nested inside it — the "N con alertas" span is itself a <Link> to the
+          filtered feed (?alerts=1), and an <a> inside an <a> is invalid HTML
+          (the same discipline "¿Por qué 0?" below already follows). The rest of
+          the metrics stay non-interactive text; the row link keeps covering the
+          name/subtitle above, and "Entrar →" covers navigation on its own.
+        */}
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "4px 14px",
+            marginTop: 8,
+            fontSize: 12,
+            color: "var(--fg-muted)",
+          }}
+        >
+          <span data-testid="profile-metric-matched">
+            <strong style={{ color: "var(--fg)" }}>{fmtInt(metrics.matched_count)}</strong> candidatos
+          </span>
+          <span data-testid="profile-metric-new">
+            <strong style={{ color: metrics.new_count > 0 ? "var(--up)" : "var(--fg)" }}>
+              {fmtInt(metrics.new_count)}
+            </strong>{" "}
+            nuevos
+          </span>
+          {priceRange !== null && <span data-testid="profile-metric-price">{priceRange}</span>}
+          <span data-testid="profile-metric-model">{modelLabel}</span>
+          {metrics.gross_yield_median_pct !== null && (
+            <span data-testid="profile-metric-yield">
+              yield bruto ~
+              {metrics.gross_yield_median_pct.toLocaleString("es-ES", {
+                minimumFractionDigits: 1,
+                maximumFractionDigits: 1,
+              })}
+              % (estimado)
+            </span>
+          )}
+          {metrics.flagged_count > 0 && (
+            <Link
+              href={`/profiles/${profile.id}?alerts=1`}
+              data-testid="profile-metric-flags"
+              title="Ver los candidatos con alertas de este perfil"
+              style={{ color: "var(--warn)", textDecoration: "none" }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.textDecoration = "underline";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.textDecoration = "none";
+              }}
+            >
+              {fmtInt(metrics.flagged_count)} con alertas
+            </Link>
+          )}
+        </div>
 
         {metrics.matched_count === 0 && (
           <button
