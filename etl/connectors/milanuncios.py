@@ -125,7 +125,9 @@ from etl.connectors.base import (
     ConnectorScope,
     ListingUnavailableError,
     RawListing,
+    SearchParam,
     SearchPreview,
+    SearchUrlGrammar,
     SoftBlockError,
     Throttle,
 )
@@ -242,6 +244,32 @@ def _resolve_geography(scope: ConnectorScope) -> str | None:
     if place is None:
         return None
     return _CITY_SLUGS.get(place.name)
+
+
+# Issue #492: the invertible search-URL grammar. Milanuncios' sale-category URL
+# repeats the geography slug (`…/venta-de-pisos-en-<geo>-<geo>/`, the canonical
+# province/city form live-verified in issue #169 — see `_search_url`).
+# `_search_url()` delegates to `build()` so the grammar IS the URL builder and
+# can never drift; the per-connector round-trip pytest contract pins the two.
+#
+# The two halves are tied together by a NAMED BACKREFERENCE (`-\k<geography>`,
+# ECMAScript spelling — the Python side translates it to `(?P=geography)`; both
+# engines support it, only the spelling differs). This keeps ONE `geography`
+# group == ONE `{geography}` placeholder (a backreference is not a group), so
+# the anti-drift `group_names == placeholders` contract still holds AND the
+# generic browser-side inference needs no per-connector code. A URL whose two
+# halves disagree (`…-en-madrid-toledo/`) fails the backreference → parses to
+# None → the page keeps it verbatim with a warning (issue #492 EC-2). The
+# trailing `/?$` tolerates the optional slash; a query string is rejected by the
+# anchor (Milanuncios can't paginate — robots.txt disallows it).
+_SEARCH_URL_GRAMMAR = SearchUrlGrammar(
+    build_template=f"{_BASE_URL}/venta-de-pisos-en-{{geography}}-{{geography}}/",
+    parse_pattern=(
+        r"^https?://(?:www\.)?milanuncios\.com/venta-de-pisos-en-"
+        r"(?<geography>[^/]+)-\k<geography>/?$"
+    ),
+    params={"geography": {"label": "Municipio", "source": "profile"}},
+)
 
 
 # Note: the feasibility spike (module docstring) confirmed real phone numbers
@@ -465,6 +493,13 @@ class MilanunciosConnector(Connector):
     override_host_suffix = "milanuncios.com"
     supports_search_override = True
 
+    # Issue #492: published to connector_registry.search_url_grammar so the
+    # dashboard can invert an owner-edited URL back to params in the browser.
+    # NOTE: this is the SALE connector's grammar; MilanunciosRentalConnector
+    # publishes its own (`alquiler-de-pisos-en-…`) rather than inheriting this
+    # one, so the two operations never share a build template.
+    search_url_grammar = _SEARCH_URL_GRAMMAR
+
     # Issue #179: skip-if-seen IS on, at Fotocasa's 24h precedent, and it is
     # turned on WITHOUT the discovery-time price safety net that Fotocasa
     # has. That asymmetry is deliberate; here is the evidence and the cost.
@@ -555,8 +590,10 @@ class MilanunciosConnector(Connector):
         # live (e.g. "venta-de-pisos-en-madrid-madrid") — the province/city
         # slug repeated. Confirmed during the feasibility spike this returns
         # *only* the sale category (no rentals/shared-rooms mixed in), unlike
-        # the shorter "/pisos-en-<geo>/" category-overview URL.
-        return f"{_BASE_URL}/venta-de-pisos-en-{geography}-{geography}/"
+        # the shorter "/pisos-en-<geo>/" category-overview URL. Delegates to the
+        # grammar (issue #492) so the derived URL and the published grammar can
+        # never drift — the round-trip pytest contract pins parse(build(x)) == x.
+        return self.search_url_grammar.build({"geography": geography})
 
     def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
         """Reuses `_search_url()` — the exact helper discover()'s entry URL uses."""
@@ -580,6 +617,34 @@ class MilanunciosConnector(Connector):
                 url=self._search_url(geography),
                 kind="search_page",
                 tunable=True,
+                # Issue #492: the exact params discover() uses for this scope,
+                # built from the SAME resolved geography the URL is (anti-drift).
+                # `operation` is a constant — discover() only requests the
+                # `venta-de-pisos` (sale) category. The profile's
+                # price/size/type filters are deliberately ABSENT: they never
+                # reach the connector (applied downstream by data), and
+                # Milanuncios' native query params for them are unverified, which
+                # the repo forbids advertising (base.Connector.supported_filters).
+                params=(
+                    SearchParam(
+                        key="geography",
+                        label="Municipio",
+                        value=geography,
+                        source="profile",
+                        in_url=True,
+                    ),
+                    SearchParam(
+                        key="operation",
+                        label="Operación",
+                        value="venta",
+                        source="constant",
+                        in_url=True,
+                        notes=(
+                            "Solo página 1 — Milanuncios bloquea la paginación "
+                            "en robots.txt, así que no viaja en la URL."
+                        ),
+                    ),
+                ),
             )
         ]
 

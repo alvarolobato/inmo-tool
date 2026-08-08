@@ -1288,3 +1288,57 @@ class TestNormalizeWithoutEnergyCertificate:
         canonical = connector.normalize(raw)
         assert canonical.energy_rating is None
         assert canonical.features == ()
+
+
+# ── search URL grammar (issue #492) ───────────────────────────────────
+
+
+def test_search_url_delegates_to_the_grammar():
+    """_search_url() IS the grammar's build() — the repeated slug and the
+    published grammar can never drift apart (issue #492)."""
+    c = MilanunciosConnector()
+    assert c.search_url_grammar is not None
+    for geo in ("madrid", "sevilla", "malaga"):
+        assert c._search_url(geo) == c.search_url_grammar.build({"geography": geo})
+
+
+def test_grammar_round_trip_and_rejects_unequal_halves():
+    """parse(build(geo)) == {geography: geo}; a URL whose two slug halves
+    disagree (the owner edited only one) fails the backreference and parses to
+    None → kept verbatim (EC-2); the rental sibling's URL is also rejected."""
+    from etl.tests.grammar_contract import assert_grammar_roundtrip
+
+    c = MilanunciosConnector()
+    cases = [{"geography": "madrid"}, {"geography": "sevilla"}, {"geography": "malaga"}]
+    foreign = [
+        "https://www.habitaclia.com/viviendas-madrid.htm",
+        "https://www.milanuncios.com/alquiler-de-pisos-en-madrid-madrid/",
+        # Two halves disagree → backreference fails → unparseable.
+        "https://www.milanuncios.com/venta-de-pisos-en-madrid-toledo/",
+        # Only one half → also rejected.
+        "https://www.milanuncios.com/venta-de-pisos-en-madrid/",
+    ]
+    assert_grammar_roundtrip(
+        c.search_url_grammar,
+        cases,
+        foreign,
+        build_real=lambda p: c._search_url(p["geography"]),
+    )
+
+
+def test_grammar_validates():
+    from etl.connectors.base import validate_grammar
+
+    validate_grammar(MilanunciosConnector())  # no raise
+
+
+def test_search_previews_expose_geography_and_operation_params():
+    c = MilanunciosConnector()
+    previews = c.search_previews(ConnectorScope(geography="madrid"))
+    assert len(previews) == 1
+    params = {p.key: p for p in previews[0].params}
+    assert params["geography"].value == "madrid"
+    assert params["geography"].source == "profile"
+    assert params["operation"].value == "venta"
+    assert params["operation"].source == "constant"
+    assert set(params) == {"geography", "operation"}

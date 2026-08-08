@@ -61,6 +61,175 @@
         },
         "parse_pattern": "^https?://(?:www\\.)?pisos\\.com/venta/pisos-(?<geography>[^/]+)/?$"
       }
+    },
+    {
+      "cases": [
+        {
+          "expected": {
+            "geography": "madrid"
+          },
+          "url": "https://www.habitaclia.com/viviendas-madrid.htm"
+        },
+        {
+          "expected": {
+            "geography": "barcelona"
+          },
+          "url": "https://www.habitaclia.com/viviendas-barcelona.htm"
+        },
+        {
+          "expected": {
+            "geography": "dos_hermanas"
+          },
+          "url": "https://www.habitaclia.com/viviendas-dos_hermanas.htm"
+        },
+        {
+          "expected": {
+            "geography": "alcala_de_guadaira"
+          },
+          "url": "https://www.habitaclia.com/viviendas-alcala_de_guadaira.htm"
+        },
+        {
+          "expected": null,
+          "url": "https://www.pisos.com/venta/pisos-madrid/"
+        },
+        {
+          "expected": null,
+          "url": "https://www.idealista.com/venta-viviendas/madrid/"
+        },
+        {
+          "expected": null,
+          "url": "https://www.milanuncios.com/venta-de-pisos-en-madrid-madrid/"
+        },
+        {
+          "expected": null,
+          "url": "https://www.habitaclia.com/viviendas-madrid.htm?pag=2"
+        },
+        {
+          "expected": null,
+          "url": "https://www.habitaclia.com/viviendas-madrid.htm\n"
+        }
+      ],
+      "connector": "habitaclia",
+      "grammar": {
+        "build_template": "https://www.habitaclia.com/viviendas-{geography}.htm",
+        "params": {
+          "geography": {
+            "label": "Municipio",
+            "source": "profile"
+          }
+        },
+        "parse_pattern": "^https?://(?:www\\.)?habitaclia\\.com/viviendas-(?<geography>[^/?#]+)\\.htm$"
+      }
+    },
+    {
+      "cases": [
+        {
+          "expected": {
+            "geography": "madrid"
+          },
+          "url": "https://www.milanuncios.com/venta-de-pisos-en-madrid-madrid/"
+        },
+        {
+          "expected": {
+            "geography": "sevilla"
+          },
+          "url": "https://www.milanuncios.com/venta-de-pisos-en-sevilla-sevilla/"
+        },
+        {
+          "expected": {
+            "geography": "barcelona"
+          },
+          "url": "https://www.milanuncios.com/venta-de-pisos-en-barcelona-barcelona/"
+        },
+        {
+          "expected": {
+            "geography": "valencia"
+          },
+          "url": "https://www.milanuncios.com/venta-de-pisos-en-valencia-valencia/"
+        },
+        {
+          "expected": {
+            "geography": "malaga"
+          },
+          "url": "https://www.milanuncios.com/venta-de-pisos-en-malaga-malaga/"
+        },
+        {
+          "expected": null,
+          "url": "https://www.habitaclia.com/viviendas-madrid.htm"
+        },
+        {
+          "expected": null,
+          "url": "https://www.pisos.com/venta/pisos-madrid/"
+        },
+        {
+          "expected": null,
+          "url": "https://www.milanuncios.com/alquiler-de-pisos-en-madrid-madrid/"
+        },
+        {
+          "expected": null,
+          "url": "https://www.milanuncios.com/venta-de-pisos-en-madrid-toledo/"
+        },
+        {
+          "expected": null,
+          "url": "https://www.milanuncios.com/venta-de-pisos-en-madrid/"
+        }
+      ],
+      "connector": "milanuncios",
+      "grammar": {
+        "build_template": "https://www.milanuncios.com/venta-de-pisos-en-{geography}-{geography}/",
+        "params": {
+          "geography": {
+            "label": "Municipio",
+            "source": "profile"
+          }
+        },
+        "parse_pattern": "^https?://(?:www\\.)?milanuncios\\.com/venta-de-pisos-en-(?<geography>[^/]+)-\\k<geography>/?$"
+      }
+    },
+    {
+      "cases": [
+        {
+          "expected": {
+            "geography": "madrid"
+          },
+          "url": "https://www.milanuncios.com/alquiler-de-pisos-en-madrid-madrid/"
+        },
+        {
+          "expected": {
+            "geography": "sevilla"
+          },
+          "url": "https://www.milanuncios.com/alquiler-de-pisos-en-sevilla-sevilla/"
+        },
+        {
+          "expected": {
+            "geography": "barcelona"
+          },
+          "url": "https://www.milanuncios.com/alquiler-de-pisos-en-barcelona-barcelona/"
+        },
+        {
+          "expected": null,
+          "url": "https://www.habitaclia.com/viviendas-madrid.htm"
+        },
+        {
+          "expected": null,
+          "url": "https://www.milanuncios.com/venta-de-pisos-en-madrid-madrid/"
+        },
+        {
+          "expected": null,
+          "url": "https://www.milanuncios.com/alquiler-de-pisos-en-madrid-toledo/"
+        }
+      ],
+      "connector": "milanuncios_rental",
+      "grammar": {
+        "build_template": "https://www.milanuncios.com/alquiler-de-pisos-en-{geography}-{geography}/",
+        "params": {
+          "geography": {
+            "label": "Municipio",
+            "source": "profile"
+          }
+        },
+        "parse_pattern": "^https?://(?:www\\.)?milanuncios\\.com/alquiler-de-pisos-en-(?<geography>[^/]+)-\\k<geography>/?$"
+      }
     }
   ]
 }

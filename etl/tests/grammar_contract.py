@@ -25,6 +25,9 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from etl.connectors.base import SearchUrlGrammar
+from etl.connectors.habitaclia import HabitacliaConnector
+from etl.connectors.milanuncios import MilanunciosConnector
+from etl.connectors.milanuncios_rental import MilanunciosRentalConnector
 from etl.connectors.pisos import PisosConnector
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "url-grammar-cases.json"
@@ -85,21 +88,120 @@ def _pisos_spec() -> tuple[PisosConnector, list[dict[str, str]], list[str]]:
     return connector, cases, foreign
 
 
+def _habitaclia_spec() -> tuple[HabitacliaConnector, list[dict[str, str]], list[str]]:
+    connector = HabitacliaConnector()
+    cases = [
+        {"geography": "madrid"},
+        {"geography": "barcelona"},
+        # A multi-word city whose live slug is underscore-joined (issue #369).
+        {"geography": "dos_hermanas"},
+        {"geography": "alcala_de_guadaira"},
+    ]
+    foreign = [
+        # Other portals entirely.
+        "https://www.pisos.com/venta/pisos-madrid/",
+        "https://www.idealista.com/venta-viviendas/madrid/",
+        "https://www.milanuncios.com/venta-de-pisos-en-madrid-madrid/",
+        # habitaclia + a `?pag=2` query — robots.txt disallows pagination, so the
+        # grammar must NOT parse it (EC-3): saved verbatim, not silently
+        # truncated to the municipality.
+        "https://www.habitaclia.com/viviendas-madrid.htm?pag=2",
+        # A trailing newline — JS `$` (no /m) does NOT match before it, and the
+        # Python side's `$`→`\Z` translation matches that, so BOTH must reject.
+        # This is the case that would expose the Python/JS `$` divergence if the
+        # translation regressed (issue #492 validate_grammar hardening).
+        "https://www.habitaclia.com/viviendas-madrid.htm\n",
+    ]
+    return connector, cases, foreign
+
+
+def _milanuncios_spec() -> tuple[MilanunciosConnector, list[dict[str, str]], list[str]]:
+    connector = MilanunciosConnector()
+    # Single-word slugs only — Milanuncios' verified slugs are identity
+    # single-word (see _CITY_SLUGS); the repeated-slug grammar keys off the
+    # single hyphen between the two halves.
+    cases = [
+        {"geography": "madrid"},
+        {"geography": "sevilla"},
+        {"geography": "barcelona"},
+        {"geography": "valencia"},
+        {"geography": "malaga"},
+    ]
+    foreign = [
+        # Other portals.
+        "https://www.habitaclia.com/viviendas-madrid.htm",
+        "https://www.pisos.com/venta/pisos-madrid/",
+        # The RENTAL sibling's URL — the sale grammar must reject it (the two
+        # operations never cross).
+        "https://www.milanuncios.com/alquiler-de-pisos-en-madrid-madrid/",
+        # The two halves disagree (owner edited only one) → backreference fails
+        # → unparseable, kept verbatim (EC-2).
+        "https://www.milanuncios.com/venta-de-pisos-en-madrid-toledo/",
+        # Only ONE half present (the owner deleted the repeat) → also rejected.
+        "https://www.milanuncios.com/venta-de-pisos-en-madrid/",
+    ]
+    return connector, cases, foreign
+
+
+def _milanuncios_rental_spec() -> tuple[
+    MilanunciosRentalConnector, list[dict[str, str]], list[str]
+]:
+    connector = MilanunciosRentalConnector()
+    cases = [
+        {"geography": "madrid"},
+        {"geography": "sevilla"},
+        {"geography": "barcelona"},
+    ]
+    foreign = [
+        "https://www.habitaclia.com/viviendas-madrid.htm",
+        # The SALE sibling's URL — the rental grammar must reject it.
+        "https://www.milanuncios.com/venta-de-pisos-en-madrid-madrid/",
+        # Unequal halves → rejected.
+        "https://www.milanuncios.com/alquiler-de-pisos-en-madrid-toledo/",
+    ]
+    return connector, cases, foreign
+
+
 def connector_specs() -> list[
     tuple[str, SearchUrlGrammar, list[dict[str, str]], list[str], Callable]
 ]:
     """Every connector with a published grammar, as
-    `(name, grammar, cases, foreign_urls, build_real)`. #492–#496 append here.
+    `(name, grammar, cases, foreign_urls, build_real)`. #493–#496 append here.
     """
-    connector, cases, foreign = _pisos_spec()
-    assert connector.search_url_grammar is not None
+    pisos, pisos_cases, pisos_foreign = _pisos_spec()
+    habi, habi_cases, habi_foreign = _habitaclia_spec()
+    mil, mil_cases, mil_foreign = _milanuncios_spec()
+    rental, rental_cases, rental_foreign = _milanuncios_rental_spec()
+    for c in (pisos, habi, mil, rental):
+        assert c.search_url_grammar is not None
     return [
         (
             "pisos",
-            connector.search_url_grammar,
-            cases,
-            foreign,
-            lambda params: connector._search_url(params["geography"]),
+            pisos.search_url_grammar,
+            pisos_cases,
+            pisos_foreign,
+            lambda params: pisos._search_url(params["geography"]),
+        ),
+        (
+            "habitaclia",
+            habi.search_url_grammar,
+            habi_cases,
+            habi_foreign,
+            lambda params: habi._search_url(params["geography"]),
+        ),
+        (
+            "milanuncios",
+            mil.search_url_grammar,
+            mil_cases,
+            mil_foreign,
+            lambda params: mil._search_url(params["geography"]),
+        ),
+        (
+            "milanuncios_rental",
+            rental.search_url_grammar,
+            rental_cases,
+            rental_foreign,
+            lambda params: rental._rental_search_url(params["geography"]),
         ),
     ]
 

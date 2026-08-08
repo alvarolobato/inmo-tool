@@ -123,13 +123,14 @@ test.beforeAll(async () => {
         supports_discovery, supported_filters, override_host_suffix, supports_search_override,
         search_url_grammar)
      VALUES ('pisos', true, 20, false, true, '[]'::jsonb, 'pisos.com', false, $1::jsonb),
+            ('habitaclia', true, 20, false, true, '[]'::jsonb, 'habitaclia.com', true, $2::jsonb),
             ('cimenta2', true, 20, true, true, '[]'::jsonb, NULL, false, NULL)
      ON CONFLICT (connector_name) DO UPDATE SET
        registered = true, supports_discovery = true,
        override_host_suffix = EXCLUDED.override_host_suffix,
        supports_search_override = EXCLUDED.supports_search_override,
        search_url_grammar = EXCLUDED.search_url_grammar`,
-    [JSON.stringify(PISOS_GRAMMAR)],
+    [JSON.stringify(PISOS_GRAMMAR), JSON.stringify(HABITACLIA_GRAMMAR)],
   );
   await seedEtlPreviews();
 });
@@ -142,11 +143,22 @@ const PISOS_GRAMMAR = {
   params: { geography: { label: "Municipio", source: "profile" } },
 };
 
+// The habitaclia grammar exactly as sync_connector_registry publishes it
+// (issue #492): a single geography slug, no query string. The `[^/?#]+` slug
+// class + trailing `\.htm$` anchor reject any `?pag=` pagination.
+const HABITACLIA_GRAMMAR = {
+  build_template: "https://www.habitaclia.com/viviendas-{geography}.htm",
+  parse_pattern:
+    "^https?://(?:www\\.)?habitaclia\\.com/viviendas-(?<geography>[^/?#]+)\\.htm$",
+  params: { geography: { label: "Municipio", source: "profile" } },
+};
+const HABITACLIA_PREVIEW_URL = "https://www.habitaclia.com/viviendas-sevilla.htm";
+
 /** (Re)seed the pisos + cimenta2 previews for the profile (P4/#491). */
 async function seedEtlPreviews(): Promise<void> {
   await pool.query(
     `INSERT INTO connector_search_preview (profile_id, connector, previews)
-     VALUES ($1, 'pisos', $2::jsonb), ($1, 'cimenta2', $3::jsonb)
+     VALUES ($1, 'pisos', $2::jsonb), ($1, 'cimenta2', $3::jsonb), ($1, 'habitaclia', $4::jsonb)
      ON CONFLICT (profile_id, connector) DO UPDATE SET
        previews = EXCLUDED.previews, computed_at = NOW()`,
     [
@@ -175,6 +187,29 @@ async function seedEtlPreviews(): Promise<void> {
           // the constant operation, which does NOT travel in the sitemap URL.
           params: [
             { key: "operation", label: "Operación", value: "venta", source: "constant", in_url: false, notes: null },
+          ],
+        },
+      ]),
+      JSON.stringify([
+        {
+          // issue #492: a tunable single-URL connector with a published grammar
+          // (habitaclia). geography (perfil) + operation (constante) chips, and
+          // an owner-edited URL re-infers the municipality live in the browser.
+          label: "Habitaclia — sevilla",
+          url: HABITACLIA_PREVIEW_URL,
+          kind: "search_page",
+          tunable: true,
+          notes: null,
+          params: [
+            { key: "geography", label: "Municipio", value: "sevilla", source: "profile", in_url: true, notes: null },
+            {
+              key: "operation",
+              label: "Operación",
+              value: "venta viviendas",
+              source: "constant",
+              in_url: true,
+              notes: "Solo página 1 — habitaclia bloquea la paginación (*pag=) en robots.txt, así que no viaja en la URL.",
+            },
           ],
         },
       ]),
@@ -390,6 +425,48 @@ test("unparseable URL saves verbatim with a warning (issue #491 EC-3)", async ({
     "DELETE FROM profile_connector_filter WHERE profile_id = $1 AND connector = 'pisos'",
     [profileId],
   );
+});
+
+test("habitaclia: params chips + live inference + `?pag=2` verbatim (issue #492)", async ({
+  page,
+}) => {
+  await seedEtlPreviews();
+  await page.goto(`/profiles/${profileId}/filtros`);
+  await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
+  await assertNoErrorSurface(page);
+
+  const habi = page.locator('[data-testid="etl-connector-row"][data-connector="habitaclia"]');
+  await expect(habi).toBeVisible();
+  await expect(habi).toHaveAttribute("data-tunable", "true");
+  await expect(habi.getByTestId("etl-url")).toHaveText(HABITACLIA_PREVIEW_URL);
+
+  // EC-1: geography (perfil) + operation (constante) chips.
+  const geoChip = habi.locator('[data-testid="etl-param-chip"][data-param-key="geography"]');
+  await expect(geoChip).toContainText("Municipio");
+  await expect(geoChip).toContainText("sevilla");
+  await expect(geoChip).toContainText("perfil");
+  await expect(
+    habi.locator('[data-testid="etl-param-chip"][data-param-key="operation"]'),
+  ).toContainText("constante");
+
+  // EC-2: editing to a valid habitaclia URL for a DIFFERENT municipality infers
+  // the new municipality live (grammar-driven, no per-connector TS).
+  await habi.getByTestId("etl-url-input").fill("https://www.habitaclia.com/viviendas-malaga.htm");
+  const panel = habi.getByTestId("etl-inference-panel");
+  await expect(panel).toBeVisible();
+  const inferred = habi.locator('[data-testid="etl-inferred-chip"][data-param-key="geography"]');
+  await expect(inferred).toContainText("malaga");
+  await expect(inferred).toHaveAttribute("data-differs", "true");
+  await expect(habi.getByTestId("etl-inference-warning")).toHaveCount(0);
+  await assertNoErrorSurface(page);
+
+  // EC-3: a `?pag=2` query is unparseable — robots disallows pagination — so the
+  // page warns it will be used verbatim, but does NOT block Guardar.
+  await habi.getByTestId("etl-url-input").fill("https://www.habitaclia.com/viviendas-sevilla.htm?pag=2");
+  await expect(habi.getByTestId("etl-inference-warning")).toContainText("se usará tal cual");
+  await expect(habi.getByTestId("etl-inference-panel")).toHaveCount(0);
+  await expect(habi.getByTestId("etl-save")).toBeEnabled();
+  await assertNoErrorSurface(page);
 });
 
 test("ETL section renders with no seeded previews — pending, no error surface (P4)", async ({

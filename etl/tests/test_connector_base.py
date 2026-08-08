@@ -168,3 +168,76 @@ class TestValidateGrammar:
         )
         with pytest.raises(ValueError, match="does not compile"):
             validate_grammar(c)
+
+    # ── issue #492 hardening: reject constructs that diverge Python↔JS ──
+
+    @pytest.mark.parametrize("cls", [r"\d", r"\w", r"\s", r"\D", r"\W", r"\S"])
+    def test_shorthand_class_fails(self, cls):
+        """`\\d`/`\\w`/`\\s` (and negations) are Unicode in Python but ASCII in
+        JS RegExp — reject them so a grammar can't accept different URLs on the
+        two sides. Use an explicit char class instead."""
+        c = _GrammarConnector()
+        c.search_url_grammar = SearchUrlGrammar(
+            build_template="https://x.com/{geography}/",
+            parse_pattern=rf"^https://x\.com/(?<geography>{cls}+)/$",
+        )
+        with pytest.raises(ValueError, match="shorthand class"):
+            validate_grammar(c)
+
+    def test_python_only_named_group_spelling_fails(self):
+        """A hand-written Python `(?P<name>…)` compiles here but is a syntax
+        error in the browser's RegExp — the stored form must be ECMAScript."""
+        c = _GrammarConnector()
+        c.search_url_grammar = SearchUrlGrammar(
+            build_template="https://x.com/{geography}/",
+            parse_pattern=r"^https://x\.com/(?P<geography>[^/]+)/$",
+        )
+        with pytest.raises(ValueError, match="Python-only group spelling"):
+            validate_grammar(c)
+
+    def test_python_only_backreference_spelling_fails(self):
+        c = _GrammarConnector()
+        c.search_url_grammar = SearchUrlGrammar(
+            build_template="https://x.com/{geography}-{geography}/",
+            parse_pattern=r"^https://x\.com/(?<geography>[^/]+)-(?P=geography)/$",
+        )
+        with pytest.raises(ValueError, match="Python-only group spelling"):
+            validate_grammar(c)
+
+    def test_unanchored_pattern_fails(self):
+        c = _GrammarConnector()
+        c.search_url_grammar = SearchUrlGrammar(
+            build_template="https://x.com/{geography}/",
+            parse_pattern=r"https://x\.com/(?<geography>[^/]+)/$",  # no ^
+        )
+        with pytest.raises(ValueError, match="fully anchored"):
+            validate_grammar(c)
+
+    def test_mid_pattern_dollar_fails(self):
+        """A `$` anywhere but the final anchor would stay `$` on the Python side
+        and diverge from JS on a trailing newline — reject it."""
+        c = _GrammarConnector()
+        c.search_url_grammar = SearchUrlGrammar(
+            build_template="https://x.com/{geography}/",
+            parse_pattern=r"^https://x\.com/(a$b)?(?<geography>[^/]+)/$",
+        )
+        with pytest.raises(ValueError, match="exactly one unescaped"):
+            validate_grammar(c)
+
+    def test_named_backreference_grammar_passes_and_round_trips(self):
+        """A repeated-slug grammar (ECMAScript `\\k<name>`) validates — one
+        named group == one placeholder — and round-trips, with the Python side
+        translating the backreference to `(?P=name)`."""
+        g = SearchUrlGrammar(
+            build_template="https://x.com/{geography}-{geography}/",
+            parse_pattern=r"^https://x\.com/(?<geography>[^/]+)-\k<geography>/?$",
+        )
+        c = _GrammarConnector()
+        c.search_url_grammar = g
+        validate_grammar(c)  # no raise
+        assert g.group_names() == {"geography"} == g.placeholders()
+        assert g.parse("https://x.com/madrid-madrid/") == {"geography": "madrid"}
+        # Halves disagree → backreference fails → None.
+        assert g.parse("https://x.com/madrid-toledo/") is None
+        # Trailing newline rejected (the `$`→`\Z` translation).
+        assert g.parse("https://x.com/madrid-madrid/\n") is None
