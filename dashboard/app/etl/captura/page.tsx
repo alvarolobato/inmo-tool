@@ -219,6 +219,12 @@ export default function CapturaWorklistPage() {
     [],
   );
 
+  // Whether any portal is still sitemap-seedable. Gated to extension-capturable
+  // portals (issue #454): cimenta2 moved to ETL fetch, so this is empty today
+  // and the "Refrescar sitemap" affordance is hidden rather than shown pointing
+  // at a portal that no longer belongs on this surface.
+  const hasSeedablePortal = SITEMAP_SEEDABLE_PORTALS.length > 0;
+
   const visibleRows = useMemo(
     () =>
       statusFilter === "all"
@@ -299,25 +305,27 @@ export default function CapturaWorklistPage() {
         >
           Actualizar
         </button>
-        <button
-          data-testid="worklist-refresh-sitemap"
-          onClick={() => handleSeed(SITEMAP_SEEDABLE_PORTALS[0])}
-          disabled={seeding}
-          title="Rellena la lista desde el sitemap público de Cimenta2 (solo descubrimiento)"
-          style={{
-            padding: "6px 16px",
-            fontSize: 13,
-            fontWeight: 600,
-            borderRadius: 8,
-            border: "1px solid var(--border)",
-            background: "var(--bg-1)",
-            color: "var(--fg)",
-            cursor: seeding ? "not-allowed" : "pointer",
-            opacity: seeding ? 0.6 : 1,
-          }}
-        >
-          {seeding ? "Sembrando…" : "Refrescar sitemap (Cimenta2)"}
-        </button>
+        {hasSeedablePortal && (
+          <button
+            data-testid="worklist-refresh-sitemap"
+            onClick={() => handleSeed(SITEMAP_SEEDABLE_PORTALS[0])}
+            disabled={seeding}
+            title="Rellena la lista desde el sitemap público del portal (solo descubrimiento)"
+            style={{
+              padding: "6px 16px",
+              fontSize: 13,
+              fontWeight: 600,
+              borderRadius: 8,
+              border: "1px solid var(--border)",
+              background: "var(--bg-1)",
+              color: "var(--fg)",
+              cursor: seeding ? "not-allowed" : "pointer",
+              opacity: seeding ? 0.6 : 1,
+            }}
+          >
+            {seeding ? "Sembrando…" : `Refrescar sitemap (${SITEMAP_SEEDABLE_PORTALS[0]})`}
+          </button>
+        )}
         <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>
           Abre un anuncio cada vez que pulsas. Navega tú y espera a que cargue: la
           extensión lo captura sola.
@@ -492,8 +500,7 @@ export default function CapturaWorklistPage() {
         ) : rows.length === 0 ? (
           <p style={{ fontSize: 13, color: "var(--fg-muted)" }} data-testid="worklist-empty">
             No hay URLs en la lista todavía. Pega arriba las URLs de los anuncios
-            de Aliseda que quieras capturar, o pulsa <strong>Refrescar sitemap</strong>
-            {" "}para sembrar Cimenta2.
+            de Aliseda (u otro portal de extensión) que quieras capturar.
           </p>
         ) : visibleRows.length === 0 ? (
           <p style={{ fontSize: 13, color: "var(--fg-muted)" }} data-testid="worklist-filter-empty">

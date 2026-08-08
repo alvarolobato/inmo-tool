@@ -314,7 +314,16 @@ class TestProcessSeedTrigger:
             )
             return cur.fetchone()
 
-    def test_pending_trigger_runs_seed_and_marks_done(self, pg_conn):
+    def test_cimenta2_trigger_is_gated_and_marked_failed(self, pg_conn):
+        """cimenta2 is fetched over HTTP by the ETL (aura), not the extension, so
+        it must NOT be seeded into capture_worklist — the extension queue (issue
+        #454). A trigger for it is gated BEFORE any seeder runs: the trigger is
+        marked failed with a clear message and no worklist rows are created.
+
+        Guards against the regression this issue fixed: cimenta2 was seeded from
+        its sitemap and then showed a misleading "0/N pending forever" on the
+        guided-capture list.
+        """
         _apply_schema(pg_conn)
         _cleanup(pg_conn)
         try:
@@ -324,11 +333,12 @@ class TestProcessSeedTrigger:
             processed = worklist_seed.process_pending_seed_trigger(pg_conn, fetch=fetch)
             assert processed == tid
 
-            status, added_count, error_msg = self._trigger_row(pg_conn, tid)
-            assert status == "done"
-            assert added_count == 14
-            assert error_msg is None
-            assert _worklist_count(pg_conn) == 14
+            status, _added_count, error_msg = self._trigger_row(pg_conn, tid)
+            assert status == "failed"
+            assert error_msg is not None
+            assert "#454" in error_msg
+            # The gate runs before the seeder — no worklist rows are created.
+            assert _worklist_count(pg_conn) == 0
 
             # Nothing pending now.
             assert (

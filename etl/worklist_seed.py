@@ -37,7 +37,7 @@ from collections.abc import Callable
 
 import requests
 
-from etl.capture import worklist_match_key
+from etl.capture import EXTENSION_CAPTURE_PORTALS, worklist_match_key
 from etl.connectors.cimenta2_mapping import (
     asset_sitemap_url,
     iter_locs,
@@ -217,7 +217,11 @@ def seed_cimenta2_worklist(conn, *, fetch: Fetcher = _http_get) -> int:
 
 
 # Portal -> seeding function. A portal that later gains a sitemap adds ONE entry
-# here (issue #260 §2), not a new mechanism.
+# here (issue #260 §2), not a new mechanism. `seed_cimenta2_worklist` is the
+# reusable seeder implementation; whether a given portal may actually be seeded
+# is decided by the extension-capturable gate in `process_pending_seed_trigger`
+# (issue #454), NOT by mere presence in this map — cimenta2 has a sitemap seeder
+# but is fetched over HTTP by the ETL, so the gate refuses to run it.
 _SEEDERS: dict[str, Callable[..., int]] = {
     CIMENTA2_PORTAL: seed_cimenta2_worklist,
 }
@@ -293,6 +297,22 @@ def process_pending_seed_trigger(conn, *, fetch: Fetcher = _http_get) -> int | N
     if claimed is None:
         return None
     trigger_id, portal = claimed
+
+    # Extension-capturable gate (issue #454): capture_worklist is the extension's
+    # queue. A connector fetched over HTTP by the ETL (e.g. cimenta2, via aura)
+    # must never be seeded into it — its listings live in `listing` and its
+    # health in Data Health, and a seeded worklist for it only shows a misleading
+    # "0/N pending forever" on the guided-capture list. Refuse before touching a
+    # seeder so a stray/legacy trigger fails cleanly instead of accruing rows.
+    if portal not in EXTENSION_CAPTURE_PORTALS:
+        conn.rollback()
+        _mark_failed(
+            conn,
+            trigger_id,
+            f"El portal '{portal}' no se captura con la extensión "
+            "(se obtiene por ETL); no se siembra en capture_worklist (#454).",
+        )
+        return trigger_id
 
     seeder = _SEEDERS.get(portal)
     if seeder is None:

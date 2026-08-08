@@ -17,6 +17,9 @@ import {
   pendingUrls,
   selectNextPendingUrls,
   isPortalDue,
+  isCapturePortal,
+  CAPTURE_PORTAL_NAMES,
+  SITEMAP_SEEDABLE_PORTALS,
   PORTAL_RANK_NOT_DUE,
 } from "@/lib/worklist";
 import type {
@@ -219,5 +222,34 @@ describe("isPortalDue — due when rank < not-due (issue #434)", () => {
     expect(isPortalDue(99)).toBe(false);
     expect(isPortalDue(undefined)).toBe(false);
     expect(isPortalDue(NaN)).toBe(false);
+  });
+});
+
+describe("isCapturePortal / SITEMAP_SEEDABLE_PORTALS — extension-only gate (issue #454)", () => {
+  it("recognises the extension-capturable portals", () => {
+    for (const p of ["idealista", "aliseda", "altamira"]) {
+      expect(isCapturePortal(p)).toBe(true);
+    }
+    expect([...CAPTURE_PORTAL_NAMES].sort()).toEqual([
+      "aliseda",
+      "altamira",
+      "idealista",
+    ]);
+  });
+
+  it("rejects cimenta2 — fetched by the ETL, not the extension", () => {
+    // The whole point of #454: cimenta2 must never appear on the guided-capture
+    // surface, so it is not a capture portal.
+    expect(isCapturePortal("cimenta2")).toBe(false);
+    expect(isCapturePortal("unknown-portal")).toBe(false);
+  });
+
+  it("does not seed cimenta2 (or any non-extension portal) via sitemap", () => {
+    // SITEMAP_SEEDABLE_PORTALS is the candidate list intersected with the
+    // extension-capturable gate; cimenta2 is filtered out, leaving it empty.
+    expect(SITEMAP_SEEDABLE_PORTALS).not.toContain("cimenta2");
+    for (const p of SITEMAP_SEEDABLE_PORTALS) {
+      expect(isCapturePortal(p)).toBe(true);
+    }
   });
 });

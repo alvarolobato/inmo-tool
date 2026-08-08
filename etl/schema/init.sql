@@ -1752,6 +1752,19 @@ ALTER TABLE capture_worklist DROP CONSTRAINT IF EXISTS capture_worklist_status_c
 ALTER TABLE capture_worklist ADD CONSTRAINT capture_worklist_status_check
     CHECK (status IN ('pending','captured','failed','skipped','stale'));
 
+-- One-time (idempotent) cleanup (issue #454): capture_worklist is the browser
+-- extension's queue, so only extension-capturable portals belong in it. cimenta2
+-- was seeded here from its sitemap historically, but it is fetched over HTTP by
+-- the ETL (aura), NOT by the extension — its ~3917 rows drained to nothing and
+-- showed a misleading "0/N pending forever" on the guided-capture list. Delete
+-- every row for a non-extension portal (cimenta2 and any other fetch-by-ETL
+-- connector). Naturally idempotent: re-running deletes nothing new once the
+-- seeding path is gated (etl/worklist_seed.py + the seed route). The extension
+-- portal list mirrors etl.capture.EXTENSION_CAPTURE_PORTALS /
+-- dashboard/lib/worklist.ts CAPTURE_PORTAL_NAMES — keep the three in step.
+DELETE FROM capture_worklist
+ WHERE source_portal NOT IN ('idealista', 'aliseda', 'altamira');
+
 -- ── Worklist sitemap-seed trigger (issue #260) ──────────────────────────────
 -- The same "queue table, not a synchronous call" transport the dashboard uses
 -- for ad-hoc connector runs (etl_manual_trigger) and extension captures: the
