@@ -56,6 +56,16 @@ export function CandidateList({ profileId }: { profileId: number }) {
   const [filters, setFilters] = useState<CandidateFilters>(
     DEFAULT_CANDIDATE_FILTERS,
   );
+  // #467 (deep-load race fix): the feed must NOT fire its first page-1 fetch
+  // until the filters have been seeded from the URL. Without this gate, mount
+  // fires a fetch with the DEFAULT (empty) filters, then the URL-read effect
+  // below corrects them and fires a second, narrower fetch — and on a contended
+  // main thread (CI) the first, UNFILTERED response can land after the URL-read
+  // effect is delayed, showing the whole pool under an active filter/chip. We
+  // start `false` and flip to `true` in the same effect that reads the URL, so
+  // the very first fetch already carries the deep-linked filters (one request,
+  // no throwaway unfiltered round-trip). SSR-safe: nothing fetches on the server.
+  const [filtersReady, setFiltersReady] = useState(false);
   const {
     source,
     occupancy,
@@ -85,15 +95,14 @@ export function CandidateList({ profileId }: { profileId: number }) {
   // Best-effort: a failed fetch leaves the count at 0 (no badge).
   const [seguimientoAlertCount, setSeguimientoAlertCount] = useState(0);
 
-  // #467: out-of-order guard for the page-1 (replace) fetch. On mount the feed
-  // fires one fetch with the default filters, then the URL-read effect below
-  // corrects the filters (e.g. hasAlerts=true when landing on `?alerts=1` from
-  // the /perfiles "N con alertas" link) and fires a second, narrower fetch.
-  // These two page-1 requests race; without a guard the slower stale response
-  // (the unfiltered, wider one) can resolve last and clobber the correct
-  // filtered result — the feed then shows MORE cards than the active chip/toggle
-  // claim. Each replace fetch bumps this seq; a response only applies if it is
-  // still the latest replace request.
+  // #467: out-of-order guard for the page-1 (replace) fetch. The deep-load race
+  // (mount's unfiltered fetch vs the URL-corrected one) is now prevented at the
+  // source by `filtersReady` above — mount fires no fetch until the URL filters
+  // are in. This guard still protects the OTHER page-1 race: rapid soft-nav
+  // filter changes (e.g. toggling a chip twice quickly), where two replace
+  // fetches are in flight and the slower stale one must not clobber the newer.
+  // Each replace fetch bumps this seq; a response only applies if it is still
+  // the latest replace request.
   const pageOneSeq = useRef(0);
 
   // Read the filters out of the URL once on mount (SSR-safe: starts at the
@@ -101,6 +110,10 @@ export function CandidateList({ profileId }: { profileId: number }) {
   // property-detail page (avoids the useSearchParams Suspense boundary).
   useEffect(() => {
     setFilters(parseCandidateFilters(window.location.search));
+    // Both updates batch into one re-render, so the render that first turns the
+    // fetch on already has the URL-seeded filters — the first page-1 request is
+    // the correct (filtered) one, never a throwaway unfiltered fetch.
+    setFiltersReady(true);
   }, []);
 
   // Single writer: update state AND mirror it into the URL with router.replace
@@ -248,15 +261,20 @@ export function CandidateList({ profileId }: { profileId: number }) {
     };
   }, [profileId]);
 
-  // Re-runs on profile OR source change (fetchPage's identity depends on
-  // both) — resetting the feed to page 1 whenever the filter changes.
+  // Re-runs on profile OR filter change (fetchPage's identity depends on both) —
+  // resetting the feed to page 1 whenever the filter changes. Gated on
+  // `filtersReady` so the FIRST run happens only after the URL filters are
+  // seeded (see the filtersReady note above): on the initial mount this effect
+  // no-ops until the URL-read effect flips the flag, at which point fetchPage
+  // already carries the deep-linked filters — a single, correct page-1 request.
   useEffect(() => {
+    if (!filtersReady) return;
     setItems([]);
     setCursor(null);
     setError(null);
     setLoading(true);
     fetchPage(null, true).finally(() => setLoading(false));
-  }, [fetchPage]);
+  }, [fetchPage, filtersReady]);
 
   const loadMore = async () => {
     setLoadingMore(true);
