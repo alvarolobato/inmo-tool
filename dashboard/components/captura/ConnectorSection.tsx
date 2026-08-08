@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { CaptureTaskRow } from "@/components/captura/CaptureTaskRow";
-import { formatCaptureSummary, lastDoneLabel, relativeAgo, type ConnectorView } from "@/lib/captura-tasks";
+import { formatCaptureSummary, lastDoneLabel, type ConnectorView } from "@/lib/captura-tasks";
 import type { CaptureTask } from "@/lib/captura-tasks";
 import { withCaptureSignal } from "@/lib/extension-capture";
 
@@ -17,9 +17,9 @@ import { withCaptureSignal } from "@/lib/extension-capture";
  * "al día". The operator can always toggle manually — collapsing something due
  * or expanding something not-due to run it anyway.
  *
- * Collapsed = a single stats line (per-profile task counts + portal-global real
- * captures). Expanded = the same header plus every task row (the launch-capture
- * buttons). Executing a task records the run (POST) then opens its pre-filtered
+ * Collapsed = a single stats line (per-profile capture summary only — no
+ * portal-global numbers, #445). Expanded = the same header plus every task row
+ * (the launch-capture buttons). Executing a task records the run (POST) then opens its pre-filtered
  * URL tagged with the auto-start signal — identical to the old page's flow, just
  * scoped to this connector's profile.
  */
@@ -61,18 +61,12 @@ export function ConnectorSection({
   const summaryLine = useMemo(() => formatCaptureSummary(connector), [connector]);
 
   // Secondary context that trails the summary on the collapsed line: how many
-  // tasks are already al-día this cycle, and the portal-global capture recency.
+  // tasks are already al-día this cycle. Everything shown is PROFILE-scoped —
+  // no portal-global numbers on this page (#445).
   const contextLine = useMemo(() => {
     const parts: string[] = [];
     if (connector.mutedCount > 0 && connector.dueCount > 0) {
       parts.push(`${connector.mutedCount} al día`);
-    }
-    if (connector.capturedProfile > 0 || connector.capturedReal > 0) {
-      const global =
-        connector.capturedReal !== connector.capturedProfile
-          ? ` (${connector.capturedReal} en el portal)`
-          : "";
-      parts.push(`última ${relativeAgo(connector.lastCapturedAt)}${global}`);
     }
     return parts.join(" · ");
   }, [connector]);
@@ -179,7 +173,7 @@ export function ConnectorSection({
         )}
       </button>
 
-      {/* Expanded body — secondary portal-global context + the task rows. */}
+      {/* Expanded body — profile-scoped stats + the task rows (no global numbers, #445). */}
       {expanded && (
         <div style={{ padding: "0 14px 14px" }}>
           <div
@@ -203,8 +197,9 @@ export function ConnectorSection({
                 properties captured on this connector that match THIS profile,
                 via profile_listing_state. CAVEAT: captures aren't exclusive — a
                 property matching several profiles counts under each, so profiles'
-                counts can sum to more than the portal-global figure shown after
-                it. The title spells this out on hover. */}
+                counts can sum to more than the number of distinct captured
+                properties. The title spells this out on hover. This page shows
+                ONLY profile-scoped numbers — no portal-global figures (#445). */}
             <span
               data-testid={`captura-activity-${profileId}-${connector.portal}`}
               title="Capturas de propiedades que encajan con este perfil. Una propiedad que encaja con varios perfiles cuenta en cada uno (las capturas no son exclusivas)."
@@ -218,30 +213,6 @@ export function ConnectorSection({
                 ? `${connector.capturedProfile} propiedad${connector.capturedProfile === 1 ? "" : "es"} de este perfil capturada${connector.capturedProfile === 1 ? "" : "s"}`
                 : "sin capturas de este perfil todavía"}
             </span>
-            <span
-              data-testid={`captura-activity-portal-${profileId}-${connector.portal}`}
-              style={{ fontSize: 12, color: "var(--fg-muted)" }}
-            >
-              {connector.capturedReal > 0
-                ? `portal: ${connector.capturedReal} en total · última ${relativeAgo(connector.lastCapturedAt)}`
-                : "portal: sin capturas"}
-            </span>
-            {connector.summary ? (
-              <span
-                data-testid={`captura-worklist-${profileId}-${connector.portal}`}
-                style={{ fontSize: 12, color: "var(--fg-muted)" }}
-              >
-                lista: {connector.summary.captured}/{connector.summary.total} ·{" "}
-                {connector.summary.pending} pendientes
-              </span>
-            ) : (
-              <span
-                data-testid={`captura-nolist-${profileId}-${connector.portal}`}
-                style={{ fontSize: 12, color: "var(--fg-muted)" }}
-              >
-                sin lista de captura
-              </span>
-            )}
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>

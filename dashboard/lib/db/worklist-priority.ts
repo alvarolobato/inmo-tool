@@ -48,18 +48,9 @@ export async function getPortalDuePriority(): Promise<Record<string, number>> {
         resolveSearchTasks(p.scope),
         getTaskRuns(p.id),
       ]);
-      // Portal-global secondary context AND the per-profile captured counts are
-      // irrelevant to the due state, so pass empty maps/record — the connector
-      // state is derived purely from task staleness.
-      const connectors = buildConnectorViews(
-        tasks,
-        runs,
-        staleness,
-        new Map(),
-        new Map(),
-        {},
-        now,
-      );
+      // The per-profile captured counts are irrelevant to the due state, so pass
+      // an empty record — the connector state is derived purely from task staleness.
+      const connectors = buildConnectorViews(tasks, runs, staleness, {}, now);
       for (const c of connectors) {
         const r = rankFor(c.state);
         rank[c.portal] =

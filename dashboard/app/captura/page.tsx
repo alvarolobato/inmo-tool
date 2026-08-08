@@ -2,16 +2,9 @@ import Link from "next/link";
 import { CapturaProfiles } from "@/components/captura/CapturaProfiles";
 import { listActiveProfiles } from "@/lib/db/profiles";
 import { resolveSearchTasks } from "@/lib/search-url/resolve";
-import {
-  getTaskRuns,
-  getPortalCaptureActivity,
-  getProfileConnectorCaptured,
-} from "@/lib/db/capture-task-run";
-import { listWorklist } from "@/lib/db/worklist";
+import { getTaskRuns, getProfileConnectorCaptured } from "@/lib/db/capture-task-run";
 import { getStalenessConfig } from "@/lib/captura-staleness-config";
 import { buildProfileCaptureView, type ProfileCaptureView } from "@/lib/captura-tasks";
-import type { PortalCaptureActivity } from "@/lib/captura-tasks";
-import type { WorklistPortalSummary } from "@/lib/worklist";
 
 /**
  * Captura — task-driven guided-capture EXECUTION page (issue #237 → #289 →
@@ -29,8 +22,9 @@ import type { WorklistPortalSummary } from "@/lib/worklist";
  * Now a SERVER component (was client + client-side fetch fan-out): it reads all
  * profiles, their pre-filtered tasks (learned-aware, {@link resolveSearchTasks}),
  * the per-profile task-run ledger (staleness → due/collapse), and the
- * portal-global capture activity / worklist roll-up, then hands a fully-computed
- * view-model to the client {@link CapturaProfiles}. The due/collapse decision is
+ * per-profile captured counts, then hands a fully-computed view-model to the
+ * client {@link CapturaProfiles}. The page shows ONLY profile-scoped numbers —
+ * no portal-global figures (#445). The due/collapse decision is
  * derived purely from each task's last-run timestamp vs. the staleness window —
  * see lib/captura-tasks `buildConnectorViews`.
  *
@@ -46,18 +40,7 @@ export default async function CapturaPage() {
   try {
     const now = new Date();
     const staleness = getStalenessConfig();
-    const [profiles, activity, wl] = await Promise.all([
-      listActiveProfiles(),
-      getPortalCaptureActivity(),
-      listWorklist(),
-    ]);
-
-    const activityByPortal = new Map<string, PortalCaptureActivity>(
-      activity.map((a) => [a.portal, a]),
-    );
-    const summaryByPortal = new Map<string, WorklistPortalSummary>(
-      wl.summaries.map((s) => [s.source_portal, s]),
-    );
+    const profiles = await listActiveProfiles();
 
     // Resolve every profile's tasks + run ledger first, so we know exactly which
     // (profile, connector) pairs are on screen before the per-profile captured
@@ -77,16 +60,7 @@ export default async function CapturaPage() {
     const capturedByProfileConnector = await getProfileConnectorCaptured(profileIds, connectors);
 
     views = perProfile.map(({ profile, tasks, runs }) =>
-      buildProfileCaptureView(
-        profile,
-        tasks,
-        runs,
-        staleness,
-        activityByPortal,
-        summaryByPortal,
-        capturedByProfileConnector,
-        now,
-      ),
+      buildProfileCaptureView(profile, tasks, runs, staleness, capturedByProfileConnector, now),
     );
   } catch {
     // Never surface a technical error page: the capture ledger is best-effort

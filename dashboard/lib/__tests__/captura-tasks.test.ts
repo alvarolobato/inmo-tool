@@ -15,9 +15,7 @@ import {
   formatCaptureSummary,
   DEFAULT_STALENESS_DAYS,
   type CaptureTask,
-  type PortalCaptureActivity,
 } from "@/lib/captura-tasks";
-import type { WorklistPortalSummary } from "@/lib/worklist";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -227,24 +225,11 @@ describe("per-profile × connector captured counts (issue #430)", () => {
     loosened: [],
   });
   const staleness = { defaultDays: 7, byPortal: {} };
-  const emptyActivity = new Map<string, PortalCaptureActivity>();
-  const emptySummary = new Map<string, WorklistPortalSummary>();
 
-  it("uses the per-connector map for capturedProfile, independent of portal-global", () => {
-    const activity = new Map<string, PortalCaptureActivity>([
-      ["idealista", { portal: "idealista", captured: 10, lastCapturedAt: "2026-08-01T00:00:00.000Z" }],
-    ]);
-    const [connector] = buildConnectorViews(
-      [t("a", "idealista")],
-      {},
-      staleness,
-      activity,
-      emptySummary,
-      { idealista: 3 },
-    );
-    // Per-profile figure comes from the map; portal-global is carried alongside.
+  it("uses the per-connector map for capturedProfile (the only capturados figure, #445)", () => {
+    const [connector] = buildConnectorViews([t("a", "idealista")], {}, staleness, { idealista: 3 });
+    // Per-profile figure comes from the map; no portal-global figure is carried.
     expect(connector.capturedProfile).toBe(3);
-    expect(connector.capturedReal).toBe(10);
   });
 
   it("defaults capturedProfile to 0 for a connector absent from the map", () => {
@@ -252,8 +237,6 @@ describe("per-profile × connector captured counts (issue #430)", () => {
       [t("a", "aliseda")],
       {},
       staleness,
-      emptyActivity,
-      emptySummary,
       { idealista: 5 }, // no aliseda entry
     );
     expect(connector.capturedProfile).toBe(0);
@@ -273,8 +256,6 @@ describe("per-profile × connector captured counts (issue #430)", () => {
       tasks,
       {},
       staleness,
-      emptyActivity,
-      emptySummary,
       capturedByProfileConnector,
     );
     const viewB = buildProfileCaptureView(
@@ -282,8 +263,6 @@ describe("per-profile × connector captured counts (issue #430)", () => {
       tasks,
       {},
       staleness,
-      emptyActivity,
-      emptySummary,
       capturedByProfileConnector,
     );
     expect(viewA.connectors[0].capturedProfile).toBe(1);
@@ -296,8 +275,6 @@ describe("per-profile × connector captured counts (issue #430)", () => {
       [t("a", "idealista")],
       {},
       staleness,
-      emptyActivity,
-      emptySummary,
       new Map(), // profile 99 not present
     );
     expect(view.connectors[0].capturedProfile).toBe(0);
