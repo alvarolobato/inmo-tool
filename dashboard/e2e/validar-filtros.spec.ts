@@ -120,8 +120,11 @@ test("navigate from ⋮ menu; pinned + derived rows; save persists; captura uses
   await expect(row).toBeVisible();
   await row.getByRole("button", { name: /más acciones/i }).click();
   await page.getByRole("menuitem", { name: "Validar filtros" }).click();
-  await expect(page).toHaveURL(new RegExp(`/profiles/${profileId}/filtros`));
-  await expect(page.getByTestId("validar-filtros-page")).toBeVisible();
+  // The filtros route is brand-new, so `npm run dev` compiles it on-demand on
+  // first hit; App Router only commits the URL once the RSC payload resolves,
+  // which can exceed the default 5s expect timeout on a cold compile in CI.
+  await expect(page).toHaveURL(new RegExp(`/profiles/${profileId}/filtros`), { timeout: 30_000 });
+  await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
   await assertNoErrorSurface(page);
 
   // 2) Idealista row → "URL fijada" + the seeded URL verbatim.
