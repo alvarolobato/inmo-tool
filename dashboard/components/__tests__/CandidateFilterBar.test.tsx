@@ -192,11 +192,13 @@ describe("CandidateFilterBar more-filters popover + clear all", () => {
     expect(screen.getByTestId("more-filters-count")).toHaveTextContent("2");
   });
 
-  it("shows Limpiar todo only when a filter is active and resets everything", () => {
-    // No active filters → no button.
+  it("keeps Limpiar todo always visible but disabled when no filter is active", () => {
+    // Always rendered (no layout jump); disabled when nothing is active.
     const { onChange, values } = renderBar();
     void values;
-    expect(screen.queryByTestId("clear-all-filters")).toBeNull();
+    const clearBtn = screen.getByTestId("clear-all-filters");
+    expect(clearBtn).toBeInTheDocument();
+    expect(clearBtn).toBeDisabled();
     expect(onChange).not.toHaveBeenCalled();
   });
 
