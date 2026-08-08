@@ -28,6 +28,10 @@
  *                 vivienda protegida candidates; `false` keeps only non-VPO
  *                 candidates; absent/empty = off. Any other value → 400. Reads
  *                 the `opportunity` AI-assessment axis.
+ *   hasAlerts   — #466 UNION hard filter: `true` keeps only candidates with ≥1
+ *                 red flag (any type) OR ≥1 warn-tone occupancy caveat — the warn
+ *                 badges the card shows. Absent/empty = off; any other value →
+ *                 400. Reads the `redflags` + `occupancy` AI-assessment axes.
  *   minDiscount — #310 hard filter: keep only candidates priced at least this
  *                 PERCENT (0–100) below the pool median price/m². Sent as a
  *                 percent (e.g. `15`); converted to a fraction for the query.
@@ -216,6 +220,23 @@ export async function GET(
     isVpo = rawIsVpo === "true";
   }
 
+  // #466 "Con alertas" UNION toggle. Only the exact string "true" turns it on
+  // (keep only candidates with a red flag or a warn occupancy caveat); absent/
+  // empty = off. Any other non-empty value is a malformed request (400), never
+  // silently ignored — mirrors the isVpo/state strict parse above, so a typo'd
+  // param can't quietly show an unfiltered feed the user didn't ask for.
+  const rawHasAlerts = searchParams.get("hasAlerts");
+  let hasAlerts = false;
+  if (rawHasAlerts !== null && rawHasAlerts !== "") {
+    if (rawHasAlerts !== "true") {
+      return NextResponse.json(
+        formatApiError("Filtro de alertas no válido.", "VALIDATION", undefined, requestId),
+        { status: 400 },
+      );
+    }
+    hasAlerts = true;
+  }
+
   // #379: show-rejected toggle. Absent/anything-but-"true" keeps today's
   // behaviour (rejected candidates hidden). Only the exact string "true"
   // opts in — a permissive parse here can't silently surface rejected cards.
@@ -308,6 +329,7 @@ export async function GET(
       beachProximity,
       heritageZone,
       isVpo,
+      hasAlerts,
       includeRejected,
       state,
     });

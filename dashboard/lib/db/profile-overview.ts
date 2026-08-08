@@ -55,6 +55,7 @@
  */
 
 import { sql } from "@/lib/db-write";
+import { WARN_CAVEAT_CODES } from "@/lib/candidates";
 import { DISABLED_SOURCES_CTE, activeSourceClause } from "./source-active";
 import { toProfileListEntry, type ProfileListEntry, type SearchProfileRawRow } from "./profiles";
 import { MIN_TRAINING_EXAMPLES } from "@/lib/scoring/pipeline";
@@ -62,24 +63,11 @@ import type { ProfileThumbnail, ProfileOverviewMetrics, ProfileOverviewEntry } f
 
 export type { ProfileThumbnail, ProfileOverviewMetrics, ProfileOverviewEntry } from "@/lib/profile-overview-types";
 
-/**
- * Occupancy caveat codes that render as a tone='warn' badge — must mirror
- * `CAVEAT_LABELS`'s keys in lib/candidates.ts exactly (every occupancy
- * caveat there is tone='warn'; 'condition' assessments are all
- * tone='neutral', so they're excluded from this aggregate on purpose, not by
- * oversight). Duplicated here (rather than shared) because that file is a
- * TS module and this is a SQL literal; if lib/candidates.ts's vocabulary
- * changes, update this list too.
- */
-const WARN_CAVEAT_CODES = [
-  "tenanted",
-  "occupied_illegally",
-  "venta_deuda",
-  "nuda_propiedad",
-  "usufructo",
-  "proindiviso",
-  "derecho_superficie",
-];
+// #466: the warn-tone occupancy caveat codes for the "N con alertas" aggregate
+// are now the single `WARN_CAVEAT_CODES` exported from lib/candidates.ts (the
+// same array the feed's "Con alertas" filter and the distress boost read), so
+// the count and the filter can never disagree about which caveats are warns.
+// Re-exported below for the callers/tests that import it from this module.
 
 interface RawOverviewRow extends SearchProfileRawRow {
   matched_count: number;

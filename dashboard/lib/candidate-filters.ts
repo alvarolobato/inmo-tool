@@ -11,8 +11,9 @@
  * URL param names are 1:1 with the plan (§1.2). Most match the API param they
  * ultimately drive; three are shortened (`cond`/`redflag`/`beach`/`heritage`/
  * `vpo`) and the two mutually-exclusive feed presets collapse into one `view`
- * param (`seguimiento` / `descartadas`; absent = Todas). `alerts` is reserved
- * for Fase 3 (#466) and intentionally NOT read or written here.
+ * param (`seguimiento` / `descartadas`; absent = Todas). #466 wires the primary-
+ * row "⚠ Con alertas" toggle to the `alerts=1` param (drives the API's
+ * `hasAlerts=true`).
  *
  * Invariant: an absent param always maps to the filter's default, and a default
  * value never emits a param — so the URL stays minimal and
@@ -44,6 +45,12 @@ export interface CandidateFilters {
   heritageZone: boolean;
   /** #398 VPO bidirectional ("" | "true" | "false"). Param: `vpo`. */
   isVpo: string;
+  /**
+   * #466 "Con alertas" UNION toggle — keep only candidates with ≥1 red flag OR
+   * ≥1 warn occupancy caveat (the warn badges the card shows). Param: `alerts`
+   * ("1"); drives the API's `hasAlerts=true`.
+   */
+  hasAlerts: boolean;
   /** #422/#379 preset. Param: `view` (`seguimiento`/`descartadas`; absent = Todas). */
   view: CandidateView;
 }
@@ -58,6 +65,7 @@ export const DEFAULT_CANDIDATE_FILTERS: CandidateFilters = {
   beachProximity: "",
   heritageZone: false,
   isVpo: "",
+  hasAlerts: false,
   view: "all",
 };
 
@@ -96,6 +104,7 @@ export function hasActiveFilters(f: CandidateFilters): boolean {
   return (
     f.source !== null ||
     f.minDiscount !== "" ||
+    f.hasAlerts ||
     f.view !== "all" ||
     moreFiltersActiveCount(f) > 0
   );
@@ -115,6 +124,7 @@ export function parseCandidateFilters(search: string): CandidateFilters {
     beachProximity: p.get("beach") ?? "",
     heritageZone: p.get("heritage") === "true",
     isVpo: p.get("vpo") ?? "",
+    hasAlerts: p.get("alerts") === "1",
     view: view === "seguimiento" || view === "descartadas" ? view : "all",
   };
 }
@@ -134,6 +144,7 @@ export function candidateFiltersToParams(f: CandidateFilters): URLSearchParams {
   if (f.beachProximity !== "") p.set("beach", f.beachProximity);
   if (f.heritageZone) p.set("heritage", "true");
   if (f.isVpo !== "") p.set("vpo", f.isVpo);
+  if (f.hasAlerts) p.set("alerts", "1");
   if (f.view !== "all") p.set("view", f.view);
   return p;
 }
