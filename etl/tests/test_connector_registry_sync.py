@@ -11,7 +11,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from etl import orchestrator
-from etl.connectors.base import Connector, ConnectorScope, RawListing
+from etl.connectors.base import (
+    Connector,
+    ConnectorScope,
+    RawListing,
+    SearchUrlGrammar,
+)
 from etl.tests.fixtures.dummy_connector import DummyConnector
 
 _SCHEMA_SQL = Path(__file__).parent.parent / "schema" / "init.sql"
@@ -56,6 +61,16 @@ class _OverrideConnector(DummyConnector):
 
     override_host_suffix = "example.com"
     supports_search_override = False
+
+
+class _GrammarConnector(DummyConnector):
+    """A connector that publishes a search-URL grammar (issue #491)."""
+
+    search_url_grammar = SearchUrlGrammar(
+        build_template="https://example.com/venta/{geography}/",
+        parse_pattern=r"^https://example\.com/venta/(?<geography>[^/]+)/$",
+        params={"geography": {"label": "Municipio", "source": "profile"}},
+    )
 
 
 def _registry_rows(conn, names: list[str]) -> dict[str, tuple]:
@@ -137,6 +152,37 @@ class TestSyncConnectorRegistry:
             # A connector that declares no override: NULL host, false override.
             assert rows[plain.name][1] is None
             assert rows[plain.name][2] is False
+        finally:
+            orchestrator.CONNECTORS[:] = original
+            _cleanup(pg_conn, names)
+
+    def test_publishes_search_url_grammar_and_leaves_others_null(self, pg_conn):
+        """Issue #491: a connector with a grammar exposes it as JSONB in the
+        registry (build_template + parse_pattern + params); a connector without
+        one leaves the column NULL."""
+        _apply_schema(pg_conn)
+        with_grammar = _GrammarConnector(name="test-registry-grammar")
+        without = DummyConnector(name="test-registry-nogrammar")
+        names = [with_grammar.name, without.name]
+        original = list(orchestrator.CONNECTORS)
+        orchestrator.CONNECTORS[:] = [with_grammar, without]
+        try:
+            orchestrator.sync_connector_registry(pg_conn)
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT connector_name, search_url_grammar "
+                    "  FROM connector_registry WHERE connector_name = ANY(%s)",
+                    (names,),
+                )
+                rows = {r[0]: r[1] for r in cur.fetchall()}
+            grammar = rows[with_grammar.name]
+            assert grammar is not None
+            # psycopg2 returns JSONB as a parsed dict.
+            assert grammar["build_template"] == "https://example.com/venta/{geography}/"
+            assert "(?<geography>" in grammar["parse_pattern"]
+            assert grammar["params"]["geography"]["source"] == "profile"
+            # A connector without a grammar: NULL.
+            assert rows[without.name] is None
         finally:
             orchestrator.CONNECTORS[:] = original
             _cleanup(pg_conn, names)

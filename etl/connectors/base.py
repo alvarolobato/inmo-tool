@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import logging
 import re
+import string
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Literal
@@ -88,6 +89,156 @@ Throttle = Callable[[], None]
 
 
 @dataclass(frozen=True)
+class SearchParam:
+    """One resolved parameter a connector's discover() actually uses for a scope
+    — for the "Validar filtros" page (issue #478/#491).
+
+    A `SearchPreview.url` is a single opaque string; this is its decomposition
+    into the individual, human-labelled inputs that produced it (geography,
+    operation, room count, …) plus WHERE each one came from and WHETHER it
+    travels in the URL at all. The page renders one chip per param with a
+    source badge, so the owner can see exactly what the ETL sends — including
+    the honest truth that a profile's price/size/type filters are NOT sent to
+    the connector (they are applied downstream by data), which surfaces here as
+    params that simply don't exist (or, for a filter a connector *does* honour,
+    `in_url=True`).
+
+    Anti-drift contract (same as `SearchPreview.url`): a connector must build
+    these from the SAME resolved values / helpers its `discover()` uses — never
+    a hand-written parallel description that can silently disagree with what the
+    connector really does.
+
+    - `source`: `"profile"` (from the search_profile scope, e.g. geography),
+      `"connector_config"` (an operator-set native filter, e.g. rooms),
+      `"constant"` (baked into the connector, e.g. operation=venta), or
+      `"derived"` (computed from other inputs).
+    - `in_url`: True when the value appears in the search URL (so the URL
+      grammar can round-trip it); False for a param the connector uses but does
+      not encode in the URL.
+    """
+
+    key: str
+    label: str
+    value: str | None
+    source: Literal["profile", "connector_config", "constant", "derived"]
+    in_url: bool
+    notes: str | None = None
+
+
+def _ecma_pattern_to_python(pattern: str) -> str:
+    """Rewrite an ECMAScript-canonical regex so Python's `re` accepts it.
+
+    The one syntactic difference that matters for URL grammars is named-group
+    spelling: JavaScript writes `(?<name>...)`, Python `(?P<name>...)`. Grammars
+    are stored in the ECMAScript form (so the browser's `RegExp` consumes them
+    verbatim — the whole point of publishing the grammar, issue #491), and this
+    translates them for the Python side. Only a named-group open (`(?<` followed
+    by a name character) is rewritten; a lookbehind (`(?<=` / `(?<!`) is left
+    untouched (and is rejected by `validate_grammar` anyway).
+    """
+    return re.sub(r"\(\?<(?=[A-Za-z_])", "(?P<", pattern)
+
+
+@dataclass(frozen=True)
+class SearchUrlGrammar:
+    """A declarative, invertible description of a connector's search URL —
+    issue #491.
+
+    Two halves that round-trip:
+    - `build_template`: a `str.format` template with `{placeholder}` slots, e.g.
+      `https://www.pisos.com/venta/pisos-{geography}/`. `build(params)` fills it.
+    - `parse_pattern`: an anchored, ECMAScript-canonical regex whose NAMED GROUPS
+      are exactly the template placeholders, e.g.
+      `^https?://(?:www\\.)?pisos\\.com/venta/pisos-(?<geography>[^/]+)/?$`.
+      `parse(url)` returns the named groups, or None when the URL doesn't match.
+
+    Published verbatim to `connector_registry.search_url_grammar` by
+    `sync_connector_registry`, so the dashboard infers params from an
+    owner-edited URL IN THE BROWSER using the same grammar — one implementation,
+    zero per-connector TypeScript. `parse_pattern` is stored in ECMAScript form
+    so the browser's `RegExp` uses it directly; the Python side translates it
+    with `_ecma_pattern_to_python`.
+
+    `params` carries per-placeholder metadata (label, source) mirroring the
+    `SearchParam` fields, so the UI can label the inferred groups without a
+    second source of truth.
+    """
+
+    build_template: str
+    parse_pattern: str
+    params: dict[str, dict] = field(default_factory=dict)
+
+    def placeholders(self) -> set[str]:
+        """The `{name}` slots in `build_template`."""
+        return {
+            field_name
+            for _, field_name, _, _ in string.Formatter().parse(self.build_template)
+            if field_name
+        }
+
+    def group_names(self) -> set[str]:
+        """The named capture groups in `parse_pattern`."""
+        return set(re.compile(_ecma_pattern_to_python(self.parse_pattern)).groupindex)
+
+    def build(self, params: Mapping[str, str]) -> str:
+        """Fill `build_template` from `params` (extra keys are ignored)."""
+        return self.build_template.format(**params)
+
+    def parse(self, url: str) -> dict[str, str] | None:
+        """Return the named groups `parse_pattern` extracts from `url`, or None
+        when it doesn't match (an owner-edited URL the grammar can't invert)."""
+        compiled = re.compile(_ecma_pattern_to_python(self.parse_pattern))
+        match = compiled.match(url)
+        if match is None:
+            return None
+        return dict(match.groupdict())
+
+
+def validate_grammar(connector: type[Connector] | Connector) -> None:
+    """Assert a connector's `search_url_grammar` is a safe, self-consistent,
+    ECMAScript-compatible grammar (issue #491). No-op when the connector has no
+    grammar. Raises ValueError with a specific reason otherwise.
+
+    Checks:
+    1. No inline flags (`(?i)`, `(?m):`, …) — ECMAScript has none, so the same
+       pattern must not rely on them (parity with the browser would break).
+    2. No lookbehind (`(?<=` / `(?<!`) — kept out of the shared subset (the
+       issue's "sin lookbehind variable"), and never needed for a URL grammar.
+    3. The pattern compiles (after the named-group translation).
+    4. Its named groups are EXACTLY the build template's placeholders — so
+       `build(parse(url)) == url` can round-trip and neither half carries a
+       parameter the other doesn't.
+    """
+    grammar = connector.search_url_grammar
+    if grammar is None:
+        return
+    name = getattr(connector, "name", connector.__class__.__name__)
+    ecma = grammar.parse_pattern
+    if re.search(r"\(\?[aiLmsux]", ecma):
+        raise ValueError(
+            f"{name}: grammar parse_pattern uses inline flags — not ECMAScript-safe"
+        )
+    if "(?<=" in ecma or "(?<!" in ecma:
+        raise ValueError(
+            f"{name}: grammar parse_pattern uses lookbehind — outside the "
+            "shared regex subset (issue #491)"
+        )
+    try:
+        compiled = re.compile(_ecma_pattern_to_python(ecma))
+    except re.error as exc:
+        raise ValueError(
+            f"{name}: grammar parse_pattern does not compile: {exc}"
+        ) from exc
+    groups = set(compiled.groupindex)
+    placeholders = grammar.placeholders()
+    if groups != placeholders:
+        raise ValueError(
+            f"{name}: grammar named groups {sorted(groups)} != build template "
+            f"placeholders {sorted(placeholders)}"
+        )
+
+
+@dataclass(frozen=True)
 class SearchPreview:
     """What discover() will actually execute for a scope — for the "Validar
     filtros" page (issue #478 P4).
@@ -114,6 +265,14 @@ class SearchPreview:
     kind: Literal["search_page", "sitemap", "api"]
     tunable: bool
     notes: str | None = None
+    # The resolved parameters this preview's URL is built from (issue #491) —
+    # geography, operation, room count, … each with its source and whether it
+    # travels in the URL. Additive with a default `()` so no existing connector
+    # or test needs updating; a connector populates it from the SAME resolved
+    # values `discover()`/`_search_url()` use (the anti-drift contract that
+    # binds `url`). Serialised into the existing `connector_search_preview
+    # .previews` JSONB by `dataclasses.asdict` — no migration.
+    params: tuple[SearchParam, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -446,6 +605,17 @@ class Connector(ABC):
     # distinct from `override_host_suffix` so a connector can advertise "you may
     # pin a URL here" before its discover() honours it.
     supports_search_override: bool = False
+
+    # Issue #491: a declarative, invertible grammar for this connector's search
+    # URL (build template + parse regex). Published to
+    # `connector_registry.search_url_grammar` by sync_connector_registry so the
+    # dashboard can infer params from an owner-edited URL in the browser — one
+    # generic implementation, no per-connector TypeScript. None (the default)
+    # means "no grammar published": the page still shows this connector's params
+    # (from search_previews) but cannot re-infer them from an edited URL. A
+    # grammar must satisfy `validate_grammar` and stay pinned to `_search_url()`
+    # by a per-connector round-trip pytest contract.
+    search_url_grammar: SearchUrlGrammar | None = None
 
     def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
         """What discover() would execute for `scope`, for the Validar filtros page.

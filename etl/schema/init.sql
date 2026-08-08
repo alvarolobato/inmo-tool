@@ -1274,6 +1274,14 @@ CREATE TABLE IF NOT EXISTS connector_registry (
     -- recall wiring lands per-connector in Phase 5).
     override_host_suffix      TEXT,
     supports_search_override  BOOLEAN      NOT NULL DEFAULT false,
+    -- Issue #491: the connector's declarative search-URL grammar (build
+    -- template + ECMAScript-canonical parse regex + per-param metadata), or
+    -- NULL for a connector without one. Published verbatim by
+    -- sync_connector_registry from Connector.search_url_grammar; the dashboard
+    -- reads it to infer params from an owner-edited URL in the browser (one
+    -- generic implementation, no per-connector TypeScript). parse_pattern is
+    -- stored in ECMAScript form so the browser's RegExp consumes it directly.
+    search_url_grammar        JSONB,
     updated_at                TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
@@ -1281,6 +1289,8 @@ CREATE TABLE IF NOT EXISTS connector_registry (
 -- fresh install). Issue #478.
 ALTER TABLE connector_registry ADD COLUMN IF NOT EXISTS override_host_suffix TEXT;
 ALTER TABLE connector_registry ADD COLUMN IF NOT EXISTS supports_search_override BOOLEAN NOT NULL DEFAULT false;
+-- Issue #491.
+ALTER TABLE connector_registry ADD COLUMN IF NOT EXISTS search_url_grammar JSONB;
 
 -- Issue #217 (D-030): per-(connector, scope) "when did this geography last
 -- actually get a discover() attempt" bookkeeping — what makes scope

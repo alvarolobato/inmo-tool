@@ -1068,9 +1068,9 @@ def sync_connector_registry(conn) -> None:
                     connector_name, registered, rate_limit_per_minute,
                     discovers_full_inventory, supports_discovery,
                     supported_filters, override_host_suffix,
-                    supports_search_override, updated_at
+                    supports_search_override, search_url_grammar, updated_at
                 )
-                VALUES (%s, true, %s, %s, %s, %s::jsonb, %s, %s, NOW())
+                VALUES (%s, true, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, NOW())
                 ON CONFLICT (connector_name) DO UPDATE SET
                     registered = true,
                     rate_limit_per_minute = EXCLUDED.rate_limit_per_minute,
@@ -1079,6 +1079,7 @@ def sync_connector_registry(conn) -> None:
                     supported_filters = EXCLUDED.supported_filters,
                     override_host_suffix = EXCLUDED.override_host_suffix,
                     supports_search_override = EXCLUDED.supports_search_override,
+                    search_url_grammar = EXCLUDED.search_url_grammar,
                     updated_at = NOW()
                 """,
                 (
@@ -1089,6 +1090,12 @@ def sync_connector_registry(conn) -> None:
                     json.dumps(list(connector.supported_filters)),
                     connector.override_host_suffix,
                     connector.supports_search_override,
+                    # Issue #491: the declarative URL grammar, or NULL for a
+                    # connector without one. asdict serialises the ECMAScript-
+                    # canonical parse_pattern verbatim for the browser side.
+                    json.dumps(dataclasses.asdict(connector.search_url_grammar))
+                    if connector.search_url_grammar is not None
+                    else None,
                 ),
             )
             cur.execute(

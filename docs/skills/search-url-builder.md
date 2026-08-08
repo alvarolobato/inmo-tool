@@ -10,6 +10,15 @@ capture-capable portal understands, so guided capture ("Abrir búsqueda" /
 takes over. **URL construction only — no automated fetch**; the operator's
 browser loads the URL.
 
+> **Not to be confused with the ETL-connector URL grammar (issue #491).** This
+> module (`dashboard/lib/search-url/`) is the *capture-extension* builder for the
+> browser-driven CAPTURE portals. The ETL **connectors** publish their own
+> declarative, invertible `SearchUrlGrammar` (build template + parse regex) to
+> `connector_registry.search_url_grammar`; the generic
+> `dashboard/lib/connector-url/parse.ts` reads it to infer params from an
+> owner-edited URL on the "Validar filtros" page. Different surface, different
+> connectors — see [connectors.md → Search params + URL grammar](../architecture/connectors.md#search-params--url-grammar-issue-491).
+
 ## Public API
 
 ```ts

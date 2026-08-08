@@ -312,3 +312,73 @@ def test_map_property_type_from_url(url, expected):
 
 def test_type_token_from_url_handles_absolute_url():
     assert type_token_from_url("https://www.pisos.com/comprar/atico-x-1_2/") == "atico"
+
+
+# ── search URL grammar (issue #491) ───────────────────────────────────
+
+
+def test_search_url_delegates_to_the_grammar():
+    """_search_url() IS the grammar's build() — so the derived URL and the
+    published grammar can never drift apart (issue #491)."""
+    c = PisosConnector()
+    assert c.search_url_grammar is not None
+    for geo in ("madrid", "dos_hermanas", "hospitalet_de_llobregat"):
+        assert c._search_url(geo) == c.search_url_grammar.build({"geography": geo})
+
+
+def test_grammar_round_trip_and_rejects_foreign_urls():
+    """parse(build(geo)) == {geography: geo} for a battery of real slugs
+    (including a _SLUG_OVERRIDES target); a habitaclia URL is rejected."""
+    from etl.tests.grammar_contract import assert_grammar_roundtrip
+
+    c = PisosConnector()
+    cases = [
+        {"geography": "madrid"},
+        {"geography": "dos_hermanas"},
+        {"geography": "alcala_de_guadaira"},
+        {"geography": "hospitalet_de_llobregat"},
+    ]
+    foreign = [
+        "https://www.habitaclia.com/viviendas-dos_hermanas.htm",
+        "https://www.pisos.com/comprar/piso-madrid-123/",
+    ]
+    assert_grammar_roundtrip(
+        c.search_url_grammar,
+        cases,
+        foreign,
+        build_real=lambda p: c._search_url(p["geography"]),
+    )
+
+
+def test_grammar_validates():
+    from etl.connectors.base import validate_grammar
+
+    validate_grammar(PisosConnector())  # no raise
+
+
+def test_search_previews_carry_geography_and_operation_params():
+    """The preview exposes the exact params discover() uses — geography (from the
+    profile, in the URL) and operation=venta (a constant, in the URL). The
+    profile's price/size/type filters are deliberately NOT present (issue #491
+    ground truth: the orchestrator never sends them to the connector)."""
+    c = PisosConnector()
+    preview = c.search_previews(ConnectorScope(geography="dos_hermanas"))[0]
+    by_key = {p.key: p for p in preview.params}
+    assert set(by_key) == {"geography", "operation"}
+    assert by_key["geography"].value == "dos_hermanas"
+    assert by_key["geography"].source == "profile"
+    assert by_key["geography"].in_url is True
+    assert by_key["operation"].value == "venta"
+    assert by_key["operation"].source == "constant"
+    # No downstream-only filter leaked in as a param.
+    assert not {"price_min", "price_max", "size_min", "property_types"} & set(by_key)
+
+
+def test_unresolved_preview_has_no_params():
+    """When the scope resolves to no geography, the degraded preview carries no
+    params (nothing to show), matching url=None."""
+    c = PisosConnector()
+    # A scope with neither a center nor a geography string resolves to None.
+    preview = c.search_previews(ConnectorScope())[0]
+    assert preview.url is None
+    assert preview.params == ()

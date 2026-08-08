@@ -214,6 +214,7 @@ export default async function ValidarFiltrosPage({
                   connector={row.connector}
                   preview={row.previews[0] ?? null}
                   tunable={row.overrideHostSuffix !== null}
+                  grammar={row.searchUrlGrammar}
                   computedAt={row.computedAt}
                   overridden={Boolean(pin)}
                   pinnedUrl={pin ? pin.url : null}

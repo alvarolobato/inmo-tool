@@ -76,7 +76,9 @@ from etl.connectors.base import (
     ConnectorScope,
     ListingUnavailableError,
     RawListing,
+    SearchParam,
     SearchPreview,
+    SearchUrlGrammar,
     Throttle,
 )
 from etl.connectors.extraction import underscore_city_slug
@@ -119,6 +121,20 @@ _SLUG_OVERRIDES: dict[str, str] = {
 }
 
 _CARD_SELECTOR = "div.ad-preview[id]"
+
+# Issue #491: the reference URL grammar. pisos.com's search URL is the simplest
+# in the fleet — a single geography slug in a fixed `/venta/pisos-<slug>/` path
+# — which is why it's the first connector to publish one. `_search_url()`
+# delegates to `build()` below, so the grammar is not a parallel description that
+# can drift from what discover() builds: it IS what discover() builds. The
+# per-connector round-trip pytest contract pins the two together. Stored in
+# ECMAScript-canonical form (`(?<geography>…)`) so the dashboard's browser-side
+# `RegExp` consumes `parse_pattern` verbatim; the Python side translates it.
+_SEARCH_URL_GRAMMAR = SearchUrlGrammar(
+    build_template=f"{_BASE_URL}/venta/pisos-{{geography}}/",
+    parse_pattern=r"^https?://(?:www\.)?pisos\.com/venta/pisos-(?<geography>[^/]+)/?$",
+    params={"geography": {"label": "Municipio", "source": "profile"}},
+)
 
 # Characteristics are a flat list of short strings on each card
 # (".ad-preview__char"): "3 habs.", "3 baños", "155 m²", "4ª planta". Order
@@ -218,6 +234,10 @@ class PisosConnector(Connector):
     override_host_suffix = "pisos.com"
     supports_search_override = True
 
+    # Issue #491: published to connector_registry.search_url_grammar so the
+    # dashboard can invert an owner-edited URL back to params in the browser.
+    search_url_grammar = _SEARCH_URL_GRAMMAR
+
     def __init__(self) -> None:
         # Populated by discover() as a side effect of the single search
         # request it makes; read back by fetch_detail() (no network) and by
@@ -258,7 +278,10 @@ class PisosConnector(Connector):
         return geography
 
     def _search_url(self, geography: str) -> str:
-        return f"{_BASE_URL}/venta/pisos-{geography}/"
+        # Delegates to the grammar (issue #491) so the derived URL and the
+        # grammar can never drift apart — the grammar IS the URL builder, and
+        # the round-trip pytest contract pins parse(build(x)) == x.
+        return self.search_url_grammar.build({"geography": geography})
 
     def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
         """Reuses `_search_url()` (the exact helper discover() builds its entry
@@ -283,6 +306,29 @@ class PisosConnector(Connector):
                 url=self._search_url(geography),
                 kind="search_page",
                 tunable=True,
+                # Issue #491: the exact params discover() uses for this scope,
+                # built from the SAME resolved geography the URL is (anti-drift).
+                # `operation` is a constant baked into every /venta/ URL this
+                # connector requests (see normalize()'s operation="sale"). Note
+                # that the profile's price/size/type filters are deliberately
+                # ABSENT here — the orchestrator never passes them to the
+                # connector; they are applied downstream by data.
+                params=(
+                    SearchParam(
+                        key="geography",
+                        label="Municipio",
+                        value=geography,
+                        source="profile",
+                        in_url=True,
+                    ),
+                    SearchParam(
+                        key="operation",
+                        label="Operación",
+                        value="venta",
+                        source="constant",
+                        in_url=True,
+                    ),
+                ),
             )
         ]
 
