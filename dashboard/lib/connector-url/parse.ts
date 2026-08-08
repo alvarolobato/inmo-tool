@@ -134,7 +134,9 @@ export function buildUrl(grammar: SearchUrlGrammar, params: Record<string, strin
  * ECMAScript-canonical, so `RegExp` consumes them verbatim (no translation).
  */
 export function rejection(grammar: SearchUrlGrammar, url: string): string | null {
-  for (const { pattern, reason } of grammar.rejectReasons) {
+  // Tolerate a grammar shaped without rejectReasons (older stored rows, or a
+  // hand-built test fixture) — treat it as "no reject reasons".
+  for (const { pattern, reason } of grammar.rejectReasons ?? []) {
     let re: RegExp;
     try {
       re = new RegExp(pattern);

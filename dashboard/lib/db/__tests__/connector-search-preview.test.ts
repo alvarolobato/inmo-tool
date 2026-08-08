@@ -89,6 +89,9 @@ describe("getEtlConnectorPreviews", () => {
       buildTemplate: "https://www.pisos.com/venta/pisos-{geography}/",
       parsePattern: "^https?://(?:www\\.)?pisos\\.com/venta/pisos-(?<geography>[^/]+)/?$",
       params: { geography: { label: "Municipio", source: "profile" } },
+      // issue #493: parseGrammar always yields a rejectReasons array (empty when
+      // the stored grammar declares none, as pisos does).
+      rejectReasons: [],
     });
     expect(out[0].previews[0].params).toEqual([
       { key: "geography", label: "Municipio", value: "sevilla", source: "profile", inUrl: true, notes: null },
