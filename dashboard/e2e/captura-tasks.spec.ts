@@ -52,7 +52,9 @@ const SCOPE_B = {
   price_max: 300000,
 };
 
-// A little real context so the secondary lines render (portal-global).
+// Portal-global rows seeded as a NEGATIVE CONTROL (#445): even though global
+// capture activity + a worklist roll-up exist for these portals, the per-profile
+// Captura page must show NONE of their numbers — only profile-scoped stats.
 const EC_SEED = [
   "https://www.idealista.com/inmueble/E2E-CAP413-EC-1/",
   "https://www.idealista.com/inmueble/E2E-CAP413-EC-2/",
@@ -245,6 +247,18 @@ test("stacks both profiles; expands due/half-done, collapses not-due; manual exp
   await expect(page.getByTestId(`captura-activity-${profileBId}-idealista`)).toContainText(
     "sin capturas de este perfil todavía",
   );
+
+  // Profile-scoped ONLY (#445): despite the seeded portal-global capture activity
+  // and worklist roll-up (EC_SEED / WL_SEED), the connector line must surface NO
+  // global numbers. The removed surfaces (portal activity + worklist/no-list) no
+  // longer render, and none of their phrasing appears anywhere on the page.
+  await expect(page.locator('[data-testid^="captura-activity-portal-"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid^="captura-worklist-"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid^="captura-nolist-"]')).toHaveCount(0);
+  await expect(page.getByTestId("captura-page").getByText(/portal:/)).toHaveCount(0);
+  await expect(page.getByTestId("captura-page").getByText(/\blista:/)).toHaveCount(0);
+  await expect(page.getByTestId("captura-page").getByText(/en el portal/)).toHaveCount(0);
+  await expect(page.getByTestId("captura-page").getByText(/pendientes/)).toHaveCount(0);
 
   // Capture-progress summary (issue #433): each connector line shows the three
   // reconciling numbers "capturados / total · N restantes". Profile A idealista

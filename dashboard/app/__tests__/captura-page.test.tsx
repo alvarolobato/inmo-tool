@@ -52,9 +52,7 @@ function mkConnector(
     mutedCount,
     state,
     defaultExpanded: dueCount > 0,
-    capturedReal: 0,
-    lastCapturedAt: null,
-    summary: null,
+    capturedProfile: 0,
     ...extra,
   };
 }
@@ -71,12 +69,9 @@ const IDEA_HALF_PENDING = mkTask("idea-half-pending", "idealista", IDEALISTA_URL
 
 function buildViews(): ProfileCaptureView[] {
   const p1Idealista = mkConnector("idealista", [mkTaskView(IDEA_DUE, { muted: false })], {
-    capturedReal: 10,
-    lastCapturedAt: new Date(Date.now() - 3600_000).toISOString(),
+    capturedProfile: 10,
   });
-  const p1Aliseda = mkConnector("aliseda", [mkTaskView(ALI_DONE, { muted: true })], {
-    summary: { source_portal: "aliseda", total: 10, pending: 4, captured: 5, failed: 1, skipped: 0, stale: 0 },
-  });
+  const p1Aliseda = mkConnector("aliseda", [mkTaskView(ALI_DONE, { muted: true })]);
   const p2Idealista = mkConnector("idealista", [
     mkTaskView(IDEA_HALF_DONE, { muted: true }),
     mkTaskView(IDEA_HALF_PENDING, { muted: false }),
@@ -119,14 +114,7 @@ describe("buildConnectorViews (due/collapse derivation)", () => {
 
   it("collapses a connector where every task ran within the window", () => {
     const tasks = [mkTask("a", "idealista", IDEALISTA_URL), mkTask("b", "idealista", IDEALISTA_URL + "?x")];
-    const [conn] = buildConnectorViews(
-      tasks,
-      { a: recent, b: recent },
-      STALENESS,
-      new Map(),
-      new Map(),
-      now,
-    );
+    const [conn] = buildConnectorViews(tasks, { a: recent, b: recent }, STALENESS, {}, now);
     expect(conn.state).toBe("not-due");
     expect(conn.defaultExpanded).toBe(false);
     expect(conn.dueCount).toBe(0);
@@ -134,7 +122,7 @@ describe("buildConnectorViews (due/collapse derivation)", () => {
 
   it("marks a connector half-done (expanded) when one task is pending and one recent", () => {
     const tasks = [mkTask("a", "idealista", IDEALISTA_URL), mkTask("b", "idealista", IDEALISTA_URL + "?x")];
-    const [conn] = buildConnectorViews(tasks, { a: recent }, STALENESS, new Map(), new Map(), now);
+    const [conn] = buildConnectorViews(tasks, { a: recent }, STALENESS, {}, now);
     expect(conn.state).toBe("half-done");
     expect(conn.defaultExpanded).toBe(true);
     expect(conn.dueCount).toBe(1);
@@ -143,7 +131,7 @@ describe("buildConnectorViews (due/collapse derivation)", () => {
 
   it("marks a connector due (expanded) when every task is pending or stale", () => {
     const tasks = [mkTask("a", "idealista", IDEALISTA_URL), mkTask("b", "idealista", IDEALISTA_URL + "?x")];
-    const [conn] = buildConnectorViews(tasks, { b: old }, STALENESS, new Map(), new Map(), now);
+    const [conn] = buildConnectorViews(tasks, { b: old }, STALENESS, {}, now);
     expect(conn.state).toBe("due");
     expect(conn.defaultExpanded).toBe(true);
   });

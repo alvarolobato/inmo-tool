@@ -26,7 +26,6 @@
  */
 
 import type { LoosenedConstraint } from "@/lib/search-url";
-import type { WorklistPortalSummary } from "@/lib/worklist";
 
 /**
  * One openable capture task as the Captura page renders it. Mirrors the
@@ -350,20 +349,15 @@ export interface ConnectorView {
   /**
    * PER-PROFILE captured properties on this connector (issue #430): DISTINCT
    * `extension_capture` (status='done') properties that match THIS profile via
-   * `profile_listing_state`. This is the primary "capturados" figure the page
-   * shows per profile — not `capturedReal` (portal-global).
+   * `profile_listing_state`. This is the only "capturados" figure the page shows
+   * per profile — the page deliberately shows NO portal-global numbers (#445).
    *
    * CAVEAT: captures are not exclusive to one profile — a property matching two
    * profiles counts under both, so profiles' `capturedProfile` values can sum to
-   * more than `capturedReal`. Correct reading: "this profile has that captured".
+   * more than the number of distinct captured properties on the portal. Correct
+   * reading: "this profile has that captured".
    */
   capturedProfile: number;
-  /** Portal-global real captures (extension_capture) — secondary context. */
-  capturedReal: number;
-  /** ISO of the most recent real capture for the portal, or null. */
-  lastCapturedAt: string | null;
-  /** Portal-global seeded-worklist roll-up — secondary context, may be null. */
-  summary: WorklistPortalSummary | null;
 }
 
 /** One active profile with its connectors (the stacked-page unit). */
@@ -431,17 +425,14 @@ export function deriveConnectorState(dueCount: number, mutedCount: number): Conn
  * (builder order), computes each task's staleness against its portal's window,
  * and folds those into the connector state + default collapse decision.
  * `capturedByConnector` (issue #430) carries THIS profile's per-connector
- * captured counts (connector key → count) as the primary "capturados" figure;
- * a portal absent from it yields 0. The portal-global maps (`activityByPortal`,
- * `summaryByPortal`) attach the secondary portal-wide context; a portal absent
- * from them yields 0 / null.
+ * captured counts (connector key → count) as the only "capturados" figure;
+ * a portal absent from it yields 0. Portal-global context (activity / worklist
+ * roll-up) is intentionally NOT surfaced per profile (#445).
  */
 export function buildConnectorViews(
   tasks: readonly CaptureTask[],
   runs: Record<string, string>,
   staleness: StalenessConfig,
-  activityByPortal: ReadonlyMap<string, PortalCaptureActivity>,
-  summaryByPortal: ReadonlyMap<string, WorklistPortalSummary>,
   capturedByConnector: Readonly<Record<string, number>>,
   now: Date = new Date(),
 ): ConnectorView[] {
@@ -462,7 +453,6 @@ export function buildConnectorViews(
         lastDone: lastDoneLabel(lastRunAt, now),
       };
     });
-    const act = activityByPortal.get(g.portal) ?? null;
     return {
       portal: g.portal,
       label: g.label,
@@ -473,9 +463,6 @@ export function buildConnectorViews(
       state: deriveConnectorState(dueCount, mutedCount),
       defaultExpanded: dueCount > 0,
       capturedProfile: capturedByConnector[g.portal] ?? 0,
-      capturedReal: act?.captured ?? 0,
-      lastCapturedAt: act?.lastCapturedAt ?? null,
-      summary: summaryByPortal.get(g.portal) ?? null,
     };
   });
 }
@@ -491,8 +478,6 @@ export function buildProfileCaptureView(
   tasks: readonly CaptureTask[],
   runs: Record<string, string>,
   staleness: StalenessConfig,
-  activityByPortal: ReadonlyMap<string, PortalCaptureActivity>,
-  summaryByPortal: ReadonlyMap<string, WorklistPortalSummary>,
   capturedByProfileConnector: ReadonlyMap<number, Record<string, number>>,
   now: Date = new Date(),
 ): ProfileCaptureView {
@@ -500,8 +485,6 @@ export function buildProfileCaptureView(
     tasks,
     runs,
     staleness,
-    activityByPortal,
-    summaryByPortal,
     capturedByProfileConnector.get(profile.id) ?? {},
     now,
   );
