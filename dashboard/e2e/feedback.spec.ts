@@ -216,7 +216,9 @@ test("reject defers removal: card stays this session, is gone on reload, and the
   // Show-rejected toggle: the rejected card reappears, still marked. Flipping it
   // triggers a feed refetch (includeRejected=true) — wait for it before
   // asserting the card is back (#457).
-  await actAndWaitForFeed(page, () => page.getByTestId("show-rejected-toggle").check());
+  await actAndWaitForFeed(page, () =>
+    page.getByTestId("view-segment-descartadas").click(),
+  );
   const cardAgain = page.locator(cardSel);
   await expect(cardAgain).toBeVisible();
   await expect(cardAgain.getByTestId("candidate-rejected-badge")).toBeVisible();
@@ -231,7 +233,9 @@ test("reject defers removal: card stays this session, is gone on reload, and the
   // The un-reject persists: with the toggle off, the property is back in the
   // default feed, unmarked. The toggle-off triggers a feed refetch — wait for
   // it before asserting the card reappears (#457).
-  await actAndWaitForFeed(page, () => page.getByTestId("show-rejected-toggle").uncheck());
+  await actAndWaitForFeed(page, () =>
+    page.getByTestId("view-segment-todas").click(),
+  );
   const cardDefault = page.locator(cardSel);
   await expect(cardDefault).toBeVisible();
   await expect(cardDefault.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "false");
@@ -330,7 +334,9 @@ test("#422: accepting a property adds it to the 'En seguimiento' view; the star 
   // Turn on the "En seguimiento" preset: only the tracked property remains,
   // the (untracked) bystander drops out. The preset triggers a feed refetch
   // (state=accept) — wait for it before asserting the narrowed feed (#457).
-  await actAndWaitForFeed(page, () => page.getByTestId("tracked-only-toggle").check());
+  await actAndWaitForFeed(page, () =>
+    page.getByTestId("view-segment-seguimiento").click(),
+  );
   await assertNoErrorSurface(page);
   const trackedCard = page.locator(cardSel);
   await expect(trackedCard).toBeVisible();

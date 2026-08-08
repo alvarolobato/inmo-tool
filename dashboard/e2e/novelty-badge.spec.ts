@@ -217,7 +217,7 @@ test("the NUEVO mark survives the whole visit — reload, a filter re-fetch, and
 
   // A filter re-fetch (fetchPage with includeRejected=true) — same code path
   // as any filter change — must not drop the marks either.
-  await page.getByTestId("show-rejected-toggle").check();
+  await page.getByTestId("view-segment-descartadas").click();
   await expect(newCards(page)).toHaveCount(30);
 
   // "Cargar más" pulls a genuine second page; the whole fresh block (all

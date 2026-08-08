@@ -24,6 +24,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { Pool } from "pg";
 import { adminKey, seedAdminSession } from "./helpers/admin-session";
+import { openMoreFilters } from "./helpers/filter-bar";
 
 function buildPool(): Pool {
   const dsn = process.env.POSTGRES_DSN;
@@ -206,6 +207,8 @@ test("beach filter narrows by minimum grade, heritage toggle narrows, and the bo
   const cards = page.locator('[data-testid="candidate-card"]');
   await expect(cards).toHaveCount(4);
 
+  // beach + casco-histórico controls live in the "Más filtros" popover (#465).
+  await openMoreFilters(page);
   const beach = page.getByTestId("beach-filter");
   const heritage = page.getByTestId("heritage-filter");
   await expect(beach).toBeVisible();

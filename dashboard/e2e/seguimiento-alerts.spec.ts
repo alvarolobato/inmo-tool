@@ -220,7 +220,7 @@ test("in-app indicator counts only tracked drops; seguimiento view hides untrack
   // (2) Switch to the "En seguimiento" working set: only tracked (accept)
   // properties remain; the untracked drop drops out → a non-tracked drop never
   // becomes a seguimiento alert.
-  await page.getByTestId("tracked-only-toggle").check();
+  await page.getByTestId("view-segment-seguimiento").click();
   await expect(cardFor(page, "tracked-drop")).toBeVisible();
   await expect(cardFor(page, "tracked-nodrop")).toBeVisible();
   await expect(cardFor(page, "untracked-drop")).toHaveCount(0);

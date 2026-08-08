@@ -1,13 +1,23 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { ErrorDisplay } from "@/components/ErrorDisplay";
 import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
 import type { CandidateRow } from "@/lib/candidates";
 import { COLD_START_EXPLANATION } from "@/lib/scoring/cold-start";
 import { CandidateCard } from "./CandidateCard";
+import { CandidateFilterBar } from "./CandidateFilterBar";
 import { ZeroCandidatesDiagnostic } from "@/components/profiles/ZeroCandidatesDiagnostic";
+import {
+  DEFAULT_CANDIDATE_FILTERS,
+  candidateFiltersToSearch,
+  parseCandidateFilters,
+  showRejectedFromView,
+  trackedOnlyFromView,
+  type CandidateFilters,
+} from "@/lib/candidate-filters";
 
 /**
  * Candidate feed for one profile (task 2.5, #19) — one card per property,
@@ -27,63 +37,72 @@ export function CandidateList({ profileId }: { profileId: number }) {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<ApiErrorResponse | string | null>(null);
-  // Source (portal) filter (#265). `source === null` means "all portals".
+  const router = useRouter();
+
+  // #465 (Feed UX F2): all feed filters live in ONE object, sourced from the
+  // page URL (query params on /profiles/[id]) instead of per-filter useState —
+  // so the feed supports deep-links, back/forward, and the Fase-4 click-through.
+  // Semantics/vocabulary of every filter are preserved bit-for-bit (D-059
+  // filter⇔rank invariant); only the state SOURCE changed. Serialization lives
+  // in lib/candidate-filters.ts. Individual filter meanings:
+  //   - source (#265): portal filter, null = all.
+  //   - occupancy/conditionSel (#310), caveat/redflagType (#386),
+  //     beachProximity/heritageZone (#392), isVpo (#398): AI-gated hard filters
+  //     (empty until assessment data flows — folded into assessmentFilterActive
+  //     so the empty state says "needs assessment", not "broken").
+  //   - minDiscount (#310): below-market %, computed from price, works today.
+  //   - view (#422/#379): the 3 reachable preset states (all / seguimiento /
+  //     descartadas) that were two mutually-exclusive checkboxes.
+  const [filters, setFilters] = useState<CandidateFilters>(
+    DEFAULT_CANDIDATE_FILTERS,
+  );
+  const {
+    source,
+    occupancy,
+    conditionSel,
+    minDiscount,
+    caveat,
+    redflagType,
+    beachProximity,
+    heritageZone,
+    isVpo,
+    view,
+  } = filters;
+  // Derived from the segmented `view`: what the fetch layer / card rendering
+  // used to read off two booleans.
+  const trackedOnly = trackedOnlyFromView(view);
+  const showRejected = showRejectedFromView(view);
+
   // The options are the sources this profile's candidates actually carry
   // (GET .../candidate-sources), fetched once and kept stable while the feed
   // pages — so the dropdown never offers a portal that would match nothing.
-  const [source, setSource] = useState<string | null>(null);
   const [availableSources, setAvailableSources] = useState<string[]>([]);
-
-  // #310 hard filters (D-059). All optional, all combine with each other and
-  // with the source filter/pagination. `occupancy`/`conditionSel` gate on AI
-  // assessment data (empty until #316), so they legitimately narrow the feed to
-  // nothing until that data flows — the empty state below says so explicitly
-  // instead of implying the feed is broken. `minDiscount` is a percent computed
-  // from price and works today. `conditionSel` is a composite token ("" |
-  // "a_reformar" | "a_reformar:leve" | "a_reformar:integral" | "reformado" |
-  // "obra_nueva") that maps to the API's separate condition/renovation params.
-  const [occupancy, setOccupancy] = useState<string>("");
-  const [conditionSel, setConditionSel] = useState<string>("");
-  const [minDiscount, setMinDiscount] = useState<string>("");
-  // #386 (Fase 1 of #385): expose the already-derived occupancy caveats
-  // (`venta_deuda` etc.) and redflags problem types (`unfinished_construction`
-  // etc.) as hard filters. Both read AI-assessment data (empty until #316), so
-  // they narrow the feed to nothing until that data flows — folded into
-  // `assessmentFilterActive` below so the empty state says "needs assessment"
-  // rather than implying the feed is broken.
-  const [caveat, setCaveat] = useState<string>("");
-  const [redflagType, setRedflagType] = useState<string>("");
-  // #392 (Fase 4 of #385): the owner's headline ask — beach proximity as a
-  // MINIMUM-grade hard filter (frontline = only primera línea; sea_view =
-  // frontline or vistas al mar; near_beach = any beach signal) plus a
-  // casco-histórico toggle. Both read the `location` AI-assessment axis (empty
-  // until the LLM populates it), so they're folded into `assessmentFilterActive`
-  // below — an empty feed says "needs assessment", not "broken".
-  const [beachProximity, setBeachProximity] = useState<string>("");
-  const [heritageZone, setHeritageZone] = useState(false);
-  // #398 (Fase 5 of #385): VPO / vivienda protegida as a BIDIRECTIONAL hard
-  // filter — "" = off, "true" = only VPO, "false" = exclude VPO. Reads the
-  // `opportunity` assessment axis (empty until the LLM populates it), so it's
-  // folded into `assessmentFilterActive` for the "needs assessment" empty state.
-  const [isVpo, setIsVpo] = useState<string>("");
-  // #379: show-rejected toggle. Default OFF — the feed hides rejected
-  // candidates (today's behaviour), so a reject only "removes" a card on the
-  // next fetch. ON re-fetches with `includeRejected=true`, surfacing rejected
-  // candidates (rendered marked, still un-rejectable). Wired into fetchPage's
-  // identity below, so flipping it resets the feed to page 1.
-  const [showRejected, setShowRejected] = useState(false);
-  // #422: "En seguimiento" preset — restrict the feed to tracked (accepted)
-  // properties, the working set. Sends `state=accept`. Wired into fetchPage's
-  // identity below, so toggling it resets the feed to page 1. Mutually
-  // exclusive with "Mostrar descartadas" (a tracked-only view can't also show
-  // rejects), so turning one on turns the other off.
-  const [trackedOnly, setTrackedOnly] = useState(false);
   // #428: in-app "En seguimiento" indicator — count of tracked (accept)
   // properties with a sanity-banded price DROP in the recent window
-  // (GET .../seguimiento-alerts). Backs the small count next to the toggle so
-  // the owner sees at a glance that something he tracks has moved. Best-effort:
-  // a failed fetch leaves the count at 0 (no badge), never surfaces an error.
+  // (GET .../seguimiento-alerts). Backs the small count on the seguimiento
+  // segment so the owner sees at a glance that something he tracks has moved.
+  // Best-effort: a failed fetch leaves the count at 0 (no badge).
   const [seguimientoAlertCount, setSeguimientoAlertCount] = useState(0);
+
+  // Read the filters out of the URL once on mount (SSR-safe: starts at the
+  // defaults, corrected on the client) — same window.location precedent as the
+  // property-detail page (avoids the useSearchParams Suspense boundary).
+  useEffect(() => {
+    setFilters(parseCandidateFilters(window.location.search));
+  }, []);
+
+  // Single writer: update state AND mirror it into the URL with router.replace
+  // (no history spam, no scroll jump). fetchPage's identity depends on the
+  // primitive fields, so this transparently resets the feed to page 1.
+  const updateFilters = useCallback(
+    (next: CandidateFilters) => {
+      setFilters(next);
+      router.replace(`/profiles/${profileId}${candidateFiltersToSearch(next)}`, {
+        scroll: false,
+      });
+    },
+    [router, profileId],
+  );
 
   const assessmentFilterActive =
     occupancy !== "" ||
@@ -222,319 +241,18 @@ export function CandidateList({ profileId }: { profileId: number }) {
     }
   };
 
-  // The filter bar must render in EVERY state (loading/error/empty/populated),
-  // not just alongside a full grid — otherwise narrowing to a filter with zero
-  // candidates would early-return the empty state and hide the very controls
-  // the user needs to clear the filter. Rendered once here, above whatever body
-  // the state below produces. The #310 distress/condition/discount filters
-  // always render (they don't depend on live source data); the source (#265)
-  // select is hidden only when the profile has no sources at all.
-  const selectStyle = {
-    padding: "5px 8px",
-    fontSize: 13,
-    color: "var(--fg)",
-    background: "var(--bg-1)",
-    border: "1px solid var(--border)",
-    borderRadius: 6,
-  } as const;
+  // The filter bar (#465) must render in EVERY state
+  // (loading/error/empty/populated), not just alongside a full grid —
+  // otherwise narrowing to a filter with zero candidates would early-return the
+  // empty state and hide the very controls the user needs to clear the filter.
+  // Rendered once here, above whatever body the state below produces.
   const filterBar = (
-    <div
-      data-testid="candidate-filter-bar"
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        marginTop: 16,
-        flexWrap: "wrap",
-      }}
-    >
-      {availableSources.length > 0 && (
-        <>
-          <label
-            htmlFor="candidate-source-filter"
-            style={{ fontSize: 12, color: "var(--fg-muted)" }}
-          >
-            Fuente
-          </label>
-          <select
-            id="candidate-source-filter"
-            data-testid="source-filter"
-            value={source ?? ""}
-            onChange={(e) =>
-              setSource(e.target.value === "" ? null : e.target.value)
-            }
-            style={{ ...selectStyle, textTransform: "capitalize" }}
-          >
-            <option value="">Todas las fuentes</option>
-            {availableSources.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-        </>
-      )}
-
-      {/* #310: occupancy (occupied vs free). Needs assessment data (#316). */}
-      <label
-        htmlFor="candidate-occupancy-filter"
-        style={{ fontSize: 12, color: "var(--fg-muted)" }}
-      >
-        Ocupación
-      </label>
-      <select
-        id="candidate-occupancy-filter"
-        data-testid="occupancy-filter"
-        value={occupancy}
-        onChange={(e) => setOccupancy(e.target.value)}
-        style={selectStyle}
-      >
-        <option value="">Cualquiera</option>
-        <option value="occupied">Ocupado</option>
-        <option value="free">Libre</option>
-      </select>
-
-      {/* #310: condition + renovation severity (#313), combined. Needs assessment data. */}
-      <label
-        htmlFor="candidate-condition-filter"
-        style={{ fontSize: 12, color: "var(--fg-muted)" }}
-      >
-        Estado
-      </label>
-      <select
-        id="candidate-condition-filter"
-        data-testid="condition-filter"
-        value={conditionSel}
-        onChange={(e) => setConditionSel(e.target.value)}
-        style={selectStyle}
-      >
-        <option value="">Cualquiera</option>
-        <option value="a_reformar">A reformar</option>
-        <option value="a_reformar:leve">A reformar (leve)</option>
-        <option value="a_reformar:integral">A reformar (integral)</option>
-        <option value="reformado">Reformado</option>
-        <option value="obra_nueva">Obra nueva</option>
-      </select>
-
-      {/* #310: below-market discount threshold. Works today (computed from price). */}
-      <label
-        htmlFor="candidate-discount-filter"
-        style={{ fontSize: 12, color: "var(--fg-muted)" }}
-      >
-        Bajo mercado
-      </label>
-      <select
-        id="candidate-discount-filter"
-        data-testid="discount-filter"
-        value={minDiscount}
-        onChange={(e) => setMinDiscount(e.target.value)}
-        style={selectStyle}
-      >
-        <option value="">Cualquiera</option>
-        <option value="10">≥ 10%</option>
-        <option value="15">≥ 15%</option>
-        <option value="20">≥ 20%</option>
-        <option value="25">≥ 25%</option>
-      </select>
-
-      {/* #386: occupancy caveat (venta_deuda etc.). Needs assessment data (#316). */}
-      <label
-        htmlFor="candidate-caveat-filter"
-        style={{ fontSize: 12, color: "var(--fg-muted)" }}
-      >
-        Situación jurídica
-      </label>
-      <select
-        id="candidate-caveat-filter"
-        data-testid="caveat-filter"
-        value={caveat}
-        onChange={(e) => setCaveat(e.target.value)}
-        style={selectStyle}
-      >
-        <option value="">Cualquiera</option>
-        <option value="venta_deuda">Venta de deuda</option>
-        <option value="nuda_propiedad">Nuda propiedad</option>
-        <option value="usufructo">Usufructo</option>
-        <option value="proindiviso">Proindiviso</option>
-        <option value="derecho_superficie">Derecho de superficie</option>
-      </select>
-
-      {/* #386: redflags problem type (obra sin terminar / embargo / …). Needs assessment data. */}
-      <label
-        htmlFor="candidate-redflag-filter"
-        style={{ fontSize: 12, color: "var(--fg-muted)" }}
-      >
-        Alerta
-      </label>
-      <select
-        id="candidate-redflag-filter"
-        data-testid="redflag-filter"
-        value={redflagType}
-        onChange={(e) => setRedflagType(e.target.value)}
-        style={selectStyle}
-      >
-        <option value="">Cualquiera</option>
-        <option value="unfinished_construction">Obra inacabada</option>
-        <option value="embargo">Embargo</option>
-        <option value="subasta_judicial">Subasta judicial</option>
-        <option value="litigio">Litigio</option>
-        <option value="construccion_ilegal">Construcción ilegal</option>
-        <option value="herencia_yacente">Herencia yacente</option>
-        <option value="deuda_comunidad">Deuda comunidad</option>
-        <option value="sin_financiacion_hipotecaria">
-          Sin financiación hipotecaria
-        </option>
-        <option value="cambio_uso_pendiente">Cambio de uso pendiente</option>
-        <option value="structural_damage">Daño estructural</option>
-      </select>
-
-      {/* #392: beach proximity as a MINIMUM-grade filter (owner's headline ask).
-          frontline = only primera línea; sea_view = frontline or vistas al mar;
-          near_beach = any beach signal. Needs the `location` assessment axis. */}
-      <label
-        htmlFor="candidate-beach-filter"
-        style={{ fontSize: 12, color: "var(--fg-muted)" }}
-      >
-        Playa
-      </label>
-      <select
-        id="candidate-beach-filter"
-        data-testid="beach-filter"
-        value={beachProximity}
-        onChange={(e) => setBeachProximity(e.target.value)}
-        style={selectStyle}
-      >
-        <option value="">Cualquiera</option>
-        <option value="frontline">Primera línea</option>
-        <option value="sea_view">Vistas al mar o mejor</option>
-        <option value="near_beach">Cerca de playa o mejor</option>
-      </select>
-
-      {/* #392: casco-histórico toggle. On → only heritage-zone candidates. Needs
-          the `location` assessment axis. */}
-      <label
-        htmlFor="candidate-heritage-toggle"
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-          fontSize: 12,
-          color: "var(--fg-muted)",
-          cursor: "pointer",
-        }}
-      >
-        <input
-          id="candidate-heritage-toggle"
-          data-testid="heritage-filter"
-          type="checkbox"
-          checked={heritageZone}
-          onChange={(e) => setHeritageZone(e.target.checked)}
-          style={{ cursor: "pointer" }}
-        />
-        Casco histórico
-      </label>
-
-      {/* #398: VPO / vivienda protegida as a BIDIRECTIONAL hard filter — only
-          VPO or exclude VPO. Needs the `opportunity` assessment axis. */}
-      <label
-        htmlFor="candidate-vpo-filter"
-        style={{ fontSize: 12, color: "var(--fg-muted)" }}
-      >
-        VPO
-      </label>
-      <select
-        id="candidate-vpo-filter"
-        data-testid="vpo-filter"
-        value={isVpo}
-        onChange={(e) => setIsVpo(e.target.value)}
-        style={selectStyle}
-      >
-        <option value="">Cualquiera</option>
-        <option value="true">Solo VPO</option>
-        <option value="false">Sin VPO</option>
-      </select>
-
-      {/* #422: "En seguimiento" preset — restrict the feed to tracked
-          (accepted) properties, the working set. Mutually exclusive with
-          "Mostrar descartadas" (a tracked-only view can't also show rejects). */}
-      <label
-        htmlFor="tracked-only-toggle"
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-          fontSize: 12,
-          color: "var(--fg-muted)",
-          cursor: "pointer",
-        }}
-      >
-        <input
-          id="tracked-only-toggle"
-          data-testid="tracked-only-toggle"
-          type="checkbox"
-          checked={trackedOnly}
-          onChange={(e) => {
-            setTrackedOnly(e.target.checked);
-            if (e.target.checked) setShowRejected(false);
-          }}
-          style={{ cursor: "pointer" }}
-        />
-        En seguimiento
-        {/* #428: in-app indicator — count of tracked properties with a recent
-            price drop. Only shown when > 0. The BAJADA badge on each card
-            (#420) is the drill-down; this is the at-a-glance count. */}
-        {seguimientoAlertCount > 0 && (
-          <span
-            data-testid="seguimiento-alert-count"
-            title={`${seguimientoAlertCount} en seguimiento con bajada reciente`}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              minWidth: 16,
-              height: 16,
-              padding: "0 5px",
-              borderRadius: 8,
-              fontSize: 10,
-              lineHeight: "16px",
-              fontWeight: 600,
-              color: "var(--up-fg, #fff)",
-              background: "var(--up, #16a34a)",
-            }}
-          >
-            {seguimientoAlertCount}
-          </span>
-        )}
-      </label>
-
-      {/* #379: show/hide rejected candidates. Default off (rejected hidden).
-          Turning it on re-fetches with includeRejected=true so the user can
-          review and un-reject past rejections. */}
-      <label
-        htmlFor="show-rejected-toggle"
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-          fontSize: 12,
-          color: "var(--fg-muted)",
-          cursor: "pointer",
-        }}
-      >
-        <input
-          id="show-rejected-toggle"
-          data-testid="show-rejected-toggle"
-          type="checkbox"
-          checked={showRejected}
-          onChange={(e) => {
-            setShowRejected(e.target.checked);
-            if (e.target.checked) setTrackedOnly(false);
-          }}
-          style={{ cursor: "pointer" }}
-        />
-        Mostrar descartadas
-      </label>
-    </div>
+    <CandidateFilterBar
+      values={filters}
+      onChange={updateFilters}
+      availableSources={availableSources}
+      seguimientoAlertCount={seguimientoAlertCount}
+    />
   );
 
   if (loading) {
