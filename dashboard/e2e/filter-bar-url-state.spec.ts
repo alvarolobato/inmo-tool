@@ -204,6 +204,10 @@ test("popover filter → chip + feed refetch carries the API param", async ({ pa
   // The state is mirrored into the URL (deep-linkable).
   await expect(page).toHaveURL(/occupancy=occupied/);
 
+  // Close the popover so its panel no longer overlaps the chips row.
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("more-filters-panel")).toHaveCount(0);
+
   // The chip's ✕ clears exactly this filter → feed restores to the full pool.
   await page.getByTestId("filter-chip-clear-occupancy").click();
   await assertNoErrorSurface(page);
@@ -237,14 +241,15 @@ test("bar (and its empty-state) still renders when a filter matches nothing", as
 }) => {
   skipIfNoDb(test);
 
-  // No property is assessed as `free`, so occupancy=free narrows to zero — the
-  // AI-assessment empty state. The bar must still render so the user can clear.
-  await page.goto(`/profiles/${profileId}?occupancy=free`);
+  // No property carries the `venta_deuda` caveat, so this AI-gated filter
+  // narrows the feed to zero — the "needs assessment" empty state. The bar must
+  // still render (with the message) so the user can clear the filter.
+  await page.goto(`/profiles/${profileId}?caveat=venta_deuda`);
   await assertNoErrorSurface(page);
 
+  await expect(page.getByTestId("no-candidates-needs-assessment")).toBeVisible();
   await expect(page.locator('[data-testid="candidate-card"]')).toHaveCount(0);
   await expect(page.getByTestId("candidate-filter-bar")).toBeVisible();
-  await expect(page.getByTestId("no-candidates-needs-assessment")).toBeVisible();
   // The active chip is still shown so the narrowing filter is never invisible.
-  await expect(page.getByTestId("filter-chip-occupancy")).toBeVisible();
+  await expect(page.getByTestId("filter-chip-caveat")).toBeVisible();
 });
