@@ -16,6 +16,7 @@ import { PropertyDescription, pickDescriptions } from "@/components/property/Pro
 import { PriceHistoryChart } from "@/components/property/PriceHistoryChart";
 import { YieldSection } from "@/components/property/sections/YieldSection";
 import { FlipSection } from "@/components/property/sections/FlipSection";
+import { InvestorScoreSection } from "@/components/property/sections/InvestorScoreSection";
 import { DetailSections, type DetailSection } from "@/components/property/DetailSections";
 import { FeedbackControls } from "@/components/candidates/FeedbackControls";
 
@@ -190,6 +191,20 @@ export default function PropertyDetailPage() {
   // contract and reserved order numbers for Phase 4/5/6's future sections).
   const sections: DetailSection[] = property
     ? [
+        // #452 Puntuación inversora (order 5 — first, above the linked
+        // listings): the 0–100 score + band + breakdown + risk chips. Only
+        // added when the route resolved the investor-score inputs (best-effort),
+        // the same "absent, not a placeholder" rule the other sections follow.
+        ...(property.investor_score
+          ? [
+              {
+                id: "investor-score",
+                title: "Puntuación inversora",
+                order: 5,
+                content: <InvestorScoreSection score={property.investor_score} />,
+              },
+            ]
+          : []),
         {
           id: "listings",
           title: "Anuncios vinculados",

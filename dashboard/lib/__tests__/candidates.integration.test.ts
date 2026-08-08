@@ -34,8 +34,14 @@ import { Pool } from "pg";
 import { buildPgPoolConfig } from "@/lib/db-shared";
 import { resetPool } from "@/lib/db-write";
 import { createProfile } from "@/lib/db/profiles";
-import { getAdjacentCandidates, listCandidates, listCandidateSources } from "../candidates";
+import {
+  getAdjacentCandidates,
+  listCandidates,
+  listCandidateSources,
+  getPropertyInvestorScore,
+} from "../candidates";
 import { getPropertyDetail } from "../property-detail";
+import { investorScoreBreakdown } from "@/lib/display-score";
 import type { Scope } from "@/lib/profiles-schema";
 
 // Deliberately NOT Sol/Atocha (the coordinates materialize.integration.test.ts
@@ -965,6 +971,150 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
           // the pool is large enough), and never a fabricated positive.
           expect(row.below_market_pct).toBeCloseTo(0, 5);
         }
+      });
+    });
+  });
+
+  describe("timing boosts + investor score (#452)", () => {
+    // Seed a matched, scored candidate with a chosen days-on-market (via a past
+    // first_seen_at on an active listing) and an optional two-point price history
+    // that produces a net drop. All same price (300k) so the below-market signal
+    // is ~0 and the timing boost is isolated.
+    async function seedTiming(
+      pool: Pool,
+      profileId: number,
+      opts: {
+        score: number | null;
+        firstSeenDaysAgo: number;
+        priceHistory?: { price: number; daysAgo: number }[];
+        price?: number;
+      },
+    ): Promise<number> {
+      const price = opts.price ?? 300000;
+      const id = await insertProperty(pool);
+      const listing = await pool.query<{ id: number }>(
+        `INSERT INTO listing (property_id, source, external_id, status, operation, current_price, first_seen_at)
+         VALUES ($1, 'fotocasa', $2, 'active', 'sale', $3, NOW() - ($4 || ' days')::interval) RETURNING id`,
+        [id, `int-tim-${Math.random().toString(36).slice(2)}`, price, String(opts.firstSeenDaysAgo)],
+      );
+      const listingId = Number(listing.rows[0].id);
+      for (const p of opts.priceHistory ?? []) {
+        await pool.query(
+          `INSERT INTO listing_price_history (listing_id, observed_at, price)
+           VALUES ($1, NOW() - ($2 || ' days')::interval, $3)`,
+          [listingId, String(p.daysAgo), p.price],
+        );
+      }
+      await markMatched(pool, profileId, id);
+      await setScore(pool, profileId, id, opts.score);
+      return id;
+    }
+
+    it("a long-on-market candidate is boosted above an equal-base fresh one, and the boost is capped", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const fresh = await seedTiming(pool, profileId, { score: 0.5, firstSeenDaysAgo: 2 });
+        const stale = await seedTiming(pool, profileId, { score: 0.5, firstSeenDaysAgo: 300 });
+
+        const page = await listCandidates(profileId, { limit: 10 });
+        const staleRow = page.items.find((i) => i.property_id === stale)!;
+        const freshRow = page.items.find((i) => i.property_id === fresh)!;
+        // Both share base 0.5; the stale one is lifted by the DOM boost (≤ 0.04)
+        // and must sort first.
+        expect(staleRow.effective_score!).toBeGreaterThan(freshRow.effective_score!);
+        expect(staleRow.effective_score! - freshRow.effective_score!).toBeLessThanOrEqual(0.04 + 1e-9);
+        expect(page.items.map((i) => i.property_id).indexOf(stale)).toBe(0);
+      });
+    });
+
+    it("a net price drop lifts effective_score, and the joint timing cap holds at 0.11", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const flat = await seedTiming(pool, profileId, { score: 0.5, firstSeenDaysAgo: 2 });
+        // Long on market AND a deep (25%) net drop → both timing boosts max out,
+        // so the combined lift is capped at 0.11, never 0.04 + 0.07 uncapped-plus.
+        const motivated = await seedTiming(pool, profileId, {
+          score: 0.5,
+          firstSeenDaysAgo: 300,
+          priceHistory: [
+            { price: 400000, daysAgo: 200 },
+            { price: 300000, daysAgo: 5 },
+          ],
+        });
+
+        const page = await listCandidates(profileId, { limit: 10 });
+        const flatRow = page.items.find((i) => i.property_id === flat)!;
+        const motivatedRow = page.items.find((i) => i.property_id === motivated)!;
+        const lift = motivatedRow.effective_score! - flatRow.effective_score!;
+        expect(lift).toBeGreaterThan(0.04); // more than DOM alone
+        expect(lift).toBeLessThanOrEqual(0.11 + 1e-9); // joint cap
+      });
+    });
+
+    it("degrades to 0 timing boost when there is no history and the listing is fresh (never sinks the base)", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // Fresh listing (2 days), no price history → DOM boost ≈ 0.0004, drop 0.
+        const id = await seedTiming(pool, profileId, { score: 0.6, firstSeenDaysAgo: 2 });
+        const page = await listCandidates(profileId, { limit: 10 });
+        const row = page.items.find((i) => i.property_id === id)!;
+        // effective_score is base + a negligible DOM boost, never below base.
+        expect(row.effective_score!).toBeGreaterThanOrEqual(0.6);
+        expect(row.effective_score!).toBeLessThan(0.6 + 0.001);
+      });
+    });
+
+    it("keeps a never-scored candidate below any real score even with both timing boosts maxed (invariant)", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const scored = await seedTiming(pool, profileId, { score: 0.05, firstSeenDaysAgo: 2 });
+        const unscored = await seedTiming(pool, profileId, {
+          score: null,
+          firstSeenDaysAgo: 300,
+          priceHistory: [
+            { price: 400000, daysAgo: 200 },
+            { price: 300000, daysAgo: 5 },
+          ],
+        });
+        const page = await listCandidates(profileId, { limit: 10 });
+        const order = page.items.map((i) => i.property_id);
+        // Even fully timing-boosted, the never-scored sentinel sorts below the
+        // lowest real score.
+        expect(order.indexOf(scored)).toBeLessThan(order.indexOf(unscored));
+        expect(order[order.length - 1]).toBe(unscored);
+      });
+    });
+
+    it("getPropertyInvestorScore exposes the raw inputs and effective_score that the display re-expresses", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const id = await seedTiming(pool, profileId, {
+          score: 0.5,
+          firstSeenDaysAgo: 300,
+          priceHistory: [
+            { price: 360000, daysAgo: 200 },
+            { price: 300000, daysAgo: 5 },
+          ],
+        });
+        const s = await getPropertyInvestorScore(profileId, id);
+        expect(s).not.toBeNull();
+        expect(s!.base_score).toBeCloseTo(0.5, 5);
+        expect(s!.days_on_market!).toBeGreaterThanOrEqual(299);
+        expect(s!.price_drop_pct!).toBeCloseTo((360000 - 300000) / 360000, 4);
+        // effective_score = base + timing boost (no below-market/distress here).
+        expect(s!.effective_score!).toBeGreaterThan(0.5);
+        // The display re-expression sums the breakdown to the shown score.
+        const b = investorScoreBreakdown(s!);
+        expect(b.terms.reduce((a, t) => a + t.points, 0)).toBe(b.display.value);
+        expect(b.display.unscored).toBe(false);
+      });
+    });
+
+    it("returns null for a property that is not a matched candidate of the profile", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        const orphan = await insertProperty(pool);
+        expect(await getPropertyInvestorScore(profileId, orphan)).toBeNull();
       });
     });
   });

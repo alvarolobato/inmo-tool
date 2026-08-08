@@ -9,6 +9,7 @@ import { FeedbackControls } from "./FeedbackControls";
 import { CandidatePhotoTicker } from "./CandidatePhotoTicker";
 import { PriceSignals } from "@/components/property/PriceSignals";
 import { StalenessBadge } from "@/components/StalenessBadge";
+import { InvestorScoreChip } from "./InvestorScoreChip";
 
 /**
  * One card per deduplicated property (issue #19) — never one per listing.
@@ -235,9 +236,18 @@ export function CandidateCard({
             {candidate.address ?? "Dirección no disponible"}
           </p>
 
-          <p data-testid="candidate-facts" style={{ margin: 0, fontSize: 12, color: "var(--fg-muted)" }}>
-            {facts.length > 0 ? facts.join(" · ") : "Sin datos estructurados"}
-          </p>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+            <p data-testid="candidate-facts" style={{ margin: 0, fontSize: 12, color: "var(--fg-muted)" }}>
+              {facts.length > 0 ? facts.join(" · ") : "Sin datos estructurados"}
+            </p>
+            {/* #452 investor score — a monotone re-expression of effective_score,
+                tooltip = the already-computed ranking_boost_reason. */}
+            <InvestorScoreChip
+              effectiveScore={candidate.effective_score}
+              baseScore={candidate.score}
+              reason={candidate.ranking_boost_reason}
+            />
+          </div>
 
           {(candidate.is_new ||
             candidate.price_changed ||

@@ -27,6 +27,25 @@ import {
   TOURIST_LICENSE_LABEL,
 } from "@/lib/ai-assessment/opportunity";
 import type { StateFeedbackType } from "@/lib/db/feedback";
+// #452: the investor-score boost weights/caps live in the pure, client-safe
+// display module so the SQL sort key and the UI breakdown derive from ONE set of
+// constants (D-059 derive-once). This file interpolates them into the ranked
+// CTE; the card/detail import them from the same module.
+import {
+  BELOW_MARKET_DISCOUNT_CAP,
+  BELOW_MARKET_WEIGHT,
+  DISTRESS_MAX_UNITS,
+  DISTRESS_UNIT_WEIGHT,
+  BEACH_PROXIMITY_BOOST_UNITS,
+  BEACH_UNIT_WEIGHT,
+  TOURIST_LICENSE_BOOST,
+  DOM_BOOST_WEIGHT,
+  DOM_SATURATION_DAYS,
+  PRICE_DROP_BOOST_WEIGHT,
+  PRICE_DROP_SATURATION,
+  TIMING_JOINT_CAP,
+  NO_SCORE_SENTINEL,
+} from "@/lib/display-score";
 
 export interface CandidateListingSummary {
   id: number;
@@ -290,81 +309,36 @@ const MAX_LIMIT = 100;
  */
 const MAX_CARD_PHOTOS = 8;
 
-/**
- * `score` is a sigmoid output, always in (0, 1) when set (task 3.2) — -1 is
- * a safe sentinel for "no score yet" that still sorts correctly last under
- * `ORDER BY effective_score DESC`, letting the keyset comparison stay a
- * plain numeric compound compare instead of needing NULL-aware branching.
- */
-const NO_SCORE_SENTINEL = -1;
-
-// ── Ranking blend (#309 / D-057) ────────────────────────────────────────────
+// ── Ranking blend (#309 / D-057, extended by #452) ──────────────────────────
 //
 // The default feed used to sort purely on the learned `score`, so a genuinely
 // below-market or distressed listing showed its badge but never rose in the
-// list — the investor still had to scan for it. #309 blends two OPPORTUNITY
-// signals into the sort key as an additive, non-negative boost on top of the
-// learned score:
+// list — the investor still had to scan for it. #309 blends OPPORTUNITY signals
+// into the sort key as additive, non-negative boosts on top of the learned
+// score; #452 adds two TIMING boosts (days-on-market + net price-drop):
 //
 //   effective_score = COALESCE(score, -1)
-//                   + below_market_boost   (0 … BELOW_MARKET_DISCOUNT_CAP·WEIGHT)
-//                   + distress_boost        (0 … DISTRESS_MAX_UNITS·UNIT_WEIGHT)
-//                   + beach_boost           (0 … 3·BEACH_UNIT_WEIGHT, #392)
-//                   + tourist_license_boost (0 … TOURIST_LICENSE_BOOST, #398)
+//                   + below_market_boost   (0 … BELOW_MARKET_DISCOUNT_CAP·WEIGHT = 0.25)
+//                   + distress_boost        (0 … DISTRESS_MAX_UNITS·UNIT_WEIGHT  = 0.15)
+//                   + beach_boost           (0 … 3·BEACH_UNIT_WEIGHT            = 0.09, #392)
+//                   + tourist_license_boost (0 … TOURIST_LICENSE_BOOST          = 0.04, #398)
+//                   + timing_boost          (0 … TIMING_JOINT_CAP               = 0.11, #452)
 //
-// Because all boosts are ≥ 0, a candidate with no assessment and no discount
+// Because ALL boosts are ≥ 0, a candidate with no assessment and no discount
 // keeps its base score EXACTLY (graceful degradation — it never sinks or
 // errors), and a never-scored candidate (score NULL → −1 sentinel) still sorts
-// last: even the maximum boost (0.25 + 0.15 + 0.09 + 0.04 = 0.53) leaves it at
-// −0.47, below any real sigmoid score (which is in (0,1)). The learned model is
-// augmented, never replaced.
+// last: even the maximum total boost (0.25 + 0.15 + 0.09 + 0.04 + 0.11 = 0.64,
+// = MAX_TOTAL_BOOST in lib/display-score.ts) leaves it at −0.36, still below any
+// real sigmoid score (which is in (0,1)). The learned model is augmented, never
+// replaced, and adding the timing terms does NOT break the invariant.
+//
+// The weights/caps themselves live in lib/display-score.ts (imported above) so
+// the SQL sort key here and the 0–100 display re-expression derive from ONE set
+// of constants (D-059). The score is a monotone re-expression of this same
+// effective_score — one number, one order — so it can never disagree with the
+// feed sort or the #425 keyset cursor (which is unchanged: effective_score is
+// still the single sort key; #452 only adds terms to its existing expression).
 
-/** Below-market discount is capped at 50% below the pool median — beyond that is almost always a data error (wrong m²) or a different asset class, not a real deal worth over-weighting. */
-const BELOW_MARKET_DISCOUNT_CAP = 0.5;
-/** Weight on the (capped) discount fraction. 0.5 → a property 50% below the pool median gets the maximum +0.25 boost, enough to overtake a meaningful learned-score gap without swamping it. */
-const BELOW_MARKET_WEIGHT = 0.5;
-/** Distress axes counted (occupancy warn caveat / red flag / a_reformar); capped so all three present is +0.15, kept smaller than the max discount boost (price is the harder signal). */
-const DISTRESS_MAX_UNITS = 3;
-const DISTRESS_UNIT_WEIGHT = 0.05;
-/**
- * Beach-proximity ranking boost (#392, Fase 4 of #385). A SOFT, graded lift —
- * NOT a filter: a beachfront/sea-view/near-beach listing rises in the order
- * without excluding the rest, so the owner chooses in the UI between "filtrar
- * por" (the hard filter below) and "priorizar" (this boost). Graded exactly
- * like the axis itself (frontline > sea_view > near_beach > none): the per-grade
- * unit count here × BEACH_UNIT_WEIGHT. `frontline` earns the TOP boost even
- * though it is ALSO the hard-filter target — the two mechanisms are independent
- * (the filter says "show only these"; the boost says "lift this when present"),
- * so a frontline property still surfaces at the top of an UNfiltered feed. Max
- * beach boost is 3 × 0.03 = 0.09, deliberately below the distress max (0.15) and
- * the below-market max (0.25) — price and distress stay the harder signals; and
- * the combined max boost (0.25 + 0.15 + 0.09 = 0.49) still leaves a never-scored
- * candidate (−1 sentinel) at −0.51, below any real sigmoid score, so #309's
- * "augment, never replace" invariant holds.
- */
-const BEACH_PROXIMITY_BOOST_UNITS: Record<string, number> = {
-  frontline: 3,
-  sea_view: 2,
-  near_beach: 1,
-};
-const BEACH_UNIT_WEIGHT = 0.03;
-/**
- * Tourist-licence ranking boost (#398, Fase 5 of #385). A SOFT, single-boolean
- * lift — NOT a filter: a property that ALREADY carries a licencia turística /
- * VUT rises in the order without excluding the rest. Its absence is deliberately
- * never a filter (the owner's decision): most adverts simply don't mention a
- * licence, so filtering on it would manufacture false negatives — the signal
- * only PRIORITISES a property whose licence is already granted.
- *
- * Weighted 0.04 — above nothing, but below the beach frontline max (0.09), the
- * distress max (0.15) and the below-market max (0.25): price and distress stay
- * the harder signals. The combined max boost is now
- * 0.25 + 0.15 + 0.09 + 0.04 = 0.53, which still leaves a never-scored candidate
- * (−1 sentinel) at −0.47, below any real sigmoid score in (0,1) — so #309's
- * "augment, never replace" invariant holds. `is_vpo` is deliberately NOT a boost
- * (it is a bidirectional hard filter, not a value signal to lift).
- */
-const TOURIST_LICENSE_BOOST = 0.04;
 /**
  * Minimum number of priced candidates in the pool before a below-market
  * discount is trusted for ranking — a "median" of one or two listings is
@@ -648,6 +622,27 @@ function rankedCandidatesCte(params: RankedCteParams): string {
   // licence); false/NULL add 0. TOURIST_LICENSE_BOOST is a numeric constant,
   // never user input.
   const touristBoostCase = `CASE WHEN base.tourist_license = true THEN ${TOURIST_LICENSE_BOOST} ELSE 0 END`;
+  // #452 timing boosts, read off the `timing` CTE (LEFT JOINed as `tim`). Both
+  // degrade to 0 when the signal is absent (tim.* NULL → the CASE ELSE 0), and
+  // both are non-negative (GREATEST(x,0)), so they augment `effective_score`
+  // without ever sinking a candidate or breaking the never-scored floor. The
+  // weights/caps/saturation points are numeric constants from display-score.ts,
+  // never user input, so interpolating them is safe (same pattern as the beach
+  // and tourist boost CASEs above). `.0` forces float division in SQL.
+  const domBoostSql = `CASE WHEN tim.days_on_market IS NOT NULL
+        THEN LEAST(GREATEST(tim.days_on_market, 0) / ${DOM_SATURATION_DAYS}.0, 1) * ${DOM_BOOST_WEIGHT}
+        ELSE 0 END`;
+  const priceDropBoostSql = `CASE WHEN tim.price_drop_pct IS NOT NULL
+        THEN LEAST(GREATEST(tim.price_drop_pct, 0) / ${PRICE_DROP_SATURATION}, 1) * ${PRICE_DROP_BOOST_WEIGHT}
+        ELSE 0 END`;
+  // Joint cap (Fable: 0.11): the two timing boosts together never exceed
+  // TIMING_JOINT_CAP. LEAST over their sum, which is 0 when both signals are
+  // absent — the degrade-to-0 case.
+  const timingBoostSql = `LEAST((${domBoostSql}) + (${priceDropBoostSql}), ${TIMING_JOINT_CAP})`;
+  // Terminal-status set for the days-on-market freeze (matches
+  // market-signals.ts TERMINAL_STATUSES). Hardcoded constants → safe to inline
+  // as a literal array, avoiding a new param threaded through all four callers.
+  const terminalStatusesLiteral = `ARRAY['sold','withdrawn','expired']::text[]`;
   return `${DISABLED_SOURCES_CTE},
      base AS (
        SELECT
@@ -903,6 +898,58 @@ function rankedCandidatesCte(params: RankedCteParams): string {
           AND curr_price IS DISTINCT FROM prev_price
           AND observed_at > (SELECT ts FROM anchor)
      ),
+     -- #452 timing signals: per-property days-on-market + net price-drop, the
+     -- inputs to the two timing boosts. Mirrors computePropertyScoringSignals
+     -- (lib/analytics/market-signals.ts) EXACTLY — one representative listing
+     -- per property (active first, then most recently listed), days-on-market
+     -- frozen at the terminal-status transition (EC-2), and the net drop as
+     -- (first_price - last_price) / first_price over the rep's price history.
+     -- BOUNDED to base's property set via the JOIN (never a scan of the whole
+     -- listing table), pre-aggregated to one row per property, and joined once
+     -- into ranked below — the same shape as novelty / price_moves, not a
+     -- correlated subquery in base (the D-057 per-row cost). Selects only
+     -- property_id + the two signals, so it is free of any ORDER BY impact and
+     -- harmless in getAdjacentCandidates' shared CTE.
+     timing AS (
+       SELECT
+         rep.property_id,
+         FLOOR(
+           EXTRACT(EPOCH FROM (
+             CASE
+               WHEN rep.status = 'active' THEN NOW()
+               ELSE COALESCE(
+                 (SELECT MIN(e.observed_at)
+                    FROM listing_status_event e
+                   WHERE e.listing_id = rep.listing_id
+                     AND e.status = ANY(${terminalStatusesLiteral})),
+                 NOW()
+               )
+             END - rep.first_seen_at
+           )) / 86400.0
+         ) AS days_on_market,
+         (
+           SELECT CASE
+                    WHEN agg.cnt > 1 AND agg.first_price > 0
+                    THEN (agg.first_price - agg.last_price) / agg.first_price
+                    ELSE NULL
+                  END
+             FROM (
+               SELECT COUNT(*) AS cnt,
+                      (ARRAY_AGG(h.price ORDER BY h.observed_at ASC, h.id ASC))[1] AS first_price,
+                      (ARRAY_AGG(h.price ORDER BY h.observed_at DESC, h.id DESC))[1] AS last_price
+                 FROM listing_price_history h
+                WHERE h.listing_id = rep.listing_id
+             ) agg
+         ) AS price_drop_pct
+       FROM (
+         SELECT DISTINCT ON (l.property_id)
+           l.property_id, l.id AS listing_id, l.first_seen_at, l.status
+           FROM listing l
+           JOIN base b ON b.property_id = l.property_id
+          WHERE l.first_seen_at IS NOT NULL
+          ORDER BY l.property_id, (l.status = 'active') DESC, l.first_seen_at DESC, l.id DESC
+       ) rep
+     ),
      pool AS (
        SELECT
          percentile_cont(0.5) WITHIN GROUP (ORDER BY ppm2) AS median_ppm2,
@@ -930,6 +977,12 @@ function rankedCandidatesCte(params: RankedCteParams): string {
          -- getAdjacentCandidates) order on the SAME (novelty_tier, effective_
          -- score, property_id) key and prev/next can never desync from the feed.
          ${noveltyTierExpr(params)} AS novelty_tier,
+         -- #452: per-property timing signals carried through ranked.* so the
+         -- detail-page investor-score breakdown (getPropertyInvestorScore) can
+         -- read them; the feed doesn't select these, but exposing them keeps the
+         -- breakdown reading the SAME values that fed the boost (derive-once).
+         tim.days_on_market,
+         tim.price_drop_pct,
          CASE
            WHEN base.ppm2 IS NOT NULL AND pool.n >= ${MIN_POOL_SIZE}
                 AND pool.median_ppm2 IS NOT NULL AND pool.median_ppm2 > 0
@@ -954,10 +1007,16 @@ function rankedCandidatesCte(params: RankedCteParams): string {
            -- #398 soft tourist-licence boost (single boolean, non-negative →
            -- augments, never filters). A granted licence lifts; false/NULL add 0.
            + (${touristBoostCase})
+           -- #452 timing boost (days-on-market + net price-drop, joint-capped at
+           -- ${TIMING_JOINT_CAP}). Non-negative and degrades to 0 when both signals are
+           -- absent, so the never-scored floor holds (see the ranking-blend note
+           -- above for the recomputed ceiling).
+           + (${timingBoostSql})
          ) AS effective_score
        FROM base CROSS JOIN pool
        LEFT JOIN novelty nov ON nov.property_id = base.property_id
        LEFT JOIN price_moves pm ON pm.property_id = base.property_id
+       LEFT JOIN timing tim ON tim.property_id = base.property_id
      )`;
 }
 
@@ -972,6 +1031,8 @@ export function describeRankingBoost(
   distressLevel: number,
   beachProximity: string | null = null,
   touristLicense: boolean = false,
+  daysOnMarket: number | null = null,
+  priceDropPct: number | null = null,
 ): string | null {
   const parts: string[] = [];
   if (belowMarketPct !== null && belowMarketPct >= MIN_NOTABLE_DISCOUNT) {
@@ -1003,9 +1064,23 @@ export function describeRankingBoost(
   if (touristLicense) {
     parts.push("licencia turística concedida");
   }
+  // #452: the two timing signals also lift the ranking, so name them when
+  // notable. A short time on market or no drop carries a negligible boost and
+  // earns no mention (same "no reason on every card" discipline as above).
+  if (daysOnMarket !== null && daysOnMarket >= MIN_NOTABLE_DAYS_ON_MARKET) {
+    parts.push(`lleva ~${Math.round(daysOnMarket)} días en el mercado`);
+  }
+  if (priceDropPct !== null && priceDropPct >= MIN_NOTABLE_DISCOUNT) {
+    parts.push(
+      `el precio ha bajado ~${Math.round(priceDropPct * 100)}% desde que se publicó`,
+    );
+  }
   if (parts.length === 0) return null;
   return `Destacado: ${parts.join("; ")}.`;
 }
+
+/** A time-on-market only worth NAMING in the explanation once it clears this — shorter reads as an ordinary fresh listing, not a motivated seller. */
+const MIN_NOTABLE_DAYS_ON_MARKET = 60;
 
 /**
  * The three price-change presentation fields the card renders, all derived from
@@ -1258,6 +1333,10 @@ interface RawCandidateRow {
   beach_proximity: string | null;
   /** #398: whether the latest `opportunity` row found a granted tourist licence; null when unassessed. Feeds the ranking-boost reason (the badge itself comes from loadFlags). */
   tourist_license: boolean | null;
+  /** #452: frozen days-on-market for the property's representative listing (NUMERIC → string); null when unknown. Feeds the timing boost's ranking-boost reason. */
+  days_on_market: string | null;
+  /** #452: net price-drop fraction since first listed for that representative listing (NUMERIC → string); null when no drop data. Positive = price fell. */
+  price_drop_pct: string | null;
   /** Current verdict (#379), already `clear`-collapsed-to-null in SQL; null when none. */
   feedback_state: StateFeedbackType | null;
 }
@@ -1807,6 +1886,12 @@ export async function listCandidates(
        ranked.below_market_pct,
        ranked.distress_level,
        ranked.beach_proximity,
+       -- #452 timing signals derived in the timing CTE — carried onto the row
+       -- so the card's ranking_boost_reason can name a long time on market / a
+       -- cumulative price drop (the boost itself is already folded into
+       -- effective_score above).
+       ranked.days_on_market,
+       ranked.price_drop_pct,
        -- Current accept/reject verdict (#379/#422), derived in the base CTE
        -- (clear already collapsed to NULL). Projected here so the card renders
        -- its marked state (accept pressed, or the "Descartada" treatment for
@@ -2030,6 +2115,8 @@ export async function listCandidates(
         r.distress_level ?? 0,
         r.beach_proximity ?? null,
         r.tourist_license === true,
+        r.days_on_market != null ? Number(r.days_on_market) : null,
+        r.price_drop_pct != null ? Number(r.price_drop_pct) : null,
       ),
       feedback_state: r.feedback_state ?? null,
     };
@@ -2318,5 +2405,104 @@ export async function getPropertyMarketSignals(
     price_changed: change.price_changed,
     price_delta_pct: change.price_delta_pct,
     price_direction: change.price_direction,
+  };
+}
+
+/**
+ * #452 — the raw inputs the property DETAIL page's "Puntuación inversora"
+ * section needs to render the 0–100 score, its band/confidence, and the per-term
+ * breakdown. Reuses `rankedCandidatesCte` verbatim (so the detail score can
+ * never disagree with the feed card's for the same property) and reads the SAME
+ * `effective_score` and per-signal columns the sort key is built from — the
+ * authoritative total, with each signal's raw value alongside so the pure
+ * display module (lib/display-score.ts) can reconstruct the contributions that
+ * sum to it. The 0–100 re-expression and band all live in display-score.ts;
+ * this only fetches the inputs.
+ *
+ * `risk_flags` are the warn-tone assessment flags (caveats + red flags + VPO)
+ * rendered as informational CHIPS in the breakdown — per the owner's decision
+ * they are NEVER subtracted from the score (a distressed listing is the
+ * opportunity for a value buyer; the distress boost already ADDS for it).
+ *
+ * Returns null when the property isn't a ranked candidate of the profile.
+ * Callers should treat a throw as "no score" — this is an enhancement, never
+ * worth failing the detail page over.
+ */
+export interface PropertyInvestorScore {
+  base_score: number | null;
+  effective_score: number | null;
+  below_market_pct: number | null;
+  distress_level: number;
+  beach_proximity: string | null;
+  tourist_license: boolean;
+  days_on_market: number | null;
+  price_drop_pct: number | null;
+  /** Warn-tone flags shown as chips (never subtracted). `{ label, kind }` only. */
+  risk_flags: { label: string; kind: string }[];
+}
+
+export async function getPropertyInvestorScore(
+  profileId: number,
+  propertyId: number,
+): Promise<PropertyInvestorScore | null> {
+  const { minFrac, maxFrac } = readPriceChangeBand();
+  const rows = await sql<{
+    base_score: string | null;
+    effective_score: string | null;
+    below_market_pct: string | null;
+    distress_level: number;
+    beach_proximity: string | null;
+    tourist_license: boolean | null;
+    days_on_market: string | null;
+    price_drop_pct: string | null;
+  }>(
+    `WITH sp AS (
+       SELECT COALESCE(previous_viewed_at, created_at - interval '1 day') AS anchor_ts
+         FROM search_profile
+        WHERE id = $1
+     ),
+     ${rankedCandidatesCte({
+       warnParam: "$2",
+       anchorParam: "(SELECT anchor_ts FROM sp)",
+       bandMinParam: "$3",
+       bandMaxParam: "$4",
+       coldStartParam: "false",
+     })}
+     SELECT
+       score AS base_score,
+       effective_score,
+       below_market_pct,
+       distress_level,
+       beach_proximity,
+       tourist_license,
+       days_on_market,
+       price_drop_pct
+       FROM ranked
+      WHERE property_id = $5::bigint`,
+    [profileId, WARN_CAVEAT_CODES, minFrac, maxFrac, propertyId],
+  );
+  if (rows.length === 0) return null;
+  const r = rows[0];
+
+  // Risk chips: reuse the same latest-per-axis assessment rows + flag mapping
+  // the card uses (flagsFromAssessments), then keep only the warn-tone flags —
+  // exactly the "red flags" the owner wants shown as chips, never subtracted.
+  const flagsByProperty = await loadFlags([propertyId]);
+  const risk_flags = (flagsByProperty.get(propertyId) ?? [])
+    .filter((f) => f.tone === "warn")
+    .map((f) => ({ label: f.label, kind: f.kind }));
+
+  return {
+    base_score: r.base_score !== null ? Number(r.base_score) : null,
+    effective_score:
+      r.effective_score !== null ? Number(r.effective_score) : null,
+    below_market_pct:
+      r.below_market_pct !== null ? Number(r.below_market_pct) : null,
+    distress_level: r.distress_level ?? 0,
+    beach_proximity: r.beach_proximity ?? null,
+    tourist_license: r.tourist_license === true,
+    days_on_market: r.days_on_market !== null ? Number(r.days_on_market) : null,
+    price_drop_pct: r.price_drop_pct !== null ? Number(r.price_drop_pct) : null,
+    risk_flags,
   };
 }
