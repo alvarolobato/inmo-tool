@@ -136,19 +136,24 @@ from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
     RawListing,
+    SoftBlockError,
     Throttle,
 )
 from etl.connectors.cimenta2_mapping import (
     asset_sitemap_url,
     aura_request_form,
     canonical_property_fields,
+    has_soft_block_signature,
+    http_status_is_soft_block,
     iter_locs,
     parse_asset_url,
+    post_response_is_soft_block,
     project_internal_fields,
     project_public_fields,
     record_from_response,
     response_is_expired,
     scrape_framework_ids,
+    shell_is_soft_block,
 )
 from etl.connectors.geography import (
     UnresolvableGeographyError,
@@ -190,10 +195,42 @@ _USER_AGENT = (
 _NATIONAL_SCOPE_KEY = "national"
 
 
+class Cimenta2SoftBlockError(SoftBlockError):
+    """The site rate-throttled / anti-bot-blocked a shell GET or getRecord POST
+    (issue #441, D-047).
+
+    Over a full ~3.3h sweep of 3,917 detail POSTs the guest endpoint
+    intermittently serves an HTTP 429/403, or an HTTP-200 challenge/interstitial
+    instead of the aura JSON. Before this class every such response became a
+    fatal `ConnectorError` that tripped the circuit at the tight 30% threshold
+    and — because it happened during `fetch_detail`, not `discover()` — surfaced
+    with `failure_classification=structure_change`, making a transient throttle
+    look like the page had been redesigned (the flapping in issue #441).
+
+    As a `SoftBlockError` it instead trips only the looser soft-block threshold
+    (`circuit_breaker_soft_block_error_rate`) and any resulting stop is recorded
+    as a CLEAN "waited for budget" outcome (status stays 'ok'), never
+    'circuit_open'/'structure_change'. It still counts in `error_count` (#291).
+    """
+
+
 class Cimenta2Connector(Connector):
     """Cajamar's REO portal. Sitemap discovery; config-gated detail fetch (D-035)."""
 
     name = "cimenta2"
+
+    # Issue #441 (D-047): the detail-fetch throttle is TRANSIENT — a single
+    # ~3.3h sweep of 3,917 guest POSTs intermittently hits the site's rate-limit
+    # / anti-bot wall in a burst that clears, then full-success on the next run.
+    # A cluster of soft-blocked fetches mid-sweep must NOT trip the breaker at
+    # the tight 30% fatal threshold and abandon this (the largest) connector's
+    # remaining assets for the whole run. Tolerate soft-blocks up to 75% of the
+    # rolling window before stopping (matching Fotocasa's transient-block
+    # tuning); a site that has gone FULLY into block mode still stops the run,
+    # and either way the stop is a clean "waited for budget" outcome, never a
+    # failure. Genuine fatal errors (network, a real structure change) keep the
+    # tight 30% `circuit_breaker_error_rate`.
+    circuit_breaker_soft_block_error_rate = 0.75
 
     # discover() reads the complete `ga-activo` child sitemap in a single
     # request -- no pagination to defeat, no result cap, no relevance sort.
@@ -266,7 +303,7 @@ class Cimenta2Connector(Connector):
             )
             response.raise_for_status()
         except requests.RequestException as exc:
-            raise ConnectorError(f"cimenta2: request failed for {url}: {exc}") from exc
+            self._raise_for_request_exception(url, exc)
         return response.text
 
     def _post_form(self, url: str, form: dict[str, str], throttle: Throttle) -> str:
@@ -285,8 +322,33 @@ class Cimenta2Connector(Connector):
             )
             response.raise_for_status()
         except requests.RequestException as exc:
-            raise ConnectorError(f"cimenta2: request failed for {url}: {exc}") from exc
+            self._raise_for_request_exception(url, exc)
         return response.text
+
+    @staticmethod
+    def _raise_for_request_exception(url: str, exc: Exception) -> None:
+        """Map a `requests` failure onto the right connector exception.
+
+        Issue #441 (D-047): an HTTP 429/403 — or any error page carrying a known
+        anti-bot / rate-limit signature — is the site throttling guest traffic,
+        not a broken connector. It becomes a `Cimenta2SoftBlockError` (a clean
+        "waited for budget" backoff that trips only the looser soft-block
+        threshold), so a transient throttle burst mid-sweep no longer flaps the
+        circuit as a fatal `structure_change`. Everything else (timeouts, DNS,
+        connection resets, genuine 5xx) stays a fatal `ConnectorError`.
+        """
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        body = getattr(response, "text", "") or ""
+        if http_status_is_soft_block(status) or (
+            status is not None and has_soft_block_signature(body)
+        ):
+            raise Cimenta2SoftBlockError(
+                f"cimenta2: rate-limit / anti-bot response (HTTP {status}) for "
+                f"{url} — site throttling guest traffic, backing off rather than "
+                "treating this as a failure"
+            ) from exc
+        raise ConnectorError(f"cimenta2: request failed for {url}: {exc}") from exc
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         """Enumerate every published Cajamar asset from the public sitemap.
@@ -448,6 +510,24 @@ class Cimenta2Connector(Connector):
             form = aura_request_form(external_id, self._fwuid, self._marker)
             raw_text = self._post_form(aura_url, form, throttle)
 
+        # Issue #441 (D-047): a healthy guest getRecord ALWAYS returns parseable
+        # aura JSON. A non-JSON body (an HTML challenge/interstitial served with
+        # HTTP 200) or a body carrying a known anti-bot signature is the site's
+        # rate-limit wall, not a structure change — raise a soft-block so a
+        # transient throttle burst doesn't flap the circuit as fatal
+        # `structure_change`. Checked BEFORE record_from_response so its
+        # JSONDecodeError (which would classify as fatal) is never reached for
+        # this case. Valid JSON with an unexpected shape still falls through to
+        # the fatal ConnectorError below — that IS the genuine-structure-change
+        # signal.
+        if post_response_is_soft_block(raw_text):
+            raise Cimenta2SoftBlockError(
+                f"cimenta2: detail fetch for {external_id} returned a rate-limit "
+                "/ anti-bot page instead of the aura getRecord JSON — site "
+                "throttling guest traffic, backing off rather than treating this "
+                "as a structure change"
+            )
+
         try:
             return record_from_response(raw_text)
         except ValueError as exc:
@@ -463,6 +543,21 @@ class Cimenta2Connector(Connector):
         shell = self._fetch(_SHELL_URL, throttle)
         ids = scrape_framework_ids(shell)
         if ids is None:
+            # Issue #441 (D-047): a real shell on HTTP 200 always embeds the
+            # Aura framework script (`auraFW`). Its absence — or an explicit
+            # anti-bot signature — means the site served a rate-limit / anti-bot
+            # wall, which is a transient throttle (raise a soft-block so it
+            # doesn't flap the circuit as fatal `structure_change`), NOT that the
+            # shell was redesigned. Only when the framework script IS present but
+            # the specific ids couldn't be parsed is it a genuine structure
+            # change worth a fatal ConnectorError.
+            if shell_is_soft_block(shell):
+                raise Cimenta2SoftBlockError(
+                    "cimenta2: shell GET returned a rate-limit / anti-bot page "
+                    "instead of the Aura community shell — site throttling guest "
+                    "traffic, backing off rather than treating this as a "
+                    "structure change"
+                )
             raise ConnectorError(
                 "cimenta2: could not scrape Aura framework ids from the shell "
                 "HTML — the site structure may have changed or detail access "

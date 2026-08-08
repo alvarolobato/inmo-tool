@@ -16,23 +16,29 @@ patched config accessors and the fake endpoint.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
+import requests
 
-from etl.connectors.base import ConnectorError, ConnectorScope
+from etl.connectors.base import ConnectorError, ConnectorScope, SoftBlockError
 from etl.connectors.cimenta2 import (
     _ASSET_SITEMAP_DEFAULT_URL,
     _BASE_URL,
     _SITEMAP_INDEX_URL,
     Cimenta2Connector,
+    Cimenta2SoftBlockError,
 )
 from etl.connectors.cimenta2_mapping import (
     OWNER_CONTACT_KEYS,
     asset_sitemap_url,
+    has_soft_block_signature,
+    http_status_is_soft_block,
     parse_asset_url,
+    post_response_is_soft_block,
     record_id_from_url,
     reference_code_from_url,
+    shell_is_soft_block,
 )
 from etl.connectors.geography import UnresolvableGeographyError
 
@@ -780,3 +786,221 @@ class TestDetailFetchStaysOffWhenEndpointUnset:
         assert canonical.current_price is None
         assert canonical.lat is None
         assert canonical.raw_extra["detail_fetched"] is False
+
+
+def _http_error_response(status: int, text: str = ""):
+    """A mock whose raise_for_status() raises an HTTPError carrying `status`,
+    mirroring how `requests` surfaces a 4xx/5xx (see milanuncios tests)."""
+    resp = Mock()
+    resp.text = text
+    resp.status_code = status
+    err = requests.HTTPError(f"{status} Error")
+    err.response = Mock(status_code=status, text=text)
+    resp.raise_for_status = Mock(side_effect=err)
+    return resp
+
+
+class TestSoftBlockHelpers:
+    """Pure classifiers (issue #441): the rate-limit / anti-bot signature split
+    that keeps a transient throttle from being read as a structure change."""
+
+    @pytest.mark.parametrize("status", [403, 429])
+    def test_bot_block_statuses_are_soft(self, status):
+        assert http_status_is_soft_block(status) is True
+
+    @pytest.mark.parametrize("status", [200, 404, 410, 500, 503, None])
+    def test_other_statuses_are_not_soft_by_status_alone(self, status):
+        assert http_status_is_soft_block(status) is False
+
+    def test_challenge_body_carries_a_soft_block_signature(self):
+        assert has_soft_block_signature(_fixture("cimenta2_soft_block.html"))
+
+    def test_a_real_shell_carries_no_soft_block_signature(self):
+        assert not has_soft_block_signature(_fixture("cimenta2_sample_shell.html"))
+
+    def test_non_json_post_body_is_a_soft_block(self):
+        # An HTML challenge served with HTTP 200 where aura JSON is guaranteed.
+        assert post_response_is_soft_block(_fixture("cimenta2_soft_block.html"))
+
+    def test_valid_json_with_an_unexpected_shape_is_not_a_soft_block(self):
+        # A genuine structure change stays fatal — it is real JSON, just wrong.
+        assert not post_response_is_soft_block('{"actions":[{"state":"ERROR"}]}')
+
+    def test_a_healthy_getrecord_body_is_not_a_soft_block(self):
+        assert not post_response_is_soft_block(
+            _fixture("cimenta2_sample_getrecord.json")
+        )
+
+    def test_shell_without_the_aura_framework_is_a_soft_block(self):
+        assert shell_is_soft_block(_fixture("cimenta2_soft_block.html"))
+
+    def test_shell_with_the_aura_framework_is_not_a_soft_block(self):
+        # auraFW present but ids unparseable == genuine structure change (fatal).
+        assert not shell_is_soft_block(
+            "<html><head><script src='/auraFW/javascript/x/other.js'>"
+            "</script></head><body>renamed markup</body></html>"
+        )
+
+
+class TestDetailFetchSoftBlockClassification:
+    """Issue #441 (D-047): the intermittent breakage is the site rate-limiting
+    the long detail sweep, NOT a structure change. Those responses must raise
+    Cimenta2SoftBlockError (a SoftBlockError) so a transient burst trips only
+    the looser soft-block threshold and is recorded as a clean budget stop —
+    never a fatal `circuit_open`/`structure_change` flap.
+    """
+
+    def test_looser_soft_block_threshold_is_configured(self):
+        # A transient throttle burst mid-sweep must ride through rather than trip
+        # the tight fatal threshold and abandon the largest connector's assets.
+        c = Cimenta2Connector()
+        assert c.circuit_breaker_soft_block_error_rate == 0.75
+        assert c.circuit_breaker_soft_block_error_rate >= c.circuit_breaker_error_rate
+
+    def test_soft_block_error_is_a_soft_block_error_subclass(self):
+        # So the orchestrator's `except SoftBlockError` / isinstance checks treat
+        # it as a clean budget backoff, not a fatal ConnectorError.
+        assert issubclass(Cimenta2SoftBlockError, SoftBlockError)
+
+    def test_shell_get_429_is_a_soft_block_not_a_fatal_error(self):
+        connector = Cimenta2Connector()
+        _discovered(connector)
+        with (
+            patch("etl.config.cimenta2_detail_endpoint", return_value=_FAKE_ENDPOINT),
+            patch(
+                "etl.connectors.cimenta2.requests.get",
+                return_value=_http_error_response(429),
+            ),
+            pytest.raises(Cimenta2SoftBlockError),
+        ):
+            connector.fetch_detail("a0v3X00000dwiQQQAY", throttle=lambda: None)
+
+    def test_post_403_is_a_soft_block_not_a_fatal_error(self):
+        connector = Cimenta2Connector()
+        _discovered(connector)
+        with (
+            patch("etl.config.cimenta2_detail_endpoint", return_value=_FAKE_ENDPOINT),
+            patch("etl.connectors.cimenta2.requests.get", side_effect=_shell_get),
+            patch(
+                "etl.connectors.cimenta2.requests.post",
+                return_value=_http_error_response(403),
+            ),
+            pytest.raises(Cimenta2SoftBlockError),
+        ):
+            connector.fetch_detail("a0v3X00000dwiQQQAY", throttle=lambda: None)
+
+    def test_post_200_challenge_page_is_a_soft_block_not_structure_change(self):
+        # The critical flapping case: HTTP 200 whose body is an anti-bot
+        # interstitial instead of the aura getRecord JSON. Before the fix this
+        # hit json.loads -> fatal ConnectorError -> structure_change.
+        connector = Cimenta2Connector()
+        _discovered(connector)
+
+        def _challenge_post(url, **_kwargs):
+            return _mock_response(_fixture("cimenta2_soft_block.html"))
+
+        with (
+            patch("etl.config.cimenta2_detail_endpoint", return_value=_FAKE_ENDPOINT),
+            patch("etl.connectors.cimenta2.requests.get", side_effect=_shell_get),
+            patch("etl.connectors.cimenta2.requests.post", side_effect=_challenge_post),
+            pytest.raises(Cimenta2SoftBlockError),
+        ):
+            connector.fetch_detail("a0v3X00000dwiQQQAY", throttle=lambda: None)
+
+    def test_shell_200_challenge_page_is_a_soft_block_not_structure_change(self):
+        connector = Cimenta2Connector()
+        _discovered(connector)
+
+        def _challenge_shell(url, **_kwargs):
+            return _mock_response(_fixture("cimenta2_soft_block.html"))
+
+        with (
+            patch("etl.config.cimenta2_detail_endpoint", return_value=_FAKE_ENDPOINT),
+            patch("etl.connectors.cimenta2.requests.get", side_effect=_challenge_shell),
+            pytest.raises(Cimenta2SoftBlockError),
+        ):
+            connector.fetch_detail("a0v3X00000dwiQQQAY", throttle=lambda: None)
+
+    def test_genuine_structure_change_stays_a_fatal_connector_error(self):
+        # auraFW present but ids unparseable: a real redesign, which MUST stay a
+        # fatal ConnectorError (and NOT a soft-block) so it is visible, not
+        # silently ridden through forever.
+        connector = Cimenta2Connector()
+        _discovered(connector)
+
+        def _renamed_shell(url, **_kwargs):
+            return _mock_response(
+                "<html><head><script src='/auraFW/javascript/abc/other.js'>"
+                "</script></head><body>redesigned</body></html>"
+            )
+
+        with (
+            patch("etl.config.cimenta2_detail_endpoint", return_value=_FAKE_ENDPOINT),
+            patch("etl.connectors.cimenta2.requests.get", side_effect=_renamed_shell),
+            pytest.raises(ConnectorError) as excinfo,
+        ):
+            connector.fetch_detail("a0v3X00000dwiQQQAY", throttle=lambda: None)
+        assert not isinstance(excinfo.value, SoftBlockError)
+
+    def test_post_valid_json_wrong_shape_stays_fatal_not_soft_block(self):
+        # A real aura response whose shape changed (ERROR state) is a genuine
+        # break, not a throttle — it must NOT be reclassified as a soft-block.
+        connector = Cimenta2Connector()
+        _discovered(connector)
+
+        def _error_post(url, **_kwargs):
+            return _mock_response('{"actions":[{"id":"1;a","state":"ERROR"}]}')
+
+        with (
+            patch("etl.config.cimenta2_detail_endpoint", return_value=_FAKE_ENDPOINT),
+            patch("etl.connectors.cimenta2.requests.get", side_effect=_shell_get),
+            patch("etl.connectors.cimenta2.requests.post", side_effect=_error_post),
+            pytest.raises(ConnectorError) as excinfo,
+        ):
+            connector.fetch_detail("a0v3X00000dwiQQQAY", throttle=lambda: None)
+        assert not isinstance(excinfo.value, SoftBlockError)
+
+
+class TestFrameworkIdRefreshOnExpiry:
+    """The stale-fwuid self-heal path (issue #441). Live-verified that this
+    endpoint's getRecord ignores fwuid today, but the refresh-and-retry is kept
+    defensive: an `expiredFrameworkUid` event must re-scrape the shell and retry
+    once, succeeding — never raise a fatal error on the first stale response.
+    """
+
+    def test_expired_framework_uid_triggers_rescrape_and_retry(self):
+        connector = Cimenta2Connector()
+        _discovered(connector)
+
+        shell_calls = {"n": 0}
+
+        def _get(url, **_kwargs):
+            shell_calls["n"] += 1
+            return _mock_response(_fixture("cimenta2_sample_shell.html"))
+
+        posts = {"n": 0}
+
+        def _post(url, **_kwargs):
+            posts["n"] += 1
+            if posts["n"] == 1:
+                # First POST: the stale-fwuid signature.
+                return _mock_response(
+                    '{"event":{"descriptor":"markup://aura:expiredFrameworkUid"}}'
+                )
+            # Retry after the re-scrape: the healthy record.
+            return _mock_response(_fixture("cimenta2_sample_getrecord.json"))
+
+        with (
+            patch("etl.config.cimenta2_detail_endpoint", return_value=_FAKE_ENDPOINT),
+            patch("etl.config.cimenta2_include_internal", return_value=False),
+            patch("etl.connectors.cimenta2.requests.get", side_effect=_get),
+            patch("etl.connectors.cimenta2.requests.post", side_effect=_post),
+        ):
+            raw = connector.fetch_detail("a0v3X00000dwiQQQAY", throttle=lambda: None)
+            canonical = connector.normalize(raw)
+
+        # Re-scraped the shell (2 GETs) and retried the POST (2 POSTs), then
+        # produced a real record rather than raising.
+        assert shell_calls["n"] == 2
+        assert posts["n"] == 2
+        assert canonical.reference_code == "TESTREF-4242"

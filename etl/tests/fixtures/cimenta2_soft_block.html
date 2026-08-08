@@ -1,0 +1,28 @@
+<!--
+  SYNTHETIC anti-bot / rate-limit interstitial for tests only (issue #441).
+  Modelled on a Cloudflare "Just a moment" challenge page: the shape the site
+  serves guest traffic once it starts rate-throttling a long detail sweep.
+  It carries NONE of the real Aura community-shell markers (no `auraFW` script,
+  no communityApp marker) — that absence, plus the challenge signature, is what
+  the connector reads as a soft-block rather than a page-structure change.
+  No real endpoint URL, no PII, no site secrets (D-035).
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>Just a moment...</title>
+  <meta name="robots" content="noindex,nofollow">
+</head>
+<body>
+  <div class="main-wrapper">
+    <h1>Checking your browser before accessing the site.</h1>
+    <p>Attention Required! This process is automatic. Your browser will
+       redirect to your requested content shortly.</p>
+    <p>Please allow up to 5 seconds&hellip;</p>
+    <div id="cf-please-wait">
+      <div class="cf-error-details">Ray ID: 0000000000000000</div>
+      <div class="cf-mitigated">/cdn-cgi/challenge-platform/h/g/orchestrate</div>
+    </div>
+  </div>
+</body>
+</html>
