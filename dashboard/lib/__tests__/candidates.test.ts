@@ -581,6 +581,27 @@ describe("listCandidates", () => {
     expect(sql).toContain("AS tourist_license");
   });
 
+  it("emits the #452 timing boosts (DOM + price-drop, joint-capped) in effective_score", async () => {
+    await listCandidates(7);
+    const [sql] = mainCall();
+    // A dedicated `timing` CTE computes days_on_market + net price_drop_pct,
+    // LEFT JOINed as `tim` and freezing DOM at the terminal-status transition.
+    expect(sql).toContain("timing AS (");
+    expect(sql).toContain("LEFT JOIN timing tim ON tim.property_id = base.property_id");
+    expect(sql).toContain("ARRAY['sold','withdrawn','expired']::text[]");
+    // DOM boost: linear ramp to 180 days × 0.04, degrades to 0 when NULL.
+    expect(sql).toContain("GREATEST(tim.days_on_market, 0) / 180.0");
+    expect(sql).toContain("* 0.04");
+    // Price-drop boost: linear ramp to a 0.2 net drop × 0.07.
+    expect(sql).toContain("GREATEST(tim.price_drop_pct, 0) / 0.2");
+    expect(sql).toContain("* 0.07");
+    // Joint cap 0.11 over the sum of the two.
+    expect(sql).toContain(", 0.11)");
+    // The two signals are also projected for the card's boost reason.
+    expect(sql).toContain("ranked.days_on_market");
+    expect(sql).toContain("ranked.price_drop_pct");
+  });
+
   it("rejects a malformed cursor rather than silently resetting to page 1", async () => {
     await expect(
       listCandidates(7, { cursor: "not-valid-base64-json" }),
@@ -1468,6 +1489,31 @@ describe("describeRankingBoost (#309)", () => {
     const reason = describeRankingBoost(0.2, 1, "sea_view", true)!;
     expect(reason.split(";")).toHaveLength(4);
     expect(reason).toContain("licencia turística concedida");
+  });
+
+  it("names a long time on market as a boost reason (#452)", () => {
+    const reason = describeRankingBoost(null, 0, null, false, 120, null)!;
+    expect(reason).toContain("120 días en el mercado");
+    // A fresh listing (below the notable threshold) earns no clause.
+    expect(describeRankingBoost(null, 0, null, false, 10, null)).toBeNull();
+    // Default args keep every existing 4-arg caller unchanged.
+    expect(describeRankingBoost(null, 0, null, false)).toBeNull();
+  });
+
+  it("names a cumulative price drop as a boost reason (#452)", () => {
+    const reason = describeRankingBoost(null, 0, null, false, null, 0.12)!;
+    expect(reason).toContain("bajado ~12%");
+    // A negligible drop earns no clause; a rise (negative) never does.
+    expect(describeRankingBoost(null, 0, null, false, null, 0.02)).toBeNull();
+    expect(describeRankingBoost(null, 0, null, false, null, -0.1)).toBeNull();
+  });
+
+  it("joins the timing reasons after the opportunity ones (#452)", () => {
+    const reason = describeRankingBoost(0.2, 1, "sea_view", true, 120, 0.12)!;
+    // below-market ; distress ; beach ; tourist ; days ; drop = 6 clauses.
+    expect(reason.split(";")).toHaveLength(6);
+    expect(reason).toContain("días en el mercado");
+    expect(reason).toContain("bajado ~12%");
   });
 });
 

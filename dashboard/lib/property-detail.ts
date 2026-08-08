@@ -142,6 +142,16 @@ export interface PropertyDetail {
   price_changed?: boolean;
   price_delta_pct?: number | null;
   price_direction?: "drop" | "up" | null;
+  /**
+   * #452 — the profile-scoped investor score inputs (base score, blended
+   * `effective_score`, per-signal values + warn-tone risk flags), merged in by
+   * the detail API route from `getPropertyInvestorScore`. The 0–100
+   * re-expression, band and breakdown are computed on the client from these via
+   * `lib/display-score.ts`. Undefined when the route couldn't compute it
+   * (best-effort — never fails the page); the same "absent, not a placeholder"
+   * rule the rest of the detail follows.
+   */
+  investor_score?: import("@/lib/candidates").PropertyInvestorScore;
 }
 
 interface RawPropertyRow {

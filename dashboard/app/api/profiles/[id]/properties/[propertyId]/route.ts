@@ -12,7 +12,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getPropertyDetail, isPropertyMatchedForProfile } from "@/lib/property-detail";
-import { getPropertyMarketSignals } from "@/lib/candidates";
+import { getPropertyMarketSignals, getPropertyInvestorScore } from "@/lib/candidates";
 import { getProfileById } from "@/lib/db/profiles";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
@@ -75,11 +75,19 @@ export async function GET(
     // the profile-agnostic detail. Best-effort — a failure here (or a property
     // that isn't a ranked candidate) leaves the signals off the response and
     // the header simply renders no adornments, never an error.
-    const signals = await getPropertyMarketSignals(profileId, propertyId).catch(
-      () => null,
-    );
+    // #452: the investor score is resolved from the same ranked CTE, in
+    // parallel and best-effort — a failure leaves it off the response and the
+    // detail page simply renders no "Puntuación inversora" section.
+    const [signals, investorScore] = await Promise.all([
+      getPropertyMarketSignals(profileId, propertyId).catch(() => null),
+      getPropertyInvestorScore(profileId, propertyId).catch(() => null),
+    ]);
 
-    return NextResponse.json(signals ? { ...detail, ...signals } : detail);
+    return NextResponse.json({
+      ...detail,
+      ...(signals ?? {}),
+      ...(investorScore ? { investor_score: investorScore } : {}),
+    });
   } catch (err) {
     console.error(`[${requestId}] Error al cargar el detalle de la propiedad:`, err);
     return NextResponse.json(
