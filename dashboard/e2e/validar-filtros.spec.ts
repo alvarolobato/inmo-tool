@@ -138,8 +138,10 @@ test("navigate from ⋮ menu; pinned + derived rows; save persists; captura uses
   await expect(aliRow).toBeVisible();
   await expect(aliRow.getByTestId("filter-source-badge")).toHaveText("derivada del perfil");
 
-  // 2c) The Phase-2 "abrir sin señal" transient note is present.
-  await expect(page.getByTestId("validar-filtros-open-note")).toBeVisible();
+  // 2c) The transient Phase-2 "abrir sin señal" note is gone (Phase 3); a
+  //     permanent validation-mode hint replaces it.
+  await expect(page.getByTestId("validar-filtros-open-note")).toHaveCount(0);
+  await expect(page.getByTestId("validar-filtros-open-hint")).toBeVisible();
 
   // 3) Pin a new URL on the aliseda row → persists + re-renders.
   await aliRow.getByTestId("filter-url-input").fill(NEW_ALISEDA);

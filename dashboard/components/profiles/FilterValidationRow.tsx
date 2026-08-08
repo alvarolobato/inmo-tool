@@ -2,11 +2,12 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { withValidateSignal } from "@/lib/extension-validate";
 import type { LoosenedConstraint } from "@/lib/search-url";
 import type { ProfileConnectorFilterSource } from "@/lib/db/profile-connector-filter";
 
 /**
- * One connector row on the "Validar filtros" page (issue #478 P2).
+ * One connector row on the "Validar filtros" page (issue #478 P2/P3).
  *
  * Shows, for a (profile × connector × section): a source badge (pinned vs
  * derived), the copyable search URL, the decoded filter chips + any mismatch
@@ -14,12 +15,11 @@ import type { ProfileConnectorFilterSource } from "@/lib/db/profile-connector-fi
  * owner controls — an editable URL field with Guardar (PUT), Quitar (DELETE,
  * only when pinned) and Abrir.
  *
- * Phase 2 note: "Abrir" opens the URL WITHOUT any extension signal
- * (`window.open(url)` clean). Without `#inmo-capture` the extension shows only
- * its manual banner and never auto-starts the batch (detect.js verdict
- * `banner`). Suppressing the banner and detail auto-capture (the true
- * "validation mode") arrives in Phase 3; the page carries a transient note
- * saying so.
+ * Phase 3: "Abrir" opens the URL tagged with the extension's VALIDATION signal
+ * (`withValidateSignal`), so the extension enters validation mode on that tab —
+ * no batch autostart, no listing banner, no detail auto-capture — and the popup
+ * offers "Usar esta URL como filtro" to pin the (tuned) URL back. The owner
+ * tunes the search on the portal and hands the URL back with one click.
  */
 export function FilterValidationRow({
   profileId,
@@ -101,10 +101,16 @@ export function FilterValidationRow({
   }
 
   function onOpen() {
-    // Phase 2: open WITHOUT any signal — a clean window.open. No #inmo-capture,
-    // so no batch autostart (see the file header + the page's transient note).
+    // Phase 3: open in VALIDATION MODE — tag the URL with `#inmo-validate=<pid>:
+    // <connector>` so the extension suppresses all capture on that tab and the
+    // popup can pin the tuned URL back. withValidateSignal returns the URL
+    // untouched if it can't be parsed, so this never breaks the open.
     if (url && typeof window !== "undefined") {
-      window.open(url, "_blank", "noopener,noreferrer");
+      window.open(
+        withValidateSignal(url, profileId, connector),
+        "_blank",
+        "noopener,noreferrer",
+      );
     }
   }
 

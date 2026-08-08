@@ -24,6 +24,7 @@ const states = {
   results: $('#state-results'),
   batch: $('#state-batch'),
   guide: $('#state-guide'),
+  validation: $('#state-validation'),
 };
 
 let extractedData = null;
@@ -89,6 +90,22 @@ async function init() {
   if (!tab.url.startsWith('http://') && !tab.url.startsWith('https://')) {
     showState('unsupported');
     return;
+  }
+
+  // Validation mode (issue #478 P3): if this tab was opened from "Validar
+  // filtros", show the pin panel instead of the capture flows — capture is
+  // suppressed while validating, so there's nothing to capture here.
+  try {
+    const validation = await chrome.runtime.sendMessage({
+      type: 'GET_VALIDATION_STATE',
+      tabId: tab.id,
+    });
+    if (validation && validation.active) {
+      enterValidationMode(tab, validation);
+      return;
+    }
+  } catch {
+    /* no worker / no state — fall through to normal detection */
   }
 
   // Ask the content script to classify the page and (for a listing page)
@@ -207,6 +224,85 @@ async function enterGuideMode(tab, portal) {
       window.close();
     };
   }
+}
+
+// ─── Validation mode (issue #478 P3) ────────────────────────────
+
+/**
+ * Show the validation panel for a tab opened from "Validar filtros". Displays
+ * which (connector × profile) is being validated and offers to pin the tab's
+ * CURRENT URL as that connector's filter (the owner may have tuned it on the
+ * portal) or to exit validation mode. The admin key lives only in the worker,
+ * so pinning goes through SAVE_VALIDATION_URL (never a PUT from here).
+ */
+function enterValidationMode(tab, state) {
+  showState('validation');
+  const cap = String(state.connector || '')
+    .replace(/^./, (c) => c.toUpperCase());
+  $('#validation-title').textContent = 'Modo validación';
+  $('#validation-sub').textContent =
+    `Validando ${cap || 'conector'} para el perfil #${state.profileId}.`;
+  const status = $('#validation-status');
+  status.classList.add('hidden');
+  status.textContent = '';
+
+  const saveBtn = $('#validation-save-btn');
+  saveBtn.disabled = false;
+  saveBtn.textContent = 'Usar esta URL como filtro';
+  saveBtn.onclick = () => onSaveValidationUrl(tab);
+
+  $('#validation-exit-btn').onclick = () => onExitValidation(tab);
+}
+
+/** Pin the active tab's current URL as the connector filter via the worker. */
+async function onSaveValidationUrl(tab) {
+  const btn = $('#validation-save-btn');
+  const status = $('#validation-status');
+  btn.disabled = true;
+  btn.textContent = 'Guardando…';
+  status.classList.add('hidden');
+
+  // Re-read the tab's CURRENT url — the owner may have navigated/tuned since the
+  // popup opened. The worker strips the signal + validates + attaches the key.
+  let currentUrl = tab.url;
+  try {
+    const fresh = await chrome.tabs.get(tab.id);
+    if (fresh && fresh.url) currentUrl = fresh.url;
+  } catch {
+    /* fall back to the url we already have */
+  }
+
+  let res;
+  try {
+    res = await chrome.runtime.sendMessage({
+      type: 'SAVE_VALIDATION_URL',
+      tabId: tab.id,
+      url: currentUrl,
+    });
+  } catch (err) {
+    res = { success: false, error: { message: err.message } };
+  }
+
+  if (res && res.success) {
+    status.textContent = 'Filtro guardado ✓';
+    btn.textContent = 'Guardar de nuevo';
+  } else {
+    status.textContent =
+      (res && res.error && res.error.message) || 'No se pudo guardar el filtro';
+    btn.textContent = 'Usar esta URL como filtro';
+  }
+  status.classList.remove('hidden');
+  btn.disabled = false;
+}
+
+/** Exit validation mode for this tab, then re-run detection for it. */
+async function onExitValidation(tab) {
+  try {
+    await chrome.runtime.sendMessage({ type: 'END_VALIDATION', tabId: tab.id });
+  } catch {
+    /* ignore — re-init handles the rest */
+  }
+  init();
 }
 
 async function detectPage(tab) {

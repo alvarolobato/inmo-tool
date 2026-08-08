@@ -22,10 +22,11 @@ import type { ProfileConnectorFilterSource } from "@/lib/db/profile-connector-fi
  * open the URL. altamira (a capture portal with no builder) always gets a row
  * so its first URL can be pasted in even though nothing is derived.
  *
- * Phase 2 interim: "Abrir" opens the URL WITHOUT any extension signal — no
- * batch autostart. Banner + detail-capture suppression (true validation mode)
- * lands in Phase 3; a transient note says so. The ETL-connector section is a
- * degraded Phase-4 placeholder.
+ * Phase 3: "Abrir" opens the URL in the extension's validation mode
+ * (`withValidateSignal`) — no batch autostart, no listing banner, no detail
+ * auto-capture — and the extension popup offers "Usar esta URL como filtro" to
+ * pin the tuned URL back. The ETL-connector section is a degraded Phase-4
+ * placeholder.
  *
  * `force-dynamic`: every load reflects the live override table + resolver.
  * Admin-gated by middleware.ts like every page.
@@ -120,9 +121,11 @@ export default async function ValidarFiltrosPage({
         ahora.
       </p>
 
-      {/* Phase 2 transient note: Abrir opens without the extension signal. */}
+      {/* Phase 3: "Abrir" enters the extension's validation mode — a short
+          permanent hint on how to hand a tuned URL back. (The transient P2
+          "not yet implemented" note is gone.) */}
       <p
-        data-testid="validar-filtros-open-note"
+        data-testid="validar-filtros-open-hint"
         style={{
           marginTop: 12,
           fontSize: 12,
@@ -134,10 +137,10 @@ export default async function ValidarFiltrosPage({
           lineHeight: 1.5,
         }}
       >
-        Nota (temporal): «Abrir» abre la página del portal <strong>sin</strong> ninguna señal para la
-        extensión, así que no se arranca ninguna captura por lotes. La extensión todavía puede mostrar
-        su banner manual o auto-capturar páginas de detalle — el modo de validación que suprime todo
-        eso llega en la Fase 3.
+        «Abrir» abre la página del portal en <strong>modo validación</strong>: la extensión no arranca
+        ninguna captura (ni banner, ni auto-captura de detalle), aunque navegues dentro del portal.
+        Afina la búsqueda (por ejemplo, dibuja la zona) y pulsa «Usar esta URL como filtro» en el popup
+        de la extensión para fijarla como fuente de este conector.
       </p>
 
       <section style={{ marginTop: 20 }}>
