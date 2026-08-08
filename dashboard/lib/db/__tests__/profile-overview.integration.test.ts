@@ -71,6 +71,12 @@ interface SeedPropertyOpts {
    * applied when a listing is actually seeded (`price !== null`).
    */
   firstSeenAt?: string;
+  /**
+   * #447: the listing's `source` (portal). Defaults to 'test'. Set to a source
+   * registered as a disabled connector to prove new_count excludes it, exactly
+   * as the feed's novelty CTE does (activeSourceClause / D-055).
+   */
+  source?: string;
 }
 
 async function seedProperty(pool: Pool, opts: SeedPropertyOpts = {}): Promise<number> {
@@ -86,8 +92,14 @@ async function seedProperty(pool: Pool, opts: SeedPropertyOpts = {}): Promise<nu
   if (opts.price !== null) {
     await pool.query(
       `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at)
-       VALUES ($1, 'test', $2, 'active', $3, COALESCE($4::timestamptz, NOW()))`,
-      [propertyId, `ext-${propertyId}-${Math.random()}`, opts.price ?? 200000, opts.firstSeenAt ?? null],
+       VALUES ($1, $5, $2, 'active', $3, COALESCE($4::timestamptz, NOW()))`,
+      [
+        propertyId,
+        `ext-${propertyId}-${Math.random()}`,
+        opts.price ?? 200000,
+        opts.firstSeenAt ?? null,
+        opts.source ?? "test",
+      ],
     );
   }
   return propertyId;
@@ -108,11 +120,32 @@ describe.runIf(dbAvailable)("listProfileOverviews — real Postgres (issue #192)
 
   let createdProfileIds: number[] = [];
   let createdPropertyIds: number[] = [];
+  let createdConnectorNames: string[] = [];
 
   beforeEach(() => {
     createdProfileIds = [];
     createdPropertyIds = [];
+    createdConnectorNames = [];
   });
+
+  // #447: register `source` as a connector and set its on/off state, so the
+  // overview query can resolve the listing's source to a disabled portal
+  // (mirrors the candidates.ts D-055 test helper). Tracked for afterEach cleanup.
+  async function registerConnector(pool: Pool, name: string, on: boolean) {
+    createdConnectorNames.push(name);
+    await pool.query(
+      `INSERT INTO connector_registry (connector_name, registered, supports_discovery, supported_filters)
+       VALUES ($1, true, true, '[]'::jsonb)
+       ON CONFLICT (connector_name) DO UPDATE SET supports_discovery = EXCLUDED.supports_discovery`,
+      [name],
+    );
+    await pool.query(
+      `INSERT INTO connector_config (connector_name, enabled, capture_enabled, filters)
+       VALUES ($1, $2, true, '{}'::jsonb)
+       ON CONFLICT (connector_name) DO UPDATE SET enabled = $2`,
+      [name, on],
+    );
+  }
 
   afterEach(async () => {
     await withRealDb(async (pool) => {
@@ -139,6 +172,14 @@ describe.runIf(dbAvailable)("listProfileOverviews — real Postgres (issue #192)
       }
       if (createdPropertyIds.length > 0) {
         await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [createdPropertyIds]);
+      }
+      if (createdConnectorNames.length > 0) {
+        await pool.query("DELETE FROM connector_config WHERE connector_name = ANY($1::text[])", [
+          createdConnectorNames,
+        ]);
+        await pool.query("DELETE FROM connector_registry WHERE connector_name = ANY($1::text[])", [
+          createdConnectorNames,
+        ]);
       }
     });
   });
@@ -429,6 +470,66 @@ describe.runIf(dbAvailable)("listProfileOverviews — real Postgres (issue #192)
     expect(entry?.ok).toBe(true);
     if (entry?.ok) {
       expect(entry.metrics.matched_count).toBe(2);
+      expect(entry.metrics.new_count).toBe(1);
+    }
+  });
+
+  it("new_count (#447): a recent listing from a DISABLED source does not count as new — matches the feed's activeSourceClause (D-055)", async () => {
+    const profile = await createProfile("Fuente desactivada", scope(), {});
+    createdProfileIds = [profile.id];
+    const disabledSource = `ov447-off-${Date.now()}`;
+    let active!: number, disabled!: number;
+    await withRealDb(async (pool) => {
+      await registerConnector(pool, disabledSource, false);
+      // Both first-seen just now (well after the never-visited anchor of
+      // created_at - 1 day), so both WOULD be new on timing alone. Only the
+      // active-source one is shown as NUEVO in the feed, so only it counts.
+      active = await seedProperty(pool, { price: 200000, firstSeenAt: new Date().toISOString() });
+      disabled = await seedProperty(pool, {
+        price: 200000,
+        firstSeenAt: new Date().toISOString(),
+        source: disabledSource,
+      });
+      createdPropertyIds.push(active, disabled);
+      await matchProperty(pool, profile.id, active);
+      await matchProperty(pool, profile.id, disabled);
+    });
+
+    const overviews = await listProfileOverviews();
+    const entry = overviews.find((e) => e.ok && e.profile.id === profile.id);
+    expect(entry?.ok).toBe(true);
+    if (entry?.ok) {
+      expect(entry.metrics.matched_count).toBe(2);
+      // Only the active-source property is NUEVO in the feed → count is 1, not 2.
+      expect(entry.metrics.new_count).toBe(1);
+    }
+  });
+
+  it("new_count (#447): STRICT '>' against previous_viewed_at — a listing first-seen exactly at the anchor is NOT new (matches the feed)", async () => {
+    const profile = await createProfile("Frontera del ancla", scope(), {});
+    createdProfileIds = [profile.id];
+    const anchor = new Date("2026-01-01T00:00:00.000Z");
+    const afterAnchor = new Date(anchor.getTime() + 60_000); // 1 min after
+    let atAnchor!: number, after!: number;
+    await withRealDb(async (pool) => {
+      // Pin the visit anchor: the feed and the count both read previous_viewed_at.
+      await pool.query("UPDATE search_profile SET previous_viewed_at = $2 WHERE id = $1", [
+        profile.id,
+        anchor.toISOString(),
+      ]);
+      atAnchor = await seedProperty(pool, { price: 200000, firstSeenAt: anchor.toISOString() });
+      after = await seedProperty(pool, { price: 200000, firstSeenAt: afterAnchor.toISOString() });
+      createdPropertyIds.push(atAnchor, after);
+      await matchProperty(pool, profile.id, atAnchor);
+      await matchProperty(pool, profile.id, after);
+    });
+
+    const overviews = await listProfileOverviews();
+    const entry = overviews.find((e) => e.ok && e.profile.id === profile.id);
+    expect(entry?.ok).toBe(true);
+    if (entry?.ok) {
+      expect(entry.metrics.matched_count).toBe(2);
+      // '>' is strict: first_seen == anchor is NOT new; only the later one is.
       expect(entry.metrics.new_count).toBe(1);
     }
   });
