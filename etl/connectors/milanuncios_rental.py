@@ -147,7 +147,9 @@ import requests
 from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
+    SearchParam,
     SearchPreview,
+    SearchUrlGrammar,
     Throttle,
 )
 from etl.connectors.geography import UnresolvableGeographyError
@@ -161,6 +163,22 @@ from etl.connectors.milanuncios import (
 )
 
 logger = logging.getLogger("etl.connectors.milanuncios_rental")
+
+# Issue #492: the rental connector's OWN invertible search-URL grammar — the
+# same repeated-slug shape as the sale connector's (see milanuncios._SEARCH_URL_GRAMMAR
+# for the named-backreference reasoning), with the `alquiler-de-pisos-en-`
+# segment instead of `venta-de-pisos-en-`. Published separately (NOT inherited
+# from MilanunciosConnector) so the `milanuncios_rental` registry row describes
+# the rental URL, and so the sale pattern rejects a rental URL and vice versa
+# (the two operations never cross — issue #492 acceptance).
+_RENTAL_SEARCH_URL_GRAMMAR = SearchUrlGrammar(
+    build_template=f"{_BASE_URL}/alquiler-de-pisos-en-{{geography}}-{{geography}}/",
+    parse_pattern=(
+        r"^https?://(?:www\.)?milanuncios\.com/alquiler-de-pisos-en-"
+        r"(?<geography>[^/]+)-\k<geography>/?$"
+    ),
+    params={"geography": {"label": "Municipio", "source": "profile"}},
+)
 
 
 class MilanunciosRentalConnector(MilanunciosConnector):
@@ -240,11 +258,19 @@ class MilanunciosRentalConnector(MilanunciosConnector):
     # with the "advertise pinnable before discover() honours it" split.
     supports_search_override = False
 
+    # Issue #492: publish the rental grammar (NOT the inherited sale one) so the
+    # `milanuncios_rental` registry row inverts a rental URL. Stated explicitly
+    # rather than relying on inheritance — the same per-connector discipline as
+    # discovers_full_inventory / supports_search_override above.
+    search_url_grammar = _RENTAL_SEARCH_URL_GRAMMAR
+
     def _rental_search_url(self, geography: str) -> str:
         """The rental sale-category entry URL — the same "-en-<geo>-<geo>"
         convention as the sale connector, with the `alquiler-de-pisos`
-        segment. Shared by discover() and search_previews()."""
-        return f"{_BASE_URL}/alquiler-de-pisos-en-{geography}-{geography}/"
+        segment. Shared by discover() and search_previews(). Delegates to the
+        rental grammar (issue #492) so the derived URL and the published grammar
+        can never drift — the round-trip pytest contract pins parse(build(x))."""
+        return self.search_url_grammar.build({"geography": geography})
 
     def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
         """Reuses `_rental_search_url()` — the exact helper discover() uses."""
@@ -268,6 +294,32 @@ class MilanunciosRentalConnector(MilanunciosConnector):
                 url=self._rental_search_url(geography),
                 kind="search_page",
                 tunable=True,
+                # Issue #492: params built from the SAME resolved geography the
+                # URL is (anti-drift). `operation` is a constant — discover()
+                # only requests the `alquiler-de-pisos` (rental) category (see
+                # the parent connector's normalize(), which reads the ad's own
+                # category slug). Price/size/type filters are deliberately ABSENT
+                # (never reach the connector; unverified native params).
+                params=(
+                    SearchParam(
+                        key="geography",
+                        label="Municipio",
+                        value=geography,
+                        source="profile",
+                        in_url=True,
+                    ),
+                    SearchParam(
+                        key="operation",
+                        label="Operación",
+                        value="alquiler",
+                        source="constant",
+                        in_url=True,
+                        notes=(
+                            "Solo página 1 — Milanuncios bloquea la paginación "
+                            "en robots.txt, así que no viaja en la URL."
+                        ),
+                    ),
+                ),
             )
         ]
 

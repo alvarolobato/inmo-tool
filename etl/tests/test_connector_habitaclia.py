@@ -409,3 +409,64 @@ def test_type_token_and_city_from_url():
     url = "/comprar-piso-en_venta_en_sagrada_familia-barcelona-i4737003828090.htm"
     assert type_token_from_url(url) == "piso"
     assert city_from_url(url) == "Barcelona"
+
+
+# ── search URL grammar (issue #492) ───────────────────────────────────
+
+
+def test_search_url_delegates_to_the_grammar():
+    """_search_url() IS the grammar's build() — so the derived URL and the
+    published grammar can never drift apart (issue #492)."""
+    c = HabitacliaConnector()
+    assert c.search_url_grammar is not None
+    for geo in ("madrid", "dos_hermanas", "alcala_de_guadaira"):
+        assert c._search_url(geo) == c.search_url_grammar.build({"geography": geo})
+
+
+def test_grammar_round_trip_and_rejects_foreign_and_paginated_urls():
+    """parse(build(geo)) == {geography: geo}; a `?pag=2` query is rejected
+    (robots disallows pagination — EC-3), as is another portal's URL."""
+    from etl.tests.grammar_contract import assert_grammar_roundtrip
+
+    c = HabitacliaConnector()
+    cases = [
+        {"geography": "madrid"},
+        {"geography": "dos_hermanas"},
+        {"geography": "alcala_de_guadaira"},
+    ]
+    foreign = [
+        "https://www.pisos.com/venta/pisos-madrid/",
+        "https://www.milanuncios.com/venta-de-pisos-en-madrid-madrid/",
+        # A query string (the disallowed `*pag=` pagination) must NOT parse.
+        "https://www.habitaclia.com/viviendas-madrid.htm?pag=2",
+        # A trailing newline must be rejected on both engines (the `$`→`\Z`
+        # translation guarantees Python matches JS here — issue #492 hardening).
+        "https://www.habitaclia.com/viviendas-madrid.htm\n",
+    ]
+    assert_grammar_roundtrip(
+        c.search_url_grammar,
+        cases,
+        foreign,
+        build_real=lambda p: c._search_url(p["geography"]),
+    )
+
+
+def test_grammar_validates():
+    from etl.connectors.base import validate_grammar
+
+    validate_grammar(HabitacliaConnector())  # no raise
+
+
+def test_search_previews_expose_geography_and_operation_params():
+    """The preview publishes the geography (profile) and operation (constant)
+    params, both built from the SAME resolved geography the URL is."""
+    c = HabitacliaConnector()
+    previews = c.search_previews(ConnectorScope(geography="dos_hermanas"))
+    assert len(previews) == 1
+    params = {p.key: p for p in previews[0].params}
+    assert params["geography"].value == "dos_hermanas"
+    assert params["geography"].source == "profile"
+    assert params["geography"].in_url is True
+    assert params["operation"].source == "constant"
+    # No price/size/type params — they never reach the connector.
+    assert set(params) == {"geography", "operation"}

@@ -313,3 +313,74 @@ class TestDisabledByDefault:
                     (connector.name,),
                 )
             pg_conn.commit()
+
+
+# ── search URL grammar (issue #492) ───────────────────────────────────
+
+
+def test_rental_search_url_delegates_to_the_grammar():
+    """_rental_search_url() IS the rental grammar's build() (issue #492)."""
+    c = MilanunciosRentalConnector()
+    assert c.search_url_grammar is not None
+    for geo in ("madrid", "sevilla", "barcelona"):
+        assert c._rental_search_url(geo) == c.search_url_grammar.build(
+            {"geography": geo}
+        )
+
+
+def test_rental_grammar_is_distinct_from_the_sale_grammar():
+    """The rental connector publishes its OWN grammar (alquiler-…), not the
+    inherited sale one — the two operations never cross (issue #492)."""
+    rental = MilanunciosRentalConnector()
+    sale = MilanunciosConnector()
+    assert rental.search_url_grammar is not sale.search_url_grammar
+    assert "alquiler-de-pisos" in rental.search_url_grammar.build_template
+    # The rental grammar rejects a sale URL and the sale grammar rejects a
+    # rental URL — the two sources never cross.
+    assert (
+        rental.search_url_grammar.parse(
+            "https://www.milanuncios.com/venta-de-pisos-en-madrid-madrid/"
+        )
+        is None
+    )
+    assert (
+        sale.search_url_grammar.parse(
+            "https://www.milanuncios.com/alquiler-de-pisos-en-madrid-madrid/"
+        )
+        is None
+    )
+
+
+def test_rental_grammar_round_trip_and_rejects_unequal_halves():
+    from etl.tests.grammar_contract import assert_grammar_roundtrip
+
+    c = MilanunciosRentalConnector()
+    cases = [{"geography": "madrid"}, {"geography": "sevilla"}]
+    foreign = [
+        "https://www.habitaclia.com/viviendas-madrid.htm",
+        "https://www.milanuncios.com/venta-de-pisos-en-madrid-madrid/",
+        "https://www.milanuncios.com/alquiler-de-pisos-en-madrid-toledo/",
+    ]
+    assert_grammar_roundtrip(
+        c.search_url_grammar,
+        cases,
+        foreign,
+        build_real=lambda p: c._rental_search_url(p["geography"]),
+    )
+
+
+def test_rental_grammar_validates():
+    from etl.connectors.base import validate_grammar
+
+    validate_grammar(MilanunciosRentalConnector())  # no raise
+
+
+def test_rental_search_previews_expose_alquiler_operation():
+    c = MilanunciosRentalConnector()
+    previews = c.search_previews(ConnectorScope(geography="madrid"))
+    assert len(previews) == 1
+    params = {p.key: p for p in previews[0].params}
+    assert params["geography"].value == "madrid"
+    assert params["operation"].value == "alquiler"
+    assert params["operation"].source == "constant"
+    assert set(params) == {"geography", "operation"}

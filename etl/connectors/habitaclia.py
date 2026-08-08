@@ -76,7 +76,9 @@ from etl.connectors.base import (
     ConnectorScope,
     ListingUnavailableError,
     RawListing,
+    SearchParam,
     SearchPreview,
+    SearchUrlGrammar,
     SoftBlockError,
     Throttle,
 )
@@ -154,6 +156,26 @@ def _is_bot_interstitial(html: str) -> bool:
 _ROOMS_RE = re.compile(r"(\d+)\s*habitaci", re.IGNORECASE)
 _BATHS_RE = re.compile(r"(\d+)\s*ba[nñ]o", re.IGNORECASE)
 _SURFACE_RE = re.compile(r"Superficie\s*([\d.]+)", re.IGNORECASE)
+
+# Issue #492: the invertible search-URL grammar. habitaclia's search URL is a
+# single geography slug in a fixed `/viviendas-<slug>.htm` path — even simpler
+# than pisos.com's (no query string at all). `_search_url()` delegates to
+# `build()` below so the grammar IS the URL builder and can never drift; the
+# per-connector round-trip pytest contract pins the two together. Stored in
+# ECMAScript-canonical form so the dashboard's browser-side `RegExp` consumes
+# `parse_pattern` verbatim; the Python side translates it (see base
+# `_ecma_pattern_to_python`).
+#
+# The slug class is `[^/?#]+` — it excludes `/`, `?` and `#`, and the trailing
+# `\.htm$` anchor rejects ANY query string: habitaclia's robots.txt disallows
+# the `*pag=` pagination param this connector cannot use anyway (page-1-only),
+# so a pasted `…/viviendas-madrid.htm?pag=2` must fall to "unparseable / used
+# verbatim" rather than invite the owner to pin a pagination the ETL ignores.
+_SEARCH_URL_GRAMMAR = SearchUrlGrammar(
+    build_template=f"{_BASE_URL}/viviendas-{{geography}}.htm",
+    parse_pattern=r"^https?://(?:www\.)?habitaclia\.com/viviendas-(?<geography>[^/?#]+)\.htm$",
+    params={"geography": {"label": "Municipio", "source": "profile"}},
+)
 
 
 def _resolve_geography(scope: ConnectorScope) -> str | None:
@@ -305,8 +327,15 @@ class HabitacliaConnector(Connector):
     override_host_suffix = "habitaclia.com"
     supports_search_override = True
 
+    # Issue #492: published to connector_registry.search_url_grammar so the
+    # dashboard can invert an owner-edited URL back to params in the browser.
+    search_url_grammar = _SEARCH_URL_GRAMMAR
+
     def _search_url(self, geography: str) -> str:
-        return f"{_BASE_URL}/viviendas-{geography}.htm"
+        # Delegates to the grammar (issue #492) so the derived URL and the
+        # published grammar can never drift apart — the grammar IS the URL
+        # builder, and the round-trip pytest contract pins parse(build(x)) == x.
+        return self.search_url_grammar.build({"geography": geography})
 
     def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
         """Reuses `_search_url()` — the same helper discover()'s entry URL uses."""
@@ -330,6 +359,35 @@ class HabitacliaConnector(Connector):
                 url=self._search_url(geography),
                 kind="search_page",
                 tunable=True,
+                # Issue #492: the exact params discover() uses for this scope,
+                # built from the SAME resolved geography the URL is (anti-drift).
+                # `operation` is a constant — this connector only ever reads the
+                # /comprar- (sale) listing pages off `/viviendas-<slug>.htm` (see
+                # normalize()'s operation="sale"). The profile's price/size/type
+                # filters are deliberately ABSENT: the orchestrator never passes
+                # them to the connector; habitaclia's native query params for
+                # them are not live-verified and the repo forbids advertising an
+                # unverified filter (base.Connector.supported_filters).
+                params=(
+                    SearchParam(
+                        key="geography",
+                        label="Municipio",
+                        value=geography,
+                        source="profile",
+                        in_url=True,
+                    ),
+                    SearchParam(
+                        key="operation",
+                        label="Operación",
+                        value="venta viviendas",
+                        source="constant",
+                        in_url=True,
+                        notes=(
+                            "Solo página 1 — habitaclia bloquea la paginación "
+                            "(*pag=) en robots.txt, así que no viaja en la URL."
+                        ),
+                    ),
+                ),
             )
         ]
 

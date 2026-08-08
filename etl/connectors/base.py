@@ -126,17 +126,35 @@ class SearchParam:
 
 
 def _ecma_pattern_to_python(pattern: str) -> str:
-    """Rewrite an ECMAScript-canonical regex so Python's `re` accepts it.
+    r"""Rewrite an ECMAScript-canonical regex so Python's `re` accepts it AND so
+    it matches the SAME strings the browser's `RegExp` would.
 
-    The one syntactic difference that matters for URL grammars is named-group
-    spelling: JavaScript writes `(?<name>...)`, Python `(?P<name>...)`. Grammars
-    are stored in the ECMAScript form (so the browser's `RegExp` consumes them
-    verbatim — the whole point of publishing the grammar, issue #491), and this
-    translates them for the Python side. Only a named-group open (`(?<` followed
-    by a name character) is rewritten; a lookbehind (`(?<=` / `(?<!`) is left
-    untouched (and is rejected by `validate_grammar` anyway).
+    Grammars are stored in ECMAScript form (so the browser's `RegExp` consumes
+    them verbatim — the whole point of publishing the grammar, issue #491), and
+    this translates the three constructs that are spelled or behave differently
+    on the Python side:
+
+    1. **Named groups** — JS `(?<name>...)` → Python `(?P<name>...)`. Only a
+       named-group open (`(?<` followed by a name char) is rewritten; a
+       lookbehind (`(?<=` / `(?<!`) is left untouched (and `validate_grammar`
+       rejects it anyway).
+    2. **Named backreferences** — JS `\k<name>` → Python `(?P=name)` (issue
+       #492: Milanuncios' repeated-slug grammar needs `…-\k<geography>` to force
+       the two slug halves equal). Both engines support the construct; only the
+       spelling differs.
+    3. **End anchor** — a lone trailing `$` → `\Z`. Without the `m` flag JS `$`
+       matches ONLY the true end of input, whereas Python `$` ALSO matches just
+       before a final `\n`. For a URL grammar that difference is a real
+       divergence (a pasted URL with a trailing newline would parse in Python
+       but not the browser), so the Python anchor is tightened to `\Z`, which is
+       exactly "true end of input". `validate_grammar` guarantees there is a
+       single trailing `$` and nothing else to translate here.
     """
-    return re.sub(r"\(\?<(?=[A-Za-z_])", "(?P<", pattern)
+    pattern = re.sub(r"\(\?<(?=[A-Za-z_])", "(?P<", pattern)
+    pattern = re.sub(r"\\k<([A-Za-z_][A-Za-z0-9_]*)>", r"(?P=\1)", pattern)
+    if pattern.endswith("$") and not pattern.endswith(r"\$"):
+        pattern = pattern[:-1] + r"\Z"
+    return pattern
 
 
 @dataclass(frozen=True)
@@ -195,7 +213,7 @@ class SearchUrlGrammar:
 
 
 def validate_grammar(connector: type[Connector] | Connector) -> None:
-    """Assert a connector's `search_url_grammar` is a safe, self-consistent,
+    r"""Assert a connector's `search_url_grammar` is a safe, self-consistent,
     ECMAScript-compatible grammar (issue #491). No-op when the connector has no
     grammar. Raises ValueError with a specific reason otherwise.
 
@@ -204,10 +222,25 @@ def validate_grammar(connector: type[Connector] | Connector) -> None:
        pattern must not rely on them (parity with the browser would break).
     2. No lookbehind (`(?<=` / `(?<!`) — kept out of the shared subset (the
        issue's "sin lookbehind variable"), and never needed for a URL grammar.
-    3. The pattern compiles (after the named-group translation).
-    4. Its named groups are EXACTLY the build template's placeholders — so
+    3. No shorthand classes `\d \w \s` (and negations) — issue #492: these mean
+       DIFFERENT things in Python (Unicode by default) and JS `RegExp` (ASCII),
+       so the same pattern would accept different URLs on the two sides. The
+       shared subset uses explicit classes (`[0-9]`, `[^/]`, …), which are
+       identical everywhere. Fail fast rather than diverge silently.
+    4. No Python-only group spellings (`(?P<…>` / `(?P=…)`) in the stored
+       ECMAScript source — a hand-written Python named group/backreference would
+       compile here but be a syntax error in the browser's `RegExp`. The
+       canonical spellings are `(?<name>…)` and `\k<name>` (issue #492).
+    5. Fully anchored with a single trailing `$` — the parse must bind the whole
+       URL, and the `$`→`\Z` translation in `_ecma_pattern_to_python` is only
+       sound for a lone trailing anchor; a stray `$` elsewhere would stay `$` on
+       the Python side and diverge from JS on a trailing newline (issue #492).
+    6. The pattern compiles (after the named-group/backreference translation).
+    7. Its named groups are EXACTLY the build template's placeholders — so
        `build(parse(url)) == url` can round-trip and neither half carries a
-       parameter the other doesn't.
+       parameter the other doesn't. (A `\k<name>` backreference is NOT a group,
+       so a repeated-slug grammar still has one `geography` group == one
+       `{geography}` placeholder.)
     """
     grammar = connector.search_url_grammar
     if grammar is None:
@@ -222,6 +255,31 @@ def validate_grammar(connector: type[Connector] | Connector) -> None:
         raise ValueError(
             f"{name}: grammar parse_pattern uses lookbehind — outside the "
             "shared regex subset (issue #491)"
+        )
+    shorthand = re.search(r"\\[dDwWsS]", ecma)
+    if shorthand:
+        raise ValueError(
+            f"{name}: grammar parse_pattern uses the shorthand class "
+            f"{shorthand.group(0)!r} — it means different things in Python "
+            "(Unicode) and JS RegExp (ASCII); use an explicit char class "
+            "([0-9], [^/], …) from the shared subset (issue #492)"
+        )
+    if "(?P<" in ecma or "(?P=" in ecma:
+        raise ValueError(
+            f"{name}: grammar parse_pattern uses a Python-only group spelling "
+            "((?P<…>/(?P=…)) — store it in ECMAScript form ((?<name>…) / "
+            "\\k<name>); the Python side translates it (issue #492)"
+        )
+    if not ecma.startswith("^") or not ecma.endswith("$"):
+        raise ValueError(
+            f"{name}: grammar parse_pattern must be fully anchored (^…$) (issue #492)"
+        )
+    unescaped_dollars = [m.start() for m in re.finditer(r"(?<!\\)\$", ecma)]
+    if unescaped_dollars != [len(ecma) - 1]:
+        raise ValueError(
+            f"{name}: grammar parse_pattern must contain exactly one unescaped "
+            "`$`, as the final anchor — a `$` elsewhere diverges between Python "
+            "and JS on a trailing newline (issue #492)"
         )
     try:
         compiled = re.compile(_ecma_pattern_to_python(ecma))
