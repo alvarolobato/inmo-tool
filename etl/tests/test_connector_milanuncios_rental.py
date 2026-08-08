@@ -109,6 +109,21 @@ def test_milanuncios_rental_does_not_inherit_the_sale_connectors_skip_window():
     )
 
 
+def test_milanuncios_rental_does_not_inherit_search_override_consumption():
+    """Issue #478 P5 (D-101): the sale connector turned
+    supports_search_override ON and wired its discover() to consume
+    scope.override_url. The rental subclass's discover() was NOT wired for
+    it, so it must declare supports_search_override = False in its own right —
+    otherwise it would silently inherit True and the orchestrator would hand
+    it override scopes its discover() ignores. Same per-connector-behaviour
+    rule (declare, never inherit) as discovers_full_inventory above."""
+    assert MilanunciosRentalConnector.supports_search_override is False
+    assert "supports_search_override" in vars(MilanunciosRentalConnector), (
+        "supports_search_override must be declared explicitly on "
+        "MilanunciosRentalConnector, not inherited from MilanunciosConnector"
+    )
+
+
 class TestDiscover:
     def test_discover_requests_the_rental_category_url_not_sale(self):
         """The one real behavioural difference from MilanunciosConnector:

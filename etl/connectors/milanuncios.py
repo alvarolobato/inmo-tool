@@ -456,9 +456,14 @@ class MilanunciosConnector(Connector):
     # honestly claim full coverage.
     discovers_full_inventory = False
 
-    # Issue #478: an owner-pinned milanuncios search URL may become this
-    # connector's recall source for a profile (discover() wiring is Phase 5).
+    # Issue #478: an owner-pinned milanuncios search URL is this connector's
+    # recall source for a profile. Since Phase 5 (D-101) discover() consumes it
+    # (`scope.override_url`) as its entry page. NOTE: this is the SALE connector
+    # only; MilanunciosRentalConnector sets supports_search_override=False
+    # explicitly (it is a next candidate) so it does not silently inherit
+    # consumption its own discover() would still need wiring for.
     override_host_suffix = "milanuncios.com"
+    supports_search_override = True
 
     # Issue #179: skip-if-seen IS on, at Fotocasa's 24h precedent, and it is
     # turned on WITHOUT the discovery-time price safety net that Fotocasa
@@ -533,7 +538,13 @@ class MilanunciosConnector(Connector):
         for why the resolved slug itself is the right dedup/coverage key,
         and for why an `UnresolvableGeographyError` (issue #169) must be
         translated into a sentinel key here rather than `None` — this
-        method must never raise itself."""
+        method must never raise itself.
+
+        Issue #478 P5 (D-101): an owner-pinned `override_url` keys purely off
+        the URL — distinct from the twin scope (never deduped) and always
+        resolvable (discover() hits the pinned URL directly)."""
+        if scope.override_url:
+            return f"override:{scope.override_url}"
         try:
             return _resolve_geography(scope)
         except UnresolvableGeographyError:
@@ -576,18 +587,27 @@ class MilanunciosConnector(Connector):
         # _resolve_geography can raise UnresolvableGeographyError, left to
         # propagate uncaught (issue #169) — see fotocasa.py's discover() for
         # the full reasoning.
-        geography = _resolve_geography(scope)
-        if geography is None:
-            # Reachable only if discover() is invoked directly, bypassing
-            # scope_key()'s gate — see fotocasa.py's discover() docstring.
-            raise ConnectorError(
-                "milanuncios discover: scope has neither a resolvable center "
-                "nor an explicit geography string, or resolves to a "
-                "municipality this connector's _CITY_SLUGS table doesn't "
-                "cover — nothing to discover, not defaulting to a "
-                "hardcoded city (see issue #71)"
-            )
-        url = self._search_url(geography)
+        # Issue #478 P5 (D-101): an owner-pinned URL is this profile's recall
+        # source — hit it verbatim as the entry page (geography left None: it
+        # plays no part here). Without an override the code path is
+        # byte-identical to before.
+        override_url = scope.override_url if self.supports_search_override else None
+        if override_url:
+            geography = None
+            url = override_url
+        else:
+            geography = _resolve_geography(scope)
+            if geography is None:
+                # Reachable only if discover() is invoked directly, bypassing
+                # scope_key()'s gate — see fotocasa.py's discover() docstring.
+                raise ConnectorError(
+                    "milanuncios discover: scope has neither a resolvable center "
+                    "nor an explicit geography string, or resolves to a "
+                    "municipality this connector's _CITY_SLUGS table doesn't "
+                    "cover — nothing to discover, not defaulting to a "
+                    "hardcoded city (see issue #71)"
+                )
+            url = self._search_url(geography)
         throttle()
         try:
             response = requests.get(

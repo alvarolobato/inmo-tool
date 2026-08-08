@@ -2262,8 +2262,67 @@ def publish_search_previews(conn) -> None:
     )
 
 
+def _override_scopes_for_connector(conn, connector_name: str) -> list[ConnectorScope]:
+    """Owner-pinned recall scopes for *connector_name* (issue #478 P5, D-101).
+
+    Every active profile that pinned a URL for this connector in
+    `profile_connector_filter` gets a DEDICATED `ConnectorScope` carrying that
+    profile's geography plus the pinned `override_url`. Because
+    `ConnectorScope.scope_key` incorporates `override_url`, such a scope is
+    never deduped against the twin (non-override) scope derived from the same
+    profile — both run, and the pinned URL is that profile's recall source.
+
+    Only called for a connector that declares `supports_search_override` (the
+    caller gates on it), so a connector without support never gains an override
+    scope — it "ignores" any pin, no error.
+
+    A profile with missing/malformed geography still yields an override scope
+    (center/radius left None): the pinned URL is a valid recall source on its
+    own — `discover()` hits it directly, not the geography — so one bad
+    geography must not drop the owner's pin. Same "one bad row never sinks the
+    resolution" posture `_active_profile_scopes` takes. Ordered by row id for a
+    deterministic scope order (fairness ordering downstream relies on a stable
+    incoming order).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT sp.scope, pcf.url "
+            "FROM profile_connector_filter pcf "
+            "JOIN search_profile sp ON sp.id = pcf.profile_id "
+            "WHERE pcf.connector = %s AND sp.archived_at IS NULL "
+            "ORDER BY pcf.id",
+            (connector_name,),
+        )
+        rows = cur.fetchall()
+
+    scopes: list[ConnectorScope] = []
+    for scope_json, url in rows:
+        center: tuple[float, float] | None = None
+        radius: float | None = None
+        geography = (scope_json or {}).get("geography")
+        if isinstance(geography, dict) and geography.get("type") == "radius":
+            raw_center = geography.get("center")
+            raw_radius = geography.get("radius_km")
+            if (
+                isinstance(raw_center, list)
+                and len(raw_center) == 2
+                and not isinstance(raw_radius, bool)
+                and isinstance(raw_radius, (int, float))
+            ):
+                try:
+                    center = (float(raw_center[0]), float(raw_center[1]))
+                    radius = float(raw_radius)
+                except (TypeError, ValueError):
+                    center, radius = None, None
+        scopes.append(ConnectorScope(center=center, radius_km=radius, override_url=url))
+    return scopes
+
+
 def _scopes_for_connector(
-    conn, connector_name: str, profile_scopes: list[ConnectorScope]
+    conn,
+    connector_name: str,
+    profile_scopes: list[ConnectorScope],
+    supports_search_override: bool = False,
 ) -> tuple[list[ConnectorScope], bool, int | None]:
     """Resolve one connector's actual scopes for this run, per issue #99's
     hybrid model: an explicit `connector_config` row overrides the shared
@@ -2287,6 +2346,19 @@ def _scopes_for_connector(
     `connector.min_refetch_interval_seconds`, same override-vs-class-
     attribute-default pattern `filters.rooms` already established for
     `ConnectorScope.rooms` above.
+
+    Issue #478 P5 (D-101): when `supports_search_override` is True, every
+    owner-pinned URL in `profile_connector_filter` for this connector is
+    attached as a DEDICATED override scope (see
+    `_override_scopes_for_connector`), ADDED to whatever base scopes the
+    connector_config logic below resolves. Precedence for a given profile:
+    per-profile pinned override > `connector_config.geography_override`
+    (global) > profile-derived scopes (#71/#99). "Added, not replacing" is
+    deliberate — an override scope has a distinct `scope_key` so it is never
+    deduped against a twin; the derived/geography_override scopes still run for
+    every profile that did NOT pin a URL. A connector without
+    `supports_search_override` never gains an override scope (the pin is
+    ignored, no error).
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -2298,8 +2370,15 @@ def _scopes_for_connector(
         row = cur.fetchone()
 
     if row is None:
-        # No config row at all: issue #71's default, unmodified.
-        return profile_scopes, True, None
+        # No config row at all: issue #71's default, unmodified — plus any
+        # owner-pinned override scopes (issue #478 P5), which are independent
+        # of connector_config.
+        base_scopes = profile_scopes
+        if supports_search_override:
+            base_scopes = base_scopes + _override_scopes_for_connector(
+                conn, connector_name
+            )
+        return base_scopes, True, None
 
     enabled, geography_override, filters, min_refetch_interval_seconds_raw = row
     if not enabled:
@@ -2374,6 +2453,14 @@ def _scopes_for_connector(
         # unusable". Distinguishing these two is why this isn't a single
         # `if geography_override:` branch.
         base_scopes = profile_scopes
+
+    # Issue #478 P5 (D-101): attach owner-pinned override scopes on top of
+    # whatever base scopes the geography_override/profile logic resolved above,
+    # BEFORE the rooms replace below so a connector_config rooms filter applies
+    # to them too. Added, never replacing — their distinct scope_key keeps them
+    # off the dedup path against the twin non-override scopes.
+    if supports_search_override:
+        base_scopes = base_scopes + _override_scopes_for_connector(conn, connector_name)
 
     rooms: int | None = None
     if isinstance(filters, dict):
@@ -3022,7 +3109,10 @@ def run_all_connectors(
 
     for connector in connectors_to_run:
         scopes, enabled, min_refetch_override = _scopes_for_connector(
-            conn, connector.name, profile_scopes
+            conn,
+            connector.name,
+            profile_scopes,
+            supports_search_override=connector.supports_search_override,
         )
         if not enabled:
             # Issue #292: a deliberately-disabled connector is NOT an event

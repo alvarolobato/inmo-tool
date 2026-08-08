@@ -161,6 +161,22 @@ class ConnectorScope:
     # contract the way center/radius_km are (issue #96/#71's
     # coverage-resolution logic never looks at it).
     rooms: int | None = None
+    # Issue #478 P5 (D-101): an owner-pinned search URL that IS this
+    # (profile × connector)'s recall source — the URL discover() hits as its
+    # entry page instead of the one it would build from center/radius. Set by
+    # the orchestrator (`_scopes_for_connector`) from `profile_connector_filter`
+    # for a connector that declares `supports_search_override`; None for every
+    # other scope. Verbatim — never re-substituted (the owner tuned it by hand;
+    # it is the strongest "owner-confirmed" signal, tier 0 over D-051).
+    #
+    # Carried on the scope itself, same precedent as `rooms` above, so it flows
+    # through the identical discover()/scope_key() path. Crucially it IS part of
+    # this scope's identity here: `scope_key()` incorporates it, so an override
+    # scope is never deduped against the twin (non-override) scope derived from
+    # the same geography — both run, and the pinned URL is that profile's recall
+    # source. A connector WITHOUT `supports_search_override` simply ignores this
+    # field (no error) — the orchestrator never sets it for such a connector.
+    override_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -518,10 +534,22 @@ class Connector(ABC):
         into a site-specific geography (see fotocasa.py/milanuncios.py's
         `_resolve_geography`, which their `scope_key` override delegates
         to directly).
+
+        Issue #478 P5 (D-101): a scope carrying an owner-pinned
+        `override_url` MUST resolve to a key that includes it — the default
+        appends `f"override:{override_url}"` when present — so the override
+        scope is never deduped by the orchestrator against the twin
+        (non-override) scope derived from the same geography. A connector
+        that overrides this method and supports pinned URLs must do the same
+        (see pisos/habitaclia/milanuncios).
         """
         if scope.geography:
-            return f"geography:{scope.geography}"
-        return f"raw:{scope.center}:{scope.radius_km}"
+            base = f"geography:{scope.geography}"
+        else:
+            base = f"raw:{scope.center}:{scope.radius_km}"
+        if scope.override_url:
+            return f"{base}|override:{scope.override_url}"
+        return base
 
     @abstractmethod
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:

@@ -36,6 +36,19 @@ API route: `GET /api/profiles/[id]/search-urls` → `{ profileId, name, tasks }`
 > "Abrir búsqueda" button per task) as an interim; a dedicated task-driven UI
 > (per-task last-run tracking) is a separate issue.
 
+## Precedence: the builder is tier 3 — an owner pin wins (tier 0, D-051/D-101)
+
+The `build()` in this module is the **bottom** of a precedence stack that
+`resolveSearchTasks(scope, profileId)` (`dashboard/lib/search-url/resolve.ts`)
+applies per task. From strongest to weakest:
+
+> **tier 0** — owner-pinned override (`profile_connector_filter`, issue #478 / D-101): the URL the owner tuned and pinned by hand for this `(profile × portal × section)`. Used **verbatim** (`loosened: []`, `overridden: true`), never re-substituted — it is the maximal "owner-confirmed" signal and beats every derived URL. Matched by `section_key` (the parser's `categoryKey`, or `''` = all sections); id/label are preserved so `capture_task_run` staleness survives the upgrade. A capture portal with no builder (altamira) gets a **synthesised** task from its pin — its first search URL with zero builder code.
+> **tier 1** — exact learned example (D-051): substitute the profile's numbers into a confirmed same-section, same-slug template.
+> **tier 2** — same-area (≤25 km) learned example, capped by #444 (`municipioForPoint`).
+> **tier 3** — this module's hand-written `build()` (the default for any profile with no pin and no learned example; #471 P2 upgrades it to a `shape=` polygon builder).
+
+Tier 0 is *stronger* in the same direction #444/D-090 already point (owner-confirmed beats derived), so the #444 regression must stay green with tier 0 present. On the **ETL** side the same pin drives recall too: a supporting HTTP connector consumes it as `ConnectorScope.override_url` in `discover()` (D-101 — see `docs/architecture/connectors.md`).
+
 ## Best-effort mapping contract (issue #267)
 
 If a portal's URL grammar can't express a constraint, the builder **loosens it

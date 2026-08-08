@@ -494,6 +494,49 @@ class TestDiscover:
         assert key is not None
         assert key.startswith("unresolvable-geography:")
 
+    def test_discover_uses_pinned_override_url_as_entry_page(self):
+        """Issue #478 P5 (D-101): with supports_search_override=True and a
+        scope carrying override_url, discover()'s request hits the pinned URL
+        verbatim — the derived venta-de-pisos slug is bypassed entirely."""
+        pinned = "https://www.milanuncios.com/venta-de-pisos-en-madrid/?dias=7"
+        html = _read_fixture("milanuncios_sample_search.html")
+        with patch(
+            "etl.connectors.milanuncios.requests.get", return_value=_mock_response(html)
+        ) as mock_get:
+            MilanunciosConnector().discover(
+                ConnectorScope(
+                    center=(40.4168, -3.7038), radius_km=10, override_url=pinned
+                ),
+                throttle=lambda: None,
+            )
+        assert mock_get.call_args.args[0] == pinned
+
+    def test_discover_without_override_is_byte_identical(self):
+        """The regression guard for the retrofit: without an override, the
+        request URL is exactly the derived slug, unchanged from before P5."""
+        html = _read_fixture("milanuncios_sample_search.html")
+        with patch(
+            "etl.connectors.milanuncios.requests.get", return_value=_mock_response(html)
+        ) as mock_get:
+            MilanunciosConnector().discover(
+                ConnectorScope(geography="madrid"), throttle=lambda: None
+            )
+        assert (
+            mock_get.call_args.args[0]
+            == "https://www.milanuncios.com/venta-de-pisos-en-madrid-madrid/"
+        )
+
+    def test_scope_key_keys_off_override_url_when_pinned(self):
+        connector = MilanunciosConnector()
+        pinned = "https://www.milanuncios.com/venta-de-pisos-en-madrid/?x=1"
+        base = ConnectorScope(center=(40.4168, -3.7038), radius_km=10)
+        over = ConnectorScope(
+            center=(40.4168, -3.7038), radius_km=10, override_url=pinned
+        )
+        assert connector.scope_key(over) == f"override:{pinned}"
+        # Distinct from the twin — the orchestrator can never dedupe them.
+        assert connector.scope_key(over) != connector.scope_key(base)
+
     def test_discover_raises_on_soft_block_page_not_empty_list(self):
         html = _read_fixture("milanuncios_sample_block_page.html")
         connector = MilanunciosConnector()

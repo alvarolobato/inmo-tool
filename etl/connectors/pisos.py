@@ -213,9 +213,10 @@ class PisosConnector(Connector):
     supported_filters: tuple[str, ...] = ()
 
     # Issue #478: the owner may pin a pisos.com search URL as this connector's
-    # recall source for a profile. discover() honouring it lands in Phase 5
-    # (supports_search_override stays False here).
+    # recall source for a profile. Since Phase 5 (D-101) discover() consumes
+    # that pinned URL (`scope.override_url`) as its entry page.
     override_host_suffix = "pisos.com"
+    supports_search_override = True
 
     def __init__(self) -> None:
         # Populated by discover() as a side effect of the single search
@@ -240,7 +241,16 @@ class PisosConnector(Connector):
         orchestrator calls it without try/except): an
         UnresolvableGeographyError becomes a distinct sentinel key so
         discover() still runs and fails there as a real result, while a
-        plain None (no slug) puts the scope on the skip path."""
+        plain None (no slug) puts the scope on the skip path.
+
+        Issue #478 P5 (D-101): an owner-pinned `override_url` IS the target —
+        geography resolution is irrelevant to it — so it keys purely off the
+        URL. This makes the key distinct from the twin (non-override) scope so
+        the orchestrator never dedupes them, and always resolvable (discover()
+        hits the pinned URL directly, even when the profile's geography would
+        not resolve)."""
+        if scope.override_url:
+            return f"override:{scope.override_url}"
         try:
             geography = _resolve_geography(scope)
         except UnresolvableGeographyError:
@@ -282,21 +292,30 @@ class PisosConnector(Connector):
         self._search_records = {}
         self._last_discovery_prices = {}
 
-        geography = _resolve_geography(scope)
-        if geography is None:
-            # Reachable only if discover() is invoked directly, bypassing
-            # scope_key()'s gate (a test, or a future caller) — normally
-            # scope_key() already returned None and the orchestrator skipped
-            # this scope. Now that the slug is derived mechanically from any
-            # resolved municipality (issue #369), None here means only "no
-            # center and no geography string to resolve at all".
-            raise ConnectorError(
-                "pisos discover: scope has neither a resolvable center nor an "
-                "explicit geography string — nothing to discover, not "
-                "defaulting to a hardcoded city"
-            )
-
-        url = self._search_url(geography)
+        # Issue #478 P5 (D-101): an owner-pinned URL is this profile's recall
+        # source — hit it verbatim as the entry page, skipping the derived slug
+        # entirely (geography left None: it plays no part, but the log/404
+        # branches below tolerate it). Without an override the code path is
+        # byte-identical to before.
+        override_url = scope.override_url if self.supports_search_override else None
+        if override_url:
+            geography = None
+            url = override_url
+        else:
+            geography = _resolve_geography(scope)
+            if geography is None:
+                # Reachable only if discover() is invoked directly, bypassing
+                # scope_key()'s gate (a test, or a future caller) — normally
+                # scope_key() already returned None and the orchestrator skipped
+                # this scope. Now that the slug is derived mechanically from any
+                # resolved municipality (issue #369), None here means only "no
+                # center and no geography string to resolve at all".
+                raise ConnectorError(
+                    "pisos discover: scope has neither a resolvable center nor an "
+                    "explicit geography string — nothing to discover, not "
+                    "defaulting to a hardcoded city"
+                )
+            url = self._search_url(geography)
         throttle()
         try:
             response = requests.get(
