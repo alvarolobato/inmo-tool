@@ -215,6 +215,7 @@ export function ProfileForm({
         <input
           type="text"
           required
+          data-testid="profile-name-input"
           value={values.name}
           onChange={(e) => setValues((v) => ({ ...v, name: e.target.value }))}
           style={inputStyle}
