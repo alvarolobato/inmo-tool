@@ -151,9 +151,14 @@ export function CandidatePhotoTicker({
               width: "100%",
               padding: "12px 10px 6px",
               background: "linear-gradient(to top, rgba(0,0,0,0.72), rgba(0,0,0,0))",
+              // #460: price + rating/direction chips on ONE line (wrapping only
+              // when they truly don't fit), not stacked — the chip sits NEXT to
+              // the price, not below it.
               display: "flex",
-              flexDirection: "column",
-              gap: 4,
+              flexWrap: "wrap",
+              alignItems: "center",
+              columnGap: 8,
+              rowGap: 4,
             }}
           >
             <p
@@ -162,7 +167,8 @@ export function CandidatePhotoTicker({
             >
               {priceLabel}
             </p>
-            {/* #448 F: below-market rating + price up/down, next to the price. */}
+            {/* #448 F / #460: below-market rating + price up/down, on the same
+                line as the price. */}
             {priceSignals}
           </div>
         </div>
