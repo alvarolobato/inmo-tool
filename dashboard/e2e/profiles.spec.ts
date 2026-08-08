@@ -278,8 +278,23 @@ test("a materialized profile with zero matches explains a specific cause, not a 
   await expect(row).toBeVisible();
   await expect(row.getByTestId("profile-metric-matched")).toContainText("0");
 
-  // "¿Por qué 0?" expands the on-demand diagnostic.
+  // "¿Por qué 0?" expands the on-demand diagnostic, which fires an on-mount
+  // GET /api/profiles/[id]/diagnostics that runs several SQL funnel queries.
+  // Late in the full suite under CI load that fetch can exceed Playwright's
+  // default 5s expect timeout (observed ~6.2s → "element(s) not found"), while
+  // locally it is sub-500ms. Make the wait deterministic: await the actual
+  // network response and the loading placeholder clearing before asserting on
+  // the resolved diagnostic — never a blind sleep, and without weakening what
+  // is asserted.
+  const diagnosticsResponse = page.waitForResponse(
+    (res) =>
+      new RegExp(`/api/profiles/${zeroProfileId}/diagnostics`).test(res.url()) &&
+      res.request().method() === "GET",
+    { timeout: 30_000 },
+  );
   await row.getByTestId("profile-zero-why-link").click();
+  await diagnosticsResponse;
+  await expect(row.getByTestId("zero-diagnostic-loading")).toHaveCount(0);
 
   const diagnostic = row.getByTestId("zero-diagnostic");
   await expect(diagnostic).toBeVisible();
