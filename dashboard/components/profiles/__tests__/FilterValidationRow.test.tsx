@@ -96,12 +96,18 @@ describe("FilterValidationRow (issue #478 P2)", () => {
     expect(screen.queryByTestId("filter-remove")).not.toBeInTheDocument();
   });
 
-  it("Abrir opens the URL with NO capture signal (verbatim, #478 P2)", () => {
+  it("Abrir opens the URL tagged with the validation signal (#478 P3)", () => {
     const openSpy = vi.fn();
     vi.stubGlobal("open", openSpy);
     render(<FilterValidationRow {...baseProps()} />);
     fireEvent.click(screen.getByTestId("filter-open"));
-    expect(openSpy).toHaveBeenCalledWith(IDEALISTA_URL, "_blank", "noopener,noreferrer");
+    // profileId=7, connector="idealista" → #inmo-validate=7:idealista, so the
+    // extension enters validation mode (no capture) on the opened tab.
+    expect(openSpy).toHaveBeenCalledWith(
+      `${IDEALISTA_URL}#inmo-validate=7:idealista`,
+      "_blank",
+      "noopener,noreferrer",
+    );
   });
 
   it("empty-URL row shows the no-URL note and disables Abrir", () => {

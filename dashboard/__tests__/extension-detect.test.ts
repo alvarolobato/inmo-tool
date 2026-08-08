@@ -29,6 +29,11 @@ const {
   extractDetailUrls,
   captureSignalPresent,
   stripCaptureSignal,
+  validateSignalPayload,
+  validateSignalPresent,
+  stripValidateSignal,
+  inValidationMode,
+  buildValidationSavePayload,
   listingCaptureAction,
   buildCaptureBanner,
   RESULTS_PAGE_CAP,
@@ -55,6 +60,14 @@ const {
   extractDetailUrls: (hrefs: unknown, portal?: string) => string[];
   captureSignalPresent: (u: string) => boolean;
   stripCaptureSignal: (u: string) => string;
+  validateSignalPayload: (u: string) => { profileId: number; connector: string } | null;
+  validateSignalPresent: (u: string) => boolean;
+  stripValidateSignal: (u: string) => string;
+  inValidationMode: (u: string, active: boolean) => boolean;
+  buildValidationSavePayload: (
+    state: { profileId?: number; connector?: string } | null,
+    url: string,
+  ) => { profileId: number; connector: string; url: string; source: string } | null;
   listingCaptureAction: (
     u: string,
     detailUrls: unknown,
@@ -570,6 +583,120 @@ describe("stripCaptureSignal — clean the URL before capture-to-infer learning 
     const clean = "https://www.idealista.com/venta-viviendas/estepona/";
     expect(stripCaptureSignal(clean)).toBe(clean);
     expect(stripCaptureSignal("not a url")).toBe("not a url");
+  });
+});
+
+// ── Validation-mode signal (issue #478 P3) ──────────────────────────────────
+
+describe("validateSignalPayload — parse #inmo-validate=<pid>:<connector>", () => {
+  const BASE = "https://www.idealista.com/venta-viviendas/sevilla-sevilla/";
+
+  it("parses the fragment form into { profileId, connector }", () => {
+    expect(validateSignalPayload(`${BASE}#inmo-validate=42:idealista`)).toEqual({
+      profileId: 42,
+      connector: "idealista",
+    });
+  });
+
+  it("parses the query-key form (percent-decoded colon)", () => {
+    expect(validateSignalPayload(`${BASE}?inmo-validate=7%3Aaliseda`)).toEqual({
+      profileId: 7,
+      connector: "aliseda",
+    });
+  });
+
+  it("keeps a connector name that itself contains a colon (splits on the first)", () => {
+    expect(validateSignalPayload(`${BASE}#inmo-validate=1:a:b`)).toEqual({
+      profileId: 1,
+      connector: "a:b",
+    });
+  });
+
+  it("returns null for a missing / malformed payload", () => {
+    expect(validateSignalPayload(BASE)).toBeNull(); // no signal
+    expect(validateSignalPayload(`${BASE}#inmo-validate=`)).toBeNull(); // empty
+    expect(validateSignalPayload(`${BASE}#inmo-validate=idealista`)).toBeNull(); // no id
+    expect(validateSignalPayload(`${BASE}#inmo-validate=0:idealista`)).toBeNull(); // id not > 0
+    expect(validateSignalPayload(`${BASE}#inmo-validate=1:`)).toBeNull(); // empty connector
+    expect(validateSignalPayload(`${BASE}#inmo-validate=x:idealista`)).toBeNull(); // non-numeric id
+    expect(validateSignalPayload("not a url")).toBeNull();
+  });
+
+  it("validateSignalPresent mirrors payload presence", () => {
+    expect(validateSignalPresent(`${BASE}#inmo-validate=1:idealista`)).toBe(true);
+    expect(validateSignalPresent(BASE)).toBe(false);
+    expect(validateSignalPresent("")).toBe(false);
+  });
+});
+
+describe("stripValidateSignal — never persist the validation signal", () => {
+  const BASE = "https://www.idealista.com/venta-viviendas/sevilla-sevilla/";
+
+  it("removes the fragment form", () => {
+    expect(stripValidateSignal(`${BASE}#inmo-validate=42:idealista`)).toBe(BASE);
+  });
+
+  it("removes the query-key form, preserving other params", () => {
+    expect(stripValidateSignal(`${BASE}?a=1&inmo-validate=7%3Aaliseda`)).toBe(`${BASE}?a=1`);
+  });
+
+  it("leaves a URL without the signal (and junk) untouched", () => {
+    expect(stripValidateSignal(BASE)).toBe(BASE);
+    expect(stripValidateSignal("not a url")).toBe("not a url");
+  });
+});
+
+describe("inValidationMode — the pure 'stay suppressed?' verdict", () => {
+  const BASE = "https://www.idealista.com/venta-viviendas/sevilla-sevilla/";
+
+  it("true when the URL still carries the signal (first load)", () => {
+    expect(inValidationMode(`${BASE}#inmo-validate=1:idealista`, false)).toBe(true);
+  });
+
+  it("true when the background flagged the tab (fragment already stripped)", () => {
+    expect(inValidationMode(BASE, true)).toBe(true);
+  });
+
+  it("false when neither the URL nor the background says so", () => {
+    expect(inValidationMode(BASE, false)).toBe(false);
+  });
+
+  it("false for a bad payload with no active flag", () => {
+    expect(inValidationMode(`${BASE}#inmo-validate=0:idealista`, false)).toBe(false);
+  });
+});
+
+describe("buildValidationSavePayload — shape the 'Usar esta URL como filtro' body", () => {
+  const BASE = "https://www.idealista.com/venta-viviendas/sevilla-sevilla/";
+
+  it("combines state with the signal-stripped tab URL and source='extension'", () => {
+    const out = buildValidationSavePayload(
+      { profileId: 42, connector: "idealista" },
+      `${BASE}#inmo-validate=42:idealista`,
+    );
+    expect(out).toEqual({
+      profileId: 42,
+      connector: "idealista",
+      url: BASE, // stripped — the signal is never persisted
+      source: "extension",
+    });
+  });
+
+  it("keeps a tuned URL (e.g. shape=) verbatim, minus only the signal", () => {
+    const tuned = "https://www.idealista.com/areas/venta-viviendas/?shape=%28%28abc%29%29";
+    const out = buildValidationSavePayload({ profileId: 5, connector: "idealista" }, tuned);
+    expect(out!.url).toBe(tuned);
+  });
+
+  it("returns null for a bad state or a non-http(s) URL", () => {
+    expect(buildValidationSavePayload(null, BASE)).toBeNull();
+    expect(buildValidationSavePayload({ connector: "idealista" }, BASE)).toBeNull(); // no id
+    expect(buildValidationSavePayload({ profileId: 0, connector: "idealista" }, BASE)).toBeNull();
+    expect(buildValidationSavePayload({ profileId: 1, connector: "" }, BASE)).toBeNull();
+    expect(
+      buildValidationSavePayload({ profileId: 1, connector: "idealista" }, "javascript:alert(1)"),
+    ).toBeNull();
+    expect(buildValidationSavePayload({ profileId: 1, connector: "idealista" }, "nope")).toBeNull();
   });
 });
 

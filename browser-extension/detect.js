@@ -469,6 +469,18 @@
   // CAPTURE_SIGNAL; must agree byte-for-byte with the dashboard opener.
   var DISCOVER_SIGNAL = "inmo-discover";
 
+  // ── Validation-mode signal (issue #478 P3) ────────────────────────────────
+  //
+  // The dashboard's "Validar filtros" page opens a portal search URL carrying
+  // `#inmo-validate=<profileId>:<connector>` (query fallback
+  // `?inmo-validate=<profileId>:<connector>`) so the content script puts the tab
+  // in VALIDATION MODE — no batch autostart, no listing banner, no detail
+  // auto-capture — while the owner tunes the search and hands the URL back as
+  // this connector's pinned filter. Same fragment-preferred contract as the
+  // other signals, but WITH a payload; must agree byte-for-byte with the
+  // dashboard opener dashboard/lib/extension-validate.ts `withValidateSignal`.
+  var VALIDATE_SIGNAL = "inmo-validate";
+
   /** True iff `url` carries the given fragment/query signal. Pure; false on parse error. */
   function urlSignalPresent(url, signal) {
     var parsed;
@@ -525,6 +537,131 @@
       /* searchParams unavailable — ignore */
     }
     return parsed.toString();
+  }
+
+  /**
+   * The raw signal VALUE carried by `url` for `signal` (the part after `=`), or
+   * null when absent. Reads the fragment form `#<signal>=<value>` first, then
+   * the query form `?<signal>=<value>` (already percent-decoded by searchParams).
+   * Pure; null on parse error.
+   */
+  function urlSignalValue(url, signal) {
+    var parsed;
+    try {
+      parsed = new URL(String(url).trim());
+    } catch (e) {
+      return null;
+    }
+    var hashKey = parsed.hash.replace(/^#/, "");
+    var prefix = signal + "=";
+    if (hashKey.indexOf(prefix) === 0) {
+      return hashKey.slice(prefix.length);
+    }
+    try {
+      if (parsed.searchParams.has(signal)) {
+        return parsed.searchParams.get(signal);
+      }
+    } catch (e) {
+      /* searchParams unavailable — ignore */
+    }
+    return null;
+  }
+
+  /**
+   * Parse the validation-mode signal payload (issue #478 P3) out of `url`:
+   * `#inmo-validate=<profileId>:<connector>` (or the `?inmo-validate=` query
+   * fallback). Returns `{ profileId, connector }` for a well-formed payload
+   * (positive integer id + non-empty connector), or null otherwise. Pure — no
+   * DOM/chrome. Must agree with dashboard/lib/extension-validate.ts
+   * `withValidateSignal`.
+   */
+  function validateSignalPayload(url) {
+    var raw = urlSignalValue(url, VALIDATE_SIGNAL);
+    if (raw == null || raw === "") return null;
+    var idx = raw.indexOf(":");
+    if (idx <= 0) return null;
+    var pidStr = raw.slice(0, idx);
+    var connector = raw.slice(idx + 1);
+    if (!/^\d+$/.test(pidStr)) return null;
+    var profileId = parseInt(pidStr, 10);
+    if (!(profileId > 0)) return null;
+    if (!connector) return null;
+    return { profileId: profileId, connector: connector };
+  }
+
+  /**
+   * True iff `url` carries a well-formed validation-mode signal (issue #478 P3).
+   * Pure — no DOM/chrome. Returns false for an unparseable URL / bad payload.
+   */
+  function validateSignalPresent(url) {
+    return validateSignalPayload(url) !== null;
+  }
+
+  /**
+   * Return `url` with the validation-mode signal removed (both the
+   * `#inmo-validate=…` fragment and the `?inmo-validate=…` query-key forms).
+   * Used before the content script hands the tab's URL back as a pinned filter
+   * (and by the on-load history.replaceState) so the synthetic signal is NEVER
+   * persisted. Pure; returns the input unchanged on a parse failure.
+   */
+  function stripValidateSignal(url) {
+    var parsed;
+    try {
+      parsed = new URL(String(url).trim());
+    } catch (e) {
+      return url;
+    }
+    var hashKey = parsed.hash.replace(/^#/, "");
+    if (hashKey === VALIDATE_SIGNAL || hashKey.indexOf(VALIDATE_SIGNAL + "=") === 0) {
+      parsed.hash = "";
+    }
+    try {
+      if (parsed.searchParams.has(VALIDATE_SIGNAL)) {
+        parsed.searchParams.delete(VALIDATE_SIGNAL);
+      }
+    } catch (e) {
+      /* searchParams unavailable — ignore */
+    }
+    return parsed.toString();
+  }
+
+  /**
+   * The pure "should the capture loops STAY SUPPRESSED?" verdict for validation
+   * mode (issue #478 P3). A tab is in validation mode when EITHER the URL still
+   * carries the validate signal (first load, before the fragment is stripped) OR
+   * the background has recorded this tab as a validation tab (`validationActive`,
+   * which survives the in-portal navigation that drops the fragment). When true,
+   * startAutoCaptureLoop / startListingLoop early-return — no banner, no
+   * autostart, no detail auto-capture. Pure — no DOM/chrome.
+   */
+  function inValidationMode(url, validationActive) {
+    return validationActive === true || validateSignalPresent(url);
+  }
+
+  /**
+   * Shape the "Usar esta URL como filtro" save payload (issue #478 P3): combine
+   * the per-tab validation `state` ({ profileId, connector }) with the tab's
+   * current `url` (signal-stripped), validating it's an http(s) URL. Returns
+   * `{ profileId, connector, url, source:'extension' }` or null. Pure — the
+   * background worker re-validates + attaches the admin key before the PUT, and
+   * the server re-derives the portal from the host (never client-claimed).
+   */
+  function buildValidationSavePayload(state, url) {
+    if (!state || !(state.profileId > 0) || !state.connector) return null;
+    var cleanUrl = stripValidateSignal(url);
+    var parsed;
+    try {
+      parsed = new URL(String(cleanUrl).trim());
+    } catch (e) {
+      return null;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    return {
+      profileId: state.profileId,
+      connector: state.connector,
+      url: cleanUrl,
+      source: "extension",
+    };
   }
 
   /**
@@ -747,9 +884,15 @@
     createCaptureGuard: createCaptureGuard,
     CAPTURE_SIGNAL: CAPTURE_SIGNAL,
     DISCOVER_SIGNAL: DISCOVER_SIGNAL,
+    VALIDATE_SIGNAL: VALIDATE_SIGNAL,
     captureSignalPresent: captureSignalPresent,
     discoverSignalPresent: discoverSignalPresent,
     stripCaptureSignal: stripCaptureSignal,
+    validateSignalPayload: validateSignalPayload,
+    validateSignalPresent: validateSignalPresent,
+    stripValidateSignal: stripValidateSignal,
+    inValidationMode: inValidationMode,
+    buildValidationSavePayload: buildValidationSavePayload,
     listingCaptureAction: listingCaptureAction,
     buildCaptureBanner: buildCaptureBanner,
   };

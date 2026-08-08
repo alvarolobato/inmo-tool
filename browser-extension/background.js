@@ -160,6 +160,52 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true; // async response
   }
 
+  // Validation mode (issue #478 P3): the content script detected the
+  // `#inmo-validate` signal on load and asks the worker to remember this tab as a
+  // validation tab (so suppression survives in-portal navigation once the
+  // fragment is stripped). No admin key needed — pure per-tab session state.
+  if (msg.type === 'START_VALIDATION') {
+    const tabId = _sender.tab && _sender.tab.id;
+    startValidation(tabId, msg.profileId, msg.connector)
+      .then(sendResponse)
+      .catch(() => sendResponse({ ok: false }));
+    return true; // async
+  }
+
+  // Both the content script (loops) and the popup (validation panel) read the
+  // per-tab validation state. The popup passes the active tab's id explicitly;
+  // the content script omits it and we use the sender tab.
+  if (msg.type === 'GET_VALIDATION_STATE') {
+    const tabId = msg.tabId != null ? msg.tabId : _sender.tab && _sender.tab.id;
+    getValidationState(tabId)
+      .then(sendResponse)
+      .catch(() => sendResponse({ active: false }));
+    return true; // async
+  }
+
+  // "Salir del modo validación" from the popup — clear this tab's validation
+  // state so the normal capture flows resume.
+  if (msg.type === 'END_VALIDATION') {
+    const tabId = msg.tabId != null ? msg.tabId : _sender.tab && _sender.tab.id;
+    endValidation(tabId)
+      .then(sendResponse)
+      .catch(() => sendResponse({ ok: false }));
+    return true; // async
+  }
+
+  // "Usar esta URL como filtro" from the popup (issue #478 P3): pin the tab's
+  // current (signal-stripped) URL as the (profile × connector) filter via the
+  // admin-gated PUT. The admin key only ever lives in this worker (like #475);
+  // the profile id + connector come from the tab's validation state, never the
+  // untrusted message.
+  if (msg.type === 'SAVE_VALIDATION_URL') {
+    const tabId = msg.tabId != null ? msg.tabId : _sender.tab && _sender.tab.id;
+    saveValidationUrl(tabId, msg.url)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ success: false, error: { message: err.message } }));
+    return true; // async
+  }
+
   // URL-building discovery (issue #336): the content script enumerated a
   // portal's search-form filter options and the URL fragment each produces;
   // persist the catalog via the ingest route so the connector's URL builder can
@@ -563,6 +609,107 @@ async function postCapturedSearchUrl(payload) {
   }
   return { success: true, id: body.id, portal: body.portal };
 }
+
+// ═══ Validation mode (issue #478 P3) ════════════════════════════════════════
+//
+// The "Validar filtros" page opens a portal search URL with `#inmo-validate=`
+// so the owner can tune the search WITHOUT the extension capturing anything.
+// The fragment is stripped off the visible URL on load (content-script), so the
+// suppression can't ride on the URL alone once the owner navigates in-portal —
+// it rides on this PER-TAB session map (tabId → { profileId, connector }),
+// mirroring BATCH_TABS_KEY. Cleared when the tab closes or the owner clicks
+// "Salir del modo validación".
+const VALIDATION_TABS_KEY = 'inmoValidationTabs';
+
+/** The whole tabId → { profileId, connector } map (plain object in session). */
+async function getValidationTabsMap() {
+  const o = await chrome.storage.session.get(VALIDATION_TABS_KEY);
+  const map = o[VALIDATION_TABS_KEY];
+  return map && typeof map === 'object' ? map : {};
+}
+async function setValidationTabsMap(map) {
+  await chrome.storage.session.set({ [VALIDATION_TABS_KEY]: map });
+}
+
+/** Remember `tabId` as validating (profileId × connector). */
+async function startValidation(tabId, profileId, connector) {
+  if (tabId == null || !(profileId > 0) || !connector) return { ok: false };
+  const map = await getValidationTabsMap();
+  map[tabId] = { profileId, connector };
+  await setValidationTabsMap(map);
+  return { ok: true, profileId, connector };
+}
+
+/** The validation state for `tabId`: { active, profileId?, connector? }. */
+async function getValidationState(tabId) {
+  if (tabId == null) return { active: false };
+  const map = await getValidationTabsMap();
+  const s = map[tabId];
+  return s
+    ? { active: true, profileId: s.profileId, connector: s.connector }
+    : { active: false };
+}
+
+/** Forget `tabId`'s validation state (tab closed / owner exited). */
+async function endValidation(tabId) {
+  if (tabId == null) return { ok: false };
+  const map = await getValidationTabsMap();
+  if (Object.prototype.hasOwnProperty.call(map, tabId)) {
+    delete map[tabId];
+    await setValidationTabsMap(map);
+  }
+  return { ok: true };
+}
+
+/**
+ * Pin the tab's current URL as the (profile × connector) filter (issue #478 P3).
+ * The profile id + connector come from the tab's VALIDATION STATE (never the
+ * untrusted message); the URL is signal-stripped and validated by the shared
+ * pure helper (self.InmoDetect.buildValidationSavePayload). PUTs through the
+ * admin-key channel — the key only lives here — and the server re-derives +
+ * re-validates the portal from the host.
+ */
+async function saveValidationUrl(tabId, url) {
+  const state = await getValidationState(tabId);
+  if (!state.active) {
+    return { success: false, error: { message: 'Esta pestaña no está en modo validación.' } };
+  }
+  const payload = self.InmoDetect.buildValidationSavePayload(
+    { profileId: state.profileId, connector: state.connector },
+    url,
+  );
+  if (!payload) {
+    return { success: false, error: { message: 'La URL de la pestaña no es válida para fijarla.' } };
+  }
+  const { apiUrl, apiKey } = await getApiConfig();
+  const response = await fetch(
+    `${apiUrl}/api/profiles/${payload.profileId}/connector-filters`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'x-admin-key': apiKey },
+      body: JSON.stringify({
+        connector: payload.connector,
+        url: payload.url,
+        source: payload.source,
+      }),
+    },
+  );
+  const body = await response.json().catch(() => null);
+  if (!response.ok || !body || body.success !== true) {
+    const message =
+      (body && (body.error?.message || body.error)) || `HTTP ${response.status}`;
+    return { success: false, error: { message } };
+  }
+  return { success: true, connector: payload.connector, profileId: payload.profileId };
+}
+
+// A closed tab can't be validating — drop its state (mirrors the batch tab
+// reconciliation). Best-effort; failures are ignored.
+chrome.tabs.onRemoved.addListener((tabId) => {
+  endValidation(tabId).catch(() => {
+    /* session state cleanup is best-effort */
+  });
+});
 
 /**
  * POST a discovered filter catalog to the ingest route (issue #336). Unlike

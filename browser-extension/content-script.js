@@ -116,6 +116,14 @@
   const guard = D.createCaptureGuard();
   let loopKey = null; // key of the detail page we're currently watching
 
+  // Validation mode (issue #478 P3): true when this tab was opened from "Validar
+  // filtros" (the `#inmo-validate` signal) — the owner is tuning the search, so
+  // ALL capture is suppressed (no autostart, no banner, no detail auto-capture).
+  // Held here so it SURVIVES in-portal navigation after the fragment is stripped;
+  // seeded from the URL signal on first load and from the background's per-tab
+  // session state on a plain reload / in-portal nav (see initValidationMode).
+  let validationActive = false;
+
   async function autoCaptureEnabled() {
     try {
       const cfg = await chrome.storage.sync.get("autoCaptureEnabled");
@@ -252,6 +260,11 @@
   }
 
   function startAutoCaptureLoop() {
+    // A tab in VALIDATION MODE (#478 P3) never auto-captures a detail page — the
+    // owner is validating the search filters, not capturing. Same early-return
+    // shape as the discover guard below; survives in-portal navigation via the
+    // per-tab `validationActive` flag once the URL fragment is stripped.
+    if (D.inValidationMode(window.location.href, validationActive)) return;
     // A page opened for URL-building DISCOVERY (#inmo-discover) is NOT a capture
     // target — bail so the listing-capture banner/auto-start never fires there
     // (issue #377: the /etl/discovery page was still offering "capturar N").
@@ -378,6 +391,9 @@
 
   function startListingLoop() {
     if (listingHandled) return;
+    // Validation mode (#478 P3): never show the "Capturar todas" banner or
+    // auto-start a batch while the owner is validating this tab's search URL.
+    if (D.inValidationMode(window.location.href, validationActive)) return;
     // Discovery-signalled pages (#inmo-discover) run the enumeration pass only —
     // suppress the "Capturar todas" listing banner/auto-start there (issue #377).
     if (D.discoverSignalPresent(window.location.href)) return;
@@ -451,7 +467,52 @@
     runDiscoveryWhenReady(url, Date.now() + DISCOVER_MAX_WAIT_MS);
   }
 
+  // ── 4. Validation mode bootstrap (issue #478 P3) ──────────────────────────
+  //
+  // On load, decide whether this tab is validating a search URL. Two entry
+  // points, because the signal fragment is stripped off the visible URL:
+  //   • FIRST open from "Validar filtros" → the URL carries
+  //     `#inmo-validate=<pid>:<connector>`: register the tab with the background
+  //     (so suppression survives in-portal navigation) and history.replaceState
+  //     the fragment away so it's never persisted / bookmarked.
+  //   • a plain RELOAD or in-portal navigation (fragment already gone) → ask the
+  //     background whether this tab is still a validation tab.
+  // Sets `validationActive` BEFORE the loops arm so nothing captures.
+  async function initValidationMode() {
+    const url = window.location.href;
+    const payload = D.validateSignalPayload(url);
+    if (payload) {
+      validationActive = true;
+      try {
+        chrome.runtime.sendMessage({
+          type: "START_VALIDATION",
+          profileId: payload.profileId,
+          connector: payload.connector,
+        });
+      } catch {
+        /* background asleep — the URL signal still suppresses this load */
+      }
+      try {
+        const clean = D.stripValidateSignal(url);
+        if (clean !== url) history.replaceState(null, "", clean);
+      } catch {
+        /* replaceState best-effort — the signal is harmless if it lingers */
+      }
+      return;
+    }
+    // No signal on the URL: this may be a reload / in-portal nav of a tab that
+    // is still validating. Ask the background for the per-tab state.
+    try {
+      const state = await chrome.runtime.sendMessage({ type: "GET_VALIDATION_STATE" });
+      if (state && state.active) validationActive = true;
+    } catch {
+      /* background unavailable — default to NOT validating (normal capture) */
+    }
+  }
+
   (async () => {
+    // Resolve validation mode first so the loops below see the right verdict.
+    await initValidationMode();
     // The banner + app-signal auto-start are ALWAYS available (the banner is a
     // manual button; the signal is an explicit per-open intent), independent of
     // the detail auto-capture kill switch.
