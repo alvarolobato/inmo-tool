@@ -208,3 +208,34 @@ test("BAJADA / SUBIDA badge for band-clearing drops and rises; noise, suspect an
   await expect(cardFor(page, "preanchor")).toBeVisible();
   await expect(priceBadge(page, "preanchor")).toHaveCount(0);
 });
+
+test("#448 F: the card shows a below-market rating + a price up/down chip next to the price", async ({
+  page,
+}) => {
+  skipIfNoDb(test);
+
+  await page.goto(`/profiles/${profileId}`);
+  await assertNoErrorSurface(page);
+
+  // The drop card carries the new price-signals row next to its price, with a
+  // BAJADA direction chip (green) — shown right by the price, not only in the
+  // in-body badge row.
+  const bajadaCard = cardFor(page, "bajada");
+  await expect(bajadaCard.getByTestId("price-signals")).toBeVisible();
+  await expect(bajadaCard.getByTestId("price-direction")).toHaveAttribute(
+    "data-direction",
+    "drop",
+  );
+
+  // The rise card: its price/m² is above the pool median → a RED "sobre
+  // mercado" rating, plus a SUBIDA (up) direction chip.
+  const subidaCard = cardFor(page, "subida");
+  await expect(subidaCard.getByTestId("price-rating")).toHaveAttribute(
+    "data-rating",
+    "above",
+  );
+  await expect(subidaCard.getByTestId("price-direction")).toHaveAttribute(
+    "data-direction",
+    "up",
+  );
+});

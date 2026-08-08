@@ -353,6 +353,17 @@ body {
   }
 }
 
+/* #448 H: the same FeedbackControls are reused on the property DETAIL page
+   ("Tu valoración:"), where there is NO `.candidate-card` ancestor to trigger
+   the hover/focus visibility rules above — so the toggles stayed at opacity:0
+   and only appeared once a click set data-active="true" (the "empty block that
+   needs a click" bug). This detail-page row wants them visible from the start,
+   so force full opacity for every toggle inside it regardless of hover/focus. */
+.detail-feedback-controls .feedback-toggle {
+  opacity: 1;
+  transform: none;
+}
+
 /* Users who ask for reduced motion get the visibility change without the
    slide/fade. */
 @media (prefers-reduced-motion: reduce) {

@@ -2252,3 +2252,71 @@ export async function getAdjacentCandidates(
     prevPropertyId: prevRows.length > 0 ? prevRows[0].property_id : null,
   };
 }
+
+/**
+ * #448 F — the profile-scoped price signals the property DETAIL page shows next
+ * to its header price: the below-market RATING (`below_market_pct`) and the
+ * BAJADA/SUBIDA move since the visit anchor. Both are relative to THIS profile's
+ * candidate pool / visit anchor, so they can't be computed by the
+ * profile-agnostic `getPropertyDetail`; the detail API route calls this and
+ * merges the result into the response.
+ *
+ * Reuses the shared `rankedCandidatesCte` verbatim (so the detail page's rating
+ * can never disagree with the feed card's for the same property) and resolves
+ * the visit anchor inline via the same `sp` sub-select pattern
+ * `resolveNoveltyContext` uses — one round-trip. `coldStartParam:"false"`
+ * because the detail page never tiers (it reads a single row's raw signals).
+ * The sanity band is applied in TS by `classifyPriceChange`, exactly as
+ * `listCandidates` does for the card.
+ *
+ * Returns null when the property isn't a ranked candidate of the profile (the
+ * route already 404s that case, but this stays null-safe). Callers should treat
+ * a throw as "no signals" — these are an enhancement, never worth failing the
+ * detail page over.
+ */
+export interface PropertyMarketSignals {
+  below_market_pct: number | null;
+  price_changed: boolean;
+  price_delta_pct: number | null;
+  price_direction: "drop" | "up" | null;
+}
+
+export async function getPropertyMarketSignals(
+  profileId: number,
+  propertyId: number,
+): Promise<PropertyMarketSignals | null> {
+  const { minFrac, maxFrac } = readPriceChangeBand();
+  const rows = await sql<{
+    below_market_pct: string | null;
+    price_delta_pct: string | null;
+  }>(
+    `WITH sp AS (
+       SELECT COALESCE(previous_viewed_at, created_at - interval '1 day') AS anchor_ts
+         FROM search_profile
+        WHERE id = $1
+     ),
+     ${rankedCandidatesCte({
+       warnParam: "$2",
+       anchorParam: "(SELECT anchor_ts FROM sp)",
+       bandMinParam: "$3",
+       bandMaxParam: "$4",
+       coldStartParam: "false",
+     })}
+     SELECT below_market_pct, price_delta_pct
+       FROM ranked
+      WHERE property_id = $5::bigint`,
+    [profileId, WARN_CAVEAT_CODES, minFrac, maxFrac, propertyId],
+  );
+  if (rows.length === 0) return null;
+  const belowMarket =
+    rows[0].below_market_pct !== null ? Number(rows[0].below_market_pct) : null;
+  const rawDelta =
+    rows[0].price_delta_pct !== null ? Number(rows[0].price_delta_pct) : null;
+  const change = classifyPriceChange(rawDelta, minFrac, maxFrac);
+  return {
+    below_market_pct: belowMarket,
+    price_changed: change.price_changed,
+    price_delta_pct: change.price_delta_pct,
+    price_direction: change.price_direction,
+  };
+}

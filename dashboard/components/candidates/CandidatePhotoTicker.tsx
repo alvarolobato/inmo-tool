@@ -49,11 +49,14 @@ export function CandidatePhotoTicker({
   photos,
   href,
   priceLabel,
+  priceSignals,
   children,
 }: {
   photos: string[];
   href: string;
   priceLabel: string;
+  /** #448 F: below-market rating + price up/down chips shown next to the price over the photo. Omitted → just the price. */
+  priceSignals?: ReactNode;
   children: ReactNode;
 }) {
   const [index, setIndex] = useState(0);
@@ -140,23 +143,28 @@ export function CandidatePhotoTicker({
             </div>
           )}
 
-          <p
-            data-testid="candidate-price"
+          <div
             style={{
               position: "absolute",
               left: 0,
               bottom: 0,
-              margin: 0,
-              padding: "10px 10px 6px",
               width: "100%",
-              fontSize: 17,
-              fontWeight: 700,
-              color: "#fff",
+              padding: "12px 10px 6px",
               background: "linear-gradient(to top, rgba(0,0,0,0.72), rgba(0,0,0,0))",
+              display: "flex",
+              flexDirection: "column",
+              gap: 4,
             }}
           >
-            {priceLabel}
-          </p>
+            <p
+              data-testid="candidate-price"
+              style={{ margin: 0, fontSize: 17, fontWeight: 700, color: "#fff" }}
+            >
+              {priceLabel}
+            </p>
+            {/* #448 F: below-market rating + price up/down, next to the price. */}
+            {priceSignals}
+          </div>
         </div>
 
         {children}

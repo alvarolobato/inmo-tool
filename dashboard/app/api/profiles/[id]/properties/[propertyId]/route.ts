@@ -12,6 +12,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getPropertyDetail, isPropertyMatchedForProfile } from "@/lib/property-detail";
+import { getPropertyMarketSignals } from "@/lib/candidates";
 import { getProfileById } from "@/lib/db/profiles";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
@@ -70,7 +71,15 @@ export async function GET(
       );
     }
 
-    return NextResponse.json(detail);
+    // #448 F: profile-scoped price rating + BAJADA/SUBIDA, merged in next to
+    // the profile-agnostic detail. Best-effort — a failure here (or a property
+    // that isn't a ranked candidate) leaves the signals off the response and
+    // the header simply renders no adornments, never an error.
+    const signals = await getPropertyMarketSignals(profileId, propertyId).catch(
+      () => null,
+    );
+
+    return NextResponse.json(signals ? { ...detail, ...signals } : detail);
   } catch (err) {
     console.error(`[${requestId}] Error al cargar el detalle de la propiedad:`, err);
     return NextResponse.json(

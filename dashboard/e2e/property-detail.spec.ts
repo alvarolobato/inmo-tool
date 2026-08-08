@@ -45,6 +45,13 @@ let singleListingPropertyId: number;
 let fotocasaListingId: number;
 let richQualityPropertyId: number;
 let sparseQualityPropertyId: number;
+// #448 F: a property priced clearly below the profile pool's median price/m²
+// (low price, same 70 m²) AND with a recent price drop — so its detail header
+// must show a GREEN "bajo mercado" rating chip and a BAJADA direction chip.
+let belowMarketPropertyId: number;
+// #448 I: a matched candidate with NO coordinates — its detail gallery must
+// omit the map tile cleanly (no broken cell, no error surface).
+let noCoordsPropertyId: number;
 
 test.beforeAll(async () => {
   pool = buildPool();
@@ -207,6 +214,40 @@ test.beforeAll(async () => {
   sparseQualityPropertyId = await insertProperty(`${NAME_PREFIX}Calle Sparse, Madrid`);
   await insertListingWithQuality(sparseQualityPropertyId, "fotocasa", "F", 0.28, 2);
   await markMatched(sparseQualityPropertyId);
+
+  // #448 F: strongly below-market property (150.000€ at 70 m² vs the other
+  // candidates' 250–400k) plus a −25% price drop → GREEN rating + BAJADA.
+  belowMarketPropertyId = await insertProperty(`${NAME_PREFIX}Calle Ganga, Madrid`);
+  const belowMarketListingId = await insertListing(
+    belowMarketPropertyId,
+    "fotocasa",
+    150000,
+    "active",
+    [`https://example.com/${NAME_PREFIX}ganga-1.jpg`],
+  );
+  // The latest observation must land AFTER the visit anchor (this profile is
+  // never-visited → anchor = created_at - 1 day) for the "since last visit"
+  // BAJADA to badge, so the drop is 2 hours ago, the prior price 10 days ago.
+  await pool.query(
+    `INSERT INTO listing_price_history (listing_id, observed_at, price) VALUES
+       ($1, NOW() - INTERVAL '10 days', 200000),
+       ($1, NOW() - INTERVAL '2 hours', 150000)`,
+    [belowMarketListingId],
+  );
+  await markMatched(belowMarketPropertyId);
+
+  // #448 I: matched candidate with no usable coordinates — the map tile must
+  // be omitted cleanly. Direct insert since insertProperty always sets coords.
+  const noCoordsResult = await pool.query<{ id: number }>(
+    `INSERT INTO property (lat, lon, property_type, m2_built, rooms, bathrooms, address)
+     VALUES (NULL, NULL, 'piso', 70, 2, 1, $1) RETURNING id`,
+    [`${NAME_PREFIX}Sin coordenadas, Madrid`],
+  );
+  noCoordsPropertyId = noCoordsResult.rows[0].id;
+  await insertListing(noCoordsPropertyId, "fotocasa", 260000, "active", [
+    `https://example.com/${NAME_PREFIX}sincoords-1.jpg`,
+  ]);
+  await markMatched(noCoordsPropertyId);
 });
 
 test.afterAll(async () => {
@@ -401,6 +442,83 @@ test("no error surface on property detail page", async ({ page }) => {
   await page.goto(`/profiles/${profileId}/properties/${dedupedPropertyId}`);
   await assertNoErrorSurface(page);
   await expect(page.getByTestId("property-detail-page")).toBeVisible();
+});
+
+test("#448 H: the 'Tu valoración' seguir/descartar buttons are visible WITHOUT a click", async ({
+  page,
+}) => {
+  skipIfNoDb(test);
+
+  await page.goto(`/profiles/${profileId}/properties/${dedupedPropertyId}`);
+  await expect(page.getByTestId("property-detail-page")).toBeVisible();
+  await assertNoErrorSurface(page);
+
+  // The controls block renders, and BOTH toggles are actually visible from the
+  // start — the bug was an empty block whose buttons only appeared once a click
+  // set an active state (opacity:0 with no `.candidate-card` hover ancestor).
+  const controls = page.getByTestId("detail-feedback-controls");
+  await expect(controls).toBeVisible();
+  const accept = controls.getByTestId("feedback-accept");
+  const reject = controls.getByTestId("feedback-reject");
+  await expect(accept).toBeVisible();
+  await expect(reject).toBeVisible();
+  // Neither is pre-pressed — they're visible because they render, not because a
+  // verdict already made one the always-visible active button.
+  await expect(accept).toHaveAttribute("aria-pressed", "false");
+  await expect(reject).toHaveAttribute("aria-pressed", "false");
+});
+
+test("#448 F: a below-market property shows a GREEN rating + a BAJADA chip next to the price", async ({
+  page,
+}) => {
+  skipIfNoDb(test);
+
+  await page.goto(`/profiles/${profileId}/properties/${belowMarketPropertyId}`);
+  await expect(page.getByTestId("property-detail-page")).toBeVisible();
+  await assertNoErrorSurface(page);
+
+  const rating = page.getByTestId("price-rating");
+  await expect(rating).toBeVisible();
+  await expect(rating).toHaveAttribute("data-rating", "below");
+  await expect(rating).toContainText(/bajo mercado/i);
+
+  const direction = page.getByTestId("price-direction");
+  await expect(direction).toBeVisible();
+  await expect(direction).toHaveAttribute("data-direction", "drop");
+  await expect(direction).toContainText(/BAJADA/);
+});
+
+test("#448 I: the detail gallery shows a map tile with a circle as its first tile", async ({
+  page,
+}) => {
+  skipIfNoDb(test);
+
+  await page.goto(`/profiles/${profileId}/properties/${dedupedPropertyId}`);
+  await expect(page.getByTestId("property-detail-page")).toBeVisible();
+
+  const mapTile = page.getByTestId("photo-gallery-map-tile");
+  await expect(mapTile).toBeVisible();
+  // The (dynamically, ssr:false) imported Leaflet map mounts inside the tile…
+  await expect(mapTile.locator(".leaflet-container")).toBeVisible();
+  // …and draws the approximate-location circle (an SVG path carrying the class
+  // we set via pathOptions).
+  await expect(page.locator(".property-location-circle")).toHaveCount(1);
+  await assertNoErrorSurface(page);
+});
+
+test("#448 I: the map tile is omitted cleanly for a property with no coordinates", async ({
+  page,
+}) => {
+  skipIfNoDb(test);
+
+  await page.goto(`/profiles/${profileId}/properties/${noCoordsPropertyId}`);
+  await expect(page.getByTestId("property-detail-page")).toBeVisible();
+  await assertNoErrorSurface(page);
+
+  // No coords → no map tile at all, but the gallery (its one photo) still
+  // renders and the page is otherwise fine.
+  await expect(page.getByTestId("photo-gallery-map-tile")).toHaveCount(0);
+  await expect(page.locator('[data-testid="photo-gallery-thumb"]')).toHaveCount(1);
 });
 
 test("candidate list card links through to the property detail page", async ({ page }) => {
