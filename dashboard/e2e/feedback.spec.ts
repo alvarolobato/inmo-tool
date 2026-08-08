@@ -6,7 +6,7 @@
  * browser actually reaches it and the resulting state survives a reload —
  * exactly what EC-1 requires. Skips cleanly if no DB is reachable.
  */
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page, type Locator, type Response as PWResponse } from "@playwright/test";
 import { Pool } from "pg";
 import { adminKey, seedAdminSession } from "./helpers/admin-session";
 
@@ -133,6 +133,45 @@ async function assertNoErrorSurface(page: Page) {
   await expect(page.getByText(/error|hubo un problema|there is no parameter|http 500/i)).toHaveCount(0);
 }
 
+const isFeedbackPost = (r: PWResponse) =>
+  /\/feedback(\?|$)/.test(new URL(r.url()).pathname) && r.request().method() === "POST";
+
+// The candidate FEED fetch (the list itself), not the per-card feedback GET
+// (`/candidates/:id/feedback`) nor the sources GET (`/candidate-sources`) —
+// only the bare `.../candidates` path, method GET.
+const isCandidatesFetch = (r: PWResponse) =>
+  /\/candidates(\?|$)/.test(new URL(r.url()).pathname) && r.request().method() === "GET";
+
+/**
+ * #457: click a state toggle (accept/reject) and WAIT for its persistence POST
+ * to complete before returning. A state click updates optimistically and then
+ * reconciles the button against the server's derived state (FeedbackControls);
+ * firing several transitions back-to-back WITHOUT awaiting each POST lets the
+ * browser deliver the concurrent POSTs — and the server record the events —
+ * out of order, so both the optimistic UI and the persisted "latest event" end
+ * up wrong. That raced ~1-in-3 on CI and tanked unrelated PRs (#412/#449).
+ * Serialising each transition on its POST makes the sequence deterministic
+ * without weakening any assertion — the transitions and their outcomes are all
+ * still proven, just in a guaranteed order (which is what a human clicking one
+ * button at a time actually produces).
+ */
+async function clickStateAndWait(page: Page, button: Locator) {
+  const [res] = await Promise.all([page.waitForResponse(isFeedbackPost), button.click()]);
+  expect(res.ok()).toBe(true);
+  return res;
+}
+
+/**
+ * #457: perform an action that triggers a feed REFETCH (reload, or flipping a
+ * filter/toggle) and wait for that GET to complete before asserting. Without
+ * this gate, a negative assertion (e.g. "the rejected card is gone") can pass
+ * against the transient loading state — the old feed cleared, the new one not
+ * yet arrived — rather than against the refetched feed it means to check.
+ */
+async function actAndWaitForFeed(page: Page, action: () => Promise<unknown>) {
+  await Promise.all([page.waitForResponse(isCandidatesFetch), action()]);
+}
+
 test("reject defers removal: card stays this session, is gone on reload, and the show-rejected toggle un-rejects it (#379)", async ({
   page,
 }) => {
@@ -151,13 +190,7 @@ test("reject defers removal: card stays this session, is gone on reload, and the
   // Reject. Wait for the persistence POST to COMPLETE (not just the optimistic
   // flip) so the reload below observes committed state — a genuine ~1-in-3
   // flake otherwise (the test's bug, not the app's).
-  const [feedbackResponse] = await Promise.all([
-    page.waitForResponse(
-      (r) => /\/feedback(\?|$)/.test(new URL(r.url()).pathname) && r.request().method() === "POST",
-    ),
-    rejectButton.click(),
-  ]);
-  expect(feedbackResponse.ok()).toBe(true);
+  await clickStateAndWait(page, rejectButton);
 
   // Deferred removal (#379): the card does NOT vanish on click — it stays this
   // session, visibly marked (reject pressed + the "Descartada" badge), so the
@@ -170,16 +203,20 @@ test("reject defers removal: card stays this session, is gone on reload, and the
 
   // Next browse: the reject is now excluded server-side, so the rejected card
   // is gone from the default feed — while the bystander candidate stays, so
-  // this proves targeted removal, not an emptied feed.
-  await page.reload();
+  // this proves targeted removal, not an emptied feed. Gate on the feed refetch
+  // (#457) so the "gone" assertion below runs against the reloaded feed, not the
+  // transient loading state.
+  await actAndWaitForFeed(page, () => page.reload());
   await assertNoErrorSurface(page);
   await expect(
     page.locator(`[data-testid="candidate-card"][data-property-id="${bystanderPropertyId}"]`),
   ).toBeVisible();
   await expect(page.locator(cardSel)).toHaveCount(0);
 
-  // Show-rejected toggle: the rejected card reappears, still marked.
-  await page.getByTestId("show-rejected-toggle").check();
+  // Show-rejected toggle: the rejected card reappears, still marked. Flipping it
+  // triggers a feed refetch (includeRejected=true) — wait for it before
+  // asserting the card is back (#457).
+  await actAndWaitForFeed(page, () => page.getByTestId("show-rejected-toggle").check());
   const cardAgain = page.locator(cardSel);
   await expect(cardAgain).toBeVisible();
   await expect(cardAgain.getByTestId("candidate-rejected-badge")).toBeVisible();
@@ -187,19 +224,14 @@ test("reject defers removal: card stays this session, is gone on reload, and the
 
   // Un-reject: clicking the active reject clears the verdict. The card stays
   // (show-rejected is on) but is no longer marked.
-  const [unrejectResponse] = await Promise.all([
-    page.waitForResponse(
-      (r) => /\/feedback(\?|$)/.test(new URL(r.url()).pathname) && r.request().method() === "POST",
-    ),
-    cardAgain.getByTestId("feedback-reject").click(),
-  ]);
-  expect(unrejectResponse.ok()).toBe(true);
+  await clickStateAndWait(page, cardAgain.getByTestId("feedback-reject"));
   await expect(cardAgain.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "false");
   await expect(cardAgain.getByTestId("candidate-rejected-badge")).toHaveCount(0);
 
   // The un-reject persists: with the toggle off, the property is back in the
-  // default feed, unmarked.
-  await page.getByTestId("show-rejected-toggle").uncheck();
+  // default feed, unmarked. The toggle-off triggers a feed refetch — wait for
+  // it before asserting the card reappears (#457).
+  await actAndWaitForFeed(page, () => page.getByTestId("show-rejected-toggle").uncheck());
   const cardDefault = page.locator(cardSel);
   await expect(cardDefault).toBeVisible();
   await expect(cardDefault.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "false");
@@ -216,7 +248,9 @@ test("submitting a note does not change the seguir/descartar toggle state", asyn
   // Playwright doesn't guarantee execution order or isolation between
   // files/workers).
   const card = page.locator(`[data-testid="candidate-card"][data-property-id="${propertyId}"]`);
-  await card.getByTestId("feedback-reject").click();
+  // Wait for the reject to persist (#457) so its reconciliation can't land
+  // during — and clobber — the note submission below.
+  await clickStateAndWait(page, card.getByTestId("feedback-reject"));
   await expect(card.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "true");
 
   await card.getByTestId("feedback-note-toggle").click();
@@ -240,14 +274,19 @@ test("seguir(accept) <-> descartar(reject) transitions replace the active toggle
   // #422: only two state buttons exist now — accept ("Seguir") and reject.
   await expect(card.getByTestId("feedback-star")).toHaveCount(0);
 
-  await card.getByTestId("feedback-accept").click();
+  // Each transition waits for its own POST to commit before the next click
+  // (#457) — un-awaited back-to-back clicks let the concurrent POSTs, and the
+  // recorded events, land out of order, flipping the toggle back and tanking
+  // this assertion ~1-in-3 on CI. Serialising proves every transition in a
+  // guaranteed order without weakening what's asserted.
+  await clickStateAndWait(page, card.getByTestId("feedback-accept"));
   await expect(card.getByTestId("feedback-accept")).toHaveAttribute("aria-pressed", "true");
   await expect(card.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "false");
   // Accepting a property marks it "en seguimiento".
   await expect(card.getByTestId("candidate-tracked-badge")).toBeVisible();
   await expect(card).toHaveAttribute("data-tracked", "true");
 
-  await card.getByTestId("feedback-reject").click();
+  await clickStateAndWait(page, card.getByTestId("feedback-reject"));
   await expect(card.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "true");
   await expect(card.getByTestId("feedback-accept")).toHaveAttribute("aria-pressed", "false");
   await expect(card.getByTestId("candidate-tracked-badge")).toHaveCount(0);
@@ -255,19 +294,14 @@ test("seguir(accept) <-> descartar(reject) transitions replace the active toggle
   // Land on 'accept' (a state the default feed still shows — #379 hides only
   // 'reject' on reload) and gate the reload on its write committing, so the
   // reload observes the latest event, not an earlier one.
-  const [acceptResponse] = await Promise.all([
-    page.waitForResponse(
-      (r) => /\/feedback(\?|$)/.test(new URL(r.url()).pathname) && r.request().method() === "POST",
-    ),
-    card.getByTestId("feedback-accept").click(),
-  ]);
-  expect(acceptResponse.ok()).toBe(true);
+  await clickStateAndWait(page, card.getByTestId("feedback-accept"));
   await expect(card.getByTestId("feedback-accept")).toHaveAttribute("aria-pressed", "true");
   await expect(card.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "false");
 
   // Survives a reload as the latest of the transitions, not an earlier one —
-  // proves "current state" really reads the most recent event.
-  await page.reload();
+  // proves "current state" really reads the most recent event. Gate on the feed
+  // refetch (#457) so the assertion runs against the reloaded feed.
+  await actAndWaitForFeed(page, () => page.reload());
   await assertNoErrorSurface(page);
   const cardAfterReload = page.locator(`[data-testid="candidate-card"][data-property-id="${propertyId}"]`);
   await expect(cardAfterReload.getByTestId("feedback-accept")).toHaveAttribute("aria-pressed", "true");
@@ -290,18 +324,13 @@ test("#422: accepting a property adds it to the 'En seguimiento' view; the star 
 
   // Follow (accept) the property, waiting for the write to commit so the
   // seguimiento view below reads committed state.
-  const [acceptResponse] = await Promise.all([
-    page.waitForResponse(
-      (r) => /\/feedback(\?|$)/.test(new URL(r.url()).pathname) && r.request().method() === "POST",
-    ),
-    card.getByTestId("feedback-accept").click(),
-  ]);
-  expect(acceptResponse.ok()).toBe(true);
+  await clickStateAndWait(page, card.getByTestId("feedback-accept"));
   await expect(card.getByTestId("candidate-tracked-badge")).toBeVisible();
 
   // Turn on the "En seguimiento" preset: only the tracked property remains,
-  // the (untracked) bystander drops out.
-  await page.getByTestId("tracked-only-toggle").check();
+  // the (untracked) bystander drops out. The preset triggers a feed refetch
+  // (state=accept) — wait for it before asserting the narrowed feed (#457).
+  await actAndWaitForFeed(page, () => page.getByTestId("tracked-only-toggle").check());
   await assertNoErrorSurface(page);
   const trackedCard = page.locator(cardSel);
   await expect(trackedCard).toBeVisible();
