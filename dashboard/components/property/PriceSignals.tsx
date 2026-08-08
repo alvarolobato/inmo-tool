@@ -144,6 +144,8 @@ export function PriceDirectionBadge({
 }
 
 export function PriceSignals({
+  price,
+  align = "center",
   belowMarketPct,
   belowMarketBase,
   belowMarketComparables,
@@ -152,6 +154,21 @@ export function PriceSignals({
   priceDeltaPct,
   style,
 }: {
+  /**
+   * #460 wrap fix: when the price element is passed in, PriceSignals owns the
+   * whole `[price][below-market chip]  [direction chip]` layout and guarantees
+   * the price and the below-market rating stay on ONE line — they live in an
+   * inner `flex-wrap: nowrap` group so they can never separate onto different
+   * lines at narrow card widths. Only the less-critical BAJADA/SUBIDA direction
+   * chip is allowed to wrap below when space is truly tight.
+   *
+   * When omitted (legacy signals-only usage, e.g. unit tests), the component
+   * behaves exactly as before: it renders just the badges and returns `null`
+   * when there is no signal at all.
+   */
+  price?: ReactNode;
+  /** Cross-axis alignment of the price+rating group (h1 detail header wants "baseline"). */
+  align?: "center" | "baseline";
   belowMarketPct: number | null | undefined;
   /** #461-forward: comparison base behind the rating, for the tooltip. */
   belowMarketBase?: BelowMarketBase;
@@ -173,23 +190,60 @@ export function PriceSignals({
     priceDeltaPct !== undefined &&
     Number.isFinite(priceDeltaPct);
 
-  if (!showRating && !showDirection) return null;
+  const rating = showRating ? (
+    <BelowMarketRatingBadge
+      belowMarketPct={belowMarketPct}
+      base={belowMarketBase}
+      comparables={belowMarketComparables}
+    />
+  ) : null;
+  const direction = showDirection ? (
+    <PriceDirectionBadge direction={priceDirection} deltaPct={priceDeltaPct} />
+  ) : null;
 
+  // Legacy signals-only mode: caller renders the price itself, we render only
+  // the badges (and nothing when there is no signal — the "no badge" rule).
+  if (price === undefined) {
+    if (!rating && !direction) return null;
+    return (
+      <span
+        data-testid="price-signals"
+        style={{ display: "inline-flex", flexWrap: "wrap", gap: 4, alignItems: "center", ...style }}
+      >
+        {rating}
+        {direction}
+      </span>
+    );
+  }
+
+  // Price mode (#460): the price + below-market chip are ONE non-wrapping unit,
+  // sitting immediately next to each other on the same line at every width.
+  // Only the direction chip may wrap to the next line when space runs out.
   return (
-    <span
+    <div
       data-testid="price-signals"
-      style={{ display: "inline-flex", flexWrap: "wrap", gap: 4, alignItems: "center", ...style }}
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        alignItems: align,
+        columnGap: 8,
+        rowGap: 4,
+        minWidth: 0,
+        ...style,
+      }}
     >
-      {showRating && (
-        <BelowMarketRatingBadge
-          belowMarketPct={belowMarketPct}
-          base={belowMarketBase}
-          comparables={belowMarketComparables}
-        />
-      )}
-      {showDirection && (
-        <PriceDirectionBadge direction={priceDirection} deltaPct={priceDeltaPct} />
-      )}
-    </span>
+      <span
+        style={{
+          display: "inline-flex",
+          flexWrap: "nowrap",
+          alignItems: align === "baseline" ? "baseline" : "center",
+          columnGap: 8,
+        }}
+      >
+        {price}
+        {rating}
+      </span>
+      {direction}
+    </div>
   );
 }

@@ -59,19 +59,46 @@ async function seedProfile(): Promise<number> {
   return res.rows[0].id;
 }
 
-/** Seeds a matched, scored candidate (fixed 70 m², so price drives €/m²). */
-async function seedProp(key: string, price: number, score: number | null): Promise<number> {
+/**
+ * Seeds a matched, scored candidate (fixed 70 m², so price drives €/m²).
+ *
+ * `dropFrom` (optional): seeds a price history that drops from that price to
+ * `price` AFTER the profile's visit anchor, so the card also shows a BAJADA
+ * direction chip. Used to stress the price line with THREE elements (price +
+ * below-market chip + direction chip) at the min card width — the exact #460
+ * wrap scenario, where the below-market chip must stay on the price line.
+ */
+async function seedProp(
+  key: string,
+  price: number,
+  score: number | null,
+  dropFrom?: number,
+): Promise<number> {
   const prop = await pool.query<{ id: number }>(
     `INSERT INTO property (lat, lon, property_type, m2_built, address)
      VALUES ($1, $2, 'piso', 70, $3) RETURNING id`,
     [MADRID_SOL[0], MADRID_SOL[1], `${NAME_PREFIX}${key}, Madrid`],
   );
   const propertyId = prop.rows[0].id;
-  await pool.query(
+  const listing = await pool.query<{ id: number }>(
     `INSERT INTO listing (property_id, source, external_id, status, operation, current_price, first_seen_at, last_seen_at)
-     VALUES ($1, 'fotocasa', $2, 'active', 'sale', $3, NOW() - interval '3 days', NOW())`,
+     VALUES ($1, 'fotocasa', $2, 'active', 'sale', $3, NOW() - interval '3 days', NOW()) RETURNING id`,
     [propertyId, `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`, price],
   );
+  if (dropFrom !== undefined) {
+    // A drop from `dropFrom` → `price`, both observations RECENT (last hour) so
+    // the move lands AFTER the visit anchor and produces a badge-worthy BAJADA
+    // (within the 1%–60% band). The anchor is `previous_viewed_at`, which the
+    // first page visit shifts to `last_viewed_at` (seeded at -2h) and the 30-min
+    // debounce then holds stable — so a sub-2h move stays visible across every
+    // repeat-each run (a -1d move would fall before the shifted anchor).
+    await pool.query(
+      `INSERT INTO listing_price_history (listing_id, observed_at, price) VALUES
+         ($1, NOW() - interval '90 minutes', $2),
+         ($1, NOW() - interval '30 minutes', $3)`,
+      [listing.rows[0].id, dropFrom, price],
+    );
+  }
   await pool.query(
     `INSERT INTO profile_listing_state (profile_id, property_id, matched, score, score_kind)
      VALUES ($1, $2, true, $3, $4)`,
@@ -96,14 +123,19 @@ test.beforeAll(async () => {
   }
 
   profileId = await seedProfile();
+  // 7-digit prices (millones) so the price LABEL is wide — the #460 wrap only
+  // bites when the price + chips genuinely can't share one line at the min card
+  // width, and a wide price is what makes that reproducible & deterministic.
   // At-market fillers establish the pool median (≥ MIN_POOL_SIZE priced).
   for (let i = 0; i < 3; i++) {
-    await seedProp(`filler${i}`, 300000, 0.3);
+    await seedProp(`filler${i}`, 3000000, 0.3);
   }
-  // A DEAL: ~40% below the 300k pool median → GREEN chip.
-  await seedProp("deal", 180000, 0.5);
+  // A DEAL: ~40% below the 3M pool median → GREEN chip. Also dropped from 3.2M
+  // → BAJADA direction chip, so its price line carries THREE elements (price +
+  // below-market chip + direction chip): the exact narrow-width wrap scenario.
+  await seedProp("deal", 1800000, 0.5, 3200000);
   // A PREMIUM: above the pool median → RED chip.
-  await seedProp("premium", 480000, 0.5);
+  await seedProp("premium", 4800000, 0.5);
 });
 
 test.afterAll(async () => {
@@ -142,6 +174,14 @@ test("#460: the below-market chip sits next to the price, is green/red with a si
 }) => {
   skipIfNoDb(test);
 
+  // #460: render at the TRUE min card width. The feed grid is
+  // `repeat(auto-fill, minmax(280px, 1fr))` (CandidateList) — a hard 280px
+  // minimum. A narrow viewport forces exactly one 280px column, the worst case
+  // where the price + below-market chip + direction chip must share one line.
+  // At the default 1280px viewport cards are wide and the wrap never bites, so
+  // the bug was invisible here; this pins the real narrow width deterministically.
+  await page.setViewportSize({ width: 340, height: 900 });
+
   await page.goto(`/profiles/${profileId}`);
   await assertNoErrorSurface(page);
 
@@ -155,14 +195,23 @@ test("#460: the below-market chip sits next to the price, is green/red with a si
   await expect(dealRating).toContainText(/−\d+%/);
   await expect(dealRating).not.toContainText(/bajo mercado/i);
 
+  // The deal ALSO carries a BAJADA direction chip, so its price line has THREE
+  // elements (price + below-market chip + direction chip). At the min card width
+  // that no longer fits on one line — the exact #460 wrap. The below-market chip
+  // must still stay WITH the price (only the less-critical direction chip may
+  // wrap): this is what the pre-fix layout got wrong (the whole signals group
+  // wrapped below the price), and what the nowrap price+chip group fixes.
+  await expect(deal.getByTestId("price-direction")).toBeVisible();
+
   // (1): the chip is on the SAME line, immediately after the price. We encode
   // that INTENT robustly rather than pinning a brittle exact pixel gap (a tight
   // x-gap threshold flaked under CI render/font timing — seen ~39.5 vs a ~25px
-  // bound). Both the price (<p>) and the chip live in one `alignItems:center`
-  // flex row that wraps only when they truly don't fit, so "same line" means
-  // their vertical centres coincide; a stacked/wrapped chip would sit a full
-  // line-height below and fail. The chip must also sit to the RIGHT of the
-  // price and be reasonably close (a generous gap, not an exact pixel value).
+  // bound). The price (<p>) and the below-market chip live in one
+  // `flex-wrap: nowrap` group (PriceSignals price mode), so they can never land
+  // on different lines — "same line" means their vertical centres coincide; a
+  // stacked/wrapped chip would sit a full line-height below and fail. The chip
+  // must also sit to the RIGHT of the price and be reasonably close (a generous
+  // gap, not an exact pixel value).
   await expect(dealRating).toBeVisible();
   const priceBox = await deal.getByTestId("candidate-price").boundingBox();
   const ratingBox = await dealRating.boundingBox();

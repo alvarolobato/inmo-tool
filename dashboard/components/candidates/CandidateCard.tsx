@@ -212,6 +212,17 @@ export function CandidateCard({
         priceLabel={priceLabel}
         priceSignals={
           <PriceSignals
+            // #460: the price lives INSIDE PriceSignals so the price and the
+            // below-market chip form one non-wrapping unit and never split onto
+            // separate lines at narrow card widths.
+            price={
+              <p
+                data-testid="candidate-price"
+                style={{ margin: 0, fontSize: 17, fontWeight: 700, color: "#fff", whiteSpace: "nowrap" }}
+              >
+                {priceLabel}
+              </p>
+            }
             belowMarketPct={candidate.below_market_pct}
             priceChanged={candidate.price_changed}
             priceDirection={candidate.price_direction}

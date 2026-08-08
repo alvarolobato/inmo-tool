@@ -80,18 +80,21 @@ export function PropertyHeader({ property }: { property: PropertyDetail }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: "var(--fg)" }}>
-            {minPrice !== null ? fmtEUR0(minPrice) : "Precio no disponible"}
-          </h1>
-          {/* #448 F: below-market rating (green/red) + price up/down, next to the price. */}
-          <PriceSignals
-            belowMarketPct={property.below_market_pct}
-            priceChanged={property.price_changed}
-            priceDirection={property.price_direction}
-            priceDeltaPct={property.price_delta_pct}
-          />
-        </div>
+        {/* #448 F / #460: the price + below-market rating (green/red) are one
+            non-wrapping unit; only the BAJADA/SUBIDA direction chip may wrap. */}
+        <PriceSignals
+          price={
+            <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: "var(--fg)", whiteSpace: "nowrap" }}>
+              {minPrice !== null ? fmtEUR0(minPrice) : "Precio no disponible"}
+            </h1>
+          }
+          align="baseline"
+          belowMarketPct={property.below_market_pct}
+          priceChanged={property.price_changed}
+          priceDirection={property.price_direction}
+          priceDeltaPct={property.price_delta_pct}
+          style={{ minWidth: 0 }}
+        />
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           {/* Extraction-quality grade (#80) — "genuinely thin listing" vs
               "our connector under-extracted this one". Absent until a listing
