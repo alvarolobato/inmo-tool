@@ -67,6 +67,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
   // no throwaway unfiltered round-trip). SSR-safe: nothing fetches on the server.
   const [filtersReady, setFiltersReady] = useState(false);
   const {
+    q,
     source,
     occupancy,
     conditionSel,
@@ -152,6 +153,10 @@ export function CandidateList({ profileId }: { profileId: number }) {
         window.location.origin,
       );
       if (afterCursor !== null) url.searchParams.set("cursor", afterCursor);
+      // #470 free-text search — narrows the feed to properties whose search doc
+      // matches. Combines (AND) with every other filter and the cursor, exactly
+      // like `source`; changing it resets to page 1 via fetchPage's identity.
+      if (q !== "") url.searchParams.set("q", q);
       // Combines with pagination (cursor) rather than replacing it (#265).
       if (source !== null) url.searchParams.set("source", source);
       // #310 filters. `conditionSel` splits into condition + renovation params.
@@ -206,6 +211,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
     },
     [
       profileId,
+      q,
       source,
       occupancy,
       conditionSel,
@@ -365,6 +371,45 @@ export function CandidateList({ profileId }: { profileId: number }) {
           >
             Todavía no sigues ninguna propiedad. Pulsa &quot;Seguir&quot; (✓) en
             una tarjeta para añadirla a tu seguimiento.
+          </p>
+        </div>
+      );
+    }
+    // #470: a free-text search matched nothing. More specific than the generic
+    // filter-narrowed message below and than source/below-market — say so and
+    // offer a one-click way out. Placed after the assessment/tracked branches
+    // (per plan) so those more structural causes take precedence.
+    if (q !== "") {
+      return (
+        <div>
+          {filterBar}
+          <p
+            data-testid="no-candidates-for-search"
+            style={{
+              marginTop: 16,
+              fontSize: 13,
+              color: "var(--fg-muted)",
+              margin: 0,
+            }}
+          >
+            Sin resultados para «{q}». Prueba con otros términos o quita la
+            búsqueda.{" "}
+            <button
+              type="button"
+              data-testid="clear-search-empty-state"
+              onClick={() => updateFilters({ ...filters, q: "" })}
+              style={{
+                padding: 0,
+                border: "none",
+                background: "transparent",
+                color: "var(--accent)",
+                cursor: "pointer",
+                fontSize: 13,
+                textDecoration: "underline",
+              }}
+            >
+              Quitar búsqueda
+            </button>
           </p>
         </div>
       );

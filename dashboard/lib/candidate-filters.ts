@@ -24,6 +24,13 @@
 export type CandidateView = "all" | "seguimiento" | "descartadas";
 
 export interface CandidateFilters {
+  /**
+   * #470 free-text search across the ad description AND every other searchable
+   * field (address, references, AI-assessment labels — the materialized
+   * `property_search_doc`). `""` = no search. Param: `q` (the same name the API
+   * accepts, P1). Lives in the always-visible primary row, not the popover.
+   */
+  q: string;
   /** #265 portal filter. `null` = all sources. Param: `source`. */
   source: string | null;
   /** #310 occupancy (occupied/free). Param: `occupancy`. */
@@ -56,6 +63,7 @@ export interface CandidateFilters {
 }
 
 export const DEFAULT_CANDIDATE_FILTERS: CandidateFilters = {
+  q: "",
   source: null,
   occupancy: "",
   conditionSel: "",
@@ -102,6 +110,7 @@ export function moreFiltersActiveCount(f: CandidateFilters): number {
  */
 export function hasActiveFilters(f: CandidateFilters): boolean {
   return (
+    f.q !== "" ||
     f.source !== null ||
     f.minDiscount !== "" ||
     f.hasAlerts ||
@@ -115,6 +124,7 @@ export function parseCandidateFilters(search: string): CandidateFilters {
   const p = new URLSearchParams(search);
   const view = p.get("view");
   return {
+    q: p.get("q") ?? "",
     source: p.get("source"),
     occupancy: p.get("occupancy") ?? "",
     conditionSel: p.get("cond") ?? "",
@@ -135,6 +145,7 @@ export function parseCandidateFilters(search: string): CandidateFilters {
  */
 export function candidateFiltersToParams(f: CandidateFilters): URLSearchParams {
   const p = new URLSearchParams();
+  if (f.q !== "") p.set("q", f.q);
   if (f.source !== null) p.set("source", f.source);
   if (f.occupancy !== "") p.set("occupancy", f.occupancy);
   if (f.conditionSel !== "") p.set("cond", f.conditionSel);
