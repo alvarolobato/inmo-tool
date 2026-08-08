@@ -1265,8 +1265,22 @@ CREATE TABLE IF NOT EXISTS connector_registry (
     -- connector with an empty list, so an unconfirmed filter never ships
     -- as a control that appears to work but doesn't.
     supported_filters         JSONB        NOT NULL DEFAULT '[]'::jsonb,
+    -- Issue #478 (Validar filtros): the host suffix an owner-pinned search URL
+    -- must fall under for this connector (NULL = does not accept a pinned URL:
+    -- capture-only portals and the non-tunable sitemap/API connectors). Read by
+    -- the dashboard's connector-filters PUT route to validate a pinned URL's
+    -- host server-side. supports_search_override is whether discover() actually
+    -- CONSUMES a pinned URL yet (false for all connectors in Phase 4 — the
+    -- recall wiring lands per-connector in Phase 5).
+    override_host_suffix      TEXT,
+    supports_search_override  BOOLEAN      NOT NULL DEFAULT false,
     updated_at                TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+
+-- Idempotent columns for existing databases (the CREATE above only runs on a
+-- fresh install). Issue #478.
+ALTER TABLE connector_registry ADD COLUMN IF NOT EXISTS override_host_suffix TEXT;
+ALTER TABLE connector_registry ADD COLUMN IF NOT EXISTS supports_search_override BOOLEAN NOT NULL DEFAULT false;
 
 -- Issue #217 (D-030): per-(connector, scope) "when did this geography last
 -- actually get a discover() attempt" bookkeeping — what makes scope
@@ -2003,6 +2017,30 @@ CREATE TRIGGER trg_profile_connector_filter_set_updated_at
     BEFORE UPDATE ON profile_connector_filter
     FOR EACH ROW
     EXECUTE FUNCTION set_updated_at();
+
+
+-- Issue #478 P4 (Validar filtros): per-(profile × connector) preview of what
+-- the ETL's discover() will actually execute for a profile — the entry URL /
+-- sitemap / endpoint plus an honest note for the non-tunable connectors. The
+-- ETL computes these OFFLINE (pure geography resolution + the connector's own
+-- _search_url()) and upserts them each scheduler cycle and after a profile
+-- quick-refresh (etl.orchestrator.publish_search_previews); the "Validar
+-- filtros" page reads them for its ETL-connectors section. `previews` is the
+-- JSON-serialised list[SearchPreview] (label/url/kind/tunable/notes). Rows for
+-- an archived/deleted profile are pruned by publish_search_previews (and
+-- hard-deleted via the FK cascade), so a stale profile never lingers here.
+CREATE TABLE IF NOT EXISTS connector_search_preview (
+    profile_id   BIGINT      NOT NULL REFERENCES search_profile(id) ON DELETE CASCADE,
+    connector    TEXT        NOT NULL,
+    previews     JSONB       NOT NULL,
+    computed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (profile_id, connector)
+);
+
+-- The page loads every preview for one profile in a single shot
+-- (WHERE profile_id = $1) — the PK's leading column already serves that, so no
+-- extra index is needed. ANALYZE so the planner has stats on a fresh install.
+ANALYZE connector_search_preview;
 
 
 -- ============================================================

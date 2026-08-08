@@ -88,6 +88,35 @@ Throttle = Callable[[], None]
 
 
 @dataclass(frozen=True)
+class SearchPreview:
+    """What discover() will actually execute for a scope — for the "Validar
+    filtros" page (issue #478 P4).
+
+    A pure, offline description of the search a connector would run for a
+    given profile scope: the entry URL (or endpoint) it hits, what KIND of
+    request that is, whether the connector can accept an owner-pinned URL as
+    its recall source, and an honest note when there is nothing to tune.
+
+    `search_previews()` builds these by REUSING the same `_search_url()` /
+    module constants `discover()` uses, so a preview can never drift from what
+    the connector actually does (that's the per-connector pytest contract).
+
+    - `url` is None when the scope resolves to no geography this connector
+      covers (a degraded row the page renders with `notes`).
+    - `tunable` mirrors `supports_search_override` semantics for the page: a
+      connector with a real, host-scoped search URL the owner could pin. The
+      sitemap/API connectors whose recall is national/complete are `tunable
+      = False` with a note explaining the filtering is by data, not by URL.
+    """
+
+    label: str
+    url: str | None
+    kind: Literal["search_page", "sitemap", "api"]
+    tunable: bool
+    notes: str | None = None
+
+
+@dataclass(frozen=True)
 class ConnectorScope:
     """What a connector should look for.
 
@@ -382,6 +411,36 @@ class Connector(ABC):
     # docs/architecture/connectors.md) can never ship as a control that
     # looks functional but isn't.
     supported_filters: tuple[str, ...] = ()
+
+    # Issue #478 (Validar filtros): the host suffix an owner-pinned search URL
+    # must fall under for this connector, published to `connector_registry` by
+    # sync_connector_registry() so the dashboard's PUT
+    # /api/profiles/[id]/connector-filters route can validate a pinned URL's
+    # host server-side (never client-claimed — #476). None means this connector
+    # does not accept a pinned URL at all: the capture-only portals (their
+    # override lives on the TS side) and the non-tunable sitemap/API connectors
+    # (cimenta2/vivantial/buildingcenter/escogecasa — national/complete recall,
+    # nothing to pin) leave it None.
+    override_host_suffix: str | None = None
+
+    # Whether discover() actually CONSUMES a pinned `ConnectorScope.override_url`
+    # as its entry URL. False for every connector in Phase 4 — the page can save
+    # a pin against `override_host_suffix`, but the recall wiring
+    # (`scope.override_url` → discover()) lands per-connector in Phase 5. Kept
+    # distinct from `override_host_suffix` so a connector can advertise "you may
+    # pin a URL here" before its discover() honours it.
+    supports_search_override: bool = False
+
+    def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
+        """What discover() would execute for `scope`, for the Validar filtros page.
+
+        Pure and offline — resolves geography against the local gazetteer and
+        reuses the connector's own `_search_url()`/constants, issuing no network
+        request. Default `[]` means "no ETL preview" (the capture-only portals,
+        whose preview is produced on the TypeScript side). Every HTTP connector
+        overrides this (issue #478 P4).
+        """
+        return []
 
     # Issue #143 (fetch-budget / skip-if-seen): minimum seconds between two
     # real fetch_detail() calls for the same already-known external_id.

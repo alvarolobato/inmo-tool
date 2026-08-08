@@ -128,6 +128,7 @@ from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
     RawListing,
+    SearchPreview,
     Throttle,
 )
 from etl.connectors.extraction import first_present, scoped_text
@@ -468,6 +469,42 @@ class SolviaConnector(Connector):
             return _resolve_geography(scope)
         except UnresolvableGeographyError:
             return unresolvable_scope_key(scope)
+
+    # Issue #478: an owner-pinned solvia URL may become this connector's recall
+    # source for a profile (discover() wiring is Phase 5).
+    override_host_suffix = "solvia.es"
+
+    def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
+        """`kind="sitemap"`: discover() enumerates the provincia's municipality
+        pages from the sitemap index — the same `_SITEMAP_INDEX_URL` its first
+        request hits."""
+        try:
+            provincia = _resolve_geography(scope)
+        except UnresolvableGeographyError:
+            provincia = None
+        if provincia is None:
+            return [
+                SearchPreview(
+                    label="Solvia",
+                    url=None,
+                    kind="sitemap",
+                    tunable=True,
+                    notes="El perfil no resuelve a una provincia que este conector cubra.",
+                )
+            ]
+        return [
+            SearchPreview(
+                label=f"Solvia — {provincia}",
+                url=_SITEMAP_INDEX_URL,
+                kind="sitemap",
+                tunable=True,
+                notes=(
+                    f"Barre las páginas de municipio de la provincia "
+                    f"'{provincia}' enumeradas en el sitemap; el filtrado fino "
+                    f"es por datos."
+                ),
+            )
+        ]
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         # _resolve_geography can raise UnresolvableGeographyError, left to

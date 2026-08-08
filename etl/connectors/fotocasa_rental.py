@@ -134,6 +134,7 @@ from etl.connectors.base import (
     ConnectorScope,
     ListingUnavailableError,
     RawListing,
+    SearchPreview,
     Throttle,
 )
 from etl.connectors.fotocasa import (
@@ -210,6 +211,36 @@ class FotocasaRentalConnector(FotocasaConnector):
         except UnresolvableGeographyError:
             return unresolvable_scope_key(scope)
 
+    def _rental_search_url(self, geography: str) -> str:
+        """The single unfiltered rental search page discover() enters from —
+        distinct signature from the sale connector's `_search_url()`."""
+        return f"{_BASE_URL}/es/alquiler/viviendas/{geography}/{_ZONE_SLUG_ALL}/l"
+
+    def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
+        """Reuses `_rental_search_url()` — the exact helper discover() uses."""
+        try:
+            geography = _resolve_geography(scope)
+        except UnresolvableGeographyError:
+            geography = None
+        if geography is None:
+            return [
+                SearchPreview(
+                    label="Fotocasa (alquiler)",
+                    url=None,
+                    kind="search_page",
+                    tunable=True,
+                    notes="El perfil no resuelve a una geografía que este conector cubra.",
+                )
+            ]
+        return [
+            SearchPreview(
+                label=f"Fotocasa (alquiler) — {geography}",
+                url=self._rental_search_url(geography),
+                kind="search_page",
+                tunable=True,
+            )
+        ]
+
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         # Reset before this scope's own sweep — a scope that raises partway
         # through must not leave a prior scope's records for fetch_detail()
@@ -239,7 +270,7 @@ class FotocasaRentalConnector(FotocasaConnector):
                 f"hyphenated slug like '{geography}-capital' instead"
             )
 
-        url = f"{_BASE_URL}/es/alquiler/viviendas/{geography}/{_ZONE_SLUG_ALL}/l"
+        url = self._rental_search_url(geography)
         throttle()
         try:
             response = requests.get(

@@ -7,6 +7,9 @@ import { CAPTURE_PORTALS } from "@/lib/worklist";
 import { portalTitle } from "@/lib/captura-tasks";
 import { decodeFilterUrl } from "@/lib/filter-validation";
 import { FilterValidationRow } from "@/components/profiles/FilterValidationRow";
+import { EtlConnectorPreviewRow } from "@/components/profiles/EtlConnectorPreviewRow";
+import { RecalcularPreviewsButton } from "@/components/profiles/RecalcularPreviewsButton";
+import { getEtlConnectorPreviews } from "@/lib/db/connector-search-preview";
 import type { LoosenedConstraint } from "@/lib/search-url";
 import type { ProfileConnectorFilterSource } from "@/lib/db/profile-connector-filter";
 
@@ -58,9 +61,10 @@ export default async function ValidarFiltrosPage({
   const profile = await getProfileById(id);
   if (!profile || profile.archived_at !== null) notFound();
 
-  const [tasks, overrides] = await Promise.all([
+  const [tasks, overrides, etlPreviews] = await Promise.all([
     resolveSearchTasks(profile.scope, id),
     findOverridesForProfile(id),
+    getEtlConnectorPreviews(id).catch(() => []),
   ]);
 
   const rows: FilterRowModel[] = tasks.map((task) => {
@@ -167,25 +171,55 @@ export default async function ValidarFiltrosPage({
         </div>
       </section>
 
-      <section style={{ marginTop: 24 }}>
-        <h2 style={{ fontSize: 15, fontWeight: 600, color: "var(--fg)", margin: "0 0 10px" }}>
-          Conectores ETL
-        </h2>
-        <p
-          data-testid="validar-filtros-etl-placeholder"
-          style={{
-            fontSize: 12,
-            color: "var(--fg-muted)",
-            border: "1px dashed var(--border)",
-            borderRadius: 10,
-            padding: "12px 14px",
-            background: "var(--bg-1)",
-          }}
-        >
-          Previsualización de conectores ETL: Fase 4. Aquí aparecerá, por cada conector HTTP, la
-          petición real que va a ejecutar (URL / sitemap / endpoint) y la opción de fijar su filtro
-          cuando sea afinable.
+      <section style={{ marginTop: 24 }} data-testid="validar-filtros-etl-section">
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+          <h2 style={{ fontSize: 15, fontWeight: 600, color: "var(--fg)", margin: 0 }}>
+            Conectores ETL
+          </h2>
+          <span style={{ marginLeft: "auto" }}>
+            <RecalcularPreviewsButton />
+          </span>
+        </div>
+        <p style={{ fontSize: 12, color: "var(--fg-muted)", margin: "0 0 10px", lineHeight: 1.5 }}>
+          Por cada conector HTTP, la petición que va a ejecutar el ETL para este perfil (URL de
+          búsqueda, sitemap o endpoint). Los afinables aceptan fijar una URL; los que barren a nivel
+          nacional filtran por datos y son de solo lectura.
         </p>
+        {etlPreviews.length === 0 ? (
+          <p
+            data-testid="validar-filtros-etl-empty"
+            style={{
+              fontSize: 12,
+              color: "var(--fg-muted)",
+              border: "1px dashed var(--border)",
+              borderRadius: 10,
+              padding: "12px 14px",
+              background: "var(--bg-1)",
+            }}
+          >
+            Aún no hay previsualizaciones de conectores ETL para este perfil. Se calcularán en la
+            próxima ejecución del ETL — o pulsa «Recalcular».
+          </p>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {etlPreviews.map((row) => {
+              const pin = overrides.find((o) => o.connector === row.connector && o.section_key === "");
+              return (
+                <EtlConnectorPreviewRow
+                  key={row.connector}
+                  profileId={id}
+                  connector={row.connector}
+                  preview={row.previews[0] ?? null}
+                  tunable={row.overrideHostSuffix !== null}
+                  computedAt={row.computedAt}
+                  overridden={Boolean(pin)}
+                  pinnedUrl={pin ? pin.url : null}
+                  source={pin?.source}
+                />
+              );
+            })}
+          </div>
+        )}
       </section>
     </main>
   );

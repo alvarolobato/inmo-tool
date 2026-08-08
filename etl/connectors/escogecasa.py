@@ -85,6 +85,7 @@ from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
     RawListing,
+    SearchPreview,
     Throttle,
 )
 from etl.connectors.escogecasa_mapping import (
@@ -356,6 +357,23 @@ class EscogecasaConnector(Connector):
         if place is None:
             return None
         return f"escogecasa:{place.province}:{place.name}"
+
+    def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
+        """Non-tunable: discover() POSTs a bounding box to the results loader
+        endpoint — it is not a GET URL an owner can open and tune. `_SEARCH_ACTION`
+        is exactly the endpoint discover() posts to; the filtering is by data."""
+        return [
+            SearchPreview(
+                label="Escogecasa (Abanca) — búsqueda por bbox",
+                url=_SEARCH_ACTION,
+                kind="api",
+                tunable=False,
+                notes=(
+                    "Búsqueda por POST de un bounding box a este endpoint; no es "
+                    "una URL GET afinable — el filtrado es por datos."
+                ),
+            )
+        ]
 
     def _scope_bbox(
         self, scope: ConnectorScope

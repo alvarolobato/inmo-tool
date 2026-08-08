@@ -144,7 +144,13 @@ import logging
 
 import requests
 
-from etl.connectors.base import ConnectorError, ConnectorScope, Throttle
+from etl.connectors.base import (
+    ConnectorError,
+    ConnectorScope,
+    SearchPreview,
+    Throttle,
+)
+from etl.connectors.geography import UnresolvableGeographyError
 from etl.connectors.milanuncios import (
     _BASE_URL,
     _REQUEST_TIMEOUT_SECONDS,
@@ -221,6 +227,37 @@ class MilanunciosRentalConnector(MilanunciosConnector):
     # connector's evidence.
     min_refetch_interval_seconds = 0
 
+    def _rental_search_url(self, geography: str) -> str:
+        """The rental sale-category entry URL — the same "-en-<geo>-<geo>"
+        convention as the sale connector, with the `alquiler-de-pisos`
+        segment. Shared by discover() and search_previews()."""
+        return f"{_BASE_URL}/alquiler-de-pisos-en-{geography}-{geography}/"
+
+    def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
+        """Reuses `_rental_search_url()` — the exact helper discover() uses."""
+        try:
+            geography = _resolve_geography(scope)
+        except UnresolvableGeographyError:
+            geography = None
+        if geography is None:
+            return [
+                SearchPreview(
+                    label="Milanuncios (alquiler)",
+                    url=None,
+                    kind="search_page",
+                    tunable=True,
+                    notes="El perfil no resuelve a una geografía que este conector cubra.",
+                )
+            ]
+        return [
+            SearchPreview(
+                label=f"Milanuncios (alquiler) — {geography}",
+                url=self._rental_search_url(geography),
+                kind="search_page",
+                tunable=True,
+            )
+        ]
+
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         """Same shape as `MilanunciosConnector.discover()`, targeting the
         `alquiler-de-pisos-en-{geo}-{geo}/` rental category instead of
@@ -241,7 +278,7 @@ class MilanunciosRentalConnector(MilanunciosConnector):
         # "alquiler-de-pisos-en-madrid-madrid/" returned 41 real rental ads,
         # same JSON shape and geography-slug-repeated-twice URL convention
         # as the sale category.
-        url = f"{_BASE_URL}/alquiler-de-pisos-en-{geography}-{geography}/"
+        url = self._rental_search_url(geography)
         throttle()
         try:
             response = requests.get(

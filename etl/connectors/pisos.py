@@ -76,6 +76,7 @@ from etl.connectors.base import (
     ConnectorScope,
     ListingUnavailableError,
     RawListing,
+    SearchPreview,
     Throttle,
 )
 from etl.connectors.extraction import underscore_city_slug
@@ -211,6 +212,11 @@ class PisosConnector(Connector):
     # none — see base.Connector.supported_filters).
     supported_filters: tuple[str, ...] = ()
 
+    # Issue #478: the owner may pin a pisos.com search URL as this connector's
+    # recall source for a profile. discover() honouring it lands in Phase 5
+    # (supports_search_override stays False here).
+    override_host_suffix = "pisos.com"
+
     def __init__(self) -> None:
         # Populated by discover() as a side effect of the single search
         # request it makes; read back by fetch_detail() (no network) and by
@@ -243,6 +249,32 @@ class PisosConnector(Connector):
 
     def _search_url(self, geography: str) -> str:
         return f"{_BASE_URL}/venta/pisos-{geography}/"
+
+    def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
+        """Reuses `_search_url()` (the exact helper discover() builds its entry
+        URL from), so the preview cannot drift from the real request."""
+        try:
+            geography = _resolve_geography(scope)
+        except UnresolvableGeographyError:
+            geography = None
+        if geography is None:
+            return [
+                SearchPreview(
+                    label="Pisos.com",
+                    url=None,
+                    kind="search_page",
+                    tunable=True,
+                    notes="El perfil no resuelve a una geografía que este conector cubra.",
+                )
+            ]
+        return [
+            SearchPreview(
+                label=f"Pisos.com — {geography}",
+                url=self._search_url(geography),
+                kind="search_page",
+                tunable=True,
+            )
+        ]
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
         # Reset before this scope's own sweep — a scope that raises partway

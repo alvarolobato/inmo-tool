@@ -70,6 +70,7 @@ from etl.connectors.base import (
     ConnectorScope,
     ListingUnavailableError,
     RawListing,
+    SearchPreview,
     SoftBlockError,
     Throttle,
 )
@@ -558,6 +559,10 @@ class FotocasaConnector(Connector):
     # absent here rather than shipped as controls that might silently no-op.
     supported_filters = ("rooms",)
 
+    # Issue #478: an owner-pinned fotocasa search URL may become this
+    # connector's recall source for a profile (discover() wiring is Phase 5).
+    override_host_suffix = "fotocasa.es"
+
     # Issue #143: this is the connector the fetch-budget problem was written
     # about (see the issue — a single sweep at 3 req/min was ~8h even before
     # zone partitioning made discover() itself heavier). 24h is a documented
@@ -895,6 +900,36 @@ class FotocasaConnector(Connector):
         return (
             f"{_BASE_URL}/es/comprar/viviendas/{geography}/{zone_slug}/{rooms_segment}l"
         )
+
+    def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
+        """The base (unfiltered city) page discover() enters from — built with
+        the same `_search_url()` helper and the same `rooms` segment logic, so
+        the preview matches the real entry URL for the scope."""
+        try:
+            geography = _resolve_geography(scope)
+        except UnresolvableGeographyError:
+            geography = None
+        if geography is None:
+            return [
+                SearchPreview(
+                    label="Fotocasa",
+                    url=None,
+                    kind="search_page",
+                    tunable=True,
+                    notes="El perfil no resuelve a una geografía que este conector cubra.",
+                )
+            ]
+        rooms_segment = (
+            f"{scope.rooms}-habitaciones/" if scope.rooms is not None else ""
+        )
+        return [
+            SearchPreview(
+                label=f"Fotocasa — {geography}",
+                url=self._search_url(geography, _ZONE_SLUG_ALL, rooms_segment),
+                kind="search_page",
+                tunable=True,
+            )
+        ]
 
     def _fetch_search_page(self, url: str, *, strict: bool) -> str | None:
         """Fetch one search page. `strict` controls failure handling.
