@@ -20,6 +20,7 @@
  *     nothing active is ever hidden inside the popover.
  */
 
+import { useEffect, useRef, useState } from "react";
 import { Popover, PopoverButton, PopoverPanel } from "@headlessui/react";
 import {
   DEFAULT_CANDIDATE_FILTERS,
@@ -200,12 +201,64 @@ export function CandidateFilterBar({
 
   const setView = (view: CandidateView) => set("view", view);
 
+  // #470 free-text search box (primary row). The input is debounced so typing
+  // doesn't fire a feed refetch per keystroke: local `qText` tracks the field,
+  // and the trimmed term is pushed into the shared filter state (which the
+  // parent mirrors to the URL and refetches from) 350 ms after the last
+  // keystroke — or immediately on Enter / ✕. Refs hold the latest `onChange`
+  // and `values` so the debounced emit never clobbers a filter that changed
+  // meanwhile and the timer effect stays keyed only on the typed text.
+  const [qText, setQText] = useState(values.q);
+  const qTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  const valuesRef = useRef(values);
+  valuesRef.current = values;
+
+  // External changes to `q` (chip ✕, "Limpiar todo", deep-load) flow back into
+  // the input; a no-op when the user's own debounced commit is what changed it.
+  useEffect(() => {
+    setQText(values.q);
+  }, [values.q]);
+
+  // Clear a pending debounce on unmount.
+  useEffect(
+    () => () => {
+      if (qTimer.current) clearTimeout(qTimer.current);
+    },
+    [],
+  );
+
+  const emitQ = (raw: string) => {
+    if (qTimer.current) clearTimeout(qTimer.current);
+    const trimmed = raw.trim();
+    if (trimmed === valuesRef.current.q) return;
+    onChangeRef.current({ ...valuesRef.current, q: trimmed });
+  };
+
+  const onQInput = (raw: string) => {
+    setQText(raw);
+    if (qTimer.current) clearTimeout(qTimer.current);
+    qTimer.current = setTimeout(() => emitQ(raw), 350);
+  };
+
+  const clearQ = () => {
+    setQText("");
+    emitQ("");
+  };
+
   const moreCount = moreFiltersActiveCount(values);
   const anyActive = hasActiveFilters(values);
 
   // One chip per non-default filter (except `view`, which is always visible as
   // the segmented control). Each ✕ resets exactly that filter to its default.
   const chips: ActiveChip[] = [];
+  if (values.q !== "")
+    chips.push({
+      key: "q",
+      label: `Búsqueda: «${values.q}»`,
+      clear: clearQ,
+    });
   if (values.source !== null)
     chips.push({
       key: "source",
@@ -328,6 +381,84 @@ export function CandidateFilterBar({
           >
             Con descartadas
           </SegmentButton>
+        </div>
+
+        {/* #470 free-text search — always-visible primary-row control. Debounced
+            (350 ms) so it doesn't refetch per keystroke; Enter commits at once,
+            ✕ clears. Feeds the `q` filter (address + description + AI labels). */}
+        <div
+          data-testid="search-box"
+          style={{
+            position: "relative",
+            display: "inline-flex",
+            alignItems: "center",
+            flex: "1 1 180px",
+            minWidth: 150,
+            maxWidth: 320,
+          }}
+        >
+          <span
+            aria-hidden="true"
+            style={{
+              position: "absolute",
+              left: 8,
+              fontSize: 13,
+              color: "var(--fg-muted)",
+              pointerEvents: "none",
+            }}
+          >
+            🔍
+          </span>
+          <input
+            type="search"
+            data-testid="search-input"
+            value={qText}
+            placeholder="Buscar en anuncios…"
+            aria-label="Buscar en anuncios y todos los campos"
+            onChange={(e) => onQInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                emitQ(qText);
+              }
+            }}
+            style={{
+              width: "100%",
+              padding: "5px 26px 5px 28px",
+              fontSize: 13,
+              color: "var(--fg)",
+              background: "var(--bg-1)",
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+            }}
+          />
+          {qText !== "" && (
+            <button
+              type="button"
+              data-testid="search-clear"
+              aria-label="Limpiar búsqueda"
+              onClick={clearQ}
+              style={{
+                position: "absolute",
+                right: 6,
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 16,
+                height: 16,
+                padding: 0,
+                border: "none",
+                borderRadius: 999,
+                background: "transparent",
+                color: "var(--fg-muted)",
+                cursor: "pointer",
+                fontSize: 12,
+                lineHeight: 1,
+              }}
+            >
+              ✕
+            </button>
+          )}
         </div>
 
         {/* #265 source (portal) — hidden only when the profile has no sources. */}

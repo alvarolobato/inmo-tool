@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { render, screen, fireEvent, within, act } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { CandidateFilterBar } from "../candidates/CandidateFilterBar";
 import {
@@ -112,6 +112,77 @@ describe("CandidateFilterBar active chips", () => {
   it("renders no chips row when nothing is active", () => {
     renderBar();
     expect(screen.queryByTestId("active-filter-chips")).toBeNull();
+  });
+});
+
+describe("CandidateFilterBar #470 free-text search box", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("renders the primary-row search box seeded from `q`", () => {
+    renderBar({ q: "terraza" });
+    const box = screen.getByTestId("search-input") as HTMLInputElement;
+    expect(box).toBeInTheDocument();
+    expect(box.value).toBe("terraza");
+    // An active search surfaces its chip.
+    expect(screen.getByTestId("filter-chip-q")).toHaveTextContent(
+      "Búsqueda: «terraza»",
+    );
+  });
+
+  it("debounces typing into a single onChange with the trimmed term", () => {
+    vi.useFakeTimers();
+    const { onChange } = renderBar();
+    const box = screen.getByTestId("search-input");
+
+    // Several keystrokes in quick succession.
+    fireEvent.change(box, { target: { value: "ter" } });
+    fireEvent.change(box, { target: { value: "terra" } });
+    fireEvent.change(box, { target: { value: "terraza " } });
+    // Before the debounce window elapses, nothing is emitted.
+    expect(onChange).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.advanceTimersByTime(350);
+    });
+    // Exactly one emit, carrying the last (trimmed) value.
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ q: "terraza" }),
+    );
+  });
+
+  it("Enter commits the term immediately (no debounce wait)", () => {
+    vi.useFakeTimers();
+    const { onChange } = renderBar();
+    const box = screen.getByTestId("search-input");
+    fireEvent.change(box, { target: { value: "embargo" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ q: "embargo" }),
+    );
+  });
+
+  it("the ✕ button clears only the search", () => {
+    const { onChange } = renderBar({ q: "terraza", source: "fotocasa" });
+    fireEvent.click(screen.getByTestId("search-clear"));
+    expect(onChange).toHaveBeenCalledWith({
+      ...DEFAULT_CANDIDATE_FILTERS,
+      q: "", // cleared
+      source: "fotocasa", // untouched
+    });
+  });
+
+  it("the q chip's ✕ clears only the search", () => {
+    const { onChange } = renderBar({ q: "terraza", minDiscount: "15" });
+    fireEvent.click(screen.getByTestId("filter-chip-clear-q"));
+    expect(onChange).toHaveBeenCalledWith({
+      ...DEFAULT_CANDIDATE_FILTERS,
+      q: "",
+      minDiscount: "15",
+    });
   });
 });
 
