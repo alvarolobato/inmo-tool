@@ -51,6 +51,14 @@
       <button id="batch-stop-btn" class="btn btn-secondary hidden">Detener</button>
     </div>
 
+    <!-- Capturar URL de búsqueda (issue #475, part of #471): on an Idealista
+         results page (incl. after "Dibuja tu zona", which adds `shape=` to the
+         URL), send the raw results URL to the dashboard for later decoding. -->
+    <div class="actions batch-search-url hidden" id="capture-search-url-wrap">
+      <button id="capture-search-url-btn" class="btn btn-secondary">Capturar URL de búsqueda</button>
+    </div>
+    <p id="capture-search-url-status" class="state-sub hidden"></p>
+
     <!-- Auto mode (issue #424): drain the WHOLE worklist unattended, in capped
          batches with a cooldown between them. Alarm-driven so it survives the
          MV3 service worker being evicted. -->
@@ -118,6 +126,7 @@
     </div>
   </div>
 
+  <script src="capture-search-url.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

@@ -23,6 +23,10 @@ const ADMIN_NAV = [
   { href: "/etl/salud", label: "Salud de datos" },
   // Extension setup (#256) — download the extension + copy the API URL/key.
   { href: "/etl/extension", label: "Extensión" },
+  // Captured Idealista search URLs (#475, part of #471) — the raw results URLs
+  // (incl. the drawn-zone `shape=` param) the extension captured, for decoding.
+  // Sits with the other extension-driven surfaces; same /admin gating.
+  { href: "/admin/captured-urls", label: "URLs capturadas" },
   // Promotion review (#399, Fase 8 of #385) — recurring `candidate_type` slugs
   // the model coined in redflags `other` flags, for the owner to review and
   // (manually) promote to the closed vocabulary. Sits after the extension

@@ -21,6 +21,10 @@
 // URL helpers off self.InmoDetect.
 importScripts("detect.js");
 importScripts("batch.js");
+// Pure helpers for the "Capturar URL de búsqueda" action (issue #475): validate
+// an Idealista results URL and shape the capture payload. Side-effect-free at
+// load; publishes self.InmoSearchUrl.
+importScripts("capture-search-url.js");
 
 /**
  * Supported capture hosts are BACKEND-DRIVEN (issue #237): the dashboard's
@@ -141,6 +145,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === 'GET_WORKLIST_PROGRESS') {
     fetchWorklistProgress(msg.portal)
       .then((progress) => sendResponse({ success: true, progress }))
+      .catch((err) => sendResponse({ success: false, error: { message: err.message } }));
+    return true; // async response
+  }
+
+  // Capturar URL de búsqueda (issue #475, part of #471): the popup captured the
+  // active Idealista results-page URL (with its `shape=` drawn-zone param) and
+  // asks the worker to persist it to the dashboard. Needs the admin key, which
+  // only the background worker holds.
+  if (msg.type === 'CAPTURE_SEARCH_URL') {
+    postCapturedSearchUrl(msg.payload)
+      .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: { message: err.message } }));
     return true; // async response
   }
@@ -514,6 +529,39 @@ async function saveSearchUrlExample(searchUrl, resultCount) {
   } catch {
     /* best-effort: never let a learned-example save disrupt the capture run */
   }
+}
+
+/**
+ * Persist a captured Idealista search URL (issue #475, part of #471). Unlike
+ * saveSearchUrlExample (fire-and-forget, best-effort mining), this is an
+ * explicit owner action, so it DOES report success/failure back to the popup so
+ * it can show "URL capturada ✓" or a real error. Re-validates the payload
+ * through the same pure helper the popup used (never trust a malformed message)
+ * and posts it to the admin-gated endpoint; the server re-derives + re-validates
+ * the portal from the URL host.
+ */
+async function postCapturedSearchUrl(payload) {
+  const capture = self.InmoSearchUrl.buildSearchUrlCapture(payload || {});
+  if (!capture) {
+    return { success: false, error: { message: 'La pestaña activa no es una URL de búsqueda de Idealista.' } };
+  }
+  const { apiUrl, apiKey } = await getApiConfig();
+  const response = await fetch(`${apiUrl}/api/captured-search-urls`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-admin-key': apiKey },
+    body: JSON.stringify({
+      url: capture.url,
+      title: capture.title,
+      capturedAt: capture.capturedAt,
+    }),
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok || !body || body.success !== true) {
+    const message =
+      (body && (body.error?.message || body.error)) || `HTTP ${response.status}`;
+    return { success: false, error: { message } };
+  }
+  return { success: true, id: body.id, portal: body.portal };
 }
 
 /**

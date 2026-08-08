@@ -1898,6 +1898,41 @@ CREATE INDEX IF NOT EXISTS idx_search_url_example_lookup
 ALTER TABLE search_url_example ADD COLUMN IF NOT EXISTS last_result_count INTEGER;
 
 
+-- Captured Idealista search URLs (issue #475, part of #471).
+--
+-- The browser extension's "Capturar URL de búsqueda" action sends the RAW
+-- results-page URL the owner is on — verbatim, including the `shape=` param
+-- that "Dibuja tu zona" encodes the drawn polygon into. Unlike
+-- search_url_example (which DECODES a URL into a reusable filter template and
+-- drops anything it can't parse), this table keeps the URL exactly as captured
+-- so #471 P1 can reverse-engineer Idealista's polygon encoding. The extension
+-- is the safe channel: CDP/automation hits DataDome (403), but the owner's real
+-- session in their own browser does not.
+--
+-- No dedupe/upsert: a re-draw of the same zone is a distinct capture worth
+-- keeping (the encoding may differ), and the review surface is a plain
+-- newest-first list. Idempotent CREATE TABLE IF NOT EXISTS — safe to re-run.
+CREATE TABLE IF NOT EXISTS captured_search_urls (
+    id           BIGSERIAL    PRIMARY KEY,
+    -- Portal derived server-side from the URL host (never client-claimed).
+    -- Today always 'idealista' (the only portal with a drawn-zone grammar).
+    portal       TEXT         NOT NULL,
+    -- The search URL exactly as captured (shape= and all).
+    url          TEXT         NOT NULL,
+    -- The results page's document.title at capture time (may be empty).
+    title        TEXT,
+    captured_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    -- Free-text operator annotation (unused by the extension path; reserved for
+    -- the review surface).
+    notes        TEXT
+);
+
+-- The review surface reads newest-first; a captured_at index keeps that cheap
+-- as captures accumulate.
+CREATE INDEX IF NOT EXISTS idx_captured_search_urls_recent
+    ON captured_search_urls (captured_at DESC);
+
+
 -- URL-building discovery catalog (issue #336, D-063).
 --
 -- One row per connector × discovery session. The browser extension enumerates a
@@ -2498,3 +2533,4 @@ ANALYZE capture_worklist;
 ANALYZE capture_worklist_seed_trigger;
 ANALYZE capture_task_run;
 ANALYZE search_url_example;
+ANALYZE captured_search_urls;
