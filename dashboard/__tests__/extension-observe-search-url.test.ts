@@ -1,0 +1,110 @@
+// @vitest-environment node
+/**
+ * Unit tests for the browser-extension's pure PASSIVE observer helpers
+ * (issue #488, part of #471). Imports the REAL extension module
+ * (browser-extension/observe-search-url.js) — not a copy — so the shipped
+ * host-validation, observable-page detection, normalization and payload-shaping
+ * logic is what's under test.
+ *
+ * The chrome.* messaging + fetch wiring (content-script.js / background.js) is
+ * not unit-testable in-process; this file covers the pure pieces #488 calls out:
+ * is-this-an-observable-idealista-search-URL, the de-dup normalization, and the
+ * observe payload shape.
+ */
+
+import { describe, it, expect } from "vitest";
+import * as mod from "../../browser-extension/observe-search-url.js";
+
+// observe-search-url.js publishes via `module.exports = api`; vite's CJS interop
+// may expose it as the default export or spread the named keys — accept either.
+const O = (mod as unknown as { default?: Record<string, unknown> }).default ?? mod;
+const { isObservableIdealistaUrl, normalizeObservedUrl, buildObservedCapture } =
+  O as {
+    isObservableIdealistaUrl: (u: string) => boolean;
+    normalizeObservedUrl: (u: string) => string | null;
+    buildObservedCapture: (
+      input: { url?: string; title?: string },
+      now?: Date,
+    ) => { url: string; title: string; host: string; capturedAt: string } | null;
+  };
+
+const LISTADO = "https://www.idealista.com/venta-viviendas/estepona-malaga/";
+const AREAS_SHAPE =
+  "https://www.idealista.com/areas/venta-viviendas/?shape=%28%28abc123%29%29";
+const MULTI = "https://www.idealista.com/multi/venta-viviendas/madrid/";
+
+describe("isObservableIdealistaUrl", () => {
+  it("accepts listado, areas, multi and any shape= URL", () => {
+    expect(isObservableIdealistaUrl(LISTADO)).toBe(true);
+    expect(isObservableIdealistaUrl("https://idealista.com/alquiler-viviendas/malaga/")).toBe(true);
+    expect(isObservableIdealistaUrl(AREAS_SHAPE)).toBe(true);
+    expect(isObservableIdealistaUrl(MULTI)).toBe(true);
+    expect(isObservableIdealistaUrl("https://www.idealista.com/venta-locales/?shape=xyz")).toBe(true);
+  });
+
+  it("rejects the home page and detail pages", () => {
+    expect(isObservableIdealistaUrl("https://www.idealista.com/")).toBe(false);
+    expect(isObservableIdealistaUrl("https://www.idealista.com/inmueble/106387165/")).toBe(false);
+  });
+
+  it("rejects other portals, look-alikes and non-http(s) schemes", () => {
+    expect(isObservableIdealistaUrl("https://www.alisedainmobiliaria.com/comprar/")).toBe(false);
+    expect(isObservableIdealistaUrl("https://idealista.com.evil.example/venta-viviendas/")).toBe(false);
+    expect(isObservableIdealistaUrl("javascript://idealista.com/venta-viviendas/")).toBe(false);
+  });
+
+  it("rejects malformed / empty input", () => {
+    expect(isObservableIdealistaUrl("")).toBe(false);
+    expect(isObservableIdealistaUrl("not a url")).toBe(false);
+    expect(isObservableIdealistaUrl(undefined as unknown as string)).toBe(false);
+  });
+});
+
+describe("normalizeObservedUrl", () => {
+  it("collapses www, trailing slash and query-param order to one key", () => {
+    const a = normalizeObservedUrl("https://www.idealista.com/venta-viviendas/malaga/?b=2&a=1");
+    const b = normalizeObservedUrl("https://idealista.com/venta-viviendas/malaga?a=1&b=2#frag");
+    expect(a).toBe("idealista.com/venta-viviendas/malaga?a=1&b=2");
+    expect(a).toBe(b);
+  });
+
+  it("keeps shape= in the key so distinct drawn zones stay distinct", () => {
+    const one = normalizeObservedUrl("https://www.idealista.com/areas/venta-viviendas/?shape=AAA");
+    const two = normalizeObservedUrl("https://www.idealista.com/areas/venta-viviendas/?shape=BBB");
+    expect(one).not.toBe(two);
+    expect(one).toContain("shape=AAA");
+  });
+
+  it("returns null for a non-observable / unparseable URL", () => {
+    expect(normalizeObservedUrl("https://www.idealista.com/")).toBe(
+      "idealista.com",
+    ); // parseable idealista, but the OBSERVER gate is isObservableIdealistaUrl
+    expect(normalizeObservedUrl("https://example.com/x")).toBeNull();
+    expect(normalizeObservedUrl("not a url")).toBeNull();
+  });
+});
+
+describe("buildObservedCapture", () => {
+  it("shapes the payload for an observable URL, keeping it verbatim", () => {
+    const now = new Date("2026-08-08T10:00:00.000Z");
+    const out = buildObservedCapture({ url: AREAS_SHAPE, title: "  Zona  " }, now);
+    expect(out).toEqual({
+      url: AREAS_SHAPE, // verbatim — shape= preserved
+      title: "Zona", // trimmed
+      host: "idealista.com", // www stripped
+      capturedAt: "2026-08-08T10:00:00.000Z",
+    });
+  });
+
+  it("trims whitespace around the URL before validating", () => {
+    const out = buildObservedCapture({ url: `  ${LISTADO}  ` });
+    expect(out).not.toBeNull();
+    expect(out!.url).toBe(LISTADO);
+  });
+
+  it("returns null for a non-observable / invalid URL", () => {
+    expect(buildObservedCapture({ url: "https://www.idealista.com/" })).toBeNull();
+    expect(buildObservedCapture({ url: "https://example.com/x" })).toBeNull();
+    expect(buildObservedCapture({})).toBeNull();
+  });
+});

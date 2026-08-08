@@ -25,6 +25,10 @@ importScripts("batch.js");
 // an Idealista results URL and shape the capture payload. Side-effect-free at
 // load; publishes self.InmoSearchUrl.
 importScripts("capture-search-url.js");
+// Pure helpers for the PASSIVE search-URL observer (issue #488): validate +
+// normalize an Idealista search/results URL and shape the observe payload.
+// Side-effect-free at load; publishes self.InmoObserve.
+importScripts("observe-search-url.js");
 
 /**
  * Supported capture hosts are BACKEND-DRIVEN (issue #237): the dashboard's
@@ -155,6 +159,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   // only the background worker holds.
   if (msg.type === 'CAPTURE_SEARCH_URL') {
     postCapturedSearchUrl(msg.payload)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ success: false, error: { message: err.message } }));
+    return true; // async response
+  }
+
+  // Passive search-URL observation (issue #488, part of #471): the content
+  // script forwards every Idealista search/results URL the owner browses. The
+  // worker DE-DUPS against a per-session set (so the same normalised search is
+  // sent once per session) and, when new, POSTs it to the dashboard. Needs the
+  // admin key, which only the background worker holds. Best-effort — a failure
+  // never affects the page.
+  if (msg.type === 'OBSERVE_SEARCH_URL') {
+    postObservedSearchUrl(msg.payload)
       .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: { message: err.message } }));
     return true; // async response
@@ -608,6 +625,81 @@ async function postCapturedSearchUrl(payload) {
     return { success: false, error: { message } };
   }
   return { success: true, id: body.id, portal: body.portal };
+}
+
+// ═══ Passive search-URL observation (issue #488, part of #471) ══════════════
+//
+// As the owner browses Idealista search/results pages, the content script
+// forwards each one it sees (OBSERVE_SEARCH_URL). To avoid re-sending the same
+// search over and over within a browsing session, the worker keeps a SET of the
+// normalised URLs it has already forwarded in chrome.storage.session — which
+// survives the MV3 worker being torn down + respawned but resets when the
+// browser session ends (so a genuinely-new session re-observes, and the server
+// UPSERT bumps the seen count). The server ALSO de-dups (UPSERT by norm_key), so
+// this session set is purely a network-traffic optimisation.
+const OBSERVED_URLS_KEY = 'inmoObservedUrls';
+// Cap the session set so a marathon session can't grow it without bound; oldest
+// entries drop first (they're the least likely to be revisited).
+const OBSERVED_URLS_CAP = 2000;
+
+/** The set of normalised URLs already forwarded this session (plain array). */
+async function readObservedKeys() {
+  const o = await chrome.storage.session.get(OBSERVED_URLS_KEY);
+  const arr = o[OBSERVED_URLS_KEY];
+  return Array.isArray(arr) ? arr : [];
+}
+
+/** Record `key` as observed this session (bounded, oldest-first eviction). */
+async function markObservedKey(key) {
+  const arr = await readObservedKeys();
+  if (arr.includes(key)) return;
+  arr.push(key);
+  if (arr.length > OBSERVED_URLS_CAP) arr.splice(0, arr.length - OBSERVED_URLS_CAP);
+  await chrome.storage.session.set({ [OBSERVED_URLS_KEY]: arr });
+}
+
+/**
+ * Forward a passively-observed Idealista search URL to the dashboard (issue
+ * #488). Re-validates + normalises the payload through the shared pure helper
+ * (never trust a malformed message), DE-DUPS against the per-session set, and —
+ * when new — POSTs it to the admin-gated endpoint. Returns `{ success, deduped }`
+ * so the content script can no-op quietly; a failure is non-fatal (observation
+ * is passive). The server re-derives the portal + de-dup key from the URL.
+ */
+async function postObservedSearchUrl(payload) {
+  const capture = self.InmoObserve.buildObservedCapture(payload || {});
+  if (!capture) {
+    return { success: false, error: { message: 'No es una URL de búsqueda de Idealista observable.' } };
+  }
+  const key = self.InmoObserve.normalizeObservedUrl(capture.url);
+  if (!key) {
+    return { success: false, error: { message: 'No se pudo normalizar la URL observada.' } };
+  }
+  const seen = await readObservedKeys();
+  if (seen.includes(key)) {
+    return { success: true, deduped: true };
+  }
+  // Mark BEFORE the POST so two rapid observations of the same search (e.g. a
+  // MutationObserver double-fire) don't both hit the network.
+  await markObservedKey(key);
+
+  const { apiUrl, apiKey } = await getApiConfig();
+  const response = await fetch(`${apiUrl}/api/observed-search-urls`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-admin-key': apiKey },
+    body: JSON.stringify({
+      url: capture.url,
+      title: capture.title,
+      observedAt: capture.capturedAt,
+    }),
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok || !body || body.success !== true) {
+    const message =
+      (body && (body.error?.message || body.error)) || `HTTP ${response.status}`;
+    return { success: false, error: { message } };
+  }
+  return { success: true, id: body.id, seen_count: body.seen_count };
 }
 
 // ═══ Validation mode (issue #478 P3) ════════════════════════════════════════

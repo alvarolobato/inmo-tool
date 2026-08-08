@@ -59,6 +59,15 @@
     </div>
     <p id="capture-search-url-status" class="state-sub hidden"></p>
 
+    <!-- Modo observación (issue #488, part of #471): cuando está activo, la
+         extensión reenvía pasivamente cada URL de búsqueda/resultados de
+         Idealista que visitas (sin capturar anuncios) para analizar los patrones
+         de filtrado. Desactívalo aquí si genera ruido. -->
+    <label class="batch-force" for="observe-mode-chk">
+      <input type="checkbox" id="observe-mode-chk" />
+      Modo observación: reenviar las URLs de búsqueda de Idealista que visito
+    </label>
+
     <!-- Auto mode (issue #424): drain the WHOLE worklist unattended, in capped
          batches with a cooldown between them. Alarm-driven so it survives the
          MV3 service worker being evicted. -->

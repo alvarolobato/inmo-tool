@@ -25,6 +25,7 @@ async function load() {
     'batchBackgroundTabs',
     'autoBatchSize',
     'autoBatchTimeoutSec',
+    'observeMode',
   ]);
   $('#api-url').value = config.apiUrl || 'http://localhost:4000';
   $('#api-key').value = config.apiKey || '';
@@ -50,6 +51,12 @@ async function load() {
     : (config.batchPaceSpreadMs ?? 5000);
   // Background-tab mode is opt-in: default OFF (safe active mode).
   $('#batch-background-tabs').checked = config.batchBackgroundTabs === true;
+
+  // Passive search-URL observation (issue #488) defaults ON: an absent stored
+  // value reads as enabled (mirrors content-script.js OBSERVE_DEFAULT / popup).
+  $('#observe-mode').checked = config.observeMode === undefined
+    ? true
+    : !!config.observeMode;
 
   // Auto-mode knobs (issue #424) — clamped through the same batch.js helpers the
   // driver uses, so the field always reflects what the loop will actually use.
@@ -122,6 +129,14 @@ $('#save-btn').addEventListener('click', async () => {
 $('#auto-capture').addEventListener('change', async (e) => {
   await chrome.storage.sync.set({ autoCaptureEnabled: e.target.checked });
   showStatus(e.target.checked ? 'Captura automática activada' : 'Captura automática desactivada', 'success');
+});
+
+// Passive search-URL observation (issue #488) — like auto-capture, independent
+// of the API URL/key, so persist immediately on change. The content-script
+// observer reads this on the next page it loads.
+$('#observe-mode').addEventListener('change', async (e) => {
+  await chrome.storage.sync.set({ observeMode: e.target.checked });
+  showStatus(e.target.checked ? 'Modo observación activado' : 'Modo observación desactivado', 'success');
 });
 
 // ── Capture-tuning knobs (issue #410) ──────────────────────────────────────

@@ -460,6 +460,9 @@ function enterBatchMode(ctx, existingProgress) {
   // results page, where "Dibuja tu zona" encodes the polygon into `shape=`.
   setupSearchUrlCapture(ctx?.tab || null);
 
+  // Modo observación (issue #488): the passive search-URL observer toggle.
+  setupObserveToggle();
+
   if (existingProgress) {
     renderBatchProgress(existingProgress);
     startBatchPolling();
@@ -711,6 +714,37 @@ function setupSearchUrlCapture(tab) {
   btn.disabled = false;
   btn.textContent = 'Capturar URL de búsqueda';
   btn.onclick = () => onCaptureSearchUrl(tab);
+}
+
+// ─── Modo observación (issue #488, part of #471) ────────────────
+
+// The passive observer defaults ON (mirrors content-script.js OBSERVE_DEFAULT);
+// an absent stored value reads as enabled.
+const OBSERVE_MODE_DEFAULT = true;
+
+/**
+ * Load + wire the "modo observación" toggle. Reflects the stored
+ * chrome.storage.sync `observeMode` preference (default ON) and persists any
+ * change so the content-script observer picks it up on the next page.
+ */
+async function setupObserveToggle() {
+  const chk = $("#observe-mode-chk");
+  if (!chk) return;
+  let enabled = OBSERVE_MODE_DEFAULT;
+  try {
+    const cfg = await chrome.storage.sync.get("observeMode");
+    enabled = cfg.observeMode === undefined ? OBSERVE_MODE_DEFAULT : !!cfg.observeMode;
+  } catch {
+    /* storage unavailable — fall back to the default */
+  }
+  chk.checked = enabled;
+  chk.onchange = async () => {
+    try {
+      await chrome.storage.sync.set({ observeMode: chk.checked });
+    } catch {
+      /* best-effort — the next open re-reads the stored value */
+    }
+  };
 }
 
 /** Send the active tab's Idealista results URL to the dashboard to persist. */
