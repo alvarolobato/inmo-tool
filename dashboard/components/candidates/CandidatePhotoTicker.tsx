@@ -55,7 +55,12 @@ export function CandidatePhotoTicker({
   photos: string[];
   href: string;
   priceLabel: string;
-  /** #448 F: below-market rating + price up/down chips shown next to the price over the photo. Omitted → just the price. */
+  /**
+   * #448 F / #460: the price line over the photo — a `<PriceSignals price=… />`
+   * that renders the price together with the below-market/direction chips and
+   * keeps the price + below-market chip on one line. Omitted → just the
+   * `priceLabel` price.
+   */
   priceSignals?: ReactNode;
   children: ReactNode;
 }) {
@@ -151,25 +156,21 @@ export function CandidatePhotoTicker({
               width: "100%",
               padding: "12px 10px 6px",
               background: "linear-gradient(to top, rgba(0,0,0,0.72), rgba(0,0,0,0))",
-              // #460: price + rating/direction chips on ONE line (wrapping only
-              // when they truly don't fit), not stacked — the chip sits NEXT to
-              // the price, not below it.
-              display: "flex",
-              flexWrap: "wrap",
-              alignItems: "center",
-              columnGap: 8,
-              rowGap: 4,
             }}
           >
-            <p
-              data-testid="candidate-price"
-              style={{ margin: 0, fontSize: 17, fontWeight: 700, color: "#fff" }}
-            >
-              {priceLabel}
-            </p>
-            {/* #448 F / #460: below-market rating + price up/down, on the same
-                line as the price. */}
-            {priceSignals}
+            {/* #460: `priceSignals` (a <PriceSignals price=… />) now owns the
+                whole price line — it keeps the price and the below-market chip
+                as one non-wrapping unit so the chip stays NEXT to the price,
+                never below it, at every card width. Fallback (no signals node
+                passed): just the price. */}
+            {priceSignals ?? (
+              <p
+                data-testid="candidate-price"
+                style={{ margin: 0, fontSize: 17, fontWeight: 700, color: "#fff", whiteSpace: "nowrap" }}
+              >
+                {priceLabel}
+              </p>
+            )}
           </div>
         </div>
 
