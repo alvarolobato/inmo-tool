@@ -59,3 +59,22 @@ export function taskLabel(
 ): string {
   return `${portalDisplayName(portal)} — ${typesLabel(types)} en ${locationLabel(locationSlug)}${priceLabel(priceMin, priceMax)}`;
 }
+
+/**
+ * Label for a drawn-polygon (shape) task (issue #471): a polyline is not
+ * self-describing the way `dos-hermanas-sevilla` was, so the label keeps the
+ * nearest-municipio name (or province, or "zona") plus the radius so the
+ * operator can tell what area a task covers — e.g.
+ * "Idealista — pisos ~Dos Hermanas (r=5 km) ≤200.000 €".
+ */
+export function shapeTaskLabel(
+  portal: string,
+  types: readonly PropertyType[],
+  nearestName: string,
+  radiusKm: number,
+  priceMin?: number,
+  priceMax?: number,
+): string {
+  const km = Math.round(radiusKm * 10) / 10;
+  return `${portalDisplayName(portal)} — ${typesLabel(types)} ~${nearestName} (r=${km} km)${priceLabel(priceMin, priceMax)}`;
+}

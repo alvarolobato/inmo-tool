@@ -74,7 +74,9 @@ describe("GET /api/profiles/[id]/search-urls", () => {
       expect(typeof t.label).toBe("string");
     }
     const idealista = body.tasks.find((t: { portal: string }) => t.portal === "idealista");
-    expect(idealista.url).toContain("idealista.com/venta-viviendas");
+    // Idealista geography is now a drawn polygon (#471): /areas/…?shape=((…)).
+    expect(idealista.url).toContain("idealista.com/areas/venta-viviendas");
+    expect(idealista.url).toContain("/mapa-google?shape=%28%28");
     expect(idealista.url).toContain("precio-hasta_250000");
   });
 

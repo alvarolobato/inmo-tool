@@ -132,6 +132,14 @@ function resolveTask(
   const self = parsedSelf;
   if (!self) return baseTask;
 
+  // CONCRETE, code-pinned geometry (issue #471, D-090/#444): when the builder
+  // emitted a drawn polygon (`shape`) or a multi-zone URL, the geometry is a
+  // faithful rendering of the profile's OWN circle — no learned example may
+  // relocate it. This makes the #444 municipality-crossing rewrite structurally
+  // impossible for Idealista (its builder now always emits a shape): only a
+  // tier-0 owner override (checked above) can replace it. Skip tiers 1-3.
+  if (self.filters.geoKind === "shape" || self.filters.geoKind === "multi") return baseTask;
+
   const sameSection = examples.filter((e) => e.category_key === self.categoryKey);
   if (sameSection.length === 0) return baseTask;
 

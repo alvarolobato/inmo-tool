@@ -4,10 +4,11 @@
  * Decodes a connector search URL with the portal's parser (the same client-safe
  * PARSERS the resolver uses) into human chips, and compares the decoded filters
  * against the profile's own scope to surface where the URL is BROADER (or
- * simply different) than the profile asks for. A URL the parser can't decode
- * (e.g. an Idealista `shape=` drawn zone — #471) is reported as `unparseable`;
- * the page then notes "se usará tal cual" (tier 0 is verbatim and needs no
- * parse — see resolve.ts).
+ * simply different) than the profile asks for. Idealista drawn-polygon
+ * (`/areas/…?shape=((…))`) and multi-zone (`/multi/…`) URLs are now decoded too
+ * (#471) — a shape shows its vertex count, a multi its zone count. A URL the
+ * parser still can't decode is reported as `unparseable`; the page then notes
+ * "se usará tal cual" (tier 0 is verbatim and needs no parse — see resolve.ts).
  *
  * Pure: no `pg`, no React. Shared by the server page and its unit tests.
  */
@@ -67,7 +68,14 @@ export function decodeFilterUrl(portal: string, url: string, scope: Scope): Deco
     );
     chips.push(`Tipos: ${labels.join(", ")}`);
   }
-  if (f.locationSlug) chips.push(`Zona: ${f.locationSlug}`);
+  if (f.geoKind === "shape") {
+    chips.push(`Zona: polígono dibujado (${f.shapeVertexCount ?? 0} vértices)`);
+  } else if (f.geoKind === "multi") {
+    const nZones = f.locationSlug ? f.locationSlug.split(",").length : 0;
+    chips.push(`Zona: ${nZones} zonas Idealista (multi)`);
+  } else if (f.locationSlug) {
+    chips.push(`Zona: ${f.locationSlug}`);
+  }
   if (f.priceMin !== undefined || f.priceMax !== undefined) {
     chips.push(`Precio: ${range(f.priceMin, f.priceMax, eur)}`);
   }
