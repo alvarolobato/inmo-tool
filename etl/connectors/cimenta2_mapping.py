@@ -286,8 +286,104 @@ def aura_request_form(record_id: str, fwuid: str, marker: str) -> dict[str, str]
 
 def response_is_expired(raw_text: str) -> bool:
     """A stale fwuid/marker yields an `aura:expiredFrameworkUid` event rather
-    than a normal action result — refresh the context once and retry."""
+    than a normal action result — refresh the context once and retry.
+
+    NOTE (issue #441): live-verified 2026-08-08 that this endpoint's guest
+    `getRecord` action ignores fwuid/marker entirely — every stale/empty/garbage
+    value still returns state=SUCCESS with a real record. So this signature is
+    effectively never seen in practice; the refresh-and-retry path is kept as a
+    cheap, defensive no-op in case the site later starts validating the build id.
+    The real intermittent breakage is a rate-limit / anti-bot wall, handled by
+    the soft-block helpers below, NOT by fwuid rotation.
+    """
     return "expiredFrameworkUid" in raw_text or "clientOutOfSync" in raw_text
+
+
+# Substrings that mark an HTTP-200 body (or a 4xx/5xx error page) as the site's
+# own rate-limit / anti-bot wall rather than a page-structure change. Issue #441:
+# over a full ~3.3h sweep of 3,917 detail POSTs (plus the shell GET) the guest
+# endpoint intermittently serves one of these instead of the aura JSON. Treating
+# it as a fatal parse break tripped the circuit at the tight 30% threshold and
+# surfaced as `structure_change` (see cimenta2.Cimenta2SoftBlockError); it is a
+# transient throttle, so per D-047 it must be a clean SoftBlockError instead.
+# Case-insensitive membership (matched against a lower-cased body).
+_SOFT_BLOCK_MARKERS: tuple[str, ...] = (
+    # Cloudflare interstitials / blocks
+    "just a moment",
+    "checking your browser",
+    "attention required",
+    "cf-mitigated",
+    "cf-chl",
+    "cf_chl",
+    "/cdn-cgi/challenge-platform",
+    "ray id",
+    # Generic WAF / bot-mitigation walls
+    "access denied",
+    "request rejected",
+    "you have been blocked",
+    "captcha",
+    "are you a robot",
+    "pardon our interruption",
+    # Salesforce guest throttle / concurrency limits (seen as an aura event or a
+    # plain-text error page rather than the getRecord SUCCESS payload)
+    "request_limit_exceeded",
+    "concurrentperorglongtxn",
+    "throttlingexception",
+    "too many requests",
+    "server is too busy",
+    "unable to process request",
+)
+
+
+def has_soft_block_signature(text: str) -> bool:
+    """True when the body carries a known rate-limit / anti-bot signature."""
+    lowered = text.lower()
+    return any(marker in lowered for marker in _SOFT_BLOCK_MARKERS)
+
+
+def http_status_is_soft_block(status: int | None) -> bool:
+    """True for the HTTP statuses the site returns when it rate-limits / blocks
+    guest traffic. 429 (Too Many Requests) and 403 (bot block) are unambiguous;
+    a 503 challenge is caught by the body-signature check instead so a genuine
+    server outage still reads as a fatal failure."""
+    return status in (403, 429)
+
+
+def post_response_is_soft_block(raw_text: str) -> bool:
+    """True when a `getRecord` POST body is the throttle/anti-bot wall rather
+    than a usable (or genuinely restructured) aura response.
+
+    A healthy guest getRecord ALWAYS returns parseable JSON with an `actions`
+    array. So the throttle wall shows up as either (a) a non-JSON body (an HTML
+    challenge / interstitial), or (b) a body carrying a known anti-bot / guest-
+    throttle signature. Valid JSON with an unexpected *shape* is deliberately
+    NOT flagged here — that is the genuine-structure-change signal and stays a
+    fatal ConnectorError via `record_from_response`.
+    """
+    if has_soft_block_signature(raw_text):
+        return True
+    try:
+        json.loads(raw_text)
+    except ValueError:
+        # Not JSON at all where JSON is guaranteed on a healthy response — an
+        # HTML challenge/interstitial page, i.e. the soft-block wall.
+        return True
+    return False
+
+
+def shell_is_soft_block(shell_html: str) -> bool:
+    """True when the community shell HTML is a challenge/interstitial rather than
+    the real Aura shell.
+
+    A real shell on HTTP 200 ALWAYS embeds the Aura framework script path
+    (`auraFW`). Its total absence — or an explicit anti-bot signature — means the
+    site served a rate-limit / anti-bot wall, not that the shell's structure
+    changed. When `auraFW` IS present but `scrape_framework_ids` still failed,
+    that is a genuine structure change and this returns False (fatal).
+    """
+    if has_soft_block_signature(shell_html):
+        return True
+    return "auraFW" not in shell_html
 
 
 def record_from_response(raw_text: str) -> dict:
