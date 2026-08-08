@@ -12,15 +12,44 @@ vi.mock("@/lib/db/search-url-example", () => ({
   findExamplesForPortal: vi.fn(),
 }));
 
+vi.mock("@/lib/db/profile-connector-filter", () => ({
+  findOverridesForProfile: vi.fn(),
+}));
+
 import { resolveSearchTasks, AREA_MATCH_KM } from "@/lib/search-url/resolve";
 import { idealistaBuilder, idealistaParser } from "@/lib/search-url/portals/idealista";
 import { alisedaBuilder, alisedaParser } from "@/lib/search-url/portals/aliseda";
+import { fallbackTaskId } from "@/lib/captura-tasks";
 import * as exampleDb from "@/lib/db/search-url-example";
+import * as overrideDb from "@/lib/db/profile-connector-filter";
 import type { SearchUrlExampleRow } from "@/lib/db/search-url-example";
+import type { ProfileConnectorFilterRow } from "@/lib/db/profile-connector-filter";
 import type { CanonicalSearchScope, PortalSearchUrlBuilder, PortalSearchUrlParser } from "@/lib/search-url/types";
 import type { Scope } from "@/lib/profiles-schema";
 
 const mockFind = vi.mocked(exampleDb.findExamplesForPortal);
+const mockOverrides = vi.mocked(overrideDb.findOverridesForProfile);
+
+/** Profile id passed to resolveSearchTasks; the override lookup is mocked. */
+const PROFILE_ID = 1;
+
+/** Build a profile_connector_filter row for tier-0 tests. */
+function overrideRow(
+  connector: string,
+  url: string,
+  sectionKey = "",
+): ProfileConnectorFilterRow {
+  return {
+    id: 1,
+    profile_id: PROFILE_ID,
+    connector,
+    section_key: sectionKey,
+    url,
+    source: "manual",
+    created_at: "2026-08-08T00:00:00.000Z",
+    updated_at: "2026-08-08T00:00:00.000Z",
+  };
+}
 
 const ESTEPONA: [number, number] = [36.4268, -5.1468];
 const MANILVA: [number, number] = [36.3766, -5.2493]; // ~10 km from Estepona
@@ -72,7 +101,11 @@ function idealistaTask(tasks: Awaited<ReturnType<typeof resolveSearchTasks>>) {
 }
 
 describe("resolveSearchTasks — capture-to-infer tiers (slug grammar)", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Default: no owner-pinned overrides (tier 0 inert) — tiers 1-3 unchanged.
+    mockOverrides.mockResolvedValue([]);
+  });
 
   it("tier 1: exact section + exact location slug → substitute profile values, NO reuse flag", async () => {
     // Learned: Estepona piso at 200k. Profile: Estepona piso at 180k.
@@ -84,7 +117,7 @@ describe("resolveSearchTasks — capture-to-infer tiers (slug grammar)", () => {
     }, 1);
     withExamples({ idealista: [ex] });
 
-    const tasks = await resolveSearchTasks(scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>));
+    const tasks = await resolveSearchTasks(scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>), PROFILE_ID);
     const t = idealistaTask(tasks);
     // Confirmed template used + the PROFILE's price substituted in.
     expect(t.url).toBe("https://www.idealista.com/venta-viviendas/estepona-malaga/con-precio-hasta_180000/");
@@ -103,7 +136,7 @@ describe("resolveSearchTasks — capture-to-infer tiers (slug grammar)", () => {
     }, 2);
     withExamples({ idealista: [ex] });
 
-    const tasks = await resolveSearchTasks(scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>));
+    const tasks = await resolveSearchTasks(scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>), PROFILE_ID);
     const t = idealistaTask(tasks);
     // Deterministic Estepona slug, NOT the reused manilva-malaga.
     expect(t.url).toBe("https://www.idealista.com/venta-viviendas/estepona-malaga/con-precio-hasta_180000/");
@@ -121,7 +154,7 @@ describe("resolveSearchTasks — capture-to-infer tiers (slug grammar)", () => {
     }, 6);
     withExamples({ idealista: [ex] });
 
-    const tasks = await resolveSearchTasks(scope(SEVILLA, { price_max: 180000 } as Partial<Scope>));
+    const tasks = await resolveSearchTasks(scope(SEVILLA, { price_max: 180000 } as Partial<Scope>), PROFILE_ID);
     const t = idealistaTask(tasks);
     expect(t.url).toBe("https://www.idealista.com/venta-viviendas/sevilla-sevilla/con-precio-hasta_180000/");
     expect(t.url).not.toContain("dos-hermanas");
@@ -141,6 +174,7 @@ describe("resolveSearchTasks — capture-to-infer tiers (slug grammar)", () => {
 
     const tasks = await resolveSearchTasks(
       scope(MALAGA_PROVINCE_FALLBACK, { price_max: 180000 } as Partial<Scope>),
+      PROFILE_ID,
     );
     const t = idealistaTask(tasks);
     // Reused the nearby example's concrete slug (malaga-malaga), profile's price.
@@ -160,7 +194,7 @@ describe("resolveSearchTasks — capture-to-infer tiers (slug grammar)", () => {
     withExamples({ idealista: [ex] });
 
     const s = scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>);
-    const tasks = await resolveSearchTasks(s);
+    const tasks = await resolveSearchTasks(s, PROFILE_ID);
     const t = idealistaTask(tasks);
     const base = idealistaBuilder.build({ center: ESTEPONA, radiusKm: 8, propertyTypes: ["piso"], priceMax: 180000 })[0];
     expect(t.url).toBe(base.url);
@@ -169,7 +203,7 @@ describe("resolveSearchTasks — capture-to-infer tiers (slug grammar)", () => {
   it("tier 3: no learned examples → every task is the builder's output", async () => {
     withExamples({});
     const s = scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>);
-    const tasks = await resolveSearchTasks(s);
+    const tasks = await resolveSearchTasks(s, PROFILE_ID);
     const canonical: CanonicalSearchScope = { center: ESTEPONA, radiusKm: 8, propertyTypes: ["piso"], priceMax: 180000 };
     expect(tasks).toEqual([...idealistaBuilder.build(canonical), ...alisedaBuilder.build(canonical)]);
   });
@@ -183,7 +217,7 @@ describe("resolveSearchTasks — capture-to-infer tiers (slug grammar)", () => {
     }, 4);
     withExamples({ aliseda: [ex] });
 
-    const tasks = await resolveSearchTasks(scope(ESTEPONA, { price_max: 175000 } as Partial<Scope>));
+    const tasks = await resolveSearchTasks(scope(ESTEPONA, { price_max: 175000 } as Partial<Scope>), PROFILE_ID);
     const t = tasks.find((x) => x.portal === "aliseda")!;
     expect(t.url).toBe(
       "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/andalucia/malaga?subtipo=36&precio=0-175000",
@@ -202,12 +236,104 @@ describe("resolveSearchTasks — capture-to-infer tiers (slug grammar)", () => {
 
     const s = scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>);
     const base = idealistaBuilder.build({ center: ESTEPONA, radiusKm: 8, propertyTypes: ["piso"], priceMax: 180000 })[0];
-    const t = idealistaTask(await resolveSearchTasks(s));
+    const t = idealistaTask(await resolveSearchTasks(s, PROFILE_ID));
     expect(t.id).toBe(base.id);
     expect(t.label).toBe(base.label);
   });
 
   it("AREA_MATCH_KM is a coarse, non-trivial radius", () => {
     expect(AREA_MATCH_KM).toBeGreaterThan(0);
+  });
+});
+
+describe("resolveSearchTasks — tier 0 owner-pinned overrides (issue #478)", () => {
+  const PINNED = "https://www.idealista.com/areas/venta-viviendas/?shape=%28%28abc%29%29";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockOverrides.mockResolvedValue([]);
+  });
+
+  it("override beats tier 1 (a matching learned example) — url verbatim, loosened [], overridden", async () => {
+    const ex = exampleRow(idealistaBuilder, idealistaParser, {
+      center: ESTEPONA,
+      radiusKm: 8,
+      propertyTypes: ["piso"],
+      priceMax: 200000,
+    }, 1);
+    withExamples({ idealista: [ex] });
+    mockOverrides.mockResolvedValue([overrideRow("idealista", PINNED)]);
+
+    const t = idealistaTask(
+      await resolveSearchTasks(scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>), PROFILE_ID),
+    );
+    expect(t.url).toBe(PINNED); // verbatim — no numeric re-substitution
+    expect(t.loosened).toEqual([]);
+    expect(t.overridden).toBe(true);
+  });
+
+  it("override beats tier 3 (no learned examples at all)", async () => {
+    withExamples({});
+    mockOverrides.mockResolvedValue([overrideRow("idealista", PINNED)]);
+    const t = idealistaTask(
+      await resolveSearchTasks(scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>), PROFILE_ID),
+    );
+    expect(t.url).toBe(PINNED);
+    expect(t.overridden).toBe(true);
+  });
+
+  it("preserves the task id + label (capture_task_run staleness intact)", async () => {
+    withExamples({});
+    mockOverrides.mockResolvedValue([overrideRow("idealista", PINNED)]);
+    const base = idealistaBuilder.build({ center: ESTEPONA, radiusKm: 8, propertyTypes: ["piso"], priceMax: 180000 })[0];
+    const t = idealistaTask(
+      await resolveSearchTasks(scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>), PROFILE_ID),
+    );
+    expect(t.id).toBe(base.id);
+    expect(t.label).toBe(base.label);
+  });
+
+  it("a section_key override matches the task's categoryKey exactly", async () => {
+    withExamples({});
+    const base = idealistaBuilder.build({ center: ESTEPONA, radiusKm: 8, propertyTypes: ["piso"], priceMax: 180000 })[0];
+    const categoryKey = idealistaParser.parse(base.url)!.categoryKey;
+    mockOverrides.mockResolvedValue([overrideRow("idealista", PINNED, categoryKey)]);
+    const t = idealistaTask(
+      await resolveSearchTasks(scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>), PROFILE_ID),
+    );
+    expect(t.url).toBe(PINNED);
+    expect(t.overridden).toBe(true);
+  });
+
+  it("a section_key override for a DIFFERENT section does not apply (derived URL stands)", async () => {
+    withExamples({});
+    mockOverrides.mockResolvedValue([overrideRow("idealista", PINNED, "some-other-section")]);
+    const base = idealistaBuilder.build({ center: ESTEPONA, radiusKm: 8, propertyTypes: ["piso"], priceMax: 180000 })[0];
+    const t = idealistaTask(
+      await resolveSearchTasks(scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>), PROFILE_ID),
+    );
+    expect(t.url).toBe(base.url);
+    expect(t.overridden).toBeUndefined();
+  });
+
+  it("altamira (a capture portal with no builder) synthesizes a task from an override", async () => {
+    withExamples({});
+    const altUrl = "https://www.altamirainmuebles.com/venta/viviendas/sevilla/";
+    mockOverrides.mockResolvedValue([overrideRow("altamira", altUrl)]);
+    const tasks = await resolveSearchTasks(scope(SEVILLA, { price_max: 180000 } as Partial<Scope>), PROFILE_ID);
+    const t = tasks.find((x) => x.portal === "altamira");
+    expect(t).toBeDefined();
+    expect(t!.url).toBe(altUrl);
+    expect(t!.label).toBe("Altamira — URL fijada");
+    expect(t!.id).toBe(fallbackTaskId("altamira", altUrl));
+    expect(t!.overridden).toBe(true);
+  });
+
+  it("with no override, output is identical to today (snapshot)", async () => {
+    withExamples({});
+    mockOverrides.mockResolvedValue([]);
+    const canonical: CanonicalSearchScope = { center: ESTEPONA, radiusKm: 8, propertyTypes: ["piso"], priceMax: 180000 };
+    const tasks = await resolveSearchTasks(scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>), PROFILE_ID);
+    expect(tasks).toEqual([...idealistaBuilder.build(canonical), ...alisedaBuilder.build(canonical)]);
   });
 });

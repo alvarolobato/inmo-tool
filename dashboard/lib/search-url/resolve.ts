@@ -11,6 +11,13 @@
  * shape (id/label preserved, only url/loosened may change) is unchanged.
  *
  * Matching, per task (owner-approved defaults, 2026-08-05):
+ *   0. OVERRIDE (issue #478) — an owner-pinned URL in profile_connector_filter
+ *      for this (profile × portal × section) → use it VERBATIM, loosened []; the
+ *      owner tuned it by hand so it beats every derived tier and is never
+ *      re-substituted. Matched by section_key == the task's categoryKey (or ''
+ *      for a whole-connector override). Task id/label preserved, so the
+ *      capture_task_run staleness ledger survives. A capture portal with no
+ *      builder (altamira) + an override SYNTHESIZES its first task.
  *   1. EXACT — an example for the SAME section (categoryKey) AND the SAME
  *      location slug the profile resolves to → substitute the profile's numeric
  *      values into the confirmed template. Owner-confirmed: the guessed-grammar
@@ -28,6 +35,11 @@
 import type { Scope } from "@/lib/profiles-schema";
 import { CAPTURE_PORTALS } from "@/lib/worklist";
 import { findExamplesForPortal, type SearchUrlExampleRow } from "@/lib/db/search-url-example";
+import {
+  findOverridesForProfile,
+  type ProfileConnectorFilterRow,
+} from "@/lib/db/profile-connector-filter";
+import { fallbackTaskId, portalTitle } from "@/lib/captura-tasks";
 import { BUILDERS, canonicalScopeFromProfile } from "./index";
 import { municipioForPoint } from "./municipios";
 import { haversineKm } from "./parse-shared";
@@ -70,6 +82,33 @@ function unfilledFlags(unfilled: readonly LoosenableConstraint[]): LoosenedConst
 }
 
 /**
+ * The owner-pinned override that governs a task, or null. Matches on the task's
+ * decoded `categoryKey` (section + sorted types); a `section_key = ''` override
+ * covers every task of the connector. An exact section match wins over a
+ * whole-connector one. `categoryKey` is "" for an unparseable URL (e.g. a
+ * `shape=` drawn zone) — a '' override still applies, which is what we want
+ * (tier 0 is verbatim and needs no parse).
+ */
+function overrideForTask(
+  overrides: readonly ProfileConnectorFilterRow[],
+  portal: string,
+  categoryKey: string,
+): ProfileConnectorFilterRow | null {
+  const forPortal = overrides.filter((o) => o.connector === portal);
+  if (forPortal.length === 0) return null;
+  return (
+    forPortal.find((o) => o.section_key === categoryKey) ??
+    forPortal.find((o) => o.section_key === "") ??
+    null
+  );
+}
+
+/** Apply an override to a base task: verbatim URL, no loosening, flagged. */
+function applyOverride(baseTask: SearchTask, override: ProfileConnectorFilterRow): SearchTask {
+  return { ...baseTask, url: override.url, loosened: [], overridden: true };
+}
+
+/**
  * Upgrade ONE hand-written task with a learned example if a matching one exists.
  * `baseTask` is the builder's output; `examples` are all learned rows for the
  * portal (newest first). Returns the task unchanged when nothing applies.
@@ -79,10 +118,18 @@ function resolveTask(
   parser: PortalSearchUrlParser,
   examples: readonly SearchUrlExampleRow[],
   canonical: CanonicalSearchScope,
+  overrides: readonly ProfileConnectorFilterRow[],
 ): SearchTask {
+  // Tier 0 (issue #478) — an owner-pinned override beats everything derived.
+  // Match on the task's decoded categoryKey; keep id/label so the staleness
+  // ledger (capture_task_run) survives the URL swap.
+  const parsedSelf = parser.parse(baseTask.url);
+  const override = overrideForTask(overrides, baseTask.portal, parsedSelf?.categoryKey ?? "");
+  if (override) return applyOverride(baseTask, override);
+
   // Parse the builder's OWN task URL → the section + location slug this profile
   // resolves to (drift-proof: build → parse can't diverge from parse()).
-  const self = parser.parse(baseTask.url);
+  const self = parsedSelf;
   if (!self) return baseTask;
 
   const sameSection = examples.filter((e) => e.category_key === self.categoryKey);
@@ -134,16 +181,44 @@ function resolveTask(
 }
 
 /**
- * Resolve the pre-filtered search TASKS for a profile scope, preferring learned
- * examples over the hand-written builders — the learned-aware replacement for
- * buildSearchUrls(). Same flat `SearchTask[]` shape and CAPTURE_PORTALS order.
+ * Synthesize a task for a capture portal that has NO builder (e.g. altamira)
+ * from an owner-pinned override — the override gives the portal its first search
+ * URL without writing a builder (issue #478). Id = djb2 hash of `portal|url`
+ * (fallbackTaskId), so the staleness ledger keys on a stable id.
  */
-export async function resolveSearchTasks(scope: Scope): Promise<SearchTask[]> {
+function synthesizeOverrideTask(override: ProfileConnectorFilterRow): SearchTask {
+  return {
+    id: fallbackTaskId(override.connector, override.url),
+    portal: override.connector,
+    label: `${portalTitle(override.connector)} — URL fijada`,
+    url: override.url,
+    loosened: [],
+    overridden: true,
+  };
+}
+
+/**
+ * Resolve the pre-filtered search TASKS for a profile scope, preferring an
+ * owner-pinned override (tier 0, #478) then learned examples (#293) over the
+ * hand-written builders — the learned-aware replacement for buildSearchUrls().
+ * Same flat `SearchTask[]` shape and CAPTURE_PORTALS order. `profileId` scopes
+ * the override lookup (break-by-default over the old single-arg signature).
+ */
+export async function resolveSearchTasks(scope: Scope, profileId: number): Promise<SearchTask[]> {
   const canonical = canonicalScopeFromProfile(scope);
+  // Load every owner-pinned override for the profile once (tier 0).
+  const overrides = await findOverridesForProfile(profileId);
   const out: SearchTask[] = [];
   for (const { portal } of CAPTURE_PORTALS) {
     const builder = BUILDERS[portal];
-    if (!builder) continue;
+    if (!builder) {
+      // No builder (altamira): the portal has no derived URL, but an owner
+      // override can still give it one — synthesize a task per override.
+      for (const o of overrides.filter((x) => x.connector === portal)) {
+        out.push(synthesizeOverrideTask(o));
+      }
+      continue;
+    }
 
     // URL building is 100% code-driven (D-090, issue #371): the builder's
     // hard-coded per-portal map is authoritative. Discovery no longer feeds URL
@@ -155,15 +230,21 @@ export async function resolveSearchTasks(scope: Scope): Promise<SearchTask[]> {
 
     const parser = PARSERS[portal];
     if (!parser) {
-      out.push(...baseTasks);
+      // No parser → we can't decode a categoryKey, so only a whole-connector
+      // ('') override can match; tier 0 still applies verbatim.
+      out.push(
+        ...baseTasks.map((t) => {
+          const o = overrideForTask(overrides, portal, "");
+          return o ? applyOverride(t, o) : t;
+        }),
+      );
       continue;
     }
+    // Examples are only needed for tiers 1-2; tier 0 (override) is checked first
+    // inside resolveTask, so we must NOT short-circuit when examples are empty
+    // but an override exists.
     const examples = await findExamplesForPortal(portal);
-    if (examples.length === 0) {
-      out.push(...baseTasks);
-      continue;
-    }
-    out.push(...baseTasks.map((t) => resolveTask(t, parser, examples, canonical)));
+    out.push(...baseTasks.map((t) => resolveTask(t, parser, examples, canonical, overrides)));
   }
   return out;
 }

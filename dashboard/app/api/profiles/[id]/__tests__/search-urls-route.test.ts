@@ -20,6 +20,11 @@ vi.mock("@/lib/db/search-url-example", () => ({
   findExamplesForPortal: vi.fn().mockResolvedValue([]),
 }));
 
+// No owner-pinned overrides (issue #478) → tier 0 is inert, builder output stands.
+vi.mock("@/lib/db/profile-connector-filter", () => ({
+  findOverridesForProfile: vi.fn().mockResolvedValue([]),
+}));
+
 import { GET } from "../search-urls/route";
 import * as profiles from "@/lib/db/profiles";
 import type { SearchProfileRow } from "@/lib/profiles-schema";
