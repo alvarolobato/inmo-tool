@@ -54,14 +54,14 @@ export default function ProfileCandidateFeedPage() {
 
   if (id === null) {
     return (
-      <main style={{ maxWidth: 960, margin: "0 auto", padding: 24 }}>
+      <div style={{ width: "100%", padding: "16px clamp(16px, 2vw, 40px) 32px" }}>
         <ErrorDisplay error="Id de perfil no válido." />
-      </main>
+      </div>
     );
   }
 
   return (
-    <main style={{ maxWidth: 960, margin: "0 auto", padding: 24 }}>
+    <div style={{ width: "100%", padding: "16px clamp(16px, 2vw, 40px) 32px" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <div>
           <Link href="/profiles" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
@@ -90,6 +90,6 @@ export default function ProfileCandidateFeedPage() {
       {!loading && !error && profile !== null && profile.archived_at === null && (
         <CandidateList profileId={id} />
       )}
-    </main>
+    </div>
   );
 }
