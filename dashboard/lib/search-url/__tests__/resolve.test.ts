@@ -25,6 +25,12 @@ const mockFind = vi.mocked(exampleDb.findExamplesForPortal);
 const ESTEPONA: [number, number] = [36.4268, -5.1468];
 const MANILVA: [number, number] = [36.3766, -5.2493]; // ~10 km from Estepona
 const MADRID: [number, number] = [40.4168, -3.7038];
+const SEVILLA: [number, number] = [37.3891, -5.9845];
+const DOS_HERMANAS: [number, number] = [37.2836, -5.9222]; // ~13 km from Sevilla
+const MALAGA: [number, number] = [36.7213, -4.4214];
+// ~16 km north of Málaga: too far for a concrete municipio (MAX_MATCH_KM 12) so
+// the builder falls back to the province, but still inside AREA_MATCH_KM (25).
+const MALAGA_PROVINCE_FALLBACK: [number, number] = [36.8713, -4.4214];
 
 /** Craft a learned example row from a single-section scope via build + parse. */
 function exampleRow(
@@ -85,8 +91,10 @@ describe("resolveSearchTasks — capture-to-infer tiers (slug grammar)", () => {
     expect(t.loosened.find((l) => l.reason.includes("reutilizada"))).toBeUndefined();
   });
 
-  it("tier 2: same section, different (nearby) location slug → reuse WITH loosened flag", async () => {
+  it("issue #444: a concrete-municipio profile NEVER borrows a different town's slug", async () => {
     // Learned: piso in MANILVA (manilva-malaga). Profile: piso in ESTEPONA (~10 km).
+    // Estepona resolves to a concrete municipio, so the deterministic slug wins
+    // and the nearby Manilva example must NOT move the search there.
     const ex = exampleRow(idealistaBuilder, idealistaParser, {
       center: MANILVA,
       radiusKm: 8,
@@ -97,8 +105,46 @@ describe("resolveSearchTasks — capture-to-infer tiers (slug grammar)", () => {
 
     const tasks = await resolveSearchTasks(scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>));
     const t = idealistaTask(tasks);
-    // Reused the nearby example's slug (manilva-malaga), profile's price.
-    expect(t.url).toBe("https://www.idealista.com/venta-viviendas/manilva-malaga/con-precio-hasta_180000/");
+    // Deterministic Estepona slug, NOT the reused manilva-malaga.
+    expect(t.url).toBe("https://www.idealista.com/venta-viviendas/estepona-malaga/con-precio-hasta_180000/");
+    expect(t.loosened.find((l) => l.reason.includes("reutilizada"))).toBeUndefined();
+  });
+
+  it("issue #444: the Sevilla profile does NOT open Dos Hermanas listings", async () => {
+    // The original bug: a single Dos Hermanas capture rewrote the Sevilla
+    // profile's Idealista URL, because the two towns are ~13 km apart (≤ 25 km).
+    const ex = exampleRow(idealistaBuilder, idealistaParser, {
+      center: DOS_HERMANAS,
+      radiusKm: 8,
+      propertyTypes: ["piso"],
+      priceMax: 200000,
+    }, 6);
+    withExamples({ idealista: [ex] });
+
+    const tasks = await resolveSearchTasks(scope(SEVILLA, { price_max: 180000 } as Partial<Scope>));
+    const t = idealistaTask(tasks);
+    expect(t.url).toBe("https://www.idealista.com/venta-viviendas/sevilla-sevilla/con-precio-hasta_180000/");
+    expect(t.url).not.toContain("dos-hermanas");
+    expect(t.loosened.find((l) => l.reason.includes("reutilizada"))).toBeUndefined();
+  });
+
+  it("tier 2 still reuses a nearby town ONLY when the builder found no concrete municipio", async () => {
+    // Learned: piso in MALAGA (malaga-malaga). Profile centre is ~16 km north of
+    // Málaga → outside MAX_MATCH_KM (province fallback), inside AREA_MATCH_KM.
+    const ex = exampleRow(idealistaBuilder, idealistaParser, {
+      center: MALAGA,
+      radiusKm: 8,
+      propertyTypes: ["piso"],
+      priceMax: 150000,
+    }, 7);
+    withExamples({ idealista: [ex] });
+
+    const tasks = await resolveSearchTasks(
+      scope(MALAGA_PROVINCE_FALLBACK, { price_max: 180000 } as Partial<Scope>),
+    );
+    const t = idealistaTask(tasks);
+    // Reused the nearby example's concrete slug (malaga-malaga), profile's price.
+    expect(t.url).toBe("https://www.idealista.com/venta-viviendas/malaga-malaga/con-precio-hasta_180000/");
     const flag = t.loosened.find((l) => l.reason.includes("reutilizada"));
     expect(flag).toBeDefined();
     expect(flag!.constraint).toBe("geography");
