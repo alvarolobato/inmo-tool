@@ -61,4 +61,5 @@ dashboard/playwright-report/
 # Generated at build time by scripts/build-extension-zip.sh (staged into the
 # dashboard build context so the image can serve the extension). Never committed.
 dashboard/public/inmo-tool-extension.zip
+dashboard/public/extension-version.json
 node_modules

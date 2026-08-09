@@ -20,7 +20,7 @@
  */
 export const LINKED_WINDOW_MS = 10 * 60 * 1000;
 
-/** The status shape both the API route and the CTA component consume. */
+/** The heartbeat-derived status the DB layer produces. */
 export interface ExtensionStatus {
   /** True when a heartbeat landed within LINKED_WINDOW_MS. */
   linked: boolean;
@@ -28,6 +28,49 @@ export interface ExtensionStatus {
   lastSeenAt: string | null;
   /** The extension version reported at the last heartbeat, or null. */
   version: string | null;
+}
+
+/**
+ * The full shape `GET /api/extension/status` returns and the CTA consumes: the
+ * heartbeat status plus `servedVersion` — the version of the extension this
+ * dashboard currently serves at `/api/extension/download`. Read from a shared
+ * source at request time (see lib/extension-served-version.ts), never hardcoded,
+ * so the CTA can tell the installed version (`version`) from the available one
+ * and prompt an update even while linked (#527).
+ */
+export interface ExtensionStatusResponse extends ExtensionStatus {
+  /** The version this dashboard currently serves, or null if unknown. */
+  servedVersion: string | null;
+}
+
+/**
+ * Compare two dotted numeric versions ("0.14.2" vs "0.13.10"). Returns -1 if
+ * `a < b`, 1 if `a > b`, 0 if equal. Missing trailing parts count as 0
+ * ("0.14" == "0.14.0"). A non-numeric part anywhere makes the pair
+ * incomparable → 0, so an unparseable version never triggers a false update
+ * prompt. Pure; the single source of the ordering rule, tested in isolation.
+ */
+export function compareVersions(a: string, b: string): number {
+  const pa = a.split(".");
+  const pb = b.split(".");
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const x = i < pa.length ? Number(pa[i]) : 0;
+    const y = i < pb.length ? Number(pb[i]) : 0;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Is an update available? True only when both versions are known and the
+ * installed one is strictly older than the served one. Null on either side (or
+ * an incomparable pair) → false, so we never nag when we can't be sure.
+ */
+export function updateAvailable(installed: string | null, served: string | null): boolean {
+  if (!installed || !served) return false;
+  return compareVersions(installed, served) < 0;
 }
 
 /**

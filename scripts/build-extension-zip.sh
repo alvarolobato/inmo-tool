@@ -48,3 +48,22 @@ rm -f "${OUT_FILE}"
 ( cd "${SRC_DIR}" && zip -q -r -X "${OUT_FILE}" . -x '.*' )
 
 echo "build-extension-zip: wrote ${OUT_FILE} ($(du -h "${OUT_FILE}" | cut -f1))"
+
+# Also emit the served version alongside the zip so the running container can
+# tell the dashboard which extension version it serves — WITHOUT hardcoding it
+# (browser-extension/ is outside the ./dashboard build context, so the manifest
+# itself isn't in the image). The dashboard reads this at request time to prompt
+# an update when an older version is linked (#527). Single source: the manifest.
+MANIFEST="${SRC_DIR}/manifest.json"
+VERSION_FILE="${OUT_DIR}/extension-version.json"
+if [ -f "${MANIFEST}" ]; then
+  # First "version": "..." line (manifest_version has no leading quote before
+  # `version`, so it never matches this pattern).
+  VERSION="$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "${MANIFEST}" | head -1 | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/')"
+  if [ -n "${VERSION}" ]; then
+    printf '{"version":"%s"}\n' "${VERSION}" > "${VERSION_FILE}"
+    echo "build-extension-zip: wrote ${VERSION_FILE} (v${VERSION})"
+  else
+    echo "build-extension-zip: could not parse version from ${MANIFEST} — skipping version file." >&2
+  fi
+fi

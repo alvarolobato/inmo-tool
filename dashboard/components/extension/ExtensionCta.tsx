@@ -3,19 +3,24 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { ExtensionSetup } from "@/components/extension/ExtensionSetup";
-import type { ExtensionStatus } from "@/lib/extension-status";
+import { updateAvailable, type ExtensionStatusResponse } from "@/lib/extension-status";
 
 /**
- * Inline "instalar/vincular la extensión" CTA (issue #509).
+ * Inline extension install / update CTA (issues #509, #527).
  *
- * Replaces the removed Extensión admin tab: every surface where a working
- * browser extension is actually needed drops one of these where the old static
- * "¿Primera vez?" link used to be. It polls GET /api/extension/status (presence
- * is server-mediated — the extension pings a heartbeat, see #509) and:
- *   - LINKED (a recent heartbeat)  → renders nothing (no CTA noise);
- *   - UNLINKED (no/stale heartbeat, or the status read failed) → a button that
- *     opens a modal with the full setup steps ({@link ExtensionSetup}) plus a
- *     deep-link to the canonical `/etl/extension` full page.
+ * The Extensión admin tab is gone, so this inline CTA is the ONLY discoverable
+ * path to install, reinstall, or update the browser extension — it therefore
+ * must never fully disappear (the #527 regression: it hid whenever `linked`, so
+ * after one capture the operator had no way to reinstall/update). It polls
+ * GET /api/extension/status (presence is server-mediated via a heartbeat, #509)
+ * and renders one of three states, all of which reach the same setup modal:
+ *   - UNLINKED (no/stale heartbeat, or the read failed) → a prominent
+ *     "Instalar o vincular la extensión" button;
+ *   - LINKED but the installed version is older than the served one → an
+ *     "Actualización disponible (vX → vY)" prompt with an update link;
+ *   - LINKED and up to date → a DISCREET "Extensión vinculada (vX)" chip with a
+ *     "Gestionar / actualizar" link, so reinstall/update is always reachable.
+ * Only the brief initial load (before the first status resolves) renders nothing.
  *
  * `context` only tweaks the one-line copy + the testid so each placement is
  * addressable in e2e; the setup content is identical everywhere.
@@ -33,9 +38,9 @@ const CONTEXT_COPY: Record<CtaContext, string> = {
 
 export function ExtensionCta({ context }: { context: CtaContext }) {
   // `null` = still loading (render nothing to avoid a flash); once resolved we
-  // know whether to show the CTA. A failed read is treated as unlinked so a
+  // always render some state. A failed read is treated as unlinked so a
   // capture surface never silently hides the setup path.
-  const [status, setStatus] = useState<ExtensionStatus | null>(null);
+  const [status, setStatus] = useState<ExtensionStatusResponse | null>(null);
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
@@ -44,13 +49,15 @@ export function ExtensionCta({ context }: { context: CtaContext }) {
       try {
         const res = await fetch("/api/extension/status");
         if (!res.ok) {
-          if (!cancelled) setStatus({ linked: false, lastSeenAt: null, version: null });
+          if (!cancelled)
+            setStatus({ linked: false, lastSeenAt: null, version: null, servedVersion: null });
           return;
         }
-        const body = (await res.json()) as ExtensionStatus;
+        const body = (await res.json()) as ExtensionStatusResponse;
         if (!cancelled) setStatus(body);
       } catch {
-        if (!cancelled) setStatus({ linked: false, lastSeenAt: null, version: null });
+        if (!cancelled)
+          setStatus({ linked: false, lastSeenAt: null, version: null, servedVersion: null });
       }
     })();
     return () => {
@@ -60,38 +67,108 @@ export function ExtensionCta({ context }: { context: CtaContext }) {
 
   const close = useCallback(() => setOpen(false), []);
 
-  // Loading, or linked → nothing to show. The e2e asserts the CTA is absent
-  // once a heartbeat lands.
-  if (!status || status.linked) return null;
+  // Only the initial load renders nothing (avoid a flash). Every resolved state
+  // below keeps install/update reachable — the #527 fix (never fully hide).
+  if (!status) return null;
+
+  const linkStyle = {
+    background: "none",
+    border: "none",
+    padding: 0,
+    font: "inherit",
+    color: "var(--accent)",
+    cursor: "pointer",
+    textDecoration: "underline",
+  } as const;
+
+  const canUpdate = status.linked && updateAvailable(status.version, status.servedVersion);
 
   return (
-    <div data-testid="extension-cta" data-context={context}>
-      <button
-        type="button"
-        data-testid="extension-cta-button"
-        onClick={() => setOpen(true)}
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 8,
-          padding: "6px 14px",
-          fontSize: 13,
-          fontWeight: 600,
-          borderRadius: 8,
-          border: "1px solid var(--accent)",
-          background: "var(--accent)",
-          color: "#fff",
-          cursor: "pointer",
-        }}
-      >
-        Instalar o vincular la extensión
-      </button>
-      <p
-        data-testid="extension-cta-note"
-        style={{ margin: "6px 0 0", fontSize: 12, color: "var(--fg-muted)", lineHeight: 1.5 }}
-      >
-        {CONTEXT_COPY[context]}
-      </p>
+    <div data-testid="extension-cta" data-context={context} data-linked={String(status.linked)}>
+      {!status.linked ? (
+        // ── UNLINKED: prominent install/link button ──────────────────────────
+        <>
+          <button
+            type="button"
+            data-testid="extension-cta-button"
+            onClick={() => setOpen(true)}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "6px 14px",
+              fontSize: 13,
+              fontWeight: 600,
+              borderRadius: 8,
+              border: "1px solid var(--accent)",
+              background: "var(--accent)",
+              color: "#fff",
+              cursor: "pointer",
+            }}
+          >
+            Instalar o vincular la extensión
+          </button>
+          <p
+            data-testid="extension-cta-note"
+            style={{ margin: "6px 0 0", fontSize: 12, color: "var(--fg-muted)", lineHeight: 1.5 }}
+          >
+            {CONTEXT_COPY[context]}
+          </p>
+        </>
+      ) : canUpdate ? (
+        // ── LINKED, outdated: update-available prompt ────────────────────────
+        <div
+          data-testid="extension-cta-update"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "4px 10px",
+            fontSize: 12,
+            borderRadius: 8,
+            border: "1px solid var(--warn, #b45309)",
+            background: "var(--warn-bg, rgba(180,83,9,0.08))",
+            color: "var(--warn, #b45309)",
+            lineHeight: 1.4,
+          }}
+        >
+          <span>
+            Actualización disponible (v{status.version} → v{status.servedVersion})
+          </span>
+          <button
+            type="button"
+            data-testid="extension-cta-manage"
+            onClick={() => setOpen(true)}
+            style={{ ...linkStyle, color: "var(--warn, #b45309)", fontWeight: 600 }}
+          >
+            Actualizar
+          </button>
+        </div>
+      ) : (
+        // ── LINKED, up to date: discreet chip + manage/update link ───────────
+        <div
+          data-testid="extension-cta-linked"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 8,
+            fontSize: 12,
+            color: "var(--fg-muted)",
+            lineHeight: 1.4,
+          }}
+        >
+          <span aria-hidden="true">●</span>
+          <span>Extensión vinculada{status.version ? ` (v${status.version})` : ""}</span>
+          <button
+            type="button"
+            data-testid="extension-cta-manage"
+            onClick={() => setOpen(true)}
+            style={linkStyle}
+          >
+            Gestionar / actualizar
+          </button>
+        </div>
+      )}
 
       {open && (
         <div
