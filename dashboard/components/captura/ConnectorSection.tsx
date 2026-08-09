@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import Link from "next/link";
 import { CaptureTaskRow } from "@/components/captura/CaptureTaskRow";
 import { formatCaptureSummary, lastDoneLabel, type ConnectorView } from "@/lib/captura-tasks";
 import type { CaptureTask } from "@/lib/captura-tasks";
@@ -213,6 +214,17 @@ export function ConnectorSection({
                 ? `${connector.capturedProfile} propiedad${connector.capturedProfile === 1 ? "" : "es"} de este perfil capturada${connector.capturedProfile === 1 ? "" : "s"}`
                 : "sin capturas de este perfil todavía"}
             </span>
+            {/* Queue deep-link (#512, EC-3): jump to the admin ledger filtered to
+                this portal's pending rows. No count is shown — this page stays
+                profile-scoped with NO portal-global numbers (#445); the global
+                queue figures live only on the ledger. */}
+            <Link
+              href={`/etl/captura?portal=${encodeURIComponent(connector.portal)}&status=pending`}
+              data-testid={`captura-queue-link-${profileId}-${connector.portal}`}
+              style={{ fontSize: 12, color: "var(--accent)", textDecoration: "none" }}
+            >
+              ver la cola en el libro de capturas →
+            </Link>
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>

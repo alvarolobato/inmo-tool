@@ -142,14 +142,23 @@ test("status filter tabs and per-portal progress bar render; the sitemap-refresh
 
   const [pendingId, capturedId, failedId] = seededIds;
 
+  // Ledger framing (#512, EC-2): the admin page presents itself as the "libro de
+  // capturas" and cross-links back to /captura, the surface capture is launched
+  // from — it does not claim to be where you capture.
+  await expect(page.getByText("libro de capturas")).toBeVisible();
+  await expect(page.getByTestId("worklist-to-captura")).toHaveAttribute("href", "/captura");
+  await expect(page.getByTestId(`worklist-portal-captura-${PORTAL}`)).toHaveAttribute(
+    "href",
+    "/captura",
+  );
+
   // Per-portal progress bar (visual) with an accessible value.
   const progress = page.getByTestId(`worklist-progress-${PORTAL}`);
   await expect(progress).toBeVisible();
   await expect(progress).toHaveAttribute("aria-valuenow", /\d+/);
 
-  // The sitemap-refresh affordance is HIDDEN now (issue #454): cimenta2 was the
-  // only sitemap-seedable portal and it moved to ETL fetch, so no portal is
-  // seedable and the button must not render pointing at a stale portal.
+  // The sitemap-refresh affordance is GONE now (#512 removed the dead code path;
+  // it was already permanently hidden since #454 — cimenta2 moved to ETL fetch).
   await expect(page.getByTestId("worklist-refresh-sitemap")).toHaveCount(0);
 
   // Status filter tabs: filtering to "Capturadas" shows the captured row and
