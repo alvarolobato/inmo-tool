@@ -184,6 +184,68 @@ def _norm(value: str) -> str:
     return re.sub(r"\s+", " ", strip_accents(value).strip().lower())
 
 
+# The inverse of `_PROVINCE_INE_CODE`: INE province code -> a single canonical
+# display name (issue #494). `_PROVINCE_INE_CODE` is many-keys-to-one-code
+# (bilingual aliases), so it cannot be inverted programmatically without an
+# arbitrary tie-break; this is the curated, one-name-per-code table the
+# "Validar filtros" UI shows so a bare INE code ("29") reads as "INE 29 ·
+# Málaga". Names are the site's own province labels (Spanish, proper case).
+_INE_CODE_TO_PROVINCE: dict[str, str] = {
+    "1": "Álava",
+    "2": "Albacete",
+    "3": "Alicante",
+    "4": "Almería",
+    "5": "Ávila",
+    "6": "Badajoz",
+    "7": "Baleares",
+    "8": "Barcelona",
+    "9": "Burgos",
+    "10": "Cáceres",
+    "11": "Cádiz",
+    "12": "Castellón",
+    "13": "Ciudad Real",
+    "14": "Córdoba",
+    "15": "A Coruña",
+    "16": "Cuenca",
+    "17": "Girona",
+    "18": "Granada",
+    "19": "Guadalajara",
+    "20": "Guipúzcoa",
+    "21": "Huelva",
+    "22": "Huesca",
+    "23": "Jaén",
+    "24": "León",
+    "25": "Lleida",
+    "26": "La Rioja",
+    "27": "Lugo",
+    "28": "Madrid",
+    "29": "Málaga",
+    "30": "Murcia",
+    "31": "Navarra",
+    "32": "Ourense",
+    "33": "Asturias",
+    "34": "Palencia",
+    "35": "Las Palmas",
+    "36": "Pontevedra",
+    "37": "Salamanca",
+    "38": "Santa Cruz de Tenerife",
+    "39": "Cantabria",
+    "40": "Segovia",
+    "41": "Sevilla",
+    "42": "Soria",
+    "43": "Tarragona",
+    "44": "Teruel",
+    "45": "Toledo",
+    "46": "Valencia",
+    "47": "Valladolid",
+    "48": "Vizcaya",
+    "49": "Zamora",
+    "50": "Zaragoza",
+    "51": "Ceuta",
+    "52": "Melilla",
+}
+
+
 def province_to_ine_code(province_name: str | None) -> str | None:
     """Map a province name (gazetteer or site vocabulary) to its INE code.
 
@@ -194,6 +256,17 @@ def province_to_ine_code(province_name: str | None) -> str | None:
     if not province_name:
         return None
     return _PROVINCE_INE_CODE.get(_norm(province_name))
+
+
+def ine_code_to_province(ine_code: str | None) -> str | None:
+    """Map an INE province code back to its canonical display name (issue #494).
+
+    The inverse of `province_to_ine_code` for the UI: the search URL carries a
+    bare code (`provincia=29`), and the "Validar filtros" page shows it as a
+    legible "INE 29 · Málaga" chip. Returns None for an unknown code."""
+    if not ine_code:
+        return None
+    return _INE_CODE_TO_PROVINCE.get(ine_code.strip())
 
 
 def is_refcode(value: str | None) -> bool:
