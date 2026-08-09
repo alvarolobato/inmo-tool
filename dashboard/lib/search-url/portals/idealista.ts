@@ -435,3 +435,29 @@ export const idealistaParser: PortalSearchUrlParser = {
   parse: parseIdealista,
   substitute: substituteIdealista,
 };
+
+/**
+ * Map-view → listing-view normalisation (issue #506) — server mirror of the
+ * browser extension's `InmoDetect.toListingUrl` (browser-extension/detect.js).
+ *
+ * The builder/parser above keep `/mapa-google` as the CANONICAL round-trip form
+ * (the drawn-area grammar); verbatim storage is unchanged (D-101). This util is
+ * for the CONSUMPTION side only — should `resolveSearchTasks` ever need to feed
+ * a searchUrl to a harvester that expects the listing (card) view, it strips the
+ * `/mapa-google` path segment while preserving the query (`shape=…`) and hash
+ * character-for-character. Idempotent; a no-op for any URL that is already a
+ * listing path or is not parseable. Do NOT wire this into build()/parse().
+ */
+export function toListingUrl(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(String(url).trim());
+  } catch {
+    return url;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return url;
+  const newPath = parsed.pathname.replace(/\/mapa-google(?=\/|$)/i, "");
+  if (newPath === parsed.pathname) return url; // already a listing path — no-op
+  parsed.pathname = /\/$/.test(newPath) ? newPath : newPath + "/";
+  return parsed.toString();
+}

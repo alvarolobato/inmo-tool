@@ -991,7 +991,12 @@ async function enumerateResultsPages(portal, searchUrl, page1Urls) {
   const seen = new Set(
     (page1Urls || []).map((u) => D.matchKey(u)).filter(Boolean),
   );
-  let current = D.stripCaptureSignal(searchUrl);
+  // Normalise a map-view search to its listing (card) view BEFORE rendering
+  // (issue #506): the map page shows pins, not detail anchors, so harvesting it
+  // yields nothing and pagination breaks (`/mapa-google/pagina-2.htm`). No-op
+  // for URLs that are already a listing path or for other portals. The pinned
+  // searchUrl is still stored/decoded verbatim elsewhere (D-101).
+  let current = D.toListingUrl(D.stripCaptureSignal(searchUrl));
   let tabId = null;
   try {
     for (let page = 1; page <= D.RESULTS_PAGE_CAP; page++) {
