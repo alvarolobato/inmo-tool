@@ -128,7 +128,9 @@ from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
     RawListing,
+    SearchParam,
     SearchPreview,
+    SearchUrlGrammar,
     Throttle,
 )
 from etl.connectors.extraction import first_present, scoped_text
@@ -239,6 +241,34 @@ _SITEMAP_NS = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
 # extra segment (query string, trailing slash variant).
 _MUNICIPIO_LOC_RE = re.compile(
     r"^https://www\.solvia\.es/es/comprar/viviendas/([a-z0-9-]+)/([a-z0-9-]+)$"
+)
+
+# Issue #495: the invertible grammar for Solvia's REAL search pages. discover()
+# sweeps `/es/comprar/viviendas/<provincia>/<municipio>` — human search pages
+# that show listings (not the sitemap XML the P4 preview wrongly showed). The
+# `municipio_segment` placeholder round-trips the WHOLE optional `/<municipio>`
+# tail (or empty for the province entry page) — the same technique Fotocasa's
+# `rooms_segment` uses, so a plain `str.format` build template can round-trip an
+# optional path segment. `_search_url()` delegates to `build()` (anti-drift).
+# A pasted province+municipio URL infers both; the municipio is a PROPOSED
+# restriction (consumed=False) — the sweep visits every municipio the sitemap
+# lists, so pinning one is a future (P5) concern, not applied today. An
+# `/es/alquiler/...` URL simply doesn't match (kept verbatim). No reject_reasons:
+# these comprar search pages are robots-allowed.
+_SEARCH_URL_GRAMMAR = SearchUrlGrammar(
+    build_template=f"{_BASE_URL}/es/comprar/viviendas/{{provincia}}{{municipio_segment}}",
+    parse_pattern=(
+        r"^https?://(?:www\.)?solvia\.es/es/comprar/viviendas/"
+        r"(?<provincia>[^/]+)(?<municipio_segment>(?:/[^/]+)?)$"
+    ),
+    params={
+        "provincia": {"label": "Provincia", "source": "profile"},
+        "municipio_segment": {
+            "label": "Municipio",
+            "source": "derived",
+            "consumed": False,
+        },
+    },
 )
 # Same threshold and reasoning as Fotocasa's _MAX_CONSECUTIVE_ZONE_FAILURES
 # (#65): a persistent soft-block doesn't clear mid-sweep, so a fixed run of
@@ -474,10 +504,28 @@ class SolviaConnector(Connector):
     # source for a profile (discover() wiring is Phase 5).
     override_host_suffix = "solvia.es"
 
+    # Issue #495: published to connector_registry.search_url_grammar so the
+    # dashboard infers provincia (+ proposed municipio) from an owner-edited URL
+    # with the same grammar. `_search_url()` delegates to `build()` (anti-drift).
+    search_url_grammar = _SEARCH_URL_GRAMMAR
+
+    @staticmethod
+    def _search_url(provincia: str, municipio_segment: str) -> str:
+        """A Solvia comprar search page. `municipio_segment` is `""` (the
+        provincia entry page) or `"/<municipio>"` (a specific municipality).
+        discover() calls it with `f"/{municipio}"` per municipality; the preview
+        uses `""`. Delegates to `search_url_grammar.build()` so the swept URL and
+        the published grammar stay pinned (issue #495)."""
+        return _SEARCH_URL_GRAMMAR.build(
+            {"provincia": provincia, "municipio_segment": municipio_segment}
+        )
+
     def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
-        """`kind="sitemap"`: discover() enumerates the provincia's municipality
-        pages from the sitemap index — the same `_SITEMAP_INDEX_URL` its first
-        request hits."""
+        """`kind="search_page"`: discover() sweeps the provincia's municipality
+        pages (`/es/comprar/viviendas/<provincia>/<municipio>`) — real search
+        pages that show listings. The preview shows the provincia entry page (a
+        human, openable URL — NOT the sitemap XML the earlier P4 preview wrongly
+        showed); a second `sitemap` entry keeps the sweep mechanics visible."""
         try:
             provincia = _resolve_geography(scope)
         except UnresolvableGeographyError:
@@ -487,21 +535,58 @@ class SolviaConnector(Connector):
                 SearchPreview(
                     label="Solvia",
                     url=None,
-                    kind="sitemap",
+                    kind="search_page",
                     tunable=True,
                     notes="El perfil no resuelve a una provincia que este conector cubra.",
                 )
             ]
+        # Issue #495: provincia is consumed (it selects the municipality set the
+        # sweep visits); municipio is PROPOSED — the sweep visits every
+        # municipality the sitemap lists, so pinning one is a future (P5)
+        # concern, surfaced as a non-consumed chip.
+        params: tuple[SearchParam, ...] = (
+            SearchParam(
+                key="provincia",
+                label="Provincia",
+                value=provincia,
+                source="profile",
+                in_url=True,
+            ),
+            SearchParam(
+                key="operation",
+                label="Operación",
+                value="comprar",
+                source="constant",
+                in_url=True,
+            ),
+            SearchParam(
+                key="municipio_segment",
+                label="Municipio",
+                value="(todos)",
+                source="derived",
+                in_url=True,
+                consumed=False,
+                notes=(
+                    "El conector barre TODOS los municipios de la provincia "
+                    "enumerados en el sitemap; al fijar un municipio en la URL "
+                    "queda como restricción propuesta (cableado P5)."
+                ),
+            ),
+        )
         return [
             SearchPreview(
                 label=f"Solvia — {provincia}",
-                url=_SITEMAP_INDEX_URL,
-                kind="sitemap",
+                url=self._search_url(provincia, ""),
+                kind="search_page",
                 tunable=True,
+                params=params,
                 notes=(
-                    f"Barre las páginas de municipio de la provincia "
-                    f"'{provincia}' enumeradas en el sitemap; el filtrado fino "
-                    f"es por datos."
+                    "Página de búsqueda de la provincia (abrible, muestra "
+                    "anuncios). El barrido enumera los municipios de la "
+                    "provincia desde el sitemap y visita la página de cada uno. "
+                    "Nota: se muestra la URL de provincia; algunas provincias "
+                    "renderizan mejor la página de un municipio concreto "
+                    "(pendiente de verificación en vivo)."
                 ),
             )
         ]
@@ -537,7 +622,7 @@ class SolviaConnector(Connector):
         aborted_early = False
         for municipio in municipios:
             municipios_attempted += 1
-            url = f"{_BASE_URL}/es/comprar/viviendas/{provincia}/{municipio}"
+            url = self._search_url(provincia, f"/{municipio}")
             html = self._fetch_municipio_page(url, throttle)
             if html is None:
                 municipios_failed += 1

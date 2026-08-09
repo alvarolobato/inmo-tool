@@ -101,7 +101,9 @@ from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
     RawListing,
+    SearchParam,
     SearchPreview,
+    SearchUrlGrammar,
     Throttle,
 )
 from etl.connectors.extraction import (
@@ -194,10 +196,37 @@ def _resolve_geography(scope: ConnectorScope) -> str | None:
     return _PROVINCE_SITEMAP_SLUGS.get(place.province)
 
 
+# Issue #495: Servihabitat is honestly LIMITED. Its faceted search is
+# robots.txt-disallowed (see the class docstring and `discovers_full_inventory
+# = False`), so the ONLY URL that round-trips is the province sitemap discover()
+# actually reads. The grammar therefore inverts just `sitemap-es-<province>.xml`
+# — and `reject_reasons` turns any owner-pasted faceted-search URL (a
+# servihabitat.com URL carrying a query string, the faceted search's tell) into
+# a REASONED block that explains the robots limit, rather than a silent
+# no-match. `_sitemap_url()` delegates to `build()` (anti-drift).
+_SEARCH_URL_GRAMMAR = SearchUrlGrammar(
+    build_template=f"{_BASE_URL}/es/sitemap-es-{{province}}.xml",
+    parse_pattern=(
+        r"^https?://(?:www\.)?servihabitat\.com/es/sitemap-es-"
+        r"(?<province>[^./]+)\.xml$"
+    ),
+    params={"province": {"label": "Provincia (sitemap)", "source": "profile"}},
+    reject_reasons=(
+        {
+            "pattern": r"^https?://(?:www\.)?servihabitat\.com/[^?]*\?",
+            "reason": "robots-faceted-search",
+        },
+    ),
+)
+
+
 def _sitemap_url(province: str) -> str:
     """The province sitemap discover() sweeps for `province`. Shared by
-    discover() and search_previews() so the preview can't drift."""
-    return f"{_BASE_URL}/es/sitemap-es-{province}.xml"
+    discover() and search_previews() so the preview can't drift.
+
+    Delegates to `_SEARCH_URL_GRAMMAR.build()` (issue #495) so the swept URL and
+    the published grammar stay pinned together (anti-drift)."""
+    return _SEARCH_URL_GRAMMAR.build({"province": province})
 
 
 def _get(url: str, throttle: Throttle) -> requests.Response:
@@ -292,6 +321,12 @@ class ServihabitatConnector(Connector):
     # recall source for a profile (discover() wiring is Phase 5).
     override_host_suffix = "servihabitat.com"
 
+    # Issue #495: published to connector_registry.search_url_grammar. Only the
+    # province sitemap round-trips; a pasted faceted-search URL is rejected with
+    # the robots reason (the dashboard blocks saving it). `_sitemap_url()`
+    # delegates to `build()` — the anti-drift contract.
+    search_url_grammar = _SEARCH_URL_GRAMMAR
+
     def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
         """Reuses `_sitemap_url()` — the exact province sitemap discover()
         enters from. `kind="sitemap"`: discovery enumerates the province's
@@ -310,15 +345,32 @@ class ServihabitatConnector(Connector):
                     notes="El perfil no resuelve a una provincia que este conector cubra.",
                 )
             ]
+        # Issue #495: the only param that reaches this connector is the province
+        # (it selects the sitemap). No faceted filters travel — robots.txt
+        # disallows the faceted search entirely — so the honest note below and
+        # the grammar's reject_reasons keep the row from implying more.
+        params: tuple[SearchParam, ...] = (
+            SearchParam(
+                key="province",
+                label="Provincia (sitemap)",
+                value=province,
+                source="profile",
+                in_url=True,
+            ),
+        )
         return [
             SearchPreview(
                 label=f"Servihabitat — {province}",
                 url=_sitemap_url(province),
                 kind="sitemap",
                 tunable=True,
+                params=params,
                 notes=(
                     "La búsqueda enumera el sitemap de la provincia; el filtrado "
-                    "fino es por datos."
+                    "fino es por datos. La búsqueda facetada de este portal está "
+                    "prohibida por robots.txt, así que solo el sitemap de "
+                    "provincia es una URL válida (pegar una URL de búsqueda con "
+                    "filtros se rechaza)."
                 ),
             )
         ]
