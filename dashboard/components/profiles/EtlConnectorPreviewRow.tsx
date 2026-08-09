@@ -64,6 +64,7 @@ export function EtlConnectorPreviewRow({
   overridden,
   pinnedUrl,
   source,
+  derivedUrl = null,
 }: {
   profileId: number;
   connector: string;
@@ -81,10 +82,21 @@ export function EtlConnectorPreviewRow({
   pinnedUrl: string | null;
   /** The pin's origin, when pinned. */
   source?: ProfileConnectorFilterSource;
+  /**
+   * Issue #513: a URL built on demand from the grammar when the ETL has no
+   * preview row yet (so the row is never URL-less). Best-effort, unverified by
+   * the ETL — shown with a "derivada (sin verificar por ETL)" badge/note.
+   */
+  derivedUrl?: string | null;
 }) {
   const router = useRouter();
-  // What the connector will actually use: the pin (if any) else the derived URL.
-  const effectiveUrl = (overridden ? pinnedUrl : preview?.url) ?? "";
+  // Issue #513: when neither a pin nor an ETL-computed URL exists, fall back to
+  // the on-demand derived URL so the row is never blank.
+  const isDerived = !overridden && !preview?.url && Boolean(derivedUrl);
+  // What the connector will actually use: the pin, else the ETL-derived URL,
+  // else the on-demand grammar-built one.
+  const effectiveUrl =
+    (overridden ? pinnedUrl : (preview?.url ?? derivedUrl)) ?? "";
   const [draft, setDraft] = useState(effectiveUrl);
   const [busy, setBusy] = useState<"save" | "remove" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -191,7 +203,9 @@ export function EtlConnectorPreviewRow({
       ? source === "extension"
         ? "URL fijada (extensión)"
         : "URL fijada"
-      : "derivada del perfil";
+      : isDerived
+        ? "derivada (sin verificar por ETL)"
+        : "derivada del perfil";
 
   return (
     <div
@@ -270,6 +284,16 @@ export function EtlConnectorPreviewRow({
           {preview === null
             ? "Previsualización pendiente de la próxima ejecución del ETL."
             : "Este conector no resuelve a una URL para este perfil."}
+        </p>
+      )}
+
+      {/* Issue #513: the URL was built on demand from the grammar (no ETL sweep
+          for this profile yet) — an honest "unverified" note; «Recalcular» sigue
+          siendo la fuente autoritativa. */}
+      {isDerived && (
+        <p data-testid="etl-derived-note" style={{ fontSize: 11, color: "var(--fg-muted)", margin: 0, lineHeight: 1.5 }}>
+          URL derivada de la gramática del conector, aún sin verificar por el ETL. Pulsa
+          «Recalcular» para obtener la que ejecutará realmente el ETL, o fíjala tal cual si te sirve.
         </p>
       )}
 

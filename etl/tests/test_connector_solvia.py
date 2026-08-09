@@ -435,6 +435,33 @@ class TestDiscoverProvinciaSweep:
         assert "150714-187731" in ids  # a real Dos Hermanas listing
         assert len(ids) == 9  # only Dos Hermanas' page had any listings
 
+    def test_uses_pinned_override_url_as_single_entry_page(self):
+        """Issue #513: an owner-pinned municipio search URL is fetched verbatim
+        once, skipping the sitemap index/child + per-municipio sweep."""
+        pinned = "https://www.solvia.es/es/comprar/viviendas/sevilla/dos-hermanas"
+        connector = SolviaConnector()
+        with patch(
+            "etl.connectors.solvia.requests.get",
+            return_value=_mock_response(
+                _read("solvia_sample_search_dos_hermanas.html")
+            ),
+        ) as mock_get:
+            ids = connector.discover(
+                ConnectorScope(
+                    center=(37.283689, -5.9226718),
+                    radius_km=7.0,
+                    override_url=pinned,
+                ),
+                throttle=_noop_throttle,
+            )
+        assert mock_get.call_count == 1  # no sitemap fetch, no municipio sweep
+        assert mock_get.call_args.args[0] == pinned
+        assert len(ids) == 9
+        assert "150714-187731" in ids
+
+    def test_declares_search_override_consumption(self):
+        assert SolviaConnector.supports_search_override is True
+
     def test_a_few_bad_municipio_pages_dont_abort_the_whole_sweep(self):
         child_url = "https://www.solvia.es/sitemap_comprar_viviendas.xml"
         responses = {

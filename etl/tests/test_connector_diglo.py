@@ -394,6 +394,36 @@ class TestDiscover:
                 ConnectorScope(geography="madrid"), throttle=lambda: None
             )
 
+    def test_uses_pinned_override_url_as_single_entry_page(self):
+        """Issue #513: an owner-pinned buscador URL is hit verbatim once (no
+        pagination); the province the in-province filter needs is read from the
+        pinned URL itself via the grammar."""
+        pinned = "https://digloservicer.com/venta-pisos/madrid"
+        connector = DigloConnector()
+        with patch(
+            "etl.connectors.diglo.requests.get",
+            return_value=_mock_response(_read("diglo_buscador_p0.html")),
+        ) as mock_get:
+            ids = connector.discover(
+                ConnectorScope(
+                    center=(40.4168, -3.7038), radius_km=10, override_url=pinned
+                ),
+                throttle=lambda: None,
+            )
+        assert mock_get.call_count == 1
+        assert mock_get.call_args.args[0] == pinned
+        # Only the three madrid residential cards from page 0 (no pagination).
+        assert ids == sorted(
+            [
+                "venta-pisos/madrid/madrid/efe0000200055",
+                "venta-casas/madrid/villaviciosa-odon/ib00100025555",
+                "venta-pisos/madrid/madrid/efe0000200057",
+            ]
+        )
+
+    def test_declares_search_override_consumption(self):
+        assert DigloConnector.supports_search_override is True
+
 
 class TestWithdrawnRedirect:
     """A listing withdrawn between discovery and fetch 302-redirects to the

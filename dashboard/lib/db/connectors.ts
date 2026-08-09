@@ -122,6 +122,9 @@ interface RegistryRow {
   discovers_full_inventory: boolean | null;
   supports_discovery: boolean;
   supported_filters: unknown;
+  override_host_suffix: string | null;
+  supports_search_override: boolean | null;
+  search_url_grammar: unknown;
   enabled: boolean | null;
   capture_enabled: boolean | null;
   geography_override: unknown;
@@ -364,6 +367,9 @@ export async function listConnectors(): Promise<ConnectorView[]> {
               g.discovers_full_inventory,
               g.supports_discovery,
               g.supported_filters,
+              g.override_host_suffix,
+              g.supports_search_override,
+              g.search_url_grammar,
               c.enabled,
               c.capture_enabled,
               c.geography_override,
@@ -428,6 +434,10 @@ export async function listConnectors(): Promise<ConnectorView[]> {
       discovers_full_inventory: row.discovers_full_inventory,
       supports_discovery: supportsDiscovery,
       supported_filters: parseSupportedFilters(row.supported_filters),
+      overrideHostSuffix: row.override_host_suffix,
+      supportsSearchOverride: row.supports_search_override ?? false,
+      hasSearchUrlGrammar:
+        typeof row.search_url_grammar === "object" && row.search_url_grammar !== null,
       usingDefaults: !row.has_config,
       enabled,
       capture_enabled: captureEnabled,

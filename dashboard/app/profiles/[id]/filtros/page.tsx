@@ -12,6 +12,7 @@ import { ProfileSwitcher } from "@/components/layout/ProfileSwitcher";
 import { EtlConnectorPreviewRow } from "@/components/profiles/EtlConnectorPreviewRow";
 import { RecalcularPreviewsButton } from "@/components/profiles/RecalcularPreviewsButton";
 import { getEtlConnectorPreviews } from "@/lib/db/connector-search-preview";
+import { deriveGrammarPreview } from "@/lib/connector-url/derive";
 import type { LoosenedConstraint } from "@/lib/search-url";
 import type { ProfileConnectorFilterSource } from "@/lib/db/profile-connector-filter";
 
@@ -215,18 +216,26 @@ export default async function ValidarFiltrosPage({
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {etlPreviews.map((row) => {
               const pin = overrides.find((o) => o.connector === row.connector && o.section_key === "");
+              const tunable = row.overrideHostSuffix !== null;
+              // Issue #513: when there's no pin and no ETL-computed URL yet, build
+              // one on demand from the grammar so the row is never URL-less.
+              const derivedUrl =
+                !pin && tunable && row.searchUrlGrammar && !row.previews[0]?.url
+                  ? (deriveGrammarPreview(row.searchUrlGrammar, profile.scope)?.url ?? null)
+                  : null;
               return (
                 <EtlConnectorPreviewRow
                   key={row.connector}
                   profileId={id}
                   connector={row.connector}
                   preview={row.previews[0] ?? null}
-                  tunable={row.overrideHostSuffix !== null}
+                  tunable={tunable}
                   grammar={row.searchUrlGrammar}
                   computedAt={row.computedAt}
                   overridden={Boolean(pin)}
                   pinnedUrl={pin ? pin.url : null}
                   source={pin?.source}
+                  derivedUrl={derivedUrl}
                 />
               );
             })}

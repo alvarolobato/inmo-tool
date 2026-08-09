@@ -618,9 +618,13 @@ class FotocasaConnector(Connector):
     # absent here rather than shipped as controls that might silently no-op.
     supported_filters = ("rooms",)
 
-    # Issue #478: an owner-pinned fotocasa search URL may become this
-    # connector's recall source for a profile (discover() wiring is Phase 5).
+    # Issue #478: an owner-pinned fotocasa search URL is this connector's
+    # recall source for a profile. Issue #513: discover() now CONSUMES
+    # `scope.override_url` (hits it verbatim as the single entry page, skipping
+    # the derived slug + zone sweep) — so a pin actually changes what the next
+    # ETL run fetches instead of being silently ignored.
     override_host_suffix = "fotocasa.es"
+    supports_search_override = True
 
     # Issue #493: published to connector_registry.search_url_grammar so the
     # dashboard infers params from an owner-edited URL in the browser with the
@@ -702,6 +706,27 @@ class FotocasaConnector(Connector):
         # discovered_prices() and misattribute to a sweep that never
         # actually happened.
         self._last_discovery_prices = {}
+
+        # Issue #513: an owner-pinned URL is this profile's recall source — hit
+        # it verbatim as the single entry page, skipping the derived city slug
+        # AND the zone sweep entirely (the owner tuned this exact search; it is
+        # the strongest tier-0 signal). Prices are still harvested free from the
+        # same page. Without an override the code path below is byte-identical.
+        override_url = scope.override_url if self.supports_search_override else None
+        if override_url:
+            throttle()
+            override_html = self._fetch_search_page(override_url, strict=True)
+            external_ids = self._parse_external_ids(override_html)
+            self._last_discovery_prices.update(
+                _extract_search_result_prices(override_html)
+            )
+            logger.info(
+                "fotocasa discover: pinned override URL %s found %d external_ids "
+                "(single entry page, no zone sweep)",
+                override_url,
+                len(external_ids),
+            )
+            return sorted(external_ids)
 
         # _resolve_geography can raise UnresolvableGeographyError (a
         # ConnectorError subclass) when scope.center matches nothing in the

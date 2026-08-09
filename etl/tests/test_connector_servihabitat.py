@@ -260,6 +260,32 @@ class TestDiscover:
             connector.discover(far, throttle=lambda: None)
         mock_get.assert_not_called()
 
+    def test_uses_pinned_override_url_as_sitemap_entry(self):
+        """Issue #513: a scope carrying override_url makes discover() fetch the
+        pinned province-sitemap URL verbatim, bypassing the derived one. Only a
+        sitemap URL round-trips the grammar (faceted search is rejected at save
+        time), so the same residential filtering still applies."""
+        pinned = (
+            "https://www.servihabitat.com/es/sitemap/comprar/vivienda/barcelona.xml"
+        )
+        connector = ServihabitatConnector()
+        with patch(
+            "etl.connectors.servihabitat.requests.get",
+            return_value=_mock_response(_read("servihabitat_sample_sitemap.xml")),
+        ) as mock_get:
+            ids = connector.discover(
+                ConnectorScope(
+                    center=(40.4168, -3.7038), radius_km=10, override_url=pinned
+                ),
+                throttle=lambda: None,
+            )
+        assert mock_get.call_args.args[0] == pinned
+        assert len(ids) == 3
+        assert all("/vivienda" in i for i in ids)
+
+    def test_declares_search_override_consumption(self):
+        assert ServihabitatConnector.supports_search_override is True
+
 
 class TestScopeAndFlags:
     def test_discovers_full_inventory_is_false(self):

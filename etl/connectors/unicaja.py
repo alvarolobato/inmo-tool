@@ -355,9 +355,12 @@ class UnicajaConnector(Connector):
     # a fetch glitch can't read as "the whole province was withdrawn".
     discovers_full_inventory = True
 
-    # Issue #478: an owner-pinned unicaja URL may become this connector's recall
-    # source for a profile (discover() wiring is Phase 5).
+    # Issue #478: an owner-pinned unicaja URL is this connector's recall source
+    # for a profile. Issue #513: discover() now CONSUMES `scope.override_url` —
+    # it fetches the pinned search page verbatim as the single entry point (no
+    # pagination), so a pin actually changes what the next ETL run fetches.
     override_host_suffix = "unicajainmuebles.com"
+    supports_search_override = True
 
     # Issue #494: published to connector_registry.search_url_grammar so the
     # dashboard infers params from an owner-edited URL in the browser with the
@@ -528,6 +531,30 @@ class UnicajaConnector(Connector):
         ]
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
+        # Issue #513: an owner-pinned URL is this profile's recall source — hit
+        # it verbatim as the single entry page (no pagination), running the same
+        # refcode/card extraction so fetch_detail() still finds its cards.
+        # Without an override the code path below is byte-identical.
+        override_url = scope.override_url if self.supports_search_override else None
+        if override_url:
+            self._cards = {}
+            external_ids: list[str] = []
+            html = _get(override_url, throttle).text
+            cards = parse_search_cards(html)
+            for ref in refcodes_in_search(html):
+                card = cards.get(ref, {})
+                if not is_residential(card.get("property_type_raw")):
+                    continue
+                self._cards[ref] = card
+                external_ids.append(ref)
+            logger.info(
+                "unicaja discover: pinned override URL %s -> %d residential "
+                "listings (single entry page, no pagination)",
+                override_url,
+                len(external_ids),
+            )
+            return sorted(external_ids)
+
         ine_code = self._scope_ine_code(scope)
         if ine_code is None:
             raise ConnectorError(

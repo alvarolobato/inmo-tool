@@ -151,6 +151,35 @@ class TestDiscover:
                 ConnectorScope(geography="madrid"), throttle=lambda: None
             )
 
+    def test_uses_pinned_override_url_as_entry_page(self):
+        """Issue #513: a scope carrying override_url makes discover() hit the
+        pinned URL verbatim, bypassing the derived /es/alquiler/… slug."""
+        pinned = "https://www.fotocasa.es/es/alquiler/viviendas/madrid-capital/centro/l"
+        html = _read_fixture("fotocasa_rental_sample_search.html")
+        with patch(
+            "etl.connectors.fotocasa_rental.requests.get",
+            return_value=_mock_response(html),
+        ) as mock_get:
+            ids = FotocasaRentalConnector().discover(
+                ConnectorScope(
+                    center=(40.4168, -3.7038), radius_km=10, override_url=pinned
+                ),
+                throttle=lambda: None,
+            )
+        assert mock_get.call_args.args[0] == pinned
+        assert ids == ["188990001", "189725317", "190014264"]
+
+    def test_declares_search_override_consumption_explicitly(self):
+        assert FotocasaRentalConnector.supports_search_override is True
+        assert "supports_search_override" in vars(FotocasaRentalConnector)
+
+    def test_without_override_uses_the_derived_url(self):
+        _, mock_get = _discover(FotocasaRentalConnector())
+        assert (
+            "/es/alquiler/viviendas/madrid-capital/todas-las-zonas/l"
+            in mock_get.call_args.args[0]
+        )
+
 
 # ── fetch_detail() makes no network request ───────────────────────────
 

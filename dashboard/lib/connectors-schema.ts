@@ -170,6 +170,20 @@ export interface ConnectorView {
   supports_discovery: boolean;
   supported_filters: string[];
 
+  /**
+   * Capability flags mirrored from `connector_registry` (issue #513) so the
+   * Conectores admin page can show, per connector, WHAT it supports — making
+   * the snowflakes (a "filtrado por datos" structural connector vs a tunable
+   * HTTP one vs a capture-only portal) visible at a glance instead of only in
+   * code.
+   */
+  /** Host suffix a pinned URL must fall under, or null when un-pinnable. */
+  overrideHostSuffix: string | null;
+  /** Whether discover() actually consumes a pinned URL (Phase 1 of #513). */
+  supportsSearchOverride: boolean;
+  /** Whether the connector publishes a URL grammar (build + parse). */
+  hasSearchUrlGrammar: boolean;
+
   /** True when no `connector_config` row exists — running on pure defaults. */
   usingDefaults: boolean;
   enabled: boolean;

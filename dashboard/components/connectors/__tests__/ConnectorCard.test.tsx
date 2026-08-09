@@ -34,6 +34,9 @@ function makeConnector(overrides: Partial<ConnectorView> = {}): ConnectorView {
     discovers_full_inventory: false,
     supports_discovery: true,
     supported_filters: ["rooms"],
+    overrideHostSuffix: "fotocasa.es",
+    supportsSearchOverride: true,
+    hasSearchUrlGrammar: true,
     usingDefaults: false,
     enabled: true,
     capture_enabled: true,
@@ -75,6 +78,9 @@ function captureOnly(overrides: Partial<ConnectorView> = {}): ConnectorView {
     rate_limit_per_minute: 20,
     supports_discovery: false,
     supported_filters: [],
+    overrideHostSuffix: null,
+    supportsSearchOverride: false,
+    hasSearchUrlGrammar: false,
     enabled: false,
     capture_enabled: true,
     scopeSource: "capture-only",
@@ -284,5 +290,52 @@ describe("ConnectorCard — freshness cadence (issue #295 / D-050)", () => {
     expect(screen.getByTestId("freshness-interval-idealista")).toBeInTheDocument();
     // …but still no scope/filter controls.
     expect(screen.queryByTestId("edit-scope-idealista")).not.toBeInTheDocument();
+  });
+});
+
+describe("ConnectorCard — capability badges (issue #513)", () => {
+  it("shows grammar / preview / pin badges for a tunable HTTP connector", () => {
+    render(<ConnectorCard connector={makeConnector()} onPatch={noop} />);
+    const strip = screen.getByTestId("capabilities-fotocasa");
+    const caps = within(strip)
+      .getAllByTestId("capability-badge")
+      .map((b) => b.getAttribute("data-capability"));
+    expect(caps).toContain("grammar");
+    expect(caps).toContain("preview");
+    expect(caps).toContain("pin");
+    // A tunable connector is NOT "filtrado por datos".
+    expect(caps).not.toContain("data-filter");
+  });
+
+  it("shows 'filtrado por datos' (not pin) for a structural connector", () => {
+    // cimenta2-style: discovers, has no pinnable URL, no grammar.
+    render(
+      <ConnectorCard
+        connector={makeConnector({
+          name: "cimenta2",
+          overrideHostSuffix: null,
+          supportsSearchOverride: false,
+          hasSearchUrlGrammar: false,
+        })}
+        onPatch={noop}
+      />,
+    );
+    const caps = within(screen.getByTestId("capabilities-cimenta2"))
+      .getAllByTestId("capability-badge")
+      .map((b) => b.getAttribute("data-capability"));
+    expect(caps).toContain("data-filter");
+    expect(caps).toContain("preview");
+    expect(caps).not.toContain("pin");
+    expect(caps).not.toContain("grammar");
+  });
+
+  it("shows 'captura extensión' for a capture-only connector", () => {
+    render(<ConnectorCard connector={captureOnly()} onPatch={noop} />);
+    const caps = within(screen.getByTestId("capabilities-idealista"))
+      .getAllByTestId("capability-badge")
+      .map((b) => b.getAttribute("data-capability"));
+    expect(caps).toContain("harvest");
+    expect(caps).not.toContain("preview");
+    expect(caps).not.toContain("data-filter");
   });
 });
