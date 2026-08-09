@@ -116,4 +116,41 @@ describe("FilterValidationRow (issue #478 P2)", () => {
     expect(screen.getByTestId("filter-open")).toBeDisabled();
     expect(screen.queryByTestId("filter-url")).not.toBeInTheDocument();
   });
+
+  it("verbatim-only portal (altamira #497) shows the honest note and 'sin URL fijada' badge", () => {
+    render(
+      <FilterValidationRow
+        {...baseProps()}
+        connector="altamira"
+        label="Altamira"
+        url=""
+        sectionKey=""
+        chips={[]}
+        verbatimOnly
+      />,
+    );
+    expect(screen.getByTestId("filter-verbatim-note")).toHaveTextContent("se usa tal cual");
+    expect(screen.getByTestId("filter-source-badge")).toHaveTextContent("sin URL fijada");
+  });
+
+  it("verbatim-only portal suppresses the misleading 'no se pudo descodificar' note", () => {
+    render(
+      <FilterValidationRow
+        {...baseProps()}
+        connector="altamira"
+        label="Altamira"
+        url="https://www.altamirainmuebles.com/venta/piso/sevilla"
+        overridden
+        source="manual"
+        sectionKey=""
+        chips={[]}
+        unparseable
+        verbatimOnly
+      />,
+    );
+    // The honest note stands in for the generic unparseable one.
+    expect(screen.getByTestId("filter-verbatim-note")).toBeInTheDocument();
+    expect(screen.queryByTestId("filter-unparseable")).not.toBeInTheDocument();
+    expect(screen.getByTestId("filter-source-badge")).toHaveTextContent("URL fijada");
+  });
 });

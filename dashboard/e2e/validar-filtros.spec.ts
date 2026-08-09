@@ -49,6 +49,11 @@ const PINNED_IDEALISTA =
 // A hand-tuned aliseda URL the test pins during the run.
 const NEW_ALISEDA =
   "https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/andalucia/sevilla/?precio=0-175000";
+// #497: an altamira URL the test pins verbatim. Altamira has no verified grammar
+// (Akamai WAF) — no builder, no parser — so the row offers NO inference, only a
+// verbatim pin under its host (altamirainmuebles.com).
+const NEW_ALTAMIRA =
+  "https://www.altamirainmuebles.com/es/venta/viviendas/sevilla/sevilla";
 // P4: the ETL-connector previews section. `pisos` is a tunable HTTP connector
 // (a real search page + an override_host_suffix); `cimenta2` is non-tunable
 // (national sitemap sweep). Both are seeded into the registry + preview tables
@@ -419,10 +424,13 @@ test("navigate from ⋮ menu; pinned + derived rows; save persists; captura uses
   await expect(ideaRow.getByTestId("filter-unparseable")).toHaveCount(0);
   await expect(ideaRow.getByTestId("filter-chips")).toContainText("polígono dibujado");
 
-  // 2b) Aliseda row → derived (no pin yet).
+  // 2b) Aliseda row → derived (no pin yet). #497: the derived URL is decoded by
+  //     the aliseda inverse parser into chips (price/zone), not "no se pudo validar".
   const aliRow = page.locator('[data-testid="filter-validation-row"][data-connector="aliseda"]');
   await expect(aliRow).toBeVisible();
   await expect(aliRow.getByTestId("filter-source-badge")).toHaveText("derivada del perfil");
+  await expect(aliRow.getByTestId("filter-unparseable")).toHaveCount(0);
+  await expect(aliRow.getByTestId("filter-chips")).toContainText("Precio");
 
   // 2c) The transient Phase-2 "abrir sin señal" note is gone (Phase 3); a
   //     permanent validation-mode hint replaces it.
@@ -458,6 +466,39 @@ test("navigate from ⋮ menu; pinned + derived rows; save persists; captura uses
   const ideaConn = page.getByTestId(`captura-connector-${profileId}-idealista`);
   await expect(ideaConn).toBeVisible();
   await expect(ideaConn.locator(`[title="${PINNED_IDEALISTA}"]`).first()).toBeVisible();
+});
+
+test("altamira: verbatim-pin row — honest note, zero inference, pin persists (#497)", async ({
+  page,
+}) => {
+  await page.goto(`/profiles/${profileId}/filtros`);
+  await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
+  await assertNoErrorSurface(page);
+
+  const altaRow = page.locator('[data-testid="filter-validation-row"][data-connector="altamira"]');
+  await expect(altaRow).toBeVisible();
+  // No verified grammar → an honest note, "sin URL fijada" badge, and NO chips /
+  // no misleading "no se pudo descodificar" note.
+  await expect(altaRow.getByTestId("filter-verbatim-note")).toContainText("se usa tal cual");
+  await expect(altaRow.getByTestId("filter-source-badge")).toHaveText("sin URL fijada");
+  await expect(altaRow.getByTestId("filter-chips")).toHaveCount(0);
+  await expect(altaRow.getByTestId("filter-unparseable")).toHaveCount(0);
+
+  // Pin a URL verbatim → persists + re-renders as "URL fijada", shown verbatim,
+  // and the honest note stays (still no inference offered).
+  await altaRow.getByTestId("filter-url-input").fill(NEW_ALTAMIRA);
+  await altaRow.getByTestId("filter-save").click();
+  await expect(altaRow.getByTestId("filter-source-badge")).toHaveText("URL fijada");
+  await expect(altaRow.getByTestId("filter-url")).toHaveText(NEW_ALTAMIRA);
+  await expect(altaRow.getByTestId("filter-verbatim-note")).toBeVisible();
+  await expect(altaRow.getByTestId("filter-unparseable")).toHaveCount(0);
+  await assertNoErrorSurface(page);
+
+  // Clean the pin so the suite can be re-run against a persistent dev DB.
+  await pool.query(
+    "DELETE FROM profile_connector_filter WHERE profile_id = $1 AND connector = 'altamira'",
+    [profileId],
+  );
 });
 
 test("ETL section: cimenta2 read-only with its note; pisos tunable and saves (P4)", async ({
