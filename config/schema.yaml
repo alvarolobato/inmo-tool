@@ -945,3 +945,33 @@
   description: "Token de acceso Docker Hub (para GitHub Actions)."
   requires_restart: []
   components: [docker]
+
+- key: discovery.drift_auto_enabled
+  env: DISCOVERY_DRIFT_AUTO_ENABLED
+  type: bool
+  sensitive: false
+  default: true
+  section: "Descubrimiento"
+  description: "Interruptor del comprobador automático de deriva de filtros de portales (#511). Con false, el scheduler no arranca; la comprobación manual desde Salud de datos sigue disponible."
+  requires_restart: [dashboard]
+  components: [dashboard]
+
+- key: discovery.drift_tick_seconds
+  env: DISCOVERY_DRIFT_TICK_SECONDS
+  type: int
+  sensitive: false
+  default: 21600
+  section: "Descubrimiento"
+  description: "Cadencia (segundos) del tick del scheduler de deriva. Por defecto 6h: cada tick comprueba qué portales tienen su último catálogo más viejo que drift_check_interval_days y ejecuta el extractor estático solo para esos. Debe ser positivo."
+  requires_restart: [dashboard]
+  components: [dashboard]
+
+- key: discovery.drift_check_interval_days
+  env: DISCOVERY_DRIFT_CHECK_INTERVAL_DAYS
+  type: int
+  sensitive: false
+  default: 7
+  section: "Descubrimiento"
+  description: "Ventana (días) tras la cual un portal vuelve a estar 'vencido' para comprobar deriva. Por defecto 7 (semanal). La idempotencia la da el captured_at del último catálogo, no este intervalo. Debe ser positivo."
+  requires_restart: [dashboard]
+  components: [dashboard]

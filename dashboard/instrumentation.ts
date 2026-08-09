@@ -89,6 +89,18 @@ export async function register() {
       } catch (err) {
         console.warn("[digest] Could not start the digest scheduler:", err);
       }
+
+      // Start the weekly portal filter-drift scheduler (#511). Same startup
+      // seam, DB requirement (SKIP_DB_MIGRATE gate), idempotency, and non-fatal
+      // handling as the schedulers above. Its own discovery.drift_auto_enabled
+      // kill switch, and it skips silently when a portal is unreachable, so it
+      // is harmless everywhere.
+      try {
+        const { startDriftScheduler } = await import("./lib/search-url/drift-scheduler");
+        startDriftScheduler();
+      } catch (err) {
+        console.warn("[drift] Could not start the drift scheduler:", err);
+      }
     }
   }
 }

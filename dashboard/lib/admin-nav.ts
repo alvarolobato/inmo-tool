@@ -10,11 +10,12 @@
  * the index omitted every `/etl/*` surface) and names had drifted from where
  * the work actually happens. Add or reorder a tab HERE and both surfaces follow.
  *
- * Removal of the two extension-only surfaces (Extensión, Descubrimiento) is
- * deliberately NOT done here — it is owned by follow-up issues #509 and #511,
- * which reference this module. They stay listed (with `pendingRemoval`) so those
- * issues have a tab to remove and so the shipped extension/discovery features
- * remain reachable in the meantime. See #508 Scope OUT.
+ * The two extension-only surfaces that #508 kept with `pendingRemoval` are now
+ * gone: #509 removed Extensión (its setup is surfaced inline via the
+ * `<ExtensionCta/>` modal wherever capture happens; `/etl/extension` stays
+ * routable as the modal's full-page deep link), and #511 removed Descubrimiento
+ * (the aliseda static drift check moved to Salud de datos + a weekly scheduled
+ * run). The strip is back to its intended tab set.
  */
 
 export interface AdminNavItem {
@@ -29,11 +30,6 @@ export interface AdminNavItem {
    * Used by the consolidated "LLM" landing, which groups four sub-routes.
    */
   matchPrefixes?: readonly string[];
-  /**
-   * Set when a follow-up issue owns removing this tab. Kept so the two
-   * consumers stay in lock-step until that issue lands. Purely informational.
-   */
-  pendingRemoval?: string;
 }
 
 export const ADMIN_NAV: readonly AdminNavItem[] = [
@@ -58,29 +54,14 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
     description:
       "Registro de la captura asistida por extensión: qué portales visitar y el estado de cada tarea.",
   },
-  // URL-building discovery (#336/#339). Pending removal — issue #511 folds the
-  // aliseda drift check into Salud de datos and deletes this page.
-  {
-    href: "/etl/discovery",
-    label: "Descubrimiento",
-    description:
-      "Comprobación de deriva en los filtros de los portales (extractor estático).",
-    pendingRemoval: "#511",
-  },
-  // Data-health observability (#272) — read-only capture/ETL health.
+  // Data-health observability (#272) — read-only capture/ETL health. Since #511
+  // it also carries the "Deriva de portales" section (the aliseda static drift
+  // check that used to live on the retired Descubrimiento tab).
   {
     href: "/etl/salud",
     label: "Salud de datos",
     description:
       "Salud de la captura y el ETL: capturas atascadas, fallos de conectores, calidad de extracción y perfiles obsoletos.",
-  },
-  // Extension setup (#256). Pending removal — issue #509 replaces the tab with
-  // inline install/link CTAs where capture happens (keeps the route routable).
-  {
-    href: "/etl/extension",
-    label: "Extensión",
-    description: "Descarga la extensión del navegador y copia la URL/clave de la API.",
-    pendingRemoval: "#509",
   },
   // Captured Idealista search URLs (#475, part of #471).
   {

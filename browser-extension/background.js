@@ -1318,6 +1318,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === BATCH_ALARM) {
     reattachIfStranded();
     autoTick();
+    // Piggyback the presence heartbeat on the ~30s watchdog tick (#509).
+    sendHeartbeat();
   }
   if (alarm.name === AUTO_ALARM) autoTick();
 });
@@ -1325,17 +1327,21 @@ chrome.runtime.onStartup.addListener(() => {
   ensureBatchWatchdog();
   reattachIfStranded();
   autoTick();
+  sendHeartbeat();
 });
 chrome.runtime.onInstalled.addListener(() => {
   ensureBatchWatchdog();
   reattachIfStranded();
   autoTick();
+  sendHeartbeat();
 });
 // Top-level: fires whenever the worker (re)spawns, including after an eviction
 // that no lifecycle event covers. The auto driver's top-level tick is at the end
 // of the auto block below (its state consts must be initialised first).
 ensureBatchWatchdog();
 reattachIfStranded();
+// Announce presence to the dashboard on every worker (re)spawn (#509).
+sendHeartbeat();
 
 // ═══ Auto-capture continuous driver (issue #424; v2 discover→harvest #516) ═══
 //
@@ -1779,6 +1785,30 @@ async function getApiConfig() {
     apiUrl: (config.apiUrl || 'http://localhost:4000').replace(/\/+$/, ''),
     apiKey: config.apiKey || '',
   };
+}
+
+/**
+ * Server-mediated presence heartbeat (issue #509). The extension can NOT inject
+ * into the dashboard origin, so the dashboard can only know the extension is
+ * installed + configured by receiving this ping. Fire-and-forget: sent on worker
+ * spawn and on the periodic watchdog tick; a failure (dashboard down, key not
+ * set yet) is swallowed so it never interferes with capture work. Skipped when
+ * no API key is configured — an unconfigured extension is, correctly, "not
+ * linked".
+ */
+async function sendHeartbeat() {
+  try {
+    const { apiUrl, apiKey } = await getApiConfig();
+    if (!apiKey) return; // not configured yet — nothing to report
+    const version = chrome.runtime.getManifest().version;
+    await fetch(`${apiUrl}/api/extension/heartbeat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-admin-key': apiKey },
+      body: JSON.stringify({ version }),
+    });
+  } catch {
+    /* best-effort — never let a heartbeat failure surface or block capture */
+  }
 }
 
 /**

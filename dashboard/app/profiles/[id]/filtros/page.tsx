@@ -8,6 +8,7 @@ import { portalTitle } from "@/lib/captura-tasks";
 import { decodeFilterUrl } from "@/lib/filter-validation";
 import { PARSERS } from "@/lib/search-url/parsers";
 import { FilterValidationRow } from "@/components/profiles/FilterValidationRow";
+import { ExtensionCta } from "@/components/extension/ExtensionCta";
 import { ProfileSwitcher } from "@/components/layout/ProfileSwitcher";
 import { EtlConnectorPreviewRow } from "@/components/profiles/EtlConnectorPreviewRow";
 import { RecalcularPreviewsButton } from "@/components/profiles/RecalcularPreviewsButton";
@@ -158,9 +159,16 @@ export default async function ValidarFiltrosPage({
       </p>
 
       <section style={{ marginTop: 20 }}>
-        <h2 style={{ fontSize: 15, fontWeight: 600, color: "var(--fg)", margin: "0 0 10px" }}>
-          Portales de captura (extensión)
-        </h2>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", margin: "0 0 10px" }}>
+          <h2 style={{ fontSize: 15, fontWeight: 600, color: "var(--fg)", margin: 0 }}>
+            Portales de captura (extensión)
+          </h2>
+          {/* Inline CTA (#509): "Abrir"/pin need the extension linked — shown
+              only while it isn't. */}
+          <div style={{ marginLeft: "auto" }}>
+            <ExtensionCta context="filtros" />
+          </div>
+        </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {rows.map((row) => (
             <FilterValidationRow
