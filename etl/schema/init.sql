@@ -1282,6 +1282,13 @@ CREATE TABLE IF NOT EXISTS connector_registry (
     -- generic implementation, no per-connector TypeScript). parse_pattern is
     -- stored in ECMAScript form so the browser's RegExp consumes it directly.
     search_url_grammar        JSONB,
+    -- Issue #515: the connector's public home/base page (e.g.
+    -- https://www.pisos.com). The Validar-filtros ETL rows open this when a row
+    -- has no derived/pinned search URL yet, so "Abrir" is never a dead button.
+    -- NULL only for a connector that declares neither an override_host_suffix nor
+    -- an explicit home_url (should be none in the fleet after #515). Published by
+    -- sync_connector_registry from Connector.home_url.
+    home_url                  TEXT,
     updated_at                TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
@@ -1291,6 +1298,8 @@ ALTER TABLE connector_registry ADD COLUMN IF NOT EXISTS override_host_suffix TEX
 ALTER TABLE connector_registry ADD COLUMN IF NOT EXISTS supports_search_override BOOLEAN NOT NULL DEFAULT false;
 -- Issue #491.
 ALTER TABLE connector_registry ADD COLUMN IF NOT EXISTS search_url_grammar JSONB;
+-- Issue #515.
+ALTER TABLE connector_registry ADD COLUMN IF NOT EXISTS home_url TEXT;
 
 -- Issue #217 (D-030): per-(connector, scope) "when did this geography last
 -- actually get a discover() attempt" bookkeeping — what makes scope

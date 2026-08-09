@@ -110,11 +110,38 @@ describe("FilterValidationRow (issue #478 P2)", () => {
     );
   });
 
-  it("empty-URL row shows the no-URL note and disables Abrir", () => {
-    render(<FilterValidationRow {...baseProps()} url="" sectionKey="" chips={[]} connector="altamira" label="Altamira" />);
+  it("empty-URL row shows the no-URL note and disables Abrir when there is no home URL", () => {
+    render(<FilterValidationRow {...baseProps()} url="" homeUrl={null} sectionKey="" chips={[]} connector="altamira" label="Altamira" />);
     expect(screen.getByTestId("filter-no-url")).toBeInTheDocument();
     expect(screen.getByTestId("filter-open")).toBeDisabled();
     expect(screen.queryByTestId("filter-url")).not.toBeInTheDocument();
+  });
+
+  it("empty-URL row with a home URL enables an 'Abrir portal' fallback that opens the portal home tagged for validation (#515)", () => {
+    const openSpy = vi.fn();
+    vi.stubGlobal("open", openSpy);
+    render(
+      <FilterValidationRow
+        {...baseProps()}
+        url=""
+        homeUrl="https://www.altamirainmuebles.com"
+        sectionKey=""
+        chips={[]}
+        connector="altamira"
+        label="Altamira"
+      />,
+    );
+    const open = screen.getByTestId("filter-open");
+    expect(open).toBeEnabled();
+    expect(open).toHaveTextContent("Abrir portal");
+    fireEvent.click(open);
+    // profileId=7, connector="altamira" → the home page is opened validate-tagged
+    // so the extension stays capture-free while the owner navigates + captures.
+    expect(openSpy).toHaveBeenCalledWith(
+      "https://www.altamirainmuebles.com/#inmo-validate=7:altamira",
+      "_blank",
+      "noopener,noreferrer",
+    );
   });
 
   it("verbatim-only portal (altamira #497) shows the honest note and 'sin URL fijada' badge", () => {

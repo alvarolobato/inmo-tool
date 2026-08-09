@@ -234,6 +234,11 @@ class Cimenta2Connector(Connector):
 
     name = "cimenta2"
 
+    # Issue #515: no override_host_suffix (non-tunable, national sitemap), so the
+    # base default can't derive a home page — point at the public search shell the
+    # owner can actually navigate.
+    home_url = _SHELL_URL
+
     # Issue #441 (D-047): the detail-fetch throttle is TRANSIENT — a single
     # ~3.3h sweep of 3,917 guest POSTs intermittently hits the site's rate-limit
     # / anti-bot wall in a burst that clears, then full-success on the next run.

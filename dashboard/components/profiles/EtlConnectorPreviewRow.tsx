@@ -65,6 +65,7 @@ export function EtlConnectorPreviewRow({
   pinnedUrl,
   source,
   derivedUrl = null,
+  homeUrl = null,
 }: {
   profileId: number;
   connector: string;
@@ -88,6 +89,13 @@ export function EtlConnectorPreviewRow({
    * the ETL — shown with a "derivada (sin verificar por ETL)" badge/note.
    */
   derivedUrl?: string | null;
+  /**
+   * Issue #515: the connector's public home page (connector_registry.home_url).
+   * When the row resolves to no URL, "Abrir" falls back to this so the owner can
+   * still reach the portal. HTTP connectors open it plainly (no validate signal —
+   * that is a capture-portal concern). null → no fallback.
+   */
+  homeUrl?: string | null;
 }) {
   const router = useRouter();
   // Issue #513: when neither a pin nor an ETL-computed URL exists, fall back to
@@ -178,9 +186,24 @@ export function EtlConnectorPreviewRow({
     }
   }
 
+  // Issue #515: "Abrir" opens the resolved URL when present, else the portal
+  // home page — so a URL-less row is never a dead button. HTTP connectors open
+  // the page plainly (the validation signal is a capture-portal concern).
+  const openTarget = effectiveUrl || homeUrl || "";
+  const openIsHome = !effectiveUrl && Boolean(homeUrl);
+
   function onOpen() {
-    if (effectiveUrl && typeof window !== "undefined") {
-      window.open(effectiveUrl, "_blank", "noopener,noreferrer");
+    if (openTarget && typeof window !== "undefined") {
+      window.open(openTarget, "_blank", "noopener,noreferrer");
+    }
+  }
+
+  // For a non-tunable connector (national sitemap / catalogue API) the preview
+  // URL is a machine endpoint the owner can't navigate — its "Abrir portal"
+  // affordance always targets the browseable home page (issue #515).
+  function onOpenHome() {
+    if (homeUrl && typeof window !== "undefined") {
+      window.open(homeUrl, "_blank", "noopener,noreferrer");
     }
   }
 
@@ -377,11 +400,29 @@ export function EtlConnectorPreviewRow({
         </p>
       )}
 
-      {/* Non-tunable connectors: read-only explanation, no owner controls. */}
+      {/* Non-tunable connectors: read-only explanation, no owner controls.
+          Issue #515: they still get an "Abrir portal" affordance (the preview URL
+          is a sitemap/API endpoint, not a browseable page) so the row is never a
+          dead end — opens the connector's public home page. */}
       {!tunable && (
-        <p data-testid="etl-readonly" style={{ fontSize: 11, color: "var(--fg-muted)", margin: 0 }}>
-          El filtrado de este conector es por datos; no hay una URL de búsqueda que fijar.
-        </p>
+        <>
+          <p data-testid="etl-readonly" style={{ fontSize: 11, color: "var(--fg-muted)", margin: 0 }}>
+            El filtrado de este conector es por datos; no hay una URL de búsqueda que fijar.
+          </p>
+          {homeUrl && (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                data-testid="etl-open"
+                onClick={onOpenHome}
+                title="No hay URL derivada; se abre la portada del portal"
+                style={ghostButtonStyle}
+              >
+                Abrir portal ↗
+              </button>
+            </div>
+          )}
+        </>
       )}
 
       {/* Tunable connectors: editable URL + actions. */}
@@ -438,11 +479,15 @@ export function EtlConnectorPreviewRow({
               type="button"
               data-testid="etl-open"
               onClick={onOpen}
-              disabled={!effectiveUrl}
-              title={effectiveUrl || undefined}
+              disabled={!openTarget}
+              title={
+                openIsHome
+                  ? "No hay URL derivada; se abre la portada del portal"
+                  : effectiveUrl || undefined
+              }
               style={ghostButtonStyle}
             >
-              Abrir ↗
+              {openIsHome ? "Abrir portal ↗" : "Abrir ↗"}
             </button>
           </div>
 

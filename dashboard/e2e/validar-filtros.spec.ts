@@ -154,6 +154,13 @@ test.beforeAll(async () => {
     ],
   );
   await seedEtlPreviews();
+  // Issue #515: give the non-tunable escogecasa row a home_url (as
+  // sync_connector_registry now publishes from Connector.home_url) so the ETL
+  // "Abrir portal" fallback (EC-2) has a browseable target. The main INSERT's ON
+  // CONFLICT clause doesn't touch home_url, so this UPDATE persists across reseeds.
+  await pool.query(
+    "UPDATE connector_registry SET home_url = 'https://www.escogecasa.es' WHERE connector_name = 'escogecasa'",
+  );
 });
 
 // Issue #513: a synthetic connector used ONLY to exercise the on-demand derived
@@ -868,6 +875,80 @@ test("servihabitat row rejects a faceted-search URL with the robots reason (issu
   await expect(rejected).toHaveAttribute("data-reject-reason", "robots-faceted-search");
   await expect(rejected).toContainText(/facetada|robots/i);
   await expect(servi.getByTestId("etl-save")).toBeDisabled();
+  await assertNoErrorSurface(page);
+});
+
+test("empty url opens the portal home — altamira capture row, validate-tagged (issue #515 EC-1)", async ({
+  page,
+}) => {
+  // Ensure altamira has no pin so its row is the empty (no derived URL) case.
+  await pool.query(
+    "DELETE FROM profile_connector_filter WHERE profile_id = $1 AND connector = 'altamira'",
+    [profileId],
+  );
+  // Capture window.open args deterministically instead of spawning a real popup.
+  await page.addInitScript(() => {
+    (window as unknown as { __opened: unknown[][] }).__opened = [];
+    window.open = ((...args: unknown[]) => {
+      (window as unknown as { __opened: unknown[][] }).__opened.push(args);
+      return null;
+    }) as typeof window.open;
+  });
+  await page.goto(`/profiles/${profileId}/filtros`);
+  await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
+  await assertNoErrorSurface(page);
+
+  const altaRow = page.locator('[data-testid="filter-validation-row"][data-connector="altamira"]');
+  await expect(altaRow).toBeVisible();
+  // No derived URL → the "Abrir" button is the enabled portal-home fallback.
+  await expect(altaRow.getByTestId("filter-no-url")).toBeVisible();
+  const open = altaRow.getByTestId("filter-open");
+  await expect(open).toBeEnabled();
+  await expect(open).toHaveText(/Abrir portal/);
+
+  await open.click();
+  const opened = await page.evaluate(
+    () => (window as unknown as { __opened: unknown[][] }).__opened,
+  );
+  expect(opened.length).toBe(1);
+  const openedUrl = opened[0][0] as string;
+  // Opens the altamira portal home, tagged for validation (capture-free).
+  expect(openedUrl).toContain("altamirainmuebles.com");
+  expect(openedUrl).toContain("#inmo-validate=");
+  await assertNoErrorSurface(page);
+});
+
+test("etl row home fallback — a non-tunable connector opens its portal home (issue #515 EC-2)", async ({
+  page,
+}) => {
+  await seedEtlPreviews();
+  await pool.query(
+    "UPDATE connector_registry SET home_url = 'https://www.escogecasa.es' WHERE connector_name = 'escogecasa'",
+  );
+  await page.addInitScript(() => {
+    (window as unknown as { __opened: unknown[][] }).__opened = [];
+    window.open = ((...args: unknown[]) => {
+      (window as unknown as { __opened: unknown[][] }).__opened.push(args);
+      return null;
+    }) as typeof window.open;
+  });
+  await page.goto(`/profiles/${profileId}/filtros`);
+  await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
+  await assertNoErrorSurface(page);
+
+  const esc = page.locator('[data-testid="etl-connector-row"][data-connector="escogecasa"]');
+  await expect(esc).toBeVisible();
+  await expect(esc).toHaveAttribute("data-tunable", "false");
+  // Non-tunable rows expose an "Abrir portal" button that opens the browseable
+  // home page (their preview URL is a machine endpoint), so the row is never dead.
+  const open = esc.getByTestId("etl-open");
+  await expect(open).toHaveText(/Abrir portal/);
+  await open.click();
+  const opened = await page.evaluate(
+    () => (window as unknown as { __opened: unknown[][] }).__opened,
+  );
+  expect(opened.length).toBe(1);
+  expect(opened[0][0]).toBe("https://www.escogecasa.es");
   await assertNoErrorSurface(page);
 });
 

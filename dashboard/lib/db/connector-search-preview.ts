@@ -61,6 +61,12 @@ export interface EtlConnectorPreview {
   supportsSearchOverride: boolean;
   /** The connector's URL grammar (issue #491), or null when it publishes none. */
   searchUrlGrammar: SearchUrlGrammar | null;
+  /**
+   * Issue #515: the portal's public home page — opened by the row's "Abrir
+   * portal" fallback when it has no derived/pinned URL. null when the connector
+   * declares none.
+   */
+  homeUrl: string | null;
   /** Parsed previews; [] when the ETL hasn't computed any for this profile yet. */
   previews: SearchPreview[];
   /** When the previews were computed (ISO), or null when none exist yet. */
@@ -72,6 +78,7 @@ interface RawRow {
   override_host_suffix: string | null;
   supports_search_override: boolean;
   search_url_grammar: unknown;
+  home_url: string | null;
   previews: unknown;
   computed_at: Date | string | null;
 }
@@ -163,6 +170,7 @@ export async function getEtlConnectorPreviews(
               g.override_host_suffix,
               g.supports_search_override,
               g.search_url_grammar,
+              g.home_url,
               p.previews,
               p.computed_at
          FROM connector_registry g
@@ -186,6 +194,7 @@ export async function getEtlConnectorPreviews(
     overrideHostSuffix: row.override_host_suffix,
     supportsSearchOverride: row.supports_search_override,
     searchUrlGrammar: parseGrammar(row.search_url_grammar),
+    homeUrl: row.home_url,
     previews: parsePreviews(row.previews),
     computedAt: toIso(row.computed_at),
   }));

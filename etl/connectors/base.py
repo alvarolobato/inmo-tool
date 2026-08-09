@@ -747,6 +747,28 @@ class Connector(ABC):
     # nothing to pin) leave it None.
     override_host_suffix: str | None = None
 
+    # Issue #515 (uniform "Abrir"): the connector's public home/base page — the
+    # portal's browseable landing page the dashboard opens when a row has NO
+    # derived/pinned search URL yet, so "Abrir" is never a dead button (the owner
+    # can reach the portal, navigate and hand a search URL back). Published to
+    # `connector_registry.home_url` by sync_connector_registry() and read by the
+    # Validar-filtros ETL rows.
+    #
+    # This is a PROPERTY, not a bare class attribute, so it defaults to
+    # `https://www.{override_host_suffix}` for the many connectors that already
+    # declare a host suffix — no per-connector boilerplate. A subclass may shadow
+    # it with a plain class attribute string (which wins over this property in the
+    # MRO): the four structural connectors whose `override_host_suffix` is None by
+    # design (cimenta2/vivantial/buildingcenter/escogecasa) set an explicit value
+    # so their rows still open the portal. A connector with neither a host suffix
+    # nor an explicit `home_url` reports None — its row stays without a portal link
+    # (should be none in the fleet after #515).
+    @property
+    def home_url(self) -> str | None:
+        if self.override_host_suffix:
+            return f"https://www.{self.override_host_suffix}"
+        return None
+
     # Whether discover() actually CONSUMES a pinned `ConnectorScope.override_url`
     # as its entry URL. False for every connector in Phase 4 — the page can save
     # a pin against `override_host_suffix`, but the recall wiring

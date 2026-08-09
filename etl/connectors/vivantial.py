@@ -172,6 +172,10 @@ def _detail_url_for(
 class VivantialConnector(Connector):
     name = "vivantial"
 
+    # Issue #515: non-tunable (no override_host_suffix), so set the public home
+    # page explicitly for the Validar-filtros "Abrir portal" fallback.
+    home_url = _BASE_URL
+
     # The sitemap is the site's own complete published inventory, and this
     # connector reads all of it (filtering by city locally, not by asking
     # the site for a subset). So a listing that stops appearing genuinely

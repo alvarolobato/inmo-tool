@@ -295,3 +295,100 @@ describe("EtlConnectorPreviewRow — derived URL fallback (issue #513)", () => {
     expect(screen.queryByTestId("etl-derived-note")).toBeNull();
   });
 });
+
+describe("EtlConnectorPreviewRow — Abrir portal fallback when URL-less (issue #515)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ success: true }) }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("a tunable URL-less row opens the portal home (plain, no validate signal) as 'Abrir portal'", () => {
+    const openSpy = vi.fn();
+    vi.stubGlobal("open", openSpy);
+    render(
+      <EtlConnectorPreviewRow
+        {...baseProps()}
+        preview={null}
+        derivedUrl={null}
+        grammar={null}
+        homeUrl="https://www.pisos.com"
+      />,
+    );
+    const open = screen.getByTestId("etl-open");
+    expect(open).toBeEnabled();
+    expect(open).toHaveTextContent("Abrir portal");
+    fireEvent.click(open);
+    // HTTP connectors open the page plainly — NO #inmo-validate tag.
+    expect(openSpy).toHaveBeenCalledWith(
+      "https://www.pisos.com",
+      "_blank",
+      "noopener,noreferrer",
+    );
+  });
+
+  it("a non-tunable row offers an 'Abrir portal' button opening the home page", () => {
+    const openSpy = vi.fn();
+    vi.stubGlobal("open", openSpy);
+    render(
+      <EtlConnectorPreviewRow
+        {...baseProps()}
+        connector="cimenta2"
+        tunable={false}
+        grammar={null}
+        homeUrl="https://inmuebles.cimenta2.com/inmuebles/s/"
+        preview={{
+          label: "Cimenta2",
+          url: "https://inmuebles.cimenta2.com/inmuebles/s/sitemap.xml",
+          kind: "sitemap",
+          tunable: false,
+          notes: "Barrido nacional",
+          params: [],
+        }}
+      />,
+    );
+    expect(screen.getByTestId("etl-readonly")).toBeInTheDocument();
+    const open = screen.getByTestId("etl-open");
+    expect(open).toHaveTextContent("Abrir portal");
+    fireEvent.click(open);
+    expect(openSpy).toHaveBeenCalledWith(
+      "https://inmuebles.cimenta2.com/inmuebles/s/",
+      "_blank",
+      "noopener,noreferrer",
+    );
+  });
+
+  it("a non-tunable row without a home URL shows no Abrir button", () => {
+    render(
+      <EtlConnectorPreviewRow
+        {...baseProps()}
+        connector="cimenta2"
+        tunable={false}
+        grammar={null}
+        homeUrl={null}
+        preview={{
+          label: "Cimenta2",
+          url: "https://inmuebles.cimenta2.com/inmuebles/s/sitemap.xml",
+          kind: "sitemap",
+          tunable: false,
+          notes: null,
+          params: [],
+        }}
+      />,
+    );
+    expect(screen.queryByTestId("etl-open")).toBeNull();
+  });
+
+  it("keeps 'Abrir ↗' opening the resolved URL when one exists (home URL ignored)", () => {
+    const openSpy = vi.fn();
+    vi.stubGlobal("open", openSpy);
+    render(<EtlConnectorPreviewRow {...baseProps()} homeUrl="https://www.pisos.com" />);
+    const open = screen.getByTestId("etl-open");
+    expect(open).toHaveTextContent("Abrir ↗");
+    fireEvent.click(open);
+    expect(openSpy).toHaveBeenCalledWith(
+      "https://www.pisos.com/venta/pisos-sevilla/",
+      "_blank",
+      "noopener,noreferrer",
+    );
+  });
+});

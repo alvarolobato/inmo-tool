@@ -1068,9 +1068,10 @@ def sync_connector_registry(conn) -> None:
                     connector_name, registered, rate_limit_per_minute,
                     discovers_full_inventory, supports_discovery,
                     supported_filters, override_host_suffix,
-                    supports_search_override, search_url_grammar, updated_at
+                    supports_search_override, search_url_grammar, home_url,
+                    updated_at
                 )
-                VALUES (%s, true, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, NOW())
+                VALUES (%s, true, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s, NOW())
                 ON CONFLICT (connector_name) DO UPDATE SET
                     registered = true,
                     rate_limit_per_minute = EXCLUDED.rate_limit_per_minute,
@@ -1080,6 +1081,7 @@ def sync_connector_registry(conn) -> None:
                     override_host_suffix = EXCLUDED.override_host_suffix,
                     supports_search_override = EXCLUDED.supports_search_override,
                     search_url_grammar = EXCLUDED.search_url_grammar,
+                    home_url = EXCLUDED.home_url,
                     updated_at = NOW()
                 """,
                 (
@@ -1096,6 +1098,10 @@ def sync_connector_registry(conn) -> None:
                     json.dumps(dataclasses.asdict(connector.search_url_grammar))
                     if connector.search_url_grammar is not None
                     else None,
+                    # Issue #515: the portal's public home page for the
+                    # Validar-filtros "Abrir portal" fallback (NULL when the
+                    # connector declares neither a host suffix nor an explicit one).
+                    connector.home_url,
                 ),
             )
             cur.execute(

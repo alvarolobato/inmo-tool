@@ -187,6 +187,38 @@ class TestSyncConnectorRegistry:
             orchestrator.CONNECTORS[:] = original
             _cleanup(pg_conn, names)
 
+    def test_publishes_home_url(self, pg_conn):
+        """Issue #515: home_url reaches the registry. A connector with an
+        override_host_suffix gets the derived https://www.{suffix}; one that sets
+        an explicit home_url class attribute gets that verbatim; one with neither
+        leaves the column NULL."""
+        _apply_schema(pg_conn)
+
+        class _ExplicitHome(DummyConnector):
+            home_url = "https://inmuebles.example.com/inmuebles/s/"
+
+        derived = _OverrideConnector(name="test-home-derived")  # override_host_suffix
+        explicit = _ExplicitHome(name="test-home-explicit")
+        none = DummyConnector(name="test-home-none")
+        names = [derived.name, explicit.name, none.name]
+        original = list(orchestrator.CONNECTORS)
+        orchestrator.CONNECTORS[:] = [derived, explicit, none]
+        try:
+            orchestrator.sync_connector_registry(pg_conn)
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT connector_name, home_url "
+                    "  FROM connector_registry WHERE connector_name = ANY(%s)",
+                    (names,),
+                )
+                rows = {r[0]: r[1] for r in cur.fetchall()}
+            assert rows[derived.name] == "https://www.example.com"
+            assert rows[explicit.name] == "https://inmuebles.example.com/inmuebles/s/"
+            assert rows[none.name] is None
+        finally:
+            orchestrator.CONNECTORS[:] = original
+            _cleanup(pg_conn, names)
+
     def test_is_idempotent_and_refreshes_changed_metadata(self, pg_conn):
         _apply_schema(pg_conn)
         connector = DummyConnector(name="test-registry-idempotent")
