@@ -100,6 +100,58 @@ describe("idealistaParser round-trips buildIdealista (#471 shape grammar)", () =
     expect(idealistaParser.substitute(parsed.template, scope).url).toBe(url);
   });
 
+  it("parses the owner-captured LISTING-form shape URL (no /mapa-google, #524)", () => {
+    // Real specimen captured by the owner via the observer (#489/#510) — the
+    // listing (card) form Idealista serves and toListingUrl (#506) produces:
+    // `/areas/<op>/con-…/?shape=((…))` with NO `/mapa-google` and a trailing
+    // slash before `?`. Before #524 this failed to parse (SHAPE_RE hard-required
+    // `/mapa-google`) so Validar filtros showed "no se pudo validar".
+    const listing =
+      "https://www.idealista.com/areas/venta-viviendas/con-precio-hasta_210000/?shape=%28%28ep%7DbFxcjc%40ajAojCaPsoBriByJf%60Buf%40nj%40qUb%7E%40xg%40%7Cs%40xh%40%7CJps%40kH%7CpCsu%40vXwqA%3FuiBnFy%5CxJ%29%29";
+    const parsed = idealistaParser.parse(listing)!;
+    expect(parsed).not.toBeNull();
+    expect(parsed.categoryKey).toBe("venta-viviendas");
+    expect(parsed.filters.section).toBe("venta-viviendas");
+    expect(parsed.filters.geoKind).toBe("shape");
+    expect(parsed.filters.locationSlug).toBe("");
+    expect(parsed.filters.shapeVertexCount).toBe(14); // owner-drawn ring
+    expect(parsed.filters.priceMax).toBe(210000);
+    expect(parsed.filters.center).toBeDefined();
+
+    // The CANONICAL map form of the same search parses identically (same ring,
+    // same filters) — both forms are the SAME search.
+    const mapForm = listing.replace("/?shape=", "/mapa-google?shape=");
+    const parsedMap = idealistaParser.parse(mapForm)!;
+    expect(parsedMap).not.toBeNull();
+    expect(parsedMap.filters.geoKind).toBe("shape");
+    expect(parsedMap.filters.shapeVertexCount).toBe(14);
+    expect(parsedMap.filters.priceMax).toBe(210000);
+
+    // parse() normalises to the CANONICAL /mapa-google template regardless of
+    // input form, so the builder's byte-for-byte round trip is unchanged: a
+    // substitute against a matching scope reproduces the canonical map URL.
+    expect(parsed.template).toBe(
+      "https://www.idealista.com/areas/venta-viviendas/con-precio-hasta_{price_max}/mapa-google?shape=%28%28ep%7DbFxcjc%40ajAojCaPsoBriByJf%60Buf%40nj%40qUb%7E%40xg%40%7Cs%40xh%40%7CJps%40kH%7CpCsu%40vXwqA%3FuiBnFy%5CxJ%29%29",
+    );
+    const scope: CanonicalSearchScope = {
+      center: parsed.filters.center!,
+      radiusKm: 8,
+      propertyTypes: ["piso"],
+      priceMax: 210000,
+    };
+    expect(idealistaParser.substitute(parsed.template, scope).url).toBe(mapForm);
+  });
+
+  it("parses a LISTING-form shape URL with NO con- segment (#524)", () => {
+    const listing =
+      "https://www.idealista.com/areas/venta-viviendas/?shape=%28%28ep%7DbFxcjc%40ajAojCaPsoBriByJf%60Buf%40nj%40qUb%7E%40xg%40%7Cs%40xh%40%7CJps%40kH%7CpCsu%40vXwqA%3FuiBnFy%5CxJ%29%29";
+    const parsed = idealistaParser.parse(listing)!;
+    expect(parsed).not.toBeNull();
+    expect(parsed.filters.geoKind).toBe("shape");
+    expect(parsed.filters.shapeVertexCount).toBe(14);
+    expect(parsed.filters.priceMax).toBeUndefined();
+  });
+
   it("returns null for a non-search / non-idealista / malformed-shape URL", () => {
     expect(idealistaParser.parse("https://www.idealista.com/inmueble/123/")).toBeNull();
     expect(idealistaParser.parse("https://example.com/venta-viviendas/estepona-malaga/")).toBeNull();

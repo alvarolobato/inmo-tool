@@ -321,8 +321,13 @@ function substituteConTokens(
 }
 
 // origin | operation | con tokens | shape value
+// `/mapa-google` is OPTIONAL (issue #524): parse accepts BOTH the canonical map
+// form `…/mapa-google?shape=((…))` AND the listing form `…/?shape=((…))` — the
+// shape the observer (#489/#510) and toListingUrl (#506) actually capture. The
+// `\/?` after the optional `/mapa-google` matches the listing form's trailing
+// slash before `?`. build()/substitute() still EMIT the canonical map form.
 const SHAPE_RE =
-  /^(https?:\/\/(?:www\.)?idealista\.com)\/areas\/([^/?#]+)(?:\/con-([^/?#]+))?\/mapa-google\?shape=(.+)$/;
+  /^(https?:\/\/(?:www\.)?idealista\.com)\/areas\/([^/?#]+)(?:\/con-([^/?#]+))?(?:\/mapa-google)?\/?\?shape=(.+)$/;
 // origin | operation | zone codes (a segment NOT starting with con-) | con tokens
 const MULTI_RE =
   /^(https?:\/\/(?:www\.)?idealista\.com)\/multi\/([^/?#]+)\/((?!con-)[^/?#]+)(?:\/con-([^/?#]+))?\/?$/;
