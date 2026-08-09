@@ -115,6 +115,14 @@ class SearchParam:
     - `in_url`: True when the value appears in the search URL (so the URL
       grammar can round-trip it); False for a param the connector uses but does
       not encode in the URL.
+    - `consumed`: True (default) when the connector's discover() actually APPLIES
+      this param. False for a param that is present/inferrable in the URL but
+      that discover() does NOT yet act on — e.g. Unicaja's native `precioMax` /
+      `numDormitorios` query fields (issue #494), or a Solvia `municipio` an
+      owner pins that the sweep does not yet restrict to (issue #495). The UI
+      dims a non-consumed chip and explains it, so the page never advertises a
+      filter the ETL silently ignores (the BuildingCenter lesson: "no
+      server-side filter parameter this connector tried had any effect").
     """
 
     key: str
@@ -123,6 +131,7 @@ class SearchParam:
     source: Literal["profile", "connector_config", "constant", "derived"]
     in_url: bool
     notes: str | None = None
+    consumed: bool = True
 
 
 def _ecma_pattern_to_python(pattern: str) -> str:

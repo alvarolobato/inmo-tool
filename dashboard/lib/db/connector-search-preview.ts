@@ -31,6 +31,14 @@ export interface SearchParamView {
   /** Whether this param travels in the search URL (so the grammar round-trips it). */
   inUrl: boolean;
   notes: string | null;
+  /**
+   * Whether discover() actually APPLIES this param (issue #494/#495). False for
+   * a param present/inferrable in the URL that the connector does not yet act on
+   * (e.g. Unicaja's native price/rooms fields, or a proposed Solvia municipio) —
+   * the UI dims it so the page never advertises a filter the ETL ignores.
+   * Absent on old rows → true.
+   */
+  consumed: boolean;
 }
 
 /** One preview row as serialised by the ETL (list[SearchPreview] in Python). */
@@ -108,6 +116,9 @@ function parseParams(raw: unknown): SearchParamView[] {
       source,
       inUrl: r.in_url === true,
       notes: typeof r.notes === "string" ? r.notes : null,
+      // Absent (old rows) or any non-false value → consumed; only an explicit
+      // `false` marks a param the connector doesn't act on (issue #494/#495).
+      consumed: r.consumed !== false,
     });
   }
   return out;

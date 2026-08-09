@@ -29,6 +29,8 @@ const REJECT_REASON_MESSAGE: Record<string, string> = {
     "Este portal prohíbe por robots.txt los filtros en la query (?…) de las URLs de búsqueda; esta URL no puede usarse como filtro (el ETL nunca podría abrirla).",
   "robots-bare-geography":
     "Este portal prohíbe por robots.txt el segmento de ciudad «desnudo» (p. ej. /madrid/); usa el slug con guion (p. ej. madrid-capital).",
+  "robots-faceted-search":
+    "Este portal prohíbe por robots.txt su búsqueda facetada; el conector solo puede usar el sitemap de provincia, así que esta URL no puede fijarse como filtro.",
 };
 
 function rejectReasonMessage(reason: string): string {
@@ -285,21 +287,35 @@ export function EtlConnectorPreviewRow({
               data-testid="etl-param-chip"
               data-param-key={p.key}
               data-param-source={p.source}
-              title={p.notes ?? undefined}
+              data-consumed={p.consumed ? "true" : "false"}
+              title={
+                p.consumed
+                  ? (p.notes ?? undefined)
+                  : `${p.notes ? p.notes + " " : ""}Este portal admite este parámetro en su URL; el conector todavía no lo aplica.`
+              }
               style={{
                 display: "inline-flex",
                 alignItems: "center",
                 gap: 6,
                 fontSize: 11,
-                color: "var(--fg)",
+                // A param the connector doesn't act on yet is dimmed and dashed,
+                // so the page never advertises a filter the ETL ignores
+                // (issue #494/#495).
+                color: p.consumed ? "var(--fg)" : "var(--fg-muted)",
                 background: "var(--bg-2)",
-                border: "1px solid var(--border)",
+                border: p.consumed ? "1px solid var(--border)" : "1px dashed var(--border)",
                 borderRadius: 999,
                 padding: "2px 8px",
+                opacity: p.consumed ? 1 : 0.7,
               }}
             >
               <span style={{ color: "var(--fg-muted)" }}>{p.label}</span>
               <strong>{p.value ?? "—"}</strong>
+              {!p.consumed && (
+                <span data-testid="etl-param-not-consumed" style={{ fontSize: 10, fontStyle: "italic" }}>
+                  no consumido aún
+                </span>
+              )}
               <span
                 style={{
                   fontSize: 10,
@@ -452,22 +468,34 @@ export function EtlConnectorPreviewRow({
                   const differs = derivedByKey.has(key) && derived !== value;
                   const metaLabel =
                     (paramMeta[key] && paramMeta[key].label) || key;
+                  // A param the connector doesn't act on yet (issue #494/#495):
+                  // shown so the owner sees it was inferred, but dimmed with an
+                  // explicit "no consumido" tag so the page never implies the
+                  // ETL will apply it.
+                  const notConsumed = paramMeta[key]?.consumed === false;
                   return (
                     <span
                       key={key}
                       data-testid="etl-inferred-chip"
                       data-param-key={key}
                       data-differs={differs ? "true" : "false"}
+                      data-consumed={notConsumed ? "false" : "true"}
+                      title={
+                        notConsumed
+                          ? "Este portal admite este parámetro en su URL; el conector todavía no lo aplica."
+                          : undefined
+                      }
                       style={{
                         display: "inline-flex",
                         alignItems: "center",
                         gap: 6,
                         fontSize: 11,
-                        color: differs ? "var(--warn)" : "var(--fg)",
+                        color: differs ? "var(--warn)" : notConsumed ? "var(--fg-muted)" : "var(--fg)",
                         background: differs ? "var(--warn-bg)" : "var(--bg-1)",
-                        border: "1px solid var(--border)",
+                        border: notConsumed ? "1px dashed var(--border)" : "1px solid var(--border)",
                         borderRadius: 999,
                         padding: "2px 8px",
+                        opacity: notConsumed && !differs ? 0.7 : 1,
                       }}
                     >
                       <span style={{ color: "var(--fg-muted)" }}>{metaLabel}</span>
@@ -475,6 +503,11 @@ export function EtlConnectorPreviewRow({
                       {differs && (
                         <span style={{ fontSize: 10 }}>
                           ≠ {derived ?? "—"}
+                        </span>
+                      )}
+                      {notConsumed && (
+                        <span data-testid="etl-inferred-not-consumed" style={{ fontSize: 10, fontStyle: "italic" }}>
+                          no consumido aún
                         </span>
                       )}
                     </span>
