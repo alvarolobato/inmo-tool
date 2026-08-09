@@ -82,6 +82,18 @@
       // pagination path family). The segment goes on the PATH, before any
       // `?query`/`#hash`, which are preserved.
       pagination: { kind: "path-htm" },
+      // Map-view → listing-view normalisation (issue #506). Idealista renders a
+      // drawn-area / polygon search as a MAP page whose path ends in the
+      // `/mapa-google` segment (e.g.
+      // `/areas/venta-viviendas/<filtros>/mapa-google?shape=((…))`). The map
+      // page shows PINS, not detail-card anchors, so harvesting it yields zero
+      // links and pagination breaks (`/mapa-google/pagina-2.htm` is invalid).
+      // The listing (card) view of the SAME search is the identical path with
+      // the `/mapa-google` segment removed, query preserved. toListingUrl()
+      // reads this to strip that segment at harvest time. Only Idealista has a
+      // map view; the other portals leave this unset and toListingUrl is a
+      // no-op for them.
+      mapPathSegment: "mapa-google",
       readySelectors: [
         "h1.main-info__title-main",
         ".info-data-price",
@@ -401,6 +413,15 @@
       // Strip any existing `/pagina-<n>.htm`, normalise a trailing slash, then
       // append the segment for pages ≥ 2. Query + hash ride along untouched.
       var path = parsed.pathname.replace(/\/pagina-\d+\.htm$/i, "");
+      // Defensive (issue #506): a map-view path would otherwise produce an
+      // invalid `/mapa-google/pagina-2.htm`. Strip the portal's map segment here
+      // too so pagination is always built on the LISTING path — this mirrors
+      // toListingUrl, which the enumeration walk already applies upstream.
+      var cfgP = portalConfigForHost(parsed.hostname);
+      if (cfgP && cfgP.mapPathSegment) {
+        var segP = cfgP.mapPathSegment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        path = path.replace(new RegExp("/" + segP + "(?=/|$)", "i"), "");
+      }
       if (!/\/$/.test(path)) path += "/";
       if (n > 1) path += "pagina-" + n + ".htm";
       parsed.pathname = path;
@@ -448,6 +469,59 @@
       return href.trim();
     }
     return null;
+  }
+
+  /**
+   * Map-view → listing-view URL normalisation (issue #506).
+   *
+   * The owner may pin an Idealista search whose URL is the MAP view
+   * (`/areas/venta-viviendas/<filtros>/mapa-google?shape=((…))`). That page
+   * renders PINS, not detail-card anchors, so guided capture harvests nothing
+   * and pagination breaks (`/mapa-google/pagina-2.htm` is not a valid results
+   * URL). This returns the LISTING (card) view of the same search — the exact
+   * same URL with the portal's map path segment (`mapa-google`) removed — so the
+   * harvest tab renders cards and `resultsPageUrl` can append `pagina-N.htm` on a
+   * valid listing path. Applied at CONSUMPTION time only (the enumeration path);
+   * the pinned URL is still stored/decoded verbatim (D-101).
+   *
+   * Byte-for-byte contract:
+   *   - Only Idealista (the sole portal with a `mapPathSegment`) is transformed;
+   *     aliseda/altamira/any other host and any non-http(s) or unparseable URL
+   *     are returned UNCHANGED (the original string, not a re-serialised one).
+   *   - Strips a WHOLE `/<mapPathSegment>` path segment (segment boundary on both
+   *     sides: a leading `/` and a following `/` or end-of-path). Nothing else in
+   *     the path is touched; a `mapa-google` substring inside another segment is
+   *     never matched.
+   *   - Ensures a single trailing slash on the resulting path so the listing form
+   *     is `/areas/venta-viviendas/<filtros>/?shape=…` (matches Idealista's own
+   *     listing URLs and keeps `resultsPageUrl` producing `…/pagina-2.htm`).
+   *   - The QUERY and HASH ride along verbatim. The `shape=((…))` value (raw or
+   *     percent-encoded) is never re-encoded or otherwise altered — only the
+   *     pathname field is reassigned; `URL` preserves `.search`/`.hash` as-is.
+   *   - Idempotent: a URL that is already a listing path (no map segment) is a
+   *     no-op, and toListingUrl(toListingUrl(u)) === toListingUrl(u).
+   * Pure — no DOM/chrome.
+   */
+  function toListingUrl(url) {
+    var parsed;
+    try {
+      parsed = new URL(String(url).trim());
+    } catch (e) {
+      return url;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return url;
+    var cfg = portalConfigForHost(parsed.hostname);
+    if (!cfg || !cfg.mapPathSegment) return url;
+    // Match `/<segment>` as a whole path segment (boundary before: the literal
+    // leading slash; boundary after: a `/` or the end of the path).
+    var seg = cfg.mapPathSegment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    var re = new RegExp("/" + seg + "(?=/|$)", "i");
+    var newPath = parsed.pathname.replace(re, "");
+    if (newPath === parsed.pathname) return url; // already a listing path — no-op
+    if (!/\/$/.test(newPath)) newPath += "/";
+    // Reassign ONLY the pathname; `.search` and `.hash` stay byte-for-byte.
+    parsed.pathname = newPath;
+    return parsed.toString();
   }
 
   // ── Batch auto-start signal (issue #297) ──────────────────────────────────
@@ -880,6 +954,7 @@
     resultsPageUrl: resultsPageUrl,
     nextResultsUrl: nextResultsUrl,
     nextResultsUrlFromHrefs: nextResultsUrlFromHrefs,
+    toListingUrl: toListingUrl,
     isRenderReady: isRenderReady,
     createCaptureGuard: createCaptureGuard,
     CAPTURE_SIGNAL: CAPTURE_SIGNAL,

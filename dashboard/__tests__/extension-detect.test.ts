@@ -41,6 +41,7 @@ const {
   resultsPageUrl,
   nextResultsUrl,
   nextResultsUrlFromHrefs,
+  toListingUrl,
 } = D as {
   detailPortalForUrl: (u: string) => string | null;
   isDetailUrl: (u: string) => boolean;
@@ -85,6 +86,7 @@ const {
     currentUrl: string,
     portal: string,
   ) => string | null;
+  toListingUrl: (u: string) => string;
 };
 
 describe("detailPortalForUrl — only real listing-detail pages", () => {
@@ -498,6 +500,93 @@ describe("resultsPageUrl / nextResultsUrl — derive page-N and next-page URLs",
     expect(typeof RESULTS_PAGE_CAP).toBe("number");
     expect(RESULTS_PAGE_CAP).toBeGreaterThan(1);
     expect(RESULTS_PAGE_CAP).toBeLessThanOrEqual(100);
+  });
+});
+
+describe("toListingUrl — map-view → listing-view normalisation (#506)", () => {
+  // Owner-confirmed empirical pair: the ONLY change is removing the
+  // `/mapa-google` segment; the trailing slash before `?` stays and the
+  // URL-encoded `shape` value is preserved character-for-character.
+  const MAP =
+    "https://www.idealista.com/areas/venta-viviendas/con-precio-hasta_210000/mapa-google?shape=%28%28ep%7DbFxcjc%40ajAojCaPsoBriByJf%60Buf%40nj%40qUb%7E%40xg%40%7Cs%40xh%40%7CJps%40kH%7CpCsu%40vXwqA%3FuiBnFy%5CxJ%29%29";
+  const LISTING =
+    "https://www.idealista.com/areas/venta-viviendas/con-precio-hasta_210000/?shape=%28%28ep%7DbFxcjc%40ajAojCaPsoBriByJf%60Buf%40nj%40qUb%7E%40xg%40%7Cs%40xh%40%7CJps%40kH%7CpCsu%40vXwqA%3FuiBnFy%5CxJ%29%29";
+
+  it("converts the owner-confirmed map URL to the listing URL byte-for-byte", () => {
+    expect(toListingUrl(MAP)).toBe(LISTING);
+  });
+
+  it("preserves the encoded shape value character-for-character (no decode/re-encode)", () => {
+    const shape = new URL(toListingUrl(MAP)).search;
+    expect(shape).toBe(
+      "?shape=%28%28ep%7DbFxcjc%40ajAojCaPsoBriByJf%60Buf%40nj%40qUb%7E%40xg%40%7Cs%40xh%40%7CJps%40kH%7CpCsu%40vXwqA%3FuiBnFy%5CxJ%29%29",
+    );
+  });
+
+  it("is idempotent (a second pass is a no-op)", () => {
+    expect(toListingUrl(toListingUrl(MAP))).toBe(LISTING);
+  });
+
+  it("is a no-op for a URL that is already a listing path", () => {
+    expect(toListingUrl(LISTING)).toBe(LISTING);
+    const plain = "https://www.idealista.com/venta-viviendas/madrid-madrid/";
+    expect(toListingUrl(plain)).toBe(plain);
+  });
+
+  it("preserves a raw (un-encoded) shape query and appended params", () => {
+    expect(
+      toListingUrl(
+        "https://www.idealista.com/areas/venta-viviendas/x/mapa-google?shape=((ku_bF|xg@}@|@))&ordenado-por=precios-asc",
+      ),
+    ).toBe(
+      "https://www.idealista.com/areas/venta-viviendas/x/?shape=((ku_bF|xg@}@|@))&ordenado-por=precios-asc",
+    );
+  });
+
+  it("preserves the hash", () => {
+    expect(
+      toListingUrl(
+        "https://www.idealista.com/areas/venta-viviendas/x/mapa-google?shape=((a))#foo",
+      ),
+    ).toBe("https://www.idealista.com/areas/venta-viviendas/x/?shape=((a))#foo");
+  });
+
+  it("is a no-op for other portals (aliseda/altamira) even if the path contains mapa-google", () => {
+    const aliseda =
+      "https://www.alisedainmobiliaria.com/comprar-viviendas/mapa-google?x=1";
+    expect(toListingUrl(aliseda)).toBe(aliseda);
+    const altamira =
+      "https://www.altamirainmuebles.com/venta-viviendas/mapa-google";
+    expect(toListingUrl(altamira)).toBe(altamira);
+  });
+
+  it("is a no-op for an unsupported portal or unparseable input", () => {
+    const fotocasa = "https://www.fotocasa.es/mapa-google?x=1";
+    expect(toListingUrl(fotocasa)).toBe(fotocasa);
+    expect(toListingUrl("not a url")).toBe("not a url");
+  });
+
+  it("only strips a WHOLE segment, never a mapa-google substring", () => {
+    const inner =
+      "https://www.idealista.com/areas/venta-viviendas/mapa-google-x/mapa-google?shape=((a))";
+    expect(toListingUrl(inner)).toBe(
+      "https://www.idealista.com/areas/venta-viviendas/mapa-google-x/?shape=((a))",
+    );
+  });
+
+  it("after normalisation, page 2 is a valid listing URL (pagination fix)", () => {
+    const listing = toListingUrl(MAP);
+    expect(resultsPageUrl(listing, 2)).toBe(
+      "https://www.idealista.com/areas/venta-viviendas/con-precio-hasta_210000/pagina-2.htm?shape=%28%28ep%7DbFxcjc%40ajAojCaPsoBriByJf%60Buf%40nj%40qUb%7E%40xg%40%7Cs%40xh%40%7CJps%40kH%7CpCsu%40vXwqA%3FuiBnFy%5CxJ%29%29",
+    );
+  });
+
+  it("resultsPageUrl is itself defensive: a map URL never yields /mapa-google/pagina-2.htm", () => {
+    const p2 = resultsPageUrl(MAP, 2)!;
+    expect(p2).not.toContain("/mapa-google/pagina-2.htm");
+    expect(p2).toContain(
+      "/areas/venta-viviendas/con-precio-hasta_210000/pagina-2.htm",
+    );
   });
 });
 
