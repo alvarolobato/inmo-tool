@@ -50,6 +50,18 @@ describe("decodeFilterUrl (issue #478 P2)", () => {
     expect(d.chips.some((c) => /polígono dibujado \(10 vértices\)/.test(c))).toBe(true);
   });
 
+  it("decodes the LISTING-form shape URL (no /mapa-google) into a chip (#524)", () => {
+    // Owner-captured listing form (observer #489/#510): same drawn polygon as the
+    // map form, served without `/mapa-google` and with a trailing slash before `?`.
+    // Before #524 this was flagged unparseable ("no se pudo validar").
+    const url =
+      "https://www.idealista.com/areas/venta-viviendas/con-precio-hasta_210000/?shape=%28%28ep%7DbFxcjc%40ajAojCaPsoBriByJf%60Buf%40nj%40qUb%7E%40xg%40%7Cs%40xh%40%7CJps%40kH%7CpCsu%40vXwqA%3FuiBnFy%5CxJ%29%29";
+    const d = decodeFilterUrl("idealista", url, scope({ price_max: 210000 }));
+    expect(d.unparseable).toBe(false);
+    expect(d.sectionKey).toBe("venta-viviendas");
+    expect(d.chips.some((c) => /polígono dibujado \(14 vértices\)/.test(c))).toBe(true);
+  });
+
   it("decodes a multi-zone URL into a zone-count chip (#471)", () => {
     const url =
       "https://www.idealista.com/multi/venta-viviendas/ac0,ac2,acY,acZ,adb,cuZ/con-precio-hasta_700000/";
