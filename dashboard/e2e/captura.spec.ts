@@ -132,10 +132,7 @@ test("corrected pointers: /captura points at Conectores + the ledger, not 'Admin
   const ledgerLink = page.getByTestId("captura-to-ledger");
   await expect(ledgerLink).toBeVisible();
   await expect(ledgerLink).toHaveAttribute("href", "/etl/captura");
-
-  // Extension/key setup is the inline CTA in the header (the extension setup
-  // deep link), present while the extension is not linked.
-  await expect(page.getByText("libro de capturas")).toBeVisible();
+  await expect(ledgerLink).toHaveText("Captura (admin)");
 
   // No error surface — the D-041 bar.
   await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
