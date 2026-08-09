@@ -27,11 +27,11 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: vi.fn() }),
 }));
 
-import AdminCandidatosPage from "../page";
+import AdminClasificacionPage from "../page";
 
 /** Render the async server component: await it, then mount the returned tree. */
 async function renderPage() {
-  const ui = await AdminCandidatosPage();
+  const ui = await AdminClasificacionPage();
   render(ui);
 }
 
@@ -48,7 +48,7 @@ const SAMPLE: PromotionCandidate[] = [
   },
 ];
 
-describe("AdminCandidatosPage", () => {
+describe("AdminClasificacionPage", () => {
   beforeEach(() => {
     getPromotionCandidates.mockReset();
     getCandidatePromotionThreshold.mockReturnValue(5);

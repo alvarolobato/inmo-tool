@@ -81,6 +81,32 @@ describe("middleware — admin UI gating", () => {
       expect(res.headers.get("location")).toBeNull();
     });
 
+    // #508 — the renamed (Clasificación) and new (LLM landing) admin routes
+    // must stay gated. The matcher is gate-by-default, so this is a regression
+    // net against anyone narrowing it.
+    it("redirects unauthenticated /admin/clasificacion to login", () => {
+      const res = middleware(makeRequest("/admin/clasificacion"));
+      expect(res.status).toBe(307);
+      expect(res.headers.get("location")).toContain("/admin/login");
+    });
+
+    it("redirects unauthenticated /admin/candidatos (legacy redirect stub) to login", () => {
+      const res = middleware(makeRequest("/admin/candidatos"));
+      expect(res.status).toBe(307);
+      expect(res.headers.get("location")).toContain("/admin/login");
+    });
+
+    it("redirects unauthenticated /admin/llm to login", () => {
+      const res = middleware(makeRequest("/admin/llm"));
+      expect(res.status).toBe(307);
+      expect(res.headers.get("location")).toContain("/admin/login");
+    });
+
+    it("allows authenticated requests to /admin/clasificacion to pass through", () => {
+      const res = middleware(makeRequest("/admin/clasificacion", { cookie: ADMIN_KEY }));
+      expect(res.headers.get("location")).toBeNull();
+    });
+
     it("redirects authenticated /etl request with wrong cookie back to login", () => {
       const res = middleware(makeRequest("/etl", { cookie: "stale" }));
       expect(res.status).toBe(307);

@@ -1,13 +1,23 @@
 import Link from "next/link";
-import { ADMIN_NAV } from "@/lib/admin-nav";
+import { ADMIN_LLM_SUBPAGES } from "@/lib/admin-nav";
 
 export const metadata = {
-  title: "Admin — inmo-tool",
+  title: "LLM — Admin",
 };
 
-export default function AdminIndexPage() {
+/**
+ * Consolidated landing for the four LLM diagnostics surfaces (#508). The strip
+ * used to carry four separate tabs (Consultas lentas, Herramientas LLM, Uso
+ * LLM, Interacciones); they now live under one "LLM" tab whose landing links to
+ * each. The existing routes are untouched — this page only groups them, and the
+ * strip highlights the LLM tab on any of the four (see activeAdminHref).
+ */
+export default function AdminLlmPage() {
   return (
-    <div style={{ padding: "var(--pad)", maxWidth: 720 }}>
+    <div
+      data-testid="admin-llm-page"
+      style={{ padding: "var(--pad)", maxWidth: 720 }}
+    >
       <h1
         style={{
           fontSize: 20,
@@ -16,14 +26,13 @@ export default function AdminIndexPage() {
           marginBottom: 6,
         }}
       >
-        Administración
+        LLM
       </h1>
       <p style={{ fontSize: 13, color: "var(--fg-muted)", marginBottom: 24 }}>
-        Herramientas de monitorización y diagnóstico del sistema.
+        Diagnóstico del modelo de lenguaje: rendimiento de las consultas, uso de
+        herramientas, tokens/coste e historial de interacciones.
       </p>
 
-      {/* Rendered from the single shared nav source (lib/admin-nav.ts) — the
-          same array the admin strip uses, so the two can never disagree. */}
       <div
         style={{
           display: "grid",
@@ -31,10 +40,11 @@ export default function AdminIndexPage() {
           gap: "var(--gap)",
         }}
       >
-        {ADMIN_NAV.map(({ href, label, description }) => (
+        {ADMIN_LLM_SUBPAGES.map(({ href, label, description }) => (
           <Link
             key={href}
             href={href}
+            data-testid={`admin-llm-link-${href.replace("/admin/", "")}`}
             style={{
               display: "block",
               padding: "var(--pad)",
