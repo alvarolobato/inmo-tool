@@ -408,6 +408,16 @@ const BATCH_CAPTURE_TIMEOUT_MS = 30000;
 const batchTabIds = new Set();
 const batchWaiters = new Map(); // tabId -> finish(ok)
 let batchLooping = false;
+// In-memory liveness flag for the results-page ENUMERATION phase (issue #516).
+// Unlike the capture queue (whose `running` state + slot array survive eviction
+// and are re-attached by the watchdog), the enumeration walk has no resumable
+// persisted state — so a worker eviction mid-enumeration would strand its
+// session `BATCH_ENUM_KEY` with no loop driving it, and isBatchActive() would
+// then report "active" forever (auto wedged). This flag lets the harvest
+// eviction-recovery (recoverStrandedHarvest) tell "actively enumerating in THIS
+// worker" (true) from "a persisted enum state with no live walk" (false, e.g.
+// after a respawn). It is intentionally NOT persisted.
+let enumRunning = false;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -987,6 +997,9 @@ async function renderAndHarvest(url, existingTabId) {
  */
 async function enumerateResultsPages(portal, searchUrl, page1Urls) {
   if (!searchUrl) return;
+  // Mark the enumeration phase live in THIS worker (issue #516) so a respawn can
+  // distinguish an active walk from a stranded one. Reset in the finally below.
+  enumRunning = true;
   const D = self.InmoDetect;
   const seen = new Set(
     (page1Urls || []).map((u) => D.matchKey(u)).filter(Boolean),
@@ -1076,6 +1089,7 @@ async function enumerateResultsPages(portal, searchUrl, page1Urls) {
     // Best-effort and keyed by the same search URL the batch-start save used,
     // so the zero-results regression monitor gets the extension-path signal.
     await saveSearchUrlExample(D.stripCaptureSignal(searchUrl), seen.size);
+    enumRunning = false;
   }
 }
 
@@ -1323,31 +1337,41 @@ chrome.runtime.onInstalled.addListener(() => {
 ensureBatchWatchdog();
 reattachIfStranded();
 
-// ═══ Auto-capture continuous driver (issue #424) ════════════════════════════
+// ═══ Auto-capture continuous driver (issue #424; v2 discover→harvest #516) ═══
 //
-// Auto mode leaves the capture page open and drains the WHOLE worklist without
-// the operator clicking per batch:
-//   1. fetch the next ≤N pending URLs, prioritised (due-first then oldest) by
-//      GET /api/etl/worklist?pending=1&limit=N&dueOnly=1 — see runAutoBatch /
-//      the route. By default (`dueOnly=1`, issue #434) only portals whose
-//      connector staleness window has elapsed are returned; the "Forzar" toggle
-//      requests `dueOnly=0` to re-capture even not-due / already-done listings.
-//      When nothing is due the set is empty → Auto idles until the next tick
-//      (respecting the inter-batch timeout), it never spins,
-//   2. run the EXISTING bounded-concurrency capture queue over them (so the
-//      concurrency cap + WAF-safe jittered stagger are unchanged),
-//   3. on completion, schedule the NEXT batch via chrome.alarms after the
+// Auto mode leaves the capture page open and, without the operator clicking per
+// batch, drives the FULL discovery → harvest → capture loop. v1 only drained the
+// already-known worklist (GET /api/etl/worklist?pending=1), so a due connector
+// with an empty pending set made auto idle and NEW listings were never found. v2
+// asks the server for the ONE next unit each cooldown:
+//   1. GET /api/etl/auto-plan[?portal=][&force=1] → runAutoBatch dispatches it:
+//        • harvest — open the most-DUE profile×connector search task, ENUMERATE
+//          every results page, SEED the discovered detail URLs, CAPTURE them
+//          (reusing the exact enumerate+capture machinery the manual "Capturar
+//          todas" flow uses), then POST the task run so staleness advances
+//          (else the task stays due and auto re-harvests it forever),
+//        • drain — no due task, but leftover pending detail URLs exist → run the
+//          bounded-concurrency capture queue over them (v1's behaviour),
+//        • idle — nothing due, nothing pending → slow-poll for new work.
+//      `force=1` (the popup "Forzar" toggle) ignores staleness — round-robin
+//      every task and drain the full pending set.
+//   2. the EXISTING bounded-concurrency capture queue runs the capture (so the
+//      concurrency cap + WAF-safe jittered stagger are unchanged); a harvest is
+//      at most ONE unit per cooldown (it fans out into a whole batch),
+//   3. on completion, schedule the NEXT unit via chrome.alarms after the
 //      configured cooldown (NOT setTimeout — that dies with an evicted worker),
-//   4. repeat until Auto is turned off or the worklist empties (then it
-//      slow-polls in case new work arrives).
+//   4. repeat until Auto is turned off.
 //
 // MV3 survival: the whole loop is data-driven. The auto state (enabled, status,
-// batchesDone, lastBatchAt) lives in chrome.storage.session (survives eviction);
-// scheduling is entirely alarm-driven. If the worker is evicted mid-batch, the
-// top-level reattach restarts the capture loop and the periodic BATCH_ALARM tick
-// detects the finished batch and schedules the next one — the same discipline as
-// reattachIfStranded. The single-driver guard (batchLooping / batch state) means
-// Auto and a manual batch never double-run.
+// batchesDone, lastBatchAt, harvestTask) lives in chrome.storage.session
+// (survives eviction); scheduling is entirely alarm-driven. If the worker is
+// evicted mid-CAPTURE, the top-level reattach restarts the capture loop and the
+// periodic BATCH_ALARM tick completes the unit; if evicted mid-ENUMERATION (no
+// resumable state), recoverStrandedHarvest closes the orphan tab, clears the
+// stranded enum, and finishes the unit (recording the task run). The persisted
+// harvestTask lets completion record the run even across an eviction. The
+// single-driver guard (batchLooping / enum state / batch state) means Auto and a
+// manual batch never double-run.
 
 const AUTO_KEY = 'inmoAuto';
 // One-shot alarm that fires after the inter-batch cooldown to start the next
@@ -1409,29 +1433,47 @@ async function isBatchActive() {
 }
 
 /**
- * Fetch the next ≤N pending URLs (prioritised) from the worklist endpoint.
- * `force` (issue #434): false → `dueOnly=1` (only portals whose staleness window
- * has elapsed — the default); true → `dueOnly=0` (the whole pending set, so
- * already-done / not-due listings are re-captured).
+ * Ask the server for the ONE next auto unit (issue #516): a `harvest` (open the
+ * most-due profile×connector search task → enumerate → seed → capture), a
+ * `drain` (capture the already-discovered pending detail URLs), or `idle`.
+ * `force` (issue #434 "Forzar"): `force=1` ignores staleness (round-robin every
+ * task; drain returns the full pending set). Returns the parsed unit; throws on
+ * a transport/HTTP error so the caller can back off one timeout.
  */
-async function fetchNextPending(portal, limit, force) {
+async function fetchAutoPlan(portal, force) {
   const { apiUrl, apiKey } = await getApiConfig();
-  const params = new URLSearchParams({
-    pending: '1',
-    limit: String(limit),
-    dueOnly: force ? '0' : '1',
-  });
+  const params = new URLSearchParams();
   if (portal) params.set('portal', portal);
-  const response = await fetch(`${apiUrl}/api/etl/worklist?${params.toString()}`, {
-    headers: { 'x-admin-key': apiKey },
-  });
-  if (!response.ok) throw new Error(`worklist pending: ${response.status}`);
-  const data = await response.json();
-  return {
-    urls: Array.isArray(data.urls) ? data.urls.filter((u) => typeof u === 'string') : [],
-    totalPending:
-      typeof data.totalPending === 'number' ? data.totalPending : undefined,
-  };
+  if (force) params.set('force', '1');
+  const qs = params.toString();
+  const response = await fetch(
+    `${apiUrl}/api/etl/auto-plan${qs ? `?${qs}` : ''}`,
+    { headers: { 'x-admin-key': apiKey } },
+  );
+  if (!response.ok) throw new Error(`auto-plan: ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Record (upsert) a capture task run so the staleness ledger advances (issue
+ * #516) — the extension counterpart to the /captura button's POST
+ * (ConnectorSection.tsx). Without this, a harvested-but-not-recorded task stays
+ * "due" and auto would re-harvest it forever. Best-effort: a failure is logged
+ * by the caller and never blocks the cooldown. Uses the admin-key channel — the
+ * key only lives in this worker — like every other write here.
+ */
+async function postCaptureTaskRun(profileId, taskId) {
+  const { apiUrl, apiKey } = await getApiConfig();
+  const response = await fetch(
+    `${apiUrl}/api/profiles/${profileId}/capture-task-runs`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-admin-key': apiKey },
+      body: JSON.stringify({ taskId }),
+    },
+  );
+  if (!response.ok) throw new Error(`capture-task-run: ${response.status}`);
+  return response.json();
 }
 
 /** Turn Auto ON: persist enabled state, then kick the first batch immediately. */
@@ -1485,6 +1527,9 @@ async function getAutoProgress() {
     batchSize: auto.batchSize,
     timeoutSec: auto.timeoutSec,
     force: auto.force === true,
+    // The harvest unit in flight (issue #516) so the popup can label
+    // "descubriendo <portal>" vs a plain drain batch.
+    harvestTask: auto.harvestTask || null,
     batch,
   };
 }
@@ -1504,19 +1549,60 @@ async function setAutoForce(force) {
 }
 
 /**
- * Start one auto batch: fetch the next ≤N pending URLs, build + run the
- * bounded-concurrency queue, then (inline, fast path) begin the cooldown. Guards
- * against starting on top of a live batch. On an empty worklist it keeps Auto ON
- * and slow-polls; on a backend error it backs off for one timeout.
+ * Run ONE harvest unit end to end (issue #516): open the task's search URL,
+ * enumerate every results page (rendered, in-session — reuses the SAME machinery
+ * the manual "Capturar todas" flow uses), seed each page's detail URLs, then
+ * build + run the bounded-concurrency capture queue over the portal's pending
+ * set. Awaitable — resolves only once the capture queue has drained (or was
+ * stopped) — so the caller can then record the task run and cool down.
+ *
+ * The map→listing normalisation (#506 `toListingUrl`) happens inside
+ * enumerateResultsPages, so the server hands us the resolved search URL verbatim.
+ */
+async function runAutoHarvest(portal, searchUrl) {
+  // Piggyback capture-to-infer, exactly like startBatch (best-effort).
+  await saveSearchUrlExample(searchUrl);
+  // Enter the enumeration phase so a reopened popup shows discovery progress.
+  await setEnumState({ status: 'enumerating', portal, discovered: 0, page: 1 });
+  try {
+    // page1Urls = [] → the walk renders + seeds page 1 itself (no popup harvest).
+    await enumerateResultsPages(portal, searchUrl, []);
+  } finally {
+    await clearEnumState();
+  }
+  // Build + run the capture queue over everything just seeded. Concurrency +
+  // pacing come from the SAME operator config the manual path uses.
+  const pending = await fetchPendingUrls(portal);
+  const { concurrency } = await getBatchConfig();
+  await setBatchState(InmoBatch.makeBatchState(pending, concurrency));
+  await runBatchLoop(); // resolves when the capture batch finishes / is stopped
+}
+
+/**
+ * Drive ONE auto unit (issue #516): ask the server for the next unit
+ * (harvest / drain / idle) and execute it, then begin the cooldown.
+ *   • harvest → open the most-due search task and run discovery→seed→capture
+ *     (runAutoHarvest), persisting the in-flight task so an eviction can still
+ *     record the run; onAutoBatchComplete POSTs the task run so staleness advances.
+ *   • drain   → run the bounded-concurrency queue over the returned pending URLs
+ *     (v1's behaviour).
+ *   • idle    → keep Auto ON and slow-poll for new work.
+ * Guards against starting on top of a live batch. On a backend error it backs
+ * off for one timeout. Kept the name `runAutoBatch` — it is still "run the next
+ * auto unit" and is wired to the same alarm-tick 'start' action.
  */
 async function runAutoBatch() {
   const auto = await getAutoState();
   if (!auto || auto.enabled !== true) return;
   if (await isBatchActive()) return; // single-driver guard
 
-  let next;
+  // Mark PLANNING before the network call so an eviction during the fetch is
+  // recoverable (nextAutoAction maps a stranded PLANNING → re-plan).
+  await setAutoState({ ...auto, status: InmoBatch.AUTO_STATUS.PLANNING });
+
+  let plan;
   try {
-    next = await fetchNextPending(auto.portal, auto.batchSize, auto.force === true);
+    plan = await fetchAutoPlan(auto.portal, auto.force === true);
   } catch {
     // Backend hiccup: back off one timeout and try again (Auto stays ON).
     await setAutoState({
@@ -1528,49 +1614,125 @@ async function runAutoBatch() {
     return;
   }
 
-  const urls = next.urls || [];
-  if (!InmoBatch.shouldContinueAuto(auto, urls.length)) {
-    // Worklist drained (or Auto turned off mid-fetch). Keep Auto ON and
-    // slow-poll for new work — re-check on the next cooldown alarm.
+  if (plan && plan.kind === 'harvest' && plan.task && plan.task.url) {
+    const task = plan.task;
+    // Persist the in-flight harvest task BEFORE any work so a mid-harvest
+    // eviction can still POST the task run on completion (else re-harvest forever).
     await setAutoState({
       ...auto,
-      status: InmoBatch.AUTO_STATUS.EMPTY,
-      lastBatchAt: Date.now(),
-      totalPending: next.totalPending ?? 0,
+      status: InmoBatch.AUTO_STATUS.HARVESTING,
+      harvestTask: {
+        profileId: task.profileId,
+        taskId: task.taskId,
+        portal: task.portal,
+        url: task.url,
+      },
     });
-    scheduleAutoAlarm(auto.timeoutSec);
+    await runAutoHarvest(task.portal, task.url);
+    await onAutoBatchComplete();
     return;
   }
 
-  // Build + run the capture queue over this batch. Concurrency + pacing come
-  // from the SAME operator config (#410/#411) the manual path uses.
-  const { concurrency } = await getBatchConfig();
-  await setBatchState(InmoBatch.makeBatchState(urls, concurrency));
+  if (plan && plan.kind === 'drain' && Array.isArray(plan.urls) && plan.urls.length > 0) {
+    const urls = plan.urls.filter((u) => typeof u === 'string');
+    const { concurrency } = await getBatchConfig();
+    await setBatchState(InmoBatch.makeBatchState(urls, concurrency));
+    await setAutoState({
+      ...auto,
+      status: InmoBatch.AUTO_STATUS.RUNNING,
+      harvestTask: null,
+      totalPending: urls.length,
+    });
+    await runBatchLoop(); // resolves when the batch finishes (or was paused/stopped)
+    await onAutoBatchComplete();
+    return;
+  }
+
+  // idle (nothing due, nothing pending) — keep Auto ON and slow-poll.
+  const retry =
+    plan && typeof plan.retryAfterSec === 'number' && plan.retryAfterSec > 0
+      ? plan.retryAfterSec
+      : auto.timeoutSec;
   await setAutoState({
     ...auto,
-    status: InmoBatch.AUTO_STATUS.RUNNING,
-    totalPending: next.totalPending ?? auto.totalPending,
+    status: InmoBatch.AUTO_STATUS.EMPTY,
+    harvestTask: null,
+    lastBatchAt: Date.now(),
+    totalPending: 0,
   });
-  await runBatchLoop(); // resolves when the batch finishes (or was paused/stopped)
-  await onAutoBatchComplete();
+  scheduleAutoAlarm(retry);
 }
 
 /**
- * A batch finished under Auto: count it and begin the cooldown before the next.
- * Idempotent — only acts while status is RUNNING, so the inline call and a
- * watchdog-detected completion can't double-count. No-op once Auto is off.
+ * A unit finished under Auto: for a HARVESTING unit, record the task run first
+ * (issue #516) so the staleness ledger advances and the task stops being "due";
+ * then count the unit and begin the cooldown before the next. Idempotent — only
+ * acts while status is RUNNING or HARVESTING, so the inline call and a
+ * watchdog-detected completion can't double-count (the status flip to WAITING
+ * makes a second call a no-op). No-op once Auto is off.
  */
 async function onAutoBatchComplete() {
   const auto = await getAutoState();
   if (!auto || auto.enabled !== true) return;
-  if (auto.status !== InmoBatch.AUTO_STATUS.RUNNING) return;
+  if (
+    auto.status !== InmoBatch.AUTO_STATUS.RUNNING &&
+    auto.status !== InmoBatch.AUTO_STATUS.HARVESTING
+  ) {
+    return;
+  }
+  // Record the harvest task run (staleness advances). Best-effort: a failure
+  // must not wedge the cooldown — the task simply stays due and is retried.
+  if (auto.status === InmoBatch.AUTO_STATUS.HARVESTING && auto.harvestTask) {
+    try {
+      await postCaptureTaskRun(auto.harvestTask.profileId, auto.harvestTask.taskId);
+    } catch {
+      /* best-effort — the next plan will re-surface the due task */
+    }
+  }
   await setAutoState({
     ...auto,
     status: InmoBatch.AUTO_STATUS.WAITING,
+    harvestTask: null,
     batchesDone: auto.batchesDone + 1,
     lastBatchAt: Date.now(),
   });
   scheduleAutoAlarm(auto.timeoutSec);
+}
+
+/**
+ * Recover a HARVEST unit stranded by an MV3 worker eviction (issue #516).
+ *
+ * The capture queue survives eviction (persisted slots + reattachIfStranded),
+ * but the results-page ENUMERATION phase has no resumable state — so an eviction
+ * mid-enumeration leaves `BATCH_ENUM_KEY` set with no live walk, which would make
+ * isBatchActive() report "active" forever and wedge auto. This detects that
+ * (status HARVESTING, nothing live: not looping, not enumerating, no active
+ * capture queue), closes the orphaned enumeration tab, clears the stranded enum
+ * state, and FINISHES the unit — recording the task run so staleness advances
+ * (never re-harvest the same task forever) and cooling down. When the eviction
+ * happened during CAPTURE instead (queue still `running`), it defers to
+ * reattachIfStranded, which resumes the queue; a later tick then completes it.
+ * Idempotent and cheap — a no-op unless a harvest is genuinely stranded.
+ */
+async function recoverStrandedHarvest() {
+  if (batchLooping || enumRunning) return; // something live is driving it
+  const auto = await getAutoState();
+  if (!auto || auto.enabled !== true) return;
+  if (auto.status !== InmoBatch.AUTO_STATUS.HARVESTING) return;
+  const batch = await getBatchState();
+  if (InmoBatch.isActive(batch)) return; // capture stranded → reattachIfStranded owns it
+  const persisted = await readBatchTabs();
+  for (const id of persisted) {
+    try {
+      await chrome.tabs.remove(id);
+    } catch {
+      /* tab already gone */
+    }
+  }
+  batchTabIds.clear();
+  await clearBatchTabs();
+  await clearEnumState();
+  await onAutoBatchComplete(); // records the task run (if any) + begins cooldown
 }
 
 /**
@@ -1583,6 +1745,9 @@ async function autoTick() {
   if (autoTicking) return;
   autoTicking = true;
   try {
+    // First heal a harvest stranded by an eviction (issue #516) — must run
+    // BEFORE isBatchActive() so a stranded enumeration can't defer forever.
+    await recoverStrandedHarvest();
     const auto = await getAutoState();
     if (!auto || auto.enabled !== true) {
       await disarmAutoAlarm();

@@ -432,9 +432,11 @@
 
   var AUTO_STATUS = {
     IDLE: "idle", // never started / freshly created
-    RUNNING: "running", // a batch is in flight right now
-    WAITING: "waiting", // between batches, cooling down for the timeout
-    EMPTY: "empty", // worklist drained; slow-polling for new work
+    PLANNING: "planning", // asking the server for the next unit (issue #516)
+    HARVESTING: "harvesting", // running a discovery→seed→capture harvest (#516)
+    RUNNING: "running", // a (drain) capture batch is in flight right now
+    WAITING: "waiting", // between units, cooling down for the timeout
+    EMPTY: "empty", // nothing due / pending; slow-polling for new work
     STOPPED: "stopped", // operator turned Auto off
   };
 
@@ -500,6 +502,15 @@
       totalPending:
         typeof opts.totalPending === "number" && opts.totalPending >= 0
           ? Math.floor(opts.totalPending)
+          : null,
+      // The harvest unit in flight (issue #516), persisted so a worker eviction
+      // mid-harvest can still record the task run on completion (else auto would
+      // re-harvest the same due task forever). null when the current unit is a
+      // drain / idle, or nothing is in flight. Shape: { profileId, taskId,
+      // portal, url }.
+      harvestTask:
+        opts.harvestTask && typeof opts.harvestTask === "object"
+          ? opts.harvestTask
           : null,
     };
   }
@@ -610,16 +621,30 @@
    * Returns one of:
    *   'idle'     — Auto is off; disarm the alarm.
    *   'defer'    — a batch is running; do nothing, re-check next tick.
-   *   'complete' — our batch just finished (was RUNNING, now nothing active) →
-   *                record it and begin the cooldown.
+   *   'complete' — our unit just finished (was RUNNING drain, or HARVESTING with
+   *                nothing now active) → record it and begin the cooldown. For a
+   *                harvest, background.js also POSTs the task run before cooling.
    *   'wait'     — cooling down; the timeout has not elapsed yet.
-   *   'start'    — never ran, or the timeout has elapsed → start the next batch.
+   *   'start'    — never ran, the timeout elapsed, or PLANNING was stranded
+   *                (evicted before a unit ran) → fetch + start the next unit.
+   *
+   * PLANNING (issue #516) is transient — set while the driver fetches the next
+   * unit from /api/etl/auto-plan. If the worker is evicted during that window,
+   * no batch is active and re-planning is safe (the GET is idempotent), so a
+   * stranded PLANNING re-starts. HARVESTING is treated like RUNNING for the
+   * finish transition; the difference (recording the task run) is background's.
    */
   function nextAutoAction(state, opts) {
     opts = opts || {};
     if (!state || state.enabled !== true) return "idle";
     if (opts.batchActive === true) return "defer";
-    if (state.status === AUTO_STATUS.RUNNING) return "complete";
+    if (
+      state.status === AUTO_STATUS.RUNNING ||
+      state.status === AUTO_STATUS.HARVESTING
+    ) {
+      return "complete";
+    }
+    if (state.status === AUTO_STATUS.PLANNING) return "start";
     var now = typeof opts.now === "number" ? opts.now : Date.now();
     var timeoutMs = clampAutoTimeoutSec(state.timeoutSec) * 1000;
     if (state.lastBatchAt == null) return "start";

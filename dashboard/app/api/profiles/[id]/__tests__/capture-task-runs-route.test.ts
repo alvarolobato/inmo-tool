@@ -9,7 +9,7 @@
  * + wiring.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
 
 vi.mock("@/lib/db/profiles", () => ({ getProfileById: vi.fn() }));
@@ -49,15 +49,30 @@ function makeProfile(): SearchProfileRow {
   };
 }
 
-function getReq(id = "7"): NextRequest {
-  return new NextRequest(`http://localhost:4000/api/profiles/${id}/capture-task-runs`);
+// The route checks `adminApiKeyValid` as defense-in-depth (issue #516) because
+// the browser extension POSTs task runs over the x-admin-key channel; every
+// request here carries it (the UI would send the ps_admin cookie instead).
+const ADMIN_KEY = "test-admin-key";
+
+function getReq(id = "7", opts: { adminKey?: string } = { adminKey: ADMIN_KEY }): NextRequest {
+  const headers: Record<string, string> = {};
+  if (opts.adminKey) headers["x-admin-key"] = opts.adminKey;
+  return new NextRequest(`http://localhost:4000/api/profiles/${id}/capture-task-runs`, {
+    headers,
+  });
 }
 
-function postReq(id = "7", body: unknown = { taskId: "t1" }): NextRequest {
+function postReq(
+  id = "7",
+  body: unknown = { taskId: "t1" },
+  opts: { adminKey?: string } = { adminKey: ADMIN_KEY },
+): NextRequest {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (opts.adminKey) headers["x-admin-key"] = opts.adminKey;
   return new NextRequest(`http://localhost:4000/api/profiles/${id}/capture-task-runs`, {
     method: "POST",
     body: JSON.stringify(body),
-    headers: { "Content-Type": "application/json" },
+    headers,
   });
 }
 
@@ -67,6 +82,7 @@ function ctx(id = "7") {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.stubEnv("ADMIN_API_KEY", ADMIN_KEY);
   mockStaleness.mockReturnValue({ defaultDays: 7, byPortal: { idealista: 3 } });
   mockActivity.mockResolvedValue([
     { portal: "idealista", captured: 10, lastCapturedAt: "2026-08-04T00:00:00.000Z" },
@@ -74,7 +90,15 @@ beforeEach(() => {
   ]);
 });
 
+afterEach(() => vi.unstubAllEnvs());
+
 describe("GET /api/profiles/[id]/capture-task-runs", () => {
+  it("401 without a valid admin key", async () => {
+    const res = await GET(getReq("7", {}), ctx());
+    expect(res.status).toBe(401);
+    expect(mockGetProfile).not.toHaveBeenCalled();
+  });
+
   it("returns runs + staleness for an existing profile", async () => {
     mockGetProfile.mockResolvedValue(makeProfile());
     mockGetRuns.mockResolvedValue({ t1: "2026-08-01T00:00:00.000Z" });
@@ -114,6 +138,12 @@ describe("GET /api/profiles/[id]/capture-task-runs", () => {
 });
 
 describe("POST /api/profiles/[id]/capture-task-runs", () => {
+  it("401 without a valid admin key", async () => {
+    const res = await POST(postReq("7", { taskId: "t1" }, {}), ctx());
+    expect(res.status).toBe(401);
+    expect(mockRecord).not.toHaveBeenCalled();
+  });
+
   it("records a run and returns the timestamp", async () => {
     mockGetProfile.mockResolvedValue(makeProfile());
     mockRecord.mockResolvedValue("2026-08-05T12:00:00.000Z");
@@ -160,7 +190,7 @@ describe("POST /api/profiles/[id]/capture-task-runs", () => {
     const bad = new NextRequest("http://localhost:4000/api/profiles/7/capture-task-runs", {
       method: "POST",
       body: "{not json",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-admin-key": ADMIN_KEY },
     });
     const res = await POST(bad, ctx());
     expect(res.status).toBe(400);
