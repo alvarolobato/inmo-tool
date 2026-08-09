@@ -96,6 +96,26 @@ is resolved by two small lat/lng tables:
 A capture portal with no builder is skipped, not an error — the roster and the
 builder set grow independently.
 
+## Inverse preview on "Validar filtros" (issue #497)
+
+The capture-portal rows on `/profiles/[id]/filtros` render the resolved task URL
+back through the **existing** per-portal parsers (`PARSERS` in
+`dashboard/lib/search-url/parsers.ts`, via `decodeFilterUrl` in
+`dashboard/lib/filter-validation.ts`) — this is UI wiring, **not** new parser
+logic. An edited/pinned URL is decoded into Spanish chips (idealista: vertex
+count for a `shape=` polygon, zone count for a `/multi/` URL, filters for a
+legacy slug; aliseda: type/zone/price) plus amber warnings where the URL is
+broader than the profile scope. **Confirmed tokens only**: anything the parser
+does not recognise degrades to a verbatim pin with the "se usará tal cual" note
+— never an error or a block (the owner tuned it by hand; their intent wins).
+
+**Verbatim-only portals** (no builder *and* no parser — e.g. **altamira**, whose
+Akamai WAF blocks grammar verification) are flagged `verbatimOnly` on the row.
+That row offers zero inference: no chips, no warnings, no misleading "no se pudo
+descodificar" note — just an honest "sin gramática verificada; se usa tal cual"
+note and a verbatim pin under the portal's host. A portal graduates out of
+verbatim-only the moment it gains a real `PortalSearchUrlParser`.
+
 ## Volatility note
 
 The path/query spellings are the fragile part (portals change their URL

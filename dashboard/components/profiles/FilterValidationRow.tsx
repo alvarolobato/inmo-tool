@@ -33,6 +33,7 @@ export function FilterValidationRow({
   chips,
   warnings,
   unparseable,
+  verbatimOnly = false,
 }: {
   profileId: number;
   connector: string;
@@ -49,6 +50,13 @@ export function FilterValidationRow({
   chips: string[];
   warnings: string[];
   unparseable: boolean;
+  /**
+   * The portal has NO verified search grammar (no builder, no parser) — e.g.
+   * altamira (Akamai WAF, issue #497). Its URL can only be pinned + used
+   * verbatim: no chips, no inference, no mismatch warnings. The row shows an
+   * honest note instead of the misleading "no se pudo descodificar" one.
+   */
+  verbatimOnly?: boolean;
 }) {
   const router = useRouter();
   const [draft, setDraft] = useState(url);
@@ -129,7 +137,9 @@ export function FilterValidationRow({
     ? source === "extension"
       ? "URL fijada (extensión)"
       : "URL fijada"
-    : "derivada del perfil";
+    : verbatimOnly
+      ? "sin URL fijada"
+      : "derivada del perfil";
 
   return (
     <div
@@ -221,8 +231,20 @@ export function FilterValidationRow({
         </div>
       )}
 
-      {/* Unparseable → verbatim note. */}
-      {url && unparseable && (
+      {/* Verbatim-only portal (no verified grammar / WAF, e.g. altamira #497):
+          an honest note is shown always — there is no inference to offer, so a
+          pinned URL is simply used as typed. This REPLACES the generic
+          "no se pudo descodificar" note below (which would be misleading). */}
+      {verbatimOnly && (
+        <p data-testid="filter-verbatim-note" style={{ fontSize: 11, color: "var(--fg-muted)", margin: 0, lineHeight: 1.5 }}>
+          Este portal no tiene gramática verificada (WAF de Akamai): no se puede inferir ni validar la
+          URL. Se guarda y se usa tal cual.
+        </p>
+      )}
+
+      {/* Unparseable → verbatim note. Not shown for verbatim-only portals: for
+          those the honest note above already explains why nothing decodes. */}
+      {url && unparseable && !verbatimOnly && (
         <p data-testid="filter-unparseable" style={{ fontSize: 11, color: "var(--fg-muted)", margin: 0 }}>
           No se pudo descodificar la URL; se usará tal cual.
         </p>

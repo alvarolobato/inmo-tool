@@ -6,6 +6,7 @@ import { findOverridesForProfile } from "@/lib/db/profile-connector-filter";
 import { CAPTURE_PORTALS } from "@/lib/worklist";
 import { portalTitle } from "@/lib/captura-tasks";
 import { decodeFilterUrl } from "@/lib/filter-validation";
+import { PARSERS } from "@/lib/search-url/parsers";
 import { FilterValidationRow } from "@/components/profiles/FilterValidationRow";
 import { ProfileSwitcher } from "@/components/layout/ProfileSwitcher";
 import { EtlConnectorPreviewRow } from "@/components/profiles/EtlConnectorPreviewRow";
@@ -23,8 +24,10 @@ import type { ProfileConnectorFilterSource } from "@/lib/db/profile-connector-fi
  * which already folds in the tier-0 owner override from Phase 1): a source
  * badge, the copyable URL, decoded filter chips + mismatch warnings, the
  * resolver's loosened flags, and owner controls to pin (PUT) / unpin (DELETE) /
- * open the URL. altamira (a capture portal with no builder) always gets a row
- * so its first URL can be pasted in even though nothing is derived.
+ * open the URL. altamira (a capture portal with no builder AND no parser) always
+ * gets a row so its first URL can be pasted in even though nothing is derived;
+ * that row is flagged `verbatimOnly` (#497) so it shows an honest "sin gramática
+ * verificada; se usa tal cual" note instead of offering (impossible) inference.
  *
  * Phase 3: "Abrir" opens the URL in the extension's validation mode
  * (`withValidateSignal`) — no batch autostart, no listing banner, no detail
@@ -48,6 +51,8 @@ interface FilterRowModel {
   chips: string[];
   warnings: string[];
   unparseable: boolean;
+  /** Portal with no verified grammar (no parser) — pin + verbatim only (#497). */
+  verbatimOnly: boolean;
 }
 
 export default async function ValidarFiltrosPage({
@@ -87,6 +92,7 @@ export default async function ValidarFiltrosPage({
       chips: decoded.chips,
       warnings: decoded.warnings,
       unparseable: decoded.unparseable,
+      verbatimOnly: !PARSERS[task.portal],
     };
   });
 
@@ -105,6 +111,7 @@ export default async function ValidarFiltrosPage({
       chips: [],
       warnings: [],
       unparseable: false,
+      verbatimOnly: !PARSERS[portal],
     });
   }
 
@@ -169,6 +176,7 @@ export default async function ValidarFiltrosPage({
               chips={row.chips}
               warnings={row.warnings}
               unparseable={row.unparseable}
+              verbatimOnly={row.verbatimOnly}
             />
           ))}
         </div>
