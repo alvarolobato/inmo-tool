@@ -82,13 +82,29 @@ export default async function CapturaPage() {
         </div>
       </div>
       <p style={{ fontSize: 13, color: "var(--fg-muted)", marginTop: 8, lineHeight: 1.5 }}>
-        Todos tus perfiles, uno debajo de otro. Bajo cada perfil, sus conectores: los que{" "}
-        <strong>toca ejecutar</strong> o están <strong>a medias</strong> se muestran abiertos con sus
-        botones de captura; los que están al día se pliegan en una línea. Puedes abrir o plegar
-        cualquiera a mano para lanzar una captura aunque no toque. La configuración (extensión, clave,
-        conectores) vive en{" "}
-        <Link href="/etl/captura" style={{ color: "var(--accent)", textDecoration: "none" }}>
-          Admin · Captura
+        Esta es la página desde la que se captura. Todos tus perfiles, uno debajo de otro. Bajo cada
+        perfil, sus conectores: los que <strong>toca ejecutar</strong> o están{" "}
+        <strong>a medias</strong> se muestran abiertos con sus botones de captura; los que están al
+        día se pliegan en una línea. Puedes abrir o plegar cualquiera a mano para lanzar una captura
+        aunque no toque.
+      </p>
+      <p style={{ fontSize: 13, color: "var(--fg-muted)", marginTop: 6, lineHeight: 1.5 }}>
+        La <strong>extensión y su clave</strong> se instalan y vinculan con el botón de arriba. Los{" "}
+        <strong>conectores</strong> de cada portal se configuran en{" "}
+        <Link
+          href="/etl/connectors"
+          data-testid="captura-to-connectors"
+          style={{ color: "var(--accent)", textDecoration: "none" }}
+        >
+          Conectores
+        </Link>
+        . El registro de todo lo que la extensión va capturando —el libro de capturas— vive en{" "}
+        <Link
+          href="/etl/captura"
+          data-testid="captura-to-ledger"
+          style={{ color: "var(--accent)", textDecoration: "none" }}
+        >
+          Captura (admin)
         </Link>
         .
       </p>

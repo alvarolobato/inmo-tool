@@ -6,11 +6,7 @@ import { ErrorDisplay } from "@/components/ErrorDisplay";
 import { ExtensionCta } from "@/components/extension/ExtensionCta";
 import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
-import {
-  firstPendingUrl,
-  SITEMAP_SEEDABLE_PORTALS,
-  WORKLIST_STATUSES,
-} from "@/lib/worklist";
+import { firstPendingUrl, WORKLIST_STATUSES } from "@/lib/worklist";
 import type {
   WorklistPortalSummary,
   WorklistRow,
@@ -29,19 +25,22 @@ const FILTER_LABEL: Record<StatusFilter, string> = {
 };
 
 /**
- * Guided capture worklist (issue #237) — "the page with all the places to
- * visit one by one" the owner asked for. It lists the URLs to open for each
- * capture portal (Aliseda today), tracks per-URL progress, and takes manually
- * pasted URLs (Aliseda has no usable sitemap — D-019 — so seeding is manual
- * paste for now).
+ * Captura (admin) — the capture worklist LEDGER (issue #237 → reconciled in
+ * #512).
+ *
+ * Role split (#512): capture is DECIDED AND LAUNCHED from `/captura` (the
+ * TopBar surface: per-profile tasks, staleness, "Abrir búsqueda ↗" that
+ * auto-starts the extension batch). THIS admin page only OBSERVES AND REPAIRS
+ * the queue the extension drains — the "libro de capturas": per-portal
+ * progress, status filters, manual paste-seeding of hand-collected URLs, and
+ * per-row skip / reactivate. It never launches a capture cycle itself.
  *
  * Lives under /etl so middleware.ts already admin-gates it (and its
  * `/api/etl/worklist` API), same as the connector-management page.
  *
- * The owner still does the actual browsing: "Abrir" opens the listing in a new
- * tab, they let the Angular page finish rendering, then click the extension
- * popup to capture. etl/capture.py flips the row to 'captured' when the capture
- * lands — this page never navigates or captures anything itself.
+ * Deep-linkable (#512): `?portal=<portal>&status=<status>` presets the portal
+ * and status filters, so the queue chips on `/captura` can land straight on a
+ * portal's pending rows.
  */
 
 const STATUS_LABEL: Record<WorklistStatus, string> = {
@@ -60,6 +59,10 @@ const STATUS_COLOR: Record<WorklistStatus, string> = {
   skipped: "var(--fg-muted)",
   stale: "var(--fg-muted)",
 };
+
+function isWorklistStatus(v: string | null): v is WorklistStatus {
+  return v != null && (WORKLIST_STATUSES as readonly string[]).includes(v);
+}
 
 function StatusBadge({ status, id }: { status: WorklistStatus; id: number }) {
   return (
@@ -86,8 +89,20 @@ export default function CapturaWorklistPage() {
   const [adding, setAdding] = useState(false);
   const [addResult, setAddResult] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  const [seeding, setSeeding] = useState(false);
-  const [seedResult, setSeedResult] = useState<string | null>(null);
+  // Deep-link portal focus (#512): a queue chip on /captura lands here filtered
+  // to one portal. null = every portal (the default admin view).
+  const [portalFilter, setPortalFilter] = useState<string | null>(null);
+
+  // Apply `?portal=&status=` once on mount (client-only; the page is already a
+  // client component, so read straight off the URL — no Suspense boundary
+  // needed as would be with useSearchParams).
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const status = params.get("status");
+    if (isWorklistStatus(status)) setStatusFilter(status);
+    const portal = params.get("portal")?.trim();
+    if (portal) setPortalFilter(portal);
+  }, []);
 
   const fetchWorklist = useCallback(async () => {
     setLoading(true);
@@ -164,12 +179,22 @@ export default function CapturaWorklistPage() {
     [fetchWorklist],
   );
 
-  const grandTotal = useMemo(
-    () => summaries.reduce((acc, s) => acc + s.total, 0),
-    [summaries],
+  // Rows/summaries the portal deep-link focuses on (all portals when null).
+  const scopedRows = useMemo(
+    () => (portalFilter ? rows.filter((r) => r.source_portal === portalFilter) : rows),
+    [rows, portalFilter],
+  );
+  const scopedSummaries = useMemo(
+    () => (portalFilter ? summaries.filter((s) => s.source_portal === portalFilter) : summaries),
+    [summaries, portalFilter],
   );
 
-  const nextPendingUrl = useMemo(() => firstPendingUrl(rows), [rows]);
+  const grandTotal = useMemo(
+    () => scopedSummaries.reduce((acc, s) => acc + s.total, 0),
+    [scopedSummaries],
+  );
+
+  const nextPendingUrl = useMemo(() => firstPendingUrl(scopedRows), [scopedRows]);
 
   // Manual fallback advance (issue #262, D-043): open the NEXT pending URL in a
   // new tab, one per click. This used to be the PRIMARY flow (#254's deliberate
@@ -183,62 +208,19 @@ export default function CapturaWorklistPage() {
     window.open(nextPendingUrl, "_blank", "noopener,noreferrer");
   }, [nextPendingUrl]);
 
-  // "Refrescar sitemap" (issue #260): signal the ETL to re-seed the worklist
-  // from a portal's public sitemap. It's async — the ETL poll loop fetches the
-  // sitemap and upserts pending rows within ~10s — so this only confirms the
-  // request was queued; the operator refreshes the list to see new rows.
-  const handleSeed = useCallback(
-    async (portal: string) => {
-      setSeeding(true);
-      setSeedResult(null);
-      setError(null);
-      try {
-        const res = await fetch("/api/etl/worklist/seed", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ portal }),
-        });
-        const body = await res.json().catch(() => null);
-        if (!res.ok) {
-          if (res.status === 409) {
-            setSeedResult("Ya hay una siembra en curso para este portal.");
-            return;
-          }
-          setError(isApiErrorResponse(body) ? body : "No se pudo lanzar la siembra");
-          return;
-        }
-        setSeedResult(
-          `Siembra de ${portal} encolada. Se rellenará en unos segundos; ` +
-            "pulsa Actualizar para ver las URLs nuevas.",
-        );
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "No se pudo lanzar la siembra");
-      } finally {
-        setSeeding(false);
-      }
-    },
-    [],
-  );
-
-  // Whether any portal is still sitemap-seedable. Gated to extension-capturable
-  // portals (issue #454): cimenta2 moved to ETL fetch, so this is empty today
-  // and the "Refrescar sitemap" affordance is hidden rather than shown pointing
-  // at a portal that no longer belongs on this surface.
-  const hasSeedablePortal = SITEMAP_SEEDABLE_PORTALS.length > 0;
-
   const visibleRows = useMemo(
     () =>
       statusFilter === "all"
-        ? rows
-        : rows.filter((r) => r.status === statusFilter),
-    [rows, statusFilter],
+        ? scopedRows
+        : scopedRows.filter((r) => r.status === statusFilter),
+    [scopedRows, statusFilter],
   );
 
   return (
     <main style={{ padding: 24, maxWidth: 980 }} data-testid="worklist-page">
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <h1 style={{ fontSize: 20, fontWeight: 600, color: "var(--fg)", margin: 0 }}>
-          Captura guiada
+          Captura (admin)
         </h1>
         <Link
           href="/etl/connectors"
@@ -249,13 +231,22 @@ export default function CapturaWorklistPage() {
       </div>
 
       <p style={{ fontSize: 13, color: "var(--fg-muted)", marginTop: 8 }}>
-        Lista de anuncios a visitar uno por uno para portales que solo se pueden
-        capturar con la extensión del navegador (Aliseda no publica los datos por
-        HTTP — ver D-019). Desde una página de resultados, la extensión detecta
-        todos los anuncios y con <strong>«Capturar todas»</strong> los captura en
-        secuencia sola (issue #262). Aquí puedes seguir el progreso, sembrar URLs
-        a mano o abrir una pendiente suelta con <strong>Abrir siguiente</strong>.
-        La lista se marca sola como capturada cuando llega cada captura.
+        El <strong>libro de capturas</strong>: el registro de lo que la extensión
+        está drenando, no desde donde se captura. La captura se decide y se lanza
+        desde{" "}
+        <Link
+          href="/captura"
+          data-testid="worklist-to-captura"
+          style={{ color: "var(--accent)", textDecoration: "none" }}
+        >
+          Captura
+        </Link>
+        , donde cada perfil abre su búsqueda y la extensión captura sola con{" "}
+        <strong>«Capturar todas»</strong> (issue #262). Aquí solo{" "}
+        <strong>observas y reparas la cola</strong>: sigues el progreso por
+        portal, filtras por estado, siembras a mano URLs sueltas y omites o
+        reactivas filas. La lista se marca sola como capturada cuando llega cada
+        captura.
       </p>
 
       {error && (
@@ -270,7 +261,42 @@ export default function CapturaWorklistPage() {
         <ExtensionCta context="worklist" />
       </div>
 
-      {/* ── Human-paced "Siguiente" advance ──────────────────────────── */}
+      {/* Deep-link portal focus (#512): show which portal we're scoped to and a
+          one-click way back to the full ledger. */}
+      {portalFilter && (
+        <div
+          data-testid="worklist-portal-focus"
+          style={{
+            marginTop: 16,
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            fontSize: 13,
+            color: "var(--fg-muted)",
+          }}
+        >
+          <span>
+            Mostrando solo <strong style={{ color: "var(--fg)", textTransform: "capitalize" }}>{portalFilter}</strong>.
+          </span>
+          <button
+            data-testid="worklist-portal-focus-clear"
+            onClick={() => setPortalFilter(null)}
+            style={{
+              fontSize: 12,
+              color: "var(--fg-muted)",
+              background: "none",
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              padding: "2px 8px",
+              cursor: "pointer",
+            }}
+          >
+            Ver todos los portales
+          </button>
+        </div>
+      )}
+
+      {/* ── Human-paced "Siguiente" advance (repair affordance) ──────────── */}
       <section style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <button
           data-testid="worklist-open-next"
@@ -312,50 +338,20 @@ export default function CapturaWorklistPage() {
         >
           Actualizar
         </button>
-        {hasSeedablePortal && (
-          <button
-            data-testid="worklist-refresh-sitemap"
-            onClick={() => handleSeed(SITEMAP_SEEDABLE_PORTALS[0])}
-            disabled={seeding}
-            title="Rellena la lista desde el sitemap público del portal (solo descubrimiento)"
-            style={{
-              padding: "6px 16px",
-              fontSize: 13,
-              fontWeight: 600,
-              borderRadius: 8,
-              border: "1px solid var(--border)",
-              background: "var(--bg-1)",
-              color: "var(--fg)",
-              cursor: seeding ? "not-allowed" : "pointer",
-              opacity: seeding ? 0.6 : 1,
-            }}
-          >
-            {seeding ? "Sembrando…" : `Refrescar sitemap (${SITEMAP_SEEDABLE_PORTALS[0]})`}
-          </button>
-        )}
         <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>
           Abre un anuncio cada vez que pulsas. Navega tú y espera a que cargue: la
           extensión lo captura sola.
         </span>
       </section>
 
-      {seedResult && (
-        <p
-          data-testid="worklist-seed-result"
-          style={{ fontSize: 13, color: "var(--fg-muted)", marginTop: 8 }}
-        >
-          {seedResult}
-        </p>
-      )}
-
       {/* ── Progress summary ─────────────────────────────────────────── */}
       <section data-testid="worklist-summary" style={{ marginTop: 16 }}>
-        {summaries.length === 0 ? (
+        {scopedSummaries.length === 0 ? (
           <p style={{ fontSize: 13, color: "var(--fg-muted)" }} data-testid="worklist-summary-empty">
             Aún no hay URLs en la lista.
           </p>
         ) : (
-          summaries.map((s) => {
+          scopedSummaries.map((s) => {
             const pct = s.total > 0 ? Math.round((s.captured / s.total) * 100) : 0;
             return (
               <div
@@ -380,6 +376,15 @@ export default function CapturaWorklistPage() {
                   {s.failed > 0 && <span style={{ color: "#dc2626" }}>{s.failed} fallidas</span>}
                   {s.skipped > 0 && <span style={{ color: "var(--fg-muted)" }}>{s.skipped} omitidas</span>}
                   {s.stale > 0 && <span style={{ color: "var(--fg-muted)" }}>{s.stale} obsoletas</span>}
+                  {/* Cross-link back to where this portal's queue is fed from —
+                      the profiles/tasks on /captura (#512). */}
+                  <Link
+                    href="/captura"
+                    data-testid={`worklist-portal-captura-${s.source_portal}`}
+                    style={{ color: "var(--accent)", textDecoration: "none" }}
+                  >
+                    ver en Captura →
+                  </Link>
                   <span style={{ color: "var(--fg-muted)", marginLeft: "auto" }}>{pct}%</span>
                 </div>
                 {/* Visual progress bar (issue #260): captured share of the portal. */}
@@ -413,7 +418,7 @@ export default function CapturaWorklistPage() {
         )}
       </section>
 
-      {/* ── Manual URL entry ─────────────────────────────────────────── */}
+      {/* ── Manual URL entry (the only seed path for hand-collected URLs) ── */}
       <section style={{ marginTop: 20 }}>
         <label
           htmlFor="worklist-paste"
@@ -468,14 +473,14 @@ export default function CapturaWorklistPage() {
       </section>
 
       {/* ── Status filter tabs ───────────────────────────────────────── */}
-      {rows.length > 0 && (
+      {scopedRows.length > 0 && (
         <section
           data-testid="worklist-filters"
           style={{ marginTop: 24, display: "flex", gap: 8, flexWrap: "wrap" }}
         >
           {(["all", ...WORKLIST_STATUSES] as StatusFilter[]).map((f) => {
             const active = statusFilter === f;
-            const count = f === "all" ? rows.length : rows.filter((r) => r.status === f).length;
+            const count = f === "all" ? scopedRows.length : scopedRows.filter((r) => r.status === f).length;
             return (
               <button
                 key={f}
@@ -504,7 +509,7 @@ export default function CapturaWorklistPage() {
       <section style={{ marginTop: 12 }}>
         {loading ? (
           <p style={{ fontSize: 13, color: "var(--fg-muted)" }}>Cargando…</p>
-        ) : rows.length === 0 ? (
+        ) : scopedRows.length === 0 ? (
           <p style={{ fontSize: 13, color: "var(--fg-muted)" }} data-testid="worklist-empty">
             No hay URLs en la lista todavía. Pega arriba las URLs de los anuncios
             de Aliseda (u otro portal de extensión) que quieras capturar.

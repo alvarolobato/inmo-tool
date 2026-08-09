@@ -94,26 +94,6 @@ export function isCapturePortal(portal: string): boolean {
 }
 
 /**
- * Portals whose worklist can be seeded automatically from a public sitemap
- * (issue #260) — GATED to extension-capturable portals (issue #454).
- *
- * A sitemap seed only belongs in `capture_worklist` if the extension actually
- * drains that portal; seeding a portal it never captures just piles up
- * vestigial rows (the cimenta2 bug — 0/3917 pending forever). So the candidate
- * list is intersected with {@link isCapturePortal}.
- *
- * cimenta2 has a public sitemap (D-034/D-035) but is fetched over HTTP by the
- * ETL, not the extension, so it is intentionally filtered OUT here — leaving no
- * portal seedable today. The mechanism (etl/worklist_seed.py + the seed
- * trigger) stays for a future extension portal that ships a usable sitemap.
- * This list is the dashboard-side mirror of etl/worklist_seed.py's `_SEEDERS`
- * (gated by etl.capture.EXTENSION_CAPTURE_PORTALS) — the two must stay in step.
- */
-const _SITEMAP_CANDIDATE_PORTALS: readonly string[] = ["cimenta2"];
-export const SITEMAP_SEEDABLE_PORTALS: readonly string[] =
-  _SITEMAP_CANDIDATE_PORTALS.filter(isCapturePortal);
-
-/**
  * Canonical correlation key linking a worklist URL to an incoming capture,
  * tolerant of cosmetic URL differences (issue #237).
  *
