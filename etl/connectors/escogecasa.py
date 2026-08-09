@@ -315,6 +315,10 @@ def extract_photos(html: str, internal_id: str) -> tuple[str, ...]:
 class EscogecasaConnector(Connector):
     name = "escogecasa"
 
+    # Issue #515: non-tunable (no override_host_suffix), so set the public home
+    # page explicitly for the Validar-filtros "Abrir portal" fallback.
+    home_url = _BASE_URL
+
     # Conservative, matching the other REO connectors in the batch: a bbox
     # sweep is one search POST plus a detail fetch per listing, on a legacy
     # bank portal we want to be a quiet guest on.

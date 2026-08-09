@@ -107,6 +107,32 @@ class TestConnectorSkipIfSeenDefaults:
         assert DiscoverFailsConnector().discovered_prices() == {}
 
 
+class TestConnectorHomeUrl:
+    """Issue #515: `home_url` defaults to https://www.{override_host_suffix} when
+    the connector declares a host suffix, is None when it declares neither, and
+    an explicit class-attribute value shadows the property default."""
+
+    def test_defaults_to_none_without_a_host_suffix(self):
+        # DiscoverFailsConnector declares no override_host_suffix.
+        assert DiscoverFailsConnector().home_url is None
+
+    def test_derives_from_the_override_host_suffix(self):
+        from etl.connectors.base import Connector
+
+        class _WithSuffix(DiscoverFailsConnector):
+            override_host_suffix = "example.com"
+
+        assert _WithSuffix().home_url == "https://www.example.com"
+        # It really is the base property, not a bare attribute.
+        assert isinstance(Connector.home_url, property)
+
+    def test_explicit_home_url_shadows_the_property(self):
+        class _Explicit(DiscoverFailsConnector):
+            home_url = "https://portal.example.org/inicio/"
+
+        assert _Explicit().home_url == "https://portal.example.org/inicio/"
+
+
 class TestShouldSkipFetch:
     """Pure-function tests for the skip-if-seen decision (issue #143) — no
     DB needed, since `_should_skip_fetch` takes every input as a plain

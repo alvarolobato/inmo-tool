@@ -42,10 +42,23 @@ import type { ProfileConnectorFilterSource } from "@/lib/db/profile-connector-fi
  */
 export const dynamic = "force-dynamic";
 
+/**
+ * Issue #515: the public home page for an extension capture portal, derived from
+ * its host suffix in {@link CAPTURE_PORTALS} (no Python/registry round-trip for
+ * these — the capture portals live entirely on the TS side). null for a portal
+ * not in that list.
+ */
+function capturePortalHomeUrl(portal: string): string | null {
+  const p = CAPTURE_PORTALS.find((c) => c.portal === portal);
+  return p ? `https://www.${p.hostSuffix}` : null;
+}
+
 interface FilterRowModel {
   connector: string;
   label: string;
   url: string;
+  /** Issue #515: the portal home page, for the empty-URL "Abrir portal" fallback. */
+  homeUrl: string | null;
   sectionKey: string;
   overridden: boolean;
   source?: ProfileConnectorFilterSource;
@@ -87,6 +100,7 @@ export default async function ValidarFiltrosPage({
       connector: task.portal,
       label: task.label,
       url: task.url,
+      homeUrl: capturePortalHomeUrl(task.portal),
       sectionKey: pin ? pin.section_key : decoded.sectionKey,
       overridden: Boolean(task.overridden),
       source: pin?.source,
@@ -107,6 +121,7 @@ export default async function ValidarFiltrosPage({
       connector: portal,
       label: portalTitle(portal),
       url: "",
+      homeUrl: capturePortalHomeUrl(portal),
       sectionKey: "",
       overridden: false,
       loosened: [],
@@ -178,6 +193,7 @@ export default async function ValidarFiltrosPage({
               connector={row.connector}
               label={row.label}
               url={row.url}
+              homeUrl={row.homeUrl}
               sectionKey={row.sectionKey}
               overridden={row.overridden}
               source={row.source}
@@ -244,6 +260,7 @@ export default async function ValidarFiltrosPage({
                   pinnedUrl={pin ? pin.url : null}
                   source={pin?.source}
                   derivedUrl={derivedUrl}
+                  homeUrl={row.homeUrl}
                 />
               );
             })}

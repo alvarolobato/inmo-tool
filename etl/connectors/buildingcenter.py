@@ -264,6 +264,11 @@ class BuildingCenterConnector(Connector):
 
     name = "buildingcenter"
 
+    # Issue #515: the API base (apifrontend.buildingcenter.es) is a machine
+    # endpoint, not a browseable page; the owner-facing portal is the public site.
+    # Non-tunable (no override_host_suffix), so set the home page explicitly.
+    home_url = "https://www.buildingcenter.es"
+
     # Measured, not copied — see module docstring's step 5. Mirrors
     # Solvia's/Vivantial's single-servicer-courtesy default rather than
     # the framework's 30/min.

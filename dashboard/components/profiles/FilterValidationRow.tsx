@@ -26,6 +26,7 @@ export function FilterValidationRow({
   connector,
   label,
   url,
+  homeUrl = null,
   sectionKey,
   overridden,
   source,
@@ -40,6 +41,13 @@ export function FilterValidationRow({
   label: string;
   /** The URL the resolver produced (pinned or derived); "" for an empty row. */
   url: string;
+  /**
+   * Issue #515: the portal's public home page. When `url` is empty, "Abrir"
+   * falls back to opening this (validate-tagged, so the extension stays
+   * capture-free) instead of being a dead button. null → no fallback (Abrir
+   * disabled as before).
+   */
+  homeUrl?: string | null;
   /** The section_key a PUT/DELETE must target so tier 0 matches this task. */
   sectionKey: string;
   /** True when the URL came from a profile_connector_filter override (pinned). */
@@ -108,14 +116,21 @@ export function FilterValidationRow({
     }
   }
 
+  // Issue #515: what "Abrir" opens — the derived/pinned URL when present, else
+  // the portal home page (so the button is never dead). Either way it is tagged
+  // with the validation signal, so opening the portal home keeps the extension
+  // capture-free while the owner navigates to a results page and hands a URL back.
+  const openTarget = url || homeUrl || "";
+  const openIsHome = !url && Boolean(homeUrl);
+
   function onOpen() {
     // Phase 3: open in VALIDATION MODE — tag the URL with `#inmo-validate=<pid>:
     // <connector>` so the extension suppresses all capture on that tab and the
     // popup can pin the tuned URL back. withValidateSignal returns the URL
     // untouched if it can't be parsed, so this never breaks the open.
-    if (url && typeof window !== "undefined") {
+    if (openTarget && typeof window !== "undefined") {
       window.open(
-        withValidateSignal(url, profileId, connector),
+        withValidateSignal(openTarget, profileId, connector),
         "_blank",
         "noopener,noreferrer",
       );
@@ -326,11 +341,15 @@ export function FilterValidationRow({
           type="button"
           data-testid="filter-open"
           onClick={onOpen}
-          disabled={!url}
-          title={url || undefined}
+          disabled={!openTarget}
+          title={
+            openIsHome
+              ? "No hay URL derivada; se abre la portada del portal"
+              : url || undefined
+          }
           style={ghostButtonStyle}
         >
-          Abrir ↗
+          {openIsHome ? "Abrir portal ↗" : "Abrir ↗"}
         </button>
       </div>
 

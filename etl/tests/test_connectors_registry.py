@@ -36,6 +36,24 @@ class TestRegisterAll:
         finally:
             _reset_connectors()
 
+    def test_every_discovery_connector_has_a_home_url(self):
+        """Issue #515 EC-3: after registration, every connector that appears on
+        the Validar-filtros ETL section (supports_discovery=True) reports a
+        non-null home_url — either derived from its override_host_suffix or set
+        explicitly (the four non-tunable structural connectors). No such row may
+        leave "Abrir" a dead button. Capture-only portals (supports_discovery=
+        False) derive their home page from CAPTURE_PORTALS on the dashboard side,
+        so they are intentionally not required to carry one in Python."""
+        _reset_connectors()
+        try:
+            register_all()
+            missing = [
+                c.name for c in CONNECTORS if c.supports_discovery and not c.home_url
+            ]
+            assert missing == [], f"discovery connectors without a home_url: {missing}"
+        finally:
+            _reset_connectors()
+
     def test_idempotent_does_not_duplicate_on_repeated_calls(self):
         _reset_connectors()
         try:
