@@ -19,13 +19,18 @@
  *      timestamp (idempotent per press).
  *
  * Admin-gated by middleware.ts (`/api/*` is gate-by-default), same as every
- * other write-capable route — no separate auth surface here.
+ * other write-capable route. This route ALSO checks `adminApiKeyValid`
+ * explicitly as defense-in-depth because the browser extension's auto driver
+ * (issue #516) POSTs task runs via the `x-admin-key` channel — the same pattern
+ * connector-filters/route.ts uses. `adminApiKeyValid` accepts the `ps_admin`
+ * cookie too, so the UI's cookie-authenticated calls are unaffected.
  *
- * Error codes: 400 invalid id / missing taskId · 404 profile not found ·
- * 500 unexpected.
+ * Error codes: 400 invalid id / missing taskId · 401 missing/invalid admin key ·
+ * 404 profile not found · 500 unexpected.
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { adminApiKeyValid, adminUnauthorized } from "@/lib/admin-api-auth";
 import { getProfileById } from "@/lib/db/profiles";
 import { getTaskRuns, recordTaskRun, getPortalCaptureActivity } from "@/lib/db/capture-task-run";
 import { getStalenessConfig } from "@/lib/captura-staleness-config";
@@ -43,6 +48,7 @@ export async function GET(
   context: RouteContext,
 ): Promise<NextResponse> {
   const requestId = generateRequestId();
+  if (!adminApiKeyValid(_request)) return adminUnauthorized();
   const { id: rawId } = await context.params;
   const id = parseId(rawId);
   if (id === null) {
@@ -82,6 +88,7 @@ export async function POST(
   context: RouteContext,
 ): Promise<NextResponse> {
   const requestId = generateRequestId();
+  if (!adminApiKeyValid(request)) return adminUnauthorized();
   const { id: rawId } = await context.params;
   const id = parseId(rawId);
   if (id === null) {

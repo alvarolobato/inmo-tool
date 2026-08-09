@@ -578,9 +578,11 @@ function startBatchPolling() {
 
 /** Human label for each auto status. */
 const AUTO_STATUS_LABELS = {
+  planning: 'buscando el siguiente paso…',
+  harvesting: 'descubriendo y capturando anuncios nuevos',
   running: 'capturando lote',
   waiting: 'esperando al siguiente lote',
-  empty: 'lista vacía — esperando trabajo nuevo',
+  empty: 'nada pendiente — esperando trabajo nuevo',
   stopped: 'deteniéndose tras el lote en curso',
   idle: 'iniciando…',
 };
@@ -607,7 +609,11 @@ function renderAutoStatus(auto) {
     btn.textContent = 'Auto: detener';
     btn.classList.remove('btn-primary');
     btn.classList.add('btn-secondary');
-    const phase = AUTO_STATUS_LABELS[auto.status] || auto.status || '';
+    let phase = AUTO_STATUS_LABELS[auto.status] || auto.status || '';
+    // While harvesting (issue #516) name the portal being discovered.
+    if (auto.status === 'harvesting' && auto.harvestTask && auto.harvestTask.portal) {
+      phase = `descubriendo ${auto.harvestTask.portal}`;
+    }
     const batches = auto.batchesDone || 0;
     const pending =
       typeof auto.totalPending === 'number' ? auto.totalPending : '—';
@@ -616,7 +622,7 @@ function renderAutoStatus(auto) {
         ? ` · lote ${auto.batch.done || 0}/${auto.batch.total}`
         : '';
     line.textContent =
-      `Auto activo · ${batches} lote(s) hechos · ${pending} pendientes` +
+      `Auto activo · ${batches} unidad(es) hechas · ${pending} pendientes` +
       `${batchLine} · ${phase}`;
     line.classList.remove('hidden');
   } else {

@@ -922,4 +922,34 @@ describe("nextAutoAction — the alarm-tick decision", () => {
     const empty = { ...base, status: AUTO_STATUS.EMPTY, lastBatchAt: now - 61_000 };
     expect(nextAutoAction(empty, { batchActive: false, now })).toBe("start");
   });
+
+  // Auto v2 discover→harvest states (issue #516).
+  it("defers while a HARVESTING unit is in flight", () => {
+    const harvesting = { ...base, status: AUTO_STATUS.HARVESTING };
+    expect(nextAutoAction(harvesting, { batchActive: true })).toBe("defer");
+  });
+
+  it("completes a HARVESTING unit once nothing is active (records the task run)", () => {
+    const harvesting = { ...base, status: AUTO_STATUS.HARVESTING };
+    expect(nextAutoAction(harvesting, { batchActive: false })).toBe("complete");
+  });
+
+  it("re-plans (start) a PLANNING unit stranded by an eviction", () => {
+    const planning = { ...base, status: AUTO_STATUS.PLANNING };
+    expect(nextAutoAction(planning, { batchActive: false })).toBe("start");
+  });
+});
+
+describe("makeAutoState — harvestTask (issue #516)", () => {
+  it("defaults harvestTask to null and preserves an object", () => {
+    expect(makeAutoState({ enabled: true }).harvestTask).toBeNull();
+    expect(makeAutoState({ enabled: true, harvestTask: "x" as unknown }).harvestTask).toBeNull();
+    const task = { profileId: 3, taskId: "t", portal: "idealista", url: "https://x/" };
+    expect(makeAutoState({ enabled: true, harvestTask: task }).harvestTask).toEqual(task);
+  });
+
+  it("exposes the PLANNING and HARVESTING status constants", () => {
+    expect(AUTO_STATUS.PLANNING).toBe("planning");
+    expect(AUTO_STATUS.HARVESTING).toBe("harvesting");
+  });
 });
