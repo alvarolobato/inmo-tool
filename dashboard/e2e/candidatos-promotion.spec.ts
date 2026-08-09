@@ -1,5 +1,5 @@
 /**
- * E2E: the candidate-type promotion review page (/admin/candidatos), issue #399
+ * E2E: the candidate-type promotion review page (/admin/clasificacion), issue #399
  * (Fase 8 of #385), D-041.
  *
  * Drives a real Next.js server against a real Postgres. Seeds a property + a
@@ -119,8 +119,8 @@ test.beforeEach(async ({ page, baseURL }) => {
 test("lists recurring candidate_types over the threshold with evidence (D-041)", async ({
   page,
 }) => {
-  await page.goto("/admin/candidatos");
-  await expect(page.getByTestId("candidatos-page")).toBeVisible();
+  await page.goto("/admin/clasificacion");
+  await expect(page.getByTestId("clasificacion-page")).toBeVisible();
 
   // The qualifying slug's card renders, with slug, count, definition and quote.
   const card = page.getByTestId(`candidato-${HIT}`);
@@ -148,8 +148,8 @@ test("#407: dismissing a candidate removes it from the list, no error surface (D
   // Accept the optional-reason window.prompt the dismiss button opens.
   page.on("dialog", (dialog) => dialog.accept("duplicado de otro eje"));
 
-  await page.goto("/admin/candidatos");
-  await expect(page.getByTestId("candidatos-page")).toBeVisible();
+  await page.goto("/admin/clasificacion");
+  await expect(page.getByTestId("clasificacion-page")).toBeVisible();
 
   // The candidate is present before dismissal.
   const card = page.getByTestId(`candidato-${HIT}`);
@@ -162,7 +162,7 @@ test("#407: dismissing a candidate removes it from the list, no error surface (D
 
   // The dismissal really persisted — a reload still shows it gone.
   await page.reload();
-  await expect(page.getByTestId("candidatos-page")).toBeVisible();
+  await expect(page.getByTestId("clasificacion-page")).toBeVisible();
   await expect(page.getByTestId(`candidato-${HIT}`)).toHaveCount(0);
 
   // ── D-041 bar: no error surface anywhere on the page. ──

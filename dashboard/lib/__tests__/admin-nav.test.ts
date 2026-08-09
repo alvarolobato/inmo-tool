@@ -1,0 +1,101 @@
+// @vitest-environment node
+import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+import {
+  ADMIN_NAV,
+  ADMIN_LLM_SUBPAGES,
+  activeAdminHref,
+  type AdminNavItem,
+} from "../admin-nav";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const dashboardRoot = resolve(here, "..", "..");
+
+function read(rel: string): string {
+  return readFileSync(resolve(dashboardRoot, rel), "utf8");
+}
+
+describe("ADMIN_NAV — shared nav source (#508)", () => {
+  it("has unique hrefs and non-empty labels/descriptions", () => {
+    const hrefs = ADMIN_NAV.map((i) => i.href);
+    expect(new Set(hrefs).size).toBe(hrefs.length);
+    for (const item of ADMIN_NAV) {
+      expect(item.label.trim().length).toBeGreaterThan(0);
+      expect(item.description.trim().length).toBeGreaterThan(0);
+    }
+  });
+
+  it("contains the renamed + consolidated entries and drops the four LLM tabs", () => {
+    const byHref = new Map(ADMIN_NAV.map((i) => [i.href, i]));
+
+    // Renames.
+    expect(byHref.get("/admin/clasificacion")?.label).toBe("Clasificación");
+    expect(byHref.get("/etl/captura")?.label).toBe("Captura (admin)");
+
+    // Duplicados now on the strip.
+    expect(byHref.get("/admin/dedup")?.label).toBe("Duplicados");
+
+    // Old names/routes are gone from the nav.
+    expect(byHref.has("/admin/candidatos")).toBe(false);
+    for (const sub of ADMIN_LLM_SUBPAGES) {
+      expect(byHref.has(sub.href)).toBe(false);
+    }
+
+    // The four LLM tabs are folded under a single landing.
+    const llm = byHref.get("/admin/llm");
+    expect(llm?.label).toBe("LLM");
+    expect(llm?.matchPrefixes).toEqual(ADMIN_LLM_SUBPAGES.map((s) => s.href));
+  });
+
+  it("keeps Extensión/Descubrimiento pending removal by #509/#511 (not deleted here)", () => {
+    const byHref = new Map(ADMIN_NAV.map((i) => [i.href, i]));
+    expect(byHref.get("/etl/extension")?.pendingRemoval).toBe("#509");
+    expect(byHref.get("/etl/discovery")?.pendingRemoval).toBe("#511");
+  });
+
+  it("both consumers render from ADMIN_NAV (no local nav arrays left)", () => {
+    const chrome = read("app/admin/AdminChrome.tsx");
+    const index = read("app/admin/page.tsx");
+    for (const src of [chrome, index]) {
+      expect(src).toContain("ADMIN_NAV");
+      expect(src).toContain("@/lib/admin-nav");
+    }
+    // The old inline arrays are gone.
+    expect(index).not.toContain("ADMIN_LINKS");
+    expect(chrome).not.toContain("const ADMIN_NAV = [");
+  });
+});
+
+describe("activeAdminHref — longest-prefix match", () => {
+  const cases: Array<[string, string | null]> = [
+    ["/etl", "/etl"],
+    // A deeper /etl/* route must NOT also light up Monitor ETL.
+    ["/etl/connectors", "/etl/connectors"],
+    ["/etl/connectors/fotocasa", "/etl/connectors"],
+    ["/etl/captura", "/etl/captura"],
+    ["/admin/clasificacion", "/admin/clasificacion"],
+    ["/admin/dedup", "/admin/dedup"],
+    // The four LLM sub-routes all highlight the single LLM tab.
+    ["/admin/llm", "/admin/llm"],
+    ["/admin/slow-queries", "/admin/llm"],
+    ["/admin/tool-calls", "/admin/llm"],
+    ["/admin/usage", "/admin/llm"],
+    ["/admin/interactions", "/admin/llm"],
+    ["/admin/config", "/admin/config"],
+    ["/something-else", null],
+  ];
+  for (const [pathname, expected] of cases) {
+    it(`${pathname} → ${expected}`, () => {
+      expect(activeAdminHref(pathname)).toBe(expected);
+    });
+  }
+
+  it("exactly one nav item is active for every nav route (no double-highlight)", () => {
+    for (const item of ADMIN_NAV as AdminNavItem[]) {
+      const active = activeAdminHref(item.href);
+      expect(active).toBe(item.href);
+    }
+  });
+});

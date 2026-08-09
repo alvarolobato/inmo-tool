@@ -162,7 +162,7 @@ test("shows the connector picker and the static drift-check action (Aliseda)", a
   await expect(page.getByTestId("start-discovery")).toHaveCount(0);
 });
 
-test("is reachable from the admin nav, next to Captura guiada", async ({ page }) => {
+test("is reachable from the admin nav, next to Captura (admin)", async ({ page }) => {
   // The page was unreachable from the UI before this — only by typing the URL.
   // NB: /etl/* renders two <nav>s (global TopBar + the AdminChrome admin strip),
   // so select the link directly — "Descubrimiento" is unique to the admin strip.
