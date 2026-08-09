@@ -136,6 +136,7 @@ from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
     RawListing,
+    SearchParam,
     SearchPreview,
     SoftBlockError,
     Throttle,
@@ -194,6 +195,19 @@ _USER_AGENT = (
 # identical ones. Returning a per-profile key would re-fetch the same
 # 556 KB document once per profile for no benefit.
 _NATIONAL_SCOPE_KEY = "national"
+
+
+def _scope_display(scope: ConnectorScope) -> str | None:
+    """A human label for the scope, for the "Validar filtros" perfil chip
+    (issue #496). Pure and NEVER raises — an unresolvable center degrades to
+    None (a "—" chip), mirroring search_previews()'s degrade-don't-throw rule."""
+    if scope.geography:
+        return scope.geography
+    try:
+        place = resolve_place(scope)
+    except UnresolvableGeographyError:
+        return None
+    return place.name if place else None
 
 
 class Cimenta2SoftBlockError(SoftBlockError):
@@ -299,12 +313,41 @@ class Cimenta2Connector(Connector):
         for every scope (the asset URLs carry no geography), so there is no
         per-profile URL to tune — the filtering is by data. `_SITEMAP_INDEX_URL`
         is exactly discover()'s first request."""
+        # Issue #496: even a non-tunable connector must show WHICH params govern
+        # its recall. Cimenta2's answer is honest and minimal: the sweep is
+        # national (no geography reaches any URL), and the profile only GATES it
+        # (discover() confirms the scope points somewhere real, then sweeps the
+        # whole sitemap). No price/size/type param exists — those are applied
+        # downstream by data.
+        params: tuple[SearchParam, ...] = (
+            SearchParam(
+                key="alcance",
+                label="Alcance",
+                value="nacional",
+                source="constant",
+                in_url=False,
+                notes="Barrido nacional del sitemap; ningún parámetro entra en la URL.",
+            ),
+            SearchParam(
+                key="perfil",
+                label="Perfil",
+                value=_scope_display(scope),
+                source="profile",
+                in_url=False,
+                consumed=False,
+                notes=(
+                    "Solo valida que el perfil apunta a un sitio real y gatea el "
+                    "barrido; los filtros del perfil se aplican después, por datos."
+                ),
+            ),
+        )
         return [
             SearchPreview(
                 label="Cimenta2 (Cajamar) — barrido nacional",
                 url=_SITEMAP_INDEX_URL,
                 kind="sitemap",
                 tunable=False,
+                params=params,
                 notes=(
                     "Barrido nacional del sitemap; el scope no entra en la URL "
                     "— el filtrado es por datos."
