@@ -1,15 +1,16 @@
 /**
- * /api/observed-search-urls — Passively-observed Idealista search URLs
- * (issue #488, part of #471).
+ * /api/observed-search-urls — Passively-observed search URLs from any capture
+ * portal (issue #488, part of #471; generalized to all capture portals in #510).
  *
  * POST: the browser extension's passive observer forwards a search/results URL
  *   the owner is browsing (verbatim, `shape=` and all). We validate it is an
- *   OBSERVABLE idealista.com http(s) URL (rejecting anything else, 400), derive
- *   the portal + de-dup key server-side from the URL (never client-claimed), and
- *   UPSERT it — a repeat sighting bumps its seen count rather than duplicating.
+ *   OBSERVABLE http(s) URL on a supported capture portal (idealista / aliseda /
+ *   altamira — rejecting anything else, 400), derive the portal + de-dup key
+ *   server-side from the URL (never client-claimed), and UPSERT it — a repeat
+ *   sighting bumps its seen count rather than duplicating.
  *
  * GET: the admin review surface lists the observed URLs (newest sighting first)
- *   so their filtering/drawn-zone grammar can be analysed for #471.
+ *   so each portal's filtering/drawn-zone grammar can be analysed (#471, #514).
  *
  * Same admin-key gate as every other write-capable route (the extension sends
  * `x-admin-key`; the admin UI relies on the `ps_admin` cookie via middleware).
@@ -23,7 +24,7 @@ import {
 } from "@/lib/errors";
 import { adminApiKeyValid, adminUnauthorized } from "@/lib/admin-api-auth";
 import {
-  isObservableIdealistaUrl,
+  observablePortalForUrl,
   normalizeObservedUrl,
 } from "@/lib/observed-search-url";
 import {
@@ -64,13 +65,15 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // The URL must be an OBSERVABLE idealista.com search/results page. This single
-  // check covers scheme, host and page-role — the same predicate the extension
-  // used before forwarding (we never trust the client's word for it).
-  if (!isObservableIdealistaUrl(url)) {
+  // The URL must be an OBSERVABLE search/results page on a supported capture
+  // portal. This single check covers scheme, host and page-role — the same
+  // predicate the extension used before forwarding (we never trust the client's
+  // word for it) — and yields the portal, derived server-side from the host.
+  const portal = observablePortalForUrl(url);
+  if (!portal) {
     return NextResponse.json(
       formatApiError(
-        "'url' debe ser una página de búsqueda/resultados de idealista.com.",
+        "'url' debe ser una página de búsqueda/resultados de un portal soportado (idealista, aliseda o altamira).",
         "VALIDATION",
         undefined,
         requestId,
@@ -91,11 +94,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     typeof body.title === "string" ? body.title.trim().slice(0, MAX_TITLE_LEN) || null : null;
 
   try {
-    const saved = await saveObservedSearchUrl("idealista", url, normKey, title);
+    const saved = await saveObservedSearchUrl(portal, url, normKey, title);
     return NextResponse.json({
       success: true,
       id: saved.id,
-      portal: "idealista",
+      portal,
       seen_count: saved.seen_count,
       last_seen: saved.last_seen,
     });

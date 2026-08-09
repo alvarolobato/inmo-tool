@@ -616,7 +616,7 @@ async function saveSearchUrlExample(searchUrl, resultCount) {
 async function postCapturedSearchUrl(payload) {
   const capture = self.InmoSearchUrl.buildSearchUrlCapture(payload || {});
   if (!capture) {
-    return { success: false, error: { message: 'La pestaña activa no es una URL de búsqueda de Idealista.' } };
+    return { success: false, error: { message: 'La pestaña activa no es una URL de un portal soportado.' } };
   }
   const { apiUrl, apiKey } = await getApiConfig();
   const response = await fetch(`${apiUrl}/api/captured-search-urls`, {
@@ -679,7 +679,7 @@ async function markObservedKey(key) {
 async function postObservedSearchUrl(payload) {
   const capture = self.InmoObserve.buildObservedCapture(payload || {});
   if (!capture) {
-    return { success: false, error: { message: 'No es una URL de búsqueda de Idealista observable.' } };
+    return { success: false, error: { message: 'No es una URL de búsqueda observable de un portal soportado.' } };
   }
   const key = self.InmoObserve.normalizeObservedUrl(capture.url);
   if (!key) {

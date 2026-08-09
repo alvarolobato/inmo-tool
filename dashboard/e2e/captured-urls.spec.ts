@@ -32,6 +32,12 @@ const SHAPE_URL =
   "https://www.idealista.com/areas/venta-viviendas/?shape=%28%28E2E-475-shape%29%29";
 const PLAIN_URL =
   "https://www.idealista.com/venta-viviendas/estepona-malaga/E2E-475-plain/";
+// All-portals generalization (#510): captured rows for aliseda + altamira so the
+// portal filter chips have ≥2 portals to switch between (EC-1).
+const ALISEDA_URL =
+  "https://www.alisedainmobiliaria.com/comprar-viviendas/malaga/E2E-475-aliseda/";
+const ALTAMIRA_URL =
+  "https://www.altamirainmuebles.com/venta-viviendas/pontevedra/E2E-475-altamira/";
 
 // Observed URLs (issue #488): a plain listado + an areas/shape drawn zone.
 // The shape encodes Google's documented 3-vertex example polyline.
@@ -63,14 +69,16 @@ test.beforeAll(async () => {
     return;
   }
   await purge();
-  for (const { url, title } of [
-    { url: SHAPE_URL, title: "Zona dibujada E2E" },
-    { url: PLAIN_URL, title: "Búsqueda E2E" },
+  for (const { portal, url, title } of [
+    { portal: "idealista", url: SHAPE_URL, title: "Zona dibujada E2E" },
+    { portal: "idealista", url: PLAIN_URL, title: "Búsqueda E2E" },
+    { portal: "aliseda", url: ALISEDA_URL, title: "Aliseda E2E" },
+    { portal: "altamira", url: ALTAMIRA_URL, title: "Altamira E2E" },
   ]) {
     const res = await pool.query<{ id: number }>(
       `INSERT INTO captured_search_urls (portal, url, title)
-       VALUES ('idealista', $1, $2) RETURNING id`,
-      [url, title],
+       VALUES ($1, $2, $3) RETURNING id`,
+      [portal, url, title],
     );
     seededIds.push(res.rows[0].id);
   }
@@ -123,6 +131,38 @@ test("lists captured URLs with the shape badge and no error surface", async ({ p
   await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
   await expect(page.getByText("Error al cargar")).toHaveCount(0);
   await expect(page.getByText("there is no parameter")).toHaveCount(0);
+  await expect(page.getByText("HTTP 500")).toHaveCount(0);
+});
+
+test("portal chips filter rows across portals (#510, EC-1)", async ({ page }) => {
+  await page.goto("/admin/captured-urls");
+  await expect(page.getByTestId("captured-urls-page")).toBeVisible();
+
+  // The seeded data spans ≥2 portals, so a chip exists for each + "Todos".
+  const filter = page.getByTestId("portal-filter");
+  await expect(filter).toBeVisible();
+  await expect(page.getByTestId("portal-chip").filter({ hasText: "aliseda" })).toBeVisible();
+  await expect(page.getByTestId("portal-chip").filter({ hasText: "altamira" })).toBeVisible();
+
+  // Unfiltered: both an idealista and an aliseda captured row are present.
+  await expect(
+    page.getByTestId("captured-url-link").filter({ hasText: "E2E-475-shape" }),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("captured-url-link").filter({ hasText: "E2E-475-aliseda" }),
+  ).toBeVisible();
+
+  // Filter to aliseda: the aliseda row stays, the idealista rows drop out.
+  await page.getByTestId("portal-chip").filter({ hasText: "aliseda" }).click();
+  await expect(
+    page.getByTestId("captured-url-link").filter({ hasText: "E2E-475-aliseda" }),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("captured-url-link").filter({ hasText: "E2E-475-shape" }),
+  ).toHaveCount(0);
+
+  // No error surface — the D-041 bar.
+  await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
   await expect(page.getByText("HTTP 500")).toHaveCount(0);
 });
 

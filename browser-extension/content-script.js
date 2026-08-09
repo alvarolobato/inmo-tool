@@ -470,9 +470,11 @@
 
   // ── 3b. Passive search-URL observer (issue #488, part of #471) ────────────
   //
-  // As the owner browses Idealista SEARCH/RESULTS pages, forward each distinct
-  // URL to the dashboard so the drawn-zone/filtering grammar can be analysed in
-  // bulk (#471). This is OBSERVE-ONLY: it never captures a listing, never
+  // As the owner browses a supported portal's SEARCH/RESULTS pages (idealista /
+  // aliseda / altamira — #510), forward each distinct URL to the dashboard so
+  // each portal's drawn-zone/filtering grammar can be analysed in bulk (#471,
+  // and #514 for altamira). This is OBSERVE-ONLY: it never captures a listing,
+  // never
   // navigates, and never interferes with the capture/validation flows. It is:
   //   - gated by the popup toggle "modo observación" (chrome.storage.sync
   //     `observeMode`, default ON) so the owner can silence it if noisy;
@@ -501,7 +503,7 @@
     // the way of the owner tuning a search URL.
     if (D.inValidationMode(window.location.href, validationActive)) return;
     const url = window.location.href;
-    if (!O.isObservableIdealistaUrl(url)) return; // not a search/results page
+    if (!O.isObservableSearchUrl(url)) return; // not a search/results page on a supported portal
     const key = O.normalizeObservedUrl(url);
     if (!key || observedThisLoad === key) return; // already forwarded this URL
     if (!(await observeModeEnabled())) return; // toggle off

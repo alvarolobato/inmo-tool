@@ -1,23 +1,80 @@
 /**
- * Pure helpers for the passively-observed Idealista search URLs (issue #488,
- * part of #471). No DB / server imports — safe to use from a server component
- * (the review page) and the API route, and directly unit-testable.
+ * Pure helpers for the passively-observed search URLs (issue #488, part of #471;
+ * generalized to all capture portals in #510). No DB / server imports — safe to
+ * use from a server component (the review page) and the API route, and directly
+ * unit-testable.
  *
- * Mirrors the extension's browser-extension/observe-search-url.js host check +
- * normalization so the server re-derives the same de-dup key it stores (never
- * trusting the client), plus the review-only analysis helpers (type badge +
+ * Mirrors the extension's browser-extension/observe-search-url.js per-portal
+ * specs + host check + normalization so the server re-derives the same de-dup
+ * key it stores (never trusting the client) and accepts exactly what the
+ * extension forwards, plus the review-only analysis helpers (type badge +
  * `shape=` vertex count) the extension has no need for.
  */
 
 const ALLOWED_URL_SCHEMES = new Set(["http:", "https:"]);
-// #488/#471 target Idealista only — the drawn-zone/`shape=` grammar is theirs.
-export const IDEALISTA_HOST_SUFFIX = "idealista.com";
+
+// Altamira listing-DETAIL path shape (mirror of the extension + detect.js):
+// `/venta-de-<tipo>/…/<numeric-id>[/<photo>]`. Everything else under altamira is
+// treated as an observable search page (permissive, #510).
+const ALTAMIRA_DETAIL_RE = /^\/(?:venta|alquiler)-de-[^/]+\/.+\/\d+(?:\/\d+)?\/?$/;
+
+/**
+ * Per-portal observer spec — the dashboard mirror of
+ * browser-extension/observe-search-url.js's SEARCH_URL_PORTAL_SPECS. Host
+ * suffixes match CAPTURE_PORTALS (lib/worklist.ts); the two + the extension must
+ * stay in step. The shared unit fixture
+ * (dashboard/__tests__/fixtures/search-url-observable.ts) pins server + extension
+ * to identical verdicts.
+ */
+export const SEARCH_URL_PORTAL_SPECS: readonly {
+  portal: string;
+  hostSuffix: string;
+  isSearchPath: (parsed: URL) => boolean;
+}[] = [
+  {
+    portal: "idealista",
+    hostSuffix: "idealista.com",
+    isSearchPath: (parsed) => {
+      const path = parsed.pathname;
+      if (/^\/(venta|alquiler)-[a-z]/.test(path)) return true;
+      if (/^\/areas(\/|$)/.test(path)) return true;
+      if (/^\/multi(\/|$)/.test(path)) return true;
+      try {
+        if (parsed.searchParams.has("shape")) return true;
+      } catch {
+        /* ignore */
+      }
+      return false;
+    },
+  },
+  {
+    portal: "aliseda",
+    hostSuffix: "alisedainmobiliaria.com",
+    isSearchPath: (parsed) => /^\/(comprar|alquilar|alquiler)/.test(parsed.pathname),
+  },
+  {
+    portal: "altamira",
+    hostSuffix: "altamirainmuebles.com",
+    // Permissive (#510): any non-detail, non-home path — the corpus #514 builds
+    // altamira's URL grammar from.
+    isSearchPath: (parsed) => {
+      const path = parsed.pathname;
+      if (path === "/" || path === "") return false;
+      return !ALTAMIRA_DETAIL_RE.test(path);
+    },
+  },
+];
 
 /** The observed-URL "type" the review surface badges. */
 export type ObservedUrlType = "areas" | "multi" | "plana";
 
-/** Parse `url` to a URL only for a valid http(s) idealista.com host, else null. */
-function parseIdealista(url: string): URL | null {
+/**
+ * Parse `url` and, if its HOST belongs to a capture portal, return
+ * `{ parsed, spec }`; null otherwise. Path is NOT considered here.
+ */
+function parsePortalUrl(
+  url: string,
+): { parsed: URL; spec: (typeof SEARCH_URL_PORTAL_SPECS)[number] } | null {
   if (typeof url !== "string") return null;
   let parsed: URL;
   try {
@@ -27,44 +84,47 @@ function parseIdealista(url: string): URL | null {
   }
   if (!ALLOWED_URL_SCHEMES.has(parsed.protocol)) return null;
   const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
-  if (host !== IDEALISTA_HOST_SUFFIX && !host.endsWith("." + IDEALISTA_HOST_SUFFIX)) {
-    return null;
+  for (const spec of SEARCH_URL_PORTAL_SPECS) {
+    if (host === spec.hostSuffix || host.endsWith("." + spec.hostSuffix)) {
+      return { parsed, spec };
+    }
   }
-  return parsed;
+  return null;
 }
 
 /**
- * True when `url` is an Idealista search/results page worth observing (a
- * `/venta-…`/`/alquiler-…` listado, an `/areas/…` or `/multi/…` path, or any
- * Idealista URL carrying `shape=`). MUST agree with the extension helper's
- * `isObservableIdealistaUrl` so the server accepts exactly what the extension
- * forwards. Returns false on any parse failure.
+ * The capture portal for which `url` is an OBSERVABLE search/results page, or
+ * null (unsupported host, non-search page, or unparseable). MUST agree with the
+ * extension helper's `observablePortalForUrl`.
  */
-export function isObservableIdealistaUrl(url: string): boolean {
-  const parsed = parseIdealista(url);
-  if (!parsed) return false;
-  const path = parsed.pathname;
-  if (/^\/(venta|alquiler)-[a-z]/.test(path)) return true;
-  if (/^\/areas(\/|$)/.test(path)) return true;
-  if (/^\/multi(\/|$)/.test(path)) return true;
-  try {
-    if (parsed.searchParams.has("shape")) return true;
-  } catch {
-    /* ignore */
-  }
-  return false;
+export function observablePortalForUrl(url: string): string | null {
+  const hit = parsePortalUrl(url);
+  if (!hit) return null;
+  return hit.spec.isSearchPath(hit.parsed) ? hit.spec.portal : null;
+}
+
+/**
+ * True when `url` is an OBSERVABLE search/results page on any supported capture
+ * portal. MUST agree with the extension helper's `isObservableSearchUrl` so the
+ * server accepts exactly what the extension forwards. Returns false on any parse
+ * failure. Renamed from the idealista-only `isObservableIdealistaUrl` in #510.
+ */
+export function isObservableSearchUrl(url: string): boolean {
+  return observablePortalForUrl(url) !== null;
 }
 
 /**
  * Canonical de-dup key for an observed URL — host (lowercased, `www.` stripped)
  * + path (trailing slash stripped) + query params sorted by key (values kept,
- * `shape=` included). Scheme + fragment dropped. MUST agree with the extension
- * helper's `normalizeObservedUrl`. Returns null for a non-observable /
- * unparseable URL.
+ * `shape=` included). Scheme + fragment dropped. Gated on the HOST being a
+ * capture portal (not on the search-page predicate) so it stays byte-compatible
+ * with the pre-#510 idealista rows. MUST agree with the extension helper's
+ * `normalizeObservedUrl`. Returns null for a non-portal-host / unparseable URL.
  */
 export function normalizeObservedUrl(url: string): string | null {
-  const parsed = parseIdealista(url);
-  if (!parsed) return null;
+  const hit = parsePortalUrl(url);
+  if (!hit) return null;
+  const parsed = hit.parsed;
   const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
   const path = parsed.pathname.replace(/\/+$/, "");
   let query = "";
@@ -88,8 +148,8 @@ export function normalizeObservedUrl(url: string): string | null {
  * Falls back to "plana" for anything else observable (e.g. a bare host + shape).
  */
 export function observedUrlType(url: string): ObservedUrlType {
-  const parsed = parseIdealista(url);
-  const path = parsed ? parsed.pathname : "";
+  const hit = parsePortalUrl(url);
+  const path = hit ? hit.parsed.pathname : "";
   if (/^\/multi(\/|$)/.test(path)) return "multi";
   if (/^\/areas(\/|$)/.test(path)) return "areas";
   return "plana";

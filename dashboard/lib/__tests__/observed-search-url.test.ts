@@ -1,35 +1,33 @@
 // @vitest-environment node
 /**
  * Unit tests for the pure observed-search-URL helpers (issue #488, part of
- * #471): the server-side host/observable check + de-dup normalization (which
- * must mirror the extension helper), and the review-only analysis helpers
- * (type badge + `shape=` vertex count).
+ * #471; generalized to all capture portals in #510): the server-side
+ * host/observable check + portal derivation + de-dup normalization (which must
+ * mirror the extension helper — driven by the shared fixture), and the
+ * review-only analysis helpers (type badge + `shape=` vertex count).
  */
 
 import { describe, it, expect } from "vitest";
 import {
-  isObservableIdealistaUrl,
+  isObservableSearchUrl,
+  observablePortalForUrl,
   normalizeObservedUrl,
   observedUrlType,
   shapeVertexCount,
 } from "../observed-search-url";
+import { OBSERVABLE_CASES } from "../../__tests__/fixtures/search-url-observable";
 
 const LISTADO = "https://www.idealista.com/venta-viviendas/estepona-malaga/";
 const AREAS = "https://www.idealista.com/areas/venta-viviendas/?shape=AAA";
 const MULTI = "https://www.idealista.com/multi/venta-viviendas/madrid/";
 
-describe("isObservableIdealistaUrl", () => {
-  it("accepts listado / areas / multi / shape URLs", () => {
-    expect(isObservableIdealistaUrl(LISTADO)).toBe(true);
-    expect(isObservableIdealistaUrl(AREAS)).toBe(true);
-    expect(isObservableIdealistaUrl(MULTI)).toBe(true);
-  });
-
-  it("rejects the home page, detail pages and other portals", () => {
-    expect(isObservableIdealistaUrl("https://www.idealista.com/")).toBe(false);
-    expect(isObservableIdealistaUrl("https://www.idealista.com/inmueble/123/")).toBe(false);
-    expect(isObservableIdealistaUrl("https://example.com/venta-viviendas/")).toBe(false);
-  });
+describe("observablePortalForUrl / isObservableSearchUrl (shared fixture)", () => {
+  for (const c of OBSERVABLE_CASES) {
+    it(`${c.desc} → ${c.portal ?? "null"}`, () => {
+      expect(observablePortalForUrl(c.url)).toBe(c.portal);
+      expect(isObservableSearchUrl(c.url)).toBe(c.portal !== null);
+    });
+  }
 });
 
 describe("normalizeObservedUrl", () => {
@@ -40,7 +38,16 @@ describe("normalizeObservedUrl", () => {
     expect(a).toBe(b);
   });
 
-  it("returns null for non-idealista URLs", () => {
+  it("normalizes aliseda + altamira hosts (host gate, not the search-page gate)", () => {
+    expect(normalizeObservedUrl("https://www.alisedainmobiliaria.com/comprar-viviendas/malaga")).toBe(
+      "alisedainmobiliaria.com/comprar-viviendas/malaga",
+    );
+    expect(normalizeObservedUrl("https://www.altamirainmuebles.com/venta-viviendas/pontevedra/")).toBe(
+      "altamirainmuebles.com/venta-viviendas/pontevedra",
+    );
+  });
+
+  it("returns null for non-portal URLs", () => {
     expect(normalizeObservedUrl("https://example.com/x")).toBeNull();
     expect(normalizeObservedUrl("nope")).toBeNull();
   });
