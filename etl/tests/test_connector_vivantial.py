@@ -532,3 +532,22 @@ class TestRegistration:
         # and discover() reads all of it, so absence really does mean removed
         # (unlike Fotocasa's page-1 slice).
         assert by_name["vivantial"].discovers_full_inventory is True
+
+
+# --- Issue #496: non-tunable params visibility -----------------------------
+
+
+def test_preview_shows_city_slug_matching_resolver():
+    """The ciudad chip equals what discover() would filter the sitemap by, from
+    the same `_resolve_geography` helper (issue #496)."""
+    from etl.connectors.base import ConnectorScope
+    from etl.connectors.vivantial import VivantialConnector, _resolve_geography
+
+    c = VivantialConnector()
+    scope = ConnectorScope(geography="malaga")
+    params = {p.key: p for p in c.search_previews(scope)[0].params}
+    assert params["ciudad"].value == _resolve_geography(scope)
+    assert params["ciudad"].source == "profile"
+    assert params["alcance"].value == "sitemap nacional"
+    p = c.search_previews(scope)[0]
+    assert p.tunable is False and c.override_host_suffix is None

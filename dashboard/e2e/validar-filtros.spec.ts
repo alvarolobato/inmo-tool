@@ -125,6 +125,9 @@ test.beforeAll(async () => {
      VALUES ('pisos', true, 20, false, true, '[]'::jsonb, 'pisos.com', false, $1::jsonb),
             ('habitaclia', true, 20, false, true, '[]'::jsonb, 'habitaclia.com', true, $2::jsonb),
             ('fotocasa', true, 3, false, true, '["rooms"]'::jsonb, 'fotocasa.es', true, $3::jsonb),
+            ('unicaja', true, 20, true, true, '[]'::jsonb, 'unicajainmuebles.com', true, $4::jsonb),
+            ('servihabitat', true, 12, false, true, '[]'::jsonb, 'servihabitat.com', true, $5::jsonb),
+            ('escogecasa', true, 20, false, true, '[]'::jsonb, NULL, false, NULL),
             ('cimenta2', true, 20, true, true, '[]'::jsonb, NULL, false, NULL)
      ON CONFLICT (connector_name) DO UPDATE SET
        registered = true, supports_discovery = true,
@@ -135,6 +138,8 @@ test.beforeAll(async () => {
       JSON.stringify(PISOS_GRAMMAR),
       JSON.stringify(HABITACLIA_GRAMMAR),
       JSON.stringify(FOTOCASA_GRAMMAR),
+      JSON.stringify(UNICAJA_GRAMMAR),
+      JSON.stringify(SERVIHABITAT_GRAMMAR),
     ],
   );
   await seedEtlPreviews();
@@ -186,12 +191,49 @@ const FOTOCASA_GRAMMAR = {
 const FOTOCASA_PREVIEW_URL =
   "https://www.fotocasa.es/es/comprar/viviendas/sevilla-capital/todas-las-zonas/2-habitaciones/l";
 
+// Issue #494: the unicaja query grammar exactly as sync_connector_registry
+// publishes it. `provincia` is consumed; every native filter (precioMax,
+// numDormitorios, …) is inferrable but NOT consumed yet.
+const UNICAJA_GRAMMAR = {
+  build_template:
+    "https://unicajainmuebles.com/listadoPromocion.do?definitionName=busqueda&tipoInmueble=0&tipoOperacion=1&provincia={provincia}&municipio={municipio}&zona=-1&antiguedadAlta=-1&precioMin={precioMin}&precioMax={precioMax}&codRef=&codigoPostal={codigoPostal}&soloFotos=false&numDormitorios={numDormitorios}&superficieMin={superficieMin}&pagina={pagina}&paginando=true&orden=",
+  parse_pattern:
+    "^https?://(?:www\\.)?unicajainmuebles\\.com/listadoPromocion\\.do\\?definitionName=busqueda&tipoInmueble=0&tipoOperacion=1&provincia=(?<provincia>[^&]*)&municipio=(?<municipio>[^&]*)&zona=-1&antiguedadAlta=-1&precioMin=(?<precioMin>[^&]*)&precioMax=(?<precioMax>[^&]*)&codRef=&codigoPostal=(?<codigoPostal>[^&]*)&soloFotos=false&numDormitorios=(?<numDormitorios>[^&]*)&superficieMin=(?<superficieMin>[^&]*)&pagina=(?<pagina>[^&]*)&paginando=true&orden=$",
+  params: {
+    provincia: { label: "Provincia (INE)", source: "profile" },
+    municipio: { label: "Municipio", source: "constant", consumed: false },
+    precioMin: { label: "Precio mín.", source: "constant", consumed: false },
+    precioMax: { label: "Precio máx.", source: "constant", consumed: false },
+    codigoPostal: { label: "Código postal", source: "constant", consumed: false },
+    numDormitorios: { label: "Dormitorios", source: "constant", consumed: false },
+    superficieMin: { label: "Superficie mín.", source: "constant", consumed: false },
+    pagina: { label: "Página", source: "derived", consumed: false },
+  },
+};
+const UNICAJA_PREVIEW_URL =
+  "https://unicajainmuebles.com/listadoPromocion.do?definitionName=busqueda&tipoInmueble=0&tipoOperacion=1&provincia=29&municipio=-1&zona=-1&antiguedadAlta=-1&precioMin=&precioMax=&codRef=&codigoPostal=&soloFotos=false&numDormitorios=-1&superficieMin=&pagina=1&paginando=true&orden=";
+
+// Issue #495: servihabitat — only the province sitemap round-trips; a faceted
+// search URL (any query string) is a robots-forbidden reasoned block.
+const SERVIHABITAT_GRAMMAR = {
+  build_template: "https://www.servihabitat.com/es/sitemap-es-{province}.xml",
+  parse_pattern:
+    "^https?://(?:www\\.)?servihabitat\\.com/es/sitemap-es-(?<province>[^./]+)\\.xml$",
+  params: { province: { label: "Provincia (sitemap)", source: "profile" } },
+  reject_reasons: [
+    { pattern: "^https?://(?:www\\.)?servihabitat\\.com/[^?]*\\?", reason: "robots-faceted-search" },
+  ],
+};
+const SERVIHABITAT_PREVIEW_URL = "https://www.servihabitat.com/es/sitemap-es-sevilla.xml";
+const ESCOGECASA_PREVIEW_URL = "https://www.escogecasa.es/buscador/cargar_resultados.jsp";
+
 /** (Re)seed the pisos + cimenta2 previews for the profile (P4/#491). */
 async function seedEtlPreviews(): Promise<void> {
   await pool.query(
     `INSERT INTO connector_search_preview (profile_id, connector, previews)
      VALUES ($1, 'pisos', $2::jsonb), ($1, 'cimenta2', $3::jsonb), ($1, 'habitaclia', $4::jsonb),
-            ($1, 'fotocasa', $5::jsonb)
+            ($1, 'fotocasa', $5::jsonb), ($1, 'unicaja', $6::jsonb),
+            ($1, 'servihabitat', $7::jsonb), ($1, 'escogecasa', $8::jsonb)
      ON CONFLICT (profile_id, connector) DO UPDATE SET
        previews = EXCLUDED.previews, computed_at = NOW()`,
     [
@@ -275,6 +317,55 @@ async function seedEtlPreviews(): Promise<void> {
               in_url: true,
               notes: "Filtro EXACTO (no mínimo): viaja como '2-habitaciones/'.",
             },
+          ],
+        },
+      ]),
+      JSON.stringify([
+        {
+          // issue #494: unicaja — provincia resolved to a legible INE chip
+          // (consumed), plus native filter fields present-but-not-consumed.
+          label: "Unicaja — provincia INE 29 · Málaga",
+          url: UNICAJA_PREVIEW_URL,
+          kind: "search_page",
+          tunable: true,
+          notes: null,
+          params: [
+            { key: "provincia", label: "Provincia (INE)", value: "INE 29 · Málaga", source: "profile", in_url: true, notes: null, consumed: true },
+            { key: "precioMax", label: "Precio máx.", value: null, source: "constant", in_url: true, notes: "no consumido aún", consumed: false },
+            { key: "numDormitorios", label: "Dormitorios", value: null, source: "constant", in_url: true, notes: "no consumido aún", consumed: false },
+          ],
+        },
+      ]),
+      JSON.stringify([
+        {
+          // issue #495: servihabitat — only the province sitemap round-trips; a
+          // faceted-search URL is a robots reasoned block.
+          label: "Servihabitat — sevilla",
+          url: SERVIHABITAT_PREVIEW_URL,
+          kind: "sitemap",
+          tunable: true,
+          notes:
+            "La búsqueda facetada de este portal está prohibida por robots.txt; solo el sitemap de provincia es válido.",
+          params: [
+            { key: "province", label: "Provincia (sitemap)", value: "sevilla", source: "profile", in_url: true, notes: null, consumed: true },
+          ],
+        },
+      ]),
+      JSON.stringify([
+        {
+          // issue #496: escogecasa — non-tunable (POST bbox); surfaces the real
+          // params (centro, radio, derived bbox, term) with an honest note.
+          label: "Escogecasa (Abanca) — búsqueda por bbox",
+          url: ESCOGECASA_PREVIEW_URL,
+          kind: "api",
+          tunable: false,
+          notes:
+            "Búsqueda por POST de un bounding box a este endpoint; no es una URL GET afinable — el filtrado es por datos.",
+          params: [
+            { key: "tgs", label: "Categoría", value: "viviendas", source: "constant", in_url: false, notes: null, consumed: true },
+            { key: "centro", label: "Centro", value: "37.389100, -5.984500", source: "profile", in_url: false, notes: null, consumed: true },
+            { key: "radio_km", label: "Radio", value: "30 km", source: "constant", in_url: false, notes: null, consumed: true },
+            { key: "bbox", label: "Bounding box", value: "37.118830…37.659370 × -6.324664…-5.644336", source: "derived", in_url: false, notes: "Caja calculada con bbox_from_center; ~100 markers máx. por caja.", consumed: true },
           ],
         },
       ]),
@@ -624,5 +715,80 @@ test("profile switcher on the filtros page navigates to the other profile's filt
   await switcher.selectOption(String(profileId2));
   await expect(page).toHaveURL(new RegExp(`/profiles/${profileId2}/filtros`), { timeout: 30_000 });
   await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
+  await assertNoErrorSurface(page);
+});
+
+test("unicaja row shows the INE province chip and a dimmed non-consumed filter; editing infers it (issue #494)", async ({
+  page,
+}) => {
+  await seedEtlPreviews();
+  await page.goto(`/profiles/${profileId}/filtros`);
+  await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
+  await assertNoErrorSurface(page);
+
+  const uni = page.locator('[data-testid="etl-connector-row"][data-connector="unicaja"]');
+  await expect(uni).toBeVisible();
+  await expect(uni).toHaveAttribute("data-tunable", "true");
+  // Provincia resolved to a legible "INE 29 · Málaga" chip (consumed).
+  const prov = uni.locator('[data-testid="etl-param-chip"][data-param-key="provincia"]');
+  await expect(prov).toContainText("INE 29 · Málaga");
+  await expect(prov).toHaveAttribute("data-consumed", "true");
+  // A native filter present in the URL but NOT consumed yet is dimmed + labelled.
+  const price = uni.locator('[data-testid="etl-param-chip"][data-param-key="precioMax"]');
+  await expect(price).toHaveAttribute("data-consumed", "false");
+  await expect(price).toContainText(/no consumido aún/i);
+
+  // Editing precioMax into the URL infers it, still flagged non-consumed.
+  await uni
+    .getByTestId("etl-url-input")
+    .fill(UNICAJA_PREVIEW_URL.replace("precioMax=", "precioMax=200000"));
+  const inferred = uni.locator('[data-testid="etl-inferred-chip"][data-param-key="precioMax"]');
+  await expect(inferred).toContainText("200000");
+  await expect(inferred).toHaveAttribute("data-consumed", "false");
+  await assertNoErrorSurface(page);
+});
+
+test("servihabitat row rejects a faceted-search URL with the robots reason (issue #495)", async ({
+  page,
+}) => {
+  await seedEtlPreviews();
+  await page.goto(`/profiles/${profileId}/filtros`);
+  await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
+
+  const servi = page.locator('[data-testid="etl-connector-row"][data-connector="servihabitat"]');
+  await expect(servi).toBeVisible();
+  await expect(servi.getByTestId("etl-url")).toHaveText(SERVIHABITAT_PREVIEW_URL);
+  // A faceted-search URL (query string) is a HARD reasoned block: Guardar off.
+  await servi
+    .getByTestId("etl-url-input")
+    .fill("https://www.servihabitat.com/es/venta/viviendas/sevilla?precio=0-200000");
+  const rejected = servi.getByTestId("etl-inference-rejected");
+  await expect(rejected).toHaveAttribute("data-reject-reason", "robots-faceted-search");
+  await expect(rejected).toContainText(/facetada|robots/i);
+  await expect(servi.getByTestId("etl-save")).toBeDisabled();
+  await assertNoErrorSurface(page);
+});
+
+test("non-tunable escogecasa row shows its real params (bbox, centro, radio) and no URL to save (issue #496)", async ({
+  page,
+}) => {
+  await seedEtlPreviews();
+  await page.goto(`/profiles/${profileId}/filtros`);
+  await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
+
+  const esc = page.locator('[data-testid="etl-connector-row"][data-connector="escogecasa"]');
+  await expect(esc).toBeVisible();
+  await expect(esc).toHaveAttribute("data-tunable", "false");
+  // The real params governing recall are shown instead of only a note.
+  await expect(esc.locator('[data-testid="etl-param-chip"][data-param-key="bbox"]')).toContainText(
+    "37.118830",
+  );
+  await expect(esc.locator('[data-testid="etl-param-chip"][data-param-key="centro"]')).toBeVisible();
+  await expect(esc.locator('[data-testid="etl-param-chip"][data-param-key="radio_km"]')).toContainText(
+    "30 km",
+  );
+  // Honestly non-tunable: no editable URL, read-only note present.
+  await expect(esc.getByTestId("etl-readonly")).toBeVisible();
+  await expect(esc.getByTestId("etl-url-input")).toHaveCount(0);
   await assertNoErrorSurface(page);
 });

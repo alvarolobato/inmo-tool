@@ -476,3 +476,37 @@ class TestRegistration:
         register_all()
         matches = [c for c in CONNECTORS if c.name == "buildingcenter"]
         assert len(matches) == 1
+
+
+# --- Issue #496: non-tunable params visibility -----------------------------
+
+
+def test_preview_shows_center_and_default_radius():
+    """A center scope with no radius shows the connector's default radius as a
+    constant-sourced chip; the row stays non-tunable (issue #496)."""
+    from etl.connectors.base import ConnectorScope
+    from etl.connectors.buildingcenter import (
+        _DEFAULT_RADIUS_KM,
+        BuildingCenterConnector,
+    )
+
+    c = BuildingCenterConnector()
+    scope = ConnectorScope(center=(37.3891, -5.9845), radius_km=None)
+    p = c.search_previews(scope)[0]
+    params = {sp.key: sp for sp in p.params}
+    assert params["centro"].source == "profile"
+    assert params["radio_km"].value == f"{_DEFAULT_RADIUS_KM:g} km"
+    assert params["radio_km"].source == "constant"
+    assert params["categoria"].value == "Viviendas"
+    assert p.tunable is False and c.override_host_suffix is None
+
+
+def test_preview_profile_radius_is_sourced_from_profile():
+    from etl.connectors.base import ConnectorScope
+    from etl.connectors.buildingcenter import BuildingCenterConnector
+
+    c = BuildingCenterConnector()
+    scope = ConnectorScope(center=(37.3891, -5.9845), radius_km=25.0)
+    params = {sp.key: sp for sp in c.search_previews(scope)[0].params}
+    assert params["radio_km"].value == "25 km"
+    assert params["radio_km"].source == "profile"

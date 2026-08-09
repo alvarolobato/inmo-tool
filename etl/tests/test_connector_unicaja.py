@@ -462,3 +462,99 @@ class TestSchemaRoundTrip:
         # Postal code came from the search card, not the detail page — prove
         # it survives the merge all the way into the property row.
         assert row[2] == "29327"
+
+
+# --- Issue #494: search-URL grammar + params -------------------------------
+
+
+def test_grammar_validates_and_round_trips():
+    from etl.connectors.base import validate_grammar
+    from etl.connectors.unicaja import _search_url
+    from etl.tests.grammar_contract import _unicaja_spec, assert_grammar_roundtrip
+
+    connector, cases, foreign, parse_only = _unicaja_spec()
+    validate_grammar(connector)
+    assert_grammar_roundtrip(
+        connector.search_url_grammar,
+        cases,
+        foreign,
+        build_real=lambda p: _search_url(p["provincia"], int(p["pagina"])),
+        parse_only=parse_only,
+    )
+
+
+def test_search_url_delegates_to_grammar_and_is_parse_qs_order_stable():
+    """`_search_url()` == grammar.build (anti-drift), and its query decodes via
+    parse_qs to the exact default field set regardless of how a reader splits
+    it (issue #494)."""
+    from urllib.parse import parse_qs, urlsplit
+
+    from etl.connectors.unicaja import _search_url
+
+    url = _search_url("29", 1)
+    assert url == UnicajaConnector().search_url_grammar.build(
+        {
+            "provincia": "29",
+            "municipio": "-1",
+            "precioMin": "",
+            "precioMax": "",
+            "codigoPostal": "",
+            "numDormitorios": "-1",
+            "superficieMin": "",
+            "pagina": "1",
+        }
+    )
+    q = parse_qs(urlsplit(url).query, keep_blank_values=True)
+    assert q["provincia"] == ["29"]
+    assert q["tipoInmueble"] == ["0"] and q["tipoOperacion"] == ["1"]
+    assert q["precioMax"] == [""] and q["numDormitorios"] == ["-1"]
+    assert q["pagina"] == ["1"]
+
+
+def test_edited_native_filters_are_inferred_but_not_consumed():
+    """Editing precioMax / numDormitorios into the URL is inferred by the
+    grammar; the params model marks those fields consumed=False (issue #494)."""
+    from etl.connectors.unicaja import _search_url
+
+    g = UnicajaConnector().search_url_grammar
+    edited = (
+        _search_url("29", 1)
+        .replace("precioMax=", "precioMax=200000")
+        .replace("numDormitorios=-1", "numDormitorios=3")
+    )
+    parsed = g.parse(edited)
+    assert parsed is not None
+    assert parsed["precioMax"] == "200000" and parsed["numDormitorios"] == "3"
+    # Every native filter field is flagged non-consumed in the grammar metadata.
+    for key in ("precioMax", "precioMin", "numDormitorios", "superficieMin"):
+        assert g.params[key]["consumed"] is False
+
+
+def test_preview_resolves_ine_code_and_flags_native_filters():
+    from etl.connectors.base import ConnectorScope
+
+    c = UnicajaConnector()
+    previews = c.search_previews(ConnectorScope(geography="Malaga"))
+    assert len(previews) == 1
+    params = {p.key: p for p in previews[0].params}
+    # INE 29 · Málaga (legible reverse lookup).
+    assert params["provincia"].value == "INE 29 · Málaga"
+    assert params["provincia"].consumed is True
+    # Native filters present but not consumed yet.
+    for key in (
+        "precioMin",
+        "precioMax",
+        "numDormitorios",
+        "superficieMin",
+        "municipio",
+    ):
+        assert params[key].consumed is False
+
+
+def test_ine_code_to_province_reverse_lookup():
+    from etl.connectors.unicaja_mapping import ine_code_to_province
+
+    assert ine_code_to_province("29") == "Málaga"
+    assert ine_code_to_province("28") == "Madrid"
+    assert ine_code_to_province("999") is None
+    assert ine_code_to_province(None) is None

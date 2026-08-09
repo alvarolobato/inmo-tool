@@ -533,3 +533,46 @@ class TestSchemaRoundTrip:
         assert row is not None
         assert row[0] == Decimal("308000.00")
         assert row[1] == "sale"
+
+
+# --- Issue #494: search-URL grammar + params -------------------------------
+
+
+def test_grammar_validates_and_round_trips():
+    """diglo's grammar passes validate_grammar and round-trips its cases;
+    foreign / detail / trailing-newline URLs stay verbatim (no parse)."""
+    from etl.connectors.base import ConnectorScope, validate_grammar
+    from etl.tests.grammar_contract import _diglo_spec, assert_grammar_roundtrip
+
+    connector, cases, foreign = _diglo_spec()
+    validate_grammar(connector)
+    assert_grammar_roundtrip(
+        connector.search_url_grammar,
+        cases,
+        foreign,
+        build_real=lambda p: connector._search_url(p["province"], int(p["page"])),
+    )
+    # _search_url is exactly grammar.build (anti-drift).
+    c = DigloConnector()
+    assert c._search_url("madrid", 0) == c.search_url_grammar.build(
+        {"province": "madrid", "page": "0"}
+    )
+    # A province-only URL (no ?page=) still infers the province — the page is a
+    # mechanical entry point, not a filter (issue #494).
+    parsed = c.search_url_grammar.parse("https://digloservicer.com/venta-pisos/sevilla")
+    assert parsed is not None and parsed["province"] == "sevilla"
+    del ConnectorScope  # (imported for symmetry with sibling tests)
+
+
+def test_preview_params_province_consumed_page_not():
+    """The diglo row shows province (profile, consumed) and page (derived, NOT
+    consumed — the sweep re-paginates)."""
+    from etl.connectors.base import ConnectorScope
+
+    c = DigloConnector()
+    previews = c.search_previews(ConnectorScope(geography="Sevilla"))
+    assert len(previews) == 1
+    params = {p.key: p for p in previews[0].params}
+    assert params["province"].source == "profile" and params["province"].consumed
+    assert params["type"].value == "pisos" and params["type"].source == "constant"
+    assert params["page"].consumed is False

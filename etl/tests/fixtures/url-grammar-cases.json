@@ -442,6 +442,326 @@
           }
         ]
       }
+    },
+    {
+      "cases": [
+        {
+          "expected": {
+            "page": "0",
+            "province": "madrid"
+          },
+          "reject": null,
+          "url": "https://digloservicer.com/venta-pisos/madrid?page=0"
+        },
+        {
+          "expected": {
+            "page": "3",
+            "province": "barcelona"
+          },
+          "reject": null,
+          "url": "https://digloservicer.com/venta-pisos/barcelona?page=3"
+        },
+        {
+          "expected": {
+            "page": "0",
+            "province": "sevilla"
+          },
+          "reject": null,
+          "url": "https://digloservicer.com/venta-pisos/sevilla?page=0"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://www.pisos.com/venta/pisos-madrid/"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://www.idealista.com/venta-viviendas/madrid/"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://digloservicer.com/venta-pisos/madrid/madrid/efe0000200055"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://digloservicer.com/venta-casas/madrid?page=0"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://digloservicer.com/venta-pisos/madrid?page=0\n"
+        }
+      ],
+      "connector": "diglo",
+      "grammar": {
+        "build_template": "https://digloservicer.com/venta-pisos/{province}?page={page}",
+        "params": {
+          "page": {
+            "consumed": false,
+            "label": "Página",
+            "source": "derived"
+          },
+          "province": {
+            "label": "Provincia",
+            "source": "profile"
+          }
+        },
+        "parse_pattern": "^https?://(?:www\\.)?digloservicer\\.com/venta-pisos/(?<province>[^/?#]+)(?:\\?page=(?<page>[0-9]+))?$",
+        "reject_reasons": []
+      }
+    },
+    {
+      "cases": [
+        {
+          "expected": {
+            "codigoPostal": "",
+            "municipio": "-1",
+            "numDormitorios": "-1",
+            "pagina": "1",
+            "precioMax": "",
+            "precioMin": "",
+            "provincia": "29",
+            "superficieMin": ""
+          },
+          "reject": null,
+          "url": "https://unicajainmuebles.com/listadoPromocion.do?definitionName=busqueda&tipoInmueble=0&tipoOperacion=1&provincia=29&municipio=-1&zona=-1&antiguedadAlta=-1&precioMin=&precioMax=&codRef=&codigoPostal=&soloFotos=false&numDormitorios=-1&superficieMin=&pagina=1&paginando=true&orden="
+        },
+        {
+          "expected": {
+            "codigoPostal": "",
+            "municipio": "-1",
+            "numDormitorios": "-1",
+            "pagina": "2",
+            "precioMax": "",
+            "precioMin": "",
+            "provincia": "41",
+            "superficieMin": ""
+          },
+          "reject": null,
+          "url": "https://unicajainmuebles.com/listadoPromocion.do?definitionName=busqueda&tipoInmueble=0&tipoOperacion=1&provincia=41&municipio=-1&zona=-1&antiguedadAlta=-1&precioMin=&precioMax=&codRef=&codigoPostal=&soloFotos=false&numDormitorios=-1&superficieMin=&pagina=2&paginando=true&orden="
+        },
+        {
+          "expected": {
+            "codigoPostal": "29001",
+            "municipio": "29067",
+            "numDormitorios": "3",
+            "pagina": "1",
+            "precioMax": "200000",
+            "precioMin": "50000",
+            "provincia": "29",
+            "superficieMin": "80"
+          },
+          "reject": null,
+          "url": "https://unicajainmuebles.com/listadoPromocion.do?definitionName=busqueda&tipoInmueble=0&tipoOperacion=1&provincia=29&municipio=29067&zona=-1&antiguedadAlta=-1&precioMin=50000&precioMax=200000&codRef=&codigoPostal=29001&soloFotos=false&numDormitorios=3&superficieMin=80&pagina=1&paginando=true&orden="
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://www.pisos.com/venta/pisos-madrid/"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital/todas-las-zonas/l"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://unicajainmuebles.com/fichainmueble.do?referencia=0001234854"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://unicajainmuebles.com/listadoPromocion.do?provincia=29&definitionName=busqueda"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://unicajainmuebles.com/listadoPromocion.do?definitionName=busqueda&tipoInmueble=0&tipoOperacion=1&provincia=29&municipio=-1&zona=-1&antiguedadAlta=-1&precioMin=&precioMax=&codRef=&codigoPostal=&soloFotos=false&numDormitorios=-1&superficieMin=&pagina=1&paginando=true&orden=\n"
+        }
+      ],
+      "connector": "unicaja",
+      "grammar": {
+        "build_template": "https://unicajainmuebles.com/listadoPromocion.do?definitionName=busqueda&tipoInmueble=0&tipoOperacion=1&provincia={provincia}&municipio={municipio}&zona=-1&antiguedadAlta=-1&precioMin={precioMin}&precioMax={precioMax}&codRef=&codigoPostal={codigoPostal}&soloFotos=false&numDormitorios={numDormitorios}&superficieMin={superficieMin}&pagina={pagina}&paginando=true&orden=",
+        "params": {
+          "codigoPostal": {
+            "consumed": false,
+            "label": "Código postal",
+            "source": "constant"
+          },
+          "municipio": {
+            "consumed": false,
+            "label": "Municipio",
+            "source": "constant"
+          },
+          "numDormitorios": {
+            "consumed": false,
+            "label": "Dormitorios",
+            "source": "constant"
+          },
+          "pagina": {
+            "consumed": false,
+            "label": "Página",
+            "source": "derived"
+          },
+          "precioMax": {
+            "consumed": false,
+            "label": "Precio máx.",
+            "source": "constant"
+          },
+          "precioMin": {
+            "consumed": false,
+            "label": "Precio mín.",
+            "source": "constant"
+          },
+          "provincia": {
+            "label": "Provincia (INE)",
+            "source": "profile"
+          },
+          "superficieMin": {
+            "consumed": false,
+            "label": "Superficie mín.",
+            "source": "constant"
+          }
+        },
+        "parse_pattern": "^https?://(?:www\\.)?unicajainmuebles\\.com/listadoPromocion\\.do\\?definitionName=busqueda&tipoInmueble=0&tipoOperacion=1&provincia=(?<provincia>[^&]*)&municipio=(?<municipio>[^&]*)&zona=-1&antiguedadAlta=-1&precioMin=(?<precioMin>[^&]*)&precioMax=(?<precioMax>[^&]*)&codRef=&codigoPostal=(?<codigoPostal>[^&]*)&soloFotos=false&numDormitorios=(?<numDormitorios>[^&]*)&superficieMin=(?<superficieMin>[^&]*)&pagina=(?<pagina>[^&]*)&paginando=true&orden=$",
+        "reject_reasons": []
+      }
+    },
+    {
+      "cases": [
+        {
+          "expected": {
+            "municipio_segment": "",
+            "provincia": "madrid"
+          },
+          "reject": null,
+          "url": "https://www.solvia.es/es/comprar/viviendas/madrid"
+        },
+        {
+          "expected": {
+            "municipio_segment": "/mijas",
+            "provincia": "malaga"
+          },
+          "reject": null,
+          "url": "https://www.solvia.es/es/comprar/viviendas/malaga/mijas"
+        },
+        {
+          "expected": {
+            "municipio_segment": "",
+            "provincia": "sevilla"
+          },
+          "reject": null,
+          "url": "https://www.solvia.es/es/comprar/viviendas/sevilla"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://www.pisos.com/venta/pisos-madrid/"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://www.idealista.com/venta-viviendas/madrid/"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://www.solvia.es/es/alquiler/viviendas/malaga"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://www.solvia.es/es/comprar/viviendas/malaga/mijas/extra"
+        }
+      ],
+      "connector": "solvia",
+      "grammar": {
+        "build_template": "https://www.solvia.es/es/comprar/viviendas/{provincia}{municipio_segment}",
+        "params": {
+          "municipio_segment": {
+            "consumed": false,
+            "label": "Municipio",
+            "source": "derived"
+          },
+          "provincia": {
+            "label": "Provincia",
+            "source": "profile"
+          }
+        },
+        "parse_pattern": "^https?://(?:www\\.)?solvia\\.es/es/comprar/viviendas/(?<provincia>[^/]+)(?<municipio_segment>(?:/[^/]+)?)$",
+        "reject_reasons": []
+      }
+    },
+    {
+      "cases": [
+        {
+          "expected": {
+            "province": "madrid"
+          },
+          "reject": null,
+          "url": "https://www.servihabitat.com/es/sitemap-es-madrid.xml"
+        },
+        {
+          "expected": {
+            "province": "sevilla"
+          },
+          "reject": null,
+          "url": "https://www.servihabitat.com/es/sitemap-es-sevilla.xml"
+        },
+        {
+          "expected": {
+            "province": "malaga"
+          },
+          "reject": null,
+          "url": "https://www.servihabitat.com/es/sitemap-es-malaga.xml"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://www.pisos.com/venta/pisos-madrid/"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://www.servihabitat.com/es/venta/viviendas/madrid/piso-123"
+        },
+        {
+          "expected": null,
+          "reject": null,
+          "url": "https://www.servihabitat.com/es/sitemap-es-madrid.xml\n"
+        },
+        {
+          "expected": null,
+          "reject": "robots-faceted-search",
+          "url": "https://www.servihabitat.com/es/venta/viviendas/madrid?provincia=madrid"
+        },
+        {
+          "expected": null,
+          "reject": "robots-faceted-search",
+          "url": "https://www.servihabitat.com/es/buscar?operacion=venta&precio=0-200000"
+        }
+      ],
+      "connector": "servihabitat",
+      "grammar": {
+        "build_template": "https://www.servihabitat.com/es/sitemap-es-{province}.xml",
+        "params": {
+          "province": {
+            "label": "Provincia (sitemap)",
+            "source": "profile"
+          }
+        },
+        "parse_pattern": "^https?://(?:www\\.)?servihabitat\\.com/es/sitemap-es-(?<province>[^./]+)\\.xml$",
+        "reject_reasons": [
+          {
+            "pattern": "^https?://(?:www\\.)?servihabitat\\.com/[^?]*\\?",
+            "reason": "robots-faceted-search"
+          }
+        ]
+      }
     }
   ]
 }

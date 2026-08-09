@@ -410,3 +410,45 @@ class TestDatabaseRoundTrip:
         with pg_conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM listing WHERE source='servihabitat'")
             assert cur.fetchone()[0] == 1
+
+
+# --- Issue #495: sitemap grammar + honest robots limit ----------------------
+
+
+def test_grammar_validates_round_trips_and_rejects_faceted_search():
+    from etl.connectors import servihabitat as sh
+    from etl.connectors.base import validate_grammar
+    from etl.connectors.servihabitat import ServihabitatConnector
+    from etl.tests.grammar_contract import (
+        _servihabitat_spec,
+        assert_grammar_roundtrip,
+    )
+
+    connector, cases, foreign, rejects = _servihabitat_spec()
+    validate_grammar(connector)
+    assert_grammar_roundtrip(
+        connector.search_url_grammar,
+        cases,
+        foreign,
+        build_real=lambda p: sh._sitemap_url(p["province"]),
+        rejects=rejects,
+    )
+    g = ServihabitatConnector().search_url_grammar
+    # Only the sitemap round-trips; a faceted-search URL is a reasoned block.
+    assert g.parse(sh._sitemap_url("madrid")) == {"province": "madrid"}
+    assert (
+        g.rejection("https://www.servihabitat.com/es/venta/viviendas/madrid?x=1")
+        == "robots-faceted-search"
+    )
+
+
+def test_preview_shows_province_param_and_honest_note():
+    from etl.connectors.base import ConnectorScope
+    from etl.connectors.servihabitat import ServihabitatConnector
+
+    c = ServihabitatConnector()
+    previews = c.search_previews(ConnectorScope(geography="sevilla"))
+    assert len(previews) == 1
+    params = {p.key: p for p in previews[0].params}
+    assert params["province"].source == "profile"
+    assert "robots" in (previews[0].notes or "").lower()

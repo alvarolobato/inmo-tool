@@ -886,3 +886,45 @@ class TestDatabaseRoundTrip:
         with pg_conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM listing WHERE source = 'solvia'")
             assert cur.fetchone()[0] == 1
+
+
+# --- Issue #495: search-URL grammar + human search-page preview -------------
+
+
+def test_grammar_validates_and_round_trips():
+    from etl.connectors.base import validate_grammar
+    from etl.connectors.solvia import SolviaConnector
+    from etl.tests.grammar_contract import _solvia_spec, assert_grammar_roundtrip
+
+    connector, cases, foreign = _solvia_spec()
+    validate_grammar(connector)
+    assert_grammar_roundtrip(
+        connector.search_url_grammar,
+        cases,
+        foreign,
+        build_real=lambda p: connector._search_url(
+            p["provincia"], p["municipio_segment"]
+        ),
+    )
+    # Editing to a specific municipio infers both provincia and municipio.
+    g = SolviaConnector().search_url_grammar
+    parsed = g.parse("https://www.solvia.es/es/comprar/viviendas/malaga/mijas")
+    assert parsed == {"provincia": "malaga", "municipio_segment": "/mijas"}
+
+
+def test_preview_is_human_search_page_with_proposed_municipio():
+    from etl.connectors.base import ConnectorScope
+    from etl.connectors.solvia import SolviaConnector
+
+    c = SolviaConnector()
+    previews = c.search_previews(ConnectorScope(geography="malaga"))
+    assert len(previews) == 1
+    p = previews[0]
+    # A human, openable search page — not the sitemap XML.
+    assert p.kind == "search_page"
+    assert p.url == c._search_url("malaga", "")
+    assert ".xml" not in (p.url or "")
+    params = {sp.key: sp for sp in p.params}
+    assert params["provincia"].consumed is True
+    # municipio is a PROPOSED restriction, not applied today.
+    assert params["municipio_segment"].consumed is False
