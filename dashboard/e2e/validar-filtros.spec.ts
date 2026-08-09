@@ -785,10 +785,18 @@ test("ETL section renders with no seeded previews — pending, no error surface 
   await expect(page.getByTestId("validar-filtros-etl-section")).toBeVisible();
   await assertNoErrorSurface(page);
 
-  // pisos still appears (it's registered), now pending its next ETL computation.
+  // pisos still appears (it's registered). Issue #513: with no ETL preview row
+  // it is NO LONGER pending — its URL is derived on demand from the grammar +
+  // the profile's province and labelled unverified (never URL-less).
   const pisos = page.locator('[data-testid="etl-connector-row"][data-connector="pisos"]');
   await expect(pisos).toBeVisible();
-  await expect(pisos.getByTestId("etl-pending")).toBeVisible();
+  await expect(pisos.getByTestId("etl-pending")).toHaveCount(0);
+  await expect(pisos.getByTestId("etl-source-badge")).toHaveText(
+    "derivada (sin verificar por ETL)",
+  );
+  await expect(pisos.getByTestId("etl-url")).toHaveText(
+    "https://www.pisos.com/venta/pisos-sevilla/",
+  );
 
   // Restore for any later ordering.
   await seedEtlPreviews();

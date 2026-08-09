@@ -66,18 +66,24 @@ test.beforeAll(async () => {
   // CONNECTOR is a tunable HTTP connector: it publishes a grammar, advertises a
   // pinnable host, and (issue #513) its discover() consumes the pin — so it must
   // show the grammar / preview / pin capability badges. CAPTURE_ONLY has none of
-  // those (no discovery) → "captura extensión".
+  // those (no discovery) → "captura extensión". The grammar is passed as a
+  // JSON.stringify'd parameter (never inlined — JSON's `\\.` can't survive a raw
+  // SQL string literal).
+  const CONNECTOR_GRAMMAR = {
+    build_template: "https://www.fotocasa.es/x-{geography}/",
+    parse_pattern: "^https?://(?:www\\.)?fotocasa\\.es/x-(?<geography>[^/]+)/$",
+    params: { geography: { label: "Municipio", source: "profile" } },
+  };
   await pool.query(
     `INSERT INTO connector_registry
        (connector_name, registered, rate_limit_per_minute, discovers_full_inventory,
         supports_discovery, supported_filters,
         override_host_suffix, supports_search_override, search_url_grammar)
      VALUES ($1, true, 20, false, true, '["rooms"]'::jsonb,
-             'fotocasa.es', true,
-             '{"build_template":"https://www.fotocasa.es/x-{geography}/","parse_pattern":"^https?://(?:www\\.)?fotocasa\\.es/x-(?<geography>[^/]+)/$","params":{"geography":{"label":"Municipio","source":"profile"}}}'::jsonb),
+             'fotocasa.es', true, $3::jsonb),
             ($2, true, 20, false, false, '[]'::jsonb,
              NULL, false, NULL)`,
-    [CONNECTOR, CAPTURE_ONLY],
+    [CONNECTOR, CAPTURE_ONLY, JSON.stringify(CONNECTOR_GRAMMAR)],
   );
 
   // Freshness cadence state (issue #295, D-050): CONNECTOR is fresh (last cycle
