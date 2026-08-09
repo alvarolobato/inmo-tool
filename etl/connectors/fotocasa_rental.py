@@ -251,6 +251,13 @@ class FotocasaRentalConnector(FotocasaConnector):
     # its build() so the two can never drift.
     search_url_grammar = _RENTAL_SEARCH_URL_GRAMMAR
 
+    # Issue #513: state explicitly (rather than inheriting the parent's value)
+    # that this connector's OWN discover() consumes `scope.override_url` — the
+    # same per-connector discipline as search_url_grammar above. The rental
+    # discover() below wires it; advertising it without wiring would let the
+    # orchestrator hand it an override scope its discover() silently ignored.
+    supports_search_override = True
+
     def _rental_search_url(self, geography: str) -> str:
         """The single unfiltered rental search page discover() enters from —
         distinct signature from the sale connector's `_search_url()`. Delegates
@@ -322,29 +329,36 @@ class FotocasaRentalConnector(FotocasaConnector):
         # _last_discovery_prices reset).
         self._search_records: dict[str, dict] = {}
 
-        geography = _resolve_geography(scope)
-        if geography is None:
-            # Reachable only if discover() is called directly, bypassing
-            # scope_key()'s gate — normally scope_key() already returned
-            # None and the orchestrator skipped this scope.
-            raise ConnectorError(
-                "fotocasa_rental discover: scope has neither a resolvable "
-                "center nor an explicit geography string, or resolves to a "
-                "municipality this connector's slug table doesn't cover — "
-                "nothing to discover, not defaulting to a hardcoded city "
-                "(see issue #71)"
-            )
-        if geography in _ROBOTS_DISALLOWED_BARE_GEOGRAPHIES:
-            # Same robots.txt guard as the parent: the bare "/madrid/" path
-            # segment is disallowed, but the hyphenated "madrid-capital"
-            # slug is not.
-            raise ConnectorError(
-                f"fotocasa_rental discover: geography={geography!r} is "
-                f"disallowed by robots.txt (bare city-name path) — use a "
-                f"hyphenated slug like '{geography}-capital' instead"
-            )
-
-        url = self._rental_search_url(geography)
+        # Issue #513: an owner-pinned URL is this profile's recall source — hit
+        # it verbatim as the entry page (geography left None: it plays no part).
+        # Without an override the code path is byte-identical to before.
+        override_url = scope.override_url if self.supports_search_override else None
+        if override_url:
+            geography = None
+            url = override_url
+        else:
+            geography = _resolve_geography(scope)
+            if geography is None:
+                # Reachable only if discover() is called directly, bypassing
+                # scope_key()'s gate — normally scope_key() already returned
+                # None and the orchestrator skipped this scope.
+                raise ConnectorError(
+                    "fotocasa_rental discover: scope has neither a resolvable "
+                    "center nor an explicit geography string, or resolves to a "
+                    "municipality this connector's slug table doesn't cover — "
+                    "nothing to discover, not defaulting to a hardcoded city "
+                    "(see issue #71)"
+                )
+            if geography in _ROBOTS_DISALLOWED_BARE_GEOGRAPHIES:
+                # Same robots.txt guard as the parent: the bare "/madrid/" path
+                # segment is disallowed, but the hyphenated "madrid-capital"
+                # slug is not.
+                raise ConnectorError(
+                    f"fotocasa_rental discover: geography={geography!r} is "
+                    f"disallowed by robots.txt (bare city-name path) — use a "
+                    f"hyphenated slug like '{geography}-capital' instead"
+                )
+            url = self._rental_search_url(geography)
         throttle()
         try:
             response = requests.get(

@@ -109,15 +109,13 @@ def test_milanuncios_rental_does_not_inherit_the_sale_connectors_skip_window():
     )
 
 
-def test_milanuncios_rental_does_not_inherit_search_override_consumption():
-    """Issue #478 P5 (D-101): the sale connector turned
-    supports_search_override ON and wired its discover() to consume
-    scope.override_url. The rental subclass's discover() was NOT wired for
-    it, so it must declare supports_search_override = False in its own right —
-    otherwise it would silently inherit True and the orchestrator would hand
-    it override scopes its discover() ignores. Same per-connector-behaviour
-    rule (declare, never inherit) as discovers_full_inventory above."""
-    assert MilanunciosRentalConnector.supports_search_override is False
+def test_milanuncios_rental_declares_search_override_consumption():
+    """Issue #513: the rental connector's own discover() is now wired to
+    consume scope.override_url (same verbatim-entry-page pattern as the sale
+    connector), so it must declare supports_search_override = True in its own
+    right — declared explicitly, never silently inherited (same
+    per-connector-behaviour rule as discovers_full_inventory above)."""
+    assert MilanunciosRentalConnector.supports_search_override is True
     assert "supports_search_override" in vars(MilanunciosRentalConnector), (
         "supports_search_override must be declared explicitly on "
         "MilanunciosRentalConnector, not inherited from MilanunciosConnector"
@@ -192,6 +190,42 @@ class TestDiscover:
         connector = MilanunciosRentalConnector()
         with pytest.raises(ConnectorError, match="nothing to discover"):
             connector.discover(ConnectorScope(), throttle=lambda: None)
+
+    def test_discover_uses_pinned_override_url_as_entry_page(self):
+        """Issue #513: with a scope carrying override_url, discover() hits the
+        pinned URL verbatim — the derived alquiler-de-pisos-en-… URL is
+        bypassed entirely (the same tier-0 pattern as the sale connector)."""
+        pinned = (
+            "https://www.milanuncios.com/alquiler-de-pisos-en-madrid-madrid/?desde=800"
+        )
+        html = _read_fixture("milanuncios_rental_sample_search.html")
+        with patch(
+            "etl.connectors.milanuncios_rental.requests.get",
+            return_value=_mock_response(html),
+        ) as mock_get:
+            ids = MilanunciosRentalConnector().discover(
+                ConnectorScope(
+                    center=(40.4168, -3.7038), radius_km=10, override_url=pinned
+                ),
+                throttle=lambda: None,
+            )
+        assert mock_get.call_args.args[0] == pinned
+        assert sorted(ids) == ["511445103", "549058037", "560555908"]
+
+    def test_discover_without_override_uses_the_derived_url(self):
+        """Regression guard: no override → exactly the derived rental URL."""
+        html = _read_fixture("milanuncios_rental_sample_search.html")
+        with patch(
+            "etl.connectors.milanuncios_rental.requests.get",
+            return_value=_mock_response(html),
+        ) as mock_get:
+            MilanunciosRentalConnector().discover(
+                ConnectorScope(geography="madrid"), throttle=lambda: None
+            )
+        assert (
+            mock_get.call_args.args[0]
+            == "https://www.milanuncios.com/alquiler-de-pisos-en-madrid-madrid/"
+        )
 
 
 class TestFetchDetailAndNormalizeInherited:

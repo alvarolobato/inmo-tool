@@ -63,13 +63,27 @@ test.beforeAll(async () => {
 
   // Stand in for what etl/main.py publishes at startup via
   // orchestrator.sync_connector_registry().
+  // CONNECTOR is a tunable HTTP connector: it publishes a grammar, advertises a
+  // pinnable host, and (issue #513) its discover() consumes the pin — so it must
+  // show the grammar / preview / pin capability badges. CAPTURE_ONLY has none of
+  // those (no discovery) → "captura extensión". The grammar is passed as a
+  // JSON.stringify'd parameter (never inlined — JSON's `\\.` can't survive a raw
+  // SQL string literal).
+  const CONNECTOR_GRAMMAR = {
+    build_template: "https://www.fotocasa.es/x-{geography}/",
+    parse_pattern: "^https?://(?:www\\.)?fotocasa\\.es/x-(?<geography>[^/]+)/$",
+    params: { geography: { label: "Municipio", source: "profile" } },
+  };
   await pool.query(
     `INSERT INTO connector_registry
        (connector_name, registered, rate_limit_per_minute, discovers_full_inventory,
-        supports_discovery, supported_filters)
-     VALUES ($1, true, 20, false, true, '["rooms"]'::jsonb),
-            ($2, true, 20, false, false, '[]'::jsonb)`,
-    [CONNECTOR, CAPTURE_ONLY],
+        supports_discovery, supported_filters,
+        override_host_suffix, supports_search_override, search_url_grammar)
+     VALUES ($1, true, 20, false, true, '["rooms"]'::jsonb,
+             'fotocasa.es', true, $3::jsonb),
+            ($2, true, 20, false, false, '[]'::jsonb,
+             NULL, false, NULL)`,
+    [CONNECTOR, CAPTURE_ONLY, JSON.stringify(CONNECTOR_GRAMMAR)],
   );
 
   // Freshness cadence state (issue #295, D-050): CONNECTOR is fresh (last cycle
@@ -137,6 +151,32 @@ test("lists registered connectors with no error surface", async ({ page }) => {
   // A connector with no config row shows as enabled-by-default, which is
   // exactly what the ETL does with a missing row (issue #71's default).
   await expect(page.getByTestId(`status-${CONNECTOR}`)).toContainText("activo");
+});
+
+test("capability badges distinguish a tunable connector from a capture-only one (issue #513)", async ({
+  page,
+}) => {
+  await page.goto("/etl/connectors");
+  await expect(page.getByTestId("connectors-page")).toBeVisible();
+
+  // The tunable HTTP connector advertises grammar + preview + pin, and is NOT
+  // "filtrado por datos".
+  const tunableCaps = page.getByTestId(`capabilities-${CONNECTOR}`);
+  await expect(tunableCaps).toBeVisible();
+  await expect(tunableCaps.locator('[data-capability="grammar"]')).toBeVisible();
+  await expect(tunableCaps.locator('[data-capability="preview"]')).toBeVisible();
+  await expect(tunableCaps.locator('[data-capability="pin"]')).toBeVisible();
+  await expect(tunableCaps.locator('[data-capability="data-filter"]')).toHaveCount(0);
+
+  // The capture-only connector advertises "captura extensión" and no preview.
+  const captureCaps = page.getByTestId(`capabilities-${CAPTURE_ONLY}`);
+  await expect(captureCaps.locator('[data-capability="harvest"]')).toBeVisible();
+  await expect(captureCaps.locator('[data-capability="preview"]')).toHaveCount(0);
+
+  // No error surface — the D-041 bar.
+  await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
+  await expect(page.getByText("Error al cargar")).toHaveCount(0);
+  await expect(page.getByText("HTTP 500")).toHaveCount(0);
 });
 
 test("rows are compact by default and expand on click to reveal detail (issue #264)", async ({

@@ -504,6 +504,12 @@ class SolviaConnector(Connector):
     # source for a profile (discover() wiring is Phase 5).
     override_host_suffix = "solvia.es"
 
+    # Issue #513: discover() now CONSUMES `scope.override_url` — it fetches the
+    # pinned municipio/provincia search page verbatim as the single entry point,
+    # skipping the sitemap-driven per-municipio sweep, so a pin actually changes
+    # what the next ETL run fetches instead of being silently ignored.
+    supports_search_override = True
+
     # Issue #495: published to connector_registry.search_url_grammar so the
     # dashboard infers provincia (+ proposed municipio) from an owner-edited URL
     # with the same grammar. `_search_url()` delegates to `build()` (anti-drift).
@@ -595,6 +601,22 @@ class SolviaConnector(Connector):
         # _resolve_geography can raise UnresolvableGeographyError, left to
         # propagate uncaught (issue #169/#177) — see fotocasa.py's
         # discover() for the full reasoning.
+        # Issue #513: an owner-pinned URL is this profile's recall source — hit
+        # it verbatim as the single entry page, skipping the sitemap-driven
+        # per-municipio sweep. Without an override the code path below is
+        # byte-identical.
+        override_url = scope.override_url if self.supports_search_override else None
+        if override_url:
+            html = _get(override_url, throttle, context="discover")
+            external_ids = sorted({m.group(1) for m in _DETAIL_HREF_RE.finditer(html)})
+            logger.info(
+                "solvia discover: pinned override URL %s -> %d external_ids "
+                "(single entry page, no sitemap sweep)",
+                override_url,
+                len(external_ids),
+            )
+            return external_ids
+
         provincia = _resolve_geography(scope)
         if provincia is None:
             # Reachable only if discover() is invoked directly, bypassing

@@ -317,9 +317,13 @@ class ServihabitatConnector(Connector):
         except UnresolvableGeographyError:
             return unresolvable_scope_key(scope)
 
-    # Issue #478: an owner-pinned servihabitat URL may become this connector's
-    # recall source for a profile (discover() wiring is Phase 5).
+    # Issue #478: an owner-pinned servihabitat URL is this connector's recall
+    # source for a profile. Issue #513: discover() now CONSUMES
+    # `scope.override_url` (fetches it verbatim as the entry point). Only a
+    # province sitemap URL round-trips the grammar; a faceted-search URL is
+    # rejected at save time (robots reason), so a pin here is always a sitemap.
     override_host_suffix = "servihabitat.com"
+    supports_search_override = True
 
     # Issue #495: published to connector_registry.search_url_grammar. Only the
     # province sitemap round-trips; a pasted faceted-search URL is rejected with
@@ -379,19 +383,27 @@ class ServihabitatConnector(Connector):
         # _resolve_geography can raise UnresolvableGeographyError, left to
         # propagate uncaught (issue #169) — see fotocasa.py's discover() for
         # the full reasoning.
-        province = _resolve_geography(scope)
-        if province is None:
-            # Reachable only if discover() is invoked directly, bypassing
-            # scope_key()'s gate — see fotocasa.py's discover() docstring.
-            raise ConnectorError(
-                "servihabitat discover: scope has neither a resolvable "
-                "center nor an explicit geography string, or resolves to a "
-                "province this connector's _PROVINCE_SITEMAP_SLUGS table "
-                "doesn't cover — nothing to discover, and not defaulting to "
-                "a hardcoded province (issue #71)"
-            )
+        # Issue #513: an owner-pinned URL is this profile's recall source — hit
+        # it verbatim as the sitemap entry (province left None: it plays no part
+        # beyond the log). Without an override the code path is byte-identical.
+        override_url = scope.override_url if self.supports_search_override else None
+        if override_url:
+            province = None
+            url = override_url
+        else:
+            province = _resolve_geography(scope)
+            if province is None:
+                # Reachable only if discover() is invoked directly, bypassing
+                # scope_key()'s gate — see fotocasa.py's discover() docstring.
+                raise ConnectorError(
+                    "servihabitat discover: scope has neither a resolvable "
+                    "center nor an explicit geography string, or resolves to a "
+                    "province this connector's _PROVINCE_SITEMAP_SLUGS table "
+                    "doesn't cover — nothing to discover, and not defaulting to "
+                    "a hardcoded province (issue #71)"
+                )
+            url = _sitemap_url(province)
 
-        url = _sitemap_url(province)
         response = _get(url, throttle)
         locs = _sitemap_locs(response.text)
 

@@ -235,6 +235,44 @@ class TestDiscover:
         mock_get.assert_not_called()
 
 
+class TestOwnerPinnedOverride:
+    """Issue #513: an owner-pinned URL is hit verbatim as the single entry
+    page — the derived city slug AND the zone sweep are bypassed."""
+
+    def test_discover_uses_pinned_override_url_as_single_entry_page(self):
+        pinned = "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital/centro/l"
+        html = _read_fixture("fotocasa_sample_search.html")
+        with patch(
+            "etl.connectors.fotocasa.requests.get",
+            return_value=_mock_response(html),
+        ) as mock_get:
+            ids = FotocasaConnector().discover(
+                ConnectorScope(
+                    center=(40.4168, -3.7038), radius_km=10, override_url=pinned
+                ),
+                throttle=lambda: None,
+            )
+        # A single fetch — the pinned URL — and no zone sweep at all.
+        assert mock_get.call_count == 1
+        assert mock_get.call_args.args[0] == pinned
+        assert sorted(ids) == ["190011971", "190022222", "190033333"]
+
+    def test_discover_without_override_uses_the_derived_slug(self):
+        """Regression guard: no override → the derived city slug is the first
+        (baseline) request, never a pinned URL."""
+        html = _read_fixture("fotocasa_sample_search.html")
+        with patch(
+            "etl.connectors.fotocasa.requests.get",
+            return_value=_mock_response(html),
+        ) as mock_get:
+            FotocasaConnector().discover(
+                ConnectorScope(geography="madrid-capital"), throttle=lambda: None
+            )
+        first_url = mock_get.call_args_list[0].args[0]
+        assert "madrid-capital" in first_url
+        assert "/todas-las-zonas/" in first_url
+
+
 class TestZonePartitioning:
     """Issue #65: lift coverage past the ~30-listing page-1 cap by sweeping
     the neighbourhood ("zone") slices Fotocasa itself links from the city

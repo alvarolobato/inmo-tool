@@ -250,13 +250,11 @@ class MilanunciosRentalConnector(MilanunciosConnector):
     # never silently ride on a parent class's value" discipline as
     # discovers_full_inventory / min_refetch_interval_seconds above. The sale
     # MilanunciosConnector turned this on and wired its discover() to consume
-    # `scope.override_url`; this subclass's discover() has NOT been wired for it,
-    # so advertising support would let the orchestrator hand it an override scope
-    # its discover() would silently ignore. It is a documented next candidate
-    # (own mini-issue). `override_host_suffix` ("milanuncios.com") is still
-    # inherited so the Validar filtros page can render/pin it (P4), consistent
-    # with the "advertise pinnable before discover() honours it" split.
-    supports_search_override = False
+    # `scope.override_url`. Issue #513: this subclass's discover() below is now
+    # wired for it too (the same verbatim-entry-page pattern), so it honestly
+    # advertises consumption. `override_host_suffix` ("milanuncios.com") is
+    # inherited so the Validar filtros page can render/pin it.
+    supports_search_override = True
 
     # Issue #492: publish the rental grammar (NOT the inherited sale one) so the
     # `milanuncios_rental` registry row inverts a rental URL. Stated explicitly
@@ -331,19 +329,28 @@ class MilanunciosRentalConnector(MilanunciosConnector):
         redefining them — same city-slug table, same JSON extraction, only
         the URL's category segment differs.
         """
-        geography = _resolve_geography(scope)
-        if geography is None:
-            raise ConnectorError(
-                "milanuncios_rental discover: scope has neither a resolvable "
-                "center (nearest known city too far away) nor an explicit "
-                "geography string — nothing to discover, not defaulting to "
-                "a hardcoded city (see issue #71)"
-            )
-        # Category slug confirmed live 2026-08-03 (module docstring) —
-        # "alquiler-de-pisos-en-madrid-madrid/" returned 41 real rental ads,
-        # same JSON shape and geography-slug-repeated-twice URL convention
-        # as the sale category.
-        url = self._rental_search_url(geography)
+        # Issue #513: an owner-pinned URL is this profile's recall source — hit
+        # it verbatim as the entry page (geography left None: it plays no part),
+        # mirroring the sale MilanunciosConnector. Without an override the code
+        # path is byte-identical to before.
+        override_url = scope.override_url if self.supports_search_override else None
+        if override_url:
+            geography = None
+            url = override_url
+        else:
+            geography = _resolve_geography(scope)
+            if geography is None:
+                raise ConnectorError(
+                    "milanuncios_rental discover: scope has neither a resolvable "
+                    "center (nearest known city too far away) nor an explicit "
+                    "geography string — nothing to discover, not defaulting to "
+                    "a hardcoded city (see issue #71)"
+                )
+            # Category slug confirmed live 2026-08-03 (module docstring) —
+            # "alquiler-de-pisos-en-madrid-madrid/" returned 41 real rental ads,
+            # same JSON shape and geography-slug-repeated-twice URL convention
+            # as the sale category.
+            url = self._rental_search_url(geography)
         throttle()
         try:
             response = requests.get(

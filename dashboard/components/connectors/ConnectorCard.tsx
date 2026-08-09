@@ -94,6 +94,94 @@ function Pill({ text, tone }: { text: string; tone: "on" | "off" | "muted" }) {
 }
 
 /**
+ * Per-connector capability badges (issue #513) — makes the fleet's snowflakes
+ * visible at a glance: which connectors build URLs from a grammar, publish
+ * previews, honour a pinned URL, harvest via the extension, or filter by data.
+ * Computed purely from `connector_registry` flags already on the view.
+ */
+function capabilitiesOf(
+  connector: ConnectorView,
+): { key: string; label: string; title: string }[] {
+  const caps: { key: string; label: string; title: string }[] = [];
+  if (connector.hasSearchUrlGrammar) {
+    caps.push({
+      key: "grammar",
+      label: "gramática",
+      title: "Publica una gramática de URL (construye y analiza su URL de búsqueda).",
+    });
+  }
+  if (connector.supports_discovery) {
+    caps.push({
+      key: "preview",
+      label: "previsualización",
+      title: "Calcula, sin red, la búsqueda que ejecutará para cada perfil.",
+    });
+  }
+  if (connector.supportsSearchOverride) {
+    caps.push({
+      key: "pin",
+      label: "URL fijable",
+      title: "Acepta una URL fijada a mano y su discover() la usa como fuente de recall.",
+    });
+  }
+  if (!connector.supports_discovery) {
+    caps.push({
+      key: "harvest",
+      label: "captura extensión",
+      title: "No rastrea; sus anuncios entran mediante la extensión de navegador.",
+    });
+  } else if (connector.overrideHostSuffix === null) {
+    // A discovery connector with no pinnable URL filters by data, not by URL —
+    // the four structural connectors (cimenta2/vivantial/buildingcenter/
+    // escogecasa) keep this honest badge.
+    caps.push({
+      key: "data-filter",
+      label: "filtrado por datos",
+      title: "Barre a nivel nacional/estructural; el filtrado fino es por datos, no por URL.",
+    });
+  }
+  return caps;
+}
+
+function CapabilityBadges({ connector }: { connector: ConnectorView }) {
+  const caps = capabilitiesOf(connector);
+  if (caps.length === 0) return null;
+  return (
+    <div
+      data-testid={`capabilities-${connector.name}`}
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        gap: 6,
+        padding: "0 12px 10px 34px",
+      }}
+    >
+      {caps.map((c) => (
+        <span
+          key={c.key}
+          data-testid="capability-badge"
+          data-capability={c.key}
+          title={c.title}
+          style={{
+            fontSize: 10,
+            fontWeight: 600,
+            padding: "2px 8px",
+            borderRadius: 999,
+            color: "var(--fg-muted)",
+            background: "var(--bg-2)",
+            border: "1px solid var(--border)",
+            textTransform: "uppercase",
+            letterSpacing: "0.03em",
+          }}
+        >
+          {c.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/**
  * Explains, in plain language, what this connector will actually ingest on
  * its next run — the visibility gap that made ingestion feel unpredictable
  * (issue #96: an operator had no way to see what a profile's geography
@@ -424,6 +512,10 @@ export function ConnectorCard({
           {active ? "Desactivar" : "Activar"}
         </button>
       </div>
+
+      {/* Issue #513: always-visible capability badges — the fleet's snowflakes
+          at a glance, without expanding the row. */}
+      <CapabilityBadges connector={connector} />
 
       {expanded && (
         <div style={detailStyle} data-testid={`connector-detail-${connector.name}`}>

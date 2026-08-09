@@ -249,3 +249,49 @@ describe("EtlConnectorPreviewRow — non-consumed params (issue #494/#495)", () 
     expect(screen.getByTestId("etl-save")).toBeDisabled();
   });
 });
+
+describe("EtlConnectorPreviewRow — derived URL fallback (issue #513)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ success: true }) }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("shows the derived URL (not the pending note) when there is no ETL preview yet", () => {
+    render(
+      <EtlConnectorPreviewRow
+        {...baseProps()}
+        preview={null}
+        derivedUrl="https://www.pisos.com/venta/pisos-malaga/"
+      />,
+    );
+    // Never blank: the URL is shown, the pending note is gone…
+    expect(screen.getByTestId("etl-url")).toHaveTextContent(
+      "https://www.pisos.com/venta/pisos-malaga/",
+    );
+    expect(screen.queryByTestId("etl-pending")).toBeNull();
+    // …and it's honestly labelled unverified.
+    expect(screen.getByTestId("etl-source-badge")).toHaveTextContent(
+      "derivada (sin verificar por ETL)",
+    );
+    expect(screen.getByTestId("etl-derived-note")).toBeInTheDocument();
+  });
+
+  it("prefers the ETL preview URL over the derived one when both exist", () => {
+    render(
+      <EtlConnectorPreviewRow
+        {...baseProps()}
+        derivedUrl="https://www.pisos.com/venta/pisos-malaga/"
+      />,
+    );
+    expect(screen.getByTestId("etl-url")).toHaveTextContent(
+      "https://www.pisos.com/venta/pisos-sevilla/",
+    );
+    expect(screen.queryByTestId("etl-derived-note")).toBeNull();
+  });
+
+  it("falls back to the pending note when neither preview nor derived URL exists", () => {
+    render(<EtlConnectorPreviewRow {...baseProps()} preview={null} derivedUrl={null} />);
+    expect(screen.getByTestId("etl-pending")).toBeInTheDocument();
+    expect(screen.queryByTestId("etl-derived-note")).toBeNull();
+  });
+});

@@ -381,6 +381,13 @@ class DigloConnector(Connector):
     # source for a profile (discover() wiring is Phase 5).
     override_host_suffix = "digloservicer.com"
 
+    # Issue #513: discover() now CONSUMES `scope.override_url` — it fetches the
+    # pinned buscador page verbatim as the single entry point (no pagination),
+    # so a pin actually changes what the next ETL run fetches. The province the
+    # in-province listing filter needs is read from the pinned URL itself (via
+    # the grammar), falling back to the scope's resolved province.
+    supports_search_override = True
+
     def scope_key(self, scope: ConnectorScope) -> str | None:
         """The resolved province slug IS the coverage key: two scopes in the
         same province filter the identical national sitemap.
@@ -495,6 +502,26 @@ class DigloConnector(Connector):
         ]
 
     def discover(self, scope: ConnectorScope, throttle: Throttle) -> list[str]:
+        # Issue #513: an owner-pinned URL is this profile's recall source — hit
+        # it verbatim as the single entry page (no pagination). The province the
+        # in-province filter needs comes from the pinned URL itself (grammar),
+        # falling back to the scope's resolved province. Without an override the
+        # code path below is byte-identical.
+        override_url = scope.override_url if self.supports_search_override else None
+        if override_url:
+            parsed = _SEARCH_URL_GRAMMAR.parse(override_url) or {}
+            province = parsed.get("province") or self._scope_province(scope)
+            response = _get(override_url, throttle)
+            external_ids = buscador_listing_paths(response.text, province or "")
+            logger.info(
+                "diglo discover: pinned override URL %s (province=%s) -> %d "
+                "residential in-province listings (single entry page)",
+                override_url,
+                province,
+                len(external_ids),
+            )
+            return sorted(external_ids)
+
         province = self._scope_province(scope)
         if province is None:
             raise ConnectorError(

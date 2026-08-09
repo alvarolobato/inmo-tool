@@ -305,6 +305,32 @@ class TestDiscover:
                 ConnectorScope(geography="malaga"), throttle=lambda: None
             )
 
+    def test_uses_pinned_override_url_as_single_entry_page(self):
+        """Issue #513: an owner-pinned search URL is fetched verbatim once (no
+        pagination), running the same residential/card extraction so
+        fetch_detail() still finds its stashed cards."""
+        pinned = (
+            "https://www.unicajainmuebles.com/es/buscador?provincia=29&precioMax=200000"
+        )
+        connector = UnicajaConnector()
+        with patch(
+            "etl.connectors.unicaja.requests.get",
+            return_value=_mock_response(_read("unicaja_sample_search.html")),
+        ) as mock_get:
+            ids = connector.discover(
+                ConnectorScope(
+                    center=(36.7213, -4.4213), radius_km=10, override_url=pinned
+                ),
+                throttle=lambda: None,
+            )
+        assert mock_get.call_count == 1
+        assert mock_get.call_args.args[0] == pinned
+        assert ids == ["0012837647", "0017922090"]  # garaje dropped
+        assert connector._cards["0017922090"]["postal_code"] == "29327"
+
+    def test_declares_search_override_consumption(self):
+        assert UnicajaConnector.supports_search_override is True
+
 
 class TestScopeAndFlags:
     def test_discovers_full_inventory_is_true(self):

@@ -133,7 +133,11 @@ test.beforeAll(async () => {
             ('unicaja', true, 20, true, true, '[]'::jsonb, 'unicajainmuebles.com', true, $4::jsonb),
             ('servihabitat', true, 12, false, true, '[]'::jsonb, 'servihabitat.com', true, $5::jsonb),
             ('escogecasa', true, 20, false, true, '[]'::jsonb, NULL, false, NULL),
-            ('cimenta2', true, 20, true, true, '[]'::jsonb, NULL, false, NULL)
+            ('cimenta2', true, 20, true, true, '[]'::jsonb, NULL, false, NULL),
+            -- Issue #513: a tunable connector with a grammar but DELIBERATELY no
+            -- preview row (not in seedEtlPreviews) → the page must derive its URL
+            -- on demand from the grammar and the profile's province.
+            ($6, true, 20, false, true, '[]'::jsonb, 'e2e-derived.example', true, $7::jsonb)
      ON CONFLICT (connector_name) DO UPDATE SET
        registered = true, supports_discovery = true,
        override_host_suffix = EXCLUDED.override_host_suffix,
@@ -145,10 +149,26 @@ test.beforeAll(async () => {
       JSON.stringify(FOTOCASA_GRAMMAR),
       JSON.stringify(UNICAJA_GRAMMAR),
       JSON.stringify(SERVIHABITAT_GRAMMAR),
+      DERIVED_CONNECTOR,
+      JSON.stringify(DERIVED_GRAMMAR),
     ],
   );
   await seedEtlPreviews();
 });
+
+// Issue #513: a synthetic connector used ONLY to exercise the on-demand derived
+// preview (its registry row is seeded with a grammar but NO connector_search_
+// preview row). A single province-sourced param so the built URL round-trips
+// with just the profile's resolved province filled in.
+const DERIVED_CONNECTOR = "e2e-derived";
+const DERIVED_GRAMMAR = {
+  build_template: "https://e2e-derived.example/buscar-{province}/",
+  parse_pattern:
+    "^https?://(?:www\\.)?e2e-derived\\.example/buscar-(?<province>[^/]+)/$",
+  params: { province: { label: "Provincia", source: "profile" } },
+};
+// The profile's Sevilla centre resolves via provinceForPoint → "sevilla".
+const DERIVED_EXPECTED_URL = "https://e2e-derived.example/buscar-sevilla/";
 
 // The pisos search-URL grammar exactly as etl.orchestrator.sync_connector_registry
 // publishes it (ECMAScript-canonical parse pattern — the browser's RegExp uses it).
@@ -379,7 +399,14 @@ async function seedEtlPreviews(): Promise<void> {
 }
 
 test.afterAll(async () => {
-  if (dbAvailable) await purge();
+  if (dbAvailable) {
+    await purge();
+    // Issue #513: the synthetic derived-preview connector isn't a real fleet
+    // member — remove its registry row so it doesn't linger in a shared dev DB.
+    await pool
+      .query("DELETE FROM connector_registry WHERE connector_name = $1", [DERIVED_CONNECTOR])
+      .catch(() => undefined);
+  }
   await pool?.end();
 });
 
@@ -499,6 +526,32 @@ test("altamira: verbatim-pin row — honest note, zero inference, pin persists (
     "DELETE FROM profile_connector_filter WHERE profile_id = $1 AND connector = 'altamira'",
     [profileId],
   );
+});
+
+test("ETL section: a grammar-bearing connector with no preview shows an on-demand derived URL (issue #513)", async ({
+  page,
+}) => {
+  await page.goto(`/profiles/${profileId}/filtros`);
+  await expect(page.getByTestId("validar-filtros-page")).toBeVisible({ timeout: 15_000 });
+  await assertNoErrorSurface(page);
+
+  // This connector has a grammar but NO connector_search_preview row for the
+  // profile — the pre-#513 behaviour was a URL-less "pendiente" row. Now the
+  // page builds the URL on demand from the grammar + the profile's province.
+  const row = page.locator(
+    `[data-testid="etl-connector-row"][data-connector="${DERIVED_CONNECTOR}"]`,
+  );
+  await expect(row).toBeVisible();
+  await expect(row).toHaveAttribute("data-tunable", "true");
+  // Never URL-less: the derived URL is shown, the pending note is gone…
+  await expect(row.getByTestId("etl-url")).toHaveText(DERIVED_EXPECTED_URL);
+  await expect(row.getByTestId("etl-pending")).toHaveCount(0);
+  // …and it's honestly labelled unverified, with the explanatory note.
+  await expect(row.getByTestId("etl-source-badge")).toHaveText(
+    "derivada (sin verificar por ETL)",
+  );
+  await expect(row.getByTestId("etl-derived-note")).toBeVisible();
+  await assertNoErrorSurface(page);
 });
 
 test("ETL section: cimenta2 read-only with its note; pisos tunable and saves (P4)", async ({
@@ -732,10 +785,18 @@ test("ETL section renders with no seeded previews — pending, no error surface 
   await expect(page.getByTestId("validar-filtros-etl-section")).toBeVisible();
   await assertNoErrorSurface(page);
 
-  // pisos still appears (it's registered), now pending its next ETL computation.
+  // pisos still appears (it's registered). Issue #513: with no ETL preview row
+  // it is NO LONGER pending — its URL is derived on demand from the grammar +
+  // the profile's province and labelled unverified (never URL-less).
   const pisos = page.locator('[data-testid="etl-connector-row"][data-connector="pisos"]');
   await expect(pisos).toBeVisible();
-  await expect(pisos.getByTestId("etl-pending")).toBeVisible();
+  await expect(pisos.getByTestId("etl-pending")).toHaveCount(0);
+  await expect(pisos.getByTestId("etl-source-badge")).toHaveText(
+    "derivada (sin verificar por ETL)",
+  );
+  await expect(pisos.getByTestId("etl-url")).toHaveText(
+    "https://www.pisos.com/venta/pisos-sevilla/",
+  );
 
   // Restore for any later ordering.
   await seedEtlPreviews();
