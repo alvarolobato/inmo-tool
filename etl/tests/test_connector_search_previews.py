@@ -113,9 +113,11 @@ class TestTunablePreviewsMatchDiscoverHelper:
     def test_solvia(self):
         c = solvia.SolviaConnector()
         p = _one(c, _PROV)
-        # discover()'s first request is the sitemap index constant.
-        assert p.url == solvia._SITEMAP_INDEX_URL
-        assert p.kind == "sitemap"
+        # Issue #495: the preview is now a HUMAN search page (the provincia
+        # entry page discover() sweeps), not the sitemap XML — built from the
+        # same `_search_url()` helper discover() uses per municipio.
+        assert p.url == c._search_url("sevilla", "")
+        assert p.kind == "search_page"
         assert p.tunable is True
         assert c.override_host_suffix == "solvia.es"
 

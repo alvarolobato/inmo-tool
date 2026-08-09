@@ -31,8 +31,8 @@ export interface SearchUrlGrammar {
   buildTemplate: string;
   /** Anchored, ECMAScript-canonical regex; named groups == template slots. */
   parsePattern: string;
-  /** Per-placeholder metadata (label, source) mirroring SearchParam fields. */
-  params: Record<string, { label?: string; source?: string }>;
+  /** Per-placeholder metadata (label, source, consumed) mirroring SearchParam fields. */
+  params: Record<string, { label?: string; source?: string; consumed?: boolean }>;
   /**
    * Robots-forbidden shapes this portal serves but discover() could never open
    * (issue #493) — a URL matching one is a HARD, reasoned block, distinct from a
@@ -62,6 +62,9 @@ export function parseGrammar(raw: unknown): SearchUrlGrammar | null {
         params[key] = {
           label: typeof m.label === "string" ? m.label : undefined,
           source: typeof m.source === "string" ? m.source : undefined,
+          // Only an explicit `false` marks a param the connector doesn't act on
+          // (issue #494/#495); absent → consumed (undefined, treated as true).
+          consumed: typeof m.consumed === "boolean" ? m.consumed : undefined,
         };
       } else {
         params[key] = {};

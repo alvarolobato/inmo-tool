@@ -1004,3 +1004,20 @@ class TestFrameworkIdRefreshOnExpiry:
         assert shell_calls["n"] == 2
         assert posts["n"] == 2
         assert canonical.reference_code == "TESTREF-4242"
+
+
+# --- Issue #496: non-tunable params visibility -----------------------------
+
+
+def test_preview_shows_national_scope_and_profile_gate():
+    from etl.connectors.base import ConnectorScope
+    from etl.connectors.cimenta2 import Cimenta2Connector
+
+    c = Cimenta2Connector()
+    scope = ConnectorScope(geography="dos-hermanas")
+    p = c.search_previews(scope)[0]
+    params = {sp.key: sp for sp in p.params}
+    assert params["alcance"].value == "nacional"
+    assert params["perfil"].value == "dos-hermanas"
+    assert params["perfil"].consumed is False
+    assert p.tunable is False and c.override_host_suffix is None

@@ -62,6 +62,8 @@ class TestSearchParamAndPreview:
                 "source": "profile",
                 "in_url": True,
                 "notes": None,
+                # Issue #494: additive field, default True (the param IS acted on).
+                "consumed": True,
             },
             {
                 "key": "operation",
@@ -70,6 +72,7 @@ class TestSearchParamAndPreview:
                 "source": "constant",
                 "in_url": True,
                 "notes": None,
+                "consumed": True,
             },
         ]
 

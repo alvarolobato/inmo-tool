@@ -29,9 +29,22 @@ from etl.tests.grammar_contract import (
 
 
 def test_every_connector_grammar_round_trips():
-    for name, grammar, cases, foreign, build_real, rejects in connector_specs():
+    for (
+        name,
+        grammar,
+        cases,
+        foreign,
+        build_real,
+        rejects,
+        parse_only,
+    ) in connector_specs():
         assert_grammar_roundtrip(
-            grammar, cases, foreign, build_real=build_real, rejects=rejects
+            grammar,
+            cases,
+            foreign,
+            build_real=build_real,
+            rejects=rejects,
+            parse_only=parse_only,
         )
 
 

@@ -57,7 +57,6 @@ import logging
 import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
-from urllib.parse import urlencode
 
 import requests
 
@@ -67,7 +66,9 @@ from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
     RawListing,
+    SearchParam,
     SearchPreview,
+    SearchUrlGrammar,
     Throttle,
 )
 from etl.connectors.extraction import first_present
@@ -77,6 +78,7 @@ from etl.connectors.geography import (
     unresolvable_scope_key,
 )
 from etl.connectors.unicaja_mapping import (
+    ine_code_to_province,
     is_residential,
     map_property_type,
     parse_es_price,
@@ -129,27 +131,91 @@ def _get(url: str, throttle: Throttle) -> requests.Response:
     return response
 
 
+# Issue #494: the invertible search-URL grammar for `listadoPromocion.do`. This
+# is a query-param search, so the grammar's build_template IS the full query
+# string in the FIXED order `urlencode` used to emit (dict-insertion order) —
+# `_search_url()` now delegates to `build()` so the two can never drift, and the
+# per-connector round-trip contract plus a `parse_qs`↔grammar property test pin
+# them together.
+#
+# The named groups are EVERY tunable field the site's search form exposes —
+# provincia, municipio, precioMin/Max, codigoPostal, numDormitorios,
+# superficieMin, pagina — even though discover() today only sets `provincia`
+# (and mechanically re-paginates). The rest are captured so an owner who edits
+# `precioMax=200000` into the URL sees it inferred, tagged "no consumido aún":
+# Unicaja is the flotilla's strongest candidate to honour native URL filters,
+# but announcing a filter the server may ignore is worse than not (the
+# BuildingCenter lesson), so consumption is gated on a live spike (issue #494
+# Phase 2). The truly fixed fields (definitionName/tipoInmueble/tipoOperacion/
+# zona/antiguedadAlta/codRef/soloFotos/paginando/orden) stay literal in both
+# halves. Every value is digits / -1 / empty / `false`, none needs percent-
+# encoding, so a hand-written template reproduces `urlencode`'s output exactly
+# (the anti-drift test asserts it). No `reject_reasons`: robots.txt disallows
+# nothing here (see the module docstring).
+_SEARCH_URL_GRAMMAR = SearchUrlGrammar(
+    build_template=(
+        f"{_SEARCH_ACTION}?definitionName=busqueda"
+        f"&tipoInmueble={_TIPO_VIVIENDA}&tipoOperacion={_TIPO_COMPRA}"
+        "&provincia={provincia}&municipio={municipio}&zona=-1&antiguedadAlta=-1"
+        "&precioMin={precioMin}&precioMax={precioMax}&codRef=&codigoPostal={codigoPostal}"
+        "&soloFotos=false&numDormitorios={numDormitorios}&superficieMin={superficieMin}"
+        "&pagina={pagina}&paginando=true&orden="
+    ),
+    parse_pattern=(
+        r"^https?://(?:www\.)?unicajainmuebles\.com/listadoPromocion\.do"
+        r"\?definitionName=busqueda&tipoInmueble=0&tipoOperacion=1"
+        r"&provincia=(?<provincia>[^&]*)&municipio=(?<municipio>[^&]*)"
+        r"&zona=-1&antiguedadAlta=-1"
+        r"&precioMin=(?<precioMin>[^&]*)&precioMax=(?<precioMax>[^&]*)"
+        r"&codRef=&codigoPostal=(?<codigoPostal>[^&]*)"
+        r"&soloFotos=false&numDormitorios=(?<numDormitorios>[^&]*)"
+        r"&superficieMin=(?<superficieMin>[^&]*)"
+        r"&pagina=(?<pagina>[^&]*)&paginando=true&orden=$"
+    ),
+    params={
+        "provincia": {"label": "Provincia (INE)", "source": "profile"},
+        "municipio": {"label": "Municipio", "source": "constant", "consumed": False},
+        "precioMin": {"label": "Precio mín.", "source": "constant", "consumed": False},
+        "precioMax": {"label": "Precio máx.", "source": "constant", "consumed": False},
+        "codigoPostal": {
+            "label": "Código postal",
+            "source": "constant",
+            "consumed": False,
+        },
+        "numDormitorios": {
+            "label": "Dormitorios",
+            "source": "constant",
+            "consumed": False,
+        },
+        "superficieMin": {
+            "label": "Superficie mín.",
+            "source": "constant",
+            "consumed": False,
+        },
+        "pagina": {"label": "Página", "source": "derived", "consumed": False},
+    },
+)
+
+
 def _search_url(ine_code: str, page: int) -> str:
-    params = {
-        "definitionName": "busqueda",
-        "tipoInmueble": _TIPO_VIVIENDA,
-        "tipoOperacion": _TIPO_COMPRA,
-        "provincia": ine_code,
-        "municipio": "-1",
-        "zona": "-1",
-        "antiguedadAlta": "-1",
-        "precioMin": "",
-        "precioMax": "",
-        "codRef": "",
-        "codigoPostal": "",
-        "soloFotos": "false",
-        "numDormitorios": "-1",
-        "superficieMin": "",
-        "pagina": str(page),
-        "paginando": "true",
-        "orden": "",
-    }
-    return f"{_SEARCH_ACTION}?{urlencode(params)}"
+    """The `listadoPromocion.do` search page discover() paginates over.
+
+    Delegates to `_SEARCH_URL_GRAMMAR.build()` (issue #494) so the derived URL
+    and the published grammar stay pinned together (anti-drift). Only `provincia`
+    and `pagina` vary; every other field is a fixed default (the site's own
+    empty/`-1` search-form values)."""
+    return _SEARCH_URL_GRAMMAR.build(
+        {
+            "provincia": ine_code,
+            "municipio": "-1",
+            "precioMin": "",
+            "precioMax": "",
+            "codigoPostal": "",
+            "numDormitorios": "-1",
+            "superficieMin": "",
+            "pagina": str(page),
+        }
+    )
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:
@@ -293,6 +359,12 @@ class UnicajaConnector(Connector):
     # source for a profile (discover() wiring is Phase 5).
     override_host_suffix = "unicajainmuebles.com"
 
+    # Issue #494: published to connector_registry.search_url_grammar so the
+    # dashboard infers params from an owner-edited URL in the browser with the
+    # same grammar (one implementation, zero per-connector TS). `_search_url()`
+    # delegates to `build()` — the anti-drift contract.
+    search_url_grammar = _SEARCH_URL_GRAMMAR
+
     def __init__(self) -> None:
         # Card data captured during the most recent discover(), keyed by
         # reference. fetch_detail() reads it to recover the postal code (and
@@ -347,12 +419,111 @@ class UnicajaConnector(Connector):
                     notes="El perfil no resuelve a una provincia que este conector cubra.",
                 )
             ]
+        # Issue #494: the params discover() builds the URL from, plus the native
+        # search-form fields the URL carries but the connector does NOT act on
+        # yet (consumed=False). `provincia` is the only consumed one (the sweep
+        # sets it); the empty precio/dormitorios/superficie/municipio/CP fields
+        # are surfaced so the owner sees Unicaja supports them in its URL, tagged
+        # "no consumido aún" pending the live spike (Phase 2). `pagina` is
+        # mechanical (the sweep re-paginates from 1). The province chip resolves
+        # the bare INE code to a legible "INE 29 · Málaga".
+        province_name = ine_code_to_province(ine_code)
+        province_label = (
+            f"INE {ine_code} · {province_name}" if province_name else f"INE {ine_code}"
+        )
+        params: tuple[SearchParam, ...] = (
+            SearchParam(
+                key="provincia",
+                label="Provincia (INE)",
+                value=province_label,
+                source="profile",
+                in_url=True,
+            ),
+            SearchParam(
+                key="operation",
+                label="Operación",
+                value="COMPRA",
+                source="constant",
+                in_url=True,
+            ),
+            SearchParam(
+                key="tipoInmueble",
+                label="Tipo",
+                value="VIVIENDA",
+                source="constant",
+                in_url=True,
+            ),
+            SearchParam(
+                key="precioMin",
+                label="Precio mín.",
+                value=None,
+                source="constant",
+                in_url=True,
+                consumed=False,
+                notes="El portal lo admite en su URL; el conector todavía no lo aplica (ver spike, issue #494).",
+            ),
+            SearchParam(
+                key="precioMax",
+                label="Precio máx.",
+                value=None,
+                source="constant",
+                in_url=True,
+                consumed=False,
+                notes="El portal lo admite en su URL; el conector todavía no lo aplica (ver spike, issue #494).",
+            ),
+            SearchParam(
+                key="numDormitorios",
+                label="Dormitorios",
+                value=None,
+                source="constant",
+                in_url=True,
+                consumed=False,
+                notes="El portal lo admite en su URL; el conector todavía no lo aplica (ver spike, issue #494).",
+            ),
+            SearchParam(
+                key="superficieMin",
+                label="Superficie mín.",
+                value=None,
+                source="constant",
+                in_url=True,
+                consumed=False,
+                notes="El portal lo admite en su URL; el conector todavía no lo aplica (ver spike, issue #494).",
+            ),
+            SearchParam(
+                key="municipio",
+                label="Municipio",
+                value=None,
+                source="constant",
+                in_url=True,
+                consumed=False,
+                notes="El portal lo admite en su URL; el conector barre toda la provincia (no consumido aún).",
+            ),
+            SearchParam(
+                key="codigoPostal",
+                label="Código postal",
+                value=None,
+                source="constant",
+                in_url=True,
+                consumed=False,
+                notes="El portal lo admite en su URL; el conector todavía no lo aplica (ver spike, issue #494).",
+            ),
+            SearchParam(
+                key="pagina",
+                label="Página",
+                value="1",
+                source="derived",
+                in_url=True,
+                consumed=False,
+                notes="Se pagina hasta agotar; el valor de la URL es solo la página de entrada.",
+            ),
+        )
         return [
             SearchPreview(
-                label=f"Unicaja — provincia INE {ine_code}",
+                label=f"Unicaja — provincia {province_label}",
                 url=_search_url(ine_code, 1),
                 kind="search_page",
                 tunable=True,
+                params=params,
             )
         ]
 

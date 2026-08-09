@@ -90,7 +90,9 @@ from etl.connectors.base import (
     ConnectorScope,
     ListingUnavailableError,
     RawListing,
+    SearchParam,
     SearchPreview,
+    SearchUrlGrammar,
     Throttle,
 )
 from etl.connectors.diglo_mapping import (
@@ -125,6 +127,27 @@ _BUSCADOR_PATH = "/venta-{type_seg}/{province}"
 # One request per page; a province tops out around a dozen pages. This guard
 # only trips on a pathological server that keeps yielding fresh ids forever.
 _MAX_PAGES = 60
+
+# Issue #494: the invertible search-URL grammar for the province buscador.
+# `_search_url()` delegates to `build()` so the derived URL and the published
+# grammar can never drift; the per-connector round-trip contract pins them.
+# The type segment (`pisos`) is a fixed entry point (the server returns the
+# whole province's stock regardless), so it is a literal in both halves — only
+# `province` and `page` vary. `page` round-trips but is a MECHANICAL param: the
+# sweep always re-paginates from 0, so a pasted URL's `page=7` only fixes the
+# province, never the sweep's entry page (surfaced as a non-consumed chip). No
+# `reject_reasons`: Diglo's buscador has no robots-forbidden filter shape.
+_SEARCH_URL_GRAMMAR = SearchUrlGrammar(
+    build_template=f"{_BASE_URL}/venta-pisos/{{province}}?page={{page}}",
+    parse_pattern=(
+        r"^https?://(?:www\.)?digloservicer\.com/venta-pisos/"
+        r"(?<province>[^/?#]+)(?:\?page=(?<page>[0-9]+))?$"
+    ),
+    params={
+        "province": {"label": "Provincia", "source": "profile"},
+        "page": {"label": "Página", "source": "derived", "consumed": False},
+    },
+)
 # A Diglo detail/listing anchor: `/venta-<type>/…/<refcode>`. The buscador
 # cards use `<a href="/venta-pisos/madrid/madrid/efe0000200055">`; nav/facet
 # links (`/venta-pisos/cualquiera`) have no trailing refcode and are dropped
@@ -391,12 +414,21 @@ class DigloConnector(Connector):
             return None
         return province_slug(place.province)
 
+    # Issue #494: published to connector_registry.search_url_grammar so the
+    # dashboard infers params from an owner-edited URL in the browser with the
+    # same grammar (one implementation, zero per-connector TS). `_search_url()`
+    # delegates to `build()` — the anti-drift contract.
+    search_url_grammar = _SEARCH_URL_GRAMMAR
+
     @staticmethod
     def _search_url(province: str, page: int) -> str:
         """The province buscador page discover() paginates over. Shared by
-        discover() and search_previews() so the preview can't drift."""
-        base_path = _BUSCADOR_PATH.format(type_seg="pisos", province=province)
-        return f"{_BASE_URL}{base_path}?page={page}"
+        discover() and search_previews() so the preview can't drift.
+
+        Delegates to `search_url_grammar.build()` (issue #494) so the derived
+        URL and the published grammar stay pinned together (per-connector
+        round-trip contract)."""
+        return _SEARCH_URL_GRAMMAR.build({"province": province, "page": str(page)})
 
     def search_previews(self, scope: ConnectorScope) -> list[SearchPreview]:
         """Reuses `_search_url()` — the exact helper discover()'s entry page
@@ -415,12 +447,50 @@ class DigloConnector(Connector):
                     notes="El perfil no resuelve a una provincia que este conector cubra.",
                 )
             ]
+        # Issue #494: the exact params discover() uses for this scope, built from
+        # the SAME resolved province the URL is (anti-drift). `type` is the fixed
+        # buscador entry segment; `page` travels in the URL but is mechanical —
+        # the sweep re-paginates from 0, so the URL's page value is only the
+        # entry page (marked non-consumed so the UI never implies it's a filter).
+        params: tuple[SearchParam, ...] = (
+            SearchParam(
+                key="province",
+                label="Provincia",
+                value=province,
+                source="profile",
+                in_url=True,
+            ),
+            SearchParam(
+                key="type",
+                label="Tipo (segmento URL)",
+                value="pisos",
+                source="constant",
+                in_url=True,
+                notes=(
+                    "Segmento de entrada fijo; el servidor devuelve todo el "
+                    "stock de la provincia, no solo pisos."
+                ),
+            ),
+            SearchParam(
+                key="page",
+                label="Página",
+                value="0",
+                source="derived",
+                in_url=True,
+                consumed=False,
+                notes=(
+                    "Se pagina hasta agotar (page=0,1,2,…); el valor de la URL "
+                    "es solo la página de entrada, no restringe el barrido."
+                ),
+            ),
+        )
         return [
             SearchPreview(
                 label=f"Diglo — {province}",
                 url=self._search_url(province, 0),
                 kind="search_page",
                 tunable=True,
+                params=params,
             )
         ]
 

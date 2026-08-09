@@ -436,3 +436,24 @@ class TestSchemaRoundTrip:
         assert row[0] == Decimal(210000)
         assert row[1] == "sale"
         assert row[2] == "36207"
+
+
+# --- Issue #496: non-tunable params visibility -----------------------------
+
+
+def test_preview_bbox_param_matches_search_data_exactly():
+    """EC-2: the bbox chip is numerically the box `_search_data` would POST."""
+    from etl.connectors.base import ConnectorScope
+
+    c = EscogecasaConnector()
+    scope = ConnectorScope(geography="37.3891,-5.9845")
+    box = c._scope_bbox(scope)
+    sd = c._search_data(box, 0, 0)
+    params = {p.key: p for p in c.search_previews(scope)[0].params}
+    expected = f"{sd['lat_min']}…{sd['lat_max']} × {sd['lng_min']}…{sd['lng_max']}"
+    assert params["bbox"].value == expected
+    assert params["bbox"].source == "derived"
+    assert params["tgs"].value == "viviendas"
+    # Non-tunable row: no URL grammar, still no override host suffix.
+    assert c.search_previews(scope)[0].tunable is False
+    assert c.override_host_suffix is None

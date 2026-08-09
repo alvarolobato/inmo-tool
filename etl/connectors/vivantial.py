@@ -58,6 +58,7 @@ from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
     RawListing,
+    SearchParam,
     SearchPreview,
     Throttle,
 )
@@ -207,12 +208,38 @@ class VivantialConnector(Connector):
         """Non-tunable: discover() reads a single NATIONAL sitemap and filters
         in memory, so there is no per-profile URL to tune — the filtering is by
         data. `_SITEMAP_URL` is exactly discover()'s request."""
+        # Issue #496: the param that genuinely governs recall IS visible — the
+        # city slug discover() filters the national sitemap's <loc>s by, from the
+        # SAME `_resolve_geography()` discover() uses (anti-drift). It just
+        # doesn't travel in a URL (in_url=False): the filtering is in memory.
+        try:
+            ciudad = _resolve_geography(scope)
+        except UnresolvableGeographyError:
+            ciudad = None
+        params: tuple[SearchParam, ...] = (
+            SearchParam(
+                key="ciudad",
+                label="Ciudad",
+                value=ciudad,
+                source="profile",
+                in_url=False,
+                notes="El sitemap nacional se filtra en memoria por esta ciudad.",
+            ),
+            SearchParam(
+                key="alcance",
+                label="Alcance",
+                value="sitemap nacional",
+                source="constant",
+                in_url=False,
+            ),
+        )
         return [
             SearchPreview(
                 label="Vivantial — barrido nacional",
                 url=_SITEMAP_URL,
                 kind="sitemap",
                 tunable=False,
+                params=params,
                 notes=(
                     "Barrido nacional del sitemap; el scope no entra en la URL "
                     "— el filtrado es por datos."

@@ -24,13 +24,18 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
+from etl.connectors import servihabitat, unicaja
 from etl.connectors.base import SearchUrlGrammar
+from etl.connectors.diglo import DigloConnector
 from etl.connectors.fotocasa import FotocasaConnector
 from etl.connectors.fotocasa_rental import FotocasaRentalConnector
 from etl.connectors.habitaclia import HabitacliaConnector
 from etl.connectors.milanuncios import MilanunciosConnector
 from etl.connectors.milanuncios_rental import MilanunciosRentalConnector
 from etl.connectors.pisos import PisosConnector
+from etl.connectors.servihabitat import ServihabitatConnector
+from etl.connectors.solvia import SolviaConnector
+from etl.connectors.unicaja import UnicajaConnector
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "url-grammar-cases.json"
 
@@ -41,6 +46,7 @@ def assert_grammar_roundtrip(
     foreign_urls: Sequence[str],
     build_real: Callable[[Mapping[str, str]], str] | None = None,
     rejects: Sequence[tuple[str, str]] = (),
+    parse_only: Sequence[Mapping[str, str]] = (),
 ) -> None:
     """Assert the contract properties for `grammar` over `cases`.
 
@@ -51,6 +57,12 @@ def assert_grammar_roundtrip(
     `rejects` (issue #493) are `(url, reason)` pairs the grammar must flag as a
     robots-forbidden shape via `rejection()` — the UI blocks saving these,
     distinct from a plain no-match; a valid URL must never be rejected.
+
+    `parse_only` (issue #494) are param dicts that must round-trip
+    (`parse(build(x)) == x`) but are NOT checked against `build_real`: they carry
+    native URL fields the connector INFERS from an owner-edited URL but does not
+    itself build (e.g. Unicaja's `precioMax`/`numDormitorios`), so there is no
+    real builder to drift against — only the grammar's own invertibility.
     """
     placeholders = grammar.placeholders()
     for case in cases:
@@ -67,6 +79,17 @@ def assert_grammar_roundtrip(
         )
         assert grammar.rejection(url) is None, (
             f"grammar wrongly rejected a valid URL {url!r}"
+        )
+    for case in parse_only:
+        url = grammar.build(case)
+        parsed = grammar.parse(url)
+        expected = {k: v for k, v in case.items() if k in placeholders}
+        assert parsed == expected, (
+            f"parse(build({case!r})) = {parsed!r}, expected {expected!r} "
+            "(parse_only case)"
+        )
+        assert grammar.rejection(url) is None, (
+            f"grammar wrongly rejected a valid URL {url!r} (parse_only case)"
         )
     for url in foreign_urls:
         assert grammar.parse(url) is None, f"grammar wrongly parsed foreign URL {url!r}"
@@ -265,12 +288,141 @@ def _fotocasa_rental_spec() -> tuple[
     return connector, cases, foreign, rejects
 
 
+def _diglo_spec() -> tuple[DigloConnector, list[dict[str, str]], list[str]]:
+    connector = DigloConnector()
+    cases = [
+        {"province": "madrid", "page": "0"},
+        {"province": "barcelona", "page": "3"},
+        {"province": "sevilla", "page": "0"},
+    ]
+    foreign = [
+        # Other portals.
+        "https://www.pisos.com/venta/pisos-madrid/",
+        "https://www.idealista.com/venta-viviendas/madrid/",
+        # A Diglo DETAIL URL (extra path segments) — not a buscador page.
+        "https://digloservicer.com/venta-pisos/madrid/madrid/efe0000200055",
+        # The buscador entry type-segment is fixed `venta-pisos`; a different
+        # `venta-<type>` is not this grammar's URL.
+        "https://digloservicer.com/venta-casas/madrid?page=0",
+        # A trailing newline — JS `$` (no /m) does not match before it and the
+        # Python `$`→`\Z` translation matches that, so BOTH must reject.
+        "https://digloservicer.com/venta-pisos/madrid?page=0\n",
+    ]
+    return connector, cases, foreign
+
+
+def _unicaja_spec() -> tuple[
+    UnicajaConnector, list[dict[str, str]], list[str], list[dict[str, str]]
+]:
+    connector = UnicajaConnector()
+    # DEFAULT-shaped cases: only `provincia`/`pagina` vary — exactly what the
+    # connector's own `_search_url()` builds, so the anti-drift `build_real`
+    # check applies.
+    default_extras = {
+        "municipio": "-1",
+        "precioMin": "",
+        "precioMax": "",
+        "codigoPostal": "",
+        "numDormitorios": "-1",
+        "superficieMin": "",
+    }
+    cases = [
+        {"provincia": "29", "pagina": "1", **default_extras},
+        {"provincia": "41", "pagina": "2", **default_extras},
+    ]
+    # PARSE-ONLY: native URL fields the owner may edit in and the grammar infers,
+    # but the connector does NOT build (consumed=False) — no `build_real` to drift
+    # against, only the grammar's own invertibility (issue #494 EC-2).
+    parse_only = [
+        {
+            "provincia": "29",
+            "municipio": "29067",
+            "precioMin": "50000",
+            "precioMax": "200000",
+            "codigoPostal": "29001",
+            "numDormitorios": "3",
+            "superficieMin": "80",
+            "pagina": "1",
+        },
+    ]
+    foreign = [
+        # Other portals.
+        "https://www.pisos.com/venta/pisos-madrid/",
+        "https://www.fotocasa.es/es/comprar/viviendas/madrid-capital/todas-las-zonas/l",
+        # A Unicaja DETAIL URL — a different `*.do` action, not the search list.
+        "https://unicajainmuebles.com/fichainmueble.do?referencia=0001234854",
+        # A reordered query (owner moved provincia before the fixed prefix) —
+        # the fixed-order grammar can't match it, so it's kept verbatim.
+        "https://unicajainmuebles.com/listadoPromocion.do?provincia=29&definitionName=busqueda",
+        # Trailing newline of an otherwise-valid URL.
+        connector.search_url_grammar.build(
+            {"provincia": "29", "pagina": "1", **default_extras}
+        )
+        + "\n",
+    ]
+    return connector, cases, foreign, parse_only
+
+
+def _solvia_spec() -> tuple[SolviaConnector, list[dict[str, str]], list[str]]:
+    connector = SolviaConnector()
+    cases = [
+        {"provincia": "madrid", "municipio_segment": ""},
+        {"provincia": "malaga", "municipio_segment": "/mijas"},
+        {"provincia": "sevilla", "municipio_segment": ""},
+    ]
+    foreign = [
+        # Other portals.
+        "https://www.pisos.com/venta/pisos-madrid/",
+        "https://www.idealista.com/venta-viviendas/madrid/",
+        # The RENTAL section — the comprar grammar must not parse it (EC-1).
+        "https://www.solvia.es/es/alquiler/viviendas/malaga",
+        # Too many path segments (province + municipio + extra) → no match.
+        "https://www.solvia.es/es/comprar/viviendas/malaga/mijas/extra",
+    ]
+    return connector, cases, foreign
+
+
+def _servihabitat_spec() -> tuple[
+    ServihabitatConnector, list[dict[str, str]], list[str], list[tuple[str, str]]
+]:
+    connector = ServihabitatConnector()
+    cases = [
+        {"province": "madrid"},
+        {"province": "sevilla"},
+        {"province": "malaga"},
+    ]
+    foreign = [
+        # Other portals.
+        "https://www.pisos.com/venta/pisos-madrid/",
+        # A servihabitat listing/detail path with NO query — not the sitemap and
+        # not the (query-bearing) faceted search, so kept verbatim (not rejected).
+        "https://www.servihabitat.com/es/venta/viviendas/madrid/piso-123",
+        # Trailing newline of a valid sitemap URL.
+        "https://www.servihabitat.com/es/sitemap-es-madrid.xml\n",
+    ]
+    rejects = [
+        # The faceted search (any servihabitat.com URL carrying a query) is
+        # robots.txt-disallowed — a hard, reasoned block (issue #495 EC-3).
+        (
+            "https://www.servihabitat.com/es/venta/viviendas/madrid?provincia=madrid",
+            "robots-faceted-search",
+        ),
+        (
+            "https://www.servihabitat.com/es/buscar?operacion=venta&precio=0-200000",
+            "robots-faceted-search",
+        ),
+    ]
+    return connector, cases, foreign, rejects
+
+
 def connector_specs() -> list[
-    tuple[str, SearchUrlGrammar, list[dict[str, str]], list[str], Callable, list]
+    tuple[str, SearchUrlGrammar, list[dict[str, str]], list[str], Callable, list, list]
 ]:
     """Every connector with a published grammar, as
-    `(name, grammar, cases, foreign_urls, build_real, rejects)`. #494–#496
-    append here.
+    `(name, grammar, cases, foreign_urls, build_real, rejects, parse_only)`.
+    `parse_only` (issue #494) are param dicts the grammar must invert but which
+    the connector doesn't itself build (native URL fields); `[]` for connectors
+    without any.
     """
     pisos, pisos_cases, pisos_foreign = _pisos_spec()
     habi, habi_cases, habi_foreign = _habitaclia_spec()
@@ -278,7 +430,11 @@ def connector_specs() -> list[
     rental, rental_cases, rental_foreign = _milanuncios_rental_spec()
     foto, foto_cases, foto_foreign, foto_rejects = _fotocasa_spec()
     foto_r, foto_r_cases, foto_r_foreign, foto_r_rejects = _fotocasa_rental_spec()
-    for c in (pisos, habi, mil, rental, foto, foto_r):
+    dg, dg_cases, dg_foreign = _diglo_spec()
+    uni, uni_cases, uni_foreign, uni_parse_only = _unicaja_spec()
+    sol, sol_cases, sol_foreign = _solvia_spec()
+    servi, servi_cases, servi_foreign, servi_rejects = _servihabitat_spec()
+    for c in (pisos, habi, mil, rental, foto, foto_r, dg, uni, sol, servi):
         assert c.search_url_grammar is not None
     return [
         (
@@ -288,6 +444,7 @@ def connector_specs() -> list[
             pisos_foreign,
             lambda params: pisos._search_url(params["geography"]),
             [],
+            [],
         ),
         (
             "habitaclia",
@@ -295,6 +452,7 @@ def connector_specs() -> list[
             habi_cases,
             habi_foreign,
             lambda params: habi._search_url(params["geography"]),
+            [],
             [],
         ),
         (
@@ -304,6 +462,7 @@ def connector_specs() -> list[
             mil_foreign,
             lambda params: mil._search_url(params["geography"]),
             [],
+            [],
         ),
         (
             "milanuncios_rental",
@@ -311,6 +470,7 @@ def connector_specs() -> list[
             rental_cases,
             rental_foreign,
             lambda params: rental._rental_search_url(params["geography"]),
+            [],
             [],
         ),
         (
@@ -322,6 +482,7 @@ def connector_specs() -> list[
                 params["geography"], params["zone"], params["rooms_segment"]
             ),
             foto_rejects,
+            [],
         ),
         (
             "fotocasa_rental",
@@ -330,6 +491,47 @@ def connector_specs() -> list[
             foto_r_foreign,
             lambda params: foto_r._rental_search_url(params["geography"]),
             foto_r_rejects,
+            [],
+        ),
+        (
+            "diglo",
+            dg.search_url_grammar,
+            dg_cases,
+            dg_foreign,
+            lambda params: dg._search_url(params["province"], int(params["page"])),
+            [],
+            [],
+        ),
+        (
+            "unicaja",
+            uni.search_url_grammar,
+            uni_cases,
+            uni_foreign,
+            lambda params: unicaja._search_url(
+                params["provincia"], int(params["pagina"])
+            ),
+            [],
+            uni_parse_only,
+        ),
+        (
+            "solvia",
+            sol.search_url_grammar,
+            sol_cases,
+            sol_foreign,
+            lambda params: sol._search_url(
+                params["provincia"], params["municipio_segment"]
+            ),
+            [],
+            [],
+        ),
+        (
+            "servihabitat",
+            servi.search_url_grammar,
+            servi_cases,
+            servi_foreign,
+            lambda params: servihabitat._sitemap_url(params["province"]),
+            servi_rejects,
+            [],
         ),
     ]
 
@@ -339,10 +541,10 @@ def grammar_fixture_payload() -> dict:
     grammar plus a battery of `{url, expected}` cases (expected is the param dict
     for a valid URL, None for one the grammar must reject)."""
     connectors = []
-    for name, grammar, cases, foreign, _, rejects in connector_specs():
+    for name, grammar, cases, foreign, _, rejects, parse_only in connector_specs():
         placeholders = grammar.placeholders()
         entries: list[dict] = []
-        for case in cases:
+        for case in (*cases, *parse_only):
             url = grammar.build(case)
             expected = {k: v for k, v in case.items() if k in placeholders}
             entries.append({"url": url, "expected": expected, "reject": None})

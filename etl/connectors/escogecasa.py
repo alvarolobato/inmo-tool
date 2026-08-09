@@ -85,6 +85,7 @@ from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
     RawListing,
+    SearchParam,
     SearchPreview,
     Throttle,
 )
@@ -362,15 +363,79 @@ class EscogecasaConnector(Connector):
         """Non-tunable: discover() POSTs a bounding box to the results loader
         endpoint — it is not a GET URL an owner can open and tune. `_SEARCH_ACTION`
         is exactly the endpoint discover() posts to; the filtering is by data."""
+        # Issue #496: show the real params of the POST — centre, radius, the
+        # DERIVED bounding box (from the SAME `_scope_bbox()`/`bbox_from_center()`
+        # helper discover() uses, so it's numerically identical to what
+        # `_search_data` sends), the search term, and the constant category.
+        try:
+            box = self._scope_bbox(scope)
+        except UnresolvableGeographyError:
+            box = None
+        params: list[SearchParam] = [
+            SearchParam(
+                key="tgs",
+                label="Categoría",
+                value="viviendas",
+                source="constant",
+                in_url=False,
+            ),
+        ]
+        if box is not None:
+            lat, lon, lat_min, lat_max, lng_min, lng_max, term = box
+            radius = scope.radius_km or _DEFAULT_RADIUS_KM
+            params.extend(
+                [
+                    SearchParam(
+                        key="centro",
+                        label="Centro",
+                        value=f"{lat:.6f}, {lon:.6f}",
+                        source="profile",
+                        in_url=False,
+                    ),
+                    SearchParam(
+                        key="radio_km",
+                        label="Radio",
+                        value=f"{radius:g} km",
+                        source="profile" if scope.radius_km else "constant",
+                        in_url=False,
+                        notes=(
+                            None
+                            if scope.radius_km
+                            else f"Radio por defecto del conector ({_DEFAULT_RADIUS_KM:g} km)."
+                        ),
+                    ),
+                    SearchParam(
+                        key="bbox",
+                        label="Bounding box",
+                        # Same :.6f formatting `_search_data` uses, so this is
+                        # exactly the box the POST would carry (issue #496 EC-2).
+                        value=(
+                            f"{lat_min:.6f}…{lat_max:.6f} × {lng_min:.6f}…{lng_max:.6f}"
+                        ),
+                        source="derived",
+                        in_url=False,
+                        notes="Caja calculada con bbox_from_center; ~100 markers máx. por caja.",
+                    ),
+                    SearchParam(
+                        key="term",
+                        label="Término",
+                        value=term or "(vacío)",
+                        source="derived",
+                        in_url=False,
+                    ),
+                ]
+            )
         return [
             SearchPreview(
                 label="Escogecasa (Abanca) — búsqueda por bbox",
                 url=_SEARCH_ACTION,
                 kind="api",
                 tunable=False,
+                params=tuple(params),
                 notes=(
                     "Búsqueda por POST de un bounding box a este endpoint; no es "
-                    "una URL GET afinable — el filtrado es por datos."
+                    "una URL GET afinable — el filtrado es por datos. Cada caja "
+                    "está limitada a ~100 markers."
                 ),
             )
         ]

@@ -94,8 +94,8 @@ describe("getEtlConnectorPreviews", () => {
       rejectReasons: [],
     });
     expect(out[0].previews[0].params).toEqual([
-      { key: "geography", label: "Municipio", value: "sevilla", source: "profile", inUrl: true, notes: null },
-      { key: "operation", label: "Operación", value: "venta", source: "constant", inUrl: true, notes: null },
+      { key: "geography", label: "Municipio", value: "sevilla", source: "profile", inUrl: true, notes: null, consumed: true },
+      { key: "operation", label: "Operación", value: "venta", source: "constant", inUrl: true, notes: null, consumed: true },
     ]);
     expect(out[1]).toMatchObject({ connector: "cimenta2", overrideHostSuffix: null });
     expect(out[1].searchUrlGrammar).toBeNull();

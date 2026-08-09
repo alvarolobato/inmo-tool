@@ -96,6 +96,7 @@ from etl.connectors.base import (
     ConnectorError,
     ConnectorScope,
     RawListing,
+    SearchParam,
     SearchPreview,
     Throttle,
 )
@@ -307,15 +308,75 @@ class BuildingCenterConnector(Connector):
         filters the full catalogue in memory, so there is no per-profile GET
         URL to tune — the filtering is by data. `_SEARCH_URL` is the API
         endpoint discover() calls."""
+        # Issue #496: surface the params that actually govern recall — the same
+        # ones `_resolve_geography_filter()` (discover()'s own helper) computes,
+        # so the chips can't drift. The catalogue is fetched whole and filtered
+        # in memory (the server ignores filter params — the connector's own
+        # finding), by radius around a centre OR by a text needle.
+        try:
+            resolved = _resolve_geography_filter(scope)
+        except UnresolvableGeographyError:
+            resolved = None
+        params: list[SearchParam] = [
+            SearchParam(
+                key="categoria",
+                label="Categoría",
+                value="Viviendas",
+                source="constant",
+                in_url=False,
+            ),
+        ]
+        if resolved is not None and resolved[0] == "radius":
+            center, radius = resolved[1]
+            radius_from_profile = bool(scope.radius_km and scope.radius_km > 0)
+            params.append(
+                SearchParam(
+                    key="centro",
+                    label="Centro",
+                    value=f"{center[0]:.5f}, {center[1]:.5f}",
+                    source="profile",
+                    in_url=False,
+                    notes="Se filtra en memoria por distancia haversine a este centro.",
+                )
+            )
+            params.append(
+                SearchParam(
+                    key="radio_km",
+                    label="Radio",
+                    value=f"{radius:g} km",
+                    # Profile value when the profile sets a positive radius;
+                    # otherwise the connector's baked-in default.
+                    source="profile" if radius_from_profile else "constant",
+                    in_url=False,
+                    notes=(
+                        None
+                        if radius_from_profile
+                        else f"Radio por defecto del conector ({_DEFAULT_RADIUS_KM:g} km)."
+                    ),
+                )
+            )
+        elif resolved is not None and resolved[0] == "text":
+            params.append(
+                SearchParam(
+                    key="texto",
+                    label="Texto",
+                    value=str(resolved[1]),
+                    source="profile",
+                    in_url=False,
+                    notes="Se filtra en memoria por coincidencia de este texto.",
+                )
+            )
         return [
             SearchPreview(
                 label="BuildingCenter — catálogo completo",
                 url=_SEARCH_URL,
                 kind="api",
                 tunable=False,
+                params=tuple(params),
                 notes=(
-                    "Catálogo completo vía API; se filtra en memoria — no hay "
-                    "URL de búsqueda afinable."
+                    "Catálogo completo vía API; el servidor ignora los filtros, "
+                    "se filtra en memoria por radio (o texto) — no hay URL de "
+                    "búsqueda afinable."
                 ),
             )
         ]
