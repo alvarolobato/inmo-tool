@@ -698,11 +698,11 @@ function hideBatchControls() {
 // ─── Capturar URL de búsqueda (issue #475, part of #471) ────────
 
 /**
- * Reveal + wire the "Capturar URL de búsqueda" button when `tab` is an
- * Idealista results page (the drawn-zone `shape=` grammar is Idealista's). On
- * any other page (or none) the button stays hidden — nothing to capture. Uses
- * the shared pure helper (self.InmoSearchUrl) so the host check is identical to
- * the background worker's re-validation.
+ * Reveal + wire the "Capturar URL de búsqueda" button when `tab` is on any
+ * supported capture portal (idealista / aliseda / altamira — #510). On any other
+ * page (or none) the button stays hidden — nothing to capture. Uses the shared
+ * pure helper (self.InmoSearchUrl) so the host check is identical to the
+ * background worker's re-validation.
  */
 function setupSearchUrlCapture(tab) {
   const wrap = $('#capture-search-url-wrap');
@@ -710,9 +710,9 @@ function setupSearchUrlCapture(tab) {
   const btn = $('#capture-search-url-btn');
   status.classList.add('hidden');
   status.textContent = '';
-  const isIdealista =
-    !!tab && !!tab.url && self.InmoSearchUrl.isIdealistaUrl(tab.url);
-  if (!isIdealista) {
+  const isCapturePortal =
+    !!tab && !!tab.url && self.InmoSearchUrl.isCaptureSearchUrl(tab.url);
+  if (!isCapturePortal) {
     wrap.classList.add('hidden');
     return;
   }
@@ -762,7 +762,7 @@ async function onCaptureSearchUrl(tab) {
     title: tab.title,
   });
   if (!payload) {
-    status.textContent = 'La pestaña activa no es una URL de búsqueda de Idealista.';
+    status.textContent = 'La pestaña activa no es una URL de un portal soportado.';
     status.classList.remove('hidden');
     return;
   }

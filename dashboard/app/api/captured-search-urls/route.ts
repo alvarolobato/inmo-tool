@@ -1,14 +1,15 @@
 /**
- * /api/captured-search-urls — Capture + review raw Idealista search URLs
- * (issue #475, part of #471).
+ * /api/captured-search-urls — Capture + review raw search URLs from any capture
+ * portal (issue #475, part of #471; generalized to all capture portals in #510).
  *
  * POST: the browser extension's "Capturar URL de búsqueda" action sends the raw
- *   results-page URL the owner is on (verbatim, including the `shape=` param
- *   that "Dibuja tu zona" encodes the drawn polygon into) + the page title. We
- *   validate it is an idealista.com http(s) URL (rejecting anything else, 400),
- *   derive the portal server-side from the host (never client-claimed), and
- *   persist it. This unblocks #471 P1: reverse-engineering Idealista's polygon
- *   grammar so the platform can decode/re-encode drawn zones.
+ *   results-page URL the owner is on (verbatim, including any `shape=` param that
+ *   Idealista's "Dibuja tu zona" encodes the drawn polygon into) + the page
+ *   title. We validate it is an http(s) URL on a supported capture portal
+ *   (idealista / aliseda / altamira — rejecting anything else, 400), derive the
+ *   portal server-side from the host (never client-claimed), and persist it. For
+ *   idealista this unblocks #471 P1 (its polygon grammar); for aliseda/altamira
+ *   it accrues the corpus each portal's URL grammar is built from (#510 → #514).
  *
  * GET: the admin review surface lists the captured URLs (newest first) so they
  *   can be copied/decoded.
@@ -24,14 +25,13 @@ import {
   sanitizeErrorMessage,
 } from "@/lib/errors";
 import { adminApiKeyValid, adminUnauthorized } from "@/lib/admin-api-auth";
+import { portalForUrl } from "@/lib/worklist";
 import {
   saveCapturedSearchUrl,
   listCapturedSearchUrls,
 } from "@/lib/db/captured-search-url";
 
 const ALLOWED_URL_SCHEMES = new Set(["http:", "https:"]);
-// #475/#471 target Idealista only — the drawn-zone `shape=` grammar is theirs.
-const IDEALISTA_HOST_SUFFIX = "idealista.com";
 // A page title is short; cap it so a malformed/huge value can't bloat a row.
 const MAX_TITLE_LEN = 500;
 
@@ -40,12 +40,6 @@ interface Body {
   title?: unknown;
   capturedAt?: unknown; // accepted for parity with the extension payload; unused (server timestamps).
   notes?: unknown;
-}
-
-/** True when `url` is a valid http(s) URL on idealista.com (or a subdomain). */
-function isIdealistaUrl(parsed: URL): boolean {
-  const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
-  return host === IDEALISTA_HOST_SUFFIX || host.endsWith("." + IDEALISTA_HOST_SUFFIX);
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -87,9 +81,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  if (!isIdealistaUrl(parsedUrl)) {
+  // Derive the portal from the host (never client-claimed); reject any host that
+  // isn't a supported capture portal (idealista / aliseda / altamira).
+  const portal = portalForUrl(url);
+  if (!portal) {
     return NextResponse.json(
-      formatApiError("'url' debe ser una URL de idealista.com.", "VALIDATION", undefined, requestId),
+      formatApiError(
+        "'url' debe ser de un portal soportado (idealista, aliseda o altamira).",
+        "VALIDATION",
+        undefined,
+        requestId,
+      ),
       { status: 400 },
     );
   }
@@ -100,11 +102,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     typeof body.notes === "string" ? body.notes.trim().slice(0, MAX_TITLE_LEN) : null;
 
   try {
-    const saved = await saveCapturedSearchUrl("idealista", url, title, notes);
+    const saved = await saveCapturedSearchUrl(portal, url, title, notes);
     return NextResponse.json({
       success: true,
       id: saved.id,
-      portal: "idealista",
+      portal,
       captured_at: saved.captured_at,
     });
   } catch (err) {

@@ -72,20 +72,43 @@ describe("POST /api/captured-search-urls", () => {
     expect(mockSql).not.toHaveBeenCalled();
   });
 
-  it("400 on a non-idealista URL", async () => {
+  it("400 on a non-portal host", async () => {
     const res = await POST(
-      postReq({ url: "https://www.alisedainmobiliaria.com/venta?zona=x" }, { adminKey: ADMIN_KEY }),
+      postReq({ url: "https://www.example.com/venta?zona=x" }, { adminKey: ADMIN_KEY }),
     );
     expect(res.status).toBe(400);
     expect(mockSql).not.toHaveBeenCalled();
   });
 
-  it("400 on a look-alike host that only ends near idealista.com", async () => {
+  it("400 on a look-alike host that only ends near a portal domain", async () => {
     const res = await POST(
       postReq({ url: "https://idealista.com.evil.example/x" }, { adminKey: ADMIN_KEY }),
     );
     expect(res.status).toBe(400);
     expect(mockSql).not.toHaveBeenCalled();
+  });
+
+  it("persists an aliseda URL (portal derived from host)", async () => {
+    mockSql.mockResolvedValue([{ id: 9, captured_at: "2026-08-08T10:00:00.000Z" }]);
+    const url = "https://www.alisedainmobiliaria.com/comprar-viviendas/malaga";
+    const res = await POST(postReq({ url }, { adminKey: ADMIN_KEY }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ success: true, portal: "aliseda" });
+    const params = mockSql.mock.calls[0][1] as unknown[];
+    expect(params[0]).toBe("aliseda");
+    expect(params[1]).toBe(url);
+  });
+
+  it("persists an altamira URL (portal derived from host)", async () => {
+    mockSql.mockResolvedValue([{ id: 10, captured_at: "2026-08-08T10:00:00.000Z" }]);
+    const url = "https://www.altamirainmuebles.com/venta-viviendas/pontevedra/";
+    const res = await POST(postReq({ url }, { adminKey: ADMIN_KEY }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ success: true, portal: "altamira" });
+    const params = mockSql.mock.calls[0][1] as unknown[];
+    expect(params[0]).toBe("altamira");
   });
 
   it("persists a valid idealista shape= URL (portal derived, title trimmed)", async () => {

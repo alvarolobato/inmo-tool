@@ -1968,7 +1968,7 @@ ALTER TABLE search_url_example ADD COLUMN IF NOT EXISTS last_result_count INTEGE
 CREATE TABLE IF NOT EXISTS captured_search_urls (
     id           BIGSERIAL    PRIMARY KEY,
     -- Portal derived server-side from the URL host (never client-claimed).
-    -- Today always 'idealista' (the only portal with a drawn-zone grammar).
+    -- One of the capture portals: 'idealista' | 'aliseda' | 'altamira' (#510).
     portal       TEXT         NOT NULL,
     -- The search URL exactly as captured (shape= and all).
     url          TEXT         NOT NULL,
@@ -2000,7 +2000,7 @@ CREATE INDEX IF NOT EXISTS idx_captured_search_urls_recent
 CREATE TABLE IF NOT EXISTS observed_search_urls (
     id           BIGSERIAL    PRIMARY KEY,
     -- Portal derived server-side from the URL host (never client-claimed).
-    -- Today always 'idealista' (the only portal with a drawn-zone grammar).
+    -- One of the capture portals: 'idealista' | 'aliseda' | 'altamira' (#510).
     portal       TEXT         NOT NULL,
     -- The search URL exactly as observed (shape= and all), latest sighting.
     url          TEXT         NOT NULL,

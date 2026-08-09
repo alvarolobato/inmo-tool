@@ -75,15 +75,51 @@ describe("POST /api/observed-search-urls", () => {
     expect(mockSql).not.toHaveBeenCalled();
   });
 
-  it("400 on a non-idealista URL and a look-alike host", async () => {
+  it("400 on a non-portal host, a look-alike host and a bad scheme", async () => {
     for (const url of [
-      "https://www.alisedainmobiliaria.com/comprar-viviendas/",
+      "https://www.example.com/venta-viviendas/",
       "https://idealista.com.evil.example/venta-viviendas/",
       "javascript://idealista.com/venta-viviendas/",
     ]) {
       const res = await POST(postReq({ url }, { adminKey: ADMIN_KEY }));
       expect(res.status).toBe(400);
     }
+    expect(mockSql).not.toHaveBeenCalled();
+  });
+
+  it("upserts an aliseda observable URL (portal derived from host)", async () => {
+    mockSql.mockResolvedValue([
+      { id: 11, seen_count: 1, first_seen: "x", last_seen: "y" },
+    ]);
+    const url = "https://www.alisedainmobiliaria.com/comprar-viviendas/malaga?b=2&a=1";
+    const res = await POST(postReq({ url }, { adminKey: ADMIN_KEY }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ success: true, portal: "aliseda" });
+    const params = mockSql.mock.calls[0][1] as unknown[];
+    expect(params[0]).toBe("aliseda");
+    expect(params[1]).toBe(url); // verbatim
+    expect(params[2]).toBe("alisedainmobiliaria.com/comprar-viviendas/malaga?a=1&b=2");
+  });
+
+  it("upserts an altamira observable (non-detail) URL", async () => {
+    mockSql.mockResolvedValue([
+      { id: 12, seen_count: 1, first_seen: "x", last_seen: "y" },
+    ]);
+    const url = "https://www.altamirainmuebles.com/venta-viviendas/pontevedra/";
+    const res = await POST(postReq({ url }, { adminKey: ADMIN_KEY }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ success: true, portal: "altamira" });
+    const params = mockSql.mock.calls[0][1] as unknown[];
+    expect(params[0]).toBe("altamira");
+  });
+
+  it("400 on an altamira DETAIL page (not an observable search URL)", async () => {
+    const url =
+      "https://www.altamirainmuebles.com/venta-de-atico/pontevedra/sanxenxo/segunda-mano/9186_1001_PE0001/375859/1";
+    const res = await POST(postReq({ url }, { adminKey: ADMIN_KEY }));
+    expect(res.status).toBe(400);
     expect(mockSql).not.toHaveBeenCalled();
   });
 
