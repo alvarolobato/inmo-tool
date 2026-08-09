@@ -18,6 +18,8 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getExtensionStatus } from "@/lib/db/extension-status";
+import { readServedExtensionVersion } from "@/lib/extension-served-version";
+import type { ExtensionStatusResponse } from "@/lib/extension-status";
 import { adminApiKeyValid, adminUnauthorized } from "@/lib/admin-api-auth";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
@@ -31,8 +33,15 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
 
   try {
-    const status = await getExtensionStatus();
-    return NextResponse.json(status, { headers: { "Cache-Control": "no-store" } });
+    // Heartbeat status (DB) + the version we currently serve (filesystem). The
+    // served version lets the CTA prompt an update while linked (#527); reading
+    // it never throws, so a missing version file just yields servedVersion:null.
+    const [status, servedVersion] = await Promise.all([
+      getExtensionStatus(),
+      readServedExtensionVersion(),
+    ]);
+    const body: ExtensionStatusResponse = { ...status, servedVersion };
+    return NextResponse.json(body, { headers: { "Cache-Control": "no-store" } });
   } catch (err) {
     console.error(`[${requestId}] No se pudo leer el estado de la extensión:`, err);
     return NextResponse.json(
