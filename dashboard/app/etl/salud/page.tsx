@@ -32,6 +32,8 @@ import {
 } from "@/lib/data-health";
 import { getLlmEndpointMetaEs } from "@/lib/llm-endpoint-meta";
 import type { LlmHealthResponse } from "@/lib/llm-health";
+import { DriftReport } from "@/components/etl/DriftReport";
+import type { PortalDriftStatus } from "@/lib/search-url/drift-check";
 
 // ─── Formatters ──────────────────────────────────────────────────────────────
 
@@ -538,6 +540,111 @@ function StaleProfilesSection({
   );
 }
 
+// ─── Portal filter-drift section (issue #511) ────────────────────────────────
+
+/**
+ * "Deriva de portales" — the aliseda static drift check that used to live on
+ * the retired Descubrimiento tab, now surfaced here (issue #511). Each portal
+ * shows its last-check timestamp and the green "sin deriva" / red drift detail
+ * via the shared {@link DriftReport}. A weekly scheduler keeps it fresh; the
+ * per-portal "Comprobar ahora" runs the same static extractor on demand.
+ */
+function PortalDriftSection({
+  reports,
+  onRefetch,
+}: {
+  reports: PortalDriftStatus[];
+  onRefetch: () => void;
+}) {
+  const [checking, setChecking] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const checkNow = useCallback(
+    async (connector: string) => {
+      setChecking(connector);
+      setError(null);
+      try {
+        const res = await fetch(
+          `/api/etl/discovery/${encodeURIComponent(connector)}/refresh`,
+          { method: "POST" },
+        );
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          setError(
+            isApiErrorResponse(body) ? body.error : "No se pudo comprobar la deriva ahora.",
+          );
+          return;
+        }
+        onRefetch();
+      } catch {
+        setError("No se pudo comprobar la deriva ahora.");
+      } finally {
+        setChecking(null);
+      }
+    },
+    [onRefetch],
+  );
+
+  return (
+    <section className="space-y-3" data-testid="portal-drift">
+      <div>
+        <SectionTitle>Deriva de portales</SectionTitle>
+        <p className="mt-1 text-sm text-tremor-content dark:text-dark-tremor-content">
+          Compara las opciones de filtro que publica cada portal con el mapeo del
+          código y avisa cuando hay deriva, para que actualices el mapeo a mano.
+          La comprobación se ejecuta sola cada semana; la construcción de URLs
+          sigue siendo 100% del código.
+        </p>
+      </div>
+
+      {error && (
+        <p className="text-xs" style={{ color: "var(--danger, #b91c1c)" }} data-testid="portal-drift-error">
+          {error}
+        </p>
+      )}
+
+      {reports.length === 0 ? (
+        <EmptyRow testId="portal-drift-empty">
+          No hay portales con comprobación de deriva configurada.
+        </EmptyRow>
+      ) : (
+        <div className="space-y-3">
+          {reports.map((r) => (
+            <Card key={r.connector} className="space-y-3 p-4" data-testid={`portal-drift-${r.connector}`}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="font-semibold text-tremor-content-strong dark:text-dark-tremor-content-strong">
+                  {r.connector}
+                  <span className="ml-2 text-xs font-normal text-tremor-content-subtle dark:text-dark-tremor-content-subtle">
+                    última comprobación: {r.capturedAt ? formatRelative(r.capturedAt) : "nunca"}
+                  </span>
+                </p>
+                <button
+                  type="button"
+                  data-testid={`portal-drift-check-${r.connector}`}
+                  onClick={() => void checkNow(r.connector)}
+                  disabled={checking !== null}
+                  className="rounded-md border px-3 py-1.5 text-xs font-medium disabled:opacity-60"
+                  style={{ borderColor: "var(--border)", color: "var(--accent)" }}
+                >
+                  {checking === r.connector ? "Comprobando…" : "Comprobar ahora"}
+                </button>
+              </div>
+              {r.drift && r.drift.hasCatalog ? (
+                <DriftReport drift={r.drift} />
+              ) : (
+                <EmptyRow testId={`portal-drift-nocatalog-${r.connector}`}>
+                  Aún no se ha capturado ningún catálogo para «{r.connector}». Pulsa
+                  «Comprobar ahora» para ejecutar el extractor estático.
+                </EmptyRow>
+              )}
+            </Card>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 // ─── LLM / IA cost + usage section (issue #324) ──────────────────────────────
 
 function Stat({
@@ -877,20 +984,38 @@ function Skeleton() {
 export default function DataHealthPage() {
   const [data, setData] = useState<DataHealthResponse | null>(null);
   const [llm, setLlm] = useState<LlmHealthResponse | null>(null);
+  const [drift, setDrift] = useState<PortalDriftStatus[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<ApiErrorResponse | string | null>(null);
+
+  // Portal-drift reports (#511) — additive, fetched independently so a failure
+  // never takes down the health page (the section simply doesn't render).
+  const fetchDrift = useCallback(async () => {
+    try {
+      const res = await fetch("/api/etl/drift-reports");
+      if (!res.ok) {
+        setDrift(null);
+        return;
+      }
+      const body = await res.json();
+      setDrift((body.reports ?? []) as PortalDriftStatus[]);
+    } catch {
+      setDrift(null);
+    }
+  }, []);
 
   const fetchHealth = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      // Two independent read-only aggregates. The LLM panel is additive — a
-      // failure there must not take down the capture/ETL health page, so its
-      // error is swallowed (the section simply doesn't render) rather than
+      // Independent read-only aggregates. The LLM + drift panels are additive —
+      // a failure there must not take down the capture/ETL health page, so their
+      // errors are swallowed (the section simply doesn't render) rather than
       // surfaced as a page-level error.
-      const [res, llmRes] = await Promise.all([
+      const [res, llmRes, driftRes] = await Promise.all([
         fetch("/api/etl/data-health"),
         fetch("/api/etl/llm-health").catch(() => null),
+        fetch("/api/etl/drift-reports").catch(() => null),
       ]);
       if (!res.ok) {
         const body = await res.json().catch(() => null);
@@ -902,6 +1027,12 @@ export default function DataHealthPage() {
         setLlm((await llmRes.json()) as LlmHealthResponse);
       } else {
         setLlm(null);
+      }
+      if (driftRes && driftRes.ok) {
+        const body = await driftRes.json();
+        setDrift((body.reports ?? []) as PortalDriftStatus[]);
+      } else {
+        setDrift(null);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error al cargar la salud de datos");
@@ -946,6 +1077,7 @@ export default function DataHealthPage() {
         <div className="space-y-8">
           <ConnectorHealthSection rows={data.connectors} />
           <ZeroResultRegressionSection rows={data.zero_result_regressions} />
+          {drift && <PortalDriftSection reports={drift} onRefetch={fetchDrift} />}
           <PortalHealthSection rows={data.portals} />
           <SourceQualitySection rows={data.sources} />
           <StaleProfilesSection

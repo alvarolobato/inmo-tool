@@ -18,6 +18,7 @@ import {
   type ObservedSearchUrlRow,
 } from "@/lib/db/observed-search-url";
 import { observedUrlType, shapeVertexCount } from "@/lib/observed-search-url";
+import { ExtensionCta } from "@/components/extension/ExtensionCta";
 
 export const metadata = {
   title: "URLs de búsqueda capturadas — Admin",
@@ -85,6 +86,10 @@ export default async function AdminCapturedUrlsPage() {
         que codifica la zona dibujada (&quot;Dibuja tu zona&quot;) — la base para
         decodificar/re-codificar zonas geográficas (#471).
       </p>
+
+      {/* Inline install/link CTA (#509): capturing search URLs needs the
+          extension linked — shown only while it isn't. */}
+      <ExtensionCta context="captured-urls" />
 
       <section className="grid gap-4 sm:grid-cols-2">
         <div className="rounded-lg border border-tremor-border dark:border-dark-tremor-border p-4">

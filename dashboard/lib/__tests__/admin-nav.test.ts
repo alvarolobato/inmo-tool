@@ -49,10 +49,10 @@ describe("ADMIN_NAV — shared nav source (#508)", () => {
     expect(llm?.matchPrefixes).toEqual(ADMIN_LLM_SUBPAGES.map((s) => s.href));
   });
 
-  it("keeps Extensión/Descubrimiento pending removal by #509/#511 (not deleted here)", () => {
+  it("has removed the Extensión (#509) and Descubrimiento (#511) tabs", () => {
     const byHref = new Map(ADMIN_NAV.map((i) => [i.href, i]));
-    expect(byHref.get("/etl/extension")?.pendingRemoval).toBe("#509");
-    expect(byHref.get("/etl/discovery")?.pendingRemoval).toBe("#511");
+    expect(byHref.has("/etl/extension")).toBe(false);
+    expect(byHref.has("/etl/discovery")).toBe(false);
   });
 
   it("both consumers render from ADMIN_NAV (no local nav arrays left)", () => {

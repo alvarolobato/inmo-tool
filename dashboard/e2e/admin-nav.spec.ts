@@ -13,8 +13,9 @@
  *   - visiting an LLM sub-route (`/admin/usage`) highlights the single LLM tab;
  *   - no error surface anywhere (the D-041 bar).
  *
- * Extensión and Descubrimiento remain in the strip on purpose — their removal
- * is owned by #509 / #511. This spec asserts the exact set THIS issue ships.
+ * Extensión (#509) and Descubrimiento (#511) have now been removed — their
+ * function moved to inline CTAs / Salud de datos. The strip is down to its
+ * intended 9-tab set, asserted here.
  *
  * Admin-gated (middleware gates every UI page on the ps_admin cookie), so the
  * test seeds that cookie like /admin/login does. Skips cleanly when Postgres is
@@ -24,15 +25,13 @@ import { test, expect } from "@playwright/test";
 import { Pool } from "pg";
 import { adminKey, seedAdminSession } from "./helpers/admin-session";
 
-// The tabs THIS issue ships, in strip order. Extensión + Descubrimiento are
-// still present pending #509 / #511.
+// The tabs the admin strip ships, in strip order. Extensión + Descubrimiento
+// were removed by #509 / #511.
 const EXPECTED_STRIP_LABELS = [
   "Monitor ETL",
   "Conectores",
   "Captura (admin)",
-  "Descubrimiento",
   "Salud de datos",
-  "Extensión",
   "URLs capturadas",
   "Clasificación",
   "Duplicados",
@@ -48,6 +47,9 @@ const REMOVED_STRIP_LABELS = [
   "Herramientas LLM",
   "Uso LLM",
   "Interacciones",
+  // Removed by #509 / #511.
+  "Extensión",
+  "Descubrimiento",
 ];
 
 function buildPool(): Pool {

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { CapturaProfiles } from "@/components/captura/CapturaProfiles";
+import { ExtensionCta } from "@/components/extension/ExtensionCta";
 import { listActiveProfiles } from "@/lib/db/profiles";
 import { resolveSearchTasks } from "@/lib/search-url/resolve";
 import { getTaskRuns, getProfileConnectorCaptured } from "@/lib/db/capture-task-run";
@@ -74,13 +75,11 @@ export default async function CapturaPage() {
       {/* Header */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <h1 style={{ fontSize: 22, fontWeight: 700, color: "var(--fg)", margin: 0 }}>Captura</h1>
-        <Link
-          href="/etl/extension"
-          data-testid="captura-setup-link"
-          style={{ fontSize: 13, color: "var(--accent)", textDecoration: "none", marginLeft: "auto" }}
-        >
-          ¿Primera vez? Instalar la extensión →
-        </Link>
+        {/* Inline install/link CTA (#509) — shown only while the extension is
+            not linked; replaces the old static "¿Primera vez?" setup link. */}
+        <div style={{ marginLeft: "auto" }}>
+          <ExtensionCta context="captura" />
+        </div>
       </div>
       <p style={{ fontSize: 13, color: "var(--fg-muted)", marginTop: 8, lineHeight: 1.5 }}>
         Todos tus perfiles, uno debajo de otro. Bajo cada perfil, sus conectores: los que{" "}

@@ -6,9 +6,12 @@
  * category sitemap + the Angular app bundle's slug map), which are GET-able
  * server-side even though Aliseda's SPA defeats a browser DOM scrape. This route
  * fetches + parses them into a `CatalogAxes`, writes a `portal_filter_catalog`
- * row (source `static-asset`), and returns the freshly computed drift so the
- * /etl/discovery "Comprobar deriva" button can flag ADDED/REMOVED/CHANGED vs the
- * code mapping. URL building stays 100% code-driven (D-090) — this only detects.
+ * row (source `static-asset`), and returns the freshly computed drift.
+ *
+ * Since #511 the extract+save+diff logic lives in the shared `runDriftCheck`
+ * helper (lib/search-url/drift-check.ts) so this route, the weekly scheduler, and
+ * the "Comprobar ahora" button on Salud de datos all run the exact same check.
+ * URL building stays 100% code-driven (D-090) — this only detects.
  *
  * Only `aliseda` has a static extractor today; other connectors → 400. Mounted
  * under /api/etl so it inherits the admin gating middleware.ts applies.
@@ -21,19 +24,11 @@
  */
 
 import { NextResponse } from "next/server";
-import { extractAlisedaStaticCatalog } from "@/lib/search-url/aliseda-static";
-import { saveFilterCatalog } from "@/lib/db/portal-filter-catalog";
-import { codeMappingForPortal } from "@/lib/search-url";
-import { computePortalDrift } from "@/lib/search-url/drift";
+import { runDriftCheck, STATIC_EXTRACTORS } from "@/lib/search-url/drift-check";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
 // Fetches the live portal per request; never prerender.
 export const dynamic = "force-dynamic";
-
-/** Connectors with a server-side static-asset extractor. */
-const STATIC_EXTRACTORS: Record<string, () => ReturnType<typeof extractAlisedaStaticCatalog>> = {
-  aliseda: () => extractAlisedaStaticCatalog(),
-};
 
 export async function POST(
   _request: Request,
@@ -42,8 +37,7 @@ export async function POST(
   const requestId = generateRequestId();
   const { connector } = await params;
 
-  const extractor = STATIC_EXTRACTORS[connector];
-  if (!extractor) {
+  if (!STATIC_EXTRACTORS[connector]) {
     return NextResponse.json(
       formatApiError(
         `El conector «${connector}» no tiene un extractor de activos estáticos.`,
@@ -56,40 +50,18 @@ export async function POST(
   }
 
   try {
-    const { axes, bundleUrl } = await extractor();
-
-    const capturedAt = new Date().toISOString();
-    let saved: { id: number; optionsCount: number };
-    try {
-      saved = await saveFilterCatalog({ connector, source: "static-asset", axes, capturedAt });
-    } catch (dbErr) {
-      console.error(`[${requestId}] No se pudo guardar el catálogo estático de «${connector}»:`, dbErr);
-      return NextResponse.json(
-        formatApiError(
-          "No se pudo guardar el catálogo de filtros. Inténtalo de nuevo.",
-          "DB_QUERY",
-          sanitizeErrorMessage(dbErr),
-          requestId,
-        ),
-        { status: 500 },
-      );
-    }
-
-    const codeMapping = codeMappingForPortal(connector);
-    const drift = codeMapping ? computePortalDrift(connector, axes, codeMapping) : null;
-
+    const result = await runDriftCheck(connector);
     return NextResponse.json({
-      connector,
-      source: "static-asset",
-      captured_at: capturedAt,
-      bundle_url: bundleUrl,
-      options_count: saved.optionsCount,
-      drift,
+      connector: result.connector,
+      source: result.source,
+      captured_at: result.capturedAt,
+      bundle_url: result.bundleUrl,
+      options_count: result.optionsCount,
+      drift: result.drift,
     });
   } catch (err) {
     // A fetch/parse failure (WAF block, moved asset, bundle regex miss) — surface
-    // it as an upstream error rather than a 500 so the operator knows to retry /
-    // fall back to the extension fetch.
+    // it as an upstream error rather than a 500 so the operator knows to retry.
     console.error(`[${requestId}] Fallo al extraer activos estáticos de «${connector}»:`, err);
     return NextResponse.json(
       formatApiError(

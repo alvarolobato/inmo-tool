@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { ErrorDisplay } from "@/components/ErrorDisplay";
 import { ConnectorCard } from "@/components/connectors/ConnectorCard";
+import { ExtensionCta } from "@/components/extension/ExtensionCta";
 import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
 import type { ConnectorConfigPatch, ConnectorView } from "@/lib/connectors-schema";
@@ -96,6 +97,12 @@ export default function ConnectorsPage() {
           <ErrorDisplay error={error} />
         </div>
       )}
+
+      {/* Inline install/link CTA (#509): the "solo captura" connectors depend on
+          the extension being linked — shown only while it isn't. */}
+      <div style={{ marginTop: 16 }}>
+        <ExtensionCta context="connectors" />
+      </div>
 
       {/* Only show the full-page spinner on the FIRST load. A refetch after a
           PATCH (toggle/scope/rooms) must keep the existing rows mounted —

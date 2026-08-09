@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ErrorDisplay } from "@/components/ErrorDisplay";
+import { ExtensionCta } from "@/components/extension/ExtensionCta";
 import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
 import {
@@ -262,6 +263,12 @@ export default function CapturaWorklistPage() {
           <ErrorDisplay error={error} />
         </div>
       )}
+
+      {/* Inline install/link CTA (#509) — a banner shown only while the
+          extension is not linked; the whole worklist depends on it. */}
+      <div style={{ marginTop: 16 }}>
+        <ExtensionCta context="worklist" />
+      </div>
 
       {/* ── Human-paced "Siguiente" advance ──────────────────────────── */}
       <section style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>

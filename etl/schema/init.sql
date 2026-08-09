@@ -1678,6 +1678,22 @@ ALTER TABLE extension_capture DROP CONSTRAINT IF EXISTS extension_capture_status
 ALTER TABLE extension_capture ADD CONSTRAINT extension_capture_status_check
     CHECK (status IN ('pending','done','failed','listing'));
 
+-- Browser-extension presence heartbeat (issue #509). The dashboard origin can
+-- NOT be injected into by the extension (its manifest host_permissions cover
+-- only the three portal hosts), so presence is SERVER-MEDIATED: the extension
+-- fire-and-forget POSTs /api/extension/heartbeat on worker spawn and on its
+-- periodic watchdog tick, and every capture-dependent surface reads the last
+-- seen timestamp to decide whether to show an "instalar/vincular la extensión"
+-- CTA. A single row (id is pinned to 1) — we only care about the latest ping.
+-- Idempotent CREATE TABLE IF NOT EXISTS — safe to re-run on every boot.
+CREATE TABLE IF NOT EXISTS extension_heartbeat (
+    id           SMALLINT     PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    last_seen_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    -- The extension's manifest version at ping time (chrome.runtime.getManifest),
+    -- shown next to the "vinculada" state. Nullable: an old build may not send it.
+    version      TEXT
+);
+
 -- One-time migration (issue #292): drop the per-sweep 'disabled via
 -- connector_config' rows that issue #99 wrote to connector_run_results for
 -- every disabled connector on every sweep (~63 rows / 8 connectors). A
