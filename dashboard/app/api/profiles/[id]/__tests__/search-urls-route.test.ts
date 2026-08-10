@@ -78,6 +78,11 @@ describe("GET /api/profiles/[id]/search-urls", () => {
     expect(idealista.url).toContain("idealista.com/areas/venta-viviendas");
     expect(idealista.url).toContain("/mapa-google?shape=%28%28");
     expect(idealista.url).toContain("precio-hasta_250000");
+    // #529: the task keeps its canonical MAP url (display + pin, D-101) but also
+    // exposes a listing captureUrl — the map segment stripped, shape= preserved.
+    expect(idealista.captureUrl).not.toContain("/mapa-google");
+    expect(idealista.captureUrl).toContain("idealista.com/areas/venta-viviendas");
+    expect(new URL(idealista.captureUrl).search).toBe(new URL(idealista.url).search);
   });
 
   it("400 on a non-numeric id", async () => {

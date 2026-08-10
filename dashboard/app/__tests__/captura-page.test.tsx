@@ -22,7 +22,9 @@ import {
  */
 
 function mkTask(id: string, portal: string, url: string): CaptureTask {
-  return { id, portal, label: `${portal} · ${id}`, url, loosened: [] };
+  // captureUrl defaults to url (no map-view) — #529; a map task would pass a
+  // distinct listing form explicitly.
+  return { id, portal, label: `${portal} · ${id}`, url, captureUrl: url, loosened: [] };
 }
 
 function mkTaskView(task: CaptureTask, opts: { muted: boolean }): ConnectorTaskView {

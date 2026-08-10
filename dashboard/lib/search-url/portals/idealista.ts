@@ -200,6 +200,9 @@ function buildTask(
       scope.priceMax,
     ),
     url,
+    // captureUrl is recomputed from the FINAL url by resolveSearchTasks (#529);
+    // the builder default keeps buildSearchUrls() output a valid SearchTask.
+    captureUrl: url,
     loosened,
   };
 }

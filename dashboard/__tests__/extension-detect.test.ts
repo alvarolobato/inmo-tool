@@ -28,6 +28,7 @@ const {
   pageRoleForUrl,
   extractDetailUrls,
   captureSignalPresent,
+  withCaptureSignal,
   stripCaptureSignal,
   validateSignalPayload,
   validateSignalPresent,
@@ -60,6 +61,7 @@ const {
   pageRoleForUrl: (u: string) => "detail" | "listing" | "other" | null;
   extractDetailUrls: (hrefs: unknown, portal?: string) => string[];
   captureSignalPresent: (u: string) => boolean;
+  withCaptureSignal: (u: string) => string;
   stripCaptureSignal: (u: string) => string;
   validateSignalPayload: (u: string) => { profileId: number; connector: string } | null;
   validateSignalPresent: (u: string) => boolean;
@@ -72,10 +74,21 @@ const {
   listingCaptureAction: (
     u: string,
     detailUrls: unknown,
-  ) => { action: "none" | "autostart" | "banner"; portal?: string; count?: number };
+  ) => {
+    action: "none" | "autostart" | "banner" | "convert";
+    portal?: string;
+    count?: number;
+    listingUrl?: string;
+  };
   buildCaptureBanner: (
     doc: Document,
-    opts: { count?: number; onCapture?: () => void; onDismiss?: () => void },
+    opts: {
+      count?: number;
+      label?: string;
+      buttonText?: string;
+      onCapture?: () => void;
+      onDismiss?: () => void;
+    },
   ) => HTMLElement | null;
   RESULTS_PAGE_CAP: number;
   currentResultsPage: (u: string) => number;
@@ -809,9 +822,52 @@ describe("listingCaptureAction — what the content script should do", () => {
     });
   });
 
-  it("does nothing on a listing page with zero harvested detail URLs", () => {
+  it("does nothing on a NON-map listing page with zero harvested detail URLs", () => {
+    // Card-view listing with no map segment: toListingUrl is a no-op → none.
     expect(listingCaptureAction(`${LISTING}#inmo-capture`, [])).toEqual({ action: "none" });
     expect(listingCaptureAction(LISTING, undefined)).toEqual({ action: "none" });
+  });
+
+  it("#529: converts a map-view search (zero anchors) to the listing form", () => {
+    const MAP =
+      "https://www.idealista.com/areas/venta-viviendas/con-precio-hasta_700000/mapa-google?shape=%28%28abc%29%29";
+    const v = listingCaptureAction(MAP, []);
+    expect(v.action).toBe("convert");
+    expect(v.portal).toBe("idealista");
+    expect(v.listingUrl).not.toContain("/mapa-google");
+    // shape= query preserved byte-for-byte between the map and listing forms.
+    expect(new URL(v.listingUrl!).search).toBe(new URL(MAP).search);
+  });
+
+  it("#529: convert survives the capture signal on the map URL (hash rides along)", () => {
+    const MAP =
+      "https://www.idealista.com/areas/venta-viviendas/mapa-google?shape=%28%28abc%29%29#inmo-capture";
+    const v = listingCaptureAction(MAP, []);
+    expect(v.action).toBe("convert");
+    expect(v.listingUrl).toContain("#inmo-capture");
+  });
+});
+
+describe("withCaptureSignal — tag a URL for extension auto-start (#529)", () => {
+  it("adds the #inmo-capture fragment when the URL has none", () => {
+    expect(withCaptureSignal("https://www.idealista.com/areas/venta-viviendas/?shape=x")).toBe(
+      "https://www.idealista.com/areas/venta-viviendas/?shape=x#inmo-capture",
+    );
+  });
+
+  it("is idempotent (already-tagged URL unchanged)", () => {
+    const tagged = "https://www.idealista.com/areas/venta-viviendas/?shape=x#inmo-capture";
+    expect(withCaptureSignal(tagged)).toBe(tagged);
+  });
+
+  it("falls back to the ?inmo-capture query when a foreign fragment is present", () => {
+    const out = withCaptureSignal("https://www.idealista.com/areas/venta-viviendas/?shape=x#foo");
+    expect(out).toContain("inmo-capture=1");
+    expect(out).toContain("#foo");
+  });
+
+  it("returns an unparseable URL untouched", () => {
+    expect(withCaptureSignal("not a url")).toBe("not a url");
   });
 });
 

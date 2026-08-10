@@ -17,8 +17,10 @@ vi.mock("@/lib/db/profile-connector-filter", () => ({
 }));
 
 import { resolveSearchTasks, AREA_MATCH_KM } from "@/lib/search-url/resolve";
+import { toCaptureUrl } from "@/lib/search-url/capture-url";
 import { idealistaBuilder, idealistaParser } from "@/lib/search-url/portals/idealista";
 import { alisedaBuilder, alisedaParser } from "@/lib/search-url/portals/aliseda";
+import type { SearchTask } from "@/lib/search-url/types";
 import { decodeShapeValue, polygonCentroid } from "@/lib/search-url/geo";
 import { haversineKm } from "@/lib/search-url/parse-shared";
 import { fallbackTaskId } from "@/lib/captura-tasks";
@@ -102,6 +104,15 @@ function idealistaTask(tasks: Awaited<ReturnType<typeof resolveSearchTasks>>) {
   return tasks.find((t) => t.portal === "idealista")!;
 }
 
+/**
+ * The resolver derives each task's `captureUrl` from its FINAL url (issue #529),
+ * so a builder-output snapshot must have captureUrl recomputed the same way
+ * before comparing (the builder default is the map form; the resolver strips it).
+ */
+function withCaptureUrls(tasks: SearchTask[]): SearchTask[] {
+  return tasks.map((t) => ({ ...t, captureUrl: toCaptureUrl(t.portal, t.url) }));
+}
+
 describe("resolveSearchTasks — capture-to-infer tiers", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -171,7 +182,9 @@ describe("resolveSearchTasks — capture-to-infer tiers", () => {
     const s = scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>);
     const tasks = await resolveSearchTasks(s, PROFILE_ID);
     const canonical: CanonicalSearchScope = { center: ESTEPONA, radiusKm: 8, propertyTypes: ["piso"], priceMax: 180000 };
-    expect(tasks).toEqual([...idealistaBuilder.build(canonical), ...alisedaBuilder.build(canonical)]);
+    expect(tasks).toEqual(
+      withCaptureUrls([...idealistaBuilder.build(canonical), ...alisedaBuilder.build(canonical)]),
+    );
   });
 
   it("tier 1 works for aliseda too (exact section + province slug)", async () => {
@@ -209,6 +222,23 @@ describe("resolveSearchTasks — capture-to-infer tiers", () => {
 
   it("AREA_MATCH_KM is a coarse, non-trivial radius", () => {
     expect(AREA_MATCH_KM).toBeGreaterThan(0);
+  });
+
+  it("#529: sets captureUrl to the LISTING form for the idealista map task, = url for aliseda", async () => {
+    withExamples({});
+    const tasks = await resolveSearchTasks(scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>), PROFILE_ID);
+
+    const ideal = idealistaTask(tasks);
+    // url stays the canonical map form (display + pin, D-101)…
+    expect(ideal.url).toContain("/mapa-google?shape=");
+    // …captureUrl strips /mapa-google (the harvestable listing form)…
+    expect(ideal.captureUrl).not.toContain("/mapa-google");
+    // …with the shape= query byte-identical between the two.
+    expect(new URL(ideal.captureUrl).search).toBe(new URL(ideal.url).search);
+
+    // Aliseda has no map view → captureUrl is identical to url (identity).
+    const aliseda = tasks.find((t) => t.portal === "aliseda")!;
+    expect(aliseda.captureUrl).toBe(aliseda.url);
   });
 });
 
@@ -300,6 +330,8 @@ describe("resolveSearchTasks — tier 0 owner-pinned overrides (issue #478)", ()
     mockOverrides.mockResolvedValue([]);
     const canonical: CanonicalSearchScope = { center: ESTEPONA, radiusKm: 8, propertyTypes: ["piso"], priceMax: 180000 };
     const tasks = await resolveSearchTasks(scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>), PROFILE_ID);
-    expect(tasks).toEqual([...idealistaBuilder.build(canonical), ...alisedaBuilder.build(canonical)]);
+    expect(tasks).toEqual(
+      withCaptureUrls([...idealistaBuilder.build(canonical), ...alisedaBuilder.build(canonical)]),
+    );
   });
 });

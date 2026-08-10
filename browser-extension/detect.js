@@ -589,6 +589,41 @@
   }
 
   /**
+   * Return `url` tagged with the batch auto-start signal (issue #529 — the map-view
+   * "convert" path re-navigates to the listing form and wants it to autostart).
+   * Preferred form is the `#inmo-capture` fragment; if the URL already carries a
+   * fragment, fall back to the `?inmo-capture` query key rather than clobbering it.
+   * Idempotent (either form already present → unchanged) and never throws — returns
+   * the input untouched on a parse failure. MUST agree byte-for-byte with the
+   * dashboard's lib/extension-capture.ts `withCaptureSignal`.
+   */
+  function withCaptureSignal(url) {
+    var parsed;
+    try {
+      parsed = new URL(String(url).trim());
+    } catch (e) {
+      return url;
+    }
+    if (parsed.hash.replace(/^#/, "") === CAPTURE_SIGNAL) return parsed.toString();
+    try {
+      if (parsed.searchParams.has(CAPTURE_SIGNAL)) return parsed.toString();
+    } catch (e) {
+      /* searchParams unavailable — ignore */
+    }
+    if (!parsed.hash) {
+      parsed.hash = CAPTURE_SIGNAL;
+      return parsed.toString();
+    }
+    // Already has a fragment — don't clobber it; use the query fallback instead.
+    try {
+      parsed.searchParams.set(CAPTURE_SIGNAL, "1");
+    } catch (e) {
+      /* searchParams unavailable — return unchanged */
+    }
+    return parsed.toString();
+  }
+
+  /**
    * Return `url` with the auto-start signal removed (both the `#inmo-capture`
    * fragment and the `?inmo-capture` query-key forms). Used when handing the
    * search page's OWN url to the capture-to-infer learner (issue #293/#303) so
@@ -747,6 +782,9 @@
    *   { action: "none" }                         — not a listing, or nothing to capture
    *   { action: "autostart", portal, count }     — listing + signal + ≥1 detail URL
    *   { action: "banner",    portal, count }     — listing + ≥1 detail URL, no signal
+   *   { action: "convert", portal, listingUrl }  — Idealista map-view (pins, zero
+   *                                                 anchors): listingUrl is the card
+   *                                                 form of the same search (#529)
    *
    * `count` is detailUrls.length. Auto-start requires the app-supplied signal so
    * capture stays human-initiated in spirit (the owner clicked "Abrir búsqueda");
@@ -756,7 +794,21 @@
     var portal = listingPortalForUrl(url);
     var count =
       detailUrls && typeof detailUrls.length === "number" ? detailUrls.length : 0;
-    if (!portal || count === 0) return { action: "none" };
+    if (!portal) return { action: "none" };
+    if (count === 0) {
+      // Zero anchors harvested. A drawn-zone Idealista search renders as a MAP of
+      // PINS (`/mapa-google?shape=…`) — an isListingPath match with no detail
+      // anchors. Rather than silently poll to a dead deadline (issue #529),
+      // surface the LISTING (card) form of the SAME search, where capture works.
+      // toListingUrl strips `/mapa-google` and rides the query + hash (incl. any
+      // capture signal) along verbatim; it is a no-op for any non-map URL, so
+      // `listingUrl !== url` fires this for exactly the Idealista map-view case.
+      var listingUrl = toListingUrl(url);
+      if (listingUrl !== url) {
+        return { action: "convert", portal: portal, listingUrl: listingUrl };
+      }
+      return { action: "none" };
+    }
     return {
       action: captureSignalPresent(url) ? "autostart" : "banner",
       portal: portal,
@@ -802,8 +854,12 @@
 
     var label = doc.createElement("span");
     label.setAttribute("data-inmo-banner-label", "1");
+    // `o.label` overrides the default copy (issue #529: the map-view "convert"
+    // banner reads "ver esta zona como lista y capturar" instead of a count).
     label.textContent =
-      "Inmo-Tool: capturar las " + count + " propiedades de esta búsqueda";
+      typeof o.label === "string" && o.label
+        ? o.label
+        : "Inmo-Tool: capturar las " + count + " propiedades de esta búsqueda";
     label.style.whiteSpace = "nowrap";
     label.style.overflow = "hidden";
     label.style.textOverflow = "ellipsis";
@@ -812,7 +868,8 @@
     capture.id = "inmo-capture-banner-start";
     capture.setAttribute("data-inmo-banner-start", "1");
     capture.type = "button";
-    capture.textContent = "Capturar todas";
+    capture.textContent =
+      typeof o.buttonText === "string" && o.buttonText ? o.buttonText : "Capturar todas";
     Object.assign(capture.style, {
       flexShrink: "0",
       padding: "6px 14px",
@@ -962,6 +1019,7 @@
     VALIDATE_SIGNAL: VALIDATE_SIGNAL,
     captureSignalPresent: captureSignalPresent,
     discoverSignalPresent: discoverSignalPresent,
+    withCaptureSignal: withCaptureSignal,
     stripCaptureSignal: stripCaptureSignal,
     validateSignalPayload: validateSignalPayload,
     validateSignalPresent: validateSignalPresent,

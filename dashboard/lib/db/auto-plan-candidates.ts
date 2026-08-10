@@ -60,7 +60,9 @@ export async function getHarvestCandidates(portal?: string): Promise<HarvestCand
             profileId: p.id,
             taskId: tv.task.id,
             portal: c.portal,
-            url: tv.task.url,
+            // The harvester opens the CAPTURE url (issue #529): the listing form
+            // for an Idealista map-view task, else identical to task.url.
+            url: tv.task.captureUrl,
             connectorRank,
             due: tv.due,
             lastRunAt: tv.lastRunAt,

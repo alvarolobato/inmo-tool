@@ -11,6 +11,7 @@ function task(over: Partial<CaptureTask> = {}): CaptureTask {
     portal: "aliseda",
     label: "Aliseda",
     url: "https://www.alisedainmobiliaria.com/venta",
+    captureUrl: "https://www.alisedainmobiliaria.com/venta",
     loosened: [],
     ...over,
   };
