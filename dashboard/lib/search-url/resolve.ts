@@ -41,6 +41,7 @@ import {
 } from "@/lib/db/profile-connector-filter";
 import { fallbackTaskId, portalTitle } from "@/lib/captura-tasks";
 import { BUILDERS, canonicalScopeFromProfile } from "./index";
+import { toCaptureUrl } from "./capture-url";
 import { municipioForPoint } from "./municipios";
 import { haversineKm } from "./parse-shared";
 import { PARSERS } from "./parsers";
@@ -200,6 +201,9 @@ function synthesizeOverrideTask(override: ProfileConnectorFilterRow): SearchTask
     portal: override.connector,
     label: `${portalTitle(override.connector)} — URL fijada`,
     url: override.url,
+    // Recomputed from url by resolveSearchTasks' withCaptureUrl; the default
+    // keeps this a valid SearchTask on its own (#529).
+    captureUrl: override.url,
     loosened: [],
     overridden: true,
   };
@@ -217,13 +221,21 @@ export async function resolveSearchTasks(scope: Scope, profileId: number): Promi
   // Load every owner-pinned override for the profile once (tier 0).
   const overrides = await findOverridesForProfile(profileId);
   const out: SearchTask[] = [];
+  // Derive each emitted task's capture-open URL from its FINAL `url` (issue
+  // #529): tier-0 overrides and learned examples can rewrite `url`, so
+  // captureUrl is recomputed here rather than trusting the builder's default.
+  // `url` itself is left untouched (verbatim/canonical for display + pin, D-101).
+  const withCaptureUrl = (t: SearchTask): SearchTask => ({
+    ...t,
+    captureUrl: toCaptureUrl(t.portal, t.url),
+  });
   for (const { portal } of CAPTURE_PORTALS) {
     const builder = BUILDERS[portal];
     if (!builder) {
       // No builder (altamira): the portal has no derived URL, but an owner
       // override can still give it one — synthesize a task per override.
       for (const o of overrides.filter((x) => x.connector === portal)) {
-        out.push(synthesizeOverrideTask(o));
+        out.push(withCaptureUrl(synthesizeOverrideTask(o)));
       }
       continue;
     }
@@ -243,7 +255,7 @@ export async function resolveSearchTasks(scope: Scope, profileId: number): Promi
       out.push(
         ...baseTasks.map((t) => {
           const o = overrideForTask(overrides, portal, "");
-          return o ? applyOverride(t, o) : t;
+          return withCaptureUrl(o ? applyOverride(t, o) : t);
         }),
       );
       continue;
@@ -252,7 +264,9 @@ export async function resolveSearchTasks(scope: Scope, profileId: number): Promi
     // inside resolveTask, so we must NOT short-circuit when examples are empty
     // but an override exists.
     const examples = await findExamplesForPortal(portal);
-    out.push(...baseTasks.map((t) => resolveTask(t, parser, examples, canonical, overrides)));
+    out.push(
+      ...baseTasks.map((t) => withCaptureUrl(resolveTask(t, parser, examples, canonical, overrides))),
+    );
   }
   return out;
 }

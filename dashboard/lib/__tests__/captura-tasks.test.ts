@@ -67,11 +67,28 @@ describe("normalizeTasks", () => {
       portal: "idealista",
       label: "Idealista · Viviendas",
       url: "https://i/v",
+      // #529: no captureUrl in the source → defaults to url.
+      captureUrl: "https://i/v",
       loosened: [],
     });
     // Missing label falls back to Title-case portal; loosened defaults to [].
     expect(out[1].label).toBe("Idealista");
     expect(out[1].loosened).toEqual([]);
+  });
+
+  it("#529: passes through a server-derived captureUrl distinct from url", () => {
+    const out = normalizeTasks({
+      tasks: [
+        {
+          id: "t1",
+          portal: "idealista",
+          url: "https://www.idealista.com/areas/venta-viviendas/mapa-google?shape=x",
+          captureUrl: "https://www.idealista.com/areas/venta-viviendas/?shape=x",
+        },
+      ],
+    });
+    expect(out[0].url).toContain("/mapa-google");
+    expect(out[0].captureUrl).not.toContain("/mapa-google");
   });
 
   it("drops malformed task entries", () => {

@@ -88,9 +88,12 @@ export function ConnectorSection({
       // Recording is best-effort — never block opening the search.
     } finally {
       // Open in the click's user gesture so popup blockers don't eat it; the
-      // #inmo-capture signal auto-starts the extension batch (issue #297).
+      // #inmo-capture signal auto-starts the extension batch (issue #297). Open
+      // the CAPTURE url (issue #529): identical to task.url except an Idealista
+      // map-view search, opened in its listing form so anchors harvest + capture
+      // arms (task.url stays the canonical map form for display/pin, D-101).
       if (typeof window !== "undefined") {
-        window.open(withCaptureSignal(task.url), "_blank", "noopener,noreferrer");
+        window.open(withCaptureSignal(task.captureUrl), "_blank", "noopener,noreferrer");
       }
     }
   }

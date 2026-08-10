@@ -272,6 +272,9 @@ function buildTask(
       scope.priceMax,
     ),
     url,
+    // Aliseda has no map view → captureUrl == url (identity). Set at construction
+    // so buildSearchUrls() output is a valid SearchTask (#529).
+    captureUrl: url,
     loosened,
   };
 }

@@ -46,10 +46,18 @@
         );
         detailUrls = D.extractDetailUrls(hrefs, listingPortal);
       }
+      // Map-view "convert" hint (issue #529): on an Idealista map search (pins,
+      // zero anchors) the popup's "Capturar todas" would be dead (n === 0). Hand
+      // it the listing (card) form of the same search, already tagged with the
+      // auto-start signal, so it can offer a live "Ver como lista y capturar"
+      // that opens straight into capture. Null for every other page.
+      const verdict = D.listingCaptureAction(url, detailUrls);
       sendResponse({
         isListing: !!listingPortal,
         isDetail: !!detailPortal,
         portal: listingPortal || detailPortal,
+        convertUrl:
+          verdict.action === "convert" ? D.withCaptureSignal(verdict.listingUrl) : null,
         // Guided capture (issue #237): the supported portal for this HOST
         // regardless of page role, plus the page role itself, so the popup can
         // show GUIDANCE on a supported-portal page that is neither a detail nor
@@ -363,6 +371,25 @@
     bannerEl = el;
   }
 
+  // Map-view → listing-view "convert" banner (issue #529). A drawn-zone Idealista
+  // search renders as a MAP of pins with no detail anchors, so nothing can be
+  // captured HERE — but the listing (card) form of the same search can. Offer a
+  // one-click navigation there (tagged with the auto-start signal so capture arms
+  // on arrival). We NEVER silently redirect a page the owner opened themselves.
+  function showConvertBanner(listingUrl) {
+    if (document.getElementById("inmo-capture-banner")) return; // already shown
+    const target = D.withCaptureSignal(listingUrl);
+    const el = D.buildCaptureBanner(document, {
+      label: "Inmo-Tool: ver esta zona como lista y capturar",
+      buttonText: "Ver como lista y capturar",
+      onCapture: () => window.location.assign(target),
+      onDismiss: () => removeBanner(),
+    });
+    if (!el || !document.body) return;
+    document.body.appendChild(el);
+    bannerEl = el;
+  }
+
   function handleListingWhenReady(info, deadline) {
     if (listingHandled) return;
     const now = currentListing();
@@ -380,6 +407,17 @@
       listingHandled = true;
       if (verdict.action === "autostart") {
         startBatchFromPage(verdict.portal, urls);
+      } else if (verdict.action === "convert") {
+        // Idealista map-view (pins, zero anchors) — capture can't run here (#529).
+        // If the tab already carries the auto-start signal (an app-opened URL, or
+        // a hand URL we tagged), redirect straight to the listing form (the signal
+        // rides along the preserved hash) so it autostarts there. Otherwise offer
+        // a one-click banner — never silently move a page the owner opened.
+        if (D.captureSignalPresent(window.location.href)) {
+          window.location.replace(D.withCaptureSignal(verdict.listingUrl));
+        } else {
+          showConvertBanner(verdict.listingUrl);
+        }
       } else {
         showBanner(verdict.portal, urls);
       }

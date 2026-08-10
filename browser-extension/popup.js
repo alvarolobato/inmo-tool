@@ -118,7 +118,18 @@ async function init() {
   }
 
   if (page?.isListing) {
-    enterBatchMode({ tab, portal: page.portal, detailUrls: page.detailUrls || [] }, null);
+    enterBatchMode(
+      {
+        tab,
+        portal: page.portal,
+        detailUrls: page.detailUrls || [],
+        // #529: on an Idealista map-view search this is the listing (card) form
+        // (signal-tagged) so the dead "Capturar todas" becomes a live "Ver como
+        // lista y capturar"; null on any normal listing page.
+        convertUrl: page.convertUrl || null,
+      },
+      null,
+    );
     return;
   }
 
@@ -472,6 +483,26 @@ function enterBatchMode(ctx, existingProgress) {
   const startBtn = $('#batch-start-btn');
   const n = ctx?.detailUrls?.length || 0;
   $('#batch-title').textContent = 'Página de resultados';
+
+  // Map-view "convert" case (issue #529): zero anchors here, but the listing
+  // (card) form of the same drawn-zone search can be captured. Offer a LIVE
+  // "Ver como lista y capturar" that navigates the tab there (signal-tagged, so
+  // capture arms on arrival) instead of a dead, disabled "Capturar todas".
+  if (n === 0 && ctx?.convertUrl && ctx?.tab?.id != null) {
+    $('#batch-sub').textContent =
+      'Esta búsqueda es un mapa (sin anuncios que capturar aquí). Ábrela como lista para capturarla.';
+    startBtn.textContent = 'Ver como lista y capturar';
+    startBtn.disabled = false;
+    startBtn.onclick = () => {
+      chrome.tabs.update(ctx.tab.id, { url: ctx.convertUrl, active: true });
+      window.close();
+    };
+    startBtn.classList.remove('hidden');
+    $('#batch-progress').classList.add('hidden');
+    hideBatchControls();
+    return;
+  }
+
   $('#batch-sub').textContent =
     n > 0
       ? `${n} anuncio(s) detectado(s) en esta página.`

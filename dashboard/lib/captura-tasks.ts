@@ -41,6 +41,13 @@ export interface CaptureTask {
   label: string;
   /** The pre-filtered search URL this task opens. */
   url: string;
+  /**
+   * The URL a HARVESTER should open (issue #529). Identical to `url` except an
+   * Idealista map-view search, where it is the listing (card) form so anchors
+   * harvest and capture arms. `url` stays canonical for display/pin (D-101).
+   * Falls back to `url` when the response predates the field.
+   */
+  captureUrl: string;
   /** Constraints the portal's URL grammar had to broaden (never narrow). */
   loosened: LoosenedConstraint[];
 }
@@ -120,6 +127,9 @@ export function normalizeTasks(body: TasksResponse | null | undefined): CaptureT
       portal: t.portal,
       label: typeof t.label === "string" && t.label.trim() ? t.label : portalTitle(t.portal),
       url: t.url,
+      // #529: prefer the server-derived capture URL; fall back to url for an
+      // older response shape (or a portal with no map view — they're equal).
+      captureUrl: typeof t.captureUrl === "string" && t.captureUrl ? t.captureUrl : t.url,
       loosened: Array.isArray(t.loosened) ? t.loosened : [],
     }));
   }
@@ -130,6 +140,8 @@ export function normalizeTasks(body: TasksResponse | null | undefined): CaptureT
       portal: u.portal,
       label: portalTitle(u.portal),
       url: u.url,
+      // Legacy shape carries no captureUrl → identity (#529).
+      captureUrl: u.url,
       loosened: Array.isArray(u.loosened) ? u.loosened : [],
     }));
   }

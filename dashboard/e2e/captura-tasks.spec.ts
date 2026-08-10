@@ -297,3 +297,62 @@ test("stacks both profiles; expands due/half-done, collapses not-due; manual exp
   await expect(page.getByText("there is no parameter")).toHaveCount(0);
   await expect(page.getByText("HTTP 500")).toHaveCount(0);
 });
+
+test("Abrir búsqueda opens the LISTING form for a drawn-zone Idealista task (#529)", async ({
+  page,
+}) => {
+  // Both seeded profiles are drawn-zone searches → the Idealista builder emits a
+  // /mapa-google?shape=((…)) MAP url. The map renders pins, not card anchors, so
+  // capturing it would harvest nothing; the capture-open target must therefore be
+  // the LISTING (card) form — /mapa-google stripped, shape= preserved — while the
+  // canonical map url stays the task's displayed/pinned url (D-101). EC-1/EC-3.
+
+  // Sanity: the API reports the canonical MAP url and a listing captureUrl.
+  const res = await page.request.get(`/api/profiles/${profileAId}/search-urls`);
+  expect(res.ok()).toBeTruthy();
+  const body = (await res.json()) as {
+    tasks: { portal: string; url: string; captureUrl: string }[];
+  };
+  const ideal = body.tasks.find((t) => t.portal === "idealista")!;
+  expect(ideal.url).toContain("/mapa-google?shape=");
+  expect(ideal.captureUrl).not.toContain("/mapa-google");
+  expect(new URL(ideal.captureUrl).search).toBe(new URL(ideal.url).search);
+
+  await page.goto("/captura");
+  await expect(page.getByTestId("captura-page")).toBeVisible();
+
+  // Make sure profile A's Idealista connector is expanded, then launch a task.
+  const conn = page.getByTestId(`captura-connector-${profileAId}-idealista`);
+  await expect(conn).toBeVisible();
+  if ((await conn.getAttribute("data-expanded")) !== "true") {
+    await page.getByTestId(`captura-connector-toggle-${profileAId}-idealista`).click();
+    await expect(conn).toHaveAttribute("data-expanded", "true");
+  }
+  await conn.locator('[data-testid^="captura-task-run-"]').first().click();
+
+  // The opened URL is the LISTING form (with the auto-start signal), never the map.
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window as unknown as { __opened: string[] }).__opened.some((u) =>
+          u.includes("idealista.com/areas"),
+        ),
+      ),
+    )
+    .toBe(true);
+  const opened = await page.evaluate(() =>
+    (window as unknown as { __opened: string[] }).__opened.find((u) =>
+      u.includes("idealista.com/areas"),
+    ),
+  );
+  expect(opened).toBeTruthy();
+  expect(opened).not.toContain("/mapa-google");
+  expect(opened).toContain("shape=");
+  expect(opened).toContain("inmo-capture"); // auto-start signal rides along
+
+  // No error surface — the D-041 bar.
+  await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
+  await expect(page.getByText("Error al cargar")).toHaveCount(0);
+  await expect(page.getByText("there is no parameter")).toHaveCount(0);
+  await expect(page.getByText("HTTP 500")).toHaveCount(0);
+});

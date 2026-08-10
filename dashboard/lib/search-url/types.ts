@@ -94,6 +94,14 @@ export interface SearchTask {
   label: string;
   /** The openable, pre-filtered search URL. */
   url: string;
+  /**
+   * The URL a HARVESTER should open. Identical to `url` except for an Idealista
+   * map-view search, where it is the listing (card) form (`/mapa-google` stripped,
+   * query + hash byte-preserved). `url` stays verbatim / canonical for display,
+   * decoding and pin matching (D-101, issue #529); only the capture-open path
+   * uses `captureUrl`. Required — so `tsc` enumerates every producer.
+   */
+  captureUrl: string;
   /** Constraints the portal's URL grammar had to broaden (never narrow). */
   loosened: LoosenedConstraint[];
   /**
