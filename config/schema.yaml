@@ -425,7 +425,7 @@
   sensitive: false
   default: true
   section: "Dashboard LLM"
-  description: "Elimina el contexto del arnés de Claude Code (su propio system prompt, catálogo de herramientas integradas, skills, servidores MCP y ficheros de settings) en cada invocación del CLI, y usa el system prompt del dashboard en su lugar. Medido: 25.664 → 167 tokens de entrada en la misma tarea (17,4x más barato). Ponga false solo si un flujo resulta depender de ese contexto."
+  description: "Elimina el contexto del arnés de Claude Code (su propio system prompt, catálogo de herramientas integradas, skills, servidores MCP y ficheros de settings) en cada invocación del CLI, y lo sustituye por el prompt de protocolo (pequeño) de la llamada; el system prompt de dominio del dashboard sigue viajando por stdin. Medido: 25.664 → 167 tokens de entrada en la misma tarea (17,4x más barato). Ponga false solo si un flujo resulta depender de ese contexto."
   requires_restart: []
   components: [dashboard]
 

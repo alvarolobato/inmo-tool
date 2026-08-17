@@ -318,7 +318,7 @@ describe("llmComplete", () => {
     stubCli("answer", {
       prompt_tokens: 9,
       completion_tokens: 36,
-      total_tokens: 25_700,
+      total_tokens: 45,
       cache_creation_input_tokens: 7521,
       cache_read_input_tokens: 18_134,
       cost_usd: 0.0176284,
@@ -331,7 +331,7 @@ describe("llmComplete", () => {
     });
 
     expect(resp.usage).toEqual(
-      expect.objectContaining({ prompt_tokens: 9, completion_tokens: 36, total_tokens: 25_700 }),
+      expect.objectContaining({ prompt_tokens: 9, completion_tokens: 36, total_tokens: 45 }),
     );
     const [, , loggedUsage, , options] = mockLogUsage.mock.calls.at(-1)!;
     expect(loggedUsage).toEqual(

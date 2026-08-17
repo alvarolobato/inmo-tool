@@ -33,8 +33,14 @@ The data was there the whole time. Verified live against the installed binary:
 - Every LLM execution path writes an `llm_usage` row: single-shot (`llm-client.ts`), agentic (`llm-context/assemble.ts`, at the one seam every agentic run passes through), and history summarisation (`llm-context/history.ts`, whose CLI branch also logged nothing).
 - CLI usage is parsed from the CLI's own envelope by `llm-provider/cli/usage.ts` and threaded through unchanged. `input_tokens` maps to `prompt_tokens` and cache counters stay separate — Anthropic reports them exclusively, the same normalisation `logUsage` already documents for OpenRouter.
 - `total_cost_usd` is stored via `LogUsageOptions.reportedCostUsd` and wins over the rate table: it is the provider's own list-price figure for that call, not an estimate we have to keep in sync.
-- **Unreported is not zero.** When the binary reports nothing parseable, usage is `null` and the row falls back to zeros — but the parser never invents a zero from a present-but-unparsed envelope. A `cli` row with `total_tokens = 0` is now a signal that something drifted, and is worth surfacing as a canary on `/etl/salud`.
+- **Unreported is not zero — as a code convention, not a storage guarantee.** The parser returns `null` rather than inventing zeros from a present-but-unparsed envelope, and every consumer inside the process can tell the difference. At the DB layer `null` still coalesces to `0`, so a stored zero remains ambiguous; distinguishing them there needs a `cost_source` column, filed as a follow-up. Until then a `cli` row with `total_tokens = 0` is a *suspicion* that something drifted, worth surfacing as a canary on `/etl/salud`.
+- `total_tokens` on a `cli` row is `prompt + completion`, **excluding** the cache counters — the same column semantics as the OpenRouter path, because `/admin/usage` sums that column across providers and a mixed sum has to mean one thing. Cache volume has its own two columns.
 - `checkDailyBudget` sums `estimated_cost_usd` across **all** providers. Rows written before this change store 0 and contribute nothing.
+
+**Two honest caveats about the CLI cost figure**, both properties of the CLI rather than of this plumbing:
+
+1. **Under OAuth (`CLAUDE_CODE_OAUTH_TOKEN`, which is how this project authenticates — D-025) `total_cost_usd` is a notional list price, not money billed.** It is the right number for *comparing* calls and for spotting a burn, and the wrong number to treat as an invoice. A dollar cap on subscription usage therefore halts work on imaginary spend — which is why the daily budget's schema default stays unset, and why a token-denominated cap may fit this deployment better (filed as a follow-up).
+2. **The cost covers slightly more than the tokens.** `total_cost_usd` prices everything the CLI did for the invocation, while the `usage` block describes the main turn only — a probe showed a small un-attributed auxiliary call included in the cost but not the counters. So the cost figure is the more complete of the two, and €/token derived from a single `cli` row will not reconcile.
 
 **Alternatives rejected**:
 
@@ -43,5 +49,7 @@ The data was there the whole time. Verified live against the installed binary:
 - *Log usage inside the runner.* The runner is provider-agnostic and is also used in tests; `assemble.ts` is the single seam with the endpoint/requestId context the row needs.
 
 **Rationale**: You cannot optimise what you cannot see, and you cannot bound what you do not count. This decision is deliberately about measurement and enforcement only — the reductions live in [D-103](D-103-cli-lean-invocation.md) and [D-104](D-104-assessment-failure-ledger.md), both of which are only verifiable because of this one.
+
+**Also fixed here** (review of the first cut): `/etl/salud`'s roll-up hard-coded CLI buckets to €0 with a "subscription" comment, so the panel this decision exists to un-blank would have kept showing zero even with the rows populated. `rollUpCosts` now uses the provider-reported cost for CLI buckets, and `DEFAULT_LLM_RATES` gained the OpenRouter spelling of the new default model (`anthropic/claude-haiku-4.5`, with a dot), which would otherwise have landed in `unpriced_models` at €0.
 
 **See**: `dashboard/lib/llm-provider/cli/usage.ts`, `dashboard/lib/llm-client.ts`, `dashboard/lib/llm-context/assemble.ts`, `dashboard/lib/llm-usage.ts`, `dashboard/lib/llm-provider/cli/agent-adapter.ts`, [docs/roadmap/llm-cost-optimization.md](../roadmap/llm-cost-optimization.md), [D-025 (archive)](archive/D-025-oauth-single-refresher.md).

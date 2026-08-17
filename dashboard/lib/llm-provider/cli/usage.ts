@@ -37,8 +37,25 @@
  * and cache-read are separate counters, each billed at its own rate. That is
  * the same normalisation `logUsage` already documents for OpenRouter, so the
  * mapping is direct: `prompt_tokens = input_tokens`, cache counters passed
- * through verbatim. `total_tokens` is the sum of every billed class so the
- * usage panel shows the real volume moved, not just the uncached remainder.
+ * through verbatim, and **`total_tokens = prompt + completion`**.
+ *
+ * `total_tokens` deliberately EXCLUDES the cache counters, matching what
+ * OpenRouter puts in the same column. An earlier version summed all four so
+ * the panel would show "real volume moved" — but `/admin/usage` sums that
+ * column across providers, so a CLI row reporting 25,700 next to an OpenRouter
+ * row reporting 45 made the total meaningless, and `prompt + completion !=
+ * total` on one provider only. Cache volume has its own two columns; anything
+ * that wants the full picture adds them up explicitly.
+ *
+ * ## What `cost_usd` covers (wider than the token counts)
+ *
+ * `total_cost_usd` is the cost of everything the CLI did for the invocation,
+ * while the top-level `usage` block describes the MAIN turn only. A probe of
+ * one lean call showed `modelUsage` carrying two entries — the main turn plus
+ * a small un-attributed auxiliary call — with `total_cost_usd` covering both.
+ * So the cost figure is the more complete of the two, and deriving €/token
+ * from a single CLI row will not reconcile. That is a property of the CLI, not
+ * of this parser; `CLI_LEAN_ARGS` does not remove the auxiliary call.
  *
  * ## `CLI_LEAN_ARGS` — the harness-overhead fix
  *
@@ -55,8 +72,11 @@
  * system prompt, and the agentic protocol has the SERVER execute our tools
  * (the model only emits a JSON envelope naming them — see `claude-code.ts`),
  * so Claude's built-in tools are never called. `CLI_LEAN_ARGS` strips the lot.
- * `--system-prompt` replaces the default harness prompt with the caller's, so
- * it is applied per call site rather than being part of this constant.
+ *
+ * `--system-prompt` is applied per call site rather than being part of this
+ * constant, and carries the caller's small PROTOCOL SHIM — its job is to
+ * displace the harness prompt, not to deliver the dashboard's domain system
+ * prompt (which still travels in stdin). See `claude-code.ts`'s `leanArgs`.
  *
  * Gated by `dashboard.llm_cli_lean_mode` (default true) so a regression can be
  * turned off in config without a redeploy.
@@ -140,31 +160,11 @@ export function parseCliReportedUsage(envelope: unknown): CliReportedUsage | nul
   return {
     prompt_tokens: input,
     completion_tokens: output,
-    total_tokens: input + output + (cacheCreation ?? 0) + (cacheRead ?? 0),
+    // Excludes the cache counters on purpose — same column semantics as the
+    // OpenRouter path. See the module doc.
+    total_tokens: input + output,
     cache_creation_input_tokens: cacheCreation,
     cache_read_input_tokens: cacheRead,
     cost_usd: cost,
-  };
-}
-
-/** Sum of two CLI usage records (an agentic run makes one call per round). */
-export function addCliReportedUsage(
-  acc: CliReportedUsage | null,
-  next: CliReportedUsage | null,
-): CliReportedUsage | null {
-  if (!next) return acc;
-  if (!acc) return { ...next };
-  const sumNullable = (a: number | null, b: number | null): number | null =>
-    a === null && b === null ? null : (a ?? 0) + (b ?? 0);
-  return {
-    prompt_tokens: acc.prompt_tokens + next.prompt_tokens,
-    completion_tokens: acc.completion_tokens + next.completion_tokens,
-    total_tokens: acc.total_tokens + next.total_tokens,
-    cache_creation_input_tokens: sumNullable(
-      acc.cache_creation_input_tokens,
-      next.cache_creation_input_tokens,
-    ),
-    cache_read_input_tokens: sumNullable(acc.cache_read_input_tokens, next.cache_read_input_tokens),
-    cost_usd: sumNullable(acc.cost_usd, next.cost_usd),
   };
 }

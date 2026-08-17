@@ -60,8 +60,15 @@ export const DEFAULT_LLM_RATES: LlmRateTable = {
   "anthropic/claude-3-5-sonnet": { in_eur_per_mtok: 3.0, out_eur_per_mtok: 15.0 },
   "anthropic/claude-3-7-sonnet": { in_eur_per_mtok: 3.0, out_eur_per_mtok: 15.0 },
   "anthropic/claude-haiku-4-5": { in_eur_per_mtok: 0.8, out_eur_per_mtok: 4.0 },
+  // OpenRouter spells Haiku 4.5 with a DOT, and that is now the default model
+  // (D-103) — without this key the default lands in `unpriced_models` at €0.
+  "anthropic/claude-haiku-4.5": { in_eur_per_mtok: 0.8, out_eur_per_mtok: 4.0 },
   "anthropic/claude-3-5-haiku": { in_eur_per_mtok: 0.8, out_eur_per_mtok: 4.0 },
+  "anthropic/claude-sonnet-4.6": { in_eur_per_mtok: 3.0, out_eur_per_mtok: 15.0 },
+  "anthropic/claude-sonnet-5": { in_eur_per_mtok: 3.0, out_eur_per_mtok: 15.0 },
   "anthropic/claude-opus-4": { in_eur_per_mtok: 15.0, out_eur_per_mtok: 75.0 },
+  "anthropic/claude-opus-4.8": { in_eur_per_mtok: 5.0, out_eur_per_mtok: 25.0 },
+  "anthropic/claude-opus-5": { in_eur_per_mtok: 5.0, out_eur_per_mtok: 25.0 },
   "openai/gpt-4o": { in_eur_per_mtok: 2.5, out_eur_per_mtok: 10.0 },
   "openai/gpt-4o-mini": { in_eur_per_mtok: 0.15, out_eur_per_mtok: 0.6 },
 };
@@ -140,6 +147,16 @@ export interface ModelTokenBucket {
   completion_today: number;
   prompt_7d: number;
   completion_7d: number;
+  /**
+   * Cost the PROVIDER itself reported for this bucket, summed from
+   * `llm_usage.estimated_cost_usd` (D-102). For `cli` rows this is the Claude
+   * CLI's own `total_cost_usd` — a real per-call figure, and the only way this
+   * panel can price CLI usage at all, since no local rate table can account
+   * for the CLI's cache-read/cache-write mix. Absent (0) on rows written
+   * before D-102 and on any provider that reports no cost.
+   */
+  reported_today?: number;
+  reported_7d?: number;
 }
 
 export interface CostRollup {
@@ -159,8 +176,18 @@ export interface CostRollup {
 /**
  * Fold per-(provider,model) token buckets into a € roll-up. Pure — the server
  * gathers the buckets from `llm_usage`, this does the arithmetic so it stays
- * unit-testable without a DB. CLI buckets contribute €0 (subscription) and are
- * never treated as unpriced.
+ * unit-testable without a DB.
+ *
+ * CLI buckets used to contribute a hard-coded €0 ("subscription"), which is
+ * how this panel came to show no spend for the DEFAULT provider even after
+ * D-102 started recording it. They now use the cost the CLI itself reported
+ * (`reported_*`, from `llm_usage.estimated_cost_usd`). No local rate table
+ * could price them correctly anyway — the CLI's cost is dominated by a
+ * cache-read/cache-write mix this panel never sees.
+ *
+ * Currency note: the CLI reports USD and this panel is labelled €, treated at
+ * parity — exactly as `DEFAULT_LLM_RATES` already does (its "eur" values are
+ * the USD list prices). This is an order-of-magnitude signal, not an invoice.
  */
 export function rollUpCosts(
   buckets: ModelTokenBucket[],
@@ -174,8 +201,12 @@ export function rollUpCosts(
   for (const b of buckets) {
     const cli = isCliProvider(b.provider);
     const rate = cli ? null : rateForModel(rates, b.model);
-    const today = cli ? 0 : modelCostEur(rate, b.prompt_today, b.completion_today);
-    const week = cli ? 0 : modelCostEur(rate, b.prompt_7d, b.completion_7d);
+    const today = cli
+      ? (b.reported_today ?? 0)
+      : modelCostEur(rate, b.prompt_today, b.completion_today);
+    const week = cli
+      ? (b.reported_7d ?? 0)
+      : modelCostEur(rate, b.prompt_7d, b.completion_7d);
 
     // A non-CLI model with real tokens but no rate is a cost gap, not free.
     if (!cli && !rate && (b.prompt_7d > 0 || b.completion_7d > 0)) {

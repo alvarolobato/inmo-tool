@@ -24,6 +24,10 @@ vi.mock("@/lib/db-write", () => ({
 }));
 
 import { getOrCompute, AssessmentParkedError } from "../cache";
+// The REAL error classes the exemption keys off — see the "pins" test below.
+import { BudgetExceededError } from "@/lib/llm-usage";
+import { CircuitBreakerOpenError } from "@/lib/llm-circuit-breaker";
+import { CliRunnerError } from "@/lib/llm-provider/cli/errors";
 import type { ListingSnapshot } from "@/lib/llm-context";
 
 const listings: ListingSnapshot[] = [{ listingId: 1, description: "piso de 90m2" }];
@@ -112,16 +116,20 @@ describe("assessment failure ledger", () => {
     expect(issued()).toContain("clear-failure");
   });
 
+  // `isEnvironmentalError` matches on `.name`/`.code`, not `instanceof`
+  // (importing lib/llm here would create a cycle). These use the REAL classes,
+  // so deleting `this.name = ...` from either one fails a test instead of
+  // silently disabling the exemption.
+  it("pins the real classes' name/code, which the exemption matches on", () => {
+    expect(new BudgetExceededError().name).toBe("BudgetExceededError");
+    expect(new CircuitBreakerOpenError("x").name).toBe("CircuitBreakerOpenError");
+    expect(new CliRunnerError("LLM_CLI_TIMEOUT", "x").code).toBe("LLM_CLI_TIMEOUT");
+  });
+
   it("does NOT strike on a budget stop — that is about the environment, not the input", async () => {
     // Otherwise one budget-exhausted day would park the entire backlog and it
     // would never be assessed again without operator intervention.
     stubDb();
-    class BudgetExceededError extends Error {
-      constructor() {
-        super("daily budget");
-        this.name = "BudgetExceededError";
-      }
-    }
     const computeFn = vi.fn().mockRejectedValue(new BudgetExceededError());
 
     await expect(
@@ -132,18 +140,68 @@ describe("assessment failure ledger", () => {
 
   it("does NOT strike when the circuit breaker is open", async () => {
     stubDb();
-    class CircuitBreakerOpenError extends Error {
-      constructor() {
-        super("circuit open");
-        this.name = "CircuitBreakerOpenError";
-      }
-    }
-    const computeFn = vi.fn().mockRejectedValue(new CircuitBreakerOpenError());
+    const computeFn = vi.fn().mockRejectedValue(new CircuitBreakerOpenError("open"));
 
     await expect(
       getOrCompute(1, "condition", "v1", listings, computeFn, vi.fn()),
     ).rejects.toBeInstanceOf(CircuitBreakerOpenError);
     expect(issued()).not.toContain("record-failure");
+  });
+
+  it.each([
+    ["LLM_CLI_TIMEOUT"],
+    ["LLM_CLI_AUTH"],
+    ["LLM_CLI_API_ERROR"],
+    ["LLM_CLI_EXIT"],
+  ])("does NOT strike on %s — infrastructure, not content", async (code) => {
+    // Selection is created_at ASC, so during an outage the SAME head-of-queue
+    // property is retried every tick; striking on infra failures would park it
+    // after three ticks of a bad 45 minutes.
+    stubDb();
+    const computeFn = vi.fn().mockRejectedValue(new CliRunnerError(code, "boom"));
+
+    await expect(
+      getOrCompute(1, "condition", "v1", listings, computeFn, vi.fn()),
+    ).rejects.toBeInstanceOf(CliRunnerError);
+    expect(issued()).not.toContain("record-failure");
+  });
+
+  it.each([["LLM_CLI_EMPTY"], ["LLM_CLI_PARSE"], ["LLM_CLI_TRUNCATED"]])(
+    "DOES strike on %s — that is a property of this listing's text",
+    async (code) => {
+      stubDb();
+      const computeFn = vi.fn().mockRejectedValue(new CliRunnerError(code, "boom"));
+
+      await expect(
+        getOrCompute(1, "condition", "v1", listings, computeFn, vi.fn()),
+      ).rejects.toBeInstanceOf(CliRunnerError);
+      expect(issued()).toContain("record-failure");
+    },
+  );
+
+  it("does NOT strike on an upstream 429", async () => {
+    stubDb();
+    const err = Object.assign(new Error("rate limited"), { status: 429 });
+    await expect(
+      getOrCompute(1, "condition", "v1", listings, vi.fn().mockRejectedValue(err), vi.fn()),
+    ).rejects.toBe(err);
+    expect(issued()).not.toContain("record-failure");
+  });
+
+  it("scopes the ledger read to a decay window so a park cannot outlive its cause", async () => {
+    stubDb();
+    await getOrCompute(
+      1,
+      "condition",
+      "v1",
+      listings,
+      vi.fn().mockResolvedValue({ result: { v: 1 }, model: "m" }),
+      vi.fn(),
+    );
+    const ledgerRead = mockSql.mock.calls
+      .map((c) => String(c[0]))
+      .find((t) => classify(t) === "read-failure");
+    expect(ledgerRead).toContain("last_failed_at >");
   });
 
   it("a cache hit is served without touching the ledger", async () => {

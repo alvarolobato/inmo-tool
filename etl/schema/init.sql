@@ -801,7 +801,11 @@ ALTER TABLE ai_assessment ADD COLUMN IF NOT EXISTS content_hash TEXT;
 CREATE TABLE IF NOT EXISTS ai_assessment_failure (
     id              BIGSERIAL    PRIMARY KEY,
     property_id     BIGINT       NOT NULL REFERENCES property(id) ON DELETE CASCADE,
-    assessment_type TEXT         NOT NULL,
+    -- Same vocabulary as ai_assessment.assessment_type (minus 'compare',
+    -- which is never cached and so never parked) — a typo'd type must fail
+    -- loudly here rather than silently accruing strikes nothing will read.
+    assessment_type TEXT         NOT NULL
+        CHECK (assessment_type IN ('occupancy','condition','redflags','location','opportunity','extract')),
     prompt_version  TEXT         NOT NULL,
     -- The `computeAssessmentContentHash` value the failing call was made with.
     -- Part of the key: new evidence must get a fresh chance.

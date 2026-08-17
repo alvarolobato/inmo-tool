@@ -40,10 +40,11 @@ export interface DashboardLlmConfig {
   cliMaxCaptureBytes: number;
   /**
    * Strip the Claude Code harness context (its own system prompt, built-in
-   * tool catalog, skills, MCP servers, settings files) from every invocation
-   * and substitute the dashboard's own system prompt. Default true — measured
-   * 17.4x cheaper per call. Set false to restore the full-harness behaviour if
-   * a flow turns out to depend on it. See `cli/usage.ts`.
+   * tool catalog, skills, MCP servers, settings files) from every invocation,
+   * replacing its system prompt with the caller's small protocol shim. Default
+   * true — measured 17.4x cheaper per call. Set false to restore the
+   * full-harness behaviour if a flow turns out to depend on it. See
+   * `cli/usage.ts`.
    */
   cliLeanMode: boolean;
 }

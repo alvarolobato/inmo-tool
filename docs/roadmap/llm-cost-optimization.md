@@ -139,7 +139,8 @@ D-104, which reuses the same content hash as its key.
 | P3 | Daily budget counts every provider; the `cli` exemption is retired | D-102 |
 | P4 | `CLI_LEAN_ARGS` + `--system-prompt` on every CLI call, gated by `dashboard.llm_cli_lean_mode` | [D-103](../decisions/D-103-cli-lean-invocation.md) |
 | P5 | Default model → Haiku 4.5 on both backends | D-103 |
-| P6 | `ai_assessment_failure` ledger; park after `dashboard.assessment_max_failures` strikes on an unchanged input | [D-104](../decisions/D-104-assessment-failure-ledger.md) |
+| P6 | `ai_assessment_failure` ledger; park after `dashboard.assessment_max_failures` strikes on an unchanged input (409 + `?force=1` on the POST routes; infra failures exempt; 14-day decay) | [D-104](../decisions/D-104-assessment-failure-ledger.md) |
+| P7 | `/etl/salud` prices CLI buckets from the reported cost instead of hard-coding €0, and knows the OpenRouter spelling of the new default model | D-102 |
 
 ---
 
@@ -158,7 +159,11 @@ Ordered by expected saving per unit of effort.
 | F-7 | **Pre-bump cost preview** — a `*_PROMPT_VERSION` bump instantly reopens the entire matched pool as backlog. `/etl/salud` should show "this reopens N properties ≈ €X" *before* the merge (reuse `projectBacklogCostEur`) | avoids surprise step-functions | S | low |
 | F-8 | **Zero-usage canary on `/etl/salud`** — count `cli` rows with `total_tokens = 0`. After D-102 this must be 0; a nonzero count means the CLI envelope shape drifted and we are flying blind again. Render it red | regression alarm | S | low |
 | F-9 | **Add `location`/`opportunity` to `ASSESSMENT_SELECTION_FLOWS`** — they are absent, so any property assessed before #388/#398 landed will never receive them. Safe to do now that D-104 bounds the retry loop | coverage (small cost increase) | S | low |
-| F-10 | **Park visibility + manual retry** — surface `ai_assessment_failure` (count, `last_error`, per-flow) on `/etl/salud` with a "retry now" action. Today parking is only visible in the scheduler's `parked=N` log line | operability | S | low |
+| F-10 | **Park visibility** — surface `ai_assessment_failure` (count, `last_error`, per-flow) on `/etl/salud`. The unpark path exists (`POST …?force=1`), but nothing tells the operator a property has been given up on except the scheduler's `parked=N` log line. The ledger's `last_failed_at DESC` index exists for this query | operability | S | low |
+| F-11 | **`cost_source` column** on `llm_usage` (`provider_reported` vs `estimated`) — today a real CLI cost and an estimated OpenRouter cost land in the same column indistinguishably, and a stored `0` cannot be told from "nothing reported" | correctness of the canary | S | low |
+| F-12 | **Token-denominated daily cap** (`dashboard.llm_daily_token_budget`) — under OAuth the CLI's `total_cost_usd` is a notional list price, so a dollar cap halts work on imaginary spend. Ask the owner which they want before building | fits subscription billing | S | low |
+| F-13 | **Pass the real system prompt via `--system-prompt`** — today it carries the small protocol shim (enough to displace the harness prompt) while the domain prompt still travels in stdin. Cleaner shape, but it means splitting stdin into system/task at every CLI call site | small token saving, better shape | M | low |
+| F-14 | **Ledger retention** — `clearAssessmentFailures` only fires on success, so a property that fails twice and is then edited leaves one orphan row per content hash forever. Slow, unbounded growth | housekeeping | S | low |
 
 ---
 

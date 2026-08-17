@@ -25,6 +25,12 @@ interface EnumSelectProps {
 }
 
 export function EnumSelect({ value, onChange, options, disabled, ariaLabel }: EnumSelectProps) {
+  // A `<select>` whose value matches no option renders as "nothing selected",
+  // which browsers display as the first option — so a stored value this list
+  // doesn't know about looks like a different setting, and saving the form
+  // silently rewrites it. Surface the real value instead, disabled so it can
+  // be read but not re-picked once changed away from.
+  const known = options.some((o) => o.value === value);
   return (
     <select
       value={value}
@@ -33,6 +39,11 @@ export function EnumSelect({ value, onChange, options, disabled, ariaLabel }: En
       aria-label={ariaLabel}
       className="w-full rounded-md border border-tremor-border dark:border-dark-tremor-border bg-tremor-background dark:bg-dark-tremor-background px-3 py-1.5 text-sm text-tremor-content-emphasis dark:text-dark-tremor-content-emphasis focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
     >
+      {!known && value !== "" && (
+        <option value={value} disabled>
+          {value} (valor actual, no listado)
+        </option>
+      )}
       {options.map((opt) => (
         <option key={opt.value} value={opt.value}>
           {opt.label}
@@ -57,10 +68,16 @@ export const PROVIDER_OPTIONS: EnumSelectOption[] = [
  *  When new Claude models ship, append them here (and bump the default
  *  in config/schema.yaml if appropriate). Stale ids are harmless — they
  *  just won't appear in the dropdown until they're added. */
+/*  ORDER MATTERS: a `<select>` whose `value` matches no `<option>` renders
+ *  with nothing selected, which browsers show as the FIRST option — so a
+ *  value missing from this list is silently "changed" to options[0] the
+ *  moment an operator saves the form. Keep the schema default first, and
+ *  make sure every value `config/schema.yaml` can produce appears here. */
 export const CLAUDE_CLI_MODEL_OPTIONS: EnumSelectOption[] = [
-  { value: "claude-opus-4-7", label: "Opus 4.7 (último, máxima capacidad)" },
-  { value: "claude-opus-4-6", label: "Opus 4.6" },
-  { value: "claude-sonnet-4-6", label: "Sonnet 4.6 (recomendado por defecto)" },
+  { value: "claude-haiku-4-5", label: "Haiku 4.5 (rápido y barato — por defecto)" },
+  { value: "claude-haiku-4-5-20251001", label: "Haiku 4.5 (id con fecha)" },
+  { value: "claude-sonnet-4-6", label: "Sonnet 4.6" },
   { value: "claude-sonnet-4-5", label: "Sonnet 4.5" },
-  { value: "claude-haiku-4-5-20251001", label: "Haiku 4.5 (rápido y barato)" },
+  { value: "claude-opus-4-7", label: "Opus 4.7 (máxima capacidad, ~50x el coste de Haiku)" },
+  { value: "claude-opus-4-6", label: "Opus 4.6" },
 ];

@@ -338,7 +338,24 @@ interface FailureRow {
   last_error: string | null;
 }
 
-/** Current strike count for this exact input, or null when never failed. */
+/**
+ * Days after which a park lapses and the input gets one more chance.
+ *
+ * A park is normally released by new evidence (a changed content hash) or a
+ * prompt-version bump. This is the third release: a listing nobody edits, on a
+ * prompt nobody bumps, would otherwise stay parked forever on the strength of
+ * three failures — including three failures that happened to be caused by
+ * something we have since fixed. One cheap retry a fortnight is a rounding
+ * error against the 96/day it replaced.
+ */
+const PARK_DECAY_DAYS = 14;
+
+/**
+ * Current strike count for this exact input, or null when never failed.
+ *
+ * Rows whose most recent failure is older than `PARK_DECAY_DAYS` are ignored,
+ * so a stale park does not outlive its cause.
+ */
 async function readFailure(
   propertyId: number,
   assessmentType: AssessmentType,
@@ -349,8 +366,9 @@ async function readFailure(
     `SELECT fail_count, last_error
        FROM ai_assessment_failure
       WHERE property_id = $1 AND assessment_type = $2
-        AND prompt_version = $3 AND content_hash = $4`,
-    [propertyId, assessmentType, promptVersion, contentHash],
+        AND prompt_version = $3 AND content_hash = $4
+        AND last_failed_at > now() - ($5 || ' days')::interval`,
+    [propertyId, assessmentType, promptVersion, contentHash, String(PARK_DECAY_DAYS)],
   );
   return rows[0] ?? null;
 }
@@ -385,8 +403,14 @@ async function recordFailure(
   }
 }
 
-/** Clear the ledger for this flow after a success (any hash — the flow works again). */
-async function clearFailures(
+/**
+ * Clear the ledger for this flow (any hash — the flow works again).
+ *
+ * Called automatically after a successful run, and exported so a route can
+ * honour an explicit operator override (`POST …?force=1`) — the documented
+ * escape hatch from a park, see `route-errors.ts`.
+ */
+export async function clearAssessmentFailures(
   propertyId: number,
   assessmentType: AssessmentType,
   promptVersion: string,
@@ -403,15 +427,51 @@ async function clearFailures(
 }
 
 /**
- * Errors that are about the ENVIRONMENT, not this property's input: a budget
- * stop or an open circuit breaker says nothing about whether this property can
- * ever be assessed, so they must not accrue strikes against it. Matched by
- * name to avoid importing `lib/llm` here (which would create a cycle:
- * llm → llm-context → … → ai-assessment).
+ * Errors that are about the ENVIRONMENT, not this property's input.
+ *
+ * A strike is a claim that *this listing text* cannot be assessed. A budget
+ * stop, an open breaker, a timeout, an expired credential or an upstream
+ * 429/5xx say nothing of the kind — and striking on them is actively
+ * dangerous: batch selection is `created_at ASC`, so during any sustained
+ * outage the SAME head-of-queue property is struck every tick, and three
+ * ticks of a bad 45 minutes would park it (the circuit breaker only opens
+ * after 5 CONSECUTIVE failures and half-opens every 60s, so it does not
+ * cover this on its own).
+ *
+ * Matched by `name`/`code` rather than `instanceof` to avoid importing
+ * `lib/llm` here, which would create a cycle (llm → llm-context → …  →
+ * ai-assessment). `lib/llm-usage.ts` and `lib/llm-circuit-breaker.ts` both set
+ * `.name` explicitly; `cli/errors.ts` sets `.code`. Pinned by tests that
+ * import the real classes.
  */
+/**
+ * `CliRunnerError.code` values that describe infrastructure, not content.
+ *
+ * Deliberately NOT here: `LLM_CLI_EMPTY`, `LLM_CLI_PARSE` and
+ * `LLM_CLI_TRUNCATED` — an unparseable, empty or oversized completion IS a
+ * property of this listing's text, reproduces on every retry, and is exactly
+ * the poison-property case D-104 exists to stop paying for.
+ */
+const TRANSIENT_CLI_CODES = new Set([
+  "LLM_CLI_TIMEOUT",
+  "LLM_CLI_AUTH",
+  "LLM_CLI_API_ERROR",
+  "LLM_CLI_EXIT",
+]);
+
 function isEnvironmentalError(err: unknown): boolean {
   const name = err instanceof Error ? err.name : "";
-  return name === "BudgetExceededError" || name === "CircuitBreakerOpenError";
+  if (name === "BudgetExceededError" || name === "CircuitBreakerOpenError") return true;
+
+  const code = (err as { code?: unknown } | null)?.code;
+  if (typeof code === "string" && TRANSIENT_CLI_CODES.has(code)) return true;
+
+  // Upstream rate-limit / server errors, however they surface.
+  const status = (err as { status?: unknown; innerErrorCode?: unknown } | null);
+  for (const raw of [status?.status, status?.innerErrorCode]) {
+    if (typeof raw === "number" && (raw === 429 || raw >= 500)) return true;
+  }
+  return false;
 }
 
 /**
@@ -504,7 +564,7 @@ export async function getOrCompute<T>(
     }
 
     await save(propertyId, result, model, contentHash);
-    await clearFailures(propertyId, assessmentType, promptVersion);
+    await clearAssessmentFailures(propertyId, assessmentType, promptVersion);
     return { result, model, fromCache: false };
   });
 }

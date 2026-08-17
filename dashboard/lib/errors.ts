@@ -38,6 +38,11 @@ export type ErrorCode =
   // state — e.g. configuring a connector that is no longer registered in
   // the ETL, where the write would be a silent no-op (issue #100).
   | "CONFLICT"
+  // The AI assessment for this (property, flow) is parked: it has failed
+  // `dashboard.assessment_max_failures` times on unchanged listing text, so
+  // the LLM call is deliberately not made (D-104). Distinct from CONFLICT so
+  // a client can offer the documented `?force=1` override.
+  | "ASSESSMENT_PARKED"
   | "TIMEOUT"
   | "COST_LIMIT"
   | "REVIEW_EXISTS"

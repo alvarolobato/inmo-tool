@@ -14,15 +14,23 @@ import { triggerHostTokenSync } from "./host-token-sync";
 import { CLI_LEAN_ARGS, parseCliReportedUsage, type CliReportedUsage } from "./usage";
 
 /**
- * Per-call argv prefix that strips the Claude Code harness context (its own
- * system prompt, built-in tool catalog, skills, MCP servers, settings files)
- * and substitutes the dashboard's own system prompt.
+ * Per-call argv prefix that strips the Claude Code harness context: its own
+ * system prompt, the built-in tool catalog, skills, MCP servers and settings
+ * files.
+ *
+ * `systemPrompt` is the CALLER'S PROTOCOL SHIM — `SINGLE_SHOT_PRINT_ARG` or
+ * `AGENTIC_PROTOCOL_INSTRUCTION` — not the dashboard's domain system prompt,
+ * which still travels in stdin as a `## system` section (see
+ * `llm-client.ts`'s `buildMessagesPlain`). Its only job here is to REPLACE the
+ * harness prompt with something small; passing the real domain prompt instead
+ * would be a better shape and is filed as a follow-up, because it means
+ * splitting stdin into system/task at every call site.
  *
  * Measured on this repo's default flow: 25,664 → 167 input tokens for an
  * identical trivial task, a 17.4x cost reduction. See `usage.ts` for the full
  * rationale and for why `--bare` is deliberately not used.
  *
- * `dashboard.llm_cli_lean_mode = false` restores the pre-#TBD behaviour (full
+ * `dashboard.llm_cli_lean_mode = false` restores the previous behaviour (full
  * harness context) as an escape hatch if a flow turns out to depend on it.
  */
 function leanArgs(cfg: DashboardLlmConfig, systemPrompt: string): string[] {
@@ -197,7 +205,19 @@ function parseSingleShotEnvelope(
   let envelope: Record<string, unknown> | null = null;
   try {
     const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    // A bare "is it a JSON object?" test is NOT enough to call this an
+    // envelope: every assessment flow's own ANSWER is a JSON object
+    // (`{"condition":"a_reformar",...}`). Without a discriminator, an older
+    // binary that ignores `--output-format json` would have its answer read as
+    // an envelope with no `result` key → empty text → LLM_CLI_EMPTY → a strike
+    // in the D-104 ledger → the property parked permanently, on the exact path
+    // this fallback exists to protect. Require a field only the CLI emits.
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed) &&
+      ("result" in parsed || "is_error" in parsed || (parsed as { type?: unknown }).type === "result")
+    ) {
       envelope = parsed as Record<string, unknown>;
     }
   } catch {

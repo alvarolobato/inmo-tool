@@ -7,11 +7,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import {
-  CLI_LEAN_ARGS,
-  parseCliReportedUsage,
-  addCliReportedUsage,
-} from "../llm-provider/cli/usage";
+import { CLI_LEAN_ARGS, parseCliReportedUsage } from "../llm-provider/cli/usage";
 
 describe("parseCliReportedUsage", () => {
   it("maps a real CLI envelope to normalised usage", () => {
@@ -31,7 +27,9 @@ describe("parseCliReportedUsage", () => {
     expect(parseCliReportedUsage(envelope)).toEqual({
       prompt_tokens: 9,
       completion_tokens: 36,
-      total_tokens: 25_700,
+      // prompt + completion only — cache has its own columns, same as the
+      // OpenRouter path (a mixed-provider SUM of this column must mean one thing).
+      total_tokens: 45,
       cache_creation_input_tokens: 7521,
       cache_read_input_tokens: 18_134,
       cost_usd: 0.0176284,
@@ -46,7 +44,7 @@ describe("parseCliReportedUsage", () => {
     });
     expect(parsed?.prompt_tokens).toBe(100);
     expect(parsed?.cache_read_input_tokens).toBe(900);
-    expect(parsed?.total_tokens).toBe(1010);
+    expect(parsed?.total_tokens).toBe(110);
   });
 
   it("returns null rather than a fake zero when nothing is reported", () => {
@@ -72,39 +70,6 @@ describe("parseCliReportedUsage", () => {
     expect(parsed?.prompt_tokens).toBe(0);
     expect(parsed?.completion_tokens).toBe(5);
     expect(parsed?.cost_usd).toBeNull();
-  });
-});
-
-describe("addCliReportedUsage", () => {
-  it("sums rounds of an agentic run, preserving null as 'unreported'", () => {
-    const a = {
-      prompt_tokens: 1,
-      completion_tokens: 2,
-      total_tokens: 3,
-      cache_creation_input_tokens: null,
-      cache_read_input_tokens: 10,
-      cost_usd: 0.001,
-    };
-    const b = {
-      prompt_tokens: 4,
-      completion_tokens: 5,
-      total_tokens: 9,
-      cache_creation_input_tokens: 7,
-      cache_read_input_tokens: 20,
-      cost_usd: 0.002,
-    };
-
-    expect(addCliReportedUsage(a, b)).toEqual({
-      prompt_tokens: 5,
-      completion_tokens: 7,
-      total_tokens: 12,
-      cache_creation_input_tokens: 7,
-      cache_read_input_tokens: 30,
-      cost_usd: 0.003,
-    });
-    expect(addCliReportedUsage(null, b)).toEqual(b);
-    expect(addCliReportedUsage(a, null)).toEqual(a);
-    expect(addCliReportedUsage(null, null)).toBeNull();
   });
 });
 

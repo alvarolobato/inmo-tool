@@ -241,13 +241,25 @@ describe("claudeCliSingleShot", () => {
     expect(out.usage).toEqual({
       prompt_tokens: 9,
       completion_tokens: 36,
-      // Anthropic reports input_tokens EXCLUSIVE of cache tokens, so the true
-      // billed volume is the sum of all four counters.
-      total_tokens: 9 + 36 + 7521 + 18134,
+      // prompt + completion only; cache volume lives in its own two columns
+      // (same semantics as the OpenRouter path).
+      total_tokens: 45,
       cache_creation_input_tokens: 7521,
       cache_read_input_tokens: 18134,
       cost_usd: 0.0176284,
     });
+  });
+
+  it("returns a bare JSON ANSWER verbatim instead of mistaking it for an envelope", async () => {
+    // Regression guard: every assessment flow answers with a JSON object. If
+    // an older binary ignores `--output-format json`, a naive "is it an
+    // object?" check reads that answer as an envelope, finds no `result`,
+    // raises LLM_CLI_EMPTY, and the D-104 ledger parks the property for good.
+    const answer = '{"condition":"a_reformar","confidence":0.95}';
+    mockRunCliProcess.mockResolvedValueOnce(okResult(answer));
+
+    const out = await claudeCliSingleShot({ cfg, prompt: "x" });
+    expect(out).toEqual({ text: answer, usage: null });
   });
 
   it("classifies an is_error envelope instead of returning it as the answer", async () => {
