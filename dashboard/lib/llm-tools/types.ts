@@ -107,6 +107,12 @@ export interface AgenticUsageTotals {
   cache_creation_input_tokens: number | null;
   /** Tokens read from Anthropic prompt cache across all steps. NULL when provider doesn't report caching. */
   cache_read_input_tokens: number | null;
+  /**
+   * Provider-reported USD cost summed across steps (Claude CLI
+   * `total_cost_usd`, one per round). NULL when the provider reports no cost,
+   * in which case the consumer falls back to the rate-table estimate.
+   */
+  reported_cost_usd: number | null;
 }
 
 export function emptyUsage(): AgenticUsageTotals {
@@ -116,6 +122,7 @@ export function emptyUsage(): AgenticUsageTotals {
     total_tokens: 0,
     cache_creation_input_tokens: null,
     cache_read_input_tokens: null,
+    reported_cost_usd: null,
   };
 }
 
@@ -127,6 +134,7 @@ export function addUsage(
     total_tokens?: number;
     cache_creation_input_tokens?: number | null;
     cache_read_input_tokens?: number | null;
+    cost_usd?: number | null;
   } | null | undefined,
 ): void {
   if (!u) return;
@@ -141,5 +149,10 @@ export function addUsage(
   }
   if (u.cache_read_input_tokens != null) {
     acc.cache_read_input_tokens = (acc.cache_read_input_tokens ?? 0) + u.cache_read_input_tokens;
+  }
+  // Same null-vs-zero contract: null means "provider reported no cost", which
+  // must stay distinguishable from a genuinely free round.
+  if (u.cost_usd != null) {
+    acc.reported_cost_usd = (acc.reported_cost_usd ?? 0) + u.cost_usd;
   }
 }

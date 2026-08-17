@@ -778,6 +778,49 @@ DROP INDEX IF EXISTS idx_ai_assessment_property_type;
 -- against a table that already exists.
 ALTER TABLE ai_assessment ADD COLUMN IF NOT EXISTS content_hash TEXT;
 
+-- LLM cost control: the failure ledger that stops the assessment scheduler
+-- paying for the same doomed call every 15 minutes, forever.
+--
+-- Before this table, a flow that failed for a non-budget reason (the model
+-- returned unparseable JSON, an empty completion, a CLI error) wrote NOTHING
+-- anywhere: `runAssessmentBatch` counted `errors += 1` and moved on, so the
+-- property still satisfied the "missing a current-version verdict" selection
+-- predicate and came back on the very next tick — and, because selection is
+-- `created_at ASC`, it came back FIRST. One property whose text reliably
+-- provokes bad output burned up to 96 paid retries per day per flow, with no
+-- backoff, no cap, and no record anywhere that it was happening.
+--
+-- A row here means "this exact (property, flow, prompt version, input) has
+-- failed `fail_count` times". `getOrCompute` refuses to call the LLM once
+-- `fail_count` reaches `dashboard.assessment_max_failures` (default 3) and
+-- raises `AssessmentParkedError` instead. The park is keyed on
+-- `content_hash`, so it releases itself the moment the evidence changes (a
+-- new/edited listing) — exactly like a cache miss — and a prompt-version bump
+-- writes a different key, so a fixed prompt is retried without operator
+-- action. A successful run deletes the row.
+CREATE TABLE IF NOT EXISTS ai_assessment_failure (
+    id              BIGSERIAL    PRIMARY KEY,
+    property_id     BIGINT       NOT NULL REFERENCES property(id) ON DELETE CASCADE,
+    assessment_type TEXT         NOT NULL,
+    prompt_version  TEXT         NOT NULL,
+    -- The `computeAssessmentContentHash` value the failing call was made with.
+    -- Part of the key: new evidence must get a fresh chance.
+    content_hash    TEXT         NOT NULL,
+    fail_count      INTEGER      NOT NULL DEFAULT 1,
+    first_failed_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    last_failed_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    -- Truncated error message, for the operator to see WHY it is parked.
+    last_error      TEXT,
+    CONSTRAINT ai_assessment_failure_key
+        UNIQUE (property_id, assessment_type, prompt_version, content_hash)
+);
+
+-- Parked-row lookups are per (property, flow); the unique constraint above
+-- already covers that prefix, so no extra index is needed. This one supports
+-- the operator-facing "what is parked?" listing, ordered by recency.
+CREATE INDEX IF NOT EXISTS idx_ai_assessment_failure_last
+    ON ai_assessment_failure (last_failed_at DESC);
+
 -- #407: candidate_type slugs a human reviewed on /admin/candidatos and
 -- explicitly DISMISSED (rejected as a real category). Two effects:
 --   1. excluded from the promotion list (getPromotionCandidates) and the

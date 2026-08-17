@@ -107,8 +107,8 @@ async function tick(batchSize: number): Promise<void> {
       console.info(
         `[ai-assessment:scheduler] tick: properties=${result.properties} ` +
           `assessed=${result.assessed} skipped=${result.skipped} ` +
-          `noListings=${result.noListings} errors=${result.errors} ` +
-          `stopped=${result.stopped ?? "none"}`,
+          `noListings=${result.noListings} parked=${result.parked} ` +
+          `errors=${result.errors} stopped=${result.stopped ?? "none"}`,
       );
     }
   } catch (err) {

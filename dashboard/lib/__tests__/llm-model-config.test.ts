@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import {
   getDashboardLlmModel,
   getDashboardLlmDisplayConfig,
@@ -6,6 +6,16 @@ import {
 } from "@/lib/llm-model-config";
 
 describe("dashboard LLM model config", () => {
+  beforeEach(() => {
+    // Isolate from the developer's real ~/.config/inmo-tool/config.yaml: the
+    // loader reads that file directly, so a machine that pins
+    // `dashboard.llm_model_openrouter` made the "deprecated env fallback" and
+    // "schema default" cases assert against local config instead of the code
+    // under test (they passed or failed depending on whose laptop ran them).
+    vi.stubEnv("CONFIG_FILE", "/nonexistent/inmo-tool-test/config.yaml");
+    resetDashboardLlmConfigCache();
+  });
+
   afterEach(() => {
     vi.unstubAllEnvs();
     resetDashboardLlmConfigCache();
@@ -36,8 +46,8 @@ describe("dashboard LLM model config", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.stubEnv("DASHBOARD_LLM_MODEL", "openrouter-style/something");
     // The CLI accepts native Claude ids only — a slashed legacy value is
-    // ignored and the hard-coded default ("claude-sonnet-4-6") wins.
-    expect(getDashboardLlmModel()).toBe("claude-sonnet-4-6");
+    // ignored and the hard-coded default ("claude-haiku-4-5") wins.
+    expect(getDashboardLlmModel()).toBe("claude-haiku-4-5");
     warn.mockRestore();
   });
 
@@ -52,7 +62,7 @@ describe("dashboard LLM model config", () => {
     vi.stubEnv("DASHBOARD_LLM_PROVIDER", "openrouter");
     delete process.env.DASHBOARD_LLM_MODEL;
     delete process.env.DASHBOARD_LLM_MODEL_OPENROUTER;
-    expect(getDashboardLlmModel()).toBe("anthropic/claude-sonnet-4");
+    expect(getDashboardLlmModel()).toBe("anthropic/claude-haiku-4.5");
   });
 
   it("getDashboardLlmDisplayConfig exposes both backend models", () => {

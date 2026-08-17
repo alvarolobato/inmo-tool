@@ -20,6 +20,7 @@ import {
   createDashboardAgenticAdapter,
 } from "@/lib/llm-client";
 import { runAgenticChat } from "@/lib/llm-tools/runner";
+import { logUsage } from "@/lib/llm-usage";
 import { callWithCircuitBreaker } from "@/lib/llm-circuit-breaker";
 import {
   loadDashboardLlmConfig,
@@ -188,6 +189,19 @@ export async function assembleRequest(
       cache_creation_input_tokens: usage.cache_creation_input_tokens ?? null,
       cache_read_input_tokens: usage.cache_read_input_tokens ?? null,
     };
+
+    // The agentic path returned `usage` to its caller and NOBODY persisted it —
+    // no `logUsage` call existed on this branch for either provider, so every
+    // chat turn (up to 8 tool rounds, each a full model call) was invisible to
+    // `llm_usage`, to the /etl/salud cost panel, and to `checkDailyBudget`.
+    // Log it here, at the single seam every agentic run passes through.
+    logUsage(endpoint, model, normalizedUsage, {
+      provider: cfg.provider,
+      driver: cfg.provider === "cli" ? cfg.cliDriver : null,
+    }, {
+      requestId,
+      reportedCostUsd: usage.reported_cost_usd,
+    });
 
     return { text: content, usage: normalizedUsage, model };
   }

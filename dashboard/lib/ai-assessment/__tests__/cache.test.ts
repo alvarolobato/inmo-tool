@@ -44,6 +44,10 @@ function row(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   mockSql.mockReset();
+  // Default for any query a test doesn't explicitly queue with
+  // `mockResolvedValueOnce` — notably the failure-ledger read/clear that
+  // `getOrCompute` now performs around `computeFn`. Empty = never failed.
+  mockSql.mockResolvedValue([]);
   mockClientQuery.mockClear();
   mockRelease.mockClear();
   mockConnect.mockClear();

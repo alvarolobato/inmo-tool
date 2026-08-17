@@ -12,7 +12,19 @@ import type {
   DashboardLlmProviderId,
 } from "./types";
 
-const DEFAULT_MODEL = "anthropic/claude-sonnet-4";
+/**
+ * Fallback OpenRouter model when neither a per-flow override nor
+ * `dashboard.llm_model_openrouter` is set.
+ *
+ * Haiku 4.5 ($1/$5 per MTok) rather than Sonnet ($3/$15): every dashboard flow
+ * is a short structured extraction or classification over one property's
+ * listing text, which is what Haiku is for. Raise it per flow
+ * (`dashboard.llm_model_openrouter_<flow>`) where quality actually needs it.
+ */
+const DEFAULT_MODEL = "anthropic/claude-haiku-4.5";
+
+/** Native Claude id used when `dashboard.llm_model_cli` is unset. See above. */
+const DEFAULT_CLI_MODEL = "claude-haiku-4-5";
 
 function normalizeProvider(raw: string | null | undefined): DashboardLlmProviderId {
   // Default is `cli` (config/schema.yaml). The CLI provider uses host claude
@@ -42,6 +54,14 @@ function parseExtraArgs(raw: string | null | undefined): string[] {
   if (!raw || String(raw).trim() === "") return [];
   // Split on whitespace; callers must not pass shell syntax — document in .env.example.
   return String(raw).trim().split(/\s+/).filter(Boolean);
+}
+
+function parseBool(raw: string | number | boolean | null | undefined, fallback: boolean): boolean {
+  if (raw === null || raw === undefined || String(raw).trim() === "") return fallback;
+  const v = String(raw).trim().toLowerCase();
+  if (v === "false" || v === "0" || v === "no") return false;
+  if (v === "true" || v === "1" || v === "yes") return true;
+  return fallback;
 }
 
 function parsePositiveInt(raw: string | number | boolean | null | undefined, fallback: number): number {
@@ -137,8 +157,7 @@ export function loadDashboardLlmConfig(): DashboardLlmConfig {
     chat: readStr(cfg, "dashboard.llm_model_openrouter_chat"),
   };
 
-  const cliModel =
-    readStr(cfg, "dashboard.llm_model_cli") || legacyForCli || "claude-sonnet-4-6";
+  const cliModel = readStr(cfg, "dashboard.llm_model_cli") || legacyForCli || DEFAULT_CLI_MODEL;
 
   const cliDriverRaw = cfg["dashboard.llm_cli_driver"]?.value;
   const cliDriver: DashboardCliDriverId =
@@ -168,6 +187,9 @@ export function loadDashboardLlmConfig(): DashboardLlmConfig {
   const captureRaw = provider === "cli" ? cfg["dashboard.llm_cli_max_capture_bytes"]?.value : undefined;
   const cliMaxCaptureBytes = parsePositiveInt(captureRaw, 8_000_000);
 
+  const leanRaw = cfg["dashboard.llm_cli_lean_mode"]?.value;
+  const cliLeanMode = parseBool(leanRaw, true);
+
   _cached = {
     provider,
     openrouterModel,
@@ -178,6 +200,7 @@ export function loadDashboardLlmConfig(): DashboardLlmConfig {
     cliExtraArgs,
     cliTimeoutMs,
     cliMaxCaptureBytes,
+    cliLeanMode,
   };
   return _cached;
 }

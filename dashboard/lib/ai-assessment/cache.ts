@@ -120,6 +120,7 @@
 import { sql, getPool } from "@/lib/db-write";
 import { createHash } from "node:crypto";
 import type { ListingSnapshot } from "@/lib/llm-context";
+import { getSystemConfig } from "@/lib/system-config/loader";
 
 /** Every property-level assessment_type this cache wrapper understands. */
 export type AssessmentType =
@@ -292,6 +293,128 @@ export function logCacheOutcome(
 }
 
 /**
+ * Raised instead of calling the LLM when this exact (property, flow, prompt
+ * version, content hash) has already failed `assessment_max_failures` times.
+ *
+ * A distinct type so callers can tell "we deliberately did not spend money on
+ * a known-bad input" apart from "the call was attempted and failed" — the
+ * batch counts it separately and it must never trip the circuit breaker.
+ */
+export class AssessmentParkedError extends Error {
+  constructor(
+    readonly propertyId: number,
+    readonly assessmentType: AssessmentType,
+    readonly failCount: number,
+    readonly lastError: string | null,
+  ) {
+    super(
+      `Assessment parked: property=${propertyId} type=${assessmentType} ` +
+        `failed ${failCount}x on unchanged input` +
+        (lastError ? ` (last error: ${lastError})` : ""),
+    );
+    this.name = "AssessmentParkedError";
+  }
+}
+
+/** How many failures on an UNCHANGED input before the flow stops being retried. */
+export const DEFAULT_MAX_ASSESSMENT_FAILURES = 3;
+
+function maxAssessmentFailures(): number {
+  try {
+    const raw = getSystemConfig()["dashboard.assessment_max_failures"]?.value;
+    if (raw !== null && raw !== undefined && String(raw).trim() !== "") {
+      const n = Number(String(raw).trim());
+      // 0 disables parking entirely (retry forever — the pre-ledger behaviour).
+      if (Number.isFinite(n) && n >= 0) return Math.floor(n);
+    }
+  } catch {
+    // Loader unavailable (build context / schema file missing) — use the default.
+  }
+  return DEFAULT_MAX_ASSESSMENT_FAILURES;
+}
+
+interface FailureRow {
+  fail_count: number;
+  last_error: string | null;
+}
+
+/** Current strike count for this exact input, or null when never failed. */
+async function readFailure(
+  propertyId: number,
+  assessmentType: AssessmentType,
+  promptVersion: string,
+  contentHash: string,
+): Promise<FailureRow | null> {
+  const rows = await sql<FailureRow>(
+    `SELECT fail_count, last_error
+       FROM ai_assessment_failure
+      WHERE property_id = $1 AND assessment_type = $2
+        AND prompt_version = $3 AND content_hash = $4`,
+    [propertyId, assessmentType, promptVersion, contentHash],
+  );
+  return rows[0] ?? null;
+}
+
+/**
+ * Record one failed attempt (upsert, incrementing the strike count).
+ *
+ * Best-effort: a bookkeeping write must never replace the real error the
+ * caller is about to see, so a failure here is logged and swallowed.
+ */
+async function recordFailure(
+  propertyId: number,
+  assessmentType: AssessmentType,
+  promptVersion: string,
+  contentHash: string,
+  err: unknown,
+): Promise<void> {
+  const message = (err instanceof Error ? err.message : String(err)).slice(0, 500);
+  try {
+    await sql(
+      `INSERT INTO ai_assessment_failure
+         (property_id, assessment_type, prompt_version, content_hash, last_error)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT ON CONSTRAINT ai_assessment_failure_key DO UPDATE
+         SET fail_count = ai_assessment_failure.fail_count + 1,
+             last_failed_at = now(),
+             last_error = EXCLUDED.last_error`,
+      [propertyId, assessmentType, promptVersion, contentHash, message],
+    );
+  } catch (writeErr) {
+    console.error("[ai-assessment] failed to record assessment failure:", writeErr);
+  }
+}
+
+/** Clear the ledger for this flow after a success (any hash — the flow works again). */
+async function clearFailures(
+  propertyId: number,
+  assessmentType: AssessmentType,
+  promptVersion: string,
+): Promise<void> {
+  try {
+    await sql(
+      `DELETE FROM ai_assessment_failure
+        WHERE property_id = $1 AND assessment_type = $2 AND prompt_version = $3`,
+      [propertyId, assessmentType, promptVersion],
+    );
+  } catch (err) {
+    console.error("[ai-assessment] failed to clear assessment failures:", err);
+  }
+}
+
+/**
+ * Errors that are about the ENVIRONMENT, not this property's input: a budget
+ * stop or an open circuit breaker says nothing about whether this property can
+ * ever be assessed, so they must not accrue strikes against it. Matched by
+ * name to avoid importing `lib/llm` here (which would create a cycle:
+ * llm → llm-context → … → ai-assessment).
+ */
+function isEnvironmentalError(err: unknown): boolean {
+  const name = err instanceof Error ? err.name : "";
+  return name === "BudgetExceededError" || name === "CircuitBreakerOpenError";
+}
+
+/**
  * The #30 wrapper: check cache, call the LLM only on a genuine miss.
  *
  * A HIT requires ALL of:
@@ -349,8 +472,39 @@ export async function getOrCompute<T>(
       return { result: cached.result, model: cached.model, fromCache: true };
     }
 
-    const { result, model } = await computeFn();
+    // Cost guard: refuse to re-buy a call that has already failed N times on
+    // this exact input. Checked AFTER the cache read (a hit is still free) and
+    // BEFORE `computeFn` (the only place money is spent). Keyed on the content
+    // hash, so new evidence unparks it automatically.
+    const maxFailures = maxAssessmentFailures();
+    if (maxFailures > 0) {
+      const failure = await readFailure(propertyId, assessmentType, promptVersion, contentHash);
+      if (failure && failure.fail_count >= maxFailures) {
+        throw new AssessmentParkedError(
+          propertyId,
+          assessmentType,
+          failure.fail_count,
+          failure.last_error,
+        );
+      }
+    }
+
+    let result: T;
+    let model: string | null;
+    try {
+      ({ result, model } = await computeFn());
+    } catch (err) {
+      // Budget/circuit stops are about the environment, not this input — they
+      // must not accrue strikes, or a single budget-exhausted day would park
+      // the whole backlog.
+      if (!isEnvironmentalError(err)) {
+        await recordFailure(propertyId, assessmentType, promptVersion, contentHash, err);
+      }
+      throw err;
+    }
+
     await save(propertyId, result, model, contentHash);
+    await clearFailures(propertyId, assessmentType, promptVersion);
     return { result, model, fromCache: false };
   });
 }

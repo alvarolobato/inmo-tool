@@ -11,6 +11,24 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 import { CHAT_TOOLS } from "@/lib/llm-tools/catalog";
 import { sanitize, sanitizeArgv, sanitizeTail } from "../sanitize";
 import { triggerHostTokenSync } from "./host-token-sync";
+import { CLI_LEAN_ARGS, parseCliReportedUsage, type CliReportedUsage } from "./usage";
+
+/**
+ * Per-call argv prefix that strips the Claude Code harness context (its own
+ * system prompt, built-in tool catalog, skills, MCP servers, settings files)
+ * and substitutes the dashboard's own system prompt.
+ *
+ * Measured on this repo's default flow: 25,664 → 167 input tokens for an
+ * identical trivial task, a 17.4x cost reduction. See `usage.ts` for the full
+ * rationale and for why `--bare` is deliberately not used.
+ *
+ * `dashboard.llm_cli_lean_mode = false` restores the pre-#TBD behaviour (full
+ * harness context) as an escape hatch if a flow turns out to depend on it.
+ */
+function leanArgs(cfg: DashboardLlmConfig, systemPrompt: string): string[] {
+  if (!cfg.cliLeanMode) return [];
+  return [...CLI_LEAN_ARGS, "--system-prompt", systemPrompt];
+}
 
 /**
  * Run a CLI operation and, on `LLM_CLI_AUTH` failure (typically caused by an
@@ -89,20 +107,40 @@ export interface ClaudeCliSingleShotInput {
   prompt: string;
 }
 
-export function claudeCliSingleShot(input: ClaudeCliSingleShotInput): Promise<string> {
+/**
+ * Result of a single-shot CLI call.
+ *
+ * `usage` is `null` only when the binary reported nothing parseable (an older
+ * build, or a shape change) — never a silent zero. Callers persist it verbatim
+ * so `llm_usage` reflects what the CLI actually billed.
+ */
+export interface ClaudeCliSingleShotResult {
+  text: string;
+  usage: CliReportedUsage | null;
+}
+
+export function claudeCliSingleShot(
+  input: ClaudeCliSingleShotInput,
+): Promise<ClaudeCliSingleShotResult> {
   return withAuthAutoRecovery(() => claudeCliSingleShotOnce(input));
 }
 
-async function claudeCliSingleShotOnce(input: ClaudeCliSingleShotInput): Promise<string> {
+async function claudeCliSingleShotOnce(
+  input: ClaudeCliSingleShotInput,
+): Promise<ClaudeCliSingleShotResult> {
   const { cfg, prompt } = input;
+  // `--output-format json` (was `text`): the JSON envelope carries `usage` and
+  // `total_cost_usd` alongside `result`. The text format carries neither,
+  // which is why every `cli` row in `llm_usage` used to read zero tokens.
   const args = [
     ...cfg.cliExtraArgs,
+    ...leanArgs(cfg, SINGLE_SHOT_PRINT_ARG),
     "-p",
     SINGLE_SHOT_PRINT_ARG,
     "--model",
     cfg.cliModel,
     "--output-format",
-    "text",
+    "json",
   ];
   const fullArgv = [cfg.cliBin, ...args];
   const result = await runCliProcess({
@@ -119,8 +157,9 @@ async function claudeCliSingleShotOnce(input: ClaudeCliSingleShotInput): Promise
     if (e instanceof CliRunnerError) throw e;
     throw e;
   }
-  const text = result.stdout.trim();
-  if (!text) {
+
+  const raw = result.stdout.trim();
+  if (!raw) {
     throw new CliRunnerError("LLM_CLI_EMPTY", "claude single-shot: empty stdout", {
       stderr: sanitizeTail(result.stderr, TAIL_MAX_BYTES),
       command: sanitizeArgv(fullArgv),
@@ -128,7 +167,66 @@ async function claudeCliSingleShotOnce(input: ClaudeCliSingleShotInput): Promise
       durationMs: result.durationMs,
     });
   }
-  return text;
+
+  const { text, usage } = parseSingleShotEnvelope(raw, result, fullArgv);
+  if (!text) {
+    throw new CliRunnerError("LLM_CLI_EMPTY", "claude single-shot: empty result text", {
+      stderr: sanitizeTail(result.stderr, TAIL_MAX_BYTES),
+      command: sanitizeArgv(fullArgv),
+      phase: "empty",
+      durationMs: result.durationMs,
+    });
+  }
+  return { text, usage };
+}
+
+/**
+ * Read `{result, usage, total_cost_usd, is_error}` out of the JSON envelope.
+ *
+ * Falls back to treating stdout as plain text when it does not parse as a JSON
+ * object — an older binary that ignores `--output-format json` still works,
+ * just without usage. `is_error` is surfaced with the same auth/API-error
+ * classification the agentic path uses, so a policy or credential failure is
+ * reported as such instead of being handed back as the assistant's answer.
+ */
+function parseSingleShotEnvelope(
+  raw: string,
+  result: { exitCode: number | null; stderr: string; stdout: string; durationMs: number },
+  fullArgv: string[],
+): { text: string; usage: CliReportedUsage | null } {
+  let envelope: Record<string, unknown> | null = null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      envelope = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Not JSON — older binary emitting plain text.
+  }
+  if (!envelope) return { text: raw, usage: null };
+
+  if (envelope.is_error === true) {
+    const status = typeof envelope.api_error_status === "number" ? envelope.api_error_status : null;
+    const inner = sanitize(typeof envelope.result === "string" ? envelope.result : "");
+    const isAuth =
+      status === 401 || status === 403 || /authentication|invalid.*credentials|unauthorized/i.test(inner);
+    throw new CliRunnerError(
+      isAuth ? "LLM_CLI_AUTH" : "LLM_CLI_API_ERROR",
+      `claude single-shot: ${inner.slice(0, 240) || `api_error_status=${status}`}`,
+      {
+        exitCode: result.exitCode,
+        stderr: sanitizeTail(result.stderr, TAIL_MAX_BYTES),
+        stdout: sanitizeTail(result.stdout, TAIL_MAX_BYTES),
+        command: sanitizeArgv(fullArgv),
+        phase: isAuth ? "auth" : "exit",
+        durationMs: result.durationMs,
+        innerErrorCode: status,
+      },
+    );
+  }
+
+  const text = typeof envelope.result === "string" ? envelope.result.trim() : "";
+  return { text, usage: parseCliReportedUsage(envelope) };
 }
 
 export interface ClaudeCliAgenticStepInput {
@@ -148,11 +246,18 @@ export type ClaudeAgenticStepKind = "final" | "tools";
 export interface ClaudeAgenticStepFinal {
   kind: "final";
   content: string;
+  /**
+   * Usage reported by the CLI's terminal `result` line for THIS round.
+   * `null` when the binary reported nothing parseable. An agentic run makes
+   * one CLI invocation per round, so the caller sums these across rounds.
+   */
+  usage?: CliReportedUsage | null;
 }
 
 export interface ClaudeAgenticStepTools {
   kind: "tools";
   calls: { name: string; arguments: string }[];
+  usage?: CliReportedUsage | null;
 }
 
 export type ClaudeAgenticStep = ClaudeAgenticStepFinal | ClaudeAgenticStepTools;
@@ -278,7 +383,14 @@ export type StreamJsonLineParse =
   | { kind: "text_delta"; text: string }
   | { kind: "thinking_delta"; text: string }
   | { kind: "text_full"; text: string }
-  | { kind: "result"; text: string; isError: boolean; status?: number | null }
+  | {
+      kind: "result";
+      text: string;
+      isError: boolean;
+      status?: number | null;
+      /** Token/cost accounting for this round — see `usage.ts`. */
+      usage?: CliReportedUsage | null;
+    }
   | { kind: "ignore" };
 
 export function parseStreamJsonLine(line: string): StreamJsonLineParse {
@@ -298,7 +410,9 @@ export function parseStreamJsonLine(line: string): StreamJsonLineParse {
     const isError = obj.is_error === true;
     const resultText = typeof obj.result === "string" ? obj.result : "";
     const status = typeof obj.api_error_status === "number" ? obj.api_error_status : null;
-    return { kind: "result", text: resultText, isError, status };
+    // The terminal line carries this round's `usage` + `total_cost_usd`; it was
+    // previously parsed for `result`/`is_error` only and the accounting dropped.
+    return { kind: "result", text: resultText, isError, status, usage: parseCliReportedUsage(obj) };
   }
 
   // Incremental token chunks emitted with --include-partial-messages.
@@ -367,6 +481,7 @@ async function claudeCliAgenticStepOnce(input: ClaudeCliAgenticStepInput): Promi
   // and emit it as a single chunk.
   const args = [
     ...cfg.cliExtraArgs,
+    ...leanArgs(cfg, printArg),
     "-p",
     printArg,
     "--model",
@@ -392,7 +507,14 @@ async function claudeCliAgenticStepOnce(input: ClaudeCliAgenticStepInput): Promi
   // Store the last result line so we can use its envelope for error detection.
   // Use a box object to avoid TypeScript control-flow narrowing issues with
   // variables mutated inside closures.
-  const resultBox: { line: { text: string; isError: boolean; status?: number | null } | null } = { line: null };
+  const resultBox: {
+    line: {
+      text: string;
+      isError: boolean;
+      status?: number | null;
+      usage?: CliReportedUsage | null;
+    } | null;
+  } = { line: null };
 
   const emitDelta = (deltaText: string) => {
     accumulatedText += deltaText;
@@ -507,7 +629,10 @@ async function claudeCliAgenticStepOnce(input: ClaudeCliAgenticStepInput): Promi
           );
         }
         if (typeof envelope.result === "string") {
-          return parseClaudeAgenticStepJson(envelope.result);
+          return {
+            ...parseClaudeAgenticStepJson(envelope.result),
+            usage: parseCliReportedUsage(envelope),
+          };
         }
       } catch (e) {
         if (e instanceof CliRunnerError) throw e;
@@ -523,5 +648,7 @@ async function claudeCliAgenticStepOnce(input: ClaudeCliAgenticStepInput): Promi
     });
   }
 
-  return parseClaudeAgenticStepJson(textOutput);
+  // Attach this round's accounting to the step so the adapter can forward it
+  // into the runner's usage totals (previously hard-coded to zero).
+  return { ...parseClaudeAgenticStepJson(textOutput), usage: resultLine?.usage ?? null };
 }

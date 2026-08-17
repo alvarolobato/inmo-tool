@@ -19,6 +19,8 @@ type AgenticStepUsage = {
   cache_creation_input_tokens?: number | null;
   /** Tokens read from the Anthropic prompt cache (90% discount). */
   cache_read_input_tokens?: number | null;
+  /** Provider-reported USD cost for this step (Claude CLI `total_cost_usd`). */
+  cost_usd?: number | null;
 } | null;
 
 export type AgenticStepResult =
