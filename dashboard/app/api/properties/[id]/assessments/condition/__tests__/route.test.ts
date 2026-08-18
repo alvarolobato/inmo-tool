@@ -6,6 +6,13 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+// Partial mock: keep the real AssessmentParkedError class (the route maps on
+// `instanceof`) while making the ledger clear observable without a database.
+vi.mock("@/lib/ai-assessment/cache", async (importOriginal) => ({
+  ...((await importOriginal()) as Record<string, unknown>),
+  clearAssessmentFailures: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock("@/lib/ai-assessment/condition", () => ({
   assessPropertyCondition: vi.fn(),
   getConditionAssessment: vi.fn(),
@@ -26,6 +33,10 @@ import {
 } from "@/lib/ai-assessment/condition";
 import { BudgetExceededError, CircuitBreakerOpenError } from "@/lib/llm";
 import { NextRequest } from "next/server";
+import { AssessmentParkedError } from "@/lib/ai-assessment/cache";
+import { clearAssessmentFailures } from "@/lib/ai-assessment/cache";
+
+const mockClearFailures = vi.mocked(clearAssessmentFailures);
 
 const mockAssess = vi.mocked(assessPropertyCondition);
 const mockGet = vi.mocked(getConditionAssessment);
@@ -41,6 +52,7 @@ function makeRequest(): NextRequest {
 beforeEach(() => {
   mockAssess.mockReset();
   mockGet.mockReset();
+  mockClearFailures.mockClear();
 });
 
 describe("GET /api/properties/[id]/assessments/condition", () => {
@@ -132,5 +144,37 @@ describe("POST /api/properties/[id]/assessments/condition", () => {
     mockAssess.mockRejectedValue(new Error("boom"));
     const res = await POST(makeRequest(), makeContext("1"));
     expect(res.status).toBe(500);
+  });
+
+  // D-104: a parked flow is a deliberate cost guard. Before this mapping it
+  // fell through to the generic 500, so "Evaluar" on a parked property was an
+  // opaque server error with no way out.
+  it("returns 409 ASSESSMENT_PARKED when the flow is parked, not 500", async () => {
+    mockAssess.mockRejectedValue(
+      new AssessmentParkedError(1, "condition", 3, "unparseable JSON"),
+    );
+    const res = await POST(makeRequest(), makeContext("1"));
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("ASSESSMENT_PARKED");
+    // The operator needs to know why, and how to override.
+    expect(body.error).toContain("3");
+    expect(body.error).toContain("force=1");
+  });
+
+  it("does not touch the ledger without ?force=1", async () => {
+    mockAssess.mockResolvedValue({ condition: "a_reformar" } as never);
+    await POST(makeRequest(), makeContext("1"));
+    expect(mockClearFailures).not.toHaveBeenCalled();
+  });
+
+  it("?force=1 clears the ledger first, so a parked flow can be overridden", async () => {
+    mockAssess.mockResolvedValue({ condition: "a_reformar" } as never);
+    const res = await POST(
+      new NextRequest("http://localhost:4000/api/properties/1/assessments/condition?force=1"),
+      makeContext("1"),
+    );
+    expect(res.status).toBe(200);
+    expect(mockClearFailures).toHaveBeenCalledWith(1, "condition", "condition/v1");
   });
 });

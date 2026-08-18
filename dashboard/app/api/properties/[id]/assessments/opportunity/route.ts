@@ -29,6 +29,8 @@
  * Error codes:
  *   400 — Invalid property id
  *   404 — Property not found, no live listings, or (GET) no cached verdict
+ *   409 — Assessment parked after repeated failures on unchanged listing text
+ *         (D-104); repeat with ?force=1 to override
  *   429 — Daily LLM budget exhausted
  *   503 — LLM circuit breaker open
  *   500 — Unexpected error
@@ -43,6 +45,12 @@ import {
 } from "@/lib/ai-assessment/opportunity";
 import { BudgetExceededError, CircuitBreakerOpenError } from "@/lib/llm";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
+import {
+  assessmentParkedResponse,
+  llmDisabledResponse,
+  wantsForceRetry,
+} from "@/lib/ai-assessment/route-errors";
+import { clearAssessmentFailures } from "@/lib/ai-assessment/cache";
 
 type RouteContext = {
   params: Promise<{ id: string }> | { id: string };
@@ -100,7 +108,7 @@ export async function GET(
 }
 
 export async function POST(
-  _request: NextRequest,
+  request: NextRequest,
   context: RouteContext,
 ): Promise<NextResponse> {
   const requestId = generateRequestId();
@@ -112,6 +120,13 @@ export async function POST(
       formatApiError("Id de propiedad no válido.", "VALIDATION", undefined, requestId),
       { status: 400 },
     );
+  }
+
+  // `?force=1` is the documented way out of a D-104 park: clear the
+  // ledger for this flow first, then run normally. Deliberately the SAME
+  // endpoint that returned the 409 — the operator already has this URL.
+  if (wantsForceRetry(request.url)) {
+    await clearAssessmentFailures(propertyId, "opportunity", OPPORTUNITY_PROMPT_VERSION);
   }
 
   try {
@@ -153,6 +168,13 @@ export async function POST(
         { status: 503 },
       );
     }
+    // D-104: a parked flow is a deliberate cost guard, not a server
+    // fault — 409 with the reason, never an opaque 500.
+    const parked = assessmentParkedResponse(err, requestId);
+    if (parked) return parked;
+    // Master kill switch is off — 503, again not a 500.
+    const off = llmDisabledResponse(err, requestId);
+    if (off) return off;
     console.error(`[${requestId}] POST opportunity assessment failed:`, err);
     return NextResponse.json(
       formatApiError(sanitizeErrorMessage(err), "UNKNOWN", undefined, requestId),

@@ -31,6 +31,7 @@ const cfg: DashboardLlmConfig = {
   cliExtraArgs: ["--quiet"],
   cliTimeoutMs: 5000,
   cliMaxCaptureBytes: 1_000_000,
+  cliLeanMode: true,
 };
 
 function okResult(stdout: string) {
@@ -189,10 +190,12 @@ describe("claudeCliSingleShot", () => {
   });
 
   it("invokes the CLI with the configured args and returns trimmed stdout", async () => {
+    // Older binaries (or a `--output-format json` that isn't honoured) emit
+    // bare text; that path still works, just without usage.
     mockRunCliProcess.mockResolvedValueOnce(okResult("  hello world  "));
 
     const out = await claudeCliSingleShot({ cfg, prompt: "do the thing" });
-    expect(out).toBe("hello world");
+    expect(out).toEqual({ text: "hello world", usage: null });
 
     const callArgs = mockRunCliProcess.mock.calls[0][0];
     expect(callArgs.file).toBe("claude");
@@ -202,6 +205,98 @@ describe("claudeCliSingleShot", () => {
     expect(callArgs.args[0]).toBe("--quiet"); // cliExtraArgs prepended
     expect(callArgs.stdin).toBe("do the thing");
     expect(callArgs.timeoutMs).toBe(5000);
+  });
+
+  it("requests JSON output so the usage envelope is available at all", () => {
+    // `--output-format text` carried no `usage`/`total_cost_usd`, which is why
+    // every `cli` row in llm_usage read zero tokens and zero cost.
+    mockRunCliProcess.mockResolvedValueOnce(okResult("hi"));
+    return claudeCliSingleShot({ cfg, prompt: "x" }).then(() => {
+      const args: string[] = mockRunCliProcess.mock.calls[0][0].args;
+      expect(args).toContain("--output-format");
+      expect(args[args.indexOf("--output-format") + 1]).toBe("json");
+    });
+  });
+
+  it("parses tokens and the CLI's own total_cost_usd out of the JSON envelope", async () => {
+    mockRunCliProcess.mockResolvedValueOnce(
+      okResult(
+        JSON.stringify({
+          type: "result",
+          is_error: false,
+          result: "hello world",
+          total_cost_usd: 0.0176284,
+          usage: {
+            input_tokens: 9,
+            output_tokens: 36,
+            cache_creation_input_tokens: 7521,
+            cache_read_input_tokens: 18134,
+          },
+        }),
+      ),
+    );
+
+    const out = await claudeCliSingleShot({ cfg, prompt: "x" });
+    expect(out.text).toBe("hello world");
+    expect(out.usage).toEqual({
+      prompt_tokens: 9,
+      completion_tokens: 36,
+      // prompt + completion only; cache volume lives in its own two columns
+      // (same semantics as the OpenRouter path).
+      total_tokens: 45,
+      cache_creation_input_tokens: 7521,
+      cache_read_input_tokens: 18134,
+      cost_usd: 0.0176284,
+    });
+  });
+
+  it("returns a bare JSON ANSWER verbatim instead of mistaking it for an envelope", async () => {
+    // Regression guard: every assessment flow answers with a JSON object. If
+    // an older binary ignores `--output-format json`, a naive "is it an
+    // object?" check reads that answer as an envelope, finds no `result`,
+    // raises LLM_CLI_EMPTY, and the D-104 ledger parks the property for good.
+    const answer = '{"condition":"a_reformar","confidence":0.95}';
+    mockRunCliProcess.mockResolvedValueOnce(okResult(answer));
+
+    const out = await claudeCliSingleShot({ cfg, prompt: "x" });
+    expect(out).toEqual({ text: answer, usage: null });
+  });
+
+  it("classifies an is_error envelope instead of returning it as the answer", async () => {
+    mockRunCliProcess.mockResolvedValueOnce(
+      okResult(
+        JSON.stringify({
+          type: "result",
+          is_error: true,
+          api_error_status: 401,
+          result: "authentication_error: invalid credentials",
+        }),
+      ),
+    );
+
+    const promise = claudeCliSingleShot({ cfg, prompt: "x" });
+    await expect(promise).rejects.toMatchObject({ code: "LLM_CLI_AUTH" });
+  });
+
+  it("strips the Claude Code harness context when lean mode is on (the default)", async () => {
+    mockRunCliProcess.mockResolvedValueOnce(okResult("hi"));
+    await claudeCliSingleShot({ cfg, prompt: "x" });
+
+    const args: string[] = mockRunCliProcess.mock.calls[0][0].args;
+    // Measured: 25,664 -> 167 input tokens on an identical task.
+    expect(args).toContain("--tools");
+    expect(args).toContain("--disable-slash-commands");
+    expect(args).toContain("--strict-mcp-config");
+    expect(args).toContain("--system-prompt");
+  });
+
+  it("keeps the full harness context when lean mode is disabled", async () => {
+    mockRunCliProcess.mockResolvedValueOnce(okResult("hi"));
+    await claudeCliSingleShot({ cfg: { ...cfg, cliLeanMode: false }, prompt: "x" });
+
+    const args: string[] = mockRunCliProcess.mock.calls[0][0].args;
+    expect(args).not.toContain("--tools");
+    expect(args).not.toContain("--system-prompt");
   });
 
   it("throws LLM_CLI_EMPTY when the CLI returns empty stdout on success", async () => {

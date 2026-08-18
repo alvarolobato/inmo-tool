@@ -22,6 +22,7 @@
 
 import { getSystemConfig } from "@/lib/system-config/loader";
 import { runAssessmentBatch } from "./batch";
+import { isLlmEnabled } from "@/lib/llm-enabled";
 
 interface SchedulerConfig {
   enabled: boolean;
@@ -107,8 +108,8 @@ async function tick(batchSize: number): Promise<void> {
       console.info(
         `[ai-assessment:scheduler] tick: properties=${result.properties} ` +
           `assessed=${result.assessed} skipped=${result.skipped} ` +
-          `noListings=${result.noListings} errors=${result.errors} ` +
-          `stopped=${result.stopped ?? "none"}`,
+          `noListings=${result.noListings} parked=${result.parked} ` +
+          `errors=${result.errors} stopped=${result.stopped ?? "none"}`,
       );
     }
   } catch (err) {
@@ -131,6 +132,13 @@ async function tick(batchSize: number): Promise<void> {
 export function startAssessmentScheduler(): void {
   if (started) return;
   started = true;
+
+  // Master switch first: with the LLM off, every tick would do nothing but
+  // discover it is not allowed to work. Log once at boot instead.
+  if (!isLlmEnabled()) {
+    console.info("[ai-assessment:scheduler] LLM disabled via dashboard.llm_enabled — not starting.");
+    return;
+  }
 
   const cfg = loadSchedulerConfig();
   if (!cfg.enabled) {

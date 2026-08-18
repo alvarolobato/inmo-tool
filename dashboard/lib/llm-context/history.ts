@@ -229,7 +229,26 @@ async function buildSummary(messages: HistoryMessage[], flow?: string): Promise<
 
   if (cfg.provider === "cli") {
     try {
-      return await callWithCircuitBreaker(() => claudeCliSingleShot({ cfg, prompt }));
+      const { text, usage } = await callWithCircuitBreaker(() =>
+        claudeCliSingleShot({ cfg, prompt }),
+      );
+      // This branch logged no usage at all before the CLI envelope was parsed;
+      // history summarisation fires on every long conversation and was free
+      // as far as `llm_usage` was concerned.
+      logUsage(
+        "dashboard/history/summarise",
+        model,
+        {
+          prompt_tokens: usage?.prompt_tokens ?? 0,
+          completion_tokens: usage?.completion_tokens ?? 0,
+          total_tokens: usage?.total_tokens ?? 0,
+          cache_creation_input_tokens: usage?.cache_creation_input_tokens ?? null,
+          cache_read_input_tokens: usage?.cache_read_input_tokens ?? null,
+        },
+        { provider: "cli", driver: cfg.cliDriver },
+        { reportedCostUsd: usage?.cost_usd ?? null },
+      );
+      return text;
     } catch {
       return userPrompts;
     }

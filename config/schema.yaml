@@ -304,6 +304,16 @@
 # -----------------------------------------------------------------------------
 # Dashboard LLM
 # -----------------------------------------------------------------------------
+- key: dashboard.llm_enabled
+  env: DASHBOARD_LLM_ENABLED
+  type: bool
+  sensitive: false
+  default: true
+  section: "Dashboard LLM"
+  description: "Interruptor GENERAL de todo el uso de LLM. Con false no se hace ni una sola llamada al modelo: no arrancan el pase automático de evaluación IA ni los avisos, el chat y las evaluaciones a mano devuelven 503 con un mensaje claro, y el gasto es exactamente cero. Es el único interruptor que cubre TODAS las rutas (los de cada subsistema —assessment_auto_enabled, digest_auto_enabled— solo apagan su propio scheduler y dejan pasar el chat y las llamadas manuales). Úselo cuando quiera parar el gasto de golpe."
+  requires_restart: [dashboard]
+  components: [dashboard]
+
 - key: dashboard.llm_provider
   env: DASHBOARD_LLM_PROVIDER
   type: enum
@@ -413,9 +423,19 @@
   env: DASHBOARD_LLM_MODEL_CLI
   type: string
   sensitive: false
-  default: "claude-sonnet-4-6"
+  default: "claude-haiku-4-5"
   section: "Dashboard LLM"
-  description: "Modelo CLI nativo de Claude (p.ej. claude-sonnet-4-6). No usa formato OpenRouter."
+  description: "Modelo CLI nativo de Claude (p.ej. claude-haiku-4-5). No usa formato OpenRouter. Haiku 4.5 (1$/5$ por MTok) es el valor por defecto: todos los flujos del dashboard son extracciones o clasificaciones cortas sobre el texto de un anuncio. Suba a claude-sonnet-5 si la calidad de un flujo lo exige."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.llm_cli_lean_mode
+  env: DASHBOARD_LLM_CLI_LEAN_MODE
+  type: bool
+  sensitive: false
+  default: true
+  section: "Dashboard LLM"
+  description: "Elimina el contexto del arnés de Claude Code (su propio system prompt, catálogo de herramientas integradas, skills, servidores MCP y ficheros de settings) en cada invocación del CLI, y lo sustituye por el prompt de protocolo (pequeño) de la llamada; el system prompt de dominio del dashboard sigue viajando por stdin. Medido: 25.664 → 167 tokens de entrada en la misma tarea (17,4x más barato). Ponga false solo si un flujo resulta depender de ese contexto."
   requires_restart: []
   components: [dashboard]
 
@@ -499,6 +519,16 @@
   section: "Evaluación IA"
   description: "Número máximo de inmuebles procesados por tick del pase de evaluación IA (los más antiguos sin veredicto actual primero). Acota el gasto LLM por ciclo; no es un backfill de todo el histórico de golpe. Debe ser positivo."
   requires_restart: [dashboard]
+  components: [dashboard]
+
+- key: dashboard.assessment_max_failures
+  env: DASHBOARD_ASSESSMENT_MAX_FAILURES
+  type: int
+  sensitive: false
+  default: 3
+  section: "Evaluación IA"
+  description: "Número de fallos sobre la MISMA entrada (inmueble + eje + versión de prompt + hash de contenido) tras el cual se deja de reintentar la llamada al LLM. Antes de esto, un inmueble cuyo texto provocaba siempre una salida no parseable se reintentaba cada tick indefinidamente y se pagaba cada vez. El aparcamiento se libera solo cuando cambia la evidencia (anuncio nuevo o editado) o la versión del prompt. 0 desactiva el aparcamiento (reintentos infinitos, comportamiento anterior)."
+  requires_restart: []
   components: [dashboard]
 
 - key: dashboard.assessment_interval_seconds

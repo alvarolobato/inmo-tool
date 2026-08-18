@@ -171,7 +171,7 @@ describe("llm", () => {
 
       expect(mockCreate).toHaveBeenCalledWith(
         expect.objectContaining({
-          model: "anthropic/claude-sonnet-4",
+          model: "anthropic/claude-haiku-4.5",
         })
       );
     });
@@ -401,7 +401,7 @@ describe("llm", () => {
 
       expect(mockLogUsage).toHaveBeenLastCalledWith(
         "occupancy",
-        "anthropic/claude-sonnet-4",
+        "anthropic/claude-haiku-4.5",
         { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cache_creation_input_tokens: null, cache_read_input_tokens: null },
         { provider: "openrouter", driver: null },
         { requestId: null },
@@ -418,7 +418,7 @@ describe("llm", () => {
 
       expect(mockLogUsage).toHaveBeenLastCalledWith(
         "occupancy",
-        "anthropic/claude-sonnet-4",
+        "anthropic/claude-haiku-4.5",
         { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150, cache_creation_input_tokens: null, cache_read_input_tokens: null },
         { provider: "openrouter", driver: null },
         { requestId: null },

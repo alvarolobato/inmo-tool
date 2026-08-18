@@ -47,7 +47,7 @@ import {
 } from "./eligibility";
 import { BudgetExceededError, CircuitBreakerOpenError } from "@/lib/llm";
 import type { LlmAgenticContext } from "@/lib/llm-tools/types";
-import { getLatestAssessment, type AssessmentType } from "./cache";
+import { getLatestAssessment, AssessmentParkedError, type AssessmentType } from "./cache";
 import { NoListingsError } from "./shared";
 import {
   getTrendingCandidateTypes,
@@ -118,6 +118,13 @@ export interface AssessmentBatchResult {
   skipped: number;
   /** Flow runs skipped because the property had nothing to read (NoListingsError). */
   noListings: number;
+  /**
+   * Flow runs skipped WITHOUT spending, because this exact input has already
+   * failed `dashboard.assessment_max_failures` times (AssessmentParkedError).
+   * A steadily growing number here means bad inputs are being parked instead
+   * of retried forever — which is the point; a large one is worth inspecting.
+   */
+  parked: number;
   /** Flow runs that raised an unexpected error (logged, non-fatal). */
   errors: number;
   /** Set when a budget/circuit error stopped the batch mid-run (EC-3); null on a clean full pass. */
@@ -244,6 +251,7 @@ export async function runAssessmentBatch(
     assessed: 0,
     skipped: 0,
     noListings: 0,
+    parked: 0,
     errors: 0,
     stopped: null,
   };
@@ -319,6 +327,13 @@ export async function runAssessmentBatch(
         // is a race backstop.)
         if (err instanceof NoListingsError) {
           result.noListings += 1;
+          continue;
+        }
+        // Parked by the failure ledger — no LLM call was made, no money spent.
+        // Logged at info, not error: this is the cost guard working, and at
+        // one line per tick per parked flow it would otherwise drown the log.
+        if (err instanceof AssessmentParkedError) {
+          result.parked += 1;
           continue;
         }
         // Any other per-property/flow failure (malformed model output, a

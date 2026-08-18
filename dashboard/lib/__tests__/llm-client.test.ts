@@ -48,9 +48,19 @@ function stubOpenRouter(responseText: string) {
   });
 }
 
-function stubCli(responseText: string) {
+function stubCli(
+  responseText: string,
+  usage: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    cache_creation_input_tokens: number | null;
+    cache_read_input_tokens: number | null;
+    cost_usd: number | null;
+  } | null = null,
+) {
   mockCallWithCircuitBreaker.mockImplementation((fn: () => unknown) => fn());
-  mockCliSingleShot.mockResolvedValue(responseText);
+  mockCliSingleShot.mockResolvedValue({ text: responseText, usage });
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -283,7 +293,7 @@ describe("llmComplete", () => {
     );
   });
 
-  it("returns zero usage from cli provider (flat-rate, unknown tokens)", async () => {
+  it("falls back to zero usage when the CLI reports none (older binary)", async () => {
     vi.stubEnv("DASHBOARD_LLM_PROVIDER", "cli");
     resetDashboardLlmConfigCache();
     stubCli("cli text");
@@ -297,6 +307,41 @@ describe("llmComplete", () => {
     expect(resp.usage).toEqual(
       expect.objectContaining({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }),
     );
+  });
+
+  it("logs the CLI's real tokens and reported cost, not a hard-coded zero", async () => {
+    // Regression guard for the reason the owner could not see any spend: this
+    // path used to log EMPTY_USAGE unconditionally, so every `cli` row in
+    // llm_usage read 0 tokens / $0 no matter how much the call actually cost.
+    vi.stubEnv("DASHBOARD_LLM_PROVIDER", "cli");
+    resetDashboardLlmConfigCache();
+    stubCli("answer", {
+      prompt_tokens: 9,
+      completion_tokens: 36,
+      total_tokens: 45,
+      cache_creation_input_tokens: 7521,
+      cache_read_input_tokens: 18_134,
+      cost_usd: 0.0176284,
+    });
+
+    const resp = await llmComplete({
+      flow: "generate",
+      systemPrompt: { stable: "s" },
+      messages: [{ role: "user", content: "q" }],
+    });
+
+    expect(resp.usage).toEqual(
+      expect.objectContaining({ prompt_tokens: 9, completion_tokens: 36, total_tokens: 45 }),
+    );
+    const [, , loggedUsage, , options] = mockLogUsage.mock.calls.at(-1)!;
+    expect(loggedUsage).toEqual(
+      expect.objectContaining({
+        prompt_tokens: 9,
+        cache_creation_input_tokens: 7521,
+        cache_read_input_tokens: 18_134,
+      }),
+    );
+    expect(options).toEqual(expect.objectContaining({ reportedCostUsd: 0.0176284 }));
   });
 
   // ── onTextDelta streaming callback ───────────────────────────────────────────
@@ -359,5 +404,25 @@ describe("llmComplete", () => {
 
     // Telemetry written once.
     expect(mockLogUsage).toHaveBeenCalledOnce();
+  });
+
+  it("makes NO provider call at all when dashboard.llm_enabled is false", async () => {
+    // The whole value of the master switch: not "logs zero", not "returns
+    // empty" — the provider is never reached, so nothing can be spent.
+    vi.stubEnv("DASHBOARD_LLM_PROVIDER", "cli");
+    vi.stubEnv("DASHBOARD_LLM_ENABLED", "false");
+    resetDashboardLlmConfigCache();
+    stubCli("should never be produced");
+
+    await expect(
+      llmComplete({
+        flow: "generate",
+        systemPrompt: { stable: "s" },
+        messages: [{ role: "user", content: "q" }],
+      }),
+    ).rejects.toMatchObject({ name: "LlmDisabledError" });
+
+    expect(mockCliSingleShot).not.toHaveBeenCalled();
+    expect(mockLogUsage).not.toHaveBeenCalled();
   });
 });

@@ -112,7 +112,11 @@ export async function getLlmHealth(): Promise<LlmHealthResponse> {
                 COALESCE(SUM(prompt_tokens)     FILTER (WHERE created_at >= CURRENT_DATE), 0)                    AS prompt_today,
                 COALESCE(SUM(completion_tokens) FILTER (WHERE created_at >= CURRENT_DATE), 0)                    AS completion_today,
                 COALESCE(SUM(prompt_tokens)     FILTER (WHERE created_at >= CURRENT_DATE - INTERVAL '7 days'), 0) AS prompt_7d,
-                COALESCE(SUM(completion_tokens) FILTER (WHERE created_at >= CURRENT_DATE - INTERVAL '7 days'), 0) AS completion_7d
+                COALESCE(SUM(completion_tokens) FILTER (WHERE created_at >= CURRENT_DATE - INTERVAL '7 days'), 0) AS completion_7d,
+                -- Provider-reported cost (D-102). The only way to price cli
+                -- buckets: no local rate table can model the CLI cache mix.
+                COALESCE(SUM(estimated_cost_usd) FILTER (WHERE created_at >= CURRENT_DATE), 0)                    AS reported_today,
+                COALESCE(SUM(estimated_cost_usd) FILTER (WHERE created_at >= CURRENT_DATE - INTERVAL '7 days'), 0) AS reported_7d
            FROM llm_usage
           WHERE created_at >= CURRENT_DATE - INTERVAL '7 days'
           GROUP BY COALESCE(llm_provider, 'openrouter'), model`,
@@ -187,6 +191,8 @@ export async function getLlmHealth(): Promise<LlmHealthResponse> {
     completion_today: num(r[3]),
     prompt_7d: num(r[4]),
     completion_7d: num(r[5]),
+    reported_today: num(r[6]),
+    reported_7d: num(r[7]),
   }));
   const costRollup = rollUpCosts(buckets, rates);
 

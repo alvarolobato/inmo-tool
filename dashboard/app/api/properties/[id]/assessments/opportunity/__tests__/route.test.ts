@@ -31,6 +31,7 @@ import {
 } from "@/lib/ai-assessment/opportunity";
 import { BudgetExceededError, CircuitBreakerOpenError } from "@/lib/llm";
 import { NextRequest } from "next/server";
+import { AssessmentParkedError } from "@/lib/ai-assessment/cache";
 
 const mockAssess = vi.mocked(assessPropertyOpportunity);
 const mockGet = vi.mocked(getOpportunityAssessment);
@@ -159,5 +160,21 @@ describe("POST /api/properties/[id]/assessments/opportunity", () => {
     mockAssess.mockRejectedValue(new Error("boom"));
     const res = await POST(makeRequest(), makeContext("1"));
     expect(res.status).toBe(500);
+  });
+
+  // D-104: a parked flow is a deliberate cost guard. Before this mapping it
+  // fell through to the generic 500, so "Evaluar" on a parked property was an
+  // opaque server error with no way out.
+  it("returns 409 ASSESSMENT_PARKED when the flow is parked, not 500", async () => {
+    mockAssess.mockRejectedValue(
+      new AssessmentParkedError(1, "opportunity", 3, "unparseable JSON"),
+    );
+    const res = await POST(makeRequest(), makeContext("1"));
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("ASSESSMENT_PARKED");
+    // The operator needs to know why, and how to override.
+    expect(body.error).toContain("3");
+    expect(body.error).toContain("force=1");
   });
 });

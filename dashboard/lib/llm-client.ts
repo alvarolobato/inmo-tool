@@ -29,6 +29,7 @@ import {
 } from "./llm-provider/config";
 import { createDashboardAgenticAdapter } from "./llm-provider/registry";
 import { logUsage } from "./llm-usage";
+import { assertLlmEnabled } from "./llm-enabled";
 import { callWithCircuitBreaker } from "./llm-circuit-breaker";
 import type { DashboardLlmFlow, DashboardLlmProviderId } from "./llm-provider/types";
 // Direct module import (not the ./llm-context barrel) to avoid a cycle:
@@ -167,6 +168,9 @@ function buildMessagesPlain(req: LlmRequest): ChatCompletionMessageParam[] {
  * circuit-breaker, and error propagation.
  */
 export async function llmComplete(req: LlmRequest): Promise<LlmResponse> {
+  // Master kill switch — checked before ANY provider work, so a disabled
+  // install cannot spend a token by any route. See lib/llm-enabled.ts.
+  assertLlmEnabled();
   const cfg = loadDashboardLlmConfig();
   const dFlow = narrowDashboardLlmFlow(req.flow);
   const model = getEffectiveDashboardModel(cfg, dFlow);
@@ -190,11 +194,26 @@ export async function llmComplete(req: LlmRequest): Promise<LlmResponse> {
       })
       .join("\n\n");
 
-    const text = await callWithCircuitBreaker(() =>
+    const { text, usage: cliUsage } = await callWithCircuitBreaker(() =>
       claudeCliSingleShot({ cfg, prompt: combined }),
     );
 
-    logUsage(endpoint, model, EMPTY_USAGE, meta, { requestId });
+    // Real token counts + the CLI's own `total_cost_usd`, instead of the
+    // hard-coded EMPTY_USAGE this used to log for every single CLI call.
+    const usage: NormalizedUsage = cliUsage
+      ? {
+          prompt_tokens: cliUsage.prompt_tokens,
+          completion_tokens: cliUsage.completion_tokens,
+          total_tokens: cliUsage.total_tokens,
+          cache_creation_input_tokens: cliUsage.cache_creation_input_tokens,
+          cache_read_input_tokens: cliUsage.cache_read_input_tokens,
+        }
+      : { ...EMPTY_USAGE };
+
+    logUsage(endpoint, model, usage, meta, {
+      requestId,
+      reportedCostUsd: cliUsage?.cost_usd ?? null,
+    });
 
     if (req.onTextDelta && text) {
       try {
@@ -206,7 +225,7 @@ export async function llmComplete(req: LlmRequest): Promise<LlmResponse> {
 
     return {
       text,
-      usage: { ...EMPTY_USAGE },
+      usage,
       provider: "cli",
       driver: cfg.cliDriver,
     };

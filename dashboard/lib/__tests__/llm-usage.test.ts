@@ -296,12 +296,18 @@ describe("checkDailyBudget", () => {
     await expect(checkDailyBudget()).resolves.toBeUndefined();
   });
 
-  it("skips the PostgreSQL budget query when dashboard LLM provider is cli", async () => {
+  it("enforces the budget under the cli provider too, counting every provider's spend", async () => {
+    // Previously this returned early for `cli` on the grounds that CLI rows
+    // always stored cost 0 — which made the daily cap inert under the DEFAULT
+    // provider. CLI rows now carry the CLI's own `total_cost_usd`, so the cap
+    // applies, and the query must not filter by `llm_provider`.
     vi.stubEnv("LLM_DAILY_BUDGET_USD", "1");
     vi.stubEnv("DASHBOARD_LLM_PROVIDER", "cli");
     mockQuery.mockClear();
+    mockQuery.mockResolvedValueOnce({ rows: [["2.50"]] });
 
-    await expect(checkDailyBudget()).resolves.toBeUndefined();
-    expect(mockQuery).not.toHaveBeenCalled();
+    await expect(checkDailyBudget()).rejects.toBeInstanceOf(BudgetExceededError);
+    expect(mockQuery).toHaveBeenCalled();
+    expect(String(mockQuery.mock.calls[0][0])).not.toContain("llm_provider");
   });
 });

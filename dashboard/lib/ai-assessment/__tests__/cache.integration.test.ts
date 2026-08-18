@@ -18,7 +18,8 @@ import { describe, it, expect, afterAll, beforeEach, afterEach, vi } from "vites
 import { Pool } from "pg";
 import { buildPgPoolConfig } from "@/lib/db-shared";
 import { sql, resetPool } from "@/lib/db-write";
-import { getOrCompute, getLatestAssessment } from "../cache";
+import { getOrCompute, getLatestAssessment, AssessmentParkedError } from "../cache";
+import { CliRunnerError } from "@/lib/llm-provider/cli/errors";
 import {
   saveConditionAssessment,
   getConditionAssessment,
@@ -118,6 +119,10 @@ describe.runIf(dbAvailable)("assessment cache — real Postgres round trip", () 
       await pool.query("DELETE FROM ai_assessment WHERE property_id = ANY($1::bigint[])", [
         createdPropertyIds,
       ]);
+      await pool.query(
+        "DELETE FROM ai_assessment_failure WHERE property_id = ANY($1::bigint[])",
+        [createdPropertyIds],
+      );
       await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [
         createdPropertyIds,
       ]);
@@ -366,6 +371,103 @@ describe.runIf(dbAvailable)("assessment cache — real Postgres round trip", () 
         [propertyId],
       );
       expect(Number(rows[0].n)).toBe(1);
+    });
+  });
+
+  // ── D-104 failure ledger, against the real schema ─────────────────────────
+  //
+  // failure-ledger.test.ts mocks `sql` and routes on SQL TEXT, so the actual
+  // `ON CONFLICT ON CONSTRAINT ai_assessment_failure_key` upsert is never
+  // executed by that suite. If the constraint name ever drifts, every strike
+  // would silently fail, `fail_count` would never increment, and the retry
+  // burn this ledger exists to stop would resume with no visible symptom.
+
+  it("increments fail_count via the real ON CONFLICT upsert, then parks", async () => {
+    await withRealDb(async (pool) => {
+      const propertyId = await seedProperty(pool);
+      const listings: ListingSnapshot[] = [{ listingId: 1, description: "texto que rompe" }];
+      // Not environmental → strikes. LLM_CLI_PARSE is the real poison case.
+      const boom = new CliRunnerError("LLM_CLI_PARSE", "unparseable JSON");
+      const computeFn = vi.fn().mockRejectedValue(boom);
+
+      for (let i = 1; i <= 3; i++) {
+        await expect(
+          getOrCompute(
+            propertyId,
+            "condition",
+            CONDITION_PROMPT_VERSION,
+            listings,
+            computeFn,
+            saveConditionAssessment,
+          ),
+        ).rejects.toBeInstanceOf(CliRunnerError);
+
+        const { rows } = await pool.query<{ fail_count: number; last_error: string }>(
+          `SELECT fail_count, last_error FROM ai_assessment_failure
+            WHERE property_id = $1 AND assessment_type = 'condition'`,
+          [propertyId],
+        );
+        // One row, counter climbing — proves the upsert, not just the INSERT.
+        expect(rows).toHaveLength(1);
+        expect(Number(rows[0].fail_count)).toBe(i);
+        expect(rows[0].last_error).toContain("unparseable JSON");
+      }
+
+      // Fourth attempt is parked: no LLM call at all.
+      expect(computeFn).toHaveBeenCalledTimes(3);
+      await expect(
+        getOrCompute(
+          propertyId,
+          "condition",
+          CONDITION_PROMPT_VERSION,
+          listings,
+          computeFn,
+          saveConditionAssessment,
+        ),
+      ).rejects.toBeInstanceOf(AssessmentParkedError);
+      expect(computeFn).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  it("a changed listing (new content hash) unparks without operator action", async () => {
+    await withRealDb(async (pool) => {
+      const propertyId = await seedProperty(pool);
+      const original: ListingSnapshot[] = [{ listingId: 1, description: "texto que rompe" }];
+      const failing = vi.fn().mockRejectedValue(new CliRunnerError("LLM_CLI_PARSE", "bad"));
+
+      for (let i = 0; i < 3; i++) {
+        await expect(
+          getOrCompute(propertyId, "condition", CONDITION_PROMPT_VERSION, original, failing, saveConditionAssessment),
+        ).rejects.toBeInstanceOf(CliRunnerError);
+      }
+      await expect(
+        getOrCompute(propertyId, "condition", CONDITION_PROMPT_VERSION, original, failing, saveConditionAssessment),
+      ).rejects.toBeInstanceOf(AssessmentParkedError);
+
+      // The owner edits the listing / a connector re-fetches new text → the
+      // hash changes → a different ledger key → the flow runs again.
+      const edited: ListingSnapshot[] = [{ listingId: 1, description: "descripción corregida" }];
+      const ok = vi.fn().mockResolvedValue({
+        result: parseConditionResult(A_REFORMAR),
+        model: "test-model",
+      });
+      const out = await getOrCompute(
+        propertyId,
+        "condition",
+        CONDITION_PROMPT_VERSION,
+        edited,
+        ok,
+        saveConditionAssessment,
+      );
+      expect(out.fromCache).toBe(false);
+      expect(ok).toHaveBeenCalledTimes(1);
+
+      // A success clears every strike for the flow, old hash included.
+      const { rows } = await pool.query<{ n: string }>(
+        `SELECT COUNT(*) AS n FROM ai_assessment_failure WHERE property_id = $1`,
+        [propertyId],
+      );
+      expect(Number(rows[0].n)).toBe(0);
     });
   });
 });

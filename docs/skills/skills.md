@@ -27,6 +27,7 @@ This list shrank sharply in task 1.1 (#9) — most of the source project's skill
 | **[../issue-format.md](../issue-format.md)** | Standard issue/PR template, Exit Criteria conventions, single-track vs. decompose-into-sub-issues escape hatch. | Writing or refining a GitHub issue. |
 | **[../roadmap/connector-etl-ops.md](../roadmap/connector-etl-ops.md)** | Forward roadmap for hardening connectors + ETL ops: management, ad-hoc execution, error tracking/monitoring, aging/withdrawal, dedup. Proposed issue sequence + broken-telemetry findings. | Planning connector/ETL reliability + data-quality work. |
 | **[../roadmap/dedup-optimization.md](../roadmap/dedup-optimization.md)** | Dedup performance/approach analysis: where the runtime goes, blocking/bucketing (deferred), incremental dedup, and profile-scoped review-queue prioritization. | Planning dedup speed or duplicate-review improvements. |
+| **[../roadmap/llm-cost-optimization.md](../roadmap/llm-cost-optimization.md)** | Where the LLM spend actually goes: the five confirmed metering/overhead/retry bugs (D-102/D-103/D-104, fixed) with their measurements, what is deliberately NOT broken (the content-hash cache), and the prioritized follow-up list (batch ordering, cache erosion, merging cheap axes, per-flow model tiers). | Touching anything that costs tokens, or asked why the LLM bill is what it is. |
 
 ## Meta Skills
 
