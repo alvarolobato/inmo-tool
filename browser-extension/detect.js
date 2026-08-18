@@ -369,7 +369,8 @@
   /**
    * The 1-based results-page number encoded in `url`, or 1 when none is present
    * (page 1 is the canonical, indicator-free URL). Recognises ALL the schemes
-   * this module writes — idealista's `/pagina-<n>.htm` path segment and the
+   * this module writes — idealista's `/pagina-<n>.htm` path segment, its
+   * extensionless `/areas/` twin `/pagina-<n>` (D-110), and the
    * `?pagina=`/`?page=`/`?pag=` query params — regardless of portal, so the
    * DOM-anchor fallback can read a "next page" link whatever shape it takes.
    * Pure; returns 1 for an unparseable URL.

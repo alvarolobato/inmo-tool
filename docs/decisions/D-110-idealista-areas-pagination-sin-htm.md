@@ -1,4 +1,12 @@
-# D-108 — Idealista pagina `/areas/` sin `.htm`
+---
+id: D-110
+title: Idealista pagina las búsquedas /areas/ sin `.htm`
+date: 2026-08-18
+group: Data / connectors
+rule: 'Idealista tiene DOS familias de paginación: la normal usa `/pagina-N.htm` y la de polígono (`/areas/...?shape=`) usa `/pagina-N` SIN extensión — la forma `.htm` devuelve su página de error aunque la página exista. Va por config (`pagination.extensionlessPathPrefixes`), nunca en el constructor.'
+---
+
+# D-110: Idealista pagina las búsquedas `/areas/` sin `.htm`
 
 **Estado**: ACEPTADA · **Fecha**: 18-ago-2026 · **Contexto**: captura guiada (extensión)
 
