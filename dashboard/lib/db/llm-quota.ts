@@ -1,5 +1,5 @@
 /**
- * Persistence for subscription quota readings (D-106).
+ * Persistence for subscription quota readings (D-107).
  *
  * Server-only: imports `lib/db-write`.
  */
@@ -14,6 +14,7 @@ interface Row {
   week_top_model_pct: number | null;
   session_resets_at: string | null;
   week_resets_at: string | null;
+  week_top_model_resets_at: string | null;
 }
 
 /** Persist one reading. Best-effort: telemetry must never fail the caller. */
@@ -24,8 +25,8 @@ export async function saveQuotaReading(
   await sql(
     `INSERT INTO llm_quota_reading
        (read_at, session_pct, week_pct, week_top_model_pct,
-        session_resets_at, week_resets_at, source)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        session_resets_at, week_resets_at, week_top_model_resets_at, source)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
     [
       s.readAt,
       s.session?.pctUsed ?? null,
@@ -33,6 +34,7 @@ export async function saveQuotaReading(
       s.weekTopModel?.pctUsed ?? null,
       s.session?.resetsAt ?? null,
       s.week?.resetsAt ?? null,
+      s.weekTopModel?.resetsAt ?? null,
       source,
     ],
   );
@@ -49,7 +51,7 @@ export async function saveQuotaReading(
 export async function getLatestQuotaReading(): Promise<QuotaSnapshot | null> {
   const rows = await sql<Row>(
     `SELECT read_at, session_pct, week_pct, week_top_model_pct,
-            session_resets_at, week_resets_at
+            session_resets_at, week_resets_at, week_top_model_resets_at
        FROM llm_quota_reading
       ORDER BY read_at DESC, id DESC
       LIMIT 1`,
@@ -61,7 +63,7 @@ export async function getLatestQuotaReading(): Promise<QuotaSnapshot | null> {
   return {
     session: win(r.session_pct, r.session_resets_at),
     week: win(r.week_pct, r.week_resets_at),
-    weekTopModel: win(r.week_top_model_pct, null),
+    weekTopModel: win(r.week_top_model_pct, r.week_top_model_resets_at),
     readAt: new Date(r.read_at).toISOString(),
   };
 }

@@ -171,7 +171,7 @@ export async function llmComplete(req: LlmRequest): Promise<LlmResponse> {
   // Master kill switch — checked before ANY provider work, so a disabled
   // install cannot spend a token by any route. See lib/llm-enabled.ts.
   assertLlmEnabled();
-  // Subscription-quota cap (D-106): stop before the account's session/weekly
+  // Subscription-quota cap (D-107): stop before the account's session/weekly
   // limit is reached. No-op unless `dashboard.llm_quota_stop_pct` is set.
   await assertQuotaAvailable();
   const cfg = loadDashboardLlmConfig();

@@ -221,10 +221,26 @@ function findResultEnvelope(raw: string): Record<string, unknown> | null {
     } catch {
       continue;
     }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
-    const o = parsed as Record<string, unknown>;
-    if ("result" in o || "is_error" in o || o.type === "result") return o;
+    const o = asEnvelope(parsed);
+    if (o) return o;
   }
+  // Line scanning strictly NARROWS what used to parse: the previous code ran
+  // JSON.parse over the whole of stdout, so a PRETTY-PRINTED envelope (one
+  // that spans several lines) worked and now would not — every line fails,
+  // and the caller would hand the entire JSON blob back as the assistant's
+  // answer. Fall back to the whole-blob parse, with the same discriminator.
+  try {
+    return asEnvelope(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+/** The envelope discriminator, applied to an already-parsed value. */
+function asEnvelope(parsed: unknown): Record<string, unknown> | null {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const o = parsed as Record<string, unknown>;
+  if ("result" in o || "is_error" in o || o.type === "result") return o;
   return null;
 }
 

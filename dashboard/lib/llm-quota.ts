@@ -86,7 +86,8 @@ export function parseUsageOutput(text: string): QuotaSnapshot {
     if (!m) return null;
     const pct = Number(m[1]);
     if (!Number.isFinite(pct) || pct < 0 || pct > 100) return null;
-    return { pctUsed: pct, resetsAt: (m[2] ?? "").trim() || null };
+    // Bounded: this string is persisted, and the capture is unbounded.
+    return { pctUsed: pct, resetsAt: (m[2] ?? "").trim().slice(0, 200) || null };
   };
 
   return {
@@ -151,16 +152,23 @@ export function evaluateQuota(
     ["week", snapshot!.week],
     ["week_top_model", snapshot!.weekTopModel],
   ];
-  for (const [name, w] of windows) {
-    if (w && w.pctUsed >= thresholdPct) {
-      return {
-        allowed: false,
-        reason: "threshold_reached",
-        pctUsed: w.pctUsed,
-        window: name,
-        threshold: thresholdPct,
-      };
-    }
+  // Report the HIGHEST window over the threshold, not merely the first in
+  // declaration order — the allow/block decision is the same either way, but
+  // the operator-facing number must be the one actually closest to the limit,
+  // which is what the config description and D-107 promise.
+  const over = windows
+    .filter((entry): entry is [string, QuotaWindow] => entry[1] !== null)
+    .filter(([, w]) => w.pctUsed >= thresholdPct)
+    .sort((a, b) => b[1].pctUsed - a[1].pctUsed);
+  if (over.length > 0) {
+    const [name, w] = over[0];
+    return {
+      allowed: false,
+      reason: "threshold_reached",
+      pctUsed: w.pctUsed,
+      window: name,
+      threshold: thresholdPct,
+    };
   }
   return { allowed: true, reason: "under_threshold", pctUsed: peakPctUsed(snapshot) };
 }

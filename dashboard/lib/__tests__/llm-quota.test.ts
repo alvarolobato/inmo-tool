@@ -1,5 +1,5 @@
 /**
- * Subscription-quota parsing and the stop-at-N% decision (D-106).
+ * Subscription-quota parsing and the stop-at-N% decision (D-107).
  *
  * The fixture below is REAL output captured from
  * `claude -p "/usage" --output-format json` on a Max account, not invented —

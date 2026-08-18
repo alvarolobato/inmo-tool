@@ -3,7 +3,7 @@ id: D-107
 title: The LLM cap is percentage-of-subscription-quota, fed by a host-side poller
 date: 2026-08-18
 group: AI layer
-rule: `dashboard.llm_quota_stop_pct` (0 = off) stops LLM calls when the account's consumption reaches N% of ANY window the CLI reports (session or weekly), read for free from `claude -p "/usage"` by a HOST-side poller (`scripts/claude-quota-poller.sh` → `POST /api/etl/llm-quota`) because only credential-file auth can see it. An absent or stale reading is UNKNOWN: it never blocks and never counts as 0%.
+rule: "`dashboard.llm_quota_stop_pct` (0 = off) stops LLM calls when the account's consumption reaches N% of ANY window the CLI reports (session or weekly), read for free from `claude -p \"/usage\"` by a HOST-side poller (`scripts/claude-quota-poller.sh` → `POST /api/etl/llm-quota`) because only credential-file auth can see it. An absent or stale reading is UNKNOWN: it never blocks and never counts as 0%."
 ---
 
 # D-107: The LLM cap is percentage-of-subscription-quota
@@ -34,6 +34,8 @@ Two constraints found while verifying, both of which shape the design:
 - Stored in `llm_quota_reading` (one row per reading, newest wins) because it originates outside the dashboard process, must survive a restart, and `/etl/salud` will want the history.
 - **Unknown is neither blocked nor zero.** A missing reading, or one older than `dashboard.llm_quota_max_age_seconds` (default 1800), allows the call — a dead poller must not take the product down — but is reported as `reason: "unknown"` so a UI can say "cap not enforced: no recent reading" instead of implying it is active. Silently treating unknown as 0% would let it spend freely while blind; silently blocking would make a poller outage look like an outage of the product.
 - Any error reading the snapshot **fails open**, for the same reason.
+- **A quota stop is an ENVIRONMENTAL error, never a strike.** `LlmQuotaExceededError` (and `LlmDisabledError`) are exempt from the D-104 failure ledger, the batch halts cleanly with `stopped: "quota"`, and the scheduler checks the cap once per tick instead of discovering it per property. The first cut got this wrong and it was caught in review: the cap throws for every property in the tick, so each took a strike, and at the default `assessment_max_failures: 3` the head-of-queue properties (selection is `created_at ASC`) were **parked permanently** after three ticks — while the cap itself self-heals in 30 minutes. A cost guard that damages data is worse than no guard.
+- **The API answers 503 `LLM_QUOTA_EXCEEDED`**, carrying the percentage and window, never a generic 500 — the same rule already applied to `AssessmentParkedError` (409) and `LlmDisabledError` (503).
 
 **Alternatives rejected**:
 

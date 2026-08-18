@@ -17,7 +17,7 @@
 import { NextResponse } from "next/server";
 import { formatApiError } from "@/lib/errors";
 import { AssessmentParkedError } from "./cache";
-import { LlmDisabledError } from "@/lib/llm-enabled";
+import { LlmDisabledError, LlmQuotaExceededError } from "@/lib/llm-enabled";
 
 /**
  * Map `AssessmentParkedError` to a 409 that tells the operator what happened,
@@ -52,6 +52,22 @@ export function llmDisabledResponse(err: unknown, requestId: string): NextRespon
   if (!(err instanceof LlmDisabledError)) return null;
   return NextResponse.json(
     formatApiError(err.message, "LLM_DISABLED", undefined, requestId),
+    { status: 503 },
+  );
+}
+
+/**
+ * Map `LlmQuotaExceededError` to a 503 carrying the percentage and the window
+ * that tripped, so the operator can see WHY work paused and roughly when it
+ * resumes. Without this it fell through to the generic 500 — the same mistake
+ * this module was created to fix for `AssessmentParkedError`, and the reason
+ * its opening note says a cost guard presenting as a 500 is a bug report
+ * waiting to happen. Returns `null` for any other error.
+ */
+export function llmQuotaResponse(err: unknown, requestId: string): NextResponse | null {
+  if (!(err instanceof LlmQuotaExceededError)) return null;
+  return NextResponse.json(
+    formatApiError(err.message, "LLM_QUOTA_EXCEEDED", undefined, requestId),
     { status: 503 },
   );
 }

@@ -46,6 +46,10 @@ export type ErrorCode =
   // All LLM use is switched off (`dashboard.llm_enabled = false`) — a
   // deliberate operator state, not a fault. See lib/llm-enabled.ts.
   | "LLM_DISABLED"
+  // The account's subscription quota reached `dashboard.llm_quota_stop_pct`
+  // (D-107). Like LLM_DISABLED this is a deliberate cost guard, not a fault —
+  // but unlike it, it clears on its own when the window resets.
+  | "LLM_QUOTA_EXCEEDED"
   | "TIMEOUT"
   | "COST_LIMIT"
   | "REVIEW_EXISTS"

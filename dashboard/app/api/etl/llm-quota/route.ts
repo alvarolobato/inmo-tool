@@ -1,5 +1,5 @@
 /**
- * POST /api/etl/llm-quota — ingest a subscription-quota reading (D-106).
+ * POST /api/etl/llm-quota — ingest a subscription-quota reading (D-107).
  * GET  /api/etl/llm-quota — read the latest reading and the cap's verdict.
  *
  * ## Why an endpoint instead of the dashboard reading it directly

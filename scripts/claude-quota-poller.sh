@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Push the Claude subscription quota into the dashboard (D-106).
+# Push the Claude subscription quota into the dashboard (D-107).
 #
 # WHY THIS RUNS ON THE HOST
 # -------------------------
@@ -82,10 +82,14 @@ import sys, json
 print(json.dumps({"usage_text": sys.stdin.read(), "source": "host-poller"}))
 ')"
 
+  # The admin key goes in via --config on stdin-adjacent fd, NOT on the argv:
+  # a header argument is visible in `ps aux` to every user on the box, and
+  # under --loop that exposure repeats forever.
   http="$(printf '%s' "$payload" | curl -s -o /dev/null -w '%{http_code}' \
+    --max-time 30 \
+    --config <(printf 'header = "X-Admin-Key: %s"\n' "$ADMIN_API_KEY") \
     -X POST "$DASHBOARD_URL/api/etl/llm-quota" \
     -H "Content-Type: application/json" \
-    -H "X-Admin-Key: $ADMIN_API_KEY" \
     --data-binary @-)"
 
   if [ "$http" != "200" ]; then
@@ -96,6 +100,14 @@ print(json.dumps({"usage_text": sys.stdin.read(), "source": "host-poller"}))
   printf '%s\n' "$usage_text" | grep -E '% used' || true
   return 0
 }
+
+case "${1:-}" in
+  ""|--loop) : ;;
+  *)
+    echo "claude-quota-poller: unknown argument '$1' (expected --loop or nothing)" >&2
+    exit 2
+    ;;
+esac
 
 if [ "${1:-}" = "--loop" ]; then
   while true; do

@@ -78,7 +78,7 @@ export function assertLlmEnabled(): void {
 
 /**
  * Raised when the account's subscription quota has reached the configured
- * stop threshold (`dashboard.llm_quota_stop_pct`). See D-106.
+ * stop threshold (`dashboard.llm_quota_stop_pct`). See D-107.
  *
  * Distinct from `LlmDisabledError`: the AI is switched ON, we are simply out
  * of headroom for now, and the window resets on its own.

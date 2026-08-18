@@ -46,6 +46,7 @@ import {
   missingCurrentVerdictClause,
 } from "./eligibility";
 import { BudgetExceededError, CircuitBreakerOpenError } from "@/lib/llm";
+import { LlmQuotaExceededError } from "@/lib/llm-enabled";
 import type { LlmAgenticContext } from "@/lib/llm-tools/types";
 import { getLatestAssessment, AssessmentParkedError, type AssessmentType } from "./cache";
 import { NoListingsError } from "./shared";
@@ -107,7 +108,7 @@ export const DEFAULT_BATCH_FLOWS: BatchFlow[] = [
 ];
 
 /** Why a batch stopped early — a clean, budget-driven halt, not a crash. */
-export type BatchStopReason = "budget" | "circuit";
+export type BatchStopReason = "budget" | "circuit" | "quota";
 
 export interface AssessmentBatchResult {
   /** Properties examined this tick (≤ batchSize). */
@@ -311,6 +312,19 @@ export async function runAssessmentBatch(
           console.warn(
             `[ai-assessment:batch] daily LLM budget exhausted at property=${propertyId} ` +
               `flow=${flow.type} — stopping this pass cleanly (assessed=${result.assessed}).`,
+          );
+          return result;
+        }
+        // D-107: the subscription quota cap is a clean halt of the WHOLE pass,
+        // exactly like a budget stop. Continuing would throw for every
+        // remaining property in the page to no purpose.
+        if (err instanceof LlmQuotaExceededError) {
+          result.stopped = "quota";
+          console.warn(
+            `[ai-assessment:batch] subscription quota cap reached at property=${propertyId} ` +
+              `flow=${flow.type} (${err.pctUsed}% of the "${err.window}" window, ` +
+              `limit ${err.threshold}%) — stopping this pass cleanly ` +
+              `(assessed=${result.assessed}).`,
           );
           return result;
         }

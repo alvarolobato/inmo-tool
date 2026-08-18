@@ -80,8 +80,20 @@ def parse_frontmatter(text: str) -> dict:
         return {}
     try:
         data = yaml.safe_load(parts[1])
-    except yaml.YAMLError:
-        return {}
+    except yaml.YAMLError as exc:
+        # Do NOT swallow this. A record whose frontmatter fails to parse used to
+        # be dropped from the index in silence, and the drift guard could not
+        # catch it: the generator's output stays self-consistent with its own
+        # omission, so `--check` says "up to date" while a binding rule is
+        # missing from the file every session loads. That is exactly how D-043,
+        # D-105, D-106 and D-107 went missing — each `rule:` began with a
+        # backtick, which a YAML plain scalar may not do (reserved indicator).
+        raise ValueError(
+            f"Unparseable YAML frontmatter: {exc}. "
+            "Quote the `rule:` value: a YAML plain scalar may not start with a "
+            "reserved indicator (` @ % & * ! | > { } [ ] , # ? : -) nor contain "
+            "a colon followed by a space."
+        ) from exc
     return data if isinstance(data, dict) else {}
 
 

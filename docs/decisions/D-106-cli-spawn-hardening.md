@@ -3,7 +3,7 @@ id: D-106
 title: CLI spawn hardening — safety flags are unconditional, stdin is EPIPE-safe, cwd is neutral
 date: 2026-08-18
 group: AI layer
-rule: `CLI_SAFETY_ARGS` (`--tools ""`, `--no-session-persistence`) is passed on EVERY CLI call regardless of `dashboard.llm_cli_lean_mode` — disabling tools against untrusted scraped listing text is a security control, not a cost knob. The runner also spawns with a neutral `cwd` and an EPIPE-guarded stdin, and reads the result envelope line-by-line.
+rule: "`CLI_SAFETY_ARGS` (`--tools \"\"`, `--no-session-persistence`) is passed on EVERY CLI call regardless of `dashboard.llm_cli_lean_mode` — disabling tools against untrusted scraped listing text is a security control, not a cost knob. The runner also spawns with a neutral `cwd` and an EPIPE-guarded stdin, and reads the result envelope line-by-line."
 ---
 
 # D-106: CLI spawn hardening
