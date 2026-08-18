@@ -18,7 +18,7 @@ import psycopg2
 import pytest
 
 from etl import orchestrator
-from etl.connectors.base import CanonicalListingVersion, ConnectorError
+from etl.connectors.base import CanonicalListingVersion, ConnectorError, ConnectorScope
 from etl.connectors.fotocasa import FotocasaConnector
 from etl.connectors.geography import (
     UnresolvableGeographyError,
@@ -921,9 +921,21 @@ class TestConnectorConfig:
             # fixture profile from _apply_schema. The malformed profile's
             # scope was skipped, not substituted with garbage and not
             # allowed to abort discovery for the valid profile alongside it.
-            assert connector.scopes_seen == [
-                orchestrator.ConnectorScope(center=(40.4168, -3.7038), radius_km=10.0)
-            ]
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM search_profile "
+                    "WHERE name = %s AND archived_at IS NULL",
+                    (_TEST_PROFILE_NAME,),
+                )
+                (fixture_profile_id,) = cur.fetchone()
+            assert len(connector.scopes_seen) == 1
+            (only_scope,) = connector.scopes_seen
+            assert only_scope.center == (40.4168, -3.7038)
+            assert only_scope.radius_km == 10.0
+            # #530: the surviving scope is attributed to the valid profile
+            # (profile_ids is now dynamic, so assert against its real id
+            # rather than an object-equality literal).
+            assert only_scope.profile_ids == (fixture_profile_id,)
         finally:
             orchestrator.CONNECTORS.clear()
             _cleanup(pg_conn, connector.name, run_id)
@@ -5731,6 +5743,89 @@ class TestFailureClassificationAndGeographyScope:
             _cleanup(pg_conn, connector.name, run_id)
             _cleanup_scope_state(pg_conn, connector.name)
 
+    def test_geography_scope_entry_carries_the_profile_id(self, pg_conn):
+        # #530: a crawled scope names the profile it came from. The only active
+        # profile at this point is _apply_schema's fixture — its id must appear
+        # on the crawled entry (attribution, not just geometry).
+        _apply_schema(pg_conn)
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM search_profile WHERE name = %s AND archived_at IS NULL",
+                (_TEST_PROFILE_NAME,),
+            )
+            (fixture_profile_id,) = cur.fetchone()
+        connector = DummyConnector(name="test-profile-attr")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            row = _classification_row(pg_conn, run_id, connector.name)
+            crawled = [
+                g for g in (row["geography_scope"] or []) if g["outcome"] == "crawled"
+            ]
+            assert crawled, f"expected a crawled scope, got {row['geography_scope']}"
+            assert crawled[0]["profile_ids"] == [fixture_profile_id]
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            _cleanup_scope_state(pg_conn, connector.name)
+
+    def test_record_geo_emits_profile_ids_for_unresolvable(self, pg_conn):
+        # EC-3: a scope that could NOT be resolved is still recorded against the
+        # profile that asked for it — precisely the entries #531/#532 need.
+        _apply_schema(pg_conn)
+        with pg_conn.cursor() as cur:
+            # Suppress the resolvable fixture profile so the ONLY scope this run
+            # walks is the unresolvable one under test (scoped by name per PR
+            # #177 round 3, N8 — never a blanket archive of the shared DB).
+            cur.execute(
+                "UPDATE search_profile SET archived_at = NOW() "
+                "WHERE name = %s AND archived_at IS NULL",
+                (_TEST_PROFILE_NAME,),
+            )
+            cur.execute(
+                "INSERT INTO search_profile (name, scope) VALUES (%s, %s) RETURNING id",
+                (
+                    "unresolvable-attribution-profile",
+                    # Lisbon — outside the Spanish gazetteer, so resolve_place
+                    # raises UnresolvableGeographyError (same center the
+                    # existing M4 unresolvable tests use).
+                    (
+                        '{"geography": {"type": "radius", '
+                        '"center": [38.7223, -9.1393], "radius_km": 10}}'
+                    ),
+                ),
+            )
+            (profile_id,) = cur.fetchone()
+        pg_conn.commit()
+
+        connector = _GeographyAwareConnector(name="test-unresolvable-attr")
+        orchestrator.CONNECTORS[:] = [connector]
+        run_id = None
+        try:
+            run_id = orchestrator.run_all_connectors(pg_conn, trigger="test")
+            row = _classification_row(pg_conn, run_id, connector.name)
+            unresolvable = [
+                g
+                for g in (row["geography_scope"] or [])
+                if g["outcome"] == "unresolvable"
+            ]
+            assert unresolvable, (
+                f"expected an unresolvable scope, got {row['geography_scope']}"
+            )
+            assert unresolvable[0]["profile_ids"] == [profile_id]
+        finally:
+            orchestrator.CONNECTORS.clear()
+            _cleanup(pg_conn, connector.name, run_id)
+            _cleanup_scope_state(pg_conn, connector.name)
+            with pg_conn.cursor() as cur:
+                cur.execute("DELETE FROM search_profile WHERE id = %s", (profile_id,))
+                cur.execute(
+                    "UPDATE search_profile SET archived_at = NULL WHERE name = %s",
+                    (_TEST_PROFILE_NAME,),
+                )
+            pg_conn.commit()
+
     @pytest.mark.parametrize(
         "message, expected_kind",
         [
@@ -6192,3 +6287,110 @@ class TestCurrentPriceBackfill:
             )
         finally:
             _cleanup(pg_conn, source, None)
+
+
+class _FakeScopeCursor:
+    """Minimal cursor stand-in for the pure query->transform scope builders.
+
+    `_active_profile_scopes` / `_override_scopes_for_connector` only
+    `cur.execute(...)` then `cur.fetchall()` — no DB semantics are under test
+    here, only the #530 dedup/union transform over the returned rows, so a real
+    Postgres round-trip would add nothing (contrast the persistence tests above,
+    which genuinely need pg_conn). Runs everywhere, no DB required.
+    """
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, *args, **kwargs):
+        pass
+
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeScopeConn:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def cursor(self):
+        return _FakeScopeCursor(self._rows)
+
+
+def _radius_geo(lat, lon, radius_km):
+    return {
+        "geography": {"type": "radius", "center": [lat, lon], "radius_km": radius_km}
+    }
+
+
+class TestScopeProfileAttribution:
+    """Issue #530: each derived/override scope retains the profile id(s) that
+    produced it, WITHOUT changing dedup for actual fetching."""
+
+    def test_active_profile_scopes_dedupes_and_unions_profile_ids(self):
+        # EC-2: two profiles on the same rounded centre/radius collapse to ONE
+        # scope (crawled once), now carrying BOTH ids; a third, distinct
+        # geography stays its own scope with its own single id.
+        rows = [
+            (7, _radius_geo(40.4168, -3.7038, 10)),
+            (9, _radius_geo(40.4168, -3.7038, 10)),  # dupe of profile 7's area
+            (11, _radius_geo(37.3891, -5.9845, 15)),  # Sevilla — distinct
+        ]
+        scopes = orchestrator._active_profile_scopes(_FakeScopeConn(rows))
+
+        assert len(scopes) == 2, "the shared area must still be a single scope"
+        by_center = {s.center: s for s in scopes}
+        # Union of ids for the shared scope, deduped and ORDER BY id preserved.
+        assert by_center[(40.4168, -3.7038)].profile_ids == (7, 9)
+        # The distinct geography keeps just its own profile.
+        assert by_center[(37.3891, -5.9845)].profile_ids == (11,)
+
+    def test_active_profile_scopes_single_profile_records_one_id(self):
+        rows = [(3, _radius_geo(41.3874, 2.1686, 12))]
+        scopes = orchestrator._active_profile_scopes(_FakeScopeConn(rows))
+        assert len(scopes) == 1
+        assert scopes[0].profile_ids == (3,)
+
+    def test_active_profile_scopes_does_not_double_count_a_repeated_id(self):
+        # A single profile that (pathologically) appears twice on the same area
+        # must not have its id duplicated in the union.
+        rows = [
+            (5, _radius_geo(40.0, -3.0, 8)),
+            (5, _radius_geo(40.0, -3.0, 8)),
+        ]
+        scopes = orchestrator._active_profile_scopes(_FakeScopeConn(rows))
+        assert len(scopes) == 1
+        assert scopes[0].profile_ids == (5,)
+
+    def test_override_scopes_for_connector_carries_single_profile_id(self):
+        # An override scope is dedicated to the one profile that pinned its URL —
+        # its profile_ids is always a single-element tuple, never a union.
+        rows = [
+            (_radius_geo(40.4168, -3.7038, 10), "https://x/pinned-a", 7),
+            (_radius_geo(37.3891, -5.9845, 15), "https://x/pinned-b", 11),
+        ]
+        scopes = orchestrator._override_scopes_for_connector(
+            _FakeScopeConn(rows), "fotocasa"
+        )
+        assert [s.profile_ids for s in scopes] == [(7,), (11,)]
+        # Attribution is additive: it does not disturb the override_url the pin
+        # exists to carry.
+        assert [s.override_url for s in scopes] == [
+            "https://x/pinned-a",
+            "https://x/pinned-b",
+        ]
+
+    def test_profile_ids_is_not_part_of_scope_key(self):
+        # The identity contract must ignore profile_ids (D-101): two scopes that
+        # differ ONLY in attribution resolve to the same key, so adding ids can
+        # never change dedup shape for any connector.
+        base = DummyConnector(name="key-probe")
+        a = ConnectorScope(center=(40.0, -3.0), radius_km=10, profile_ids=(1,))
+        b = ConnectorScope(center=(40.0, -3.0), radius_km=10, profile_ids=(1, 2, 3))
+        assert base.scope_key(a) == base.scope_key(b)

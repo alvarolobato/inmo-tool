@@ -73,8 +73,11 @@ describe("GET /api/etl/runs/[id]", () => {
     expect(body.connectors[0].duration_ms).toBe(900000);
     // #242 + #109: the typed classification and resolved geography pass through.
     expect(body.connectors[0].failure_classification).toBeNull();
+    // #530: the mock row above predates profile_ids (a historical JSONB entry) —
+    // the read boundary defaults the missing field to [] (never null/undefined),
+    // so a (connector × profile) consumer can always read `.profile_ids`.
     expect(body.connectors[0].geography_scope).toEqual([
-      { scope_key: "madrid", center: [40.4, -3.7], radius_km: 10, rooms: null, outcome: "crawled" },
+      { scope_key: "madrid", center: [40.4, -3.7], radius_km: 10, rooms: null, outcome: "crawled", profile_ids: [] },
     ]);
     expect(body.connectors[1].connector_name).toBe("milanuncios");
     expect(body.connectors[1].geography_scope).toBeNull();
@@ -86,6 +89,21 @@ describe("GET /api/etl/runs/[id]", () => {
       trend: { baseline_mean: 0.86, baseline_n_runs: 4, delta: 0.02, degraded: false },
     });
     expect(body.connectors[1].extraction_quality_summary).toBeNull();
+  });
+
+  it("passes through profile_ids attribution on geography scopes (#530)", async () => {
+    const attributedConnector = [4, "fotocasa", new Date("2026-04-10T02:00:00Z"), new Date("2026-04-10T02:15:00Z"), "ok", 5, 5, 0, null, null, [{ scope_key: "madrid", center: [40.4, -3.7], radius_km: 10, rooms: null, outcome: "crawled", profile_ids: [7, 9] }], null, 900000];
+    mockQuery
+      .mockResolvedValueOnce({ rows: [MOCK_RUN_ROW], columns: [] })
+      .mockResolvedValueOnce({ rows: [attributedConnector], columns: [] });
+
+    const res = await GET(makeRequest(), makeContext("1"));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    // A scope shared by two profiles keeps both ids (crawled once, names both) —
+    // the shape #531/#532 read to build a (connector × profile) view.
+    expect(body.connectors[0].geography_scope[0].profile_ids).toEqual([7, 9]);
   });
 
   it("returns 404 when run not found", async () => {

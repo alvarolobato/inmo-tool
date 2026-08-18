@@ -485,6 +485,19 @@ class ConnectorScope:
     # source. A connector WITHOUT `supports_search_override` simply ignores this
     # field (no error) — the orchestrator never sets it for such a connector.
     override_url: str | None = None
+    # Issue #530: the set of search_profile ids that produced this scope —
+    # informational attribution ONLY, never part of the identity contract
+    # (exactly like `rooms` above; #96/#71's coverage-resolution logic and
+    # `scope_key()` must never look at it). Its sole purpose is to make each
+    # recorded geography-scope outcome attributable back to the profile(s) it
+    # came from so a (connector × profile) view of data quality is possible
+    # (enables #531/#532). A scope shared by N profiles carries N ids (the
+    # ordered, deduped union — dedup for actual fetching is unchanged, the
+    # scope is still crawled once, it just now names both profiles); a
+    # manual/test scope or an unattributed override carries `()`. It must
+    # NEVER enter `scope_key()` — doing so would change D-101's
+    # override-vs-derived dedup guarantee for every connector at once.
+    profile_ids: tuple[int, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
