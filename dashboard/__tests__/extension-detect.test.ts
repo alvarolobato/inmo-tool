@@ -474,6 +474,36 @@ describe("resultsPageUrl / nextResultsUrl — derive page-N and next-page URLs",
     expect(resultsPageUrl(p2!, 1)).toBe(base);
   });
 
+  it("idealista /areas/: paginates WITHOUT .htm (issue: page-2 404 on polygon searches)", () => {
+    // A drawn-polygon search. Writing `/pagina-2.htm` here returns idealista's
+    // "no corresponde a ninguna pagina" error even when page 2 exists; the form
+    // the site itself links to is extensionless. Verified by hand against a live
+    // search that HAS a page 2, so this is not a "there is no page 2" artefact.
+    const base =
+      "https://www.idealista.com/areas/venta-viviendas/con-precio-desde_80000,precio-hasta_250000/?shape=%28%28abc%29%29";
+    const p2 = resultsPageUrl(base, 2);
+    expect(p2).toBe(
+      "https://www.idealista.com/areas/venta-viviendas/con-precio-desde_80000,precio-hasta_250000/pagina-2?shape=%28%28abc%29%29",
+    );
+    // The shape query is what makes it a polygon search — it must ride along
+    // byte-for-byte, or the page-2 URL silently becomes a different search.
+    expect(p2).toContain("?shape=%28%28abc%29%29");
+    // 2 -> 3 keeps the extensionless form.
+    expect(nextResultsUrl(p2!)).toContain("/pagina-3?shape=");
+    expect(nextResultsUrl(p2!)).not.toContain(".htm");
+    // Page 1 strips the extensionless segment back to the canonical URL.
+    expect(resultsPageUrl(p2!, 1)).toBe(base);
+    // And the page number is readable back off the extensionless form, so the
+    // enumeration walk's didn't-advance guard doesn't stall on page 1.
+    expect(currentResultsPage(p2!)).toBe(2);
+  });
+
+  it("idealista: the .htm form still applies outside /areas/ (no regression)", () => {
+    expect(
+      resultsPageUrl("https://www.idealista.com/venta-viviendas/sevilla-sevilla/", 2),
+    ).toBe("https://www.idealista.com/venta-viviendas/sevilla-sevilla/pagina-2.htm");
+  });
+
   it("idealista: normalises a missing trailing slash before the pagina segment", () => {
     expect(
       resultsPageUrl("https://www.idealista.com/venta-viviendas/madrid-madrid", 2),
@@ -590,16 +620,18 @@ describe("toListingUrl — map-view → listing-view normalisation (#506)", () =
   it("after normalisation, page 2 is a valid listing URL (pagination fix)", () => {
     const listing = toListingUrl(MAP);
     expect(resultsPageUrl(listing, 2)).toBe(
-      "https://www.idealista.com/areas/venta-viviendas/con-precio-hasta_210000/pagina-2.htm?shape=%28%28ep%7DbFxcjc%40ajAojCaPsoBriByJf%60Buf%40nj%40qUb%7E%40xg%40%7Cs%40xh%40%7CJps%40kH%7CpCsu%40vXwqA%3FuiBnFy%5CxJ%29%29",
+      "https://www.idealista.com/areas/venta-viviendas/con-precio-hasta_210000/pagina-2?shape=%28%28ep%7DbFxcjc%40ajAojCaPsoBriByJf%60Buf%40nj%40qUb%7E%40xg%40%7Cs%40xh%40%7CJps%40kH%7CpCsu%40vXwqA%3FuiBnFy%5CxJ%29%29",
     );
   });
 
-  it("resultsPageUrl is itself defensive: a map URL never yields /mapa-google/pagina-2.htm", () => {
+  it("resultsPageUrl is itself defensive: a map URL never yields /mapa-google/pagina-2", () => {
     const p2 = resultsPageUrl(MAP, 2)!;
-    expect(p2).not.toContain("/mapa-google/pagina-2.htm");
+    expect(p2).not.toContain("/mapa-google/pagina-2");
     expect(p2).toContain(
-      "/areas/venta-viviendas/con-precio-hasta_210000/pagina-2.htm",
+      "/areas/venta-viviendas/con-precio-hasta_210000/pagina-2",
     );
+    // Under /areas/ the segment carries no .htm — that form 404s on the live site.
+    expect(p2).not.toContain(".htm");
   });
 });
 

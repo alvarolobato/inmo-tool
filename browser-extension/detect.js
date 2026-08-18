@@ -81,7 +81,15 @@
       // idealista's robots.txt, which disallows `/*/pagina-*.htm` (the
       // pagination path family). The segment goes on the PATH, before any
       // `?query`/`#hash`, which are preserved.
-      pagination: { kind: "path-htm" },
+      // …EXCEPT under `/areas/` (a drawn-polygon search), where the page
+      // segment carries NO `.htm`: `/areas/venta-viviendas/<filtros>/pagina-2`.
+      // Writing `/pagina-2.htm` there returns idealista's "no corresponde a
+      // ninguna página" 404 even when page 2 demonstrably exists — verified by
+      // hand against a live polygon search that has one. robots.txt only ever
+      // documented the `.htm` family (`Disallow: /*/pagina-*.htm`), which is
+      // why the original scheme looked complete; `/areas/` is a separate
+      // family there too (`Disallow: /areas/`).
+      pagination: { kind: "path-htm", extensionlessPathPrefixes: ["/areas/"] },
       // Map-view → listing-view normalisation (issue #506). Idealista renders a
       // drawn-area / polygon search as a MAP page whose path ends in the
       // `/mapa-google` segment (e.g.
@@ -412,7 +420,8 @@
     if (pg.kind === "path-htm") {
       // Strip any existing `/pagina-<n>.htm`, normalise a trailing slash, then
       // append the segment for pages ≥ 2. Query + hash ride along untouched.
-      var path = parsed.pathname.replace(/\/pagina-\d+\.htm$/i, "");
+      // Strips BOTH written forms: `.htm` and the extensionless `/areas/` one.
+      var path = parsed.pathname.replace(/\/pagina-\d+(?:\.htm)?\/?$/i, "");
       // Defensive (issue #506): a map-view path would otherwise produce an
       // invalid `/mapa-google/pagina-2.htm`. Strip the portal's map segment here
       // too so pagination is always built on the LISTING path — this mirrors
@@ -423,7 +432,17 @@
         path = path.replace(new RegExp("/" + segP + "(?=/|$)", "i"), "");
       }
       if (!/\/$/.test(path)) path += "/";
-      if (n > 1) path += "pagina-" + n + ".htm";
+      // Which of the two forms this path family uses (see the config comment).
+      var extensionless = false;
+      if (pg.extensionlessPathPrefixes) {
+        for (var pi = 0; pi < pg.extensionlessPathPrefixes.length; pi++) {
+          if (path.indexOf(pg.extensionlessPathPrefixes[pi]) === 0) {
+            extensionless = true;
+            break;
+          }
+        }
+      }
+      if (n > 1) path += "pagina-" + n + (extensionless ? "" : ".htm");
       parsed.pathname = path;
       return parsed.toString();
     }
