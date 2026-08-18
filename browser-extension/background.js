@@ -959,14 +959,22 @@ async function startBatch({ portal, urls, searchUrl, queue: extraQueue }) {
     // section. The rest of `extra` is enqueued behind THIS claimed search —
     // still inside the lock, so no interleaved START_BATCH can land between
     // this search and its own tail.
-    for (const e of extra) {
-      q = InmoBatch.enqueueSearch(q, {
-        portal: e && e.portal,
-        urls: [],
-        searchUrl: e && e.searchUrl,
-      });
+    if (extra.length > 0) {
+      for (const e of extra) {
+        q = InmoBatch.enqueueSearch(q, {
+          portal: e && e.portal,
+          urls: [],
+          searchUrl: e && e.searchUrl,
+        });
+      }
+      // issue #556 review N6: only write the queue back when `extra` actually
+      // changed it — the overwhelmingly common case (a plain single-task
+      // START_BATCH, no batch button involved) has nothing to add here, and
+      // this claimed-run path already has its OWN storage write below
+      // (setEnumState) — no need for a second, no-op chrome.storage.session
+      // write on the hot path.
+      await setSearchQueue(q);
     }
-    await setSearchQueue(q);
     await setEnumState({
       status: 'enumerating',
       portal,

@@ -729,8 +729,17 @@
   /**
    * The raw signal VALUE carried by `url` for `signal` (the part after `=`), or
    * null when absent. Reads the fragment form `#<signal>=<value>` first, then
-   * the query form `?<signal>=<value>` (already percent-decoded by searchParams).
-   * Pure; null on parse error.
+   * the query form `?<signal>=<value>` (already percent-decoded by
+   * searchParams). The FRAGMENT branch is percent-DECODED here explicitly
+   * (issue #556 review N4) — `URL.hash` is never auto-decoded by the platform
+   * the way `searchParams.get()` is, so a value written with
+   * `encodeURIComponent` (as `withCaptureQueue` does — see
+   * dashboard/lib/extension-capture.ts) would otherwise come back through
+   * still percent-encoded and fail `JSON.parse` at the call site, silently
+   * degrading to "no queue" instead of a real error. A malformed
+   * percent-encoding (`decodeURIComponent` throwing) returns the raw slice
+   * unchanged rather than null — the caller's own parsing (e.g. `JSON.parse`)
+   * is left to fail safely on it. Pure; null on URL parse error.
    */
   function urlSignalValue(url, signal) {
     var parsed;
@@ -742,7 +751,12 @@
     var hashKey = parsed.hash.replace(/^#/, "");
     var prefix = signal + "=";
     if (hashKey.indexOf(prefix) === 0) {
-      return hashKey.slice(prefix.length);
+      var raw = hashKey.slice(prefix.length);
+      try {
+        return decodeURIComponent(raw);
+      } catch (e) {
+        return raw;
+      }
     }
     try {
       if (parsed.searchParams.has(signal)) {

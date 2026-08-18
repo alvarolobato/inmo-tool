@@ -1120,6 +1120,45 @@ describe("makeSearchQueue / enqueueSearch / dequeueSearch — FIFO queue", () =>
     expect(queue).toEqual([]); // original untouched
     expect(next).not.toBe(queue);
   });
+
+  // issue #556 review N3: a reloaded (F5) "Capturar todo" tab re-parses the
+  // same #inmo-capture-queue payload and would otherwise re-enqueue the whole
+  // tail on every reload.
+  describe("dedupe (issue #556 review N3)", () => {
+    it("drops an exact (portal, searchUrl) repeat instead of growing the queue", () => {
+      let queue = makeSearchQueue();
+      queue = enqueueSearch(queue, { portal: "aliseda", searchUrl: "https://x/1", urls: [] });
+      queue = enqueueSearch(queue, { portal: "aliseda", searchUrl: "https://x/1", urls: [] });
+      expect(searchQueueDepth(queue)).toBe(1);
+    });
+
+    it("simulates an F5 reload re-firing the whole queued tail — still ends up deduped, not multiplied", () => {
+      const tail = [
+        { portal: "aliseda", searchUrl: "https://x/1", urls: [] },
+        { portal: "altamira", searchUrl: "https://y/2", urls: [] },
+      ];
+      let queue = makeSearchQueue();
+      for (const e of tail) queue = enqueueSearch(queue, e);
+      // "Reload" — the same tail arrives again.
+      for (const e of tail) queue = enqueueSearch(queue, e);
+      expect(searchQueueDepth(queue)).toBe(2);
+      expect(queue.map((e) => e.portal)).toEqual(["aliseda", "altamira"]);
+    });
+
+    it("does NOT dedupe two DIFFERENT searches on the same portal", () => {
+      let queue = makeSearchQueue();
+      queue = enqueueSearch(queue, { portal: "aliseda", searchUrl: "https://x/1", urls: [] });
+      queue = enqueueSearch(queue, { portal: "aliseda", searchUrl: "https://x/2", urls: [] });
+      expect(searchQueueDepth(queue)).toBe(2);
+    });
+
+    it("does NOT dedupe two searchUrl:null entries against each other (unknown source, not provably the same)", () => {
+      let queue = makeSearchQueue();
+      queue = enqueueSearch(queue, { portal: "aliseda", urls: [] }); // searchUrl → null
+      queue = enqueueSearch(queue, { portal: "aliseda", urls: [] });
+      expect(searchQueueDepth(queue)).toBe(2);
+    });
+  });
 });
 
 describe("removeSearchAt / clearSearchQueue — popup queue management", () => {

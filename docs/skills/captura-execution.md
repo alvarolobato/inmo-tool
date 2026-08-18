@@ -64,7 +64,8 @@ re-implements the URL grammar or the batch loop (it reuses their APIs).
 | Per-connector (portal) collapsible section | `dashboard/components/captura/ConnectorSection.tsx` |
 | Per-task row (button + checkbox) | `dashboard/components/captura/CaptureTaskRow.tsx` |
 | Batch selection→queue pure mapping (#556) | `dashboard/lib/captura-tasks.ts` — `defaultTickedTaskIds`, `allProfileTasks`, `buildCaptureBatchPlan` |
-| Batch-queue URL piggyback (#556, D-113) | `dashboard/lib/extension-capture.ts` — `withCaptureQueue`, `encodeCaptureQueue`/`decodeCaptureQueue`, `CAPTURE_QUEUE_SIGNAL` |
+| Batch-queue URL-fragment piggyback (#556, D-113) | `dashboard/lib/extension-capture.ts` — `withCaptureQueue`, `encodeCaptureQueue`/`decodeCaptureQueue`, `CAPTURE_QUEUE_SIGNAL`, `MAX_QUEUE_ENTRIES` |
+| Cap on the piggybacked queue (#556 review B3) | `dashboard/lib/captura-tasks.ts` — `capCaptureBatchPlan` |
 
 ### `tasks[]` normaliser (transitional)
 
@@ -108,36 +109,64 @@ count (`CapturaProfileSection.tsx`). Owns a `Set<taskId>` pre-populated by
 `defaultTickedTaskIds` (every task where `ConnectorTaskView.due === true` —
 D-048's staleness computation, never re-derived) plus Todo/Nada
 (select-all/none, acting across EVERY connector of the profile, expanded or
-collapsed). Clicking it:
+collapsed), and the LIFTED `runOverrides` (optimistic per-task "just ran"
+state, shared with every `ConnectorSection` under the profile — see below).
+Clicking it:
 
-1. Best-effort POSTs `capture_task_run` for every ticked task (parallel, same
-   endpoint the single-task button already uses, one call per task — no new
-   route).
-2. Opens **exactly ONE** tab — the first ticked task, in display order, via
-   `window.open` inside the click's gesture (byte-identical to the
-   single-task flow, which stays untouched).
-3. The rest ride on that ONE url as `?inmo-capture-queue=<json>`
-   (`withCaptureQueue`) — see D-113 for why: the dashboard has **no other
-   channel** to the extension (no `externally_connectable`, no content script
-   on the dashboard's own origin — the same constraint
-   `background.js`'s `sendHeartbeat` docstring already records the other way).
-   The opened tab's content script decodes it (`detect.js`
-   `parseCaptureQueue`) and forwards it as an extra `queue` field on the SAME
-   `START_BATCH` message it already sends; `background.js`'s `startBatch`
-   appends each entry to **#555/D-112's own** pending-search queue
-   (`InmoBatch.enqueueSearch`) — never a second queue, never a second message
-   channel. The extension then opens each queued search itself, one at a
-   time, via `chrome.tabs` (exempt from the page-level popup blocker).
-4. Nothing ticked → a status message ("No has marcado ninguna tarea…"), no
+1. Opens **exactly ONE** tab — the first ticked task, in display order, via
+   `window.open` SYNCHRONOUSLY inside the click's gesture, before any
+   `await` (byte-identical to the single-task flow for that ONE tab, which
+   stays untouched).
+2. The rest ride on that ONE url as `#inmo-capture-queue=<json>` — the URL
+   **FRAGMENT**, never the query string (`withCaptureQueue`; a fresh-context
+   review, D-113, moved this off the query string after finding it could
+   poison a learned/pinned search-url template — see D-113 for the full
+   story). A cap (`MAX_QUEUE_ENTRIES = 24`, `capCaptureBatchPlan`) bounds how
+   many ride along; anything past it is **neither queued nor recorded** — a
+   dropped task must never look "done" — and the status message says how
+   many didn't fit. Composition order matters: `withCaptureSignal(withCaptureQueue(url,
+   queue))` — the queue claims the fragment, so the signal falls back to its
+   OWN pre-existing query form.
+3. THEN best-effort POSTs `capture_task_run` for every task that actually got
+   opened/queued (parallel, same endpoint the single-task button already
+   uses, one call per task — no new route) — AFTER `window.open`, never
+   before (open-before-record is strictly safer for the popup-blocker gesture
+   and lets a blocked open be reported honestly).
+4. The status message distinguishes what's CONFIRMED (the one tab that
+   visibly opened) from what's merely QUEUED and depends on the extension
+   being installed and running — the due-cue must never imply a task was
+   captured when nobody, including the dashboard, actually saw it happen.
+5. Launching a task — via EITHER this button OR a single-task button —
+   immediately greys it out AND un-ticks it (the shared `runOverrides`), so a
+   second "Capturar todo" click before the page reloads doesn't re-fire the
+   same batch.
+6. Nothing ticked → a status message ("No has marcado ninguna tarea…"), no
    fetch, no `window.open` — never a silent no-op.
+
+The dashboard has **no other channel** to the extension (no
+`externally_connectable`, no content script on the dashboard's own origin —
+the same constraint `background.js`'s `sendHeartbeat` docstring already
+records the other way). The opened tab's content script decodes the fragment
+(`detect.js` `parseCaptureQueue`, from BOTH the auto-start path and the
+manual in-page-banner path) and forwards it as an extra `queue` field on the
+SAME `START_BATCH` message it already sends; `background.js`'s `startBatch`
+appends each entry to **#555/D-112's own** pending-search queue
+(`InmoBatch.enqueueSearch`, which also DEDUPES an exact `(portal, searchUrl)`
+repeat — guards against an accidental tab reload re-enqueuing the whole
+tail) — never a second queue, never a second message channel. The extension
+then opens each queued search itself, one at a time, via `chrome.tabs`
+(exempt from the page-level popup blocker).
 
 **A future agent extending this must NOT**: open more than one tab from the
 dashboard side (popup blockers + Chrome background-tab render throttling both
-break it — see D-043/D-112's own rationale); add a second pending-search
-queue; or wire `externally_connectable`/direct extension messaging to "solve"
-the hand-off — piggybacking on the one allowed tab is the deliberate,
-narrowest mechanism (D-113 records the alternatives considered and why they
-were rejected).
+break it — see D-043/D-112's own rationale); put the queue payload back in
+the query string (every portal URL-grammar parser in `lib/search-url/portals/*.ts`
+reads pathname+query only, never `.hash` — the fragment is what makes a
+learned-template poisoning attack structurally impossible, not just avoided by
+convention, see D-113); add a second pending-search queue; or wire
+`externally_connectable`/direct extension messaging to "solve" the hand-off —
+piggybacking on the one allowed tab is the deliberate, narrowest mechanism
+(D-113 records the alternatives considered and why they were rejected).
 
 ## Loosened searches (#267 caveat)
 
@@ -156,22 +185,29 @@ separate auth surface.
 ## Tests
 
 - Unit: `lib/__tests__/captura-tasks.test.ts` (incl. #556's
-  `defaultTickedTaskIds`/`allProfileTasks`/`buildCaptureBatchPlan`),
-  `lib/__tests__/captura-staleness-config.test.ts`,
-  `lib/__tests__/extension-capture.test.ts` (incl. #556's `withCaptureQueue`/
-  `encodeCaptureQueue`/`decodeCaptureQueue` round trip),
-  `lib/db/__tests__/capture-task-run.test.ts`,
+  `defaultTickedTaskIds`/`allProfileTasks`/`buildCaptureBatchPlan`/
+  `capCaptureBatchPlan`), `lib/__tests__/captura-staleness-config.test.ts`,
+  `lib/__tests__/extension-capture.test.ts` (incl. #556's `withCaptureQueue`
+  — the FRAGMENT carrier, its query-string fallback, and its composition with
+  `withCaptureSignal` — plus `encodeCaptureQueue`/`decodeCaptureQueue` round
+  trip), `lib/db/__tests__/capture-task-run.test.ts`,
   `components/captura/__tests__/CaptureTaskRow.test.tsx`,
   `components/captura/__tests__/CapturaProfileSection.test.tsx` (#556: default
   tick state, select-all/none, the count label, nothing-ticked no-op, exactly
-  ONE `window.open` for a multi-task batch),
+  ONE `window.open` for a multi-task batch fired BEFORE any record POST,
+  the signal-in-query/queue-in-fragment split, the B3 cap dropping the tail
+  without recording it, and N7's un-tick-after-launch),
   `app/__tests__/captura-page.test.tsx`,
   `app/api/profiles/[id]/__tests__/capture-task-runs-route.test.ts`.
 - Extension-side unit (Node, real `browser-extension/` modules — see
   `docs/skills/connectors.md`-adjacent pattern): `__tests__/extension-detect.test.ts`
-  (`parseCaptureQueue`/`stripCaptureQueue`), `__tests__/extension-background-batch-queue.test.ts`
+  (`parseCaptureQueue`/`stripCaptureQueue`, incl. the fragment-branch
+  percent-decode), `__tests__/extension-background-batch-queue.test.ts`
   (`startBatch`'s `queue` field appending into #555/D-112's real queue wiring,
-  both when the search claims the run and when it queues itself).
+  both when the search claims the run and when it queues itself, plus the N6
+  write-skip when `queue` is empty), `__tests__/extension-batch.test.ts`
+  (`enqueueSearch`'s N3 dedupe — an exact `(portal, searchUrl)` repeat is
+  dropped, a genuinely different search or a null-searchUrl entry is not).
 - E2e (D-041): `dashboard/e2e/captura-tasks.spec.ts` — seeds a profile + worklist
   rows, asserts tasks render with buttons, executing one grays it with a
   'hecho …' last-done, a different task stays active, and no error surface.
@@ -181,6 +217,6 @@ separate auth surface.
   mirrors due-ness, select-all/none, the live count label, a nothing-ticked
   click shows a message and leaves `capture_task_run` untouched (DB-checked),
   and a multi-task click opens exactly ONE tab (never one per ticked task)
-  carrying both the `#inmo-capture` signal and the `inmo-capture-queue` param,
-  while every ticked task's `capture_task_run.last_run_at` DOES advance
-  (DB-checked).
+  carrying the queue in the `#inmo-capture-queue=` FRAGMENT and the
+  `#inmo-capture` signal in the query string, while every ticked task's
+  `capture_task_run.last_run_at` DOES advance (DB-checked).

@@ -391,7 +391,12 @@
     if (document.getElementById("inmo-capture-banner")) return; // already shown
     const el = D.buildCaptureBanner(document, {
       count: urls.length,
-      onCapture: () => startBatchFromPage(portal, urls),
+      // issue #556 review N2: a tab carrying the "Capturar todo" queue param
+      // can ALSO land on the manual-banner path (e.g. no auto-start signal
+      // present, just the queue riding along some other way) — forward the
+      // parsed queue here too, exactly like the autostart branch does, so a
+      // manual "Capturar todas" click never silently drops the rest.
+      onCapture: () => startBatchFromPage(portal, urls, D.parseCaptureQueue(window.location.href)),
       onDismiss: () => removeBanner(),
     });
     if (!el || !document.body) return;

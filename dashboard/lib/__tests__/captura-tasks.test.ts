@@ -16,6 +16,7 @@ import {
   defaultTickedTaskIds,
   allProfileTasks,
   buildCaptureBatchPlan,
+  capCaptureBatchPlan,
   DEFAULT_STALENESS_DAYS,
   type CaptureTask,
   type ConnectorView,
@@ -451,5 +452,50 @@ describe("buildCaptureBatchPlan", () => {
   it("ignores ticked ids absent from the task list (stale selection)", () => {
     const plan = buildCaptureBatchPlan(tasks, new Set(["ghost", "t1"]));
     expect(plan!.taskIds).toEqual(["t1"]);
+  });
+});
+
+describe("capCaptureBatchPlan (issue #556 review B3 — bound the piggybacked queue)", () => {
+  function planWithQueueLength(n: number) {
+    const first = mkTask("first", "idealista", "https://x/first");
+    const queue = Array.from({ length: n }, (_, i) => ({ portal: "idealista", captureUrl: `https://x/${i}` }));
+    return {
+      first,
+      queue,
+      taskIds: ["first", ...queue.map((_, i) => `q${i}`)],
+    };
+  }
+
+  it("is a no-op (droppedCount 0, same plan) when already within the cap", () => {
+    const plan = planWithQueueLength(5);
+    const capped = capCaptureBatchPlan(plan, 10);
+    expect(capped.droppedCount).toBe(0);
+    expect(capped.plan).toEqual(plan);
+  });
+
+  it("is a no-op exactly AT the cap boundary", () => {
+    const plan = planWithQueueLength(10);
+    const capped = capCaptureBatchPlan(plan, 10);
+    expect(capped.droppedCount).toBe(0);
+    expect(capped.plan.queue).toHaveLength(10);
+  });
+
+  it("truncates the queue and taskIds together, reporting how many were dropped", () => {
+    const plan = planWithQueueLength(30);
+    const capped = capCaptureBatchPlan(plan, 24);
+    expect(capped.droppedCount).toBe(6);
+    expect(capped.plan.queue).toHaveLength(24);
+    // taskIds = first + kept queue entries only — the dropped tail never appears.
+    expect(capped.plan.taskIds).toHaveLength(25);
+    expect(capped.plan.taskIds[0]).toBe("first");
+    expect(capped.plan.first).toBe(plan.first); // the first task always rides along regardless
+  });
+
+  it("the FIRST task is never counted against the cap (only the queue tail is bounded)", () => {
+    const plan = planWithQueueLength(1);
+    const capped = capCaptureBatchPlan(plan, 0);
+    expect(capped.plan.queue).toHaveLength(0);
+    expect(capped.plan.taskIds).toEqual(["first"]); // first still present even with a 0 cap
+    expect(capped.droppedCount).toBe(1);
   });
 });

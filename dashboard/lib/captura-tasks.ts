@@ -547,6 +547,41 @@ export function buildCaptureBatchPlan(
   };
 }
 
+/** A capped batch plan, plus how many ticked tasks got dropped by the cap. */
+export interface CappedCaptureBatchPlan {
+  plan: CaptureBatchPlan;
+  /** Ticked tasks that did NOT fit and were left un-queued and un-recorded. */
+  droppedCount: number;
+}
+
+/**
+ * Enforce a sane cap on how many searches ride behind the opened tab (issue
+ * #556 review B3). Dropped tasks are NEVER recorded (`capture_task_run`) and
+ * NEVER queued — recording a task as "done" when it was actually dropped
+ * would be a worse lie than the one this cap exists to prevent. The caller
+ * (`CapturaProfileSection.onCapturarTodo`) tells the owner exactly how many
+ * didn't fit so a second "Capturar todo" click (once the first batch drains)
+ * picks up the remainder — nothing is silently lost, just deferred.
+ * `maxQueueEntries` caps `plan.queue.length` (the FIRST task always rides
+ * along regardless, since it costs nothing extra — only the piggybacked tail
+ * is bounded). Pure; a no-op (droppedCount 0) when already within the cap.
+ */
+export function capCaptureBatchPlan(
+  plan: CaptureBatchPlan,
+  maxQueueEntries: number,
+): CappedCaptureBatchPlan {
+  if (plan.queue.length <= maxQueueEntries) return { plan, droppedCount: 0 };
+  const droppedCount = plan.queue.length - maxQueueEntries;
+  return {
+    plan: {
+      first: plan.first,
+      queue: plan.queue.slice(0, maxQueueEntries),
+      taskIds: plan.taskIds.slice(0, 1 + maxQueueEntries),
+    },
+    droppedCount,
+  };
+}
+
 /**
  * Assemble one profile's full stacked-view model from its tasks + runs.
  * `capturedByProfileConnector` (issue #430) maps profile id → { connector →

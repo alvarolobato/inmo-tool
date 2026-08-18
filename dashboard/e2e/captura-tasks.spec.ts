@@ -462,8 +462,14 @@ test.describe("Capturar todo — profile-level batch button (issue #556)", () =>
       () => (window as unknown as { __opened: string[] }).__opened.at(-1)!,
     );
     const u = new URL(opened);
-    expect(u.hash).toBe("#inmo-capture"); // single-task signal untouched
-    expect(u.searchParams.has("inmo-capture-queue")).toBe(true); // the 2nd task rides along
+    // D-113 review B2: the queue payload rides in the FRAGMENT (never sent to
+    // the portal server); the auto-start signal falls back to the QUERY since
+    // the fragment slot is taken.
+    expect(u.hash.startsWith("#inmo-capture-queue=")).toBe(true);
+    expect(u.searchParams.has("inmo-capture-queue")).toBe(false); // never in the query string
+    expect(u.searchParams.get("inmo-capture")).toBe("1");
+    const decodedQueue = JSON.parse(decodeURIComponent(u.hash.slice("#inmo-capture-queue=".length)));
+    expect(decodedQueue).toHaveLength(1); // exactly the second ticked task
 
     // Both ticked tasks recorded a fresh capture_task_run — the ledger write
     // the single-task path already does, per taskId.

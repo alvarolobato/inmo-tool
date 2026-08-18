@@ -83,9 +83,13 @@ function makeStorageArea(store: Record<string, unknown>): StorageArea {
       for (const k of list) if (k in store) out[k] = store[k];
       return out;
     },
-    set: async (obj) => {
+    // Wrapped in vi.fn() (issue #556 review N6) so tests can assert HOW MANY
+    // storage writes a call caused, not just the resulting value — the N6 fix
+    // is specifically about avoiding a redundant no-op write, which a
+    // value-only assertion can't distinguish from "wrote the same value twice".
+    set: vi.fn(async (obj: Record<string, unknown>) => {
       Object.assign(store, obj);
-    },
+    }),
     remove: async (keys) => {
       const list = Array.isArray(keys) ? keys : [keys];
       for (const k of list) delete store[k];
@@ -533,5 +537,34 @@ describe("startBatch's `queue` field — the dashboard's 'Capturar todo' handoff
     const res = await bg.startBatch({ portal: "idealista", urls: [], searchUrl: null });
     expect(res.started).toBe(true);
     expect(await bg.getSearchQueue()).toEqual([]);
+  });
+
+  it("N6: an empty `queue` on a CLAIMED run skips the redundant chrome.storage.session write entirely", async () => {
+    const chrome = makeChromeMock();
+    const fetchMock = makeFetchMock({});
+    const bg = loadBackground(chrome, fetchMock);
+    const setSpy = chrome.storage.session.set as unknown as { mock: { calls: unknown[][] } };
+
+    await bg.startBatch({ portal: "idealista", urls: [], searchUrl: null }); // no `queue` field at all
+    // Only the enumerating-claim write (setEnumState) — no separate, no-op
+    // setSearchQueue write on the hot (no-batch-button) path.
+    expect(setSpy.mock.calls).toHaveLength(1);
+  });
+
+  it("a non-empty `queue` on a CLAIMED run still writes the queue exactly once", async () => {
+    const chrome = makeChromeMock();
+    const fetchMock = makeFetchMock({});
+    const bg = loadBackground(chrome, fetchMock);
+    const setSpy = chrome.storage.session.set as unknown as { mock: { calls: unknown[][] } };
+
+    await bg.startBatch({
+      portal: "idealista",
+      urls: [],
+      searchUrl: null,
+      queue: [{ portal: "aliseda", searchUrl: null }],
+    });
+    // setSearchQueue (the extra entry) + setEnumState (the claim) — exactly 2.
+    expect(setSpy.mock.calls).toHaveLength(2);
+    expect(await bg.getSearchQueue()).toHaveLength(1);
   });
 });

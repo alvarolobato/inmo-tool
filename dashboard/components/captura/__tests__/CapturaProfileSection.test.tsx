@@ -10,14 +10,22 @@ import {
   type ConnectorView,
   type ProfileCaptureView,
 } from "@/lib/captura-tasks";
+import { MAX_QUEUE_ENTRIES } from "@/lib/extension-capture";
 
 /**
- * Unit coverage for the "Capturar todo" batch button (issue #556):
+ * Unit coverage for the "Capturar todo" batch button (issue #556, D-113):
  * default tick state (due → ticked, muted → unticked), select-all/none, the
  * live count in the button label, the nothing-ticked no-op, and — the
- * bug-prone part — that a multi-task click opens exactly ONE tab (never N)
- * whose URL carries both the auto-start signal AND the rest of the ticked
- * tasks as the `inmo-capture-queue` param.
+ * bug-prone parts — that a multi-task click:
+ *   - opens exactly ONE tab (never N);
+ *   - carries the auto-start signal in the QUERY and the rest of the ticked
+ *     tasks in the URL FRAGMENT (D-113 review B2 — never the query, so the
+ *     payload never reaches the first task's portal server);
+ *   - opens the tab BEFORE recording anything (review N5);
+ *   - caps how many searches ride along and never records a dropped task as
+ *     done (review B3);
+ *   - un-ticks + greys out every task it just launched (review N7), so a
+ *     second click doesn't re-fire the same batch.
  */
 
 function mkTask(id: string, portal: string, captureUrl: string): CaptureTask {
@@ -68,6 +76,9 @@ function buildProfile(): ProfileCaptureView {
     actionableConnectors: 1,
   };
 }
+
+/** A fake `Window` — `window.open` mocked to return this counts as "opened" (non-null). */
+const FAKE_WINDOW = {} as Window;
 
 describe("CapturaProfileSection — Capturar todo (issue #556)", () => {
   beforeEach(() => vi.restoreAllMocks());
@@ -129,30 +140,37 @@ describe("CapturaProfileSection — Capturar todo (issue #556)", () => {
     expect(openSpy).not.toHaveBeenCalled();
   });
 
-  it("multi-task click opens exactly ONE tab, carrying the signal + the rest as the queue param, and records a run for every ticked task", async () => {
-    const fetchSpy = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ ok: true }),
+  it("multi-task click opens exactly ONE tab BEFORE recording anything (N5), carrying the signal in the QUERY and the rest in the FRAGMENT (B2), and records a run for every ticked task", async () => {
+    let openedBeforeFirstFetch = false;
+    const fetchSpy = vi.fn().mockImplementation(async () => {
+      openedBeforeFirstFetch = openSpy.mock.calls.length === 1; // captured on first fetch call
+      return { ok: true, json: () => Promise.resolve({ ok: true }) };
     });
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
-    const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(FAKE_WINDOW);
 
     render(<CapturaProfileSection profile={buildProfile()} />);
     // Default tick state: idea-1 + idea-2 ticked (due), ali-1 unticked (muted).
     fireEvent.click(screen.getByTestId("captura-batch-run-1"));
 
-    await waitFor(() => expect(openSpy).toHaveBeenCalledTimes(1));
+    // Exactly ONE tab, ever — synchronously, before any fetch resolved.
+    expect(openSpy).toHaveBeenCalledTimes(1);
     const openedUrl = String(openSpy.mock.calls[0][0]);
     const u = new URL(openedUrl);
     // Opens the FIRST ticked task's captureUrl (display order), never a 2nd tab.
     expect(u.origin + u.pathname).toBe("https://www.idealista.com/venta-viviendas/madrid/piso/");
-    expect(u.hash).toBe("#inmo-capture");
-    const queueParam = u.searchParams.get("inmo-capture-queue");
-    expect(queueParam).toBeTruthy();
-    expect(JSON.parse(queueParam!)).toEqual([["idealista", IDEA_DUE_2.captureUrl]]);
+    // B2: signal rides in the QUERY (fragment is claimed by the queue payload).
+    expect(u.searchParams.get("inmo-capture")).toBe("1");
+    // B2: the queue payload rides in the FRAGMENT, never the query string —
+    // the whole point being that it's never sent to idealista's server.
+    expect(u.searchParams.has("inmo-capture-queue")).toBe(false);
+    expect(u.hash.startsWith("#inmo-capture-queue=")).toBe(true);
+    const decoded = decodeURIComponent(u.hash.slice("#inmo-capture-queue=".length));
+    expect(JSON.parse(decoded)).toEqual([["idealista", IDEA_DUE_2.captureUrl]]);
 
     // Records capture_task_run for BOTH ticked tasks (never the untouched muted one).
     await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+    expect(openedBeforeFirstFetch).toBe(true); // N5: open happened before any record POST
     const posted = fetchSpy.mock.calls.map((c) => ({
       url: String(c[0]),
       body: JSON.parse((c[1] as RequestInit).body as string),
@@ -164,22 +182,103 @@ describe("CapturaProfileSection — Capturar todo (issue #556)", () => {
       ]),
     );
 
+    // N1: the status is honest about what's confirmed vs. merely queued.
     await waitFor(() =>
-      expect(screen.getByTestId("captura-batch-status-1")).toHaveTextContent("Capturando 2 tareas"),
+      expect(screen.getByTestId("captura-batch-status-1")).toHaveTextContent(
+        'Se abre "idealista · idea-1" ahora.',
+      ),
+    );
+    expect(screen.getByTestId("captura-batch-status-1")).toHaveTextContent(
+      "1 búsqueda más en cola en la extensión",
+    );
+    expect(screen.getByTestId("captura-batch-status-1")).toHaveTextContent(
+      "solo se capturarán si la extensión está instalada y activa",
+    );
+
+    // N7: both launched tasks un-tick themselves (a second click wouldn't re-fire them).
+    await waitFor(() => expect(screen.getByTestId("captura-batch-run-1")).toHaveTextContent("Capturar 0 tareas"));
+    expect(screen.getByTestId("captura-task-check-idea-1")).not.toBeChecked();
+    expect(screen.getByTestId("captura-task-check-idea-2")).not.toBeChecked();
+  });
+
+  it("when window.open returns null (blocked), the status says so honestly instead of claiming success", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) });
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    vi.spyOn(window, "open").mockReturnValue(null); // simulates a popup-blocked open
+
+    render(<CapturaProfileSection profile={buildProfile()} />);
+    fireEvent.click(screen.getByTestId("captura-batch-run-1"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("captura-batch-status-1")).toHaveTextContent(
+        "puede que el navegador haya bloqueado la pestaña",
+      ),
     );
   });
 
-  it("a single ticked task behaves like the plain single-task flow (no queue param)", async () => {
+  it("a single ticked task behaves like the plain single-task flow (no queue param, signal back in the fragment)", async () => {
     const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) });
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
-    const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(FAKE_WINDOW);
 
     render(<CapturaProfileSection profile={buildProfile()} />);
     fireEvent.click(screen.getByTestId("captura-task-check-idea-2")); // leave only idea-1 ticked
     fireEvent.click(screen.getByTestId("captura-batch-run-1"));
 
-    await waitFor(() => expect(openSpy).toHaveBeenCalledTimes(1));
+    expect(openSpy).toHaveBeenCalledTimes(1);
     const u = new URL(String(openSpy.mock.calls[0][0]));
     expect(u.searchParams.has("inmo-capture-queue")).toBe(false);
+    expect(u.hash).toBe("#inmo-capture"); // byte-identical to the single-task flow
+    expect(u.searchParams.has("inmo-capture")).toBe(false); // signal not pushed to query when queue is empty
+
+    await waitFor(() =>
+      expect(screen.getByTestId("captura-batch-status-1")).toHaveTextContent('Se abre "idealista · idea-1" ahora.'),
+    );
+    expect(screen.getByTestId("captura-batch-status-1")).not.toHaveTextContent("en cola en la extensión");
+  });
+
+  it("caps how many searches ride along (B3): drops the tail, never queues or records a dropped task", async () => {
+    const N = MAX_QUEUE_ENTRIES + 6; // comfortably over the cap
+    const tasks = Array.from({ length: N }, (_, i) =>
+      mkTask(`t${i}`, "idealista", `https://www.idealista.com/venta-viviendas/x${i}/`),
+    );
+    const connector = mkConnector(
+      "idealista",
+      tasks.map((t) => mkTaskView(t, { muted: false })),
+    );
+    const profile: ProfileCaptureView = {
+      id: 9,
+      name: "Grande",
+      connectors: [connector],
+      totalTasks: N,
+      actionableConnectors: 1,
+    };
+
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) });
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(FAKE_WINDOW);
+
+    render(<CapturaProfileSection profile={profile} />);
+    expect(screen.getByTestId("captura-batch-run-9")).toHaveTextContent(`Capturar ${N} tareas`);
+    fireEvent.click(screen.getByTestId("captura-batch-run-9"));
+
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    const u = new URL(String(openSpy.mock.calls[0][0]));
+    const decoded = JSON.parse(decodeURIComponent(u.hash.slice("#inmo-capture-queue=".length))) as unknown[];
+    expect(decoded).toHaveLength(MAX_QUEUE_ENTRIES); // capped, not N-1
+
+    // Only 1 (first) + MAX_QUEUE_ENTRIES (queue) get recorded — never the dropped tail.
+    const expectedPosts = 1 + MAX_QUEUE_ENTRIES;
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(expectedPosts));
+    // Give any stray extra call a chance to show up before asserting the ceiling.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(fetchSpy).toHaveBeenCalledTimes(expectedPosts);
+
+    const droppedCount = N - expectedPosts;
+    await waitFor(() =>
+      expect(screen.getByTestId("captura-batch-status-9")).toHaveTextContent(
+        `${droppedCount} tareas no caben en esta tanda`,
+      ),
+    );
   });
 });
