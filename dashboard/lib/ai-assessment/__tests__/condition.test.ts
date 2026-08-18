@@ -1,94 +1,18 @@
 /**
  * Condition assessment — unit tests (#26).
  *
- * Mirrors occupancy.test.ts's structure (#25): prompt-content assertions
- * against the REAL `buildSystemPrompt` output (not a spy on a function we
- * hope carries the evidence), plus parsing-degrades-safely tests for
- * `parseConditionResult`. The real end-to-end "does the model actually say
- * `a_reformar` when the text says so" question is covered by the mock
- * provider in e2e and by these prompt-content assertions.
+ * Parsing-degrades-safely tests for `parseConditionResult`. Prompt-CONTENT
+ * assertions (evidence union across merged listings, the `unclear`-not-
+ * `unknown` correction surviving ASSESSMENT_RULES, the `renovation_severity`
+ * sub-axis wording, the hash-scoped-fields invisibility) moved to
+ * `triage.test.ts` (#542): `condition` is answered from the merged `triage`
+ * prompt now (`buildTriagePrompt`), not a standalone `buildSystemPrompt
+ * ("condition", …)` call — that flow name no longer exists. The parser itself
+ * (`parseConditionResult`/`parseConditionObject`) is UNCHANGED by the merge,
+ * so every test below still exercises the real, unmodified degrade logic.
  */
 import { describe, it, expect } from "vitest";
-import { buildSystemPrompt } from "@/lib/llm-context/system-prompt";
-import type { ListingSnapshot } from "@/lib/llm-context";
 import { parseConditionResult, CONDITION_PROMPT_VERSION } from "../condition";
-
-const SILENT_ADVERT: ListingSnapshot = {
-  propertyId: 9,
-  listingId: 201,
-  source: "fotocasa",
-  operation: "sale",
-  description: "Piso de 90 m2 en Chamberí. Tres dormitorios, dos baños. Luminoso.",
-};
-
-const REFORM_NEEDED_ADVERT: ListingSnapshot = {
-  propertyId: 9,
-  listingId: 202,
-  source: "milanuncios",
-  operation: "sale",
-  description:
-    "Piso a reformar, necesita actualización de instalaciones y baño. Buena ubicación.",
-};
-
-function conditionPromptText(listings: ListingSnapshot[]): string {
-  const { stable, volatile } = buildSystemPrompt("condition", { listings });
-  return `${stable}\n${volatile ?? ""}`;
-}
-
-describe("condition prompt — evidence union across merged listings", () => {
-  it("carries EVERY advert's description, not just the first", () => {
-    const text = conditionPromptText([SILENT_ADVERT, REFORM_NEEDED_ADVERT]);
-    expect(text).toContain("necesita actualización de instalaciones y baño");
-    expect(text).toContain("Tres dormitorios");
-  });
-
-  it("labels each advert with its portal so a verdict can cite a source", () => {
-    const text = conditionPromptText([SILENT_ADVERT, REFORM_NEEDED_ADVERT]);
-    expect(text).toContain("fotocasa");
-    expect(text).toContain("milanuncios");
-  });
-
-  it("still works for a property with a single advert", () => {
-    const text = conditionPromptText([SILENT_ADVERT]);
-    expect(text).toContain("Tres dormitorios");
-    expect(text).toMatch(/ANUNCIO\s+1\s+DE\s+1/i);
-  });
-
-  it("states that silence is NOT evidence of `reformado` (no safe default, unlike occupancy's ejes 2/3)", () => {
-    const text = conditionPromptText([SILENT_ADVERT]);
-    expect(text.toLowerCase()).toContain("el silencio no es prueba");
-  });
-});
-
-describe("condition prompt — `unclear` override survives ASSESSMENT_RULES (#168 review, must-fix 2)", () => {
-  // ASSESSMENT_RULES (shared by every flow) tells the model to answer
-  // insufficient info with `"unknown"` — a value outside CONDITION_CATEGORIES.
-  // A model resolving the conflict by recency (the last instruction it reads
-  // wins) would emit `unknown`, which `parseVerdict` then degrades to
-  // `unclear` at FORCED zero confidence (via `known === false`) regardless of
-  // what confidence the model actually reported — turning a deliberate
-  // low-confidence "I don't know" into something indistinguishable from
-  // garbage. Occupancy's ejes-2/3 exception already established the fix:
-  // restate the flow-specific rule AFTER ASSESSMENT_RULES so it's the last
-  // thing the model reads (occupancy.test.ts, "survives ASSESSMENT_RULES").
-  it("restates the `unclear`-not-`unknown` correction AFTER ASSESSMENT_RULES' generic unknown rule", () => {
-    const text = conditionPromptText([SILENT_ADVERT]);
-
-    const genericUnknownRuleIdx = text.indexOf('`"unknown"` y una `confidence` baja');
-    const correctionIdx = text.indexOf("Nota sobre la regla 2 anterior");
-
-    expect(genericUnknownRuleIdx).toBeGreaterThan(-1);
-    expect(correctionIdx).toBeGreaterThan(-1);
-    // The correction must come LAST: it is what a model resolving a conflict
-    // by recency will actually obey.
-    expect(correctionIdx).toBeGreaterThan(genericUnknownRuleIdx);
-  });
-
-  it("explicitly tells the model `unknown` is not a valid `condition` value", () => {
-    const text = conditionPromptText([SILENT_ADVERT]);
-    expect(text).toContain("`unknown` no es un valor válido de");
-  });
-});
 
 describe("parseConditionResult", () => {
   it("EC-1: 'a reformar, necesita actualización de instalaciones y baño' produces a_reformar with issues", () => {
@@ -214,33 +138,11 @@ describe("parseConditionResult", () => {
 
 describe("prompt version", () => {
   it("is pinned, so a prompt change forces a new row rather than overwriting", () => {
-    // #313 bumped v1 -> v2 when the renovation_severity sub-axis landed, so
-    // #308's batch scheduler re-assesses pre-severity `a_reformar` rows rather
-    // than reading them back stale. The bump IS the re-assessment trigger.
-    expect(CONDITION_PROMPT_VERSION).toBe("condition/v2");
-  });
-});
-
-describe("condition prompt — renovation_severity sub-axis (#313)", () => {
-  it("asks for renovation_severity only when the verdict is `a_reformar`", () => {
-    const text = conditionPromptText([REFORM_NEEDED_ADVERT]);
-    expect(text).toContain("renovation_severity");
-    // Both graded values must be offered so the model can distinguish depth.
-    expect(text).toContain("leve");
-    expect(text).toContain("integral");
-    // Scoped to a_reformar, not a fifth top-level category.
-    expect(text.toLowerCase()).toContain("solo si");
-  });
-
-  it("carries the leve-vs-integral cue language the split keys off", () => {
-    const text = conditionPromptText([REFORM_NEEDED_ADVERT]).toLowerCase();
-    expect(text).toContain("cosmética");
-    expect(text).toContain("estructural");
-  });
-
-  it("offers `null` for renovation_severity in the output schema (non-a_reformar case)", () => {
-    const text = conditionPromptText([REFORM_NEEDED_ADVERT]);
-    expect(text).toMatch(/"renovation_severity":\s*"leve" \| "integral" \| "unknown" \| null/);
+    // #313 bumped v1 -> v2 when the renovation_severity sub-axis landed;
+    // #542 bumped v2 -> v3 when condition moved to the merged `triage` prompt.
+    // #308's batch scheduler re-assesses every bump. The bump IS the
+    // re-assessment trigger.
+    expect(CONDITION_PROMPT_VERSION).toBe("condition/v3");
   });
 });
 
@@ -341,26 +243,5 @@ describe("parseConditionResult — renovation_severity (#313, EC-1)", () => {
     );
     expect(r.condition).toBe("unclear");
     expect(r.renovation_severity).toBeNull();
-  });
-});
-
-describe("condition prompt — hash-scoped fields are invisible (#30 review, must-fix 1)", () => {
-  it("never emits precio_eur, m2_construidos, habitaciones, banos, planta, or num_fotos", () => {
-    const withStructuredFields: ListingSnapshot = {
-      ...SILENT_ADVERT,
-      price: 250000,
-      m2Built: 90,
-      rooms: 3,
-      bathrooms: 2,
-      floor: "3",
-      photoUrls: ["a.jpg"],
-    };
-    const text = conditionPromptText([withStructuredFields]);
-    expect(text).not.toContain("precio_eur");
-    expect(text).not.toContain("m2_construidos");
-    expect(text).not.toContain("habitaciones:");
-    expect(text).not.toContain("banos:");
-    expect(text).not.toContain("planta:");
-    expect(text).not.toContain("num_fotos");
   });
 });

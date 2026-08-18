@@ -1,100 +1,29 @@
 /**
  * Location assessment — unit tests (#388, Fase 3 de #385).
  *
- * Mirrors condition.test.ts's structure: prompt-content assertions against the
- * REAL `buildSystemPrompt` output (not a spy), plus parsing-degrades-safely
- * tests for `parseLocationResult`, plus the `terreno` exclusion predicate.
+ * Parsing-degrades-safely tests for `parseLocationResult`, plus the `terreno`
+ * exclusion predicate. Prompt-CONTENT assertions (the graded vocabulary, the
+ * evidence-quote requirement, "restates the correction after ASSESSMENT_RULES")
+ * moved to `triage.test.ts` (#542): `location` is answered from the merged
+ * `triage` prompt now (`buildTriagePrompt`), not a standalone `buildSystemPrompt
+ * ("location", …)` call — that flow name no longer exists. The parser itself
+ * (`parseLocationResult`/`parseLocationObject`) is UNCHANGED by the merge, so
+ * every test below still exercises the real, unmodified degrade logic.
  *
  * The owner's constraint — detection is LLM-based, NEVER regex — is a property
- * of WHERE the value comes from (the prompt/model), which these tests exercise
- * by asserting the prompt demands a literal cited quote per graded verdict and
- * that the parser degrades an uncited claim to the safe default. There is no
- * ILIKE/keyword classifier to test because there is none in the runtime path.
+ * of WHERE the value comes from (the prompt/model), which `triage.test.ts`
+ * exercises by asserting the prompt demands a literal cited quote per graded
+ * verdict; the parser tests below prove the CODE-SIDE half: an uncited claim
+ * degrades to the safe default regardless of what the prompt asked for. There
+ * is no ILIKE/keyword classifier to test because there is none in the runtime
+ * path.
  */
 import { describe, it, expect } from "vitest";
-import { buildSystemPrompt } from "@/lib/llm-context/system-prompt";
-import type { ListingSnapshot } from "@/lib/llm-context";
 import {
   parseLocationResult,
   locationApplies,
   LOCATION_PROMPT_VERSION,
 } from "../location";
-
-const FRONTLINE_ADVERT: ListingSnapshot = {
-  propertyId: 7,
-  listingId: 301,
-  source: "fotocasa",
-  operation: "sale",
-  propertyType: "piso",
-  description:
-    "Piso en primera línea de playa, a pie de arena, con acceso directo al paseo marítimo.",
-};
-
-const SEA_VIEW_ADVERT: ListingSnapshot = {
-  propertyId: 7,
-  listingId: 302,
-  source: "milanuncios",
-  operation: "sale",
-  propertyType: "piso",
-  description: "Ático con espectaculares vistas al mar, aunque no es primera línea.",
-};
-
-const SILENT_ADVERT: ListingSnapshot = {
-  propertyId: 8,
-  listingId: 303,
-  source: "idealista",
-  operation: "sale",
-  propertyType: "piso",
-  description: "Piso de 90 m2 en el interior, tres dormitorios, dos baños. Luminoso.",
-};
-
-function locationPromptText(listings: ListingSnapshot[]): string {
-  const { stable, volatile } = buildSystemPrompt("location", { listings });
-  return `${stable}\n${volatile ?? ""}`;
-}
-
-describe("location prompt — graded vocabulary and evidence discipline", () => {
-  it("states the closed, graded beach vocabulary inline", () => {
-    const text = locationPromptText([FRONTLINE_ADVERT]);
-    for (const v of ["frontline", "sea_view", "near_beach", "none"]) {
-      expect(text).toContain(v);
-    }
-    expect(text).toContain("heritage_zone");
-  });
-
-  it("draws the primera-línea vs. vistas-al-mar vs. cerca distinction explicitly", () => {
-    const text = locationPromptText([FRONTLINE_ADVERT]).toLowerCase();
-    expect(text).toContain("primera línea");
-    expect(text).toContain("vistas al mar");
-    expect(text).toContain("paseo marítimo");
-    // The prompt must warn against conflating the grades.
-    expect(text).toContain('"vistas al mar" no es');
-  });
-
-  it("demands a literal evidence quote per signal or the safe default", () => {
-    const text = locationPromptText([FRONTLINE_ADVERT]);
-    expect(text).toContain("beach_evidence");
-    expect(text).toContain("heritage_evidence");
-    expect(text.toLowerCase()).toContain("cita literal");
-  });
-
-  it("carries EVERY advert's description so a verdict can cite any of them", () => {
-    const text = locationPromptText([SEA_VIEW_ADVERT, FRONTLINE_ADVERT]);
-    expect(text).toContain("primera línea de playa");
-    expect(text).toContain("vistas al mar");
-    expect(text).toContain("fotocasa");
-    expect(text).toContain("milanuncios");
-  });
-
-  it("restates the none/false correction AFTER ASSESSMENT_RULES' generic unknown rule (recency wins)", () => {
-    const text = locationPromptText([SILENT_ADVERT]);
-    const genericUnknownRuleIdx = text.indexOf('`"unknown"` y una `confidence` baja');
-    const correctionIdx = text.indexOf("Nota sobre la regla 2 anterior");
-    expect(genericUnknownRuleIdx).toBeGreaterThan(-1);
-    expect(correctionIdx).toBeGreaterThan(-1);
-    expect(correctionIdx).toBeGreaterThan(genericUnknownRuleIdx);
-  });
-});
 
 describe("parseLocationResult — graded beach values", () => {
   it("parses `frontline` with its evidence and source", () => {
@@ -239,7 +168,7 @@ describe("locationApplies — terreno exclusion (owner decision)", () => {
 });
 
 describe("LOCATION_PROMPT_VERSION", () => {
-  it("is the v1 axis version so #308 re-assesses on future bumps", () => {
-    expect(LOCATION_PROMPT_VERSION).toBe("location/v1");
+  it("is the v2 axis version (#542, triage merge) so #308 re-assesses on future bumps", () => {
+    expect(LOCATION_PROMPT_VERSION).toBe("location/v2");
   });
 });

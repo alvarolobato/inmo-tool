@@ -416,7 +416,7 @@ describe("canonical config/schema.yaml — flow keys", () => {
   // Must match `DashboardLlmFlow` in dashboard/lib/llm-provider/types.ts, which
   // is exactly what dashboard/lib/llm-provider/config.ts reads into
   // openrouterModelByFlow.
-  const REAL_FLOWS = ["occupancy", "condition", "redflags", "extract", "compare", "chat"];
+  const REAL_FLOWS = ["occupancy", "triage", "redflags", "extract", "compare", "chat"];
   const STALE_FLOWS = ["generate", "modify", "analyze", "weekly"];
 
   function loadCanonical() {

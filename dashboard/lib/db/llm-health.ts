@@ -57,8 +57,12 @@ function num(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-/** Endpoints that count as an AI-assessment run (for per-property avg cost). */
-const ASSESSMENT_ENDPOINTS = ["occupancy", "condition", "redflags", "extract", "compare"];
+/**
+ * Endpoints that count as an AI-assessment run (for per-property avg cost).
+ * `condition`/`location`/`opportunity` merged into `triage` (#542) — their
+ * `llm_usage.endpoint` value is `triage` now, not their own name.
+ */
+const ASSESSMENT_ENDPOINTS = ["occupancy", "triage", "redflags", "extract", "compare"];
 
 /**
  * Aggregate every LLM cost/usage signal. Independent reads run in parallel;
@@ -139,7 +143,10 @@ export async function getLlmHealth(): Promise<LlmHealthResponse> {
       query(
         `WITH ${DISABLED_SOURCES_CTE},
          eligible AS (
-           SELECT p.id
+           -- property_type carried through so missingCurrentVerdictClause's
+           -- terreno guard (#542 — location/opportunity never get a row for a
+           -- terreno by design) can read it on the "e" alias below.
+           SELECT p.id, p.property_type
              FROM property p
             WHERE ${assessmentEligibleClause("p")}
          ),

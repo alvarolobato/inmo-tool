@@ -77,6 +77,22 @@ function nullableNum(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/**
+ * `llm_usage.endpoint` a bump's calls are actually LOGGED under (#542).
+ * `condition`/`location`/`opportunity` are answered by the merged `triage`
+ * flow now, not by a standalone call of their own name — previewing a bump
+ * for one of those three must read the SAME endpoint the real spend lands
+ * under, or `avg_cost_eur_per_call` would silently read back null forever
+ * (a real cost, hidden by a stale endpoint name) even while `triage` calls
+ * are logging real tokens. Every other `assessment_type` already equals its
+ * own endpoint name.
+ */
+function costEndpointFor(assessmentType: string): string {
+  return assessmentType === "condition" || assessmentType === "location" || assessmentType === "opportunity"
+    ? "triage"
+    : assessmentType;
+}
+
 async function previewOneFlow(req: BumpPreviewRequest): Promise<BumpPreviewResult> {
   // `missingCurrentVerdictClause` expects a `(VALUES ...)` fragment; a single
   // hypothetical (type, version) pair is exactly a one-row VALUES list, bound
@@ -99,7 +115,7 @@ async function previewOneFlow(req: BumpPreviewRequest): Promise<BumpPreviewResul
          FROM llm_usage
         WHERE endpoint = $1
           AND created_at >= NOW() - INTERVAL '7 days'`,
-      [req.assessmentType],
+      [costEndpointFor(req.assessmentType)],
     ),
   ]);
 

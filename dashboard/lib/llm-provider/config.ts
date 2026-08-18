@@ -148,10 +148,10 @@ export function loadDashboardLlmConfig(): DashboardLlmConfig {
   // resolver will fall back to openrouterModel.
   const openrouterModelByFlow: Record<DashboardLlmFlow, string> = {
     occupancy: readStr(cfg, "dashboard.llm_model_openrouter_occupancy"),
-    condition: readStr(cfg, "dashboard.llm_model_openrouter_condition"),
+    // #542 — condition/location/opportunity merged into one `triage` flow;
+    // one override key replaces their three.
+    triage: readStr(cfg, "dashboard.llm_model_openrouter_triage"),
     redflags: readStr(cfg, "dashboard.llm_model_openrouter_redflags"),
-    location: readStr(cfg, "dashboard.llm_model_openrouter_location"),
-    opportunity: readStr(cfg, "dashboard.llm_model_openrouter_opportunity"),
     extract: readStr(cfg, "dashboard.llm_model_openrouter_extract"),
     compare: readStr(cfg, "dashboard.llm_model_openrouter_compare"),
     chat: readStr(cfg, "dashboard.llm_model_openrouter_chat"),

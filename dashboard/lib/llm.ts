@@ -18,23 +18,28 @@
  * raw text; parsing and persisting the JSON belongs to the flow's own task
  * (#25–#30), which knows the shape it asked for.
  *
- * occupancy/condition/redflags/extract (#25/#26/#27/#28) ALL run at property
- * level — every live listing of ONE deduplicated property, read together —
- * because the fact each looks for (occupied, needs reform, embargo pending,
- * missing m²/rooms/floor/elevator) is a property of the physical flat, not of
- * any one advert, and "one portal omits what another discloses" applies
- * equally to all four. This updates an earlier version of this note, written
- * when #24 landed extract's plumbing ahead of #28's real prompt: it argued
- * extract should stay listing-level because "each portal's own structured-
- * data completeness varies" — true, but irrelevant, because the fields
- * extract fills (`m2_built`, `m2_useful`, `rooms`, `bathrooms`, `floor`,
- * `has_elevator`) are columns on `property`, not `listing` (see
- * `etl/schema/init.sql`). The dedup pipeline already reconciles per-listing
- * facts onto that one property row, so extraction has to read every live
- * listing's description together for the same reason occupancy does: an
- * `m2_built` disclosed only in one portal's text must not be missed because a
- * sibling listing (which happened to have shorter or vaguer text) is the one
- * that got read. See `lib/ai-assessment/extract.ts`.
+ * occupancy/triage/redflags/extract (#25/#26/#27/#28, triage per #542) ALL run
+ * at property level — every live listing of ONE deduplicated property, read
+ * together — because the fact each looks for (occupied, needs reform, beach
+ * proximity, VPO, embargo pending, missing m²/rooms/floor/elevator) is a
+ * property of the physical flat, not of any one advert, and "one portal omits
+ * what another discloses" applies equally to all four. This updates an
+ * earlier version of this note, written when #24 landed extract's plumbing
+ * ahead of #28's real prompt: it argued extract should stay listing-level
+ * because "each portal's own structured-data completeness varies" — true, but
+ * irrelevant, because the fields extract fills (`m2_built`, `m2_useful`,
+ * `rooms`, `bathrooms`, `floor`, `has_elevator`) are columns on `property`,
+ * not `listing` (see `etl/schema/init.sql`). The dedup pipeline already
+ * reconciles per-listing facts onto that one property row, so extraction has
+ * to read every live listing's description together for the same reason
+ * occupancy does: an `m2_built` disclosed only in one portal's text must not
+ * be missed because a sibling listing (which happened to have shorter or
+ * vaguer text) is the one that got read. See `lib/ai-assessment/extract.ts`.
+ *
+ * `triage` (#542, docs/roadmap/llm-batching-plan.md D-A) replaced the three
+ * separate `condition`/`location`/`opportunity` calls with one that asks for
+ * all three axes at once — see `assessTriage` below and
+ * `lib/ai-assessment/triage.ts` for the merge.
  */
 
 import { checkDailyBudget } from "./llm-usage";
@@ -47,6 +52,7 @@ import type {
   ListingSnapshot,
   RedflagTrendingCandidate,
   DismissedCandidate,
+  TriagePropertyInput,
 } from "./llm-context";
 
 export { BudgetExceededError } from "./llm-usage";
@@ -61,7 +67,7 @@ export interface AssessmentOpts {
   ctx?: LlmAgenticContext;
   /**
    * Derived (non-listing) zone-median price comparison — #184. Only
-   * `assessOccupancy` and `extractRedFlags` read this; `assessCondition`/
+   * `assessOccupancy` and `extractRedFlags` read this; `assessTriage`/
    * `extractStructuredFields` accept the same `AssessmentOpts` shape but
    * never forward it into `assembleRequest`'s vars (see
    * `runPropertyAssessment`'s `extraVars` param), so passing it there is a
@@ -103,7 +109,7 @@ export interface AssessmentOpts {
  * omit it) changing shape at all.
  */
 async function runPropertyAssessment(
-  flow: "condition" | "redflags" | "location" | "opportunity" | "extract",
+  flow: "redflags" | "extract",
   listings: ListingSnapshot[],
   instruction: string,
   opts?: AssessmentOpts,
@@ -177,42 +183,13 @@ export async function assessOccupancy(
 }
 
 /**
- * #26 — Assess the property's renovation state.
- *
- * Takes EVERY live listing of one deduplicated property (see the module-level
- * note): the same flat's condition doesn't change per portal, and one advert
- * mentioning "a reformar" while another stays silent is resolved the same way
- * occupancy resolves a silent portal — by reading them together.
- *
- * Deliberately does NOT receive `opts.areaPriceSignal` (#184): price-per-m²
- * correlating with condition is a real but weak, confounded signal (location,
- * floor, orientation and size all move price/m² at least as much as
- * renovation state does), and condition is read directly off what the ad
- * text says about the flat, not inferred from price — see
- * `lib/ai-assessment/price-signal.ts`'s module doc for the full reasoning.
- *
- * Returns the raw JSON text plus the model that produced it.
- */
-export function assessCondition(
-  listings: ListingSnapshot[],
-  opts?: AssessmentOpts,
-): Promise<{ text: string; model: string }> {
-  return runPropertyAssessment(
-    "condition",
-    listings,
-    "Evalúa el estado de conservación del inmueble según las instrucciones (condition).",
-    opts,
-  );
-}
-
-/**
  * #27 / #361 — Extract property problems worth a review before offering:
  * legal/financial risks (a lawyer's review) AND physical problems such as
  * unfinished/halted construction or structural damage (a technician's review).
  *
  * Takes EVERY live listing of one deduplicated property, same reasoning as
- * `assessCondition` above: a disclosure like "pendiente de embargo" made on
- * one portal must not be missed because a sibling advert omits it.
+ * `assessTriage`'s condition axis: a disclosure like "pendiente de embargo"
+ * made on one portal must not be missed because a sibling advert omits it.
  *
  * `opts.areaPriceSignal` (#184): a bucketed zone-median price comparison,
  * when the caller (`lib/ai-assessment/redflags.ts`) has one. Redflags is the
@@ -241,54 +218,54 @@ export function extractRedFlags(
 }
 
 /**
- * #388 (Fase 3 de #385) — Assess two location signals derived from the advert
- * text: beach proximity (graded: frontline/sea_view/near_beach/none) and
- * whether the property sits in a casco/centro histórico.
+ * #542 (docs/roadmap/llm-batching-plan.md, D-A) — Assess condition + location
+ * + opportunity for one or more properties in ONE call ("triage" flow),
+ * replacing the three separate `assessCondition`/`assessLocation`/
+ * `assessOpportunity` calls this merges. Per-property axis selection (a
+ * `terreno` requests `["condition"]` only; `lib/ai-assessment/triage.ts` also
+ * narrows to genuine cache misses) lives in each `TriagePropertyInput`, not
+ * here — this function is a thin transport wrapper, same as every other
+ * `assess*` helper in this file.
  *
- * Takes EVERY live listing of one deduplicated property, same reasoning as
- * `assessCondition`: a "primera línea de playa" disclosure made on one portal
- * must not be missed because a sibling advert omits it. LLM-only by owner
- * decision — no regex/keyword classifier anywhere (see
- * `lib/ai-assessment/location.ts` and D-095).
+ * `maxOutputTokens` scales with how many axis-answers the response must carry
+ * (`sum(property.axes.length)`), not a flat 2048: three axes for one property
+ * already need noticeably more room than any single pre-merge flow did. Reuses
+ * the batching plan's `N × 900 + 512` shape (D-C) with "N" being axis-answers
+ * rather than properties — the two are the same quantity at N=1, and this
+ * keeps the formula ready for Phase 3 multi-property packing without a second
+ * tuning pass.
  *
- * Returns the raw JSON text plus the model that produced it.
+ * Returns the raw JSON ARRAY text plus the model that produced it — parsing
+ * (splitting the array back into per-property, per-axis results) belongs to
+ * `lib/ai-assessment/triage.ts`.
  */
-export function assessLocation(
-  listings: ListingSnapshot[],
+export async function assessTriage(
+  properties: TriagePropertyInput[],
   opts?: AssessmentOpts,
 ): Promise<{ text: string; model: string }> {
-  return runPropertyAssessment(
-    "location",
-    listings,
-    "Evalúa las señales de ubicación del inmueble (proximidad a la playa y casco histórico) según las instrucciones (location).",
-    opts,
-  );
-}
+  await checkDailyBudget();
 
-/**
- * #398 (Fase 5 de #385) — Assess two investor-opportunity signals derived from
- * the advert text: whether the property is VPO / vivienda protegida (`is_vpo`,
- * a hard filter downstream) and whether a licencia turística / VUT is already
- * granted (`tourist_license`, a soft ranking boost).
- *
- * Takes EVERY live listing of one deduplicated property, same reasoning as
- * `assessCondition`: a "VPO" disclosure made on one portal must not be missed
- * because a sibling advert omits it. LLM-only by owner decision — no
- * regex/keyword classifier anywhere (see `lib/ai-assessment/opportunity.ts` and
- * D-095's LLM-not-regex principle).
- *
- * Returns the raw JSON text plus the model that produced it.
- */
-export function assessOpportunity(
-  listings: ListingSnapshot[],
-  opts?: AssessmentOpts,
-): Promise<{ text: string; model: string }> {
-  return runPropertyAssessment(
-    "opportunity",
-    listings,
-    "Evalúa las señales de oportunidad del inmueble (VPO y licencia turística) según las instrucciones (opportunity).",
-    opts,
+  const axisAnswers = properties.reduce((n, p) => n + p.axes.length, 0);
+  const maxOutputTokens = Math.min(8192, Math.max(2048, axisAnswers * 900 + 512));
+
+  const result = await assembleRequest(
+    "triage",
+    { triageProperties: properties },
+    null,
+    "Evalúa los ejes solicitados (condition / location / opportunity) para cada inmueble según las instrucciones (triage).",
+    {
+      ctx: opts?.ctx,
+      requestId: opts?.requestId ?? null,
+      endpoint: "triage",
+      temperature: 0,
+      maxOutputTokens,
+    },
   );
+
+  if (!result.text) {
+    throw new Error('LLM returned an empty response for flow "triage"');
+  }
+  return { text: result.text, model: result.model };
 }
 
 /**
@@ -300,7 +277,7 @@ export function assessOpportunity(
  * note): the fields this recovers live on `property`, not `listing`, so a
  * disclosure in one portal's text must not be missed because a sibling
  * listing's (shorter, vaguer) text is what got read — same reasoning as
- * `assessCondition`/`extractRedFlags`.
+ * `assessTriage`/`extractRedFlags`.
  *
  * Deliberately does NOT receive `opts.areaPriceSignal` (#184): extract pulls
  * objective structured fields straight out of the ad text, and per its own

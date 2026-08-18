@@ -33,7 +33,7 @@ beforeEach(() => __resetMockCallId());
 describe("detectMockFlow", () => {
   it("maps each flow from its real assembled system prompt", () => {
     expect(detectMockFlow(promptFor("occupancy"))).toBe("occupancy");
-    expect(detectMockFlow(promptFor("condition"))).toBe("condition");
+    expect(detectMockFlow(promptFor("triage"))).toBe("triage");
     expect(detectMockFlow(promptFor("redflags"))).toBe("redflags");
     expect(detectMockFlow(promptFor("extract"))).toBe("extract");
     expect(detectMockFlow(promptFor("compare"))).toBe("compare");
@@ -82,15 +82,44 @@ describe("mockRunStep — assessment flows", () => {
     }
   });
 
-  it("condition returns a condition verdict with an issues array", () => {
-    const step = mockRunStep([sys(promptFor("condition")), user("evalúa")]);
+  it("triage returns a JSON array with condition/location/opportunity slices (#542)", () => {
+    const step = mockRunStep([sys(promptFor("triage")), user("evalúa")]);
     expect(step.kind).toBe("final");
     if (step.kind === "final") {
       const parsed = JSON.parse(step.content);
-      expect(parsed.condition).toBe("reformado");
-      expect(Array.isArray(parsed.issues)).toBe(true);
+      expect(Array.isArray(parsed)).toBe(true);
+      expect(parsed).toHaveLength(1);
+      const entry = parsed[0];
+      expect(typeof entry.property_id).toBe("number");
+      expect(entry.condition.condition).toBe("reformado");
+      expect(Array.isArray(entry.condition.issues)).toBe(true);
       // #313: severity is null on a non-a_reformar verdict.
-      expect(parsed.renovation_severity).toBeNull();
+      expect(entry.condition.renovation_severity).toBeNull();
+      expect(entry.location.beach_proximity).toBe("none");
+      expect(entry.opportunity.is_vpo).toBe(false);
+    }
+  });
+
+  it("triage echoes the REAL requested property_id and only the requested axes", () => {
+    const { stable, volatile } = buildSystemPrompt("triage", {
+      triageProperties: [
+        {
+          propertyId: 4242,
+          listings: [{ propertyId: 4242, listingId: 1, description: "Piso en Chamberí." }],
+          axes: ["condition"],
+        },
+      ],
+    });
+    const step = mockRunStep([sys(`${stable}\n${volatile ?? ""}`), user("evalúa")]);
+    expect(step.kind).toBe("final");
+    if (step.kind === "final") {
+      const parsed = JSON.parse(step.content);
+      expect(parsed).toEqual([
+        {
+          property_id: 4242,
+          condition: expect.objectContaining({ condition: "reformado" }),
+        },
+      ]);
     }
   });
 

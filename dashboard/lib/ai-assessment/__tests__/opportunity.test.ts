@@ -1,100 +1,28 @@
 /**
  * Opportunity assessment — unit tests (#398, Fase 5 de #385).
  *
- * Mirrors location.test.ts's structure: prompt-content assertions against the
- * REAL `buildSystemPrompt` output (not a spy), plus parsing-degrades-safely
- * tests for `parseOpportunityResult`, plus the `terreno` exclusion predicate.
+ * Parsing-degrades-safely tests for `parseOpportunityResult`, plus the
+ * `terreno` exclusion predicate. Prompt-CONTENT assertions moved to
+ * `triage.test.ts` (#542): `opportunity` is answered from the merged `triage`
+ * prompt now, not a standalone `buildSystemPrompt("opportunity", …)` call —
+ * that flow name no longer exists. The parser itself
+ * (`parseOpportunityResult`/`parseOpportunityObject`) is UNCHANGED by the
+ * merge, so every test below still exercises the real, unmodified degrade
+ * logic.
  *
  * The owner's constraint — detection is LLM-based, NEVER regex — is a property
- * of WHERE the value comes from (the prompt/model), which these tests exercise
- * by asserting the prompt demands a literal cited quote per boolean and that the
- * parser degrades an uncited claim to false. There is no ILIKE/keyword
+ * of WHERE the value comes from (the prompt/model), which `triage.test.ts`
+ * exercises by asserting the prompt demands a literal cited quote per boolean;
+ * the parser tests below prove the CODE-SIDE half: an uncited claim degrades
+ * to false regardless of what the prompt asked for. There is no ILIKE/keyword
  * classifier to test because there is none in the runtime path.
  */
 import { describe, it, expect } from "vitest";
-import { buildSystemPrompt } from "@/lib/llm-context/system-prompt";
-import type { ListingSnapshot } from "@/lib/llm-context";
 import {
   parseOpportunityResult,
   opportunityApplies,
   OPPORTUNITY_PROMPT_VERSION,
 } from "../opportunity";
-
-const VPO_ADVERT: ListingSnapshot = {
-  propertyId: 11,
-  listingId: 401,
-  source: "fotocasa",
-  operation: "sale",
-  propertyType: "piso",
-  description:
-    "Vivienda de protección oficial (VPO) con precio máximo de venta tasado, tres dormitorios.",
-};
-
-const TOURIST_ADVERT: ListingSnapshot = {
-  propertyId: 11,
-  listingId: 402,
-  source: "idealista",
-  operation: "sale",
-  propertyType: "piso",
-  description: "Apartamento con licencia turística concedida, número de registro VUT vigente.",
-};
-
-const SILENT_ADVERT: ListingSnapshot = {
-  propertyId: 12,
-  listingId: 403,
-  source: "milanuncios",
-  operation: "sale",
-  propertyType: "piso",
-  description: "Piso de 90 m2, tres dormitorios, dos baños. Luminoso y céntrico.",
-};
-
-function opportunityPromptText(listings: ListingSnapshot[]): string {
-  const { stable, volatile } = buildSystemPrompt("opportunity", { listings });
-  return `${stable}\n${volatile ?? ""}`;
-}
-
-describe("opportunity prompt — closed vocabulary and evidence discipline", () => {
-  it("states both booleans and their closed vocabulary inline", () => {
-    const text = opportunityPromptText([VPO_ADVERT]);
-    expect(text).toContain("is_vpo");
-    expect(text).toContain("tourist_license");
-    expect(text.toLowerCase()).toContain("protección oficial");
-    expect(text.toLowerCase()).toContain("vivienda protegida");
-    expect(text.toLowerCase()).toContain("licencia turística");
-    expect(text.toLowerCase()).toContain("vut");
-  });
-
-  it("demands the tourist licence be ALREADY granted, not a mere potential", () => {
-    const text = opportunityPromptText([TOURIST_ADVERT]).toLowerCase();
-    expect(text).toContain("ya tiene concedida");
-    // The prompt must warn against treating "posibilidad de licencia" as true.
-    expect(text).toContain("posibilidad de licencia turística");
-  });
-
-  it("demands a literal evidence quote per signal or the safe default", () => {
-    const text = opportunityPromptText([VPO_ADVERT]);
-    expect(text).toContain("vpo_evidence");
-    expect(text).toContain("tourist_license_evidence");
-    expect(text.toLowerCase()).toContain("cita literal");
-  });
-
-  it("carries EVERY advert's description so a verdict can cite any of them", () => {
-    const text = opportunityPromptText([VPO_ADVERT, TOURIST_ADVERT]);
-    expect(text).toContain("protección oficial");
-    expect(text).toContain("licencia turística concedida");
-    expect(text).toContain("fotocasa");
-    expect(text).toContain("idealista");
-  });
-
-  it("restates the false correction AFTER ASSESSMENT_RULES' generic unknown rule (recency wins)", () => {
-    const text = opportunityPromptText([SILENT_ADVERT]);
-    const genericUnknownRuleIdx = text.indexOf('`"unknown"` y una `confidence` baja');
-    const correctionIdx = text.indexOf("Nota sobre la regla 2 anterior");
-    expect(genericUnknownRuleIdx).toBeGreaterThan(-1);
-    expect(correctionIdx).toBeGreaterThan(-1);
-    expect(correctionIdx).toBeGreaterThan(genericUnknownRuleIdx);
-  });
-});
 
 describe("parseOpportunityResult — is_vpo", () => {
   it("parses is_vpo true with its evidence and source", () => {
@@ -218,7 +146,7 @@ describe("opportunityApplies — terreno exclusion (owner decision)", () => {
 });
 
 describe("OPPORTUNITY_PROMPT_VERSION", () => {
-  it("is the v1 axis version so #308 re-assesses on future bumps", () => {
-    expect(OPPORTUNITY_PROMPT_VERSION).toBe("opportunity/v1");
+  it("is the v2 axis version (#542, triage merge) so #308 re-assesses on future bumps", () => {
+    expect(OPPORTUNITY_PROMPT_VERSION).toBe("opportunity/v2");
   });
 });

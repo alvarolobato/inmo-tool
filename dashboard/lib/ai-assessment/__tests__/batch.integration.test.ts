@@ -36,6 +36,8 @@ import {
 } from "../occupancy";
 import { saveConditionAssessment, parseConditionResult, CONDITION_PROMPT_VERSION } from "../condition";
 import { saveRedFlagsAssessment, parseRedFlagsResult, REDFLAGS_PROMPT_VERSION } from "../redflags";
+import { saveLocationAssessment, parseLocationResult, LOCATION_PROMPT_VERSION } from "../location";
+import { saveOpportunityAssessment, parseOpportunityResult, OPPORTUNITY_PROMPT_VERSION } from "../opportunity";
 
 async function withRealDb(fn: (pool: Pool) => Promise<void>) {
   const pool = new Pool(buildPgPoolConfig({ max: 2 }));
@@ -229,8 +231,9 @@ describe.runIf(dbAvailable)("assessment batch — real Postgres", () => {
       const unassessed = await seedUnassessedProperty(pool, "sel-miss");
       const assessed = await seedUnassessedProperty(pool, "sel-hit");
 
-      // Give `assessed` a current-prompt-version verdict for all three
-      // selection flows, so it should drop out of selection.
+      // Give `assessed` a current-prompt-version verdict for all FIVE
+      // selection flows (#542/F-9 added location/opportunity), so it should
+      // drop out of selection.
       await saveOccupancyAssessment(
         assessed,
         parseOccupancyResult(
@@ -255,6 +258,20 @@ describe.runIf(dbAvailable)("assessment batch — real Postgres", () => {
         parseRedFlagsResult(JSON.stringify({ flags: [], confidence: 0.5, reasoning: "x" })),
         "m",
       );
+      await saveLocationAssessment(
+        assessed,
+        parseLocationResult(
+          JSON.stringify({ beach_proximity: "none", heritage_zone: false, confidence: 0.5, reasoning: "x" }),
+        ),
+        "m",
+      );
+      await saveOpportunityAssessment(
+        assessed,
+        parseOpportunityResult(
+          JSON.stringify({ is_vpo: false, tourist_license: false, confidence: 0.5, reasoning: "x" }),
+        ),
+        "m",
+      );
 
       // A large batch so ordering/other fixtures don't hide our target.
       const selected = await selectPropertiesNeedingAssessment(1000);
@@ -263,7 +280,13 @@ describe.runIf(dbAvailable)("assessment batch — real Postgres", () => {
 
       // Sanity: the versions we wrote are the current ones (guards against a
       // silent prompt-version bump making this test vacuous).
-      expect([OCCUPANCY_PROMPT_VERSION, CONDITION_PROMPT_VERSION, REDFLAGS_PROMPT_VERSION]).toHaveLength(3);
+      expect([
+        OCCUPANCY_PROMPT_VERSION,
+        CONDITION_PROMPT_VERSION,
+        REDFLAGS_PROMPT_VERSION,
+        LOCATION_PROMPT_VERSION,
+        OPPORTUNITY_PROMPT_VERSION,
+      ]).toHaveLength(5);
     });
   });
 

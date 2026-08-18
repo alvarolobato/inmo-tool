@@ -43,10 +43,14 @@
  */
 
 import { sql } from "@/lib/db-write";
-import { assessOpportunity } from "@/lib/llm";
 import type { LlmAgenticContext } from "@/lib/llm-tools/types";
 import { NoListingsError, loadPropertyListings, clamp01, stripCodeFence } from "./shared";
-import { getOrCompute, getLatestAssessment, logCacheOutcome, type CachedAssessment } from "./cache";
+import { getLatestAssessment, logCacheOutcome, AssessmentParkedError, type CachedAssessment } from "./cache";
+// #542 — opportunity is now assessed as one axis of the merged `triage` flow.
+// See condition.ts's matching import for why this circular import (triage.ts
+// imports back from this file) is safe: only read inside a function body here
+// (never at this module's top level).
+import { assessPropertyTriage } from "./triage";
 
 export { NoListingsError, loadPropertyListings };
 
@@ -55,8 +59,13 @@ export { NoListingsError, loadPropertyListings };
  * change a verdict, so `ai_assessment`'s unique key treats the new output as a
  * distinct row and #308's batch scheduler re-assesses (same convention as
  * `LOCATION_PROMPT_VERSION`). `v1` is the initial axis (#398).
+ *
+ * `v2` (#542): answered from the merged `triage` prompt now, not a standalone
+ * `opportunity` prompt — same vocabulary/evidence rules, different
+ * surrounding text. See `CONDITION_PROMPT_VERSION`'s `v3` note for the full
+ * rationale.
  */
-export const OPPORTUNITY_PROMPT_VERSION = "opportunity/v1";
+export const OPPORTUNITY_PROMPT_VERSION = "opportunity/v2";
 
 // The opportunity signal names + badge labels live in the leaf module
 // `opportunity-vocabulary.ts` (no `pg`/LLM imports) so the redflags prompt
@@ -122,9 +131,17 @@ export function parseOpportunityResult(raw: string): OpportunityResult {
   if (typeof parsed !== "object" || parsed === null) {
     throw new Error("Opportunity flow returned a non-object JSON value.");
   }
+  return parseOpportunityObject(parsed as Record<string, unknown>);
+}
 
-  const o = parsed as Record<string, unknown>;
-
+/**
+ * The object-taking core of `parseOpportunityResult` (#542, triage) — see
+ * condition.ts's `parseConditionObject` doc for why this split exists.
+ * `parseOpportunityResult` above is now a thin `JSON.parse` + fence-strip
+ * wrapper; every validation and degrade rule below is UNCHANGED from before
+ * the merge.
+ */
+export function parseOpportunityObject(o: Record<string, unknown>): OpportunityResult {
   // Evidence-or-false guard, once per boolean (mirrors location's heritage_zone
   // handling): a claim with no literal quote is not a finding, it is exactly
   // what the assessment rules forbid — degrade it to false and drop its quote.
@@ -213,42 +230,36 @@ export type OpportunityOutcome =
   | { skipped: false; result: OpportunityResult };
 
 /**
- * Assess one property end-to-end: load its merged listings, skip a `terreno`
- * plot (owner decision — the axis doesn't apply), else ask the model (unless an
- * unchanged verdict is already cached — #30), validate, persist.
+ * Assess one property end-to-end (#542): delegates to the merged `triage`
+ * flow (`lib/ai-assessment/triage.ts`) and returns just the `opportunity`
+ * slice — every existing caller keeps this exact signature/return type. The
+ * terreno exclusion (#398, owner decision — the axis doesn't apply to a bare
+ * plot) is now decided inside `assessPropertyTriage` (same
+ * `opportunityApplies`/`locationApplies` rule), surfaced here as the
+ * `not_applicable` outcome.
  *
  * Throws `NoListingsError` when the property has no live listings, OR when every
  * live listing has no description (see `loadPropertyListings`) — same 404 signal
- * the other flows use.
+ * the other flows use. Throws `AssessmentParkedError` when specifically the
+ * `opportunity` axis is parked (D-104).
  */
 export async function assessPropertyOpportunity(
   propertyId: number,
   opts?: { requestId?: string | null; ctx?: LlmAgenticContext },
 ): Promise<OpportunityOutcome> {
-  const listings = await loadPropertyListings(propertyId);
-  if (listings.length === 0) throw new NoListingsError(propertyId);
-
-  // Terreno exclusion (#398, owner decision) — a plot has no VPO/tourist-licence
-  // reading in the same sense; skip before any LLM spend. property_type is a
-  // property-level fact, identical across a deduplicated property's listings.
-  if (!opportunityApplies(listings[0].propertyType)) {
-    return {
-      skipped: true,
-      reason: "El eje 'opportunity' no aplica a un terreno/solar.",
-    };
+  const triage = await assessPropertyTriage(propertyId, opts);
+  const axis = triage.opportunity;
+  switch (axis.status) {
+    case "ok":
+      logCacheOutcome("opportunity", propertyId, axis.fromCache);
+      return { skipped: false, result: axis.result };
+    case "not_applicable":
+      // Terreno exclusion (#398, owner decision) — a plot has no VPO/tourist-
+      // licence reading in the same sense.
+      return { skipped: true, reason: "El eje 'opportunity' no aplica a un terreno/solar." };
+    case "parked":
+      throw new AssessmentParkedError(propertyId, "opportunity", axis.failCount, axis.lastError);
+    case "error":
+      throw axis.error;
   }
-
-  const { result, fromCache } = await getOrCompute<OpportunityResult>(
-    propertyId,
-    "opportunity",
-    OPPORTUNITY_PROMPT_VERSION,
-    listings,
-    async () => {
-      const { text, model } = await assessOpportunity(listings, opts);
-      return { result: parseOpportunityResult(text), model };
-    },
-    saveOpportunityAssessment,
-  );
-  logCacheOutcome("opportunity", propertyId, fromCache);
-  return { skipped: false, result };
 }

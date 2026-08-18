@@ -271,6 +271,50 @@ async function withAdvisoryLock<T>(key: string, fn: () => Promise<T>): Promise<T
 }
 
 /**
+ * Multi-key counterpart of {@link withAdvisoryLock} (#542, triage). Acquires
+ * EVERY given lock key on ONE dedicated client, in SORTED order, before
+ * running `fn`; releases them all (reverse order) on the same client
+ * afterward.
+ *
+ * This is not a convenience wrapper — it is the load-bearing fix for a real
+ * deadlock risk the batching plan calls out (§1.3 "Advisory-lock mechanics"):
+ * `getPool()` is capped at `max: 5` connections (db-write.ts). A naive
+ * `Promise.all(keys.map(k => withAdvisoryLock(k, ...)))` would open one
+ * client PER KEY — three for a triage call — racing the app's own queries for
+ * the same 5-connection pool, and two such calls acquiring their three locks
+ * in different orders could deadlock each other. Taking every lock on ONE
+ * client, always in the SAME (sorted) order, avoids both: a Postgres session
+ * can hold many advisory locks at once, and a fixed acquisition order makes a
+ * lock-ordering deadlock between two concurrent multi-key callers impossible
+ * (they always contend for the same key first).
+ *
+ * `keys` must already be de-duplicated and sorted by the caller — sorting
+ * here would hide a caller bug that skipped the ordering discipline.
+ */
+async function withAdvisoryLockMulti<T>(
+  keys: readonly string[],
+  fn: () => Promise<T>,
+): Promise<T> {
+  const client = await getPool().connect();
+  const acquired: string[] = [];
+  try {
+    for (const key of keys) {
+      await client.query("SELECT pg_advisory_lock(hashtext($1)::bigint)", [key]);
+      acquired.push(key);
+    }
+    try {
+      return await fn();
+    } finally {
+      for (const key of [...acquired].reverse()) {
+        await client.query("SELECT pg_advisory_unlock(hashtext($1)::bigint)", [key]);
+      }
+    }
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * Cost-visibility log line (#30 review, "also fix": `fromCache` was computed
  * by `getOrCompute` and then discarded by all four `assessProperty*`
  * callers — for a cost-control feature, "did this POST spend money" is the
@@ -581,5 +625,176 @@ export async function getOrCompute<T>(
     await save(propertyId, result, model, contentHash);
     await clearAssessmentFailures(propertyId, assessmentType, promptVersion);
     return { result, model, fromCache: false };
+  });
+}
+
+// ── Multi-axis cache (#542 — triage: condition + location + opportunity) ──────
+
+/**
+ * One axis `getOrComputeMulti` is asked to check/compute, identified by a
+ * short `key` local to the call (the axis outcomes map is keyed on this, not
+ * on `assessmentType`, so a caller can pick whatever name is convenient —
+ * triage.ts uses the assessment type itself, e.g. `"condition"`).
+ */
+export interface MultiAxisSpec {
+  key: string;
+  assessmentType: AssessmentType;
+  promptVersion: string;
+}
+
+/**
+ * Outcome of one axis inside a `getOrComputeMulti` call:
+ *   - `hit`      — served from cache; `computeFn` was never asked about it.
+ *   - `computed` — a genuine miss, resolved by `computeFn`, saved, and its
+ *                   failure ledger cleared before this returns.
+ *   - `parked`   — D-104: this exact (property, axis, prompt_version,
+ *                   content_hash) already failed `assessment_max_failures`
+ *                   times; excluded from `computeFn`'s request, no spend.
+ *   - `error`    — `computeFn` succeeded overall but its result had no usable
+ *                   entry for this axis (a partial/malformed response) — a
+ *                   content-failure strike was recorded for THIS axis only.
+ *                   A whole-call failure (network, budget, an unparseable
+ *                   response covering every axis) is NOT reported this way —
+ *                   `getOrComputeMulti` re-throws it instead, exactly like
+ *                   single-axis `getOrCompute`, so BudgetExceededError /
+ *                   CircuitBreakerOpenError / LlmQuotaExceededError still
+ *                   reach the batch loop's EC-3 handling unmodified.
+ */
+export type MultiAxisOutcome<T> =
+  | { status: "hit"; result: T; model: string | null }
+  | { status: "computed"; result: T; model: string | null }
+  | { status: "parked"; failCount: number; lastError: string | null }
+  | { status: "error"; error: unknown };
+
+/** What `computeFn` returns for one axis it was asked to resolve. */
+export interface MultiAxisComputed {
+  result: unknown;
+  model: string | null;
+}
+
+/**
+ * Multi-axis counterpart of {@link getOrCompute} (#542, triage — condition +
+ * location + opportunity in one LLM call). See
+ * `docs/roadmap/llm-batching-plan.md` §1.3 "Advisory-lock mechanics" and the
+ * triage decision record for the design this implements:
+ *
+ *   - **One content hash for the whole property**, not one per axis — every
+ *     axis reads the identical payload (the property's merged listings), so
+ *     there is exactly one hash to compute and compare, exactly like a
+ *     single-axis flow's `contentHash` — see `computeAssessmentContentHash`.
+ *   - **A per-axis hit/park check** BEFORE any lock or LLM spend, exactly
+ *     mirroring `getOrCompute`'s single-axis checks, just run once per axis
+ *     in `axes`.
+ *   - **One advisory-lock CLIENT holding every axis's lock key, sorted** —
+ *     see {@link withAdvisoryLockMulti}'s doc for why nesting per-axis
+ *     `withAdvisoryLock` calls here would risk exhausting the 5-connection
+ *     pool and deadlocking.
+ *   - **`computeFn` is called ONCE**, given the list of axis keys that are
+ *     genuine misses (not hits, not parked) — never for a key already served
+ *     from cache or already parked. When every axis is a hit or parked,
+ *     `computeFn` is never called at all (no LLM spend).
+ *   - **Per-axis isolation on a partial response**: an axis key `computeFn`
+ *     doesn't return an entry for becomes an `"error"` outcome for THAT axis
+ *     alone (with its own D-104 strike) — the other axes' `"computed"`
+ *     outcomes are unaffected. This is what stops a malformed `location`
+ *     slice from poisoning a good `condition` verdict in the same response.
+ */
+export async function getOrComputeMulti(
+  propertyId: number,
+  axes: readonly MultiAxisSpec[],
+  listings: ListingSnapshot[],
+  computeFn: (missingKeys: string[]) => Promise<Record<string, MultiAxisComputed | undefined>>,
+  save: (
+    key: string,
+    propertyId: number,
+    result: unknown,
+    model: string | null,
+    contentHash: string,
+  ) => Promise<void>,
+): Promise<Record<string, MultiAxisOutcome<unknown>>> {
+  const contentHash = computeAssessmentContentHash(listings);
+  // Sorted once, on the exact string every lock is keyed on — the same
+  // `ai_assessment:<propertyId>:<assessmentType>` shape single-axis
+  // `getOrCompute` uses, so a triage call and a concurrent single-axis POST
+  // for the SAME axis contend for the identical key.
+  const sortedKeys = [...new Set(axes.map((a) => `ai_assessment:${propertyId}:${a.assessmentType}`))].sort();
+
+  return withAdvisoryLockMulti(sortedKeys, async () => {
+    const outcomes: Record<string, MultiAxisOutcome<unknown>> = {};
+    const missing: MultiAxisSpec[] = [];
+    const maxFailures = maxAssessmentFailures();
+
+    for (const axis of axes) {
+      const cached = await getLatestAssessment(propertyId, axis.assessmentType, axis.promptVersion);
+      if (
+        cached &&
+        !cached.stale &&
+        cached.content_hash !== null &&
+        cached.content_hash === contentHash
+      ) {
+        outcomes[axis.key] = { status: "hit", result: cached.result, model: cached.model };
+        continue;
+      }
+
+      if (maxFailures > 0) {
+        const failure = await readFailure(
+          propertyId,
+          axis.assessmentType,
+          axis.promptVersion,
+          contentHash,
+        );
+        if (failure && failure.fail_count >= maxFailures) {
+          outcomes[axis.key] = {
+            status: "parked",
+            failCount: failure.fail_count,
+            lastError: failure.last_error,
+          };
+          continue;
+        }
+      }
+
+      missing.push(axis);
+    }
+
+    if (missing.length === 0) return outcomes;
+
+    let computed: Record<string, MultiAxisComputed | undefined>;
+    try {
+      computed = await computeFn(missing.map((a) => a.key));
+    } catch (err) {
+      // Whole-call failure (network, an unparseable response covering every
+      // axis, …): strike every axis this call was responsible for — unless
+      // the error is environmental, in which case it must reach the caller
+      // WITHOUT a strike (see `isEnvironmentalError`'s doc) — then propagate
+      // unconditionally so budget/circuit/quota errors still reach the batch
+      // loop's EC-3 handling, exactly like single-axis `getOrCompute`.
+      if (!isEnvironmentalError(err)) {
+        for (const axis of missing) {
+          await recordFailure(propertyId, axis.assessmentType, axis.promptVersion, contentHash, err);
+        }
+      }
+      throw err;
+    }
+
+    for (const axis of missing) {
+      const entry = computed[axis.key];
+      if (!entry) {
+        // The call succeeded overall, but this axis's slice was missing or
+        // got dropped by the parser (malformed, unknown id, …) — a content
+        // failure scoped to THIS axis alone. The other axes in `missing`
+        // are judged independently, in the loop's next iteration.
+        const axisErr = new Error(
+          `Triage response has no usable entry for axis "${axis.key}" (property ${propertyId}).`,
+        );
+        await recordFailure(propertyId, axis.assessmentType, axis.promptVersion, contentHash, axisErr);
+        outcomes[axis.key] = { status: "error", error: axisErr };
+        continue;
+      }
+      await save(axis.key, propertyId, entry.result, entry.model, contentHash);
+      await clearAssessmentFailures(propertyId, axis.assessmentType, axis.promptVersion);
+      outcomes[axis.key] = { status: "computed", result: entry.result, model: entry.model };
+    }
+
+    return outcomes;
   });
 }
