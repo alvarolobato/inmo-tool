@@ -290,13 +290,57 @@ describe("claudeCliSingleShot", () => {
     expect(args).toContain("--system-prompt");
   });
 
-  it("keeps the full harness context when lean mode is disabled", async () => {
+  it("keeps the cost flags OFF but the safety flags ON when lean mode is disabled", async () => {
+    // The security-relevant flags must not be something a debug toggle can
+    // switch off: our prompts carry untrusted scraped listing text, and
+    // re-enabling Claude's built-in Bash/Edit tools against it would turn a
+    // prompt injection in a property description into host code execution.
     mockRunCliProcess.mockResolvedValueOnce(okResult("hi"));
     await claudeCliSingleShot({ cfg: { ...cfg, cliLeanMode: false }, prompt: "x" });
 
     const args: string[] = mockRunCliProcess.mock.calls[0][0].args;
-    expect(args).not.toContain("--tools");
+    expect(args).toContain("--tools");
+    expect(args[args.indexOf("--tools") + 1]).toBe("");
+    expect(args).toContain("--no-session-persistence");
+    // ...but the cost-only flags are gone.
+    expect(args).not.toContain("--disable-slash-commands");
     expect(args).not.toContain("--system-prompt");
+  });
+
+  it("always disables tools, in both CLI flows", async () => {
+    mockRunCliProcess.mockResolvedValueOnce(okResult("hi"));
+    await claudeCliSingleShot({ cfg, prompt: "x" });
+    const singleShot: string[] = mockRunCliProcess.mock.calls[0][0].args;
+    expect(singleShot[singleShot.indexOf("--tools") + 1]).toBe("");
+
+    mockRunCliProcessStreaming.mockImplementation(
+      makeStreamingMock(makeStreamJsonResult(JSON.stringify({ kind: "final", content: "ok" }))),
+    );
+    await claudeCliAgenticStep({ cfg, messages: [{ role: "user", content: "q" }] });
+    const agentic: string[] = mockRunCliProcessStreaming.mock.calls[0][0].args;
+    expect(agentic[agentic.indexOf("--tools") + 1]).toBe("");
+  });
+
+  it("reads the envelope even when the binary prints a line before it", async () => {
+    // A deprecation notice or update nag ahead of the JSON used to break
+    // JSON.parse on the whole of stdout, silently degrading to "the entire
+    // blob is the answer".
+    mockRunCliProcess.mockResolvedValueOnce(
+      okResult(
+        "npm notice: a new version of claude is available\n" +
+          JSON.stringify({
+            type: "result",
+            is_error: false,
+            result: "hello world",
+            total_cost_usd: 0.001,
+            usage: { input_tokens: 5, output_tokens: 6 },
+          }),
+      ),
+    );
+
+    const out = await claudeCliSingleShot({ cfg, prompt: "x" });
+    expect(out.text).toBe("hello world");
+    expect(out.usage?.cost_usd).toBe(0.001);
   });
 
   it("throws LLM_CLI_EMPTY when the CLI returns empty stdout on success", async () => {

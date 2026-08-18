@@ -65,6 +65,9 @@ export default defineConfig({
     // of the parallel run's wall time was jsdom/react environment setup, not
     // test execution.
     fileParallelism: false,
+    // Isolate every test file from the developer's real
+    // ~/.config/inmo-tool/config.yaml — see vitest.setup.ts.
+    setupFiles: ["./vitest.setup.ts"],
     include: ["**/__tests__/**/*.test.{ts,tsx}"],
     coverage: {
       provider: "v8",

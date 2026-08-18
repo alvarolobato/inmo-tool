@@ -16,7 +16,12 @@ vi.mock("node:child_process", () => ({
 import { runCliProcessStreaming } from "@/lib/llm-provider/cli/process";
 
 type MockChild = EventEmitter & {
-  stdin: { write: ReturnType<typeof vi.fn>; end: ReturnType<typeof vi.fn> };
+  stdin: {
+    write: ReturnType<typeof vi.fn>;
+    end: ReturnType<typeof vi.fn>;
+    /** Real streams are EventEmitters; the runner attaches an EPIPE guard. */
+    on: ReturnType<typeof vi.fn>;
+  };
   stdout: EventEmitter;
   stderr: EventEmitter;
   kill: ReturnType<typeof vi.fn>;
@@ -24,7 +29,7 @@ type MockChild = EventEmitter & {
 
 function baseChild(): MockChild {
   const child = new EventEmitter() as MockChild;
-  child.stdin = { write: vi.fn(), end: vi.fn() };
+  child.stdin = { write: vi.fn(), end: vi.fn(), on: vi.fn() };
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
   child.kill = vi.fn(() => {

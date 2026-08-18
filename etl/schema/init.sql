@@ -3054,3 +3054,29 @@ ANALYZE captured_search_urls;
 ANALYZE observed_search_urls;
 ANALYZE profile_connector_filter;
 ANALYZE property_search_doc;
+
+-- Subscription quota readings (D-106). A host-side poller runs
+-- `claude -p "/usage"` — free, no model call — and pushes the parsed
+-- percentages here so the dashboard can stop calling the LLM before the
+-- account's session/weekly limit is reached.
+--
+-- Why a table and not an in-memory value: the reading comes from OUTSIDE the
+-- dashboard process (only credential-file auth can see the quota view, which
+-- the container does not have), it must survive a restart, and /etl/salud
+-- wants to show it. One row per reading, newest wins; old rows are history.
+CREATE TABLE IF NOT EXISTS llm_quota_reading (
+    id                  BIGSERIAL   PRIMARY KEY,
+    read_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- 0-100 per window; NULL when that window was absent from the output.
+    session_pct         INTEGER     CHECK (session_pct BETWEEN 0 AND 100),
+    week_pct            INTEGER     CHECK (week_pct BETWEEN 0 AND 100),
+    week_top_model_pct  INTEGER     CHECK (week_top_model_pct BETWEEN 0 AND 100),
+    -- Raw reset strings, for display only ("Aug 21 at 12pm (Europe/Madrid)").
+    session_resets_at   TEXT,
+    week_resets_at      TEXT,
+    -- Where the reading came from, so a stale source is diagnosable.
+    source              TEXT        NOT NULL DEFAULT 'host-poller'
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_quota_reading_read_at
+    ON llm_quota_reading (read_at DESC);

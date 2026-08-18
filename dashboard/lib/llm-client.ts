@@ -29,7 +29,7 @@ import {
 } from "./llm-provider/config";
 import { createDashboardAgenticAdapter } from "./llm-provider/registry";
 import { logUsage } from "./llm-usage";
-import { assertLlmEnabled } from "./llm-enabled";
+import { assertLlmEnabled, assertQuotaAvailable } from "./llm-enabled";
 import { callWithCircuitBreaker } from "./llm-circuit-breaker";
 import type { DashboardLlmFlow, DashboardLlmProviderId } from "./llm-provider/types";
 // Direct module import (not the ./llm-context barrel) to avoid a cycle:
@@ -171,6 +171,9 @@ export async function llmComplete(req: LlmRequest): Promise<LlmResponse> {
   // Master kill switch — checked before ANY provider work, so a disabled
   // install cannot spend a token by any route. See lib/llm-enabled.ts.
   assertLlmEnabled();
+  // Subscription-quota cap (D-106): stop before the account's session/weekly
+  // limit is reached. No-op unless `dashboard.llm_quota_stop_pct` is set.
+  await assertQuotaAvailable();
   const cfg = loadDashboardLlmConfig();
   const dFlow = narrowDashboardLlmFlow(req.flow);
   const model = getEffectiveDashboardModel(cfg, dFlow);

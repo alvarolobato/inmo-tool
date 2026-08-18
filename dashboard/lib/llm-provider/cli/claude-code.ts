@@ -11,7 +11,12 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 import { CHAT_TOOLS } from "@/lib/llm-tools/catalog";
 import { sanitize, sanitizeArgv, sanitizeTail } from "../sanitize";
 import { triggerHostTokenSync } from "./host-token-sync";
-import { CLI_LEAN_ARGS, parseCliReportedUsage, type CliReportedUsage } from "./usage";
+import {
+  CLI_LEAN_ARGS,
+  CLI_SAFETY_ARGS,
+  parseCliReportedUsage,
+  type CliReportedUsage,
+} from "./usage";
 
 /**
  * Per-call argv prefix that strips the Claude Code harness context: its own
@@ -34,8 +39,11 @@ import { CLI_LEAN_ARGS, parseCliReportedUsage, type CliReportedUsage } from "./u
  * harness context) as an escape hatch if a flow turns out to depend on it.
  */
 function leanArgs(cfg: DashboardLlmConfig, systemPrompt: string): string[] {
-  if (!cfg.cliLeanMode) return [];
-  return [...CLI_LEAN_ARGS, "--system-prompt", systemPrompt];
+  // CLI_SAFETY_ARGS is unconditional: it disables Claude's built-in tools
+  // against untrusted scraped listing text, so it must not be something a
+  // debug toggle can switch off. Only the cost-saving flags are gated.
+  if (!cfg.cliLeanMode) return [...CLI_SAFETY_ARGS];
+  return [...CLI_SAFETY_ARGS, ...CLI_LEAN_ARGS, "--system-prompt", systemPrompt];
 }
 
 /**
@@ -189,6 +197,38 @@ async function claudeCliSingleShotOnce(
 }
 
 /**
+ * Find the CLI's result envelope in stdout, scanning LINE BY LINE.
+ *
+ * Parsing the whole of stdout as one JSON document assumes the envelope is the
+ * only thing the binary ever prints. It is not guaranteed to be: a deprecation
+ * notice, an update nag or any stray stderr-turned-stdout line ahead of the
+ * JSON breaks `JSON.parse` outright, and we would silently fall back to
+ * treating the entire blob as the assistant's answer. Scanning lines is what
+ * the sibling obsidian-meeting-copilot bridge does, and it costs nothing.
+ *
+ * A line only counts as the envelope if it carries a field the CLI actually
+ * emits (`result` / `is_error` / `type: "result"`) — every assessment flow's
+ * own ANSWER is also a JSON object, and mistaking one for an envelope yields
+ * empty text → LLM_CLI_EMPTY → a D-104 strike → the property parked for good.
+ */
+function findResultEnvelope(raw: string): Record<string, unknown> | null {
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const o = parsed as Record<string, unknown>;
+    if ("result" in o || "is_error" in o || o.type === "result") return o;
+  }
+  return null;
+}
+
+/**
  * Read `{result, usage, total_cost_usd, is_error}` out of the JSON envelope.
  *
  * Falls back to treating stdout as plain text when it does not parse as a JSON
@@ -202,27 +242,7 @@ function parseSingleShotEnvelope(
   result: { exitCode: number | null; stderr: string; stdout: string; durationMs: number },
   fullArgv: string[],
 ): { text: string; usage: CliReportedUsage | null } {
-  let envelope: Record<string, unknown> | null = null;
-  try {
-    const parsed = JSON.parse(raw);
-    // A bare "is it a JSON object?" test is NOT enough to call this an
-    // envelope: every assessment flow's own ANSWER is a JSON object
-    // (`{"condition":"a_reformar",...}`). Without a discriminator, an older
-    // binary that ignores `--output-format json` would have its answer read as
-    // an envelope with no `result` key → empty text → LLM_CLI_EMPTY → a strike
-    // in the D-104 ledger → the property parked permanently, on the exact path
-    // this fallback exists to protect. Require a field only the CLI emits.
-    if (
-      parsed &&
-      typeof parsed === "object" &&
-      !Array.isArray(parsed) &&
-      ("result" in parsed || "is_error" in parsed || (parsed as { type?: unknown }).type === "result")
-    ) {
-      envelope = parsed as Record<string, unknown>;
-    }
-  } catch {
-    // Not JSON — older binary emitting plain text.
-  }
+  const envelope = findResultEnvelope(raw);
   if (!envelope) return { text: raw, usage: null };
 
   if (envelope.is_error === true) {

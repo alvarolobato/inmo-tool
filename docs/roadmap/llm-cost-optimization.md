@@ -144,6 +144,26 @@ D-104, which reuses the same content hash as its key.
 
 ---
 
+## Follow-up round (PR #2 — spawn hardening + the quota cap)
+
+| id | change | decision |
+|---|---|---|
+| H1 | `--tools ""` is unconditional — a debug toggle must not re-arm Claude's Bash/Edit tools against untrusted scraped listing text | [D-106](../decisions/D-106-cli-spawn-hardening.md) |
+| H2 | EPIPE-guarded stdin — an unhandled stream error was **killing the Node process** when the CLI exited before draining a large prompt (reproduced) | D-106 |
+| H3 | Neutral spawn `cwd` — the server's cwd leaked `CLAUDE.md` into prompts (measured 22,490 extra cached tokens from the repo root) | D-106 |
+| H4 | Result envelope located line-by-line, so a notice printed before the JSON can't break parsing | D-106 |
+| H5 | `vitest.setup.ts` isolates every test from the operator's real `config.yaml` | D-106 |
+| Q1 | **Subscription-quota cap**: stop at N% of the session/weekly limit, read for free from `claude -p "/usage"` via a host-side poller | [D-107](../decisions/D-107-subscription-quota-cap.md) |
+
+H1–H4 came from reading the sibling `obsidian-meeting-copilot` project, which
+drives the same binary; each practice was verified against our own code before
+adoption, and one of them (`--no-session-persistence`) measured as a no-op here
+and is documented as insurance rather than a fix.
+
+Q1 supersedes the token-allowance proxy this document previously proposed
+(F-12): the real percentages turned out to be readable at zero cost, so a
+hand-calibrated proxy is no longer the best available answer.
+
 ## Follow-up issues (not in this PR)
 
 Ordered by expected saving per unit of effort.
@@ -161,7 +181,9 @@ Ordered by expected saving per unit of effort.
 | F-9 | **Add `location`/`opportunity` to `ASSESSMENT_SELECTION_FLOWS`** — they are absent, so any property assessed before #388/#398 landed will never receive them. Safe to do now that D-104 bounds the retry loop | coverage (small cost increase) | S | low |
 | F-10 | **Park visibility** — surface `ai_assessment_failure` (count, `last_error`, per-flow) on `/etl/salud`. The unpark path exists (`POST …?force=1`), but nothing tells the operator a property has been given up on except the scheduler's `parked=N` log line. The ledger's `last_failed_at DESC` index exists for this query | operability | S | low |
 | F-11 | **`cost_source` column** on `llm_usage` (`provider_reported` vs `estimated`) — today a real CLI cost and an estimated OpenRouter cost land in the same column indistinguishably, and a stored `0` cannot be told from "nothing reported" | correctness of the canary | S | low |
-| F-12 | **Token-denominated daily cap** (`dashboard.llm_daily_token_budget`) — under OAuth the CLI's `total_cost_usd` is a notional list price, so a dollar cap halts work on imaginary spend. Ask the owner which they want before building | fits subscription billing | S | low |
+| ~~F-12~~ | ~~Token-denominated daily cap~~ — **superseded by D-107**, which caps on the real subscription percentage instead of a hand-calibrated token proxy | — | — | — |
+| F-15 | **Surface the quota on `/etl/salud`** — the reading, the threshold, and whether the cap is actually being enforced (a stale reading means it is not). Today only `GET /api/etl/llm-quota` exposes it | operability | S | low |
+| F-16 | **Let the container read the quota directly** — mounting `~/.claude/.credentials.json` in would remove the host-side poller, but it touches D-025's single-refresher rule, so it needs care rather than a quick change | removes a moving part | M | medium |
 | F-13 | **Pass the real system prompt via `--system-prompt`** — today it carries the small protocol shim (enough to displace the harness prompt) while the domain prompt still travels in stdin. Cleaner shape, but it means splitting stdin into system/task at every CLI call site | small token saving, better shape | M | low |
 | F-14 | **Ledger retention** — `clearAssessmentFailures` only fires on success, so a property that fails twice and is then edited leaves one orphan row per content hash forever. Slow, unbounded growth | housekeeping | S | low |
 
