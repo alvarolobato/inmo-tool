@@ -1289,22 +1289,33 @@ Formato de salida:
   return { stable, volatile };
 }
 
-/** #29 — chat: conversational search over the ingested data. */
+/**
+ * #29 — chat: conversational search over the ingested data.
+ *
+ * #543/F-13 (D-108): `stable` must be byte-identical across calls for this
+ * flow — the CLI single-shot path is reachable here (whenever
+ * `isAgenticToolsEnabled()` is false, `assemble.ts` routes even `chat`,
+ * which always has tools, through the non-agentic `llmComplete` branch) and
+ * sends `stable` verbatim on `--system-prompt`; any per-call text there
+ * degrades the prompt cache straight back to zero reuse. `vars.profileName`/
+ * `profileId` are per-conversation, not per-flow, so the scope sentence they
+ * produce lives in `volatile` — never interpolated into `stable`.
+ */
 export function buildChatPrompt(vars: FlowVars): {
   stable: string;
   volatile?: string;
 } {
   const scope = vars.profileName
-    ? `\n\nLa conversación está enmarcada en el perfil de búsqueda **${vars.profileName}**${
+    ? `La conversación está enmarcada en el perfil de búsqueda **${vars.profileName}**${
         vars.profileId ? ` (id ${vars.profileId})` : ""
       }. Cuando el usuario diga "mis candidatos" o "esta búsqueda", se refiere a ese perfil.`
-    : "";
+    : undefined;
 
   const titleRule = isAgenticToolsEnabled()
     ? "\n7. En tu primera respuesta de cada conversación nueva, llama a la herramienta `set_title` con un título conciso de 5-7 palabras en español."
     : "";
 
-  const stable = `${DOMAIN_PREAMBLE}${scope}
+  const stable = `${DOMAIN_PREAMBLE}
 
 ## Tarea: responder preguntas sobre los datos
 
@@ -1326,7 +1337,7 @@ Reglas:
 
 ${buildSchemaContext()}`;
 
-  return { stable };
+  return { stable, volatile: scope };
 }
 
 // ── Main dispatch ─────────────────────────────────────────────────────────────

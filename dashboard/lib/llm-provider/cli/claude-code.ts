@@ -49,9 +49,11 @@ import {
  *
  * `dashboard.llm_cli_lean_mode = false` restores the previous behaviour (full
  * harness context) as an escape hatch if a flow turns out to depend on it —
- * `--system-prompt` is then omitted entirely by this function, so
- * `claudeCliSingleShotOnce` folds the domain prompt back into stdin instead
- * of silently dropping it (see its `stdinBody` comment).
+ * `--system-prompt` is then omitted entirely by this function (it would
+ * REPLACE the harness default, defeating the escape hatch), so
+ * `claudeCliSingleShotOnce` instead appends the domain block on top of the
+ * harness default via `--append-system-prompt` rather than silently dropping
+ * it (see its `appendSystemPromptArgs` comment).
  */
 function leanArgs(cfg: DashboardLlmConfig, systemPrompt: string): string[] {
   // CLI_SAFETY_ARGS is unconditional: it disables Claude's built-in tools
@@ -112,8 +114,14 @@ const TAIL_MAX_BYTES = 4096;
  * stdin now carries the flow's VOLATILE context (when present, still under a
  * `## system` header — see `llm-client.ts`'s CLI branch) plus the `## user` /
  * `## assistant` conversation turns; it no longer carries the domain STABLE
- * block, so this text's own description of stdin's shape is updated to match
- * (pre-F-13 it said stdin held "the full multi-section prompt").
+ * block IN EITHER lean-mode setting, so this text's own description of
+ * stdin's shape is updated to match (pre-F-13 it said stdin held "the full
+ * multi-section prompt"). "Your system prompt (above this instruction)" is
+ * literally true whichever flag `claudeCliSingleShotOnce` used to deliver
+ * `cliSystemPrompt` — `--system-prompt` (lean mode, replaces the harness
+ * default) or `--append-system-prompt` (lean mode off, layers on top of it)
+ * — either way `cliSystemPrompt` (domain block + this shim) is what the CLI
+ * assembles as the tail of the effective system prompt.
  */
 const SINGLE_SHOT_PRINT_ARG = `You are the dashboard assistant.
 Your system prompt (above this instruction) carries the flow's stable domain
@@ -164,16 +172,20 @@ export interface ClaudeCliSingleShotInput {
    */
   prompt: string;
   /**
-   * The flow's STABLE domain system prompt, sent on `--system-prompt` ahead
-   * of the protocol shim (see `SINGLE_SHOT_PRINT_ARG`'s doc comment for why
-   * it's a prefix, not a suffix, of that flag's value). MUST be byte-stable
-   * per flow — see `llm-client.ts`'s `buildCliMessages`/CLI branch, which is
-   * the only production call site and sources this from `req.systemPrompt.stable`
-   * verbatim (never `volatile`, which is per-call and would degrade the cache
-   * back to zero reuse if it leaked in here).
+   * The flow's STABLE domain system prompt, delivered ahead of the protocol
+   * shim (see `SINGLE_SHOT_PRINT_ARG`'s doc comment for why it's a prefix,
+   * not a suffix, of the combined value) via `--system-prompt` when
+   * `cfg.cliLeanMode` is on, or `--append-system-prompt` when it's off (see
+   * `claudeCliSingleShotOnce`'s `appendSystemPromptArgs`) — never dropped
+   * either way. MUST be byte-stable per flow — see `llm-client.ts`'s
+   * `buildCliMessages`/CLI branch, which is the only production call site and
+   * sources this from `req.systemPrompt.stable` verbatim (never `volatile`,
+   * which is per-call and would degrade the cache back to zero reuse if it
+   * leaked in here).
    *
-   * Omit (or pass `""`) for a call with no domain system prompt — the flag
-   * then carries just the protocol shim, same as before F-13.
+   * Omit (or pass `""`) for a call with no domain system prompt — the system
+   * prompt channel then carries just the protocol shim (or, off lean mode,
+   * nothing at all beyond the harness default), same as before F-13.
    */
   systemPrompt?: string;
 }
@@ -207,21 +219,28 @@ async function claudeCliSingleShotOnce(
   const cliSystemPrompt = domainPrompt
     ? `${domainPrompt}\n\n${SINGLE_SHOT_PRINT_ARG}`
     : SINGLE_SHOT_PRINT_ARG;
-  // `leanArgs` only actually emits `--system-prompt` when
-  // `cfg.cliLeanMode` is on; the escape hatch (`cliLeanMode: false`, restores
-  // the full CLI harness system prompt) drops it entirely, and with it our
-  // domain block. Fold the domain block back into stdin in that case — the
-  // exact pre-F-13 shape — rather than silently lose it. This keeps the
-  // existing `dashboard.llm_cli_lean_mode` toggle's contract (full harness
-  // context, everything else unchanged) instead of adding a new one.
-  const stdinBody =
-    cfg.cliLeanMode || !domainPrompt ? prompt : `## system\n${domainPrompt}\n\n${prompt}`;
+  // `leanArgs` only actually emits `--system-prompt` (which REPLACES the
+  // harness's default system prompt) when `cfg.cliLeanMode` is on. The escape
+  // hatch (`cliLeanMode: false`) exists specifically to restore that harness
+  // default, so reusing `--system-prompt` here would fight the escape hatch's
+  // whole point. `--append-system-prompt` (confirmed present on the installed
+  // CLI, `claude --help`) is the right primitive instead: it layers our
+  // domain block ON TOP of the harness default rather than replacing it, so
+  // the escape hatch still gets the full harness context AND the domain
+  // prompt is never silently dropped. stdin then never needs to carry the
+  // domain block in either mode — no second `## system` section, and
+  // `SINGLE_SHOT_PRINT_ARG`'s "your system prompt (above this instruction)"
+  // claim stays literally true either way, since `cliSystemPrompt` is what
+  // lands in the system-prompt channel via one flag or the other.
+  const appendSystemPromptArgs: string[] =
+    !cfg.cliLeanMode && domainPrompt ? ["--append-system-prompt", cliSystemPrompt] : [];
   // `--output-format json` (was `text`): the JSON envelope carries `usage` and
   // `total_cost_usd` alongside `result`. The text format carries neither,
   // which is why every `cli` row in `llm_usage` used to read zero tokens.
   const args = [
     ...cfg.cliExtraArgs,
     ...leanArgs(cfg, cliSystemPrompt),
+    ...appendSystemPromptArgs,
     "-p",
     SINGLE_SHOT_PRINT_ARG,
     "--model",
@@ -233,7 +252,7 @@ async function claudeCliSingleShotOnce(
   const result = await runCliProcess({
     file: cfg.cliBin,
     args,
-    stdin: stdinBody,
+    stdin: prompt,
     timeoutMs: cfg.cliTimeoutMs,
     maxStdoutBytes: cfg.cliMaxCaptureBytes,
     maxStderrBytes: Math.min(cfg.cliMaxCaptureBytes, 512_000),

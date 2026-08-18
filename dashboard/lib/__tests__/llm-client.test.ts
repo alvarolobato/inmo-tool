@@ -191,9 +191,23 @@ describe("llmComplete", () => {
   // thing, every call, on every flow (measured $0.0200/call, 0 cache reads;
   // see docs/roadmap/llm-batching-plan.md Phase 0c). The fix only pays off if
   // the value handed to `claudeCliSingleShot`'s `systemPrompt` (which becomes
-  // `--system-prompt`) is BYTE-IDENTICAL across calls for the same flow — if
-  // any per-call text leaks in there, it silently degrades straight back to
-  // the pre-F-13 result and nothing would flag it. These tests pin that.
+  // `--system-prompt`) is BYTE-IDENTICAL across calls for the same flow.
+  //
+  // These two tests cover llm-client.ts's ROUTING only: that it forwards
+  // `req.systemPrompt.stable` verbatim as `systemPrompt` and keeps `volatile`
+  // + the conversation confined to `prompt` (stdin), regardless of what those
+  // other fields contain on a given call — i.e. this file's job is "does the
+  // plumbing wire the right value to the right place", not "is the value
+  // itself the same across two different properties". That second, actually
+  // load-bearing question — whether `buildSystemPrompt(flow, vars).stable`
+  // varies with `vars` — is a property of the PRODUCER
+  // (`lib/llm-context/system-prompt.ts`), not of this router, and is tested
+  // directly against that producer, across every flow, in
+  // `lib/llm-context/__tests__/system-prompt-stability.test.ts`. A test here
+  // that builds one `stable` literal and asserts it equals itself across two
+  // `llmComplete` calls would not catch a producer bug (e.g. #544's review:
+  // `buildChatPrompt` interpolating `vars.profileName` into `stable`) — it
+  // would only prove this file compares a string to itself.
 
   it("routes `stable` to claudeCliSingleShot's systemPrompt, not into the stdin prompt", async () => {
     vi.stubEnv("DASHBOARD_LLM_PROVIDER", "cli");
@@ -217,15 +231,16 @@ describe("llmComplete", () => {
     expect(call.prompt).not.toContain("STABLE_DOMAIN_BLOCK");
   });
 
-  it("sends a byte-identical CLI systemPrompt for two different properties on the same flow", async () => {
+  it("keeps routing the SAME systemPrompt through unchanged when only volatile/messages differ across calls", async () => {
     vi.stubEnv("DASHBOARD_LLM_PROVIDER", "cli");
     resetDashboardLlmConfigCache();
     stubCli("cli response");
 
-    // Same shape `buildOccupancyPrompt`/`buildConditionPrompt`/etc. produce:
-    // `stable` is a flow-constant template with no per-property interpolation;
-    // only `volatile` and the user message carry the property being assessed.
-    const stable = "STABLE_OCCUPANCY_TEMPLATE — identical for every property";
+    // One fixed `stable` value, handed to two calls that otherwise differ in
+    // every other field (`volatile`, the user message). This is a router
+    // test, NOT a claim that `buildSystemPrompt` produces this same value for
+    // two different properties — see the block comment above.
+    const stable = "STABLE_OCCUPANCY_TEMPLATE";
 
     await llmComplete({
       flow: "occupancy",
@@ -243,12 +258,13 @@ describe("llmComplete", () => {
       (c) => c[0] as { prompt: string; systemPrompt?: string },
     );
 
-    // The whole point: byte-identical across two different properties.
-    expect(callA.systemPrompt).toBe(callB.systemPrompt);
+    // Router correctness: the CALLER'S already-identical `stable` passes
+    // through unchanged and untouched by what varies elsewhere on the call.
     expect(callA.systemPrompt).toBe(stable);
+    expect(callB.systemPrompt).toBe(stable);
 
-    // And it must carry no per-property marker at all — proves the property
-    // id/description never leaked from `volatile` into the cached prefix.
+    // And it must carry no per-call marker at all — proves `volatile`/the
+    // message never leak into the value routed to `systemPrompt`.
     expect(callA.systemPrompt).not.toContain("PROP-1001");
     expect(callA.systemPrompt).not.toContain("PROP-2002");
     expect(callA.systemPrompt).not.toContain("reformar");

@@ -324,7 +324,7 @@ describe("claudeCliSingleShot", () => {
     );
   });
 
-  it("keeps the domain systemPrompt OUT of stdin when lean mode is on", async () => {
+  it("keeps the domain systemPrompt OUT of stdin when lean mode is on (the domain block travels on --system-prompt)", async () => {
     mockRunCliProcess.mockResolvedValueOnce(okResult("hi"));
     await claudeCliSingleShot({ cfg, prompt: "task body", systemPrompt: "DOMAIN_STABLE_BLOCK" });
 
@@ -333,10 +333,13 @@ describe("claudeCliSingleShot", () => {
     expect(stdin).not.toContain("DOMAIN_STABLE_BLOCK");
   });
 
-  it("falls back to the pre-F-13 shape (domain prompt folded into stdin) when lean mode is off", async () => {
+  it("delivers the domain systemPrompt via --append-system-prompt (not stdin, not --system-prompt) when lean mode is off", async () => {
     // `--system-prompt` is dropped entirely when lean mode is off (the escape
-    // hatch restores the full CLI harness system prompt) — the domain block
-    // must not just vanish in that case.
+    // hatch restores the full CLI harness system prompt, and `--system-prompt`
+    // would REPLACE that default rather than layer on top of it) — the domain
+    // block must not just vanish in that case, and stdin must not grow a
+    // second `## system` section as a workaround. `--append-system-prompt`
+    // layers the domain block on top of the harness default instead.
     mockRunCliProcess.mockResolvedValueOnce(okResult("hi"));
     await claudeCliSingleShot({
       cfg: { ...cfg, cliLeanMode: false },
@@ -346,8 +349,45 @@ describe("claudeCliSingleShot", () => {
 
     const call = mockRunCliProcess.mock.calls[0][0];
     expect(call.args).not.toContain("--system-prompt");
-    expect(call.stdin).toContain("DOMAIN_STABLE_BLOCK");
-    expect(call.stdin).toContain("task body");
+    expect(call.args).toContain("--append-system-prompt");
+    const appendValue = call.args[call.args.indexOf("--append-system-prompt") + 1];
+    expect(appendValue).toContain("DOMAIN_STABLE_BLOCK");
+    // stdin stays exactly the task body — no folded-in domain block, no
+    // duplicated `## system` header.
+    expect(call.stdin).toBe("task body");
+    expect((call.stdin.match(/## system/g) ?? []).length).toBe(0);
+  });
+
+  it("omits --append-system-prompt entirely when lean mode is off AND there is no domain systemPrompt", async () => {
+    mockRunCliProcess.mockResolvedValueOnce(okResult("hi"));
+    await claudeCliSingleShot({ cfg: { ...cfg, cliLeanMode: false }, prompt: "task body" });
+
+    const call = mockRunCliProcess.mock.calls[0][0];
+    expect(call.args).not.toContain("--system-prompt");
+    expect(call.args).not.toContain("--append-system-prompt");
+    expect(call.stdin).toBe("task body");
+  });
+
+  it("delivers the SAME combined systemPrompt+shim value in both lean-mode settings, just via a different flag", async () => {
+    // The escape hatch changes WHICH mechanism carries the domain block
+    // (replace vs. append onto the harness default), not the domain block's
+    // own content — this pins that `cliSystemPrompt` (domain + shim) is
+    // byte-identical either way, only the flag name differs.
+    mockRunCliProcess.mockResolvedValueOnce(okResult("hi"));
+    await claudeCliSingleShot({ cfg, prompt: "task body", systemPrompt: "DOMAIN_STABLE_BLOCK" });
+    const leanArgs: string[] = mockRunCliProcess.mock.calls[0][0].args;
+    const leanValue = leanArgs[leanArgs.indexOf("--system-prompt") + 1];
+
+    mockRunCliProcess.mockResolvedValueOnce(okResult("hi"));
+    await claudeCliSingleShot({
+      cfg: { ...cfg, cliLeanMode: false },
+      prompt: "task body",
+      systemPrompt: "DOMAIN_STABLE_BLOCK",
+    });
+    const notLeanArgs: string[] = mockRunCliProcess.mock.calls[1][0].args;
+    const notLeanValue = notLeanArgs[notLeanArgs.indexOf("--append-system-prompt") + 1];
+
+    expect(notLeanValue).toBe(leanValue);
   });
 
   it("behaves exactly as before F-13 when no systemPrompt is given (probe's stdin-only variants)", async () => {
@@ -356,6 +396,7 @@ describe("claudeCliSingleShot", () => {
 
     const call = mockRunCliProcess.mock.calls[0][0];
     expect(call.stdin).toBe("everything in stdin");
+    expect(call.args).not.toContain("--append-system-prompt");
     const flagValue = call.args[call.args.indexOf("--system-prompt") + 1];
     expect(flagValue).not.toContain("everything in stdin");
   });
