@@ -53,7 +53,7 @@ export function withCaptureSignal(rawUrl: string): string {
  * `sendHeartbeat` docstring records the same constraint the other way: "the
  * extension can NOT inject into the dashboard origin"). So queuing several
  * capture TASKS from one button click can only open ONE tab (the popup-blocker
- * constraint — see `CapturaProfileSection.onCapturarTodo`) and must hand the
+ * constraint — see `CapturaProfiles.onCapturarTodo`) and must hand the
  * REST to the extension through that one tab's content script.
  *
  * `withCaptureQueue` piggybacks the remaining tasks' `{portal, captureUrl}`
@@ -86,7 +86,7 @@ export function withCaptureSignal(rawUrl: string): string {
  *     convention at today's one stripping call site.
  *
  * **Composition order matters**: the call site
- * (`CapturaProfileSection.onCapturarTodo`) applies `withCaptureQueue` FIRST,
+ * (`CapturaProfiles.onCapturarTodo`) applies `withCaptureQueue` FIRST,
  * then `withCaptureSignal` — i.e. `withCaptureSignal(withCaptureQueue(url,
  * queue))`. `withCaptureQueue` claims the fragment slot (when `queue` is
  * non-empty); `withCaptureSignal` then sees a fragment already present and
@@ -161,7 +161,7 @@ export function decodeCaptureQueue(raw: string): QueuedSearch[] | null {
  * exists to avoid in the common case.
  *
  * Call this BEFORE `withCaptureSignal` (see module docstring on composition
- * order) — `CapturaProfileSection.onCapturarTodo` is the one real call site.
+ * order) — `CapturaProfiles.onCapturarTodo` is the one real call site.
  */
 export function withCaptureQueue(rawUrl: string, queue: readonly QueuedSearch[]): string {
   if (queue.length === 0) return rawUrl;

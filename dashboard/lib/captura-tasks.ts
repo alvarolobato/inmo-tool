@@ -559,7 +559,7 @@ export interface CappedCaptureBatchPlan {
  * #556 review B3). Dropped tasks are NEVER recorded (`capture_task_run`) and
  * NEVER queued — recording a task as "done" when it was actually dropped
  * would be a worse lie than the one this cap exists to prevent. The caller
- * (`CapturaProfileSection.onCapturarTodo`) tells the owner exactly how many
+ * (`CapturaProfiles.onCapturarTodo`) tells the owner exactly how many
  * didn't fit so a second "Capturar todo" click (once the first batch drains)
  * picks up the remainder — nothing is silently lost, just deferred.
  * `maxQueueEntries` caps `plan.queue.length` (the FIRST task always rides
@@ -609,5 +609,171 @@ export function buildProfileCaptureView(
     connectors,
     totalTasks: connectors.reduce((a, c) => a + c.totalTasks, 0),
     actionableConnectors: connectors.filter((c) => c.state !== "not-due").length,
+  };
+}
+
+// ─── Cross-profile "Capturar todo" (issue #559) ────────────────────────────
+//
+// #556/#558 built ONE button + ONE select-all/none PER PROFILE. The owner
+// rejected that shape outright: asked, up front, "¿el botón es por perfil o
+// global?" and answered "global, con los checks me apaño" — #556 was written
+// as "one global button *for the selected profile*" regardless, which is
+// per-profile. This section replaces the profile-scoped plan
+// (`buildCaptureBatchPlan`/`capCaptureBatchPlan` above — kept, still
+// unit-tested, and reused internally below) with a version that spans every
+// profile the page currently shows.
+//
+// `CaptureTask.id` is only stable/deterministic "for the same profile +
+// filters" (see the type doc on `CaptureTask.id`) — it is a hash of portal +
+// normalized filters, NOT of the profile id, so two different profiles with
+// identical filters can legitimately produce the SAME task id. Cross-profile
+// selection therefore keys on the PAIR (profileId, taskId), never the bare
+// task id, via {@link selectionKey}.
+
+/** One task tagged with the profile it belongs to — the cross-profile selection unit. */
+export interface ProfileTask {
+  profileId: number;
+  task: CaptureTask;
+}
+
+/**
+ * Composite selection-set key. See the module note above: `CaptureTask.id`
+ * alone is not unique across profiles, so every cross-profile ticked-set /
+ * run-override map in `CapturaProfiles` is keyed by this pair, not by the
+ * bare task id.
+ */
+export function selectionKey(profileId: number, taskId: string): string {
+  return `${profileId}:${taskId}`;
+}
+
+/**
+ * Every task across the given (caller-filtered) profiles, tagged with its
+ * profile id, preserving profile order then each profile's own
+ * connector/task display order.
+ */
+export function allTasksAcrossProfiles(profiles: readonly ProfileCaptureView[]): ProfileTask[] {
+  return profiles.flatMap((p) => allProfileTasks(p.connectors).map((task) => ({ profileId: p.id, task })));
+}
+
+/**
+ * Selection keys that start ticked across every given profile: every DUE
+ * task, per profile (reuses {@link defaultTickedTaskIds} per profile
+ * verbatim, never re-derived).
+ */
+export function defaultTickedSelectionKeys(profiles: readonly ProfileCaptureView[]): Set<string> {
+  const keys = new Set<string>();
+  for (const p of profiles) {
+    for (const id of defaultTickedTaskIds(p.connectors)) keys.add(selectionKey(p.id, id));
+  }
+  return keys;
+}
+
+/** One entry the caller must record a `capture_task_run` for — which profile's endpoint it belongs to, plus the bare task id. */
+export interface GlobalCaptureBatchEntry {
+  profileId: number;
+  taskId: string;
+}
+
+/** The cross-profile counterpart of {@link CaptureBatchPlan} (issue #559). */
+export interface GlobalCaptureBatchPlan {
+  /** Every ticked task, in display order — one `capture_task_run` POST per entry, to ITS OWN profile's endpoint. */
+  entries: GlobalCaptureBatchEntry[];
+  /** The task whose tab is opened directly (in the click's user gesture). */
+  first: CaptureTask;
+  /** The rest, handed to the extension's queue via `withCaptureQueue` — same `{portal, captureUrl}` shape regardless of which profile a task came from. */
+  queue: { portal: string; captureUrl: string }[];
+}
+
+/**
+ * Build the cross-profile batch plan. Reuses {@link buildCaptureBatchPlan}
+ * VERBATIM over a profile-qualified id space (never re-implements the
+ * selection/ordering logic) — display order is `profileTasks`' order
+ * (typically {@link allTasksAcrossProfiles}: profile order, then each
+ * profile's own connector/task order). `null` when nothing is ticked, same
+ * contract as the profile-scoped version.
+ */
+export function buildGlobalCaptureBatchPlan(
+  profileTasks: readonly ProfileTask[],
+  ticked: ReadonlySet<string>,
+): GlobalCaptureBatchPlan | null {
+  const byKey = new Map<string, ProfileTask>();
+  const keyedTasks: CaptureTask[] = profileTasks.map((pt) => {
+    const key = selectionKey(pt.profileId, pt.task.id);
+    byKey.set(key, pt);
+    return { ...pt.task, id: key };
+  });
+  const plan = buildCaptureBatchPlan(keyedTasks, ticked);
+  if (!plan) return null;
+  // De-dupe the WIRE queue by (portal, captureUrl) while leaving `entries`
+  // alone. `stableTaskId` hashes portal|section|location|price|size|rooms with
+  // NO profile component (lib/search-url/task-id.ts), so two profiles with
+  // identical filter tuples — "Rentabilidad Estepona" and "Flip Estepona",
+  // same geography and bands — produce the SAME captureUrl. Before this, the
+  // payload carried it twice and the extension really crawled it twice: the
+  // second run re-walks every results page (up to RESULTS_PAGE_CAP=40, paced)
+  // and then captures nothing. A wholly redundant walk against a portal we are
+  // trying to be a good neighbour to, and it burns a MAX_QUEUE_ENTRIES slot
+  // that would otherwise carry distinct work.
+  //
+  // `entries` is deliberately NOT de-duped: `capture_task_run` is keyed
+  // (profile_id, task_id), so BOTH profiles legitimately get their ledger row
+  // — the search genuinely ran for each of them. Only the wire is redundant.
+  // Note the extension's own `enqueueSearch` dedupe cannot catch this: the
+  // claimed run isn't in the queue it compares against.
+  const wireKeyOf = (portal: string, captureUrl: string) => `${portal}\u0000${captureUrl}`;
+  // Seed with `first` — it is opened directly rather than queued, so a queue
+  // entry matching it is the same redundant crawl, just via the other door.
+  const seenWire = new Set<string>([
+    wireKeyOf(plan.first.portal, plan.first.captureUrl),
+  ]);
+  const dedupedQueue = plan.queue.filter((q) => {
+    const wireKey = wireKeyOf(q.portal, q.captureUrl);
+    if (seenWire.has(wireKey)) return false;
+    seenWire.add(wireKey);
+    return true;
+  });
+  return {
+    entries: plan.taskIds.map((key) => {
+      const pt = byKey.get(key)!;
+      return { profileId: pt.profileId, taskId: pt.task.id };
+    }),
+    first: byKey.get(plan.first.id)!.task,
+    queue: dedupedQueue,
+  };
+}
+
+/** A capped {@link GlobalCaptureBatchPlan}, plus which VISIBLE profiles lost entries to the cap. */
+export interface CappedGlobalCaptureBatchPlan {
+  plan: GlobalCaptureBatchPlan;
+  /** Ticked tasks that did NOT fit and were left un-queued and un-recorded. */
+  droppedCount: number;
+  /** Distinct profile ids with ≥1 dropped entry, in first-dropped order. */
+  droppedProfileIds: number[];
+}
+
+/**
+ * Same cap semantics as {@link capCaptureBatchPlan} (issue #556 review B3,
+ * kept verbatim: a dropped task is NEVER queued and NEVER recorded — that
+ * would be a worse lie than the cap exists to prevent), plus WHICH profiles
+ * the dropped tail belonged to. The button now spans profiles (issue #559),
+ * so the cap can bite mid-profile — the "no caben" status message names the
+ * affected profiles, not just a bare count, so the owner knows where to
+ * click again once this batch drains.
+ */
+export function capGlobalCaptureBatchPlan(
+  plan: GlobalCaptureBatchPlan,
+  maxQueueEntries: number,
+): CappedGlobalCaptureBatchPlan {
+  if (plan.queue.length <= maxQueueEntries) return { plan, droppedCount: 0, droppedProfileIds: [] };
+  const droppedCount = plan.queue.length - maxQueueEntries;
+  const droppedEntries = plan.entries.slice(1 + maxQueueEntries);
+  return {
+    plan: {
+      first: plan.first,
+      queue: plan.queue.slice(0, maxQueueEntries),
+      entries: plan.entries.slice(0, 1 + maxQueueEntries),
+    },
+    droppedCount,
+    droppedProfileIds: Array.from(new Set(droppedEntries.map((e) => e.profileId))),
   };
 }

@@ -373,11 +373,9 @@ test("Abrir búsqueda opens the LISTING form for a drawn-zone Idealista task (#5
   await expect(page.getByText("HTTP 500")).toHaveCount(0);
 });
 
-test.describe("Capturar todo — profile-level batch button (issue #556)", () => {
-  // Force a KNOWN, hermetic staleness state for profile A regardless of what
-  // earlier tests in this file did: idealista's FIRST task freshly run (muted
-  // / not ticked by default), every other idealista + aliseda task forced
-  // stale (30 days old → due / ticked by default, same as never-run).
+test.describe("Capturar todo — GLOBAL across profiles (issue #559, correcting #556/#558)", () => {
+  // Force a KNOWN, hermetic staleness state regardless of what earlier tests
+  // in this file did.
   async function forceState(profileId: number, taskIds: string[], daysAgo: number | null): Promise<void> {
     for (const taskId of taskIds) {
       const at = daysAgo === null ? "NOW()" : `NOW() - INTERVAL '${daysAgo} days'`;
@@ -390,98 +388,153 @@ test.describe("Capturar todo — profile-level batch button (issue #556)", () =>
     }
   }
 
-  async function expandIfCollapsed(page: import("@playwright/test").Page, testId: string): Promise<void> {
-    const el = page.getByTestId(testId);
-    if ((await el.getAttribute("data-expanded")) === "false") {
-      await page.getByTestId(testId.replace("captura-connector-", "captura-connector-toggle-")).click();
-      await expect(el).toHaveAttribute("data-expanded", "true");
-    }
-  }
-
-  test("default tick state mirrors due-ness; select-all/none; the count label; nothing ticked mutates nothing; a multi-task click opens ONE tab and records every ticked run", async ({
-    page,
-  }) => {
+  /** Seed BOTH profiles' task sets into a known state: everything stale (due /
+   * ticked by default) EXCEPT profile B's idealista tasks, which are freshly
+   * run (muted → NOT-DUE → its connector renders COLLAPSED) — the fixture the
+   * "tickable while collapsed" assertion needs. */
+  async function seedKnownState(page: import("@playwright/test").Page): Promise<{
+    aIdealista: string[];
+    aAliseda: string[];
+    bIdealista: string[];
+    bAliseda: string[];
+  }> {
     const aIdealista = await idealistaTaskIds(page, profileAId!);
     const aAliseda = await alisedaTaskIds(page, profileAId!);
+    const bIdealista = await idealistaTaskIds(page, profileBId!);
+    const bAliseda = await alisedaTaskIds(page, profileBId!);
     expect(aIdealista.length).toBeGreaterThanOrEqual(2);
-    expect(aAliseda.length).toBeGreaterThanOrEqual(1);
+    expect(bIdealista.length).toBeGreaterThanOrEqual(1);
 
-    await forceState(profileAId!, [aIdealista[0]], 0); // freshly run → muted / unticked
-    await forceState(profileAId!, [...aIdealista.slice(1), ...aAliseda], 30); // stale → due / ticked
+    await forceState(profileAId!, [...aIdealista, ...aAliseda], 30); // A: everything stale → due / ticked
+    await forceState(profileBId!, bIdealista, 0); // B idealista: freshly run → muted / collapsed / unticked
+    if (bAliseda.length > 0) await forceState(profileBId!, bAliseda, 30); // B aliseda: stale → due / ticked
+
+    return { aIdealista, aAliseda, bIdealista, bAliseda };
+  }
+
+  test("ONE global button + ONE global select-all/none span BOTH profiles; a task is tickable with every connector collapsed; the count matches the visible+ticked set under an active profile filter", async ({
+    page,
+  }) => {
+    const { aIdealista, aAliseda, bIdealista, bAliseda } = await seedKnownState(page);
+    const totalA = aIdealista.length + aAliseda.length;
+    const totalB = bIdealista.length + bAliseda.length;
 
     await page.goto("/captura");
     await expect(page.getByTestId("captura-page")).toBeVisible();
 
-    await expandIfCollapsed(page, `captura-connector-${profileAId}-idealista`);
-    await expandIfCollapsed(page, `captura-connector-${profileAId}-aliseda`);
+    // Exactly ONE button and ONE select-all/none pair on the whole page —
+    // page.getByTestId() itself enforces uniqueness (throws in strict mode on
+    // a duplicate), so a stray per-profile control would fail this outright.
+    const batchBtn = page.getByTestId("captura-batch-run");
+    const selectAll = page.getByTestId("captura-batch-select-all");
+    const selectNone = page.getByTestId("captura-batch-select-none");
+    await expect(batchBtn).toBeVisible();
+    await expect(selectAll).toBeVisible();
+    await expect(selectNone).toBeVisible();
 
-    // Default ticks: due tasks checked, the freshly-run one unchecked.
-    await expect(page.getByTestId(`captura-task-check-${aIdealista[0]}`)).not.toBeChecked();
-    for (const id of [...aIdealista.slice(1), ...aAliseda]) {
-      await expect(page.getByTestId(`captura-task-check-${id}`)).toBeChecked();
-    }
-    const totalTasks = aIdealista.length + aAliseda.length;
-    const dueCount = totalTasks - 1;
-    const batchBtn = page.getByTestId(`captura-batch-run-${profileAId}`);
-    await expect(batchBtn).toHaveText(`Capturar ${dueCount} tareas`);
+    // Default ticks span BOTH profiles: A's everything (all stale/due) + B's
+    // aliseda (stale/due) — B's idealista is muted, unticked by default.
+    const defaultTicked = totalA + bAliseda.length;
+    await expect(batchBtn).toHaveText(`Capturar ${defaultTicked} tareas`);
 
-    // Select-all → every task ticked, count == total.
-    await page.getByTestId(`captura-batch-select-all-${profileAId}`).click();
-    await expect(batchBtn).toHaveText(`Capturar ${totalTasks} tareas`);
-    await expect(page.getByTestId(`captura-task-check-${aIdealista[0]}`)).toBeChecked();
+    // B's idealista connector is NOT-DUE (every task freshly run) → COLLAPSED.
+    const bIdeaConn = page.getByTestId(`captura-connector-${profileBId}-idealista`);
+    await expect(bIdeaConn).toHaveAttribute("data-expanded", "false");
 
-    // Select-none → nothing ticked, count == 0.
-    await page.getByTestId(`captura-batch-select-none-${profileAId}`).click();
+    // Tick one of B's (collapsed, muted) idealista tasks WITHOUT expanding
+    // anything — the core fix (issue #559: "los checkbox están dentro del
+    // desplegable... ponlo fuera").
+    const bTaskCheck = page.getByTestId(`captura-task-check-${profileBId}-${bIdealista[0]}`);
+    await expect(bTaskCheck).not.toBeChecked();
+    await bTaskCheck.click();
+    await expect(bTaskCheck).toBeChecked();
+    await expect(bIdeaConn).toHaveAttribute("data-expanded", "false"); // STILL collapsed
+    await expect(batchBtn).toHaveText(`Capturar ${defaultTicked + 1} tareas`);
+
+    // Filtering to profile A scopes the count to A's visible+ticked tasks
+    // ONLY (the button "acts on what's visible", per issue #559) — B's extra
+    // tick from above must not leak into A's count, and a scope note names
+    // the active filter.
+    await expect(page.getByTestId("captura-batch-scope-note")).toHaveCount(0);
+    await page.getByTestId("captura-profile-filter").selectOption(String(profileAId));
+    await expect(page.getByTestId("captura-batch-scope-note")).toBeVisible();
+    await expect(batchBtn).toHaveText(`Capturar ${totalA} tareas`);
+
+    // select-all under the filter only ticks A's own (already-all-ticked)
+    // set — count unchanged; select-none under the filter clears ONLY A.
+    await selectAll.click();
+    await expect(batchBtn).toHaveText(`Capturar ${totalA} tareas`);
+    await selectNone.click();
     await expect(batchBtn).toHaveText("Capturar 0 tareas");
 
-    // Nothing ticked → clicking Capturar todo shows a message and mutates nothing.
-    const before = await lastRunAts(pool, profileAId!, [aIdealista[0], aIdealista[1]]);
-    await batchBtn.click();
-    await expect(page.getByTestId(`captura-batch-status-${profileAId}`)).toContainText(
-      "No has marcado ninguna tarea",
-    );
+    // Clearing the filter reveals B's ticks (default + the one we ticked
+    // above) were UNTOUCHED by A-scoped select-none.
+    await page.getByTestId("captura-profile-filter").selectOption("");
+    await expect(batchBtn).toHaveText(`Capturar ${bAliseda.length + 1} tareas`);
+
+    // No error surface — the D-041 bar.
+    await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
+    await expect(page.getByText("Error al cargar")).toHaveCount(0);
+    await expect(page.getByText("HTTP 500")).toHaveCount(0);
+  });
+
+  test("clicking the global button opens ONE tab and records a run against EACH ticked task's OWN profile — spanning two profiles from one click", async ({
+    page,
+  }) => {
+    const { aIdealista } = await seedKnownState(page);
+
+    await page.goto("/captura");
+    await expect(page.getByTestId("captura-page")).toBeVisible();
+
+    const batchBtn = page.getByTestId("captura-batch-run");
+    // Start clean: untick everything, then hand-pick exactly one task from
+    // EACH profile (both reachable without expanding anything).
+    await page.getByTestId("captura-batch-select-none").click();
+    await expect(batchBtn).toHaveText("Capturar 0 tareas");
+
+    const aCheck = page.getByTestId(`captura-task-check-${profileAId}-${aIdealista[0]}`);
+    const bIdealistaIds = await idealistaTaskIds(page, profileBId!);
+    const bCheck = page.getByTestId(`captura-task-check-${profileBId}-${bIdealistaIds[0]}`);
+    await aCheck.click();
+    await bCheck.click();
+    await expect(batchBtn).toHaveText("Capturar 2 tareas");
+
+    const before = await lastRunAts(pool, profileAId!, [aIdealista[0]]);
     const openedBeforeAny = await page.evaluate(
       () => (window as unknown as { __opened: string[] }).__opened.length,
     );
-    const after = await lastRunAts(pool, profileAId!, [aIdealista[0], aIdealista[1]]);
-    expect(after).toEqual(before); // no DB mutation
-
-    // Tick exactly two idealista tasks (the muted one + one due one), leave
-    // everything else untouched, then fire the batch.
-    await page.getByTestId(`captura-task-check-${aIdealista[0]}`).click();
-    await page.getByTestId(`captura-task-check-${aIdealista[1]}`).click();
-    await expect(batchBtn).toHaveText("Capturar 2 tareas");
 
     await batchBtn.click();
 
-    // Exactly ONE new tab opened — never one per ticked task.
+    // Exactly ONE new tab opened — never one per ticked task, even though the
+    // two ticked tasks belong to DIFFERENT profiles.
     await expect
       .poll(() => page.evaluate(() => (window as unknown as { __opened: string[] }).__opened.length))
       .toBe(openedBeforeAny + 1);
-    const opened = await page.evaluate(
-      () => (window as unknown as { __opened: string[] }).__opened.at(-1)!,
-    );
+    const opened = await page.evaluate(() => (window as unknown as { __opened: string[] }).__opened.at(-1)!);
     const u = new URL(opened);
-    // D-113 review B2: the queue payload rides in the FRAGMENT (never sent to
-    // the portal server); the auto-start signal falls back to the QUERY since
-    // the fragment slot is taken.
-    expect(u.hash.startsWith("#inmo-capture-queue=")).toBe(true);
-    expect(u.searchParams.has("inmo-capture-queue")).toBe(false); // never in the query string
+    // D-113's whole point: the queue payload rides the FRAGMENT, which browsers
+    // never send to the portal, and the signal stays the 15-byte query flag.
+    // #560's review noted the rewrite dropped these two lines; restored as
+    // belt-and-braces over lib/__tests__/extension-capture.test.ts's unit pin.
+    expect(u.searchParams.has("inmo-capture-queue")).toBe(false);
     expect(u.searchParams.get("inmo-capture")).toBe("1");
+    expect(u.hash.startsWith("#inmo-capture-queue=")).toBe(true);
     const decodedQueue = JSON.parse(decodeURIComponent(u.hash.slice("#inmo-capture-queue=".length)));
-    expect(decodedQueue).toHaveLength(1); // exactly the second ticked task
+    expect(decodedQueue).toHaveLength(1); // the second ticked task, from the OTHER profile
 
-    // Both ticked tasks recorded a fresh capture_task_run — the ledger write
-    // the single-task path already does, per taskId.
+    // BOTH tasks recorded a fresh capture_task_run, against THEIR OWN
+    // profile's endpoint — the cross-profile part of the fix.
     await expect
       .poll(async () => {
-        const [r0, r1] = await lastRunAts(pool, profileAId!, [aIdealista[0], aIdealista[1]]);
-        return (
-          r0 !== null &&
-          r1 !== null &&
-          r0.getTime() > (before[0]?.getTime() ?? 0) &&
-          r1.getTime() > (before[1]?.getTime() ?? 0)
-        );
+        const [rA] = await lastRunAts(pool, profileAId!, [aIdealista[0]]);
+        return rA !== null && rA.getTime() > (before[0]?.getTime() ?? 0);
+      })
+      .toBe(true);
+    await expect
+      .poll(async () => {
+        const [rB] = await lastRunAts(pool, profileBId!, [bIdealistaIds[0]]);
+        return rB !== null;
       })
       .toBe(true);
 

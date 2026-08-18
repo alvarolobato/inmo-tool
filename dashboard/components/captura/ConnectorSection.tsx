@@ -19,10 +19,23 @@ import { withCaptureSignal } from "@/lib/extension-capture";
  * or expanding something not-due to run it anyway.
  *
  * Collapsed = a single stats line (per-profile capture summary only — no
- * portal-global numbers, #445). Expanded = the same header plus every task row
- * (the launch-capture buttons). Executing a task records the run (POST) then opens its pre-filtered
- * URL tagged with the auto-start signal — identical to the old page's flow, just
- * scoped to this connector's profile.
+ * portal-global numbers, #445) PLUS the compact "Capturar todo" checklist
+ * (below). Expanded = the same header/checklist plus every task's FULL detail
+ * row (the launch-capture buttons, loosened flags, last-done note). Executing
+ * a task records the run (POST) then opens its pre-filtered URL tagged with
+ * the auto-start signal — identical to the old page's flow, just scoped to
+ * this connector's profile.
+ *
+ * **The per-task selection checklist is ALWAYS rendered, never gated by
+ * `expanded`** (issue #559, correcting #556: *"los checkbox están dentro del
+ * desplegable lo que me obliga a abrirlo. ponlo fuera."*). It is the sole
+ * checkbox surface — `CaptureTaskRow`'s full detail row carries no checkbox of
+ * its own — so a task is tickable/untickable with every connector collapsed,
+ * which is what makes the page-level "Capturar todo" bulk control (owned by
+ * `CapturaProfiles`, issue #559) actually a bulk control: the common case
+ * ("everything due is already ticked, press one button") costs zero
+ * expansions, and deviating from the default (tick a muted task back in,
+ * untick a due one) costs zero expansions too.
  */
 
 const STATE_LABEL: Record<ConnectorView["state"], string> = {
@@ -52,17 +65,23 @@ export function ConnectorSection({
 }: {
   profileId: number;
   connector: ConnectorView;
-  /** Task ids currently ticked for the profile's "Capturar todo" batch (issue #556). */
+  /**
+   * Task ids (local to THIS profile) currently ticked for the page-level
+   * "Capturar todo" batch (issue #556, lifted GLOBAL in #559 — the caller,
+   * `CapturaProfileSection`, translates the global cross-profile selection
+   * down to plain task ids so this component's own API never had to change).
+   */
   checkedTaskIds: ReadonlySet<string>;
   /** Toggle one task's inclusion in the batch. */
   onToggleTask: (taskId: string) => void;
   /**
    * Optimistic per-task run overrides: task id → last-run ISO. Flips a row to
    * muted + "hecho …" the instant its button is pressed, before a reload.
-   * Lifted to the PROFILE level (issue #556 review N7) so both this
-   * connector's single-task button AND the profile's "Capturar todo" batch
-   * button share one source of truth — a batch-launched task greys out (and
-   * un-ticks, see `CapturaProfileSection`) exactly like a single-task launch.
+   * Lifted to the page level (issue #556 review N7, further lifted in #559)
+   * so both this connector's single-task button AND the page's "Capturar
+   * todo" batch button share one source of truth — a batch-launched task
+   * greys out (and un-ticks, see `CapturaProfiles`) exactly like a
+   * single-task launch.
    */
   runOverrides: Readonly<Record<string, string>>;
   /** Record an optimistic run for one task (called by this connector's own single-task button). */
@@ -193,7 +212,56 @@ export function ConnectorSection({
         )}
       </button>
 
-      {/* Expanded body — profile-scoped stats + the task rows (no global numbers, #445). */}
+      {/* Compact per-task selection checklist (issue #559) — ALWAYS rendered,
+          regardless of `expanded`. This is the ONLY checkbox surface (the full
+          detail row below carries none of its own): the owner's complaint was
+          that ticking a task forced expanding its connector first, which
+          defeats a bulk control. Deliberately terse (checkbox + label + a
+          small "hecho" cue for muted tasks) — full context (loosened flags,
+          exact last-run time, the execute button) stays behind `expanded`. */}
+      <div
+        data-testid={`captura-connector-checklist-${profileId}-${connector.portal}`}
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: 4,
+          padding: expanded ? "0 14px 10px" : "0 14px 12px",
+        }}
+      >
+        {connector.taskViews.map((tv) => {
+          const override = runOverrides[tv.task.id];
+          const muted = override ? true : tv.muted;
+          return (
+            <label
+              key={tv.task.id}
+              data-testid={`captura-task-checklist-item-${profileId}-${tv.task.id}`}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                fontSize: 12,
+                cursor: "pointer",
+                color: muted ? "var(--fg-muted)" : "var(--fg)",
+              }}
+            >
+              <input
+                type="checkbox"
+                data-testid={`captura-task-check-${profileId}-${tv.task.id}`}
+                checked={checkedTaskIds.has(tv.task.id)}
+                onChange={() => onToggleTask(tv.task.id)}
+                aria-label={`Incluir "${tv.task.label}" en Capturar todo`}
+                style={{ width: 14, height: 14, cursor: "pointer", flexShrink: 0 }}
+              />
+              <span style={{ opacity: muted ? 0.75 : 1 }}>{tv.task.label}</span>
+              {muted && (
+                <span style={{ fontSize: 10, fontWeight: 600, color: "var(--up)" }}>hecho</span>
+              )}
+            </label>
+          );
+        })}
+      </div>
+
+      {/* Expanded body — profile-scoped stats + the FULL task rows (no global numbers, #445). */}
       {expanded && (
         <div style={{ padding: "0 14px 14px" }}>
           <div
@@ -260,8 +328,6 @@ export function ConnectorSection({
                   lastDone={lastDone}
                   lastRunAt={lastRunAt}
                   onExecute={onExecute}
-                  checked={checkedTaskIds.has(tv.task.id)}
-                  onToggle={onToggleTask}
                 />
               );
             })}

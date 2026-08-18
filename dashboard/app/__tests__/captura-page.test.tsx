@@ -12,6 +12,7 @@ import {
   type ProfileCaptureView,
   type StalenessConfig,
 } from "@/lib/captura-tasks";
+import { MAX_QUEUE_ENTRIES } from "@/lib/extension-capture";
 
 /**
  * #413 redesign — the page is now a SERVER component that fans out DB reads and
@@ -236,5 +237,152 @@ describe("CapturaProfiles (stacked per-profile)", () => {
     ];
     render(<CapturaProfiles profiles={views} />);
     expect(within(screen.getByTestId("captura-profile-5")).getByTestId("captura-profile-empty-5")).toBeInTheDocument();
+  });
+});
+
+describe("CapturaProfiles — global 'Capturar todo' (issue #559)", () => {
+  afterEach(() => vi.restoreAllMocks());
+  beforeEach(() => vi.restoreAllMocks());
+
+  /** A fake `Window` — `window.open` mocked to return this counts as "opened" (non-null). */
+  const FAKE_WINDOW = {} as Window;
+
+  it("is ONE button spanning every profile — the count includes DUE tasks across both", () => {
+    render(<CapturaProfiles profiles={buildViews()} />);
+    // Profile 1: IDEA_DUE is due. Profile 2: IDEA_HALF_PENDING is due. Total = 2.
+    expect(screen.getByTestId("captura-batch-run")).toHaveTextContent("Capturar 2 tareas");
+    // No per-profile buttons anywhere.
+    expect(screen.queryByTestId("captura-batch-run-1")).toBeNull();
+    expect(screen.queryByTestId("captura-batch-run-2")).toBeNull();
+  });
+
+  it("is ONE select-all/select-none pair — none per-profile", () => {
+    render(<CapturaProfiles profiles={buildViews()} />);
+    expect(screen.getAllByTestId("captura-batch-select-all")).toHaveLength(1);
+    expect(screen.getAllByTestId("captura-batch-select-none")).toHaveLength(1);
+    expect(screen.queryByTestId("captura-batch-select-all-1")).toBeNull();
+    expect(screen.queryByTestId("captura-batch-select-none-1")).toBeNull();
+  });
+
+  it("select-all/select-none act across BOTH profiles from one click", () => {
+    render(<CapturaProfiles profiles={buildViews()} />);
+    fireEvent.click(screen.getByTestId("captura-batch-select-all"));
+    expect(screen.getByTestId("captura-batch-run")).toHaveTextContent("Capturar 4 tareas");
+    fireEvent.click(screen.getByTestId("captura-batch-select-none"));
+    expect(screen.getByTestId("captura-batch-run")).toHaveTextContent("Capturar 0 tareas");
+  });
+
+  it("a task is tickable/untickable with EVERY connector collapsed (issue #559 core fix)", () => {
+    render(<CapturaProfiles profiles={buildViews()} />);
+    // Profile 1's aliseda connector (ALI_DONE, muted) is NOT-DUE → collapsed by
+    // default. Its checkbox must still be reachable and functional without
+    // expanding anything.
+    const aliseda = screen.getByTestId("captura-connector-1-aliseda");
+    expect(aliseda).toHaveAttribute("data-expanded", "false");
+    const check = screen.getByTestId(`captura-task-check-1-${ALI_DONE.id}`);
+    expect(check).not.toBeChecked(); // muted → not ticked by default
+    fireEvent.click(check);
+    expect(check).toBeChecked();
+    expect(aliseda).toHaveAttribute("data-expanded", "false"); // never expanded
+    expect(screen.getByTestId("captura-batch-run")).toHaveTextContent("Capturar 3 tareas");
+  });
+
+  it("nothing ticked → clicking Capturar todo shows a message and mutates nothing", async () => {
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
+
+    render(<CapturaProfiles profiles={buildViews()} />);
+    fireEvent.click(screen.getByTestId("captura-batch-select-none"));
+    fireEvent.click(screen.getByTestId("captura-batch-run"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("captura-batch-status")).toHaveTextContent("No has marcado ninguna tarea"),
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(openSpy).not.toHaveBeenCalled();
+  });
+
+  it("a click spanning two profiles opens ONE tab and records a run against EACH task's own profile endpoint", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) });
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(FAKE_WINDOW);
+
+    render(<CapturaProfiles profiles={buildViews()} />);
+    // Default ticks: IDEA_DUE (profile 1) + IDEA_HALF_PENDING (profile 2).
+    fireEvent.click(screen.getByTestId("captura-batch-run"));
+
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    const opened = new URL(String(openSpy.mock.calls[0][0]));
+    expect(opened.origin + opened.pathname).toBe(IDEALISTA_URL); // profile 1's task opens first (display order)
+
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+    const posted = fetchSpy.mock.calls.map((c) => ({
+      url: String(c[0]),
+      body: JSON.parse((c[1] as RequestInit).body as string),
+    }));
+    expect(posted).toEqual(
+      expect.arrayContaining([
+        { url: "/api/profiles/1/capture-task-runs", body: { taskId: IDEA_DUE.id } },
+        { url: "/api/profiles/2/capture-task-runs", body: { taskId: IDEA_HALF_PENDING.id } },
+      ]),
+    );
+
+    await waitFor(() => expect(screen.getByTestId("captura-batch-run")).toHaveTextContent("Capturar 0 tareas"));
+  });
+
+  it("filtering to one profile scopes the count, select-all/none, and the click to ONLY that profile's tasks — and says so", () => {
+    render(<CapturaProfiles profiles={buildViews()} />);
+    // No scope note while unfiltered.
+    expect(screen.queryByTestId("captura-batch-scope-note")).toBeNull();
+
+    fireEvent.change(screen.getByTestId("captura-profile-filter"), { target: { value: "1" } });
+    // Only profile 1 visible → scope note names it.
+    expect(screen.getByTestId("captura-batch-scope-note")).toHaveTextContent("Madrid centro");
+    // Count now reflects ONLY profile 1's ticked-and-visible tasks (IDEA_DUE).
+    expect(screen.getByTestId("captura-batch-run")).toHaveTextContent("Capturar 1 tarea");
+
+    // select-all under the filter only ticks profile 1's tasks (2 total: IDEA_DUE + ALI_DONE).
+    fireEvent.click(screen.getByTestId("captura-batch-select-all"));
+    expect(screen.getByTestId("captura-batch-run")).toHaveTextContent("Capturar 2 tareas");
+
+    // Clearing the filter reveals profile 2's ticks were UNTOUCHED by the
+    // filtered select-all (still just its own default: IDEA_HALF_PENDING).
+    fireEvent.change(screen.getByTestId("captura-profile-filter"), { target: { value: "" } });
+    expect(screen.getByTestId("captura-batch-run")).toHaveTextContent("Capturar 3 tareas"); // 2 (profile 1, all) + 1 (profile 2, default)
+  });
+
+  it("caps how many searches ride along across profiles and names EVERY affected profile in the status", async () => {
+    const N_PER_PROFILE = MAX_QUEUE_ENTRIES; // 24 per profile → 48 total, well over the cap
+    function bigProfile(id: number, name: string): ProfileCaptureView {
+      const taskViews: ConnectorTaskView[] = Array.from({ length: N_PER_PROFILE }, (_, i) =>
+        mkTaskView(mkTask(`p${id}-t${i}`, "idealista", `https://www.idealista.com/venta-viviendas/x${id}-${i}/`), {
+          muted: false,
+        }),
+      );
+      const connector = mkConnector("idealista", taskViews);
+      return { id, name, connectors: [connector], totalTasks: N_PER_PROFILE, actionableConnectors: 1 };
+    }
+    const profiles = [bigProfile(101, "Grande Uno"), bigProfile(102, "Grande Dos")];
+
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) });
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    vi.spyOn(window, "open").mockReturnValue(FAKE_WINDOW);
+
+    render(<CapturaProfiles profiles={profiles} />);
+    expect(screen.getByTestId("captura-batch-run")).toHaveTextContent(`Capturar ${2 * N_PER_PROFILE} tareas`);
+    fireEvent.click(screen.getByTestId("captura-batch-run"));
+
+    const expectedPosts = 1 + MAX_QUEUE_ENTRIES;
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(expectedPosts));
+    const droppedCount = 2 * N_PER_PROFILE - expectedPosts;
+    await waitFor(() => {
+      const status = screen.getByTestId("captura-batch-status");
+      expect(status).toHaveTextContent(`${droppedCount} tareas no caben en esta tanda`);
+      // Profile 101 fully fits within the cap (24 of the 24+ before profile
+      // 102 even starts contributing to the queue) — only 102 loses tasks.
+      expect(status).toHaveTextContent("Grande Dos");
+      expect(status).not.toHaveTextContent("Grande Uno");
+    });
   });
 });
