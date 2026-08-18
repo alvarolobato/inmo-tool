@@ -45,9 +45,15 @@ function stateColors(state: ConnectorView["state"]): { fg: string; bg: string } 
 export function ConnectorSection({
   profileId,
   connector,
+  checkedTaskIds,
+  onToggleTask,
 }: {
   profileId: number;
   connector: ConnectorView;
+  /** Task ids currently ticked for the profile's "Capturar todo" batch (issue #556). */
+  checkedTaskIds: ReadonlySet<string>;
+  /** Toggle one task's inclusion in the batch. */
+  onToggleTask: (taskId: string) => void;
 }) {
   const [expanded, setExpanded] = useState(connector.defaultExpanded);
   // Optimistic per-task run overrides: task id → last-run ISO. Flips a row to
@@ -244,6 +250,8 @@ export function ConnectorSection({
                   lastDone={lastDone}
                   lastRunAt={lastRunAt}
                   onExecute={onExecute}
+                  checked={checkedTaskIds.has(tv.task.id)}
+                  onToggle={onToggleTask}
                 />
               );
             })}

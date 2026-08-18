@@ -479,6 +479,74 @@ export function buildConnectorViews(
   });
 }
 
+// ─── "Capturar todo" batch selection (issue #556) ─────────────────────────
+//
+// Per-task checkboxes let the owner tick/untick which DUE (or done) tasks the
+// global "Capturar todo" button acts on. These helpers are pure — no
+// chrome/DOM/fetch — so the selection→queue mapping is unit-testable without a
+// browser. The actual queuing mechanism (piggybacking the rest of the ticked
+// tasks onto the first task's URL) lives in `lib/extension-capture.ts`
+// (`withCaptureQueue`); this module only decides WHICH tasks start ticked and
+// how a ticked set turns into an ORDERED CaptureTask[] to feed it.
+
+/**
+ * The task ids that start TICKED for a profile: every task that is currently
+ * DUE (never run, or its staleness window elapsed) across every connector —
+ * mirrors `ConnectorTaskView.due`, never re-derived. A muted (done-this-cycle)
+ * task starts unticked but can be ticked back in by the owner (D-048: graying
+ * is a visual cue, never a block).
+ */
+export function defaultTickedTaskIds(connectors: readonly ConnectorView[]): Set<string> {
+  const ids = new Set<string>();
+  for (const c of connectors) {
+    for (const tv of c.taskViews) {
+      if (tv.due) ids.add(tv.task.id);
+    }
+  }
+  return ids;
+}
+
+/** Every task across a profile's connectors, in display order (portal, then task order). */
+export function allProfileTasks(connectors: readonly ConnectorView[]): CaptureTask[] {
+  return connectors.flatMap((c) => c.taskViews.map((tv) => tv.task));
+}
+
+/**
+ * One resolved "Capturar todo" click: which task's tab actually opens (the
+ * first ticked task, in display order) and which searches the extension's
+ * OWN queue (#555/D-112) should run after it. `null` when nothing is ticked —
+ * the caller must show a message and mutate nothing (issue #556 exit
+ * criterion), never fall back to "capture everything".
+ */
+export interface CaptureBatchPlan {
+  /** Every ticked task, in order — the caller records a `capture_task_run` for each. */
+  taskIds: string[];
+  /** The task whose tab is opened directly (in the click's user gesture). */
+  first: CaptureTask;
+  /** The rest, handed to the extension's queue via `withCaptureQueue`. */
+  queue: { portal: string; captureUrl: string }[];
+}
+
+/**
+ * Build the batch plan from the full task list + the ticked id set, preserving
+ * `tasks`' display order (never the Set's insertion order — Sets don't
+ * guarantee it and the owner expects the queue to run top-to-bottom as shown).
+ * Pure; `null` when no ticked task is present in `tasks`.
+ */
+export function buildCaptureBatchPlan(
+  tasks: readonly CaptureTask[],
+  ticked: ReadonlySet<string>,
+): CaptureBatchPlan | null {
+  const selected = tasks.filter((t) => ticked.has(t.id));
+  if (selected.length === 0) return null;
+  const [first, ...rest] = selected;
+  return {
+    taskIds: selected.map((t) => t.id),
+    first,
+    queue: rest.map((t) => ({ portal: t.portal, captureUrl: t.captureUrl })),
+  };
+}
+
 /**
  * Assemble one profile's full stacked-view model from its tasks + runs.
  * `capturedByProfileConnector` (issue #430) maps profile id → { connector →

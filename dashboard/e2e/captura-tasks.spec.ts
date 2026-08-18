@@ -192,6 +192,22 @@ async function idealistaTaskIds(page: import("@playwright/test").Page, profileId
   return body.tasks.filter((t) => t.portal === "idealista").map((t) => t.id);
 }
 
+async function alisedaTaskIds(page: import("@playwright/test").Page, profileId: number): Promise<string[]> {
+  const res = await page.request.get(`/api/profiles/${profileId}/search-urls`);
+  expect(res.ok()).toBeTruthy();
+  const body = (await res.json()) as { tasks: { id: string; portal: string }[] };
+  return body.tasks.filter((t) => t.portal === "aliseda").map((t) => t.id);
+}
+
+async function lastRunAts(pool: Pool, profileId: number, taskIds: string[]): Promise<(Date | null)[]> {
+  const res = await pool.query<{ task_id: string; last_run_at: Date }>(
+    "SELECT task_id, last_run_at FROM capture_task_run WHERE profile_id = $1 AND task_id = ANY($2)",
+    [profileId, taskIds],
+  );
+  const byId = new Map(res.rows.map((r) => [r.task_id, r.last_run_at]));
+  return taskIds.map((id) => byId.get(id) ?? null);
+}
+
 test("stacks both profiles; expands due/half-done, collapses not-due; manual expand + launch — no error surface", async ({
   page,
 }) => {
@@ -355,4 +371,117 @@ test("Abrir búsqueda opens the LISTING form for a drawn-zone Idealista task (#5
   await expect(page.getByText("Error al cargar")).toHaveCount(0);
   await expect(page.getByText("there is no parameter")).toHaveCount(0);
   await expect(page.getByText("HTTP 500")).toHaveCount(0);
+});
+
+test.describe("Capturar todo — profile-level batch button (issue #556)", () => {
+  // Force a KNOWN, hermetic staleness state for profile A regardless of what
+  // earlier tests in this file did: idealista's FIRST task freshly run (muted
+  // / not ticked by default), every other idealista + aliseda task forced
+  // stale (30 days old → due / ticked by default, same as never-run).
+  async function forceState(profileId: number, taskIds: string[], daysAgo: number | null): Promise<void> {
+    for (const taskId of taskIds) {
+      const at = daysAgo === null ? "NOW()" : `NOW() - INTERVAL '${daysAgo} days'`;
+      await pool.query(
+        `INSERT INTO capture_task_run (profile_id, task_id, last_run_at)
+         VALUES ($1, $2, ${at})
+         ON CONFLICT (profile_id, task_id) DO UPDATE SET last_run_at = ${at}`,
+        [profileId, taskId],
+      );
+    }
+  }
+
+  async function expandIfCollapsed(page: import("@playwright/test").Page, testId: string): Promise<void> {
+    const el = page.getByTestId(testId);
+    if ((await el.getAttribute("data-expanded")) === "false") {
+      await page.getByTestId(testId.replace("captura-connector-", "captura-connector-toggle-")).click();
+      await expect(el).toHaveAttribute("data-expanded", "true");
+    }
+  }
+
+  test("default tick state mirrors due-ness; select-all/none; the count label; nothing ticked mutates nothing; a multi-task click opens ONE tab and records every ticked run", async ({
+    page,
+  }) => {
+    const aIdealista = await idealistaTaskIds(page, profileAId!);
+    const aAliseda = await alisedaTaskIds(page, profileAId!);
+    expect(aIdealista.length).toBeGreaterThanOrEqual(2);
+    expect(aAliseda.length).toBeGreaterThanOrEqual(1);
+
+    await forceState(profileAId!, [aIdealista[0]], 0); // freshly run → muted / unticked
+    await forceState(profileAId!, [...aIdealista.slice(1), ...aAliseda], 30); // stale → due / ticked
+
+    await page.goto("/captura");
+    await expect(page.getByTestId("captura-page")).toBeVisible();
+
+    await expandIfCollapsed(page, `captura-connector-${profileAId}-idealista`);
+    await expandIfCollapsed(page, `captura-connector-${profileAId}-aliseda`);
+
+    // Default ticks: due tasks checked, the freshly-run one unchecked.
+    await expect(page.getByTestId(`captura-task-check-${aIdealista[0]}`)).not.toBeChecked();
+    for (const id of [...aIdealista.slice(1), ...aAliseda]) {
+      await expect(page.getByTestId(`captura-task-check-${id}`)).toBeChecked();
+    }
+    const totalTasks = aIdealista.length + aAliseda.length;
+    const dueCount = totalTasks - 1;
+    const batchBtn = page.getByTestId(`captura-batch-run-${profileAId}`);
+    await expect(batchBtn).toHaveText(`Capturar ${dueCount} tareas`);
+
+    // Select-all → every task ticked, count == total.
+    await page.getByTestId(`captura-batch-select-all-${profileAId}`).click();
+    await expect(batchBtn).toHaveText(`Capturar ${totalTasks} tareas`);
+    await expect(page.getByTestId(`captura-task-check-${aIdealista[0]}`)).toBeChecked();
+
+    // Select-none → nothing ticked, count == 0.
+    await page.getByTestId(`captura-batch-select-none-${profileAId}`).click();
+    await expect(batchBtn).toHaveText("Capturar 0 tareas");
+
+    // Nothing ticked → clicking Capturar todo shows a message and mutates nothing.
+    const before = await lastRunAts(pool, profileAId!, [aIdealista[0], aIdealista[1]]);
+    await batchBtn.click();
+    await expect(page.getByTestId(`captura-batch-status-${profileAId}`)).toContainText(
+      "No has marcado ninguna tarea",
+    );
+    const openedBeforeAny = await page.evaluate(
+      () => (window as unknown as { __opened: string[] }).__opened.length,
+    );
+    const after = await lastRunAts(pool, profileAId!, [aIdealista[0], aIdealista[1]]);
+    expect(after).toEqual(before); // no DB mutation
+
+    // Tick exactly two idealista tasks (the muted one + one due one), leave
+    // everything else untouched, then fire the batch.
+    await page.getByTestId(`captura-task-check-${aIdealista[0]}`).click();
+    await page.getByTestId(`captura-task-check-${aIdealista[1]}`).click();
+    await expect(batchBtn).toHaveText("Capturar 2 tareas");
+
+    await batchBtn.click();
+
+    // Exactly ONE new tab opened — never one per ticked task.
+    await expect
+      .poll(() => page.evaluate(() => (window as unknown as { __opened: string[] }).__opened.length))
+      .toBe(openedBeforeAny + 1);
+    const opened = await page.evaluate(
+      () => (window as unknown as { __opened: string[] }).__opened.at(-1)!,
+    );
+    const u = new URL(opened);
+    expect(u.hash).toBe("#inmo-capture"); // single-task signal untouched
+    expect(u.searchParams.has("inmo-capture-queue")).toBe(true); // the 2nd task rides along
+
+    // Both ticked tasks recorded a fresh capture_task_run — the ledger write
+    // the single-task path already does, per taskId.
+    await expect
+      .poll(async () => {
+        const [r0, r1] = await lastRunAts(pool, profileAId!, [aIdealista[0], aIdealista[1]]);
+        return (
+          r0 !== null &&
+          r1 !== null &&
+          r0.getTime() > (before[0]?.getTime() ?? 0) &&
+          r1.getTime() > (before[1]?.getTime() ?? 0)
+        );
+      })
+      .toBe(true);
+
+    // No error surface — the D-041 bar.
+    await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
+    await expect(page.getByText("Error al cargar")).toHaveCount(0);
+    await expect(page.getByText("HTTP 500")).toHaveCount(0);
+  });
 });

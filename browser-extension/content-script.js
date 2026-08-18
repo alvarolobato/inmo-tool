@@ -329,15 +329,24 @@
   // the sequential/jittered queue in the background service worker (batch.js).
   // We pass this search page's OWN url as `searchUrl` so the background's
   // capture-to-infer piggyback (issue #303) learns its grammar exactly as the
-  // popup path does — signal-stripped so our synthetic #inmo-capture never
-  // pollutes the learned example.
-  function startBatchFromPage(portal, urls) {
+  // popup path does — signal-stripped so our synthetic #inmo-capture (and,
+  // issue #556, our synthetic ?inmo-capture-queue) never pollute the learned
+  // example.
+  //
+  // `queue` (issue #556, optional) carries the REST of the dashboard's
+  // "Capturar todo" ticked tasks — `{portal, searchUrl}[]`, parsed by the
+  // caller via `D.parseCaptureQueue`. background.js's `startBatch` appends
+  // each entry to the #555/D-112 pending-search queue right behind this
+  // search, regardless of whether THIS search claims the run or is itself
+  // queued — the extension then opens each one itself, one at a time.
+  function startBatchFromPage(portal, urls, queue) {
     removeBanner();
-    const searchUrl = D.stripCaptureSignal(window.location.href);
+    const searchUrl = D.stripCaptureQueue(D.stripCaptureSignal(window.location.href));
+    const extra = Array.isArray(queue) ? queue : [];
     let responded = false;
     try {
       chrome.runtime.sendMessage(
-        { type: "START_BATCH", portal, urls, searchUrl },
+        { type: "START_BATCH", portal, urls, searchUrl, queue: extra },
         (res) => {
           responded = true;
           if (chrome.runtime.lastError || !res) {
@@ -362,7 +371,9 @@
             return;
           }
           showToast(
-            `Inmo-Tool: capturando ${res.total} anuncio(s) en varias pestañas…`,
+            extra.length > 0
+              ? `Inmo-Tool: capturando ${res.total} anuncio(s); ${extra.length} búsqueda(s) más en cola…`
+              : `Inmo-Tool: capturando ${res.total} anuncio(s) en varias pestañas…`,
           );
         },
       );
@@ -423,7 +434,9 @@
       }
       listingHandled = true;
       if (verdict.action === "autostart") {
-        startBatchFromPage(verdict.portal, urls);
+        // issue #556: forward any "Capturar todo" queue riding on this URL
+        // (the dashboard's batch button) to the same batch start.
+        startBatchFromPage(verdict.portal, urls, D.parseCaptureQueue(window.location.href));
       } else if (verdict.action === "convert") {
         // Idealista map-view (pins, zero anchors) — capture can't run here (#529).
         // If the tab already carries the auto-start signal (an app-opened URL, or
@@ -431,7 +444,23 @@
         // rides along the preserved hash) so it autostarts there. Otherwise offer
         // a one-click banner — never silently move a page the owner opened.
         if (D.captureSignalPresent(window.location.href)) {
-          window.location.replace(D.withCaptureSignal(verdict.listingUrl));
+          // Carry the #556 queue param forward through the redirect too — it
+          // rides in the query string (the fragment slot is CAPTURE_SIGNAL's),
+          // which withCaptureSignal doesn't touch, so re-apply it explicitly.
+          let target = D.withCaptureSignal(verdict.listingUrl);
+          try {
+            const rawQueue = new URL(window.location.href).searchParams.get(
+              D.CAPTURE_QUEUE_SIGNAL,
+            );
+            if (rawQueue) {
+              const t = new URL(target);
+              t.searchParams.set(D.CAPTURE_QUEUE_SIGNAL, rawQueue);
+              target = t.toString();
+            }
+          } catch {
+            /* best-effort — never block the redirect over this */
+          }
+          window.location.replace(target);
         } else {
           showConvertBanner(verdict.listingUrl);
         }
