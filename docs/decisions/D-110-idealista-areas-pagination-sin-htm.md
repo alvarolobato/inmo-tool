@@ -51,6 +51,25 @@ página→1 sigue devolviendo la URL canónica y la caminata puede leer el núme
 página de vuelta (`currentResultsPage`), que es de lo que depende su guarda de
 "no he avanzado".
 
+## El orden de los filtros NO importa (verificado)
+
+La URL que idealista enlaza a mano reordena los filtros
+(`hasta_250000,precio-desde_80000`) respecto a la que estaba capturando el
+dueño (`desde_80000,precio-hasta_250000`), lo que dejaba abierta la duda de si
+la paginación exigía el orden canónico además de quitar el `.htm`. **No lo
+exige**: el 18-ago-2026 el dueño cargó las tres URLs que construye ahora
+`resultsPageUrl` — página 2 y 3 del caso de dos filtros en orden NO canónico, y
+página 2 del caso de un solo filtro — y las tres devuelven resultados.
+
+Es lo que ya apuntaba el caso de un solo filtro (ahí el orden no puede ser
+variable y aun así el `.htm` fallaba), pero ahora está comprobado y no
+inferido. `geo.ts` emite los filtros en NUESTRO orden, no en el de idealista,
+así que esto es exactamente la combinación que la aplicación produce.
+
+No se puede verificar por HTTP desde aquí: el WAF de idealista responde 403 a
+las peticiones de servidor. Cualquier revisión futura de esta zona necesita a
+un humano con un navegador.
+
 ## Consecuencias
 
 - Dos tests fijaban el comportamiento incorrecto (`/areas/…/pagina-2.htm` como
