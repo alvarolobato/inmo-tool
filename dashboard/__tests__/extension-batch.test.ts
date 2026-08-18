@@ -23,6 +23,7 @@ interface BatchState {
   slots: string[];
   concurrency: number;
   status: string;
+  emptyReason?: string;
 }
 interface Progress {
   total: number;
@@ -31,6 +32,7 @@ interface Progress {
   failed: number;
   inflight: number;
   status: string;
+  emptyReason?: string | null;
 }
 interface Launch {
   state: BatchState;
@@ -85,6 +87,18 @@ const {
   shouldContinueAuto,
   selectNextPending,
   nextAutoAction,
+  // Pending-search queue (issue #554)
+  makeSearchQueue,
+  enqueueSearch,
+  dequeueSearch,
+  removeSearchAt,
+  clearSearchQueue,
+  searchQueueDepth,
+  peekNextSearch,
+  shouldAdvanceQueue,
+  shouldRecoverStrandedEnumeration,
+  EMPTY_REASON,
+  classifyEmptyCapture,
 } = B as {
   STATUSES: { RUNNING: string; PAUSED: string; DONE: string };
   SLOT: { PENDING: string; INFLIGHT: string; CAPTURED: string; FAILED: string };
@@ -99,7 +113,11 @@ const {
   clampConcurrency: (n: unknown) => number;
   clampPaceBase: (n: unknown) => number;
   clampSpread: (n: unknown) => number;
-  makeBatchState: (urls: unknown, concurrency?: number) => BatchState;
+  makeBatchState: (
+    urls: unknown,
+    concurrency?: number,
+    emptyReason?: string,
+  ) => BatchState;
   inflightCount: (s: BatchState | null) => number;
   firstPendingIndex: (s: BatchState | null) => number;
   canLaunch: (s: BatchState | null) => boolean;
@@ -151,7 +169,39 @@ const {
     s: AutoState | null,
     opts: { batchActive?: boolean; now?: number },
   ) => string;
+  // Pending-search queue (issue #554)
+  makeSearchQueue: () => SearchQueueEntry[];
+  enqueueSearch: (
+    queue: unknown,
+    entry: { portal?: unknown; searchUrl?: unknown; urls?: unknown },
+  ) => SearchQueueEntry[];
+  dequeueSearch: (queue: unknown) => {
+    queue: SearchQueueEntry[];
+    entry: SearchQueueEntry | null;
+  };
+  removeSearchAt: (queue: unknown, index: unknown) => SearchQueueEntry[];
+  clearSearchQueue: () => SearchQueueEntry[];
+  searchQueueDepth: (queue: unknown) => number;
+  peekNextSearch: (queue: unknown) => SearchQueueEntry | null;
+  shouldAdvanceQueue: (runActive: boolean, queueDepth: unknown) => boolean;
+  shouldRecoverStrandedEnumeration: (
+    hasEnumState: boolean,
+    enumRunning: boolean,
+    batchLooping: boolean,
+    batchActive: boolean,
+  ) => boolean;
+  EMPTY_REASON: { ALREADY_CAPTURED: string; NO_RESULTS: string };
+  classifyEmptyCapture: (
+    pendingCount: number,
+    discoveredCount: unknown,
+  ) => string | null;
 };
+
+interface SearchQueueEntry {
+  portal: string;
+  searchUrl: string | null;
+  urls: string[];
+}
 
 interface AutoState {
   enabled: boolean;
@@ -468,6 +518,9 @@ describe("progress", () => {
       failed: 1,
       inflight: 0,
       status: STATUSES.RUNNING,
+      // issue #554: why an empty run is empty (already-captured vs
+      // no-results) — null here since this run isn't empty.
+      emptyReason: null,
     });
   });
 
@@ -479,6 +532,7 @@ describe("progress", () => {
       failed: 0,
       inflight: 0,
       status: STATUSES.DONE,
+      emptyReason: null,
     });
   });
 });
@@ -951,5 +1005,261 @@ describe("makeAutoState — harvestTask (issue #516)", () => {
   it("exposes the PLANNING and HARVESTING status constants", () => {
     expect(AUTO_STATUS.PLANNING).toBe("planning");
     expect(AUTO_STATUS.HARVESTING).toBe("harvesting");
+  });
+});
+
+// ═══ Pending-search queue (issue #554) ═════════════════════════════════════
+//
+// The owner fires off several searches back to back; the extension must work
+// through them one at a time instead of a second START_BATCH clobbering the
+// first run's live state (BATCH_KEY was a single slot with no guard). The
+// fix lives here, in batch.js, as a pure array-based queue — never in
+// background.js's imperative shell (per AGENTS.md / the issue's own
+// direction: "put the logic in batch.js, not background.js").
+
+describe("the clobbering bug — pure state proof (issue #554)", () => {
+  // This is the regression test for the bug itself: before this queue
+  // machinery existed, a second START_BATCH while a run was live had NOTHING
+  // to hand it to but a fresh makeBatchState() call straight into the same
+  // BATCH_KEY slot the first run was using — wiping out its progress. Proven
+  // here at the pure-state level: run1's state must survive completely
+  // untouched by the arrival of a second search, which must be captured
+  // separately instead.
+  it("does not touch the live run's state when a second search arrives", () => {
+    const run1 = makeBatchState(URLS, 2);
+    expect(isActive(run1)).toBe(true);
+    const run1Snapshot = JSON.parse(JSON.stringify(run1));
+
+    // A second START_BATCH arrives while run1 is still live. The fix's
+    // contract: it goes into the queue, never into a fresh BATCH_KEY value.
+    let queue = makeSearchQueue();
+    queue = enqueueSearch(queue, {
+      portal: "idealista",
+      searchUrl: "https://www.idealista.com/venta-viviendas/segundo/",
+      urls: ["https://www.idealista.com/inmueble/9/"],
+    });
+
+    // run1's own state — url list, slots, concurrency, status — is exactly
+    // as it was. Nothing about enqueueing a second search can reach it.
+    expect(run1).toEqual(run1Snapshot);
+    expect(progress(run1).total).toBe(URLS.length);
+    expect(progress(run1).status).toBe(STATUSES.RUNNING);
+
+    // The second search is preserved, not lost or merged into run1.
+    expect(searchQueueDepth(queue)).toBe(1);
+    expect(peekNextSearch(queue)).toEqual({
+      portal: "idealista",
+      searchUrl: "https://www.idealista.com/venta-viviendas/segundo/",
+      urls: ["https://www.idealista.com/inmueble/9/"],
+    });
+  });
+
+  it("preserves BOTH searches' identities when a third arrives too — never a last-write-wins collapse", () => {
+    let queue = makeSearchQueue();
+    queue = enqueueSearch(queue, { portal: "idealista", searchUrl: "https://x/a", urls: ["u1"] });
+    queue = enqueueSearch(queue, { portal: "aliseda", searchUrl: "https://y/b", urls: ["u2"] });
+    expect(searchQueueDepth(queue)).toBe(2);
+    expect(queue.map((e) => e.portal)).toEqual(["idealista", "aliseda"]);
+  });
+});
+
+describe("makeSearchQueue / enqueueSearch / dequeueSearch — FIFO queue", () => {
+  it("starts empty", () => {
+    expect(makeSearchQueue()).toEqual([]);
+    expect(searchQueueDepth(makeSearchQueue())).toBe(0);
+  });
+
+  it("enqueues in order and normalizes the entry shape", () => {
+    let queue = makeSearchQueue();
+    queue = enqueueSearch(queue, {
+      portal: "idealista",
+      searchUrl: "https://x/1",
+      urls: ["https://x/i1", "https://x/i2"],
+    });
+    expect(queue).toEqual([
+      { portal: "idealista", searchUrl: "https://x/1", urls: ["https://x/i1", "https://x/i2"] },
+    ]);
+  });
+
+  it("drops an entry with no portal (defensive against a malformed message)", () => {
+    const queue = enqueueSearch(makeSearchQueue(), { searchUrl: "https://x/1", urls: [] });
+    expect(queue).toEqual([]);
+  });
+
+  it("defaults a missing/invalid searchUrl to null and filters non-string urls", () => {
+    const queue = enqueueSearch(makeSearchQueue(), {
+      portal: "aliseda",
+      urls: ["https://x/1", 42, null, ""],
+    });
+    expect(queue).toEqual([{ portal: "aliseda", searchUrl: null, urls: ["https://x/1"] }]);
+  });
+
+  it("dequeues FIFO — the order searches were fired off in", () => {
+    let queue = makeSearchQueue();
+    queue = enqueueSearch(queue, { portal: "idealista", searchUrl: "https://x/1", urls: [] });
+    queue = enqueueSearch(queue, { portal: "aliseda", searchUrl: "https://x/2", urls: [] });
+
+    const first = dequeueSearch(queue);
+    expect(first.entry?.portal).toBe("idealista");
+    expect(searchQueueDepth(first.queue)).toBe(1);
+
+    const second = dequeueSearch(first.queue);
+    expect(second.entry?.portal).toBe("aliseda");
+    expect(searchQueueDepth(second.queue)).toBe(0);
+  });
+
+  it("dequeuing an empty queue returns entry:null and the queue unchanged", () => {
+    const result = dequeueSearch(makeSearchQueue());
+    expect(result.entry).toBeNull();
+    expect(result.queue).toEqual([]);
+  });
+
+  it("is pure — never mutates the array it was given", () => {
+    const queue = makeSearchQueue();
+    const next = enqueueSearch(queue, { portal: "idealista", searchUrl: null, urls: [] });
+    expect(queue).toEqual([]); // original untouched
+    expect(next).not.toBe(queue);
+  });
+});
+
+describe("removeSearchAt / clearSearchQueue — popup queue management", () => {
+  function threeDeep() {
+    let queue = makeSearchQueue();
+    queue = enqueueSearch(queue, { portal: "a", searchUrl: null, urls: [] });
+    queue = enqueueSearch(queue, { portal: "b", searchUrl: null, urls: [] });
+    queue = enqueueSearch(queue, { portal: "c", searchUrl: null, urls: [] });
+    return queue;
+  }
+
+  it("removes exactly the entry at the given index", () => {
+    const next = removeSearchAt(threeDeep(), 1);
+    expect(next.map((e) => e.portal)).toEqual(["a", "c"]);
+  });
+
+  it("is a no-op for an out-of-range or non-numeric index (a stale popup click)", () => {
+    const queue = threeDeep();
+    expect(removeSearchAt(queue, -1)).toEqual(queue);
+    expect(removeSearchAt(queue, 3)).toEqual(queue);
+    expect(removeSearchAt(queue, "x" as unknown as number)).toEqual(queue);
+    expect(removeSearchAt(queue, null as unknown as number)).toEqual(queue);
+  });
+
+  it("clearSearchQueue empties it outright", () => {
+    expect(clearSearchQueue()).toEqual([]);
+  });
+
+  it("peekNextSearch reads the head without removing it", () => {
+    const queue = threeDeep();
+    expect(peekNextSearch(queue)?.portal).toBe("a");
+    expect(searchQueueDepth(queue)).toBe(3); // unchanged — peek, not pop
+    expect(peekNextSearch(makeSearchQueue())).toBeNull();
+  });
+});
+
+describe("shouldAdvanceQueue — when the watchdog/loop-finally should pop the next search", () => {
+  it("advances only when nothing is running AND something is queued", () => {
+    expect(shouldAdvanceQueue(false, 1)).toBe(true);
+    expect(shouldAdvanceQueue(false, 3)).toBe(true);
+  });
+
+  it("never advances while a run is active, no matter the queue depth", () => {
+    expect(shouldAdvanceQueue(true, 1)).toBe(false);
+    expect(shouldAdvanceQueue(true, 0)).toBe(false);
+  });
+
+  it("never advances an empty queue", () => {
+    expect(shouldAdvanceQueue(false, 0)).toBe(false);
+  });
+
+  it("treats a non-numeric/garbage depth as empty (defensive)", () => {
+    expect(shouldAdvanceQueue(false, "x" as unknown as number)).toBe(false);
+    expect(shouldAdvanceQueue(false, undefined as unknown as number)).toBe(false);
+  });
+});
+
+describe("shouldRecoverStrandedEnumeration — MV3 eviction recovery for the enumeration phase", () => {
+  it("recovers when an enum state is persisted and nothing live is walking it", () => {
+    expect(shouldRecoverStrandedEnumeration(true, false, false, false)).toBe(true);
+  });
+
+  it("does nothing when there's no enum state to recover", () => {
+    expect(shouldRecoverStrandedEnumeration(false, false, false, false)).toBe(false);
+  });
+
+  it("does nothing while THIS worker is actively walking it (enumRunning)", () => {
+    expect(shouldRecoverStrandedEnumeration(true, true, false, false)).toBe(false);
+  });
+
+  it("does nothing while a capture loop is driving (batchLooping)", () => {
+    expect(shouldRecoverStrandedEnumeration(true, false, true, false)).toBe(false);
+  });
+
+  it("does nothing when a capture queue is already active (already handed off)", () => {
+    expect(shouldRecoverStrandedEnumeration(true, false, false, true)).toBe(false);
+  });
+});
+
+describe("classifyEmptyCapture / EMPTY_REASON — a clean 'nothing left', never a bare 0/0", () => {
+  it("returns null when the queue isn't actually empty", () => {
+    expect(classifyEmptyCapture(3, 10)).toBeNull();
+    expect(classifyEmptyCapture(1, 0)).toBeNull();
+  });
+
+  it("classifies an empty queue as already-captured when this search DID discover something (same-portal drain)", () => {
+    expect(classifyEmptyCapture(0, 12)).toBe(EMPTY_REASON.ALREADY_CAPTURED);
+    expect(classifyEmptyCapture(0, 1)).toBe(EMPTY_REASON.ALREADY_CAPTURED);
+  });
+
+  it("classifies an empty queue as no-results when this search discovered nothing at all", () => {
+    expect(classifyEmptyCapture(0, 0)).toBe(EMPTY_REASON.NO_RESULTS);
+    expect(classifyEmptyCapture(0, undefined)).toBe(EMPTY_REASON.NO_RESULTS);
+    expect(classifyEmptyCapture(0, "x" as unknown as number)).toBe(EMPTY_REASON.NO_RESULTS);
+  });
+});
+
+describe("makeBatchState / progress — emptyReason threading (issue #554)", () => {
+  it("attaches emptyReason only when the list is actually empty", () => {
+    const nonEmpty = makeBatchState(URLS, 2, EMPTY_REASON.ALREADY_CAPTURED);
+    expect(nonEmpty.emptyReason).toBeUndefined();
+
+    const empty = makeBatchState([], 2, EMPTY_REASON.ALREADY_CAPTURED);
+    expect(empty.emptyReason).toBe(EMPTY_REASON.ALREADY_CAPTURED);
+  });
+
+  it("progress() surfaces emptyReason, defaulting to null", () => {
+    const already = makeBatchState([], 2, EMPTY_REASON.ALREADY_CAPTURED);
+    expect(progress(already).emptyReason).toBe(EMPTY_REASON.ALREADY_CAPTURED);
+
+    const plain = makeBatchState(URLS, 2);
+    expect(progress(plain).emptyReason).toBeNull();
+
+    expect(progress(null).emptyReason).toBeNull();
+  });
+});
+
+describe("same-portal drain end to end — the exit criterion (issue #554)", () => {
+  it("a queued run whose worklist was already drained reports cleanly, not a bare 0/0", () => {
+    // Search A ran first and (per the shared portal worklist, D-043) already
+    // captured everything search B also found. By the time search B's
+    // capture phase reads the portal's pending set, there is nothing left —
+    // but B DID discover 5 detail URLs of its own (page 1 + enumeration).
+    const bDiscovered = 5;
+    const bPending: string[] = []; // fetchPendingUrls(portal) came back empty
+
+    const reason = classifyEmptyCapture(bPending.length, bDiscovered);
+    expect(reason).toBe(EMPTY_REASON.ALREADY_CAPTURED);
+
+    const state = makeBatchState(bPending, 3, reason ?? undefined);
+    expect(progress(state)).toMatchObject({
+      total: 0,
+      status: STATUSES.DONE,
+      emptyReason: EMPTY_REASON.ALREADY_CAPTURED,
+    });
+  });
+
+  it("a search that genuinely found nothing is classified differently", () => {
+    const reason = classifyEmptyCapture(0, 0);
+    const state = makeBatchState([], 3, reason ?? undefined);
+    expect(progress(state).emptyReason).toBe(EMPTY_REASON.NO_RESULTS);
   });
 });

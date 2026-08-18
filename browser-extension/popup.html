@@ -51,6 +51,15 @@
       <button id="batch-stop-btn" class="btn btn-secondary hidden">Detener</button>
     </div>
 
+    <!-- Pending-search queue (issue #554): searches fired off while another
+         run is live queue up here instead of clobbering it. Hidden whenever
+         the queue is empty. -->
+    <div id="batch-queue" class="batch-queue hidden">
+      <p id="batch-queue-summary" class="batch-queue-summary"></p>
+      <ul id="batch-queue-list" class="batch-queue-list"></ul>
+      <button id="batch-queue-clear-btn" class="btn btn-secondary btn-small hidden">Vaciar cola</button>
+    </div>
+
     <!-- Capturar URL de búsqueda (issue #475, part of #471): on an Idealista
          results page (incl. after "Dibuja tu zona", which adds `shape=` to the
          URL), send the raw results URL to the dashboard for later decoding. -->

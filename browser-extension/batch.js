@@ -140,14 +140,19 @@
    * Build the initial queue state for a batch run over `urls` (already
    * de-duplicated pending URLs), with up to `concurrency` tabs in flight.
    * Every slot starts `pending`. Starts `running`; an empty list starts `done`.
+   *
+   * `emptyReason` (issue #554, optional) is attached only when the list is
+   * empty — a classification (see `classifyEmptyCapture`/`EMPTY_REASON`
+   * below) of WHY there's nothing to capture, so the popup can explain a 0/0
+   * instead of showing a bare, confusing one.
    */
-  function makeBatchState(urls, concurrency) {
+  function makeBatchState(urls, concurrency, emptyReason) {
     var list = Array.isArray(urls)
       ? urls.filter(function (u) {
           return typeof u === "string" && u.length > 0;
         })
       : [];
-    return {
+    var state = {
       urls: list,
       slots: list.map(function () {
         return SLOT.PENDING;
@@ -155,6 +160,10 @@
       concurrency: clampConcurrency(concurrency),
       status: list.length > 0 ? STATUSES.RUNNING : STATUSES.DONE,
     };
+    if (list.length === 0 && typeof emptyReason === "string") {
+      state.emptyReason = emptyReason;
+    }
+    return state;
   }
 
   /** Count slots in a given state (0 for a malformed state). */
@@ -296,6 +305,7 @@
         failed: 0,
         inflight: 0,
         status: STATUSES.DONE,
+        emptyReason: null,
       };
     }
     var captured = countSlot(state, SLOT.CAPTURED);
@@ -307,6 +317,10 @@
       failed: failed,
       inflight: inflightCount(state),
       status: state.status,
+      // issue #554: why a 0-total run is empty (already drained by an earlier
+      // same-portal search vs. genuinely no results) — null when not
+      // applicable (a non-empty run, or an empty one with no classification).
+      emptyReason: state.emptyReason || null,
     };
   }
 
@@ -652,6 +666,180 @@
     return "wait";
   }
 
+  // ═══ Pending-search queue (issue #554) ═════════════════════════════════════
+  //
+  // The owner fires off several searches (different zones/portals) back to
+  // back and wants the extension to work through them one at a time, instead
+  // of a second START_BATCH clobbering the first run's state (the bug this
+  // issue fixes — see D-043's single BATCH_KEY design and the extension
+  // record for #554). This is a SEPARATE queue of not-yet-started searches,
+  // never a second concurrent run: D-043's bounded concurrency + jittered
+  // pacing govern how ONE run behaves and are completely untouched here. Two
+  // searches never run at once — the WAF-safety envelope is per-browser, not
+  // per-search.
+  //
+  // Entries are plain `{ portal, searchUrl, urls }` objects (urls = the
+  // harvested page-1 detail URLs, same shape START_BATCH already carries).
+  // Pure array operations only — background.js persists the array in
+  // chrome.storage.session (matching BATCH_KEY's lifetime) and decides WHEN
+  // to enqueue/dequeue (a run is active vs. idle) and what to do with the
+  // popped entry (kick off the same enumerate→capture flow startBatch uses).
+
+  /** A fresh, empty pending-search queue. */
+  function makeSearchQueue() {
+    return [];
+  }
+
+  /**
+   * Validate + normalize one queue entry. Returns null (drop it) when `portal`
+   * is missing — everything else defaults defensively so a malformed message
+   * can never corrupt the persisted queue.
+   */
+  function normalizeSearchEntry(entry) {
+    if (!entry || typeof entry.portal !== "string" || !entry.portal) {
+      return null;
+    }
+    var urls = Array.isArray(entry.urls)
+      ? entry.urls.filter(function (u) {
+          return typeof u === "string" && u.length > 0;
+        })
+      : [];
+    return {
+      portal: entry.portal,
+      searchUrl:
+        typeof entry.searchUrl === "string" && entry.searchUrl
+          ? entry.searchUrl
+          : null,
+      urls: urls,
+    };
+  }
+
+  /**
+   * Append one search to the queue (pure — returns a NEW array). An invalid
+   * entry (see normalizeSearchEntry) is silently dropped, so a bad message can
+   * never wedge the queue with junk.
+   */
+  function enqueueSearch(queue, entry) {
+    var q = Array.isArray(queue) ? queue.slice() : [];
+    var norm = normalizeSearchEntry(entry);
+    if (!norm) return q;
+    q.push(norm);
+    return q;
+  }
+
+  /**
+   * Pop the first queued search (FIFO — searches run in the order they were
+   * fired off). Pure. Returns `{ queue, entry }`; `entry` is null (queue
+   * returned unchanged) when there was nothing to pop.
+   */
+  function dequeueSearch(queue) {
+    var q = Array.isArray(queue) ? queue.slice() : [];
+    if (q.length === 0) return { queue: q, entry: null };
+    var entry = q.shift();
+    return { queue: q, entry: entry };
+  }
+
+  /**
+   * Remove the queued search at `index` (pure — returns a NEW array). An
+   * out-of-range / non-numeric index is a no-op, so a stale popup click (the
+   * list changed underneath it) can never remove the wrong entry.
+   */
+  function removeSearchAt(queue, index) {
+    var q = Array.isArray(queue) ? queue.slice() : [];
+    if (typeof index !== "number" || index < 0 || index >= q.length) return q;
+    q.splice(index, 1);
+    return q;
+  }
+
+  /** Empty the queue outright ("Vaciar cola"). */
+  function clearSearchQueue() {
+    return [];
+  }
+
+  /** How many searches are waiting (0 for a malformed/absent queue). */
+  function searchQueueDepth(queue) {
+    return Array.isArray(queue) ? queue.length : 0;
+  }
+
+  /** The next search that will start, or null when the queue is empty. */
+  function peekNextSearch(queue) {
+    return Array.isArray(queue) && queue.length > 0 ? queue[0] : null;
+  }
+
+  /**
+   * Should the watchdog / a just-finished run's continuation pop and start the
+   * next queued search right now? Only when NOTHING is currently running
+   * (`runActive` — background.js's isBatchActive(), covering the live loop,
+   * an in-progress enumeration, and a running/paused capture queue) AND at
+   * least one search is waiting. Pure — background.js supplies both facts.
+   *
+   * This is also the exact predicate that makes eviction recovery work: if the
+   * service worker dies in the gap between "the run just finished" and "the
+   * queue got checked," `runActive` reads false (nothing survived the
+   * eviction to claim otherwise) and a respawned worker's watchdog tick calls
+   * this again and gets the same true, so the follow-up search is never
+   * silently stranded.
+   */
+  function shouldAdvanceQueue(runActive, queueDepth) {
+    return !runActive && typeof queueDepth === "number" && queueDepth > 0;
+  }
+
+  /**
+   * Should a respawned worker recover a stranded ENUMERATION phase? Mirrors
+   * `shouldReattach` for the capture queue, generalized to the phase that
+   * precedes it (issue #554 — a stranded enumeration would otherwise make
+   * `isBatchActive()` report "active" forever and wedge the pending-search
+   * queue right behind it, in addition to the existing #516 concern that it
+   * wedges Auto). True only when an enum state is persisted (`hasEnumState`)
+   * AND nothing in THIS worker is actually walking it (`enumRunning` false)
+   * AND no capture loop is driving (`batchLooping` false) AND no capture
+   * queue is already active (`batchActive` false, e.g. a previous recovery
+   * already handed off to it).
+   */
+  function shouldRecoverStrandedEnumeration(
+    hasEnumState,
+    enumRunning,
+    batchLooping,
+    batchActive,
+  ) {
+    if (!hasEnumState) return false;
+    if (enumRunning || batchLooping) return false;
+    if (batchActive) return false;
+    return true;
+  }
+
+  // ── Same-portal drain: a clean "nothing left" instead of a bare 0/0 ────────
+  //
+  // The capture queue is portal-scoped (runCaptureQueue fetches every PENDING
+  // row for the whole portal), so two queued searches on the SAME portal share
+  // one worklist — a single capture pass can already drain both. The second
+  // search's capture phase then legitimately finds 0 pending. That must read
+  // as a clean, explained no-op ("ya capturada por la búsqueda anterior"),
+  // never a bare confusing 0/0 and never an error.
+
+  var EMPTY_REASON = {
+    // This search's own detail URLs (page 1 + everything enumeration found)
+    // were seeded, but by the time the capture queue read the worklist they
+    // were already handled (captured/failed) by an earlier same-portal
+    // search that drained the shared pending set first.
+    ALREADY_CAPTURED: "already-captured",
+    // This search genuinely discovered nothing to capture (an empty results
+    // page, or a search URL that matched no listings) — unrelated to queueing.
+    NO_RESULTS: "no-results",
+  };
+
+  /**
+   * Classify why a fresh capture queue is empty (0 pending), given how many
+   * detail URLs THIS search discovered (page 1 + enumeration). Pure. Returns
+   * null when the queue isn't actually empty — nothing to classify.
+   */
+  function classifyEmptyCapture(pendingCount, discoveredCount) {
+    if (pendingCount > 0) return null;
+    var discovered =
+      typeof discoveredCount === "number" && discoveredCount > 0;
+    return discovered ? EMPTY_REASON.ALREADY_CAPTURED : EMPTY_REASON.NO_RESULTS;
+  }
+
   var api = {
     STATUSES: STATUSES,
     AUTO_STATUS: AUTO_STATUS,
@@ -701,6 +889,18 @@
     shouldContinueAuto: shouldContinueAuto,
     selectNextPending: selectNextPending,
     nextAutoAction: nextAutoAction,
+    // Pending-search queue (issue #554)
+    makeSearchQueue: makeSearchQueue,
+    enqueueSearch: enqueueSearch,
+    dequeueSearch: dequeueSearch,
+    removeSearchAt: removeSearchAt,
+    clearSearchQueue: clearSearchQueue,
+    searchQueueDepth: searchQueueDepth,
+    peekNextSearch: peekNextSearch,
+    shouldAdvanceQueue: shouldAdvanceQueue,
+    shouldRecoverStrandedEnumeration: shouldRecoverStrandedEnumeration,
+    EMPTY_REASON: EMPTY_REASON,
+    classifyEmptyCapture: classifyEmptyCapture,
   };
 
   if (typeof self !== "undefined") {
