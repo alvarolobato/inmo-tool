@@ -64,6 +64,11 @@ página de vuelta (`currentResultsPage`), que es de lo que depende su guarda de
   nuevos". No rompe nada ni pierde datos. Arreglarlo pide preferir el ancla real
   del DOM sobre el esquema limpio, que es un cambio de comportamiento para todos
   los portales y merece su propia issue.
+- `/multi/` (que `observe-search-url.js` ya trata como familia de búsqueda de
+  idealista, aunque `isListingPath` todavía no) es candidato natural a la misma
+  peculiaridad. Si algún día se le da soporte de listado, **compruébalo, no lo
+  supongas**. Lo mismo para las rutas con prefijo de idioma (`/en/areas/…`), que
+  hoy la extensión no reconoce en absoluto.
 - `robots.txt` de idealista prohíbe `/areas/` a los rastreadores. Aquí navega la
   extensión en el navegador del propio dueño sobre una búsqueda que él ha
   fijado, no un crawler de servidor, pero conviene tenerlo presente al decidir
