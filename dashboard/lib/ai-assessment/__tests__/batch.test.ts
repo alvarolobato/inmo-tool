@@ -11,10 +11,22 @@
  *         pass CLEANLY (a summary, not a crash) and processes nothing further.
  *   + the batch calls the flows for a genuinely unassessed property, and one
  *     bad property (NoListingsError / unexpected error) never sinks the rest.
+ *
+ * Phase 1 of docs/roadmap/llm-batching-plan.md restructured the loop inside
+ * `runAssessmentBatch` from property-major to flow-major (`for flow { for
+ * property { … } }`). Most of the tests above don't care — they only assert
+ * on aggregate counters and `toHaveBeenCalledWith` values, not call order —
+ * so they pass unchanged against the new loop. The tests at the bottom of
+ * this file are the ones Phase 1 added specifically to pin the restructure:
+ * order-insensitivity of a full pass, and the one semantic consequence a
+ * mid-pass stop now has under flow-major ordering (see batch.ts's loop-body
+ * comment for the full explanation).
  */
 import { describe, it, expect, vi } from "vitest";
 import { BudgetExceededError, CircuitBreakerOpenError } from "@/lib/llm";
 import { NoListingsError } from "../shared";
+import { AssessmentParkedError } from "../cache";
+import { LlmQuotaExceededError } from "@/lib/llm-enabled";
 import {
   runAssessmentBatch,
   type BatchFlow,
@@ -279,5 +291,223 @@ describe("runAssessmentBatch", () => {
       requestId: "req-abc",
     });
     expect(a).toHaveBeenCalledWith(3, { requestId: "req-abc", trendingCandidates: [], dismissedCandidates: [] });
+  });
+
+  // ---------------------------------------------------------------------
+  // Phase 1 (docs/roadmap/llm-batching-plan.md) — flow-major loop pinning.
+  // ---------------------------------------------------------------------
+
+  describe("Phase 1: flow-major loop", () => {
+    /**
+     * Builds three flows whose per-(property, flow) outcome is a pure function
+     * of the pair, never of visiting order — so re-running with the flows (or
+     * properties) supplied in a different order can't change what happens to
+     * any given pair, only the SEQUENCE in which pairs are visited. Also
+     * records every pair the loop actually reaches (via `isCurrent`, which
+     * every visited pair calls exactly once) so two runs can be compared by
+     * their attempted-pairs SET, not by call order.
+     */
+    function makeOrderInsensitiveFlows(attempted: Set<string>) {
+      const outcomeFor: Record<string, "skip" | "ok" | "noListings" | "error"> = {
+        // property 1
+        "1:occupancy": "skip",
+        "1:condition": "ok",
+        "1:redflags": "ok",
+        // property 2
+        "2:occupancy": "ok",
+        "2:condition": "noListings",
+        "2:redflags": "ok",
+        // property 3
+        "3:occupancy": "ok",
+        "3:condition": "ok",
+        "3:redflags": "error",
+      };
+
+      function assessFor(type: string) {
+        return vi.fn(async (propertyId: number) => {
+          const outcome = outcomeFor[`${propertyId}:${type}`];
+          if (outcome === "noListings") throw new NoListingsError(propertyId);
+          if (outcome === "error") throw new Error("malformed model output");
+          return undefined;
+        });
+      }
+
+      const a = assessFor("occupancy");
+      const b = assessFor("condition");
+      const c = assessFor("redflags");
+      const flows: BatchFlow[] = [
+        { type: "occupancy", promptVersion: "occupancy/v2", assess: a },
+        { type: "condition", promptVersion: "condition/v1", assess: b },
+        { type: "redflags", promptVersion: "redflags/v6", assess: c },
+      ];
+      const isCurrent = async (propertyId: number, flow: BatchFlow) => {
+        attempted.add(`${propertyId}:${flow.type}`);
+        return outcomeFor[`${propertyId}:${flow.type}`] === "skip";
+      };
+      return { flows, isCurrent };
+    }
+
+    // NOTE ON WHAT THIS PROVES. This runs ONE implementation twice with the
+    // inputs reversed, so it cannot detect a property-major -> flow-major
+    // behaviour change: it still passes against the old loop. Its real value
+    // is the golden counter values below, plus the 14 pre-existing tests in
+    // this file whose golden values were written against the OLD loop and pass
+    // unchanged — that is the strongest "same behaviour as before" evidence
+    // available. The test that actually pins the new loop SHAPE is the budget
+    // stop below, which is the only one that fails if the loop is reverted.
+    it("produces IDENTICAL summary counters and attempted (property, flow) pairs regardless of flow/property order", async () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const attemptedForward = new Set<string>();
+      const forward = makeOrderInsensitiveFlows(attemptedForward);
+      const resultForward = await runAssessmentBatch({
+        flows: forward.flows,
+        fetchTrendingCandidates: async () => [],
+        fetchDismissedCandidates: async () => [],
+        selectPropertyIds: async () => [1, 2, 3],
+        isCurrent: forward.isCurrent,
+      });
+
+      const attemptedReversed = new Set<string>();
+      const reversed = makeOrderInsensitiveFlows(attemptedReversed);
+      const resultReversed = await runAssessmentBatch({
+        flows: [...reversed.flows].reverse(),
+        fetchTrendingCandidates: async () => [],
+        fetchDismissedCandidates: async () => [],
+        selectPropertyIds: async () => [3, 2, 1], // reversed property order too
+        isCurrent: reversed.isCurrent,
+      });
+
+      // Same counter object regardless of the order flows/properties were
+      // supplied in — the whole point of the flow-major restructure being a
+      // pure control-flow change with no behavioural difference on a full
+      // (non-stopped) pass.
+      expect(resultReversed).toEqual(resultForward);
+      expect(resultForward).toMatchObject({
+        properties: 3,
+        assessed: 6, // 1:condition,1:redflags,2:occupancy,2:redflags,3:occupancy,3:condition
+        skipped: 1, // 1:occupancy
+        noListings: 1, // 2:condition
+        parked: 0,
+        errors: 1, // 3:redflags
+        stopped: null,
+      });
+      // And the SET of (property, flow) pairs the loop actually reached is
+      // identical too, even though the two runs visited them in opposite
+      // sequence.
+      expect(attemptedReversed).toEqual(attemptedForward);
+
+      spy.mockRestore();
+    });
+
+    it("a budget stop mid-flow returns partial counters with stopped: 'budget', and skip/park/noListings accounting is unchanged", async () => {
+      // Four properties, all funnelled through the FIRST flow only (occupancy)
+      // before the stop fires — condition/redflags never get a chance to run
+      // for anyone. This is the semantic consequence documented in batch.ts:
+      // a mid-pass stop under flow-major leaves properties assessed on SOME
+      // axes and not others, rather than a clean assessed-prefix/pending-
+      // suffix split of properties.
+      const isCurrent = vi.fn(async (propertyId: number, flow: BatchFlow) =>
+        propertyId === 1 && flow.type === "occupancy",
+      );
+      const a = vi.fn(async (propertyId: number) => {
+        if (propertyId === 2) throw new NoListingsError(propertyId);
+        if (propertyId === 3) throw new AssessmentParkedError(propertyId, "occupancy", 3, "LLM_CLI_PARSE");
+        if (propertyId === 4) throw new BudgetExceededError();
+        return undefined; // property 1 is skipped via isCurrent before this runs
+      });
+      const b = vi.fn(async () => undefined); // condition — must never be reached
+      const c = vi.fn(async () => undefined); // redflags — must never be reached
+      const flows: BatchFlow[] = [
+        { type: "occupancy", promptVersion: "occupancy/v2", assess: a },
+        { type: "condition", promptVersion: "condition/v1", assess: b },
+        { type: "redflags", promptVersion: "redflags/v6", assess: c },
+      ];
+
+      const result = await runAssessmentBatch({
+        flows,
+        fetchTrendingCandidates: async () => [],
+        fetchDismissedCandidates: async () => [],
+        selectPropertyIds: async () => [1, 2, 3, 4],
+        isCurrent,
+      });
+
+      expect(result).toMatchObject({
+        properties: 4, // all four were reached (touched) before the stop
+        assessed: 0, // property 1 was skipped, not assessed; 2/3/4 all failed
+        skipped: 1, // property 1 (already current on occupancy)
+        noListings: 1, // property 2
+        parked: 1, // property 3
+        errors: 0,
+        stopped: "budget",
+      });
+      // condition and redflags never ran for ANY property — the stop fired
+      // inside the first flow, before the second flow was ever entered.
+      expect(b).not.toHaveBeenCalled();
+      expect(c).not.toHaveBeenCalled();
+      // occupancy itself only reached properties 2, 3 and 4 (property 1 was
+      // skipped via isCurrent before assess would have been called).
+      expect(a).toHaveBeenCalledTimes(3);
+    });
+
+    it("EC-3: an LlmQuotaExceededError stops the batch cleanly with stopped: 'quota'", async () => {
+      // D-107 gave the batch a third clean-stop reason but no batch-level test
+      // (budget and circuit each have one). It matters more than the other two
+      // now: the quota cap is the stop the owner is most likely to actually
+      // hit, and a stop that fell through to the generic error branch would
+      // strike the D-104 ledger for every property in the page.
+      const err = new LlmQuotaExceededError(91, "session", 80);
+      const failing = vi.fn().mockRejectedValue(err);
+      const flows: BatchFlow[] = [
+        { type: "occupancy", promptVersion: "occupancy/v2", assess: failing },
+        { type: "condition", promptVersion: "condition/v2", assess: failing },
+      ];
+
+      const result = await runAssessmentBatch({
+        flows,
+        selectPropertyIds: async () => [1, 2, 3],
+        isCurrent: async () => false,
+        fetchTrendingCandidates: async () => [],
+        fetchDismissedCandidates: async () => [],
+      });
+
+      expect(result.stopped).toBe("quota");
+      // Halted on the FIRST property of the FIRST flow — not once per property.
+      expect(failing).toHaveBeenCalledTimes(1);
+      expect(result.assessed).toBe(0);
+      expect(result.errors).toBe(0);
+    });
+
+    it("fetches trending/dismissed candidates exactly once per runAssessmentBatch call, regardless of flow count", async () => {
+      const a = vi.fn(async () => undefined);
+      const b = vi.fn(async () => undefined);
+      const c = vi.fn(async () => undefined);
+      const d = vi.fn(async () => undefined);
+      const flows: BatchFlow[] = [
+        { type: "occupancy", promptVersion: "occupancy/v2", assess: a },
+        { type: "condition", promptVersion: "condition/v1", assess: b },
+        { type: "redflags", promptVersion: "redflags/v6", assess: c },
+        { type: "location", promptVersion: "location/v1", assess: d },
+      ];
+      const fetchTrendingCandidates = vi.fn(async () => []);
+      const fetchDismissedCandidates = vi.fn(async () => []);
+
+      await runAssessmentBatch({
+        flows,
+        fetchTrendingCandidates,
+        fetchDismissedCandidates,
+        selectPropertyIds: async () => [1, 2, 3],
+        isCurrent: async () => false,
+      });
+
+      // 4 flows × 3 properties = 12 flow runs, but the once-per-batch fetch
+      // stays once — it lives above both loops, untouched by the restructure.
+      expect(fetchTrendingCandidates).toHaveBeenCalledTimes(1);
+      expect(fetchDismissedCandidates).toHaveBeenCalledTimes(1);
+      expect(a).toHaveBeenCalledTimes(3);
+      expect(b).toHaveBeenCalledTimes(3);
+      expect(c).toHaveBeenCalledTimes(3);
+      expect(d).toHaveBeenCalledTimes(3);
+    });
   });
 });
