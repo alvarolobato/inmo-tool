@@ -3,12 +3,12 @@ id: D-113
 title: '"Capturar todo" batch button hands off additional searches via a URL-fragment piggyback, never a new dashboard→extension channel'
 date: 2026-08-18
 group: Data / connectors
-rule: '"Capturar todo" (per profile, one global button, issue #556) opens ONE tab (the first ticked task, via a SYNCHRONOUS `window.open` inside the click gesture, before any `await`) and piggybacks the REST as `#inmo-capture-queue=<json>` — the URL FRAGMENT, never the query string (`dashboard/lib/extension-capture.ts` `withCaptureQueue`) — capped at `MAX_QUEUE_ENTRIES` (24; a dropped task is NEVER queued or recorded). Call order is `withCaptureSignal(withCaptureQueue(url, queue))`: the queue claims the fragment, so the signal falls back to its own existing query form — zero changes to `withCaptureSignal`/`captureSignalPresent`. The opened tab''s content script (`detect.js` `parseCaptureQueue`, reading `urlSignalValue`''s percent-DECODED fragment branch) forwards the list to `background.js`''s `startBatch`, which appends each entry to #555/D-112''s OWN pending-search queue (`InmoBatch.enqueueSearch`, which now DEDUPES an exact (portal, searchUrl) repeat) — never a second queue, never a second `window.open`. Do not add `externally_connectable`/direct dashboard→extension messaging to solve this; the dashboard has no channel to the extension except opening a tab it runs a content script on. Do not move the queue payload back to the query string — every portal URL-grammar parser reads pathname+query only, never `.hash`, which is what makes a learned-template poisoning attack structurally impossible rather than merely avoided by convention.'
+rule: '"Capturar todo" (ONE page-level button spanning every VISIBLE profile, issue #559 — corrects the #556 "per profile" framing below) opens ONE tab (the first ticked task, via a SYNCHRONOUS `window.open` inside the click gesture, before any `await`) and piggybacks the REST as `#inmo-capture-queue=<json>` — the URL FRAGMENT, never the query string (`dashboard/lib/extension-capture.ts` `withCaptureQueue`) — capped at `MAX_QUEUE_ENTRIES` (24; a dropped task is NEVER queued or recorded). Call order is `withCaptureSignal(withCaptureQueue(url, queue))`: the queue claims the fragment, so the signal falls back to its own existing query form — zero changes to `withCaptureSignal`/`captureSignalPresent`. The opened tab''s content script (`detect.js` `parseCaptureQueue`, reading `urlSignalValue`''s percent-DECODED fragment branch) forwards the list to `background.js`''s `startBatch`, which appends each entry to #555/D-112''s OWN pending-search queue (`InmoBatch.enqueueSearch`, which now DEDUPES an exact (portal, searchUrl) repeat) — never a second queue, never a second `window.open`. Do not add `externally_connectable`/direct dashboard→extension messaging to solve this; the dashboard has no channel to the extension except opening a tab it runs a content script on. Do not move the queue payload back to the query string — every portal URL-grammar parser reads pathname+query only, never `.hash`, which is what makes a learned-template poisoning attack structurally impossible rather than merely avoided by convention.'
 ---
 
 # D-113: "Capturar todo" hands off additional searches via a URL-fragment piggyback
 
-*Decided: 2026-08-18 — revised 2026-08-18 (fresh-context Opus review of #558, issue #556): the transport moved from the query string to the URL FRAGMENT (review B2), plus a cap on how many searches ride along (B3), a queue-side dedupe (N3), and several correctness/honesty fixes (N1/N5/N6/N7) — see "Revised" below.*
+*Decided: 2026-08-18 — revised 2026-08-18 (fresh-context Opus review of #558, issue #556): the transport moved from the query string to the URL FRAGMENT (review B2), plus a cap on how many searches ride along (B3), a queue-side dedupe (N3), and several correctness/honesty fixes (N1/N5/N6/N7) — see "Revised" below. Amended 2026-08-18 (issue #559): the button/selection UI this decision's plumbing sits behind moved from PER-PROFILE to ONE page-level control spanning every visible profile — see "Amended (issue #559)" below. The fragment-carrier mechanism itself (this decision's actual subject: FRAGMENT not query, the cap, the D-112 handoff) is UNCHANGED; see [D-114](D-114-global-capture-selection.md) for the new cross-profile selection-state design this amendment introduces.*
 
 **Context**: Issue #556 — the owner asked for one button per profile that
 ticks off every due capture task and runs them "una a una" (one after
@@ -41,11 +41,14 @@ mechanism rather than inventing a parallel one").
 
 1. **Only the FIRST ticked task's tab is ever opened by the dashboard**, via
    `window.open` — SYNCHRONOUSLY, inside the click's user gesture, before any
-   `await` (revised, review N5 — see below). `CapturaProfileSection.onCapturarTodo`
-   (`dashboard/components/captura/CapturaProfileSection.tsx`) computes the
-   plan via the pure `buildCaptureBatchPlan` (`dashboard/lib/captura-tasks.ts`)
+   `await` (revised, review N5 — see below). `CapturaProfiles.onCapturarTodo`
+   (`dashboard/components/captura/CapturaProfiles.tsx` — moved here from
+   `CapturaProfileSection.tsx` by the #559 amendment below) computes the
+   plan via the pure `buildGlobalCaptureBatchPlan` (`dashboard/lib/captura-tasks.ts`,
+   itself built on the original `buildCaptureBatchPlan` — see D-114)
    — display-order first-ticked-task + the rest as a queue — and calls
-   `window.open` exactly once, regardless of how many tasks are ticked.
+   `window.open` exactly once, regardless of how many tasks are ticked, or how
+   many DIFFERENT profiles they belong to.
 
 2. **The rest ride on that ONE tab's URL as a FRAGMENT, never the query
    string** (revised from a first version that used a query param — see
@@ -191,7 +194,43 @@ structural fix rather than a patch:
   via EITHER the single-task button OR "Capturar todo" — now greys it out
   AND un-ticks it immediately; without this, a second "Capturar todo" click
   before the page reloads would re-fire every task the first click just
-  launched.
+  launched. **Lifted again by the #559 amendment** (below) to
+  `CapturaProfiles`, keyed cross-profile — the invariant itself (launch ⇒
+  grey + un-tick, everywhere the task renders) is unchanged.
+
+**Amended (2026-08-18, issue #559)**. The owner rejected the shape #556/#558
+shipped: he had been asked explicitly "¿el botón es por perfil o global?" and
+answered "global, con los checks me apaño" — #556 was nonetheless written (and
+built, above) as **one button/select-all PER PROFILE**, and the per-task
+checkboxes lived inside `ConnectorSection`'s collapsible, forcing an expand to
+tick anything. Both were spec errors, not a change of mind. Issue #559 fixes
+three things, none of which touch this decision's actual subject (the
+FRAGMENT-carrier transport, the cap, the D-112 handoff — all verbatim,
+untouched):
+
+1. **The button and the select-all/select-none are now ONE each, page-level**,
+   spanning every profile currently VISIBLE under the `/captura` profile
+   filter (never "all profiles" unconditionally — a filtered-out profile's
+   tasks are excluded from the count/click/select-all, and a scope note says
+   so). Ownership moves from `CapturaProfileSection` (one instance per
+   profile) to `CapturaProfiles` (one instance for the page) —
+   `onCapturarTodo`, `ticked`, and `runOverrides` all move with it.
+2. **Selection is keyed by `selectionKey(profileId, taskId)`, not the bare
+   task id** — see D-114 for why (a `CaptureTask.id` collision across two
+   profiles is possible, not hypothetical) and for the full cross-profile
+   plan-building design (`buildGlobalCaptureBatchPlan`/`capGlobalCaptureBatchPlan`,
+   both built ON TOP of this decision's original `buildCaptureBatchPlan`/
+   `capCaptureBatchPlan`, which stay exactly as documented above).
+3. **The per-task checkbox is now reachable without expanding any connector**
+   (`ConnectorSection`'s new always-visible compact checklist) — orthogonal to
+   this decision, but it is why `CapturaProfiles`, not `CapturaProfileSection`,
+   is now the right place to own the click handler: the selection surface
+   itself no longer lives inside a per-connector, per-profile subtree.
+
+The over-cap "no caben" status message additionally now NAMES which VISIBLE
+profiles lost tasks to `MAX_QUEUE_ENTRIES` (not just a bare count) — the
+button spanning profiles means the cap can bite mid-profile, and a bare count
+no longer tells the owner where to click again.
 
 **Alternatives rejected**:
 
@@ -254,15 +293,26 @@ D-048 (the staleness window `defaultTickedTaskIds` reuses verbatim, and the
 "last touched, not outcome" ledger semantics `capture_task_run` keeps); D-053
 (the `#inmo-capture` signal contract, left byte-for-byte untouched); D-101
 (`captureUrl` vs `url` — the queue always carries `captureUrl`); D-051 (the
-capture-to-infer learner B2 protects).
+capture-to-infer learner B2 protects); issue #559 and
+[D-114](D-114-global-capture-selection.md) (the #559 amendment above — the
+per-profile → page-level ownership move and the cross-profile selection-key
+design; this decision's own transport/cap/handoff plumbing is unchanged by
+it).
 `dashboard/lib/extension-capture.ts` (`CAPTURE_QUEUE_SIGNAL`,
-`MAX_QUEUE_ENTRIES`, `withCaptureQueue`, `encodeCaptureQueue`/`decodeCaptureQueue`),
+`MAX_QUEUE_ENTRIES`, `withCaptureQueue`, `encodeCaptureQueue`/`decodeCaptureQueue`
+— untouched by #559),
 `dashboard/lib/captura-tasks.ts` (`defaultTickedTaskIds`, `allProfileTasks`,
-`buildCaptureBatchPlan`, `capCaptureBatchPlan`),
-`dashboard/components/captura/CapturaProfileSection.tsx` (owns the ticked set
-AND the lifted `runOverrides`), `dashboard/components/captura/ConnectorSection.tsx`
-(consumes `runOverrides`/`onOptimisticRun` as props), `dashboard/components/captura/CaptureTaskRow.tsx`
-(the per-task checkbox), `browser-extension/detect.js`
+`buildCaptureBatchPlan`, `capCaptureBatchPlan` — original per-profile plumbing,
+kept; `selectionKey`, `buildGlobalCaptureBatchPlan`, `capGlobalCaptureBatchPlan`
+— #559 additions, see D-114),
+`dashboard/components/captura/CapturaProfiles.tsx` (owns the ticked set,
+`runOverrides` AND `onCapturarTodo` as of #559 — moved from
+`CapturaProfileSection.tsx`, now a thin per-profile translator),
+`dashboard/components/captura/ConnectorSection.tsx`
+(consumes `runOverrides`/`onOptimisticRun` as props; #559 adds its
+always-visible per-task checklist), `dashboard/components/captura/CaptureTaskRow.tsx`
+(the full per-task detail row — #559 removes its checkbox, moved to
+`ConnectorSection`'s checklist), `browser-extension/detect.js`
 (`CAPTURE_QUEUE_SIGNAL`, `parseCaptureQueue`, `stripCaptureQueue`,
 `urlSignalValue`'s decode fix), `browser-extension/content-script.js`
 (`startBatchFromPage`'s `queue` param, threaded from both the autostart and

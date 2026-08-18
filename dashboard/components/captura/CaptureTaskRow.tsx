@@ -4,12 +4,11 @@ import { useState } from "react";
 import type { CaptureTask } from "@/lib/captura-tasks";
 
 /**
- * One capture TASK on the task-driven `/captura` page (issue #289).
- *
- * A single discrete, recurring, openable capture task: label + any loosened
- * flags inline + a last-done note + one execute button. The button (a) records
- * the run (POST, via `onExecute`) and (b) opens the task's pre-filtered URL in
- * a new tab, where the browser extension's batch capture (#262) takes over.
+ * One capture TASK's FULL detail row on the task-driven `/captura` page
+ * (issue #289): label + any loosened flags inline + a last-done note + one
+ * execute button. The button (a) records the run (POST, via `onExecute`) and
+ * (b) opens the task's pre-filtered URL in a new tab, where the browser
+ * extension's batch capture (#262) takes over.
  *
  * Staleness is computed by the parent and passed in as `muted` + `lastDone`:
  *   - `muted` (done within its staleness window) → the row is greyed/atenuada,
@@ -20,11 +19,13 @@ import type { CaptureTask } from "@/lib/captura-tasks";
  * The row never captures or navigates the operator itself; it is the launch
  * pad + a per-task last-done mirror.
  *
- * A per-task CHECKBOX (issue #556) feeds the profile-level "Capturar todo"
- * button — `checked`/`onToggle` are owned by the parent (which pre-ticks every
- * DUE task, see `lib/captura-tasks.ts` `defaultTickedTaskIds`). Ticking is
- * independent of the row's own "Abrir búsqueda" button: either can be used at
- * any time, muted or not.
+ * **No checkbox here** (issue #559, revised from #556). The "Capturar todo"
+ * selection checkbox moved to `ConnectorSection`'s ALWAYS-VISIBLE compact
+ * checklist, rendered outside this row's `expanded`-gated detail — the owner's
+ * exact complaint was "los checkbox están dentro del desplegable... ponlo
+ * fuera" (the checkboxes are inside the collapsible — put them outside). This
+ * row is rendered only when its connector is expanded, so it can never be the
+ * sole place a task is tickable.
  */
 export function CaptureTaskRow({
   task,
@@ -32,8 +33,6 @@ export function CaptureTaskRow({
   lastDone,
   lastRunAt,
   onExecute,
-  checked,
-  onToggle,
 }: {
   task: CaptureTask;
   /** True while the last run sits inside the staleness window (grey / not due). */
@@ -49,10 +48,6 @@ export function CaptureTaskRow({
    * blockers).
    */
   onExecute: (task: CaptureTask) => Promise<void>;
-  /** Whether this task is included in the profile's "Capturar todo" batch. */
-  checked: boolean;
-  /** Toggle this task's inclusion in the batch. */
-  onToggle: (taskId: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
 
@@ -84,14 +79,6 @@ export function CaptureTaskRow({
         transition: "opacity 0.2s",
       }}
     >
-      <input
-        type="checkbox"
-        data-testid={`captura-task-check-${task.id}`}
-        checked={checked}
-        onChange={() => onToggle(task.id)}
-        aria-label={`Incluir "${task.label}" en Capturar todo`}
-        style={{ marginTop: 3, flexShrink: 0, width: 16, height: 16, cursor: "pointer" }}
-      />
       <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0, flex: 1 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <strong style={{ fontSize: 14, color: "var(--fg)" }}>{task.label}</strong>

@@ -17,9 +17,16 @@ import {
   allProfileTasks,
   buildCaptureBatchPlan,
   capCaptureBatchPlan,
+  selectionKey,
+  allTasksAcrossProfiles,
+  defaultTickedSelectionKeys,
+  buildGlobalCaptureBatchPlan,
+  capGlobalCaptureBatchPlan,
   DEFAULT_STALENESS_DAYS,
   type CaptureTask,
   type ConnectorView,
+  type ProfileCaptureView,
+  type ProfileTask,
 } from "@/lib/captura-tasks";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -497,5 +504,202 @@ describe("capCaptureBatchPlan (issue #556 review B3 — bound the piggybacked qu
     expect(capped.plan.queue).toHaveLength(0);
     expect(capped.plan.taskIds).toEqual(["first"]); // first still present even with a 0 cap
     expect(capped.droppedCount).toBe(1);
+  });
+});
+
+// ─── Cross-profile "Capturar todo" (issue #559) ────────────────────────────
+
+function mkProfileView(id: number, name: string, connectors: ConnectorView[]): ProfileCaptureView {
+  const totalTasks = connectors.reduce((a, c) => a + c.totalTasks, 0);
+  return {
+    id,
+    name,
+    connectors,
+    totalTasks,
+    actionableConnectors: connectors.filter((c) => c.state !== "not-due").length,
+  };
+}
+
+describe("selectionKey", () => {
+  it("combines profileId + taskId", () => {
+    expect(selectionKey(7, "t1")).toBe("7:t1");
+  });
+  it("distinguishes two profiles sharing the same bare task id", () => {
+    expect(selectionKey(1, "t1")).not.toBe(selectionKey(2, "t1"));
+  });
+});
+
+describe("allTasksAcrossProfiles", () => {
+  it("flattens every profile's tasks, tagged with their profile id, preserving profile then task order", () => {
+    const p1 = mkProfileView(1, "A", [
+      mkConnector("idealista", [
+        { task: T_DUE_1, due: true },
+        { task: T_DUE_2, due: true },
+      ]),
+    ]);
+    const p2 = mkProfileView(2, "B", [mkConnector("aliseda", [{ task: T_MUTED, due: false }])]);
+    const out = allTasksAcrossProfiles([p1, p2]);
+    expect(out).toEqual([
+      { profileId: 1, task: T_DUE_1 },
+      { profileId: 1, task: T_DUE_2 },
+      { profileId: 2, task: T_MUTED },
+    ]);
+  });
+
+  it("returns [] for no profiles", () => {
+    expect(allTasksAcrossProfiles([])).toEqual([]);
+  });
+});
+
+describe("defaultTickedSelectionKeys", () => {
+  it("ticks every DUE task across EVERY given profile, keyed by (profileId, taskId)", () => {
+    const p1 = mkProfileView(1, "A", [
+      mkConnector("idealista", [
+        { task: T_DUE_1, due: true },
+        { task: T_DUE_2, due: true },
+      ]),
+    ]);
+    const p2 = mkProfileView(2, "B", [mkConnector("aliseda", [{ task: T_MUTED, due: false }])]);
+    const keys = defaultTickedSelectionKeys([p1, p2]);
+    expect(keys).toEqual(new Set([selectionKey(1, "t1"), selectionKey(1, "t2")]));
+  });
+
+  it("returns an empty set when nothing anywhere is due", () => {
+    const p = mkProfileView(1, "A", [mkConnector("aliseda", [{ task: T_MUTED, due: false }])]);
+    expect(defaultTickedSelectionKeys([p]).size).toBe(0);
+  });
+});
+
+describe("buildGlobalCaptureBatchPlan (issue #559)", () => {
+  // Same bare task id ("shared") on TWO different profiles — the scenario
+  // that makes a cross-profile plan need composite keys at all.
+  const shared = (portal: string, suffix: string) => ({
+    id: "shared",
+    portal,
+    label: `${portal}-${suffix}`,
+    url: `https://${portal}.example/${suffix}`,
+    captureUrl: `https://${portal}.example/${suffix}`,
+    loosened: [],
+  });
+  const P1_SHARED = shared("idealista", "p1");
+  const P2_SHARED = shared("idealista", "p2");
+
+  function twoProfileTasks(): ProfileTask[] {
+    return [
+      { profileId: 1, task: P1_SHARED },
+      { profileId: 2, task: P2_SHARED },
+    ];
+  }
+
+  it("returns null when nothing is ticked", () => {
+    expect(buildGlobalCaptureBatchPlan(twoProfileTasks(), new Set())).toBeNull();
+  });
+
+  it("distinguishes two profiles' tasks sharing the same bare id — ticking only profile 2's opens/queues the right one", () => {
+    const ticked = new Set([selectionKey(2, "shared")]);
+    const plan = buildGlobalCaptureBatchPlan(twoProfileTasks(), ticked);
+    expect(plan).not.toBeNull();
+    expect(plan!.first).toBe(P2_SHARED);
+    expect(plan!.entries).toEqual([{ profileId: 2, taskId: "shared" }]);
+    expect(plan!.queue).toEqual([]);
+  });
+
+  it("ticking BOTH profiles' same-id task keeps them distinct in entries and queues the second", () => {
+    const ticked = new Set([selectionKey(1, "shared"), selectionKey(2, "shared")]);
+    const plan = buildGlobalCaptureBatchPlan(twoProfileTasks(), ticked);
+    expect(plan!.first).toBe(P1_SHARED);
+    expect(plan!.entries).toEqual([
+      { profileId: 1, taskId: "shared" },
+      { profileId: 2, taskId: "shared" },
+    ]);
+    expect(plan!.queue).toEqual([{ portal: "idealista", captureUrl: P2_SHARED.captureUrl }]);
+  });
+
+  it("preserves the profileTasks display order (profile order, then each profile's task order)", () => {
+    const p1 = { profileId: 1, task: T_DUE_1 };
+    const p1b = { profileId: 1, task: T_DUE_2 };
+    const p2 = { profileId: 2, task: T_MUTED };
+    const ticked = new Set([selectionKey(2, "t3"), selectionKey(1, "t1"), selectionKey(1, "t2")]);
+    const plan = buildGlobalCaptureBatchPlan([p1, p1b, p2], ticked);
+    expect(plan!.entries.map((e) => `${e.profileId}:${e.taskId}`)).toEqual(["1:t1", "1:t2", "2:t3"]);
+  });
+});
+
+describe("capGlobalCaptureBatchPlan (issue #559)", () => {
+  function bigCrossProfilePlan(perProfile: number, profileCount: number) {
+    const profileTasks: ProfileTask[] = [];
+    for (let p = 1; p <= profileCount; p += 1) {
+      for (let i = 0; i < perProfile; i += 1) {
+        profileTasks.push({
+          profileId: p,
+          task: mkTask(`p${p}-t${i}`, "idealista", `https://x/${p}/${i}`),
+        });
+      }
+    }
+    const ticked = new Set(profileTasks.map((pt) => selectionKey(pt.profileId, pt.task.id)));
+    return buildGlobalCaptureBatchPlan(profileTasks, ticked)!;
+  }
+
+  it("is a no-op when already within the cap", () => {
+    const plan = bigCrossProfilePlan(3, 2); // 6 total, 5 in queue
+    const capped = capGlobalCaptureBatchPlan(plan, 10);
+    expect(capped.droppedCount).toBe(0);
+    expect(capped.droppedProfileIds).toEqual([]);
+    expect(capped.plan).toEqual(plan);
+  });
+
+  it("truncates the tail and reports WHICH profiles lost entries — the whole point of issue #559's cap message", () => {
+    // Profile 1 contributes 20 tasks (fits entirely within a 24 cap after the
+    // first), profile 2 contributes 10 more — the tail that gets dropped is
+    // entirely profile 2's.
+    const p1Tasks: ProfileTask[] = Array.from({ length: 20 }, (_, i) => ({
+      profileId: 1,
+      task: mkTask(`p1-t${i}`, "idealista", `https://x/1/${i}`),
+    }));
+    const p2Extra: ProfileTask[] = Array.from({ length: 10 }, (_, i) => ({
+      profileId: 2,
+      task: mkTask(`p2-extra-${i}`, "idealista", `https://x/2extra/${i}`),
+    }));
+    const allTasks = [...p1Tasks, ...p2Extra];
+    const ticked = new Set(allTasks.map((pt) => selectionKey(pt.profileId, pt.task.id)));
+    const fullPlan = buildGlobalCaptureBatchPlan(allTasks, ticked)!;
+
+    const capped = capGlobalCaptureBatchPlan(fullPlan, 24);
+    expect(capped.droppedCount).toBe(30 - 1 - 24); // total 30, 1 "first" + 24 kept queue
+    expect(capped.droppedProfileIds).toEqual([2]); // only profile 2's tail was dropped
+    expect(capped.plan.entries).toHaveLength(25);
+    expect(capped.plan.queue).toHaveLength(24);
+  });
+
+  it("names MULTIPLE dropped profiles when the cap cuts across a profile boundary", () => {
+    // Profile 1: 30 tasks (more than the whole cap on its own), profile 2: 5
+    // more. Cap at 24 (1 first + 23 queue → 25 kept total) keeps entries
+    // 0..24 — ALL from profile 1 (which has 30) — and drops entries 25..34:
+    // profile 1's remaining 5 (indices 25-29) AND every one of profile 2's 5
+    // (indices 30-34). The dropped tail spans the profile boundary.
+    const p1Tasks: ProfileTask[] = Array.from({ length: 30 }, (_, i) => ({
+      profileId: 1,
+      task: mkTask(`p1-t${i}`, "idealista", `https://x/1/${i}`),
+    }));
+    const p2Tasks: ProfileTask[] = Array.from({ length: 5 }, (_, i) => ({
+      profileId: 2,
+      task: mkTask(`p2-t${i}`, "idealista", `https://x/2/${i}`),
+    }));
+    const allTasks = [...p1Tasks, ...p2Tasks];
+    const ticked = new Set(allTasks.map((pt) => selectionKey(pt.profileId, pt.task.id)));
+    const plan = buildGlobalCaptureBatchPlan(allTasks, ticked)!;
+
+    const capped = capGlobalCaptureBatchPlan(plan, 24);
+    expect(capped.droppedCount).toBe(35 - 1 - 24);
+    // The dropped tail spans the boundary between profile 1 and profile 2.
+    expect(capped.droppedProfileIds.sort()).toEqual([1, 2]);
+  });
+
+  it("the FIRST task is never counted against the cap regardless of which profile it belongs to", () => {
+    const plan = bigCrossProfilePlan(1, 1);
+    const capped = capGlobalCaptureBatchPlan(plan, 0);
+    expect(capped.plan.queue).toHaveLength(0);
+    expect(capped.plan.entries).toEqual([{ profileId: 1, taskId: "p1-t0" }]);
+    expect(capped.droppedCount).toBe(0);
   });
 });
