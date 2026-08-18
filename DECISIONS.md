@@ -118,6 +118,7 @@
 | [D-105](docs/decisions/D-105-llm-master-kill-switch.md) | `dashboard.llm_enabled` (default true) is the ONE switch that stops every model call — enforced at both seams (`llmComplete` and `assembleRequest`'s agentic branch, the only two paths per D-006), schedulers refuse to start, and API routes answer 503 `LLM_DISABLED`. Per-subsystem switches stop only their own scheduled pass. |
 | [D-106](docs/decisions/D-106-cli-spawn-hardening.md) | `CLI_SAFETY_ARGS` (`--tools ""`, `--no-session-persistence`) is passed on EVERY CLI call regardless of `dashboard.llm_cli_lean_mode` — disabling tools against untrusted scraped listing text is a security control, not a cost knob. The runner also spawns with a neutral `cwd` and an EPIPE-guarded stdin, and reads the result envelope line-by-line. |
 | [D-107](docs/decisions/D-107-subscription-quota-cap.md) | `dashboard.llm_quota_stop_pct` (0 = off) stops LLM calls when the account's consumption reaches N% of ANY window the CLI reports (session or weekly), read for free from `claude -p "/usage"` by a HOST-side poller (`scripts/claude-quota-poller.sh` → `POST /api/etl/llm-quota`) because only credential-file auth can see it. An absent or stale reading is UNKNOWN: it never blocks and never counts as 0%. |
+| [D-108](docs/decisions/D-108-cli-system-prompt-stable-only.md) | The CLI single-shot path (`claudeCliSingleShot`) MUST receive only `req.systemPrompt.stable` as its `systemPrompt` param, appended with the protocol shim as a SUFFIX — never `volatile` or any per-call text, which stays in stdin. |
 
 ## Product
 

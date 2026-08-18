@@ -21,8 +21,12 @@
  * same text passed via `--system-prompt` gets its own breakpoint and IS reused
  * across a differing tail — ~71% off the same call. So prefix caching is
  * available to us, but only once the domain system prompt stops travelling in
- * stdin as a `## system` section (`llm-client.ts`'s `buildMessagesPlain`) and
- * moves onto the flag — the F-13 split, now measured rather than assumed.
+ * stdin as a `## system` section and moves onto the flag — the F-13 split,
+ * measured here and then implemented in `llm-client.ts`'s `buildCliMessages`
+ * (stdin, `volatile` only) + `claude-code.ts`'s `claudeCliSingleShot`
+ * (`--system-prompt`, `stable`). Variants A/B below still exercise the raw
+ * pre-F-13 stdin-only shape directly (bypassing `buildCliMessages`) because
+ * that shape is the whole point of the comparison — see `runOnce`.
  *
  * An earlier version of this script fired two BYTE-IDENTICAL prompts and
  * concluded from variant B alone that "caching works". That is the one thing
@@ -139,7 +143,7 @@ function describeVerdict(v: CacheVerdict): string {
   }
 }
 
-/** Variant A/B: production's shape — everything concatenated into stdin. */
+/** Variant A/B: the PRE-F-13 shape — everything concatenated into stdin. */
 async function runOnce(label: string, prompt: string): Promise<ProbeResult> {
   const cfg = loadDashboardLlmConfig();
   const started = Date.now();
@@ -160,12 +164,17 @@ async function runOnce(label: string, prompt: string): Promise<ProbeResult> {
  * Variant C: the SAME stable block, but carried by `--system-prompt` instead
  * of being concatenated into stdin. stdin carries only the volatile tail.
  *
- * This deliberately bypasses `claudeCliSingleShot`, which hard-codes the small
- * protocol shim as its system prompt (`SINGLE_SHOT_PRINT_ARG`) and puts every
- * domain section in stdin. That shape is what variant A measures; measuring
- * the alternative needs the alternative argv, so the probe builds it here from
- * the same exported `CLI_SAFETY_ARGS`/`CLI_LEAN_ARGS` production uses — no
- * production code path is changed to run this.
+ * At the time this was written this deliberately bypassed `claudeCliSingleShot`,
+ * which hard-coded the small protocol shim as its system prompt
+ * (`SINGLE_SHOT_PRINT_ARG`) and put every domain section in stdin — that shape
+ * is what variant A measures. F-13 (2026-08-18, this measurement's own
+ * conclusion) subsequently taught `claudeCliSingleShot` this exact shape (its
+ * `systemPrompt` param), so this hand-rolled argv is no longer the ONLY way to
+ * get it — but it stays hand-rolled here on purpose: this script is the
+ * historical baseline measurement, and pinning its own argv construction
+ * (from the same exported `CLI_SAFETY_ARGS`/`CLI_LEAN_ARGS` production uses)
+ * keeps a future edit to `claudeCliSingleShot` from silently changing what a
+ * re-run of this probe measures.
  */
 async function runSystemPromptVariant(label: string, tail: string): Promise<ProbeResult> {
   const cfg = loadDashboardLlmConfig();
@@ -218,7 +227,7 @@ async function main() {
   console.log("F-0c CLI prompt-cache probe");
   console.log("============================");
   console.log(`Stable block: ${STABLE_PREFIX.length} chars — byte-identical in every call below.`);
-  console.log("Variants A/B carry it in stdin (production's shape); C carries it in --system-prompt.");
+  console.log("Variants A/B carry it in stdin (the pre-F-13 shape); C carries it in --system-prompt (now production's shape).");
   console.log(`Run nonce: ${RUN_NONCE} — every prompt below is one the API has never seen.`);
 
   // A vs C is the question that decides F-1/F-2: does the stable block get

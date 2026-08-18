@@ -183,6 +183,78 @@ describe("llmComplete", () => {
     expect(callArgs.messages[3]).toMatchObject({ role: "user", content: "third" });
   });
 
+  // ── CLI system-prompt split (F-13) ──────────────────────────────────────────
+  //
+  // Before F-13, `stable` + `volatile` were concatenated into ONE stdin blob
+  // for the CLI provider, so the Anthropic prompt-cache breakpoint landed at
+  // the END of the body — a per-property `volatile` tail busted the whole
+  // thing, every call, on every flow (measured $0.0200/call, 0 cache reads;
+  // see docs/roadmap/llm-batching-plan.md Phase 0c). The fix only pays off if
+  // the value handed to `claudeCliSingleShot`'s `systemPrompt` (which becomes
+  // `--system-prompt`) is BYTE-IDENTICAL across calls for the same flow — if
+  // any per-call text leaks in there, it silently degrades straight back to
+  // the pre-F-13 result and nothing would flag it. These tests pin that.
+
+  it("routes `stable` to claudeCliSingleShot's systemPrompt, not into the stdin prompt", async () => {
+    vi.stubEnv("DASHBOARD_LLM_PROVIDER", "cli");
+    resetDashboardLlmConfigCache();
+    stubCli("cli response");
+
+    await llmComplete({
+      flow: "occupancy",
+      systemPrompt: { stable: "STABLE_DOMAIN_BLOCK", volatile: "VOLATILE_PROPERTY_TEXT" },
+      messages: [{ role: "user", content: "assess this listing" }],
+    });
+
+    expect(mockCliSingleShot).toHaveBeenCalledOnce();
+    const call = mockCliSingleShot.mock.calls[0][0] as { prompt: string; systemPrompt?: string };
+    expect(call.systemPrompt).toBe("STABLE_DOMAIN_BLOCK");
+    // stdin carries the volatile context + the conversation turn...
+    expect(call.prompt).toContain("VOLATILE_PROPERTY_TEXT");
+    expect(call.prompt).toContain("assess this listing");
+    // ...but never a second copy of the stable block (that would put it back
+    // in stdin, degrading the cache to the pre-F-13 result).
+    expect(call.prompt).not.toContain("STABLE_DOMAIN_BLOCK");
+  });
+
+  it("sends a byte-identical CLI systemPrompt for two different properties on the same flow", async () => {
+    vi.stubEnv("DASHBOARD_LLM_PROVIDER", "cli");
+    resetDashboardLlmConfigCache();
+    stubCli("cli response");
+
+    // Same shape `buildOccupancyPrompt`/`buildConditionPrompt`/etc. produce:
+    // `stable` is a flow-constant template with no per-property interpolation;
+    // only `volatile` and the user message carry the property being assessed.
+    const stable = "STABLE_OCCUPANCY_TEMPLATE — identical for every property";
+
+    await llmComplete({
+      flow: "occupancy",
+      systemPrompt: { stable, volatile: "Inmueble PROP-1001: piso a reformar en Madrid" },
+      messages: [{ role: "user", content: "Evalúa PROP-1001" }],
+    });
+    await llmComplete({
+      flow: "occupancy",
+      systemPrompt: { stable, volatile: "Inmueble PROP-2002: chalet en buen estado en Sevilla" },
+      messages: [{ role: "user", content: "Evalúa PROP-2002" }],
+    });
+
+    expect(mockCliSingleShot).toHaveBeenCalledTimes(2);
+    const [callA, callB] = mockCliSingleShot.mock.calls.map(
+      (c) => c[0] as { prompt: string; systemPrompt?: string },
+    );
+
+    // The whole point: byte-identical across two different properties.
+    expect(callA.systemPrompt).toBe(callB.systemPrompt);
+    expect(callA.systemPrompt).toBe(stable);
+
+    // And it must carry no per-property marker at all — proves the property
+    // id/description never leaked from `volatile` into the cached prefix.
+    expect(callA.systemPrompt).not.toContain("PROP-1001");
+    expect(callA.systemPrompt).not.toContain("PROP-2002");
+    expect(callA.systemPrompt).not.toContain("reformar");
+    expect(callA.systemPrompt).not.toContain("Sevilla");
+  });
+
   // ── Telemetry ────────────────────────────────────────────────────────────────
 
   it("calls logUsage exactly once per llmComplete call (openrouter)", async () => {
