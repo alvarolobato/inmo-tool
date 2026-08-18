@@ -34,6 +34,16 @@
  *    host process (EC-3). A `NoListingsError` or any other per-property error
  *    is logged and skipped so one bad property never sinks the whole batch.
  *
+ * ## Loop order (docs/roadmap/llm-batching-plan.md, Phase 1)
+ *
+ * The per-property/flow work is FLOW-MAJOR (`for flow { for property { … } }`),
+ * not property-major — a pure control-flow restructure, no prompt or version
+ * change. It exists as a prerequisite for a later, separate change (multi-
+ * property batching, NOT built here): packing several properties into one LLM
+ * call requires collecting them per flow first, which only a flow-major outer
+ * loop makes possible. See the loop body below for the one semantic
+ * consequence this ordering has for a mid-pass budget/circuit/quota stop.
+ *
  * Server-only: transitively imports `lib/db-write` (the `pg` client). Never
  * import from a client component.
  */
@@ -289,9 +299,39 @@ export async function runAssessmentBatch(
     );
   }
 
-  for (const propertyId of propertyIds) {
-    result.properties += 1;
-    for (const flow of flows) {
+  // #Phase-1 (llm-batching-plan.md): FLOW-MAJOR, not property-major. The outer
+  // loop is the flow, the inner loop is the property — the reverse of the
+  // original #308 shape. This exists purely as a Phase-3 prerequisite: batching
+  // N properties into one LLM call (planned, not built here) requires collecting
+  // N properties *for the same flow* before any call is made, which is only
+  // possible if the flow is the outer loop. This PR is control-flow only — no
+  // prompt, no version bump, no batching yet; every flow still runs one property
+  // at a time via the existing `flow.assess(propertyId, …)` entry point.
+  //
+  // `properties` keeps its original meaning ("distinct properties this tick
+  // actually reached, not just selected") via `touchedProperties`, a property
+  // is "touched" the first time ANY flow visits it — mirroring the old
+  // unconditional `result.properties += 1` at the top of the (then) outer
+  // property loop, just computed from the new (then) inner loop instead.
+  //
+  // SEMANTIC CONSEQUENCE (deliberate, not a bug — see the Phase-1 PR body):
+  // under the old property-major order, a mid-pass budget/circuit/quota stop
+  // left a clean prefix of properties fully assessed (every flow) and a clean
+  // suffix wholly untouched. Under flow-major, the same stop instead leaves
+  // EVERY selected property assessed on the flows that ran before the stopped
+  // one, and none on the flows after it — i.e. properties get assessed on
+  // *some* axes and not others, rather than some properties being fully done
+  // and others fully pending. This is safe because selection is per-axis
+  // (`missingCurrentVerdictClause` in eligibility.ts): the next tick just picks
+  // up exactly the still-missing (property, flow) pairs, same as always. Pinned
+  // by the "budget stop mid-flow" test in batch.test.ts.
+  const touchedProperties = new Set<number>();
+
+  for (const flow of flows) {
+    for (const propertyId of propertyIds) {
+      touchedProperties.add(propertyId);
+      result.properties = touchedProperties.size;
+
       // EC-2: skip a flow whose verdict already matches the current prompt
       // version — no listing load, no LLM call, no spend.
       if (await isCurrent(propertyId, flow)) {
