@@ -559,7 +559,7 @@ export interface CappedCaptureBatchPlan {
  * #556 review B3). Dropped tasks are NEVER recorded (`capture_task_run`) and
  * NEVER queued — recording a task as "done" when it was actually dropped
  * would be a worse lie than the one this cap exists to prevent. The caller
- * (`CapturaProfileSection.onCapturarTodo`) tells the owner exactly how many
+ * (`CapturaProfiles.onCapturarTodo`) tells the owner exactly how many
  * didn't fit so a second "Capturar todo" click (once the first batch drains)
  * picks up the remainder — nothing is silently lost, just deferred.
  * `maxQueueEntries` caps `plan.queue.length` (the FIRST task always rides
@@ -704,13 +704,41 @@ export function buildGlobalCaptureBatchPlan(
   });
   const plan = buildCaptureBatchPlan(keyedTasks, ticked);
   if (!plan) return null;
+  // De-dupe the WIRE queue by (portal, captureUrl) while leaving `entries`
+  // alone. `stableTaskId` hashes portal|section|location|price|size|rooms with
+  // NO profile component (lib/search-url/task-id.ts), so two profiles with
+  // identical filter tuples — "Rentabilidad Estepona" and "Flip Estepona",
+  // same geography and bands — produce the SAME captureUrl. Before this, the
+  // payload carried it twice and the extension really crawled it twice: the
+  // second run re-walks every results page (up to RESULTS_PAGE_CAP=40, paced)
+  // and then captures nothing. A wholly redundant walk against a portal we are
+  // trying to be a good neighbour to, and it burns a MAX_QUEUE_ENTRIES slot
+  // that would otherwise carry distinct work.
+  //
+  // `entries` is deliberately NOT de-duped: `capture_task_run` is keyed
+  // (profile_id, task_id), so BOTH profiles legitimately get their ledger row
+  // — the search genuinely ran for each of them. Only the wire is redundant.
+  // Note the extension's own `enqueueSearch` dedupe cannot catch this: the
+  // claimed run isn't in the queue it compares against.
+  const wireKeyOf = (portal: string, captureUrl: string) => `${portal}\u0000${captureUrl}`;
+  // Seed with `first` — it is opened directly rather than queued, so a queue
+  // entry matching it is the same redundant crawl, just via the other door.
+  const seenWire = new Set<string>([
+    wireKeyOf(plan.first.portal, plan.first.captureUrl),
+  ]);
+  const dedupedQueue = plan.queue.filter((q) => {
+    const wireKey = wireKeyOf(q.portal, q.captureUrl);
+    if (seenWire.has(wireKey)) return false;
+    seenWire.add(wireKey);
+    return true;
+  });
   return {
     entries: plan.taskIds.map((key) => {
       const pt = byKey.get(key)!;
       return { profileId: pt.profileId, taskId: pt.task.id };
     }),
     first: byKey.get(plan.first.id)!.task,
-    queue: plan.queue,
+    queue: dedupedQueue,
   };
 }
 

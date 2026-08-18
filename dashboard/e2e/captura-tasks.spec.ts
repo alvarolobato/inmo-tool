@@ -513,6 +513,12 @@ test.describe("Capturar todo — GLOBAL across profiles (issue #559, correcting 
       .toBe(openedBeforeAny + 1);
     const opened = await page.evaluate(() => (window as unknown as { __opened: string[] }).__opened.at(-1)!);
     const u = new URL(opened);
+    // D-113's whole point: the queue payload rides the FRAGMENT, which browsers
+    // never send to the portal, and the signal stays the 15-byte query flag.
+    // #560's review noted the rewrite dropped these two lines; restored as
+    // belt-and-braces over lib/__tests__/extension-capture.test.ts's unit pin.
+    expect(u.searchParams.has("inmo-capture-queue")).toBe(false);
+    expect(u.searchParams.get("inmo-capture")).toBe("1");
     expect(u.hash.startsWith("#inmo-capture-queue=")).toBe(true);
     const decodedQueue = JSON.parse(decodeURIComponent(u.hash.slice("#inmo-capture-queue=".length)));
     expect(decodedQueue).toHaveLength(1); // the second ticked task, from the OTHER profile

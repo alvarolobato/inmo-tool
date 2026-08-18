@@ -595,6 +595,53 @@ describe("buildGlobalCaptureBatchPlan (issue #559)", () => {
     expect(buildGlobalCaptureBatchPlan(twoProfileTasks(), new Set())).toBeNull();
   });
 
+  it("de-dupes the WIRE queue when two profiles resolve to the same captureUrl, but keeps BOTH ledger entries", () => {
+    // stableTaskId hashes portal|section|location|price|size|rooms with no
+    // profile component, so two profiles with identical filter tuples produce
+    // the SAME captureUrl. Sending it twice makes the extension re-walk every
+    // results page (up to RESULTS_PAGE_CAP=40) to capture nothing — a
+    // redundant crawl against a portal we are trying not to abuse. The
+    // extension's own enqueueSearch dedupe cannot catch it: the claimed run
+    // is not in the queue it compares against.
+    const SAME = "https://idealista.example/venta-viviendas/estepona";
+    const same = (label: string) => ({
+      id: "shared",
+      portal: "idealista",
+      label,
+      url: SAME,
+      captureUrl: SAME,
+      loosened: [],
+    });
+    // Three profiles, one distinct extra task, all ticked.
+    const tasks: ProfileTask[] = [
+      { profileId: 1, task: same("rentabilidad") },
+      { profileId: 2, task: same("flip") },
+      { profileId: 3, task: same("patrimonio") },
+      { profileId: 4, task: { ...same("otra"), id: "other", captureUrl: SAME + "/otra", url: SAME + "/otra" } },
+    ];
+    const ticked = new Set([
+      selectionKey(1, "shared"),
+      selectionKey(2, "shared"),
+      selectionKey(3, "shared"),
+      selectionKey(4, "other"),
+    ]);
+    const plan = buildGlobalCaptureBatchPlan(tasks, ticked)!;
+    expect(plan).not.toBeNull();
+
+    // The wire carries the shared search ONCE (as `first`), plus the distinct one.
+    expect(plan.first.captureUrl).toBe(SAME);
+    expect(plan.queue.map((q) => q.captureUrl)).toEqual([SAME + "/otra"]);
+
+    // But every profile still gets its capture_task_run row — the search
+    // genuinely ran for each of them; only the transmission was redundant.
+    expect(plan.entries).toEqual([
+      { profileId: 1, taskId: "shared" },
+      { profileId: 2, taskId: "shared" },
+      { profileId: 3, taskId: "shared" },
+      { profileId: 4, taskId: "other" },
+    ]);
+  });
+
   it("distinguishes two profiles' tasks sharing the same bare id — ticking only profile 2's opens/queues the right one", () => {
     const ticked = new Set([selectionKey(2, "shared")]);
     const plan = buildGlobalCaptureBatchPlan(twoProfileTasks(), ticked);

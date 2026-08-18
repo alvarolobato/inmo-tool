@@ -108,7 +108,7 @@ run → due; run < window ago → muted; run ≥ window ago → due again.
 
 ## "Capturar todo" — the batch button (issue #556, corrected to page-level by #559/D-113/D-114)
 
-**ONE button for the whole page**, above the profile-filter select, labelled
+**ONE button for the whole page**, below the profile-filter select, labelled
 with the live ticked count (`CapturaProfiles.tsx` — moved here from
 `CapturaProfileSection.tsx` by #559; that component is now a thin per-profile
 translator, see the Composition table). Owns ONE cross-profile `Set<string>`
