@@ -715,6 +715,23 @@
   }
 
   /**
+   * True iff `queue` already carries an entry for the SAME (portal,
+   * searchUrl) pair as `entry` (issue #556 review N3). `searchUrl: null`
+   * entries are NEVER deduped against each other or anything else — a null
+   * searchUrl means "unknown source", not "the same search", so two of them
+   * are not provably duplicates. Pure.
+   */
+  function hasSameSearch(queue, entry) {
+    if (!entry.searchUrl) return false;
+    for (var i = 0; i < queue.length; i++) {
+      if (queue[i].portal === entry.portal && queue[i].searchUrl === entry.searchUrl) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Append one search to the queue (pure — returns a NEW array). An invalid
    * entry (see normalizeSearchEntry) is silently dropped, so a bad message can
    * never wedge the queue with junk.
@@ -723,6 +740,12 @@
     var q = Array.isArray(queue) ? queue.slice() : [];
     var norm = normalizeSearchEntry(entry);
     if (!norm) return q;
+    // issue #556 review N3: a reloaded (F5) capture tab re-parses the SAME
+    // #inmo-capture-queue payload and re-enqueues the whole tail on every
+    // reload — without this, a single accidental reload could duplicate an
+    // N-search batch N times over. Silently drop an exact (portal, searchUrl)
+    // repeat instead of growing the queue unbounded.
+    if (hasSameSearch(q, norm)) return q;
     q.push(norm);
     return q;
   }

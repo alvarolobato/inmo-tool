@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { ConnectorSection } from "@/components/captura/ConnectorSection";
+import { CapturaProfileSection } from "@/components/captura/CapturaProfileSection";
 import type { ProfileCaptureView } from "@/lib/captura-tasks";
 
 /**
@@ -94,15 +94,7 @@ export function CapturaProfiles({ profiles }: { profiles: ProfileCaptureView[] }
                 Este perfil no tiene ninguna tarea de captura disponible todavía.
               </p>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                {profile.connectors.map((connector) => (
-                  <ConnectorSection
-                    key={connector.portal}
-                    profileId={profile.id}
-                    connector={connector}
-                  />
-                ))}
-              </div>
+              <CapturaProfileSection profile={profile} />
             )}
           </section>
         ))}

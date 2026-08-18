@@ -45,14 +45,30 @@ function stateColors(state: ConnectorView["state"]): { fg: string; bg: string } 
 export function ConnectorSection({
   profileId,
   connector,
+  checkedTaskIds,
+  onToggleTask,
+  runOverrides,
+  onOptimisticRun,
 }: {
   profileId: number;
   connector: ConnectorView;
+  /** Task ids currently ticked for the profile's "Capturar todo" batch (issue #556). */
+  checkedTaskIds: ReadonlySet<string>;
+  /** Toggle one task's inclusion in the batch. */
+  onToggleTask: (taskId: string) => void;
+  /**
+   * Optimistic per-task run overrides: task id → last-run ISO. Flips a row to
+   * muted + "hecho …" the instant its button is pressed, before a reload.
+   * Lifted to the PROFILE level (issue #556 review N7) so both this
+   * connector's single-task button AND the profile's "Capturar todo" batch
+   * button share one source of truth — a batch-launched task greys out (and
+   * un-ticks, see `CapturaProfileSection`) exactly like a single-task launch.
+   */
+  runOverrides: Readonly<Record<string, string>>;
+  /** Record an optimistic run for one task (called by this connector's own single-task button). */
+  onOptimisticRun: (taskId: string, lastRunAt: string) => void;
 }) {
   const [expanded, setExpanded] = useState(connector.defaultExpanded);
-  // Optimistic per-task run overrides: task id → last-run ISO. Flips a row to
-  // muted + "hecho …" the instant its button is pressed, before a reload.
-  const [runOverrides, setRunOverrides] = useState<Record<string, string>>({});
 
   const colors = useMemo(() => stateColors(connector.state), [connector.state]);
 
@@ -82,7 +98,7 @@ export function ConnectorSection({
       });
       if (res.ok) {
         const body = await res.json().catch(() => null);
-        setRunOverrides((prev) => ({ ...prev, [task.id]: body?.lastRunAt ?? stamp }));
+        onOptimisticRun(task.id, body?.lastRunAt ?? stamp);
       }
     } catch {
       // Recording is best-effort — never block opening the search.
@@ -244,6 +260,8 @@ export function ConnectorSection({
                   lastDone={lastDone}
                   lastRunAt={lastRunAt}
                   onExecute={onExecute}
+                  checked={checkedTaskIds.has(tv.task.id)}
+                  onToggle={onToggleTask}
                 />
               );
             })}

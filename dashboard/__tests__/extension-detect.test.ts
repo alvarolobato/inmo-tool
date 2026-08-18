@@ -30,6 +30,8 @@ const {
   captureSignalPresent,
   withCaptureSignal,
   stripCaptureSignal,
+  parseCaptureQueue,
+  stripCaptureQueue,
   validateSignalPayload,
   validateSignalPresent,
   stripValidateSignal,
@@ -63,6 +65,8 @@ const {
   captureSignalPresent: (u: string) => boolean;
   withCaptureSignal: (u: string) => string;
   stripCaptureSignal: (u: string) => string;
+  parseCaptureQueue: (u: string) => { portal: string; searchUrl: string }[];
+  stripCaptureQueue: (u: string) => string;
   validateSignalPayload: (u: string) => { profileId: number; connector: string } | null;
   validateSignalPresent: (u: string) => boolean;
   stripValidateSignal: (u: string) => string;
@@ -758,6 +762,56 @@ describe("stripCaptureSignal — clean the URL before capture-to-infer learning 
 });
 
 // ── Validation-mode signal (issue #478 P3) ──────────────────────────────────
+
+describe("parseCaptureQueue — parse ?inmo-capture-queue=<json> (issue #556)", () => {
+  const BASE = "https://www.idealista.com/venta-viviendas/madrid/";
+
+  it("parses a well-formed tuple-array payload into {portal, searchUrl}[]", () => {
+    const payload = encodeURIComponent(
+      JSON.stringify([
+        ["aliseda", "https://www.alisedainmobiliaria.com/venta"],
+        ["altamira", "https://www.altamirainmuebles.com/venta"],
+      ]),
+    );
+    expect(parseCaptureQueue(`${BASE}?inmo-capture-queue=${payload}`)).toEqual([
+      { portal: "aliseda", searchUrl: "https://www.alisedainmobiliaria.com/venta" },
+      { portal: "altamira", searchUrl: "https://www.altamirainmuebles.com/venta" },
+    ]);
+  });
+
+  it("returns [] (never throws) when the signal is absent", () => {
+    expect(parseCaptureQueue(BASE)).toEqual([]);
+    expect(parseCaptureQueue("not a url")).toEqual([]);
+  });
+
+  it("returns [] for malformed JSON or a non-array payload", () => {
+    expect(parseCaptureQueue(`${BASE}?inmo-capture-queue=not-json`)).toEqual([]);
+    expect(parseCaptureQueue(`${BASE}?inmo-capture-queue=%7B%7D`)).toEqual([]); // "{}"
+  });
+
+  it("drops individual malformed entries without rejecting the whole list", () => {
+    const payload = encodeURIComponent(
+      JSON.stringify([["aliseda", "https://x/y"], ["only-portal"], [1, 2], ["", "https://x/z"]]),
+    );
+    expect(parseCaptureQueue(`${BASE}?inmo-capture-queue=${payload}`)).toEqual([
+      { portal: "aliseda", searchUrl: "https://x/y" },
+    ]);
+  });
+});
+
+describe("stripCaptureQueue — never persist the batch-queue param (issue #556)", () => {
+  const BASE = "https://www.idealista.com/venta-viviendas/madrid/";
+
+  it("removes the query-key form, preserving other params", () => {
+    const payload = encodeURIComponent(JSON.stringify([["aliseda", "https://x/y"]]));
+    expect(stripCaptureQueue(`${BASE}?a=1&inmo-capture-queue=${payload}`)).toBe(`${BASE}?a=1`);
+  });
+
+  it("leaves a URL without the param untouched", () => {
+    expect(stripCaptureQueue(BASE)).toBe(BASE);
+    expect(stripCaptureQueue("not a url")).toBe("not a url");
+  });
+});
 
 describe("validateSignalPayload — parse #inmo-validate=<pid>:<connector>", () => {
   const BASE = "https://www.idealista.com/venta-viviendas/sevilla-sevilla/";

@@ -616,6 +616,23 @@
   // dashboard opener dashboard/lib/extension-validate.ts `withValidateSignal`.
   var VALIDATE_SIGNAL = "inmo-validate";
 
+  // ── "Capturar todo" batch-queue signal (issue #556) ───────────────────────
+  //
+  // The dashboard's global "Capturar todo" button (one per profile) can only
+  // open ONE tab in its click's user gesture — popup blockers eat any further
+  // `window.open` call. So it hands the REST of the ticked tasks to this ONE
+  // tab as `?inmo-capture-queue=<json>` (a compact `[portal, captureUrl][]`
+  // tuple array; ALWAYS the query form — `withCaptureSignal` already claims
+  // the fragment slot for the byte-for-byte-pinned `#inmo-capture` signal, see
+  // dashboard/lib/extension-capture.ts). This tab's content script reads it
+  // (`parseCaptureQueue` below) and forwards it to background.js's
+  // `startBatch`, which appends each entry to the #555/D-112 pending-search
+  // queue — the SAME queue a manually-opened second search joins, just seeded
+  // programmatically instead of by another `window.open`. Must agree
+  // byte-for-byte with dashboard/lib/extension-capture.ts
+  // `CAPTURE_QUEUE_SIGNAL` / `encodeCaptureQueue`.
+  var CAPTURE_QUEUE_SIGNAL = "inmo-capture-queue";
+
   /** True iff `url` carries the given fragment/query signal. Pure; false on parse error. */
   function urlSignalPresent(url, signal) {
     var parsed;
@@ -712,8 +729,17 @@
   /**
    * The raw signal VALUE carried by `url` for `signal` (the part after `=`), or
    * null when absent. Reads the fragment form `#<signal>=<value>` first, then
-   * the query form `?<signal>=<value>` (already percent-decoded by searchParams).
-   * Pure; null on parse error.
+   * the query form `?<signal>=<value>` (already percent-decoded by
+   * searchParams). The FRAGMENT branch is percent-DECODED here explicitly
+   * (issue #556 review N4) — `URL.hash` is never auto-decoded by the platform
+   * the way `searchParams.get()` is, so a value written with
+   * `encodeURIComponent` (as `withCaptureQueue` does — see
+   * dashboard/lib/extension-capture.ts) would otherwise come back through
+   * still percent-encoded and fail `JSON.parse` at the call site, silently
+   * degrading to "no queue" instead of a real error. A malformed
+   * percent-encoding (`decodeURIComponent` throwing) returns the raw slice
+   * unchanged rather than null — the caller's own parsing (e.g. `JSON.parse`)
+   * is left to fail safely on it. Pure; null on URL parse error.
    */
   function urlSignalValue(url, signal) {
     var parsed;
@@ -725,7 +751,12 @@
     var hashKey = parsed.hash.replace(/^#/, "");
     var prefix = signal + "=";
     if (hashKey.indexOf(prefix) === 0) {
-      return hashKey.slice(prefix.length);
+      var raw = hashKey.slice(prefix.length);
+      try {
+        return decodeURIComponent(raw);
+      } catch (e) {
+        return raw;
+      }
     }
     try {
       if (parsed.searchParams.has(signal)) {
@@ -757,6 +788,70 @@
     if (!(profileId > 0)) return null;
     if (!connector) return null;
     return { profileId: profileId, connector: connector };
+  }
+
+  /**
+   * Parse the "Capturar todo" queue payload (issue #556) out of `url`:
+   * `?inmo-capture-queue=<json>` (a `[portal, captureUrl][]` tuple array; the
+   * fragment form is accepted too via `urlSignalValue` for symmetry, though
+   * the dashboard opener always uses the query form — see CAPTURE_QUEUE_SIGNAL
+   * above). Returns `[]` (never null, never throws) for absent/malformed
+   * input, and silently drops any malformed individual entry rather than
+   * rejecting the whole list — a bad entry must never lose the good ones.
+   * Each entry is `{ portal, searchUrl }`, matching the shape
+   * `background.js`'s `startBatch`/`InmoBatch.enqueueSearch` already expect.
+   */
+  function parseCaptureQueue(url) {
+    var raw = urlSignalValue(url, CAPTURE_QUEUE_SIGNAL);
+    if (raw == null || raw === "") return [];
+    var data;
+    try {
+      data = JSON.parse(raw);
+    } catch (e) {
+      return [];
+    }
+    if (!Array.isArray(data)) return [];
+    var out = [];
+    for (var i = 0; i < data.length; i++) {
+      var entry = data[i];
+      if (
+        Array.isArray(entry) &&
+        typeof entry[0] === "string" &&
+        entry[0] &&
+        typeof entry[1] === "string" &&
+        entry[1]
+      ) {
+        out.push({ portal: entry[0], searchUrl: entry[1] });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Return `url` with the "Capturar todo" queue param removed — used before
+   * handing this search page's own url to the capture-to-infer learner (issue
+   * #303), the same reason `stripCaptureSignal` exists, so our synthetic
+   * `inmo-capture-queue` param never pollutes a learned search-url example.
+   * Pure; returns the input unchanged on a parse failure.
+   */
+  function stripCaptureQueue(url) {
+    var parsed;
+    try {
+      parsed = new URL(String(url).trim());
+    } catch (e) {
+      return url;
+    }
+    if (parsed.hash.replace(/^#/, "").indexOf(CAPTURE_QUEUE_SIGNAL + "=") === 0) {
+      parsed.hash = "";
+    }
+    try {
+      if (parsed.searchParams.has(CAPTURE_QUEUE_SIGNAL)) {
+        parsed.searchParams.delete(CAPTURE_QUEUE_SIGNAL);
+      }
+    } catch (e) {
+      /* searchParams unavailable — ignore */
+    }
+    return parsed.toString();
   }
 
   /**
@@ -1078,10 +1173,13 @@
     CAPTURE_SIGNAL: CAPTURE_SIGNAL,
     DISCOVER_SIGNAL: DISCOVER_SIGNAL,
     VALIDATE_SIGNAL: VALIDATE_SIGNAL,
+    CAPTURE_QUEUE_SIGNAL: CAPTURE_QUEUE_SIGNAL,
     captureSignalPresent: captureSignalPresent,
     discoverSignalPresent: discoverSignalPresent,
     withCaptureSignal: withCaptureSignal,
     stripCaptureSignal: stripCaptureSignal,
+    parseCaptureQueue: parseCaptureQueue,
+    stripCaptureQueue: stripCaptureQueue,
     validateSignalPayload: validateSignalPayload,
     validateSignalPresent: validateSignalPresent,
     stripValidateSignal: stripValidateSignal,

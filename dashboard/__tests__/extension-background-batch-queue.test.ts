@@ -83,9 +83,13 @@ function makeStorageArea(store: Record<string, unknown>): StorageArea {
       for (const k of list) if (k in store) out[k] = store[k];
       return out;
     },
-    set: async (obj) => {
+    // Wrapped in vi.fn() (issue #556 review N6) so tests can assert HOW MANY
+    // storage writes a call caused, not just the resulting value — the N6 fix
+    // is specifically about avoiding a redundant no-op write, which a
+    // value-only assertion can't distinguish from "wrote the same value twice".
+    set: vi.fn(async (obj: Record<string, unknown>) => {
       Object.assign(store, obj);
-    },
+    }),
     remove: async (keys) => {
       const list = Array.isArray(keys) ? keys : [keys];
       for (const k of list) delete store[k];
@@ -182,6 +186,7 @@ interface BackgroundModule {
     portal: string;
     urls: string[];
     searchUrl: string | null;
+    queue?: { portal: string; searchUrl: string | null }[];
   }) => Promise<{ started?: boolean; queued?: boolean; queueDepth?: number; aheadCount?: number; total?: number }>;
   advanceQueueIfIdle: () => Promise<boolean>;
   runCaptureQueue: (portal: string, discoveredCount?: number) => Promise<unknown>;
@@ -431,5 +436,135 @@ describe("STOP_BATCH drains the whole pending-search queue", () => {
     await bg.stopBatch();
 
     expect(await bg.getSearchQueue()).toHaveLength(0);
+  });
+});
+
+describe("startBatch's `queue` field — the dashboard's 'Capturar todo' handoff (issue #556)", () => {
+  it("appends every `queue` entry BEHIND a search that gets itself queued (a run is already active)", async () => {
+    const deferredA = makeDeferred<{ rows: unknown[] }>();
+    const chrome = makeChromeMock();
+    const fetchMock = makeFetchMock({ idealista: () => deferredA.promise });
+    const bg = loadBackground(chrome, fetchMock);
+
+    // Search A claims the run and gets stuck mid-handoff (same technique as
+    // the B1 test above), so isBatchActive() reads true deterministically.
+    await bg.startBatch({ portal: "idealista", urls: [], searchUrl: null });
+    await vi.waitFor(() => {
+      const reached = fetchMock.mock.calls.some(
+        ([url]) => typeof url === "string" && url.includes("portal=idealista"),
+      );
+      if (!reached) throw new Error("fetchPendingUrls(idealista) not called yet");
+    });
+    expect(await bg.isBatchActive()).toBe(true);
+
+    // The dashboard's batch button opened search B's tab and piggybacked TWO
+    // more ticked tasks on it — everything must queue behind the live run,
+    // in order: B, then the two `queue` entries.
+    const resB = await bg.startBatch({
+      portal: "aliseda",
+      urls: [],
+      searchUrl: "https://www.alisedainmobiliaria.com/venta",
+      queue: [
+        { portal: "altamira", searchUrl: "https://www.altamirainmuebles.com/venta" },
+        { portal: "servihabitat", searchUrl: "https://www.servihabitat.com/venta" },
+      ],
+    });
+    expect(resB.started).toBeFalsy();
+    expect(resB.queued).toBe(true);
+
+    const queue = await bg.getSearchQueue();
+    expect(queue.map((e) => e.portal)).toEqual(["aliseda", "altamira", "servihabitat"]);
+
+    deferredA.resolve({ rows: [] }); // let search A's stuck handoff finish, unblocking teardown
+  });
+
+  it("appends `queue` entries behind a search that CLAIMS the run (nothing was active)", async () => {
+    const chrome = makeChromeMock();
+    const fetchMock = makeFetchMock({}); // idealista pending resolves empty instantly
+    const bg = loadBackground(chrome, fetchMock);
+
+    // Nothing active: search A claims the run directly. Assert the queue
+    // state the SAME critical section leaves behind before any fire-and-forget
+    // enumeration/capture work can drain it — this holds deterministically
+    // because the extra entries are enqueued synchronously inside the same
+    // `runBatchStateExclusive` section that persists the 'enumerating' claim,
+    // strictly before `beginRun`'s async chain is even started.
+    const resA = await bg.startBatch({
+      portal: "idealista",
+      urls: [],
+      searchUrl: null,
+      queue: [{ portal: "aliseda", searchUrl: null }],
+    });
+    expect(resA.started).toBe(true);
+
+    const queue = await bg.getSearchQueue();
+    expect(queue.map((e) => e.portal)).toEqual(["aliseda"]);
+  });
+
+  it("drops a malformed `queue` entry (missing portal) without dropping the well-formed ones", async () => {
+    const deferredA = makeDeferred<{ rows: unknown[] }>();
+    const chrome = makeChromeMock();
+    const fetchMock = makeFetchMock({ idealista: () => deferredA.promise });
+    const bg = loadBackground(chrome, fetchMock);
+
+    await bg.startBatch({ portal: "idealista", urls: [], searchUrl: null });
+    await vi.waitFor(() => {
+      const reached = fetchMock.mock.calls.some(
+        ([url]) => typeof url === "string" && url.includes("portal=idealista"),
+      );
+      if (!reached) throw new Error("fetchPendingUrls(idealista) not called yet");
+    });
+
+    await bg.startBatch({
+      portal: "aliseda",
+      urls: [],
+      searchUrl: null,
+      // @ts-expect-error — deliberately malformed to exercise the drop path
+      queue: [{ searchUrl: "https://x/y" }, { portal: "altamira", searchUrl: "https://x/z" }],
+    });
+
+    const queue = await bg.getSearchQueue();
+    expect(queue.map((e) => e.portal)).toEqual(["aliseda", "altamira"]);
+
+    deferredA.resolve({ rows: [] });
+  });
+
+  it("an absent `queue` field behaves exactly as before (byte-identical to the pre-#556 shape)", async () => {
+    const chrome = makeChromeMock();
+    const fetchMock = makeFetchMock({});
+    const bg = loadBackground(chrome, fetchMock);
+
+    const res = await bg.startBatch({ portal: "idealista", urls: [], searchUrl: null });
+    expect(res.started).toBe(true);
+    expect(await bg.getSearchQueue()).toEqual([]);
+  });
+
+  it("N6: an empty `queue` on a CLAIMED run skips the redundant chrome.storage.session write entirely", async () => {
+    const chrome = makeChromeMock();
+    const fetchMock = makeFetchMock({});
+    const bg = loadBackground(chrome, fetchMock);
+    const setSpy = chrome.storage.session.set as unknown as { mock: { calls: unknown[][] } };
+
+    await bg.startBatch({ portal: "idealista", urls: [], searchUrl: null }); // no `queue` field at all
+    // Only the enumerating-claim write (setEnumState) — no separate, no-op
+    // setSearchQueue write on the hot (no-batch-button) path.
+    expect(setSpy.mock.calls).toHaveLength(1);
+  });
+
+  it("a non-empty `queue` on a CLAIMED run still writes the queue exactly once", async () => {
+    const chrome = makeChromeMock();
+    const fetchMock = makeFetchMock({});
+    const bg = loadBackground(chrome, fetchMock);
+    const setSpy = chrome.storage.session.set as unknown as { mock: { calls: unknown[][] } };
+
+    await bg.startBatch({
+      portal: "idealista",
+      urls: [],
+      searchUrl: null,
+      queue: [{ portal: "aliseda", searchUrl: null }],
+    });
+    // setSearchQueue (the extra entry) + setEnumState (the claim) — exactly 2.
+    expect(setSpy.mock.calls).toHaveLength(2);
+    expect(await bg.getSearchQueue()).toHaveLength(1);
   });
 });

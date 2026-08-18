@@ -925,30 +925,63 @@ async function postFilterCatalog(payload) {
  * racing each other can never both decide "nothing's running" and both
  * clobber BATCH_ENUM_KEY — that race was the original clobbering bug, just
  * one message-timing away from a second click.
+ *
+ * `queue` (issue #556, optional — `{portal, searchUrl}[]`) is the REST of the
+ * dashboard's "Capturar todo" ticked tasks, piggybacked onto this one search's
+ * URL because the dashboard can only ever hand off ONE tab (see
+ * dashboard/lib/extension-capture.ts). Each entry is appended to the SAME
+ * #555/D-112 pending-search queue, in order, behind this search — whether
+ * THIS search claims the run or is itself queued. `urls` is always `[]` for
+ * these (the dashboard never harvests a DOM it didn't open); that's fine —
+ * `enumerateResultsPages` self-renders page 1 the same way it already renders
+ * every OTHER results page (issue #554/#362), no dashboard tab required.
  */
-async function startBatch({ portal, urls, searchUrl }) {
+async function startBatch({ portal, urls, searchUrl, queue: extraQueue }) {
   const page1 = Array.isArray(urls) ? urls : [];
+  const extra = Array.isArray(extraQueue) ? extraQueue : [];
   const claim = await runBatchStateExclusive(async () => {
+    let q = await getSearchQueue();
     if (await isBatchActive()) {
-      const queue = InmoBatch.enqueueSearch(await getSearchQueue(), {
-        portal,
-        urls: page1,
-        searchUrl,
-      });
-      await setSearchQueue(queue);
-      return { claimed: false, queueDepth: queue.length };
+      q = InmoBatch.enqueueSearch(q, { portal, urls: page1, searchUrl });
+      for (const e of extra) {
+        q = InmoBatch.enqueueSearch(q, {
+          portal: e && e.portal,
+          urls: [],
+          searchUrl: e && e.searchUrl,
+        });
+      }
+      await setSearchQueue(q);
+      return { claimed: false, queueDepth: q.length };
     }
     // Claim the run atomically: entering the enumerating phase HERE (inside
     // the lock) is what makes isBatchActive() report true for any concurrent
     // START_BATCH/advanceQueueIfIdle call that queues behind the exclusive
-    // section.
+    // section. The rest of `extra` is enqueued behind THIS claimed search —
+    // still inside the lock, so no interleaved START_BATCH can land between
+    // this search and its own tail.
+    if (extra.length > 0) {
+      for (const e of extra) {
+        q = InmoBatch.enqueueSearch(q, {
+          portal: e && e.portal,
+          urls: [],
+          searchUrl: e && e.searchUrl,
+        });
+      }
+      // issue #556 review N6: only write the queue back when `extra` actually
+      // changed it — the overwhelmingly common case (a plain single-task
+      // START_BATCH, no batch button involved) has nothing to add here, and
+      // this claimed-run path already has its OWN storage write below
+      // (setEnumState) — no need for a second, no-op chrome.storage.session
+      // write on the hot path.
+      await setSearchQueue(q);
+    }
     await setEnumState({
       status: 'enumerating',
       portal,
       discovered: page1.length,
       page: 1,
     });
-    return { claimed: true };
+    return { claimed: true, queueDepth: q.length };
   });
   if (!claim.claimed) {
     // "en cola (N por delante)": the running search plus any earlier queued

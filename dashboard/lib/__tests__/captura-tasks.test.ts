@@ -13,8 +13,13 @@ import {
   buildProfileCaptureView,
   captureSummary,
   formatCaptureSummary,
+  defaultTickedTaskIds,
+  allProfileTasks,
+  buildCaptureBatchPlan,
+  capCaptureBatchPlan,
   DEFAULT_STALENESS_DAYS,
   type CaptureTask,
+  type ConnectorView,
 } from "@/lib/captura-tasks";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -344,5 +349,153 @@ describe("deriveConnectorState", () => {
   });
   it("due when everything is pending", () => {
     expect(deriveConnectorState(2, 0)).toBe("due");
+  });
+});
+
+// ─── "Capturar todo" selection→queue mapping (issue #556) ─────────────────
+
+function mkTask(id: string, portal: string, captureUrl: string): CaptureTask {
+  return { id, portal, label: id, url: captureUrl, captureUrl, loosened: [] };
+}
+
+function mkConnector(
+  portal: string,
+  entries: { task: CaptureTask; due: boolean }[],
+): ConnectorView {
+  const taskViews = entries.map(({ task, due }) => ({
+    task,
+    muted: !due,
+    due,
+    lastRunAt: due ? null : new Date().toISOString(),
+    lastDone: due ? "nunca" : "hecho hace unos segundos",
+  }));
+  const dueCount = taskViews.filter((t) => t.due).length;
+  const mutedCount = taskViews.filter((t) => t.muted).length;
+  return {
+    portal,
+    label: portal,
+    taskViews,
+    totalTasks: taskViews.length,
+    dueCount,
+    mutedCount,
+    state: deriveConnectorState(dueCount, mutedCount),
+    defaultExpanded: dueCount > 0,
+    capturedProfile: 0,
+  };
+}
+
+const T_DUE_1 = mkTask("t1", "idealista", "https://idealista.example/1");
+const T_DUE_2 = mkTask("t2", "idealista", "https://idealista.example/2");
+const T_MUTED = mkTask("t3", "aliseda", "https://aliseda.example/1");
+
+describe("defaultTickedTaskIds", () => {
+  it("ticks every DUE task and leaves MUTED tasks unticked", () => {
+    const connectors = [
+      mkConnector("idealista", [
+        { task: T_DUE_1, due: true },
+        { task: T_DUE_2, due: true },
+      ]),
+      mkConnector("aliseda", [{ task: T_MUTED, due: false }]),
+    ];
+    expect(defaultTickedTaskIds(connectors)).toEqual(new Set(["t1", "t2"]));
+  });
+
+  it("returns an empty set when nothing is due", () => {
+    const connectors = [mkConnector("aliseda", [{ task: T_MUTED, due: false }])];
+    expect(defaultTickedTaskIds(connectors).size).toBe(0);
+  });
+});
+
+describe("allProfileTasks", () => {
+  it("flattens every connector's tasks, preserving order", () => {
+    const connectors = [
+      mkConnector("idealista", [
+        { task: T_DUE_1, due: true },
+        { task: T_DUE_2, due: true },
+      ]),
+      mkConnector("aliseda", [{ task: T_MUTED, due: false }]),
+    ];
+    expect(allProfileTasks(connectors).map((t) => t.id)).toEqual(["t1", "t2", "t3"]);
+  });
+});
+
+describe("buildCaptureBatchPlan", () => {
+  const tasks = [T_DUE_1, T_DUE_2, T_MUTED];
+
+  it("returns null when nothing is ticked — the caller must mutate nothing", () => {
+    expect(buildCaptureBatchPlan(tasks, new Set())).toBeNull();
+  });
+
+  it("picks the first ticked task (in TASK LIST order, not Set insertion order) and queues the rest", () => {
+    // Set built in reverse order — the plan must still follow `tasks`' order.
+    const ticked = new Set(["t3", "t1"]);
+    const plan = buildCaptureBatchPlan(tasks, ticked);
+    expect(plan).not.toBeNull();
+    expect(plan!.first.id).toBe("t1");
+    expect(plan!.queue).toEqual([{ portal: "aliseda", captureUrl: T_MUTED.captureUrl }]);
+    expect(plan!.taskIds).toEqual(["t1", "t3"]);
+  });
+
+  it("a single ticked task yields an empty queue (degenerates to the single-task flow)", () => {
+    const plan = buildCaptureBatchPlan(tasks, new Set(["t2"]));
+    expect(plan!.first.id).toBe("t2");
+    expect(plan!.queue).toEqual([]);
+    expect(plan!.taskIds).toEqual(["t2"]);
+  });
+
+  it("every ticked task appears in taskIds, including the first", () => {
+    const plan = buildCaptureBatchPlan(tasks, new Set(["t1", "t2", "t3"]));
+    expect(plan!.taskIds).toEqual(["t1", "t2", "t3"]);
+    expect(plan!.queue.map((q) => q.captureUrl)).toEqual([T_DUE_2.captureUrl, T_MUTED.captureUrl]);
+  });
+
+  it("ignores ticked ids absent from the task list (stale selection)", () => {
+    const plan = buildCaptureBatchPlan(tasks, new Set(["ghost", "t1"]));
+    expect(plan!.taskIds).toEqual(["t1"]);
+  });
+});
+
+describe("capCaptureBatchPlan (issue #556 review B3 — bound the piggybacked queue)", () => {
+  function planWithQueueLength(n: number) {
+    const first = mkTask("first", "idealista", "https://x/first");
+    const queue = Array.from({ length: n }, (_, i) => ({ portal: "idealista", captureUrl: `https://x/${i}` }));
+    return {
+      first,
+      queue,
+      taskIds: ["first", ...queue.map((_, i) => `q${i}`)],
+    };
+  }
+
+  it("is a no-op (droppedCount 0, same plan) when already within the cap", () => {
+    const plan = planWithQueueLength(5);
+    const capped = capCaptureBatchPlan(plan, 10);
+    expect(capped.droppedCount).toBe(0);
+    expect(capped.plan).toEqual(plan);
+  });
+
+  it("is a no-op exactly AT the cap boundary", () => {
+    const plan = planWithQueueLength(10);
+    const capped = capCaptureBatchPlan(plan, 10);
+    expect(capped.droppedCount).toBe(0);
+    expect(capped.plan.queue).toHaveLength(10);
+  });
+
+  it("truncates the queue and taskIds together, reporting how many were dropped", () => {
+    const plan = planWithQueueLength(30);
+    const capped = capCaptureBatchPlan(plan, 24);
+    expect(capped.droppedCount).toBe(6);
+    expect(capped.plan.queue).toHaveLength(24);
+    // taskIds = first + kept queue entries only — the dropped tail never appears.
+    expect(capped.plan.taskIds).toHaveLength(25);
+    expect(capped.plan.taskIds[0]).toBe("first");
+    expect(capped.plan.first).toBe(plan.first); // the first task always rides along regardless
+  });
+
+  it("the FIRST task is never counted against the cap (only the queue tail is bounded)", () => {
+    const plan = planWithQueueLength(1);
+    const capped = capCaptureBatchPlan(plan, 0);
+    expect(capped.plan.queue).toHaveLength(0);
+    expect(capped.plan.taskIds).toEqual(["first"]); // first still present even with a 0 cap
+    expect(capped.droppedCount).toBe(1);
   });
 });
