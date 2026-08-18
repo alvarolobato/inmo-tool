@@ -27,6 +27,8 @@ docstring for the extraction this connector actually performs today.
 
 from __future__ import annotations
 
+import re
+
 # Hipoges' own `assets/i18n/es.json` (public, unauthenticated static asset —
 # not the walled asset API) confirms these Spanish typology words are part of
 # the site's vocabulary. Mapped onto property.property_type's CHECK vocabulary
@@ -73,6 +75,21 @@ _TYPE_KEYWORDS: tuple[tuple[str, str], ...] = (
 )
 
 
+# Word-boundary, not raw substring — a plain `keyword in lowered` check (the
+# altamira_mapping.py/aliseda_mapping.py precedent this table otherwise
+# mirrors) misfiles any title whose LOCATION happens to contain a type word:
+# "Plaza de garaje en venta en Casares" contains "casa" inside "Casares" and
+# was silently bucketed "chalet" instead of "garaje" — verified empirically
+# (Opus review, PR #548, N2). `\b` on both sides fixes it for every keyword
+# here, not just "casa" — filed as a note for altamira_mapping.py to pick up
+# the same fix separately (it has the identical bug, pre-existing, not a
+# regression introduced here).
+_TYPE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(r"\b" + re.escape(keyword) + r"\b", re.IGNORECASE), mapped)
+    for keyword, mapped in _TYPE_KEYWORDS
+)
+
+
 def map_property_type(raw_type: str | None) -> str | None:
     """Map Hipoges' property-type text onto the canonical CHECK vocabulary.
 
@@ -80,12 +97,14 @@ def map_property_type(raw_type: str | None) -> str | None:
     neither carried a recognisable type word (honest: better a None than a
     wrong bucket). DRAFT: the keyword list is grounded in the site's own
     public i18n strings, but never verified against a real rendered title.
+    Matches on a WORD BOUNDARY (never a raw substring) so a type word that
+    happens to sit inside an unrelated word — e.g. "casa" inside a place name
+    like "Casares" — never misfiles the listing (see `_TYPE_PATTERNS`).
     """
     if not raw_type:
         return None
-    lowered = raw_type.lower()
-    for keyword, mapped in _TYPE_KEYWORDS:
-        if keyword in lowered:
+    for pattern, mapped in _TYPE_PATTERNS:
+        if pattern.search(raw_type):
             return mapped
     return None
 

@@ -1870,9 +1870,13 @@ ALTER TABLE capture_worklist ADD CONSTRAINT capture_worklist_status_check
 -- connector). Naturally idempotent: re-running deletes nothing new once the
 -- seeding path is gated (etl/worklist_seed.py + the seed route). The extension
 -- portal list mirrors etl.capture.EXTENSION_CAPTURE_PORTALS /
--- dashboard/lib/worklist.ts CAPTURE_PORTAL_NAMES — keep the three in step.
+-- dashboard/lib/worklist.ts CAPTURE_PORTAL_NAMES — keep the FOUR in step (a
+-- fourth list, historically absent, missed on the first Hipoges pass and
+-- silently zeroed its worklist every ETL boot — PR #548 review B1 — hence
+-- test_capture_worklist.py's test_delete_list_matches_capture_portal_lists,
+-- which fails loudly the next time any of these four lists drifts).
 DELETE FROM capture_worklist
- WHERE source_portal NOT IN ('idealista', 'aliseda', 'altamira');
+ WHERE source_portal NOT IN ('idealista', 'aliseda', 'altamira', 'hipoges');
 
 -- ── Worklist sitemap-seed trigger (issue #260) ──────────────────────────────
 -- The same "queue table, not a synchronous call" transport the dashboard uses
@@ -2024,7 +2028,7 @@ ALTER TABLE search_url_example ADD COLUMN IF NOT EXISTS last_result_count INTEGE
 CREATE TABLE IF NOT EXISTS captured_search_urls (
     id           BIGSERIAL    PRIMARY KEY,
     -- Portal derived server-side from the URL host (never client-claimed).
-    -- One of the capture portals: 'idealista' | 'aliseda' | 'altamira' (#510).
+    -- One of the capture portals: 'idealista' | 'aliseda' | 'altamira' | 'hipoges' (#510).
     portal       TEXT         NOT NULL,
     -- The search URL exactly as captured (shape= and all).
     url          TEXT         NOT NULL,
@@ -2056,7 +2060,7 @@ CREATE INDEX IF NOT EXISTS idx_captured_search_urls_recent
 CREATE TABLE IF NOT EXISTS observed_search_urls (
     id           BIGSERIAL    PRIMARY KEY,
     -- Portal derived server-side from the URL host (never client-claimed).
-    -- One of the capture portals: 'idealista' | 'aliseda' | 'altamira' (#510).
+    -- One of the capture portals: 'idealista' | 'aliseda' | 'altamira' | 'hipoges' (#510).
     portal       TEXT         NOT NULL,
     -- The search URL exactly as observed (shape= and all), latest sighting.
     url          TEXT         NOT NULL,

@@ -30,8 +30,15 @@ from urllib.parse import urlparse
 # Mirror of detect.js `PORTALS`. Each entry: the host suffix that identifies the
 # portal, plus a compiled detail-path regex and listing-path regex. A path is a
 # DETAIL page iff it matches `detail`; a SEARCH/RESULTS page iff it matches
-# `listing`. The two are mutually exclusive by construction (see the per-portal
-# notes in detect.js) — a detail URL never matches `listing` and vice versa.
+# `listing`. For idealista/aliseda/altamira the two are mutually exclusive by
+# construction (see the per-portal notes in detect.js) — a detail URL never
+# matches `listing` and vice versa. Hipoges is the ONE exception: a
+# synthetic path like `/es/map/detail/999` matches both (see its own entry
+# below) — every consumer here resolves detail first
+# (`detail_portal_for_url`/`listing_portal_for_url` are independent calls,
+# and callers that need one classification, e.g. etl/capture.py, check
+# detail before listing), and detect.js agrees byte-for-byte, so this is a
+# documented, harmless overlap, not an invariant every portal upholds.
 _PORTALS: list[dict[str, object]] = [
     {
         "portal": "idealista",
@@ -72,8 +79,14 @@ _PORTALS: list[dict[str, object]] = [
         # is an unvalidated draft (D-111).
         "detail": re.compile(r"^/[a-z]{2}/(?:[^/]+/)?detail/[^/]+", re.IGNORECASE),
         # Search/listing routes are `/<lang>/(sale|rent)/<typology>/<country>/…`
-        # or the `/<lang>/(area|countries|map|point)/…` variants — never a
-        # `/detail/` segment, so detail and listing stay mutually exclusive.
+        # or the `/<lang>/(area|countries|map|point)/…` variants. NOTE this is
+        # NOT strictly mutually exclusive with `detail` above: a path like
+        # `/es/map/detail/999` matches BOTH (the `map` listing marker fires,
+        # and `detail` fires too since `:investment` is unconstrained). Opus
+        # review (PR #548, N4) confirmed this — harmless in practice (every
+        # consumer here resolves detail first) but real, so this comment no
+        # longer claims the general "mutually exclusive by construction"
+        # invariant the module docstring states for the other three portals.
         # The `sale`/`rent` operation tokens are inferred from the site's own
         # public i18n key names (assets/i18n/es.json), not directly observed
         # on a live URL — unconfirmed, see hipoges.py's module docstring.

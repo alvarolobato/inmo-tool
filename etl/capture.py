@@ -37,7 +37,14 @@ logger = logging.getLogger("etl.capture")
 # (D-027), yet the page renders normally for a human (2026-08-05 live test).
 # Hipoges joined via issue #207 — capture-only because every sanctioned
 # enumeration channel 403s an honest client (D-075), selectors are an
-# unvalidated draft pending the owner's first real capture (D-111).
+# unvalidated draft pending the owner's first real capture (D-111). Its key
+# is the FULL subdomain `realestate.hipoges.com` — deliberately not a bare
+# `hipoges.com` (the corporate/parent domain, unrelated to real-estate
+# listings) — and the browser extension's manifest.json mirrors that as an
+# exact-host `host_permissions`/`content_scripts` match
+# (`*://realestate.hipoges.com/*`), not the `*://*.<domain>/*` wildcard
+# subdomain pattern the other three portals use, for the same reason (Opus
+# review, PR #548, N5).
 #
 # This dict is the source of truth for "which hosts can be captured". The
 # dashboard mirrors these host suffixes in dashboard/lib/worklist.ts
@@ -470,7 +477,7 @@ def _process_one(conn, capture_id: int, url: str, html: str) -> bool:
             url,
             "No capture-capable connector recognizes this URL "
             "(supported: Idealista, issue #75; Aliseda, issue #237; "
-            "Altamira, issue #271)",
+            "Altamira, issue #271; Hipoges, issue #207)",
         )
         return False
 
@@ -514,6 +521,19 @@ def _process_one(conn, capture_id: int, url: str, html: str) -> bool:
         canonical.raw_extra.get("title") or canonical.description or canonical.address
     )
 
+    # Issue #547 / Opus review (PR #548, C3): a connector whose selectors are
+    # not yet calibrated (raw_extra.selectors_calibrated is False — Hipoges
+    # today) writes an honest near-empty row, but normalize() never raises,
+    # so every one of its captures would otherwise reach 'done' with `html`
+    # discarded — making it IMPOSSIBLE to later pull the real captured DOM
+    # back out of the DB to build the real fixtures #547 needs. Retain the
+    # HTML for exactly that case; every OTHER (calibrated) connector keeps
+    # the pre-existing behaviour of dropping it once processed, since there
+    # is no reason to hold onto a full page capture once its fields have
+    # actually been trusted and extracted.
+    retain_html = canonical.raw_extra.get("selectors_calibrated") is False
+    retained_html = html if retain_html else None
+
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -521,7 +541,7 @@ def _process_one(conn, capture_id: int, url: str, html: str) -> bool:
             SET status = 'done', connector_name = %s, property_id = %s,
                 listing_id = %s, fields_extracted = %s, fields_available = %s,
                 title = %s, price_display = %s, processed_at = NOW(),
-                html = NULL
+                html = %s
             WHERE id = %s
             """,
             (
@@ -532,6 +552,7 @@ def _process_one(conn, capture_id: int, url: str, html: str) -> bool:
                 fields_available,
                 title[:200] if title else None,
                 price_display,
+                retained_html,
                 capture_id,
             ),
         )

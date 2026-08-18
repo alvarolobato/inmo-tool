@@ -80,6 +80,23 @@ site's actual code rather than a guess.
   issue linked from D-111). A selector that misses degrades to None — never
   a fabricated value (docs/skills/connectors.md "don't fabricate precision").
 
+  GATED, NOT JUST LABELED (Opus review, PR #548, C2): `selectors_calibrated`
+  in `raw_extra` is a MODULE CONSTANT (`_SELECTORS_CALIBRATED`), not just an
+  observational flag — while it is False, `normalize()` forces every
+  draft-derived field (price, m², rooms, bathrooms, reference code, photos,
+  property_type, operation) to None/(), full stop, regardless of what the
+  draft extractors below would have found. Only `external_id`/`url`/
+  `status`/`listing_kind` and the OpenGraph `title`/`description` are ever
+  populated today. This is deliberate: an uncalibrated guess that never
+  writes a number is recoverable; one that writes a plausible-looking wrong
+  price is not (it can drive D-057's below-market boost, get adopted into
+  D-098's price history, or wrongly exclude/include a listing from a D-059
+  hard filter — all silently, with no SQL query making it visible). The
+  draft extractor functions stay fully implemented and unit-tested
+  (`TestDraftExtractors` in test_connector_hipoges.py) so flipping
+  `_SELECTORS_CALIBRATED` to True — once #547 lands real selectors — is a
+  one-line change, not a rewrite.
+
   What grounding exists beyond the URL shape:
     - The home page carries rich OpenGraph/`<meta>` tags (title, description,
       canonical, hreflang) — plausible (not confirmed) that a detail page
@@ -112,7 +129,6 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from bs4 import BeautifulSoup
-from bs4.element import Tag
 
 from etl.connectors.base import (
     CanonicalListingVersion,
@@ -122,7 +138,7 @@ from etl.connectors.base import (
     RawListing,
     Throttle,
 )
-from etl.connectors.extraction import strip_price_punctuation, text_to_int
+from etl.connectors.extraction import scoped_node, strip_price_punctuation, text_to_int
 from etl.connectors.hipoges_mapping import map_operation, map_property_type
 
 # Detail URLs are `/<lang>/detail/<id>` or `/<lang>/<investment>/detail/<id>`,
@@ -137,14 +153,28 @@ _EXTERNAL_ID_RE = re.compile(r"/[a-z]{2}/(?:[^/]+/)?detail/([^/?#]+)", re.IGNORE
 # used to scope out contaminating subtrees before text-mining for
 # surface/room/bath figures. Unverified against a real page — see module
 # docstring's "no grounding at all" note.
+#
+# Deliberately does NOT include "carousel": the site's own MAIN photo
+# gallery is very plausibly implemented as a carousel too (Angular apps
+# routinely name their primary image slider `*-carousel`), and on a real
+# page that is the single most likely piece of markup this connector would
+# see. Treating "carousel" as contamination silently zeroed the whole
+# gallery via `_GALLERY_SELECTORS` below (empty result on any carousel-named
+# gallery — the synthetic fixture didn't catch it because its gallery is
+# conveniently named "asset-gallery", not "*-carousel") — Opus review, PR
+# #548 (C1). "similar"/"related"/"recommend" are unambiguous enough to keep.
 _CONTAMINATION_SELECTORS: tuple[str, ...] = (
     '[class*="similar" i]',
     '[class*="related" i]',
-    '[class*="carousel" i]',
     '[class*="recommend" i]',
 )
 
-# Best-effort gallery/carousel container guesses for photo harvesting.
+# Best-effort gallery/carousel container guesses for photo harvesting. Runs
+# against the contamination-SCOPED tree (`scoped_node(soup, drop=
+# _CONTAMINATION_SELECTORS)` in normalize()), so a "similar properties" rail
+# is already gone by the time this looks for "carousel" — it is safe for
+# this list to include "carousel" even though `_CONTAMINATION_SELECTORS`
+# above deliberately does not.
 _GALLERY_SELECTORS: tuple[str, ...] = (
     '[class*="gallery" i]',
     '[class*="carousel" i]',
@@ -183,20 +213,6 @@ def _og_meta(soup: BeautifulSoup, property_name: str) -> str | None:
     return content.strip() if isinstance(content, str) and content.strip() else None
 
 
-def _drop_contamination(soup: BeautifulSoup) -> Tag:
-    """A copy of the parsed tree with plausibly-contaminating subtrees
-    removed, for the text-mining fallbacks below. See
-    `_CONTAMINATION_SELECTORS`'s docstring note: an unverified guess, not a
-    confirmed selector."""
-    import copy as _copy
-
-    scope = _copy.copy(soup)
-    for selector in _CONTAMINATION_SELECTORS:
-        for contaminant in scope.select(selector):
-            contaminant.decompose()
-    return scope
-
-
 def _first_match_decimal(pattern: re.Pattern[str], text: str) -> Decimal | None:
     m = pattern.search(text)
     if not m:
@@ -220,6 +236,21 @@ def _price_from_dom(soup: BeautifulSoup) -> Decimal | None:
     text = el.get_text(" ", strip=True)
     digits = strip_price_punctuation(text)
     return _to_decimal(digits) if digits else None
+
+
+# Set True only once selectors are validated against a real Hipoges capture
+# (issue #547). While False — today, and for every row this connector has
+# ever emitted — every draft-derived field below is forced to None/() rather
+# than writing an unvalidated guess into scoring (D-057's below-market
+# boost), price history (D-098's price-move adoption), or a hard filter
+# (D-059). A first-match `[class*="price"]` guess landing "top of the feed"
+# as a fabricated bargain is exactly the failure this gate exists to prevent
+# (Opus review, PR #548, C2). The draft extractor functions below
+# (`_price_from_dom`, `_photos`, the regex helpers, `hipoges_mapping.
+# map_property_type`/`map_operation`) stay fully implemented and unit-tested
+# (see `TestDraftExtractors` in test_connector_hipoges.py) so flipping this
+# one constant is the entire #547 follow-up, not a rewrite.
+_SELECTORS_CALIBRATED = False
 
 
 class HipogesConnector(Connector):
@@ -265,41 +296,45 @@ class HipogesConnector(Connector):
         # the subject property — see extraction.py's scoped_text docstring
         # for why this exact bug class (Vivantial/Solvia/Servihabitat) is
         # worth guarding against even on a first draft.
-        scoped_soup = _drop_contamination(soup)
+        # extraction.py's scoped_node — not a hand-rolled copy.copy — is
+        # the SAME shared helper the neighbour-bleed docstring above
+        # points at; reuse it rather than reimplement it (Opus review, PR
+        # #548, N1).
+        scoped_soup = scoped_node(soup, drop=_CONTAMINATION_SELECTORS)
         body_text = scoped_soup.get_text(" ", strip=True)
 
-        # ── title / description (OpenGraph first, DOM fallback) ───────────
-        h1 = scoped_soup.select_one("h1")
-        title = (
-            h1.get_text(" ", strip=True)
-            if h1 is not None and h1.get_text(strip=True)
-            else _og_meta(soup, "og:title")
-        )
-        desc_el = scoped_soup.select_one('[class*="description" i]')
-        description = (
-            desc_el.get_text(" ", strip=True)
-            if desc_el is not None and desc_el.get_text(strip=True)
-            else _og_meta(soup, "og:description")
-        )
+        # ── title / description: OpenGraph meta ONLY. ──────────────────────
+        # The one DOM source actually grounded (the home page carries rich OG
+        # tags; a detail page plausibly does too — see module docstring). No
+        # h1/class-based DOM guess here (Opus review, PR #548, C2) — those
+        # stay exactly as uncertain as the gated fields below, so they don't
+        # get a pass just because they're text rather than a number.
+        title = _og_meta(soup, "og:title")
+        description = _og_meta(soup, "og:description")
 
-        # ── property type / operation (keyword match on title) ────────────
-        property_type = map_property_type(title)
-        operation = map_operation(title)
-
-        # ── price (best-effort DOM selector guess) ─────────────────────────
-        current_price = _price_from_dom(scoped_soup)
-
-        # ── surface / rooms / baths (best-effort text mining) ─────────────
-        m2_built = _first_match_decimal(_M2_RE, body_text)
-        rooms = _first_match_int(_ROOMS_RE, body_text)
-        bathrooms = _first_match_int(_BATHS_RE, body_text)
-
-        # ── reference code (best-effort label regex) ───────────────────────
-        ref_match = _REFERENCE_TEXT_RE.search(body_text)
-        reference_code = ref_match.group(1) if ref_match else None
-
-        # ── photos (best-effort gallery container guess) ──────────────────
-        photo_urls = _photos(scoped_soup, raw.raw.get("url"))
+        # ── everything else is a DRAFT selector — gated on calibration. ────
+        # See `_SELECTORS_CALIBRATED`'s module-level docstring: until a real
+        # capture confirms these, every one of these fields is None/() so an
+        # unvalidated guess never reaches scoring/price-history/filters.
+        if _SELECTORS_CALIBRATED:
+            property_type = map_property_type(title)
+            operation = map_operation(title)
+            current_price = _price_from_dom(scoped_soup)
+            m2_built = _first_match_decimal(_M2_RE, body_text)
+            rooms = _first_match_int(_ROOMS_RE, body_text)
+            bathrooms = _first_match_int(_BATHS_RE, body_text)
+            ref_match = _REFERENCE_TEXT_RE.search(body_text)
+            reference_code = ref_match.group(1) if ref_match else None
+            photo_urls = _photos(scoped_soup, raw.raw.get("url"))
+        else:
+            property_type = None
+            operation = None
+            current_price = None
+            m2_built = None
+            rooms = None
+            bathrooms = None
+            reference_code = None
+            photo_urls = ()
 
         return CanonicalListingVersion(
             external_id=raw.external_id,
@@ -347,7 +382,7 @@ class HipogesConnector(Connector):
                 # draft pending the owner's first real capture.
                 "capture_portal": "hipoges",
                 "title": title,
-                "selectors_calibrated": False,
+                "selectors_calibrated": _SELECTORS_CALIBRATED,
             },
         )
 

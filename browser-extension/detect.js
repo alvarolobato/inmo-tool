@@ -193,10 +193,15 @@
         return /^\/[a-z]{2}\/(?:[^/]+\/)?detail\/[^/]+/i.test(p);
       },
       // Search/listing routes are `/<lang>/(sale|rent)/<typology>/<country>/…`
-      // or the `/<lang>/(area|countries|map|point)/…` variants — never a
-      // `/detail/` segment. The `sale`/`rent` tokens are inferred from the
-      // site's own public i18n key names, not directly observed on a live
-      // URL — unconfirmed.
+      // or the `/<lang>/(area|countries|map|point)/…` variants. NOTE: not
+      // strictly disjoint from isDetailPath above — `/es/map/detail/999`
+      // matches BOTH (the `map/` marker fires here, and `detail` fires
+      // there since `:investment` is unconstrained). Harmless in practice
+      // (every consumer resolves detail first — see pageRoleForUrl below)
+      // but real, verified by Opus review (PR #548, N4) — unlike the other
+      // three portals, this one is not mutually exclusive by construction.
+      // The `sale`/`rent` tokens are inferred from the site's own public
+      // i18n key names, not directly observed on a live URL — unconfirmed.
       isListingPath: function (p) {
         return /^\/[a-z]{2}\/(?:(?:sale|rent)\/|area\/|countries\/|map\/|point\/)/i.test(
           p
