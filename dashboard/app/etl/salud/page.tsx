@@ -684,6 +684,7 @@ function LlmHealthSection({ data }: { data: LlmHealthResponse }) {
     scheduler,
     errors,
     tokens_logged,
+    cli_zero_usage_24h,
   } = data;
 
   const noUsage = flows.length === 0 && providers.length === 0;
@@ -698,6 +699,35 @@ function LlmHealthSection({ data }: { data: LlmHealthResponse }) {
           cobertura de evaluación IA y el estado del regulador.
         </p>
       </div>
+
+      {/* F-8 zero-usage canary — most prominent element in the section when
+          nonzero: it means every CLI cost/token figure below is currently
+          wrong (the B1 failure mode from llm-cost-optimization.md returning). */}
+      {cli_zero_usage_24h > 0 ? (
+        <p
+          className="rounded-md border p-3 text-sm font-semibold"
+          style={{
+            color: "var(--danger, #b91c1c)",
+            borderColor: "var(--danger, #b91c1c)",
+          }}
+          data-testid="llm-cli-zero-usage-canary"
+        >
+          ⚠ {formatInt(cli_zero_usage_24h)} llamada
+          {cli_zero_usage_24h === 1 ? "" : "s"} del proveedor CLI en las
+          últimas 24h con 0 tokens registrados. El envoltorio de uso de{" "}
+          <code>claude -p</code> puede haber cambiado de forma — el coste y
+          los tokens del proveedor CLI en este panel pueden ser incorrectos
+          (véase D-102).
+        </p>
+      ) : (
+        <p
+          className="text-xs text-tremor-content-subtle dark:text-dark-tremor-content-subtle"
+          data-testid="llm-cli-zero-usage-canary"
+        >
+          Canario CLI: 0 llamadas con 0 tokens en las últimas 24h — el
+          medidor de uso del proveedor CLI funciona correctamente.
+        </p>
+      )}
 
       {/* Cost + calls summary */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">

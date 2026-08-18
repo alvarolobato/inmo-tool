@@ -36,42 +36,23 @@ export function isCliProvider(provider: string | null | undefined): boolean {
 }
 
 // ─── Rate table ──────────────────────────────────────────────────────────────
+//
+// The table itself, plus `normalizeModel`/`rateForModel`, moved to
+// `lib/llm-rates.ts` (F-5) so `lib/llm-usage.ts` can share the exact same
+// numbers instead of carrying its own drifted copy. Re-exported here
+// unchanged so every existing importer of `@/lib/llm-health` (this file's own
+// `rollUpCosts` below, `lib/db/llm-health.ts`, and the test suite) keeps
+// working with no call-site changes.
 
-/** Per-model price, in € per 1,000,000 tokens, split by direction. */
-export interface LlmModelRate {
-  /** € per 1M input (prompt) tokens. */
-  in_eur_per_mtok: number;
-  /** € per 1M output (completion) tokens. */
-  out_eur_per_mtok: number;
-}
+import {
+  type LlmModelRate,
+  type LlmRateTable,
+  DEFAULT_LLM_RATES,
+  normalizeModel,
+  rateForModel,
+} from "@/lib/llm-rates";
 
-/** model-id → rate. Keys match `llm_usage.model` (a leading `openrouter/` is stripped before lookup). */
-export type LlmRateTable = Record<string, LlmModelRate>;
-
-/**
- * Baked-in default € rates (per 1M tokens). Rough public list prices — the
- * point is an order-of-magnitude cost signal for the owner, not an invoice.
- * Override / extend per deployment via `dashboard.llm_cost_rates_eur` (a JSON
- * object of the same shape, merged on top of these).
- */
-export const DEFAULT_LLM_RATES: LlmRateTable = {
-  "anthropic/claude-sonnet-4": { in_eur_per_mtok: 3.0, out_eur_per_mtok: 15.0 },
-  "anthropic/claude-sonnet-4-5": { in_eur_per_mtok: 3.0, out_eur_per_mtok: 15.0 },
-  "anthropic/claude-3-5-sonnet": { in_eur_per_mtok: 3.0, out_eur_per_mtok: 15.0 },
-  "anthropic/claude-3-7-sonnet": { in_eur_per_mtok: 3.0, out_eur_per_mtok: 15.0 },
-  "anthropic/claude-haiku-4-5": { in_eur_per_mtok: 0.8, out_eur_per_mtok: 4.0 },
-  // OpenRouter spells Haiku 4.5 with a DOT, and that is now the default model
-  // (D-103) — without this key the default lands in `unpriced_models` at €0.
-  "anthropic/claude-haiku-4.5": { in_eur_per_mtok: 0.8, out_eur_per_mtok: 4.0 },
-  "anthropic/claude-3-5-haiku": { in_eur_per_mtok: 0.8, out_eur_per_mtok: 4.0 },
-  "anthropic/claude-sonnet-4.6": { in_eur_per_mtok: 3.0, out_eur_per_mtok: 15.0 },
-  "anthropic/claude-sonnet-5": { in_eur_per_mtok: 3.0, out_eur_per_mtok: 15.0 },
-  "anthropic/claude-opus-4": { in_eur_per_mtok: 15.0, out_eur_per_mtok: 75.0 },
-  "anthropic/claude-opus-4.8": { in_eur_per_mtok: 5.0, out_eur_per_mtok: 25.0 },
-  "anthropic/claude-opus-5": { in_eur_per_mtok: 5.0, out_eur_per_mtok: 25.0 },
-  "openai/gpt-4o": { in_eur_per_mtok: 2.5, out_eur_per_mtok: 10.0 },
-  "openai/gpt-4o-mini": { in_eur_per_mtok: 0.15, out_eur_per_mtok: 0.6 },
-};
+export { type LlmModelRate, type LlmRateTable, DEFAULT_LLM_RATES, normalizeModel, rateForModel };
 
 /**
  * Parse the operator's rate-table override (a JSON object string) and merge it
@@ -105,19 +86,6 @@ export function parseRateTable(
     };
   }
   return merged;
-}
-
-/** Drop a leading transport prefix (`openrouter/`) so `model` keys line up. */
-export function normalizeModel(model: string): string {
-  return (model ?? "").trim().replace(/^openrouter\//i, "");
-}
-
-/** The rate for a model, or null when the model isn't in the table (unpriced). */
-export function rateForModel(
-  rates: LlmRateTable,
-  model: string,
-): LlmModelRate | null {
-  return rates[normalizeModel(model)] ?? null;
 }
 
 /**
@@ -360,5 +328,15 @@ export interface LlmHealthResponse {
    * counts + a "cost needs token logging" note instead of a fake €0.
    */
   tokens_logged: boolean;
+  /**
+   * F-8 zero-usage canary: count of `llm_usage` rows in the last 24h with
+   * `llm_provider = 'cli'` AND `total_tokens = 0`. After D-102 (which parses
+   * the CLI's real usage envelope) this must be 0 — a nonzero value means the
+   * `claude -p` output shape drifted again and every CLI-provider cost/token
+   * figure on this page is silently wrong, exactly the B1 failure mode
+   * (docs/roadmap/llm-cost-optimization.md) recurring. The UI renders this
+   * prominently in red when nonzero.
+   */
+  cli_zero_usage_24h: number;
   generated_at: string;
 }

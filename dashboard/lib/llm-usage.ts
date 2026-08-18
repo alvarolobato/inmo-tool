@@ -2,18 +2,25 @@ import { sql } from "@/lib/db-write";
 import { query } from "@/lib/db";
 import type { LlmUsageProviderMeta } from "@/lib/llm-provider/types";
 import { getSystemConfig } from "@/lib/system-config/loader";
+import { DEFAULT_LLM_RATES, DEFAULT_RATE, rateForModel, cacheAdjustedRate } from "@/lib/llm-rates";
 
 /**
  * Rate table: **estimated** USD per token used for `llm_usage.estimated_cost_usd`
  * on `llm_provider = 'openrouter'` rows.
  *
- * - Values follow public list pricing per million tokens.
+ * - Rates come from `lib/llm-rates.ts` — the single table shared with
+ *   `lib/llm-health.ts`'s salud-panel roll-up (F-5). Before that unification
+ *   this file carried its own copy that had already drifted from the panel's
+ *   (a per-flow OpenRouter model configured cheap could price correctly here
+ *   and as Sonnet-tier there, or vice versa, invisibly). Same numbers now,
+ *   one source to correct.
  * - OpenRouter may apply discounts, caching, or rounding; this app does **not** read
  *   OpenRouter’s billing API, so displayed costs are **indicative**, not invoice-accurate.
  * - Unknown models fall back to `DEFAULT_RATE` (Sonnet-tier — the conservative
  *   choice: it over-states rather than under-states a cheaper unknown model).
  * - Cache rates: Anthropic charges cache-write tokens at a 25% premium and
- *   cache-read tokens at a 90% discount vs that model's base input rate.
+ *   cache-read tokens at a 90% discount vs that model's base input rate — see
+ *   `cacheAdjustedRate`.
  *
  * `cli` rows do **not** use this table: the Claude CLI reports its own
  * `total_cost_usd` per call, which `logUsage` stores verbatim via
@@ -21,24 +28,6 @@ import { getSystemConfig } from "@/lib/system-config/loader";
  * row stored a hard-coded zero, which is why the usage panel showed no spend
  * for the default provider.
  */
-function anthropicRate(inPerMTok: number, outPerMTok: number) {
-  return {
-    prompt: inPerMTok / 1_000_000,
-    completion: outPerMTok / 1_000_000,
-    cacheWrite: (inPerMTok * 1.25) / 1_000_000,
-    cacheRead: (inPerMTok * 0.1) / 1_000_000,
-  };
-}
-
-const RATES: Record<string, { prompt: number; completion: number; cacheWrite: number; cacheRead: number }> = {
-  "anthropic/claude-haiku-4.5": anthropicRate(1.0, 5.0),
-  "anthropic/claude-sonnet-5": anthropicRate(3.0, 15.0),
-  "anthropic/claude-sonnet-4.6": anthropicRate(3.0, 15.0),
-  "anthropic/claude-sonnet-4": anthropicRate(3.0, 15.0),
-  "anthropic/claude-opus-5": anthropicRate(5.0, 25.0),
-  "anthropic/claude-opus-4.8": anthropicRate(5.0, 25.0),
-};
-const DEFAULT_RATE = anthropicRate(3.0, 15.0);
 
 export class BudgetExceededError extends Error {
   constructor() {
@@ -88,11 +77,12 @@ export function logUsage(
     // Provider-reported (CLI `total_cost_usd`) — authoritative, no estimation.
     estimatedCost = reportedCost;
   } else if (provider === "openrouter") {
-    let rate = RATES[model];
-    if (!rate) {
+    let baseRate = rateForModel(DEFAULT_LLM_RATES, model);
+    if (!baseRate) {
       console.warn(`[llm-usage] Unknown model "${model}", using default rate`);
-      rate = DEFAULT_RATE;
+      baseRate = DEFAULT_RATE;
     }
+    const rate = cacheAdjustedRate(baseRate);
     // NOTE: OpenRouter normalises `prompt_tokens` to exclude cache tokens (they are
     // reported separately in `cache_creation_input_tokens` / `cache_read_input_tokens`).
     // This differs from the raw Anthropic API where `input_tokens` is an inclusive sum.

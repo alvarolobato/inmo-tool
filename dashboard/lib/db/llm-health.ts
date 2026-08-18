@@ -75,8 +75,16 @@ export async function getLlmHealth(): Promise<LlmHealthResponse> {
   // exactly (#330).
   const { valuesSql: covValues, params: covParams } = selectionFlowValues(1);
 
-  const [flowRes, providerRes, modelRes, coverageRes, avgCostRes, errorRes, errorCodeRes] =
-    await Promise.all([
+  const [
+    flowRes,
+    providerRes,
+    modelRes,
+    coverageRes,
+    avgCostRes,
+    errorRes,
+    errorCodeRes,
+    cliZeroUsageRes,
+  ] = await Promise.all([
       // 1. Calls + tokens by flow (endpoint), today + 7d.
       query(
         `SELECT endpoint,
@@ -172,6 +180,17 @@ export async function getLlmHealth(): Promise<LlmHealthResponse> {
           GROUP BY code
           ORDER BY n DESC, code
           LIMIT 8`,
+      ),
+
+      // 7. F-8 zero-usage canary: CLI-provider rows in the last 24h that
+      //    logged total_tokens = 0. Post-D-102 this must always be 0 — see
+      //    the field doc on LlmHealthResponse.cli_zero_usage_24h.
+      query(
+        `SELECT COUNT(*)
+           FROM llm_usage
+          WHERE llm_provider = 'cli'
+            AND total_tokens = 0
+            AND created_at >= NOW() - INTERVAL '24 hours'`,
       ),
     ]);
 
@@ -271,6 +290,7 @@ export async function getLlmHealth(): Promise<LlmHealthResponse> {
     },
     errors,
     tokens_logged: tokensLogged,
+    cli_zero_usage_24h: num(cliZeroUsageRes.rows[0]?.[0]),
     generated_at: new Date().toISOString(),
   };
 }
