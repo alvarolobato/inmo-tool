@@ -26,6 +26,7 @@ import { describe, it, expect, vi } from "vitest";
 import { BudgetExceededError, CircuitBreakerOpenError } from "@/lib/llm";
 import { NoListingsError } from "../shared";
 import { AssessmentParkedError } from "../cache";
+import { LlmQuotaExceededError } from "@/lib/llm-enabled";
 import {
   runAssessmentBatch,
   type BatchFlow,
@@ -346,6 +347,14 @@ describe("runAssessmentBatch", () => {
       return { flows, isCurrent };
     }
 
+    // NOTE ON WHAT THIS PROVES. This runs ONE implementation twice with the
+    // inputs reversed, so it cannot detect a property-major -> flow-major
+    // behaviour change: it still passes against the old loop. Its real value
+    // is the golden counter values below, plus the 14 pre-existing tests in
+    // this file whose golden values were written against the OLD loop and pass
+    // unchanged — that is the strongest "same behaviour as before" evidence
+    // available. The test that actually pins the new loop SHAPE is the budget
+    // stop below, which is the only one that fails if the loop is reverted.
     it("produces IDENTICAL summary counters and attempted (property, flow) pairs regardless of flow/property order", async () => {
       const spy = vi.spyOn(console, "error").mockImplementation(() => {});
 
@@ -439,6 +448,34 @@ describe("runAssessmentBatch", () => {
       // occupancy itself only reached properties 2, 3 and 4 (property 1 was
       // skipped via isCurrent before assess would have been called).
       expect(a).toHaveBeenCalledTimes(3);
+    });
+
+    it("EC-3: an LlmQuotaExceededError stops the batch cleanly with stopped: 'quota'", async () => {
+      // D-107 gave the batch a third clean-stop reason but no batch-level test
+      // (budget and circuit each have one). It matters more than the other two
+      // now: the quota cap is the stop the owner is most likely to actually
+      // hit, and a stop that fell through to the generic error branch would
+      // strike the D-104 ledger for every property in the page.
+      const err = new LlmQuotaExceededError(91, "session", 80);
+      const failing = vi.fn().mockRejectedValue(err);
+      const flows: BatchFlow[] = [
+        { type: "occupancy", promptVersion: "occupancy/v2", assess: failing },
+        { type: "condition", promptVersion: "condition/v2", assess: failing },
+      ];
+
+      const result = await runAssessmentBatch({
+        flows,
+        selectPropertyIds: async () => [1, 2, 3],
+        isCurrent: async () => false,
+        fetchTrendingCandidates: async () => [],
+        fetchDismissedCandidates: async () => [],
+      });
+
+      expect(result.stopped).toBe("quota");
+      // Halted on the FIRST property of the FIRST flow — not once per property.
+      expect(failing).toHaveBeenCalledTimes(1);
+      expect(result.assessed).toBe(0);
+      expect(result.errors).toBe(0);
     });
 
     it("fetches trending/dismissed candidates exactly once per runAssessmentBatch call, regardless of flow count", async () => {

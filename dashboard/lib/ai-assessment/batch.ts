@@ -299,7 +299,7 @@ export async function runAssessmentBatch(
     );
   }
 
-  // #Phase-1 (llm-batching-plan.md): FLOW-MAJOR, not property-major. The outer
+  // Phase 1 (llm-batching-plan.md): FLOW-MAJOR, not property-major. The outer
   // loop is the flow, the inner loop is the property — the reverse of the
   // original #308 shape. This exists purely as a Phase-3 prerequisite: batching
   // N properties into one LLM call (planned, not built here) requires collecting
@@ -321,10 +321,29 @@ export async function runAssessmentBatch(
   // EVERY selected property assessed on the flows that ran before the stopped
   // one, and none on the flows after it — i.e. properties get assessed on
   // *some* axes and not others, rather than some properties being fully done
-  // and others fully pending. This is safe because selection is per-axis
-  // (`missingCurrentVerdictClause` in eligibility.ts): the next tick just picks
-  // up exactly the still-missing (property, flow) pairs, same as always. Pinned
-  // by the "budget stop mid-flow" test in batch.test.ts.
+  // and others fully pending.
+  //
+  // That recovers cleanly for the three SELECTION flows and ONLY those three.
+  // `missingCurrentVerdictClause` (eligibility.ts) is per-axis, but over
+  // `ASSESSMENT_SELECTION_FLOWS` — occupancy, condition, redflags — not over
+  // all six in `DEFAULT_BATCH_FLOWS`. Those three run first here, so once a
+  // property holds current verdicts for them it is never selected again, and
+  // a stop landing at or after `location` leaves `location`/`opportunity`/
+  // `extract` permanently unwritten for EVERY property in the page — not just
+  // the one in flight, as under the old property-major order. The blast radius
+  // of that pre-existing gap therefore scales with the page size (measured:
+  // 1 property -> 5 at the default batch size).
+  //
+  // Shipping it knowingly, because the exposure is bounded and closing:
+  // stops only fire on a budget/quota/circuit halt (none configured today),
+  // and Phase 2's `triage` merge makes `location`/`opportunity` ride the same
+  // call as `condition` — a selection flow — which removes the orphaning by
+  // construction. `extract` stays out of selection deliberately (it self-gates
+  // via `needsExtraction`; selecting on its absence would re-select fully
+  // structured properties forever). Tracked as F-9 / issue #542.
+  //
+  // Pinned by the "budget stop mid-flow" test in batch.test.ts, which is also
+  // the ONLY test that fails if this loop is reverted to property-major.
   const touchedProperties = new Set<number>();
 
   for (const flow of flows) {
