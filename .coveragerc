@@ -1,0 +1,28 @@
+# Coverage configuration for the pytest CI job and for local runs.
+#
+# `core = sysmon` is the reason this file exists. Measured 2026-08-18 against
+# the full suite (1,571 tests, etl/tests/ + scripts/tests/):
+#
+#   no coverage at all                    4m26s
+#   coverage, default C tracer           10m28s   <-- 2.4x the whole job
+#   coverage, core = sysmon               4m16s   <-- same as no coverage
+#
+# Byte-identical output in all three: 19,692 statements, 959 missed, 95%.
+# The default tracer hooks every line through sys.settrace; `sysmon` uses
+# CPython 3.12's sys.monitoring (PEP 669), which the interpreter supports
+# natively at near-zero cost. CI pins Python 3.12, so it is always available.
+#
+# This is not a micro-optimisation. The `test` job's timeout is 30 minutes and
+# the instrumented run had grown to ~29m30s, cancelling PRs that touch no
+# Python at all (#550) — a false red, and the kind that teaches people to
+# re-run without reading. Removing the tracer overhead restores the headroom
+# the timeout was chosen to provide.
+#
+# Why a repo config rather than COVERAGE_CORE=sysmon in the workflow: D-004
+# blocks pushing .github/workflows/ changes from this credential, and a repo
+# config also speeds up every local run, which the env var would not.
+#
+# If coverage totals ever move when this file changes, that is a real finding,
+# not tracer noise — the two cores agreed exactly when measured.
+[run]
+core = sysmon
