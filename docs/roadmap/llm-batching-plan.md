@@ -31,7 +31,7 @@ The claim "LLM only runs on properties that already matched a profile's non-LLM 
 - **Measured stable-prompt sizes** (chars, from `system-prompt.ts` template ranges): occupancy 7,537 (~2,100 tok); condition 4,950 (~1,400); redflags 4,139 + trending/dismissed blocks (~1,200+); location 4,024 (~1,120); opportunity 3,265 (~910); extract 2,849 (~790). `DOMAIN_PREAMBLE` (519 chars) and `ASSESSMENT_RULES` (600 chars) are duplicated into every stable prompt.
 - **Measured volatile payloads** (live DB, eligible properties): median 1,425 chars of description, p90 2,898, max 17,637; **1.06 active described listings per property** (dedup rarely merges) → volatile ≈ 500–700 tokens. Per-property six-flow total ≈ ~11k input + ~1.5k output ≈ **$0.019** — independently consistent with D-103's end-to-end measurement.
 - **F-2 confirmed at source**: the redflags trending and dismissed blocks render **inside the `stable` template** (`system-prompt.ts:890,894`), so any corpus growth re-cooks the flow's cacheable prefix. They are deliberately *not* in the content hash (`redflags.ts:369` — correct, keep that).
-- **CLI caching is unverified, and that changes the F-1/F-2/F-6 value story.** On the CLI path (the owner's default), `stable` and `volatile` are **concatenated** and sent as the stdin `## system` section (`llm-client.ts:127`, `cli/claude-code.ts:21-27` — F-13 pending); `--system-prompt` carries only the protocol shim. Whether `claude -p` places cache breakpoints such that two consecutive same-flow invocations get cross-process prefix hits is **unknown**. F-1/F-2/F-6's savings estimates assume API-side prompt caching works; batching (F-3 + multi-property) saves tokens **whether or not caching works**, which is why this plan weights it above the cache-tuning items. Phase 0 measures this instead of assuming.
+- **CLI caching — MEASURED (Phase 0c, see §3): cross-invocation caching WORKS.** On the CLI path (the owner's default), `stable` and `volatile` are **concatenated** and sent as the stdin `## system` section (`llm-client.ts:127`, `cli/claude-code.ts:21-27` — F-13 pending); `--system-prompt` carries only the protocol shim. Two consecutive single-shot `claude -p` calls with an identical ~20k-char stable prefix showed the second call reading back 100% of the first call's `cache_creation_input_tokens` as `cache_read_input_tokens`, at the documented cache-read discount (`total_cost_usd` 2.5× cheaper). So F-1/F-2/F-6's savings estimates are grounded, not speculative, for the CLI path too — this doesn't reduce batching's priority (F-3 + multi-property still saves tokens whether or not caching works, per the framing below), but it means the cache-ordering items (F-1/F-2) are worth landing on their own merits, not just as batching prerequisites.
 - **The demo stack has not been redeployed since #536 merged** (at time of writing): older `llm_usage` rows store 0 tokens / $0. Baseline measurement requires the redeploy first (Phase 0).
 - **Advisory-lock mechanics constrain the batch design**: `getOrCompute` holds one per-`(property, flow)` session lock on a **dedicated pooled client** (`cache.ts`, `withAdvisoryLock`), and the pool is capped at **5 connections** (`db-write.ts:59`). Naively nesting `withAdvisoryLock` per property in a batch of 5 would exhaust the pool and deadlock against the app's own queries. The batch path must take all its locks **on one client** (a session can hold many advisory locks), in sorted key order.
 - **`ASSESSMENT_SELECTION_FLOWS` is still occupancy/condition/redflags only** (`eligibility.ts:47`) — F-9 (add location/opportunity) is confirmed still open, and matters here because merging axes changes what "pending" must mean.
@@ -131,6 +131,45 @@ Each phase is a self-contained PR (Phase 2 is two PRs). Each follows the D-003 r
 
 **Exit criteria:** canary green with real token counts flowing; F-7 preview reproduces the known backlog for current versions; cache-probe result documented.
 
+#### 0c result — MEASURED: cross-invocation CLI prompt caching WORKS
+
+Run 2026-08-18 via `dashboard/scripts/probe-cli-cache.ts` (which calls the real
+`claudeCliSingleShot` code path, `--model claude-haiku-4-5`, `dashboard.llm_cli_lean_mode`
+default-on), two back-to-back single-shot calls with an IDENTICAL 20,120-char
+stable prefix (a repeated Spanish domain-preamble paragraph, same order of
+magnitude as occupancy's real 7,537-char stable prompt) + a trivial task
+suffix:
+
+| call | prompt_tokens | cache_creation_input_tokens | cache_read_input_tokens | total_cost_usd |
+|---|---:|---:|---:|---:|
+| 1 (cold) | 10 | 5,790 | 0 | $0.019051 |
+| 2 (repeat, ~4s later) | 10 | 0 | **5,790** | **$0.007505** |
+
+Call 2 read back 100% of what call 1 wrote to cache, at the documented ~90%
+discount vs. a fresh write — `total_cost_usd` dropped 2.5×. This settles the
+open question §1.3 raised: **`claude -p` DOES give cross-invocation prompt-cache
+reuse** for our stdin-carried prompts, at least under the tested conditions
+(two sequential single-shot invocations, same model, same machine, ~4s apart,
+no concurrent CLI traffic in between).
+
+**What this changes for later phases:** F-1 (flow-major ordering) and F-2
+(keep the redflags trending/dismissed blocks out of the cacheable prefix) are
+now confirmed load-bearing, not speculative — their whole value proposition
+(consecutive same-flow calls hit the CLI's own cache, not just OpenRouter's)
+is real. F-6 (1h cache TTL) stays OpenRouter-only as already decided (D-D) —
+there is still no TTL knob on the CLI path; this probe answers "does caching
+happen at all", not "for how long" or "with what eviction policy". D-B
+(multi-property batching) is unaffected either way, per §1.3's own framing:
+batching saves tokens by transmitting the stable prefix fewer times, which
+dominates a cache hit regardless of this result.
+
+**Not yet measured, left for a later probe if it matters:** cache survival
+across the scheduler's real ~900s tick gap (this run used ~4s), behavior under
+concurrent CLI invocations (the scheduler can run overlapping flows), and
+whether the cache breakpoint tracks the `--system-prompt` protocol shim or the
+stdin body — worth re-running once F-13 (real system prompt via
+`--system-prompt`) lands, per §3 Phase 4's note.
+
 ### Phase 1 — Flow-major batch loop (M; 1 PR; parallel with Phase 0)
 
 Restructure `runAssessmentBatch` from property-major to flow-major without changing any observable outcome except call order. Same summary counters, same budget/circuit clean-stop semantics. Keep the once-per-batch trending/dismissed fetch where it is.
@@ -184,4 +223,4 @@ F-6 on OpenRouter only if Phase 0c warrants; advisory `eligible` field on POST r
 - **Don't hard-gate the on-demand POST routes on profile eligibility** — they are the operator's probe-and-unpark tool.
 - **Don't fold trending/dismissed into the redflags content hash** while moving them to volatile.
 - **Don't ship any prompt-version bump outside the Phase-2 wave**, and don't land Phase 2 and Phase 3 in the same PR.
-- **Don't assume CLI prompt caching works** until the Phase 0c probe says so; don't bother with cache-TTL tuning on the CLI path at all — there is no knob.
+- **Don't bother with cache-TTL tuning on the CLI path** — there is no knob, regardless of the Phase 0c result (which confirmed caching itself works — see §3).
