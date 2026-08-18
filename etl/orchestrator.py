@@ -2165,7 +2165,23 @@ def _active_profile_scopes(conn) -> list[ConnectorScope]:
             round(lon, _SCOPE_DEDUP_DECIMALS),
             round(radius, 1),
         )
-        seen.setdefault(dedup_key, ConnectorScope(center=(lat, lon), radius_km=radius))
+        # Issue #530: retain profile attribution alongside the deduped scope.
+        # A later profile that collapses onto an already-seen scope keeps the
+        # ONE scope (still crawled once — dedup for fetching is unchanged) but
+        # unions its profile_ids so the recorded outcome is attributable to
+        # BOTH profiles. Rows arrive ORDER BY id, so appending preserves the
+        # ascending, deduped id order — leaving `_order_scopes_by_fairness`'s
+        # oldest-profile-first tie-break untouched. profile_ids is informational
+        # only and never enters `scope_key()`, so it cannot change dedup shape.
+        existing = seen.get(dedup_key)
+        if existing is None:
+            seen[dedup_key] = ConnectorScope(
+                center=(lat, lon), radius_km=radius, profile_ids=(profile_id,)
+            )
+        elif profile_id not in existing.profile_ids:
+            seen[dedup_key] = dataclasses.replace(
+                existing, profile_ids=existing.profile_ids + (profile_id,)
+            )
 
     return list(seen.values())
 
@@ -2299,7 +2315,7 @@ def _override_scopes_for_connector(conn, connector_name: str) -> list[ConnectorS
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT sp.scope, pcf.url "
+            "SELECT sp.scope, pcf.url, pcf.profile_id "
             "FROM profile_connector_filter pcf "
             "JOIN search_profile sp ON sp.id = pcf.profile_id "
             "WHERE pcf.connector = %s AND sp.archived_at IS NULL "
@@ -2309,7 +2325,7 @@ def _override_scopes_for_connector(conn, connector_name: str) -> list[ConnectorS
         rows = cur.fetchall()
 
     scopes: list[ConnectorScope] = []
-    for scope_json, url in rows:
+    for scope_json, url, profile_id in rows:
         center: tuple[float, float] | None = None
         radius: float | None = None
         geography = (scope_json or {}).get("geography")
@@ -2327,7 +2343,18 @@ def _override_scopes_for_connector(conn, connector_name: str) -> list[ConnectorS
                     radius = float(raw_radius)
                 except (TypeError, ValueError):
                     center, radius = None, None
-        scopes.append(ConnectorScope(center=center, radius_km=radius, override_url=url))
+        # Issue #530: an override scope belongs to exactly the one profile that
+        # pinned its URL — this builder never dedupes (each pin is its own
+        # dedicated scope per its docstring), so profile_ids is always a
+        # single-element tuple, not a union.
+        scopes.append(
+            ConnectorScope(
+                center=center,
+                radius_km=radius,
+                override_url=url,
+                profile_ids=(profile_id,),
+            )
+        )
     return scopes
 
 
@@ -3354,6 +3381,13 @@ def run_all_connectors(
                     "rooms": scope.rooms,
                     "outcome": outcome,
                     "discovered_count": discovered_count,
+                    # Issue #530: attribute this outcome to the profile(s) that
+                    # produced the scope — for EVERY outcome, including
+                    # `unresolvable`/`uncovered` (the ones #531/#532 most need).
+                    # An unattributed scope (a global geography_override, or a
+                    # manual/test scope) carries `[]`, never null — so a reader
+                    # never has to disambiguate missing-vs-null.
+                    "profile_ids": list(scope.profile_ids),
                 }
             )
 

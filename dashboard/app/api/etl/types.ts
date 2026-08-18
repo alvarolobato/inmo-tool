@@ -61,6 +61,17 @@ export interface GeographyScopeEntry {
    * fresh_this_cycle | duplicate | failed — what happened to this geography.
    */
   outcome: string;
+  /**
+   * Issue #530: the search_profile id(s) this scope came from — the union of
+   * every profile whose geography deduped onto this one scope (a scope shared
+   * by two profiles is still crawled once, but names both). Makes each outcome
+   * attributable to its profile(s) so a (connector × profile) view is possible
+   * (enables #531/#532). Empty `[]` for an unattributed scope (a global
+   * `geography_override` or a manual/test scope) — never null. Historical rows
+   * written before #530 lack the field; treat a missing value as `[]` at the
+   * read boundary (no `|| legacy` fallback elsewhere).
+   */
+  profile_ids: number[];
 }
 
 /**

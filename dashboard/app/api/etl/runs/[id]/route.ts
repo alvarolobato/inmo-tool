@@ -145,7 +145,15 @@ export async function GET(
       error_count: row[7] != null ? Number(row[7]) : 0,
       error_msg: row[8] != null ? String(row[8]) : null,
       failure_classification: row[9] != null ? String(row[9]) : null,
-      geography_scope: (row[10] as ConnectorRunResult["geography_scope"]) ?? null,
+      // Issue #530: profile_ids is emitted for every scope from now on, but
+      // historical rows written before #530 lack the field — default it to []
+      // here at the read boundary (never null-vs-missing) so downstream
+      // (connector × profile) consumers can always read `.profile_ids`.
+      geography_scope:
+        (row[10] as ConnectorRunResult["geography_scope"] | null)?.map((g) => ({
+          ...g,
+          profile_ids: g.profile_ids ?? [],
+        })) ?? null,
       // extraction_quality_summary (JSONB, #171) arrives already parsed as a JS
       // object by the pg driver, same as geography_scope above.
       extraction_quality_summary:

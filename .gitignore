@@ -1,5 +1,10 @@
 # Python
 .venv
+# …and any suffixed variant. `.venv` alone does NOT match `.venv312`, which is
+# how a 3,566-file virtualenv (numpy, scipy, grpc roots.pem, pip vendored idna)
+# got committed onto this very branch and left the PR unreviewable for 8 days.
+.venv*
+venv/
 __pycache__/
 *.pyc
 *.pyo
