@@ -83,10 +83,44 @@
  */
 
 /**
- * Flags that strip the Claude Code harness context from a non-interactive run.
+ * Flags passed on EVERY invocation, whatever `dashboard.llm_cli_lean_mode`
+ * says — because these are a security control, not a cost optimisation.
  *
- * - `--tools ""`             built-in tool catalog (Bash/Edit/Read/…) — unused
- *                            by both CLI flows, and the largest single chunk.
+ * `--tools ""` disables Claude Code's built-in tool catalog (Bash, Edit,
+ * Write, Read…). Our prompts carry **untrusted text scraped from listing
+ * portals**: a description is attacker-controlled content, and with tools
+ * enabled a prompt injection inside one could persuade the model to run a
+ * command or write a file on the host. Neither CLI flow needs those tools —
+ * single-shot is pure text, and the agentic protocol has the SERVER execute
+ * our tools (the model only emits a JSON envelope naming them) — so there is
+ * nothing to trade off.
+ *
+ * This used to sit in `CLI_LEAN_ARGS` below, which meant flipping lean mode
+ * off for debugging silently re-armed tool execution against untrusted input.
+ * A debug toggle must not be able to open a code-execution path.
+ *
+ * `--no-session-persistence` keeps listing text out of on-disk transcripts.
+ * Measured as a no-op on Claude Code 2.1.x (a `-p` run writes no session
+ * file), so it buys nothing today — it is cheap insurance that a future
+ * version re-enabling persistence cannot quietly start spooling scraped
+ * property descriptions to disk.
+ *
+ * The security framing here is owed to the sibling obsidian-meeting-copilot
+ * project, whose CLI bridge disables tools with exactly this rationale
+ * ("so untrusted transcript content cannot trigger tool calls").
+ */
+export const CLI_SAFETY_ARGS: readonly string[] = [
+  "--tools",
+  "",
+  "--no-session-persistence",
+];
+
+/**
+ * Flags that strip the Claude Code harness context from a non-interactive run.
+ * Purely a cost optimisation — gated by `dashboard.llm_cli_lean_mode` so it
+ * can be turned off to debug a flow, which is safe precisely because the
+ * security-relevant flags live in `CLI_SAFETY_ARGS` above.
+ *
  * - `--disable-slash-commands`  skill definitions.
  * - `--strict-mcp-config`    ignore ambient MCP servers (we pass none).
  * - `--setting-sources ""`   ignore user/project/local settings files.
@@ -96,8 +130,6 @@
  * (D-025) — it would break auth outright.
  */
 export const CLI_LEAN_ARGS: readonly string[] = [
-  "--tools",
-  "",
   "--disable-slash-commands",
   "--strict-mcp-config",
   "--setting-sources",

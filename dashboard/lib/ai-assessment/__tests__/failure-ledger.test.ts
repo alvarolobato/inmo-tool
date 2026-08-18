@@ -227,3 +227,21 @@ describe("assessment failure ledger", () => {
     expect(issued()).not.toContain("read-failure");
   });
 });
+
+describe("quota / kill-switch never strike the ledger", () => {
+  // A cost guard that damages data is worse than no guard. When the quota cap
+  // trips it throws for EVERY property in the tick; striking each one would
+  // park the head-of-queue properties permanently after three ticks (selection
+  // is created_at ASC), and the parks — unlike the cap — do not self-heal.
+  it.each([["LlmQuotaExceededError"], ["LlmDisabledError"]])(
+    "does NOT strike on %s",
+    async (name) => {
+      stubDb();
+      const err = Object.assign(new Error("stop"), { name });
+      await expect(
+        getOrCompute(1, "condition", "v1", listings, vi.fn().mockRejectedValue(err), vi.fn()),
+      ).rejects.toBe(err);
+      expect(issued()).not.toContain("record-failure");
+    },
+  );
+});

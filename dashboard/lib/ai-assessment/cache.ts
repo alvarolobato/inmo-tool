@@ -461,7 +461,22 @@ const TRANSIENT_CLI_CODES = new Set([
 
 function isEnvironmentalError(err: unknown): boolean {
   const name = err instanceof Error ? err.name : "";
-  if (name === "BudgetExceededError" || name === "CircuitBreakerOpenError") return true;
+  // `LlmQuotaExceededError` (D-107) belongs here for the same reason as the
+  // other two, and its omission was actively destructive: the cap trips for
+  // EVERY property in the tick, each one takes a strike, and at the default
+  // `assessment_max_failures: 3` the head-of-queue properties (selection is
+  // `created_at ASC`) are PARKED PERMANENTLY after three ticks. The cap
+  // self-heals in 30 minutes when the reading goes stale; the parks do not —
+  // they release only on changed listing text, a prompt bump, 14 days, or a
+  // manual `?force=1`. A cost guard that damages data is worse than no guard.
+  if (
+    name === "BudgetExceededError" ||
+    name === "CircuitBreakerOpenError" ||
+    name === "LlmQuotaExceededError" ||
+    name === "LlmDisabledError"
+  ) {
+    return true;
+  }
 
   const code = (err as { code?: unknown } | null)?.code;
   if (typeof code === "string" && TRANSIENT_CLI_CODES.has(code)) return true;

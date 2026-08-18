@@ -7,7 +7,11 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { CLI_LEAN_ARGS, parseCliReportedUsage } from "../llm-provider/cli/usage";
+import {
+  CLI_LEAN_ARGS,
+  CLI_SAFETY_ARGS,
+  parseCliReportedUsage,
+} from "../llm-provider/cli/usage";
 
 describe("parseCliReportedUsage", () => {
   it("maps a real CLI envelope to normalised usage", () => {
@@ -73,13 +77,24 @@ describe("parseCliReportedUsage", () => {
   });
 });
 
-describe("CLI_LEAN_ARGS", () => {
-  it("disables the built-in tool catalog and ambient config", () => {
-    // These four flags are what took an identical task from 25,664 to 167
-    // input tokens. `--tools ""` (empty string value) is the big one.
+describe("CLI safety vs lean args", () => {
+  it("keeps tool-disabling in the SAFETY set, not the cost set", () => {
+    // Our prompts carry untrusted scraped listing text. Disabling Claude's
+    // built-in Bash/Edit tools is a security control, so it must not live
+    // behind `dashboard.llm_cli_lean_mode`, which exists to be turned off
+    // for debugging. Guarding this split is the whole point of the test.
+    expect(CLI_SAFETY_ARGS).toContain("--tools");
+    expect(CLI_SAFETY_ARGS[CLI_SAFETY_ARGS.indexOf("--tools") + 1]).toBe("");
+    expect(CLI_LEAN_ARGS).not.toContain("--tools");
+  });
+
+  it("keeps scraped listing text out of on-disk transcripts", () => {
+    expect(CLI_SAFETY_ARGS).toContain("--no-session-persistence");
+  });
+
+  it("puts only cost flags in the lean set", () => {
+    // These took an identical task from 25,664 to 167 input tokens.
     expect(CLI_LEAN_ARGS).toEqual([
-      "--tools",
-      "",
       "--disable-slash-commands",
       "--strict-mcp-config",
       "--setting-sources",
@@ -87,9 +102,9 @@ describe("CLI_LEAN_ARGS", () => {
     ]);
   });
 
-  it("does not use --bare, which would break OAuth credential auth", () => {
+  it("does not use --bare in either set, which would break OAuth credential auth", () => {
     // --bare forces ANTHROPIC_API_KEY and never reads the credentials file the
     // launchd sync maintains (D-025).
-    expect(CLI_LEAN_ARGS).not.toContain("--bare");
+    expect([...CLI_SAFETY_ARGS, ...CLI_LEAN_ARGS]).not.toContain("--bare");
   });
 });

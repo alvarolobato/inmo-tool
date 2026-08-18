@@ -43,6 +43,7 @@ import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/e
 import {
   assessmentParkedResponse,
   llmDisabledResponse,
+  llmQuotaResponse,
   wantsForceRetry,
 } from "@/lib/ai-assessment/route-errors";
 import { clearAssessmentFailures } from "@/lib/ai-assessment/cache";
@@ -174,6 +175,9 @@ export async function POST(
     // Master kill switch is off — 503, again not a 500.
     const off = llmDisabledResponse(err, requestId);
     if (off) return off;
+    // Subscription quota cap reached (D-107) — 503, resumes on window reset.
+    const overQuota = llmQuotaResponse(err, requestId);
+    if (overQuota) return overQuota;
     console.error(`[${requestId}] POST extract assessment failed:`, err);
     return NextResponse.json(
       formatApiError(sanitizeErrorMessage(err), "UNKNOWN", undefined, requestId),

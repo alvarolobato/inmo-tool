@@ -21,7 +21,7 @@ import {
 } from "@/lib/llm-client";
 import { runAgenticChat } from "@/lib/llm-tools/runner";
 import { logUsage } from "@/lib/llm-usage";
-import { assertLlmEnabled } from "@/lib/llm-enabled";
+import { assertLlmEnabled, assertQuotaAvailable } from "@/lib/llm-enabled";
 import { callWithCircuitBreaker } from "@/lib/llm-circuit-breaker";
 import {
   loadDashboardLlmConfig,
@@ -154,6 +154,7 @@ export async function assembleRequest(
   // call in the dashboard (D-006), so the switch cannot be bypassed.
   if (isAgenticToolsEnabled() && tools.length > 0) {
     assertLlmEnabled();
+    await assertQuotaAvailable();
     const adapter = createDashboardAgenticAdapter();
 
     // Build the ctx, falling back to a minimal one if the caller didn't provide it

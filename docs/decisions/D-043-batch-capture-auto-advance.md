@@ -3,7 +3,7 @@ id: D-043
 title: Batch capture is a fully-automated bounded-concurrency queue in the extension, with jittered pacing
 date: 2026-08-05
 group: Data / connectors
-rule: Batch capture is a fully-automated BOUNDED-CONCURRENCY queue in the extension (open→auto-capture→close), seeded from a listing page. Concurrency + stagger base/spread are operator-configurable (options, clamped): default N=3, hard-cap 8, default stagger base 2 s. Keep the JITTERED/staggered launches — never fixed-interval, never an unbounded burst. Active-tab mode is the safe default; a background-tab (no-focus-steal) mode is opt-in. Supersedes the human-paced one-tab-per-click and sequential designs.
+rule: "Batch capture is a fully-automated BOUNDED-CONCURRENCY queue in the extension (open→auto-capture→close), seeded from a listing page. Concurrency + stagger base/spread are operator-configurable (options, clamped): default N=3, hard-cap 8, default stagger base 2 s. Keep the JITTERED/staggered launches — never fixed-interval, never an unbounded burst. Active-tab mode is the safe default; a background-tab (no-focus-steal) mode is opt-in. Supersedes the human-paced one-tab-per-click and sequential designs."
 order: 46
 ---
 

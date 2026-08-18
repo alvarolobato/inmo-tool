@@ -314,6 +314,26 @@
   requires_restart: [dashboard]
   components: [dashboard]
 
+- key: dashboard.llm_quota_stop_pct
+  env: DASHBOARD_LLM_QUOTA_STOP_PCT
+  type: int
+  sensitive: false
+  default: 0
+  section: "Dashboard LLM"
+  description: "Detiene las llamadas al LLM cuando el consumo de la suscripción alcanza este porcentaje (p.ej. 80). Se compara con la ventana MÁS ALTA de las que reporta el CLI (sesión de ~5h y semana), así que salta con el límite que esté más cerca, no solo el semanal. 0 = desactivado. La lectura la aporta un poller en el host (scripts/claude-quota-poller.sh) porque solo la autenticación por fichero de credenciales ve el consumo de la suscripción; sin lectura reciente el tope NO se aplica (no bloquea) y queda marcado como desconocido (consultable en GET /api/etl/llm-quota; aún no se muestra en /etl/salud). Bajo suscripción Max esto es el contador real: el total_cost_usd del CLI es un precio de lista teórico, no dinero facturado."
+  requires_restart: []
+  components: [dashboard]
+
+- key: dashboard.llm_quota_max_age_seconds
+  env: DASHBOARD_LLM_QUOTA_MAX_AGE_SECONDS
+  type: int
+  sensitive: false
+  default: 1800
+  section: "Dashboard LLM"
+  description: "Antigüedad máxima de la lectura de consumo para que el tope de cuota se considere vigente. Pasado este tiempo la lectura se trata como DESCONOCIDA: no bloquea (un poller caído no debe tumbar el producto) pero tampoco cuenta como 0%, y queda marcado como desconocido en GET /api/etl/llm-quota. Ajústelo al intervalo del poller con margen."
+  requires_restart: []
+  components: [dashboard]
+
 - key: dashboard.llm_provider
   env: DASHBOARD_LLM_PROVIDER
   type: enum

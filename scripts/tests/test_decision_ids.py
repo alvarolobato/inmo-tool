@@ -192,3 +192,59 @@ def test_no_stale_decision_cross_references() -> None:
         "exists under that name (likely left behind by a renumbering pass):\n"
         + "\n".join(f"  {v}" for v in sorted(violations))
     )
+
+
+def test_every_decision_record_has_parseable_frontmatter():
+    """A record whose frontmatter fails to parse is silently DROPPED from the
+    index, and the drift guard cannot catch it: the generator's output stays
+    self-consistent with its own omission, so `--check` reports "up to date"
+    while a binding rule is missing from the file every session loads.
+
+    That is how D-043, D-105, D-106 and D-107 all went missing at once — each
+    `rule:` value was an unquoted YAML plain scalar starting with a backtick or
+    containing ": ". This test is the guard the drift check structurally cannot
+    provide.
+    """
+    import yaml
+
+    broken = []
+    for path in sorted(DECISIONS_DIR.glob("D-*.md")):
+        text = path.read_text(encoding="utf-8")
+        if not text.startswith("---"):
+            broken.append((path.name, "no frontmatter block"))
+            continue
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            broken.append((path.name, "unterminated frontmatter block"))
+            continue
+        try:
+            data = yaml.safe_load(parts[1])
+        except yaml.YAMLError as exc:
+            broken.append((path.name, f"YAML error: {exc}"))
+            continue
+        if not isinstance(data, dict):
+            broken.append((path.name, "frontmatter is not a mapping"))
+
+    assert not broken, "Unparseable decision frontmatter (quote the rule: value): " + "; ".join(
+        f"{name} — {why}" for name, why in broken
+    )
+
+
+def test_active_records_appear_in_the_generated_index():
+    """Every non-retired record must actually reach DECISIONS.md.
+
+    Complements the drift guard, which only proves the file matches what the
+    generator produced — not that the generator saw every record.
+    """
+    index = (REPO_ROOT / "DECISIONS.md").read_text(encoding="utf-8")
+    missing = []
+    for path in sorted(DECISIONS_DIR.glob("D-*.md")):
+        text = path.read_text(encoding="utf-8")
+        if "## STATUS: retired" in text:
+            continue
+        if "\nrule:" not in text and not text.startswith("rule:"):
+            continue  # no rule: → deliberately not indexed
+        decision_id = path.name.split("-")[0] + "-" + path.name.split("-")[1]
+        if f"[{decision_id}]" not in index:
+            missing.append(decision_id)
+    assert not missing, f"Records missing from DECISIONS.md: {', '.join(missing)}"

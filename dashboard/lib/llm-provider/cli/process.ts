@@ -3,6 +3,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { tmpdir } from "node:os";
 import type { RunProcessResult } from "./types";
 import { CliRunnerError } from "./errors";
 import { sanitize, sanitizeArgv, sanitizeTail } from "../sanitize";
@@ -50,6 +51,40 @@ class CappedBufferCollector {
 }
 
 /**
+ * Write `input` to the child's stdin without letting an EPIPE crash the server.
+ *
+ * When the CLI exits before draining stdin — a rejected flag, an auth failure,
+ * anything that fails fast — the write end breaks and Node emits `error` on
+ * the stdin stream. That is a SEPARATE emitter from `child.on("error")`, which
+ * only covers spawn-level failures, so nothing was listening: an unhandled
+ * stream `error` takes down the whole Node process.
+ *
+ * Reproduced directly (`spawn("sh", ["-c", "exit 1"])` + a 5 MB write →
+ * `UNCAUGHT: EPIPE`, process dead). Not hypothetical for us either: assessment
+ * prompts carrying several listings comfortably exceed the ~64 KB pipe buffer,
+ * so the write does not complete synchronously and the race is real.
+ *
+ * Learned from the sibling obsidian-meeting-copilot project, whose CLI bridge
+ * absorbs exactly this ("child may close stdin before write completes").
+ */
+function writeStdinSafely(
+  stdinStream: NodeJS.WritableStream | null,
+  input: string | undefined,
+): void {
+  if (!stdinStream) return;
+  // Absorb EPIPE/ECONNRESET: the child closing stdin early is normal, not fatal.
+  stdinStream.on("error", () => {
+    /* child closed stdin before the write completed — the exit code tells the story */
+  });
+  try {
+    if (input !== undefined) stdinStream.write(input, "utf8");
+    stdinStream.end();
+  } catch {
+    /* synchronous throw on an already-destroyed stream — same non-fatal case */
+  }
+}
+
+/**
  * Spawn `file` with `args` (no shell). Always resolves when the child exits; sets `timedOut`
  * if the watchdog fired before then. Use `assertCliSuccess` to throw on timeout, truncation,
  * or non-zero exit.
@@ -63,6 +98,16 @@ export async function runCliProcess(params: RunCliProcessParams): Promise<RunPro
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env },
       windowsHide: true,
+      // Run from a neutral directory rather than inheriting the server's cwd.
+      // Claude Code auto-discovers CLAUDE.md from the working directory and
+      // walks up: measured from this repo's root, a trivial prompt pulled in
+      // 22,490 extra cached tokens and the model could describe the project.
+      // The lean flags (D-103) happen to suppress that today, but relying on
+      // one flag combination for it is fragile — `dashboard.llm_cli_lean_mode
+      // = false`, the documented debug escape hatch, would silently re-open
+      // it, and so would running the dashboard with `npm run dev` from the
+      // repo root. Neutral cwd fixes it structurally, for free.
+      cwd: tmpdir(),
     });
 
     const stdoutAcc = new CappedBufferCollector(maxStdoutBytes);
@@ -90,12 +135,7 @@ export async function runCliProcess(params: RunCliProcessParams): Promise<RunPro
     child.stdout?.on("data", (chunk: Buffer) => stdoutAcc.push(chunk));
     child.stderr?.on("data", (chunk: Buffer) => stderrAcc.push(chunk));
 
-    if (stdin !== undefined && child.stdin) {
-      child.stdin.write(stdin, "utf8");
-      child.stdin.end();
-    } else if (child.stdin) {
-      child.stdin.end();
-    }
+    writeStdinSafely(child.stdin, stdin);
 
     child.on("error", (err) => {
       clearTimeout(timer);
@@ -139,6 +179,16 @@ export async function runCliProcessStreaming(
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env },
       windowsHide: true,
+      // Run from a neutral directory rather than inheriting the server's cwd.
+      // Claude Code auto-discovers CLAUDE.md from the working directory and
+      // walks up: measured from this repo's root, a trivial prompt pulled in
+      // 22,490 extra cached tokens and the model could describe the project.
+      // The lean flags (D-103) happen to suppress that today, but relying on
+      // one flag combination for it is fragile — `dashboard.llm_cli_lean_mode
+      // = false`, the documented debug escape hatch, would silently re-open
+      // it, and so would running the dashboard with `npm run dev` from the
+      // repo root. Neutral cwd fixes it structurally, for free.
+      cwd: tmpdir(),
     });
 
     const stdoutAcc = new CappedBufferCollector(maxStdoutBytes);
@@ -186,12 +236,7 @@ export async function runCliProcessStreaming(
 
     child.stderr?.on("data", (chunk: Buffer) => stderrAcc.push(chunk));
 
-    if (stdin !== undefined && child.stdin) {
-      child.stdin.write(stdin, "utf8");
-      child.stdin.end();
-    } else if (child.stdin) {
-      child.stdin.end();
-    }
+    writeStdinSafely(child.stdin, stdin);
 
     child.on("error", (err) => {
       clearTimeout(timer);

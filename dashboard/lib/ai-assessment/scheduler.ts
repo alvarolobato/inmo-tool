@@ -22,7 +22,7 @@
 
 import { getSystemConfig } from "@/lib/system-config/loader";
 import { runAssessmentBatch } from "./batch";
-import { isLlmEnabled } from "@/lib/llm-enabled";
+import { isLlmEnabled, assertQuotaAvailable, LlmQuotaExceededError } from "@/lib/llm-enabled";
 
 interface SchedulerConfig {
   enabled: boolean;
@@ -103,6 +103,18 @@ async function tick(batchSize: number): Promise<void> {
   if (ticking) return;
   ticking = true;
   try {
+    // Check the quota once per tick rather than discovering it inside the
+    // batch loop: cheaper, and it keeps the "cap reached" message to one line
+    // per tick instead of one per property.
+    try {
+      await assertQuotaAvailable();
+    } catch (err) {
+      if (err instanceof LlmQuotaExceededError) {
+        console.info(`[ai-assessment:scheduler] tick skipped — ${err.message}`);
+        return;
+      }
+      throw err;
+    }
     const result = await runAssessmentBatch({ batchSize });
     if (result.properties > 0 || result.stopped) {
       console.info(

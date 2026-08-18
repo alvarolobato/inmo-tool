@@ -3,7 +3,7 @@ id: D-105
 title: One master kill switch turns off all LLM use
 date: 2026-08-18
 group: AI layer
-rule: `dashboard.llm_enabled` (default true) is the ONE switch that stops every model call — enforced at both seams (`llmComplete` and `assembleRequest`'s agentic branch, the only two paths per D-006), schedulers refuse to start, and API routes answer 503 `LLM_DISABLED`. Per-subsystem switches stop only their own scheduled pass.
+rule: "`dashboard.llm_enabled` (default true) is the ONE switch that stops every model call — enforced at both seams (`llmComplete` and `assembleRequest`'s agentic branch, the only two paths per D-006), schedulers refuse to start, and API routes answer 503 `LLM_DISABLED`. Per-subsystem switches stop only their own scheduled pass."
 ---
 
 # D-105: One master kill switch turns off all LLM use
