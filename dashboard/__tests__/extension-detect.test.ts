@@ -143,9 +143,24 @@ describe("detailPortalForUrl — only real listing-detail pages", () => {
     ["https://www.altamirainmuebles.com/venta-viviendas/cualquier-provincia", null],
     ["https://www.altamirainmuebles.com/venta-viviendas/pontevedra", null],
     ["https://www.altamirainmuebles.com/inmueble/ABC123", null],
+    // Hipoges (issue #207/D-111): grounded in the site's own public Angular
+    // route table — /<lang>/detail/<id> or /<lang>/<investment>/detail/<id>,
+    // optionally suffixed /contact-received or /unavailable. DOM extraction
+    // is an unvalidated draft; only this URL shape is grounded.
+    ["https://realestate.hipoges.com/es/detail/12345", "hipoges"],
+    ["https://realestate.hipoges.com/es/detail/12345/contact-received", "hipoges"],
+    ["https://realestate.hipoges.com/es/detail/12345/unavailable", "hipoges"],
+    ["https://realestate.hipoges.com/es/npl/detail/ABC-123", "hipoges"],
+    ["https://realestate.hipoges.com/pt/detail/12345?utm=x#foto", "hipoges"],
+    // Hipoges non-detail pages → null.
+    ["https://realestate.hipoges.com/", null],
+    ["https://realestate.hipoges.com/es", null],
+    ["https://realestate.hipoges.com/es/sale/flat/spain/madrid", null],
+    ["https://realestate.hipoges.com/es/detail", null],
     // Unsupported host → null even on a detail-shaped path.
     ["https://www.fotocasa.es/inmueble/123/", null],
     ["https://example.com/inmueble/123/", null],
+    ["https://hipoges.com/es/detail/12345", null], // corporate domain, not the real-estate host
     // Non-http(s) / garbage → null.
     ["javascript://idealista.com/inmueble/1/%0aalert(1)", null],
     ["not a url", null],
@@ -194,6 +209,9 @@ describe("isRenderReady — not an empty SPA shell", () => {
     expect(isRenderReady(document, "idealista")).toBe(true);
     expect(isRenderReady(document, "aliseda")).toBe(true);
     expect(isRenderReady(document, "altamira")).toBe(true);
+    // Hipoges' readySelectors are the generic h1/main fallback — no real
+    // capture exists yet to ground a portal-specific selector (D-111).
+    expect(isRenderReady(document, "hipoges")).toBe(true);
   });
 
   it("uses generic h1/main fallback for an unknown portal", () => {
@@ -286,6 +304,18 @@ describe("listingPortalForUrl — only search/results pages", () => {
       null,
     ],
     ["https://www.altamirainmuebles.com/", null],
+    // Hipoges search/results routes (D-111) → listing. Grounded in the site's
+    // own public Angular route table: /<lang>/(sale|rent)/<typology>/<country>
+    // /<town> or the area/countries/map/point variants.
+    ["https://realestate.hipoges.com/es/sale/flat/spain/madrid", "hipoges"],
+    ["https://realestate.hipoges.com/es/rent/house/spain/malaga/features", "hipoges"],
+    ["https://realestate.hipoges.com/es/area/sale/flat/spain", "hipoges"],
+    ["https://realestate.hipoges.com/es/countries/sale/flat/spain", "hipoges"],
+    ["https://realestate.hipoges.com/es/map/sale/flat/spain/madrid", "hipoges"],
+    ["https://realestate.hipoges.com/es/point/sale/flat/spain/10", "hipoges"],
+    // Hipoges detail / home → not a listing.
+    ["https://realestate.hipoges.com/es/detail/12345", null],
+    ["https://realestate.hipoges.com/", null],
     // Unsupported host / non-http / junk → null.
     ["https://www.fotocasa.es/es/comprar/viviendas/madrid/", null],
     ["ftp://www.idealista.com/venta-viviendas/x/", null],
@@ -319,6 +349,8 @@ describe("supportedPortalForUrl — capture portal by host, any page role (#237)
     ["https://idealista.com/mi-cuenta/favoritos", "idealista"],
     ["https://www.alisedainmobiliaria.com/", "aliseda"],
     ["https://www.altamirainmuebles.com/cualquier-pagina", "altamira"],
+    ["https://realestate.hipoges.com/", "hipoges"],
+    ["https://realestate.hipoges.com/es/detail/12345", "hipoges"],
     // Unsupported hosts and non-http(s) → null (popup keeps its manual escape hatch).
     ["https://www.fotocasa.es/", null],
     ["https://inmuebles.cimenta2.com/inmuebles/s/", null],
@@ -341,15 +373,20 @@ describe("pageRoleForUrl — detail / listing / other / null routing (#237)", ()
       "https://www.altamirainmuebles.com/venta-de-atico/pontevedra/sanxenxo/segunda-mano/9186_1001_PE0001/375859/1",
       "detail",
     ],
+    ["https://realestate.hipoges.com/es/detail/12345", "detail"],
+    ["https://realestate.hipoges.com/es/npl/detail/12345/unavailable", "detail"],
     // Listing/search pages.
     ["https://www.idealista.com/venta-viviendas/madrid-madrid/", "listing"],
     ["https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/malaga", "listing"],
     ["https://www.altamirainmuebles.com/venta-viviendas/pontevedra", "listing"],
+    ["https://realestate.hipoges.com/es/sale/flat/spain/madrid", "listing"],
     // Supported portal, but a page we can't capture → "other" (guidance shown).
     ["https://www.idealista.com/", "other"],
     ["https://idealista.com/mi-cuenta/favoritos", "other"],
     ["https://www.alisedainmobiliaria.com/", "other"],
     ["https://www.altamirainmuebles.com/", "other"],
+    ["https://realestate.hipoges.com/", "other"],
+    ["https://realestate.hipoges.com/es", "other"],
     // Unsupported host / non-http → null (no portal at all).
     ["https://www.fotocasa.es/", null],
     ["https://inmuebles.cimenta2.com/", null],

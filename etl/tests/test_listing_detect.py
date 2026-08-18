@@ -61,9 +61,26 @@ _DETAIL_CASES: list[tuple[str, str | None]] = [
     ("https://www.altamirainmuebles.com/venta-viviendas/cualquier-provincia", None),
     ("https://www.altamirainmuebles.com/venta-viviendas/pontevedra", None),
     ("https://www.altamirainmuebles.com/inmueble/ABC123", None),
+    # Hipoges: /<lang>/detail/<id> or /<lang>/<investment>/detail/<id>,
+    # optionally suffixed /contact-received or /unavailable on the SAME id —
+    # grounded in the site's own public Angular route table (D-111).
+    ("https://realestate.hipoges.com/es/detail/12345", "hipoges"),
+    ("https://realestate.hipoges.com/es/detail/12345/contact-received", "hipoges"),
+    ("https://realestate.hipoges.com/es/detail/12345/unavailable", "hipoges"),
+    ("https://realestate.hipoges.com/es/npl/detail/ABC-123", "hipoges"),
+    ("https://realestate.hipoges.com/pt/detail/12345?utm=x#foto", "hipoges"),
+    # Hipoges non-detail pages → None.
+    ("https://realestate.hipoges.com/", None),
+    ("https://realestate.hipoges.com/es", None),
+    ("https://realestate.hipoges.com/es/sale/flat/spain/madrid", None),
+    ("https://realestate.hipoges.com/es/detail", None),
     # Unsupported host → None even on a detail-shaped path.
     ("https://www.fotocasa.es/inmueble/123/", None),
     ("https://example.com/inmueble/123/", None),
+    (
+        "https://hipoges.com/es/detail/12345",
+        None,
+    ),  # corporate domain, not the real-estate host
     # Non-http(s) / garbage → None.
     ("javascript://idealista.com/inmueble/1/%0aalert(1)", None),
     ("not a url", None),
@@ -108,6 +125,19 @@ _LISTING_CASES: list[tuple[str, str | None]] = [
         None,
     ),
     ("https://www.altamirainmuebles.com/", None),
+    # Hipoges search/results routes → listing.
+    ("https://realestate.hipoges.com/es/sale/flat/spain/madrid", "hipoges"),
+    (
+        "https://realestate.hipoges.com/es/rent/house/spain/malaga/features",
+        "hipoges",
+    ),
+    ("https://realestate.hipoges.com/es/area/sale/flat/spain", "hipoges"),
+    ("https://realestate.hipoges.com/es/countries/sale/flat/spain", "hipoges"),
+    ("https://realestate.hipoges.com/es/map/sale/flat/spain/madrid", "hipoges"),
+    ("https://realestate.hipoges.com/es/point/sale/flat/spain/10", "hipoges"),
+    # Hipoges detail / home → not a listing.
+    ("https://realestate.hipoges.com/es/detail/12345", None),
+    ("https://realestate.hipoges.com/", None),
     # Unsupported host / non-http / junk → None.
     ("https://www.fotocasa.es/es/comprar/viviendas/madrid/", None),
     ("ftp://www.idealista.com/venta-viviendas/x/", None),

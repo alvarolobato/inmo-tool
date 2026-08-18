@@ -29,11 +29,13 @@
   // The portals the extension can capture. Mirror of the dashboard's
   // CAPTURE_PORTALS (dashboard/lib/worklist.ts) and etl/capture.py's
   // `_CAPTURE_CONNECTORS` — the three lists must stay in step (adding a portal
-  // is a one-line edit in each). Ordered idealista → aliseda → altamira.
+  // is a one-line edit in each). Ordered idealista → aliseda → altamira →
+  // hipoges.
   const CAPTURE_PORTALS = [
     { portal: "idealista", hostSuffix: "idealista.com" },
     { portal: "aliseda", hostSuffix: "alisedainmobiliaria.com" },
     { portal: "altamira", hostSuffix: "altamirainmuebles.com" },
+    { portal: "hipoges", hostSuffix: "realestate.hipoges.com" },
   ];
 
   /**

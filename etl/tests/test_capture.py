@@ -11,6 +11,7 @@ any other listing.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from etl import capture
@@ -74,12 +75,67 @@ class TestCaptureConnectorRegistration:
         assert connector.name == "altamira"
         assert external_id == "375859"
 
+    def test_hipoges_detail_url_resolves(self):
+        url = "https://realestate.hipoges.com/es/detail/99001"
+        resolved = capture._connector_for_url(url)
+        assert resolved is not None
+        connector, external_id = resolved
+        assert connector.name == "hipoges"
+        assert external_id == "99001"
+
     def test_all_expected_capture_hosts_registered(self):
         assert set(capture._CAPTURE_CONNECTORS) == {
             "idealista.com",
             "alisedainmobiliaria.com",
             "altamirainmuebles.com",
+            "realestate.hipoges.com",
         }
+
+
+class TestCapturePortalListsStayInSync:
+    """PR #548 review (B1): a Hipoges pass updated etl.capture.EXTENSION_CAPTURE_PORTALS
+    and dashboard/lib/worklist.ts CAPTURE_PORTALS but missed init.sql's one-time
+    cleanup DELETE — which re-applies on EVERY ETL boot — so every Hipoges
+    capture_worklist row was silently deleted on the next restart (issue #454's
+    "0/N pending forever" bug, reintroduced). The comment above that DELETE has
+    said "keep the three [lists] in step" since #454 and drifted anyway the first
+    time a fourth portal was added — so this test checks it mechanically instead
+    of trusting the comment."""
+
+    def test_delete_list_matches_capture_portal_lists(self):
+        sql = _SCHEMA_SQL.read_text(encoding="utf-8")
+        m = re.search(
+            r"DELETE FROM capture_worklist\s+WHERE source_portal NOT IN \(([^)]+)\)",
+            sql,
+        )
+        assert m is not None, "capture_worklist cleanup DELETE not found in init.sql"
+        sql_portals = {p.strip().strip("'") for p in m.group(1).split(",")}
+
+        ts_path = (
+            Path(__file__).parent.parent.parent / "dashboard" / "lib" / "worklist.ts"
+        )
+        ts_source = ts_path.read_text(encoding="utf-8")
+        block_match = re.search(
+            r"CAPTURE_PORTALS:[^=]*=\s*\[(.*?)\];", ts_source, re.DOTALL
+        )
+        assert block_match is not None, "CAPTURE_PORTALS array not found in worklist.ts"
+        ts_portals = set(re.findall(r'portal:\s*"([a-z0-9_]+)"', block_match.group(1)))
+
+        assert sql_portals == set(capture.EXTENSION_CAPTURE_PORTALS), (
+            "init.sql's capture_worklist cleanup DELETE has drifted from "
+            f"etl.capture.EXTENSION_CAPTURE_PORTALS: sql={sql_portals} "
+            f"python={set(capture.EXTENSION_CAPTURE_PORTALS)}"
+        )
+        assert sql_portals == ts_portals, (
+            "init.sql's capture_worklist cleanup DELETE has drifted from "
+            f"dashboard/lib/worklist.ts CAPTURE_PORTALS: sql={sql_portals} "
+            f"ts={ts_portals}"
+        )
+        assert set(capture.EXTENSION_CAPTURE_PORTALS) == ts_portals, (
+            "etl.capture.EXTENSION_CAPTURE_PORTALS has drifted from "
+            f"dashboard/lib/worklist.ts CAPTURE_PORTALS: python="
+            f"{set(capture.EXTENSION_CAPTURE_PORTALS)} ts={ts_portals}"
+        )
 
 
 class TestProcessPendingCaptures:
@@ -521,6 +577,83 @@ class TestProcessPendingCaptures:
                     "DELETE FROM connector_config WHERE connector_name = 'idealista'"
                 )
             pg_conn.commit()
+
+
+class TestUncalibratedConnectorRetainsHtml:
+    """Opus review (PR #548, C3): a connector whose raw_extra reports
+    selectors_calibrated=False (Hipoges today) must NOT have its html nulled
+    on a 'done' row. normalize() never raises for an uncalibrated connector —
+    every capture reaches 'done' — so without this, issue #547's whole plan
+    (preserve the real captured HTML as a fixture, once the owner captures a
+    real page) would be impossible: the HTML that landed in the DB would
+    already be gone by the time anyone went looking for it."""
+
+    _URL = "https://realestate.hipoges.com/es/detail/99001"
+    _HTML = (
+        "<html><head><title>x</title>"
+        '<meta property="og:title" content="Piso en venta"></head>'
+        "<body><app-root></app-root></body></html>"
+    )
+
+    def _cleanup(self, conn):
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM extension_capture WHERE url = %s", (self._URL,))
+            cur.execute(
+                "SELECT property_id FROM listing WHERE source = 'hipoges' "
+                "AND external_id = %s",
+                ("99001",),
+            )
+            row = cur.fetchone()
+            cur.execute(
+                "DELETE FROM listing WHERE source = 'hipoges' AND external_id = %s",
+                ("99001",),
+            )
+            if row is not None:
+                cur.execute("DELETE FROM property WHERE id = %s", (row[0],))
+        conn.commit()
+
+    def test_uncalibrated_hipoges_capture_retains_html(self, pg_conn):
+        _apply_schema(pg_conn)
+        self._cleanup(pg_conn)
+        try:
+            capture_id = _insert_pending(pg_conn, self._URL, self._HTML)
+
+            processed = capture.process_pending_captures(pg_conn)
+            assert processed == 1
+
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, html FROM extension_capture WHERE id = %s",
+                    (capture_id,),
+                )
+                status, stored_html = cur.fetchone()
+            assert status == "done"
+            assert stored_html == self._HTML, (
+                "an uncalibrated connector's captured HTML must survive "
+                "processing — #547 needs it to build real fixtures"
+            )
+        finally:
+            self._cleanup(pg_conn)
+
+    def test_calibrated_idealista_capture_still_nulls_html(self, pg_conn):
+        """Control: a CALIBRATED connector (Idealista — raw_extra carries no
+        selectors_calibrated key at all) keeps the pre-existing behaviour of
+        dropping html once processed — this PR must not weaken retention
+        for connectors that were never uncalibrated in the first place."""
+        _apply_schema(pg_conn)
+        _cleanup(pg_conn)
+        try:
+            capture_id = _insert_pending(pg_conn, _FIXTURE_URL, _FIXTURE_HTML)
+            processed = capture.process_pending_captures(pg_conn)
+            assert processed == 1
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT html FROM extension_capture WHERE id = %s", (capture_id,)
+                )
+                (stored_html,) = cur.fetchone()
+            assert stored_html is None
+        finally:
+            _cleanup(pg_conn)
 
 
 class TestCaptureTriggersMaterialize:

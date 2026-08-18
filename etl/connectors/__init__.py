@@ -35,6 +35,7 @@ def register_all() -> None:
     from etl.connectors.fotocasa import FotocasaConnector
     from etl.connectors.fotocasa_rental import FotocasaRentalConnector
     from etl.connectors.habitaclia import HabitacliaConnector
+    from etl.connectors.hipoges import HipogesConnector
     from etl.connectors.idealista import IdealistaConnector
     from etl.connectors.milanuncios import MilanunciosConnector
     from etl.connectors.milanuncios_rental import MilanunciosRentalConnector
@@ -127,3 +128,11 @@ def register_all() -> None:
     # postal code. Born disabled (#100).
     if EscogecasaConnector.name not in registered_names:
         CONNECTORS.append(EscogecasaConnector())
+    # Issue #207: Hipoges (realestate.hipoges.com), a multi-fund servicer REO
+    # portal. capture-only, same as Idealista/Aliseda/Altamira above.
+    # scope_key() always returns None (D-075 — every sanctioned enumeration
+    # channel returns an app-level 403 to an honest client, so there is no
+    # live discover(); D-111 records the capture-only path). Registered here
+    # to keep CONNECTORS "every known site".
+    if HipogesConnector.name not in registered_names:
+        CONNECTORS.append(HipogesConnector())
