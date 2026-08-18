@@ -28,10 +28,10 @@ The claim "LLM only runs on properties that already matched a profile's non-LLM 
 
 ### 1.3 Corrections and facts the plan is built on
 
-- **Measured stable-prompt sizes** (chars, from `system-prompt.ts` template ranges): occupancy 7,537 (~2,100 tok); condition 4,950 (~1,400); redflags 4,139 + trending/dismissed blocks (~1,200+); location 4,024 (~1,120); opportunity 3,265 (~910); extract 2,849 (~790). `DOMAIN_PREAMBLE` (519 chars) and `ASSESSMENT_RULES` (600 chars) are duplicated into every stable prompt.
+- **Measured stable-prompt sizes** — SUPERSEDED by the F-13 re-measurement below (§3, "F-13 landed"), which corrected the redflags figure (this line's "4,139 + ~1,200" undercounted its EMPTY-corpus baseline alone by ~2.6x — it's 10,941 chars/~3,039 tok with nothing in the corpus, the largest of the six assessment flows, not the smallest-with-an-asterisk) and re-measured all eight flows together in one pass. Original chars (from `system-prompt.ts` template ranges) for context: occupancy 7,537 (~2,100 tok); condition 4,950 (~1,400); redflags 4,139 + trending/dismissed blocks; location 4,024 (~1,120); opportunity 3,265 (~910); extract 2,849 (~790). `DOMAIN_PREAMBLE` (519 chars) and `ASSESSMENT_RULES` (600 chars) are duplicated into every stable prompt.
 - **Measured volatile payloads** (live DB, eligible properties): median 1,425 chars of description, p90 2,898, max 17,637; **1.06 active described listings per property** (dedup rarely merges) → volatile ≈ 500–700 tokens. Per-property six-flow total ≈ ~11k input + ~1.5k output ≈ **$0.019** — independently consistent with D-103's end-to-end measurement.
 - **F-2 confirmed at source**: the redflags trending and dismissed blocks render **inside the `stable` template** (`system-prompt.ts:890,894`), so any corpus growth re-cooks the flow's cacheable prefix. They are deliberately *not* in the content hash (`redflags.ts:369` — correct, keep that).
-- **CLI caching — MEASURED (Phase 0c, see §3): real, but today's shape captures none of it.** On the CLI path (the owner's default), `stable` and `volatile` are **concatenated** and sent as the stdin `## system` section (`llm-client.ts:127`, `cli/claude-code.ts:21-27` — F-13 pending); `--system-prompt` carries only the protocol shim. With that shape the cache breakpoint lands at the end of the whole body: a 20,120-char stable block shared between two calls whose tails differ read back **zero** (only a byte-identical repeat hits). Move the same block onto `--system-prompt` and it is reused across a differing tail — **$0.0200 → $0.0058, ~71% off the same call**. So the cache-ordering items (F-1/F-2) have no CLI-side value *until F-13 lands*, and F-13 is now the highest-leverage cache change available; batching's savings (F-3 + multi-property) are independent of all of it and stand either way.
+- **CLI caching — MEASURED (Phase 0c, see §3): real, but the pre-F-13 shape captured none of it; F-13 has since landed (issue #543).** `stable` and `volatile` used to be **concatenated** and sent as the stdin `## system` section (`llm-client.ts:127`, `cli/claude-code.ts:21-27`); `--system-prompt` carried only the protocol shim. With that shape the cache breakpoint landed at the end of the whole body: a 20,120-char stable block shared between two calls whose tails differ read back **zero** (only a byte-identical repeat hit). F-13 moved the stable block onto `--system-prompt`, where it IS reused across a differing tail on a synthetic block above the cache floor — **$0.0200 → $0.0058, ~71% off the same call**. A re-probe against the REAL per-flow prompts showed **zero measured saving today for six of the eight flows** (chat, compare, extract, opportunity, location, condition, occupancy), which sit below Haiku 4.5's 4,096-token minimum cacheable prefix — but **redflags is the exception**: its `stable` embeds the trending/dismissed candidate blocks, is already the largest of the six assessment flows even on an empty corpus (~3,039 tok), and crosses the floor at a plausible dismissed-candidate count (confirmed with a real CLI run: ~70% off once over the floor). See the "F-13 landed" subsection right after the 0c result below for the full re-measurement, per-flow. So the cache-ordering items (F-1/F-2) have no CLI-side value for the seven flows currently under the floor, but redflags can already benefit today depending on corpus size; F-13 remains the correctness prerequisite for the rest to ever pay out.
 - **The demo stack has not been redeployed since #536 merged** (at time of writing): older `llm_usage` rows store 0 tokens / $0. Baseline measurement requires the redeploy first (Phase 0).
 - **Advisory-lock mechanics constrain the batch design**: `getOrCompute` holds one per-`(property, flow)` session lock on a **dedicated pooled client** (`cache.ts`, `withAdvisoryLock`), and the pool is capped at **5 connections** (`db-write.ts:59`). Naively nesting `withAdvisoryLock` per property in a batch of 5 would exhaust the pool and deadlock against the app's own queries. The batch path must take all its locks **on one client** (a session can hold many advisory locks), in sorted key order.
 - **`ASSESSMENT_SELECTION_FLOWS` is still occupancy/condition/redflags only** (`eligibility.ts:47`) — F-9 (add location/opportunity) is confirmed still open, and matters here because merging axes changes what "pending" must mean.
@@ -197,6 +197,132 @@ Two findings, and the second one is actionable:
 - **Re-probe after F-13 and after Phase 3**, in that order. The script is kept
   for exactly this.
 
+#### F-13 landed (2026-08-18) — re-probed with the synthetic block, ALL EIGHT real flows, and a real above-floor redflags run
+
+F-13 (issue #543) moved the CLI single-shot path's `stable` block onto
+`--system-prompt` (as a byte-stable prefix ahead of the protocol shim,
+`SINGLE_SHOT_PRINT_ARG` — see `llm-client.ts`'s `buildCliMessages` and
+`cli/claude-code.ts`'s `claudeCliSingleShotOnce`), and left `volatile` +
+the conversation turns in stdin.
+
+Byte-stability is tested directly against the PRODUCER, `buildSystemPrompt`,
+across every one of the eight flows
+(`lib/llm-context/__tests__/system-prompt-stability.test.ts`): two calls with
+genuinely different property/candidate/profile payloads must yield a
+byte-identical `stable` and no marker unique to either payload. This test
+caught a real bug in the first version of this PR — `buildChatPrompt`
+interpolated `vars.profileName`/`profileId` directly into `stable` — now
+fixed by moving that sentence into `volatile` (chat's `stable` is otherwise
+constant; that field is not populated by any caller in production today, but
+the type contract allows it, so the fix stands regardless).
+`lib/__tests__/llm-client.test.ts`'s "CLI system-prompt split (F-13)" tests
+cover a narrower, complementary claim: that `llm-client.ts`'s CLI branch
+routes `req.systemPrompt.stable` to `systemPrompt` and keeps `volatile` +
+the message out of it — routing correctness, not producer byte-stability.
+
+**Re-run of `scripts/probe-cli-cache.ts`** (synthetic 20,120-char / ~5.8k-token
+block, same shape as the original Phase 0c run, new nonce) reproduced the
+original result almost exactly, confirming the fix behaves as measured:
+
+| variant | cache_creation | cache_read | cost |
+|---|---:|---:|---:|
+| A2 (stdin, varying tail — pre-F-13 shape) | 5,880 | 0 | $0.0209 |
+| B (stdin, byte-identical control) | 0 | 5,880 | $0.0096 |
+| C2 (`--system-prompt`, varying tail — now production's shape) | 255 | 5,498 | $0.0065 |
+
+**Then the real thing, for every flow — not just occupancy.** The original
+version of this section measured only `occupancy` and called it "the largest
+of the six assessment flows", which was wrong: redflags embeds the
+trending/dismissed candidate blocks (`renderTrendingCandidates`/
+`renderDismissedCandidates`, `system-prompt.ts:890,894`) directly into
+`stable`, and that block grows with the corpus. Re-measured all eight via
+`buildSystemPrompt(flow, vars)` with representative vars (a single listing;
+redflags additionally varied by trending/dismissed corpus size):
+
+| flow | stable size | tokens (~3.6 chars/tok) | vs. 4,096-tok floor |
+|---|---:|---:|---|
+| chat | 1,831 chars | ~509 | well under |
+| compare | 2,017 chars | ~560 | well under |
+| extract | 3,808 chars | ~1,058 | well under |
+| opportunity | 4,212 chars | ~1,170 | well under |
+| location | 4,959 chars | ~1,378 | well under |
+| condition | 5,871 chars | ~1,631 | well under |
+| occupancy | 9,560 chars | ~2,656 | well under |
+| **redflags, empty corpus** | **10,941 chars** | **~3,039** | **largest of the six even with nothing in the corpus** |
+| redflags, 10 trending + 0 dismissed | 11,228 chars | ~3,119 | still under |
+| redflags, 10 trending + 40 dismissed | 14,535 chars | ~4,038 | **just under** — ~43 dismissed entries crosses it at this rate |
+| redflags, 10 trending + 200 dismissed | 27,115 chars | ~7,532 | **over** |
+
+§1.3's original "redflags 4,139 (~1,200+ with trending/dismissed)" estimate
+undercounted the empty-corpus baseline alone by ~2.6x; corrected above.
+`getDismissedCandidateTypes()` (`lib/db/redflag-candidates.ts:120-127`) has
+**no limit at all** — it returns every row in `dismissed_candidate_type`, so
+this block only grows over the tool's life; there is no capped default to
+cite (the review's cited "200" was `getPromotionCandidates`'s own default,
+a different, unrelated query). ~40 dismissed entries — a plausible amount
+after a few months of review — is enough to cross the floor on its own, with
+trending's default top-10 essentially along for the ride.
+
+Confirmed with a real CLI run, not just extrapolation: built redflags'
+`stable` with 10 trending + 200 dismissed candidates (27,115 chars, ~7,532
+tok, comfortably over the floor) for two different properties (same batch's
+trending/dismissed, differing listing content), and ran each through the
+production `claudeCliSingleShot({ cfg, prompt, systemPrompt: stable })`:
+
+| call | cache_creation | cache_read | cost |
+|---|---:|---:|---:|
+| property A (cold) | 9,691 | 0 | $0.0285 |
+| property B (different property, same batch candidates) | 533 | 9,159 | $0.0085 |
+
+**Real reuse, ~70% off, on the flow that actually crosses the floor in
+plausible production use.** The other seven flows, at today's sizes, do not:
+built `occupancy`'s real stable prompt for two different properties (9,560
+chars, ~2,656 tok — the largest of the seven flows whose `stable` is a
+constant template) and ran the same production call shape:
+
+| call | stable block | cache_creation | cache_read | cost |
+|---|---:|---:|---:|---:|
+| property A (cold) | 9,560 chars (~2,656 tok) | 0 | 0 | $0.0117 |
+| property B (different property, same flow) | 9,560 chars, byte-identical to A | 0 | 0 | $0.0103 |
+
+**Honest result: zero measured saving today for six of the eight flows** —
+chat, compare, extract, opportunity, location, condition, and occupancy all
+sit below Haiku 4.5's measured 4,096-token minimum cacheable prefix, so
+neither call shows a cache write or read for any of them, exactly as Phase
+0c predicted for a below-floor block. **Redflags is the exception, and it is
+corpus-dependent**: near the floor with an empty-to-moderate corpus, over it
+once the dismissed list grows past roughly 40 entries — at which point F-13
+is already paying out in production, not just "once batching lands".
+
+**F-13 is still the right, necessary change for every flow**, for two
+reasons independent of whether a given flow is over the floor today: (1) it
+is a correctness prerequisite — the pre-F-13 shape could never cache
+regardless of prompt size, since the breakpoint sat at the end of a body
+whose tail always varies; a call is now at least *eligible* the moment its
+stable block crosses the floor, and redflags already demonstrates that this
+is not merely theoretical. (2) It compounds with D-B (multi-property
+batching, still unimplemented) and D-A (the "triage" axis merge), both of
+which grow the stable block — batching N properties' worth of instructions
+into one call, or merging condition+location+opportunity into one prompt,
+push those flows' stable prefixes up toward and past 4,096 tokens too, at
+which point they start paying out exactly as the synthetic probe and the
+real redflags run both showed (~70-71% off the identical work).
+
+**Scoped guidance, not a blanket one**: while a flow's `stable` stays under
+the floor, expect its `llm_usage` `cli` rows to show
+`cache_creation_input_tokens = cache_read_input_tokens = 0` — that is the
+correct, expected state for that flow, not a regression. This does NOT apply
+blanket to "the CLI path" or to redflags specifically once its corpus grows —
+check the flow and, for redflags, the current dismissed-candidate count
+before reading zeros as expected. A regression in redflags' caching (e.g. F-2
+moving trending/dismissed out of `stable` and into `volatile`, which would
+correctly shrink `stable` back to a small constant and LOSE this reuse) is a
+real, watchable event, not something this paragraph should be used to wave
+away.
+
+**Re-probe again after F-2, after D-B, or after D-A lands** (whichever ships
+first) — each changes which flows are over the floor.
+
 ### Phase 1 — Flow-major batch loop (M; 1 PR; parallel with Phase 0)
 
 Restructure `runAssessmentBatch` from property-major to flow-major without changing any observable outcome except call order. Same summary counters, same budget/circuit clean-stop semantics. Keep the once-per-batch trending/dismissed fetch where it is.
@@ -227,7 +353,7 @@ Restructure `runAssessmentBatch` from property-major to flow-major without chang
 
 ### Phase 4 — Optional / conditional tail (S each)
 
-F-6 on OpenRouter only if Phase 0c warrants; advisory `eligible` field on POST responses; extract pre-pass + reconciler extension (D-E) when a profile first constrains an extract-covered field, plus the profile-editor warning immediately. F-4/F-10/F-11/F-12/F-14 proceed independently. **F-13 is no longer an independent tidy-up — Phase 0c measured it at ~71% off per-call input cost on the default provider, making it the highest-value single item left here and a prerequisite for F-2's rationale.** It also compounds with batching: once the stable prefix rides `--system-prompt` AND is transmitted once per N properties, the two savings multiply. Re-run the 0c probe after it lands.
+F-6 on OpenRouter only if Phase 0c warrants; advisory `eligible` field on POST responses; extract pre-pass + reconciler extension (D-E) when a profile first constrains an extract-covered field, plus the profile-editor warning immediately. F-4/F-10/F-11/F-12/F-14 proceed independently. **F-13 landed (issue #543)** — Phase 0c measured a ~71% per-call input-cost cut on a synthetic above-floor block, making it the highest-value single item here and a prerequisite for F-2's rationale. The re-probe against REAL per-flow prompts (see the "F-13 landed" subsection above) showed zero measured saving today for six of the eight flows (chat/compare/extract/opportunity/location/condition/occupancy), all still below the 4,096-token cache floor — but redflags, whose `stable` embeds the trending/dismissed corpus, crosses it at a plausible corpus size and is confirmed getting ~70% off in that regime already. It compounds with batching for the rest: once the stable prefix is ALSO transmitted once per N properties (D-B) and/or merged across axes (D-A), it crosses that floor and the two savings multiply. Re-run the 0c probe again after D-B, D-A, or F-2 lands (F-2 would shrink redflags' `stable` back under the floor, trading its current reuse for the corpus-drift fix it targets).
 
 ---
 
@@ -246,7 +372,7 @@ F-6 on OpenRouter only if Phase 0c warrants; advisory `eligible` field on POST r
 - **Don't collapse per-axis `ai_assessment` rows** into one combined row or one combined prompt version. Per-axis rows are the compatibility contract that makes this a non-event downstream.
 - **Don't use the Anthropic Message Batches API** — unreachable from this setup (CLI/OAuth has no batches endpoint; OpenRouter doesn't front it) and its up-to-24h latency fights the 15-minute tick.
 - **Don't hash the batch as one content hash, and don't strike batch-mates.**
-- **Don't justify F-1 or F-2 with CLI prompt caching until F-13 lands** — measured 2026-08-18: with the stable block concatenated into stdin (today's shape) a varying tail gets zero prefix reuse, and nothing caches at all below Haiku 4.5's 4,096-token minimum. The same block on `--system-prompt` IS reused (~71% cheaper), so the fix is F-13, not a cache-ordering tweak. Also: never conclude anything from a probe whose prompts are byte-identical, or repeatable across runs. See the Phase 0c result.
+- **Don't justify F-1 or F-2 with CLI prompt caching until a stable block crosses the 4,096-token floor** — measured 2026-08-18: with the stable block concatenated into stdin (the pre-F-13 shape) a varying tail got zero prefix reuse, and nothing caches at all below Haiku 4.5's 4,096-token minimum regardless of shape. F-13 (landed) moved the stable block onto `--system-prompt`, where a synthetic above-floor block IS reused (~71% cheaper). Seven of the eight REAL per-flow stable prompts are still below the floor, so F-1 remains valueless for those on the CLI path until D-B or D-A pushes a call's stable block past it — but **redflags is already over the floor at a plausible corpus size and is confirmed reusing ~70% off**, which is F-2's actual target: don't cite "nothing caches yet" as a reason to deprioritize F-2, since the corpus-drift problem it fixes is happening on a flow that already benefits from caching today. Also: never conclude anything from a probe whose prompts are byte-identical, or repeatable across runs. See the Phase 0c result and the "F-13 landed" subsection.
 - **Don't push N past ~8, and don't trim `evidence`/`reasoning` to save output tokens** — the evidence discipline is load-bearing across every parser, D-087, D-095 and the degrade guards.
 - **Don't hard-gate the on-demand POST routes on profile eligibility** — they are the operator's probe-and-unpark tool.
 - **Don't fold trending/dismissed into the redflags content hash** while moving them to volatile.

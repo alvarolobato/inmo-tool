@@ -74,9 +74,14 @@
  * so Claude's built-in tools are never called. `CLI_LEAN_ARGS` strips the lot.
  *
  * `--system-prompt` is applied per call site rather than being part of this
- * constant, and carries the caller's small PROTOCOL SHIM — its job is to
- * displace the harness prompt, not to deliver the dashboard's domain system
- * prompt (which still travels in stdin). See `claude-code.ts`'s `leanArgs`.
+ * constant. Pre-F-13 it carried only the caller's small PROTOCOL SHIM and the
+ * dashboard's domain system prompt travelled in stdin instead; F-13
+ * (2026-08-18) moved the single-shot path's domain STABLE block onto this
+ * flag too (prefixed ahead of the shim) because that's where the CLI's
+ * prompt cache actually anchors — see `claude-code.ts`'s `leanArgs` and
+ * `SINGLE_SHOT_PRINT_ARG` doc comments, and Phase 0c of
+ * docs/roadmap/llm-batching-plan.md for the measurement. The agentic path is
+ * unchanged (still just `AGENTIC_PROTOCOL_INSTRUCTION`).
  *
  * Gated by `dashboard.llm_cli_lean_mode` (default true) so a regression can be
  * turned off in config without a redeploy.

@@ -183,6 +183,94 @@ describe("llmComplete", () => {
     expect(callArgs.messages[3]).toMatchObject({ role: "user", content: "third" });
   });
 
+  // ── CLI system-prompt split (F-13) ──────────────────────────────────────────
+  //
+  // Before F-13, `stable` + `volatile` were concatenated into ONE stdin blob
+  // for the CLI provider, so the Anthropic prompt-cache breakpoint landed at
+  // the END of the body — a per-property `volatile` tail busted the whole
+  // thing, every call, on every flow (measured $0.0200/call, 0 cache reads;
+  // see docs/roadmap/llm-batching-plan.md Phase 0c). The fix only pays off if
+  // the value handed to `claudeCliSingleShot`'s `systemPrompt` (which becomes
+  // `--system-prompt`) is BYTE-IDENTICAL across calls for the same flow.
+  //
+  // These two tests cover llm-client.ts's ROUTING only: that it forwards
+  // `req.systemPrompt.stable` verbatim as `systemPrompt` and keeps `volatile`
+  // + the conversation confined to `prompt` (stdin), regardless of what those
+  // other fields contain on a given call — i.e. this file's job is "does the
+  // plumbing wire the right value to the right place", not "is the value
+  // itself the same across two different properties". That second, actually
+  // load-bearing question — whether `buildSystemPrompt(flow, vars).stable`
+  // varies with `vars` — is a property of the PRODUCER
+  // (`lib/llm-context/system-prompt.ts`), not of this router, and is tested
+  // directly against that producer, across every flow, in
+  // `lib/llm-context/__tests__/system-prompt-stability.test.ts`. A test here
+  // that builds one `stable` literal and asserts it equals itself across two
+  // `llmComplete` calls would not catch a producer bug (e.g. #544's review:
+  // `buildChatPrompt` interpolating `vars.profileName` into `stable`) — it
+  // would only prove this file compares a string to itself.
+
+  it("routes `stable` to claudeCliSingleShot's systemPrompt, not into the stdin prompt", async () => {
+    vi.stubEnv("DASHBOARD_LLM_PROVIDER", "cli");
+    resetDashboardLlmConfigCache();
+    stubCli("cli response");
+
+    await llmComplete({
+      flow: "occupancy",
+      systemPrompt: { stable: "STABLE_DOMAIN_BLOCK", volatile: "VOLATILE_PROPERTY_TEXT" },
+      messages: [{ role: "user", content: "assess this listing" }],
+    });
+
+    expect(mockCliSingleShot).toHaveBeenCalledOnce();
+    const call = mockCliSingleShot.mock.calls[0][0] as { prompt: string; systemPrompt?: string };
+    expect(call.systemPrompt).toBe("STABLE_DOMAIN_BLOCK");
+    // stdin carries the volatile context + the conversation turn...
+    expect(call.prompt).toContain("VOLATILE_PROPERTY_TEXT");
+    expect(call.prompt).toContain("assess this listing");
+    // ...but never a second copy of the stable block (that would put it back
+    // in stdin, degrading the cache to the pre-F-13 result).
+    expect(call.prompt).not.toContain("STABLE_DOMAIN_BLOCK");
+  });
+
+  it("keeps routing the SAME systemPrompt through unchanged when only volatile/messages differ across calls", async () => {
+    vi.stubEnv("DASHBOARD_LLM_PROVIDER", "cli");
+    resetDashboardLlmConfigCache();
+    stubCli("cli response");
+
+    // One fixed `stable` value, handed to two calls that otherwise differ in
+    // every other field (`volatile`, the user message). This is a router
+    // test, NOT a claim that `buildSystemPrompt` produces this same value for
+    // two different properties — see the block comment above.
+    const stable = "STABLE_OCCUPANCY_TEMPLATE";
+
+    await llmComplete({
+      flow: "occupancy",
+      systemPrompt: { stable, volatile: "Inmueble PROP-1001: piso a reformar en Madrid" },
+      messages: [{ role: "user", content: "Evalúa PROP-1001" }],
+    });
+    await llmComplete({
+      flow: "occupancy",
+      systemPrompt: { stable, volatile: "Inmueble PROP-2002: chalet en buen estado en Sevilla" },
+      messages: [{ role: "user", content: "Evalúa PROP-2002" }],
+    });
+
+    expect(mockCliSingleShot).toHaveBeenCalledTimes(2);
+    const [callA, callB] = mockCliSingleShot.mock.calls.map(
+      (c) => c[0] as { prompt: string; systemPrompt?: string },
+    );
+
+    // Router correctness: the CALLER'S already-identical `stable` passes
+    // through unchanged and untouched by what varies elsewhere on the call.
+    expect(callA.systemPrompt).toBe(stable);
+    expect(callB.systemPrompt).toBe(stable);
+
+    // And it must carry no per-call marker at all — proves `volatile`/the
+    // message never leak into the value routed to `systemPrompt`.
+    expect(callA.systemPrompt).not.toContain("PROP-1001");
+    expect(callA.systemPrompt).not.toContain("PROP-2002");
+    expect(callA.systemPrompt).not.toContain("reformar");
+    expect(callA.systemPrompt).not.toContain("Sevilla");
+  });
+
   // ── Telemetry ────────────────────────────────────────────────────────────────
 
   it("calls logUsage exactly once per llmComplete call (openrouter)", async () => {

@@ -23,27 +23,37 @@ import {
  * system prompt, the built-in tool catalog, skills, MCP servers and settings
  * files.
  *
- * `systemPrompt` is the CALLER'S PROTOCOL SHIM — `SINGLE_SHOT_PRINT_ARG` or
- * `AGENTIC_PROTOCOL_INSTRUCTION` — not the dashboard's domain system prompt,
- * which still travels in stdin as a `## system` section (see
- * `llm-client.ts`'s `buildMessagesPlain`). Its only job here is to REPLACE the
- * harness prompt with something small.
+ * `systemPrompt` here is the CALLER-BUILT VALUE FOR THE FLAG — for the
+ * single-shot path (F-13, 2026-08-18) that's the dashboard's domain STABLE
+ * block with `SINGLE_SHOT_PRINT_ARG` appended as a suffix (see
+ * `claudeCliSingleShotOnce`); for the agentic path it's still just
+ * `AGENTIC_PROTOCOL_INSTRUCTION` (scoped out of F-13, see that constant's doc
+ * comment). Either way this function's only job is to REPLACE the harness
+ * prompt with something small(er than the full harness context).
  *
- * Passing the real domain prompt on this flag instead is not just tidier, it
- * is where the prompt cache lives: measured 2026-08-18 (`scripts/probe-cli-cache.ts`,
- * Phase 0c of docs/roadmap/llm-batching-plan.md), a 20k-char stable block
- * concatenated into stdin gets ZERO reuse when the tail varies — the cache
- * breakpoint sits at the end of the body — while the same block on
- * `--system-prompt` is reused across a differing tail, $0.0200 → $0.0058 on
- * the same call. Filed as a follow-up (F-13) rather than done here because it
- * means splitting stdin into system/task at every call site.
+ * Putting the real domain prompt on this flag (rather than concatenating it
+ * into stdin, the pre-F-13 shape) is where the prompt cache lives: measured
+ * 2026-08-18 (`scripts/probe-cli-cache.ts`, Phase 0c of
+ * docs/roadmap/llm-batching-plan.md), a 20k-char stable block concatenated
+ * into stdin gets ZERO reuse when the tail varies — the cache breakpoint sits
+ * at the end of the body — while the same block on `--system-prompt` is
+ * reused across a differing tail, $0.0200 → $0.0058 on the same call. F-13
+ * moves the single-shot path to that shape; see `docs/roadmap/llm-batching-plan.md`
+ * Phase 0c for the follow-up measurement against the REAL (smaller) per-flow
+ * stable prompts, which land below Haiku 4.5's 4,096-token minimum cacheable
+ * prefix today.
  *
  * Measured on this repo's default flow: 25,664 → 167 input tokens for an
  * identical trivial task, a 17.4x cost reduction. See `usage.ts` for the full
  * rationale and for why `--bare` is deliberately not used.
  *
  * `dashboard.llm_cli_lean_mode = false` restores the previous behaviour (full
- * harness context) as an escape hatch if a flow turns out to depend on it.
+ * harness context) as an escape hatch if a flow turns out to depend on it —
+ * `--system-prompt` is then omitted entirely by this function (it would
+ * REPLACE the harness default, defeating the escape hatch), so
+ * `claudeCliSingleShotOnce` instead appends the domain block on top of the
+ * harness default via `--append-system-prompt` rather than silently dropping
+ * it (see its `appendSystemPromptArgs` comment).
  */
 function leanArgs(cfg: DashboardLlmConfig, systemPrompt: string): string[] {
   // CLI_SAFETY_ARGS is unconditional: it disables Claude's built-in tools
@@ -89,8 +99,34 @@ async function withAuthAutoRecovery<T>(operation: () => Promise<T>): Promise<T> 
 /** Tail size to retain on CliRunnerError details (matches process.ts). */
 const TAIL_MAX_BYTES = 4096;
 
+/**
+ * The single-shot protocol shim. F-13 (2026-08-18) moved the domain STABLE
+ * block onto `--system-prompt` ahead of this text (see
+ * `claudeCliSingleShotOnce`'s `cliSystemPrompt`) — it is a SUFFIX, not a
+ * prefix, deliberately: the domain block is what needs to be the stable,
+ * byte-identical PREFIX of the flag value for the CLI's cache breakpoint to
+ * anchor on it (measured `scripts/probe-cli-cache.ts`, Phase 0c of
+ * docs/roadmap/llm-batching-plan.md). This shim text is itself already
+ * constant across every call, so its position relative to the domain block
+ * doesn't affect caching either way — suffix just keeps the large, meaningful
+ * part first.
+ *
+ * stdin now carries the flow's VOLATILE context (when present, still under a
+ * `## system` header — see `llm-client.ts`'s CLI branch) plus the `## user` /
+ * `## assistant` conversation turns; it no longer carries the domain STABLE
+ * block IN EITHER lean-mode setting, so this text's own description of
+ * stdin's shape is updated to match (pre-F-13 it said stdin held "the full
+ * multi-section prompt"). "Your system prompt (above this instruction)" is
+ * literally true whichever flag `claudeCliSingleShotOnce` used to deliver
+ * `cliSystemPrompt` — `--system-prompt` (lean mode, replaces the harness
+ * default) or `--append-system-prompt` (lean mode off, layers on top of it)
+ * — either way `cliSystemPrompt` (domain block + this shim) is what the CLI
+ * assembles as the tail of the effective system prompt.
+ */
 const SINGLE_SHOT_PRINT_ARG = `You are the dashboard assistant.
-The UTF-8 stdin contains the full multi-section prompt (## system, ## user, etc.).
+Your system prompt (above this instruction) carries the flow's stable domain
+instructions. The UTF-8 stdin carries the per-call context and task (## system
+for volatile context when present, ## user, ## assistant, etc.).
 Execute the task and write the answer to stdout only.`;
 
 const AGENTIC_PROTOCOL_INSTRUCTION = `You are the dashboard agentic planner. Reply with ONE JSON object only, no markdown fences, no prose.
@@ -126,8 +162,32 @@ function buildAgenticStdin(transcript: string): string {
 
 export interface ClaudeCliSingleShotInput {
   cfg: DashboardLlmConfig;
-  /** Full user-facing prompt (system + task combined when only one block is needed). */
+  /**
+   * Task body written to stdin — the flow's VOLATILE context (if any) plus
+   * the conversation turns. Does NOT include the domain STABLE block; that
+   * travels via `systemPrompt` below (F-13). Named `prompt` for compatibility
+   * with existing call sites that have no domain system prompt at all (e.g.
+   * `scripts/probe-cli-cache.ts`'s stdin-shape variants), in which case this
+   * is the entire user-facing content, matching the pre-F-13 shape exactly.
+   */
   prompt: string;
+  /**
+   * The flow's STABLE domain system prompt, delivered ahead of the protocol
+   * shim (see `SINGLE_SHOT_PRINT_ARG`'s doc comment for why it's a prefix,
+   * not a suffix, of the combined value) via `--system-prompt` when
+   * `cfg.cliLeanMode` is on, or `--append-system-prompt` when it's off (see
+   * `claudeCliSingleShotOnce`'s `appendSystemPromptArgs`) — never dropped
+   * either way. MUST be byte-stable per flow — see `llm-client.ts`'s
+   * `buildCliMessages`/CLI branch, which is the only production call site and
+   * sources this from `req.systemPrompt.stable` verbatim (never `volatile`,
+   * which is per-call and would degrade the cache back to zero reuse if it
+   * leaked in here).
+   *
+   * Omit (or pass `""`) for a call with no domain system prompt — the system
+   * prompt channel then carries just the protocol shim (or, off lean mode,
+   * nothing at all beyond the harness default), same as before F-13.
+   */
+  systemPrompt?: string;
 }
 
 /**
@@ -151,13 +211,36 @@ export function claudeCliSingleShot(
 async function claudeCliSingleShotOnce(
   input: ClaudeCliSingleShotInput,
 ): Promise<ClaudeCliSingleShotResult> {
-  const { cfg, prompt } = input;
+  const { cfg, prompt, systemPrompt } = input;
+  const domainPrompt = systemPrompt ?? "";
+  // The domain STABLE block is a PREFIX of the flag value, the shim a SUFFIX
+  // — see `SINGLE_SHOT_PRINT_ARG`'s doc comment for why that ordering is what
+  // makes the block cacheable.
+  const cliSystemPrompt = domainPrompt
+    ? `${domainPrompt}\n\n${SINGLE_SHOT_PRINT_ARG}`
+    : SINGLE_SHOT_PRINT_ARG;
+  // `leanArgs` only actually emits `--system-prompt` (which REPLACES the
+  // harness's default system prompt) when `cfg.cliLeanMode` is on. The escape
+  // hatch (`cliLeanMode: false`) exists specifically to restore that harness
+  // default, so reusing `--system-prompt` here would fight the escape hatch's
+  // whole point. `--append-system-prompt` (confirmed present on the installed
+  // CLI, `claude --help`) is the right primitive instead: it layers our
+  // domain block ON TOP of the harness default rather than replacing it, so
+  // the escape hatch still gets the full harness context AND the domain
+  // prompt is never silently dropped. stdin then never needs to carry the
+  // domain block in either mode — no second `## system` section, and
+  // `SINGLE_SHOT_PRINT_ARG`'s "your system prompt (above this instruction)"
+  // claim stays literally true either way, since `cliSystemPrompt` is what
+  // lands in the system-prompt channel via one flag or the other.
+  const appendSystemPromptArgs: string[] =
+    !cfg.cliLeanMode && domainPrompt ? ["--append-system-prompt", cliSystemPrompt] : [];
   // `--output-format json` (was `text`): the JSON envelope carries `usage` and
   // `total_cost_usd` alongside `result`. The text format carries neither,
   // which is why every `cli` row in `llm_usage` used to read zero tokens.
   const args = [
     ...cfg.cliExtraArgs,
-    ...leanArgs(cfg, SINGLE_SHOT_PRINT_ARG),
+    ...leanArgs(cfg, cliSystemPrompt),
+    ...appendSystemPromptArgs,
     "-p",
     SINGLE_SHOT_PRINT_ARG,
     "--model",

@@ -307,6 +307,100 @@ describe("claudeCliSingleShot", () => {
     expect(args).not.toContain("--system-prompt");
   });
 
+  // ── F-13: domain system prompt on --system-prompt ───────────────────────────
+
+  it("sends the domain systemPrompt on --system-prompt, as a PREFIX ahead of the protocol shim", async () => {
+    mockRunCliProcess.mockResolvedValueOnce(okResult("hi"));
+    await claudeCliSingleShot({ cfg, prompt: "task body", systemPrompt: "DOMAIN_STABLE_BLOCK" });
+
+    const args: string[] = mockRunCliProcess.mock.calls[0][0].args;
+    const flagValue = args[args.indexOf("--system-prompt") + 1];
+    // The domain block must be the literal PREFIX of the flag value — that's
+    // what the CLI's cache breakpoint anchors on (Phase 0c). The shim comes
+    // after, as a suffix.
+    expect(flagValue.startsWith("DOMAIN_STABLE_BLOCK")).toBe(true);
+    expect(flagValue.indexOf("DOMAIN_STABLE_BLOCK")).toBeLessThan(
+      flagValue.indexOf("stdout only"), // tail of SINGLE_SHOT_PRINT_ARG
+    );
+  });
+
+  it("keeps the domain systemPrompt OUT of stdin when lean mode is on (the domain block travels on --system-prompt)", async () => {
+    mockRunCliProcess.mockResolvedValueOnce(okResult("hi"));
+    await claudeCliSingleShot({ cfg, prompt: "task body", systemPrompt: "DOMAIN_STABLE_BLOCK" });
+
+    const stdin: string = mockRunCliProcess.mock.calls[0][0].stdin;
+    expect(stdin).toBe("task body");
+    expect(stdin).not.toContain("DOMAIN_STABLE_BLOCK");
+  });
+
+  it("delivers the domain systemPrompt via --append-system-prompt (not stdin, not --system-prompt) when lean mode is off", async () => {
+    // `--system-prompt` is dropped entirely when lean mode is off (the escape
+    // hatch restores the full CLI harness system prompt, and `--system-prompt`
+    // would REPLACE that default rather than layer on top of it) — the domain
+    // block must not just vanish in that case, and stdin must not grow a
+    // second `## system` section as a workaround. `--append-system-prompt`
+    // layers the domain block on top of the harness default instead.
+    mockRunCliProcess.mockResolvedValueOnce(okResult("hi"));
+    await claudeCliSingleShot({
+      cfg: { ...cfg, cliLeanMode: false },
+      prompt: "task body",
+      systemPrompt: "DOMAIN_STABLE_BLOCK",
+    });
+
+    const call = mockRunCliProcess.mock.calls[0][0];
+    expect(call.args).not.toContain("--system-prompt");
+    expect(call.args).toContain("--append-system-prompt");
+    const appendValue = call.args[call.args.indexOf("--append-system-prompt") + 1];
+    expect(appendValue).toContain("DOMAIN_STABLE_BLOCK");
+    // stdin stays exactly the task body — no folded-in domain block, no
+    // duplicated `## system` header.
+    expect(call.stdin).toBe("task body");
+    expect((call.stdin.match(/## system/g) ?? []).length).toBe(0);
+  });
+
+  it("omits --append-system-prompt entirely when lean mode is off AND there is no domain systemPrompt", async () => {
+    mockRunCliProcess.mockResolvedValueOnce(okResult("hi"));
+    await claudeCliSingleShot({ cfg: { ...cfg, cliLeanMode: false }, prompt: "task body" });
+
+    const call = mockRunCliProcess.mock.calls[0][0];
+    expect(call.args).not.toContain("--system-prompt");
+    expect(call.args).not.toContain("--append-system-prompt");
+    expect(call.stdin).toBe("task body");
+  });
+
+  it("delivers the SAME combined systemPrompt+shim value in both lean-mode settings, just via a different flag", async () => {
+    // The escape hatch changes WHICH mechanism carries the domain block
+    // (replace vs. append onto the harness default), not the domain block's
+    // own content — this pins that `cliSystemPrompt` (domain + shim) is
+    // byte-identical either way, only the flag name differs.
+    mockRunCliProcess.mockResolvedValueOnce(okResult("hi"));
+    await claudeCliSingleShot({ cfg, prompt: "task body", systemPrompt: "DOMAIN_STABLE_BLOCK" });
+    const leanArgs: string[] = mockRunCliProcess.mock.calls[0][0].args;
+    const leanValue = leanArgs[leanArgs.indexOf("--system-prompt") + 1];
+
+    mockRunCliProcess.mockResolvedValueOnce(okResult("hi"));
+    await claudeCliSingleShot({
+      cfg: { ...cfg, cliLeanMode: false },
+      prompt: "task body",
+      systemPrompt: "DOMAIN_STABLE_BLOCK",
+    });
+    const notLeanArgs: string[] = mockRunCliProcess.mock.calls[1][0].args;
+    const notLeanValue = notLeanArgs[notLeanArgs.indexOf("--append-system-prompt") + 1];
+
+    expect(notLeanValue).toBe(leanValue);
+  });
+
+  it("behaves exactly as before F-13 when no systemPrompt is given (probe's stdin-only variants)", async () => {
+    mockRunCliProcess.mockResolvedValueOnce(okResult("hi"));
+    await claudeCliSingleShot({ cfg, prompt: "everything in stdin" });
+
+    const call = mockRunCliProcess.mock.calls[0][0];
+    expect(call.stdin).toBe("everything in stdin");
+    expect(call.args).not.toContain("--append-system-prompt");
+    const flagValue = call.args[call.args.indexOf("--system-prompt") + 1];
+    expect(flagValue).not.toContain("everything in stdin");
+  });
+
   it("always disables tools, in both CLI flows", async () => {
     mockRunCliProcess.mockResolvedValueOnce(okResult("hi"));
     await claudeCliSingleShot({ cfg, prompt: "x" });

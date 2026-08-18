@@ -122,11 +122,6 @@ function narrowDashboardLlmFlow(flow: string | undefined): DashboardLlmFlow | un
   return flow !== undefined && isLlmFlow(flow) ? flow : undefined;
 }
 
-function assembleSystemPrompt(req: LlmRequest): string {
-  const { stable, volatile } = req.systemPrompt;
-  return volatile ? `${stable}\n\n${volatile}` : stable;
-}
-
 /**
  * Build messages for OpenRouter, applying `cache_control: ephemeral` to the
  * stable portion of the system prompt when non-empty. The volatile portion is
@@ -146,17 +141,31 @@ function buildMessagesOpenRouter(req: LlmRequest): ChatCompletionMessageParam[] 
 }
 
 /**
- * Build messages for the CLI provider, where caching markers are not supported.
- * The stable + volatile portions are concatenated into a single system prompt.
+ * Build the CLI provider's stdin task body: the flow's VOLATILE context (if
+ * any) plus the conversation turns — deliberately EXCLUDING `stable`.
+ *
+ * F-13 (2026-08-18, see docs/roadmap/llm-batching-plan.md Phase 0c): the CLI
+ * driver's `claudeCliSingleShot` now carries `stable` separately on
+ * `--system-prompt`, because that is the only shape under which the Anthropic
+ * prompt cache reuses it across a differing tail — concatenated into stdin
+ * (the pre-F-13 shape) the cache breakpoint lands at the END of the whole
+ * body, so a varying `volatile`/task tail is a full cache miss every time
+ * (measured $0.0200 vs $0.0058 for the same call, ~71% off).
+ *
+ * `volatile` is per-call by construction (it carries the property being
+ * assessed) and MUST stay out of the `--system-prompt` value — see
+ * `claudeCliSingleShotOnce`'s `systemPrompt` doc comment for why leaking it
+ * there degrades straight back to the pre-F-13 result. It keeps the same
+ * `## system` section label it had in the old combined blob (now scoped to
+ * just the volatile half) so the only change in what the model sees is WHICH
+ * channel carries `stable`, not any prompt text.
  */
-function buildMessagesPlain(req: LlmRequest): ChatCompletionMessageParam[] {
-  const systemContent = assembleSystemPrompt(req);
+function buildCliMessages(req: LlmRequest): ChatCompletionMessageParam[] {
+  const { volatile } = req.systemPrompt;
   const userMessages = req.messages.map(
     (m) => ({ role: m.role, content: m.content }) as ChatCompletionMessageParam,
   );
-  return systemContent
-    ? [{ role: "system", content: systemContent }, ...userMessages]
-    : userMessages;
+  return volatile ? [{ role: "system", content: volatile }, ...userMessages] : userMessages;
 }
 
 // ── Main entry point ──────────────────────────────────────────────────────────
@@ -189,7 +198,7 @@ export async function llmComplete(req: LlmRequest): Promise<LlmResponse> {
 
   // ── CLI provider ────────────────────────────────────────────────────────────
   if (cfg.provider === "cli") {
-    const messages = buildMessagesPlain(req);
+    const messages = buildCliMessages(req);
     const combined = messages
       .map((m) => {
         const body = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
@@ -198,7 +207,7 @@ export async function llmComplete(req: LlmRequest): Promise<LlmResponse> {
       .join("\n\n");
 
     const { text, usage: cliUsage } = await callWithCircuitBreaker(() =>
-      claudeCliSingleShot({ cfg, prompt: combined }),
+      claudeCliSingleShot({ cfg, prompt: combined, systemPrompt: req.systemPrompt.stable }),
     );
 
     // Real token counts + the CLI's own `total_cost_usd`, instead of the
