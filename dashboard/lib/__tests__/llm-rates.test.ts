@@ -2,8 +2,9 @@
 /**
  * F-5 (docs/roadmap/llm-batching-plan.md Phase 0): `lib/llm-usage.ts` and
  * `lib/llm-health.ts` used to carry two independently hard-coded price
- * tables that had already drifted (e.g. haiku-4.5 was $1.0/$5.0 per Mtok in
- * one and €0.8/€4.0 in the other). This test pins that they now price the
+ * tables that had already drifted (e.g. haiku-4.5 was $1.0/$5.0 per MTok in
+ * one and €0.8/€4.0 in the other — the latter is Haiku 3.5's price). This
+ * test pins that they now price the
  * SAME configured model identically, sourced from the one shared table in
  * `lib/llm-rates.ts`.
  */
@@ -35,8 +36,10 @@ describe("shared rate table (F-5)", () => {
   });
 
   it("prices a cheap configured model identically via llm-usage.logUsage and llm-health.modelCostEur", async () => {
-    // Haiku 4.5 is exactly the model that drifted pre-unification (1.0/5.0 in
-    // the old llm-usage.ts table vs 0.8/4.0 in llm-health.ts's).
+    // Haiku 4.5 is exactly the model that drifted pre-unification: 1.0/5.0 in
+    // the old llm-usage.ts table vs 0.8/4.0 in llm-health.ts's. The first
+    // unification attempt kept the WRONG one, which is why the list-price pin
+    // below exists as well as this agreement check.
     const model = "anthropic/claude-haiku-4.5";
     const promptTokens = 12_345;
     const completionTokens = 6_789;
@@ -67,8 +70,8 @@ describe("shared rate table (F-5)", () => {
     const model = "openrouter/anthropic/claude-haiku-4.5";
     expect(normalizeModel(model)).toBe("anthropic/claude-haiku-4.5");
     expect(rateForModel(DEFAULT_LLM_RATES, model)).toEqual({
-      in_eur_per_mtok: 0.8,
-      out_eur_per_mtok: 4.0,
+      in_eur_per_mtok: 1.0,
+      out_eur_per_mtok: 5.0,
     });
   });
 
@@ -81,5 +84,17 @@ describe("shared rate table (F-5)", () => {
     expect(adjusted.completion).toBeCloseTo(15.0 / 1_000_000, 12);
     expect(adjusted.cacheWrite).toBeCloseTo((3.0 * 1.25) / 1_000_000, 12);
     expect(adjusted.cacheRead).toBeCloseTo((3.0 * 0.1) / 1_000_000, 12);
+  });
+
+  it("pins the DEFAULT model's rate to its published list price", () => {
+    // The agreement test above compares two consumers that now read the SAME
+    // constant, so it can only catch one of them un-wiring itself — never a
+    // wrong shared value, which is the failure that actually happened. Haiku
+    // 4.5 is the default model (D-103) and its price feeds `checkDailyBudget`
+    // and /admin/usage, so pin it against the published number: $1.00 in /
+    // $5.00 out per MTok. Both spellings must agree — OpenRouter uses the dot.
+    for (const key of ["anthropic/claude-haiku-4-5", "anthropic/claude-haiku-4.5"]) {
+      expect(DEFAULT_LLM_RATES[key]).toEqual({ in_eur_per_mtok: 1.0, out_eur_per_mtok: 5.0 });
+    }
   });
 });

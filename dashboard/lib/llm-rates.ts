@@ -9,18 +9,21 @@
  * consumer and correctly in the other, with no signal that they disagreed.
  * This is the ONE table both import; a rate correction lands here once.
  *
- * Values are € per 1M tokens, treated at USD list-price parity — same
- * currency note as before (`llm-health.ts`'s roll-up labels its output €;
- * `llm-usage.ts` stores `estimated_cost_usd` in USD; neither file converts
- * between them, they always didn't). Unifying the SOURCE table does not
- * change either consumer's currency semantics — see each file for its own
- * behaviour, which is deliberately left untouched by this unification.
+ * CURRENCY: every value here is a **USD list price** per 1M tokens. The field
+ * names say `_eur_` for historical reasons — `llm-health.ts` labels its panel
+ * € and has always shown these same numbers without converting. Nothing is
+ * broken by that today (parity is assumed, not computed), but enter new rates
+ * in USD: this is the file that is supposed to settle the currency question,
+ * and a rate typed in euros here would silently mis-price `estimated_cost_usd`
+ * (genuinely USD, and what `checkDailyBudget` compares against
+ * `dashboard.llm_daily_budget_usd`). Renaming the fields is a follow-up; the
+ * comment is the guard until then.
  */
 
 export interface LlmModelRate {
-  /** € (≈ USD, see file header) per 1M input/prompt tokens. */
+  /** USD list price per 1M input/prompt tokens (field name is historical — see header). */
   in_eur_per_mtok: number;
-  /** € (≈ USD, see file header) per 1M output/completion tokens. */
+  /** USD list price per 1M output/completion tokens (field name is historical — see header). */
   out_eur_per_mtok: number;
 }
 
@@ -40,10 +43,15 @@ export const DEFAULT_LLM_RATES: LlmRateTable = {
   "anthropic/claude-sonnet-4-5": { in_eur_per_mtok: 3.0, out_eur_per_mtok: 15.0 },
   "anthropic/claude-3-5-sonnet": { in_eur_per_mtok: 3.0, out_eur_per_mtok: 15.0 },
   "anthropic/claude-3-7-sonnet": { in_eur_per_mtok: 3.0, out_eur_per_mtok: 15.0 },
-  "anthropic/claude-haiku-4-5": { in_eur_per_mtok: 0.8, out_eur_per_mtok: 4.0 },
-  // OpenRouter spells Haiku 4.5 with a DOT, and that is now the default model
+  // Haiku 4.5 is 1.00/5.00 — NOT 0.80/4.00, which is Haiku 3.5's price and
+  // what `llm-health.ts` carried before this table was unified. Getting this
+  // one wrong matters more than any other row: D-103 makes Haiku 4.5 the
+  // DEFAULT model, so an under-price here loosens `checkDailyBudget` and
+  // under-reports /admin/usage for essentially all traffic.
+  "anthropic/claude-haiku-4-5": { in_eur_per_mtok: 1.0, out_eur_per_mtok: 5.0 },
+  // OpenRouter spells Haiku 4.5 with a DOT, and that is the default model
   // (D-103) — without this key the default lands in `unpriced_models` at €0.
-  "anthropic/claude-haiku-4.5": { in_eur_per_mtok: 0.8, out_eur_per_mtok: 4.0 },
+  "anthropic/claude-haiku-4.5": { in_eur_per_mtok: 1.0, out_eur_per_mtok: 5.0 },
   "anthropic/claude-3-5-haiku": { in_eur_per_mtok: 0.8, out_eur_per_mtok: 4.0 },
   "anthropic/claude-sonnet-4.6": { in_eur_per_mtok: 3.0, out_eur_per_mtok: 15.0 },
   "anthropic/claude-sonnet-5": { in_eur_per_mtok: 3.0, out_eur_per_mtok: 15.0 },

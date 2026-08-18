@@ -27,9 +27,16 @@ import {
  * `AGENTIC_PROTOCOL_INSTRUCTION` — not the dashboard's domain system prompt,
  * which still travels in stdin as a `## system` section (see
  * `llm-client.ts`'s `buildMessagesPlain`). Its only job here is to REPLACE the
- * harness prompt with something small; passing the real domain prompt instead
- * would be a better shape and is filed as a follow-up, because it means
- * splitting stdin into system/task at every call site.
+ * harness prompt with something small.
+ *
+ * Passing the real domain prompt on this flag instead is not just tidier, it
+ * is where the prompt cache lives: measured 2026-08-18 (`scripts/probe-cli-cache.ts`,
+ * Phase 0c of docs/roadmap/llm-batching-plan.md), a 20k-char stable block
+ * concatenated into stdin gets ZERO reuse when the tail varies — the cache
+ * breakpoint sits at the end of the body — while the same block on
+ * `--system-prompt` is reused across a differing tail, $0.0200 → $0.0058 on
+ * the same call. Filed as a follow-up (F-13) rather than done here because it
+ * means splitting stdin into system/task at every call site.
  *
  * Measured on this repo's default flow: 25,664 → 167 input tokens for an
  * identical trivial task, a 17.4x cost reduction. See `usage.ts` for the full

@@ -44,8 +44,9 @@ export type LogUsageOptions = {
    *
    * Set by the CLI provider from `total_cost_usd` in the `claude -p` JSON
    * envelope — a real list-price figure for the call, not an estimate derived
-   * from a rate table. When present it wins over `RATES`; when absent the row
-   * falls back to the estimator (openrouter) or to 0 (cli, nothing reported).
+   * from a rate table. When present it wins over the `DEFAULT_LLM_RATES`
+   * estimate (`lib/llm-rates.ts`); when absent the row falls back to that
+   * estimator (openrouter) or to 0 (cli, nothing reported).
    */
   reportedCostUsd?: number | null;
 };

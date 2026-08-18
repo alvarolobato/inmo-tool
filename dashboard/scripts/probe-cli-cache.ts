@@ -5,27 +5,33 @@
  * Every planned batching/merging optimisation (F-1 flow-major ordering, F-2
  * moving redflags' trending/dismissed blocks out of STABLE, F-6 cache TTL,
  * D-A's "triage" merge) is valued on the assumption that a STABLE prompt
- * prefix gets cheaper on a repeat call — true for OpenRouter's Anthropic
- * prompt caching, and (as of the 2026-08-18 Phase 0 run recorded in
- * docs/roadmap/llm-batching-plan.md's Phase 0 section) ALSO true for the CLI
- * path: two back-to-back single-shot calls with an identical ~20k-char stable
- * prefix showed the second call reading back 100% of the first call's
- * cache-write tokens. `claude -p` is an agent harness, not a raw completion
- * endpoint, so this was worth measuring rather than assuming — kept as a
- * script (not a one-off finding) so the measurement can be re-run after a
- * CLI update or a stdin-shape change (e.g. F-13 splitting system/task).
+ * prefix gets cheaper on a repeat call. `claude -p` is an agent harness, not a
+ * raw completion endpoint, so that is worth measuring rather than assuming.
  *
- * This script fires TWO consecutive `claudeCliSingleShot` calls (the actual
- * function every CLI-path flow goes through — see D-102/`lib/llm-provider/cli/usage.ts`)
- * with a large IDENTICAL stable prefix and a trivial task suffix, and prints
- * each call's `cache_read_input_tokens` / `cache_creation_input_tokens` /
- * `total_cost_usd` from the D-102 usage envelope. It does not write to
- * `llm_usage` or need a DB — this is a standalone measurement, not a
- * production code path.
+ * WHAT THE 2026-08-18 RE-RUN SHOWED (Haiku 4.5, 20,120-char / ~5.8k-token
+ * stable block, prompts nonced so none had ever been sent before — full
+ * numbers in the Phase 0 section of the plan):
  *
- * Costs a few cents of notional CLI quota (D-102 caveat: under OAuth this is
- * a comparison metric, not an invoice) — expected and fine for a one-off
- * Phase 0 measurement.
+ *   A2. stable block in stdin, tail VARIES        → write 5,826, read 0     $0.0200
+ *   B.  same, byte-identical repeat of A2         → write 0,     read 5,826 $0.0102
+ *   C2. stable block in `--system-prompt`, varies → write 255,   read 5,498 $0.0058
+ *
+ * A2 vs B says the cache breakpoint sits at the END of the stdin prompt: only
+ * a byte-identical prompt hits, which production never produces. C2 says the
+ * same text passed via `--system-prompt` gets its own breakpoint and IS reused
+ * across a differing tail — ~71% off the same call. So prefix caching is
+ * available to us, but only once the domain system prompt stops travelling in
+ * stdin as a `## system` section (`llm-client.ts`'s `buildMessagesPlain`) and
+ * moves onto the flag — the F-13 split, now measured rather than assumed.
+ *
+ * An earlier version of this script fired two BYTE-IDENTICAL prompts and
+ * concluded from variant B alone that "caching works". That is the one thing
+ * production never does; the varying tail is the whole point. Kept as a script
+ * so the measurement can be re-run after a CLI update or a stdin-shape change.
+ *
+ * It does not write to `llm_usage` or need a DB — a standalone measurement,
+ * not a production code path. Costs a few cents of notional CLI quota (D-102
+ * caveat: under OAuth this is a comparison metric, not an invoice).
  *
  * Usage:
  *   npx tsx scripts/probe-cli-cache.ts
@@ -37,6 +43,8 @@
 import { fileURLToPath } from "url";
 import { loadDashboardLlmConfig } from "../lib/llm-provider/config";
 import { claudeCliSingleShot } from "../lib/llm-provider/cli/claude-code";
+import { runCliProcess, assertCliSuccess } from "../lib/llm-provider/cli/process";
+import { CLI_LEAN_ARGS, CLI_SAFETY_ARGS, parseCliReportedUsage } from "../lib/llm-provider/cli/usage";
 
 /**
  * A stable block sized to resemble a real assessment flow's cacheable prefix
@@ -53,11 +61,33 @@ export function buildStablePrefix(): string {
     "información es ambigua o insuficiente, marca el resultado como desconocido " +
     "en lugar de adivinar. Esta instrucción se repite para simular el tamaño de " +
     "un bloque de sistema estable de un flujo de evaluación real. ";
-  return paragraph.repeat(40); // ≈ 7,000-8,000 chars, in line with the plan's measured sizes.
+  // 40 repeats ≈ 20,120 chars ≈ 5,800 tokens. Deliberately ABOVE Haiku 4.5's
+  // 4,096-token minimum cacheable prefix, because below it nothing caches at
+  // all — which is itself a finding (our real prompts are ~2,700 tokens).
+  // `PREFIX_REPEATS` is exported so the test can pin the real size instead of
+  // a stale comment.
+  return paragraph.repeat(PREFIX_REPEATS);
 }
 
+export const PREFIX_REPEATS = 40;
 const STABLE_PREFIX = buildStablePrefix();
-const TASK_SUFFIX = "\n\nReply with exactly: OK";
+
+// THE POINT OF THE PROBE. Two byte-identical prompts only prove whole-prompt
+// reuse, which production never produces — the volatile block differs on every
+// call by construction. What F-1/F-2 depend on is PREFIX reuse under a varying
+// tail, so the probe must vary it. The first version of this script did not,
+// and concluded the opposite of the truth.
+//
+// The tails must also be unique PER RUN. A first version used two fixed tails
+// and, on the second run, every call reported a cache read — not prefix reuse
+// but a whole-prompt hit against the *previous run's* entries, which are still
+// inside the cache TTL. A run nonce makes every prompt below one the API has
+// provably never seen, so any read can only come from the shared stable block.
+const RUN_NONCE = `${Date.now().toString(36)}-${process.pid.toString(36)}`;
+const VARYING_TAILS = [
+  `\n\nExpediente ${RUN_NONCE}-a — Inmueble 1001: piso de 90 m2 a reformar. Responde: OK`,
+  `\n\nExpediente ${RUN_NONCE}-b — Inmueble 1002: chalet de 200 m2 en buen estado. Responde: OK`,
+];
 
 export interface ProbeResult {
   label: string;
@@ -75,46 +105,45 @@ export type CacheVerdict =
   | { kind: "not_observed"; cacheReadTokens: number };
 
 /**
- * Pure classification of the SECOND call's usage envelope against the F-0c
- * question ("does a repeat call read back the first call's cache write?").
+ * Pure classification of ONE warm call's usage envelope against the F-0c
+ * question ("did this call read back a previous call's cache write?").
  * Extracted from `main()` so it's testable without spawning the real CLI.
+ * Applied per variant, since the answer differs by variant — that difference
+ * IS the finding.
  */
-export function classifyCacheVerdict(second: ProbeResult): CacheVerdict {
-  const secondReadTokens = second.cache_read_input_tokens ?? 0;
-  if (secondReadTokens > 0) {
-    return { kind: "works", cacheReadTokens: secondReadTokens };
+export function classifyCacheVerdict(warm: ProbeResult): CacheVerdict {
+  const readTokens = warm.cache_read_input_tokens ?? 0;
+  if (readTokens > 0) {
+    return { kind: "works", cacheReadTokens: readTokens };
   }
-  if (second.cache_creation_input_tokens === null && second.cache_read_input_tokens === null) {
+  if (warm.cache_creation_input_tokens === null && warm.cache_read_input_tokens === null) {
     return { kind: "inconclusive" };
   }
-  return { kind: "not_observed", cacheReadTokens: secondReadTokens };
+  return { kind: "not_observed", cacheReadTokens: readTokens };
 }
 
 function describeVerdict(v: CacheVerdict): string {
   switch (v.kind) {
     case "works":
-      return `CROSS-INVOCATION CACHING WORKS: call 2 reported cache_read_input_tokens=${v.cacheReadTokens}.`;
+      return `REUSED — cache_read_input_tokens=${v.cacheReadTokens}.`;
     case "inconclusive":
       return (
-        "INCONCLUSIVE: the CLI reported no cache fields at all on call 2 (older binary or shape drift) — " +
-        "cannot tell whether caching works from this envelope."
+        "INCONCLUSIVE — the CLI reported no cache fields at all (older binary or shape drift); " +
+        "nothing can be concluded from this envelope."
       );
     case "not_observed":
       return (
-        "NO CROSS-INVOCATION CACHING OBSERVED: call 2 reported cache_read_input_tokens=" +
-        `${v.cacheReadTokens} (0 or unreported) despite an identical stable prefix. Each ` +
-        "single-shot `claude -p` invocation appears to be a fresh process with no prefix cache reuse."
+        `NOT REUSED — cache_read_input_tokens=${v.cacheReadTokens} (0 or unreported) ` +
+        "despite a byte-identical stable block in the preceding call."
       );
   }
 }
 
-async function runOnce(label: string): Promise<ProbeResult> {
+/** Variant A/B: production's shape — everything concatenated into stdin. */
+async function runOnce(label: string, prompt: string): Promise<ProbeResult> {
   const cfg = loadDashboardLlmConfig();
   const started = Date.now();
-  const { usage } = await claudeCliSingleShot({
-    cfg,
-    prompt: STABLE_PREFIX + TASK_SUFFIX,
-  });
+  const { usage } = await claudeCliSingleShot({ cfg, prompt });
   const durationMs = Date.now() - started;
   return {
     label,
@@ -124,6 +153,54 @@ async function runOnce(label: string): Promise<ProbeResult> {
     cache_read_input_tokens: usage?.cache_read_input_tokens ?? null,
     total_cost_usd: usage?.cost_usd ?? null,
     duration_ms: durationMs,
+  };
+}
+
+/**
+ * Variant C: the SAME stable block, but carried by `--system-prompt` instead
+ * of being concatenated into stdin. stdin carries only the volatile tail.
+ *
+ * This deliberately bypasses `claudeCliSingleShot`, which hard-codes the small
+ * protocol shim as its system prompt (`SINGLE_SHOT_PRINT_ARG`) and puts every
+ * domain section in stdin. That shape is what variant A measures; measuring
+ * the alternative needs the alternative argv, so the probe builds it here from
+ * the same exported `CLI_SAFETY_ARGS`/`CLI_LEAN_ARGS` production uses — no
+ * production code path is changed to run this.
+ */
+async function runSystemPromptVariant(label: string, tail: string): Promise<ProbeResult> {
+  const cfg = loadDashboardLlmConfig();
+  const args = [
+    ...cfg.cliExtraArgs,
+    ...CLI_SAFETY_ARGS,
+    ...CLI_LEAN_ARGS,
+    "--system-prompt",
+    STABLE_PREFIX,
+    "-p",
+    "Responde a la tarea de stdin.",
+    "--model",
+    cfg.cliModel,
+    "--output-format",
+    "json",
+  ];
+  const started = Date.now();
+  const result = await runCliProcess({
+    file: cfg.cliBin,
+    args,
+    stdin: tail,
+    timeoutMs: cfg.cliTimeoutMs,
+    maxStdoutBytes: cfg.cliMaxCaptureBytes,
+    maxStderrBytes: Math.min(cfg.cliMaxCaptureBytes, 512_000),
+  });
+  assertCliSuccess(result, "probe system-prompt variant", [cfg.cliBin, ...args]);
+  const usage = parseCliReportedUsage(JSON.parse(result.stdout.trim()));
+  return {
+    label,
+    prompt_tokens: usage?.prompt_tokens ?? null,
+    completion_tokens: usage?.completion_tokens ?? null,
+    cache_creation_input_tokens: usage?.cache_creation_input_tokens ?? null,
+    cache_read_input_tokens: usage?.cache_read_input_tokens ?? null,
+    total_cost_usd: usage?.cost_usd ?? null,
+    duration_ms: Date.now() - started,
   };
 }
 
@@ -140,17 +217,54 @@ function printResult(r: ProbeResult): void {
 async function main() {
   console.log("F-0c CLI prompt-cache probe");
   console.log("============================");
-  console.log(`Stable prefix length: ${STABLE_PREFIX.length} chars (identical on both calls)`);
+  console.log(`Stable block: ${STABLE_PREFIX.length} chars — byte-identical in every call below.`);
+  console.log("Variants A/B carry it in stdin (production's shape); C carries it in --system-prompt.");
+  console.log(`Run nonce: ${RUN_NONCE} — every prompt below is one the API has never seen.`);
 
-  const first = await runOnce("Call 1 (cold — expect a cache WRITE, if the CLI caches at all)");
-  printResult(first);
+  // A vs C is the question that decides F-1/F-2: does the stable block get
+  // reused when the tail differs, as it always does in production? B is the
+  // control that separates "no caching at all" from "caching, but the
+  // breakpoint is past the volatile part".
+  const stdinVarying = await runOnce(
+    "A1 (stdin, cold, tail A)",
+    STABLE_PREFIX + VARYING_TAILS[0],
+  );
+  printResult(stdinVarying);
 
-  const second = await runOnce("Call 2 (repeat — expect a cache READ if cross-invocation caching works)");
-  printResult(second);
+  const stdinVaryingSecond = await runOnce(
+    "A2 (stdin, same block, DIFFERENT tail — a read here would mean prefix reuse)",
+    STABLE_PREFIX + VARYING_TAILS[1],
+  );
+  printResult(stdinVaryingSecond);
+
+  const stdinIdentical = await runOnce(
+    "B (stdin, byte-identical repeat of A2 — control for whole-prompt reuse)",
+    STABLE_PREFIX + VARYING_TAILS[1],
+  );
+  printResult(stdinIdentical);
+
+  const sysCold = await runSystemPromptVariant("C1 (--system-prompt, cold, tail A)", VARYING_TAILS[0]);
+  printResult(sysCold);
+
+  const sysVarying = await runSystemPromptVariant(
+    "C2 (--system-prompt, DIFFERENT tail — a read here means usable prefix reuse)",
+    VARYING_TAILS[1],
+  );
+  printResult(sysVarying);
 
   console.log("\nVerdict");
   console.log("=======");
-  console.log(describeVerdict(classifyCacheVerdict(second)));
+  console.log(`  A2  stdin, varying tail:          ${describeVerdict(classifyCacheVerdict(stdinVaryingSecond))}`);
+  console.log(`  B   stdin, identical (control):   ${describeVerdict(classifyCacheVerdict(stdinIdentical))}`);
+  console.log(`  C2  --system-prompt, varying tail: ${describeVerdict(classifyCacheVerdict(sysVarying))}`);
+  console.log(
+    "\n  A2 is what today's code does, and it is the one that must read 0 for\n" +
+      "  'CLI caching does not help us' to be true. If C2 reads back while A2\n" +
+      "  does not, caching IS available — it just requires moving the domain\n" +
+      "  system prompt out of stdin and onto the flag (F-13). If B also reads\n" +
+      "  0, the block is below the model's minimum cacheable size (4,096\n" +
+      "  tokens on Haiku 4.5) and none of the above is measurable.",
+  );
 
   process.exit(0);
 }
