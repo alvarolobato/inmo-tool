@@ -29,6 +29,7 @@ import {
 } from "./llm-provider/config";
 import { createDashboardAgenticAdapter } from "./llm-provider/registry";
 import { logUsage } from "./llm-usage";
+import { assertLlmEnabled } from "./llm-enabled";
 import { callWithCircuitBreaker } from "./llm-circuit-breaker";
 import type { DashboardLlmFlow, DashboardLlmProviderId } from "./llm-provider/types";
 // Direct module import (not the ./llm-context barrel) to avoid a cycle:
@@ -167,6 +168,9 @@ function buildMessagesPlain(req: LlmRequest): ChatCompletionMessageParam[] {
  * circuit-breaker, and error propagation.
  */
 export async function llmComplete(req: LlmRequest): Promise<LlmResponse> {
+  // Master kill switch — checked before ANY provider work, so a disabled
+  // install cannot spend a token by any route. See lib/llm-enabled.ts.
+  assertLlmEnabled();
   const cfg = loadDashboardLlmConfig();
   const dFlow = narrowDashboardLlmFlow(req.flow);
   const model = getEffectiveDashboardModel(cfg, dFlow);

@@ -17,6 +17,7 @@
 import { NextResponse } from "next/server";
 import { formatApiError } from "@/lib/errors";
 import { AssessmentParkedError } from "./cache";
+import { LlmDisabledError } from "@/lib/llm-enabled";
 
 /**
  * Map `AssessmentParkedError` to a 409 that tells the operator what happened,
@@ -39,6 +40,19 @@ export function assessmentParkedResponse(
       requestId,
     ),
     { status: 409 },
+  );
+}
+
+/**
+ * Map `LlmDisabledError` to a 503 that names the switch, so "the AI is off"
+ * reads as a deliberate configuration state rather than a broken server.
+ * Returns `null` for any other error.
+ */
+export function llmDisabledResponse(err: unknown, requestId: string): NextResponse | null {
+  if (!(err instanceof LlmDisabledError)) return null;
+  return NextResponse.json(
+    formatApiError(err.message, "LLM_DISABLED", undefined, requestId),
+    { status: 503 },
   );
 }
 

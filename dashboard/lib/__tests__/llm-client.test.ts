@@ -405,4 +405,24 @@ describe("llmComplete", () => {
     // Telemetry written once.
     expect(mockLogUsage).toHaveBeenCalledOnce();
   });
+
+  it("makes NO provider call at all when dashboard.llm_enabled is false", async () => {
+    // The whole value of the master switch: not "logs zero", not "returns
+    // empty" — the provider is never reached, so nothing can be spent.
+    vi.stubEnv("DASHBOARD_LLM_PROVIDER", "cli");
+    vi.stubEnv("DASHBOARD_LLM_ENABLED", "false");
+    resetDashboardLlmConfigCache();
+    stubCli("should never be produced");
+
+    await expect(
+      llmComplete({
+        flow: "generate",
+        systemPrompt: { stable: "s" },
+        messages: [{ role: "user", content: "q" }],
+      }),
+    ).rejects.toMatchObject({ name: "LlmDisabledError" });
+
+    expect(mockCliSingleShot).not.toHaveBeenCalled();
+    expect(mockLogUsage).not.toHaveBeenCalled();
+  });
 });

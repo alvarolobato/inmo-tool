@@ -38,6 +38,7 @@ import { BudgetExceededError, CircuitBreakerOpenError } from "@/lib/llm";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 import {
   assessmentParkedResponse,
+  llmDisabledResponse,
   wantsForceRetry,
 } from "@/lib/ai-assessment/route-errors";
 import { clearAssessmentFailures } from "@/lib/ai-assessment/cache";
@@ -154,6 +155,9 @@ export async function POST(
     // fault — 409 with the reason, never an opaque 500.
     const parked = assessmentParkedResponse(err, requestId);
     if (parked) return parked;
+    // Master kill switch is off — 503, again not a 500.
+    const off = llmDisabledResponse(err, requestId);
+    if (off) return off;
     console.error(`[${requestId}] POST occupancy assessment failed:`, err);
     return NextResponse.json(
       formatApiError(sanitizeErrorMessage(err), "UNKNOWN", undefined, requestId),

@@ -43,6 +43,9 @@ export type ErrorCode =
   // the LLM call is deliberately not made (D-104). Distinct from CONFLICT so
   // a client can offer the documented `?force=1` override.
   | "ASSESSMENT_PARKED"
+  // All LLM use is switched off (`dashboard.llm_enabled = false`) — a
+  // deliberate operator state, not a fault. See lib/llm-enabled.ts.
+  | "LLM_DISABLED"
   | "TIMEOUT"
   | "COST_LIMIT"
   | "REVIEW_EXISTS"

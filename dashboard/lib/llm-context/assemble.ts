@@ -21,6 +21,7 @@ import {
 } from "@/lib/llm-client";
 import { runAgenticChat } from "@/lib/llm-tools/runner";
 import { logUsage } from "@/lib/llm-usage";
+import { assertLlmEnabled } from "@/lib/llm-enabled";
 import { callWithCircuitBreaker } from "@/lib/llm-circuit-breaker";
 import {
   loadDashboardLlmConfig,
@@ -146,7 +147,13 @@ export async function assembleRequest(
   }
 
   // 5. Execute — only route through agentic when the flow has tools.
+  //
+  // The agentic branch calls `runAgenticChat` directly, so it needs its own
+  // kill-switch check; the single-shot branch below is covered by the one
+  // inside `llmComplete`. Together these are the only two paths to a model
+  // call in the dashboard (D-006), so the switch cannot be bypassed.
   if (isAgenticToolsEnabled() && tools.length > 0) {
+    assertLlmEnabled();
     const adapter = createDashboardAgenticAdapter();
 
     // Build the ctx, falling back to a minimal one if the caller didn't provide it

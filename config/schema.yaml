@@ -304,6 +304,16 @@
 # -----------------------------------------------------------------------------
 # Dashboard LLM
 # -----------------------------------------------------------------------------
+- key: dashboard.llm_enabled
+  env: DASHBOARD_LLM_ENABLED
+  type: bool
+  sensitive: false
+  default: true
+  section: "Dashboard LLM"
+  description: "Interruptor GENERAL de todo el uso de LLM. Con false no se hace ni una sola llamada al modelo: no arrancan el pase automático de evaluación IA ni los avisos, el chat y las evaluaciones a mano devuelven 503 con un mensaje claro, y el gasto es exactamente cero. Es el único interruptor que cubre TODAS las rutas (los de cada subsistema —assessment_auto_enabled, digest_auto_enabled— solo apagan su propio scheduler y dejan pasar el chat y las llamadas manuales). Úselo cuando quiera parar el gasto de golpe."
+  requires_restart: [dashboard]
+  components: [dashboard]
+
 - key: dashboard.llm_provider
   env: DASHBOARD_LLM_PROVIDER
   type: enum
