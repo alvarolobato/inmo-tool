@@ -39,8 +39,9 @@ function result(rows: unknown[][]): { columns: string[]; rows: unknown[][] } {
 }
 
 /**
- * Queue the seven reads getLlmHealth performs, in order:
- * flows, providers, models, coverage, propertiesAssessed7d, errors, errorCodes.
+ * Queue the eight reads getLlmHealth performs, in order: flows, providers,
+ * models, coverage, propertiesAssessed7d, errors, errorCodes, cliZeroUsage
+ * (F-8 canary).
  */
 function queueReads(opts: {
   flows?: unknown[][];
@@ -50,6 +51,7 @@ function queueReads(opts: {
   propertiesAssessed?: unknown[][];
   errors?: unknown[][];
   errorCodes?: unknown[][];
+  cliZeroUsage?: unknown[][];
 }) {
   mockQuery
     .mockResolvedValueOnce(result(opts.flows ?? []))
@@ -58,7 +60,8 @@ function queueReads(opts: {
     .mockResolvedValueOnce(result(opts.coverage ?? [[0, 0]]))
     .mockResolvedValueOnce(result(opts.propertiesAssessed ?? [[0]]))
     .mockResolvedValueOnce(result(opts.errors ?? [[0, 0]]))
-    .mockResolvedValueOnce(result(opts.errorCodes ?? []));
+    .mockResolvedValueOnce(result(opts.errorCodes ?? []))
+    .mockResolvedValueOnce(result(opts.cliZeroUsage ?? [[0]]));
 }
 
 beforeEach(() => {
@@ -87,9 +90,10 @@ describe("getLlmHealth", () => {
     });
     expect(r.errors).toEqual({ errors_today: 0, errors_7d: 0, by_code: [] });
     expect(r.tokens_logged).toBe(false);
+    expect(r.cli_zero_usage_24h).toBe(0);
     expect(typeof r.generated_at).toBe("string");
-    // Exactly seven parallel reads.
-    expect(mockQuery).toHaveBeenCalledTimes(7);
+    // Exactly eight parallel reads.
+    expect(mockQuery).toHaveBeenCalledTimes(8);
   });
 
   it("maps flows/providers and prices non-CLI tokens; CLI stays €0", async () => {
@@ -170,6 +174,26 @@ describe("getLlmHealth", () => {
     const r = await getLlmHealth();
     expect(r.cost.unpriced_models).toEqual(["acme/mystery"]);
     expect(r.cost.cost_7d_eur).toBe(0);
+  });
+
+  it("F-8: surfaces a nonzero cli_zero_usage_24h count straight from the canary query", async () => {
+    queueReads({
+      flows: [["occupancy", 1, 3, 100, 300]],
+      providers: [["cli", 1, 3, 100, 300]],
+      cliZeroUsage: [[7]],
+    });
+    const r = await getLlmHealth();
+    expect(r.cli_zero_usage_24h).toBe(7);
+  });
+
+  it("F-8: cli_zero_usage_24h is 0 when the CLI envelope is being parsed correctly", async () => {
+    queueReads({
+      flows: [["occupancy", 1, 3, 100, 300]],
+      providers: [["cli", 1, 3, 100, 300]],
+      cliZeroUsage: [[0]],
+    });
+    const r = await getLlmHealth();
+    expect(r.cli_zero_usage_24h).toBe(0);
   });
 
   it("projects null cost when no properties were assessed in the window", async () => {

@@ -48,6 +48,7 @@ const SAMPLE: LlmHealthResponse = {
   scheduler: { enabled: true, batch_size: 5, interval_seconds: 900 },
   errors: { errors_today: 0, errors_7d: 0, by_code: [] },
   tokens_logged: true,
+  cli_zero_usage_24h: 0,
   generated_at: "2026-08-05T00:00:00.000Z",
 };
 
