@@ -48,11 +48,12 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function init() {
-  showState('loading');
-
-  // If a batch run is already in flight (popup reopened mid-run), show it
-  // immediately — regardless of what tab is active now.
+/**
+ * Attach to an already-live batch run's progress, if any (issue #554). Used
+ * as a FALLBACK — only once the current tab has nothing fresh of its own to
+ * offer — never as the first check. Returns true when it attached.
+ */
+async function attachLiveBatchIfAny() {
   try {
     const prog = await chrome.runtime.sendMessage({ type: 'GET_BATCH_STATE' });
     if (
@@ -62,11 +63,16 @@ async function init() {
         prog.status === 'enumerating')
     ) {
       enterBatchMode(null, prog);
-      return;
+      return true;
     }
   } catch {
-    /* no worker / no state — fall through to per-tab detection */
+    /* no worker / no state */
   }
+  return false;
+}
+
+async function init() {
+  showState('loading');
 
   // If Auto mode is ON (draining the worklist unattended), show its panel
   // regardless of the active tab so the operator can watch progress / turn it off.
@@ -88,6 +94,9 @@ async function init() {
   }
 
   if (!tab.url.startsWith('http://') && !tab.url.startsWith('https://')) {
+    // Nothing to detect on this tab (chrome://, a blank new tab, …) — fall
+    // back to any live run so the operator can still check on it from here.
+    if (await attachLiveBatchIfAny()) return;
     showState('unsupported');
     return;
   }
@@ -117,6 +126,16 @@ async function init() {
     page = null;
   }
 
+  // issue #554: a fresh listing/search page on THIS tab always gets its own
+  // "Capturar todas" offer — even while another search is running elsewhere.
+  // That's the whole point of the pending-search queue: firing off several
+  // searches back to back means reaching THIS button for search #2 while
+  // search #1 is still going, not being redirected to search #1's progress
+  // (the old unconditional "a run is active → show it" check at the top of
+  // this function, moved below as attachLiveBatchIfAny, did exactly that and
+  // made queueing unreachable from the popup). onStartBatch reads whether a
+  // run is live from the click's own response and reports "en cola" — no
+  // need to know that up front here.
   if (page?.isListing) {
     enterBatchMode(
       {
@@ -132,6 +151,10 @@ async function init() {
     );
     return;
   }
+
+  // No fresh listing page on this tab. If a batch run is already in flight
+  // (popup reopened mid-run on some other tab), show it.
+  if (await attachLiveBatchIfAny()) return;
 
   // Guided capture (issue #237): a SUPPORTED portal page that is neither a
   // detail nor a search page (home / saved search / filter form). Don't
@@ -450,6 +473,10 @@ function showListingResult(detailLinks) {
 // popup was reopened to watch it).
 let batchContext = null;
 let batchPollTimer = null;
+// Last known pending-search queue depth (issue #554 review N2), kept in sync
+// by renderSearchQueue — read by onStopBatch so "Detener" can warn before it
+// drains the whole queue, not just the live run.
+let lastKnownQueueDepth = 0;
 
 /**
  * Enter batch mode. `ctx` ({ tab, portal, detailUrls }) is present when the
@@ -463,9 +490,11 @@ function enterBatchMode(ctx, existingProgress) {
   $('#batch-start-btn').onclick = onStartBatch;
   $('#batch-pause-btn').onclick = () => sendBatchControl('PAUSE_BATCH');
   $('#batch-resume-btn').onclick = () => sendBatchControl('RESUME_BATCH');
-  $('#batch-stop-btn').onclick = () => sendBatchControl('STOP_BATCH');
+  $('#batch-stop-btn').onclick = onStopBatch;
   $('#batch-auto-btn').onclick = onToggleAuto;
   $('#batch-force-chk').onchange = onToggleForce;
+  const queueClearBtn = $('#batch-queue-clear-btn');
+  if (queueClearBtn) queueClearBtn.onclick = onClearSearchQueue;
 
   // Capturar URL de búsqueda (issue #475): only meaningful on an Idealista
   // results page, where "Dibuja tu zona" encodes the polygon into `shape=`.
@@ -476,6 +505,7 @@ function enterBatchMode(ctx, existingProgress) {
 
   if (existingProgress) {
     renderBatchProgress(existingProgress);
+    refreshSearchQueuePanel();
     startBatchPolling();
     return;
   }
@@ -512,13 +542,42 @@ function enterBatchMode(ctx, existingProgress) {
   startBtn.classList.remove('hidden');
   $('#batch-progress').classList.add('hidden');
   hideBatchControls();
+
+  // issue #554: a click here will QUEUE rather than start if a run is
+  // already live elsewhere — say so on the button itself rather than only
+  // after the click. Fire-and-forget; the default "Capturar todas" label
+  // stays until (if) this resolves true.
+  if (n > 0) {
+    chrome.runtime
+      .sendMessage({ type: 'GET_BATCH_STATE' })
+      .then((prog) => {
+        if (
+          prog &&
+          (prog.status === 'running' ||
+            prog.status === 'paused' ||
+            prog.status === 'enumerating')
+        ) {
+          startBtn.textContent = `Añadir a la cola (${n})`;
+        }
+      })
+      .catch(() => {
+        /* best-effort label hint — the click's own response is authoritative */
+      });
+  }
+
+  // Show what's already queued (issue #554), independent of whether a run is
+  // currently live — a fresh listing page can be opened while several
+  // searches are already waiting their turn.
+  refreshSearchQueuePanel();
 }
 
 async function onStartBatch() {
   if (!batchContext) return;
   const startBtn = $('#batch-start-btn');
   startBtn.disabled = true;
-  startBtn.textContent = 'Iniciando…';
+  // Neutral wording — we don't yet know if this will start now or queue
+  // behind a live run (issue #554).
+  startBtn.textContent = 'Enviando…';
 
   let res;
   try {
@@ -534,6 +593,13 @@ async function onStartBatch() {
     });
   } catch (err) {
     showError(err.message || 'No se pudo iniciar la captura por lotes');
+    return;
+  }
+
+  // Queued behind a live run (issue #554) — never claim "started" when it
+  // wasn't; say it was queued and how many are ahead of it.
+  if (res?.queued) {
+    showQueuedConfirmation(res.aheadCount || 0);
     return;
   }
 
@@ -563,6 +629,38 @@ async function onStartBatch() {
   startBatchPolling();
 }
 
+/**
+ * Render the "queued behind a live run" confirmation (issue #554) — never
+ * shown as "started", since it hasn't. Deliberately does NOT start
+ * batchPolling: while this search waits, GET_BATCH_STATE reports the OTHER,
+ * currently-running search's progress, and polling it here would show that
+ * progress under a banner the operator just read as "my search is queued" —
+ * misleading. The queued search starts automatically once it's its turn; the
+ * operator reopening the popup later (on any tab) will see whatever is live
+ * then, which by construction (searches run one at a time) is unambiguous.
+ */
+function showQueuedConfirmation(aheadCount) {
+  $('#batch-start-btn').classList.add('hidden');
+  $('#batch-progress').classList.add('hidden');
+  hideBatchControls();
+  $('#batch-title').textContent = 'Búsqueda en cola';
+  $('#batch-sub').textContent =
+    aheadCount > 0
+      ? `En cola (${aheadCount} por delante). Se iniciará sola cuando le toque.`
+      : 'En cola. Se iniciará sola en breve.';
+  // issue #554 review N3: this tab's Pausar/Detener act on nothing (this
+  // search hasn't started) — the run that's actually live is elsewhere.
+  // Offer a way to reach ITS progress/controls without switching tabs.
+  if (aheadCount > 0) {
+    const viewProgressBtn = $('#batch-view-progress-btn');
+    if (viewProgressBtn) {
+      viewProgressBtn.classList.remove('hidden');
+      viewProgressBtn.onclick = () => attachLiveBatchIfAny();
+    }
+  }
+  refreshSearchQueuePanel();
+}
+
 async function sendBatchControl(type) {
   let prog;
   try {
@@ -574,9 +672,35 @@ async function sendBatchControl(type) {
   if (type === 'STOP_BATCH') stopBatchPolling();
 }
 
+/**
+ * "Detener" (issue #554 review N2): stopping the live run ALSO drains the
+ * whole pending-search queue (see stopBatch's own docstring in
+ * background.js) — a deliberate full-stop semantic, but one the button
+ * doesn't otherwise signpost. When something is actually queued, confirm
+ * before doing it, so skipping the current search doesn't silently take N
+ * others down with it. "Quitar" on an individual entry (or not queueing it)
+ * is the way to cancel just one without touching a live run.
+ */
+async function onStopBatch() {
+  if (lastKnownQueueDepth > 0) {
+    const ok = window.confirm(
+      lastKnownQueueDepth === 1
+        ? 'Detener también cancela la búsqueda en cola. ¿Continuar?'
+        : `Detener también cancela las ${lastKnownQueueDepth} búsquedas en cola. ¿Continuar?`,
+    );
+    if (!ok) return;
+  }
+  await sendBatchControl('STOP_BATCH');
+}
+
 function startBatchPolling() {
   stopBatchPolling();
   batchPollTimer = setInterval(async () => {
+    // The pending-search queue (issue #554) can change independently of
+    // whatever run is live (another popup/tab enqueued or removed a search),
+    // so refresh it every tick alongside progress.
+    refreshSearchQueuePanel();
+
     // Read the auto state first: it carries the current-batch progress AND the
     // auto counters (N lotes hechos, pendientes), so one message covers both.
     let auto;
@@ -603,6 +727,107 @@ function startBatchPolling() {
     if (prog) renderBatchProgress(prog);
     if (prog && prog.status === 'done') stopBatchPolling();
   }, BATCH_POLL_MS);
+}
+
+// ─── Pending-search queue panel (issue #554) ─────────────────────
+
+/** Human label for a portal key ('idealista' → 'Idealista'). */
+function portalLabel(portal) {
+  if (!portal || typeof portal !== 'string') return 'portal';
+  return portal.charAt(0).toUpperCase() + portal.slice(1);
+}
+
+/** Fetch the current pending-search queue and render it. Best-effort. */
+async function refreshSearchQueuePanel() {
+  let res;
+  try {
+    res = await chrome.runtime.sendMessage({ type: 'GET_SEARCH_QUEUE' });
+  } catch {
+    return;
+  }
+  renderSearchQueue((res && res.queueList) || []);
+}
+
+/**
+ * Render the queue panel: depth + one row per waiting search, each with a
+ * "Quitar" button, plus "Vaciar cola" when there's more than one. Hidden
+ * entirely when the queue is empty.
+ */
+function renderSearchQueue(list) {
+  const depth = Array.isArray(list) ? list.length : 0;
+  lastKnownQueueDepth = depth;
+  updateStopButtonLabel(depth);
+
+  const panel = $('#batch-queue');
+  if (!panel) return;
+  if (depth === 0) {
+    panel.classList.add('hidden');
+    return;
+  }
+  panel.classList.remove('hidden');
+  $('#batch-queue-summary').textContent =
+    depth === 1 ? '1 búsqueda en cola' : `${depth} búsquedas en cola`;
+
+  const ul = $('#batch-queue-list');
+  ul.innerHTML = '';
+  list.forEach((entry, index) => {
+    const li = document.createElement('li');
+    li.className = 'batch-queue-item';
+    const label = document.createElement('span');
+    label.textContent = `${index + 1}. ${portalLabel(entry?.portal)}`;
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'batch-queue-remove';
+    removeBtn.textContent = 'Quitar';
+    removeBtn.setAttribute('aria-label', `Quitar búsqueda ${index + 1} de la cola`);
+    removeBtn.onclick = () => onRemoveQueuedSearch(index);
+    li.appendChild(label);
+    li.appendChild(removeBtn);
+    ul.appendChild(li);
+  });
+
+  const clearBtn = $('#batch-queue-clear-btn');
+  clearBtn.classList.toggle('hidden', depth === 0);
+}
+
+/**
+ * Signpost "Detener"'s full-stop semantic on the button itself (issue #554
+ * review N2) — the queue-drain confirmation in onStopBatch is the hard
+ * guard; this is the at-a-glance cue so it's never a surprise.
+ */
+function updateStopButtonLabel(depth) {
+  const stopBtn = $('#batch-stop-btn');
+  if (!stopBtn) return;
+  // Set the label unconditionally (even while hidden) so it's already
+  // correct the next time renderBatchProgress reveals the button — the 1 Hz
+  // poll otherwise leaves a stale label visible for up to one tick.
+  if (depth > 0) {
+    stopBtn.textContent = `Detener (cancela ${depth} en cola)`;
+    stopBtn.title = 'También cancela las búsquedas en cola.';
+  } else {
+    stopBtn.textContent = 'Detener';
+    stopBtn.removeAttribute('title');
+  }
+}
+
+async function onRemoveQueuedSearch(index) {
+  let res;
+  try {
+    res = await chrome.runtime.sendMessage({ type: 'REMOVE_QUEUED_SEARCH', index });
+  } catch {
+    return;
+  }
+  renderSearchQueue((res && res.queueList) || []);
+}
+
+async function onClearSearchQueue() {
+  let res;
+  try {
+    res = await chrome.runtime.sendMessage({ type: 'CLEAR_SEARCH_QUEUE' });
+  } catch {
+    return;
+  }
+  renderSearchQueue((res && res.queueList) || []);
 }
 
 // ─── Auto mode (issue #424) ─────────────────────────────────────
@@ -724,6 +949,8 @@ function hideBatchControls() {
   $('#batch-pause-btn').classList.add('hidden');
   $('#batch-resume-btn').classList.add('hidden');
   $('#batch-stop-btn').classList.add('hidden');
+  const viewProgressBtn = $('#batch-view-progress-btn');
+  if (viewProgressBtn) viewProgressBtn.classList.add('hidden');
 }
 
 // ─── Capturar URL de búsqueda (issue #475, part of #471) ────────
@@ -854,6 +1081,21 @@ function renderBatchProgress(prog) {
   if (prog.status === 'done') {
     startBtn.classList.add('hidden');
     hideBatchControls();
+    // issue #554: an empty run needs an EXPLAINED 0/0, not a bare one — the
+    // same-portal drain case (an earlier queued search already captured
+    // everything this one found) reads completely differently from a search
+    // that genuinely found nothing.
+    if (total === 0 && prog.emptyReason === 'already-captured') {
+      $('#batch-title').textContent = 'Ya capturada';
+      $('#batch-sub').textContent =
+        'Ya capturada por la búsqueda anterior — no quedaba nada pendiente.';
+      return;
+    }
+    if (total === 0 && prog.emptyReason === 'no-results') {
+      $('#batch-title').textContent = 'Sin resultados';
+      $('#batch-sub').textContent = 'Esta búsqueda no encontró anuncios que capturar.';
+      return;
+    }
     $('#batch-title').textContent = 'Captura por lotes completada';
     $('#batch-sub').textContent = `${prog.captured} capturada(s), ${prog.failed} fallida(s).`;
     return;

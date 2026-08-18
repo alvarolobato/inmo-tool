@@ -270,6 +270,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     // waiting for the 30 s watchdog alarm.
     reattachIfStranded();
     (async () => {
+      // Pending-search queue depth + what's next (issue #554) rides along on
+      // every progress read so the popup can render it without a second
+      // round trip.
+      const q = await queueSummary();
       // The enumeration phase (issue #362) runs before the capture queue exists;
       // surface it as a distinct 'enumerating' status with the growing count.
       const enumState = await getEnumState();
@@ -284,12 +288,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           inflight: 0,
           discovered,
           page: enumState.page || 1,
+          ...q,
         };
       }
-      return InmoBatch.progress(await getBatchState());
+      return { ...InmoBatch.progress(await getBatchState()), ...q };
     })()
       .then(sendResponse)
-      .catch(() => sendResponse(InmoBatch.progress(null)));
+      .catch(() => sendResponse({ ...InmoBatch.progress(null), queueDepth: 0, queueNext: null }));
     return true; // async
   }
   if (msg.type === 'PAUSE_BATCH') {
@@ -306,6 +311,30 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
   if (msg.type === 'STOP_BATCH') {
     stopBatch().then(sendResponse);
+    return true; // async
+  }
+
+  // ── Pending-search queue control (issue #554) ──────────────────────────
+  // "Detener" is a full stop, so it also drains the queue — see stopBatch's
+  // docstring. These two act only on searches that HAVEN'T started yet.
+  if (msg.type === 'GET_SEARCH_QUEUE') {
+    queueSummary().then(sendResponse).catch(() => sendResponse({ queueDepth: 0, queueNext: null }));
+    return true; // async
+  }
+  if (msg.type === 'REMOVE_QUEUED_SEARCH') {
+    (async () => {
+      const queue = InmoBatch.removeSearchAt(await getSearchQueue(), msg.index);
+      await setSearchQueue(queue);
+      return queueSummary();
+    })()
+      .then(sendResponse)
+      .catch(() => sendResponse({ queueDepth: 0, queueNext: null }));
+    return true; // async
+  }
+  if (msg.type === 'CLEAR_SEARCH_QUEUE') {
+    setSearchQueue(InmoBatch.clearSearchQueue())
+      .then(() => sendResponse({ queueDepth: 0, queueNext: null }))
+      .catch(() => sendResponse({ queueDepth: 0, queueNext: null }));
     return true; // async
   }
 
@@ -381,6 +410,12 @@ const BATCH_ENUM_KEY = 'inmoBatchEnum';
 // The tabs the loop currently has open (an array), persisted so a respawned
 // worker can reconcile (close) them after an eviction rather than leaking them.
 const BATCH_TABS_KEY = 'inmoBatchTabs';
+// Pending-search queue (issue #554): searches fired off while a run is
+// already live queue up here instead of clobbering BATCH_KEY. Same
+// chrome.storage.session lifetime as the batch state it queues behind — see
+// batch.js's "Pending-search queue" section for the pure array ops
+// (enqueueSearch/dequeueSearch/…) that operate on it.
+const BATCH_QUEUE_KEY = 'inmoBatchSearchQueue';
 // Watchdog alarm that recovers a stranded run without any user action.
 const BATCH_ALARM = 'inmoBatchWatchdog';
 // 0.5 min = 30 s, Chrome's minimum periodic-alarm interval. Short enough to
@@ -463,6 +498,33 @@ async function getBatchState() {
 
 async function setBatchState(state) {
   await chrome.storage.session.set({ [BATCH_KEY]: state });
+}
+
+// ── Pending-search queue (issue #554) ─────────────────────────────────────
+async function getSearchQueue() {
+  const o = await chrome.storage.session.get(BATCH_QUEUE_KEY);
+  return Array.isArray(o[BATCH_QUEUE_KEY]) ? o[BATCH_QUEUE_KEY] : [];
+}
+async function setSearchQueue(queue) {
+  await chrome.storage.session.set({
+    [BATCH_QUEUE_KEY]: Array.isArray(queue) ? queue : [],
+  });
+}
+
+/**
+ * The popup-friendly view of the pending-search queue: depth, what's next,
+ * and the full list (so the popup can offer removing any one entry, not just
+ * the next). Small payload — only non-empty while searches are actually
+ * waiting.
+ */
+async function queueSummary() {
+  const queue = await getSearchQueue();
+  const next = InmoBatch.peekNextSearch(queue);
+  return {
+    queueDepth: InmoBatch.searchQueueDepth(queue),
+    queueNext: next ? { portal: next.portal, searchUrl: next.searchUrl } : null,
+    queueList: queue.map((e) => ({ portal: e.portal, searchUrl: e.searchUrl })),
+  };
 }
 
 // ── Enumeration-phase state (issue #362) ──────────────────────────────────
@@ -854,50 +916,213 @@ async function postFilterCatalog(payload) {
  * pending set. Enumeration runs async so the popup stays responsive and the
  * discovered count grows as pages arrive; startBatch returns immediately with
  * `enumerating: true`.
+ *
+ * Queueing (issue #554): if a run is ALREADY active (enumerating or
+ * capturing, `isBatchActive()`), this search is queued instead of clobbering
+ * the live run's state — the bug this issue fixes. The active-check and the
+ * "claim the run" transition (entering the enumerating phase) happen inside
+ * ONE critical section (`runBatchStateExclusive`) so two START_BATCH calls
+ * racing each other can never both decide "nothing's running" and both
+ * clobber BATCH_ENUM_KEY — that race was the original clobbering bug, just
+ * one message-timing away from a second click.
  */
 async function startBatch({ portal, urls, searchUrl }) {
-  // Piggyback capture-to-infer: also learn this search page's URL grammar.
-  await saveSearchUrlExample(searchUrl);
   const page1 = Array.isArray(urls) ? urls : [];
-  if (page1.length > 0) {
-    await seedWorklist(page1);
+  const claim = await runBatchStateExclusive(async () => {
+    if (await isBatchActive()) {
+      const queue = InmoBatch.enqueueSearch(await getSearchQueue(), {
+        portal,
+        urls: page1,
+        searchUrl,
+      });
+      await setSearchQueue(queue);
+      return { claimed: false, queueDepth: queue.length };
+    }
+    // Claim the run atomically: entering the enumerating phase HERE (inside
+    // the lock) is what makes isBatchActive() report true for any concurrent
+    // START_BATCH/advanceQueueIfIdle call that queues behind the exclusive
+    // section.
+    await setEnumState({
+      status: 'enumerating',
+      portal,
+      discovered: page1.length,
+      page: 1,
+    });
+    return { claimed: true };
+  });
+  if (!claim.claimed) {
+    // "en cola (N por delante)": the running search plus any earlier queued
+    // ones — which is exactly queueDepth once this entry is the last in line.
+    return {
+      started: false,
+      queued: true,
+      queueDepth: claim.queueDepth,
+      aheadCount: claim.queueDepth,
+    };
   }
-  // Enter the enumeration phase so a reopened popup shows discovery progress.
-  await setEnumState({
-    status: 'enumerating',
-    portal,
-    discovered: page1.length,
-    page: 1,
-  });
-  // Walk the remaining results pages, then build + run the capture queue.
-  // Fire-and-forget: on any enumeration failure we still fall through to
-  // capturing whatever was seeded (page 1 at minimum), never leaving the run
-  // wedged in the enumeration phase.
-  runEnumerationThenCapture(portal, searchUrl, page1).catch(async () => {
-    await clearEnumState();
-    await runCaptureQueue(portal);
-  });
+  return beginRun({ portal, urls: page1, searchUrl });
+}
+
+/**
+ * Do the actual (non-blocking) work of a claimed run: learn the search URL,
+ * seed page 1, then kick off enumerate→capture in the background. The caller
+ * must have ALREADY persisted the 'enumerating' claim (issue #554) — this
+ * never touches EnumState itself except via runEnumerationThenCapture's own
+ * lifecycle, so it's safe to call from both startBatch's happy path and
+ * advanceQueueIfIdle.
+ *
+ * issue #554 review N5: a `saveSearchUrlExample`/`seedWorklist` failure must
+ * not strand the 'enumerating' claim we already persisted with nothing ever
+ * driving it — swallow it and fall through to the walk regardless (it
+ * re-seeds each page it harvests anyway); `runEnumerationThenCapture` below
+ * is unconditionally reached and guarantees the claim always resolves into a
+ * capture queue (or is explicitly dropped on failure), never left dangling.
+ */
+async function beginRun({ portal, urls, searchUrl }) {
+  const page1 = Array.isArray(urls) ? urls : [];
+  try {
+    // Piggyback capture-to-infer: also learn this search page's URL grammar.
+    await saveSearchUrlExample(searchUrl);
+    if (page1.length > 0) {
+      await seedWorklist(page1);
+    }
+  } catch {
+    /* best-effort — see docstring; the claim is resolved below regardless */
+  }
+  // Fire-and-forget: runEnumerationThenCapture NEVER rejects (it catches
+  // every failure internally and always resolves the 'enumerating' claim one
+  // way or another), so there is no `.catch()` needed here.
+  runEnumerationThenCapture(portal, searchUrl, page1);
   return { started: true, enumerating: true, total: page1.length };
 }
 
-/** Enumerate every results page, then hand off to the capture queue. */
+/**
+ * If nothing is currently running — no live loop, no in-progress
+ * enumeration, no running/paused capture queue — and a search is waiting,
+ * pop it and start it (issue #554). This is the ONE place that advances the
+ * pending-search queue; it's called from:
+ *   - runBatchLoop's own `finally` (natural completion advances promptly),
+ *   - the watchdog tick / onStartup / onInstalled / every popup open
+ *     (`reattachIfStranded`), which is what covers a worker eviction landing
+ *     in the gap between "the run just finished" and "the queue got
+ *     checked" — a queue that silently stalls after eviction would be worse
+ *     than no queue at all, since the owner would believe work is
+ *     progressing.
+ * The check-and-claim (like startBatch) happens inside the exclusive section
+ * so a watchdog tick racing a loop's own finally can't both pop an entry.
+ * Best-effort: never throws past the caller — `beginRun` cannot reject
+ * (issue #554 review N5), so a popped entry is never silently dropped.
+ */
+async function advanceQueueIfIdle() {
+  const claim = await runBatchStateExclusive(async () => {
+    if (await isBatchActive()) return null;
+    const popped = InmoBatch.dequeueSearch(await getSearchQueue());
+    if (!popped.entry) return null;
+    await setSearchQueue(popped.queue);
+    await setEnumState({
+      status: 'enumerating',
+      portal: popped.entry.portal,
+      discovered: popped.entry.urls.length,
+      page: 1,
+    });
+    return popped.entry;
+  });
+  if (!claim) return false;
+  await beginRun(claim);
+  return true;
+}
+
+/**
+ * Enumerate every results page, then hand off to the capture queue.
+ * `discoveredCount` (issue #554) — when known — is threaded to
+ * runCaptureQueue so a same-portal drain (an earlier queued search already
+ * captured everything this one found) reports cleanly instead of a bare 0/0;
+ * absent it falls back to page1Urls.length (the enumeration-failed path,
+ * where no further discovery happened).
+ *
+ * issue #554 review B1: `enumRunning` is held true for the ENTIRE handoff —
+ * the page walk AND the capture-queue build (runCaptureQueue) — not just the
+ * walk. Before this, `enumRunning` reset to false the instant the walk's own
+ * loop exited, which is BEFORE runCaptureQueue's `fetchPendingUrls` network
+ * call — the exact window `shouldRecoverStrandedEnumeration` could
+ * misclassify as "stranded" and race a start/advance into. This function
+ * NEVER rejects: any failure (enumeration itself, or building the capture
+ * queue) is caught and resolved by explicitly dropping the claim, so the
+ * 'enumerating' state can never dangle forever.
+ */
 async function runEnumerationThenCapture(portal, searchUrl, page1Urls) {
+  enumRunning = true;
   try {
-    await enumerateResultsPages(portal, searchUrl, page1Urls);
+    let discoveredCount = page1Urls.length;
+    try {
+      await enumerateResultsPages(portal, searchUrl, page1Urls);
+      const enumState = await getEnumState(); // read before the handoff clears it
+      if (enumState && typeof enumState.discovered === 'number') {
+        discoveredCount = enumState.discovered;
+      }
+    } catch {
+      // Enumeration itself failed outright — still fall through below to
+      // capture whatever was seeded (page 1 at minimum), never leaving the
+      // claim wedged in the enumerating phase.
+    }
+    try {
+      await runCaptureQueue(portal, discoveredCount);
+    } catch {
+      // Building the capture queue failed (network/storage) — the claim
+      // must not dangle either (issue #554 review N5): drop it explicitly
+      // so isBatchActive() frees up, then let the pending-search queue
+      // advance promptly rather than waiting for the next watchdog tick.
+      await clearEnumState().catch(() => {});
+      await advanceQueueIfIdle().catch(() => {});
+    }
   } finally {
-    await clearEnumState();
-    await runCaptureQueue(portal);
+    enumRunning = false;
   }
 }
 
-/** Build the capture queue from the portal's pending set and fire the loop. */
-async function runCaptureQueue(portal) {
+/**
+ * Build the capture queue from the portal's pending set and fire the loop.
+ * `discoveredCount` (issue #554, optional) is how many detail URLs THIS
+ * search found (page 1 + enumeration) — used to classify an empty result as
+ * "already captured by an earlier same-portal search" vs. "no results",
+ * instead of a bare 0/0 (see InmoBatch.classifyEmptyCapture).
+ *
+ * ATOMIC handoff (issue #554 review B1). The network calls below
+ * (`fetchPendingUrls`/`getBatchConfig`) happen OUTSIDE any lock, but the
+ * caller is required to leave the 'enumerating' claim (BATCH_ENUM_KEY)
+ * PERSISTED until this function clears it — so `isBatchActive()` reads true
+ * for the network call's entire duration, no matter how long it takes. Once
+ * the new capture state is ready, `clearEnumState` + `setBatchState` +
+ * kicking off `runBatchLoop` all happen inside ONE `runBatchStateExclusive`
+ * critical section, so no concurrent `startBatch`/`advanceQueueIfIdle` call
+ * can ever observe every claim signal idle at once (the original clobbering
+ * bug: a second search claiming the run mid-handoff, then overwriting the
+ * first search's state when ITS OWN handoff completes). `runBatchLoop()` is
+ * invoked from INSIDE the critical section (not awaited — the loop itself
+ * can run for minutes — but CALLING it synchronously flips the in-memory
+ * `batchLooping` guard before the lock releases), so even a same-worker
+ * caller queued right behind this one sees a fully-committed state.
+ *
+ * Returns the `runBatchLoop()` promise so a caller that needs to know when
+ * the capture actually drains (the Auto harvest path) can await it; the
+ * manual path intentionally does not (fire-and-forget — "click once").
+ */
+async function runCaptureQueue(portal, discoveredCount) {
   const pending = await fetchPendingUrls(portal);
   // Concurrency comes from the operator's config (clamped), issue #410.
   const { concurrency } = await getBatchConfig();
-  const state = InmoBatch.makeBatchState(pending, concurrency);
-  await setBatchState(state);
-  runBatchLoop(); // fire-and-forget; drives tabs until paused/stopped/done
+  const emptyReason = InmoBatch.classifyEmptyCapture(
+    pending.length,
+    discoveredCount,
+  );
+  const state = InmoBatch.makeBatchState(pending, concurrency, emptyReason);
+  let loopPromise;
+  await runBatchStateExclusive(async () => {
+    await clearEnumState();
+    await setBatchState(state);
+    loopPromise = runBatchLoop();
+  });
+  return loopPromise;
 }
 
 /**
@@ -1002,9 +1227,9 @@ async function renderAndHarvest(url, existingTabId) {
  */
 async function enumerateResultsPages(portal, searchUrl, page1Urls) {
   if (!searchUrl) return;
-  // Mark the enumeration phase live in THIS worker (issue #516) so a respawn can
-  // distinguish an active walk from a stranded one. Reset in the finally below.
-  enumRunning = true;
+  // `enumRunning` (issue #516, widened for #554 review B1) is set by the
+  // CALLER around the whole enum→capture handoff, not just this page walk —
+  // see runEnumerationThenCapture / runAutoHarvest.
   const D = self.InmoDetect;
   const seen = new Set(
     (page1Urls || []).map((u) => D.matchKey(u)).filter(Boolean),
@@ -1094,7 +1319,6 @@ async function enumerateResultsPages(portal, searchUrl, page1Urls) {
     // Best-effort and keyed by the same search URL the batch-start save used,
     // so the zero-results regression monitor gets the extension-path signal.
     await saveSearchUrlExample(D.stripCaptureSignal(searchUrl), seen.size);
-    enumRunning = false;
   }
 }
 
@@ -1104,13 +1328,29 @@ async function mutateBatch(fn) {
   return InmoBatch.progress(next);
 }
 
-/** Stop the run: mark done, unblock every in-flight wait, close all open tabs. */
+/**
+ * Stop the run: mark done, unblock every in-flight wait, close all open tabs.
+ * Also DRAINS the pending-search queue (issue #554) — "Detener" is the
+ * operator's full-stop control, so it cancels everything fired off, not just
+ * the one currently running; use "Quitar" on an individual queued search (or
+ * just don't queue it) to cancel only that one without touching a live run.
+ */
 async function stopBatch() {
-  // Clearing the enumeration state signals any in-progress results-page walk to
-  // bail on its next iteration (issue #362); its reused tab is in batchTabIds
-  // (and persisted), so the tab close below reaps it.
-  await clearEnumState();
-  const next = await updateBatchState((state) => InmoBatch.stop(state));
+  // Clear the enumeration claim, drain the pending-search queue, and stop the
+  // capture state — all inside ONE critical section (issue #554 hardening
+  // alongside review B1) so a concurrent startBatch/advanceQueueIfIdle claim
+  // can never land mid-Detener and get silently wiped a moment later.
+  const next = await runBatchStateExclusive(async () => {
+    // Clearing the enumeration state signals any in-progress results-page
+    // walk to bail on its next iteration (issue #362); its reused tab is in
+    // batchTabIds (and persisted), so the tab close below reaps it.
+    await clearEnumState();
+    await setSearchQueue(InmoBatch.clearSearchQueue());
+    const state = await getBatchState();
+    const stopped = InmoBatch.stop(state);
+    await setBatchState(stopped);
+    return stopped;
+  });
   // Unblock every outstanding wait (each resolves false → recorded as failed,
   // but recordResultAt ignores a DONE queue, so counts stay put).
   for (const finish of batchWaiters.values()) finish(false);
@@ -1219,9 +1459,15 @@ async function driveOnePage(index, url, backgroundTabs) {
 async function runBatchLoop() {
   if (batchLooping) return;
   batchLooping = true;
-  const cfg = await getBatchConfig();
   const inflight = new Map(); // index -> Promise (the driveOnePage in progress)
   try {
+    // issue #554 review N6: getBatchConfig() (a chrome.storage.sync read) is
+    // now INSIDE the try — it used to sit between `batchLooping = true` and
+    // the try, so a rejection there (e.g. an evicted/invalidated extension
+    // context) skipped the finally entirely and left `batchLooping` stuck
+    // true forever, which makes isBatchActive() permanently report "active"
+    // and wedges the pending-search queue with no recovery path at all.
+    const cfg = await getBatchConfig();
     for (;;) {
       let state = await getBatchState();
 
@@ -1271,6 +1517,15 @@ async function runBatchLoop() {
     // (or an early break) never leaves a tab leaked.
     await Promise.allSettled(inflight.values());
     batchLooping = false;
+    // issue #554: the loop just stopped driving (done, paused, or stopped) —
+    // if that means a natural completion (not a pause), advanceQueueIfIdle's
+    // own isBatchActive() check tells the difference and pops the next queued
+    // search. Best-effort: never let a queue-advance failure escape the loop.
+    try {
+      await advanceQueueIfIdle();
+    } catch {
+      /* best-effort — the watchdog tick will retry */
+    }
   }
 }
 
@@ -1282,28 +1537,119 @@ async function runBatchLoop() {
 // and cheap — a no-op when the loop is already alive or the queue is
 // paused/done, so it's safe to call from the alarm, onStartup/onInstalled, and
 // every popup open.
+// In-memory re-entrancy guard for reattachIfStranded itself (issue #554
+// review N1/B1): the watchdog alarm, onStartup/onInstalled, and every popup
+// open can all call this within the same worker close together. Without this
+// guard, two overlapping calls could both read the same "nothing live yet"
+// snapshot (stranded-enumeration / advance-queue checks) before either one's
+// first `await` commits anything — a narrow window, but a real one now that
+// this function can also POP the pending-search queue.
+let reattaching = false;
+
 async function reattachIfStranded() {
-  if (batchLooping) return; // loop alive — nothing stranded
-  let state = await getBatchState();
-  if (!InmoBatch.shouldReattach(state, batchLooping)) return;
+  if (batchLooping || reattaching) return; // loop alive, or already re-attaching
+  reattaching = true;
+  try {
+    let state = await getBatchState();
+    if (InmoBatch.shouldReattach(state, batchLooping)) {
+      // Close every tab orphaned at eviction time (their ids were persisted).
+      const persistedTabIds = await readBatchTabs();
+      const orphans = InmoBatch.orphanTabsToClose(state, batchLooping, persistedTabIds);
+      for (const id of orphans) {
+        try {
+          await chrome.tabs.remove(id);
+        } catch {
+          /* tab already gone */
+        }
+      }
+      batchTabIds.clear();
+      await clearBatchTabs();
 
-  // Close every tab orphaned at eviction time (their ids were persisted).
-  const persistedTabIds = await readBatchTabs();
-  const orphans = InmoBatch.orphanTabsToClose(state, batchLooping, persistedTabIds);
-  for (const id of orphans) {
-    try {
-      await chrome.tabs.remove(id);
-    } catch {
-      /* tab already gone */
+      // Those in-flight slots referred to the tabs we just closed — reset
+      // them to pending so the restarted driver re-launches them (capture is
+      // idempotent).
+      state = await updateBatchState((s) => InmoBatch.resetInflightToPending(s));
+      runBatchLoop(); // resumes from the persisted slots; its own finally
+      // will advance the pending-search queue (issue #554) once THIS run
+      // completes.
+      return;
     }
-  }
-  batchTabIds.clear();
-  await clearBatchTabs();
 
-  // Those in-flight slots referred to the tabs we just closed — reset them to
-  // pending so the restarted driver re-launches them (capture is idempotent).
-  state = await updateBatchState((s) => InmoBatch.resetInflightToPending(s));
-  runBatchLoop(); // resumes from the persisted slots
+    // No stranded CAPTURE queue. A stranded manual ENUMERATION (issue #554,
+    // generalizing #516's auto-only recoverStrandedHarvest below) is the
+    // other way a run can die mid-flight without a loop to resume it: worker
+    // evicted between results pages leaves BATCH_ENUM_KEY set with nothing
+    // walking it, which would make isBatchActive() report "active" forever
+    // and wedge both this run AND anything queued behind it. Recover it
+    // exactly like any other enumeration failure (startBatch's own fallback)
+    // — fall through to capturing whatever was already seeded.
+    //
+    // issue #554 review N1: EXCLUDE the case where Auto is mid-HARVEST — that
+    // is `recoverStrandedHarvest`'s (autoTick's) job, which does the
+    // additional auto-specific work (recording the task run so staleness
+    // advances, then cooling down) this generic path knows nothing about. Two
+    // independent recoveries racing for the SAME stranded enum state — one
+    // generic, one auto-aware — is exactly the kind of double-action this
+    // guard exists to prevent; deferring to the auto-aware one here keeps the
+    // generalization honest rather than merely "usually fine".
+    const enumState = await getEnumState();
+    const batchActive = InmoBatch.isActive(await getBatchState());
+    const auto = await getAutoState();
+    const autoHarvesting =
+      !!auto && auto.enabled === true && auto.status === InmoBatch.AUTO_STATUS.HARVESTING;
+    if (
+      !autoHarvesting &&
+      InmoBatch.shouldRecoverStrandedEnumeration(
+        enumState != null,
+        enumRunning,
+        batchLooping,
+        batchActive,
+      )
+    ) {
+      // Claim the recovery in-memory BEFORE any further await, mirroring
+      // runEnumerationThenCapture's own contract (issue #554 review B1): the
+      // enum claim stays PERSISTED (not cleared here) until runCaptureQueue's
+      // atomic handoff clears it, so isBatchActive() reads true for the
+      // whole recovery, and `enumRunning` stops a second concurrent
+      // recovery attempt from double-acting on the same stranded state.
+      enumRunning = true;
+      try {
+        const persistedTabIds = await readBatchTabs();
+        for (const id of persistedTabIds) {
+          try {
+            await chrome.tabs.remove(id);
+          } catch {
+            /* tab already gone */
+          }
+        }
+        batchTabIds.clear();
+        await clearBatchTabs();
+        const discovered =
+          typeof enumState.discovered === 'number' ? enumState.discovered : 0;
+        const portal = enumState.portal;
+        if (portal) {
+          await runCaptureQueue(portal, discovered); // atomically clears the enum claim
+        } else {
+          // Defensive: an enum state with no portal can't be recovered into a
+          // capture queue — just drop the dangling claim.
+          await clearEnumState();
+        }
+      } finally {
+        enumRunning = false;
+      }
+      return; // that run's own completion will advance the queue in turn
+    }
+
+    // Nothing at all is running. A queued search may still be waiting to
+    // start — e.g. the worker died in the exact gap between "the run just
+    // finished" and "advanceQueueIfIdle got to run" (issue #554).
+    // Best-effort, no-op when something IS active or the queue is empty.
+    await advanceQueueIfIdle().catch(() => {
+      /* best-effort — the next watchdog tick retries */
+    });
+  } finally {
+    reattaching = false;
+  }
 }
 
 // Arm the watchdog alarm (idempotent) and try an immediate re-attach. Runs on
@@ -1523,11 +1869,14 @@ async function stopAuto() {
 async function getAutoProgress() {
   const auto = await getAutoState();
   const batch = InmoBatch.progress(await getBatchState());
+  // The pending-search queue (issue #554) rides along here too, so the popup
+  // shows it consistently whether or not Auto is on.
+  const q = await queueSummary();
   if (!auto) {
     // No live auto state: surface the persisted "Forzar" preference so the
     // popup's checkbox reflects it even before Auto is turned on (issue #434).
     const { force } = await getAutoConfig();
-    return { enabled: false, status: InmoBatch.AUTO_STATUS.IDLE, force, batch };
+    return { enabled: false, status: InmoBatch.AUTO_STATUS.IDLE, force, batch, ...q };
   }
   return {
     enabled: auto.enabled === true,
@@ -1541,6 +1890,7 @@ async function getAutoProgress() {
     // The harvest unit in flight (issue #516) so the popup can label
     // "descubriendo <portal>" vs a plain drain batch.
     harvestTask: auto.harvestTask || null,
+    ...q,
     batch,
   };
 }
@@ -1570,23 +1920,51 @@ async function setAutoForce(force) {
  * The map→listing normalisation (#506 `toListingUrl`) happens inside
  * enumerateResultsPages, so the server hands us the resolved search URL verbatim.
  */
+/**
+ * Run ONE harvest unit end to end. The CALLER (runAutoBatch) must have
+ * ALREADY atomically claimed the run (persisted the 'enumerating' state
+ * inside `runBatchStateExclusive`) — mirrors `beginRun`'s contract for the
+ * manual path (issue #554). This function never re-claims; it only drives.
+ *
+ * issue #554 review B1: `enumRunning` spans the WHOLE handoff — the page
+ * walk AND the capture-queue build — not just the walk, exactly like
+ * `runEnumerationThenCapture`. Before this, `clearEnumState()` ran (in this
+ * function's own finally) BEFORE the network `fetchPendingUrls` call below,
+ * leaving a window where `isBatchActive()` read false for the whole request
+ * — the same clobbering shape the manual path had, just reachable only while
+ * Auto is harvesting.
+ */
 async function runAutoHarvest(portal, searchUrl) {
   // Piggyback capture-to-infer, exactly like startBatch (best-effort).
   await saveSearchUrlExample(searchUrl);
-  // Enter the enumeration phase so a reopened popup shows discovery progress.
-  await setEnumState({ status: 'enumerating', portal, discovered: 0, page: 1 });
+  enumRunning = true;
   try {
-    // page1Urls = [] → the walk renders + seeds page 1 itself (no popup harvest).
-    await enumerateResultsPages(portal, searchUrl, []);
+    let discoveredCount = 0;
+    try {
+      // page1Urls = [] → the walk renders + seeds page 1 itself (no popup harvest).
+      await enumerateResultsPages(portal, searchUrl, []);
+      const enumState = await getEnumState(); // read before the handoff clears it
+      if (enumState && typeof enumState.discovered === 'number') {
+        discoveredCount = enumState.discovered;
+      }
+    } catch {
+      /* fall through — capture whatever was seeded so far */
+    }
+    // Build + run the capture queue over everything just seeded. Concurrency
+    // + pacing come from the SAME operator config the manual path uses.
+    // runCaptureQueue atomically clears the enum claim as part of persisting
+    // the capture state (issue #554 review B1) and resolves once the batch
+    // drains, so the caller (runAutoBatch) can await task-run bookkeeping.
+    try {
+      await runCaptureQueue(portal, discoveredCount);
+    } catch (err) {
+      // A failure here must not strand the claim (issue #554 review N5).
+      await clearEnumState().catch(() => {});
+      throw err; // preserve Auto's existing error-propagation contract
+    }
   } finally {
-    await clearEnumState();
+    enumRunning = false;
   }
-  // Build + run the capture queue over everything just seeded. Concurrency +
-  // pacing come from the SAME operator config the manual path uses.
-  const pending = await fetchPendingUrls(portal);
-  const { concurrency } = await getBatchConfig();
-  await setBatchState(InmoBatch.makeBatchState(pending, concurrency));
-  await runBatchLoop(); // resolves when the capture batch finishes / is stopped
 }
 
 /**
@@ -1602,10 +1980,24 @@ async function runAutoHarvest(portal, searchUrl) {
  * off for one timeout. Kept the name `runAutoBatch` — it is still "run the next
  * auto unit" and is wired to the same alarm-tick 'start' action.
  */
+/**
+ * Back off one cooldown and let Auto retry next tick — shared by the backend
+ * hiccup path and the two "lost the claim race" paths below (issue #554
+ * review N7).
+ */
+async function deferAutoTick(auto, timeoutSec) {
+  await setAutoState({
+    ...auto,
+    status: InmoBatch.AUTO_STATUS.WAITING,
+    lastBatchAt: Date.now(),
+  });
+  scheduleAutoAlarm(timeoutSec);
+}
+
 async function runAutoBatch() {
   const auto = await getAutoState();
   if (!auto || auto.enabled !== true) return;
-  if (await isBatchActive()) return; // single-driver guard
+  if (await isBatchActive()) return; // single-driver guard (courtesy — the real guard is below)
 
   // Mark PLANNING before the network call so an eviction during the fetch is
   // recoverable (nextAutoAction maps a stranded PLANNING → re-plan).
@@ -1616,17 +2008,34 @@ async function runAutoBatch() {
     plan = await fetchAutoPlan(auto.portal, auto.force === true);
   } catch {
     // Backend hiccup: back off one timeout and try again (Auto stays ON).
-    await setAutoState({
-      ...auto,
-      status: InmoBatch.AUTO_STATUS.WAITING,
-      lastBatchAt: Date.now(),
-    });
-    scheduleAutoAlarm(auto.timeoutSec);
+    await deferAutoTick(auto, auto.timeoutSec);
     return;
   }
 
   if (plan && plan.kind === 'harvest' && plan.task && plan.task.url) {
     const task = plan.task;
+    // issue #554 review N7: the `isBatchActive()` check above is only a
+    // courtesy early-exit — `fetchAutoPlan` is a network round trip, during
+    // which a manually queued search (or a stranded-run recovery) could have
+    // claimed the run. Re-check AND claim (persist the 'enumerating' state)
+    // atomically inside the same critical section startBatch/advanceQueueIfIdle
+    // use, so the two claim paths can never both succeed.
+    const claimed = await runBatchStateExclusive(async () => {
+      if (await isBatchActive()) return false;
+      await setEnumState({
+        status: 'enumerating',
+        portal: task.portal,
+        discovered: 0,
+        page: 1,
+      });
+      return true;
+    });
+    if (!claimed) {
+      // Something else claimed the run in the gap between our guard and now
+      // — defer to it, exactly like a backend hiccup.
+      await deferAutoTick(auto, auto.timeoutSec);
+      return;
+    }
     // Persist the in-flight harvest task BEFORE any work so a mid-harvest
     // eviction can still POST the task run on completion (else re-harvest forever).
     await setAutoState({
@@ -1647,7 +2056,19 @@ async function runAutoBatch() {
   if (plan && plan.kind === 'drain' && Array.isArray(plan.urls) && plan.urls.length > 0) {
     const urls = plan.urls.filter((u) => typeof u === 'string');
     const { concurrency } = await getBatchConfig();
-    await setBatchState(InmoBatch.makeBatchState(urls, concurrency));
+    const state = InmoBatch.makeBatchState(urls, concurrency);
+    // Same atomic re-check-and-claim as the harvest branch above (issue #554
+    // review N7) — the persisted RUNNING batch state itself is what signals
+    // "active" to any concurrent claimant from here on.
+    const claimed = await runBatchStateExclusive(async () => {
+      if (await isBatchActive()) return false;
+      await setBatchState(state);
+      return true;
+    });
+    if (!claimed) {
+      await deferAutoTick(auto, auto.timeoutSec);
+      return;
+    }
     await setAutoState({
       ...auto,
       status: InmoBatch.AUTO_STATUS.RUNNING,
@@ -1860,4 +2281,39 @@ async function handleCheckStatus(captureId) {
     data.property_url = `${apiUrl}${data.property_url}`;
   }
   return data;
+}
+
+// ═══ CommonJS export for tests (issue #554 review N8) ══════════════════════
+//
+// background.js is the imperative shell around Chrome's extension APIs and
+// has never been unit-tested (batch.js carries the pure logic and IS
+// tested — see its own module header). The #554 review found a real
+// concurrency bug (B1) in exactly this wiring — the atomic-claim-vs-network
+// handoff between startBatch/advanceQueueIfIdle/runCaptureQueue/
+// reattachIfStranded — which no predicate-only test could have caught. This
+// export is ADDITIVE ONLY (a real Chrome service worker has no `module`
+// global, so this block never runs there) and exposes just enough of the
+// wiring for dashboard/__tests__/extension-background-batch-queue.test.ts to
+// drive it against a stubbed chrome/fetch, including reproducing B1's
+// interleaving directly. Keep this list narrow — export what a test needs to
+// observe or drive, not the whole file.
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    startBatch,
+    advanceQueueIfIdle,
+    runCaptureQueue,
+    stopBatch,
+    reattachIfStranded,
+    isBatchActive,
+    runBatchLoop,
+    getBatchState,
+    setBatchState,
+    getEnumState,
+    setEnumState,
+    clearEnumState,
+    getSearchQueue,
+    setSearchQueue,
+    getAutoState,
+    setAutoState,
+  };
 }

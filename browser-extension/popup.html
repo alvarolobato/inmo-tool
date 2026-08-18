@@ -49,6 +49,20 @@
       <button id="batch-pause-btn" class="btn btn-secondary hidden">Pausar</button>
       <button id="batch-resume-btn" class="btn btn-primary hidden">Reanudar</button>
       <button id="batch-stop-btn" class="btn btn-secondary hidden">Detener</button>
+      <!-- Shown only while THIS search is queued behind a live run elsewhere
+           (issue #554 review N3) — Pausar/Detener act on the run that's
+           actually driving, which this tab isn't; this reaches it without
+           switching tabs. -->
+      <button id="batch-view-progress-btn" class="btn btn-secondary hidden">Ver progreso de la búsqueda en curso</button>
+    </div>
+
+    <!-- Pending-search queue (issue #554): searches fired off while another
+         run is live queue up here instead of clobbering it. Hidden whenever
+         the queue is empty. -->
+    <div id="batch-queue" class="batch-queue hidden">
+      <p id="batch-queue-summary" class="batch-queue-summary"></p>
+      <ul id="batch-queue-list" class="batch-queue-list"></ul>
+      <button id="batch-queue-clear-btn" class="btn btn-secondary btn-small hidden">Vaciar cola</button>
     </div>
 
     <!-- Capturar URL de búsqueda (issue #475, part of #471): on an Idealista
