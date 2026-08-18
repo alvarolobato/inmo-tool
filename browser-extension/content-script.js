@@ -340,7 +340,24 @@
         { type: "START_BATCH", portal, urls, searchUrl },
         (res) => {
           responded = true;
-          if (chrome.runtime.lastError || !res || !res.started) {
+          if (chrome.runtime.lastError || !res) {
+            showToast("Inmo-Tool: no se pudo iniciar la captura por lotes");
+            return;
+          }
+          // Queued behind a live run (issue #554) — a real, expected outcome
+          // on this feature's own workflow (firing off several searches in a
+          // row via the D-053 banner / D-048 auto-start signal), never a
+          // failure. Reported distinctly so the owner isn't told "no se pudo
+          // iniciar" for a search that queued correctly.
+          if (res.queued) {
+            showToast(
+              res.aheadCount > 0
+                ? `Inmo-Tool: búsqueda en cola (${res.aheadCount} por delante)`
+                : "Inmo-Tool: búsqueda en cola",
+            );
+            return;
+          }
+          if (!res.started) {
             showToast("Inmo-Tool: no se pudo iniciar la captura por lotes");
             return;
           }

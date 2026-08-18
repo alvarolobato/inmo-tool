@@ -3,7 +3,7 @@ id: D-112
 title: Batch capture queues additional searches instead of clobbering the live one
 date: 2026-08-18
 group: Data / connectors
-rule: "START_BATCH while a run is active (enumerating or capturing) ENQUEUES the search (chrome.storage.session, FIFO) instead of clobbering BATCH_KEY/BATCH_ENUM_KEY; the next entry auto-starts on natural completion (runBatchLoop's own finally) AND on eviction recovery (reattachIfStranded). A same-portal drain (worklist already emptied by an earlier queued search) reports emptyReason 'already-captured', never a bare 0/0. STOP_BATCH drains the whole queue; concurrency/pacing (D-043) are untouched."
+rule: "START_BATCH while a run is active (enumerating or capturing) ENQUEUES the search (chrome.storage.session, FIFO) instead of clobbering BATCH_KEY/BATCH_ENUM_KEY; the enum claim stays PERSISTED across the whole enum-to-capture handoff (including the fetchPendingUrls network round trip), cleared only atomically with the new capture state inside runBatchStateExclusive, so isBatchActive() can never read idle mid-handoff. The next entry auto-starts on natural completion (runBatchLoop's own finally) AND on eviction recovery (reattachIfStranded, re-entrancy-guarded). A same-portal drain reports emptyReason 'already-captured', never a bare 0/0. STOP_BATCH atomically drains the whole queue; concurrency/pacing (D-043) are untouched."
 ---
 
 # D-112: Batch capture queues additional searches instead of clobbering the live one
@@ -39,15 +39,42 @@ the WAF-safety envelope D-043 protects is per-browser, not per-search.
    key (matching `BATCH_KEY`'s lifetime) and owns the *when* (is a run
    active?) and the *what happens next* (kick off the same enumerate→capture
    flow `startBatch` already uses).
-2. **`START_BATCH` while a run is active enqueues instead of clobbering.**
-   The active-check and the "claim the run" transition (persisting the
+2. **`START_BATCH` while a run is active enqueues instead of clobbering — and
+   the claim holds for the WHOLE handoff, not just the entry point.** The
+   active-check and the "claim the run" transition (persisting the
    `enumerating` phase) happen inside ONE critical section
    (`runBatchStateExclusive`, the existing in-memory serializer from #321) so
    two `START_BATCH` calls racing each other can never both decide "nothing's
-   running" and both write `BATCH_ENUM_KEY` — that race was one message-timing
-   coincidence away from being the original clobbering bug. The response says
+   running" and both write `BATCH_ENUM_KEY`. The response says
    `{ started: false, queued: true, queueDepth, aheadCount }` — never a lie
    that it "started" when it didn't.
+
+   **Revised (2026-08-18, fresh-context review finding B1).** The FIRST
+   version of this decision only made the *entry point* atomic — claiming
+   at `START_BATCH`/`advanceQueueIfIdle` time. It missed that the handoff
+   from enumeration to capture (`runEnumerationThenCapture` →
+   `runCaptureQueue`) used to `clearEnumState()` and THEN make a network call
+   (`fetchPendingUrls`) before persisting the new capture state
+   (`setBatchState`) — a multi-hundred-millisecond-to-seconds window during
+   which `isBatchActive()` read every signal idle (enum state cleared, batch
+   state not yet set, `batchLooping` still false). Sampled at 1 Hz by the
+   popup's own polling (`GET_BATCH_STATE` → `reattachIfStranded` →
+   `advanceQueueIfIdle`), this reproduced the ORIGINAL clobbering bug on the
+   feature's own happy path: a second search could claim mid-handoff, run
+   concurrently with the first (breaching the per-browser single-run
+   invariant D-112 exists to guarantee), and then overwrite the first run's
+   state when its own handoff completed. Fixed by keeping the `enumerating`
+   claim (and, for the AUTO harvest path and the stranded-enumeration
+   recovery, the widened `enumRunning` in-memory flag) PERSISTED for the
+   network call's entire duration; `runCaptureQueue` now clears the claim and
+   persists the new capture state — plus kicks off `runBatchLoop` — inside
+   ONE `runBatchStateExclusive` section, so no concurrent claimant can ever
+   observe every signal idle at once. The SAME pattern (persist first,
+   network second, clear-and-commit last, all inside the lock) now also
+   protects `runAutoBatch`'s own harvest/drain claim and `stopBatch`'s queue
+   drain. A future agent extending this queue must preserve this invariant:
+   **a claim, once taken, must stay persisted across every `await` in its own
+   handoff — never cleared before the replacement state is ready to commit.**
 3. **The queue advances from two places, covering both the happy path and
    eviction.** `advanceQueueIfIdle()` — itself an atomic claim-or-noop inside
    the same exclusive section — is called from:
@@ -133,14 +160,26 @@ shell around Chrome APIs. Reusing the existing `runBatchStateExclusive`
 serializer for the claim-or-enqueue decision closes the exact race that was
 the original bug, without inventing a second locking mechanism.
 
-**See**: issue #554; D-043 (the design this extends — bounded concurrency and
-pacing, untouched here); D-053 (discoverability); D-060 (extension zip
-freshness); D-069 (run hygiene); D-088 (results-page enumeration);
-`browser-extension/batch.js` (`makeSearchQueue`/`enqueueSearch`/
+**See**: issue #554 (incl. the fresh-context review that found B1/B2 and the
+predicate-only regression-test gap, N8); D-043 (the design this extends —
+bounded concurrency and pacing, untouched here); D-053 (discoverability);
+D-060 (extension zip freshness); D-069 (run hygiene); D-088 (results-page
+enumeration); `browser-extension/batch.js` (`makeSearchQueue`/`enqueueSearch`/
 `dequeueSearch`/`removeSearchAt`/`clearSearchQueue`/`searchQueueDepth`/
 `peekNextSearch`/`shouldAdvanceQueue`/`shouldRecoverStrandedEnumeration`/
 `classifyEmptyCapture`/`EMPTY_REASON`); `browser-extension/background.js`
 (`startBatch`/`beginRun`/`advanceQueueIfIdle`/`runCaptureQueue`/
-`reattachIfStranded`/`queueSummary`/`stopBatch`); `browser-extension/popup.js`
+`reattachIfStranded`/`queueSummary`/`stopBatch`/`runAutoHarvest`/
+`runAutoBatch`/`deferAutoTick`; the trailing `module.exports` block exists
+solely so the test below can drive this wiring — never used by the real
+Chrome runtime, where `module` is undefined); `browser-extension/popup.js`
 (`init`/`attachLiveBatchIfAny`/`onStartBatch`/`showQueuedConfirmation`/
-`renderSearchQueue`); `dashboard/__tests__/extension-batch.test.ts`.
+`renderSearchQueue`/`onStopBatch`); `browser-extension/content-script.js`
+(`startBatchFromPage`, review B2 — the D-053 banner / D-048 auto-start path
+now also reports `queued`, not just `started`/failure);
+`dashboard/__tests__/extension-batch.test.ts` (the pure state machine);
+`dashboard/__tests__/extension-background-batch-queue.test.ts` (review N8 —
+real reproductions of the B1 handoff race, natural queue advance, eviction
+recovery via `reattachIfStranded`, the same-portal drain, and `STOP_BATCH`'s
+queue drain, against a stubbed `chrome`/`fetch`, since the bug lived in this
+imperative wiring and no predicate-only test could have caught it).

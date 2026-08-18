@@ -741,8 +741,15 @@
 
   /**
    * Remove the queued search at `index` (pure — returns a NEW array). An
-   * out-of-range / non-numeric index is a no-op, so a stale popup click (the
-   * list changed underneath it) can never remove the wrong entry.
+   * out-of-range / non-numeric index is a no-op — that defends against a
+   * garbage index, not a stale one. Entries carry no identity (no id), so a
+   * popup click captured against a snapshot that has since shifted (another
+   * dequeue/removal landed first) WILL remove whatever now sits at that
+   * index, not necessarily the entry the operator saw — issue #554 review N4.
+   * Acceptable for now (the popup re-renders from the response and the worst
+   * case is removing the wrong queued search, never corrupting state), but a
+   * future agent adding per-entry identity should key removal on the entry
+   * instead of the index.
    */
   function removeSearchAt(queue, index) {
     var q = Array.isArray(queue) ? queue.slice() : [];

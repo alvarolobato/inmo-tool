@@ -473,6 +473,10 @@ function showListingResult(detailLinks) {
 // popup was reopened to watch it).
 let batchContext = null;
 let batchPollTimer = null;
+// Last known pending-search queue depth (issue #554 review N2), kept in sync
+// by renderSearchQueue — read by onStopBatch so "Detener" can warn before it
+// drains the whole queue, not just the live run.
+let lastKnownQueueDepth = 0;
 
 /**
  * Enter batch mode. `ctx` ({ tab, portal, detailUrls }) is present when the
@@ -486,7 +490,7 @@ function enterBatchMode(ctx, existingProgress) {
   $('#batch-start-btn').onclick = onStartBatch;
   $('#batch-pause-btn').onclick = () => sendBatchControl('PAUSE_BATCH');
   $('#batch-resume-btn').onclick = () => sendBatchControl('RESUME_BATCH');
-  $('#batch-stop-btn').onclick = () => sendBatchControl('STOP_BATCH');
+  $('#batch-stop-btn').onclick = onStopBatch;
   $('#batch-auto-btn').onclick = onToggleAuto;
   $('#batch-force-chk').onchange = onToggleForce;
   const queueClearBtn = $('#batch-queue-clear-btn');
@@ -644,6 +648,16 @@ function showQueuedConfirmation(aheadCount) {
     aheadCount > 0
       ? `En cola (${aheadCount} por delante). Se iniciará sola cuando le toque.`
       : 'En cola. Se iniciará sola en breve.';
+  // issue #554 review N3: this tab's Pausar/Detener act on nothing (this
+  // search hasn't started) — the run that's actually live is elsewhere.
+  // Offer a way to reach ITS progress/controls without switching tabs.
+  if (aheadCount > 0) {
+    const viewProgressBtn = $('#batch-view-progress-btn');
+    if (viewProgressBtn) {
+      viewProgressBtn.classList.remove('hidden');
+      viewProgressBtn.onclick = () => attachLiveBatchIfAny();
+    }
+  }
   refreshSearchQueuePanel();
 }
 
@@ -656,6 +670,27 @@ async function sendBatchControl(type) {
   }
   if (prog) renderBatchProgress(prog);
   if (type === 'STOP_BATCH') stopBatchPolling();
+}
+
+/**
+ * "Detener" (issue #554 review N2): stopping the live run ALSO drains the
+ * whole pending-search queue (see stopBatch's own docstring in
+ * background.js) — a deliberate full-stop semantic, but one the button
+ * doesn't otherwise signpost. When something is actually queued, confirm
+ * before doing it, so skipping the current search doesn't silently take N
+ * others down with it. "Quitar" on an individual entry (or not queueing it)
+ * is the way to cancel just one without touching a live run.
+ */
+async function onStopBatch() {
+  if (lastKnownQueueDepth > 0) {
+    const ok = window.confirm(
+      lastKnownQueueDepth === 1
+        ? 'Detener también cancela la búsqueda en cola. ¿Continuar?'
+        : `Detener también cancela las ${lastKnownQueueDepth} búsquedas en cola. ¿Continuar?`,
+    );
+    if (!ok) return;
+  }
+  await sendBatchControl('STOP_BATCH');
 }
 
 function startBatchPolling() {
@@ -719,15 +754,19 @@ async function refreshSearchQueuePanel() {
  * entirely when the queue is empty.
  */
 function renderSearchQueue(list) {
+  const depth = Array.isArray(list) ? list.length : 0;
+  lastKnownQueueDepth = depth;
+  updateStopButtonLabel(depth);
+
   const panel = $('#batch-queue');
   if (!panel) return;
-  if (!Array.isArray(list) || list.length === 0) {
+  if (depth === 0) {
     panel.classList.add('hidden');
     return;
   }
   panel.classList.remove('hidden');
   $('#batch-queue-summary').textContent =
-    list.length === 1 ? '1 búsqueda en cola' : `${list.length} búsquedas en cola`;
+    depth === 1 ? '1 búsqueda en cola' : `${depth} búsquedas en cola`;
 
   const ul = $('#batch-queue-list');
   ul.innerHTML = '';
@@ -748,7 +787,27 @@ function renderSearchQueue(list) {
   });
 
   const clearBtn = $('#batch-queue-clear-btn');
-  clearBtn.classList.toggle('hidden', list.length === 0);
+  clearBtn.classList.toggle('hidden', depth === 0);
+}
+
+/**
+ * Signpost "Detener"'s full-stop semantic on the button itself (issue #554
+ * review N2) — the queue-drain confirmation in onStopBatch is the hard
+ * guard; this is the at-a-glance cue so it's never a surprise.
+ */
+function updateStopButtonLabel(depth) {
+  const stopBtn = $('#batch-stop-btn');
+  if (!stopBtn) return;
+  // Set the label unconditionally (even while hidden) so it's already
+  // correct the next time renderBatchProgress reveals the button — the 1 Hz
+  // poll otherwise leaves a stale label visible for up to one tick.
+  if (depth > 0) {
+    stopBtn.textContent = `Detener (cancela ${depth} en cola)`;
+    stopBtn.title = 'También cancela las búsquedas en cola.';
+  } else {
+    stopBtn.textContent = 'Detener';
+    stopBtn.removeAttribute('title');
+  }
 }
 
 async function onRemoveQueuedSearch(index) {
@@ -890,6 +949,8 @@ function hideBatchControls() {
   $('#batch-pause-btn').classList.add('hidden');
   $('#batch-resume-btn').classList.add('hidden');
   $('#batch-stop-btn').classList.add('hidden');
+  const viewProgressBtn = $('#batch-view-progress-btn');
+  if (viewProgressBtn) viewProgressBtn.classList.add('hidden');
 }
 
 // ─── Capturar URL de búsqueda (issue #475, part of #471) ────────
