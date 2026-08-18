@@ -60,6 +60,28 @@ _PORTALS: list[dict[str, object]] = [
         # root WITHOUT the `-de-` type prefix (negative lookahead).
         "listing": re.compile(r"^/(?:venta|alquiler)-(?!de-)[a-z]+(?:/|$)"),
     },
+    {
+        "portal": "hipoges",
+        "host_suffix": "realestate.hipoges.com",
+        # Grounded in the site's own public Angular route table (main-*.js /
+        # chunk-*.js — a static client bundle every visitor's browser
+        # downloads, not an API call). Detail: `/<lang>/detail/<id>` or
+        # `/<lang>/<investment>/detail/<id>`, optionally suffixed
+        # `/contact-received` or `/unavailable` on the SAME id — see
+        # hipoges.py's module docstring. DOM extraction beyond this URL shape
+        # is an unvalidated draft (D-111).
+        "detail": re.compile(r"^/[a-z]{2}/(?:[^/]+/)?detail/[^/]+", re.IGNORECASE),
+        # Search/listing routes are `/<lang>/(sale|rent)/<typology>/<country>/…`
+        # or the `/<lang>/(area|countries|map|point)/…` variants — never a
+        # `/detail/` segment, so detail and listing stay mutually exclusive.
+        # The `sale`/`rent` operation tokens are inferred from the site's own
+        # public i18n key names (assets/i18n/es.json), not directly observed
+        # on a live URL — unconfirmed, see hipoges.py's module docstring.
+        "listing": re.compile(
+            r"^/[a-z]{2}/(?:(?:sale|rent)/|area/|countries/|map/|point/)",
+            re.IGNORECASE,
+        ),
+    },
 ]
 
 

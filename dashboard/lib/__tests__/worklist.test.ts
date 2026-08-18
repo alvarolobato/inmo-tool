@@ -226,12 +226,13 @@ describe("isPortalDue — due when rank < not-due (issue #434)", () => {
 
 describe("isCapturePortal — extension-only gate (issue #454)", () => {
   it("recognises the extension-capturable portals", () => {
-    for (const p of ["idealista", "aliseda", "altamira"]) {
+    for (const p of ["idealista", "aliseda", "altamira", "hipoges"]) {
       expect(isCapturePortal(p)).toBe(true);
     }
     expect([...CAPTURE_PORTAL_NAMES].sort()).toEqual([
       "aliseda",
       "altamira",
+      "hipoges",
       "idealista",
     ]);
   });

@@ -177,6 +177,42 @@
         "h1",
       ],
     },
+    {
+      portal: "hipoges",
+      hostSuffix: "realestate.hipoges.com",
+      // Grounded in the site's own public Angular route table (main-*.js /
+      // chunk-*.js — a static client bundle every visitor's browser
+      // downloads, not an API call; see etl/connectors/hipoges.py's module
+      // docstring for the full route list). Detail URLs are
+      // `/<lang>/detail/<id>` or `/<lang>/<investment>/detail/<id>`,
+      // optionally suffixed `/contact-received` or `/unavailable` on the SAME
+      // id. `<investment>` is an unconfirmed category segment. DOM extraction
+      // beyond this URL shape is an unvalidated draft (D-111) — no real
+      // capture exists yet to verify readySelectors against.
+      isDetailPath: function (p) {
+        return /^\/[a-z]{2}\/(?:[^/]+\/)?detail\/[^/]+/i.test(p);
+      },
+      // Search/listing routes are `/<lang>/(sale|rent)/<typology>/<country>/…`
+      // or the `/<lang>/(area|countries|map|point)/…` variants — never a
+      // `/detail/` segment. The `sale`/`rent` tokens are inferred from the
+      // site's own public i18n key names, not directly observed on a live
+      // URL — unconfirmed.
+      isListingPath: function (p) {
+        return /^\/[a-z]{2}\/(?:(?:sale|rent)\/|area\/|countries\/|map\/|point\/)/i.test(
+          p
+        );
+      },
+      // Results-page pagination: unknown scheme (no real search page has been
+      // observed). Best-effort `?pagina=<n>` write scheme matching the other
+      // capture-only portals; the enumeration walk PREFERS the rendered DOM's
+      // next-page anchor over this guess, same as aliseda/altamira.
+      pagination: { kind: "query", param: "pagina" },
+      // No real detail page has been captured, so no readySelectors are
+      // grounded — the generic h1/main fallback (DEFAULT_READY_SELECTORS)
+      // plus the body-text-volume floor in isRenderReady() is all this portal
+      // gets until the calibration issue linked from D-111 lands real ones.
+      readySelectors: ["main", "h1"],
+    },
   ];
 
   // Minimum trimmed text on a "key node" for it to count as rendered.

@@ -38,6 +38,17 @@
   const ALTAMIRA_DETAIL_RE =
     /^\/(?:venta|alquiler)-de-[^/]+\/.+\/\d+(?:\/\d+)?\/?$/;
 
+  // Hipoges listing-DETAIL path shape (mirror of detect.js's hipoges
+  // isDetailPath, grounded in the site's own public Angular route table —
+  // see hipoges.py's module docstring): `/<lang>/detail/<id>` or
+  // `/<lang>/<investment>/detail/<id>`. Everything else under Hipoges is
+  // treated as an observable search page (permissive, same posture as
+  // Altamira above) since its search-URL grammar (sale/rent/typology/country/
+  // town, or the area/countries/map/point variants) is not yet confirmed
+  // against a live search page — this is exactly the observation this file
+  // exists to accrue.
+  const HIPOGES_DETAIL_RE = /^\/[a-z]{2}\/(?:[^/]+\/)?detail\/[^/]+/i;
+
   /**
    * Per-portal observer spec: `{ portal, hostSuffix, isSearchPath(parsed) }`.
    * `isSearchPath` receives the parsed URL (path + query available) and returns
@@ -88,6 +99,21 @@
         const path = parsed.pathname;
         if (path === "/" || path === "") return false;
         return !ALTAMIRA_DETAIL_RE.test(path);
+      },
+    },
+    {
+      portal: "hipoges",
+      hostSuffix: "realestate.hipoges.com",
+      // Permissive, same reasoning as Altamira above: no confirmed search-URL
+      // grammar yet (D-111), so every non-home, non-detail path is observed
+      // to build the corpus a future search-URL builder would be
+      // reverse-engineered from (D-051's capture-to-infer path).
+      isSearchPath: function (parsed) {
+        const path = parsed.pathname;
+        if (path === "/" || path === "" || /^\/[a-z]{2}\/?$/i.test(path)) {
+          return false; // home / bare locale root, e.g. "/" or "/es"
+        }
+        return !HIPOGES_DETAIL_RE.test(path);
       },
     },
   ];

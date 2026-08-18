@@ -18,6 +18,14 @@ const ALLOWED_URL_SCHEMES = new Set(["http:", "https:"]);
 // treated as an observable search page (permissive, #510).
 const ALTAMIRA_DETAIL_RE = /^\/(?:venta|alquiler)-de-[^/]+\/.+\/\d+(?:\/\d+)?\/?$/;
 
+// Hipoges listing-DETAIL path shape (mirror of the extension + detect.js,
+// grounded in the site's own public Angular route table — see
+// etl/connectors/hipoges.py's module docstring): `/<lang>/detail/<id>` or
+// `/<lang>/<investment>/detail/<id>`. Everything else under Hipoges is
+// treated as an observable search page (permissive, same posture as
+// Altamira above — its search-URL grammar is not yet confirmed, D-111).
+const HIPOGES_DETAIL_RE = /^\/[a-z]{2}\/(?:[^/]+\/)?detail\/[^/]+/i;
+
 /**
  * Per-portal observer spec — the dashboard mirror of
  * browser-extension/observe-search-url.js's SEARCH_URL_PORTAL_SPECS. Host
@@ -61,6 +69,20 @@ export const SEARCH_URL_PORTAL_SPECS: readonly {
       const path = parsed.pathname;
       if (path === "/" || path === "") return false;
       return !ALTAMIRA_DETAIL_RE.test(path);
+    },
+  },
+  {
+    portal: "hipoges",
+    hostSuffix: "realestate.hipoges.com",
+    // Permissive (D-111): any non-home, non-detail path — the corpus a
+    // future search-URL builder would be reverse-engineered from (D-051's
+    // capture-to-infer path), same posture as Altamira above.
+    isSearchPath: (parsed) => {
+      const path = parsed.pathname;
+      if (path === "/" || path === "" || /^\/[a-z]{2}\/?$/i.test(path)) {
+        return false; // home / bare locale root, e.g. "/" or "/es"
+      }
+      return !HIPOGES_DETAIL_RE.test(path);
     },
   },
 ];

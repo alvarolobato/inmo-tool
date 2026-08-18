@@ -20,6 +20,7 @@ from etl.connectors import (
     fotocasa,
     fotocasa_rental,
     habitaclia,
+    hipoges,
     idealista,
     milanuncios,
     milanuncios_rental,
@@ -191,14 +192,16 @@ class TestNonTunablePreviewsDeclareTheirTruth:
 
 
 class TestCaptureOnlyConnectorsHaveNoEtlPreview:
-    """idealista/aliseda/altamira are capture-only: their preview is on the TS
-    side, so search_previews() is empty and they accept no pinned URL here."""
+    """idealista/aliseda/altamira/hipoges are capture-only: their preview is on
+    the TS side, so search_previews() is empty and they accept no pinned URL
+    here."""
 
     def test_capture_only(self):
         for conn in (
             idealista.IdealistaConnector(),
             aliseda.AlisedaConnector(),
             altamira.AltamiraConnector(),
+            hipoges.HipogesConnector(),
         ):
             assert conn.search_previews(_CITY) == [], conn.name
             assert conn.override_host_suffix is None, conn.name

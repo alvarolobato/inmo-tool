@@ -22,6 +22,7 @@ from urllib.parse import urljoin, urlparse
 from etl.connectors.aliseda import AlisedaConnector
 from etl.connectors.altamira import AltamiraConnector
 from etl.connectors.base import CanonicalListingVersion, ConnectorError, RawListing
+from etl.connectors.hipoges import HipogesConnector
 from etl.connectors.idealista import IdealistaConnector
 from etl.listing_detect import detail_portal_for_url, listing_portal_for_url
 
@@ -34,6 +35,9 @@ logger = logging.getLogger("etl.capture")
 # its data host is robots.txt Disallow: / (D-019). Altamira joined via issue
 # #271 — capture-only because every direct HTTP request gets an Akamai WAF 403
 # (D-027), yet the page renders normally for a human (2026-08-05 live test).
+# Hipoges joined via issue #207 — capture-only because every sanctioned
+# enumeration channel 403s an honest client (D-075), selectors are an
+# unvalidated draft pending the owner's first real capture (D-111).
 #
 # This dict is the source of truth for "which hosts can be captured". The
 # dashboard mirrors these host suffixes in dashboard/lib/worklist.ts
@@ -43,10 +47,12 @@ logger = logging.getLogger("etl.capture")
 _idealista = IdealistaConnector()
 _aliseda = AlisedaConnector()
 _altamira = AltamiraConnector()
+_hipoges = HipogesConnector()
 _CAPTURE_CONNECTORS: dict[str, tuple[object, type]] = {
     "idealista.com": (_idealista, IdealistaConnector),
     "alisedainmobiliaria.com": (_aliseda, AlisedaConnector),
     "altamirainmuebles.com": (_altamira, AltamiraConnector),
+    "realestate.hipoges.com": (_hipoges, HipogesConnector),
 }
 
 # The extension-capturable portal *names* — the Python mirror of
@@ -57,7 +63,7 @@ _CAPTURE_CONNECTORS: dict[str, tuple[object, type]] = {
 # vestigial "0/N pending forever" rows. Keep in step with _CAPTURE_CONNECTORS
 # when adding a portal.
 EXTENSION_CAPTURE_PORTALS: frozenset[str] = frozenset(
-    {"idealista", "aliseda", "altamira"}
+    {"idealista", "aliseda", "altamira", "hipoges"}
 )
 
 _BATCH_LIMIT = 10

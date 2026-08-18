@@ -63,6 +63,7 @@ export const CAPTURE_PORTALS: readonly { portal: string; hostSuffix: string }[] 
   { portal: "idealista", hostSuffix: "idealista.com" },
   { portal: "aliseda", hostSuffix: "alisedainmobiliaria.com" },
   { portal: "altamira", hostSuffix: "altamirainmuebles.com" },
+  { portal: "hipoges", hostSuffix: "realestate.hipoges.com" },
 ];
 
 /** Bare host suffixes, for the extension config endpoint. */

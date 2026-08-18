@@ -39,7 +39,12 @@ importScripts("observe-search-url.js");
  * demand) — so a stale cache or a failed fetch degrades gracefully to this
  * hardcoded default.
  */
-const DEFAULT_CAPTURE_HOSTS = ['idealista.com', 'alisedainmobiliaria.com', 'altamirainmuebles.com'];
+const DEFAULT_CAPTURE_HOSTS = [
+  'idealista.com',
+  'alisedainmobiliaria.com',
+  'altamirainmuebles.com',
+  'realestate.hipoges.com',
+];
 // Refresh the cached host list at most this often (ms). Cached in
 // chrome.storage.session so it survives the MV3 service worker being torn
 // down and respawned, without re-fetching on every single badge update.

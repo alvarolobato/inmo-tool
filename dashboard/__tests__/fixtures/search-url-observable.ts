@@ -101,6 +101,38 @@ export const OBSERVABLE_CASES: readonly ObservableCase[] = [
     desc: "altamira home",
   },
 
+  // ── hipoges: permissive — any non-detail, non-home path (D-111) ────────────
+  {
+    url: "https://realestate.hipoges.com/es/sale/flat/spain/madrid",
+    portal: "hipoges",
+    desc: "hipoges listado (operation/typology/country/town)",
+  },
+  {
+    url: "https://realestate.hipoges.com/es/area/sale/flat/spain?zona=madrid",
+    portal: "hipoges",
+    desc: "hipoges area search (permissive)",
+  },
+  {
+    url: "https://realestate.hipoges.com/es/detail/12345",
+    portal: null,
+    desc: "hipoges detail",
+  },
+  {
+    url: "https://realestate.hipoges.com/es/npl/detail/12345/unavailable",
+    portal: null,
+    desc: "hipoges investment-scoped detail + status suffix",
+  },
+  {
+    url: "https://realestate.hipoges.com/es",
+    portal: null,
+    desc: "hipoges bare locale root",
+  },
+  {
+    url: "https://realestate.hipoges.com/",
+    portal: null,
+    desc: "hipoges home",
+  },
+
   // ── rejects across the board ──────────────────────────────────────────────
   {
     url: "https://example.com/venta-viviendas/",

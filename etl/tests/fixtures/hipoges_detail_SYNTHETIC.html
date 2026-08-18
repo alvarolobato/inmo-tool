@@ -1,0 +1,58 @@
+<!--
+  SYNTHETIC, ENTIRELY FABRICATED Hipoges detail page — issue #207 / D-111.
+
+  UNLIKE every other *_detail_*.html fixture in this directory (which trim a
+  REAL captured page down to its load-bearing markup), this file was NEVER
+  observed on realestate.hipoges.com. No real Hipoges capture exists yet —
+  the detail page is Angular-rendered, a plain HTTP GET returns an empty SPA
+  shell (see hipoges.py's module docstring), and the browser extension could
+  not capture this host until the PR that adds this fixture. This markup is
+  a hand-built guess at plausible Angular-app structure, built ONLY to
+  exercise hipoges.py's parser logic (does each extractor read the right
+  node, does it degrade to None on a miss, does the contamination-drop guard
+  actually protect the subject property from a neighbouring card's figures).
+  It proves NOTHING about whether these selectors match the real site.
+
+  DO NOT treat any class name, price, or figure in this file as ground
+  truth. When the owner's first real capture lands (the calibration issue
+  linked from D-111), this fixture — and every selector calibrated against
+  it — must be replaced with one built from the real captured HTML, exactly
+  as issue #266 replaced Aliseda's fabricated fixture with three real ones.
+-->
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Hipoges - Piso en venta en Madrid</title>
+  <meta property="og:title" content="Piso en venta en Madrid, Hipoges">
+  <meta property="og:description" content="Piso reformado con 3 habitaciones y 2 baños en el centro de Madrid.">
+</head>
+<body>
+  <app-root>
+    <main>
+      <h1>Piso en venta en Madrid</h1>
+      <div class="asset-price-block">
+        <span class="asset-price">185.000 €</span>
+      </div>
+      <div class="asset-description">
+        Piso luminoso de 90 m2 con 3 hab. y 2 baños, totalmente reformado.
+        Referencia: HIP-99001-ES
+      </div>
+      <div class="asset-gallery">
+        <img src="/assets/listings/hip-99001/1.jpg" alt="Salón">
+        <img src="/assets/listings/hip-99001/2.jpg" alt="Cocina">
+      </div>
+    </main>
+    <section class="similar-properties-carousel">
+      <!-- Contaminating subtree: a DIFFERENT property's figures. If the
+           parser's contamination guard is not working, these numbers would
+           leak into the subject property's fields. -->
+      <div class="card">
+        <span class="price">999.999 €</span>
+        <p>210 m2 con 6 hab. y 5 baños</p>
+        <img src="/assets/listings/neighbour-1/1.jpg" alt="Vecino">
+      </div>
+    </section>
+  </app-root>
+</body>
+</html>

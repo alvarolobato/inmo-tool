@@ -74,11 +74,20 @@ class TestCaptureConnectorRegistration:
         assert connector.name == "altamira"
         assert external_id == "375859"
 
+    def test_hipoges_detail_url_resolves(self):
+        url = "https://realestate.hipoges.com/es/detail/99001"
+        resolved = capture._connector_for_url(url)
+        assert resolved is not None
+        connector, external_id = resolved
+        assert connector.name == "hipoges"
+        assert external_id == "99001"
+
     def test_all_expected_capture_hosts_registered(self):
         assert set(capture._CAPTURE_CONNECTORS) == {
             "idealista.com",
             "alisedainmobiliaria.com",
             "altamirainmuebles.com",
+            "realestate.hipoges.com",
         }
 
 
