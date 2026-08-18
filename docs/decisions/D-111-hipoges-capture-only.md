@@ -3,7 +3,7 @@ id: D-111
 title: Hipoges ingests via guided browser-extension capture, selectors an unvalidated draft pending the owner's first real capture
 date: 2026-08-18
 group: Data / connectors
-rule: 'Hipoges ingests via a capture-only connector (`etl/connectors/hipoges.py`) mirroring idealista/aliseda/altamira; detail-URL shape is grounded in the site''s public Angular route table, but every DOM selector is an UNVALIDATED DRAFT (no real capture exists) and must be recalibrated against the owner''s first real capture before being trusted.'
+rule: 'Hipoges ingests via a capture-only connector (`etl/connectors/hipoges.py`) mirroring idealista/aliseda/altamira; detail-URL shape is grounded in the site''s public Angular route table, but every DOM selector is an UNVALIDATED DRAFT hard-gated by `_SELECTORS_CALIBRATED` (False) — `normalize()` writes only external_id/url/status/listing_kind/OG title+description until the owner''s first real capture flips it.'
 ---
 
 # D-111: Hipoges ingests via guided browser-extension capture, selectors an unvalidated draft
@@ -82,7 +82,7 @@ reverse-engineering, or User-Agent spoofing was attempted, per D-075/D-033.
    not capture this host until this connector existed to receive it — a
    genuine chicken-and-egg problem, same shape as Aliseda's original state
    before issue #266's real captures. `hipoges.py`'s `normalize()` uses
-   OpenGraph meta tags as a first-choice source (grounded only in the
+   OpenGraph meta tags for title/description (grounded only in the
    observation that the home page carries rich OG tags, not confirmed for a
    detail page), a best-effort `[class*="price"]`/`[class*="precio"]`
    selector guess for price, and text-mining regexes for surface/rooms/baths
@@ -90,9 +90,32 @@ reverse-engineering, or User-Agent spoofing was attempted, per D-075/D-033.
    exact neighbour-bleed bug class `etl/connectors/extraction.py`'s
    `scoped_text` docstring documents from Vivantial/Solvia/Servihabitat). A
    selector miss degrades to `None`, never a fabricated value.
-   `raw_extra.selectors_calibrated = False` is written on every ingested row
-   so this state is visible in the data, not just in code comments. Tests
-   (`etl/tests/test_connector_hipoges.py`) run against a SYNTHETIC,
+
+   **Hardened after the #548 review (C2):** labeling was not enough — an
+   uncalibrated `[class*="price"]` guess landing "top of the feed" as a
+   fabricated below-market bargain (via D-057's boost, D-098's price-history
+   adoption, or a silent D-059 mis-filter) is a real, invisible-without-SQL
+   failure mode, not a hypothetical one. `hipoges.py`'s
+   `_SELECTORS_CALIBRATED` module constant (`False`) now HARD-GATES every
+   draft-derived field: while it is `False`, `normalize()` returns `None`/`()`
+   for price/m²/rooms/bathrooms/reference_code/photo_urls/property_type/
+   operation regardless of what the draft selectors find — only
+   `external_id`/`url`/`status`/`listing_kind` and the OpenGraph
+   `title`/`description` are ever written. `raw_extra.selectors_calibrated`
+   reads that same constant, so it is a live reflection of what actually
+   happened, not a separate claim that could drift from the code. The draft
+   extractor functions themselves stay fully implemented and unit-tested
+   (`TestDraftExtractors`/`TestCalibratedWiring` in
+   `test_connector_hipoges.py`) so flipping the one constant, once #547's
+   real capture lands, is genuinely a one-line change. `etl/capture.py`
+   additionally retains the captured `html` on the `extension_capture` row
+   (instead of the normal null-on-`'done'` behavior) for exactly as long as
+   `selectors_calibrated` reads `False`, so #547's own plan — pull the real
+   HTML back out of the database to build real fixtures — is actually
+   possible; without this, `normalize()` never raising meant every capture
+   reached `'done'` with its HTML already discarded.
+
+   Tests (`etl/tests/test_connector_hipoges.py`) run against a SYNTHETIC,
    explicitly-labeled-fabricated fixture
    (`etl/tests/fixtures/hipoges_detail_SYNTHETIC.html`) — they prove the
    parser logic behaves as intended, nothing about whether the selectors
