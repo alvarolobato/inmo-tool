@@ -199,6 +199,17 @@ async function alisedaTaskIds(page: import("@playwright/test").Page, profileId: 
   return body.tasks.filter((t) => t.portal === "aliseda").map((t) => t.id);
 }
 
+// issue #561: hipoges now has a search-URL builder too, so every profile with
+// a matching property type also gets hipoges task(s) from the real (unmocked)
+// route these specs hit — counted here so the totals below stay correct
+// rather than silently under-counting the page's real ticked/due state.
+async function hipogesTaskIds(page: import("@playwright/test").Page, profileId: number): Promise<string[]> {
+  const res = await page.request.get(`/api/profiles/${profileId}/search-urls`);
+  expect(res.ok()).toBeTruthy();
+  const body = (await res.json()) as { tasks: { id: string; portal: string }[] };
+  return body.tasks.filter((t) => t.portal === "hipoges").map((t) => t.id);
+}
+
 async function lastRunAts(pool: Pool, profileId: number, taskIds: string[]): Promise<(Date | null)[]> {
   const res = await pool.query<{ task_id: string; last_run_at: Date }>(
     "SELECT task_id, last_run_at FROM capture_task_run WHERE profile_id = $1 AND task_id = ANY($2)",
@@ -391,33 +402,40 @@ test.describe("Capturar todo — GLOBAL across profiles (issue #559, correcting 
   /** Seed BOTH profiles' task sets into a known state: everything stale (due /
    * ticked by default) EXCEPT profile B's idealista tasks, which are freshly
    * run (muted → NOT-DUE → its connector renders COLLAPSED) — the fixture the
-   * "tickable while collapsed" assertion needs. */
+   * "tickable while collapsed" assertion needs. Hipoges (issue #561) is
+   * treated the same as aliseda here — stale/due on both profiles — so it
+   * doesn't skew B's "idealista muted, everything else due" fixture. */
   async function seedKnownState(page: import("@playwright/test").Page): Promise<{
     aIdealista: string[];
     aAliseda: string[];
+    aHipoges: string[];
     bIdealista: string[];
     bAliseda: string[];
+    bHipoges: string[];
   }> {
     const aIdealista = await idealistaTaskIds(page, profileAId!);
     const aAliseda = await alisedaTaskIds(page, profileAId!);
+    const aHipoges = await hipogesTaskIds(page, profileAId!);
     const bIdealista = await idealistaTaskIds(page, profileBId!);
     const bAliseda = await alisedaTaskIds(page, profileBId!);
+    const bHipoges = await hipogesTaskIds(page, profileBId!);
     expect(aIdealista.length).toBeGreaterThanOrEqual(2);
     expect(bIdealista.length).toBeGreaterThanOrEqual(1);
 
-    await forceState(profileAId!, [...aIdealista, ...aAliseda], 30); // A: everything stale → due / ticked
+    await forceState(profileAId!, [...aIdealista, ...aAliseda, ...aHipoges], 30); // A: everything stale → due / ticked
     await forceState(profileBId!, bIdealista, 0); // B idealista: freshly run → muted / collapsed / unticked
     if (bAliseda.length > 0) await forceState(profileBId!, bAliseda, 30); // B aliseda: stale → due / ticked
+    if (bHipoges.length > 0) await forceState(profileBId!, bHipoges, 30); // B hipoges: stale → due / ticked
 
-    return { aIdealista, aAliseda, bIdealista, bAliseda };
+    return { aIdealista, aAliseda, aHipoges, bIdealista, bAliseda, bHipoges };
   }
 
   test("ONE global button + ONE global select-all/none span BOTH profiles; a task is tickable with every connector collapsed; the count matches the visible+ticked set under an active profile filter", async ({
     page,
   }) => {
-    const { aIdealista, aAliseda, bIdealista, bAliseda } = await seedKnownState(page);
-    const totalA = aIdealista.length + aAliseda.length;
-    const totalB = bIdealista.length + bAliseda.length;
+    const { aIdealista, aAliseda, aHipoges, bIdealista, bAliseda, bHipoges } = await seedKnownState(page);
+    const totalA = aIdealista.length + aAliseda.length + aHipoges.length;
+    const totalB = bIdealista.length + bAliseda.length + bHipoges.length;
 
     await page.goto("/captura");
     await expect(page.getByTestId("captura-page")).toBeVisible();
@@ -433,8 +451,8 @@ test.describe("Capturar todo — GLOBAL across profiles (issue #559, correcting 
     await expect(selectNone).toBeVisible();
 
     // Default ticks span BOTH profiles: A's everything (all stale/due) + B's
-    // aliseda (stale/due) — B's idealista is muted, unticked by default.
-    const defaultTicked = totalA + bAliseda.length;
+    // aliseda + hipoges (stale/due) — B's idealista is muted, unticked by default.
+    const defaultTicked = totalA + bAliseda.length + bHipoges.length;
     await expect(batchBtn).toHaveText(`Capturar ${defaultTicked} tareas`);
 
     // B's idealista connector is NOT-DUE (every task freshly run) → COLLAPSED.
@@ -470,7 +488,7 @@ test.describe("Capturar todo — GLOBAL across profiles (issue #559, correcting 
     // Clearing the filter reveals B's ticks (default + the one we ticked
     // above) were UNTOUCHED by A-scoped select-none.
     await page.getByTestId("captura-profile-filter").selectOption("");
-    await expect(batchBtn).toHaveText(`Capturar ${bAliseda.length + 1} tareas`);
+    await expect(batchBtn).toHaveText(`Capturar ${bAliseda.length + bHipoges.length + 1} tareas`);
 
     // No error surface — the D-041 bar.
     await expect(page.getByText("Detalles técnicos")).toHaveCount(0);

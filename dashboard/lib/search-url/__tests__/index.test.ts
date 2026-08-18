@@ -51,7 +51,7 @@ describe("canonicalScopeFromProfile", () => {
 
 describe("SEARCH_URL_PORTALS", () => {
   it("lists the capture portals that have a builder", () => {
-    expect([...SEARCH_URL_PORTALS]).toEqual(["idealista", "aliseda"]);
+    expect([...SEARCH_URL_PORTALS]).toEqual(["idealista", "aliseda", "hipoges"]);
   });
 });
 
@@ -73,8 +73,15 @@ describe("buildSearchUrl", () => {
 describe("buildSearchUrls", () => {
   it("returns a flat task list across every capture portal in CAPTURE_PORTALS order", () => {
     const tasks = buildSearchUrls(SCOPE);
-    // idealista: 1 viviendas task; aliseda: one task per type (piso, chalet).
-    expect(tasks.map((t) => t.portal)).toEqual(["idealista", "aliseda", "aliseda"]);
+    // idealista: 1 viviendas task; aliseda: one task per type (piso, chalet);
+    // hipoges: one task per typology (piso→flat, chalet→house).
+    expect(tasks.map((t) => t.portal)).toEqual([
+      "idealista",
+      "aliseda",
+      "aliseda",
+      "hipoges",
+      "hipoges",
+    ]);
     for (const t of tasks) {
       expect(t.url).toMatch(/^https:\/\//);
       expect(typeof t.id).toBe("string");

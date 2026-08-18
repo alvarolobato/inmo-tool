@@ -218,6 +218,16 @@ Pre-filtered URLs are reverse-engineered and unverified. Each task surfaces its
 so the owner can eyeball that the link lands filtered — failures are shown,
 never hidden. Aliseda always loosens geography (no radius search).
 
+**Hipoges (issue #561, D-115) also always carries a `"grammar"` flag** — a
+different kind of honesty note from the others. Every other portal's flags
+name a specific dropped/broadened VALUE inside an otherwise-confirmed
+grammar; Hipoges' flag says the URL's basic token VOCABULARY itself
+(operation/typology/country/town) is an unconfirmed inference, never
+observed on a real search — see
+[search-url-builder.md](search-url-builder.md#confirmed-vs-reverse-engineered-grammar)
+for what is and isn't grounded. It renders through the SAME inline flag
+mechanism, no new UI.
+
 ## Auth
 
 The whole app is admin-gated (`middleware.ts`, single-operator tool). Same-origin

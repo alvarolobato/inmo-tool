@@ -50,7 +50,13 @@ export interface CanonicalSearchScope {
   roomsMin?: number;
 }
 
-/** The scope constraints a builder can report as dropped or widened. */
+/**
+ * The scope constraints a builder can report as dropped or widened. `"grammar"`
+ * is different in kind from the others: it does not name a specific dropped
+ * constraint, it flags that the URL's basic token VOCABULARY itself (not just
+ * a value inside it) is an unconfirmed inference — see Hipoges (issue #561),
+ * the first portal to use it.
+ */
 export type LoosenableConstraint =
   | "geography"
   | "property_types"
@@ -58,7 +64,8 @@ export type LoosenableConstraint =
   | "price_max"
   | "size_min"
   | "size_max"
-  | "rooms";
+  | "rooms"
+  | "grammar";
 
 /**
  * A constraint the portal's URL grammar could not honour exactly. The builder

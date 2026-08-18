@@ -9,12 +9,14 @@
 
 import { idealistaParser } from "./portals/idealista";
 import { alisedaParser } from "./portals/aliseda";
+import { hipogesParser } from "./portals/hipoges";
 import type { ParsedSearchUrl, PortalSearchUrlParser } from "./types";
 
 /** Registered parsers, keyed by portal. Mirror of index.ts's BUILDERS. */
 export const PARSERS: Record<string, PortalSearchUrlParser> = {
   [idealistaParser.portal]: idealistaParser,
   [alisedaParser.portal]: alisedaParser,
+  [hipogesParser.portal]: hipogesParser,
 };
 
 /**

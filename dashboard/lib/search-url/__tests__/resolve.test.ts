@@ -20,6 +20,7 @@ import { resolveSearchTasks, AREA_MATCH_KM } from "@/lib/search-url/resolve";
 import { toCaptureUrl } from "@/lib/search-url/capture-url";
 import { idealistaBuilder, idealistaParser } from "@/lib/search-url/portals/idealista";
 import { alisedaBuilder, alisedaParser } from "@/lib/search-url/portals/aliseda";
+import { hipogesBuilder } from "@/lib/search-url/portals/hipoges";
 import type { SearchTask } from "@/lib/search-url/types";
 import { decodeShapeValue, polygonCentroid } from "@/lib/search-url/geo";
 import { haversineKm } from "@/lib/search-url/parse-shared";
@@ -183,7 +184,11 @@ describe("resolveSearchTasks — capture-to-infer tiers", () => {
     const tasks = await resolveSearchTasks(s, PROFILE_ID);
     const canonical: CanonicalSearchScope = { center: ESTEPONA, radiusKm: 8, propertyTypes: ["piso"], priceMax: 180000 };
     expect(tasks).toEqual(
-      withCaptureUrls([...idealistaBuilder.build(canonical), ...alisedaBuilder.build(canonical)]),
+      withCaptureUrls([
+        ...idealistaBuilder.build(canonical),
+        ...alisedaBuilder.build(canonical),
+        ...hipogesBuilder.build(canonical),
+      ]),
     );
   });
 
@@ -331,7 +336,11 @@ describe("resolveSearchTasks — tier 0 owner-pinned overrides (issue #478)", ()
     const canonical: CanonicalSearchScope = { center: ESTEPONA, radiusKm: 8, propertyTypes: ["piso"], priceMax: 180000 };
     const tasks = await resolveSearchTasks(scope(ESTEPONA, { price_max: 180000 } as Partial<Scope>), PROFILE_ID);
     expect(tasks).toEqual(
-      withCaptureUrls([...idealistaBuilder.build(canonical), ...alisedaBuilder.build(canonical)]),
+      withCaptureUrls([
+        ...idealistaBuilder.build(canonical),
+        ...alisedaBuilder.build(canonical),
+        ...hipogesBuilder.build(canonical),
+      ]),
     );
   });
 });

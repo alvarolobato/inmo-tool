@@ -66,6 +66,14 @@ to something BROADER (more results, never fewer)** and appends a
 silently dropped** — the UI surfaces every `loosened` entry so the operator
 knows the open search is wider than the profile.
 
+**`"grammar"` (issue #561, D-115) is a different kind of flag.** Every other
+`LoosenableConstraint` names one specific dropped/broadened VALUE inside an
+otherwise-confirmed grammar (a rooms token, a price bound, a geography
+approximation). `"grammar"` instead flags that the URL's basic token
+VOCABULARY is itself an unconfirmed inference — Hipoges is the first (and so
+far only) portal that uses it; see the Hipoges entry under
+[Confirmed vs. reverse-engineered grammar](#confirmed-vs-reverse-engineered-grammar) below.
+
 ## Scope → portal mapping (as of #277)
 
 The profile `Scope` carries geography as a **radius around a geocoded point**
@@ -85,6 +93,7 @@ is resolved by two small lat/lng tables:
 |--------|-----------|--------------------------|----------------------|
 | **idealista** | **Drawn polygon (`shape=`), #471.** The profile circle is rendered as a 24-gon (circumscribing → faithful, ~0.9% broader) and encoded as a Google polyline in `/areas/<operation>[/con-…]/mapa-google?shape=((<polyline>))`. The radius is expressed faithfully → geography is **never flagged**; two radii around one centre give two URLs. `municipios.ts` is used only for the human LABEL (nearest town). | One task per **operation section** (`venta-viviendas` / `venta-locales` / `venta-garajes` / …). Home subtypes are NOT narrowed (the section is the granularity — owner's confirmed URL carries no subtype token). | price `con-precio-desde_/precio-hasta_`; rooms `de-cuatro-cinco-habitaciones-o-mas` (min ≥ 4 confirmed; lower → omit + flag); size `con-metros-cuadrados-mas-de_/menos-de_`. Comma-joined after `con-`, in the PATH before `/mapa-google`. |
 | **aliseda** | `<comunidad>/<provincia>` path slugs from `provinces.ts`. Radius→province is **always broader** → geography **always loosened**. Point outside every box → drop geo segments + flag. | One task per **canonical type**, mapped to Aliseda's own taxonomy (#336): residential types are `comprar-viviendas/<subtype-slug>` (`pisos`, `chalets-adosados`, …); **non-residential types are their OWN top-level category** (`comprar-locales`/`comprar-naves`/`comprar-garajes`/`comprar-terrenos`/`comprar-edificios`), **not** nested under viviendas. Aliseda has **no `ático`** → ático folds onto `pisos` (broadened + flagged); chalet → `chalets-adosados` only (approx + flagged). Types collapsing to one URL (piso+ático) are de-duped. | `precio=<min>-<max>` (hyphen range, min defaults to 0), plus `subtipo=<code>` on viviendas (`pisos=36`, `chalets-adosados=31` confirmed; others omitted + flagged). Size has no confirmed grammar → dropped + flagged. |
+| **hipoges** (#561, D-115) | `:country/:town` — `"espana"` (bare guess) + nearest known municipio/province from `municipios.ts`/`provinces.ts`, reused from idealista/aliseda's OWN tables (not grounded for Hipoges). **Every task ALWAYS carries a `"grammar"` flag** (see above) — the whole token vocabulary is inferred, not just geography. | One task per **canonical type**, mapped onto Hipoges' i18n-derived typology tokens (`flat`/`house`/`office`/`building`/`garage`/`land`): `piso→flat`, `chalet→house`, `garaje→garage`, `terreno→land`, `edificio→building` (exact-ish); `atico→flat`, `local→office`, `nave→building` fold onto the nearest token (approx + flagged). | No confirmed grammar for either — `[:features]`'s internal shape is completely unconfirmed, so price/size are never guessed into the URL, always dropped + flagged. |
 
 ## Adding a portal
 
@@ -183,3 +192,54 @@ local edit; the tests pin current behaviour.
   **Resolver:** shape/multi are CONCRETE, code-pinned geometry — `resolve.ts`
   never lets a learned example relocate them (only a tier-0 owner override wins),
   which makes the #444 municipality-crossing rewrite structurally impossible.
+
+- **Hipoges — route GROUNDED, vocabulary INFERRED (issue #561, D-115).** Unlike
+  every other portal above, no owner-tested example and no successful crawl
+  exist for Hipoges at all (D-075: every sanctioned enumeration channel 403s
+  an honest client). The builder therefore rests on two DIFFERENT levels of
+  evidence, and conflating them is the mistake to avoid when touching this
+  file:
+
+  - **GROUNDED** — the ROUTE shape, read from the site's own public Angular
+    route table (`main-*.js`/`chunk-*.js`, a static client bundle, not an API
+    call — the same source D-111 used for the detail-URL shape):
+
+    `/:lang/:operation/:typology/:country/:town[/:features]`
+
+  - **INFERRED, never observed on a real URL** — every token inside that
+    shape:
+    - `:lang` = `"es"` — the least uncertain of the four (the sitemap index
+      D-075/D-111 already confirmed `_es_sitemap.xml` locale siblings).
+    - `:operation` = always `"sale"` — an English route token inferred from
+      the site's own public `assets/i18n/es.json` key names (#548,
+      `etl/connectors/hipoges_mapping.py`'s comment); never `"rent"` (the
+      profile scope has no operation field, matching idealista/aliseda's own
+      sale-only precedent).
+    - `:typology` — one inferred token per canonical type, from the SAME
+      i18n bundle (`flat`/`house`/`garage`/`land`/`office`/`building`
+      emitted; `apartment`/`storage` recognised by the parser but never
+      emitted). A type with no confident match folds onto the nearest token
+      and is flagged `property_types` (atico→flat, local→office,
+      nave→building) — same discipline as Aliseda's ático/chalet folding.
+    - `:country`/`:town` — the LEAST grounded segments, not even an i18n
+      echo. `:country` is a bare `"espana"` guess; `:town` reuses
+      idealista/aliseda's own municipio/province tables (grounded for THOSE
+      portals' slug spelling, not Hipoges').
+
+  Every task this builder emits therefore ALWAYS carries an unconditional
+  `"grammar"` loosened flag (a NEW `LoosenableConstraint`, distinct from
+  every other flag here — see the best-effort contract section above) saying
+  the vocabulary is inferred and may 404 or return the wrong search. `[:features]`
+  is never populated — its internal grammar (price range? feature codes?
+  something else?) is completely unconfirmed, so a profile price/size bound
+  is reported as DROPPED rather than guessed a second time.
+
+  **Do not "improve" this by probing** — no fuzzing `POST /api/assets/map`,
+  no spoofed User-Agent, no trying a guessed URL against the live site "just
+  to check" (D-075/D-033's stop-probing rule). The correction mechanism is
+  D-051 capture-to-infer: `hipogesParser` is registered like every other
+  portal's parser, so the owner's FIRST real navigated Hipoges search is
+  auto-trusted and upgrades every future task for that section, dropping the
+  guessed-grammar flags — exactly like idealista/aliseda already get. See
+  [D-115](../decisions/D-115-hipoges-search-url-inferred-grammar.md) for the
+  full record.

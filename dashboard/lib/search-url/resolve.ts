@@ -76,6 +76,10 @@ const UNFILLED_REASON: Record<LoosenableConstraint, string> = {
   geography: "El ejemplo aprendido no acota la zona; los resultados son más amplios.",
   property_types: "El ejemplo aprendido no acota los tipos; los resultados son más amplios.",
   rooms: "El ejemplo aprendido no filtra por habitaciones; los resultados son más amplios.",
+  // "grammar" is never produced via the unfilled/substitute() path (it is a
+  // whole-URL flag builders attach directly, e.g. Hipoges, issue #561) — this
+  // entry exists only so the Record<LoosenableConstraint, string> stays total.
+  grammar: "La gramática de esta URL no está confirmada.",
 };
 
 function unfilledFlags(unfilled: readonly LoosenableConstraint[]): LoosenedConstraint[] {
