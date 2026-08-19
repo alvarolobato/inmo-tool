@@ -1,0 +1,159 @@
+# inmo-tool — production stack.
+#
+# Differences from docker-compose.yml (the local one):
+#
+#   1. It does NOT run PostgreSQL. Production connects to a cluster that is
+#      already running on the host and shared with other applications, joined
+#      by network name. Which cluster, on which network, under which name —
+#      all of it comes from .env, so nothing about the deployment host is
+#      recorded in this public repository.
+#   2. The app gets its own role in that cluster, with neither SUPERUSER nor
+#      CREATEDB: it shares a server with other people's data.
+#      `deploy/db-init.sh` creates it on every start, idempotently.
+#   3. Ports bind to HOST_BIND (default 0.0.0.0) so a reverse proxy or tunnel
+#      on the host can reach the origin.
+#
+# Usage:  docker compose -f docker-compose.prod.yml up -d      (or `ps prod deploy`)
+# See config/production.md — and note that the connection details themselves
+# live in ~/.config/inmo-tool/.env, never here.
+
+name: inmo-tool
+
+networks:
+  # Externally managed: created by whatever brings up the shared PostgreSQL,
+  # not by this file. Named through .env so this repo carries no reference to
+  # the host's other services.
+  shared:
+    external: true
+    name: ${SHARED_NETWORK:?set SHARED_NETWORK in .env — the Docker network the shared PostgreSQL lives on}
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # One-shot: prepares role + database in the shared cluster. The only place,
+  # along with nothing else, where the cluster's admin credentials are used.
+  # ---------------------------------------------------------------------------
+  db-init:
+    image: postgres:16-alpine
+    restart: 'no'
+    networks: [shared]
+    environment:
+      PGHOST: ${POSTGRES_HOST:?set POSTGRES_HOST in .env}
+      PGPORT: ${POSTGRES_PORT:-5432}
+      PGUSER: ${POSTGRES_ADMIN_USER:-postgres}
+      PGPASSWORD: ${POSTGRES_ADMIN_PASSWORD:?set POSTGRES_ADMIN_PASSWORD in .env}
+      PGDATABASE: ${POSTGRES_ADMIN_MAINTENANCE_DB:-postgres}
+      APP_DB_USER: ${POSTGRES_USER:-inmotool}
+      APP_DB_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      APP_DB_NAME: ${POSTGRES_DB:-inmotool}
+    volumes:
+      - ./deploy/db-init.sh:/init.sh:ro
+    entrypoint: ['/bin/sh', '/init.sh']
+
+  # ---------------------------------------------------------------------------
+  # OTel collector — same image and config as the local stack.
+  # ---------------------------------------------------------------------------
+  otel-collector:
+    image: docker.elastic.co/elastic-agent/elastic-agent:8.16.0
+    restart: unless-stopped
+    command: ["/usr/share/elastic-agent/elastic-agent", "otel", "--config", "/etc/otelcol-config.yaml"]
+    environment:
+      ELASTIC_OTLP_ENDPOINT: ${ELASTIC_OTLP_ENDPOINT:-}
+      ELASTIC_API_KEY: ${ELASTIC_API_KEY:-}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+    volumes:
+      - ./otel/otelcol-config.yaml:/etc/otelcol-config.yaml:ro
+      - ./otel/local:/otel-output:rw
+    networks: [shared]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:13133 > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Connector scheduler. Runs every registered connector on startup, then
+  # hourly — in production that means real traffic to the listing sites from
+  # this host.
+  # ---------------------------------------------------------------------------
+  etl:
+    build: ./etl
+    restart: unless-stopped
+    networks: [shared]
+    environment:
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:-inmotool}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-inmotool}
+      CONFIG_FILE: /config/config.yaml
+      CONFIG_SCHEMA_PATH: /app/config/schema.yaml
+      ETL_DASHBOARD_BASE_URL: ${ETL_DASHBOARD_BASE_URL-http://dashboard:4000}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      OTEL_SERVICE_NAME: inmo-tool-etl
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_always_on}
+      OTEL_LOG_LEVEL: ${OTEL_LOG_LEVEL:-info}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+    volumes:
+      - ${INMO_TOOL_CONFIG_DIR:-${HOME}/.config/inmo-tool}:/config:ro
+      - ./config/schema.yaml:/app/config/schema.yaml:ro
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'etl.main' > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # Dashboard. Unlike the rest of the stack this one is reachable from outside
+  # the host, so ADMIN_API_KEY must be set and ADMIN_COOKIE_SECURE must be
+  # true whenever it is served over HTTPS.
+  # ---------------------------------------------------------------------------
+  dashboard:
+    build:
+      context: ./dashboard
+      args:
+        APP_GIT_DESCRIBE: ${APP_GIT_DESCRIBE:-}
+    restart: unless-stopped
+    networks: [shared]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-inmotool}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-inmotool}
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:?set ADMIN_API_KEY in .env — this instance is reachable from outside the host}
+      ADMIN_COOKIE_SECURE: ${ADMIN_COOKIE_SECURE:-true}
+      CONFIG_FILE: /config/config.yaml
+      CONFIG_SCHEMA_PATH: /app/config/schema.yaml
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      HOME: /home/nextjs
+      OTEL_SERVICE_NAME: inmo-tool-dashboard
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_always_on}
+      OTEL_LOG_LEVEL: ${OTEL_LOG_LEVEL:-info}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      NEXT_PUBLIC_GIT_SHA: ${APP_GIT_DESCRIBE:-}
+      DASHBOARD_CONTEXT_DIR: /app/data/conversations
+    volumes:
+      - ${INMO_TOOL_CONFIG_DIR:-${HOME}/.config/inmo-tool}:/config:rw
+      - ./config/schema.yaml:/app/config/schema.yaml:ro
+      - ./etl/schema/init.sql:/app/schema/init.sql:ro
+      - ./data/dashboard/conversations:/app/data/conversations:rw
+    ports:
+      - "${HOST_BIND:-0.0.0.0}:${DASHBOARD_PORT:?set DASHBOARD_PORT in .env}:4000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4000/api/health | grep -qF '\"status\":\"ok\"' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_healthy

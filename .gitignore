@@ -15,9 +15,12 @@ build/
 # Local credentials (never commit)
 local/
 
-# Environment files (contain secrets — .env.example is committed, .env is not)
+# Environment files (contain secrets — .env.example and .env.prod.example are
+# committed, the real ones are not). .env.bak.* is what install-prod.sh leaves
+# behind on the deployment host, which is a checkout of this repo.
 .env
 .env.local
+.env.bak.*
 
 # IDE
 .idea/

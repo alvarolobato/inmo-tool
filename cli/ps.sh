@@ -14,7 +14,10 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 usage() {
-    cat <<EOF
+    # Quoted delimiter: the help text contains backticks (`run <name>`) which
+    # an unquoted heredoc treats as command substitution — `ps help` printed a
+    # shell syntax error above the help. No variables in here to expand.
+    cat <<'EOF'
 Usage: ps <command> [options] [args]
 
 Available commands:
@@ -25,10 +28,7 @@ Available commands:
   dedup        Deduplication engine (run — stub until task 2.2, #16)
   dashboard    Dashboard App management (open/logs/restart/status)
   config       Show current configuration
-
-  (no "prod" group yet — this project has no production deployment target;
-  the source project's prod tooling was removed as PowerShop/WrenAI-specific
-  dead weight rather than kept unused. Re-add when there's a real target.)
+  prod         Drive the production deployment over SSH (docker-compose.prod.yml)
 
 Help commands:
   ps help                  Show this help
@@ -50,6 +50,8 @@ Examples:
   ps dashboard open        Open Dashboard App in browser
   ps dashboard status      Show dashboard container status
   ps config                Show loaded configuration
+  ps prod status           Containers + health on the production host
+  ps prod deploy           Pull, rebuild and restart there
 EOF
 }
 
