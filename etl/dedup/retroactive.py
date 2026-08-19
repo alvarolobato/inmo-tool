@@ -4,11 +4,20 @@ paralelo y de forma retroactiva"*).
 
 Three rules are in scope:
 
-- **D-116** (reference-code conflict, PR #565, open): 7 currently-merged
-  properties trip it. This module REVERTS the `property_merge_log` rows
-  responsible — via `etl.dedup.engine.revert`, which sets `reverted_at`
-  and restores pointers/`profile_listing_state`/`feedback_event` state.
-  **Nothing is ever deleted.**
+- **D-116** (reference-code conflict, PR #565 — MERGED into main): this
+  module REVERTS any non-reverted `property_merge_log` row it finds
+  conflicting, via `etl.dedup.engine.revert`, which sets `reverted_at` and
+  restores pointers/`profile_listing_state`/`feedback_event` state.
+  **Nothing is ever deleted.** Measured current reach against the live
+  demo DB, through the SAME reachability filter `engine._run()` itself
+  applies (source inequality, on top of property_id inequality — issue
+  #197 skips same-source pairs before `evaluate_pair` ever sees them): a
+  forward-looking guard, currently **ZERO** — the shipped veto has never
+  had an eligible, reachable pair to fire against yet (see
+  `etl.dedup.signals.reference_code`'s own module docstring, which
+  documents the same ZERO independently). Real protection the moment a
+  second connector starts capturing agency name alongside reference code;
+  not dead code.
 - **D-117** (structured-field conflict, PR #567, open) and **D-118**
   (this issue's municipality veto): both are `fuzzy`-scoped and never
   auto-merge, so they have **zero** blast radius against already-merged
@@ -34,18 +43,20 @@ Three rules are in scope:
   `pending` `fuzzy` suggestion, call `engine.run()`, and assert it lands at
   `status='rejected'` with `reevaluated_from` set.
 
-**Degrades cleanly when #565/#567 haven't merged yet** — this module does
-NOT gate behind their merge landing first. `reference_codes_conflict`
+**Degrades cleanly when a rule's PR hasn't merged yet** — this module
+does NOT gate behind any of them merging first. `reference_codes_conflict`
 (D-116) and `structured_fields_conflict` (D-117) are imported defensively
 (`_reference_codes_conflict_fn` / `_structured_fields_conflict_fn` below);
 when a rule's module/function doesn't exist yet, the corresponding section
 reports "rule not present in this build" and contributes zero to every
-count, rather than raising ImportError. This was the deliberate choice
-over gating `ps dedup retroactive` behind #565+#567 merging first: this
-issue's own municipality veto (D-118) ships and is independently useful
-the moment THIS PR lands, and re-running `ps dedup retroactive` with no
-code changes needed is exactly what should happen once #565/#567 land
-later, in whichever order.
+count, rather than raising ImportError. D-116 (#565) has since merged, so
+that arm is live; D-117 (#567) is still open as of this writing, so its
+arm still degrades to unavailable in practice, not just in a test — this
+was the deliberate choice over gating `ps dedup retroactive` behind both
+merging first: D-118's own municipality veto ships and is independently
+useful the moment THIS PR lands, and re-running `ps dedup retroactive`
+picks up each rule automatically the moment its PR merges, with no code
+change here, regardless of merge order.
 
 **Dry-run is the default everywhere** — `run_retroactive_pass(conn)` with
 no `apply` argument, and the CLI's `ps dedup retroactive` with no flag,
@@ -150,14 +161,25 @@ def find_reference_code_veto_merges(conn) -> list[ReferenceCodeRevertCandidate]:
     (`merged_listing_ids`) conflict, per `reference_codes_conflict`, with
     at least one listing that was already on the surviving property before
     this specific merge event (i.e. currently on `property_id`, minus the
-    ones this row itself moved).
+    ones this row itself moved) — restricted to CROSS-SOURCE pairs only.
 
-    Mirrors exactly the pairwise check `evaluate_pair` would have made at
-    merge time, replayed against what's in the DB today — this is how PR
-    #565's own "7 currently-merged properties" blast-radius number was
-    reproduced (validated against the live demo DB while building this
-    module: distinct flagged `property_id`s are exactly {152, 154, 189,
-    228, 566, 1641, 2087}, matching #565's own table).
+    That source-inequality restriction is not optional decoration: issue
+    #197 means `engine._run()` never hands `evaluate_pair` a same-source
+    pair at all (skipped before evaluation, at pair-generation time, not
+    filtered from the result afterward). A same-source pair could
+    therefore never have been checked against `reference_codes_conflict`
+    when the historical merge was made, so this function must not flag
+    one either — an earlier version of this function compared every
+    listing on the property against every listing this merge moved in,
+    regardless of source, which is a DIFFERENT, larger population than
+    what `evaluate_pair` can ever reach and produced a wrong, inflated
+    blast-radius number (an early draft misread this as "7 currently-
+    merged properties", all same-source pairs that were never actually
+    reachable). See `etl.dedup.signals.reference_code`'s own module
+    docstring, which independently documents current reach as measured
+    at ZERO against the live demo DB, for the same reason plus one more:
+    only `fotocasa`/`milanuncios` populate `contact_raw` at all today, and
+    `milanuncios` captures no `reference_code`.
 
     Returns `[]`, not an error, when D-116 hasn't merged yet
     (`_reference_codes_conflict_fn() is None`) — see this module's
@@ -201,6 +223,20 @@ def find_reference_code_veto_merges(conn) -> list[ReferenceCodeRevertCandidate]:
         flagged = False
         for a in other_records.values():
             for b in moved_records.values():
+                # Issue #197: engine._run() never hands evaluate_pair a
+                # same-source pair at all (skipped before evaluation, not
+                # filtered out after). A same-source pair here could never
+                # have been checked against reference_codes_conflict in
+                # the first place, so it must not be flagged either —
+                # this is exactly the mistake an earlier draft of this
+                # function made, replaying a raw listing comparison
+                # instead of the engine's own reachability rule (source
+                # inequality, on top of the property_id inequality this
+                # loop already gets for free by construction). See
+                # etl.dedup.signals.reference_code's own docstring on why
+                # that distinction matters for this exact veto.
+                if a.source == b.source:
+                    continue
                 if conflict_fn(a, b):
                     candidates.append(
                         ReferenceCodeRevertCandidate(

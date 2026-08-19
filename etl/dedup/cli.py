@@ -171,23 +171,36 @@ def _cmd_retroactive(conn, apply: bool) -> int:
         )
     else:
         candidates = report.reference_code_candidates
-        n_properties = len({c.property_id for c in candidates})
-        print(
-            f"D-116 (reference-code conflict): {len(candidates)} merge_log "
-            f"row(s) across {n_properties} currently-merged propert"
-            f"{'y' if n_properties == 1 else 'ies'} would be REVERTED:"
-        )
-        for c in candidates:
+        if not candidates:
             print(
-                f"    merge_log #{c.merge_log_id}: property {c.property_id} "
-                f"<- losing property {c.losing_property_id} "
-                f"(listing {c.a_listing_id} code={c.a_reference_code!r} vs "
-                f"listing {c.b_listing_id} code={c.b_reference_code!r})"
+                "D-116 (reference-code conflict): rule is live — 0 "
+                "currently-merged properties conflict (checked through the "
+                "same cross-source, non-same-property reachability filter "
+                "engine._run() itself applies — issue #197). Measured ZERO "
+                "against the live demo DB too; see D-116/reference_code.py "
+                "for why that's expected, not broken."
             )
-        if apply and candidates:
+        else:
+            n_properties = len({c.property_id for c in candidates})
             print(
-                f"  -> reverted merge_log id(s): {list(report.reverted_merge_log_ids)}"
+                f"D-116 (reference-code conflict): {len(candidates)} "
+                f"merge_log row(s) across {n_properties} currently-merged "
+                f"propert{'y' if n_properties == 1 else 'ies'} would be "
+                f"REVERTED:"
             )
+            for c in candidates:
+                print(
+                    f"    merge_log #{c.merge_log_id}: property "
+                    f"{c.property_id} <- losing property "
+                    f"{c.losing_property_id} (listing {c.a_listing_id} "
+                    f"code={c.a_reference_code!r} vs listing "
+                    f"{c.b_listing_id} code={c.b_reference_code!r})"
+                )
+            if apply:
+                print(
+                    f"  -> reverted merge_log id(s): "
+                    f"{list(report.reverted_merge_log_ids)}"
+                )
     print()
 
     pd = report.pending_demotions

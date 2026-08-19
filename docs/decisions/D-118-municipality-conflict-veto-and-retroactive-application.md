@@ -3,7 +3,7 @@ id: D-118
 title: Normalized-municipality conflict vetoes a fuzzy suggestion; hard vetoes apply retroactively via a previewed, reversible pass
 date: 2026-08-19
 group: Data / connectors
-rule: "A normalized `property.city` conflict (strip trailing `capital`, fold accents, casefold, collapse+drop whitespace, resolve known district->municipality aliases) vetoes `fuzzy.evaluate` ONLY, mirroring D-117 — never wired into `evaluate_pair`. Retroactive application of D-116/D-117/D-118 is `ps dedup retroactive [--apply]` (`etl/dedup/retroactive.py`): dry-run by default, reverts D-116 merges via `engine.revert` (never deletes), and reports (never triggers) D-117/D-118 pending-suggestion demotion, which happens on the next `ps dedup run` via D-024's existing reevaluation. Degrades to zero when D-116/D-117 haven't merged yet — no gating required."
+rule: "A normalized `property.city` conflict (strip trailing `capital`, fold accents, casefold, collapse+drop whitespace, resolve known district->municipality aliases) vetoes `fuzzy.evaluate` ONLY, mirroring D-117 — never wired into `evaluate_pair`. `ps dedup retroactive [--apply]` (`etl/dedup/retroactive.py`, dry-run by default) reverts D-116 merges via `engine.revert` (never deletes) using the SAME cross-source, non-same-property reachability filter `evaluate_pair` itself has — a raw listing comparison undercounts what is actually unreachable. Reports (never triggers) D-117/D-118 pending-suggestion demotion, which happens on the next `ps dedup run` via D-024. Each arm degrades to unavailable, simulated explicitly in tests, when its rule's PR hasn't merged — never inferred from ambient absence."
 ---
 
 # D-118: Normalized-municipality conflict vetoes a fuzzy suggestion; hard vetoes apply retroactively via a previewed, reversible pass
@@ -77,8 +77,24 @@ previewed before acting.
 
 5. **Retroactive application** (`etl/dedup/retroactive.py`,
    `ps dedup retroactive [--apply]`):
-   - **D-116** (7 currently-merged properties / 9 `property_merge_log`
-     rows, per PR #565): reverted via `engine.revert` — the SAME function
+   - **D-116** (PR #565, merged): `find_reference_code_veto_merges`
+     replays the SAME reachability filter `engine._run()` itself applies
+     — cross-source AND cross-property (issue #197 skips same-source
+     pairs before `evaluate_pair` ever sees them) — not a raw listing
+     comparison. Measured through that corrected filter: **ZERO**
+     currently-merged properties conflict, matching what D-116's own
+     shipped module docstring independently documents (only
+     `fotocasa`/`milanuncios` populate `contact_raw` today, and
+     `milanuncios` captures no `reference_code`, so no reachable pair has
+     ever had both fields to compare). An earlier draft of this function
+     compared every listing on a merged property against every listing
+     that merge moved in, REGARDLESS of source — a materially larger,
+     unreachable population — and reported 7 currently-merged properties
+     (9 `property_merge_log` rows) as a result. That number was wrong; a
+     coordinator review of #569 caught it before merge. When D-116
+     eventually does find a real conflicting merge (the moment a second
+     connector starts capturing agency name alongside reference code),
+     `--apply` reverts it via `engine.revert` — the SAME function
      `ps dedup revert <id>` already calls — never a bespoke unmerge path,
      never a `DELETE`.
    - **D-117/D-118**: zero blast radius against existing merges by
@@ -94,16 +110,24 @@ previewed before acting.
    - **Dry-run is the default** everywhere (`run_retroactive_pass(conn)`
      with no `apply`, and the CLI with no `--apply`) — writes nothing,
      only reports.
-   - **Degrades cleanly when D-116/D-117 haven't merged**, rather than
-     gating behind their merge order: `reference_codes_conflict`/
+   - **Degrades cleanly when a rule's PR hasn't merged**, rather than
+     gating behind merge order: `reference_codes_conflict`/
      `structured_fields_conflict` are imported defensively
      (`_reference_codes_conflict_fn`/`_structured_fields_conflict_fn`);
      absent, the corresponding section reports "rule not present in this
-     build" and contributes zero, instead of raising. Chosen over gating
-     because this issue's own municipality veto is independently useful
-     the moment this PR lands, and `ps dedup retroactive` needs no code
-     change to pick up D-116/D-117 once those PRs merge later, in
-     whichever order.
+     build" and contributes zero, instead of raising. D-116 (#565) has
+     since merged, so that arm is live (at its measured ZERO reach,
+     above); D-117 (#567) is still open as of this writing, so its arm
+     still degrades to unavailable in practice, not just in a test — the
+     degrade-path tests simulate absence EXPLICITLY via
+     `monkeypatch.delattr`/`monkeypatch.setattr` on the injection seam,
+     never by relying on a dependency being ambiently missing (a lesson
+     learned the hard way: the first cut of this PR's tests assumed
+     D-116 would stay absent and broke the moment #565 merged). Chosen
+     over gating because D-118's own municipality veto is independently
+     useful the moment this PR lands, and `ps dedup retroactive` needs no
+     code change to pick up each rule once its PR merges, in whichever
+     order.
 
 **Alternatives rejected**:
 - *Engine-wide municipality veto* — rejected on the measured Churriana
