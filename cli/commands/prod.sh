@@ -30,8 +30,11 @@ Usage: ps prod <subcommand> [args]
 
 Bring-up (once):
   install [--check-only]  Check the host, clone the repo, create data dirs and .env
-  copy-data [--force]     Push operator config + secrets + the local database
-                          (--force replaces a database that already has tables)
+  copy-data [--force] [--from-dump <file>]
+                          Push operator config + secrets + the local database
+                          (--force replaces a database that already has tables;
+                           --from-dump seeds from a dump when the local stack
+                           is not running)
 
 Day to day:
   deploy                  git pull + rebuild + up -d on the host

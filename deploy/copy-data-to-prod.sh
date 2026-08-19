@@ -14,7 +14,8 @@
 #
 # Re-runnable: --force drops the remote database and reloads it. Without
 # --force it refuses to touch a database that already has tables, rather than
-# merging two histories.
+# merging two histories. --from-dump <file> seeds from a dump taken earlier,
+# for when this workstation's stack cannot start.
 #
 # Host and paths come from PROD_HOST / PROD_PATH in ~/.config/inmo-tool/.env —
 # never from this file. inmo-tool is a public repository.
@@ -32,7 +33,18 @@ warn() { echo -e "  ${YELLOW}!${NC} $*"; }
 die()  { echo -e "  ${RED}✗${NC} $*" >&2; exit 1; }
 
 FORCE=false
-[ "${1:-}" = "--force" ] && FORCE=true
+FROM_DUMP=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --force)     FORCE=true; shift ;;
+        # A dump taken earlier, for when this workstation's stack is not
+        # running (its PostgreSQL publishes a fixed host port, so a second
+        # checkout holding that port is enough to make `up` impossible).
+        --from-dump) FROM_DUMP="${2:?--from-dump needs a file}"; shift 2 ;;
+        *) die "unknown option '$1' (expected --force or --from-dump <file>)" ;;
+    esac
+done
+[ -z "$FROM_DUMP" ] || [ -f "$FROM_DUMP" ] || die "no such dump: $FROM_DUMP"
 
 [ -n "${PROD_HOST:-}" ] || die "PROD_HOST is not set — add it to ${CONFIG_DIR}/.env"
 [ -n "${PROD_PATH:-}" ] || die "PROD_PATH is not set — add it to ${CONFIG_DIR}/.env"
@@ -89,7 +101,13 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 DUMP="${DUMP_DIR}/${DB_NAME}-${STAMP}.sql.gz"
 LOCAL_DB="$(grep -E '^postgres.db:' "${CONFIG_DIR}/config.yaml" | head -1 | awk '{print $2}')"
 LOCAL_DB="${LOCAL_DB:-inmotool}"
-if docker compose -f "${REPO_ROOT}/docker-compose.yml" ps --status running --format '{{.Service}}' | grep -qx postgres; then
+if [ -n "$FROM_DUMP" ]; then
+    DUMP="$FROM_DUMP"
+    # Counted from the dump itself: with no live database there is nothing
+    # else to compare the restored row count against.
+    LOCAL_LISTINGS="$(gunzip -c "$DUMP" | sed -n '/^COPY public.listing (/,/^\\\.$/p' | grep -vc '^COPY\|^\\\.' || true)"
+    ok "using $DUMP ($(du -h "$DUMP" | cut -f1), ${LOCAL_LISTINGS} listings)"
+elif docker compose -f "${REPO_ROOT}/docker-compose.yml" ps --status running --format '{{.Service}}' | grep -qx postgres; then
     # --no-owner/--no-acl: the roles are different over there (here the app
     # usually runs as the cluster superuser; in production it does not).
     docker compose -f "${REPO_ROOT}/docker-compose.yml" exec -T postgres \
@@ -99,7 +117,7 @@ if docker compose -f "${REPO_ROOT}/docker-compose.yml" ps --status running --for
     ok "dumped $(du -h "$DUMP" | cut -f1), ${LOCAL_LISTINGS} listings"
 else
     # Nothing to migrate is a legitimate state: the connectors repopulate.
-    warn "the local stack is down — starting with an empty database"
+    warn "the local stack is down and no --from-dump given — starting empty"
     DUMP=""
     LOCAL_LISTINGS=""
 fi
