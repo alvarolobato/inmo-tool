@@ -17,10 +17,13 @@
  * gate on — this is not a mock of the app's logic, it exercises the exact
  * code path a real finger would.
  *
- * `document.documentElement.clientWidth` (not `window.innerWidth`, which
- * reports 653 under this emulation and would silently hide a layout
- * regression) is asserted once as a sanity check that the phone-width
- * assertions below actually run at 390px, not a desktop-sized viewport.
+ * `document.documentElement.clientWidth` (not `window.innerWidth`) is
+ * asserted once as a sanity check that the phone-width assertions below
+ * actually run at 390px, not a desktop-sized viewport — `clientWidth` is
+ * the general-purpose guard per D-120; on THIS page `innerWidth` used to
+ * diverge to 653 before #571/PR #578 (merged) fixed TopBar.tsx's own
+ * overflow, so this stays a real regression guard against that class of
+ * bug recurring, not a description of a bug still present today.
  */
 import { test, expect, devices, type Page } from "@playwright/test";
 import type { CDPSession } from "playwright-core";
@@ -61,10 +64,26 @@ function photoDataUri(fill: string): string {
 }
 const PHOTO_URLS = [photoDataUri("#3366cc"), photoDataUri("#33aa55"), photoDataUri("#cc9933")];
 
+// #575 review (B1/B3): a landscape-only fixture cannot catch the
+// max-width/max-height-on-a-shrink-to-fit-flex-item clipping bug (D-123) —
+// a portrait photo is exactly the shape that bug clips top-and-bottom, and
+// this codebase's real photos are full of portrait shots (hallways,
+// facades, bathrooms). Matches the reviewer's own repro fixture (600x1200).
+function portraitPhotoDataUri(fill: string): string {
+  return (
+    "data:image/svg+xml;utf8," +
+    encodeURIComponent(
+      `<svg xmlns='http://www.w3.org/2000/svg' width='600' height='1200'><rect width='600' height='1200' fill='${fill}'/></svg>`,
+    )
+  );
+}
+const PORTRAIT_PHOTO_URL = portraitPhotoDataUri("#aa3377");
+
 let pool: Pool;
 let dbAvailable = false;
 let profileId: number;
 let propertyId: number;
+let portraitPropertyId: number;
 
 test.beforeAll(async () => {
   pool = buildPool();
@@ -111,6 +130,23 @@ test.beforeAll(async () => {
   await pool.query(
     `INSERT INTO profile_listing_state (profile_id, property_id, matched) VALUES ($1, $2, true)`,
     [profileId, propertyId],
+  );
+
+  // Second property, single portrait photo — see PORTRAIT_PHOTO_URL comment.
+  const portraitPropertyResult = await pool.query<{ id: number }>(
+    `INSERT INTO property (lat, lon, property_type, m2_built, rooms, bathrooms, address)
+     VALUES ($1, $2, 'piso', 70, 2, 1, $3) RETURNING id`,
+    [MADRID_SOL[0], MADRID_SOL[1], `${NAME_PREFIX}Calle Retrato, Madrid`],
+  );
+  portraitPropertyId = portraitPropertyResult.rows[0].id;
+  await pool.query(
+    `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at, photo_urls)
+     VALUES ($1, 'fotocasa', $2, 'active', 250000, NOW(), $3)`,
+    [portraitPropertyId, `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`, [PORTRAIT_PHOTO_URL]],
+  );
+  await pool.query(
+    `INSERT INTO profile_listing_state (profile_id, property_id, matched) VALUES ($1, $2, true)`,
+    [profileId, portraitPropertyId],
   );
 });
 
@@ -183,8 +219,12 @@ async function tapLocator(cdp: CDPSession, locator: ReturnType<Page["getByTestId
   await tapAt(cdp, await boundingCenter(locator));
 }
 
-async function openLightbox(page: Page, cdp: CDPSession): Promise<void> {
-  await page.goto(`/profiles/${profileId}/properties/${propertyId}`);
+async function openLightbox(
+  page: Page,
+  cdp: CDPSession,
+  targetPropertyId: number = propertyId,
+): Promise<void> {
+  await page.goto(`/profiles/${profileId}/properties/${targetPropertyId}`);
   await expect(page.getByTestId("property-detail-page")).toBeVisible();
   await tapLocator(cdp, page.locator('[data-testid="photo-gallery-thumb"]').first());
   await expect(page.getByTestId("photo-gallery-lightbox")).toBeVisible();
@@ -207,72 +247,85 @@ async function readTransform(page: Page): Promise<{ scale: number; x: number; y:
   };
 }
 
-test("phone viewport is actually narrow (clientWidth, not the misleading innerWidth)", async ({ page }) => {
+// Precondition sanity check, not a regression test on its own —
+// `devices["iPhone 13"]` already guarantees a narrow `clientWidth`. Kept
+// because `clientWidth` (not `innerWidth`) is the correct thing for every
+// other test below to reason about, per D-120's rule 3.
+test("precondition: devices['iPhone 13'] actually yields a narrow clientWidth", async ({ page }) => {
   skipIfNoDb(test);
   await page.goto(`/profiles/${profileId}/properties/${propertyId}`);
   const clientWidth = await page.evaluate(() => document.documentElement.clientWidth);
   expect(clientWidth).toBeLessThanOrEqual(430); // iPhone 13 CSS viewport is 390px
 });
 
+/** Full containment in `[0, viewport.width] x [0, viewport.height]` — not
+ * just "not wider than the viewport". A box can pass a width-only check
+ * while still rendering with a negative `y` (clipped off the top) or
+ * `y + height` past the bottom (clipped off the bottom), which is exactly
+ * how D-123's portrait-clipping bug slipped through the first review
+ * round: that version's assertions were width/height-only, and the only
+ * fixture was landscape, where main's OLD 90vw/90vh already fit — so nothing
+ * in that test could tell the buggy version from the fixed one. */
+async function assertFullyContained(
+  page: Page,
+  testId: string,
+  viewport: { width: number; height: number },
+): Promise<void> {
+  const box = await page.getByTestId(testId).boundingBox();
+  expect(box, `${testId} should be visible`).not.toBeNull();
+  expect(box!.x, `${testId} x (clipped off the left if negative)`).toBeGreaterThanOrEqual(0);
+  expect(box!.y, `${testId} y (clipped off the top if negative)`).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width, `${testId} right edge`).toBeLessThanOrEqual(viewport.width);
+  expect(box!.y + box!.height, `${testId} bottom edge`).toBeLessThanOrEqual(viewport.height);
+}
+
 // #575 (owner clarification): the priority bug is FIT, not zoom — "cuando
 // hago click y se abre con el visor incorporado no funciona bien en el
-// móvil y no se adapta al tamaño del móvil". This asserts the rendered
-// lightbox image, at rest (no zoom applied), never exceeds the real
-// document viewport — targeting the actual `photo-gallery-lightbox-image`
-// element by testid, not a blind coordinate.
-//
-// A cross-check confirmed the fix below (100%/100dvh/safe-area, replacing
-// 90vw/90vh) is correct: applying it on top of #571/PR #578's TopBar fix
-// (in an isolated worktree, not merged into this branch) turns this
-// assertion green. On THIS branch alone it can still measure oversized —
-// not because the CSS fix is wrong, but because `TopBar.tsx`'s own
-// pre-existing overflow (measured independently: `document.body.scrollWidth`
-// ~654px on a 390px device, #571/#578, out of scope here — "no overlap
-// expected, stop and tell me" applies) pans the whole page's visual
-// viewport, which every `position: fixed` overlay on ANY route inherits,
-// this lightbox included. The guard below detects that pre-existing,
-// unrelated overflow and skips with a citation rather than either
-// silently passing or permanently failing this PR's CI on a bug it isn't
-// responsible for; once #578 merges the guard clears and this test
-// enforces the fit for real.
-test("lightbox image fits within the real viewport at rest, and the close button clears the top-right corner", async ({
-  page,
-  context,
-}) => {
+// móvil y no se adapta al tamaño del móvil". Verified against BOTH a
+// landscape and a portrait fixture (D-123) — a landscape-only assertion
+// cannot distinguish this fix from the bug it replaced (or even from
+// main's original 90vw/90vh, which also happens to fit a landscape photo).
+test("lightbox image fits within the real viewport at rest — landscape", async ({ page, context }) => {
   skipIfNoDb(test);
   const cdp = await context.newCDPSession(page);
   await openLightbox(page, cdp);
-
-  const overflow = await page.evaluate(() => ({
-    scrollWidth: document.body.scrollWidth,
-    clientWidth: document.documentElement.clientWidth,
-  }));
-  test.skip(
-    overflow.scrollWidth > overflow.clientWidth + 50,
-    `page has a pre-existing ${overflow.scrollWidth}px-wide vs ${overflow.clientWidth}px-viewport horizontal ` +
-      `overflow unrelated to the photo gallery (see #571/PR #578, TopBar mobile shell) — this assertion is ` +
-      `verified correct once that lands; see the comment above this test`,
-  );
 
   const viewport = await page.evaluate(() => ({
     width: document.documentElement.clientWidth,
     height: document.documentElement.clientHeight,
   }));
 
-  const imageBox = await page.getByTestId("photo-gallery-lightbox-image").boundingBox();
-  expect(imageBox, "lightbox image should be visible").not.toBeNull();
-  expect(imageBox!.width).toBeLessThanOrEqual(viewport.width);
-  expect(imageBox!.height).toBeLessThanOrEqual(viewport.height);
+  await assertFullyContained(page, "photo-gallery-lightbox-image", viewport);
+  await assertFullyContained(page, "photo-gallery-lightbox-close", viewport);
+
   // Not just "doesn't overflow" — it should actually use most of the
   // available space, or "no se adapta" (renders tiny/cropped) is just as
   // real a failure as rendering oversized.
+  const imageBox = await page.getByTestId("photo-gallery-lightbox-image").boundingBox();
   expect(imageBox!.width).toBeGreaterThan(viewport.width * 0.5);
+});
 
-  const closeBox = await page.getByTestId("photo-gallery-lightbox-close").boundingBox();
-  expect(closeBox, "close button should be visible").not.toBeNull();
-  expect(closeBox!.x).toBeGreaterThanOrEqual(0);
-  expect(closeBox!.y).toBeGreaterThanOrEqual(0);
-  expect(closeBox!.x + closeBox!.width).toBeLessThanOrEqual(viewport.width);
+test("lightbox image fits within the real viewport at rest — portrait (D-123 regression)", async ({
+  page,
+  context,
+}) => {
+  skipIfNoDb(test);
+  const cdp = await context.newCDPSession(page);
+  await openLightbox(page, cdp, portraitPropertyId);
+
+  const viewport = await page.evaluate(() => ({
+    width: document.documentElement.clientWidth,
+    height: document.documentElement.clientHeight,
+  }));
+
+  await assertFullyContained(page, "photo-gallery-lightbox-image", viewport);
+  await assertFullyContained(page, "photo-gallery-lightbox-close", viewport);
+
+  // Should be height-constrained (a 1:2 portrait in a ~390x664 viewport),
+  // not width-constrained — proves objectFit:contain is resolving against
+  // a real height, not `none`.
+  const imageBox = await page.getByTestId("photo-gallery-lightbox-image").boundingBox();
+  expect(imageBox!.height).toBeGreaterThan(viewport.height * 0.5);
 });
 
 test("lightbox zooms on double-tap, pans while zoomed, and resets on a second double-tap", async ({
