@@ -2564,6 +2564,61 @@ class TestStructuredFieldsFuzzyVeto:
             assert status == "rejected"
             assert "reevaluated_from" in detail
 
+    def test_fuzzy_suggestion_not_vetoed_when_size_and_price_are_identical(
+        self, dedup_db
+    ):
+        """B1 (PR #567 review): a genuinely-incompatible type pair
+        (chalet/piso — NOT the piso/atico family) must not veto a fuzzy
+        suggestion when m2_built AND current_price are BOTH exactly
+        identical on both sides — the live-DB pattern the review found in
+        97 of 97 type-conflicting currently-merged properties (a portal
+        type-mapping quirk, not two properties)."""
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "fuzzy-identical-size-price-type-conflict-unvetoed",
+            address_a="Calle Mayor 5, Madrid",
+            address_b="Calle Mayor 5, Madrid",
+            m2_built_a=Decimal(90),
+            m2_built_b=Decimal(90),
+            current_price_a=Decimal(260000),
+            current_price_b=Decimal(260000),
+            property_type_a="chalet",
+            property_type_b="piso",
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 1
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT match_basis FROM suggested_merge")
+            assert cur.fetchone()[0] == "fuzzy"
+
+    def test_fuzzy_suggestion_not_vetoed_by_rooms_zero_treated_as_absent(
+        self, dedup_db
+    ):
+        """B3 (PR #567 review): rooms=0 is a scrape-artifact placeholder
+        for at least one connector (this issue's own property 121/128
+        example: the SAME fotocasa listing scraped once with rooms=0 and
+        once with rooms=4), not a genuine studio count — must not veto."""
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "fuzzy-rooms-zero-treated-as-absent-unvetoed",
+            address_a="Calle Mayor 5, Madrid",
+            address_b="Calle Mayor 5, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(260000),
+            rooms_a=0,
+            rooms_b=4,
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 1
+
     def test_veto_reverted_regression_check(self, dedup_db):
         """Proves the veto is what blocks the suggestion, not some other
         rule: monkeypatching structured_fields_conflict (as imported into

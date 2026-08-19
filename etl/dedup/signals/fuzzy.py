@@ -22,14 +22,24 @@ live demo DB:
 2. Placing the veto engine-wide would have been wrong. The blast-radius
    measurement this issue requires found `property_type`/`rooms` are noisy
    per-connector metadata that regularly disagree even on definite,
-   strongly-corroborated duplicates: ~76 of 615 currently-merged properties
-   (matched via address_coords/reference_code/photo_hash — identical
-   photos, identical price, identical size) carry a `property_type` or
-   `rooms` mismatch between their two original source rows (e.g. one
-   portal maps the exact same flat as "chalet", another as "piso"; one
-   scrape recorded `rooms=0`, a later one `rooms=4`, for the SAME listing).
-   An engine-wide veto ahead of those signals would have broken ~76
-   already-correct merges. See PR body for the query and sampled pairs.
+   strongly-corroborated duplicates: ~80 of 590 currently-merged properties
+   (13.6%; independently reproduced in PR #567's review as 104 merge-log
+   rows / 80 properties) matched via address_coords/reference_code/
+   photo_hash — identical photos, identical price, identical size — carry
+   a `property_type` or `rooms` mismatch between their two original source
+   rows (e.g. one portal maps the exact same flat as "chalet", another as
+   "piso"; one scrape recorded `rooms=0`, a later one `rooms=4`, for the
+   SAME listing — see structured_fields.py's B3 for why `rooms=0` is now
+   treated as unusable). An engine-wide veto ahead of those signals would
+   have broken ~80 already-correct merges. See PR body for the query and
+   sampled pairs.
+
+Deliberately NOT extended to `photo_hash`'s own `suggest` path (ratio < 1.0,
+never auto-merges) or `phone`'s: ~45 pending `photo_hash` rows and ~33
+pending `phone` rows carry the same kind of structured-field contradiction,
+untouched on purpose — an exact/partial photo match or a shared phone
+number is independent, often stronger, evidence this veto must not
+override (D-117 point 5).
 """
 
 from __future__ import annotations

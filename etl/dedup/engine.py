@@ -270,7 +270,7 @@ def evaluate_pair(
     metadata that regularly disagree even on definite, strongly-corroborated
     duplicates (identical photos, price, and size) matched by
     address_coords/reference_code/photo_hash; vetoing at this level would
-    have broken ~76 already-correct merges. Fuzzy is the one signal where
+    have broken ~80 already-correct merges (13.6% of 590 — PR #567's review). Fuzzy is the one signal where
     the issue's own measurement holds (price/size are already gated there,
     so a structured-field contradiction is real signal, not noise) and the
     one signal that's actually 97% of the pending-suggestion backlog this
