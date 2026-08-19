@@ -8,7 +8,14 @@ engine-level tests.
 
 from __future__ import annotations
 
-from etl.dedup.signals.reference_code import _normalize, _same_agency, evaluate
+import pytest
+
+from etl.dedup.signals.reference_code import (
+    _normalize,
+    _same_agency,
+    evaluate,
+    reference_codes_conflict,
+)
 from etl.dedup.types import ListingRecord
 
 
@@ -71,3 +78,57 @@ class TestEvaluate:
 
     def test_both_missing_code_returns_none(self):
         assert evaluate(_record(), _record()) is None
+
+
+class TestReferenceCodesConflict:
+    """Issue #564 (D-116): the hard veto. Same agency + two different,
+    usable codes vetoes; everything else (different agency, missing/
+    placeholder code on either side, matching codes) does not."""
+
+    def test_same_agency_different_valid_codes_conflicts(self):
+        a = _record(contact_raw="Inmobiliaria Uno", reference_code="NS603")
+        b = _record(contact_raw="Inmobiliaria Uno", reference_code="AB100")
+        assert reference_codes_conflict(a, b) is True
+
+    def test_same_agency_case_and_whitespace_insensitive_still_conflicts(self):
+        a = _record(contact_raw="INMOBILIARIA UNO", reference_code=" NS-603 ")
+        b = _record(contact_raw="inmobiliaria uno", reference_code="ab100")
+        assert reference_codes_conflict(a, b) is True
+
+    def test_same_agency_same_code_does_not_conflict(self):
+        a = _record(contact_raw="Inmobiliaria Uno", reference_code="NS603")
+        b = _record(contact_raw="Inmobiliaria Uno", reference_code="ns603")
+        assert reference_codes_conflict(a, b) is False
+
+    def test_different_agencies_different_codes_does_not_conflict(self):
+        # Codes are agency-namespaced — a different agency's differing code
+        # means nothing, so this is never eligible for the veto at all.
+        a = _record(contact_raw="Inmobiliaria Uno", reference_code="NS603")
+        b = _record(contact_raw="Inmobiliaria Dos", reference_code="AB100")
+        assert reference_codes_conflict(a, b) is False
+
+    def test_missing_code_on_one_side_does_not_conflict(self):
+        a = _record(contact_raw="Inmobiliaria Uno", reference_code="NS603")
+        b = _record(contact_raw="Inmobiliaria Uno", reference_code=None)
+        assert reference_codes_conflict(a, b) is False
+
+    @pytest.mark.parametrize("placeholder", ["0", "-", "REF", "sin referencia", ""])
+    def test_placeholder_code_on_one_side_does_not_conflict(self, placeholder):
+        # A CRM template left unedited on many of an agency's listings must
+        # never veto a legitimate merge for that whole agency — an unusable
+        # code is treated as absent, exactly like the positive-match path.
+        a = _record(contact_raw="Inmobiliaria Uno", reference_code="NS603")
+        b = _record(contact_raw="Inmobiliaria Uno", reference_code=placeholder)
+        assert reference_codes_conflict(a, b) is False
+
+    def test_both_placeholder_does_not_conflict(self):
+        a = _record(contact_raw="Inmobiliaria Uno", reference_code="REF")
+        b = _record(contact_raw="Inmobiliaria Uno", reference_code="0")
+        assert reference_codes_conflict(a, b) is False
+
+    def test_both_blank_agency_does_not_conflict(self):
+        # No captured agency name on either side means _same_agency is
+        # False by construction — never eligible for the veto.
+        a = _record(reference_code="NS603")
+        b = _record(reference_code="AB100")
+        assert reference_codes_conflict(a, b) is False

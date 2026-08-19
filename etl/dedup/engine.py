@@ -252,9 +252,34 @@ def evaluate_pair(
     real network cost, so it's deliberately last even though issue #16 lists
     it before fuzzy (signal 4 vs 5) rather than being evaluated eagerly for
     every pair regardless of whether a cheaper signal would have resolved it.
+
+    Issue #564 (D-116): a same-agency reference-code conflict is checked
+    right after `cadastral` and before every other signal — see the inline
+    comment below for why it outranks address/coords/phone/photo/fuzzy but
+    not cadastral.
     """
+    cadastral_result = cadastral.evaluate(a, b)
+    if cadastral_result is not None:
+        return cadastral_result
+
+    # Issue #564 (D-116): a same-agency pair carrying two different, both
+    # real (non-placeholder) reference codes is that agency's own
+    # bookkeeping saying these are two different properties — a hard veto
+    # that outranks every remaining signal (address/coords, phone, the
+    # reference_code signal's own weaker paths, photo hash, fuzzy), no
+    # matter how well they'd otherwise agree. Deliberately placed AFTER
+    # cadastral: a cadastral reference is a government registry ID, not
+    # agency bookkeeping, and cadastral.evaluate's own docstring calls an
+    # exact match "conclusive"/"never wrong" — an agency's internal ref
+    # mismatch doesn't get to override that. Short-circuits to "no match at
+    # all" (None): unlike the #186 floor veto (which only downgrades a
+    # merge some other signal still supports to a weaker suggestion), this
+    # is direct evidence the pair is NOT a duplicate, so nothing downstream
+    # gets a chance to suggest it either.
+    if reference_code.reference_codes_conflict(a, b):
+        return None
+
     for evaluate_fn in (
-        cadastral.evaluate,
         address_coords.evaluate,
         phone_extract.evaluate,
         reference_code.evaluate,
