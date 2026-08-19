@@ -7,7 +7,35 @@ real-world space-separated form; see normalize_address's docstring comment).
 
 from __future__ import annotations
 
-from etl.dedup.signals.fuzzy import normalize_address
+from decimal import Decimal
+
+from etl.dedup.signals.fuzzy import evaluate, normalize_address
+from etl.dedup.types import ListingRecord
+
+
+def _record(**overrides) -> ListingRecord:
+    defaults = {
+        "listing_id": 1,
+        "property_id": 1,
+        "source": "fotocasa",
+        "external_id": "1",
+        "listing_kind": None,
+        "description": None,
+        "photo_urls": (),
+        "cadastral_ref": None,
+        "address": "Calle Mayor 5, Madrid",
+        "lat": None,
+        "lon": None,
+        "m2_built": Decimal(70),
+        "current_price": Decimal(250000),
+        "contact_raw": None,
+        "reference_code": None,
+        "floor": None,
+        "property_type": None,
+        "rooms": None,
+    }
+    defaults.update(overrides)
+    return ListingRecord(**defaults)
 
 
 class TestNormalizeAddress:
@@ -43,3 +71,39 @@ class TestNormalizeAddress:
 
     def test_punctuation_is_stripped(self):
         assert normalize_address("Calle Mayor, 10 - 2ºA") == "calle mayor 10 2oa"
+
+
+class TestStructuredFieldsVeto:
+    """Issue #566: a property_type/rooms contradiction vetoes this signal's
+    suggestion outright (returns None), even when address/size/price all
+    agree well enough to otherwise fire. See this module's own docstring
+    for why the veto lives here and nowhere else in evaluate_pair."""
+
+    def test_property_type_conflict_vetoes_an_otherwise_matching_pair(self):
+        a = _record(property_type="piso")
+        b = _record(listing_id=2, property_id=2, property_type="local")
+        assert evaluate(a, b) is None
+
+    def test_rooms_diff_of_two_vetoes_an_otherwise_matching_pair(self):
+        a = _record(rooms=2)
+        b = _record(listing_id=2, property_id=2, rooms=4)
+        assert evaluate(a, b) is None
+
+    def test_rooms_diff_of_one_does_not_veto(self):
+        a = _record(rooms=2)
+        b = _record(listing_id=2, property_id=2, rooms=3)
+        result = evaluate(a, b)
+        assert result is not None
+        assert result.basis == "fuzzy"
+
+    def test_piso_atico_synonym_does_not_veto(self):
+        a = _record(property_type="piso")
+        b = _record(listing_id=2, property_id=2, property_type="atico")
+        result = evaluate(a, b)
+        assert result is not None
+
+    def test_missing_type_and_rooms_does_not_veto(self):
+        a = _record(property_type="piso", rooms=2)
+        b = _record(listing_id=2, property_id=2, property_type=None, rooms=None)
+        result = evaluate(a, b)
+        assert result is not None

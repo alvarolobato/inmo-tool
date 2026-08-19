@@ -43,6 +43,16 @@ class ListingRecord:
     # construct a record; engine.fetch_listing_records always populates it
     # from property.floor for real runs.
     floor: str | None = None
+    # `property.property_type` — already canonicalized at connector
+    # ingestion time onto the schema's fixed CHECK vocabulary ('piso',
+    # 'chalet', 'atico', 'local', 'nave', 'garaje', 'terreno', 'edificio'),
+    # never raw portal text. See etl.dedup.signals.structured_fields for
+    # the issue #566 conflict check. Defaulted for the same
+    # backward-compatible-construction reason as `floor` above.
+    property_type: str | None = None
+    # `property.rooms` — issue #566. Defaulted for the same reason as
+    # `floor`/`property_type` above.
+    rooms: int | None = None
 
 
 @dataclass(frozen=True)

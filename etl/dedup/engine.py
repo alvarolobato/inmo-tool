@@ -139,7 +139,8 @@ def fetch_listing_records(conn) -> list[ListingRecord]:
             SELECT l.id, l.property_id, l.source, l.external_id, l.listing_kind,
                    l.description, l.photo_urls,
                    p.cadastral_ref, p.address, p.lat, p.lon, p.m2_built,
-                   l.current_price, l.contact_raw, l.reference_code, p.floor
+                   l.current_price, l.contact_raw, l.reference_code, p.floor,
+                   p.property_type, p.rooms
               FROM listing l
               JOIN property p ON p.id = l.property_id
              WHERE l.operation = 'sale'
@@ -164,6 +165,8 @@ def fetch_listing_records(conn) -> list[ListingRecord]:
             contact_raw=row[13],
             reference_code=row[14],
             floor=row[15],
+            property_type=row[16],
+            rooms=row[17],
         )
         for row in rows
     ]
@@ -257,6 +260,21 @@ def evaluate_pair(
     right after `cadastral` and before every other signal — see the inline
     comment below for why it outranks address/coords/phone/photo/fuzzy but
     not cadastral.
+
+    Issue #566: `property_type`/`rooms` contradiction is NOT checked here.
+    See `etl.dedup.signals.fuzzy`'s module docstring and
+    `structured_fields_conflict`'s use inside `fuzzy.evaluate` for why it's
+    scoped to that one signal rather than placed here ahead of every
+    signal the way the reference-code veto (D-116) is — the live-DB blast
+    radius measurement found `property_type`/`rooms` are noisy per-connector
+    metadata that regularly disagree even on definite, strongly-corroborated
+    duplicates (identical photos, price, and size) matched by
+    address_coords/reference_code/photo_hash; vetoing at this level would
+    have broken ~76 already-correct merges. Fuzzy is the one signal where
+    the issue's own measurement holds (price/size are already gated there,
+    so a structured-field contradiction is real signal, not noise) and the
+    one signal that's actually 97% of the pending-suggestion backlog this
+    issue targets.
     """
     cadastral_result = cadastral.evaluate(a, b)
     if cadastral_result is not None:

@@ -41,8 +41,10 @@ def _insert_property(conn, **overrides) -> int:
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO property (cadastral_ref, address, lat, lon, m2_built, floor)
-            VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+            INSERT INTO property
+                (cadastral_ref, address, lat, lon, m2_built, floor,
+                 property_type, rooms)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
             """,
             (
                 overrides.get("cadastral_ref"),
@@ -51,6 +53,8 @@ def _insert_property(conn, **overrides) -> int:
                 overrides.get("lon"),
                 overrides.get("m2_built"),
                 overrides.get("floor"),
+                overrides.get("property_type"),
+                overrides.get("rooms"),
             ),
         )
         return cur.fetchone()[0]
@@ -198,6 +202,8 @@ def _record(listing_id: int, property_id: int, **overrides) -> ListingRecord:
         contact_raw=overrides.get("contact_raw"),
         reference_code=overrides.get("reference_code"),
         floor=overrides.get("floor"),
+        property_type=overrides.get("property_type"),
+        rooms=overrides.get("rooms"),
     )
 
 
@@ -2389,6 +2395,265 @@ class TestFloorCorroborationAcrossSignals:
             basis, confidence = cur.fetchone()
             assert basis == "phone"
             assert confidence == Decimal("0.500")
+
+
+class TestStructuredFieldsFuzzyVeto:
+    """Issue #566: a `property_type`/`rooms` contradiction vetoes a `fuzzy`
+    suggestion outright — scoped to that ONE signal, not wired into
+    evaluate_pair ahead of every signal, because the live-DB blast-radius
+    measurement (below) found those fields are noisy per-connector
+    metadata that regularly disagree even on definite, strongly-
+    corroborated duplicates matched by address_coords/reference_code/
+    photo_hash. See etl/dedup/signals/fuzzy.py and structured_fields.py's
+    module docstrings for the full reasoning."""
+
+    _LAT = Decimal("40.416775")
+    _LON = Decimal("-3.703790")
+
+    def test_fuzzy_suggestion_vetoed_by_property_type_conflict(self, dedup_db):
+        """A weak, address-text-only match (no coordinates, so
+        address_coords never fires) that agrees on price/size but
+        genuinely disagrees on property_type must not be suggested."""
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "fuzzy-type-conflict-vetoed",
+            address_a="Calle Mayor 5, Madrid",
+            address_b="Calle Mayor 5, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(260000),
+            property_type_a="piso",
+            property_type_b="local",
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 0
+
+    def test_fuzzy_suggestion_vetoed_by_rooms_diff_of_two(self, dedup_db):
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "fuzzy-rooms-conflict-vetoed",
+            address_a="Calle Mayor 5, Madrid",
+            address_b="Calle Mayor 5, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(260000),
+            rooms_a=2,
+            rooms_b=5,
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 0
+
+    def test_fuzzy_suggestion_not_vetoed_by_rooms_diff_of_one(self, dedup_db):
+        """The deliberate tolerance: a 1-room difference must not block a
+        fuzzy suggestion from being filed."""
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "fuzzy-rooms-diff-one-unvetoed",
+            address_a="Calle Mayor 5, Madrid",
+            address_b="Calle Mayor 5, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(260000),
+            rooms_a=2,
+            rooms_b=3,
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 1
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT match_basis FROM suggested_merge")
+            assert cur.fetchone()[0] == "fuzzy"
+
+    def test_fuzzy_suggestion_not_vetoed_by_piso_atico_synonym(self, dedup_db):
+        """The main risk this issue flagged: property_type is already
+        canonicalized at connector ingestion, but piso/atico is a genuine
+        floor-position synonym pair (verified against the live demo DB
+        backlog) and must not veto a fuzzy suggestion."""
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "fuzzy-piso-atico-synonym-unvetoed",
+            address_a="Calle Mayor 5, Madrid",
+            address_b="Calle Mayor 5, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(260000),
+            property_type_a="piso",
+            property_type_b="atico",
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 1
+
+    def test_fuzzy_suggestion_not_vetoed_by_missing_type_or_rooms(self, dedup_db):
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "fuzzy-missing-fields-unvetoed",
+            address_a="Calle Mayor 5, Madrid",
+            address_b="Calle Mayor 5, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(260000),
+            property_type_a="piso",
+            property_type_b=None,
+            rooms_a=2,
+            rooms_b=None,
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 1
+
+    def test_existing_pending_fuzzy_suggestion_is_demoted_to_rejected(self, dedup_db):
+        """D-024: pending suggestions are re-evaluated every run. A `fuzzy`
+        suggestion filed before this veto existed must be demoted to
+        'rejected' now that the type conflict makes fuzzy.evaluate (and so
+        evaluate_pair) return no match at all."""
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "fuzzy-veto-pending-demoted",
+            address_a="Calle Mayor 5, Madrid",
+            address_b="Calle Mayor 5, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(260000),
+            property_type_a="piso",
+            property_type_b="nave",
+        )
+        lo, hi = sorted((listing_a, listing_b))
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO suggested_merge
+                    (listing_id_a, listing_id_b, match_basis, confidence, status, detail)
+                VALUES (%s, %s, 'fuzzy', 0.590, 'pending', %s)
+                """,
+                (lo, hi, json.dumps({})),
+            )
+        dedup_db.commit()
+
+        result = engine.run(dedup_db)
+
+        assert result.merged == 0
+        assert result.reevaluated_rejected == 1
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status, detail FROM suggested_merge "
+                "WHERE listing_id_a = %s AND listing_id_b = %s",
+                (lo, hi),
+            )
+            status, detail = cur.fetchone()
+            assert status == "rejected"
+            assert "reevaluated_from" in detail
+
+    def test_veto_reverted_regression_check(self, dedup_db):
+        """Proves the veto is what blocks the suggestion, not some other
+        rule: monkeypatching structured_fields_conflict (as imported into
+        fuzzy.py) to always return False (reverting only the veto's
+        *behaviour*, keeping every other line of plumbing untouched) must
+        let the type-conflicting pair get suggested again via fuzzy."""
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "fuzzy-veto-regression-check",
+            address_a="Calle Mayor 5, Madrid",
+            address_b="Calle Mayor 5, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(260000),
+            property_type_a="piso",
+            property_type_b="local",
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(fuzzy, "structured_fields_conflict", lambda a, b: False)
+            result = engine.run(dedup_db)
+
+        assert result.merged == 0
+        assert result.suggested == 1
+
+    def test_property_type_conflict_does_not_block_address_coords_merge(self, dedup_db):
+        """The blast-radius finding this design is built around: a pair
+        that's a genuine duplicate on much stronger evidence (matching
+        coordinates, identical size/price) must still auto-merge via
+        address_coords even when property_type disagrees — real live-DB
+        clusters (e.g. property 1313/6122: fotocasa 'piso' vs idealista
+        'chalet', same address/price, matched via address_coords) showed
+        this is noisy per-connector metadata, not evidence of two
+        properties."""
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "type-conflict-does-not-block-address-coords",
+            address_a="Calle Mayor 5",
+            address_b="Calle Mayor 5",
+            lat_a=self._LAT,
+            lon_a=self._LON,
+            lat_b=self._LAT,
+            lon_b=self._LON,
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            property_type_a="piso",
+            property_type_b="chalet",
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 1
+        assert result.suggested == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT match_basis FROM property_merge_log "
+                "ORDER BY created_at DESC LIMIT 1"
+            )
+            assert cur.fetchone()[0] == "address_coords"
+
+    def test_rooms_conflict_does_not_block_photo_hash_auto_merge(self, dedup_db):
+        """Same finding, for photo_hash's issue #188 exact-match auto-merge
+        path (91 of 99 live-DB blast-radius hits were on this exact
+        signal) — an exact photo overlap, corroborated by size/price, must
+        still auto-merge even when rooms disagree by >=2."""
+        cache = _PhotoHashCache()
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "rooms-conflict-does-not-block-photo-hash",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            rooms_a=2,
+            rooms_b=6,
+        )
+        identical_hex = "ffff0000ffff0000"
+        cache._cache[listing_a] = [imagehash.hex_to_hash(identical_hex)]
+        cache._cache[listing_b] = [imagehash.hex_to_hash(identical_hex)]
+        records = {r.listing_id: r for r in engine.fetch_listing_records(dedup_db)}
+        evaluation = engine.evaluate_pair(records[listing_a], records[listing_b], cache)
+        assert evaluation is not None
+        assert evaluation.basis == "photo_hash"
+        assert evaluation.decision == "merge"
 
 
 class TestPhotoHashAutoMerge:

@@ -4,6 +4,32 @@
 The weakest, last-resort signal — only fires when a pair shares no phone
 number, no cadastral, and no close coordinates, but still looks plausibly
 like the same property (similar address text, similar price, similar size).
+
+Issue #566: a `property_type`/`rooms` contradiction (see
+`etl.dedup.signals.structured_fields`) vetoes this signal's suggestion
+outright — deliberately scoped to fuzzy ONLY, not wired into
+`etl.dedup.engine.evaluate_pair` ahead of every signal the way the
+reference-code veto (D-116) is. Two reasons, both measured against the
+live demo DB:
+
+1. This is where the issue's own case actually holds. Of 27,145 pending
+   `suggested_merge` rows, 97.1% are `match_basis='fuzzy'`, and price/size
+   are ALREADY gated here (the checks above) — so a pair that reaches this
+   point and still contradicts on `property_type`/`rooms` is agreeing on
+   price and size while disagreeing on a structured fact, which is real
+   discriminating signal, not noise.
+
+2. Placing the veto engine-wide would have been wrong. The blast-radius
+   measurement this issue requires found `property_type`/`rooms` are noisy
+   per-connector metadata that regularly disagree even on definite,
+   strongly-corroborated duplicates: ~76 of 615 currently-merged properties
+   (matched via address_coords/reference_code/photo_hash — identical
+   photos, identical price, identical size) carry a `property_type` or
+   `rooms` mismatch between their two original source rows (e.g. one
+   portal maps the exact same flat as "chalet", another as "piso"; one
+   scrape recorded `rooms=0`, a later one `rooms=4`, for the SAME listing).
+   An engine-wide veto ahead of those signals would have broken ~76
+   already-correct merges. See PR body for the query and sampled pairs.
 """
 
 from __future__ import annotations
@@ -15,6 +41,7 @@ from decimal import Decimal
 from rapidfuzz import fuzz
 
 from etl.dedup.signals.floor import floors_conflict
+from etl.dedup.signals.structured_fields import structured_fields_conflict
 from etl.dedup.types import ListingRecord, PairEvaluation
 
 _MIN_TEXT_SIMILARITY = 0.55  # rapidfuzz score is 0-100; compared as a 0-1 ratio below
@@ -86,6 +113,14 @@ def evaluate(a: ListingRecord, b: ListingRecord) -> PairEvaluation | None:
         a.current_price, b.current_price
     )
     if price_ratio > _MAX_PRICE_RATIO:
+        return None
+
+    # Issue #566: unlike floor below (annotate, never veto here), a
+    # property_type/rooms contradiction kills the suggestion outright — see
+    # this module's docstring for why that's safe specifically for fuzzy
+    # and not for the signals above/below it in evaluate_pair's priority
+    # order.
+    if structured_fields_conflict(a, b):
         return None
 
     confidence = min(Decimal(str(round(similarity, 3))), _MAX_CONFIDENCE)
