@@ -67,7 +67,7 @@ function ListingSidePanel({ side }: { side: DedupListingSide }) {
         // comparison. .dedup-photo-grid switches to 2 columns below 768px
         // (globals.css) so each thumbnail roughly doubles in both
         // dimensions; desktop keeps repeat(4, 1fr) unchanged.
-        <div className="dedup-photo-grid" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 4 }}>
+        <div className="dedup-photo-grid" style={{ display: "grid", gap: 4 }}>
           {photos.map((url, i) => (
             // eslint-disable-next-line @next/next/no-img-element -- external, unpredictable-domain listing photos
             <img
@@ -221,6 +221,7 @@ export function SuggestionCard({
 
   return (
     <div
+      className="dedup-card"
       data-testid="dedup-suggestion-card"
       data-suggestion-id={suggestion.id}
       data-match-basis={suggestion.match_basis}
@@ -229,7 +230,6 @@ export function SuggestionCard({
         border: "1px solid var(--border)",
         borderRadius: 8,
         background: "var(--bg-1)",
-        padding: 12,
         display: "flex",
         flexDirection: "column",
         gap: 10,
@@ -313,7 +313,6 @@ export function SuggestionCard({
           disabled={pendingAction !== null}
           onClick={() => submit("reject")}
           style={{
-            padding: "6px 14px",
             borderRadius: 6,
             fontSize: 13,
             cursor: pendingAction !== null ? "default" : "pointer",
@@ -332,7 +331,6 @@ export function SuggestionCard({
           disabled={pendingAction !== null}
           onClick={() => submit("confirm")}
           style={{
-            padding: "6px 14px",
             borderRadius: 6,
             fontSize: 13,
             fontWeight: 600,

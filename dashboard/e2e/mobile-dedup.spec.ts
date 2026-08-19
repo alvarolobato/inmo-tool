@@ -201,22 +201,26 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
       expect(panelBBox!.y).toBeGreaterThan(panelABox!.y + panelABox!.height - 1);
 
       // Each panel is close to the full available row width, not squeezed
-      // to a ~140px sliver (the old flex-basis-0 bug). 220px is comfortably
-      // below what a fixed #576 layout renders (~280-300px+ measured
-      // locally) and comfortably above the ~140px the bug produced.
-      expect(panelABox!.width).toBeGreaterThanOrEqual(220);
-      expect(panelBBox!.width).toBeGreaterThanOrEqual(220);
+      // to a ~140px sliver (the old flex-basis-0 bug). 300px is issue
+      // #576's own stated bar (not just "bigger than the bug") — this
+      // layout ships at ~308px locally, so there's a real but tight margin;
+      // tightening further would make the assertion chase this specific
+      // build's rounding rather than the actual requirement.
+      expect(panelABox!.width).toBeGreaterThanOrEqual(300);
+      expect(panelBBox!.width).toBeGreaterThanOrEqual(300);
 
-      // Photos: legible, not ~32px thumbnails. 90px is well below the
-      // ~105-140px a fixed layout renders and well above the old bug's ~32px.
+      // Photos: legible, not ~32px thumbnails. 130x95 is comfortably below
+      // the ~148x111 a fixed layout renders locally and comfortably above
+      // the old bug's ~32px, so it still catches a regression partway back
+      // toward the bug without pinning this exact build's pixel values.
       const photos = card.locator(".dedup-photo-grid img");
       const photoCount = await photos.count();
       expect(photoCount).toBeGreaterThan(0);
       for (let i = 0; i < photoCount; i++) {
         const box = await photos.nth(i).boundingBox();
         expect(box).not.toBeNull();
-        expect(box!.width).toBeGreaterThanOrEqual(90);
-        expect(box!.height).toBeGreaterThanOrEqual(60);
+        expect(box!.width).toBeGreaterThanOrEqual(130);
+        expect(box!.height).toBeGreaterThanOrEqual(95);
       }
 
       // No horizontal overflow of the PAGE CONTENT this PR owns. Checked in
