@@ -152,4 +152,4 @@
 
 | ID | Binding rule |
 |----|--------------|
-| [D-120](docs/decisions/D-120-mobile-breakpoint-inline-style-precedence.md) | Mobile breakpoint is Tailwind's default `md:` (768px). On components mixing inline styles with Tailwind, use Tailwind ONLY for `hidden`/`md:*` display toggling — never set `display` (or any other styled property) inline on an element that also carries a responsive display class, or the inline style wins and silently defeats the breakpoint. |
+| [D-120](docs/decisions/D-120-mobile-breakpoint-inline-style-precedence.md) | Mobile breakpoint is Tailwind's default `md:` (768px). On components mixing inline styles with Tailwind, use Tailwind ONLY for `hidden`/`md:*` display toggling — never set `display` inline on an element that also carries a responsive display class, or the inline style wins and silently defeats the breakpoint. Other inline properties (color, fontSize) are fine — the collision is per-property. |

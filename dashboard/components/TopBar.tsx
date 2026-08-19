@@ -322,6 +322,27 @@ export function TopBar({
       {/* Mobile nav panel — anchored under the 56px header, mobile only.
           Only ever mounted while open, so it never affects desktop. */}
       {menuOpen && (
+        <>
+        {/* Invisible backdrop. Without it the outside-tap-to-dismiss handler
+            closes the menu on mousedown/touchstart but nothing swallows the
+            subsequent click, so the tap ALSO activates whatever is underneath
+            — reproduced on a real touch tap: dismissing the menu over the feed
+            navigated into a profile. On a phone, "tap elsewhere to close" is
+            the natural gesture, so it would misfire constantly. Rendered with
+            the panel, below it in z-order (PR #578 review, finding 1). */}
+        <div
+          data-testid="mobile-nav-backdrop"
+          className="md:hidden"
+          onClick={() => setMenuOpen(false)}
+          style={{
+            position: "fixed",
+            top: 56,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 29,
+          }}
+        />
         <div
           id="mobile-nav-panel"
           ref={menuPanelRef}
@@ -364,6 +385,7 @@ export function TopBar({
             );
           })}
         </div>
+        </>
       )}
     </header>
   );

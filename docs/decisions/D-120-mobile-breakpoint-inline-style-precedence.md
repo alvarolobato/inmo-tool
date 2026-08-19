@@ -3,7 +3,7 @@ id: D-120
 title: Mobile breakpoint is Tailwind md (768px); Tailwind owns display/visibility only, inline styles own every other property
 date: 2026-08-20
 group: Frontend / UI
-rule: Mobile breakpoint is Tailwind's default `md:` (768px). On components mixing inline styles with Tailwind, use Tailwind ONLY for `hidden`/`md:*` display toggling — never set `display` (or any other styled property) inline on an element that also carries a responsive display class, or the inline style wins and silently defeats the breakpoint.
+rule: Mobile breakpoint is Tailwind's default `md:` (768px). On components mixing inline styles with Tailwind, use Tailwind ONLY for `hidden`/`md:*` display toggling — never set `display` inline on an element that also carries a responsive display class, or the inline style wins and silently defeats the breakpoint. Other inline properties (color, fontSize) are fine — the collision is per-property.
 ---
 
 # D-120: Mobile breakpoint is Tailwind md (768px); Tailwind owns display/visibility only, inline styles own every other property
