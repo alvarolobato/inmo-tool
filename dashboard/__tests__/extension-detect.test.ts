@@ -308,15 +308,25 @@ describe("listingPortalForUrl — only search/results pages", () => {
       null,
     ],
     ["https://www.altamirainmuebles.com/", null],
-    // Hipoges search/results routes (D-111) → listing. Grounded in the site's
-    // own public Angular route table: /<lang>/(sale|rent)/<typology>/<country>
-    // /<town> or the area/countries/map/point variants.
+    // Hipoges search/results routes (D-111) → listing. Shape-based (issue
+    // #561 review round 2), not a token allow-list: /<lang>/<operation>/
+    // <typology>/<country>/<town> or the area/countries/map/point variants —
+    // an arbitrary non-"detail" operation token still matches, on purpose (a
+    // future vocabulary surprise must not make the portal unreachable again).
     ["https://realestate.hipoges.com/es/sale/flat/spain/madrid", "hipoges"],
     ["https://realestate.hipoges.com/es/rent/house/spain/malaga/features", "hipoges"],
     ["https://realestate.hipoges.com/es/area/sale/flat/spain", "hipoges"],
     ["https://realestate.hipoges.com/es/countries/sale/flat/spain", "hipoges"],
     ["https://realestate.hipoges.com/es/map/sale/flat/spain/madrid", "hipoges"],
     ["https://realestate.hipoges.com/es/point/sale/flat/spain/10", "hipoges"],
+    // The owner's OWN real navigated URL (issue #561 review round 2) — went
+    // unrecognised under the old `(sale|rent)` allow-list because the real
+    // operation code is `venta`, not `sale`. Ground truth from the live
+    // site; worth more than any synthetic case above.
+    [
+      "https://realestate.hipoges.com/es/venta/pisos-y-casas/espana/dos-hermanas_sevilla",
+      "hipoges",
+    ],
     // Hipoges detail / home → not a listing.
     ["https://realestate.hipoges.com/es/detail/12345", null],
     ["https://realestate.hipoges.com/", null],
@@ -384,6 +394,10 @@ describe("pageRoleForUrl — detail / listing / other / null routing (#237)", ()
     ["https://www.alisedainmobiliaria.com/comprar-viviendas/pisos/malaga", "listing"],
     ["https://www.altamirainmuebles.com/venta-viviendas/pontevedra", "listing"],
     ["https://realestate.hipoges.com/es/sale/flat/spain/madrid", "listing"],
+    [
+      "https://realestate.hipoges.com/es/venta/pisos-y-casas/espana/dos-hermanas_sevilla",
+      "listing",
+    ],
     // Supported portal, but a page we can't capture → "other" (guidance shown).
     ["https://www.idealista.com/", "other"],
     ["https://idealista.com/mi-cuenta/favoritos", "other"],

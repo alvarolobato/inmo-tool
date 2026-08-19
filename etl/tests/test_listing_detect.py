@@ -125,7 +125,10 @@ _LISTING_CASES: list[tuple[str, str | None]] = [
         None,
     ),
     ("https://www.altamirainmuebles.com/", None),
-    # Hipoges search/results routes → listing.
+    # Hipoges search/results routes → listing. Shape-based (issue #561 review
+    # round 2), not a token allow-list — an arbitrary non-"detail" operation
+    # token still matches, on purpose (a future vocabulary surprise must not
+    # make the portal unreachable again).
     ("https://realestate.hipoges.com/es/sale/flat/spain/madrid", "hipoges"),
     (
         "https://realestate.hipoges.com/es/rent/house/spain/malaga/features",
@@ -135,6 +138,14 @@ _LISTING_CASES: list[tuple[str, str | None]] = [
     ("https://realestate.hipoges.com/es/countries/sale/flat/spain", "hipoges"),
     ("https://realestate.hipoges.com/es/map/sale/flat/spain/madrid", "hipoges"),
     ("https://realestate.hipoges.com/es/point/sale/flat/spain/10", "hipoges"),
+    # The owner's OWN real navigated URL (issue #561 review round 2) — went
+    # unrecognised under the old `(sale|rent)` allow-list because the real
+    # operation code is `venta`, not `sale`. Ground truth from the live site;
+    # worth more than any synthetic case above.
+    (
+        "https://realestate.hipoges.com/es/venta/pisos-y-casas/espana/dos-hermanas_sevilla",
+        "hipoges",
+    ),
     # Hipoges detail / home → not a listing.
     ("https://realestate.hipoges.com/es/detail/12345", None),
     ("https://realestate.hipoges.com/", None),

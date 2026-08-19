@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { CaptureTask } from "@/lib/captura-tasks";
+import { loosenedPrefixLabel } from "@/lib/search-url/labels";
 
 /**
  * One capture TASK's FULL detail row on the task-driven `/captura` page
@@ -116,7 +117,7 @@ export function CaptureTaskRow({
                   padding: "2px 7px",
                 }}
               >
-                <strong>ampliada:</strong> {l.reason}
+                <strong>{loosenedPrefixLabel(l.constraint)}</strong> {l.reason}
               </li>
             ))}
           </ul>

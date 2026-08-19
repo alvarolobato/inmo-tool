@@ -20,6 +20,7 @@ import type { Scope } from "@/lib/profiles-schema";
 import { CAPTURE_PORTALS } from "@/lib/worklist";
 import { idealistaBuilder } from "./portals/idealista";
 import { alisedaBuilder } from "./portals/aliseda";
+import { hipogesBuilder } from "./portals/hipoges";
 import type { CodeMappingAxes } from "./drift";
 import type {
   CanonicalSearchScope,
@@ -44,6 +45,7 @@ export type {
 export const BUILDERS: Record<string, PortalSearchUrlBuilder> = {
   [idealistaBuilder.portal]: idealistaBuilder,
   [alisedaBuilder.portal]: alisedaBuilder,
+  [hipogesBuilder.portal]: hipogesBuilder,
 };
 
 /** Capture portals that currently have a search-URL builder. */

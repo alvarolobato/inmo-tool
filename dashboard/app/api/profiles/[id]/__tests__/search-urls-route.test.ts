@@ -67,8 +67,12 @@ describe("GET /api/profiles/[id]/search-urls", () => {
     const body = await res.json();
     expect(body.profileId).toBe(7);
     expect(body.name).toBe("Centro Madrid");
-    // A single-piso profile → one idealista task + one aliseda task.
-    expect(body.tasks.map((t: { portal: string }) => t.portal)).toEqual(["idealista", "aliseda"]);
+    // A single-piso profile → one idealista task + one aliseda task + one hipoges task.
+    expect(body.tasks.map((t: { portal: string }) => t.portal)).toEqual([
+      "idealista",
+      "aliseda",
+      "hipoges",
+    ]);
     for (const t of body.tasks) {
       expect(typeof t.id).toBe("string");
       expect(typeof t.label).toBe("string");

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { withValidateSignal } from "@/lib/extension-validate";
 import type { LoosenedConstraint } from "@/lib/search-url";
+import { loosenedPrefixLabel } from "@/lib/search-url/labels";
 import type { ProfileConnectorFilterSource } from "@/lib/db/profile-connector-filter";
 
 /**
@@ -293,7 +294,7 @@ export function FilterValidationRow({
               key={l.constraint}
               style={{ fontSize: 11, color: "var(--warn)", background: "var(--warn-bg)", borderRadius: 6, padding: "2px 8px" }}
             >
-              <strong>ampliada:</strong> {l.reason}
+              <strong>{loosenedPrefixLabel(l.constraint)}</strong> {l.reason}
             </li>
           ))}
         </ul>

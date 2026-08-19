@@ -76,6 +76,10 @@ const UNFILLED_REASON: Record<LoosenableConstraint, string> = {
   geography: "El ejemplo aprendido no acota la zona; los resultados son más amplios.",
   property_types: "El ejemplo aprendido no acota los tipos; los resultados son más amplios.",
   rooms: "El ejemplo aprendido no filtra por habitaciones; los resultados son más amplios.",
+  // "grammar" is never produced via the unfilled/substitute() path (it is a
+  // whole-URL flag builders attach directly, e.g. Hipoges, issue #561) — this
+  // entry exists only so the Record<LoosenableConstraint, string> stays total.
+  grammar: "La gramática de esta URL no está confirmada.",
 };
 
 function unfilledFlags(unfilled: readonly LoosenableConstraint[]): LoosenedConstraint[] {
@@ -166,7 +170,16 @@ function resolveTask(
   // filter-grammar refinement) above still applies. Tier-2 survives only for the
   // province/national FALLBACK case, where the builder itself could not name a
   // town and a nearby learned example is a legitimate (flagged) narrowing.
-  if (municipioForPoint(canonical.center)) return baseTask;
+  //
+  // Hipoges is EXEMPT from this gate (issue #561 review) — unlike idealista's
+  // slug, its `:town` is an admitted guess (reused from idealista/aliseda's
+  // OWN municipio table, never confirmed as Hipoges' own spelling), so it is
+  // never "authoritative" the way D-090 means for idealista. Gating tier-2 on
+  // "a municipio resolved" would disable same-area reuse in EXACTLY the two
+  // markets this tool operates in (Costa del Sol / greater Sevilla), which is
+  // backwards for a portal whose whole point is that a real capture should be
+  // able to correct a nearby guess.
+  if (baseTask.portal !== "hipoges" && municipioForPoint(canonical.center)) return baseTask;
 
   // Tier 2 — same section, an example centroid within AREA_MATCH_KM of the
   // profile's own centre (from the scope, not a URL). Nearest wins.

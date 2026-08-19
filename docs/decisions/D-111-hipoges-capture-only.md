@@ -76,6 +76,16 @@ reverse-engineering, or User-Agent spoofing was attempted, per D-075/D-033.
    non-detail, non-home path), same posture as Altamira's #510 corpus-building
    approach, since the search grammar itself is not yet confirmed.
 
+   **Addendum (2026-08-19, issue #561/D-115):** the `sale`/`rent` guess above
+   was wrong — the real operation code is `venta`/`alquiler` (confirmed from
+   the SAME public bundle, just the right i18n keys), and the typology
+   vocabulary this paragraph doesn't even name yet turned out to need its own
+   correction too. See [D-115](D-115-hipoges-search-url-inferred-grammar.md)
+   for the full trace. `etl/listing_detect.py`/`detect.js`'s `isListingPath`
+   no longer allow-lists specific operation tokens at all — it matches the
+   route's SHAPE instead, so this paragraph's own inference being wrong
+   doesn't silently break capture again the next time it's wrong.
+
 3. **Every DOM/CSS selector below the URL layer is an UNVALIDATED DRAFT.**
    No real Hipoges capture exists: the detail page is Angular-rendered, a
    plain GET returns the empty shell above, and the browser extension could

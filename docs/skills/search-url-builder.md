@@ -66,6 +66,20 @@ to something BROADER (more results, never fewer)** and appends a
 silently dropped** — the UI surfaces every `loosened` entry so the operator
 knows the open search is wider than the profile.
 
+**`"grammar"` (issue #561, D-115) is a different kind of flag.** Every other
+`LoosenableConstraint` names one specific dropped/broadened VALUE inside an
+otherwise-confirmed grammar (a rooms token, a price bound, a geography
+approximation). `"grammar"` instead flags that ONE SPECIFIC TOKEN in the
+URL is an unconfirmed inference — not, as the first version of Hipoges'
+builder claimed, the whole route. A fresh-context review of that first
+version (PR #562) found FOUR of five Hipoges typology tokens were flatly
+wrong and traced every one of them from the site's own public bundle with
+plain GETs — see the Hipoges entry under
+[Confirmed vs. reverse-engineered grammar](#confirmed-vs-reverse-engineered-grammar)
+below for the corrected facts, and read it before touching `hipoges.ts`:
+almost this whole grammar is confirmed, not guessed, and the one bundle read
+that confirmed it needed no probing.
+
 ## Scope → portal mapping (as of #277)
 
 The profile `Scope` carries geography as a **radius around a geocoded point**
@@ -85,6 +99,7 @@ is resolved by two small lat/lng tables:
 |--------|-----------|--------------------------|----------------------|
 | **idealista** | **Drawn polygon (`shape=`), #471.** The profile circle is rendered as a 24-gon (circumscribing → faithful, ~0.9% broader) and encoded as a Google polyline in `/areas/<operation>[/con-…]/mapa-google?shape=((<polyline>))`. The radius is expressed faithfully → geography is **never flagged**; two radii around one centre give two URLs. `municipios.ts` is used only for the human LABEL (nearest town). | One task per **operation section** (`venta-viviendas` / `venta-locales` / `venta-garajes` / …). Home subtypes are NOT narrowed (the section is the granularity — owner's confirmed URL carries no subtype token). | price `con-precio-desde_/precio-hasta_`; rooms `de-cuatro-cinco-habitaciones-o-mas` (min ≥ 4 confirmed; lower → omit + flag); size `con-metros-cuadrados-mas-de_/menos-de_`. Comma-joined after `con-`, in the PATH before `/mapa-google`. |
 | **aliseda** | `<comunidad>/<provincia>` path slugs from `provinces.ts`. Radius→province is **always broader** → geography **always loosened**. Point outside every box → drop geo segments + flag. | One task per **canonical type**, mapped to Aliseda's own taxonomy (#336): residential types are `comprar-viviendas/<subtype-slug>` (`pisos`, `chalets-adosados`, …); **non-residential types are their OWN top-level category** (`comprar-locales`/`comprar-naves`/`comprar-garajes`/`comprar-terrenos`/`comprar-edificios`), **not** nested under viviendas. Aliseda has **no `ático`** → ático folds onto `pisos` (broadened + flagged); chalet → `chalets-adosados` only (approx + flagged). Types collapsing to one URL (piso+ático) are de-duped. | `precio=<min>-<max>` (hyphen range, min defaults to 0), plus `subtipo=<code>` on viviendas (`pisos=36`, `chalets-adosados=31` confirmed; others omitted + flagged). Size has no confirmed grammar → dropped + flagged. |
+| **hipoges** (#561, D-115) | `:country` = `"espana"` (confirmed — country values compare against Spanish slugs in the bundle). `:town` = `<municipio>_<provincia>` (CONFIRMED format from one real example, `estepona_malaga`) — the two identifier halves are reused from idealista/aliseda's OWN municipio/province tables (their exact spelling for Hipoges is the one part of this row not independently confirmed). | One task per **confirmed typology SECTION** (`pisos-y-casas`/`locales-y-naves`/`garajes`/`terrenos`/`edificios`, read from the bundle's `filtersForm.subtypologies` keys — see below), not per canonical type: `piso`+`chalet`+`atico` → `pisos-y-casas`; `local`+`nave` → `locales-y-naves`; the rest keep their own section. No `property_types` flag — this is the site's own taxonomy, same "section is the granularity" shape as idealista's `venta-viviendas`. | `:operation` = `"venta"` — the ONE inferred token on this whole row, carries the sole `"grammar"` flag. `[:features]` is a CONFIRMED comma-joined list of config codes (price/rooms/baths/area+subtypology) whose exact codes are unconfirmed → price/size dropped + flagged, never guessed in. |
 
 ## Adding a portal
 
@@ -183,3 +198,94 @@ local edit; the tests pin current behaviour.
   **Resolver:** shape/multi are CONCRETE, code-pinned geometry — `resolve.ts`
   never lets a learned example relocate them (only a tier-0 owner override wins),
   which makes the #444 municipality-crossing rewrite structurally impossible.
+
+- **Hipoges — almost the WHOLE grammar is CONFIRMED by reading the public
+  bundle; only `:operation` is a guess (issue #561, D-115, revised after a
+  fresh-context review of the first version — PR #562).** No owner-tested
+  example and no successful crawl exist for Hipoges at all (D-075: every
+  sanctioned enumeration channel 403s an honest client). The FIRST version of
+  this builder responded to that by conflating two different things under
+  the name "probing": LIVE requests against the real site (correctly
+  forbidden, D-075/D-033) and READING THE SITE'S OWN PUBLIC BUNDLE
+  (`main-*.js`/`chunk-*.js`/`assets/i18n/*.json` — static assets on a plain
+  GET, no auth, no live search — exactly what D-111 already used to ground
+  the detail-URL shape). It guessed the typology vocabulary from the wrong
+  i18n keys and never opened the bundle to check. **Read the bundle before
+  guessing anything in this file — that is the expected first step, not an
+  exception to the no-probing rule.**
+
+  What the bundle actually says (all read with plain GETs, no live search,
+  no probing of any endpoint):
+
+  - `AssetsURLValidator.canActivate` (`main-*.js`) validates each route
+    segment against a real catalog and redirects HOME on a miss —
+    `typologies.find(_ => _.code === params.typology)`, same shape for
+    `operations`/`countries`. A wrong token is a **silent home-page
+    redirect**, not a 404 — worse than a visible failure, so getting this
+    right matters more than the first version's own text implied.
+  - `AssetsService.buildListingUrl` (`chunk-*.js`) builds the URL from
+    `.code`, never `.dbValue` — different strings on the same object.
+  - Typology i18n keys are `filtersForm.subtypologies.<code>`, so
+    `es.json`'s `filtersForm.subtypologies` object KEYS ARE the real
+    typology codes: `pisos-y-casas`, `locales-y-naves`, `terrenos`,
+    `garajes`, `oficinas`, `trasteros`, `edificios`, `obra_parada` —
+    CONFIRMED, not guessed. (`flat`/`house`/`garage`/… — what the first
+    version used — are `assetType.*` i18n keys, a DIFFERENT axis entirely;
+    none of them are valid typology codes. That was the review's B1.)
+  - `operation.dbValue` is `"venta"`/`"alquiler"` (es) — `.code` (what the
+    route validates) is the ONE thing the bundle does not pin outright. The
+    first version used the ENGLISH `dbValue` ("sale") from the wrong locale,
+    which is exactly why the wrong guess looked plausible. `"venta"` is now
+    used as the most-likely code, and it is the ONLY inferred token left.
+  - `cercaliaService.getCode` + a town→code table (`chunk-*.js`) confirms
+    `:town` is `<municipio>_<provincia>` — underscore-joined, accents
+    stripped (`"Estepona, Málaga"` → `"estepona_malaga"`) — CONFIRMED
+    format, not the bare municipio slug idealista/aliseda use (which the
+    first version wrongly emitted).
+  - `:country` values compare against Spanish slugs (`"grecia"` is one) —
+    `"espana"` was already correct, unchanged.
+  - `[:features]` (`_getAssetsFeats`, `chunk-*.js`) is a confirmed
+    comma-joined list of CONFIG CODES (price/rooms/baths/area +
+    subtypology) — a known SHAPE, unconfirmed exact CODES. Never guess a
+    code in; price/size stay reported as dropped.
+
+  So the builder emits `/es/venta/<typology>/espana/<town>` where `:lang`,
+  `:typology`, `:country`, and the `:town` FORMAT are all CONFIRMED — one
+  task PER TYPOLOGY SECTION (`piso`+`chalet`+`atico` → `pisos-y-casas`;
+  `local`+`nave` → `locales-y-naves`; the rest keep their own confirmed
+  section — the site's own taxonomy, no `property_types` flag, same "section
+  is the granularity" shape idealista's `venta-viviendas` already has). Only
+  `:operation` (`"venta"`) is inferred, and it is the ONLY thing the
+  `"grammar"` loosened flag names now (a NEW `LoosenableConstraint`, distinct
+  from every other flag here — see the best-effort contract section above).
+
+  **`hipogesParser` must accept ANY operation/typology token, never reject to
+  `null`.** The first version whitelisted `sale|rent` and a fixed (wrong)
+  typology set, so a REAL captured URL — which necessarily uses tokens the
+  builder didn't happen to guess right — decoded to `null` and
+  `saveSearchUrlExample` silently never learned anything (the review's B2).
+  D-051's whole point is broken if the thing meant to teach this file a URL
+  never accepts one. An unrecognised typology now decodes `propertyTypes` to
+  `[]` (honest "we don't know which of our types this is") rather than being
+  rejected — the URL is still stored and still learnable. `resolve.ts` also
+  exempts Hipoges from the #444 "code-driven town is authoritative" gate —
+  this builder's town is an admitted guess, not a confirmed slug the way
+  idealista's is, so same-area reuse (tier 2) must stay reachable even when a
+  municipio resolves (which it does for every point in this tool's own two
+  markets).
+
+  **Do not fuzz `POST /api/assets/map`, spoof a User-Agent, or try a guessed
+  URL against the live site "just to check"** (D-075/D-033's stop-probing
+  rule — this is still correctly forbidden). **Do** read the public bundle
+  first; it answers almost everything here. The correction mechanism for the
+  one remaining guess (`:operation`) is D-051 capture-to-infer:
+  `hipogesParser` is registered like every other portal's parser, and now
+  actually accepts a real capture (see above), so the owner's FIRST real
+  navigated Hipoges search is auto-trusted and upgrades every future task
+  for that section, dropping the `"grammar"` flag — exactly like
+  idealista/aliseda already get. A resolver-level test with a hand-written,
+  realistic captured URL (`dashboard/lib/search-url/__tests__/resolve.test.ts`)
+  proves this end to end — its absence from the first version is exactly why
+  B2 shipped unnoticed; don't remove it. See
+  [D-115](../decisions/D-115-hipoges-search-url-inferred-grammar.md) for the
+  full record.
