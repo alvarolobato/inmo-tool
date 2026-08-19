@@ -56,21 +56,32 @@ services:
   otel-collector:
     image: docker.elastic.co/elastic-agent/elastic-agent:8.16.0
     restart: unless-stopped
-    command: ["/usr/share/elastic-agent/elastic-agent", "otel", "--config", "/etc/otelcol-config.yaml"]
+    # Command, env and mount paths are the local stack's, verbatim. They are
+    # not interchangeable: ELASTIC_AGENT_OTEL is what puts the image in OTel
+    # collector mode instead of Fleet mode, and without it port 13133 never
+    # binds, so this service never turns healthy and etl/dashboard never start.
+    command: ["otel", "--config", "/etc/otelcol/config.yaml"]
     environment:
-      ELASTIC_OTLP_ENDPOINT: ${ELASTIC_OTLP_ENDPOINT:-}
-      ELASTIC_API_KEY: ${ELASTIC_API_KEY:-}
+      ELASTIC_AGENT_OTEL: "true"
+      # Bare keys, no default: compose passes them through only when set, which
+      # is what lets otelcol-config.yaml fall back to writing JSONL locally.
+      ELASTIC_OTLP_ENDPOINT:
+      ELASTIC_OTLP_API_KEY:
       ENVIRONMENT: ${ENVIRONMENT:-production}
     volumes:
-      - ./otel/otelcol-config.yaml:/etc/otelcol-config.yaml:ro
-      - ./otel/local:/otel-output:rw
+      - ./otel/otelcol-config.yaml:/etc/otelcol/config.yaml:ro
+      - ./otel/local:/var/log/otel
     networks: [shared]
+    expose:
+      - "4317"   # OTLP gRPC
+      - "4318"   # OTLP HTTP
+      - "13133"  # health_check extension
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:13133 > /dev/null || exit 1"]
-      interval: 30s
+      test: ["CMD-SHELL", "curl -fsS http://localhost:13133/ || exit 1"]
+      interval: 10s
       timeout: 5s
-      retries: 3
-      start_period: 20s
+      retries: 5
+      start_period: 15s
 
   # ---------------------------------------------------------------------------
   # Connector scheduler. Runs every registered connector on startup, then
