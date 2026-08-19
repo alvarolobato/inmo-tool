@@ -127,7 +127,12 @@ remote "cd ${PROD_PATH} && docker compose -f docker-compose.prod.yml run --rm db
     || die "db-init failed"
 ok "role and database ready"
 
-tables="$(number "$(rpsql app "$DB_NAME" -tAc "\"SELECT count(*) FROM information_schema.tables WHERE table_schema='public'\"" | tr -d '[:space:]')" "the tables in ${DB_NAME}")"
+# Counts the application's own tables only. Two things would otherwise make a
+# freshly created database look occupied: information_schema.tables also lists
+# views, and db-init installs pg_stat_statements, whose two views live in
+# public. Hence real tables (relkind r/p) that no extension owns.
+COUNT_TABLES_SQL="SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind IN ('r','p') AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e')"
+tables="$(number "$(rpsql app "$DB_NAME" -tAc "\"${COUNT_TABLES_SQL}\"" | tr -d '[:space:]')" "the tables in ${DB_NAME}")"
 if [ "$tables" -gt 0 ]; then
     [ "$FORCE" = true ] || die "'${DB_NAME}' already has ${tables} tables on the host. Re-run with --force to replace it."
     warn "'${DB_NAME}' had ${tables} tables — dropping and recreating (--force)"
