@@ -23,6 +23,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { stripNulBytes } from "@/lib/strip-nul-bytes";
 import { sql } from "@/lib/db-write";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 import { adminApiKeyValid, adminUnauthorized } from "@/lib/admin-api-auth";
@@ -36,26 +37,6 @@ const MAX_HTML_BYTES = 10 * 1024 * 1024; // 10MB — a full rendered page is a f
 // on the property detail page (Opus review, PR #87 — verified end-to-end).
 const ALLOWED_URL_SCHEMES = new Set(["http:", "https:"]);
 
-/**
- * Replace U+0000 with U+FFFD before the row reaches Postgres.
- *
- * A `text` column cannot hold a NUL byte — the driver reports
- * `invalid byte sequence for encoding "UTF8": 0x00` and the whole INSERT
- * fails, so the endpoint 500s and the operator's capture is lost with a
- * message that says nothing about why. Found in production on the first real
- * Hipoges capture (issue #207): its rendered DOM carries a NUL. Nothing is
- * Hipoges-specific about it — any portal can serialise one, and this endpoint
- * had no guard at all, so this was a latent 500 for every source.
- *
- * U+FFFD (REPLACEMENT CHARACTER) rather than deletion because that is exactly
- * what the HTML spec already mandates: the tokenizer replaces a U+0000 in the
- * input stream with U+FFFD. So a browser rendering this page saw U+FFFD too —
- * substituting it keeps our stored copy faithful to what the DOM meant, and
- * keeps every downstream character offset stable, which deleting would not.
- */
-export function stripNulBytes(value: string): string {
-  return value.includes("\u0000") ? value.replaceAll("\u0000", "\uFFFD") : value;
-}
 
 interface CaptureBody {
   url?: string;
