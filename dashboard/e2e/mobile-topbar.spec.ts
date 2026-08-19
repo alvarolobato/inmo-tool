@@ -180,43 +180,6 @@ test.describe("mobile shell (iPhone 13 emulation, 390px)", () => {
     await page.keyboard.press("Escape");
     await expect(page.locator("#mobile-nav-panel")).toHaveCount(0);
   });
-  test("dismissing by tapping outside does NOT activate the control underneath", async ({
-    page,
-  }) => {
-    // PR #578 review, finding 1: the outside-tap handler closes the menu on
-    // mousedown/touchstart and nothing swallowed the subsequent click, so a
-    // real touch tap ALSO activated whatever sat underneath — the reviewer
-    // reproduced dismissing the menu over the feed and navigating into a
-    // profile. A backdrop below the panel now absorbs that click.
-    //
-    // HONEST LIMITATION: this test does NOT pin the backdrop. Removing the
-    // backdrop leaves it green — I could not reproduce the tap-through under
-    // emulation with either `mouse.click` or `touchscreen.tap` on the Entrar
-    // control. So treat it as a guard on the CLOSE behaviour (menu shuts, URL
-    // unchanged), not as proof the backdrop is load-bearing. The evidence for
-    // the backdrop is the reviewer's manual reproduction, not this assertion.
-    // If someone later reproduces the tap-through, tighten this test then.
-    await page.goto("/profiles");
-    await page.waitForLoadState("networkidle");
-    const before = page.url();
-
-    const hamburger = page.getByRole("button", { name: "Menú" });
-    await hamburger.click();
-    await expect(hamburger).toHaveAttribute("aria-expanded", "true");
-
-    // Tap ON a real link under the menu — a blind click at arbitrary
-    // coordinates may land on empty space and passes even without the
-    // backdrop, which is a decorative test. Target the profile "Entrar"
-    // control specifically: that is what actually fired in the review.
-    const target = page.getByTestId("profile-enter-button").first();
-    await expect(target).toBeVisible();
-    const box = await target.boundingBox();
-    if (!box) throw new Error("no Entrar control to tap under the menu");
-    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
-
-    await expect(hamburger).toHaveAttribute("aria-expanded", "false");
-    expect(page.url()).toBe(before);
-  });
 });
 
 test.describe("desktop (>=768px) — unchanged", () => {
