@@ -78,20 +78,45 @@ _PORTALS: list[dict[str, object]] = [
         # hipoges.py's module docstring. DOM extraction beyond this URL shape
         # is an unvalidated draft (D-111).
         "detail": re.compile(r"^/[a-z]{2}/(?:[^/]+/)?detail/[^/]+", re.IGNORECASE),
-        # Search/listing routes are `/<lang>/(sale|rent)/<typology>/<country>/…`
-        # or the `/<lang>/(area|countries|map|point)/…` variants. NOTE this is
-        # NOT strictly mutually exclusive with `detail` above: a path like
-        # `/es/map/detail/999` matches BOTH (the `map` listing marker fires,
-        # and `detail` fires too since `:investment` is unconstrained). Opus
-        # review (PR #548, N4) confirmed this — harmless in practice (every
-        # consumer here resolves detail first) but real, so this comment no
-        # longer claims the general "mutually exclusive by construction"
-        # invariant the module docstring states for the other three portals.
-        # The `sale`/`rent` operation tokens are inferred from the site's own
-        # public i18n key names (assets/i18n/es.json), not directly observed
-        # on a live URL — unconfirmed, see hipoges.py's module docstring.
+        # Search/listing routes are `/<lang>/<operation>/<typology>/<country>/
+        # <town>[/<features>]` (5+ path segments after the domain) or the
+        # `/<lang>/(area|countries|map|point)/…` variants.
+        #
+        # issue #561 review round 2 (the owner's real navigated URL,
+        # `/es/venta/pisos-y-casas/espana/dos-hermanas_sevilla`, went
+        # unrecognised): this used to hard-code `(sale|rent)` as the ONLY
+        # accepted operation tokens, guessed from the wrong i18n axis (see
+        # dashboard/lib/search-url/portals/hipoges.ts's module docstring for
+        # the full trace — the real operation code is `venta`/`alquiler`,
+        # confirmed from the public bundle, and even that is not guaranteed
+        # exhaustive). Enumerating tokens here made the SAME mistake B2 made
+        # in the search-URL parser: a real URL using a token this regex
+        # didn't happen to allow-list simply vanished. This now matches the
+        # route's SHAPE instead — any two non-"detail" segments (operation,
+        # typology) followed by at least two more segments (country, town) —
+        # so a future vocabulary surprise can't silently make the portal
+        # unreachable again.
+        #
+        # The negative lookaheads on the first two segments are what keep
+        # this from swallowing a detail URL: `/es/detail/999` puts "detail"
+        # in the OPERATION position (excluded), `/es/<investment>/detail/
+        # <id>[/…]` puts it in the TYPOLOGY position (excluded) — both of
+        # `listing_detect.py`'s two detail shapes are covered. This is
+        # STRICTER than a plain shape match would be, not looser.
+        #
+        # NOTE this is still not strictly mutually exclusive with `detail`
+        # above for the LITERAL `area|countries|map|point` markers: a path
+        # like `/es/map/detail/999` matches both (the `map` marker fires, and
+        # `detail` fires too since `:investment` is unconstrained there) —
+        # unchanged from the original Opus review (PR #548, N4) finding,
+        # harmless in practice since every consumer here resolves detail
+        # first. The shape-based branch added here does NOT introduce any
+        # new instance of that overlap — it structurally excludes "detail".
         "listing": re.compile(
-            r"^/[a-z]{2}/(?:(?:sale|rent)/|area/|countries/|map/|point/)",
+            r"^/[a-z]{2}/(?:"
+            r"(?:area|countries|map|point)(?:/|$)"
+            r"|(?!detail(?:/|$))[^/?#]+/(?!detail(?:/|$))[^/?#]+/[^/?#]+/[^/?#]+"
+            r")",
             re.IGNORECASE,
         ),
     },

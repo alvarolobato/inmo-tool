@@ -138,6 +138,41 @@ all, wired to D-051) is unchanged; what changed is the FACTS the builder
 encodes. Keeping the original text below, clearly superseded, is a more
 honest record of how the mistake happened than deleting it.
 
+## Revised again (2026-08-19, round 2) — the SAME wrong vocabulary had a THIRD
+## call site, and it was the one that actually blocked the owner
+
+The fix above corrected the builder (`hipoges.ts`) and the parser
+(`hipogesParser`). It did not touch a THIRD place the same wrong `sale`/`rent`
+guess had been written into: the LISTING-vs-DETAIL page-role detectors —
+`etl/listing_detect.py` and `browser-extension/detect.js` (D-069's
+lockstep-mirror pair) — whose `isListingPath`/`"listing"` regex hard-coded
+`(sale|rent)` as the only accepted operation tokens. The owner navigated a
+real search
+(`https://realestate.hipoges.com/es/venta/pisos-y-casas/espana/dos-hermanas_sevilla`)
+and the extension reported no capture-capable connector recognised it — the
+detectors, not the builder/parser, were what actually gated whether the
+extension would even try to capture the page at all.
+
+**Fix**: both mirrors now match the route's SHAPE (`operation`/`typology`
+positions are simply "not literally `detail`", never an enumerated token
+list) instead of an allow-list — applying the SAME B2 lesson (don't
+enumerate a vocabulary you don't have to) one level up the stack, where it
+should have been applied the first time. The owner's exact URL is now a
+permanent test case in both suites (`etl/tests/test_listing_detect.py`,
+`dashboard/__tests__/extension-detect.test.ts`) — real ground truth from the
+live site.
+
+**Lesson for future agents**: when "the vocabulary was wrong" turns out to be
+true, grep the WHOLE tree for the wrong tokens before declaring the fix
+complete — this vocabulary had three independent call sites (builder,
+parser, detector-pair) written from the same original guess, and each
+review only looked at the slice it was asked to look at. `etl/connectors/hipoges.py`'s
+own `hipoges_mapping.py` module ALSO uses `flat`/`house`/`garage`/`storage`/
+`office`/`building`/`apartment` as English keywords — but for free-text DOM
+title/description matching, a legitimately different (and still correct)
+use of the same i18n bundle's `assetType.*` axis, not a URL slug. Checked
+and left alone.
+
 ---
 
 ## Original decision (2026-08-19, SUPERSEDED above — kept for the record)

@@ -192,18 +192,43 @@
       isDetailPath: function (p) {
         return /^\/[a-z]{2}\/(?:[^/]+\/)?detail\/[^/]+/i.test(p);
       },
-      // Search/listing routes are `/<lang>/(sale|rent)/<typology>/<country>/…`
-      // or the `/<lang>/(area|countries|map|point)/…` variants. NOTE: not
-      // strictly disjoint from isDetailPath above — `/es/map/detail/999`
+      // Search/listing routes are `/<lang>/<operation>/<typology>/<country>/
+      // <town>[/<features>]` (5+ path segments after the domain) or the
+      // `/<lang>/(area|countries|map|point)/…` variants.
+      //
+      // issue #561 review round 2 (the owner's real navigated URL,
+      // `/es/venta/pisos-y-casas/espana/dos-hermanas_sevilla`, went
+      // unrecognised): this used to hard-code `(sale|rent)` as the ONLY
+      // accepted operation tokens, guessed from the wrong i18n axis (see
+      // dashboard/lib/search-url/portals/hipoges.ts's module docstring for
+      // the full trace — the real operation code is `venta`/`alquiler`,
+      // confirmed from the public bundle, and even that is not guaranteed
+      // exhaustive). Enumerating tokens here made the SAME mistake B2 made
+      // in the search-URL parser: a real URL using a token this regex
+      // didn't happen to allow-list simply vanished. This now matches the
+      // route's SHAPE instead — any two non-"detail" segments (operation,
+      // typology) followed by at least two more segments (country, town) —
+      // so a future vocabulary surprise can't silently make the portal
+      // unreachable again. MUST stay in lockstep with the Python mirror
+      // (etl/listing_detect.py, D-069).
+      //
+      // The negative lookaheads on the first two segments are what keep
+      // this from swallowing a detail URL: `/es/detail/999` puts "detail"
+      // in the OPERATION position (excluded), `/es/<investment>/detail/
+      // <id>[/…]` puts it in the TYPOLOGY position (excluded) — both of
+      // isDetailPath's two shapes are covered. STRICTER than a plain shape
+      // match, not looser.
+      //
+      // NOTE: still not strictly disjoint from isDetailPath above for the
+      // LITERAL `area|countries|map|point` markers — `/es/map/detail/999`
       // matches BOTH (the `map/` marker fires here, and `detail` fires
-      // there since `:investment` is unconstrained). Harmless in practice
-      // (every consumer resolves detail first — see pageRoleForUrl below)
-      // but real, verified by Opus review (PR #548, N4) — unlike the other
-      // three portals, this one is not mutually exclusive by construction.
-      // The `sale`/`rent` tokens are inferred from the site's own public
-      // i18n key names, not directly observed on a live URL — unconfirmed.
+      // there since `:investment` is unconstrained) — unchanged from the
+      // original Opus review (PR #548, N4) finding, harmless in practice
+      // since every consumer resolves detail first (see pageRoleForUrl
+      // below). The shape-based branch added here does NOT introduce any
+      // new instance of that overlap — it structurally excludes "detail".
       isListingPath: function (p) {
-        return /^\/[a-z]{2}\/(?:(?:sale|rent)\/|area\/|countries\/|map\/|point\/)/i.test(
+        return /^\/[a-z]{2}\/(?:(?:area|countries|map|point)(?:\/|$)|(?!detail(?:\/|$))[^/?#]+\/(?!detail(?:\/|$))[^/?#]+\/[^/?#]+\/[^/?#]+)/i.test(
           p
         );
       },
