@@ -101,3 +101,60 @@ describe("POST /api/extension/capture", () => {
     expect(mockSql).toHaveBeenCalledTimes(1);
   });
 });
+
+
+describe("NUL bytes in the captured payload (issue #207 — a real 500 in production)", () => {
+  beforeEach(() => {
+    mockSql.mockReset();
+    mockSql.mockResolvedValue([{ id: 42 }]);
+    vi.stubEnv("ADMIN_API_KEY", ADMIN_KEY);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("stores a page whose DOM carries a NUL instead of 500ing", async () => {
+    // The owner's first real Hipoges capture failed with Postgres'
+    // `invalid byte sequence for encoding "UTF8": 0x00`. A text column cannot
+    // hold U+0000, so the INSERT threw and the capture was lost behind a
+    // generic 500. Nothing Hipoges-specific — the endpoint had no guard for
+    // any source, so this was latent for every portal.
+    const html = `<html><body><h1>Piso\u0000 en Dos Hermanas</h1></body></html>`;
+    const res = await POST(
+      makeRequest(
+        { url: "https://realestate.hipoges.com/es/detail/12345", html },
+        { adminKey: ADMIN_KEY },
+      ),
+    );
+    expect(res.status).toBe(200);
+
+    const [, params] = mockSql.mock.calls[0] as [string, unknown[]];
+    // U+FFFD, not deletion: the HTML spec's tokenizer substitutes U+FFFD for
+    // U+0000, so this is what the browser rendering the page saw, and it keeps
+    // downstream character offsets stable.
+    expect(params[1]).toBe(`<html><body><h1>Piso\uFFFD en Dos Hermanas</h1></body></html>`);
+    expect(params[1]).not.toContain("\u0000");
+  });
+
+  it("sanitises the url too — a NUL anywhere in the tuple fails the same INSERT", async () => {
+    const res = await POST(
+      makeRequest(
+        { url: "https://realestate.hipoges.com/es/detail/1\u000023", html: "<html></html>" },
+        { adminKey: ADMIN_KEY },
+      ),
+    );
+    expect(res.status).toBe(200);
+    const [, params] = mockSql.mock.calls[0] as [string, unknown[]];
+    expect(params[0]).not.toContain("\u0000");
+  });
+
+  it("leaves a clean payload byte-identical — no cost on the common path", async () => {
+    const html = "<html><body>sin nulos</body></html>";
+    await POST(
+      makeRequest({ url: "https://realestate.hipoges.com/es/detail/7", html }, { adminKey: ADMIN_KEY }),
+    );
+    const [, params] = mockSql.mock.calls[0] as [string, unknown[]];
+    expect(params[1]).toBe(html);
+  });
+});
