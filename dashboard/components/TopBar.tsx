@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 import { useFreshness } from "@/components/FreshnessContext";
 
 interface TopBarProps {
@@ -33,6 +34,43 @@ export function TopBar({
   // shown with a distinct dot colour from both fresh (up) and stale (warn).
   const freshnessRefreshing = ctx.freshnessRefreshing && !freshnessStale;
 
+  // Issue #571: mobile shell. At <768px the inline nav, Admin link and avatar
+  // are hidden (Tailwind `hidden md:*` — display-only, never collides with
+  // this component's inline styles) and replaced by a hamburger button that
+  // opens a full-width panel listing the same destinations plus Admin. Menu
+  // closes on link tap, outside tap, and Escape. Desktop (>=768px) is
+  // untouched: same inline nav, same pixels.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuPanelRef = useRef<HTMLDivElement>(null);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+
+  // Close on route change (link tap navigates -> pathname changes).
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [pathname]);
+
+  // Close on outside tap and on Escape.
+  useEffect(() => {
+    if (!menuOpen) return;
+    function handlePointerDown(e: MouseEvent | TouchEvent) {
+      const target = e.target as Node;
+      if (menuPanelRef.current?.contains(target)) return;
+      if (menuButtonRef.current?.contains(target)) return;
+      setMenuOpen(false);
+    }
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") setMenuOpen(false);
+    }
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("touchstart", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("touchstart", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [menuOpen]);
+
   // Wren nav link removed: WrenAI doesn't exist in this project (removed in
   // task 1.1). Paneles + Revisión removed (#101): both were the inherited
   // PowerShop generic dashboard-builder / weekly-business-review generator,
@@ -44,7 +82,8 @@ export function TopBar({
   // deliberately placed next to Perfiles: the day-to-day loop (pick a profile →
   // open its pre-filtered searches → track capture progress) is a first-class
   // user task, not admin. SETUP (extension install, API key, connector config,
-  // the raw worklist table) stays under /etl (Admin). See D-045.
+  // the raw worklist table) stays under /etl (Admin). See D-045 — Captura must
+  // stay reachable top-level, including from the mobile hamburger menu below.
   // Issue #195: the standalone "Inicio" entry was dropped (owner-approved,
   // 2026-08-03). `/inicio` and `/` now render the same redesigned Perfiles
   // surface the "Perfiles" link points at, so a separate nav entry would be a
@@ -55,6 +94,17 @@ export function TopBar({
     { href: "/captura", label: "Captura" },
     { href: "/conversations", label: "Conversaciones" },
   ] as const;
+
+  // Same active-route rule used by the desktop pills, reused by the mobile
+  // menu rows (D-045: Admin must also be reachable, so it's appended here).
+  function isActiveHref(href: string): boolean {
+    if (href === "/profiles") {
+      return pathname === "/" || pathname.startsWith("/inicio") || pathname.startsWith("/profiles");
+    }
+    return pathname.startsWith(href);
+  }
+
+  const menuLinks = [...navLinks, { href: "/admin", label: "Admin" }] as const;
 
   return (
     <header
@@ -68,30 +118,29 @@ export function TopBar({
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path d="M4 2 L14 2 L20 11 L10 22 L4 22 L4 13 L11 13 L8 9 L4 9 Z" fill="var(--accent)" />
           </svg>
+          {/* Wordmark: never wraps; hidden below md (issue #571) — the
+              two-line "Inmo-"/"Tool" wrap was the widest single overflow
+              source alongside the nav row. */}
           <span
+            className="hidden md:inline"
             style={{
               fontFamily: "var(--font-inter), sans-serif",
               fontWeight: 700,
               fontSize: 14,
               letterSpacing: "-0.01em",
               color: "var(--fg)",
+              whiteSpace: "nowrap",
             }}
           >
             Inmo-Tool
           </span>
         </div>
 
-        {/* Primary nav */}
-        <nav className="flex items-center gap-1">
+        {/* Primary nav — hidden below md, replaced by the hamburger menu */}
+        <nav className="hidden md:flex items-center gap-1">
           {navLinks.map((link) => {
             const isExternal = "external" in link && link.external;
-            const isActive =
-              !isExternal &&
-              (link.href === "/profiles"
-                ? pathname === "/" ||
-                  pathname.startsWith("/inicio") ||
-                  pathname.startsWith("/profiles")
-                : pathname.startsWith(link.href));
+            const isActive = !isExternal && isActiveHref(link.href);
             const style = {
               padding: "6px 12px",
               borderRadius: 6,
@@ -123,7 +172,7 @@ export function TopBar({
         </nav>
       </div>
 
-      {/* Right: status + cog + admin + avatar */}
+      {/* Right: status + cog + hamburger (mobile) + admin + avatar (desktop) */}
       <div className="flex items-center gap-3 px-5">
         {/* Live status */}
         <div
@@ -145,8 +194,14 @@ export function TopBar({
               flexShrink: 0,
             }}
           />
+          {/* Dot-only below md (issue #571): the dot always renders (colour
+              semantics unchanged); the text is hidden on narrow viewports —
+              "Datos desactualizados · hace 3h" alone was ~140px of the
+              overflow. The `title` tooltip on the wrapper still carries the
+              freshness timestamp for a mobile long-press. */}
           <span
             data-testid="freshness-indicator"
+            className="hidden md:inline"
             style={{
               fontSize: 11,
               color: "var(--fg-muted)",
@@ -183,9 +238,54 @@ export function TopBar({
           </svg>
         </button>
 
-        {/* Admin link */}
+        {/* Hamburger — mobile only (issue #571). >=44x44 hit area for a
+            thumb tap; toggles the menu panel below the header. The icon is
+            centred by an inner span, not by `display` on the button itself:
+            an inline `display` on this element would beat the `md:hidden`
+            Tailwind class that hides it at >=768px (inline styles win over
+            Tailwind for the same property — see the constraint on this
+            component), which is exactly what happened during development. */}
+        <button
+          ref={menuButtonRef}
+          type="button"
+          className="md:hidden"
+          onClick={() => setMenuOpen((v) => !v)}
+          aria-label="Menú"
+          aria-expanded={menuOpen}
+          aria-controls="mobile-nav-panel"
+          style={{
+            background: "none",
+            border: "none",
+            cursor: "pointer",
+            color: "var(--fg-muted)",
+            width: 44,
+            height: 44,
+            borderRadius: 6,
+            marginRight: -10,
+            padding: 0,
+          }}
+        >
+          <span
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: "100%",
+              height: "100%",
+            }}
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+              <line x1="3" y1="6" x2="21" y2="6" />
+              <line x1="3" y1="12" x2="21" y2="12" />
+              <line x1="3" y1="18" x2="21" y2="18" />
+            </svg>
+          </span>
+        </button>
+
+        {/* Admin link — hidden below md, folded into the hamburger menu */}
         <Link
           href="/admin"
+          className="hidden md:inline"
           style={{
             fontSize: 13,
             fontWeight: 400,
@@ -198,8 +298,9 @@ export function TopBar({
           Admin
         </Link>
 
-        {/* Avatar */}
+        {/* Avatar — hidden below md (decorative, saves space) */}
         <div
+          className="hidden md:flex"
           style={{
             width: 28,
             height: 28,
@@ -208,7 +309,6 @@ export function TopBar({
             color: "var(--accent)",
             fontSize: 11,
             fontWeight: 600,
-            display: "flex",
             alignItems: "center",
             justifyContent: "center",
             flexShrink: 0,
@@ -218,6 +318,53 @@ export function TopBar({
           AL
         </div>
       </div>
+
+      {/* Mobile nav panel — anchored under the 56px header, mobile only.
+          Only ever mounted while open, so it never affects desktop. */}
+      {menuOpen && (
+        <div
+          id="mobile-nav-panel"
+          ref={menuPanelRef}
+          role="navigation"
+          aria-label="Menú principal"
+          className="md:hidden"
+          style={{
+            position: "fixed",
+            top: 56,
+            left: 0,
+            right: 0,
+            zIndex: 30,
+            background: "var(--bg-1)",
+            borderBottom: "1px solid var(--border)",
+            boxShadow: "0 8px 16px rgba(0, 0, 0, 0.15)",
+          }}
+        >
+          {menuLinks.map((link) => {
+            const isActive = isActiveHref(link.href);
+            return (
+              <Link
+                key={link.href}
+                href={link.href}
+                onClick={() => setMenuOpen(false)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  minHeight: 44,
+                  padding: "12px 20px",
+                  fontSize: 15,
+                  fontWeight: isActive ? 500 : 400,
+                  color: isActive ? "var(--fg)" : "var(--fg-muted)",
+                  background: isActive ? "var(--bg-2)" : "transparent",
+                  textDecoration: "none",
+                  borderBottom: "1px solid var(--border)",
+                }}
+              >
+                {link.label}
+              </Link>
+            );
+          })}
+        </div>
+      )}
     </header>
   );
 }
