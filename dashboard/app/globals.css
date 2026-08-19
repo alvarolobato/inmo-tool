@@ -521,3 +521,51 @@ body {
     transition: none;
   }
 }
+
+/* ============================================================
+   /admin/dedup — phone-width layout (#576)
+   ============================================================
+   SuggestionCard's comparison row is `display:flex; flexWrap:"wrap"` with
+   each ListingSidePanel now at `flex: 1 1 280px` (inline style, see the
+   component) — real wrapping below ~600px of row width. These rules only
+   adjust what happens ONCE that wrap has already occurred; the wrap
+   threshold itself lives in the panel's own flex-basis. 768px matches this
+   project's only other documented mobile/desktop split (issue #576's
+   "desktop >=768px pixel-identical" constraint) — chosen here as the
+   authoritative breakpoint rather than inferring one from a component. */
+@media (max-width: 767px) {
+  /* AdminChrome already applies padding: var(--pad) around every /admin/*
+     page's content — this page's own matching inline padding is a second,
+     redundant layer (see the component's comment). !important is required
+     to beat the inline `padding` style. */
+  .dedup-page {
+    padding: 0 !important;
+  }
+
+  /* The "≟" separator between the two panels: without this it would
+     otherwise share panel A's flex line (flex-basis 100% forces it onto
+     its own row, which pushes panel B onto a third row below). */
+  .dedup-vs-icon {
+    flex-basis: 100%;
+  }
+
+  /* 4 thumbnails across a ~300-350px stacked panel are too small to
+     compare visually (#576's root complaint) — 2 columns roughly doubles
+     each thumbnail's width and height. Desktop keeps the inline
+     repeat(4, 1fr) untouched. */
+  .dedup-photo-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+
+  /* Confirm/reject are a destructive-ish action taken with a thumb — WCAG
+     2.5.5's 44px minimum target size, not just the ~29px this padding/
+     font-size alone produce. !important is required to beat the inline
+     `padding` style (see the component's dedup-actions-row comment). */
+  .dedup-action-btn {
+    min-height: 44px;
+    padding: 12px 16px !important;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+}

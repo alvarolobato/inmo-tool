@@ -153,6 +153,7 @@
 | ID | Binding rule |
 |----|--------------|
 | [D-120](docs/decisions/D-120-mobile-breakpoint-inline-style-precedence.md) | Mobile breakpoint is Tailwind's default `md:` (768px). On components mixing inline styles with Tailwind, use Tailwind ONLY for `hidden`/`md:*` display toggling — never set `display` inline on an element that also carries a responsive display class, or the inline style wins and silently defeats the breakpoint. Other inline properties (color, fontSize) are fine — the collision is per-property. |
+| [D-121](docs/decisions/D-121-dedup-mobile-comparison-layout.md) | `flexWrap: 'wrap'` on children with `flex: 1` (basis 0%) never wraps — give the wrapping children a real non-zero `flexBasis` instead. Layout that must differ ONLY below the mobile breakpoint (grid column count, a page's own redundant padding) goes in a `@media (max-width: 767px)` CSS-class override in `globals.css`, never an inline style, since inline styles apply unconditionally and would also change the ≥768px look this project requires to stay pixel-identical. |
 
 ## UI / frontend
 

@@ -34,7 +34,15 @@ function factsLine(side: DedupListingSide): string {
 function ListingSidePanel({ side }: { side: DedupListingSide }) {
   const photos = side.photo_urls.slice(0, 4);
   return (
-    <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 6 }}>
+    // flexBasis 280 (not the shorthand `flex: 1`, which is `1 1 0%`) is
+    // load-bearing: a 0% basis is what made the parent's flexWrap inert
+    // (#576) — the panel always "fit" by shrinking to nothing instead of
+    // wrapping. With equal basis + equal grow on both panels, the resolved
+    // width above the wrap threshold is provably identical to the old
+    // basis-0 behaviour (both converge to half the available space), so
+    // desktop (>=768px, where the row never wraps) is unaffected; below the
+    // threshold the row wraps and each panel grows to fill its own line.
+    <div className="dedup-side-panel" style={{ flex: "1 1 280px", minWidth: 0, display: "flex", flexDirection: "column", gap: 6 }}>
       <span
         data-testid="dedup-side-source"
         style={{
@@ -53,7 +61,13 @@ function ListingSidePanel({ side }: { side: DedupListingSide }) {
       </span>
 
       {photos.length > 0 ? (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 4 }}>
+        // 4 across is fine once the panel itself is full desktop width, but
+        // at a stacked mobile panel width (~300-350px) that's ~70px-wide,
+        // ~55px-tall thumbnails — too small for "are these the same flat?"
+        // comparison. .dedup-photo-grid switches to 2 columns below 768px
+        // (globals.css) so each thumbnail roughly doubles in both
+        // dimensions; desktop keeps repeat(4, 1fr) unchanged.
+        <div className="dedup-photo-grid" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 4 }}>
           {photos.map((url, i) => (
             // eslint-disable-next-line @next/next/no-img-element -- external, unpredictable-domain listing photos
             <img
@@ -263,7 +277,17 @@ export function SuggestionCard({
 
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
         <ListingSidePanel side={suggestion.listing_a} />
-        <div style={{ display: "flex", alignItems: "center", color: "var(--fg-subtle)", fontSize: 18 }}>≟</div>
+        {/* dedup-vs-icon: forced to flex-basis 100% below 768px (globals.css)
+            so it lands on its own centered row between the two stacked
+            panels instead of squeezing onto panel A's line — see the
+            SuggestionCard-row comment above for why the wrap is only real
+            below the desktop breakpoint. */}
+        <div
+          className="dedup-vs-icon"
+          style={{ display: "flex", alignItems: "center", justifyContent: "center", color: "var(--fg-subtle)", fontSize: 18 }}
+        >
+          ≟
+        </div>
         <ListingSidePanel side={suggestion.listing_b} />
       </div>
 
@@ -273,10 +297,19 @@ export function SuggestionCard({
         </p>
       )}
 
-      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+      {/*
+        dedup-actions-row / dedup-action-btn: confirm/reject are a
+        destructive-ish call made with a thumb, so below 768px (globals.css)
+        each button gets a real 44px minimum hit area (WCAG 2.5.5) instead
+        of the ~29px this padding/font-size alone produce. flexWrap here is
+        unconditional and harmless on desktop — it only activates if the row
+        genuinely doesn't fit, which it always does above the breakpoint.
+      */}
+      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
         <button
           type="button"
           data-testid="dedup-reject"
+          className="dedup-action-btn"
           disabled={pendingAction !== null}
           onClick={() => submit("reject")}
           style={{
@@ -295,6 +328,7 @@ export function SuggestionCard({
         <button
           type="button"
           data-testid="dedup-confirm"
+          className="dedup-action-btn"
           disabled={pendingAction !== null}
           onClick={() => submit("confirm")}
           style={{
