@@ -64,6 +64,12 @@ function DegradedProfileRow({ profile }: { profile: SearchProfileRow }) {
       data-testid="profile-row-degraded"
       style={{
         display: "flex",
+        // #572: same reflow mechanism as ValidProfileRow — the text block
+        // has no fixed-width sibling here so it already wraps its own text
+        // safely, but a long name + Entrar's nowrap text could still be
+        // pushed off-screen on one unbroken line; wrapping is a no-op at
+        // desktop width where everything already fits.
+        flexWrap: "wrap",
         alignItems: "center",
         justifyContent: "space-between",
         padding: "14px 12px",
@@ -74,7 +80,7 @@ function DegradedProfileRow({ profile }: { profile: SearchProfileRow }) {
         gap: 12,
       }}
     >
-      <div>
+      <div style={{ flex: "1 1 200px", minWidth: 0 }}>
         <p
           style={{
             fontWeight: 500,
@@ -98,16 +104,28 @@ function DegradedProfileRow({ profile }: { profile: SearchProfileRow }) {
           No se pudieron cargar las métricas.
         </p>
       </div>
+      {/*
+        #572/D-121: same `.profile-enter-btn` class as ValidProfileRow's
+        Entrar (globals.css) — display/padding/min-height/width are static
+        literals per breakpoint, owned by the class rather than kept
+        inline. This Link is a direct flex item (no separate wrapper the
+        way ValidProfileRow has one), so the class's own `width: 100%`
+        under the mobile media query is what makes it fill its wrapped
+        line here — pixel-identical desktop, full-width >=44px target
+        below 768px.
+      */}
       <Link
         href={`/profiles/${profile.id}`}
+        className="profile-enter-btn"
         style={{
-          padding: "7px 14px",
+          boxSizing: "border-box",
           background: "var(--accent)",
           color: "#fff",
           borderRadius: 6,
           fontSize: 13,
           fontWeight: 500,
           textDecoration: "none",
+          textAlign: "center",
           whiteSpace: "nowrap",
         }}
       >
@@ -332,7 +350,12 @@ export default function ProfilesPage() {
     (overviews?.length ?? 0) > 0 || (degradedProfiles?.length ?? 0) > 0;
 
   return (
-    <main style={{ maxWidth: 720, margin: "0 auto", padding: 24 }}>
+    // #572/D-121: padding is a static literal per breakpoint (24px×2 was
+    // 23% of a 390px phone screen), so it's owned by the `.profiles-main`
+    // class (globals.css: 24px base, 12px below 768px) rather than kept
+    // inline — no var()/specificity indirection needed for a value with
+    // no prop/state dependency.
+    <main className="profiles-main" style={{ maxWidth: 720, margin: "0 auto" }}>
       <div
         style={{
           display: "flex",

@@ -255,7 +255,16 @@ function BrokenProfileRow({
   busy: boolean;
 }) {
   return (
-    <div style={rowStyle} data-testid="profile-row-broken" data-profile-id={id}>
+    // #572: flexWrap is defensive-only here (BrokenProfileRow has no
+    // fixed-width sibling forcing a squeeze the way ValidProfileRow's
+    // Thumbnails does) and belongs on THIS row only, not on the shared
+    // `rowStyle` base — ValidProfileRow overrides flexDirection to
+    // "column" and wraps its own inner row separately, so a flexWrap on
+    // the shared base would sit on a column-direction container doing
+    // nothing today, but silently start wrapping ValidProfileRow's own
+    // (currently auto-height, single-child) outer box the day that
+    // assumption stops holding.
+    <div style={{ ...rowStyle, flexWrap: "wrap" }} data-testid="profile-row-broken" data-profile-id={id}>
       <div style={{ flex: 1, paddingRight: 36 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <p style={{ fontWeight: 500, color: "var(--fg)", margin: 0, fontSize: 14 }}>{name}</p>
@@ -345,7 +354,30 @@ function ValidProfileRow({
       data-profile-id={profile.id}
       data-highlighted={highlighted ? "true" : undefined}
     >
-      <div style={{ display: "flex", gap: 12, width: "100%" }}>
+      {/*
+        #572: at phone width, thumbnails-left/text-right cannot survive —
+        `Thumbnails` is a fixed 220px (flexShrink: 0) and the text column
+        collapsed to ~10px of usable width. `flexWrap: "wrap"` + giving the
+        text column a real flex-basis (below) makes the flex algorithm
+        itself decide the break: at >=768px thumbnails(220)+gap+text(240
+        basis) always fits well inside the card, so nothing wraps and
+        desktop is unchanged; below that, the text column (then Entrar)
+        each drop to their own full-width line — a photo strip on top,
+        name/metadata below, no ResizeObserver or explicit breakpoint
+        needed.
+
+        Kebab-overlap fix is belt and braces, not the wrap alone: the
+        kebab (`OverflowMenu`, position: absolute) is positioned off the
+        OUTER `rowStyle` container (not this inner row), so wrapping
+        pushes the title's whole line below the kebab's y-range instead
+        of sharing it — that's the vertical separation. Horizontally, the
+        text column's retained `paddingRight: 36` (below) is what stops
+        the title's own text from running under the kebab within that
+        line; measured, the title's right edge and the kebab's left edge
+        land exactly abutting (zero slack) — it holds today, but there is
+        no margin to spare if either value moves.
+      */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 12, width: "100%" }}>
       <Thumbnails thumbnails={metrics.thumbnails} />
 
       {/*
@@ -358,7 +390,7 @@ function ValidProfileRow({
         that wrote real feedback rows on a stray click"). Both live in this
         shared flex:1 column so they read as one visual block.
       */}
-      <div style={{ flex: 1, minWidth: 0, paddingRight: 36 }}>
+      <div style={{ flex: "1 1 240px", minWidth: 0, paddingRight: 36 }}>
         <Link
           href={`/profiles/${profile.id}`}
           style={{ display: "block", textDecoration: "none", color: "inherit" }}
@@ -448,23 +480,31 @@ function ValidProfileRow({
         )}
       </div>
 
-      <div
-        style={{
-          alignSelf: "center",
-          flexShrink: 0,
-        }}
-      >
+      {/*
+        #572/D-121: display/padding/min-height/width all differ below
+        768px but are static literals (no prop/state dependency) — per
+        D-121's ladder they're deleted from the inline style and owned by
+        `.profile-enter-wrapper`/`.profile-enter-btn` (globals.css)
+        instead, with a `@media (max-width: 767px)` override. >=768px
+        renders the exact literal values this always had (display:
+        inline, padding: 7px 14px, no min-height, wrapper width: auto) —
+        pixel-identical desktop, no specificity fight, and no `var()`
+        reference left to be silently typed back over by a future edit.
+      */}
+      <div className="profile-enter-wrapper" style={{ alignSelf: "center", flexShrink: 0 }}>
         <Link
           href={`/profiles/${profile.id}`}
           data-testid="profile-enter-button"
+          className="profile-enter-btn"
           style={{
-            padding: "7px 14px",
+            boxSizing: "border-box",
             background: "var(--accent)",
             color: "#fff",
             borderRadius: 6,
             fontSize: 13,
             fontWeight: 500,
             textDecoration: "none",
+            textAlign: "center",
             whiteSpace: "nowrap",
           }}
         >
@@ -482,7 +522,7 @@ function ValidProfileRow({
       </div>
 
       {metrics.matched_count === 0 && showZeroDiagnostic && (
-        <div style={{ width: "100%", paddingLeft: 64 }}>
+        <div className="profile-zero-diag" style={{ width: "100%" }}>
           <ZeroCandidatesDiagnostic profileId={profile.id} />
         </div>
       )}

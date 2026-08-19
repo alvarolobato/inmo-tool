@@ -133,6 +133,81 @@ body {
 }
 
 /* ============================================================
+   Profile row phone-width tuning (issue #572, revised per D-121)
+   ============================================================
+   ProfileOverviewRow.tsx and app/profiles/page.tsx style the Perfiles
+   card entirely with inline styles, and inline style wins specificity
+   over a Tailwind utility for the same CSS property — so per this
+   project's convention Tailwind is reserved for display/visibility
+   toggles (hidden/md:flex) that never collide with an inline value.
+   A few of this card's values genuinely need to differ at phone width
+   (Entrar's tap target, the page/diagnostic padding stack) without
+   moving desktop (>=768px) by a pixel and without duplicating markup —
+   rendering Entrar twice (one hidden per breakpoint) would break
+   `getByTestId("profile-enter-button")`'s single-match assumption in
+   e2e.
+
+   Per D-121: every value below is a STATIC LITERAL per breakpoint (none
+   depend on a prop or piece of component state), so each one is simply
+   DELETED from its element's inline style object and owned by a class
+   here instead — no specificity fight to have, since the inline style no
+   longer declares the property at all. This is the same shape as this
+   file's own `--pad`/`--gap`/`--kpi-pad`/`--accent` tokens, just
+   expressed as plain class rules rather than custom properties (nothing
+   here is read via var() from a *different* file's inline style, so a
+   custom property would be pure indirection). The photo-strip/text
+   reflow itself needs no entry here either: `flexWrap` + a flex-basis on
+   the text column (ProfileOverviewRow.tsx) reflow purely from the flex
+   algorithm's own available-width math, with no explicit breakpoint at
+   all.
+   ============================================================ */
+.profiles-main {
+  padding: 24px;
+}
+@media (max-width: 767px) {
+  .profiles-main {
+    padding: 12px;
+  }
+}
+
+.profile-zero-diag {
+  padding-left: 64px;
+}
+@media (max-width: 767px) {
+  .profile-zero-diag {
+    padding-left: 24px;
+  }
+}
+
+/* ValidProfileRow's Entrar sits in its own wrapper div (a flex item
+   alongside Thumbnails/the text column/the kebab); DegradedProfileRow's
+   Entrar has no such wrapper — .profile-enter-btn's own `width: 100%`
+   under the media query covers that case directly, and this wrapper
+   rule is what lets ValidProfileRow's Entrar fill its wrapped mobile
+   line without touching DegradedProfileRow at all. */
+.profile-enter-wrapper {
+  width: auto;
+}
+@media (max-width: 767px) {
+  .profile-enter-wrapper {
+    width: 100%;
+  }
+}
+
+.profile-enter-btn {
+  display: inline;
+  padding: 7px 14px;
+}
+@media (max-width: 767px) {
+  .profile-enter-btn {
+    display: block;
+    width: 100%;
+    padding: 13px 18px;
+    min-height: 44px;
+  }
+}
+
+/* ============================================================
    Animations
    ============================================================ */
 
