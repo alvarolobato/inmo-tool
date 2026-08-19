@@ -9,6 +9,7 @@ reconciled state), which mocking the database would not meaningfully test.
 from __future__ import annotations
 
 import io
+import json
 import zlib
 from decimal import Decimal
 from pathlib import Path
@@ -730,6 +731,264 @@ class TestReferenceCodeSignal:
         result = engine.run(dedup_db)
         assert result.merged == 0
         assert result.suggested == 0
+
+
+class TestReferenceCodeConflictVeto:
+    """Issue #564 (D-116): a same-agency pair whose reference codes both
+    normalize to real, DIFFERING values is a hard veto — no merge, no
+    suggestion, regardless of which other signal would otherwise fire
+    (except `cadastral`). Mirrors TestFloorCorroborationAcrossSignals'
+    split: in-memory `evaluate_pair` coverage, then a DB round trip for
+    the D-024 pending-reevaluation / already-merged behaviour."""
+
+    _LAT = Decimal("40.416775")
+    _LON = Decimal("-3.703790")
+    _IDENTICAL_HEX = "ffff0000ffff0000"
+
+    def _cache_with_identical_hashes(
+        self, listing_id_a: int, listing_id_b: int
+    ) -> _PhotoHashCache:
+        cache = _PhotoHashCache()
+        cache._cache[listing_id_a] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
+        cache._cache[listing_id_b] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
+        return cache
+
+    def test_same_agency_different_codes_blocks_merge_despite_full_agreement(self):
+        """The module docstring's own worst case: same building, same
+        agency, same photographer, adjacent units. Address, coordinates,
+        size, price and photo hash all agree — the veto must still win,
+        checked directly against evaluate_pair (engine-level, not just the
+        signal)."""
+        a = _record(
+            1,
+            100,
+            source="fotocasa",
+            address="Calle Mayor 5",
+            lat=self._LAT,
+            lon=self._LON,
+            m2_built=Decimal(70),
+            current_price=Decimal(250000),
+            contact_raw="Inmobiliaria Sevilla 2000",
+            reference_code="NS603",
+        )
+        b = _record(
+            2,
+            200,
+            source="idealista",
+            address="Calle Mayor 5",
+            lat=self._LAT,
+            lon=self._LON,
+            m2_built=Decimal(70),
+            current_price=Decimal(250000),
+            contact_raw="INMOBILIARIA SEVILLA 2000",
+            reference_code="AB100",
+        )
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation is None
+
+    def test_cadastral_match_is_exempt_from_the_veto(self):
+        """A cadastral reference is a government registry ID, not agency
+        bookkeeping — cadastral.evaluate runs (and wins) before the veto
+        is even checked."""
+        a = _record(
+            1,
+            100,
+            cadastral_ref="3061226YH0036S0007SM",
+            contact_raw="Inmobiliaria Sevilla 2000",
+            reference_code="NS603",
+        )
+        b = _record(
+            2,
+            200,
+            cadastral_ref="3061226YH0036S0007SM",
+            contact_raw="INMOBILIARIA SEVILLA 2000",
+            reference_code="AB100",
+        )
+        evaluation = engine.evaluate_pair(a, b, _PhotoHashCache())
+        assert evaluation.basis == "cadastral"
+        assert evaluation.decision == "merge"
+
+    def test_cross_portal_same_agency_different_codes_blocks_merge_db_backed(
+        self, dedup_db
+    ):
+        """The high-value case the owner flagged: one agency syndicating
+        the SAME contact_raw to Fotocasa and Idealista under two different
+        internal refs — two different flats, not a dedup target."""
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "refcode-veto-cross-portal",
+            address_a="Calle Mayor 5",
+            address_b="Calle Mayor 5",
+            lat_a=self._LAT,
+            lon_a=self._LON,
+            lat_b=self._LAT,
+            lon_b=self._LON,
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            contact_raw_a="Inmobiliaria Sevilla 2000",
+            contact_raw_b="INMOBILIARIA SEVILLA 2000",
+            reference_code_a="NS603",
+            reference_code_b="AB100",
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 0
+
+    def test_different_agencies_different_codes_does_not_veto_address_coords_merge(
+        self, dedup_db
+    ):
+        """Different agencies + different codes means nothing (codes are
+        agency-namespaced) — the veto must not fire, so address_coords
+        merges exactly as it did before this change."""
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "refcode-different-agencies-unchanged",
+            address_a="Calle Mayor 5",
+            address_b="Calle Mayor 5",
+            lat_a=self._LAT,
+            lon_a=self._LON,
+            lat_b=self._LAT,
+            lon_b=self._LON,
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(400000),
+            contact_raw_a="Inmobiliaria Uno",
+            contact_raw_b="Inmobiliaria Dos",
+            reference_code_a="NS603",
+            reference_code_b="AB100",
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 1
+        assert result.suggested == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT match_basis FROM property_merge_log "
+                "ORDER BY created_at DESC LIMIT 1"
+            )
+            assert cur.fetchone()[0] == "address_coords"
+
+    def test_placeholder_code_never_vetoes_same_agency_merge(self, dedup_db):
+        """A CRM template default ("REF") left on one side must be treated
+        as absent, never as "differing" — otherwise it would block every
+        legitimate merge for that agency."""
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "refcode-placeholder-never-vetoes",
+            address_a="Calle Mayor 5",
+            address_b="Calle Mayor 5",
+            lat_a=self._LAT,
+            lon_a=self._LON,
+            lat_b=self._LAT,
+            lon_b=self._LON,
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(400000),
+            contact_raw_a="Inmobiliaria Sevilla 2000",
+            contact_raw_b="INMOBILIARIA SEVILLA 2000",
+            reference_code_a="NS603",
+            reference_code_b="REF",
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 1
+        assert result.suggested == 0
+
+    def test_existing_pending_suggestion_is_demoted_to_rejected_on_reevaluation(
+        self, dedup_db
+    ):
+        """D-024: pending suggestions are re-evaluated every run, not
+        frozen. A suggestion filed under the old rules (e.g. on
+        address_coords, before this veto existed) must be demoted to
+        'rejected' now that the same-agency reference conflict makes
+        evaluate_pair return no match at all — the same mechanism issue
+        #186's floor veto already exercises for this exact case."""
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "refcode-veto-pending-demoted",
+            address_a="Calle Mayor 5",
+            address_b="Calle Mayor 5",
+            lat_a=self._LAT,
+            lon_a=self._LON,
+            lat_b=self._LAT,
+            lon_b=self._LON,
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(400000),
+            contact_raw_a="Inmobiliaria Sevilla 2000",
+            contact_raw_b="INMOBILIARIA SEVILLA 2000",
+            reference_code_a="NS603",
+            reference_code_b="AB100",
+        )
+        lo, hi = sorted((listing_a, listing_b))
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO suggested_merge
+                    (listing_id_a, listing_id_b, match_basis, confidence, status, detail)
+                VALUES (%s, %s, 'address_coords', 0.900, 'pending', %s)
+                """,
+                (lo, hi, json.dumps({})),
+            )
+        dedup_db.commit()
+
+        result = engine.run(dedup_db)
+
+        assert result.merged == 0
+        assert result.reevaluated_rejected == 1
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status, detail FROM suggested_merge "
+                "WHERE listing_id_a = %s AND listing_id_b = %s",
+                (lo, hi),
+            )
+            status, detail = cur.fetchone()
+            assert status == "rejected"
+            assert "reevaluated_from" in detail
+
+    def test_already_merged_property_is_not_automatically_unmerged(self, dedup_db):
+        """This landing does not retroactively split a property merged
+        before the veto existed — run()'s pairwise loop only evaluates
+        listings that don't already share a property_id (see D-116's
+        decision record for why an automatic unmerge is out of scope)."""
+        listing_a, prop_a, listing_b, _prop_b = _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "refcode-veto-already-merged",
+            contact_raw_a="Inmobiliaria Sevilla 2000",
+            contact_raw_b="INMOBILIARIA SEVILLA 2000",
+            reference_code_a="NS603",
+            reference_code_b="AB100",
+        )
+        # Simulate a merge performed before this veto existed.
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "UPDATE listing SET property_id = %s WHERE id = %s",
+                (prop_a, listing_b),
+            )
+        dedup_db.commit()
+
+        result = engine.run(dedup_db)
+
+        assert result.merged == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT property_id FROM listing WHERE id IN (%s, %s)",
+                (listing_a, listing_b),
+            )
+            assert [row[0] for row in cur.fetchall()] == [prop_a]
 
 
 class TestNoSignal:

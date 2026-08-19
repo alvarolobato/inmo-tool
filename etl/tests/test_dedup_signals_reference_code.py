@@ -8,7 +8,14 @@ engine-level tests.
 
 from __future__ import annotations
 
-from etl.dedup.signals.reference_code import _normalize, _same_agency, evaluate
+import pytest
+
+from etl.dedup.signals.reference_code import (
+    _normalize,
+    _same_agency,
+    evaluate,
+    reference_codes_conflict,
+)
 from etl.dedup.types import ListingRecord
 
 
@@ -71,3 +78,86 @@ class TestEvaluate:
 
     def test_both_missing_code_returns_none(self):
         assert evaluate(_record(), _record()) is None
+
+
+class TestReferenceCodesConflict:
+    """Issue #564 (D-116): the hard veto. Same agency + two different,
+    usable codes vetoes; everything else (different agency, missing/
+    placeholder code on either side, matching codes) does not."""
+
+    def test_same_agency_different_valid_codes_conflicts(self):
+        a = _record(contact_raw="Inmobiliaria Uno", reference_code="NS603")
+        b = _record(contact_raw="Inmobiliaria Uno", reference_code="AB100")
+        assert reference_codes_conflict(a, b) is True
+
+    def test_same_agency_case_and_whitespace_insensitive_still_conflicts(self):
+        a = _record(contact_raw="INMOBILIARIA UNO", reference_code=" NS-603 ")
+        b = _record(contact_raw="inmobiliaria uno", reference_code="ab100")
+        assert reference_codes_conflict(a, b) is True
+
+    def test_same_agency_same_code_does_not_conflict(self):
+        a = _record(contact_raw="Inmobiliaria Uno", reference_code="NS603")
+        b = _record(contact_raw="Inmobiliaria Uno", reference_code="ns603")
+        assert reference_codes_conflict(a, b) is False
+
+    def test_different_agencies_different_codes_does_not_conflict(self):
+        # Codes are agency-namespaced — a different agency's differing code
+        # means nothing, so this is never eligible for the veto at all.
+        a = _record(contact_raw="Inmobiliaria Uno", reference_code="NS603")
+        b = _record(contact_raw="Inmobiliaria Dos", reference_code="AB100")
+        assert reference_codes_conflict(a, b) is False
+
+    def test_missing_code_on_one_side_does_not_conflict(self):
+        a = _record(contact_raw="Inmobiliaria Uno", reference_code="NS603")
+        b = _record(contact_raw="Inmobiliaria Uno", reference_code=None)
+        assert reference_codes_conflict(a, b) is False
+
+    @pytest.mark.parametrize("placeholder", ["0", "-", "REF", "sin referencia", ""])
+    def test_placeholder_code_on_one_side_does_not_conflict(self, placeholder):
+        # A CRM template left unedited on many of an agency's listings must
+        # never veto a legitimate merge for that whole agency — an unusable
+        # code is treated as absent, exactly like the positive-match path.
+        a = _record(contact_raw="Inmobiliaria Uno", reference_code="NS603")
+        b = _record(contact_raw="Inmobiliaria Uno", reference_code=placeholder)
+        assert reference_codes_conflict(a, b) is False
+
+    def test_both_placeholder_does_not_conflict(self):
+        a = _record(contact_raw="Inmobiliaria Uno", reference_code="REF")
+        b = _record(contact_raw="Inmobiliaria Uno", reference_code="0")
+        assert reference_codes_conflict(a, b) is False
+
+    def test_both_blank_agency_does_not_conflict(self):
+        # No captured agency name on either side means _same_agency is
+        # False by construction — never eligible for the veto.
+        a = _record(reference_code="NS603")
+        b = _record(reference_code="AB100")
+        assert reference_codes_conflict(a, b) is False
+
+
+class TestPlainComparisonNoPrefixTolerance:
+    """Issue #564 review round (D-116 amendment 2): a prefix-based
+    exemption from the veto was tried and reverted. It was motivated by
+    two live-DB pairs (property 37: "8385 11"/"8385 11 1"; property
+    71434: "09502,1"/"09502") that looked like false positives — but both
+    are SAME-SOURCE (fotocasa/fotocasa) pairs, which `engine._run` never
+    hands to `evaluate_pair` at all (issue #197's same-source skip,
+    `etl/dedup/engine.py`). The exemption solved a problem this signal
+    can never actually be asked about in the live pipeline, while opening
+    a real one: it would also have exempted "REF100" vs "REF1005",
+    exactly the sequential-CRM-id collision this veto exists to catch.
+    `reference_codes_conflict` is correctly a PLAIN inequality once both
+    codes clear `_normalize` — these two real code pairs are pinned here
+    as regression coverage of that, not as evidence they matter in
+    practice (they don't reach this signal at all — see
+    TestReferenceCodeConflictVeto in test_dedup_engine.py and
+    issue #197)."""
+
+    def test_property_37_pair_conflicts_under_the_plain_comparison(self):
+        a = _record(contact_raw="HOUSE MAISON, S.L.", reference_code="8385 11")
+        b = _record(contact_raw="HOUSE MAISON, S.L.", reference_code="8385 11 1")
+        assert reference_codes_conflict(a, b) is True
+
+    def test_property_71434_pair_conflicts_under_the_plain_comparison(self):
+        a = _record(contact_raw="AC-10 ASOCIADAS, S.L.", reference_code="09502,1")
+        b = _record(contact_raw="AC-10 ASOCIADAS, S.L.", reference_code="09502")
+        assert reference_codes_conflict(a, b) is True

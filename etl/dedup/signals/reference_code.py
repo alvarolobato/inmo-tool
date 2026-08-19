@@ -31,6 +31,47 @@ a merge decision on its own. Corroboration strong enough to merge is
 either address/coordinates/size proximity (independent of agency) as
 described below, or same-agency PLUS that same proximity check:
 
+**Same-agency-name is a HARD VETO when the codes differ (issue #564,
+D-116) — the negative side of the exact insight above.** An agency
+assigns one reference per property in its own CRM. Two listings from the
+same agency (`_same_agency`, portal-agnostic — the high-value case is one
+agency syndicating to Fotocasa *and* Idealista under the same
+`contact_raw`) carrying two different, both-real (non-placeholder,
+`_normalize`d) codes are, by that agency's own bookkeeping, two different
+properties — no matter how well address, coordinates, photos or size
+agree. That is exactly the situation every similarity signal is most
+easily fooled by: same building, same agency, same photographer, adjacent
+units. `reference_codes_conflict` below is that veto; see its use in
+`etl.dedup.engine.evaluate_pair`, which applies it ahead of every signal
+except `cadastral` (a government registry ID, not agency bookkeeping —
+that module's own docstring calls it "conclusive" and "never wrong",
+so an agency's internal ref mismatch does not get to override it).
+Different agencies with different codes means nothing (codes are
+agency-namespaced) — the veto is eligible only for same-agency pairs.
+Placeholder/unusable codes never veto — an unusable code is "absent", not
+"differing", the same rule `_normalize` already enforces for the positive
+path, so a CRM template left unedited across an agency's whole inventory
+can't silently block every legitimate merge for that agency.
+
+**Current reach, measured against the live demo DB (D-116): ZERO.**
+`engine._run` never calls `evaluate_pair` at all on a same-source pair
+(issue #197) or on a pair already sharing a `property_id` — so this veto
+can only ever fire on a cross-source pair that ISN'T already merged. As
+populated today, only `fotocasa` and `milanuncios` capture `contact_raw`
+at all (every other connector leaves it null, so `_same_agency` is False
+for any pair involving them); `milanuncios` captures no `reference_code`
+at all. A reachable, eligible pair therefore does not exist in the
+current corpus — this is a forward-looking guard against a shape
+(`contact_raw` AND `reference_code` both populated by two DIFFERENT
+connectors) that no connector combination produces yet. It is real
+protection the moment a second connector starts capturing agency name
+alongside reference code (e.g. an Idealista connector), not dead code —
+but don't read D-116's blast-radius numbers as evidence it is doing
+anything today, because it is not. See D-116 for the corrected
+measurement and for why an earlier draft of this module briefly carried
+a prefix-based exemption from this veto, motivated by a since-corrected
+blast-radius bug, and was reverted.
+
 1. Address/coordinates/size proximity, mirroring phone_extract._corroborated
    exactly (coords+size when both sides publish coordinates, falling back
    to size+price proximity otherwise) — sufficient for merge on its own,
@@ -126,6 +167,52 @@ def _same_agency(a: ListingRecord, b: ListingRecord) -> bool:
     a_name = (a.contact_raw or "").strip().casefold()
     b_name = (b.contact_raw or "").strip().casefold()
     return bool(a_name) and a_name == b_name
+
+
+def reference_codes_conflict(a: ListingRecord, b: ListingRecord) -> bool:
+    """True only when both sides carry a usable, DIFFERING reference code
+    from the SAME agency (issue #564, D-116) — the hard veto.
+
+    Mirrors `floor.floors_conflict`'s permissive-on-absence shape
+    deliberately (issue #186): a code missing or rejected by `_normalize`
+    (placeholder, too short, digit-free) on either side is "we don't
+    know", never "they differ" — the same discipline that keeps a CRM
+    template default from vetoing every legitimate merge for an agency
+    that never bothered to fill it in.
+
+    Deliberately a PLAIN inequality once both codes clear `_normalize` —
+    no prefix/edit-distance/fuzzy tolerance on top. A prefix exemption was
+    tried and reverted (see D-116's amendment history): the two pairs that
+    motivated it turned out to be same-source, hence structurally
+    unreachable through `evaluate_pair` in the first place (issue #197's
+    same-source skip), so it carved a real hole — it would also exempt
+    e.g. "REF100" vs "REF1005", exactly the sequential-CRM-id shape this
+    veto exists to catch — on the strength of zero corpus evidence that
+    survives that filter. Don't reintroduce fuzziness here without a
+    blast-radius measurement taken through `run()`'s own pair generator
+    (property_id inequality AND source inequality), not a raw listing
+    query — see D-116 for why that distinction matters.
+
+    Different agencies are never eligible: `_same_agency` gates first,
+    since an unrelated agency's differing code means nothing (codes are
+    agency-namespaced, see this module's docstring).
+
+    Callers must treat this as an OUTRIGHT veto, not a weaker vote: unlike
+    `floors_conflict` (which only downgrades a merge that another signal
+    already supports, and still lets a corroborated pair land as a weaker
+    suggestion), a same-agency reference-code conflict is direct evidence
+    from the agency's own bookkeeping that these are two different
+    properties — see `etl.dedup.engine.evaluate_pair`, which short-circuits
+    to "no match at all" (no merge, no suggestion) the moment this is
+    True, for every signal except `cadastral`.
+    """
+    if not _same_agency(a, b):
+        return False
+    code_a = _normalize(a.reference_code)
+    code_b = _normalize(b.reference_code)
+    if code_a is None or code_b is None:
+        return False
+    return code_a != code_b
 
 
 def _proximity_corroborated(a: ListingRecord, b: ListingRecord) -> bool:
