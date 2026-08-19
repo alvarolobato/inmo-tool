@@ -145,13 +145,25 @@ fi
 
 if [ -n "$DUMP" ]; then
     step "5. Restore"
+    # Every extension the dump needs, created first as the cluster admin.
+    # db-init installs the two the schema always wants, but a database that
+    # has been in use can carry more (the live one also uses unaccent, whose
+    # text-search dictionary the restore references), and the app's role is
+    # not allowed to create any of them. Reading the list from the dump means
+    # this does not have to be kept in sync with the schema by hand.
+    for ext in $(gunzip -c "$DUMP" | grep -oE '^CREATE EXTENSION IF NOT EXISTS [a-zA-Z0-9_]+' | awk '{print $NF}' | sort -u); do
+        rpsql admin "$DB_NAME" -c "'CREATE EXTENSION IF NOT EXISTS \"${ext}\"'" >/dev/null \
+            || die "could not create extension ${ext} in ${DB_NAME}"
+        ok "extension ${ext}"
+    done
+
     # Restored as the app's own role, so every object ends up owned by it: it
     # owns the database and its own migrations run against it on start.
     #
-    # The extension statements are dropped on the way through. db-init already
-    # created both extensions as the cluster admin, which makes the admin their
-    # owner, and a dump's `COMMENT ON EXTENSION` then fails with "must be owner
-    # of extension" — the app role cannot own an extension it is not allowed to
+    # The extension statements are then dropped on the way through: they have
+    # just been created above, as the admin, which makes the admin their owner,
+    # and a dump's `COMMENT ON EXTENSION` would fail with "must be owner of
+    # extension" — the app role cannot own an extension it is not allowed to
     # create. pg_dump writes these one per line, so a line filter is exact.
     gunzip -c "$DUMP" \
         | grep -vE '^(CREATE|COMMENT ON|ALTER) EXTENSION ' \
