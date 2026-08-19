@@ -104,17 +104,21 @@ function DegradedProfileRow({ profile }: { profile: SearchProfileRow }) {
           No se pudieron cargar las métricas.
         </p>
       </div>
+      {/*
+        #572/D-121: same `.profile-enter-btn` class as ValidProfileRow's
+        Entrar (globals.css) — display/padding/min-height/width are static
+        literals per breakpoint, owned by the class rather than kept
+        inline. This Link is a direct flex item (no separate wrapper the
+        way ValidProfileRow has one), so the class's own `width: 100%`
+        under the mobile media query is what makes it fill its wrapped
+        line here — pixel-identical desktop, full-width >=44px target
+        below 768px.
+      */}
       <Link
         href={`/profiles/${profile.id}`}
+        className="profile-enter-btn"
         style={{
-          // #572: same var-driven mobile tap-target treatment as
-          // ValidProfileRow's Entrar (see globals.css) — pixel-identical
-          // at >=768px, a full-width >=44px target below it.
-          display: "var(--profile-enter-display, inline)",
-          padding: "var(--profile-enter-pad, 7px 14px)",
-          minHeight: "var(--profile-tap-min, auto)",
           boxSizing: "border-box",
-          width: "var(--profile-enter-wrapper-width, auto)",
           background: "var(--accent)",
           color: "#fff",
           borderRadius: 6,
@@ -346,16 +350,12 @@ export default function ProfilesPage() {
     (overviews?.length ?? 0) > 0 || (degradedProfiles?.length ?? 0) > 0;
 
   return (
-    <main
-      style={{
-        maxWidth: 720,
-        margin: "0 auto",
-        // #572: 24px×2 was 23% of a 390px phone screen; below 768px this
-        // resolves to 12px×2 (globals.css) — >=768px is the literal 24px
-        // this always was.
-        padding: "var(--profiles-main-pad, 24px)",
-      }}
-    >
+    // #572/D-121: padding is a static literal per breakpoint (24px×2 was
+    // 23% of a 390px phone screen), so it's owned by the `.profiles-main`
+    // class (globals.css: 24px base, 12px below 768px) rather than kept
+    // inline — no var()/specificity indirection needed for a value with
+    // no prop/state dependency.
+    <main className="profiles-main" style={{ maxWidth: 720, margin: "0 auto" }}>
       <div
         style={{
           display: "flex",

@@ -50,12 +50,6 @@ export function ProfileOverviewRow({
 const rowStyle: React.CSSProperties = {
   position: "relative",
   display: "flex",
-  // Defensive: BrokenProfileRow renders this un-nested as its own single
-  // flex line (ValidProfileRow overrides flexDirection to column below and
-  // wraps its own inner row separately, so this only bites BrokenProfileRow
-  // in practice). Wrapping is a no-op unless content genuinely overflows —
-  // it doesn't change desktop layout for either row shape.
-  flexWrap: "wrap",
   gap: 12,
   padding: "14px 12px",
   borderRadius: 8,
@@ -261,7 +255,16 @@ function BrokenProfileRow({
   busy: boolean;
 }) {
   return (
-    <div style={rowStyle} data-testid="profile-row-broken" data-profile-id={id}>
+    // #572: flexWrap is defensive-only here (BrokenProfileRow has no
+    // fixed-width sibling forcing a squeeze the way ValidProfileRow's
+    // Thumbnails does) and belongs on THIS row only, not on the shared
+    // `rowStyle` base — ValidProfileRow overrides flexDirection to
+    // "column" and wraps its own inner row separately, so a flexWrap on
+    // the shared base would sit on a column-direction container doing
+    // nothing today, but silently start wrapping ValidProfileRow's own
+    // (currently auto-height, single-child) outer box the day that
+    // assumption stops holding.
+    <div style={{ ...rowStyle, flexWrap: "wrap" }} data-testid="profile-row-broken" data-profile-id={id}>
       <div style={{ flex: 1, paddingRight: 36 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <p style={{ fontWeight: 500, color: "var(--fg)", margin: 0, fontSize: 14 }}>{name}</p>
@@ -361,10 +364,18 @@ function ValidProfileRow({
         desktop is unchanged; below that, the text column (then Entrar)
         each drop to their own full-width line — a photo strip on top,
         name/metadata below, no ResizeObserver or explicit breakpoint
-        needed. Because the kebab (`OverflowMenu`, position: absolute) is
-        positioned off the OUTER `rowStyle` container (not this inner row),
-        wrapping pushes the title below the kebab's height instead of
-        under it, which is what actually fixes the reported overlap.
+        needed.
+
+        Kebab-overlap fix is belt and braces, not the wrap alone: the
+        kebab (`OverflowMenu`, position: absolute) is positioned off the
+        OUTER `rowStyle` container (not this inner row), so wrapping
+        pushes the title's whole line below the kebab's y-range instead
+        of sharing it — that's the vertical separation. Horizontally, the
+        text column's retained `paddingRight: 36` (below) is what stops
+        the title's own text from running under the kebab within that
+        line; measured, the title's right edge and the kebab's left edge
+        land exactly abutting (zero slack) — it holds today, but there is
+        no margin to spare if either value moves.
       */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, width: "100%" }}>
       <Thumbnails thumbnails={metrics.thumbnails} />
@@ -469,29 +480,23 @@ function ValidProfileRow({
         )}
       </div>
 
-      <div
-        style={{
-          alignSelf: "center",
-          flexShrink: 0,
-          // #572: on its own wrapped mobile line this becomes full-width
-          // (see globals.css's --profile-enter-wrapper-width) so Entrar
-          // reads as an easy full-width thumb target; unchanged ("auto") at
-          // desktop width, where it stays the compact right-aligned pill.
-          width: "var(--profile-enter-wrapper-width, auto)",
-        }}
-      >
+      {/*
+        #572/D-121: display/padding/min-height/width all differ below
+        768px but are static literals (no prop/state dependency) — per
+        D-121's ladder they're deleted from the inline style and owned by
+        `.profile-enter-wrapper`/`.profile-enter-btn` (globals.css)
+        instead, with a `@media (max-width: 767px)` override. >=768px
+        renders the exact literal values this always had (display:
+        inline, padding: 7px 14px, no min-height, wrapper width: auto) —
+        pixel-identical desktop, no specificity fight, and no `var()`
+        reference left to be silently typed back over by a future edit.
+      */}
+      <div className="profile-enter-wrapper" style={{ alignSelf: "center", flexShrink: 0 }}>
         <Link
           href={`/profiles/${profile.id}`}
           data-testid="profile-enter-button"
+          className="profile-enter-btn"
           style={{
-            // #572: >=768px resolves to the exact literal values this had
-            // before (display: inline, padding: 7px 14px, no min-height) —
-            // pixel-identical desktop. Below 768px these switch to a
-            // full-width block with taller padding so the tappable box
-            // clears the 44px minimum (see globals.css).
-            display: "var(--profile-enter-display, inline)",
-            padding: "var(--profile-enter-pad, 7px 14px)",
-            minHeight: "var(--profile-tap-min, auto)",
             boxSizing: "border-box",
             background: "var(--accent)",
             color: "#fff",
@@ -517,7 +522,7 @@ function ValidProfileRow({
       </div>
 
       {metrics.matched_count === 0 && showZeroDiagnostic && (
-        <div style={{ width: "100%", paddingLeft: "var(--profile-zero-diag-pad-left, 64px)" }}>
+        <div className="profile-zero-diag" style={{ width: "100%" }}>
           <ZeroCandidatesDiagnostic profileId={profile.id} />
         </div>
       )}

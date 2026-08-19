@@ -199,19 +199,33 @@ test("kebab does not intersect the title", async ({ page }) => {
   const kebab = row(page).getByRole("button", { name: "Más acciones para este perfil" });
   await expect(kebab).toBeVisible();
   const kebabBox = await kebab.boundingBox();
-
-  const title = row(page).getByTestId("profile-row-link").locator("p").first();
-  await expect(title).toBeVisible();
-  const titleBox = await title.boundingBox();
-
   expect(kebabBox).not.toBeNull();
-  expect(titleBox).not.toBeNull();
+
+  // No `toBeVisible()` gate on the title on purpose: on the unfixed layout
+  // the text column can collapse toward 0 width (Thumbnails' fixed 220px
+  // leaves almost nothing for it), which Playwright's visibility heuristic
+  // treats as "not visible" and would THROW here — failing the test on an
+  // opaque precondition instead of the geometric claim its name advertises
+  // (a prior version of this test did exactly that). `.boundingBox()`
+  // returns geometry regardless of the visibility heuristic.
+  const title = row(page).getByTestId("profile-row-link").locator("p").first();
+  const titleBox = await title.boundingBox();
+  expect(titleBox, "title element has a box at all (not detached)").not.toBeNull();
   if (!kebabBox || !titleBox) return;
 
-  // Two axis-aligned boxes intersect only if they overlap on BOTH axes —
-  // assert they don't (either separated horizontally or vertically is a
-  // non-overlap; on the fixed mobile layout it ends up vertical, since the
-  // reflow puts the title on its own line below the thumbnails/kebab row).
+  // This is the assertion that actually fails on the unfixed layout: a
+  // collapsed-to-~0-width column is itself the root cause the owner
+  // reported (screenshots showed the title's wrapped GLYPHS visually
+  // running under the kebab even though a 0-width box technically doesn't
+  // rectangle-intersect anything — CSS paints overflowing text past its
+  // layout box by default, which a boundingBox()-vs-boundingBox() check
+  // structurally can't see). Asserting real width is what makes this test
+  // fail for the true reason pre-fix, not an incidental one.
+  expect(titleBox.width, "title column has room to render (not collapsed by the fixed-width thumbnail strip)").toBeGreaterThan(100);
+
+  // Now the literal rectangle check, kept as a second, independent
+  // guarantee once the column has real width to lay out in: two
+  // axis-aligned boxes intersect only if they overlap on BOTH axes.
   const overlapsX = kebabBox.x < titleBox.x + titleBox.width && titleBox.x < kebabBox.x + kebabBox.width;
   const overlapsY = kebabBox.y < titleBox.y + titleBox.height && titleBox.y < kebabBox.y + kebabBox.height;
   expect(overlapsX && overlapsY).toBe(false);
@@ -223,23 +237,29 @@ test("profile card reflows to stacked layout at phone width", async ({ page }) =
   const width = await clientWidth(page);
   expect(width).toBeLessThan(768); // sanity: this really is the mobile viewport
 
+  // No `toBeVisible()` gate on either box: on the unfixed layout the text
+  // column can collapse toward 0 width, which Playwright's visibility
+  // heuristic treats as "not visible" — that would throw here on an
+  // opaque precondition rather than the reflow claim this test names.
+  // `.boundingBox()` returns geometry regardless.
   const thumbs = row(page).getByTestId("profile-thumbnails");
   const link = row(page).getByTestId("profile-row-link");
-  await expect(thumbs).toBeVisible();
-  await expect(link).toBeVisible();
-
   const thumbsBox = await thumbs.boundingBox();
   const linkBox = await link.boundingBox();
-  expect(thumbsBox).not.toBeNull();
-  expect(linkBox).not.toBeNull();
+  expect(thumbsBox, "thumbnails have a box").not.toBeNull();
+  expect(linkBox, "text column has a box").not.toBeNull();
   if (!thumbsBox || !linkBox) return;
 
-  // Photo strip on top, text column below it — not side by side.
-  expect(thumbsBox.y + thumbsBox.height).toBeLessThanOrEqual(linkBox.y + 1);
+  // This is the assertion that actually fails on the unfixed layout —
+  // the text column collapses toward 0 width there (no flex-basis, and
+  // Thumbnails' fixed 220px + Entrar leave it almost nothing), so this
+  // is what makes the test fail for the real reported cause rather than
+  // an incidental one. >= 240px matches the flex-basis the fix gives it.
+  expect(linkBox.width, "text column has room to render (not squeezed to ~10px by the fixed-width thumbnail strip)").toBeGreaterThanOrEqual(240);
 
-  // Text column has real width to render into (>= 240px, matching the
-  // flex-basis the fix gives it) — not squeezed to ~10px.
-  expect(linkBox.width).toBeGreaterThanOrEqual(240);
+  // Photo strip on top, text column below it — not side by side. Only
+  // meaningful once both boxes have real geometry (checked above).
+  expect(thumbsBox.y + thumbsBox.height).toBeLessThanOrEqual(linkBox.y + 1);
 
   // The metadata line ("Piso, Chalet, Ático · radio 3 km") reads in at most
   // two lines, not the reported seven. Its own paragraph plus a little
