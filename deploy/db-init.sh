@@ -50,12 +50,16 @@ q "REVOKE CONNECT ON DATABASE \"${APP_DB_NAME}\" FROM PUBLIC" >/dev/null
 q "GRANT CONNECT ON DATABASE \"${APP_DB_NAME}\" TO \"${APP_DB_USER}\"" >/dev/null
 echo "db-init: '${APP_DB_NAME}' now only accepts '${APP_DB_USER}' (and superusers)"
 
-# pg_stat_statements needs a superuser and is optional for the app: init.sql
-# wraps it in a DO/EXCEPTION block and carries on without it. Created here,
-# where we do have admin rights, so the dashboard's slow-query view works.
-psql -v ON_ERROR_STOP=1 -d "${APP_DB_NAME}" \
-    -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" >/dev/null 2>&1 \
-    && echo "db-init: pg_stat_statements ready" \
-    || echo "db-init: pg_stat_statements unavailable — the app works without it"
+# Extensions are created here, where we have admin rights. init.sql wraps both
+# in DO/EXCEPTION blocks and carries on without them, but the dashboard's
+# slow-query view wants pg_stat_statements, and doing it here keeps the
+# database identical to a local one.
+for ext in pg_stat_statements pgcrypto; do
+    if psql -v ON_ERROR_STOP=1 -d "${APP_DB_NAME}" -c "CREATE EXTENSION IF NOT EXISTS ${ext}" >/dev/null 2>&1; then
+        echo "db-init: ${ext} ready"
+    else
+        echo "db-init: ${ext} unavailable — the app works without it"
+    fi
+done
 
 echo "db-init: done"

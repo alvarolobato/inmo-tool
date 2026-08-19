@@ -145,9 +145,17 @@ fi
 
 if [ -n "$DUMP" ]; then
     step "5. Restore"
-    # As the app's own role, so every object ends up owned by it — it owns the
-    # database and its own migrations run against it on start.
-    gunzip -c "$DUMP" | ssh "$PROD_HOST" \
+    # Restored as the app's own role, so every object ends up owned by it: it
+    # owns the database and its own migrations run against it on start.
+    #
+    # The extension statements are dropped on the way through. db-init already
+    # created both extensions as the cluster admin, which makes the admin their
+    # owner, and a dump's `COMMENT ON EXTENSION` then fails with "must be owner
+    # of extension" — the app role cannot own an extension it is not allowed to
+    # create. pg_dump writes these one per line, so a line filter is exact.
+    gunzip -c "$DUMP" \
+        | grep -vE '^(CREATE|COMMENT ON|ALTER) EXTENSION ' \
+        | ssh "$PROD_HOST" \
         "bash -lc $(printf '%q' "cd ${PROD_PATH} && ./deploy/prod-psql.sh app ${DB_NAME} -q -o /dev/null")" \
         2> >(grep -v 'tput: No value for \$TERM' >&2) \
         || die "restore of ${DB_NAME} failed"
