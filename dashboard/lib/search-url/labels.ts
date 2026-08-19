@@ -78,3 +78,16 @@ export function shapeTaskLabel(
   const km = Math.round(radiusKm * 10) / 10;
   return `${portalDisplayName(portal)} — ${typesLabel(types)} ~${nearestName} (r=${km} km)${priceLabel(priceMin, priceMax)}`;
 }
+
+/**
+ * The inline prefix a LoosenedConstraint renders with in the UI (issue #561
+ * review, N6). Every constraint except "grammar" names a specific dropped or
+ * broadened VALUE inside an otherwise-confirmed grammar, so "ampliada:"
+ * ("broadened:") is accurate for it. "grammar" is different in kind: it
+ * flags that a TOKEN in the URL itself is an unconfirmed guess -- the search
+ * may not be broader at all, it may be a wrong page entirely (a 404 or a
+ * redirect elsewhere) -- so "ampliada:" would misstate the risk.
+ */
+export function loosenedPrefixLabel(constraint: string): string {
+  return constraint === "grammar" ? "sin confirmar:" : "ampliada:";
+}

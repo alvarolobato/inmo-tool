@@ -2,10 +2,48 @@
  * Hipoges pre-filtered search-URL builder + parser (issue #561).
  *
  * ═══════════════════════════════════════════════════════════════════════════
- *   GROUNDED SHAPE, INFERRED VOCABULARY — see the "Confirmed vs inferred"
- *   section below before touching this file. The owner's first real Hipoges
- *   search corrects the guessed tokens via capture-to-infer (D-051) — that is
- *   this file's actual safety net, not the tokens themselves.
+ *   REVISED after a fresh-context Opus review of the first version of this
+ *   file (PR #562). The route SHAPE was already grounded correctly; the
+ *   TOKEN VOCABULARY inside it was not — and it did not need probing to
+ *   settle. Reading the site's public `main-*.js`/`chunk-*.js`/`*.json`
+ *   bundle (a static asset every visitor's browser downloads — the SAME
+ *   source D-111 used for the detail-URL shape, and #548 used for the first,
+ *   wrong, typology guess) answers almost the whole grammar outright:
+ *
+ *     - `AssetsURLValidator.canActivate` (main-*.js) validates each route
+ *       segment against a real catalog and redirects home on a miss:
+ *       `typologies.find(_ => _.code === params.typology)`, same shape for
+ *       `operations`/`countries`.
+ *     - `AssetsService.buildListingUrl` (chunk-*.js) builds the URL from
+ *       `.code`, never `.dbValue` — the two are DIFFERENT strings.
+ *     - The i18n bundles key typology translations as
+ *       `filtersForm.subtypologies.<code>`, so `es.json`'s
+ *       `filtersForm.subtypologies` object keys ARE the typology codes:
+ *       `pisos-y-casas`, `locales-y-naves`, `terrenos`, `garajes`,
+ *       `oficinas`, `trasteros`, `edificios`, `obra_parada`. (The first
+ *       version of this file used `assetType.*` i18n keys —
+ *       `flat`/`house`/`garage`/… — a DIFFERENT axis entirely; none of those
+ *       six emitted tokens exist in any locale's typology vocabulary. That
+ *       was the review's B1.)
+ *     - `operation.dbValue` is `"venta"`/`"alquiler"` (es) — `.code` is the
+ *       one token the bundle does not pin outright. The first version used
+ *       the ENGLISH `dbValue` ("sale") from the wrong locale, which is
+ *       exactly why the wrong guess looked plausible.
+ *     - `cercaliaService.getCode` + a town→code table (chunk-*.js) confirms
+ *       `:town` is `<municipio>_<provincia>` — underscore-joined, accents
+ *       stripped (`"Estepona, Málaga"` → `"estepona_malaga"`) — NOT the bare
+ *       municipio slug idealista/aliseda use.
+ *     - `:country` values are compared against Spanish slugs (`"grecia"` is
+ *       one) — `"espana"` is confirmed correct, unchanged from the first
+ *       version.
+ *
+ *   No LIVE probing was used to settle any of this — every fact above comes
+ *   from a plain GET of a public static asset, the same standing D-111 and
+ *   #548 already established as fine. See D-115's "Revised" section for the
+ *   full record and why the first version's own text wrongly told a future
+ *   agent (and, once, the owner) that this vocabulary "cannot be verified
+ *   without probing" — that conflated live probing (still correctly
+ *   forbidden) with reading a public file (always fine here).
  * ═══════════════════════════════════════════════════════════════════════════
  *
  * Context: #548 shipped `etl/connectors/hipoges.py` (D-111) as capture-only —
@@ -13,60 +51,56 @@
  * honest client (D-075) — but never wrote a search-URL builder, so `/captura`
  * had no Hipoges task and the owner had no entry point at all (issue #561).
  *
- * ─── GROUNDED (read from the site's public Angular route table — the same
- *     static `main-*.js` / `chunk-*.js` bundle that grounded the detail-URL
- *     shape in D-111, no probing) ───────────────────────────────────────────
+ * ─── GROUNDED, from the public bundle ───────────────────────────────────────
  *
- *   :lang/:operation/:typology/:country/:town[/:features]   (listing/search)
+ *   /:lang/:operation/:typology/:country/:town[/:features]
  *
- * See etl/connectors/hipoges.py's module docstring for the verbatim route
- * table this is read from.
+ *   - `:lang` = `"es"` (confirmed independently — D-075/D-111's sitemap
+ *     index already showed `_es_sitemap.xml` locale siblings).
+ *   - `:typology` — one of `pisos-y-casas` / `locales-y-naves` / `terrenos` /
+ *     `garajes` / `edificios` (plus `oficinas`/`trasteros`/`obra_parada`,
+ *     which this project has no canonical property type for) — CONFIRMED
+ *     codes, not a guess. A profile fans out into one task PER TYPOLOGY
+ *     SECTION (not per canonical type): `pisos-y-casas` genuinely covers
+ *     piso+chalet+ático as the SITE'S OWN taxonomy, not an approximation on
+ *     this builder's part — same "the section is the granularity, subtypes
+ *     are not narrowed" shape idealista's `venta-viviendas` already has (see
+ *     idealista.ts). `locales-y-naves` likewise covers local+nave.
+ *   - `:country` = `"espana"` — confirmed (country values compare against
+ *     Spanish slugs in the bundle).
+ *   - `:town` = `<municipio>_<provincia>`, underscore-joined, accents
+ *     stripped — confirmed FORMAT from one real example
+ *     ("estepona_malaga"). The exact per-town SPELLING for every town this
+ *     builder might guess is not independently confirmed (only Estepona
+ *     was observed) — reused from idealista/aliseda's own municipio tables
+ *     as the best available starting point, same as before.
+ *   - `[:features]` is a comma-joined list of CONFIG CODES (price / rooms /
+ *     baths / area + subtypology — confirmed shape from
+ *     `_getAssetsFeats`), not an unknowable black box. The exact codes
+ *     (which number means "price max 200000"?) are not confirmed, so this
+ *     builder still never guesses one in — but the honest description is
+ *     "known shape, unconfirmed codes", not "no confirmed grammar at all".
  *
- * ─── NOT GROUNDED — INFERRED, never observed on a real URL ─────────────────
+ * ─── The ONE remaining inferred token ───────────────────────────────────────
  *
- *   - `:operation` — inferred "sale" / "rent" (English route tokens). #548
- *     inferred these from the site's own public i18n key names
- *     (`assets/i18n/es.json`), which is also what `hipoges_mapping.map_operation`
- *     already expects to reverse-decode. This builder only ever emits "sale"
- *     (idealista/aliseda's own precedent: the profile scope has no operation
- *     field at all, so every builder here is sale-only).
- *   - `:typology` — inferred per canonical property type from the SAME i18n
- *     bundle's key names (`flat`/`house`/`garage`/`storage`/`land`/`office`/
- *     `building`/`apartment` — see hipoges_mapping.py's comment). A canonical
- *     type with no confident 1:1 match folds onto the nearest inferred token
- *     and is flagged (same discipline as Aliseda's ático/chalet folding).
- *   - `:country` and `:town` — genuinely NOT inferred from anything (no i18n
- *     evidence, no captured example, nothing). This builder guesses "espana"
- *     for `:country` and reuses the Idealista/Aliseda municipio/province
- *     tables (`municipios.ts`/`provinces.ts` — themselves grounded for THOSE
- *     portals' own slug spelling, not Hipoges') for `:town`, purely as a
- *     starting point. This is the least grounded segment of the URL.
+ *   `:operation` — the bundle pins `.dbValue` (`"venta"`/`"alquiler"`) but
+ *   not `.code`, which is what the route actually validates against. This
+ *   builder emits `"venta"` as the most likely code (Hipoges is a REO
+ *   servicer portal — sales dominate — and Spanish route bundles commonly
+ *   reuse the Spanish-locale dbValue as the code). Every task carries a
+ *   `"grammar"` loosened flag scoped to THIS token alone — see below.
  *
- * A wrong token either 404s (safe — visibly broken) or silently returns a
- * DIFFERENT search (dangerous — looks fine, isn't). Every task this builder
- * emits therefore carries a `"grammar"` loosened flag, unconditionally, that
- * says so in the UI — never presented as confirmed. See
- * docs/decisions/D-115-hipoges-search-url-inferred-grammar.md.
+ * ─── Capture-to-infer actually closes the loop now (D-051) ─────────────────
  *
- * ─── Capture-to-infer closes the loop (D-051) ───────────────────────────────
- *
- * `hipogesParser` below is registered in `../parsers.ts`, so the FIRST time
- * the owner navigates a real Hipoges search and clicks "Capturar todas", the
- * extension's existing `POST /api/extension/search-url-example` piggyback
- * (D-051, unchanged by this file) decodes and stores it as a CONFIRMED,
- * auto-trusted example — the resolver (`resolve.ts`) then prefers it over
- * this builder's guess for every future task in the same section, with the
- * guessed-grammar flag dropped (same upgrade idealista/aliseda already get).
- * No code change is needed for that upgrade to take effect; it is the module
- * this file plugs into by registering a parser at all.
- *
- * ─── Price / size ────────────────────────────────────────────────────────
- * `[:features]` is grounded as a route SEGMENT but its internal grammar (does
- * it carry a price range? a feature-code list? something else entirely?) is
- * completely unconfirmed. This builder never encodes price/size into it —
- * doing so would be a second, compounding guess. A profile price/size bound
- * is always reported as a loosened (dropped) constraint instead, same
- * contract as Aliseda's unconfirmed-superficie handling.
+ * The first version's parser rejected any URL whose operation wasn't
+ * literally "sale"/"rent" and any typology outside its (wrong) token set —
+ * so a real owner capture would have decoded to `null` and never been
+ * learned (the review's B2). `hipogesParser` below accepts ANY operation
+ * token and ANY typology token: a real capture is always learnable, even
+ * before this file's own guesses are confirmed or corrected. `resolve.ts`
+ * also exempts Hipoges from the #444 "code-driven town is authoritative"
+ * gate (this builder's town is an admitted guess, not a confirmed slug the
+ * way idealista's is), so same-area reuse (tier 2) is actually reachable.
  */
 
 import { PROPERTY_TYPES } from "@/lib/profiles-schema";
@@ -91,89 +125,86 @@ import type {
 const ORIGIN = "https://realestate.hipoges.com";
 const PORTAL = "hipoges";
 
-// Grounded: the site's sitemap index (D-075/D-111) advertises `_es_sitemap.xml`
-// siblings for pt/gr/it — "es" is the Spanish locale code beyond reasonable
-// doubt. This project operates in Spain only (issue #1), so the builder never
-// varies it.
+// Confirmed (D-075/D-111's sitemap index).
 const LANG = "es";
 
-// Inferred (never observed) — the overwhelming default for a REO servicer
-// portal, matching hipoges_mapping.map_operation's own documented assumption.
-// Never "rent": the profile scope carries no operation field, same reason
-// idealista/aliseda are sale-only.
-const OPERATION = "sale";
+// The ONE inferred token (see module docstring) — the bundle pins .dbValue
+// ("venta"/"alquiler") but not the .code the route actually validates.
+// "venta" is the most likely code; flagged via GRAMMAR_FLAG below, and ONLY
+// this token — nothing else in the route is a guess any more.
+const OPERATION = "venta";
 
-// Inferred (never observed) — the ONLY segment with zero grounding of any
-// kind, not even an i18n-bundle echo. A single guessed constant, flagged on
-// every task via GRAMMAR_FLAG below.
+// Confirmed — country values compare against Spanish slugs in the bundle
+// (e.g. "grecia"), so "espana" is not a guess.
 const COUNTRY = "espana";
 
 /**
- * Canonical property type -> inferred Hipoges typology token, from the site's
- * own public i18n key names (`flat`/`house`/`garage`/`storage`/`land`/
- * `office`/`building`/`apartment` — see hipoges_mapping.py). A type with no
- * confident 1:1 match folds onto the nearest inferred token; `approxReason`
- * surfaces that fold as a `property_types` loosened flag (same discipline as
- * Aliseda's ático/chalet folding).
+ * Canonical property type -> CONFIRMED Hipoges typology code (from the
+ * public i18n bundle's `filtersForm.subtypologies` keys — see module
+ * docstring). Several canonical types legitimately share one typology
+ * section: that is the SITE'S OWN taxonomy, not an approximation on this
+ * builder's part, so — unlike the first version of this file — no
+ * `property_types` loosened flag is attached for it, same as idealista's
+ * `venta-viviendas` (piso+chalet+atico, no flag) already does.
  */
-interface TypologyMapping {
-  token: string;
-  approxReason?: string;
-}
-
-const TYPOLOGY_MAP: Record<PropertyType, TypologyMapping> = {
-  piso: { token: "flat" },
-  atico: {
-    token: "flat",
-    approxReason:
-      "Hipoges: no hay un token de tipología «ático» confirmado; se usa «flat» (igual que piso) — búsqueda más amplia.",
-  },
-  chalet: { token: "house" },
-  local: {
-    token: "office",
-    approxReason:
-      "Hipoges: «local» no tiene un token de tipología confirmado; se usa «office» (la categoría inferida más cercana) — aproximado.",
-  },
-  nave: {
-    token: "building",
-    approxReason:
-      "Hipoges: «nave» no tiene un token de tipología confirmado; se usa «building» (igual que edificio) — aproximado, búsqueda más amplia.",
-  },
-  garaje: { token: "garage" },
-  terreno: { token: "land" },
-  edificio: { token: "building" },
-};
-
-// Superset of typology tokens the PARSER recognises (never generated by
-// build()) — the same "recognise more than we emit" discipline Aliseda's
-// parser follows, since a real owner-navigated URL might use a category this
-// builder never picks (e.g. "apartment"/"storage", both present in the same
-// i18n bundle but not chosen as this builder's default token for any
-// canonical type). Never fabricated: each entry traces to the same i18n
-// bundle evidence hipoges_mapping.py already documents.
-const TYPOLOGY_TO_TYPES: Record<string, readonly PropertyType[]> = {
-  flat: ["piso", "atico"],
-  apartment: ["piso"],
-  house: ["chalet"],
-  office: ["local"],
-  building: ["nave", "edificio"],
-  garage: ["garaje"],
-  storage: ["garaje"],
-  land: ["terreno"],
+const TYPOLOGY_BY_TYPE: Record<PropertyType, string> = {
+  piso: "pisos-y-casas",
+  chalet: "pisos-y-casas",
+  atico: "pisos-y-casas",
+  local: "locales-y-naves",
+  nave: "locales-y-naves",
+  garaje: "garajes",
+  terreno: "terrenos",
+  edificio: "edificios",
 };
 
 /**
- * The always-present, unconditional honesty flag (issue #561): the ROUTE is
- * grounded, the VOCABULARY inside it is not. Every task this builder emits
- * carries this — never presented as a confirmed URL.
+ * Typology code -> canonical property type(s), the parser's reverse of
+ * TYPOLOGY_BY_TYPE, for decoding a REAL captured URL. Deliberately partial:
+ * `oficinas`/`trasteros`/`obra_parada` are real, confirmed typology codes
+ * (see module docstring) this project has no canonical type for — a captured
+ * URL using one of those still parses and is still learnable (never
+ * rejected), it just decodes to an empty `propertyTypes` (honest "we don't
+ * know which of our types this is", never fabricated).
  */
-const GRAMMAR_FLAG: LoosenedConstraint = {
+const TYPOLOGY_TO_TYPES: Record<string, readonly PropertyType[]> = {
+  "pisos-y-casas": ["piso", "chalet", "atico"],
+  "locales-y-naves": ["local", "nave"],
+  garajes: ["garaje"],
+  terrenos: ["terreno"],
+  edificios: ["edificio"],
+};
+
+/** Property types in canonical order, grouped by their (now CONFIRMED) typology section. */
+function sectionsInOrder(
+  types: readonly PropertyType[],
+): Array<{ typology: string; types: PropertyType[] }> {
+  const wanted = new Set(types);
+  const bySection = new Map<string, PropertyType[]>();
+  for (const t of PROPERTY_TYPES) {
+    if (!wanted.has(t)) continue;
+    const typology = TYPOLOGY_BY_TYPE[t];
+    const bucket = bySection.get(typology);
+    if (bucket) bucket.push(t);
+    else bySection.set(typology, [t]);
+  }
+  return [...bySection.entries()].map(([typology, ts]) => ({ typology, types: ts }));
+}
+
+/**
+ * The ONLY loosened flag this builder ever attaches unconditionally
+ * (issue #561 review) — scoped to the `:operation` token alone, the one
+ * remaining inference. Every other route segment is confirmed from the
+ * public bundle (see module docstring).
+ */
+const OPERATION_GRAMMAR_FLAG: LoosenedConstraint = {
   constraint: "grammar",
   reason:
-    "Hipoges: la ruta /:lang/:operation/:typology/:country/:town está confirmada en el bundle público del sitio, " +
-    "pero el vocabulario (operación, tipo, país, localidad) es una INFERENCIA — nunca se ha observado en una " +
-    "búsqueda real. Puede dar error 404 o mostrar resultados distintos a los esperados. Compruébalo al abrir; si " +
-    "no coincide, navega a mano y captura esa búsqueda — tu navegación real corrige la gramática aprendida (D-051).",
+    'Hipoges: el token de operación ("venta") no está confirmado — el bundle público fija el valor mostrado ' +
+    '("venta"/"alquiler") pero no el código interno que exige la ruta, y se usa "venta" como el más probable. ' +
+    "El resto de la ruta (tipología, país, localidad) SÍ está confirmado en el bundle público del sitio. Si esta " +
+    "búsqueda da error o muestra algo distinto, navega a mano y captúrala — tu navegación real corrige este " +
+    "token (D-051).",
 };
 
 /** Title-case a slug like `dos-hermanas` -> "Dos Hermanas" (label only). */
@@ -184,58 +215,91 @@ function titleCaseSlug(slug: string): string {
     .join(" ");
 }
 
-/** Resolved `:town` token + a human label, purely a starting guess (see module docstring). */
-function resolveTown(scope: CanonicalSearchScope): { town: string; label: string } {
-  const muni = municipioForPoint(scope.center);
-  if (muni) return { town: muni.municipio, label: titleCaseSlug(muni.municipio) };
-  const prov = provinceForPoint(scope.center);
-  if (prov) return { town: prov.provincia, label: titleCaseSlug(prov.provincia) };
-  return { town: COUNTRY, label: "España" };
+/**
+ * A province's own capital as its KNOWN_MUNICIPIOS entry (both known
+ * provinces' capitals are self-referential rows: `{municipio: "malaga",
+ * provincia: "malaga"}`, `{municipio: "sevilla", provincia: "sevilla"}`) —
+ * the coarse "search the whole province" proxy when no closer municipio
+ * resolves. Reuses an existing table entry rather than inventing a new
+ * string.
+ */
+function provinceCapital(provincia: string): { municipio: string; provincia: string } | null {
+  const m = KNOWN_MUNICIPIOS.find((km) => km.municipio === provincia);
+  return m ? { municipio: m.municipio, provincia: m.provincia } : null;
 }
 
-function buildTask(type: PropertyType, scope: CanonicalSearchScope): SearchTask {
-  const loosened: LoosenedConstraint[] = [GRAMMAR_FLAG];
-  const mapping = TYPOLOGY_MAP[type];
-  if (mapping.approxReason) {
-    loosened.push({ constraint: "property_types", reason: mapping.approxReason });
+/** Absolute last resort when nothing resolves at all (outside every known
+ * market) — the confirmed `<municipio>_<provincia>` FORMAT applied to a
+ * single, clearly-arbitrary national default (issue #561 review, N4: the
+ * previous fallback repeated the country segment as "espana/espana", which
+ * reads as a bug rather than a deliberate default). Madrid is not grounded
+ * as Hipoges' own vocabulary either — it is simply not nonsensical the way
+ * repeating the country segment is. */
+const NATIONAL_FALLBACK = { municipio: "madrid", provincia: "madrid" };
+
+/** Resolved `{municipio, provincia}` + a human label for `:town`. */
+function resolveTown(
+  scope: CanonicalSearchScope,
+): { municipio: string; provincia: string; label: string } {
+  const muni = municipioForPoint(scope.center);
+  if (muni) return { municipio: muni.municipio, provincia: muni.provincia, label: titleCaseSlug(muni.municipio) };
+  const prov = provinceForPoint(scope.center);
+  if (prov) {
+    const capital = provinceCapital(prov.provincia);
+    if (capital) return { ...capital, label: titleCaseSlug(capital.municipio) };
   }
+  return { ...NATIONAL_FALLBACK, label: "España" };
+}
 
-  const { town, label: townLabel } = resolveTown(scope);
+function buildTask(typology: string, types: PropertyType[], scope: CanonicalSearchScope): SearchTask {
+  const loosened: LoosenedConstraint[] = [OPERATION_GRAMMAR_FLAG];
 
-  // Price/size: [:features]'s internal grammar is entirely unconfirmed (module
-  // docstring) — never guessed. A profile bound is reported as dropped, same
-  // "genuinely can't express this" contract as Aliseda's superficie handling.
+  const { municipio, provincia, label: townLabel } = resolveTown(scope);
+  const town = `${municipio}_${provincia}`;
+
+  // Price/size: [:features] is a confirmed comma-joined list of CONFIG
+  // CODES (price/rooms/baths/area + subtypology — see module docstring),
+  // but the exact codes are unconfirmed, so never guessed in. A profile
+  // bound is reported as dropped rather than risk a wrong code.
   if (scope.priceMin !== undefined) {
     loosened.push({
       constraint: "price_min",
-      reason: "Hipoges: sin gramática confirmada para precio; no se aplica el mínimo (resultados más amplios).",
+      reason:
+        "Hipoges: [:features] es una lista de códigos de configuración conocida (precio/habitaciones/baños/" +
+        "superficie), pero los códigos exactos no están confirmados; no se aplica el precio mínimo (resultados más amplios).",
     });
   }
   if (scope.priceMax !== undefined) {
     loosened.push({
       constraint: "price_max",
-      reason: "Hipoges: sin gramática confirmada para precio; no se aplica el máximo (resultados más amplios).",
+      reason:
+        "Hipoges: [:features] es una lista de códigos de configuración conocida (precio/habitaciones/baños/" +
+        "superficie), pero los códigos exactos no están confirmados; no se aplica el precio máximo (resultados más amplios).",
     });
   }
   if (scope.sizeMin !== undefined) {
     loosened.push({
       constraint: "size_min",
-      reason: "Hipoges: sin gramática confirmada para superficie; no se aplica el mínimo (resultados más amplios).",
+      reason:
+        "Hipoges: [:features] es una lista de códigos de configuración conocida, pero los códigos exactos de " +
+        "superficie no están confirmados; no se aplica el mínimo (resultados más amplios).",
     });
   }
   if (scope.sizeMax !== undefined) {
     loosened.push({
       constraint: "size_max",
-      reason: "Hipoges: sin gramática confirmada para superficie; no se aplica el máximo (resultados más amplios).",
+      reason:
+        "Hipoges: [:features] es una lista de códigos de configuración conocida, pero los códigos exactos de " +
+        "superficie no están confirmados; no se aplica el máximo (resultados más amplios).",
     });
   }
 
-  const url = `${ORIGIN}/${LANG}/${OPERATION}/${mapping.token}/${COUNTRY}/${town}`;
+  const url = `${ORIGIN}/${LANG}/${OPERATION}/${typology}/${COUNTRY}/${town}`;
 
-  // Section = operation + typology (categorical identity for D-051 matching;
-  // includes operation since — unlike idealista/aliseda — the typology token
-  // alone does not encode sale-vs-rent).
-  const section = `${OPERATION}/${mapping.token}`;
+  // Section = operation + typology (categorical identity for D-051
+  // matching; includes operation since the typology token alone does not
+  // encode sale-vs-rent).
+  const section = `${OPERATION}/${typology}`;
 
   const id = stableTaskId({
     portal: PORTAL,
@@ -250,7 +314,7 @@ function buildTask(type: PropertyType, scope: CanonicalSearchScope): SearchTask 
   return {
     id,
     portal: PORTAL,
-    label: taskLabel(PORTAL, [type], townLabel, scope.priceMin, scope.priceMax),
+    label: taskLabel(PORTAL, types, townLabel, scope.priceMin, scope.priceMax),
     url,
     // Hipoges has no map view -> captureUrl == url (identity), same as Aliseda.
     captureUrl: url,
@@ -259,41 +323,24 @@ function buildTask(type: PropertyType, scope: CanonicalSearchScope): SearchTask 
 }
 
 function buildHipoges(scope: CanonicalSearchScope): SearchTask[] {
-  const seen = new Set<string>();
-  const tasks: SearchTask[] = [];
-  const wanted = new Set(scope.propertyTypes);
-  // Canonical PROPERTY_TYPES order decides which type "wins" when two fold
-  // onto the same URL (same rule Aliseda's builder uses) — piso precedes
-  // atico, so the exact piso/flat task wins that fold. nave precedes edificio,
-  // so nave's approximate "building" fold wins THAT one, not edificio's exact
-  // match — the winner is whichever type is EARLIEST in PROPERTY_TYPES, exact
-  // or not, never "prefer the exact one" specifically.
-  for (const type of PROPERTY_TYPES) {
-    if (!wanted.has(type)) continue;
-    const task = buildTask(type, scope);
-    if (seen.has(task.url)) continue;
-    seen.add(task.url);
-    tasks.push(task);
-  }
-  return tasks;
+  return sectionsInOrder(scope.propertyTypes).map(({ typology, types }) =>
+    buildTask(typology, types, scope),
+  );
 }
 
 /**
- * The Hipoges CODE mapping (issue #371, D-090) — the inferred typology tokens
- * this builder emits, for drift detection against any future captured filter
- * catalog. Unlike idealista/aliseda this connector never discovers a live
- * catalog (capture-only, D-075/D-111), so there is nothing to drift against
- * yet; exposed anyway for API-shape consistency with the other builders.
+ * The Hipoges CODE mapping (issue #371, D-090) — the CONFIRMED typology
+ * codes this builder emits, for drift detection against any future captured
+ * filter catalog. Unlike idealista/aliseda this connector never discovers a
+ * live catalog (capture-only, D-075/D-111), so there is nothing to drift
+ * against yet; exposed anyway for API-shape consistency with the other
+ * builders.
  */
 function hipogesCodeMapping(): CodeMappingAxes {
   const bySlug = new Map<string, CodeMappingOption>();
-  for (const [type, mapping] of Object.entries(TYPOLOGY_MAP) as [PropertyType, TypologyMapping][]) {
-    if (bySlug.has(mapping.token)) continue; // first canonical type owns the token
-    bySlug.set(mapping.token, {
-      slug: mapping.token,
-      label: type,
-      canonicalType: type,
-    });
+  for (const [type, typology] of Object.entries(TYPOLOGY_BY_TYPE) as [PropertyType, string][]) {
+    if (bySlug.has(typology)) continue; // first canonical type owns the slug
+    bySlug.set(typology, { slug: typology, label: type, canonicalType: type });
   }
   return { property_type: [...bySlug.values()] };
 }
@@ -306,19 +353,21 @@ export const hipogesBuilder: PortalSearchUrlBuilder = {
 
 // ─── parse(): the structural inverse of buildHipoges (D-051 capture-to-infer) ─
 //
-// Recognises `/<lang>/(sale|rent)/<typology>/<country>/<town>[/<features>]` —
-// the grounded route shape — across the FULL recognised typology vocabulary
-// (every TYPOLOGY_TO_TYPES key, a strict superset of the tokens TYPOLOGY_MAP
-// emits), not only the tokens build() emits, since this also has to decode
-// REAL owner-navigated URLs
-// (same "recognise more than we emit" discipline as Aliseda's parser).
-// Nothing about [:features] or a query string is parsed for numeric values —
-// there is no confirmed grammar for either — so both stay 100% literal in the
-// template; substitute() below never rewrites them.
+// Recognises `/<lang>/<operation>/<typology>/<country>/<town>[/<features>]`
+// for ANY operation/typology token — NOT just the ones build() emits (issue
+// #561 review, B2: the first version whitelisted `sale|rent` and a fixed
+// typology set, so a REAL captured URL — which necessarily uses tokens this
+// builder didn't happen to guess right — decoded to null and was silently
+// never learned; D-051's whole point is broken if the thing meant to teach
+// this file a URL never accepts one). The only structural exclusion is the
+// 2nd path segment (the operation slot) being literally "detail" — Hipoges'
+// detail routes (`/:lang/detail/:id`, `/:lang/:investment/detail/:id[/...]`)
+// put "detail" in that position, and this parser must never conflate the two
+// shapes.
 
 // origin | lang | operation | typology | country | town | optional features | optional query
 const PATH_RE =
-  /^(https?:\/\/(?:www\.)?realestate\.hipoges\.com)\/([a-z]{2})\/(sale|rent)\/([^/?#]+)\/([^/?#]+)\/([^/?#]+)(?:\/([^/?#]+))?\/?(?:\?([^#]*))?$/i;
+  /^(https?:\/\/(?:www\.)?realestate\.hipoges\.com)\/([a-z]{2})\/([^/?#]+)\/([^/?#]+)\/([^/?#]+)\/([^/?#]+)(?:\/([^/?#]+))?\/?(?:\?([^#]*))?$/i;
 
 interface HipogesPathParts {
   origin: string;
@@ -335,8 +384,8 @@ function splitHipogesPath(url: string): HipogesPathParts | null {
   const m = PATH_RE.exec(url.trim());
   if (!m) return null;
   const [, origin, lang, operation, typology, country, town, features, query] = m;
-  if (!(typology.toLowerCase() in TYPOLOGY_TO_TYPES)) {
-    return null; // an unrecognised typology token — not confidently this grammar
+  if (operation.toLowerCase() === "detail" || typology.toLowerCase() === "detail") {
+    return null; // this is a detail URL shape, not a search — never conflate the two
   }
   return {
     origin,
@@ -351,11 +400,13 @@ function splitHipogesPath(url: string): HipogesPathParts | null {
 }
 
 /** Approximate `[lat, lng]` centroid for a `:town` token, best-effort only —
- * Hipoges' own town slug spelling is unconfirmed, so this only resolves when
- * the token happens to match a KNOWN_MUNICIPIOS entry (e.g. because a learned
- * example came from this builder's own guessed town). Never fabricated. */
+ * only the municipio half of `<municipio>_<provincia>` is looked up, and
+ * only when it happens to match a KNOWN_MUNICIPIOS entry (e.g. because a
+ * learned example came from this builder's own guessed town). Never
+ * fabricated. */
 function centerForTown(town: string): [number, number] | undefined {
-  const m = KNOWN_MUNICIPIOS.find((km) => km.municipio === town.toLowerCase());
+  const municipio = town.split("_")[0]?.toLowerCase();
+  const m = KNOWN_MUNICIPIOS.find((km) => km.municipio === municipio);
   return m ? [m.center[0], m.center[1]] : undefined;
 }
 
@@ -369,6 +420,9 @@ function parseHipoges(url: string): ParsedSearchUrl | null {
   const p = splitHipogesPath(url);
   if (!p) return null;
 
+  // Unrecognised typology -> propertyTypes decodes to [] (honest "we don't
+  // know which of our types this is"), never rejected outright (issue #561
+  // review, B2) — the URL is still stored and still learnable.
   const propertyTypes = [...(TYPOLOGY_TO_TYPES[p.typology] ?? [])];
   const locationSlug = `${p.country}/${p.town}`;
   const section = `${p.operation}/${p.typology}`;
@@ -385,11 +439,12 @@ function parseHipoges(url: string): ParsedSearchUrl | null {
 }
 
 /**
- * No numeric placeholder exists in a Hipoges template (no confirmed price/size
- * grammar — module docstring) — substitute() therefore never rewrites the
- * template itself; it only reports the profile's price/size bounds as
- * "unfilled" so the resolver flags them exactly like build() does, keeping a
- * tier-1/tier-2 upgraded task just as honest about what it can't express.
+ * No numeric placeholder exists in a Hipoges template ([:features]'s exact
+ * codes are unconfirmed — module docstring) — substitute() therefore never
+ * rewrites the template itself; it only reports the profile's price/size
+ * bounds as "unfilled" so the resolver flags them exactly like build() does,
+ * keeping a tier-1/tier-2 upgraded task just as honest about what it can't
+ * express.
  */
 function substituteHipoges(
   template: string,

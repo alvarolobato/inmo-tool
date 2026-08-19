@@ -74,12 +74,12 @@ describe("buildSearchUrls", () => {
   it("returns a flat task list across every capture portal in CAPTURE_PORTALS order", () => {
     const tasks = buildSearchUrls(SCOPE);
     // idealista: 1 viviendas task; aliseda: one task per type (piso, chalet);
-    // hipoges: one task per typology (piso→flat, chalet→house).
+    // hipoges: piso+chalet both collapse into the ONE confirmed
+    // "pisos-y-casas" typology section (issue #561 review, N3).
     expect(tasks.map((t) => t.portal)).toEqual([
       "idealista",
       "aliseda",
       "aliseda",
-      "hipoges",
       "hipoges",
     ]);
     for (const t of tasks) {

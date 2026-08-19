@@ -1,17 +1,22 @@
 /**
  * Unit tests for the Hipoges search-URL builder + parser (issue #561).
  *
- * Grammar: `/<lang>/<operation>/<typology>/<country>/<town>[/<features>]` —
- * the ROUTE shape is grounded (etl/connectors/hipoges.py's docstring, D-111);
- * every token inside it is an unconfirmed INFERENCE, which is what the
- * always-present `"grammar"` loosened flag exists to make impossible to miss.
+ * REVISED after a fresh-context Opus review of the first version (PR #562,
+ * B1/B2/N3/N4): the typology/operation/town vocabulary here is what the
+ * review confirmed from the site's public bundle (`main-*.js`/`chunk-*.js`/
+ * `es.json`), not the wrong `flat`/`house`/`sale` guesses the first version
+ * shipped — see hipoges.ts's module docstring for the full trace.
  */
 import { describe, it, expect } from "vitest";
 import { hipogesBuilder, hipogesParser } from "@/lib/search-url/portals/hipoges";
 import type { CanonicalSearchScope } from "@/lib/search-url/types";
 
-// Estepona (Costa del Sol) — a known municipio (municipios.ts).
+// Estepona (Costa del Sol) — a known municipio (municipios.ts), and the ONE
+// real captured Hipoges town example the review confirmed the FORMAT from
+// ("Estepona, Málaga" -> "estepona_malaga").
 const ESTEPONA: readonly [number, number] = [36.4268, -5.1468];
+// Sevilla capital — the OTHER known market, and its own province capital row.
+const SEVILLA: readonly [number, number] = [37.3891, -5.9845];
 // Madrid — outside every known municipio/province box in this tool's tables.
 const MADRID: readonly [number, number] = [40.4168, -3.7038];
 
@@ -31,98 +36,89 @@ function one(scope: Partial<CanonicalSearchScope>) {
   return tasks[0];
 }
 
-describe("hipogesBuilder — grammar honesty (issue #561)", () => {
-  it("ALWAYS carries a 'grammar' loosened flag — the vocabulary is never presented as confirmed", () => {
+describe("hipogesBuilder — grammar honesty, narrowed to :operation alone (issue #561 review)", () => {
+  it("carries a 'grammar' flag scoped to the operation token, not the whole route", () => {
     const task = one({});
     const grammar = task.loosened.find((l) => l.constraint === "grammar");
     expect(grammar).toBeDefined();
-    expect(grammar!.reason).toContain("INFERENCIA");
+    expect(grammar!.reason).toContain("operación");
     expect(grammar!.reason.toLowerCase()).toContain("d-051");
   });
 
-  it("emits the grounded route shape with the inferred sale/flat/espana tokens", () => {
+  it("emits the confirmed route: /es/venta/<typology>/espana/<town>", () => {
     const task = one({});
-    expect(task.url).toBe("https://realestate.hipoges.com/es/sale/flat/espana/estepona");
-    expect(task.portal).toBe("hipoges");
+    expect(task.url).toBe("https://realestate.hipoges.com/es/venta/pisos-y-casas/espana/estepona_malaga");
   });
 });
 
-describe("hipogesBuilder — typology mapping", () => {
-  it("piso -> flat (exact, no property_types flag)", () => {
-    const task = one({ propertyTypes: ["piso"] });
-    expect(task.url).toContain("/sale/flat/");
-    expect(task.loosened.some((l) => l.constraint === "property_types")).toBe(false);
-  });
-
-  it("atico folds onto flat (approximate, flagged)", () => {
-    const task = one({ propertyTypes: ["atico"] });
-    expect(task.url).toContain("/sale/flat/");
-    const flag = task.loosened.find((l) => l.constraint === "property_types");
-    expect(flag).toBeDefined();
-    expect(flag!.reason.toLowerCase()).toContain("ático");
-  });
-
-  it("de-duplicates piso + atico (both fold onto flat) into ONE task, piso wins", () => {
-    const tasks = build({ propertyTypes: ["piso", "atico"] });
+describe("hipogesBuilder — typology sections are CONFIRMED, not per-type guesses (issue #561 review, N3)", () => {
+  it("piso, chalet and atico all collapse into ONE pisos-y-casas task (the site's own taxonomy)", () => {
+    const tasks = build({ propertyTypes: ["piso", "chalet", "atico"] });
     expect(tasks).toHaveLength(1);
+    expect(tasks[0].url).toContain("/venta/pisos-y-casas/");
+    // No property_types flag: this is the site's real section, not an approximation.
     expect(tasks[0].loosened.some((l) => l.constraint === "property_types")).toBe(false);
   });
 
-  it("chalet -> house (exact)", () => {
-    expect(one({ propertyTypes: ["chalet"] }).url).toContain("/sale/house/");
-  });
-
-  it("local -> office (approximate, flagged)", () => {
-    const task = one({ propertyTypes: ["local"] });
-    expect(task.url).toContain("/sale/office/");
-    expect(task.loosened.some((l) => l.constraint === "property_types")).toBe(true);
-  });
-
-  it("nave folds onto building (approximate, flagged) and de-dupes with edificio", () => {
-    const tasks = build({ propertyTypes: ["nave", "edificio"] });
+  it("local and nave collapse into ONE locales-y-naves task", () => {
+    const tasks = build({ propertyTypes: ["local", "nave"] });
     expect(tasks).toHaveLength(1);
-    expect(tasks[0].url).toContain("/sale/building/");
-    // nave precedes edificio in canonical PROPERTY_TYPES order, so nave (the
-    // approximate one) wins the fold — the property_types flag stays.
-    const flag = tasks[0].loosened.find((l) => l.constraint === "property_types");
-    expect(flag).toBeDefined();
-    expect(flag!.reason.toLowerCase()).toContain("nave");
+    expect(tasks[0].url).toContain("/venta/locales-y-naves/");
   });
 
   it.each([
-    ["garaje", "garage"],
-    ["terreno", "land"],
-    ["edificio", "building"],
-  ] as const)("%s -> %s (exact)", (type, token) => {
-    expect(one({ propertyTypes: [type] }).url).toContain(`/sale/${token}/`);
+    ["garaje", "garajes"],
+    ["terreno", "terrenos"],
+    ["edificio", "edificios"],
+  ] as const)("%s -> its own confirmed typology %s", (type, typology) => {
+    expect(one({ propertyTypes: [type] }).url).toContain(`/venta/${typology}/`);
+  });
+
+  it("a mixed profile fans out into one task PER TYPOLOGY SECTION, not per canonical type", () => {
+    const tasks = build({ propertyTypes: ["piso", "chalet", "local", "garaje"] });
+    // pisos-y-casas (piso+chalet), locales-y-naves (local), garajes — THREE
+    // sections, not four canonical types.
+    expect(tasks.map((t) => t.url)).toEqual([
+      "https://realestate.hipoges.com/es/venta/pisos-y-casas/espana/estepona_malaga",
+      "https://realestate.hipoges.com/es/venta/locales-y-naves/espana/estepona_malaga",
+      "https://realestate.hipoges.com/es/venta/garajes/espana/estepona_malaga",
+    ]);
   });
 });
 
-describe("hipogesBuilder — geography (least-grounded segment)", () => {
-  it("resolves a known municipio to the :town segment", () => {
-    expect(one({ center: ESTEPONA }).url).toContain("/espana/estepona");
+describe("hipogesBuilder — :town format (issue #561 review, B1: underscore-joined, not bare municipio)", () => {
+  it("resolves a known municipio to <municipio>_<provincia>, not the bare municipio", () => {
+    const task = one({ center: ESTEPONA });
+    expect(task.url).toContain("/espana/estepona_malaga");
+    expect(task.url).not.toContain("/espana/estepona/"); // bare form is the confirmed-WRONG old shape
   });
 
-  it("falls back to the province, then to 'espana', when no municipio resolves", () => {
-    // Madrid capital is outside the known-municipio table but may resolve to a
-    // province; assert it never throws and always yields a non-empty town token.
+  it("Sevilla capital resolves to sevilla_sevilla (its own known-municipio row)", () => {
+    expect(one({ center: SEVILLA }).url).toContain("/espana/sevilla_sevilla");
+  });
+
+  it("never repeats the country segment as the town — falls back to a <municipio>_<provincia>-shaped default instead (issue #561 review, N4)", () => {
     const task = one({ center: MADRID });
-    expect(task.url).toMatch(/\/espana\/[a-z-]+$/);
+    expect(task.url).not.toContain("/espana/espana");
+    expect(task.url).toMatch(/\/espana\/[a-z]+_[a-z]+$/);
   });
 });
 
-describe("hipogesBuilder — price/size (no confirmed [:features] grammar)", () => {
+describe("hipogesBuilder — [:features] (issue #561 review, N2: known shape, unconfirmed codes)", () => {
   it("never encodes price or size into the URL", () => {
     const task = one({ priceMin: 50000, priceMax: 200000, sizeMin: 40, sizeMax: 100 });
-    expect(task.url).toBe("https://realestate.hipoges.com/es/sale/flat/espana/estepona");
+    expect(task.url).toBe("https://realestate.hipoges.com/es/venta/pisos-y-casas/espana/estepona_malaga");
   });
 
-  it("flags price_min/price_max/size_min/size_max as dropped when the profile sets them", () => {
+  it("flags price_min/price_max/size_min/size_max as dropped, honestly describing [:features] as a known-shape/unconfirmed-codes list", () => {
     const task = one({ priceMin: 50000, priceMax: 200000, sizeMin: 40, sizeMax: 100 });
     const constraints = task.loosened.map((l) => l.constraint);
     expect(constraints).toEqual(
       expect.arrayContaining(["price_min", "price_max", "size_min", "size_max"]),
     );
+    const priceFlag = task.loosened.find((l) => l.constraint === "price_max")!;
+    expect(priceFlag.reason).not.toMatch(/sin gramática confirmada/i);
+    expect(priceFlag.reason.toLowerCase()).toContain("configuración");
   });
 
   it("adds no price/size flags when the profile sets none", () => {
@@ -139,7 +135,7 @@ describe("hipogesBuilder — task ids", () => {
     const a = one({}).id;
     const b = one({}).id;
     expect(a).toBe(b);
-    expect(a).toMatch(/^hipoges:sale\/flat:[0-9a-f]{8}$/);
+    expect(a).toMatch(/^hipoges:venta\/pisos-y-casas:[0-9a-f]{8}$/);
     expect(one({ center: MADRID }).id).not.toBe(a);
   });
 });
@@ -149,10 +145,10 @@ describe("hipogesParser — round trip with hipogesBuilder", () => {
     const task = one({ propertyTypes: ["chalet"], center: ESTEPONA });
     const parsed = hipogesParser.parse(task.url);
     expect(parsed).not.toBeNull();
-    expect(parsed!.filters.section).toBe("sale/house");
-    expect(parsed!.filters.propertyTypes).toEqual(["chalet"]);
-    expect(parsed!.filters.locationSlug).toBe("espana/estepona");
-    expect(parsed!.categoryKey).toBe("sale/house");
+    expect(parsed!.filters.section).toBe("venta/pisos-y-casas");
+    expect(parsed!.filters.propertyTypes).toEqual(["piso", "chalet", "atico"]);
+    expect(parsed!.filters.locationSlug).toBe("espana/estepona_malaga");
+    expect(parsed!.categoryKey).toBe("venta/pisos-y-casas");
   });
 
   it("re-substituting the template reproduces the URL byte-for-byte", () => {
@@ -174,31 +170,51 @@ describe("hipogesParser — round trip with hipogesBuilder", () => {
   });
 });
 
-describe("hipogesParser — real navigated URLs (D-051 capture-to-infer)", () => {
-  it("recognises a typology token the builder never emits (apartment/storage) — decode more than we generate", () => {
+describe("hipogesParser — real navigated URLs are ALWAYS learnable (issue #561 review, B2)", () => {
+  it("never returns null for an unrecognised typology — a real capture must always be storable", () => {
+    // The whole point of D-051: a real navigated URL, even one whose typology
+    // this project has no canonical type for (oficinas/trasteros/obra_parada
+    // are real Hipoges typologies), must still decode and be learnable.
     const parsed = hipogesParser.parse(
-      "https://realestate.hipoges.com/es/sale/apartment/espana/malaga",
+      "https://realestate.hipoges.com/es/venta/oficinas/espana/malaga_malaga",
     );
     expect(parsed).not.toBeNull();
-    expect(parsed!.filters.propertyTypes).toEqual(["piso"]);
+    expect(parsed!.filters.propertyTypes).toEqual([]); // honest: we don't map this typology, never fabricated
+    expect(parsed!.filters.section).toBe("venta/oficinas");
   });
 
-  it("recognises 'rent' as an operation and keeps it distinct from 'sale' in categoryKey", () => {
+  it("never returns null for an operation other than the guessed 'venta' — alquiler decodes and stays distinct", () => {
     const rentParsed = hipogesParser.parse(
-      "https://realestate.hipoges.com/es/rent/flat/espana/estepona",
+      "https://realestate.hipoges.com/es/alquiler/pisos-y-casas/espana/estepona_malaga",
     );
     const saleParsed = hipogesParser.parse(
-      "https://realestate.hipoges.com/es/sale/flat/espana/estepona",
+      "https://realestate.hipoges.com/es/venta/pisos-y-casas/espana/estepona_malaga",
     );
+    expect(rentParsed).not.toBeNull();
     expect(rentParsed!.categoryKey).not.toBe(saleParsed!.categoryKey);
+  });
+
+  it("never returns null for a completely unexpected operation token either", () => {
+    const parsed = hipogesParser.parse(
+      "https://realestate.hipoges.com/es/subasta/pisos-y-casas/espana/estepona_malaga",
+    );
+    expect(parsed).not.toBeNull();
+    expect(parsed!.filters.section).toBe("subasta/pisos-y-casas");
+  });
+
+  it("decodes the confirmed real typology tokens even though only one canonical bucket is mapped", () => {
+    const parsed = hipogesParser.parse(
+      "https://realestate.hipoges.com/es/venta/locales-y-naves/espana/malaga_malaga",
+    );
+    expect(parsed!.filters.propertyTypes).toEqual(["local", "nave"]);
   });
 
   it("keeps an optional [:features] segment and query string verbatim in the template", () => {
     const parsed = hipogesParser.parse(
-      "https://realestate.hipoges.com/es/sale/flat/espana/malaga/some-feature-code?x=1",
+      "https://realestate.hipoges.com/es/venta/pisos-y-casas/espana/malaga_malaga/12,45,7?x=1",
     );
     expect(parsed).not.toBeNull();
-    expect(parsed!.template).toContain("/some-feature-code");
+    expect(parsed!.template).toContain("/12,45,7");
     expect(parsed!.template).toContain("?x=1");
   });
 
@@ -209,13 +225,9 @@ describe("hipogesParser — real navigated URLs (D-051 capture-to-infer)", () =>
     ).toBeNull();
   });
 
-  it("returns null for an unrecognised typology token", () => {
-    expect(
-      hipogesParser.parse("https://realestate.hipoges.com/es/sale/spaceship/espana/madrid"),
-    ).toBeNull();
-  });
-
   it("returns null for a non-Hipoges host", () => {
-    expect(hipogesParser.parse("https://www.idealista.com/es/sale/flat/espana/madrid")).toBeNull();
+    expect(
+      hipogesParser.parse("https://www.idealista.com/es/venta/pisos-y-casas/espana/madrid_madrid"),
+    ).toBeNull();
   });
 });

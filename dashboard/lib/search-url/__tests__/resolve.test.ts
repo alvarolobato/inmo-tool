@@ -20,7 +20,7 @@ import { resolveSearchTasks, AREA_MATCH_KM } from "@/lib/search-url/resolve";
 import { toCaptureUrl } from "@/lib/search-url/capture-url";
 import { idealistaBuilder, idealistaParser } from "@/lib/search-url/portals/idealista";
 import { alisedaBuilder, alisedaParser } from "@/lib/search-url/portals/aliseda";
-import { hipogesBuilder } from "@/lib/search-url/portals/hipoges";
+import { hipogesBuilder, hipogesParser } from "@/lib/search-url/portals/hipoges";
 import type { SearchTask } from "@/lib/search-url/types";
 import { decodeShapeValue, polygonCentroid } from "@/lib/search-url/geo";
 import { haversineKm } from "@/lib/search-url/parse-shared";
@@ -244,6 +244,89 @@ describe("resolveSearchTasks — capture-to-infer tiers", () => {
     // Aliseda has no map view → captureUrl is identical to url (identity).
     const aliseda = tasks.find((t) => t.portal === "aliseda")!;
     expect(aliseda.captureUrl).toBe(aliseda.url);
+  });
+});
+
+/**
+ * Issue #561 review, B2: the first version's `hipogesParser` whitelisted
+ * `sale|rent` operations and a fixed (wrong) typology set, so a REALISTIC
+ * captured URL decoded to `null` and D-051 never actually learned anything —
+ * this whole describe block would have been red under that version, and its
+ * absence in the original PR is exactly why the bug shipped unnoticed.
+ * `manualExample` builds a `SearchUrlExampleRow` from a HAND-WRITTEN URL
+ * string (never derived from `hipogesBuilder`'s own guess), the way a real
+ * owner capture would arrive.
+ */
+describe("resolveSearchTasks — Hipoges tiers with a REALISTIC captured URL (issue #561 review, B2)", () => {
+  const MANILVA: [number, number] = [36.3766, -5.2493]; // ~10 km from Estepona
+
+  function manualExample(url: string, id: number): SearchUrlExampleRow {
+    const parsed = hipogesParser.parse(url)!;
+    if (!parsed) throw new Error(`test fixture URL did not parse: ${url}`);
+    return {
+      id,
+      portal: "hipoges",
+      url,
+      match_key: `hipoges-k${id}`,
+      filters: parsed.filters,
+      category_key: parsed.categoryKey,
+      template: parsed.template,
+      created_at: "2026-08-19T00:00:00.000Z",
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockOverrides.mockResolvedValue([]);
+  });
+
+  it("tier 1: a real capture at the SAME (guessed) town upgrades the task and drops the guessed-grammar flag", async () => {
+    const ex = manualExample(
+      "https://realestate.hipoges.com/es/venta/pisos-y-casas/espana/estepona_malaga",
+      101,
+    );
+    withExamples({ hipoges: [ex] });
+
+    const tasks = await resolveSearchTasks(scope(ESTEPONA, { property_types: ["piso"] } as Partial<Scope>), PROFILE_ID);
+    const t = tasks.find((x) => x.portal === "hipoges")!;
+    expect(t.url).toBe("https://realestate.hipoges.com/es/venta/pisos-y-casas/espana/estepona_malaga");
+    // Confirmed by a real capture now — the operation-token "grammar" flag
+    // (the ONLY thing this builder ever guesses, issue #561 review) is gone.
+    expect(t.loosened.find((l) => l.constraint === "grammar")).toBeUndefined();
+  });
+
+  it("tier 2: a real capture at a DIFFERENT nearby town still upgrades the task — the #444 municipio gate does NOT apply to Hipoges", async () => {
+    // Captured at Manilva; the profile is centred on Estepona (a DIFFERENT,
+    // but known, municipio — municipioForPoint(ESTEPONA) resolves). For
+    // idealista this would skip tier 2 entirely (#444: a code-driven slug is
+    // authoritative). Hipoges' own town is an admitted guess, never
+    // authoritative, so tier 2 must still fire here.
+    const ex = manualExample(
+      "https://realestate.hipoges.com/es/venta/pisos-y-casas/espana/manilva_malaga",
+      102,
+    );
+    withExamples({ hipoges: [ex] });
+
+    const tasks = await resolveSearchTasks(scope(ESTEPONA, { property_types: ["piso"] } as Partial<Scope>), PROFILE_ID);
+    const t = tasks.find((x) => x.portal === "hipoges")!;
+    expect(t.url).toBe("https://realestate.hipoges.com/es/venta/pisos-y-casas/espana/manilva_malaga");
+    expect(t.loosened.some((l) => l.reason.includes("reutilizada"))).toBe(true);
+    // The guessed-grammar flag is superseded by the tier-2 reuse flag — the
+    // task is no longer running on this builder's own unconfirmed town guess.
+    expect(t.loosened.find((l) => l.constraint === "grammar")).toBeUndefined();
+  });
+
+  it("tier 3: a DIFFERENT-section real capture never applies", async () => {
+    const ex = manualExample(
+      "https://realestate.hipoges.com/es/venta/garajes/espana/estepona_malaga",
+      103,
+    );
+    withExamples({ hipoges: [ex] });
+
+    const tasks = await resolveSearchTasks(scope(ESTEPONA, { property_types: ["piso"] } as Partial<Scope>), PROFILE_ID);
+    const t = tasks.find((x) => x.portal === "hipoges")!;
+    const base = hipogesBuilder.build({ center: ESTEPONA, radiusKm: 8, propertyTypes: ["piso"] })[0];
+    expect(t.url).toBe(base.url);
   });
 });
 

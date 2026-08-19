@@ -214,19 +214,29 @@ perfil", D-114).
 ## Loosened searches (#267 caveat)
 
 Pre-filtered URLs are reverse-engineered and unverified. Each task surfaces its
-`loosened` constraints inline as "ampliada: <reason>" (broader, never narrower)
-so the owner can eyeball that the link lands filtered — failures are shown,
-never hidden. Aliseda always loosens geography (no radius search).
+`loosened` constraints inline, prefixed via `loosenedPrefixLabel()`
+(`dashboard/lib/search-url/labels.ts`) — "ampliada: <reason>" (broader, never
+narrower) for every constraint except `"grammar"`, which reads "sin
+confirmar: <reason>" instead (see below) — so the owner can eyeball that the
+link lands filtered — failures are shown, never hidden. Aliseda always
+loosens geography (no radius search).
 
-**Hipoges (issue #561, D-115) also always carries a `"grammar"` flag** — a
-different kind of honesty note from the others. Every other portal's flags
-name a specific dropped/broadened VALUE inside an otherwise-confirmed
-grammar; Hipoges' flag says the URL's basic token VOCABULARY itself
-(operation/typology/country/town) is an unconfirmed inference, never
-observed on a real search — see
+**Hipoges (issue #561, D-115, revised after a fresh-context review of the
+first version — PR #562) carries a `"grammar"` flag scoped to its `:operation`
+token alone** — a different kind of honesty note from the others. Every
+other portal's flags (and Hipoges' own price/size flags) name a specific
+dropped/broadened VALUE inside an otherwise-confirmed grammar, so "ampliada:"
+("broadened:") is accurate for them. `"grammar"` instead flags that ONE
+TOKEN in the URL is an unconfirmed guess — the search may not be broader at
+all, it may be a wrong page entirely (Hipoges silently redirects home on an
+invalid route token, per the site's own public bundle) — so it renders
+"sin confirmar:" instead. The FIRST version of this flag claimed the WHOLE
+route vocabulary was unconfirmed; a review found four of five typology
+tokens were provably wrong (readable from the site's public bundle with no
+probing) and the town format didn't exist on the real site either — see
 [search-url-builder.md](search-url-builder.md#confirmed-vs-reverse-engineered-grammar)
-for what is and isn't grounded. It renders through the SAME inline flag
-mechanism, no new UI.
+for the corrected, confirmed grammar. It renders through the SAME inline
+flag mechanism, no new UI.
 
 ## Auth
 

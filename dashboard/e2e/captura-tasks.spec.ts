@@ -434,11 +434,20 @@ test.describe("Capturar todo — GLOBAL across profiles (issue #559, correcting 
     page,
   }) => {
     const { aIdealista, aAliseda, aHipoges, bIdealista, bAliseda, bHipoges } = await seedKnownState(page);
+    // issue #561 review, N1: without this, unregistering hipogesBuilder would
+    // leave every assertion below vacuously green (totals would just count
+    // fewer tasks) — assert the Hipoges task(s) actually exist first.
+    expect(aHipoges.length).toBeGreaterThanOrEqual(1);
     const totalA = aIdealista.length + aAliseda.length + aHipoges.length;
     const totalB = bIdealista.length + bAliseda.length + bHipoges.length;
 
     await page.goto("/captura");
     await expect(page.getByTestId("captura-page")).toBeVisible();
+
+    // A Hipoges connector section actually renders on the page (not just
+    // present in the API response) — the concrete, DOM-level version of the
+    // same N1 guard.
+    await expect(page.getByTestId(`captura-connector-${profileAId}-hipoges`)).toBeVisible();
 
     // Exactly ONE button and ONE select-all/none pair on the whole page —
     // page.getByTestId() itself enforces uniqueness (throws in strict mode on
