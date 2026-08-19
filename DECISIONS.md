@@ -153,6 +153,7 @@
 | ID | Binding rule |
 |----|--------------|
 | [D-120](docs/decisions/D-120-mobile-breakpoint-inline-style-precedence.md) | Mobile breakpoint is Tailwind's default `md:` (768px). On components mixing inline styles with Tailwind, use Tailwind ONLY for `hidden`/`md:*` display toggling — never set `display` inline on an element that also carries a responsive display class, or the inline style wins and silently defeats the breakpoint. Other inline properties (color, fontSize) are fine — the collision is per-property. |
+| [D-124](docs/decisions/D-124-flexwrap-basis-zero-inert.md) | Never rely on `flexWrap: "wrap"` plus children at `flex: 1` (flex-basis 0%) to produce a stack at narrow widths — flexbox collects items into lines using each item's hypothetical (basis) size, computed BEFORE any grow/shrink, so basis-0 siblings always "fit" on one line by shrinking instead of ever wrapping. If those same children also carry `minWidth: 0`, the wrap is not just unlikely, it is fully inert: without it, a flex item's default `min-width: auto` resolves to its min-content size and the row would still wrap once min-content sizes stopped fitting. Give a child that must wrap a real non-zero `flexBasis` instead. |
 
 ## UI / frontend
 

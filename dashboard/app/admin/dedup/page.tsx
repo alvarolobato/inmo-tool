@@ -6,7 +6,16 @@ export const metadata = {
 
 export default function DedupReviewPage() {
   return (
-    <div style={{ padding: "var(--pad)", maxWidth: 900 }}>
+    // dedup-page: AdminChrome (app/admin/AdminChrome.tsx) already wraps every
+    // /admin/* page's children in its own `padding: var(--pad)` div — this
+    // page used to apply a second, matching padding of its own on top of
+    // that (a real double-padding bug, not just cosmetic — see D-122). The
+    // `padding` value now lives entirely in the .dedup-page class
+    // (globals.css) instead of here: desktop keeps the exact same var(--pad)
+    // value, and the mobile override zeroes THIS page's layer only —
+    // AdminChrome's own padding layer still applies underneath, so spacing
+    // doesn't disappear, it just stops doubling.
+    <div className="dedup-page" style={{ maxWidth: 900 }}>
       <h1 style={{ fontSize: 20, fontWeight: 700, color: "var(--fg)", marginBottom: 6 }}>
         Revisión de duplicados
       </h1>

@@ -521,3 +521,97 @@ body {
     transition: none;
   }
 }
+
+/* ============================================================
+   /admin/dedup — phone-width layout (#576)
+   ============================================================
+   SuggestionCard's comparison row is `display:flex; flexWrap:"wrap"` with
+   each ListingSidePanel now at `flex: 1 1 280px` (inline style, see the
+   component) — real wrapping below ~600px of row width. That flex-basis
+   stays inline (it's the same value at every width, not a breakpoint
+   divergence) — everything below IS a breakpoint divergence, so it follows
+   D-121's ladder: every value here was a static literal with no prop/state
+   dependency, so each one was simply DELETED from the component's inline
+   `style` object and now lives here instead — a plain class fully owns it,
+   with no inline declaration left to out-specificity, so no `!important`
+   is needed anywhere in this block (see D-122). 768px matches this
+   project's only other documented mobile/desktop split (issue #576's
+   "desktop >=768px pixel-identical" constraint) — chosen here as the
+   authoritative breakpoint rather than inferring one from a component.
+
+   Two more padding layers stack around this page below 768px besides the
+   one this block removes: `main.main-content` (global app shell, every
+   page) and `AdminChrome`'s own content div (every /admin/* page, e.g.
+   /admin/llm has the identical stack). Both are correctly out of #576's
+   scope (touching either would affect far more than this one page) — see
+   D-122 for the follow-up note. */
+
+/* Base (desktop and mobile both start here): AdminChrome
+   (app/admin/AdminChrome.tsx) already wraps every /admin/* page's children
+   in its own `padding: var(--pad)` div — this class is what used to be
+   this page's OWN matching (and redundant) inline padding, now here
+   instead so the mobile override below can zero it. */
+.dedup-page {
+  padding: var(--pad);
+}
+
+/* The comparison-card shell. Desktop value matches what shipped before
+   this class existed. */
+.dedup-card {
+  padding: 12px;
+}
+
+/* Desktop: 4 photos across. Matches the shape this always rendered at. */
+.dedup-photo-grid {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+/* Confirm/reject desktop sizing — unchanged from before this class
+   existed. */
+.dedup-action-btn {
+  padding: 6px 14px;
+}
+
+@media (max-width: 767px) {
+  /* AdminChrome's own padding layer still applies (see the block comment
+     above) — this just stops THIS page's layer from doubling it, which on
+     a 390px phone was costing the comparison panels real width. */
+  .dedup-page {
+    padding: 0;
+  }
+
+  /* Recovers more of that width: issue #576's own bar is panels >=300px at
+     390px, not just "bigger than the ~140px bug" — trimming the card's own
+     horizontal breathing room (vertical unchanged) closes the remaining
+     gap once AdminChrome's + main-content's untouched padding layers are
+     accounted for. */
+  .dedup-card {
+    padding: 12px 0;
+  }
+
+  /* The "≟" separator between the two panels: without this it would
+     otherwise share panel A's flex line (flex-basis 100% forces it onto
+     its own row, which pushes panel B onto a third row below). */
+  .dedup-vs-icon {
+    flex-basis: 100%;
+  }
+
+  /* 4 thumbnails across a stacked mobile panel are too small to compare
+     visually (#576's root complaint) — 2 columns roughly doubles each
+     thumbnail's width and height. Desktop keeps the 4-column base rule
+     above, untouched. */
+  .dedup-photo-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  /* Confirm/reject are a destructive-ish action taken with a thumb — WCAG
+     2.5.5's 44px minimum target size, not just the ~29px the desktop
+     padding/font-size alone produce. */
+  .dedup-action-btn {
+    min-height: 44px;
+    padding: 12px 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+}
