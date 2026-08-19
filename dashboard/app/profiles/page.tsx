@@ -64,6 +64,12 @@ function DegradedProfileRow({ profile }: { profile: SearchProfileRow }) {
       data-testid="profile-row-degraded"
       style={{
         display: "flex",
+        // #572: same reflow mechanism as ValidProfileRow — the text block
+        // has no fixed-width sibling here so it already wraps its own text
+        // safely, but a long name + Entrar's nowrap text could still be
+        // pushed off-screen on one unbroken line; wrapping is a no-op at
+        // desktop width where everything already fits.
+        flexWrap: "wrap",
         alignItems: "center",
         justifyContent: "space-between",
         padding: "14px 12px",
@@ -74,7 +80,7 @@ function DegradedProfileRow({ profile }: { profile: SearchProfileRow }) {
         gap: 12,
       }}
     >
-      <div>
+      <div style={{ flex: "1 1 200px", minWidth: 0 }}>
         <p
           style={{
             fontWeight: 500,
@@ -101,13 +107,21 @@ function DegradedProfileRow({ profile }: { profile: SearchProfileRow }) {
       <Link
         href={`/profiles/${profile.id}`}
         style={{
-          padding: "7px 14px",
+          // #572: same var-driven mobile tap-target treatment as
+          // ValidProfileRow's Entrar (see globals.css) — pixel-identical
+          // at >=768px, a full-width >=44px target below it.
+          display: "var(--profile-enter-display, inline)",
+          padding: "var(--profile-enter-pad, 7px 14px)",
+          minHeight: "var(--profile-tap-min, auto)",
+          boxSizing: "border-box",
+          width: "var(--profile-enter-wrapper-width, auto)",
           background: "var(--accent)",
           color: "#fff",
           borderRadius: 6,
           fontSize: 13,
           fontWeight: 500,
           textDecoration: "none",
+          textAlign: "center",
           whiteSpace: "nowrap",
         }}
       >
@@ -332,7 +346,16 @@ export default function ProfilesPage() {
     (overviews?.length ?? 0) > 0 || (degradedProfiles?.length ?? 0) > 0;
 
   return (
-    <main style={{ maxWidth: 720, margin: "0 auto", padding: 24 }}>
+    <main
+      style={{
+        maxWidth: 720,
+        margin: "0 auto",
+        // #572: 24px×2 was 23% of a 390px phone screen; below 768px this
+        // resolves to 12px×2 (globals.css) — >=768px is the literal 24px
+        // this always was.
+        padding: "var(--profiles-main-pad, 24px)",
+      }}
+    >
       <div
         style={{
           display: "flex",

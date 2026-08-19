@@ -153,3 +153,9 @@
 | ID | Binding rule |
 |----|--------------|
 | [D-120](docs/decisions/D-120-mobile-breakpoint-inline-style-precedence.md) | Mobile breakpoint is Tailwind's default `md:` (768px). On components mixing inline styles with Tailwind, use Tailwind ONLY for `hidden`/`md:*` display toggling — never set `display` inline on an element that also carries a responsive display class, or the inline style wins and silently defeats the breakpoint. Other inline properties (color, fontSize) are fine — the collision is per-property. |
+
+## UI / frontend
+
+| ID | Binding rule |
+|----|--------------|
+| [D-121](docs/decisions/D-121-inline-style-phone-breakpoint-css-vars.md) | When an inline-styled dashboard component needs a value to differ only below 768px, define it as a `:root` custom property (default = the existing desktop literal) flipped under `@media (max-width: 767px)` in globals.css, and read it via `var(--x, same literal)` inside the inline `style` prop — never duplicate the element behind a Tailwind `hidden md:flex` toggle, and never fight inline-style specificity with a plain CSS class. |

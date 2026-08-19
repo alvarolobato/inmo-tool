@@ -50,6 +50,12 @@ export function ProfileOverviewRow({
 const rowStyle: React.CSSProperties = {
   position: "relative",
   display: "flex",
+  // Defensive: BrokenProfileRow renders this un-nested as its own single
+  // flex line (ValidProfileRow overrides flexDirection to column below and
+  // wraps its own inner row separately, so this only bites BrokenProfileRow
+  // in practice). Wrapping is a no-op unless content genuinely overflows —
+  // it doesn't change desktop layout for either row shape.
+  flexWrap: "wrap",
   gap: 12,
   padding: "14px 12px",
   borderRadius: 8,
@@ -345,7 +351,22 @@ function ValidProfileRow({
       data-profile-id={profile.id}
       data-highlighted={highlighted ? "true" : undefined}
     >
-      <div style={{ display: "flex", gap: 12, width: "100%" }}>
+      {/*
+        #572: at phone width, thumbnails-left/text-right cannot survive —
+        `Thumbnails` is a fixed 220px (flexShrink: 0) and the text column
+        collapsed to ~10px of usable width. `flexWrap: "wrap"` + giving the
+        text column a real flex-basis (below) makes the flex algorithm
+        itself decide the break: at >=768px thumbnails(220)+gap+text(240
+        basis) always fits well inside the card, so nothing wraps and
+        desktop is unchanged; below that, the text column (then Entrar)
+        each drop to their own full-width line — a photo strip on top,
+        name/metadata below, no ResizeObserver or explicit breakpoint
+        needed. Because the kebab (`OverflowMenu`, position: absolute) is
+        positioned off the OUTER `rowStyle` container (not this inner row),
+        wrapping pushes the title below the kebab's height instead of
+        under it, which is what actually fixes the reported overlap.
+      */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 12, width: "100%" }}>
       <Thumbnails thumbnails={metrics.thumbnails} />
 
       {/*
@@ -358,7 +379,7 @@ function ValidProfileRow({
         that wrote real feedback rows on a stray click"). Both live in this
         shared flex:1 column so they read as one visual block.
       */}
-      <div style={{ flex: 1, minWidth: 0, paddingRight: 36 }}>
+      <div style={{ flex: "1 1 240px", minWidth: 0, paddingRight: 36 }}>
         <Link
           href={`/profiles/${profile.id}`}
           style={{ display: "block", textDecoration: "none", color: "inherit" }}
@@ -452,19 +473,33 @@ function ValidProfileRow({
         style={{
           alignSelf: "center",
           flexShrink: 0,
+          // #572: on its own wrapped mobile line this becomes full-width
+          // (see globals.css's --profile-enter-wrapper-width) so Entrar
+          // reads as an easy full-width thumb target; unchanged ("auto") at
+          // desktop width, where it stays the compact right-aligned pill.
+          width: "var(--profile-enter-wrapper-width, auto)",
         }}
       >
         <Link
           href={`/profiles/${profile.id}`}
           data-testid="profile-enter-button"
           style={{
-            padding: "7px 14px",
+            // #572: >=768px resolves to the exact literal values this had
+            // before (display: inline, padding: 7px 14px, no min-height) —
+            // pixel-identical desktop. Below 768px these switch to a
+            // full-width block with taller padding so the tappable box
+            // clears the 44px minimum (see globals.css).
+            display: "var(--profile-enter-display, inline)",
+            padding: "var(--profile-enter-pad, 7px 14px)",
+            minHeight: "var(--profile-tap-min, auto)",
+            boxSizing: "border-box",
             background: "var(--accent)",
             color: "#fff",
             borderRadius: 6,
             fontSize: 13,
             fontWeight: 500,
             textDecoration: "none",
+            textAlign: "center",
             whiteSpace: "nowrap",
           }}
         >
@@ -482,7 +517,7 @@ function ValidProfileRow({
       </div>
 
       {metrics.matched_count === 0 && showZeroDiagnostic && (
-        <div style={{ width: "100%", paddingLeft: 64 }}>
+        <div style={{ width: "100%", paddingLeft: "var(--profile-zero-diag-pad-left, 64px)" }}>
           <ZeroCandidatesDiagnostic profileId={profile.id} />
         </div>
       )}
