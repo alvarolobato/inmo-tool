@@ -277,7 +277,7 @@ def evaluate_pair(
     one signal that's actually 97% of the pending-suggestion backlog this
     issue targets.
 
-    Issue #568 (D-118): a normalized-municipality conflict is NOT checked
+    Issue #568 (D-119): a normalized-municipality conflict is NOT checked
     here, same reasoning as `property_type`/`rooms` (issue #566/D-117) —
     see `etl.dedup.signals.fuzzy`'s module docstring and
     `municipality_conflict`'s use inside `fuzzy.evaluate`. Measured blast

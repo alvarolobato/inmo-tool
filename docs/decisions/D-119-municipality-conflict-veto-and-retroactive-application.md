@@ -1,12 +1,12 @@
 ---
-id: D-118
+id: D-119
 title: Normalized-municipality conflict vetoes a fuzzy suggestion; hard vetoes apply retroactively via a previewed, reversible pass
 date: 2026-08-19
 group: Data / connectors
-rule: "A normalized `property.city` conflict (strip trailing `capital`, fold accents, casefold, collapse+drop whitespace, resolve known district->municipality aliases) vetoes `fuzzy.evaluate` ONLY, mirroring D-117 — never wired into `evaluate_pair`. `ps dedup retroactive [--apply]` (`etl/dedup/retroactive.py`, dry-run by default) reverts D-116 merges via `engine.revert` (never deletes) using the SAME cross-source, non-same-property reachability filter `evaluate_pair` itself has — a raw listing comparison undercounts what is actually unreachable. Reports (never triggers) D-117/D-118 pending-suggestion demotion, which happens on the next `ps dedup run` via D-024. Each arm degrades to unavailable, simulated explicitly in tests, when its rule's PR hasn't merged — never inferred from ambient absence."
+rule: "A normalized `property.city` conflict (strip trailing `capital`, fold accents, casefold, collapse+drop whitespace, resolve known district->municipality aliases) vetoes `fuzzy.evaluate` ONLY, mirroring D-117 — never wired into `evaluate_pair`. `ps dedup retroactive [--apply]` (`etl/dedup/retroactive.py`, dry-run by default) reverts D-116 merges via `engine.revert` (never deletes) using the SAME cross-source, non-same-property reachability filter `evaluate_pair` itself has — a raw listing comparison undercounts what is actually unreachable. Reports (never triggers) D-117/D-119 pending-suggestion demotion, which happens on the next `ps dedup run` via D-024. Each arm degrades to unavailable, simulated explicitly in tests, when its rule's PR hasn't merged — never inferred from ambient absence."
 ---
 
-# D-118: Normalized-municipality conflict vetoes a fuzzy suggestion; hard vetoes apply retroactively via a previewed, reversible pass
+# D-119: Normalized-municipality conflict vetoes a fuzzy suggestion; hard vetoes apply retroactively via a previewed, reversible pass
 
 *Decided: 2026-08-19*
 
@@ -97,7 +97,7 @@ previewed before acting.
      `--apply` reverts it via `engine.revert` — the SAME function
      `ps dedup revert <id>` already calls — never a bespoke unmerge path,
      never a `DELETE`.
-   - **D-117/D-118**: zero blast radius against existing merges by
+   - **D-117/D-119**: zero blast radius against existing merges by
      construction (fuzzy-scoped, never auto-merges), so their retroactive
      effect is entirely D-024's existing per-run pending-suggestion
      reevaluation, exercised by the next `ps dedup run` — this command
@@ -115,27 +115,26 @@ previewed before acting.
      `structured_fields_conflict` are imported defensively
      (`_reference_codes_conflict_fn`/`_structured_fields_conflict_fn`);
      absent, the corresponding section reports "rule not present in this
-     build" and contributes zero, instead of raising. D-116 (#565) has
-     since merged, so that arm is live (at its measured ZERO reach,
-     above); D-117 (#567) is still open as of this writing, so its arm
-     still degrades to unavailable in practice, not just in a test — the
-     degrade-path tests simulate absence EXPLICITLY via
+     build" and contributes zero, instead of raising. D-116 (#565) and
+     D-117 (#567) have both since merged, so both arms are live — the
+     degrade-path tests still simulate absence EXPLICITLY via
      `monkeypatch.delattr`/`monkeypatch.setattr` on the injection seam,
      never by relying on a dependency being ambiently missing (a lesson
-     learned the hard way: the first cut of this PR's tests assumed
-     D-116 would stay absent and broke the moment #565 merged). Chosen
-     over gating because D-118's own municipality veto is independently
-     useful the moment this PR lands, and `ps dedup retroactive` needs no
-     code change to pick up each rule once its PR merges, in whichever
-     order.
+     learned the hard way, twice: the first cut of this PR's tests
+     assumed D-116 would stay absent and broke the moment #565 merged;
+     the D-117 arm's tests were written explicitly from the start to
+     avoid the same fate). Chosen over gating because D-119's own
+     municipality veto is independently useful the moment this PR lands,
+     and `ps dedup retroactive` needs no code change to pick up each rule
+     once its PR merges, in whichever order.
 
 **Alternatives rejected**:
 - *Engine-wide municipality veto* — rejected on the measured Churriana
   counter-example, same reasoning as D-117.
 - *Gate the retroactive command behind #565/#567 merging first* —
-  rejected: it would make this PR's own D-118 rule (which needs no
-  dependency) wait on two unrelated open PRs, and the degrade-cleanly
-  design costs nothing once they do land.
+  rejected: it would make this PR's own D-119 rule (which needs no
+  dependency) wait on two unrelated PRs, and the degrade-cleanly design
+  costs nothing once they land (both have, since).
 - *Have `--apply` also trigger `engine.run()` to force-demote pending
   suggestions immediately* — rejected: `engine.run()` is a full O(n^2)
   pairwise scan (~13.3us/pair, minutes at current volume), not a

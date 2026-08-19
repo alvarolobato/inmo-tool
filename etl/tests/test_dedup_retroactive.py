@@ -387,6 +387,39 @@ class TestCountPendingFuzzyDemotions:
         assert counts.structured_fields_conflicts == 1
         assert counts.either == 1
 
+    def test_structured_fields_conflicts_counted_with_the_real_shipped_predicate(
+        self, dedup_db
+    ):
+        """Regression test for a real bug: `_fetch_listing_records_by_id`
+        originally only selected `p.city`, not `p.property_type`/`p.rooms`
+        — so every ListingRecord this module built had `property_type`/
+        `rooms` permanently `None`, and the REAL (now-merged, D-117)
+        `structured_fields_conflict` is permissive-on-absence, so it
+        silently returned False for every pair regardless of the actual
+        data. `test_structured_fields_conflicts_counted_once_rule_available`
+        above never caught this because it monkeypatches the predicate
+        entirely (checking `city`, not `property_type`/`rooms`) — this
+        test uses the REAL shipped predicate, unmocked, specifically to
+        exercise the query/mapping bug that test cannot see."""
+        self._insert_pending_fuzzy_suggestion(
+            dedup_db,
+            ext_prefix="retro-pending-real-structured-conflict",
+            address_a="Calle Mayor 5, Madrid",
+            address_b="Calle Mayor 5, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            rooms_a=2,
+            rooms_b=5,
+        )
+
+        counts = retroactive.count_pending_fuzzy_demotions(dedup_db)
+
+        assert counts.structured_fields_rule_available is True
+        assert counts.structured_fields_conflicts == 1
+        assert counts.either == 1
+
     def test_zero_pending_fuzzy_suggestions_reports_zero(self, dedup_db):
         counts = retroactive.count_pending_fuzzy_demotions(dedup_db)
         assert counts.total_pending_fuzzy == 0

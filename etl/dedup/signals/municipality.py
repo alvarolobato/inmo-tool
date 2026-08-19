@@ -1,4 +1,4 @@
-"""Municipality-conflict predicate (issue #568, D-118).
+"""Municipality-conflict predicate (issue #568, D-119).
 
 Two listings whose `property.city` genuinely names two different
 municipalities are not the same property — but the naive `!=` comparison

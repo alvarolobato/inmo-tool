@@ -18,7 +18,7 @@ Three rules are in scope:
   documents the same ZERO independently). Real protection the moment a
   second connector starts capturing agency name alongside reference code;
   not dead code.
-- **D-117** (structured-field conflict, PR #567, open) and **D-118**
+- **D-117** (structured-field conflict, PR #567 — MERGED into main) and **D-119**
   (this issue's municipality veto): both are `fuzzy`-scoped and never
   auto-merge, so they have **zero** blast radius against already-merged
   properties by construction — `fuzzy.evaluate` is never reached for two
@@ -49,14 +49,19 @@ does NOT gate behind any of them merging first. `reference_codes_conflict`
 (`_reference_codes_conflict_fn` / `_structured_fields_conflict_fn` below);
 when a rule's module/function doesn't exist yet, the corresponding section
 reports "rule not present in this build" and contributes zero to every
-count, rather than raising ImportError. D-116 (#565) has since merged, so
-that arm is live; D-117 (#567) is still open as of this writing, so its
-arm still degrades to unavailable in practice, not just in a test — this
-was the deliberate choice over gating `ps dedup retroactive` behind both
-merging first: D-118's own municipality veto ships and is independently
-useful the moment THIS PR lands, and re-running `ps dedup retroactive`
-picks up each rule automatically the moment its PR merges, with no code
-change here, regardless of merge order.
+count, rather than raising ImportError. D-116 (#565) and D-117 (#567) have
+both since merged, so both arms are live (D-116 measured at ZERO reach
+above; D-117's measured reach is reported by `count_pending_fuzzy_demotions`
+against whatever is actually pending right now) — this degrade path is
+still exercised by tests (`monkeypatch.delattr`/`monkeypatch.setattr` on
+the injection seam, simulating absence explicitly rather than depending on
+either PR staying unmerged), since a future revert/refactor could still
+drop either signal. This was the deliberate choice over gating
+`ps dedup retroactive` behind either merging first: D-119's own
+municipality veto ships and is independently useful the moment THIS PR
+lands, and re-running `ps dedup retroactive` picks up each rule
+automatically the moment its PR merges, with no code change here,
+regardless of merge order.
 
 **Dry-run is the default everywhere** — `run_retroactive_pass(conn)` with
 no `apply` argument, and the CLI's `ps dedup retroactive` with no flag,
@@ -108,7 +113,7 @@ def _fetch_listing_records_by_id(conn, listing_ids) -> dict[int, ListingRecord]:
                    l.description, l.photo_urls,
                    p.cadastral_ref, p.address, p.lat, p.lon, p.m2_built,
                    l.current_price, l.contact_raw, l.reference_code, p.floor,
-                   p.city
+                   p.city, p.property_type, p.rooms
               FROM listing l
               JOIN property p ON p.id = l.property_id
              WHERE l.id = ANY(%s)
@@ -135,6 +140,8 @@ def _fetch_listing_records_by_id(conn, listing_ids) -> dict[int, ListingRecord]:
             reference_code=row[14],
             floor=row[15],
             city=row[16],
+            property_type=row[17],
+            rooms=row[18],
         )
         for row in rows
     }
@@ -260,26 +267,26 @@ def find_reference_code_veto_merges(conn) -> list[ReferenceCodeRevertCandidate]:
 @dataclass(frozen=True)
 class PendingFuzzyDemotionCounts:
     """Dry-run counts for the pending `fuzzy` suggested_merge backlog: how
-    many of TODAY's pending rows carry a conflict D-117/D-118 would now
+    many of TODAY's pending rows carry a conflict D-117/D-119 would now
     reject. These are diagnostic counts, not a second demotion mechanism —
     see this module's docstring for why the actual demotion happens on the
     next `ps dedup run`, not here."""
 
     total_pending_fuzzy: int
     structured_fields_conflicts: int  # D-117
-    municipality_conflicts: int  # D-118 (this issue)
+    municipality_conflicts: int  # D-119 (this issue)
     either: int  # union: at least one of the two rules fires
     structured_fields_rule_available: bool
 
 
 def count_pending_fuzzy_demotions(conn) -> PendingFuzzyDemotionCounts:
     """Of every currently-`pending`, `match_basis='fuzzy'` suggestion, how
-    many carry a D-117 (`structured_fields_conflict`) and/or D-118
+    many carry a D-117 (`structured_fields_conflict`) and/or D-119
     (`municipality_conflict`) conflict between their two listings.
 
     D-117's predicate degrades to "never fires" (0 contribution,
     `structured_fields_rule_available=False`) when PR #567 hasn't merged
-    yet — see this module's docstring. D-118 is always available; it ships
+    yet — see this module's docstring. D-119 is always available; it ships
     in this same PR.
     """
     structured_fn = _structured_fields_conflict_fn()
@@ -354,7 +361,7 @@ def run_retroactive_pass(conn, apply: bool = False) -> RetroactiveReport:
     failure partway through leaves every already-reverted row reverted and
     every not-yet-reached row untouched, not a half-applied mess.
 
-    D-117/D-118 never write anything here regardless of `apply` — see this
+    D-117/D-119 never write anything here regardless of `apply` — see this
     module's docstring for why (D-024's existing reevaluation, exercised
     by the next `ps dedup run`, owns that).
     """

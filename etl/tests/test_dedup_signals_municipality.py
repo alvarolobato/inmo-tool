@@ -1,5 +1,5 @@
 """Direct unit tests for etl.dedup.signals.municipality's pure helpers
-(issue #568, D-118). End-to-end engine-level veto coverage lives in
+(issue #568, D-119). End-to-end engine-level veto coverage lives in
 test_dedup_engine.py's TestMunicipalityConflictVeto — this file only
 covers `normalize_city`/`municipality_conflict` in isolation, mirroring
 test_dedup_signals_structured_fields.py's split between direct and

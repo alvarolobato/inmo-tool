@@ -145,10 +145,10 @@ def _cmd_purge_same_source(conn) -> int:
 def _cmd_retroactive(conn, apply: bool) -> int:
     """`ps dedup retroactive [--apply]` (issue #568) — dry-run by default.
 
-    Reports what the D-116/D-117/D-118 hard vetoes would retroactively
+    Reports what the D-116/D-117/D-119 hard vetoes would retroactively
     change against what's already in the DB: which currently-merged
     properties D-116 would revert, and how many currently-pending `fuzzy`
-    suggestions D-117/D-118 would demote to `rejected` on the next
+    suggestions D-117/D-119 would demote to `rejected` on the next
     `ps dedup run`. `--apply` performs the D-116 reverts (never deletes a
     row — see `etl.dedup.engine.revert`); it does NOT trigger the
     pending-suggestion demotion itself, which happens automatically on the
@@ -219,7 +219,7 @@ def _cmd_retroactive(conn, apply: bool) -> int:
             "this build yet — 0 counted"
         )
     print(
-        f"  D-118 (municipality conflict, this issue): "
+        f"  D-119 (municipality conflict, this issue): "
         f"{pd.municipality_conflicts} would demote to 'rejected'"
     )
     print(f"  Union (at least one rule fires): {pd.either}")
@@ -274,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
         "retroactive",
         help=(
             "Issue #568: report (dry-run by default) what the D-116/D-117/"
-            "D-118 hard vetoes would retroactively change; --apply reverts "
+            "D-119 hard vetoes would retroactively change; --apply reverts "
             "the D-116 merges"
         ),
     )

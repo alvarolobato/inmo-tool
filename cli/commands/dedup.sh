@@ -27,13 +27,13 @@ Subcommands:
                           requests once (the long-running container drains
                           these automatically on a 3s poll — this is the
                           manual/one-shot equivalent)
-  retroactive [--apply]   Issue #568: report what the D-116/D-117/D-118 hard
+  retroactive [--apply]   Issue #568: report what the D-116/D-117/D-119 hard
                           vetoes would retroactively change against what's
                           already merged/suggested. DRY-RUN BY DEFAULT —
                           nothing is written unless you pass --apply, which
                           reverts the D-116 merges (never deletes a row; see
                           'revert' above for the same underlying mechanism).
-                          Pending-suggestion demotion (D-117/D-118) is
+                          Pending-suggestion demotion (D-117/D-119) is
                           reported here but only actually happens on the
                           next 'ps dedup run'.
 

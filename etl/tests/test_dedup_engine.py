@@ -2714,7 +2714,7 @@ class TestStructuredFieldsFuzzyVeto:
 
 
 class TestMunicipalityFuzzyVeto:
-    """Issue #568 (D-118): a normalized-municipality conflict vetoes a
+    """Issue #568 (D-119): a normalized-municipality conflict vetoes a
     `fuzzy` suggestion outright — scoped to that ONE signal, not wired into
     evaluate_pair ahead of every signal, exactly like structured_fields
     (D-117) and for the same reason: the live-DB blast-radius measurement

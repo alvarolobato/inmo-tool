@@ -150,7 +150,7 @@ class TestStructuredFieldsVeto:
 
 
 class TestMunicipalityVeto:
-    """Issue #568 (D-118): a normalized-municipality conflict vetoes this
+    """Issue #568 (D-119): a normalized-municipality conflict vetoes this
     signal's suggestion outright (returns None), even when
     address/size/price all agree well enough to otherwise fire. See this
     module's own docstring and etl.dedup.signals.municipality for why the

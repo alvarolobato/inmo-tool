@@ -41,7 +41,7 @@ untouched on purpose — an exact/partial photo match or a shared phone
 number is independent, often stronger, evidence this veto must not
 override (D-117 point 5).
 
-Issue #568 (D-118): a normalized-municipality conflict (see
+Issue #568 (D-119): a normalized-municipality conflict (see
 `etl.dedup.signals.municipality`) vetoes this signal's suggestion outright
 — scoped to `fuzzy` ONLY, mirroring `structured_fields_conflict` (D-117)
 exactly, and for the same reason: `fuzzy` is the one signal where the
@@ -151,7 +151,7 @@ def evaluate(a: ListingRecord, b: ListingRecord) -> PairEvaluation | None:
     if structured_fields_conflict(a, b):
         return None
 
-    # Issue #568 (D-118): a normalized-municipality conflict kills the
+    # Issue #568 (D-119): a normalized-municipality conflict kills the
     # suggestion outright — same "veto here, not in evaluate_pair" shape
     # as structured_fields_conflict directly above; see this module's
     # docstring for why that's safe specifically for fuzzy.
