@@ -23,6 +23,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { stripNulBytes } from "@/lib/strip-nul-bytes";
 import { sql } from "@/lib/db-write";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 import { adminApiKeyValid, adminUnauthorized } from "@/lib/admin-api-auth";
@@ -35,6 +36,7 @@ const MAX_HTML_BYTES = 10 * 1024 * 1024; // 10MB — a full rendered page is a f
 // stored verbatim as `listing.url`, and execute when rendered as an <a href>
 // on the property detail page (Opus review, PR #87 — verified end-to-end).
 const ALLOWED_URL_SCHEMES = new Set(["http:", "https:"]);
+
 
 interface CaptureBody {
   url?: string;
@@ -101,9 +103,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   try {
+    // Sanitise at the write boundary, after the size check (so the cap still
+    // measures what the extension actually sent) and covering `url` too — a
+    // NUL anywhere in the tuple fails the same INSERT.
     const rows = await sql<{ id: number }>(
       "INSERT INTO extension_capture (url, html) VALUES ($1, $2) RETURNING id",
-      [url, html],
+      [stripNulBytes(url), stripNulBytes(html)],
     );
     return NextResponse.json({ success: true, capture_id: rows[0].id });
   } catch (err) {

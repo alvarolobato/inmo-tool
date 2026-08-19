@@ -14,6 +14,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import psycopg2
+import pytest
+
 from etl import capture
 
 _SCHEMA_SQL = Path(__file__).parent.parent / "schema" / "init.sql"
@@ -924,3 +927,65 @@ class TestListingPageCaptureReclassification:
             assert calls == []
         finally:
             self._cleanup_listing(pg_conn)
+
+
+class TestNulByteRejectedByPostgres:
+    """The half of PR #563 that the dashboard's mocked unit tests cannot prove.
+
+    Those tests mock `@/lib/db-write`, so they show the sanitiser RUNS — they
+    would pass just as green if U+FFFD were itself something Postgres rejects.
+    The owner's actual failure was a Postgres constraint
+    (`invalid byte sequence for encoding "UTF8": 0x00` on his first real
+    Hipoges capture), so the claim worth pinning in the repo is that a raw NUL
+    is rejected and the substituted string is accepted and round-trips exactly.
+    """
+
+    def test_raw_nul_is_rejected_and_the_substitution_is_accepted(self, pg_conn):
+        raw = "<html><body><h1>Piso\x00 en Dos Hermanas</h1></body></html>"
+        sanitised = raw.replace("\x00", "\ufffd")
+        url = "https://realestate.hipoges.com/es/detail/nul-regression"
+
+        with pg_conn.cursor() as cur:
+            cur.execute("DELETE FROM extension_capture WHERE url = %s", (url,))
+            pg_conn.commit()
+
+            # 1. A raw NUL cannot be stored. NOTE the two drivers reject it at
+            #    different layers, and the owner hit the second: psycopg2
+            #    refuses client-side with ValueError, while node-postgres (the
+            #    dashboard's driver, which is what actually wrote this row on
+            #    his Hipoges capture) sends it and Postgres answers
+            #    `invalid byte sequence for encoding "UTF8": 0x00`. Either way
+            #    the row does not land — that is the invariant worth pinning
+            #    here; the exact wording belongs to the driver, not to us.
+            with pytest.raises((psycopg2.Error, ValueError)) as excinfo:
+                cur.execute(
+                    "INSERT INTO extension_capture (url, html) VALUES (%s, %s)",
+                    (url, raw),
+                )
+            pg_conn.rollback()
+            assert "NUL" in str(excinfo.value) or "0x00" in str(excinfo.value)
+
+            # 2. The substituted string IS accepted and round-trips exactly.
+            #    This is the half the dashboard's mocked unit tests cannot
+            #    prove: they would pass just as green if U+FFFD were itself
+            #    something Postgres rejects.
+            cur.execute(
+                "INSERT INTO extension_capture (url, html) VALUES (%s, %s) RETURNING id",
+                (url, sanitised),
+            )
+            capture_id = cur.fetchone()[0]
+            pg_conn.commit()
+
+            cur.execute(
+                "SELECT html FROM extension_capture WHERE id = %s", (capture_id,)
+            )
+            stored = cur.fetchone()[0]
+
+            cur.execute("DELETE FROM extension_capture WHERE id = %s", (capture_id,))
+            pg_conn.commit()
+
+        assert stored == sanitised
+        assert "\ufffd" in stored
+        assert "\x00" not in stored
+        # Offsets unchanged — this is precisely why U+FFFD beats deletion.
+        assert len(stored) == len(raw)
