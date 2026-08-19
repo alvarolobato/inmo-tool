@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 import localFont from "next/font/local";
 import ThemeProvider from "@/components/ThemeProvider";
@@ -15,6 +15,30 @@ export const dynamic = "force-dynamic";
 export const metadata: Metadata = {
   title: "Inmo-Tool",
   description: "Plataforma de búsqueda de inversión inmobiliaria con IA",
+};
+
+// #575: the app never emitted a `<meta name="viewport">` tag (Next's App
+// Router does NOT inject one for free — it must be exported explicitly).
+// Without it, mobile browsers fall back to a desktop-site-compatibility
+// layout viewport (~980px, scaled down to fit) that is WIDER than the real
+// visual viewport (measured live: `document.documentElement.clientWidth`
+// correctly reports ~390px on an iPhone-width screen, but a `position:
+// fixed; inset: 0` element — e.g. the photo lightbox overlay — sizes itself
+// to the ~654px LAYOUT viewport instead, landing partly off-screen). This
+// is very plausibly the mechanism behind the issue's "the overlay
+// re-anchors to the visual viewport; prev/next/close buttons drift"
+// symptom, and it affects every fixed-position surface in the app, not
+// just the lightbox. `initialScale: 1` (no `maximumScale`/`userScalable:
+// false`) fixes the mismatch without disabling native pinch-zoom
+// elsewhere in the app — an accessibility regression (WCAG 1.4.4/1.4.10)
+// this project has no reason to introduce. The lightbox's own
+// `touch-action: none` (added in this same PR) is what actually keeps
+// native pinch from fighting the new custom photo-zoom gesture; this
+// viewport fix is what makes the overlay's own layout correct in the
+// first place.
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
 };
 
 // Fonts are self-hosted under public/fonts/ to avoid network fetches at Docker
