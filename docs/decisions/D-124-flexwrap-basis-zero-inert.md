@@ -1,12 +1,12 @@
 ---
-id: D-122
+id: D-124
 title: "flexWrap + flex:1 (basis 0%) never wraps — minWidth:0 makes it fully inert, not just less likely"
 date: 2026-08-20
 group: UI / frontend
 rule: "Never rely on `flexWrap: \"wrap\"` plus children at `flex: 1` (flex-basis 0%) to produce a stack at narrow widths — flexbox collects items into lines using each item's hypothetical (basis) size, computed BEFORE any grow/shrink, so basis-0 siblings always \"fit\" on one line by shrinking instead of ever wrapping. If those same children also carry `minWidth: 0`, the wrap is not just unlikely, it is fully inert: without it, a flex item's default `min-width: auto` resolves to its min-content size and the row would still wrap once min-content sizes stopped fitting. Give a child that must wrap a real non-zero `flexBasis` instead."
 ---
 
-# D-122: flexWrap + flex:1 (basis 0%) never wraps — minWidth:0 makes it fully inert, not just less likely
+# D-124: flexWrap + flex:1 (basis 0%) never wraps — minWidth:0 makes it fully inert, not just less likely
 
 *Decided: 2026-08-20*
 
