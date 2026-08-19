@@ -408,7 +408,24 @@ export function PhotoGallery({
           onClick={closeLightbox}
           style={{
             position: "fixed",
-            inset: 0,
+            // #575: `top/left/right` + `height: 100dvh` instead of `inset: 0`
+            // (which is equivalent to `bottom: 0` alongside `height: 100vh`
+            // in older browsers/iOS Safari versions specifically, does NOT
+            // reliably resize a `position: fixed` element when the dynamic
+            // address-bar/toolbar shows or hides — the classic "fixed
+            // overlay doesn't adapt to phone size" bug. `100dvh` (dynamic
+            // viewport height) is the standard modern fix: it tracks the
+            // real visible height directly, toolbar included, without
+            // depending on fixed-position viewport-tracking quirks at all.
+            top: 0,
+            left: 0,
+            right: 0,
+            height: "100dvh",
+            // Keep buttons clear of a notch/home-indicator/rounded corner —
+            // a no-op `env()` fallback of 0 everywhere without one.
+            padding:
+              "max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left))",
+            boxSizing: "border-box",
             background: "rgba(0,0,0,0.85)",
             display: "flex",
             alignItems: "center",
@@ -493,12 +510,16 @@ export function PhotoGallery({
             </>
           )}
 
-          {/* #575: pinch/double-tap zoom area. Sized like the old bare <img>
-              (maxWidth/maxHeight 90vw/90vh) so the touch target and the
-              visible photo stay the same footprint; the <img> inside carries
-              the live zoom/pan transform. touchAction: "none" so the browser
-              never intercepts a gesture started here as native scroll/zoom —
-              our own pointer handlers own it entirely. */}
+          {/* #575: the fit fix. `maxWidth/maxHeight: "100%"` — of the outer
+              lightbox's own content box, which is now itself correctly sized
+              to the real device viewport (100dvh + safe-area padding above)
+              — replaces the old `90vw`/`90vh`, which is a viewport-relative
+              unit computed independently of that safe-area padding and can
+              size the photo larger than the space actually left for it.
+              This is also the pinch/double-tap zoom area: the <img> inside
+              carries the live zoom/pan transform; touchAction: "none" so the
+              browser never intercepts a gesture started here as native
+              scroll/zoom — our own pointer handlers own it entirely. */}
           <div
             ref={zoomAreaRef}
             data-testid="photo-gallery-zoom-area"
@@ -509,8 +530,8 @@ export function PhotoGallery({
             onPointerCancel={handleZoomPointerEnd}
             onPointerLeave={handleZoomPointerEnd}
             style={{
-              maxWidth: "90vw",
-              maxHeight: "90vh",
+              maxWidth: "100%",
+              maxHeight: "100%",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -524,8 +545,8 @@ export function PhotoGallery({
               src={photoUrls[openIndex]}
               alt={`Foto ${openIndex + 1} ampliada`}
               style={{
-                maxWidth: "90vw",
-                maxHeight: "90vh",
+                maxWidth: "100%",
+                maxHeight: "100%",
                 objectFit: "contain",
                 transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`,
                 transition: gesturingRef.current ? "none" : "transform 150ms ease-out",
