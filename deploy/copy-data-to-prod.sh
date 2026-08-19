@@ -127,20 +127,29 @@ remote "cd ${PROD_PATH} && docker compose -f docker-compose.prod.yml run --rm db
     || die "db-init failed"
 ok "role and database ready"
 
-# Counts the application's own tables only. Two things would otherwise make a
+# Counts the application's own objects. Two things would otherwise make a
 # freshly created database look occupied: information_schema.tables also lists
-# views, and db-init installs pg_stat_statements, whose two views live in
-# public. Hence real tables (relkind r/p) that no extension owns.
-COUNT_TABLES_SQL="SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind IN ('r','p') AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e')"
-tables="$(number "$(rpsql app "$DB_NAME" -tAc "\"${COUNT_TABLES_SQL}\"" | tr -d '[:space:]')" "the tables in ${DB_NAME}")"
-if [ "$tables" -gt 0 ]; then
-    [ "$FORCE" = true ] || die "'${DB_NAME}' already has ${tables} tables on the host. Re-run with --force to replace it."
-    warn "'${DB_NAME}' had ${tables} tables — dropping and recreating (--force)"
+# views, and db-init installs extensions whose views live in public. Hence
+# relations and routines that no extension owns.
+#
+# Routines are counted too, and not as an afterthought: a restore that dies
+# partway through leaves functions behind before it has created a single
+# table, and a tables-only check called that database empty and skipped the
+# drop — the next attempt then failed on "function ... already exists".
+COUNT_OBJECTS_SQL="SELECT (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind IN ('r','p','v','m') AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e')) + (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e'))"
+
+if [ "$FORCE" = true ]; then
+    # Unconditional, deliberately: --force means "replace whatever is there",
+    # and deciding from a count is what let a half-restored database through.
+    warn "replacing '${DB_NAME}' from scratch (--force)"
     APP_USER="$(remote_env POSTGRES_USER)"; APP_USER="${APP_USER:-inmotool}"
-    rpsql admin postgres -c "'DROP DATABASE \"${DB_NAME}\" WITH (FORCE)'" >/dev/null
+    rpsql admin postgres -c "'DROP DATABASE IF EXISTS \"${DB_NAME}\" WITH (FORCE)'" >/dev/null
     rpsql admin postgres -c "'CREATE DATABASE \"${DB_NAME}\" OWNER \"${APP_USER}\"'" >/dev/null
-    # The CONNECT revoke lives on the database object, so it goes with the drop.
+    # The CONNECT revoke lives on the database object, so it went with the drop.
     remote "cd ${PROD_PATH} && docker compose -f docker-compose.prod.yml run --rm db-init" >/dev/null
+else
+    objects="$(number "$(rpsql app "$DB_NAME" -tAc "\"${COUNT_OBJECTS_SQL}\"" | tr -d '[:space:]')" "the contents of ${DB_NAME}")"
+    [ "$objects" -eq 0 ] || die "'${DB_NAME}' already holds ${objects} object(s) on the host. Re-run with --force to replace it."
 fi
 
 if [ -n "$DUMP" ]; then
