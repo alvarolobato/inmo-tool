@@ -12,6 +12,17 @@ Guidance for AI assistants. Use the **skills** ([docs/skills/skills.md](docs/ski
 
 This is a **public repository** — no credentials, scraped personal data (owner names/phone numbers from listings), or real financial figures in committed files.
 
+**Production is the deployment target.** When the owner says "deploy", it means
+the production host, not a local stack — see [Production settings](#production-settings--not-in-this-repository)
+below and [config/production.md](config/production.md). Finishing a task includes
+shipping it: `git push`, then `ps prod deploy`, then `ps prod status` to confirm
+the deployed commit is yours. Verifying against production is normal rather than
+reckless — there is exactly one user, so there is no one else's session to break
+and no one to coordinate with. What that does **not** buy is carelessness with
+data: before anything that deletes or rewrites it (restoring a dump, a
+destructive migration, a `DROP`), run `ps prod backup` first. The local stack is
+for development and throwaway data.
+
 ---
 
 ## Repository Structure
