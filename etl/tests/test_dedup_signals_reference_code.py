@@ -11,7 +11,6 @@ from __future__ import annotations
 import pytest
 
 from etl.dedup.signals.reference_code import (
-    _is_prefix_formatting_artifact,
     _normalize,
     _same_agency,
     evaluate,
@@ -135,65 +134,30 @@ class TestReferenceCodesConflict:
         assert reference_codes_conflict(a, b) is False
 
 
-class TestPrefixFormattingArtifact:
-    """Issue #564 follow-up (live-DB blast-radius review): a short
-    trailing extension on one side is a formatting artifact, not evidence
-    of two properties — property 37 and property 71434 in the demo
-    corpus are real, same-price, ONE-property pairs that the naive
-    exact-match comparison would have wrongly vetoed. These two exact
-    code pairs are ground truth, not invented cases."""
+class TestPlainComparisonNoPrefixTolerance:
+    """Issue #564 review round (D-116 amendment 2): a prefix-based
+    exemption from the veto was tried and reverted. It was motivated by
+    two live-DB pairs (property 37: "8385 11"/"8385 11 1"; property
+    71434: "09502,1"/"09502") that looked like false positives — but both
+    are SAME-SOURCE (fotocasa/fotocasa) pairs, which `engine._run` never
+    hands to `evaluate_pair` at all (issue #197's same-source skip,
+    `etl/dedup/engine.py`). The exemption solved a problem this signal
+    can never actually be asked about in the live pipeline, while opening
+    a real one: it would also have exempted "REF100" vs "REF1005",
+    exactly the sequential-CRM-id collision this veto exists to catch.
+    `reference_codes_conflict` is correctly a PLAIN inequality once both
+    codes clear `_normalize` — these two real code pairs are pinned here
+    as regression coverage of that, not as evidence they matter in
+    practice (they don't reach this signal at all — see
+    TestReferenceCodeConflictVeto in test_dedup_engine.py and
+    issue #197)."""
 
-    def test_property_37_trailing_word_suffix_is_an_artifact(self):
-        # Real pair: "8385 11" vs "8385 11 1", both listings priced at
-        # 239000 — one property, reference recorded with a trailing " 1"
-        # sub-unit token on one portal.
-        a = _record(
-            contact_raw="HOUSE MAISON, S.L.",
-            reference_code="8385 11",
-            current_price=239000,
-        )
-        b = _record(
-            contact_raw="HOUSE MAISON, S.L.",
-            reference_code="8385 11 1",
-            current_price=239000,
-        )
-        assert reference_codes_conflict(a, b) is False
+    def test_property_37_pair_conflicts_under_the_plain_comparison(self):
+        a = _record(contact_raw="HOUSE MAISON, S.L.", reference_code="8385 11")
+        b = _record(contact_raw="HOUSE MAISON, S.L.", reference_code="8385 11 1")
+        assert reference_codes_conflict(a, b) is True
 
-    def test_property_71434_trailing_punctuation_suffix_is_an_artifact(self):
-        # Real pair: "09502,1" vs "09502", both listings priced at 170000
-        # — one property, one portal recorded a stray ",1" suffix.
-        a = _record(
-            contact_raw="AC-10 ASOCIADAS, S.L.",
-            reference_code="09502,1",
-            current_price=170000,
-        )
-        b = _record(
-            contact_raw="AC-10 ASOCIADAS, S.L.",
-            reference_code="09502",
-            current_price=170000,
-        )
-        assert reference_codes_conflict(a, b) is False
-
-    def test_prefix_check_is_symmetric(self):
-        # Same as the property 71434 case with the operands swapped —
-        # the shorter code first this time.
-        assert _is_prefix_formatting_artifact("09502", "09502,1") is True
-        assert _is_prefix_formatting_artifact("09502,1", "09502") is True
-
-    def test_genuine_same_length_conflict_is_not_an_artifact(self):
-        # Real pairs from the same review that must STAY vetoed: they
-        # differ mid-string or in their last character at the SAME
-        # length, never solely by a trailing extension.
-        assert _is_prefix_formatting_artifact("3450-09081", "3450-09082") is False
-        assert _is_prefix_formatting_artifact("ch-37450-0007", "ch-37450-0006") is False
-        assert _is_prefix_formatting_artifact("te912bsev", "te911bsev") is False
-
-    def test_long_tail_beyond_the_cap_is_not_an_artifact(self):
-        # An unbounded prefix check would silently abstain on two
-        # genuinely different but coincidentally same-prefixed codes —
-        # exactly the dirty-code failure mode this veto exists to catch.
-        # A 4-character tail exceeds _MAX_PREFIX_TAIL_LENGTH (3).
-        assert _is_prefix_formatting_artifact("8385", "83859999") is False
-
-    def test_short_tail_at_the_cap_is_an_artifact(self):
-        assert _is_prefix_formatting_artifact("8385", "8385999") is True
+    def test_property_71434_pair_conflicts_under_the_plain_comparison(self):
+        a = _record(contact_raw="AC-10 ASOCIADAS, S.L.", reference_code="09502,1")
+        b = _record(contact_raw="AC-10 ASOCIADAS, S.L.", reference_code="09502")
+        assert reference_codes_conflict(a, b) is True
