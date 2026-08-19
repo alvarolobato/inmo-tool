@@ -51,7 +51,11 @@ agency-namespaced) — the veto is eligible only for same-agency pairs.
 Placeholder/unusable codes never veto — an unusable code is "absent", not
 "differing", the same rule `_normalize` already enforces for the positive
 path, so a CRM template left unedited across an agency's whole inventory
-can't silently block every legitimate merge for that agency.
+can't silently block every legitimate merge for that agency. Nor does a
+short trailing extension on one side ("8385 11" vs "8385 11 1") — a
+live-DB blast-radius review after this landed found two same-price pairs
+that were one property recorded with a stray suffix on one portal, not
+two properties; see `_is_prefix_formatting_artifact`.
 
 1. Address/coordinates/size proximity, mirroring phone_extract._corroborated
    exactly (coords+size when both sides publish coordinates, falling back
@@ -150,6 +154,48 @@ def _same_agency(a: ListingRecord, b: ListingRecord) -> bool:
     return bool(a_name) and a_name == b_name
 
 
+# Issue #564 follow-up (live-DB blast-radius review, D-116): a short
+# trailing extension on an otherwise-identical code is a formatting
+# artifact, not proof of two properties. Two real same-price pairs from
+# the demo corpus surfaced this: property 37 ("8385 11" vs "8385 11 1",
+# both listings 239000) and property 71434 ("09502,1" vs "09502", both
+# listings 170000) are ONE property whose reference was recorded with a
+# stray trailing token on one portal — the naive != comparison would have
+# vetoed a merge that is currently, correctly, in place. Every genuine
+# same-agency-different-property pair found in that same review differs
+# mid-string or in its last character AT THE SAME LENGTH (e.g.
+# "3450-09081"/"3450-09082", "CH-37450-0007"/"CH-37450-0006"), never
+# solely by a short trailing extension, so this exemption is narrow by
+# construction: it only fires when one code is a PREFIX of the other
+# (checked both directions) AND the extra tail is capped at
+# `_MAX_PREFIX_TAIL_LENGTH` characters. The cap matters — an unbounded
+# prefix check would silently abstain on two genuinely different but
+# coincidentally same-prefixed codes (e.g. long sequential numeric CRM
+# ids sharing a leading digit run), which is exactly the "dirty codes"
+# failure mode this whole veto exists to catch, not create.
+_MAX_PREFIX_TAIL_LENGTH = 3
+
+
+def _is_prefix_formatting_artifact(code_a: str, code_b: str) -> bool:
+    """True when one normalized code is the other plus a short trailing
+    extension (<= `_MAX_PREFIX_TAIL_LENGTH` extra characters).
+
+    Callers must pass already-`_normalize`d, non-None, non-equal codes.
+    Symmetric: checks both "a extends b" and "b extends a".
+    """
+    shorter, longer = (
+        (code_a, code_b)
+        if len(code_a) <= len(code_b)
+        else (
+            code_b,
+            code_a,
+        )
+    )
+    if not longer.startswith(shorter):
+        return False
+    return (len(longer) - len(shorter)) <= _MAX_PREFIX_TAIL_LENGTH
+
+
 def reference_codes_conflict(a: ListingRecord, b: ListingRecord) -> bool:
     """True only when both sides carry a usable, DIFFERING reference code
     from the SAME agency (issue #564, D-116) — the hard veto.
@@ -160,6 +206,11 @@ def reference_codes_conflict(a: ListingRecord, b: ListingRecord) -> bool:
     know", never "they differ" — the same discipline that keeps a CRM
     template default from vetoing every legitimate merge for an agency
     that never bothered to fill it in.
+
+    A short trailing extension on one side (`_is_prefix_formatting_artifact`)
+    is likewise treated as "we don't know" rather than "they differ" — see
+    that function's docstring for the two live-corpus pairs that motivated
+    it.
 
     Different agencies are never eligible: `_same_agency` gates first,
     since an unrelated agency's differing code means nothing (codes are
@@ -180,7 +231,9 @@ def reference_codes_conflict(a: ListingRecord, b: ListingRecord) -> bool:
     code_b = _normalize(b.reference_code)
     if code_a is None or code_b is None:
         return False
-    return code_a != code_b
+    if code_a == code_b:
+        return False
+    return not _is_prefix_formatting_artifact(code_a, code_b)
 
 
 def _proximity_corroborated(a: ListingRecord, b: ListingRecord) -> bool:

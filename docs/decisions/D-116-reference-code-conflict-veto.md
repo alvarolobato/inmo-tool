@@ -3,7 +3,7 @@ id: D-116
 title: Same-agency differing reference codes veto a merge outright
 date: 2026-08-19
 group: Data / connectors
-rule: 'A same-agency (`contact_raw`, portal-agnostic) pair whose reference codes both normalize to real, DIFFERING values is never a duplicate — `evaluate_pair` returns no match at all (no merge, no suggestion) for every signal except `cadastral`, regardless of address/coords/photo/size agreement.'
+rule: 'A same-agency (`contact_raw`, portal-agnostic) pair whose reference codes both normalize to real, DIFFERING values is never a duplicate — UNLESS one normalized code is the other plus a trailing extension of at most 3 characters (a formatting artifact, not two properties) — `evaluate_pair` returns no match at all (no merge, no suggestion) for every signal except `cadastral`, regardless of address/coords/photo/size agreement.'
 ---
 
 # D-116: Same-agency differing reference codes veto a merge outright
@@ -86,6 +86,41 @@ genuinely different flats an agency lists side by side.
    properties this veto would have blocked, for the owner to review as a
    deliberate follow-up rather than a byproduct of this change.
 
+6. **A short trailing extension on one code does NOT count as
+   "differing" — it is a formatting artifact, not two properties.**
+   Amendment made the same day, after the first blast-radius run against
+   the live demo DB surfaced two real false positives at 20% of the
+   9 flagged pairs: property 37 (`"8385 11"` vs `"8385 11 1"`, both
+   listings priced 239000) and property 71434 (`"09502,1"` vs `"09502"`,
+   both listings priced 170000) — in both, one code is exactly the other
+   plus a short trailing token, and the prices agree exactly. These are
+   one property whose reference was recorded with a stray suffix on one
+   portal, not two properties; the naive `!=` comparison would have
+   vetoed (and, per point 4 above, silently un-suggested/rejected) a
+   correct merge.
+   The exemption (`reference_code._is_prefix_formatting_artifact`) fires
+   ONLY when, after `_normalize`, one code is a strict prefix of the
+   other (checked both directions) AND the extra trailing length is at
+   most **3 characters**. Both real cases are 2-character tails (`" 1"`,
+   `",1"`); every genuine same-agency-different-property pair found in
+   the same review (`"3450-09081"`/`"3450-09082"`,
+   `"CH-37450-0007"`/`"CH-37450-0006"`, `"TE912BSEV"`/`"TE911BSEV"`,
+   `"100096612"`/`"100096617"`) differs mid-string or in its last
+   character at the SAME length, never solely by a trailing extension —
+   so the exemption does not touch them. The cap is deliberate and
+   bounded, not an unbounded prefix check: an unbounded version would
+   silently abstain on two genuinely different but coincidentally
+   same-prefixed codes (e.g. two unrelated long sequential numeric CRM
+   ids sharing a leading digit run) — exactly the "dirty codes" failure
+   mode this veto exists to catch, not manufacture. An implementer
+   reading only the rule line above must implement this bounded-prefix
+   check, not a plain `!=`.
+   Re-measured after this amendment: **7 of 558** currently-merged
+   properties would be blocked (down from 9 — confirms 37 and 71434
+   dropped out and nothing else changed); pending suggestions killed
+   stayed at **0**. See the PR body (#565) for the full before/after
+   table.
+
 **Alternatives rejected**:
 - *Auto-unmerge every already-merged pair that trips the veto* — rejected
   as unacceptably risky for a first landing: no confirmation the flagged
@@ -114,6 +149,7 @@ actively contradicting a merge, which every weaker similarity signal
 should defer to.
 
 **See**: `etl/dedup/signals/reference_code.py` (`reference_codes_conflict`,
-module docstring), `etl/dedup/engine.py` (`evaluate_pair`), issue #564,
-issue #186 (`floor.floors_conflict`, the veto shape this mirrors), D-024
-(pending-suggestion re-evaluation).
+`_is_prefix_formatting_artifact`, module docstring), `etl/dedup/engine.py`
+(`evaluate_pair`), issue #564, issue #186 (`floor.floors_conflict`, the
+veto shape this mirrors), D-024 (pending-suggestion re-evaluation), PR
+#565 (blast-radius numbers, before and after this amendment).
