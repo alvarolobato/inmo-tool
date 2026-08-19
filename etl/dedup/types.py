@@ -53,6 +53,11 @@ class ListingRecord:
     # `property.rooms` — issue #566. Defaulted for the same reason as
     # `floor`/`property_type` above.
     rooms: int | None = None
+    # `property.city` — issue #568 (D-118). Free text from each connector's
+    # own geography parsing (see etl.dedup.signals.municipality for the
+    # normalization/district-alias discipline). Defaulted for the same
+    # backward-compatible-construction reason as `floor` above.
+    city: str | None = None
 
 
 @dataclass(frozen=True)

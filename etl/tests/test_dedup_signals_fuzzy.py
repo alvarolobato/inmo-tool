@@ -33,6 +33,7 @@ def _record(**overrides) -> ListingRecord:
         "floor": None,
         "property_type": None,
         "rooms": None,
+        "city": None,
     }
     defaults.update(overrides)
     return ListingRecord(**defaults)
@@ -144,5 +145,39 @@ class TestStructuredFieldsVeto:
     def test_missing_type_and_rooms_does_not_veto(self):
         a = _record(property_type="piso", rooms=2)
         b = _record(listing_id=2, property_id=2, property_type=None, rooms=None)
+        result = evaluate(a, b)
+        assert result is not None
+
+
+class TestMunicipalityVeto:
+    """Issue #568 (D-118): a normalized-municipality conflict vetoes this
+    signal's suggestion outright (returns None), even when
+    address/size/price all agree well enough to otherwise fire. See this
+    module's own docstring and etl.dedup.signals.municipality for why the
+    veto lives here and nowhere else in evaluate_pair."""
+
+    def test_genuinely_different_municipality_vetoes_an_otherwise_matching_pair(
+        self,
+    ):
+        a = _record(city="Málaga")
+        b = _record(listing_id=2, property_id=2, city="Sevilla")
+        assert evaluate(a, b) is None
+
+    def test_same_municipality_written_differently_does_not_veto(self):
+        a = _record(city="Sevilla Capital")
+        b = _record(listing_id=2, property_id=2, city="Sevilla")
+        result = evaluate(a, b)
+        assert result is not None
+        assert result.basis == "fuzzy"
+
+    def test_district_does_not_veto_its_own_municipality(self):
+        a = _record(city="Montequinto")
+        b = _record(listing_id=2, property_id=2, city="Dos Hermanas")
+        result = evaluate(a, b)
+        assert result is not None
+
+    def test_missing_city_does_not_veto(self):
+        a = _record(city="Sevilla")
+        b = _record(listing_id=2, property_id=2, city=None)
         result = evaluate(a, b)
         assert result is not None

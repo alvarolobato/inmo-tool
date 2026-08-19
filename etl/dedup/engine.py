@@ -140,7 +140,7 @@ def fetch_listing_records(conn) -> list[ListingRecord]:
                    l.description, l.photo_urls,
                    p.cadastral_ref, p.address, p.lat, p.lon, p.m2_built,
                    l.current_price, l.contact_raw, l.reference_code, p.floor,
-                   p.property_type, p.rooms
+                   p.property_type, p.rooms, p.city
               FROM listing l
               JOIN property p ON p.id = l.property_id
              WHERE l.operation = 'sale'
@@ -167,6 +167,7 @@ def fetch_listing_records(conn) -> list[ListingRecord]:
             floor=row[15],
             property_type=row[16],
             rooms=row[17],
+            city=row[18],
         )
         for row in rows
     ]
@@ -275,6 +276,15 @@ def evaluate_pair(
     so a structured-field contradiction is real signal, not noise) and the
     one signal that's actually 97% of the pending-suggestion backlog this
     issue targets.
+
+    Issue #568 (D-118): a normalized-municipality conflict is NOT checked
+    here, same reasoning as `property_type`/`rooms` (issue #566/D-117) —
+    see `etl.dedup.signals.fuzzy`'s module docstring and
+    `municipality_conflict`'s use inside `fuzzy.evaluate`. Measured blast
+    radius against every non-reverted `property_merge_log` row found a
+    REAL Málaga-district merge (`Churriana` vs `Málaga`, photo_hash,
+    0.900 confidence) that an engine-wide veto would have broken — see
+    `etl.dedup.signals.municipality` for the full evidence.
     """
     cadastral_result = cadastral.evaluate(a, b)
     if cadastral_result is not None:

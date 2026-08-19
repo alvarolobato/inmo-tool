@@ -12,7 +12,7 @@ import sys
 from etl import orchestrator
 from etl.config import Config
 from etl.db.postgres import get_connection
-from etl.dedup import actions, engine
+from etl.dedup import actions, engine, retroactive
 
 
 def _cmd_run(conn) -> int:
@@ -142,6 +142,82 @@ def _cmd_purge_same_source(conn) -> int:
     return 0
 
 
+def _cmd_retroactive(conn, apply: bool) -> int:
+    """`ps dedup retroactive [--apply]` (issue #568) — dry-run by default.
+
+    Reports what the D-116/D-117/D-118 hard vetoes would retroactively
+    change against what's already in the DB: which currently-merged
+    properties D-116 would revert, and how many currently-pending `fuzzy`
+    suggestions D-117/D-118 would demote to `rejected` on the next
+    `ps dedup run`. `--apply` performs the D-116 reverts (never deletes a
+    row — see `etl.dedup.engine.revert`); it does NOT trigger the
+    pending-suggestion demotion itself, which happens automatically on the
+    next `ps dedup run` (D-024) — see `etl.dedup.retroactive`'s module
+    docstring for why that's a deliberate choice, not an oversight.
+    """
+    report = retroactive.run_retroactive_pass(conn, apply=apply)
+
+    print("Retroactive dedup-rule application (issue #568)")
+    print(
+        f"  Mode: {'APPLY (writing)' if apply else 'DRY RUN (default — nothing written)'}"
+    )
+    print()
+
+    if not report.reference_code_rule_available:
+        print(
+            "D-116 (reference-code conflict, PR #565): rule not present in "
+            "this build yet — 0 candidates found. Re-run this command once "
+            "#565 merges."
+        )
+    else:
+        candidates = report.reference_code_candidates
+        n_properties = len({c.property_id for c in candidates})
+        print(
+            f"D-116 (reference-code conflict): {len(candidates)} merge_log "
+            f"row(s) across {n_properties} currently-merged propert"
+            f"{'y' if n_properties == 1 else 'ies'} would be REVERTED:"
+        )
+        for c in candidates:
+            print(
+                f"    merge_log #{c.merge_log_id}: property {c.property_id} "
+                f"<- losing property {c.losing_property_id} "
+                f"(listing {c.a_listing_id} code={c.a_reference_code!r} vs "
+                f"listing {c.b_listing_id} code={c.b_reference_code!r})"
+            )
+        if apply and candidates:
+            print(
+                f"  -> reverted merge_log id(s): {list(report.reverted_merge_log_ids)}"
+            )
+    print()
+
+    pd = report.pending_demotions
+    print(
+        f"Pending 'fuzzy' suggestions currently in the review queue: "
+        f"{pd.total_pending_fuzzy}"
+    )
+    if pd.structured_fields_rule_available:
+        print(
+            f"  D-117 (type/rooms conflict, PR #567): "
+            f"{pd.structured_fields_conflicts} would demote to 'rejected'"
+        )
+    else:
+        print(
+            "  D-117 (type/rooms conflict, PR #567): rule not present in "
+            "this build yet — 0 counted"
+        )
+    print(
+        f"  D-118 (municipality conflict, this issue): "
+        f"{pd.municipality_conflicts} would demote to 'rejected'"
+    )
+    print(f"  Union (at least one rule fires): {pd.either}")
+    print(
+        "  These demote automatically on the NEXT `ps dedup run` (D-024's "
+        "existing per-run pending re-evaluation) — this command does not "
+        "trigger a full run."
+    )
+    return 0
+
+
 def _cmd_resolve_conflict(conn, suggestion_id: int) -> int:
     try:
         engine.resolve_conflict(conn, suggestion_id)
@@ -181,6 +257,19 @@ def main(argv: list[str] | None = None) -> int:
             "rows whose two listings share a source"
         ),
     )
+    retroactive_parser = subparsers.add_parser(
+        "retroactive",
+        help=(
+            "Issue #568: report (dry-run by default) what the D-116/D-117/"
+            "D-118 hard vetoes would retroactively change; --apply reverts "
+            "the D-116 merges"
+        ),
+    )
+    retroactive_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually revert the D-116 merges (default: dry-run report only)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -199,6 +288,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_process_actions(conn)
         if args.subcommand == "purge-same-source":
             return _cmd_purge_same_source(conn)
+        if args.subcommand == "retroactive":
+            return _cmd_retroactive(conn, args.apply)
         return _cmd_resolve_conflict(conn, args.suggestion_id)
     finally:
         conn.close()

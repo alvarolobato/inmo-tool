@@ -27,6 +27,15 @@ Subcommands:
                           requests once (the long-running container drains
                           these automatically on a 3s poll — this is the
                           manual/one-shot equivalent)
+  retroactive [--apply]   Issue #568: report what the D-116/D-117/D-118 hard
+                          vetoes would retroactively change against what's
+                          already merged/suggested. DRY-RUN BY DEFAULT —
+                          nothing is written unless you pass --apply, which
+                          reverts the D-116 merges (never deletes a row; see
+                          'revert' above for the same underlying mechanism).
+                          Pending-suggestion demotion (D-117/D-118) is
+                          reported here but only actually happens on the
+                          next 'ps dedup run'.
 
   Review workflow: 'suggestions' lists what needs a human decision, then
   'confirm' or 'reject' each by its id. A row listed with status 'conflict'
@@ -100,6 +109,14 @@ cmd_process_actions() {
     _run_in_etl python -m etl.dedup.cli process-actions
 }
 
+cmd_retroactive() {
+    if [ "${1:-}" = "--apply" ]; then
+        _run_in_etl python -m etl.dedup.cli retroactive --apply
+    else
+        _run_in_etl python -m etl.dedup.cli retroactive
+    fi
+}
+
 SUBCMD="${1:-}"
 if [ -z "$SUBCMD" ] || [ "$SUBCMD" = "-h" ] || [ "$SUBCMD" = "--help" ]; then
     usage
@@ -116,6 +133,7 @@ case "$SUBCMD" in
     reject)           _cmd_with_suggestion_id reject "$@" ;;
     resolve-conflict) _cmd_with_suggestion_id resolve-conflict "$@" ;;
     process-actions)  cmd_process_actions ;;
+    retroactive)      cmd_retroactive "$@" ;;
     *)
         echo -e "${RED}ps dedup: unknown subcommand '${SUBCMD}'${NC}" >&2
         usage >&2

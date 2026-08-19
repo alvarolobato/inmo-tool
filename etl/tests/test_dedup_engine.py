@@ -43,8 +43,8 @@ def _insert_property(conn, **overrides) -> int:
             """
             INSERT INTO property
                 (cadastral_ref, address, lat, lon, m2_built, floor,
-                 property_type, rooms)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+                 property_type, rooms, city)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
             """,
             (
                 overrides.get("cadastral_ref"),
@@ -55,6 +55,7 @@ def _insert_property(conn, **overrides) -> int:
                 overrides.get("floor"),
                 overrides.get("property_type"),
                 overrides.get("rooms"),
+                overrides.get("city"),
             ),
         )
         return cur.fetchone()[0]
@@ -204,6 +205,7 @@ def _record(listing_id: int, property_id: int, **overrides) -> ListingRecord:
         floor=overrides.get("floor"),
         property_type=overrides.get("property_type"),
         rooms=overrides.get("rooms"),
+        city=overrides.get("city"),
     )
 
 
@@ -2700,6 +2702,243 @@ class TestStructuredFieldsFuzzyVeto:
             current_price_b=Decimal(250000),
             rooms_a=2,
             rooms_b=6,
+        )
+        identical_hex = "ffff0000ffff0000"
+        cache._cache[listing_a] = [imagehash.hex_to_hash(identical_hex)]
+        cache._cache[listing_b] = [imagehash.hex_to_hash(identical_hex)]
+        records = {r.listing_id: r for r in engine.fetch_listing_records(dedup_db)}
+        evaluation = engine.evaluate_pair(records[listing_a], records[listing_b], cache)
+        assert evaluation is not None
+        assert evaluation.basis == "photo_hash"
+        assert evaluation.decision == "merge"
+
+
+class TestMunicipalityFuzzyVeto:
+    """Issue #568 (D-118): a normalized-municipality conflict vetoes a
+    `fuzzy` suggestion outright — scoped to that ONE signal, not wired into
+    evaluate_pair ahead of every signal, exactly like structured_fields
+    (D-117) and for the same reason: the live-DB blast-radius measurement
+    (comparing every non-reverted property_merge_log row's surviving vs.
+    losing property city) found a REAL Málaga-district merge (Churriana vs
+    Málaga, photo_hash, 0.900 confidence) an engine-wide veto would have
+    broken. See etl/dedup/signals/fuzzy.py and municipality.py's module
+    docstrings for the full reasoning."""
+
+    _LAT = Decimal("40.416775")
+    _LON = Decimal("-3.703790")
+
+    def test_fuzzy_suggestion_vetoed_by_genuine_municipality_conflict(self, dedup_db):
+        """A weak, address-text-only match (no coordinates, so
+        address_coords never fires) that agrees on price/size but
+        genuinely disagrees on municipality must not be suggested."""
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "fuzzy-municipality-conflict-vetoed",
+            address_a="Calle Mayor 5, Madrid",
+            address_b="Calle Mayor 5, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(260000),
+            city_a="Málaga",
+            city_b="Sevilla",
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 0
+
+    def test_fuzzy_suggestion_not_vetoed_by_same_municipality_written_differently(
+        self, dedup_db
+    ):
+        """The issue's own real ground-truth pair: "Sevilla Capital" vs
+        "Sevilla" must NOT veto — it's one municipality, not two."""
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "fuzzy-municipality-capital-unvetoed",
+            address_a="Calle Mayor 5, Madrid",
+            address_b="Calle Mayor 5, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(260000),
+            city_a="Sevilla Capital",
+            city_b="Sevilla",
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 1
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT match_basis FROM suggested_merge")
+            assert cur.fetchone()[0] == "fuzzy"
+
+    def test_fuzzy_suggestion_not_vetoed_by_district_of_same_municipality(
+        self, dedup_db
+    ):
+        """Issue #568's own named example: Montequinto is a district of
+        Dos Hermanas, not an independent municipality — must not veto."""
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "fuzzy-municipality-district-unvetoed",
+            address_a="Calle Mayor 5",
+            address_b="Calle Mayor 5",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(260000),
+            city_a="Montequinto",
+            city_b="Dos Hermanas",
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 1
+
+    def test_fuzzy_suggestion_not_vetoed_by_missing_city(self, dedup_db):
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "fuzzy-municipality-missing-unvetoed",
+            address_a="Calle Mayor 5, Madrid",
+            address_b="Calle Mayor 5, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(260000),
+            city_a="Sevilla",
+            city_b=None,
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 1
+
+    def test_existing_pending_fuzzy_suggestion_is_demoted_to_rejected(self, dedup_db):
+        """D-024: pending suggestions are re-evaluated every run. A `fuzzy`
+        suggestion filed before this veto existed must be demoted to
+        'rejected' now that the municipality conflict makes fuzzy.evaluate
+        (and so evaluate_pair) return no match at all."""
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "fuzzy-municipality-veto-pending-demoted",
+            address_a="Calle Mayor 5, Madrid",
+            address_b="Calle Mayor 5, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(260000),
+            city_a="Málaga",
+            city_b="Sevilla",
+        )
+        lo, hi = sorted((listing_a, listing_b))
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO suggested_merge
+                    (listing_id_a, listing_id_b, match_basis, confidence, status, detail)
+                VALUES (%s, %s, 'fuzzy', 0.590, 'pending', %s)
+                """,
+                (lo, hi, json.dumps({})),
+            )
+        dedup_db.commit()
+
+        result = engine.run(dedup_db)
+
+        assert result.merged == 0
+        assert result.reevaluated_rejected == 1
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status, detail FROM suggested_merge "
+                "WHERE listing_id_a = %s AND listing_id_b = %s",
+                (lo, hi),
+            )
+            status, detail = cur.fetchone()
+            assert status == "rejected"
+            assert "reevaluated_from" in detail
+
+    def test_veto_reverted_regression_check(self, dedup_db):
+        """Proves the veto is what blocks the suggestion, not some other
+        rule: monkeypatching municipality_conflict (as imported into
+        fuzzy.py) to always return False (reverting only the veto's
+        *behaviour*, keeping every other line of plumbing untouched) must
+        let the municipality-conflicting pair get suggested again via
+        fuzzy."""
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "fuzzy-municipality-veto-regression-check",
+            address_a="Calle Mayor 5, Madrid",
+            address_b="Calle Mayor 5, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(71),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(260000),
+            city_a="Málaga",
+            city_b="Sevilla",
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(fuzzy, "municipality_conflict", lambda a, b: False)
+            result = engine.run(dedup_db)
+
+        assert result.merged == 0
+        assert result.suggested == 1
+
+    def test_municipality_conflict_does_not_block_address_coords_merge(self, dedup_db):
+        """A genuine duplicate on much stronger evidence (matching
+        coordinates, identical size/price) must still auto-merge via
+        address_coords even when city disagrees — the same
+        stronger-signal-wins shape D-117 measured for property_type/rooms."""
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "municipality-conflict-does-not-block-address-coords",
+            address_a="Calle Mayor 5",
+            address_b="Calle Mayor 5",
+            lat_a=self._LAT,
+            lon_a=self._LON,
+            lat_b=self._LAT,
+            lon_b=self._LON,
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            city_a="Málaga",
+            city_b="Sevilla",
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 1
+        assert result.suggested == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT match_basis FROM property_merge_log "
+                "ORDER BY created_at DESC LIMIT 1"
+            )
+            assert cur.fetchone()[0] == "address_coords"
+
+    def test_municipality_conflict_does_not_block_photo_hash_auto_merge(self, dedup_db):
+        """Same finding, for photo_hash's issue #188 exact-match auto-merge
+        path — a real live-DB case (property 6953: Churriana vs Málaga,
+        photo_hash, 0.900 confidence) is exactly this shape."""
+        cache = _PhotoHashCache()
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "municipality-conflict-does-not-block-photo-hash",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            city_a="Churriana",
+            city_b="Málaga",
         )
         identical_hex = "ffff0000ffff0000"
         cache._cache[listing_a] = [imagehash.hex_to_hash(identical_hex)]

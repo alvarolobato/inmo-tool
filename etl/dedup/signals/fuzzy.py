@@ -40,6 +40,23 @@ pending `phone` rows carry the same kind of structured-field contradiction,
 untouched on purpose — an exact/partial photo match or a shared phone
 number is independent, often stronger, evidence this veto must not
 override (D-117 point 5).
+
+Issue #568 (D-118): a normalized-municipality conflict (see
+`etl.dedup.signals.municipality`) vetoes this signal's suggestion outright
+— scoped to `fuzzy` ONLY, mirroring `structured_fields_conflict` (D-117)
+exactly, and for the same reason: `fuzzy` is the one signal where the
+issue's own blast-radius measurement holds (a currently-merged property's
+`city` genuinely differing between its surviving and losing sides,
+measured across every non-reverted `property_merge_log` row, was found on
+Málaga/Estepona and Málaga/Churriana — the latter a REAL Málaga-district
+case a hard engine-wide veto would have broken; see
+`etl.dedup.signals.municipality`'s docstring for the full evidence). Every
+stronger signal (`cadastral`, `address_coords`, `phone_extract`,
+`reference_code`, `photo_hash`) is untouched, same as D-117. Checked AFTER
+`structured_fields_conflict` below — order between the two never matters in
+practice (both are simple `if ...: return None` vetoes on independent
+fields), but structured_fields (D-117) landed first, so this keeps the
+edit diff-minimal and the two vetoes read in landing order.
 """
 
 from __future__ import annotations
@@ -51,6 +68,7 @@ from decimal import Decimal
 from rapidfuzz import fuzz
 
 from etl.dedup.signals.floor import floors_conflict
+from etl.dedup.signals.municipality import municipality_conflict
 from etl.dedup.signals.structured_fields import structured_fields_conflict
 from etl.dedup.types import ListingRecord, PairEvaluation
 
@@ -131,6 +149,13 @@ def evaluate(a: ListingRecord, b: ListingRecord) -> PairEvaluation | None:
     # and not for the signals above/below it in evaluate_pair's priority
     # order.
     if structured_fields_conflict(a, b):
+        return None
+
+    # Issue #568 (D-118): a normalized-municipality conflict kills the
+    # suggestion outright — same "veto here, not in evaluate_pair" shape
+    # as structured_fields_conflict directly above; see this module's
+    # docstring for why that's safe specifically for fuzzy.
+    if municipality_conflict(a, b):
         return None
 
     confidence = min(Decimal(str(round(similarity, 3))), _MAX_CONFIDENCE)
