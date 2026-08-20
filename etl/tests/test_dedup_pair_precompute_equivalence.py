@@ -156,6 +156,12 @@ def _frozen_evaluate_pair(
     ratio = _reference_match_ratio(hashes_a, hashes_b)
     if ratio is not None and Decimal(str(ratio)) >= photo_hash_signal.MIN_MATCH_RATIO:
         detail: dict = {"match_ratio": round(ratio, 3)}
+        # Issue #602/D-137 (2026-08-20): floor_conflict is still computed
+        # and surfaced in `detail` for a human reviewing a `suggest`
+        # verdict, but no longer gates the merge decision below — mirrors
+        # the CURRENT etl.dedup.engine.evaluate_pair exactly (this file
+        # freezes the pre-#618 HASH REPRESENTATION, not the merge rule,
+        # which must track production as it changes).
         floor_conflict = floors_conflict(a.floor, b.floor)
         if floor_conflict:
             detail["floor_conflict"] = True
@@ -177,13 +183,14 @@ def _frozen_evaluate_pair(
                 for m in matches
             ]
 
+        # D-137: m2_built must be EXACTLY equal (address_coords.sizes_equal,
+        # no tolerance) — replacing the old sizes_close(..., 5%) band this
+        # file used to freeze. Price band is PHOTO_MERGE_PRICE_RATIO (5%,
+        # revised from an initial 2% same day).
         exact_match = Decimal(str(round(ratio, 3))) == Decimal("1.000")
         if (
             exact_match
-            and not floor_conflict
-            and address_coords.sizes_close(
-                a.m2_built, b.m2_built, photo_hash_signal.PHOTO_MERGE_SIZE_RATIO
-            )
+            and address_coords.sizes_equal(a.m2_built, b.m2_built)
             and address_coords.prices_close(
                 a.current_price,
                 b.current_price,
@@ -496,19 +503,45 @@ class TestEvaluatePairEquivalence:
         self._run_both(a, b, {}, case="no evidence")
 
     def test_exact_photo_match_corroborated_auto_merges(self):
+        """Issue #602/D-137 (2026-08-20): the original fixture used
+        m2_built=90 vs 91 (1.1% apart) — inside the OLD sizes_close(5%)
+        band this file used to freeze, but D-137 requires m2_built to be
+        EXACTLY equal, so 90-vs-91 would no longer clear the auto-merge
+        gate (the review's own finding: "the 90-vs-91 m² case" would
+        silently invert to 'suggest' after this file's frozen reference
+        was updated to the D-137 rule, unless the fixture itself moved
+        with it). Both sides now carry m2_built=90 so this case still
+        actually exercises the MERGE branch, on both frozen and real —
+        the point of this specific test."""
         rng = random.Random(11)
         shared = [_random_hash(rng) for _ in range(4)]
         a = _record(
             1, 1, m2_built=Decimal(90), current_price=Decimal(200000), floor="3"
         )
         b = _record(
-            2, 2, m2_built=Decimal(91), current_price=Decimal(201000), floor="3"
+            2, 2, m2_built=Decimal(90), current_price=Decimal(201000), floor="3"
+        )
+        hash_cache, phone_cache = _seeded_caches({1: shared, 2: list(shared)})
+        real = engine.evaluate_pair(a, b, hash_cache, phone_cache)
+        assert real is not None and real.decision == "merge", (
+            "fixture must actually exercise the D-137 merge branch"
         )
         self._run_both(
             a, b, {1: shared, 2: list(shared)}, case="exact match, corroborated"
         )
 
-    def test_exact_photo_match_floor_conflict_downgrades_to_suggest(self):
+    def test_exact_photo_match_floor_conflict_no_longer_downgrades(self):
+        """Issue #602/D-137 (2026-08-20): this case used to prove a floor
+        conflict downgrades an otherwise-qualifying exact-match auto-merge
+        to a suggestion (issue #186's veto). D-137 dropped that veto from
+        the gate — see photo_hash.PHOTO_MERGE_PRICE_RATIO's module comment
+        for why — so this same fixture (m2_built exact, price exact,
+        floors conflicting) now AUTO-MERGES on both frozen and real; the
+        review's own finding: this is one of the two named cases that
+        INVERT, not just drift, once the frozen reference is updated to
+        match D-137. `floor_conflict` must still be True in `detail` —
+        surfaced for suggestion review even on a pair that goes on to
+        merge — just no longer blocking."""
         rng = random.Random(12)
         shared = [_random_hash(rng) for _ in range(4)]
         a = _record(
@@ -517,6 +550,11 @@ class TestEvaluatePairEquivalence:
         b = _record(
             2, 2, m2_built=Decimal(90), current_price=Decimal(200000), floor="5"
         )
+        hash_cache, phone_cache = _seeded_caches({1: shared, 2: list(shared)})
+        real = engine.evaluate_pair(a, b, hash_cache, phone_cache)
+        assert real is not None
+        assert real.decision == "merge"
+        assert real.detail["floor_conflict"] is True
         self._run_both(
             a, b, {1: shared, 2: list(shared)}, case="exact match, floor conflict"
         )

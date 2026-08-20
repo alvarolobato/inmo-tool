@@ -60,6 +60,7 @@ __all__ = [
     "haversine_meters",
     "prices_close",
     "sizes_close",
+    "sizes_equal",
 ]
 
 _MAX_DISTANCE_METERS = 15.0
@@ -88,6 +89,32 @@ def sizes_close(a_m2: Decimal | None, b_m2: Decimal | None, tolerance: Decimal) 
         return False
     ratio = abs(a_m2 - b_m2) / max(a_m2, b_m2)
     return ratio <= tolerance
+
+
+def sizes_equal(a_m2: Decimal | None, b_m2: Decimal | None) -> bool:
+    """True when both sizes are present and EXACTLY equal — no tolerance band.
+
+    Issue #602/D-137: the photo_hash exact-photo-match auto-merge path used
+    to corroborate with `sizes_close(..., 5%)`. Replaying candidate rules
+    against photo_hash pairs the owner hand-reviewed found m2_built is a
+    real discriminator, though narrower than an earlier draft of this
+    decision claimed (that draft's "100% of merges had identical m2_built"
+    was a measurement artifact of a post-merge listing->property join
+    returning one property row's value twice — see D-137's corrected
+    reconstruction via `property_merge_log.losing_property_id`). What
+    survives cleanly: zero of the owner's rejections ever had identical
+    m2_built (that side was never merged, so no artifact applies) — kept
+    as a required gate because it never contradicts a rejection, not
+    because it captures every real merge. See D-137 for the full
+    measurement and the correction.
+
+    Same missing-value discipline as `sizes_close`/`prices_close`: absence
+    or a non-positive value on either side is never a match, never a
+    permissive default.
+    """
+    if a_m2 is None or b_m2 is None or a_m2 <= 0 or b_m2 <= 0:
+        return False
+    return a_m2 == b_m2
 
 
 def prices_close(a: Decimal | None, b: Decimal | None, tolerance: Decimal) -> bool:

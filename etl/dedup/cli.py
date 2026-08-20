@@ -13,6 +13,7 @@ from etl import orchestrator
 from etl.config import Config
 from etl.db.postgres import get_connection
 from etl.dedup import actions, engine
+from etl.dedup.signals import photo_hash
 
 
 def _cmd_run(conn) -> int:
@@ -40,6 +41,18 @@ def _cmd_run(conn) -> int:
         f"{result.merged} merged, {result.suggested} suggested for review, "
         f"{result.conflicts} merge-time conflict(s) flagged."
     )
+    if result.photo_hash_auto_merged:
+        # Issue #602, D-137: of `merged` above, how many were corroborated
+        # photo_hash auto-merges (match_ratio == 1.0, m2_built exact, price
+        # within PHOTO_MERGE_PRICE_RATIO — 5%) — surfaced separately so an
+        # operator can see this irreversible-in-practice merge path's
+        # volume without a SQL query.
+        print(
+            f"Of those, {result.photo_hash_auto_merged} were corroborated "
+            f"photo_hash auto-merge(s) (issue #602/D-137 — exact photo "
+            f"match + identical m2_built + price within "
+            f"{photo_hash.PHOTO_MERGE_PRICE_RATIO:.0%})."
+        )
     if result.same_property_pending_resolved:
         # Issue #604: same visibility precedent as same_source_skipped
         # below — a pending row resolved this way never goes through

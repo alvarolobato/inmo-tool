@@ -1227,6 +1227,16 @@ CREATE TABLE IF NOT EXISTS dedup_runs (
 CREATE INDEX IF NOT EXISTS idx_dedup_runs_started_at ON dedup_runs (started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_dedup_runs_connector_run_id ON dedup_runs (connector_run_id);
 
+-- Issue #602, D-137 (MAJOR review finding): DedupRunResult.photo_hash_auto_merged
+-- was only ever printed by `ps dedup run` -- on the production path
+-- (etl.orchestrator.run_dedup, the scheduler/connector-sweep trigger)
+-- nothing persisted it anywhere, so an irreversible-in-practice merge
+-- path's volume was invisible outside a manual CLI invocation. ALTER, not
+-- a column in the CREATE TABLE above (same reasoning as
+-- property_merge_log.losing_property_id) -- must stay safe to re-run
+-- against an already-migrated database.
+ALTER TABLE dedup_runs ADD COLUMN IF NOT EXISTS photo_hash_auto_merged INTEGER;
+
 -- Issue #99: an explicit, operator-visible override on top of issue #71's
 -- union-of-active-profiles scope derivation. A connector with no row here
 -- (the common case — this table starts empty) keeps #71's default
