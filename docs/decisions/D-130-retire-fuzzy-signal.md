@@ -86,7 +86,7 @@ information — the fix is to stop generating suggestions from it.
 **Rationale**: A signal with ~0.5% precision, 96.8% of queue volume, zero
 human confirmations ever, and a root cause (neighbourhood-granularity
 addresses) that no threshold fixes is worth killing outright rather than
-tuning. `photo_hash` (evaluated before phone as of D-129) already covers
+tuning. `photo_hash` (evaluated before phone as of D-131) already covers
 the cross-portal duplicate-detection case whenever photos exist, which —
 per the measurement above — is effectively always for a real duplicate.
 
@@ -94,5 +94,5 @@ per the measurement above — is effectively always for a real duplicate.
 `etl/dedup/signals/fuzzy.py`, `etl/dedup/signals/photo_hash.py`
 (`hashes_share_any_match`), `etl/dedup/cli.py` (`purge-fuzzy`), issue #600
 (the spike), issue #601, D-024 (pending reevaluation), D-025 (photo hash
-store), D-117 (structured-fields veto, kept dormant), D-129 (phone/photo
+store), D-117 (structured-fields veto, kept dormant), D-131 (phone/photo
 reorder, landed alongside this in the same PR).

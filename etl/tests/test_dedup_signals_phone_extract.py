@@ -59,7 +59,7 @@ def _listing(**overrides) -> ListingRecord:
 
 
 class TestEvaluateSilencedTiers:
-    """Issue #603 (D-129): the uncorroborated tier and the
+    """Issue #603 (D-131): the uncorroborated tier and the
     corroborated-but-either-side-agency tier now return None instead of a
     0.500 suggestion — #600 measured every one of the 320 pending phone
     rows on the live corpus as exactly one of these two shapes, 100% with

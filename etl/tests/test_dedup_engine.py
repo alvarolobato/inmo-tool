@@ -437,7 +437,7 @@ class TestCadastralExactMatch:
 
 class TestPhoneSignal:
     def test_uncorroborated_phone_match_files_no_suggestion(self, dedup_db):
-        """Issue #603 (D-129): previously a 0.500 suggestion — #600
+        """Issue #603 (D-131): previously a 0.500 suggestion — #600
         measured this exact tier as pure agency noise on the live corpus,
         so it's silenced (returns None) rather than tuned. Dissimilar
         addresses are belt-and-braces now that fuzzy is retired (issue
@@ -467,7 +467,7 @@ class TestPhoneSignal:
             assert cur.fetchone()[0] == 0
 
     def test_agency_phone_match_files_no_suggestion(self, dedup_db):
-        """Issue #603 (D-129): previously a 0.500 suggestion regardless of
+        """Issue #603 (D-131): previously a 0.500 suggestion regardless of
         corroboration. #600 measured 100% of the pending phone backlog as
         agency-sided — this tier is now silenced outright, not just
         blocked from auto-merging.
@@ -591,7 +591,7 @@ class TestPhoneSignal:
 
 
 class TestPhoneOrderingRescue:
-    """Issue #603 (D-129): photo_hash now runs BEFORE phone in
+    """Issue #603 (D-131): photo_hash now runs BEFORE phone in
     `evaluate_pair`. #600 measured 19 of the 320 pending phone rows on the
     live corpus as pairs that ALSO carried a photo-ratio >= 0.6 match
     (mostly 1.0, identical price/m2/description) — with the old order,
@@ -1791,7 +1791,7 @@ class TestPendingSuggestionReevaluation:
         """A phone match corroborated on price/size proximity, but with one
         side's `listing_kind` unconfirmed (`None`) — phone_extract's
         surviving 0.750 corroborated-unconfirmed-kind tier (issue #603/
-        D-129 silenced the uncorroborated and agency tiers, but left this
+        D-131 silenced the uncorroborated and agency tiers, but left this
         one alone), filed as a `pending` suggestion.
 
         Simulates #214's real-world trigger (new information making a
@@ -1881,12 +1881,12 @@ class TestPendingSuggestionReevaluation:
         """The other acceptance direction: re-evaluation must also be able
         to move a pair OUT of the queue, not just into a merge. Files a
         `phone`-basis suggestion (corroborated-unconfirmed-kind tier, 0.750
-        — issue #603/D-129 left this tier alone), then monkeypatches
+        — issue #603/D-131 left this tier alone), then monkeypatches
         `phone_extract._corroborated` to always return False — i.e. "the
         corroboration rule no longer accepts this pair's evidence" — the
         direct analogue of the #186 floor-veto acceptance case: a rule
         change makes the pair fail every signal (this tier is silenced
-        outright once uncorroborated, per D-129, and fuzzy is retired
+        outright once uncorroborated, per D-131, and fuzzy is retired
         entirely — issue #601 — so nothing downstream can catch it either),
         and a pending row that fails every signal has nothing left
         supporting it, so it becomes `rejected` rather than sitting in the

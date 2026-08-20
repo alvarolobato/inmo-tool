@@ -1,12 +1,12 @@
 ---
-id: D-129
+id: D-131
 title: photo_hash before phone; uncorroborated/agency phone silenced
 date: 2026-08-20
 group: Data / connectors
 rule: "`evaluate_pair` evaluates `photo_hash` before `phone` (was the reverse). `phone_extract.evaluate` returns `None` (files no suggestion) for the uncorroborated tier and the corroborated-but-either-side-agency tier — both previously a 0.500 suggestion. The corroborated `particular`/`particular` merge (0.900) and corroborated-unconfirmed-kind suggestion (0.750) tiers are unchanged."
 ---
 
-# D-129: photo_hash evaluated before phone; uncorroborated/agency phone tiers silenced
+# D-131: photo_hash evaluated before phone; uncorroborated/agency phone tiers silenced
 
 *Decided: 2026-08-20*
 

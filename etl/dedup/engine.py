@@ -5,7 +5,7 @@ in signal priority order: cadastral -> address+coords -> photo hash ->
 phone, auto-merging confident matches and filing the rest as suggestions
 for human review. Issue #1 §6's original order also listed a `fuzzy`
 text-similarity fallback last and phone ahead of photo hash — issue #603
-(D-129) reordered photo hash ahead of phone, and issue #601 (D-130)
+(D-131) reordered photo hash ahead of phone, and issue #601 (D-130)
 retired fuzzy entirely: see `evaluate_pair`'s docstring for the reasoning
 on both, and `purge_pending_fuzzy` for the one-off cleanup of fuzzy's
 pending backlog. `etl.dedup.signals.fuzzy` still exists — only for
@@ -274,12 +274,12 @@ def evaluate_pair(
     Photo-hash fetching only happens once address_coords/reference_code
     have already come back empty — those two are cheaper (no network) and
     would resolve a pair without ever needing a photo fetch. Phone, by
-    contrast, now runs AFTER photo_hash (issue #603/D-129): its
+    contrast, now runs AFTER photo_hash (issue #603/D-131): its
     corroborated-but-not-`particular` tiers turned out to actively SHADOW
     stronger evidence, not just add weaker evidence ahead of it — see
     below for the measurement.
 
-    Issue #603 (D-129): photo_hash was moved ahead of phone in this
+    Issue #603 (D-131): photo_hash was moved ahead of phone in this
     priority order — a real reversal of issue #16's original listing
     (cadastral -> address+coords -> phone -> photo hash -> fuzzy), not
     just a cost optimization. #600 measured all 320 pending `phone`
@@ -396,7 +396,7 @@ def evaluate_pair(
             detail=detail,
         )
 
-    # Issue #603 (D-129): phone is now evaluated AFTER photo_hash — see
+    # Issue #603 (D-131): phone is now evaluated AFTER photo_hash — see
     # this function's docstring for the shadowed-duplicate measurement
     # that motivated the reorder. Issue #601 (D-130) retired the `fuzzy`
     # fallback that used to run after phone — nothing replaces it; a pair
