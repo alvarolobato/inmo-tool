@@ -132,6 +132,47 @@ body {
   padding: 0;
 }
 
+/* Issue #596: the owner has now reported side margins on phone more than
+   once — #572/#576/D-122 each trimmed padding on ONE page/card and
+   explicitly left this shared rule alone ("touching either would affect
+   far more than this one page"). This is that follow-up, done once, here,
+   so it can't be re-litigated per page.
+
+   `.main-content`'s own padding (above) is `var(--pad, 20px)` on ALL FOUR
+   sides — every nested card (profile section, connector section, the
+   capture task row itself) then adds its own padding on top, and on a
+   390px phone that stack compounds into real lost content width. The fix
+   is horizontal-only: below 768px, `--pad-x` (new, phone-only — no
+   desktop declaration exists, so `.main-content` keeps using plain
+   `var(--pad, 20px)` on every side at desktop width, unchanged) takes
+   over the LEFT/RIGHT sides only, top/bottom stay on `--pad`. That
+   preserves vertical rhythm (untouched) and, just as importantly, the
+   `top: calc(-1 * var(--pad, 20px))` cancellation trick used elsewhere in
+   this file (the triage bar's sticky-offset math) — that calc only ever
+   read the vertical value, which this change never redefines.
+
+   Values keep each density's ORIGINAL ordering (compact < comfort <
+   spacious: 14 < 20 < 28) rather than flattening to one phone-wide
+   number, per "keep comfort/compact coherent" — just compressed
+   (10 < 12 < 16) instead of trimmed per nested card. */
+@media (max-width: 767px) {
+  :root[data-density="compact"] {
+    --pad-x: 10px;
+  }
+  :root[data-density="comfort"],
+  :root:not([data-density]) {
+    --pad-x: 12px;
+  }
+  :root[data-density="spacious"] {
+    --pad-x: 16px;
+  }
+
+  .main-content {
+    padding-left: var(--pad-x, 12px);
+    padding-right: var(--pad-x, 12px);
+  }
+}
+
 /* ============================================================
    Profile row phone-width tuning (issue #572, revised per D-121)
    ============================================================
@@ -988,4 +1029,55 @@ body {
 
 .leaflet-container {
   isolation: isolate;
+}
+
+/* ============================================================
+   Captura task row — stacked layout (issue #596)
+   ============================================================
+   CaptureTaskRow.tsx was a side-by-side flex pair: a `flex: 1` text
+   column next to a `flexShrink: 0` button ~160px wide that could not
+   shrink. On a phone that squeezed the label (and the loosened-flag
+   warning list beside it) into roughly a third of the card — long task
+   labels wrapped one word per line ("Hipoges — pisos, chalets, áticos en
+   Dos Hermanas ≤210.000 €" across seven lines) — and the owner reported
+   the SAME problem on desktop ("esto afecta tanto al móvil como
+   escritorio"), so this is a plain column stack with NO `@media` split:
+   every value below is a static literal with no prop/state dependency
+   (D-121 rung 1 — the ladder's default applies even without a breakpoint
+   divergence to manage), so it was deleted from CaptureTaskRow.tsx's
+   inline `style` objects and lives here instead. Only `opacity` (muted)
+   and `cursor` (busy) stayed inline — genuinely state-dependent.
+
+   `.capture-task-row` sets no `align-items`, so the column flex
+   container's default (`stretch`) gives the text block (and the
+   "sin confirmar"-style loosened-flag list inside it) the row's full
+   width automatically — that's the fix. The button comes after it in
+   document order, so it renders below without any explicit ordering;
+   `.capture-task-row-button` gives it `align-self: flex-start` (sized to
+   its own label, not a full-width bar) and a 44px `min-height` — the old
+   button was only ~34px tall, under the WCAG 2.5.5 tap-target minimum. */
+.capture-task-row {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  transition: opacity 0.2s;
+}
+
+.capture-task-row-button {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 10px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 8px;
+  border: none;
+  background: var(--accent);
+  color: #fff;
 }
