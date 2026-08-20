@@ -5,6 +5,7 @@
  */
 
 import { sql } from "@/lib/db-write";
+import { sightingIdsByPortal } from "@/lib/capture-sightings";
 import {
   CAPTURE_PORTAL_NAMES,
   portalForUrl,
@@ -150,6 +151,17 @@ export async function addWorklistUrls(
 ): Promise<AddWorklistResult> {
   const result: AddWorklistResult = { added: 0, duplicate: 0, invalid: [] };
   const seenKeys = new Set<string>();
+  // Issue #639 review, C1: THIS is the production sighting path, not
+  // etl/capture.py's `_record_sightings` (which only runs for a
+  // manually-captured single results page -- the D-088 results-page walk
+  // that actually enumerates a portal's search pages POSTs its harvested
+  // detail URLs straight here, `via: 'derived'`, and never touches
+  // POST /api/extension/capture at all). Every valid, portal-resolved URL
+  // in this batch -- added AND duplicate alike, since a duplicate still
+  // means this enumeration just re-confirmed a listing it already knew
+  // about -- feeds the same `last_seen_at` bump `etl.capture.py`'s sighting
+  // logic performs, via the TypeScript mirror in lib/capture-sightings.ts.
+  const sightingPairs: { portal: string; url: string }[] = [];
 
   for (const raw of urls) {
     const url = raw.trim();
@@ -179,6 +191,7 @@ export async function addWorklistUrls(
       result.invalid.push({ url, reason: "No se pudo normalizar la URL" });
       continue;
     }
+    if (addedVia === "derived") sightingPairs.push({ portal, url });
     // De-dupe within this same batch before hitting the DB (two cosmetically
     // different URLs for the same listing pasted together).
     if (seenKeys.has(matchKey)) {
@@ -197,7 +210,55 @@ export async function addWorklistUrls(
     if (inserted.length > 0) result.added += 1;
     else result.duplicate += 1;
   }
+
+  if (sightingPairs.length > 0) {
+    await recordSightings(sightingPairs);
+  }
+
   return result;
+}
+
+/**
+ * Bump `listing.last_seen_at` for every already-known listing this batch of
+ * harvested detail URLs enumerated (issue #639, review C1 -- the actual
+ * production sighting path; see `addWorklistUrls`'s own comment).
+ *
+ * A results-page enumeration proves an advert is STILL LISTED, nothing
+ * more -- so this only ever writes `last_seen_at`, never `status`, never
+ * `last_fetched_at` (the same distinction `etl.capture._record_sightings`
+ * makes on the Python side, D-039's staleness surfacing already documents,
+ * and no dashboard reader of `last_seen_at` assumes something stronger).
+ * `GREATEST(last_seen_at, NOW())` mirrors `etl.orchestrator.
+ * _update_last_seen_for_discovered`'s monotonic write -- this call runs
+ * synchronously in the request that just harvested the URLs (no queue
+ * delay the way `extension_capture` can have), so NOW() is the true
+ * observation instant here; GREATEST still guards against a rarer race
+ * with a concurrent, more recent write from another path.
+ *
+ * Best-effort: the worklist rows this batch seeded are already committed by
+ * the time this runs, so a failure here must never turn a successful
+ * `POST /api/etl/worklist` into an error -- it is only logged.
+ */
+async function recordSightings(
+  pairs: readonly { portal: string; url: string }[],
+): Promise<void> {
+  const byPortal = sightingIdsByPortal(pairs);
+  for (const [portal, externalIds] of byPortal) {
+    if (externalIds.length === 0) continue;
+    try {
+      await sql(
+        `UPDATE listing SET last_seen_at = GREATEST(last_seen_at, NOW())
+          WHERE source = $1 AND external_id = ANY($2)`,
+        [portal, externalIds],
+      );
+    } catch (err) {
+      console.error(
+        `[worklist] last_seen_at sighting update failed for portal=${portal} ` +
+          `(${externalIds.length} id(s)) -- the worklist rows themselves are unaffected:`,
+        err,
+      );
+    }
+  }
 }
 
 /**

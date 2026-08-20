@@ -1176,9 +1176,13 @@ def _warn_unrecognized_connector_config_names(conn) -> None:
 
 
 def _update_last_seen_for_discovered(
-    conn, source: str, external_ids: list[str]
-) -> None:
-    """Mark every listing this scope's discover() just found as seen now.
+    conn,
+    source: str,
+    external_ids: list[str],
+    seen_at: datetime | None = None,
+) -> int:
+    """Mark every listing this scope's discover() just found (or a capture
+    enumeration confirmed, issue #639) as seen at `seen_at` (default: now).
 
     Issue #143: skip-if-seen means fetch_detail() no longer runs for every
     discovered id on every run, so `listing.last_seen_at` can no longer
@@ -1200,16 +1204,57 @@ def _update_last_seen_for_discovered(
     connectors like Fotocasa — presence tracking for display/staleness
     purposes is a different concern from withdrawal reconciliation, which
     stays gated on `discovers_full_inventory` exactly as before.
+
+    `seen_at` (issue #639 review, C2): the discover() call site never
+    passes this, so the write uses Postgres's OWN `NOW()` — same clock
+    source as this function always used, deliberately UNCHANGED, because
+    `_record_discovery_price_observations`'s `run_started_at` guard (D-098)
+    compares a Python-clock timestamp against `last_fetched_at` (also
+    Postgres's `NOW()`); an earlier draft switched this function's default
+    to a Python-computed timestamp and that measurably reintroduced
+    cross-clock skew into that unrelated comparison, breaking
+    `TestDiscoveryPriceHistory::
+    test_discovery_does_not_clobber_a_same_run_authoritative_fetch` (caught
+    by that test, not a hypothetical). The capture path's caller
+    (etl.capture._record_sightings) passes an EXPLICIT `seen_at`
+    (extension_capture.created_at) instead, because a captured page can sit
+    `pending` for hours — a paused connector, an outage — before
+    etl/capture.py processes it; stamping NOW() at processing time would
+    then record a sighting that never happened at that moment, in the exact
+    column #643/#645 will trust for expiry. Only that explicit-seen_at path
+    uses a Python-computed value; the always-been-Postgres-clock default
+    path is untouched.
+
+    The write is `GREATEST(last_seen_at, seen_at)`, not a blind overwrite,
+    so a delayed or replayed observation can only move `last_seen_at`
+    forward, never backward past a more recent sighting some other path
+    already recorded. Postgres's GREATEST ignores a NULL `last_seen_at`
+    (unlike SQL MAX, which would propagate it) so a listing's first-ever
+    sighting still sets the column correctly.
+
+    Returns the number of rows actually updated (the cursor's own
+    `rowcount`) — the honest count for a caller's log line, distinct from
+    `len(external_ids)`, which only says how many ids were *targeted*, not
+    how many matched an ingested listing (issue #639 review, M1).
     """
     if not external_ids:
-        return
+        return 0
     with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE listing SET last_seen_at = NOW() "
-            "WHERE source = %s AND external_id = ANY(%s)",
-            (source, external_ids),
-        )
+        if seen_at is None:
+            cur.execute(
+                "UPDATE listing SET last_seen_at = GREATEST(last_seen_at, NOW()) "
+                "WHERE source = %s AND external_id = ANY(%s)",
+                (source, external_ids),
+            )
+        else:
+            cur.execute(
+                "UPDATE listing SET last_seen_at = GREATEST(last_seen_at, %s) "
+                "WHERE source = %s AND external_id = ANY(%s)",
+                (seen_at, source, external_ids),
+            )
+        updated = cur.rowcount
     conn.commit()
+    return updated
 
 
 def _record_discovery_price_observations(

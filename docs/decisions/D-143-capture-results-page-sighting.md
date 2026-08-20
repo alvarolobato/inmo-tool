@@ -1,12 +1,12 @@
 ---
 id: D-143
-title: A captured results page bumps last_seen_at for the listings it enumerates
+title: A captured/enumerated results page bumps last_seen_at for the listings it lists
 date: 2026-08-21
 group: Data / connectors
-rule: A captured SEARCH/results page bumps `last_seen_at` for every already-known listing its harvested detail links match (via `external_id_from_url`) — never `status`, never `last_fetched_at`. A sighting proves "still listed", not "re-read".
+rule: Both the manual single-page capture path (etl/capture.py) AND the real production D-088 enumeration path (dashboard lib/db/worklist.ts addWorklistUrls, via='derived') bump `listing.last_seen_at` — GREATEST-based, at the true observation instant, never `status`/`last_fetched_at`, never a portal's own "gone" route.
 ---
 
-# D-143: A captured results page bumps `last_seen_at` for the listings it enumerates
+# D-143: A captured/enumerated results page bumps `last_seen_at` for the listings it lists
 
 *Decided: 2026-08-21*
 
@@ -14,30 +14,92 @@ rule: A captured SEARCH/results page bumps `last_seen_at` for every already-know
 Fable's design judgement on #636 found that a captured results page never
 updated `listing.last_seen_at` — `etl/capture.py`'s `_process_one` classified
 a listing/search page, harvested its detail URLs into `capture_worklist` via
-`_seed_derived_worklist`, and stopped. Only a full detail-page capture (or the
-crawl path's own `discover()` sweep, via `etl.orchestrator.
-_update_last_seen_for_discovered`) ever touched the row. Measured in
-production (2026-08-20): idealista had 3,274 active listings, only 74 seen
-≤2d, and 1,098 seen >7d — while the owner was capturing idealista search
-pages regularly. A large share of that "stale" count was an artefact of the
-ledger not recording an enumeration as a sighting, not of the listings
-actually being gone. Every downstream staleness signal (D-039's badges, the
-#636 Estado board, and the withdrawal/expiry design in #641/#643/#645) reads
-`last_seen_at`, so this needed fixing before any of those act on it.
+`_seed_derived_worklist`, and stopped. Measured in production (2026-08-20):
+idealista had 3,274 active listings, only 74 seen ≤2d, and 1,098 seen >7d —
+while the owner was capturing idealista search pages regularly. Every
+downstream staleness signal (D-039's badges, the #636 Estado board, and the
+withdrawal/expiry design in #641/#643/#645) reads `last_seen_at`, so this
+needed fixing before any of those act on it.
 
-**Decision**: `etl/capture.py`'s `_process_one`, when it recognises a
-captured page as a results/listing page, now calls `_record_sightings(conn,
-portal, detail_urls)` right after `_seed_derived_worklist`. That function
-extracts external_ids from the harvested detail URLs via each portal's own
-`external_id_from_url` (the same id extraction `_connector_for_url` already
-uses for a single detail capture — new `_CONNECTOR_CLASS_BY_PORTAL`, derived
-from the existing `_CAPTURE_CONNECTORS` table so there is one list of
-capture-supported portals, not two) and delegates the actual `UPDATE` to
-`etl.orchestrator._update_last_seen_for_discovered` — the exact mechanism the
-crawl path already uses to bump presence for listings a `discover()` sweep
-re-confirmed without fetching their detail page. Reused rather than
-reimplemented, so the two ingestion paths write the exact same SQL for the
-exact same claim.
+**First pass and its review.** The first implementation added
+`etl.capture._record_sightings`, called from `_process_one`'s results-page
+branch. A fresh-context Opus review (D-003) found it correct in isolation but
+**unreachable in production**: measured against production `extension_capture`
+(08-04→08-20), 3,517 rows, `listing` status count **0** — the D-088
+results-page walk that actually enumerates idealista never posts HTML to
+`POST /api/extension/capture` at all (`popup.js` routes a recognised listing
+page to `enterBatchMode`, never `runSingleCapture`; `content-script.js` gates
+auto-capture on `currentDetail()`). It POSTs harvested detail URLs straight to
+`POST /api/etl/worklist { via: 'derived' }` (3,325 rows measured against
+idealista's 3,274 actives — the enumeration was unambiguously happening, just
+recorded nowhere). The review also found the URL→id extraction not equivalent
+to the classifier that gates it (C4), the write time wrong for a delayed
+capture (C2), and a portal's own "this listing is gone" route counting as a
+sighting of it still being live (C3). See PR review comments on the issue for
+the full C1–C4/M1/M2 finding; this record documents the corrected design.
+
+**Decision — two languages, one semantics.**
+
+1. **The real production path**: `dashboard/lib/db/worklist.ts`
+   `addWorklistUrls`, when `addedVia === 'derived'`, collects every
+   valid, portal-resolved `(portal, url)` pair in the batch (added AND
+   duplicate outcomes both count — a duplicate still means this enumeration
+   re-confirmed a listing it already knew) and calls a new
+   `recordSightings()`, which extracts external_ids via
+   `dashboard/lib/capture-sightings.ts` (`sightingIdsByPortal`) and issues one
+   `UPDATE listing SET last_seen_at = GREATEST(last_seen_at, NOW()) WHERE
+   source = $1 AND external_id = ANY($2)` per portal. Best-effort — a failure
+   is logged, never turns a successful worklist POST into an error. Scoped to
+   `via: 'derived'` only (not `'manual'`), matching the review's own framing
+   of the enumeration path.
+2. **The manual/single-page capture path** (kept — real, just not the
+   production volume): `etl/capture.py`'s `_process_one`, on a recognised
+   results/listing page, calls `_record_sightings(conn, portal, detail_urls,
+   created_at)` right after `_seed_derived_worklist`, which delegates to
+   `etl.orchestrator._update_last_seen_for_discovered` (also `GREATEST`-based
+   now — see below).
+
+Both languages share the SAME id-extraction shape, each in its own file kept
+in lockstep by a mirrored test suite (`etl/tests/test_capture.py::
+TestSightingIdExtraction` / `dashboard/lib/__tests__/capture-sightings.test.ts`),
+matching this codebase's existing `listing_detect.py`/`detect.js` and
+`worklist_match_key`/`worklistMatchKey` mirroring convention:
+
+- **C4 (URL normalization)**: a harvested `<a href>` or enumerated URL can
+  carry a query string, a fragment, or lack the trailing slash a connector's
+  `external_id_from_url` regex was calibrated for (that regex trusts a real
+  browser's `location.href`, the OTHER call site that also uses it
+  unrelaxed). `_normalize_detail_path` (Python) / `normalizeDetailPath` (TS)
+  strip query/fragment and guarantee a trailing slash on the PATH ALONE
+  before extraction — never loosening any connector's own regex, which stays
+  exactly as strict for the real-URL call site.
+- **C3 (gone-route exclusion)**: hipoges' detail route accepts a same-id
+  suffix for "this advert is gone" (`.../detail/<id>/unavailable`,
+  `.../detail/<id>/contact-received`) — a link shaped like this on a results
+  page must never count as a sighting of the advert still being live.
+  `_GONE_URL_SUFFIXES` (Python) / `GONE_URL_SUFFIXES` (TS) excludes it before
+  id extraction.
+- **C2 (observation time, not processing time)**: `etl.orchestrator.
+  _update_last_seen_for_discovered` gained an optional `seen_at` parameter
+  (default NOW()) and its write is now `GREATEST(last_seen_at, seen_at)`, not
+  a blind overwrite. `etl.capture._record_sightings` passes the capture row's
+  own `extension_capture.created_at` — a captured page can sit `pending` for
+  hours (a paused connector, an outage) before being processed, and stamping
+  NOW() at processing time would record a sighting that never happened at
+  that moment, in the exact column #643/#645 will trust. The dashboard's
+  `recordSightings` runs synchronously in the request that just harvested the
+  URLs (no equivalent queue delay), so it uses NOW() directly; `GREATEST`
+  still guards it against a rarer concurrent-write race. Either way the write
+  can only move `last_seen_at` forward, never backward past a more recent
+  sighting some other path already recorded.
+- **M1 (honest count)**: `_update_last_seen_for_discovered` now returns the
+  UPDATE's actual `cur.rowcount`, and `_record_sightings` returns that
+  through — not `len(external_ids)`, which only says how many ids were
+  targeted, not how many matched an ingested listing (the review's own
+  example: a page with 30 links and 0 matching rows must never log "30
+  sighted"). `_record_sightings` also logs a drop count when
+  `len(urls) - len(external_ids)` is nonzero, so a systematic extraction gap
+  is visible.
 
 A **sighting is weaker than a verification**: it proves the advert is still
 listed, not that its fields were re-read. So this only ever writes
@@ -48,8 +110,20 @@ sighting must not make a stale listing look freshly re-fetched and get
 skipped from the fetch budget it still needs).
 
 A page with zero matches against known listings is a clean no-op, not an
-error (D-069) — best-effort, wrapped so a failure here can never turn an
-already-clean 'listing page' outcome into a failed capture.
+error (D-069) — best-effort on both languages' sides, wrapped so a failure
+here can never turn an already-clean 'listing page'/worklist-add outcome into
+a failure.
+
+**M2 — a known, accepted side effect, not fixed here**: `etl.
+materialize_reconciler._stale_profiles_exist` treats `MAX(GREATEST(
+last_seen_at, last_fetched_at, first_seen_at))` across `listing` as "is there
+new data" — a sighting-only bump (no field actually changed) now makes it see
+"new data" and fire `notify_materialize_all` (D-046) after every enumerated
+capture batch, even when nothing substantive changed. This is benign (the
+reconciler pass is best-effort and idempotent by design, per D-046) but is
+now measurably more frequent; not worth a special-case exclusion given the
+mechanism's own idempotency guarantee, but noted here so a future investigator
+of "why does the reconciler fire so often" finds the cause immediately.
 
 **Backfill**: not attempted, and not possible in the general case. Past
 enumerations were never recorded, so there is no way to reconstruct which
@@ -66,28 +140,39 @@ listings reflect real historical sighting cadence.
 
 **No existing consumer assumed something stronger.** Checked every dashboard
 reader of `last_seen_at` (`lib/staleness.ts`, `lib/candidates.ts`,
-`lib/ai-assessment/cache.ts`, `lib/db/data-health.ts`): all of them already
-treat it as a presence-only signal — `staleness.ts`'s own module docstring
-explicitly contrasts it with `last_fetched_at` ("a scraping-budget signal")
-and `ai-assessment/cache.ts` explicitly excludes a `last_seen_at` bump from
-its cache-invalidation hash. `staleness.ts`'s docstring credits only the
-`discover()` sweep as the source of a bump; it is now also true of a captured
-results-page enumeration, but no code path needed to change — the semantics
-it already documents ("re-confirmed", not "re-read") were correct in advance
-of this fix.
+`lib/ai-assessment/cache.ts`, `lib/db/data-health.ts`, `lib/property-detail.ts`,
+`app/etl/salud/page.tsx`, `etl/materialize_reconciler.py`): all of them
+already treat it as a presence-only signal — `staleness.ts`'s own module
+docstring explicitly contrasts it with `last_fetched_at` ("a scraping-budget
+signal") and `ai-assessment/cache.ts` explicitly excludes a `last_seen_at`
+bump from its cache-invalidation hash. `staleness.ts`'s docstring credits
+only the `discover()` sweep as the source of a bump; it is now also true of
+an enumerated/captured results page, but no reader code path needed to
+change — the semantics it already documents ("re-confirmed", not "re-read")
+were correct in advance of this fix. `materialize_reconciler.py` is the one
+consumer whose BEHAVIOUR (frequency, not correctness) shifts — see M2 above.
 
 **Alternatives rejected**: extracting external_ids from `capture_worklist`'s
 `match_key` instead of each connector's `external_id_from_url` — rejected
 because `match_key` is a host+path correlation key (issue #237), not the
-canonical external_id the `listing` table is keyed on; reusing
-`external_id_from_url` keeps exactly one id-extraction path per portal.
-Writing a second, capture-scoped copy of the `UPDATE listing SET
-last_seen_at = NOW() WHERE source = %s AND external_id = ANY(%s)` — rejected
-per the project's own reuse instinct: `etl.orchestrator.
-_update_last_seen_for_discovered` already is that statement.
+canonical external_id the `listing` table is keyed on. Writing a second,
+capture-scoped copy of `UPDATE listing SET last_seen_at = ...` — rejected per
+the project's own reuse instinct: `etl.orchestrator.
+_update_last_seen_for_discovered` already is that statement, extended (not
+duplicated) with `seen_at`/`GREATEST`. Relaxing each connector's
+`external_id_from_url` regex directly (instead of normalizing the harvested
+URL before calling it) — rejected because that regex is also used UNRELAXED
+on a real captured URL in `_connector_for_url`; loosening it there risks a
+spurious id match on a URL that never went through the classifier at all.
 
 **See**: `etl/capture.py` (`_record_sightings`, `_sighting_ids_from_detail_urls`,
-`_CONNECTOR_CLASS_BY_PORTAL`), `etl/orchestrator.py`
-(`_update_last_seen_for_discovered`), `etl/tests/test_capture.py`
-(`TestListingPageSightingsBumpLastSeen`), issue #639, parent #636,
-[D-039](D-039-listing-staleness-surfacing.md), [D-069](D-069-etl-run-hygiene.md).
+`_normalize_detail_path`, `_GONE_URL_SUFFIXES`, `_CONNECTOR_CLASS_BY_PORTAL`),
+`etl/orchestrator.py` (`_update_last_seen_for_discovered`),
+`dashboard/lib/capture-sightings.ts`, `dashboard/lib/db/worklist.ts`
+(`addWorklistUrls`, `recordSightings`), `etl/tests/test_capture.py`
+(`TestListingPageSightingsBumpLastSeen`, `TestSightingIdExtraction`),
+`dashboard/lib/__tests__/capture-sightings.test.ts`,
+`dashboard/lib/db/__tests__/worklist-sightings.integration.test.ts`, issue
+#639, parent #636, [D-039](D-039-listing-staleness-surfacing.md),
+[D-046](D-046-materialize-staleness-reconciler.md),
+[D-069](D-069-etl-run-hygiene.md).
