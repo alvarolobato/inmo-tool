@@ -57,6 +57,25 @@ const PROFILE_RELEVANT_EXISTS = `EXISTS (
           AND pls.property_id IN (la.property_id, lb.property_id)
       )`;
 
+/**
+ * Same-property exclusion (issue #605 Part 1) — a pending `suggested_merge`
+ * row whose two listings already share a `property_id` was already resolved
+ * by some OTHER pair's merge since this one was filed. `engine.py`'s
+ * `confirm_suggestion` handles this at write time (marks it `confirmed`, no
+ * new merge), but between dedup runs the review query never filtered it on
+ * READ — so the owner opened one, got the "already merged" banner, and only
+ * found out after clicking. #600 measured 72 such pending rows in
+ * production.
+ *
+ * Applied to every read of the `pending` queue (list AND both count
+ * queries) so the chip/badge counts never disagree with what the list
+ * actually shows — trading "repeats a stale question" for "count says N but
+ * only N-72 cards render" would just be a different confusing thing.
+ * Requires `la`/`lb` (the listing aliases every query here already joins on
+ * `sm.listing_id_a`/`sm.listing_id_b`) to be in scope.
+ */
+const NOT_ALREADY_MERGED = `la.property_id <> lb.property_id`;
+
 interface SuggestionRow {
   id: number;
   match_basis: MatchBasis;
@@ -179,7 +198,7 @@ export async function listDedupSuggestions(opts: {
       JOIN property pa ON pa.id = la.property_id
       JOIN listing lb ON lb.id = sm.listing_id_b
       JOIN property pb ON pb.id = lb.property_id
-      WHERE sm.status = 'pending' ${basisClause} ${relevantClause}
+      WHERE sm.status = 'pending' AND ${NOT_ALREADY_MERGED} ${basisClause} ${relevantClause}
       ORDER BY profile_relevant DESC, sm.confidence DESC, sm.created_at DESC
       LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params,
@@ -210,15 +229,19 @@ export async function listDedupSuggestions(opts: {
 export async function getDedupSuggestionCounts(): Promise<DedupSuggestionCounts> {
   const [byBasisRows, relevantRows] = await Promise.all([
     sql<{ match_basis: MatchBasis; count: string }>(
-      `SELECT match_basis, COUNT(*) AS count FROM suggested_merge
-        WHERE status = 'pending' GROUP BY match_basis`,
+      `SELECT sm.match_basis, COUNT(*) AS count
+        FROM suggested_merge sm
+        JOIN listing la ON la.id = sm.listing_id_a
+        JOIN listing lb ON lb.id = sm.listing_id_b
+        WHERE sm.status = 'pending' AND ${NOT_ALREADY_MERGED}
+        GROUP BY sm.match_basis`,
     ),
     sql<{ count: string }>(
       `SELECT COUNT(*) AS count
         FROM suggested_merge sm
         JOIN listing la ON la.id = sm.listing_id_a
         JOIN listing lb ON lb.id = sm.listing_id_b
-        WHERE sm.status = 'pending' AND ${PROFILE_RELEVANT_EXISTS}`,
+        WHERE sm.status = 'pending' AND ${NOT_ALREADY_MERGED} AND ${PROFILE_RELEVANT_EXISTS}`,
     ),
   ]);
   const by_basis: Partial<Record<MatchBasis, number>> = {};
