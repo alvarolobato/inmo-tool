@@ -128,10 +128,26 @@ test.describe("phone width (iPhone 13 emulation)", () => {
   // `AdminChrome.tsx`'s content div (every `/admin/*` and `/etl/*` page)
   // and `.route-shell` (the repeated per-route `<main style={{padding:
   // 24}}>` shape, 8 call sites across 6 files).
+  // #599 review round 2 (CI failure): the FIRST version of these two tests
+  // did `page.goto(route)` with no wait at all, then measured immediately.
+  // Locally (warm demo DB, a dev server that had already compiled every
+  // route from earlier runs in this session) that never showed a problem;
+  // in CI (fresh schema-only DB, `next dev` cold-compiling `/etl/connectors`
+  // for the first time ever) it failed with "`.admin-chrome-content` not
+  // found" — `elementPadding` threw a bare "not found", which named nothing
+  // about WHY, exactly the failure mode the review called out. Both tests
+  // now (a) wait for the network to go idle before measuring (matching
+  // `assertNoHorizontalOverflow`'s own fix above) and (b) assert the page's
+  // own content actually mounted (`connectors-page` / `captura-page`,
+  // testids each page already carries) BEFORE touching `.admin-chrome-
+  // content`/`.route-shell` — so a real render failure now fails on an
+  // assertion that names the missing page, not on a class-not-found error
+  // three steps removed from the actual cause.
   test("AdminChrome content div horizontal padding shrinks on phone (every /admin/* and /etl/* page)", async ({
     page,
   }) => {
-    await page.goto("/etl/connectors");
+    await page.goto("/etl/connectors", { waitUntil: "networkidle" });
+    await expect(page.getByTestId("connectors-page"), "the page actually rendered (not an error boundary)").toBeVisible();
     const padding = await elementPadding(page, ".admin-chrome-content");
     expect(padding.left, "left padding shrinks on phone").toBe("12px");
     expect(padding.right, "right padding shrinks on phone").toBe("12px");
@@ -140,7 +156,8 @@ test.describe("phone width (iPhone 13 emulation)", () => {
   });
 
   test("route-shell horizontal padding shrinks on phone, desktop's 24px vertical stays", async ({ page }) => {
-    await page.goto("/captura");
+    await page.goto("/captura", { waitUntil: "networkidle" });
+    await expect(page.getByTestId("captura-page"), "the page actually rendered (not an error boundary)").toBeVisible();
     const padding = await elementPadding(page, ".route-shell");
     expect(padding.left, "left padding shrinks on phone").toBe("12px");
     expect(padding.right, "right padding shrinks on phone").toBe("12px");
@@ -163,12 +180,14 @@ test.describe("desktop (default project)", () => {
   });
 
   test("AdminChrome content div and route-shell padding are untouched at desktop width", async ({ page }) => {
-    await page.goto("/etl/connectors");
+    await page.goto("/etl/connectors", { waitUntil: "networkidle" });
+    await expect(page.getByTestId("connectors-page"), "the page actually rendered (not an error boundary)").toBeVisible();
     const adminPadding = await elementPadding(page, ".admin-chrome-content");
     expect(adminPadding.left).toBe("20px");
     expect(adminPadding.right).toBe("20px");
 
-    await page.goto("/captura");
+    await page.goto("/captura", { waitUntil: "networkidle" });
+    await expect(page.getByTestId("captura-page"), "the page actually rendered (not an error boundary)").toBeVisible();
     const shellPadding = await elementPadding(page, ".route-shell");
     expect(shellPadding.left).toBe("24px");
     expect(shellPadding.right).toBe("24px");
