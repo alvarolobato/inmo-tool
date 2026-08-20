@@ -519,15 +519,21 @@ def evaluate_pair(
         # the aggregate ratio above — the owner could not evaluate a
         # photo-hash suggestion at all when the card only showed a
         # percentage and (before this) the wrong photos (the first N in
-        # storage order, frequently unrelated rooms). `get_pairs` reuses
-        # the exact fetch `hashes_a`/`hashes_b` above already made (no
-        # second network round trip), and `photo_hash.matched_pairs` is the
-        # ONLY place this pairing is computed — the dashboard must render
-        # it, never re-derive a match from raw photo_urls itself. Ratio can
-        # legitimately clear the threshold with only 1 of the smaller
-        # side's photos not producing a match record here (a fetch failure
-        # after `hashes_a`/`hashes_b` were already computed is not possible
-        # since both come from the same cached pairs — this can only be
+        # storage order, frequently unrelated rooms). `hashes_a`/`hashes_b`
+        # above are `get_packed`'s PACKED-int form (issue #618/#623) —
+        # `matched_pairs` needs real `imagehash.ImageHash` objects (its own
+        # `-` subtraction is what stores a per-pair Hamming distance), so
+        # it calls `get_pairs` instead. That's still not a second network
+        # round trip: `get_packed`/`get`/`get_pairs` all key off the SAME
+        # `_ensure_fetched` memo (one fetch per listing per run) — `get_pairs`
+        # just returns a different projection (url, hash) of the identical
+        # cached fetch `get_packed` already triggered. `photo_hash.matched_pairs`
+        # is the ONLY place this pairing is computed — the dashboard must
+        # render it, never re-derive a match from raw photo_urls itself.
+        # Ratio can legitimately clear the threshold with only 1 of the
+        # smaller side's photos not producing a match record here (a fetch
+        # failure between the packed and pairs projections is not possible
+        # since both come from the same cached fetch — this can only be
         # empty when the underlying fetch found zero usable photos on one
         # side, which `match_ratio` already guards against returning a
         # ratio for).

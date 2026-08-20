@@ -329,13 +329,61 @@ class TestMatchedPairs:
 
     def test_distance_is_a_plain_int_not_numpy(self):
         """imagehash's `-` returns numpy.int64 — left un-cast this crashes
-        json.dumps the moment a caller persists `distance` (issue #615's
-        real regression, caught against a live Postgres run)."""
+        json.dumps the moment a caller persists `distance` (a papercut
+        introduced by matched_pairs itself, caught in the same PR's own
+        review against a live Postgres run — no prior signal ever wrote a
+        hash distance into `detail`)."""
         shared = _synthetic_room(9)
         pairs_a = [("https://a.example/0.jpg", _hash(shared))]
         pairs_b = [("https://b.example/0.jpg", _hash(shared))]
         matches = photo_hash.matched_pairs(pairs_a, pairs_b)
         assert type(matches[0].distance) is int
+
+    def test_asymmetric_subset_shape(self):
+        """Issue #624 review: `match_ratio` is the fraction of the SMALLER
+        set, so ratio == 1.0 means the smaller set is a SUBSET of the
+        larger one, not that the two sets are equal — the one
+        currently-qualifying live pair is a 3-photo idealista listing
+        fully contained inside a 30-photo fotocasa one. `matched_pairs`
+        must handle this real shape correctly: every one of the smaller
+        side's 3 photos finds its match among the larger side's 30 (never
+        assuming `len(pairs_a) == len(pairs_b)`), and the 27 unmatched
+        larger-side photos simply never appear in the output."""
+        shared = [_synthetic_room(700 + i) for i in range(3)]
+        # The smaller (idealista) side: exactly the 3 shared photos.
+        pairs_small = [
+            (f"https://idealista.example/{i}.jpg", _hash(shared[i])) for i in range(3)
+        ]
+        # The larger (fotocasa) side: the same 3 shared photos, interleaved
+        # at NON-trivial positions (not index 0-2) among 27 unrelated ones.
+        noise = [_synthetic_room(800 + i) for i in range(27)]
+        pairs_large = [
+            (f"https://fotocasa.example/{i}.jpg", _hash(noise[i])) for i in range(10)
+        ]
+        pairs_large += [
+            (f"https://fotocasa.example/shared-{i}.jpg", _hash(shared[i]))
+            for i in range(3)
+        ]
+        pairs_large += [
+            (f"https://fotocasa.example/{i + 10}.jpg", _hash(noise[i + 10]))
+            for i in range(17)
+        ]
+        assert len(pairs_large) == 30
+
+        matches = photo_hash.matched_pairs(pairs_small, pairs_large)
+
+        assert len(matches) == 3
+        matched_urls_small = {m.url_a for m in matches}
+        assert matched_urls_small == {url for url, _h in pairs_small}
+        matched_urls_large = {m.url_b for m in matches}
+        assert matched_urls_large == {
+            f"https://fotocasa.example/shared-{i}.jpg" for i in range(3)
+        }
+        # Confirms the ratio itself really is 1.0 (subset), not partial —
+        # the exact shape the #624 review flagged as the live case.
+        packed_small = [photo_hash.pack_hash(h) for _url, h in pairs_small]
+        packed_large = [photo_hash.pack_hash(h) for _url, h in pairs_large]
+        assert photo_hash.match_ratio(packed_small, packed_large) == 1.0
 
 
 class TestNonImageUrlFiltering:
