@@ -511,6 +511,108 @@ test("#448 I: the detail gallery shows a map tile with a circle as its first til
   await assertNoErrorSurface(page);
 });
 
+test("#594: the map tile opens as the lightbox's first slide, interactive, and the photo counter never counts it", async ({
+  page,
+}) => {
+  skipIfNoDb(test);
+
+  await page.goto(`/profiles/${profileId}/properties/${dedupedPropertyId}`);
+  await expect(page.getByTestId("property-detail-page")).toBeVisible();
+
+  await page.getByTestId("photo-gallery-map-tile-open").click();
+  await expect(page.getByTestId("photo-gallery-lightbox")).toBeVisible();
+
+  const slide = page.getByTestId("photo-gallery-map-slide");
+  await expect(slide).toBeVisible();
+  await expect(slide.locator(".leaflet-container")).toBeVisible();
+  // #594: never a "1 / 3" (or worse, "0 / 3") while the map itself is open —
+  // the counter is dedicated to photos and hidden outright here.
+  await expect(page.getByTestId("photo-gallery-counter")).toHaveCount(0);
+  await expect(page.getByTestId("photo-gallery-lightbox-image")).toHaveCount(0);
+
+  // Isolation containment (#591's fix) must hold for the map INSIDE the
+  // lightbox too, not just the static grid tile — same assertion pattern as
+  // triage-loop.spec.ts's regression guard.
+  expect(
+    await slide.locator(".leaflet-container").first().evaluate((el) => getComputedStyle(el).isolation),
+  ).toBe("isolate");
+
+  // Stepping forward leaves the map and reaches real photo 1, with the
+  // counter now excluding the map from both the numerator and denominator.
+  // Denominator is 2, not 3: `dedupedPropertyId`'s union carries the
+  // ACTIVE fotocasa listing's 2 photos only — its withdrawn milanuncios
+  // sibling's 1 photo is excluded upstream (property-detail.ts), same as
+  // every other assertion on this fixture in this file.
+  await page.getByTestId("photo-gallery-next").click();
+  await expect(page.getByTestId("photo-gallery-map-slide")).toHaveCount(0);
+  await expect(page.getByTestId("photo-gallery-counter")).toContainText("1 / 2");
+
+  // Stepping back twice returns to the map (prev from photo 1 → map).
+  await page.getByTestId("photo-gallery-prev").click();
+  await expect(page.getByTestId("photo-gallery-map-slide")).toBeVisible();
+  await expect(page.getByTestId("photo-gallery-counter")).toHaveCount(0);
+
+  await assertNoErrorSurface(page);
+});
+
+test("#594: the map slide is genuinely interactive — Leaflet enables dragging/zoom only when enlarged, and a real drag pans it", async ({
+  page,
+}) => {
+  skipIfNoDb(test);
+
+  await page.goto(`/profiles/${profileId}/properties/${dedupedPropertyId}`);
+  await expect(page.getByTestId("property-detail-page")).toBeVisible();
+
+  // Baseline: Leaflet stamps `leaflet-grab`/`leaflet-touch-drag`/
+  // `leaflet-touch-zoom` onto `.leaflet-container` itself ONLY when its
+  // corresponding interaction handler is enabled — a structural read of
+  // `dragging`/`touchZoom`, not a simulated gesture. The static grid tile
+  // (this file's PRE-EXISTING #448 I test already confirms it renders) must
+  // carry none of them. NOTE: this deliberately does not attempt a raw
+  // `page.mouse` drag on the grid tile — it sits under the SAME full-tile
+  // transparent `photo-gallery-map-tile-open` button the click-to-enlarge
+  // test above uses, and a mousedown+mouseup on that button (even with
+  // movement in between) still fires a `click` and opens the lightbox, same
+  // as dragging a finger across any of this app's other thumbnail buttons.
+  const gridContainer = page.locator('[data-testid="photo-gallery-map-tile"] .leaflet-container');
+  await expect(gridContainer).toBeVisible();
+  const gridClasses = (await gridContainer.getAttribute("class")) ?? "";
+  for (const cls of ["leaflet-grab", "leaflet-touch-drag", "leaflet-touch-zoom"]) {
+    expect(gridClasses, `grid tile should not carry ${cls}`).not.toContain(cls);
+  }
+
+  // Enlarged: the SAME container now carries them — this is the actual
+  // `interactive` prop reaching Leaflet, exercised end to end (a unit test
+  // only proves PhotoGallery PASSES `interactive`, not that Leaflet itself
+  // honours it).
+  await page.getByTestId("photo-gallery-map-tile-open").click();
+  const slideContainer = page.locator('[data-testid="photo-gallery-map-slide"] .leaflet-container');
+  await expect(slideContainer).toBeVisible();
+  const slideClasses = (await slideContainer.getAttribute("class")) ?? "";
+  for (const cls of ["leaflet-grab", "leaflet-touch-drag", "leaflet-touch-zoom"]) {
+    expect(slideClasses, `map slide should carry ${cls}`).toContain(cls);
+  }
+
+  // And a real mouse drag on the now-enlarged map actually pans it — safe to
+  // drive with raw `page.mouse` here: the map slide has no covering overlay
+  // button (the lightbox's own `zoom-area` stops propagation on click, but
+  // does not close on one, and there is nothing else to click-trap into).
+  const slidePane = page.locator('[data-testid="photo-gallery-map-slide"] .leaflet-map-pane');
+  const slideBox = await page.getByTestId("photo-gallery-map-slide").boundingBox();
+  if (!slideBox) throw new Error("map slide has no bounding box");
+  const slideTransformBefore = await slidePane.evaluate((el) => (el as HTMLElement).style.transform);
+  await page.mouse.move(slideBox.x + slideBox.width / 2, slideBox.y + slideBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(slideBox.x + slideBox.width / 2 - 80, slideBox.y + slideBox.height / 2 - 40, { steps: 5 });
+  await page.mouse.up();
+  const slideTransformAfter = await slidePane.evaluate((el) => (el as HTMLElement).style.transform);
+  expect(slideTransformAfter).not.toBe(slideTransformBefore);
+
+  // The drag must not have stepped the lightbox off the map slide.
+  await expect(page.getByTestId("photo-gallery-map-slide")).toBeVisible();
+  await assertNoErrorSurface(page);
+});
+
 test("#448 I: the map tile is omitted cleanly for a property with no coordinates", async ({
   page,
 }) => {

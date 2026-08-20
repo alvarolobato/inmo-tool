@@ -28,6 +28,15 @@ import "leaflet/dist/leaflet.css";
  * fits the map to the circle's bounds so the whole approximate-location circle
  * is framed with a little context regardless of the radius, instead of an
  * arbitrary fixed zoom that could crop the circle or leave it a tiny dot.
+ *
+ * #594: the `interactive` prop (default false, unchanged grid-tile behaviour)
+ * lets `PhotoGallery`'s lightbox reuse this exact component for the enlarged
+ * map slide, where panning IS the point — dragging/scroll-wheel-zoom/
+ * double-click-zoom/box-zoom/touch-zoom all follow `interactive`, and a
+ * zoom control + attribution are shown. `keyboard` stays hard-`false` even
+ * when interactive: the lightbox's own ArrowLeft/ArrowRight must keep
+ * stepping slides, never pan the map — ceding keyboard to Leaflet here would
+ * fight that (see PhotoGallery.tsx's gesture-conflict decision).
  */
 
 /** Approximate-location circle radius, in metres. */
@@ -72,10 +81,12 @@ export function PropertyLocationMap({
   lat,
   lon,
   radiusMeters = APPROX_RADIUS_METERS,
+  interactive = false,
 }: {
   lat: number;
   lon: number;
   radiusMeters?: number;
+  interactive?: boolean;
 }) {
   return (
     <div
@@ -88,16 +99,18 @@ export function PropertyLocationMap({
         // bounds on mount, so the final zoom always frames the radius (#459).
         zoom={14}
         style={{ width: "100%", height: "100%" }}
-        // Static preview: no interaction affordances, so it never fights the
-        // page for scroll/keyboard the way a full interactive map would.
-        zoomControl={false}
-        attributionControl={false}
-        dragging={false}
-        scrollWheelZoom={false}
-        doubleClickZoom={false}
-        boxZoom={false}
+        // Static grid tile (default): no interaction affordances, so it never
+        // fights the page for scroll/keyboard. Lightbox map slide (#594):
+        // `interactive` flips on every pan/zoom affordance EXCEPT keyboard —
+        // see the class docstring for why keyboard stays off unconditionally.
+        zoomControl={interactive}
+        attributionControl={interactive}
+        dragging={interactive}
+        scrollWheelZoom={interactive}
+        doubleClickZoom={interactive}
+        boxZoom={interactive}
         keyboard={false}
-        touchZoom={false}
+        touchZoom={interactive}
       >
         <TileLayer
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"

@@ -44,6 +44,31 @@ import { wrapIndex } from "@/lib/photo-cycle";
  * card the arrows are "for". Scoping the handler to the ticker's own
  * subtree means it only ever fires while a ticker button already has
  * focus, so it can't intercept anything else.
+ *
+ * #594 (owner scope cut, mobile report): a numeric `N / M` position counter,
+ * overlaid ON the photo rather than sitting in flow beneath it — the owner's
+ * explicit reason was "para maximizar espacio": an in-flow counter eats card
+ * height, and card height is what determines how many candidates fit on a
+ * phone screen at once. Reuses the lightbox's translucent-pill *treatment*
+ * (small rounded pill, always legible over a photo) rather than its exact
+ * colours — the lightbox pill sits on a permanent near-black backdrop
+ * (`rgba(255,255,255,0.15)` reads fine there), but this counter sits directly
+ * on an arbitrary scraped photo with no such backdrop, so it borrows the
+ * ticker buttons' own already-proven-over-arbitrary-photos treatment instead
+ * (`rgba(0,0,0,0.55)` + a blur, same as `.candidate-photo-ticker button`).
+ * Lives in the SAME sibling ticker wrapper as the prev/next buttons — never
+ * inside the card's `<Link>` — for the identical reason those buttons do
+ * (see above): it's not interactive, but keeping every ticker control in one
+ * non-`<a>`-nested subtree avoids re-litigating the question per control.
+ * Unlike the buttons it is not hover/touch-gated — it's informational, not
+ * an affordance, the same always-visible treatment the price line gets.
+ *
+ * Explicitly OUT of scope for this pass (owner scope cut after the initial
+ * #594 plan): swipe-to-step and dot indicators on this ticker. Prev/next
+ * buttons remain the only way to cycle a card's photos; do not reintroduce
+ * touch-swipe here without re-solving the vertical-scroll-safety problem the
+ * original plan flagged (a photo occupies most of a card's height, so a
+ * naive touch handler would make the feed unscrollable over every photo).
  */
 export function CandidatePhotoTicker({
   photos,
@@ -201,6 +226,27 @@ export function CandidatePhotoTicker({
           >
             ›
           </button>
+
+          <p
+            data-testid="candidate-photo-counter"
+            aria-live="polite"
+            style={{
+              position: "absolute",
+              top: 6,
+              right: 6,
+              margin: 0,
+              padding: "2px 8px",
+              borderRadius: 10,
+              background: "rgba(0,0,0,0.55)",
+              backdropFilter: "blur(2px)",
+              color: "#fff",
+              fontSize: 12,
+              lineHeight: 1.6,
+              pointerEvents: "none",
+            }}
+          >
+            {index + 1} / {photos.length}
+          </p>
         </div>
       )}
     </>

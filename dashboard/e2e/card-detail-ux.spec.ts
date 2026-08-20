@@ -378,8 +378,13 @@ test("#167: the list-card photo ticker cycles the property's photos in place, wr
   const ticker = target.getByTestId("candidate-photo-ticker");
   const next = ticker.getByTestId("candidate-photo-next");
   const prev = ticker.getByTestId("candidate-photo-prev");
+  // #594: unlike prev/next, the counter is always visible — it's
+  // informational, not an affordance, so it gets no hover-gating.
+  const counter = ticker.getByTestId("candidate-photo-counter");
 
   await expect(img).toHaveAttribute("src", /1\.jpg$/);
+  await expect(counter).toHaveText("1 / 3");
+  await expect(counter).toHaveCSS("opacity", "1");
   // Hidden until hover, same three-path rule as the action bar.
   await expect(next).toHaveCSS("opacity", "0");
 
@@ -388,14 +393,18 @@ test("#167: the list-card photo ticker cycles the property's photos in place, wr
 
   await next.click();
   await expect(img).toHaveAttribute("src", /2\.jpg$/);
+  await expect(counter).toHaveText("2 / 3");
   await next.click();
   await expect(img).toHaveAttribute("src", /3\.jpg$/);
+  await expect(counter).toHaveText("3 / 3");
   // Wraps forward past the last photo back to the first.
   await next.click();
   await expect(img).toHaveAttribute("src", /1\.jpg$/);
+  await expect(counter).toHaveText("1 / 3");
   // Wraps backward past the first photo to the last.
   await prev.click();
   await expect(img).toHaveAttribute("src", /3\.jpg$/);
+  await expect(counter).toHaveText("3 / 3");
 
   // The whole point: flicking through photos must never leave the list.
   await expect(page).toHaveURL(new RegExp(`/profiles/${profileId}$`));
