@@ -1808,6 +1808,27 @@ async function setAutoSession(session) {
 }
 
 /**
+ * Patch ONLY the volatile run-state half of the auto record — never the
+ * durable intent (issue #613 review B1). Every mid-cycle status update
+ * (PLANNING/HARVESTING/RUNNING/WAITING/EMPTY, harvestTask, batchesDone,
+ * lastBatchAt, totalPending) must go through this, never `setAutoState`,
+ * because those call sites hold a SNAPSHOT of `auto` taken before an
+ * `await` (often a network round trip in `fetchAutoPlan`). If that snapshot
+ * flowed into `setAutoState({ ...auto, ... })` it would rewrite the durable
+ * intent too — including a stale `enabled:true` — so a Stop that landed
+ * during the same window would be silently undone the instant the in-flight
+ * cycle's write lands, and (post-#587) that undo now persists in
+ * chrome.storage.local across every future restart, not just until the next
+ * browser close. Only `startAuto`/`stopAuto`/`setAutoForce` — the three
+ * functions that legitimately change what the operator asked for — may call
+ * `setAutoState`/write intent.
+ */
+async function setAutoRunState(patch) {
+  const session = (await getAutoSession()) || {};
+  await setAutoSession({ ...session, ...patch });
+}
+
+/**
  * Compose the full auto state (issue #587) — see InmoBatch.composeAutoState.
  * The live chrome.storage.sync knobs are only fetched when the session copy
  * doesn't already have its own cached batchSize/timeoutSec (a fresh start or a
@@ -1977,6 +1998,13 @@ async function startAuto(portal) {
 async function stopAuto() {
   const auto = await getAutoState();
   if (auto) {
+    // issue #613 review note: `status: STOPPED` here is written to
+    // chrome.storage.session but is now UNREACHABLE via any reader —
+    // `composeAutoState`/`getAutoState` return `null` once the durable intent
+    // is disabled (below), regardless of what the session half says. Kept
+    // (harmless, inert) rather than special-cased away; `AUTO_STATUS.STOPPED`
+    // remains meaningful raw-storage-inspection context, just not something
+    // the popup can ever render.
     await setAutoState({ ...auto, enabled: false, status: InmoBatch.AUTO_STATUS.STOPPED });
   }
   await disarmAutoAlarm();
@@ -2123,8 +2151,7 @@ async function runAutoHarvest(portal, searchUrl) {
  * review N7).
  */
 async function deferAutoTick(auto, timeoutSec) {
-  await setAutoState({
-    ...auto,
+  await setAutoRunState({
     status: InmoBatch.AUTO_STATUS.WAITING,
     lastBatchAt: Date.now(),
   });
@@ -2137,8 +2164,11 @@ async function runAutoBatch() {
   if (await isBatchActive()) return; // single-driver guard (courtesy — the real guard is below)
 
   // Mark PLANNING before the network call so an eviction during the fetch is
-  // recoverable (nextAutoAction maps a stranded PLANNING → re-plan).
-  await setAutoState({ ...auto, status: InmoBatch.AUTO_STATUS.PLANNING });
+  // recoverable (nextAutoAction maps a stranded PLANNING → re-plan). Run-state
+  // only (issue #613 review B1) — `auto` here is a snapshot that predates the
+  // `fetchAutoPlan` await below; writing it through `setAutoState` would also
+  // rewrite the durable intent with a possibly-stale `enabled`.
+  await setAutoRunState({ status: InmoBatch.AUTO_STATUS.PLANNING });
 
   let plan;
   try {
@@ -2175,8 +2205,8 @@ async function runAutoBatch() {
     }
     // Persist the in-flight harvest task BEFORE any work so a mid-harvest
     // eviction can still POST the task run on completion (else re-harvest forever).
-    await setAutoState({
-      ...auto,
+    // Run-state only (issue #613 review B1) — see the PLANNING mark above.
+    await setAutoRunState({
       status: InmoBatch.AUTO_STATUS.HARVESTING,
       harvestTask: {
         profileId: task.profileId,
@@ -2206,8 +2236,8 @@ async function runAutoBatch() {
       await deferAutoTick(auto, auto.timeoutSec);
       return;
     }
-    await setAutoState({
-      ...auto,
+    // Run-state only (issue #613 review B1) — see the PLANNING mark above.
+    await setAutoRunState({
       status: InmoBatch.AUTO_STATUS.RUNNING,
       harvestTask: null,
       totalPending: urls.length,
@@ -2222,8 +2252,8 @@ async function runAutoBatch() {
     plan && typeof plan.retryAfterSec === 'number' && plan.retryAfterSec > 0
       ? plan.retryAfterSec
       : auto.timeoutSec;
-  await setAutoState({
-    ...auto,
+  // Run-state only (issue #613 review B1) — see the PLANNING mark above.
+  await setAutoRunState({
     status: InmoBatch.AUTO_STATUS.EMPTY,
     harvestTask: null,
     lastBatchAt: Date.now(),
@@ -2258,8 +2288,8 @@ async function onAutoBatchComplete() {
       /* best-effort — the next plan will re-surface the due task */
     }
   }
-  await setAutoState({
-    ...auto,
+  // Run-state only (issue #613 review B1) — see the PLANNING mark above.
+  await setAutoRunState({
     status: InmoBatch.AUTO_STATUS.WAITING,
     harvestTask: null,
     batchesDone: auto.batchesDone + 1,
@@ -2455,9 +2485,14 @@ if (typeof module !== 'undefined' && module.exports) {
     // issue #587: durable-intent rehydration (restart recovery + popup status).
     getAutoIntent,
     getAutoSession,
+    // issue #613 review B1: run-state-only writer, so tests can prove a
+    // Stop mid-cycle can't be resurrected by an in-flight run-state update.
+    setAutoRunState,
     startAuto,
     stopAuto,
     autoTick,
+    runAutoBatch,
+    deferAutoTick,
     recoverStrandedHarvest,
     getAutoProgress,
     getNextAutoCheckAt,

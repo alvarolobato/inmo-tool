@@ -172,6 +172,26 @@ function makeFetchMock(planResponse: unknown = { kind: "idle", retryAfterSec: 30
   });
 }
 
+/**
+ * Like `makeFetchMock`, but the `/api/etl/auto-plan` response doesn't resolve
+ * until `gate` does — lets a test hold `runAutoBatch` paused mid-network-call
+ * so it can act (e.g. call `stopAuto()`) exactly inside that window, then let
+ * the in-flight cycle's write land afterward (issue #613 review B1's
+ * reproduction).
+ */
+function makeDelayedFetchMock(gate: Promise<unknown>) {
+  return vi.fn(async (url: string): Promise<FetchResponse> => {
+    if (url.includes("/api/etl/auto-plan")) {
+      const planResponse = await gate;
+      return { ok: true, json: async () => planResponse };
+    }
+    if (url.includes("/api/profiles/") && url.includes("/capture-task-runs")) {
+      return { ok: true, json: async () => ({ success: true }) };
+    }
+    return { ok: true, json: async () => ({}) };
+  });
+}
+
 interface BackgroundModule {
   startAuto: (portal: string | null) => Promise<{ enabled: boolean }>;
   stopAuto: () => Promise<{ enabled: boolean }>;
@@ -181,6 +201,8 @@ interface BackgroundModule {
     status: string;
   } | null>;
   getAutoIntent: () => Promise<{ enabled: boolean; portal: string | null; force: boolean } | null>;
+  getAutoProgress: () => Promise<{ enabled: boolean; [key: string]: unknown }>;
+  setAutoRunState: (patch: Record<string, unknown>) => Promise<void>;
 }
 
 function loadBackground(chromeMock: ChromeMock, fetchMock: ReturnType<typeof makeFetchMock>): BackgroundModule {
@@ -251,11 +273,21 @@ describe("Auto mode survives a simulated browser restart (issue #587)", () => {
     // durable intent is there, but nothing has resumed the loop yet.
     expect(await bg2.getAutoState()).not.toBeNull();
 
-    // Fire the restart lifecycle event, exactly like the real browser does.
-    onStartupHandler();
-
-    // The alarm-driven re-plan is fire-and-forget from onStartup's own
-    // (non-async) listener — poll for the cooldown alarm it schedules once
+    // Fire the restart lifecycle event. NOTE (issue #613 review T2): this is
+    // NOT what makes the assertion below pass — `loadBackground()` already
+    // triggered background.js's own TOP-LEVEL `autoTick()` (the one at the
+    // bottom of the auto-driver block, run unconditionally on every module
+    // load / worker respawn) before this line even runs, so the alarm is
+    // already re-arming by the time `onStartupHandler()` fires. That
+    // top-level tick — not `onStartup` — is the path that actually matters
+    // for MV3: a worker respawn after an eviction fires no `onStartup` event
+    // at all, only a fresh top-level module evaluation, so relying on
+    // `onStartup` alone would leave that (more common) respawn case broken.
+    // This test still exercises `onStartup` as one of the two real entry
+    // points (both call `autoTick()` and both must be safe to call
+    // redundantly — `autoTicking`'s re-entrancy guard is what makes that
+    // fine), it just doesn't ISOLATE which one is responsible for the
+    // re-arm below. Poll for the cooldown alarm either path schedules once
     // the (mocked 'idle') auto-plan round trip resolves.
     await waitFor(() => chrome2.alarms.create.mock.calls.some((c) => c[0] === "inmoAutoNext"));
 
@@ -275,12 +307,17 @@ describe("Auto mode survives a simulated browser restart (issue #587)", () => {
     const chrome1 = makeChromeMock();
     const bg1 = loadBackground(chrome1, makeFetchMock());
     await bg1.startAuto("idealista");
-    // Let the first (fire-and-forget) auto-plan cycle actually finish — an
-    // operator clicking Stop mid-PLANNING races runAutoBatch's own idle-branch
-    // write (a PRE-EXISTING, out-of-scope-for-#587 issue) and would flakily
-    // resurrect `enabled` from its stale local snapshot. This test targets
-    // the restart bug specifically, so it waits the loop out first.
-    await waitFor(() => chrome1.alarms.create.mock.calls.some((c) => c[0] === "inmoAutoNext"));
+    // Stop IMMEDIATELY, with startAuto's own fire-and-forget autoTick() ->
+    // runAutoBatch() cycle still in flight — no waiting the loop out first.
+    // Before issue #613 review B1, this was flaky: runAutoBatch held a
+    // SNAPSHOT of `auto` taken before its `fetchAutoPlan` await, and its
+    // idle-branch write went through `setAutoState({ ...auto, ... })`, which
+    // rewrote the durable intent too — silently resurrecting `enabled:true`
+    // the instant that in-flight write landed after this stopAuto() call.
+    // The fix (setAutoRunState, chrome.storage.session only) makes calling
+    // Stop mid-cycle safe by construction, so this test no longer has to
+    // dodge the race — see the dedicated race-reproduction test below for a
+    // direct assertion of that specific window.
     await bg1.stopAuto();
 
     expect(await bg1.getAutoIntent()).toEqual({ enabled: false, portal: null, force: false });
@@ -310,5 +347,90 @@ describe("Auto mode survives a simulated browser restart (issue #587)", () => {
 
     expect(await bg.getAutoState()).toBeNull();
     expect(chrome.alarms.create.mock.calls.some((c) => c[0] === "inmoAutoNext")).toBe(false);
+  });
+
+  it("a Stop landing WHILE fetchAutoPlan is in flight does not resurrect the durable intent (issue #613 review B1 — direct reproduction, not routed around)", async () => {
+    let resolvePlan!: (v: unknown) => void;
+    const planGate = new Promise((resolve) => {
+      resolvePlan = resolve;
+    });
+    const chromeMock = makeChromeMock();
+    const fetchMock = makeDelayedFetchMock(planGate);
+    const bg = loadBackground(chromeMock, fetchMock);
+
+    // startAuto() kicks off its own fire-and-forget autoTick() -> runAutoBatch()
+    // cycle, which is now blocked awaiting fetchAutoPlan's response.
+    await bg.startAuto("idealista");
+    await waitFor(() =>
+      fetchMock.mock.calls.some(([u]) => typeof u === "string" && u.includes("/api/etl/auto-plan")),
+    );
+
+    // The operator presses Stop WHILE that fetch is still in flight — exactly
+    // the review-B1 window: before the fix, the in-flight cycle held a
+    // SNAPSHOT of `auto` (enabled:true) taken before this await, and its
+    // eventual write went through `setAutoState({ ...auto, ... })`, clobbering
+    // the durable intent this stopAuto() call is about to clear.
+    await bg.stopAuto();
+    expect(await bg.getAutoIntent()).toEqual({ enabled: false, portal: null, force: false });
+
+    // Now let the in-flight cycle's fetch resolve and its write land.
+    resolvePlan({ kind: "idle", retryAfterSec: 300 });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // The actual bug this proves fixed: the durable intent must NOT have been
+    // resurrected by the in-flight cycle's stale snapshot, and the popup-
+    // facing state must not lie about it being ON.
+    expect(await bg.getAutoIntent()).toEqual({ enabled: false, portal: null, force: false });
+    expect(await bg.getAutoState()).toBeNull();
+    const progress = await bg.getAutoProgress();
+    expect(progress.enabled).toBe(false);
+  });
+
+  it("firing the AUTO_ALARM listener actually re-plans — not just re-registers an alarm (issue #613 review T1)", async () => {
+    const chromeMock = makeChromeMock();
+    const fetchMock = makeFetchMock({ kind: "idle", retryAfterSec: 300 });
+    const bg = loadBackground(chromeMock, fetchMock);
+
+    await bg.startAuto("idealista");
+    await waitFor(() => chromeMock.alarms.create.mock.calls.some((c) => c[0] === "inmoAutoNext"));
+
+    const planCallsBefore = fetchMock.mock.calls.filter(
+      ([u]) => typeof u === "string" && u.includes("/api/etl/auto-plan"),
+    ).length;
+    expect(planCallsBefore).toBeGreaterThan(0);
+
+    // Force the cooldown gate (batch.js nextAutoAction: `now - lastBatchAt >=
+    // timeoutMs`) to already be satisfied. The alarm we're about to fire by
+    // hand was armed for 300s in the future (`retryAfterSec`); a real Chrome
+    // firing it would have let that much wall-clock time pass too, but
+    // faking the clock here would only be re-proving nextAutoAction's own
+    // arithmetic (already covered by extension-batch.test.ts) — this test is
+    // about the ALARM -> WORK wiring, not the cooldown math, so it resets the
+    // one input that arithmetic reads instead.
+    await bg.setAutoRunState({ lastBatchAt: 0 });
+
+    // Grab the ACTUAL onAlarm listener background.js registered — there is
+    // exactly one; it dispatches by `alarm.name` internally — and fire it
+    // exactly like Chrome would when the armed alarm's scheduledTime arrives.
+    expect(chromeMock.alarms.onAlarm.addListener).toHaveBeenCalledTimes(1);
+    const onAlarmHandler = chromeMock.alarms.onAlarm.addListener.mock.calls[0][0] as (alarm: {
+      name: string;
+    }) => void;
+    onAlarmHandler({ name: "inmoAutoNext" });
+
+    // The proof this isn't decorative (issue #613 review T1): firing the
+    // alarm must trigger a SECOND real GET /api/etl/auto-plan round trip —
+    // the actual re-plan work "re-fire as data expires" depends on — not just
+    // leave a registered alarm sitting inert. Neutering either the AUTO_ALARM
+    // or BATCH_ALARM dispatch branch in background.js's
+    // `chrome.alarms.onAlarm.addListener` callback makes this fail while
+    // every other test in this file (which only asserts the alarm was
+    // *created*) still passes.
+    await waitFor(() => {
+      const n = fetchMock.mock.calls.filter(
+        ([u]) => typeof u === "string" && u.includes("/api/etl/auto-plan"),
+      ).length;
+      return n > planCallsBefore;
+    });
   });
 });

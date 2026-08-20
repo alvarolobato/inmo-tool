@@ -3,7 +3,7 @@ id: D-134
 title: Auto-capture durable intent survives a browser restart
 date: 2026-08-20
 group: Data / connectors
-rule: The extension's auto-capture record splits {enabled,portal,force} into chrome.storage.local (durable, restart-safe) from run state in chrome.storage.session (volatile) — getAutoState/setAutoState compose/decompose them; never put run state back in storage.local or intent back in storage.session-only.
+rule: The extension's auto-capture record splits {enabled,portal,force} into chrome.storage.local (durable, restart-safe) from run state in chrome.storage.session (volatile) — getAutoState/setAutoState compose/decompose them. A run-state-only update MUST go through setAutoRunState (session only), never setAutoState with a spread pre-await `auto` snapshot — that resurrects a stale durable intent (e.g. an operator's Stop) and, post-split, makes it survive every future restart.
 ---
 
 # D-134: Auto-capture durable intent survives a browser restart
@@ -75,9 +75,31 @@ with a fresh-module-instance unit test that simulates a restart (durable
 storage carried over, session storage and armed alarms wiped) without needing
 a real browser.
 
+**Amendment (2026-08-20, PR #613 review)**: the first cut of this split had a
+real bug — every run-state update (`deferAutoTick`, the PLANNING/HARVESTING/
+RUNNING/EMPTY/WAITING transitions in `runAutoBatch`/`onAutoBatchComplete`)
+went through `setAutoState({ ...auto, ... })`, spreading a SNAPSHOT of `auto`
+taken before an `await` (often the `fetchAutoPlan` network round trip). If the
+operator pressed Stop during that window, `stopAuto()`'s durable-intent write
+would be silently undone the instant the in-flight snapshot's write landed —
+and because that write now goes to `chrome.storage.local`, the resurrected
+`enabled:true` would have survived every future restart, not just until the
+next browser close. Fixed by adding `setAutoRunState(patch)`
+(`browser-extension/background.js`), which touches ONLY
+`chrome.storage.session` — every run-state-only call site now uses it;
+`setAutoState` (which writes both halves) is reserved for `startAuto`/
+`stopAuto`/`setAutoForce`, the three functions that legitimately change what
+the operator asked for. **Binding going forward**: a new call site that needs
+to record run-state (status, `harvestTask`, `lastBatchAt`, `batchesDone`,
+`totalPending`) must use `setAutoRunState`, never `setAutoState` with a
+spread `auto` snapshot — spreading a pre-`await` snapshot into `setAutoState`
+is exactly the bug this amendment fixes.
+
 **See**: `browser-extension/background.js` (`getAutoIntent`/`getAutoSession`/
-`getAutoState`/`setAutoState`/`getNextAutoCheckAt`), `browser-extension/batch.js`
-(`composeAutoState`/`autoIntentFromState`), `browser-extension/popup.js`
-(`renderAutoArmedStatus`), `dashboard/__tests__/extension-auto-restart.test.ts`,
-`dashboard/__tests__/extension-batch.test.ts`, issue #587, #588 (cadence-knob
+`getAutoState`/`setAutoState`/`setAutoRunState`/`getNextAutoCheckAt`),
+`browser-extension/batch.js` (`composeAutoState`/`autoIntentFromState`),
+`browser-extension/popup.js` (`renderAutoArmedStatus`),
+`dashboard/__tests__/extension-auto-restart.test.ts`,
+`dashboard/__tests__/extension-batch.test.ts`,
+`dashboard/__tests__/extension-popup-armed-status.test.ts`, issue #587, #588 (cadence-knob
 unification, not done here).

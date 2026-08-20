@@ -860,12 +860,14 @@ function formatElapsed(fromMs) {
 }
 
 /**
- * Render the always-visible armed/disarmed line (issue #587): "Auto: ON —
- * próxima comprobación HH:MM · última tanda hace X" or "Auto: OFF". This is
- * the ONLY signal the operator has that the alarm-driven loop is actually
- * still ticking — without it, a scheduler silently killed by a browser
- * restart (the bug this issue fixes) is indistinguishable from one correctly
- * idling until the next due unit.
+ * Render the armed/disarmed line (issue #587), scoped to the batch/auto panel
+ * (#state-batch) like everything around it: "Auto: ON — próxima comprobación
+ * HH:MM · última tanda hace X" or "Auto: OFF" — renders the OFF case too, not
+ * just hiding, so this is the ONLY signal the operator has that the
+ * alarm-driven loop is actually still ticking whenever that panel is showing
+ * — without it, a scheduler silently killed by a browser restart (the bug
+ * this issue fixes) is indistinguishable from one correctly idling until the
+ * next due unit.
  */
 function renderAutoArmedStatus(auto) {
   const el = $('#auto-armed-status');
@@ -1197,3 +1199,18 @@ $('#copy-json-btn').addEventListener('click', async () => {
 });
 
 init();
+
+// Publish for the unit tests (Node/vitest) — same pattern as
+// browser-extension/detect.js and browser-extension/batch.js. `module` is
+// undefined in the real popup context (loaded via a plain <script> tag), so
+// this branch is inert there; it exists only so a jsdom test can exercise the
+// real DOM-writing functions (issue #613 review T3) rather than a re-
+// implementation of them.
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    renderAutoArmedStatus,
+    renderAutoStatus,
+    formatClockTime,
+    formatElapsed,
+  };
+}
