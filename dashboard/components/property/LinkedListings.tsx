@@ -29,9 +29,9 @@ export function LinkedListings({ listings }: { listings: PropertyListingDetail[]
           data-source={l.source}
           data-status={l.status}
           data-operation={l.operation}
+          className="linked-listing-row"
           style={{
             display: "flex",
-            alignItems: "center",
             justifyContent: "space-between",
             gap: 12,
             padding: "8px 10px",
@@ -40,7 +40,14 @@ export function LinkedListings({ listings }: { listings: PropertyListingDetail[]
             background: "var(--bg-1)",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {/* #584: flexWrap so each field wraps onto its own line-fragment at
+              phone width instead of every span shrinking internally into
+              mid-token shards. Children keep their natural (content) flex
+              basis — no `flex: 1` anywhere in this group — so D-124's
+              basis-0 wrap trap doesn't apply and this needs no media query:
+              it wraps only when it doesn't fit, which never happens at
+              >=768px with real content. */}
+          <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
             <span
               style={{
                 fontSize: 11,
@@ -120,6 +127,7 @@ export function LinkedListings({ listings }: { listings: PropertyListingDetail[]
               href={l.url}
               target="_blank"
               rel="noopener noreferrer"
+              className="linked-listing-link"
               style={{ fontSize: 12, color: "var(--accent)" }}
             >
               Ver anuncio original →

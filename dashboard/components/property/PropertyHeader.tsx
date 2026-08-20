@@ -79,7 +79,10 @@ export function PropertyHeader({ property }: { property: PropertyDetail }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
+      <div
+        className="property-header-top-row"
+        style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}
+      >
         {/* #448 F / #460: the price + below-market rating (green/red) are one
             non-wrapping unit; only the BAJADA/SUBIDA direction chip may wrap. */}
         <PriceSignals
