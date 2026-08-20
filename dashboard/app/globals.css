@@ -615,3 +615,82 @@ body {
     justify-content: center;
   }
 }
+
+/* ============================================================
+   Property detail — phone-width containment (#584)
+   ============================================================
+   Two containment defects on /profiles/[id]/properties/[propertyId], same
+   failure class as #572/#576 (D-121's ladder), different components:
+
+   1. LinkedListings.tsx: each row's left group already gets `flexWrap:
+      "wrap"` as a plain inline style (component file) — its spans have
+      natural content bases, no `flex: 1` anywhere, so D-124's basis-0 wrap
+      trap doesn't apply. That property is deliberately NOT breakpoint-gated:
+      it wraps whenever the available row width can't fit every field on one
+      line, which happens below ~950px on this fixture, not just below
+      768px — the 768-950px band renders taller rows with every field whole,
+      where main sheared the same fields across two lines in that band. This
+      is an improvement over main in that band, not a regression; the
+      "desktop pixel-identical" constraint below is about the ONE breakpoint-
+      gated property in this file (the outer row's direction, below), not
+      about pinning every inline style to main's exact geometry at every
+      width down to 768px. What DOES need breakpoint divergence — because it
+      must NOT change above 768px — is the outer row's direction (row at
+      desktop so "Ver anuncio original" sits at the far right; column below
+      768px so it becomes its own full-width tap target) and its cross-axis
+      alignment (center vs stretch) — both static literals per D-121, so
+      both are deleted from the row's inline style and owned here instead.
+
+   2. PropertyHeader.tsx's top row (price+chip vs the badge group) is
+      nowrap at every width today: the price+chip unit's non-wrapping
+      #460 invariant is unchanged (PriceSignals.tsx's inner span stays
+      `flexWrap: "nowrap"`), but the ROW around it also being nowrap means
+      the row tries to fit both children on one line, and the price+chip
+      item's own `minWidth: 0` lets its BOX shrink past its nowrap
+      CONTENT's width — the content then overflows the shrunken box and
+      paints over the badge group next to it. Letting the row wrap at
+      phone width fixes this the right way: the badge group drops to its
+      own line instead of ever being asked to share space the nowrap
+      content can't actually give up. `flex-wrap` isn't set inline at all
+      today (implicit default nowrap), so per D-121 the class states that
+      default explicitly as its desktop base value and overrides it below
+      768px, rather than leaving an implicit default for a reader to infer.
+   ============================================================ */
+
+/* LinkedListings.tsx: per-row container div. Desktop base values here
+   match exactly what used to be inline before this class existed. */
+.linked-listing-row {
+  align-items: center;
+}
+@media (max-width: 767px) {
+  .linked-listing-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* LinkedListings.tsx: "Ver anuncio original" anchor. No desktop base rule
+   needed — none of these properties are set at desktop at all (an anchor
+   defaults to inline, sized to its text); they exist only inside the
+   media query below. */
+@media (max-width: 767px) {
+  .linked-listing-link {
+    display: flex;
+    align-items: center;
+    /* WCAG 2.5.5's 44px minimum target size, via padding (not font-size —
+       #584's own instruction) so the link text stays the same 12px it is
+       on desktop. */
+    min-height: 44px;
+    padding: 10px 0;
+  }
+}
+
+/* PropertyHeader.tsx: the price+chip vs badge-group top row. */
+.property-header-top-row {
+  flex-wrap: nowrap;
+}
+@media (max-width: 767px) {
+  .property-header-top-row {
+    flex-wrap: wrap;
+  }
+}
