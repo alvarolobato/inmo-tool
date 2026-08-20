@@ -70,9 +70,9 @@
   env: CAPTURE_STALENESS_DAYS_IDEALISTA
   type: int
   sensitive: false
-  default: null
+  default: 1
   section: "Captura"
-  description: "Ventana de caducidad (días) específica para las tareas de Idealista. Sin valor hereda capture.staleness_days (el global)."
+  description: "Ventana de caducidad (días) específica para las tareas de Idealista — 1 (a diferencia del global de 7) para que las tareas de Idealista vuelvan a estar due al día siguiente (issue #587). Sin valor hereda capture.staleness_days (el global); un env/config.yaml explícito sigue pudiendo sobreescribirlo."
   requires_restart: []
   components: [dashboard]
 
