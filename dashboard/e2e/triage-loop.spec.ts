@@ -221,7 +221,61 @@ async function assertBarStaysStickyAcrossScroll(page: Page): Promise<void> {
   expect(afterBox).not.toBeNull();
   // Still pinned near the top of the viewport (under the 56px TopBar),
   // nowhere near the hundreds of pixels a non-sticky bar would have scrolled.
-  expect(afterBox!.y).toBeLessThan(200);
+  //
+  // #585 review N1/N2/N3: this threshold was `< 200` and passed at EVERY
+  // wrong `top` value tried while building this bar — y≈132-136 with
+  // `top: 56px` (double-counts the TopBar offset) and y≈76 with `top: 0`
+  // (doesn't cancel `.main-content`'s own `padding-top`, so content —
+  // including the "Puntuación inversora" heading — visibly slices under the
+  // bar). `< 100` is the first threshold that rejects both; the correct
+  // `top: calc(-1 * var(--pad, 20px))` (globals.css) rests at y=56.
+  expect(afterBox!.y).toBeLessThan(100);
+}
+
+/**
+ * #585 review B1: `boundingBox()` alone is BLIND to occlusion — a control
+ * can have a perfectly correct 44×44 box while something else (the Leaflet
+ * location map, `z-index: 400` panes with no stacking context before the
+ * `.leaflet-container { isolation: isolate }` fix) paints over it and
+ * intercepts the tap. This is the real hit-test: what element does the
+ * BROWSER actually resolve at this point's centre, via the same
+ * `elementFromPoint` a real tap goes through. Returns null if the control
+ * itself isn't even found (e.g. hidden).
+ */
+async function elementAtControlCentre(page: Page, testId: string): Promise<string | null> {
+  const box = await page.getByTestId(testId).boundingBox();
+  if (!box) return null;
+  return page.evaluate(
+    ({ x, y }) => {
+      const el = document.elementFromPoint(x, y);
+      if (!el) return null;
+      const testEl = el.closest("[data-testid]");
+      return testEl?.getAttribute("data-testid") ?? el.tagName.toLowerCase();
+    },
+    { x: box.x + box.width / 2, y: box.y + box.height / 2 },
+  );
+}
+
+/**
+ * Asserts a control is not just present-with-a-box but actually the
+ * front-most hit at its own centre point, at several scroll positions
+ * across the page (not just "loaded, unscrolled") — occlusion by content
+ * that scrolls underneath a sticky element (the map tile, #585 review B1)
+ * only shows up once you're actually scrolled to where that content sits
+ * behind the bar.
+ */
+async function assertControlNeverOccluded(page: Page, testId: string): Promise<void> {
+  const mc = page.locator(".main-content");
+  const scrollHeight = await mc.evaluate((el) => el.scrollHeight);
+  const steps = 6;
+  for (let i = 0; i <= steps; i++) {
+    const target = Math.round((scrollHeight * i) / steps);
+    await mc.evaluate((el, top) => {
+      el.scrollTop = top;
+    }, target);
+    const hit = await elementAtControlCentre(page, testId);
+    expect(hit, `${testId} occluded at scrollTop=${target} (elementFromPoint hit "${hit}")`).toBe(testId);
+  }
 }
 
 async function seedAndSkip(page: Page, baseURL: string | undefined) {
@@ -258,6 +312,44 @@ async function voteAndWaitForPost(page: Page, button: ReturnType<Page["getByTest
   return response;
 }
 
+/**
+ * #585 review B2: the ONLY reliable way to assert "navigation did NOT
+ * happen" — a plain `expect(page).toHaveURL(startUrl)` right after an
+ * action is INERT: Playwright's `toHaveURL` polls and returns on its FIRST
+ * matching check, which (with no wait in between) is almost always before
+ * `router.push` has had a chance to run at all — so it passes whether or
+ * not a navigation was already in flight. This was proven directly during
+ * review: reverting `onVoted` to fire optimistically (the exact bug these
+ * tests exist to catch) left every assertion in this file green.
+ *
+ * This instead POSITIVELY waits (a bounded amount of time) for navigation
+ * TO the URL a bug would produce, and asserts that wait times out — an
+ * explicit "no such navigation occurred within the window", not "the URL
+ * happened to still match on the first poll".
+ */
+async function assertDidNotNavigateTo(page: Page, urlPattern: RegExp, timeoutMs = 1500): Promise<void> {
+  const navigated = await page
+    .waitForURL(urlPattern, { timeout: timeoutMs })
+    .then(() => true)
+    .catch(() => false);
+  expect(navigated, `expected no navigation to ${urlPattern}, but it happened`).toBe(false);
+}
+
+/**
+ * The end-of-queue case's B2 equivalent: there's no single "wrong" URL a
+ * navigation bug would produce (no valid next candidate exists to name), so
+ * instead POSITIVELY wait for the URL to leave `staysPattern` and assert
+ * that wait times out. Same "actually wait, don't just poll once" fix as
+ * `assertDidNotNavigateTo`.
+ */
+async function assertStaysAtUrl(page: Page, staysPattern: RegExp, timeoutMs = 1500): Promise<void> {
+  const left = await page
+    .waitForURL((url) => !staysPattern.test(url.toString()), { timeout: timeoutMs })
+    .then(() => true)
+    .catch(() => false);
+  expect(left, `expected the page to stay at ${staysPattern}, but it navigated away`).toBe(false);
+}
+
 test.describe("triage bar (iPhone 13 emulation, 390px)", () => {
   const { defaultBrowserType: _defaultBrowserType, ...iPhone13 } = devices["iPhone 13"];
   test.use({ ...iPhone13 });
@@ -280,13 +372,51 @@ test.describe("triage bar (iPhone 13 emulation, 390px)", () => {
     // sticky proof, not just "exists somewhere in the DOM".
     await assertBarStaysStickyAcrossScroll(page);
 
-    // Every tap target in the bar is >=44px (WCAG 2.5.5) — prev/next and the
-    // three vote toggles.
-    for (const testId of ["candidate-prev", "candidate-next", "feedback-accept", "feedback-reject", "feedback-note-toggle"]) {
+    // Every PRIMARY tap target in the bar is >=44px (WCAG 2.5.5) — prev/
+    // next and the accept/reject pair. `feedback-note-toggle` is
+    // DELIBERATELY smaller (#585 review ergonomics: demoted out of the
+    // 44px triad — it writes no training signal and never advances the
+    // loop) and checked separately below with only a presence/occlusion
+    // requirement, not the 44px minimum.
+    for (const testId of ["candidate-prev", "candidate-next", "feedback-accept", "feedback-reject"]) {
       const box = await page.getByTestId(testId).boundingBox();
       expect(box, `${testId} should have a bounding box`).not.toBeNull();
       expect(box!.width, `${testId} width`).toBeGreaterThanOrEqual(44);
       expect(box!.height, `${testId} height`).toBeGreaterThanOrEqual(44);
+    }
+    await expect(page.getByTestId("feedback-note-toggle")).toBeVisible();
+
+    // #585 review B1: `.leaflet-container` (react-leaflet's map root, no
+    // stacking context of its own by default) must isolate its internal
+    // `z-index: 400+` panes from the rest of the page — otherwise they
+    // compete DIRECTLY against `.triage-bar`'s `z-index: 15` in the root
+    // stacking context and can paint over ←/→/✓ once scrolled to where the
+    // location map sits, with a perfectly valid 44×44 box underneath the
+    // whole time (`boundingBox()` alone is blind to this — it never checks
+    // what's actually on top). This is the deterministic guard: it fails
+    // the instant the fix (`isolation: isolate`, globals.css) is removed,
+    // regardless of whether THIS fixture's exact photo/gallery geometry
+    // happens to produce a visible overlap at THIS viewport (geometric
+    // hit-testing below is real, additional coverage, but — verified during
+    // review — is sensitive to gallery layout and isn't reliable as the
+    // ONLY guard).
+    await page.locator(".leaflet-pane").first().waitFor({ state: "attached", timeout: 5000 });
+    expect(
+      await page.locator(".leaflet-container").first().evaluate((el) => getComputedStyle(el).isolation),
+    ).toBe("isolate");
+
+    // Real, additional hit-test coverage: `document.elementFromPoint` (what
+    // an actual tap resolves against) at each control's own centre, across
+    // several scroll positions spanning the WHOLE page — not just "does a
+    // box exist", but "is this control actually the front-most thing there".
+    for (const testId of [
+      "candidate-prev",
+      "candidate-next",
+      "feedback-accept",
+      "feedback-reject",
+      "feedback-note-toggle",
+    ]) {
+      await assertControlNeverOccluded(page, testId);
     }
   });
 
@@ -308,6 +438,39 @@ test.describe("triage bar (iPhone 13 emulation, 390px)", () => {
     await expect(page.getByTestId("property-detail-page")).toBeVisible();
   });
 
+  test("a vote confirmed before GET /adjacent settles still navigates correctly (race-safety, #585 review N11)", async ({
+    page,
+  }) => {
+    skipIfNoDb(test);
+
+    // Deliberately DELAY the adjacent fetch so the vote's POST (unthrottled)
+    // is guaranteed to resolve first — pinning the race `handleVoted`'s
+    // `adjacentPromiseRef` await exists to close, rather than relying on
+    // the fetch happening to lose a timing race on a fast local server (the
+    // way this bug was originally found and fixed during initial
+    // development of this feature).
+    await page.route("**/adjacent*", async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await route.continue();
+    });
+
+    await page.goto(`/profiles/${profileId}/properties/${topId}`);
+    await expect(page.getByTestId("property-detail-page")).toBeVisible();
+
+    // Vote immediately — the adjacent fetch (delayed above) has not
+    // resolved yet at click time.
+    const res = await voteAndWaitForPost(page, page.getByTestId("feedback-reject"));
+    expect(res.ok()).toBe(true);
+
+    // Once the delayed adjacent response finally lands, the navigation
+    // still happens, and lands on the CORRECT next candidate — not a
+    // silent no-op, not a false "Fin de la lista".
+    await expect(page).toHaveURL(new RegExp(`/profiles/${profileId}/properties/${middleId}$`), {
+      timeout: 5000,
+    });
+    await expect(page.getByTestId("triage-end-of-queue")).toHaveCount(0);
+  });
+
   test("clear does not advance — re-tapping the active toggle stays put", async ({ page }) => {
     skipIfNoDb(test);
 
@@ -326,7 +489,12 @@ test.describe("triage bar (iPhone 13 emulation, 390px)", () => {
     const res = await voteAndWaitForPost(page, page.getByTestId("feedback-accept"));
     expect(res.ok()).toBe(true);
     await expect(page.getByTestId("feedback-accept")).toHaveAttribute("aria-pressed", "false");
-    // The point of this test: no navigation happened.
+    // The point of this test: no navigation happened. `assertDidNotNavigateTo`
+    // (#585 review B2) is the real assertion here — a plain `toHaveURL`
+    // check right after the click would pass even with the guard removed
+    // (proven in review: it returns on the FIRST poll, before `router.push`
+    // has run).
+    await assertDidNotNavigateTo(page, new RegExp(`/properties/${middleId}`));
     await expect(page).toHaveURL(new RegExp(`/profiles/${profileId}/properties/${topId}$`));
   });
 
@@ -345,7 +513,10 @@ test.describe("triage bar (iPhone 13 emulation, 390px)", () => {
       page.getByTestId("feedback-note-submit").click(),
     ]);
     expect(noteRes.ok()).toBe(true);
-    // The point of this test: no navigation happened.
+    // The point of this test: no navigation happened (#585 review B2 —
+    // see assertDidNotNavigateTo's doc comment for why a plain toHaveURL
+    // check alone can't prove this).
+    await assertDidNotNavigateTo(page, new RegExp(`/properties/${middleId}`));
     await expect(page).toHaveURL(new RegExp(`/profiles/${profileId}/properties/${topId}$`));
     await expect(page.getByTestId("property-detail-page")).toBeVisible();
   });
@@ -367,7 +538,14 @@ test.describe("triage bar (iPhone 13 emulation, 390px)", () => {
     await expect(page.getByTestId("feedback-error")).toBeVisible();
     // ...the optimistic fill rolled back...
     await expect(page.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "false");
-    // ...and — the actual point of this test — the page did NOT navigate.
+    // ...and — the actual point of this test, the one #585 review called out
+    // by name as the assertion that protects the whole feature — the page
+    // did NOT navigate. `assertDidNotNavigateTo` (B2) actually waits for the
+    // navigation a bug would produce and asserts it never arrives; a plain
+    // `toHaveURL` right after the click was proven in review to pass even
+    // with the guard removed (it polls, returns on the first — pre-
+    // navigation — check).
+    await assertDidNotNavigateTo(page, new RegExp(`/properties/${middleId}`));
     await expect(page).toHaveURL(new RegExp(`/profiles/${profileId}/properties/${topId}$`));
     await expect(page.getByTestId("property-detail-page")).toBeVisible();
   });
@@ -416,18 +594,41 @@ test.describe("triage bar (iPhone 13 emulation, 390px)", () => {
     ]);
     await expect(page.getByTestId("property-detail-page")).toBeVisible();
     await expect(page.getByTestId("candidate-next")).toHaveAttribute("aria-disabled", "true");
+    // #585 review N4: prev must already be live and usable — bottom's own
+    // predecessor exists regardless of what happens to "next".
+    await expect(page.getByTestId("candidate-prev")).toHaveAttribute(
+      "href",
+      `/profiles/${profileId}/properties/${middleId}`,
+    );
 
     const res = await voteAndWaitForPost(page, page.getByTestId("feedback-accept"));
     expect(res.ok()).toBe(true);
 
-    // Stayed on bottom — no navigation attempted.
-    await expect(page).toHaveURL(new RegExp(`/profiles/${profileId}/properties/${bottomId}$`));
+    // Stayed on bottom — no navigation attempted (#585 review B2: an actual
+    // wait-and-confirm-it-times-out, not a single poll that would pass
+    // regardless).
+    await assertStaysAtUrl(page, new RegExp(`/profiles/${profileId}/properties/${bottomId}$`));
     const endState = page.getByTestId("triage-end-of-queue");
     await expect(endState).toBeVisible();
     await expect(endState).toContainText(/fin de la lista/i);
 
+    // #585 review N4: "← Anterior" is still the SAME functional link it was
+    // before voting — only the "next" slot was replaced, not the whole nav.
+    await expect(page.getByTestId("candidate-prev")).toHaveAttribute(
+      "href",
+      `/profiles/${profileId}/properties/${middleId}`,
+    );
+
+    // #585 review N7: the end-of-queue back link is bound by the same ≥44px
+    // rule as every other control in this bar — it was a 13px text link in
+    // the first version, the one exception to that rule.
     const backLink = page.getByTestId("triage-back-to-profile");
     await expect(backLink).toBeVisible();
+    const backLinkBox = await backLink.boundingBox();
+    expect(backLinkBox).not.toBeNull();
+    expect(backLinkBox!.width).toBeGreaterThanOrEqual(44);
+    expect(backLinkBox!.height).toBeGreaterThanOrEqual(44);
+
     await backLink.click();
     await expect(page).toHaveURL(new RegExp(`/profiles/${profileId}$`));
   });
@@ -443,12 +644,17 @@ test.describe("triage bar (iPhone 13 emulation, 390px)", () => {
     const headerPrice = await page.locator("h1").first().textContent();
     expect(barPrice?.trim()).toBe(headerPrice?.trim());
 
-    const barChip = page.getByTestId("triage-bar").getByTestId("investor-score-chip");
+    // #585 review (ergonomics): the bar folds the score into the compact
+    // price string ("300.000 € · 55") instead of rendering the full
+    // InvestorScoreChip component — still `toDisplayScore` from
+    // lib/display-score.ts underneath (D-100 derive-once), just a plainer
+    // inline element than the card's chip.
+    const barScore = page.getByTestId("triage-bar-score");
     const bodySection = page.getByTestId("investor-score-section");
-    await expect(barChip).toBeVisible();
+    await expect(barScore).toBeVisible();
     await expect(bodySection).toBeVisible();
-    expect(await barChip.getAttribute("data-score")).toBe(await bodySection.getAttribute("data-score"));
-    expect(await barChip.getAttribute("data-grade")).toBe(await bodySection.getAttribute("data-grade"));
+    expect(await barScore.getAttribute("data-score")).toBe(await bodySection.getAttribute("data-score"));
+    expect(await barScore.getAttribute("data-grade")).toBe(await bodySection.getAttribute("data-grade"));
   });
 });
 
@@ -470,11 +676,33 @@ test.describe("triage bar (desktop, >=768px)", () => {
 
     await assertBarStaysStickyAcrossScroll(page);
 
-    for (const testId of ["candidate-prev", "candidate-next", "feedback-accept", "feedback-reject", "feedback-note-toggle"]) {
+    // Same primary-vs-demoted-note split as the mobile version — see that
+    // test's comment for why `feedback-note-toggle` isn't held to 44px.
+    for (const testId of ["candidate-prev", "candidate-next", "feedback-accept", "feedback-reject"]) {
       const box = await page.getByTestId(testId).boundingBox();
       expect(box, `${testId} should have a bounding box`).not.toBeNull();
       expect(box!.width, `${testId} width`).toBeGreaterThanOrEqual(44);
       expect(box!.height, `${testId} height`).toBeGreaterThanOrEqual(44);
+    }
+    await expect(page.getByTestId("feedback-note-toggle")).toBeVisible();
+
+    // #585 review B1 — same deterministic isolation check as the mobile
+    // version (see that test's comment for why this, not the hit-test loop
+    // alone, is the reliable regression guard).
+    await page.locator(".leaflet-pane").first().waitFor({ state: "attached", timeout: 5000 });
+    expect(
+      await page.locator(".leaflet-container").first().evaluate((el) => getComputedStyle(el).isolation),
+    ).toBe("isolate");
+
+    // Same occlusion hit-test as the mobile version.
+    for (const testId of [
+      "candidate-prev",
+      "candidate-next",
+      "feedback-accept",
+      "feedback-reject",
+      "feedback-note-toggle",
+    ]) {
+      await assertControlNeverOccluded(page, testId);
     }
   });
 

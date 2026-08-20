@@ -186,11 +186,19 @@ export function FeedbackControls({
       }
       const body: FeedbackResponse = await res.json();
       applyState(body.currentState);
-      // #585: server-confirmed accept/reject only — `target` is null exactly
-      // when this submit was a clear (clicking the already-active toggle),
-      // which must never advance the triage loop.
-      if (target !== null) {
-        onVoted?.(target);
+      // #585 review N5: gate on the SERVER's derived state
+      // (`body.currentState`), not the client's optimistic `target` — by
+      // this point the server is already the authority for whether to
+      // navigate at all (that's the whole reason this fires from here and
+      // not from the optimistic write above), so it must also be the
+      // authority for WHAT was voted. `target` and `body.currentState`
+      // agree in the overwhelmingly common case, but trusting `target`
+      // regardless of what the server actually derived would let a
+      // concurrent write (e.g. a `clear` recorded from another tab between
+      // this request firing and resolving) fire `onVoted` for a vote the
+      // server no longer agrees happened.
+      if (body.currentState !== null) {
+        onVoted?.(body.currentState);
       }
     } catch {
       applyState(previous);
@@ -247,6 +255,14 @@ export function FeedbackControls({
   });
 
   const toggleClassName = size === "detail" ? "feedback-toggle feedback-toggle--detail" : "feedback-toggle";
+  // #585 review (ergonomics): in the detail-bar context, the note toggle is
+  // pulled out of the accept/reject pair's tight group — it's the one
+  // control here that doesn't write training signal and doesn't advance the
+  // triage loop, so it must not read as interchangeable with the two that
+  // do. `.feedback-toggle--note` only has an effect combined with
+  // `.feedback-toggle--detail` (globals.css); the feed-card/compact layout
+  // is unchanged (all three still sit in one tight group there).
+  const noteClassName = size === "detail" ? `${toggleClassName} feedback-toggle--note` : toggleClassName;
 
   return (
     <div
@@ -286,7 +302,7 @@ export function FeedbackControls({
         <button
           type="button"
           data-testid="feedback-note-toggle"
-          className={toggleClassName}
+          className={noteClassName}
           aria-label={noteOpen ? "Cerrar nota" : "Añadir nota"}
           aria-expanded={noteOpen}
           title={noteOpen ? "Cerrar nota" : "Añadir nota"}

@@ -45,14 +45,17 @@ export default function PropertyDetailPage() {
   const [adjacent, setAdjacent] = useState<Adjacent>({ prevPropertyId: null, nextPropertyId: null });
   // #585: mirrors `adjacent`, but as a promise `handleVoted` can safely
   // `await` — see that function's doc comment for why reading `adjacent`
-  // state directly at vote time is unsafe. Always holds the in-flight (or
-  // settled) fetch for the CURRENT (profileId, propertyId, includeRejected),
-  // kept in lockstep by the fetch effect below. Never null after the first
-  // render since it starts pre-resolved to the initial `{ null, null }`
-  // state — a vote fired before profileId/propertyId are even known can't
-  // happen (the page returns early below without registering any voteable
-  // controls).
-  const adjacentPromiseRef = useRef<Promise<Adjacent>>(Promise.resolve(adjacent));
+  // state directly at vote time is unsafe. `null` is a DISTINCT sentinel
+  // from a resolved `{ nextPropertyId: null, ... }` (#585 review N6): `null`
+  // means "we don't actually know yet" (still loading, or the GET
+  // /adjacent request failed) — a resolved object with `nextPropertyId:
+  // null` means the server CONFIRMED there is no next candidate. Collapsing
+  // those two into one shape (the first version's bug) meant a dropped
+  // request told the owner the queue was finished when it might not be.
+  // Always holds the in-flight (or settled) fetch for the CURRENT
+  // (profileId, propertyId, includeRejected), kept in lockstep by the fetch
+  // effect below.
+  const adjacentPromiseRef = useRef<Promise<Adjacent | null>>(Promise.resolve(null));
   const [investmentMetrics, setInvestmentMetrics] = useState<InvestmentMetrics | null>(null);
   // #585: set when a confirmed vote landed with no next candidate (the last
   // property in the queue) — the triage bar shows "Fin de la lista" instead
@@ -99,6 +102,14 @@ export default function PropertyDetailPage() {
   // below), so awaiting it here is always correct regardless of timing.
   const handleVoted = async (_voteState: StateFeedbackType) => {
     const resolvedAdjacent = await adjacentPromiseRef.current;
+    // #585 review N6: `null` means "unknown" (still loading, or the
+    // GET /adjacent request failed) — NOT "confirmed no next". The vote
+    // itself already saved; without a reliable answer the safest move is to
+    // do nothing rather than claim the queue is finished when it might not
+    // be, or navigate to a guess.
+    if (resolvedAdjacent === null) {
+      return;
+    }
     if (resolvedAdjacent.nextPropertyId === null) {
       setEndOfQueue(true);
       return;
@@ -150,17 +161,24 @@ export default function PropertyDetailPage() {
     // #585: the promise itself (not just its resolved value, via setAdjacent
     // below) is published to `adjacentPromiseRef` so `handleVoted` can await
     // the CURRENT property's real result even if a vote lands before this
-    // fetch settles — see that function's doc comment.
-    const promise = fetch(adjacentUrl)
+    // fetch settles — see that function's doc comment. Resolves to `null`
+    // (the "unknown" sentinel, N6) on a non-ok response or a network
+    // failure — ONLY a genuinely successful, parsed response resolves to a
+    // real `Adjacent` object, even when that object's own `nextPropertyId`
+    // is null (a real, confirmed end-of-queue). `adjacent` (the render
+    // state used for the nav links) still defaults to `{ null, null }` on
+    // failure — that's fine for display (renders as disabled, same as a
+    // genuine end-of-queue looks), it's only the NAVIGATION decision in
+    // `handleVoted` that must not conflate the two.
+    const promise: Promise<Adjacent | null> = fetch(adjacentUrl)
       .then((res) => (res.ok ? (res.json() as Promise<Adjacent>) : null))
       .then((data) => {
-        const resolved = data ?? { prevPropertyId: null, nextPropertyId: null };
-        if (!cancelled) setAdjacent(resolved);
-        return resolved;
+        if (!cancelled && data) setAdjacent(data);
+        return data;
       })
       .catch(() => {
         /* best-effort — leave the controls disabled */
-        return { prevPropertyId: null, nextPropertyId: null };
+        return null;
       });
     adjacentPromiseRef.current = promise;
     return () => {
