@@ -6,11 +6,12 @@ import { FreshnessProvider, useFreshness } from "@/components/FreshnessContext";
 import type { DataHealthResponse } from "@/app/api/data-health/route";
 
 function FreshnessProbe() {
-  const { freshnessText, freshnessStale, freshnessTooltip } = useFreshness();
+  const { freshnessText, freshnessStale, freshnessUnknown, freshnessTooltip } = useFreshness();
   return (
     <div>
       <span data-testid="text">{freshnessText}</span>
       <span data-testid="stale">{String(freshnessStale)}</span>
+      <span data-testid="unknown">{String(freshnessUnknown)}</span>
       <span data-testid="tooltip">{freshnessTooltip ?? ""}</span>
     </div>
   );
@@ -41,6 +42,7 @@ describe("FreshnessProvider", () => {
         {
           connector: "fotocasa",
           enabled: true,
+          inScope: true,
           lastSuccessAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
           lastRunAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
           lastRunStatus: "ok",
@@ -50,6 +52,7 @@ describe("FreshnessProvider", () => {
       ],
       overallStale: false,
       overallRefreshing: false,
+      overallUnknown: false,
       stalestConnector: {
         connector: "fotocasa",
         lastSuccessAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
@@ -80,6 +83,7 @@ describe("FreshnessProvider", () => {
         {
           connector: "milanuncios",
           enabled: true,
+          inScope: true,
           lastSuccessAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
           lastRunAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
           lastRunStatus: "failed",
@@ -89,6 +93,7 @@ describe("FreshnessProvider", () => {
       ],
       overallStale: true,
       overallRefreshing: false,
+      overallUnknown: false,
       stalestConnector: {
         connector: "milanuncios",
         lastSuccessAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
@@ -119,6 +124,7 @@ describe("FreshnessProvider", () => {
         {
           connector: "solvia",
           enabled: true,
+          inScope: true,
           lastSuccessAt: null,
           lastRunAt: null,
           lastRunStatus: null,
@@ -128,6 +134,7 @@ describe("FreshnessProvider", () => {
       ],
       overallStale: true,
       overallRefreshing: false,
+      overallUnknown: false,
       stalestConnector: {
         connector: "solvia",
         lastSuccessAt: null,
@@ -158,6 +165,7 @@ describe("FreshnessProvider", () => {
         {
           connector: "fotocasa",
           enabled: true,
+          inScope: true,
           lastSuccessAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
           lastRunAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
           lastRunStatus: "ok",
@@ -167,6 +175,7 @@ describe("FreshnessProvider", () => {
       ],
       overallStale: false,
       overallRefreshing: true,
+      overallUnknown: false,
       stalestConnector: {
         connector: "fotocasa",
         lastSuccessAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
@@ -204,5 +213,59 @@ describe("FreshnessProvider", () => {
     });
     expect(screen.getByTestId("text").textContent).toBe("Datos al día");
     expect(screen.getByTestId("tooltip").textContent).toBe("");
+  });
+
+  // ── Issue #586 — fail dark, never green ────────────────────────────────
+
+  it("shows 'Estado desconocido' (unknown), never 'Datos al día', when the server reports overallUnknown", async () => {
+    const unknown: DataHealthResponse = {
+      connectors: [],
+      overallStale: false,
+      overallRefreshing: false,
+      overallUnknown: true,
+      stalestConnector: null,
+      freshestSuccessAt: null,
+    };
+    globalThis.fetch = mockFetch(unknown);
+
+    render(
+      <FreshnessProvider>
+        <FreshnessProbe />
+      </FreshnessProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("unknown").textContent).toBe("true");
+    });
+    // The mutation-guard assertion: a naive fix could satisfy `unknown` while
+    // still rendering the old green-implying copy. Must not.
+    expect(screen.getByTestId("text").textContent).toBe("Estado desconocido");
+    expect(screen.getByTestId("text").textContent).not.toBe("Datos al día");
+    // Unknown is never simultaneously reported as "stale" — it is its own
+    // state, distinct from both fine and broken.
+    expect(screen.getByTestId("stale").textContent).toBe("false");
+  });
+
+  it("treats a null stalestConnector as unknown too, even if overallUnknown were somehow unset (defensive)", async () => {
+    const noStalest = {
+      connectors: [],
+      overallStale: false,
+      overallRefreshing: false,
+      overallUnknown: false,
+      stalestConnector: null,
+      freshestSuccessAt: null,
+    } as unknown as DataHealthResponse;
+    globalThis.fetch = mockFetch(noStalest);
+
+    render(
+      <FreshnessProvider>
+        <FreshnessProbe />
+      </FreshnessProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("unknown").textContent).toBe("true");
+    });
+    expect(screen.getByTestId("text").textContent).toBe("Estado desconocido");
   });
 });

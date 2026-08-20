@@ -43,12 +43,21 @@ function freshnessRows(
     cycle_target_scope_count?: number | null;
     covered_scope_count?: number | null;
     freshness_interval_hours?: number | null;
+    // Issue #586 — every real row is `supports_discovery=true` (a crawl
+    // connector) unless a test explicitly says otherwise; a real DB row is
+    // NEVER missing this (NOT NULL DEFAULT true in the schema), so mocks
+    // default it the same way rather than leaving it undefined.
+    supports_discovery?: boolean;
+    capture_enabled?: boolean;
+    last_capture_done_at?: Date | null;
   }>,
 ) {
   return {
     rows: rows.map((r) => ({
       connector: r.connector,
       enabled: r.enabled,
+      supports_discovery: r.supports_discovery ?? true,
+      capture_enabled: r.capture_enabled ?? true,
       freshness_interval_hours: r.freshness_interval_hours ?? null,
       last_fresh_at: r.last_success_at,
       cycle_started_at: r.cycle_started_at ?? null,
@@ -56,6 +65,7 @@ function freshnessRows(
       covered_scope_count: r.covered_scope_count ?? 0,
       last_run_at: r.last_run_at,
       last_run_status: r.last_run_status,
+      last_capture_done_at: r.last_capture_done_at ?? null,
     })),
     fields: [],
   };
@@ -97,6 +107,7 @@ describe("GET /api/ready", () => {
     expect(body.postgres).toBe("ok");
     expect(body.connectors).toBe(1);
     expect(body.overall_stale).toBe(false);
+    expect(body.overall_unknown).toBe(false);
     expect(body.stalest_connector).toBe("fotocasa");
     expect(typeof body.freshest_success_at).toBe("string");
   });
@@ -120,7 +131,37 @@ describe("GET /api/ready", () => {
     const body = await res.json();
     expect(body.status).toBe("degraded");
     expect(body.overall_stale).toBe(true);
+    expect(body.overall_unknown).toBe(false);
     expect(body.stalest_connector).toBe("milanuncios");
+  });
+
+  it("returns status unknown (never 'ready') when nothing is in scope — fail dark, never fail green (issue #586)", async () => {
+    mockQuery.mockResolvedValueOnce(okProbe()).mockResolvedValueOnce(
+      freshnessRows([
+        {
+          // A crawl connector, deliberately turned off, with no capture
+          // fallback (supports_discovery stays true) — nothing in scope to
+          // honestly assert "is/isn't due" about.
+          connector: "milanuncios",
+          enabled: false,
+          supports_discovery: true,
+          last_success_at: null,
+          last_run_at: null,
+          last_run_status: null,
+        },
+      ]),
+    );
+
+    const res = await GET();
+    // Readiness still gates ONLY on DB reachability — this must stay 200,
+    // never flap the container over a staleness/scope question.
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("unknown");
+    expect(body.status).not.toBe("ready");
+    expect(body.overall_unknown).toBe(true);
+    expect(body.overall_stale).toBe(false);
+    expect(body.stalest_connector).toBeNull();
   });
 
   it("ignores disabled connectors for the stale headline", async () => {
@@ -148,6 +189,7 @@ describe("GET /api/ready", () => {
     const body = await res.json();
     expect(body.status).toBe("ready");
     expect(body.overall_stale).toBe(false);
+    expect(body.overall_unknown).toBe(false);
     // Only the enabled connector drives the headline.
     expect(body.stalest_connector).toBe("fotocasa");
   });
@@ -162,7 +204,10 @@ describe("GET /api/ready", () => {
     const res = await GET();
     expect(res.status).toBe(200);
     const body = await res.json();
+    // A `note` (schema not applied) is its own explicit case — distinct
+    // from `overall_unknown` (reachable, schema applied, nothing in scope).
     expect(body.status).toBe("ready");
+    expect(body.overall_unknown).toBe(false);
     expect(body.note).toBe("connector tables missing");
     expect(body.connectors).toBe(0);
   });

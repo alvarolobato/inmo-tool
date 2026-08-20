@@ -91,4 +91,53 @@ describe("TopBar", () => {
     // Active links get background: var(--bg-2) and fontWeight 500
     expect(perfilesLink).toHaveStyle({ fontWeight: 500 });
   });
+
+  // ── Issue #586 — freshness dot colour, fail dark never green ───────────
+  //
+  // The dot itself carries no data-testid (only the text span next to it
+  // does); it is that span's previous sibling in the DOM, unaffected by the
+  // `hidden md:inline` CSS class (still present in the DOM, just visually
+  // hidden below md — issue #571) so this selector works regardless of
+  // viewport.
+  function dotElement(): HTMLElement {
+    const pill = screen.getByTestId("freshness-indicator");
+    return pill.previousElementSibling as HTMLElement;
+  }
+
+  it("dot is green ('--up') when nothing is stale, refreshing, or unknown", () => {
+    render(<TopBar freshnessStale={false} freshnessUnknown={false} />);
+    expect(dotElement()).toHaveStyle({ background: "var(--up)" });
+  });
+
+  it("dot is amber ('--warn') when stale", () => {
+    render(<TopBar freshnessStale={true} freshnessUnknown={false} />);
+    expect(dotElement()).toHaveStyle({ background: "var(--warn)" });
+  });
+
+  it("dot is grey ('--fg-muted'), never green, when the freshness state is unknown (DB error / empty scope)", () => {
+    render(<TopBar freshnessStale={false} freshnessUnknown={true} />);
+    expect(dotElement()).toHaveStyle({ background: "var(--fg-muted)" });
+  });
+
+  it("unknown takes priority over stale — never renders amber when the state can't be determined at all", () => {
+    render(<TopBar freshnessStale={true} freshnessUnknown={true} />);
+    expect(dotElement()).toHaveStyle({ background: "var(--fg-muted)" });
+  });
+
+  it("the dot carries its own accessible name (aria-label) — it is the only thing rendered below md, issue #586 review", () => {
+    render(
+      <TopBar
+        freshnessText="Estado desconocido"
+        freshnessStale={false}
+        freshnessUnknown={true}
+      />,
+    );
+    const dot = dotElement();
+    expect(dot).toHaveAttribute("role", "status");
+    expect(dot).toHaveAttribute("aria-label", "Estado desconocido");
+    // Doesn't rely on the (mobile-hidden, `display:none`) text span, which
+    // is also dropped from the accessibility tree there.
+    const pill = screen.getByTestId("freshness-indicator");
+    expect(pill).toHaveAttribute("aria-hidden", "true");
+  });
 });

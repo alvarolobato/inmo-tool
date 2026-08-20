@@ -11,6 +11,8 @@ interface TopBarProps {
   freshnessText?: string;
   /** Override freshness stale flag — falls back to context value */
   freshnessStale?: boolean;
+  /** Override freshness unknown flag (issue #586) — falls back to context value */
+  freshnessUnknown?: boolean;
   /** Override freshness tooltip (last-sync timestamp) — falls back to context value */
   freshnessTooltip?: string | null;
   /** Public URL of this dashboard app (for self-referencing links). */
@@ -23,16 +25,20 @@ export function TopBar({
   onCogClick,
   freshnessText: propFreshnessText,
   freshnessStale: propFreshnessStale,
+  freshnessUnknown: propFreshnessUnknown,
   freshnessTooltip: propFreshnessTooltip,
 }: TopBarProps) {
   const pathname = usePathname();
   const ctx = useFreshness();
   const freshnessText = propFreshnessText ?? ctx.freshnessText;
   const freshnessStale = propFreshnessStale ?? ctx.freshnessStale;
+  // Issue #586 — fail dark, never green: an unknown state (DB error, or
+  // nothing in scope) takes priority over both stale and refreshing below.
+  const freshnessUnknown = propFreshnessUnknown ?? ctx.freshnessUnknown ?? false;
   const freshnessTooltip = propFreshnessTooltip ?? ctx.freshnessTooltip;
   // Refreshing (issue #295, D-050): a live cycle in progress, nothing stale —
   // shown with a distinct dot colour from both fresh (up) and stale (warn).
-  const freshnessRefreshing = ctx.freshnessRefreshing && !freshnessStale;
+  const freshnessRefreshing = ctx.freshnessRefreshing && !freshnessStale && !freshnessUnknown;
 
   // Issue #571: mobile shell. At <768px the inline nav, Admin link and avatar
   // are hidden (Tailwind `hidden md:*` — display-only, never collides with
@@ -180,15 +186,32 @@ export function TopBar({
           title={freshnessTooltip ?? undefined}
         >
           <span
+            role="status"
+            // Issue #586 review (PR #590) — the dot is the ONLY thing
+            // rendered below md (issue #571's text span is `display:none`
+            // there, which drops it from the accessibility tree too, not
+            // just visually), so it needs its own accessible name rather
+            // than leaning on the sighted-only adjacent text or the
+            // long-press-only `title` tooltip. `aria-live="polite"` only
+            // announces when this label's text actually changes (a real
+            // state transition), not on every silent 2-minute poll.
+            aria-live="polite"
+            aria-label={freshnessText || "Estado de los datos"}
             style={{
               width: 6,
               height: 6,
               borderRadius: "50%",
-              background: freshnessStale
-                ? "var(--warn)"
-                : freshnessRefreshing
-                  ? "var(--accent)"
-                  : "var(--up)",
+              // Issue #586 — fail dark, never green: unknown (DB error, or
+              // nothing in scope to assert about) takes priority over both
+              // stale and refreshing, and is rendered in the same muted grey
+              // used for secondary text elsewhere in this bar — never `--up`.
+              background: freshnessUnknown
+                ? "var(--fg-muted)"
+                : freshnessStale
+                  ? "var(--warn)"
+                  : freshnessRefreshing
+                    ? "var(--accent)"
+                    : "var(--up)",
               animation: "pulse-dot 2s ease-in-out infinite",
               display: "inline-block",
               flexShrink: 0,
@@ -198,10 +221,14 @@ export function TopBar({
               semantics unchanged); the text is hidden on narrow viewports —
               "Datos desactualizados · hace 3h" alone was ~140px of the
               overflow. The `title` tooltip on the wrapper still carries the
-              freshness timestamp for a mobile long-press. */}
+              freshness timestamp for a mobile long-press. `aria-hidden`
+              (issue #586 review): the dot above already carries this same
+              text as its accessible name, so this stays visual-only rather
+              than announcing it twice on desktop. */}
           <span
             data-testid="freshness-indicator"
             className="hidden md:inline"
+            aria-hidden="true"
             style={{
               fontSize: 11,
               color: "var(--fg-muted)",
