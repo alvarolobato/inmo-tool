@@ -1764,15 +1764,110 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
       });
     });
 
-    it("off (default / false) does not narrow the feed", async () => {
+    it("absent hasAlerts (off, #593) does not narrow the feed", async () => {
       await withRealDb(async (pool) => {
         const profileId = await makeProfile(SCOPE);
         await seedTagged(pool, profileId, { caveats: ["venta_deuda"] });
         await seedTagged(pool, profileId, {}); // never assessed
-        const off = await listCandidates(profileId, { hasAlerts: false, limit: 50 });
         const absent = await listCandidates(profileId, { limit: 50 });
-        expect(off.items).toHaveLength(2);
         expect(absent.items).toHaveLength(2);
+      });
+    });
+
+    // #593: the tri-state's whole point — "sin alertas" (hasAlerts: false)
+    // must be the TRUE COMPLEMENT of "con alertas" (hasAlerts: true), derived
+    // from the SAME predicate rather than a second one that can silently
+    // drift (the #590 freshness-bug lesson the issue calls out by name).
+    it("hasAlerts:false ('sin alertas') is the true complement of hasAlerts:true — the two partitions sum to the unfiltered (assessed) total, and a never-assessed candidate lands in NEITHER (D-059)", async () => {
+      await withRealDb(async (pool) => {
+        const profileId = await makeProfile(SCOPE);
+        // Flagged, three ways (same fixture shape as the "keeps candidates
+        // with ≥1 redflag OR ≥1 warn caveat" test above).
+        const caveatOnly = await seedTagged(pool, profileId, {
+          caveats: ["venta_deuda"],
+        });
+        const redflagOnly = await seedTagged(pool, profileId, {
+          redflagTypes: ["embargo"],
+        });
+        const both = await seedTagged(pool, profileId, {
+          caveats: ["nuda_propiedad"],
+          redflagTypes: ["litigio"],
+        });
+        // Assessed and genuinely clean (both axes checked, nothing found) —
+        // the "sin alertas" case that must NOT be confused with "unassessed".
+        const clean1 = await seedTagged(pool, profileId, {
+          caveats: [],
+          redflagTypes: [],
+        });
+        const clean2 = await seedTagged(pool, profileId, {
+          caveats: [],
+          redflagTypes: [],
+        });
+        // Never assessed at all — the judgement-call case (#593): excluded
+        // from BOTH partitions, never counted as "sin alertas" just because
+        // no evidence exists yet.
+        const neverAssessed = await seedTagged(pool, profileId, {});
+        // Review #597 B1: the two MIXED shapes — one axis assessed-clean, the
+        // OTHER never run at all. The first cut of this predicate COALESCE'd
+        // away the redflags axis's NULL, so occCleanRfNever leaked into "sin
+        // alertas" even though its redflags axis was never checked. Both
+        // mixed shapes must land in NEITHER partition, symmetrically — this
+        // is the fixture the reviewer noted was missing (the partition-sum
+        // assertion below passed even while this asymmetry was live, because
+        // nothing in this fixture exercised it).
+        const occCleanRfNever = await seedTagged(pool, profileId, {
+          caveats: [], // occupancy assessed, no warn caveat
+          // redflagTypes omitted → redflags axis never assessed
+        });
+        const rfCleanOccNever = await seedTagged(pool, profileId, {
+          redflagTypes: [], // redflags assessed, no flags
+          // caveats omitted → occupancy axis never assessed
+        });
+
+        const withAlerts = await listCandidates(profileId, {
+          hasAlerts: true,
+          limit: 50,
+        });
+        const withoutAlerts = await listCandidates(profileId, {
+          hasAlerts: false,
+          limit: 50,
+        });
+        const unfiltered = await listCandidates(profileId, { limit: 50 });
+
+        const withIds = withAlerts.items
+          .map((i) => i.property_id)
+          .sort((a, b) => a - b);
+        const withoutIds = withoutAlerts.items
+          .map((i) => i.property_id)
+          .sort((a, b) => a - b);
+
+        expect(withIds).toEqual(
+          [caveatOnly, redflagOnly, both].sort((a, b) => a - b),
+        );
+        expect(withoutIds).toEqual([clean1, clean2].sort((a, b) => a - b));
+
+        // Disjoint (a candidate is never in both partitions at once)...
+        expect(new Set([...withIds, ...withoutIds]).size).toBe(
+          withIds.length + withoutIds.length,
+        );
+        // ...never-assessed excluded from BOTH (the D-059 judgement call)...
+        expect(withIds).not.toContain(neverAssessed);
+        expect(withoutIds).not.toContain(neverAssessed);
+        // ...and the two MIXED shapes (B1) are excluded from BOTH,
+        // SYMMETRICALLY — this is the exact regression #597 B1 fixed:
+        // occCleanRfNever used to leak into "sin alertas" because only the
+        // caveats axis's NULL was ever preserved.
+        expect(withIds).not.toContain(occCleanRfNever);
+        expect(withoutIds).not.toContain(occCleanRfNever);
+        expect(withIds).not.toContain(rfCleanOccNever);
+        expect(withoutIds).not.toContain(rfCleanOccNever);
+        // ...and — the assertion that actually proves "true complement" —
+        // the two partitions sum to the unfiltered total MINUS the three
+        // candidates the tri-state deliberately excludes from both
+        // (neverAssessed + the 2 mixed shapes). If the negative were a
+        // second, drifted predicate, this sum would silently stop matching.
+        expect(unfiltered.items).toHaveLength(8);
+        expect(withIds.length + withoutIds.length).toBe(5);
       });
     });
   });

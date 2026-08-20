@@ -37,6 +37,38 @@ export function CandidateList({ profileId }: { profileId: number }) {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<ApiErrorResponse | string | null>(null);
+  // #592: a failed page-2+ fetch (button OR sentinel-triggered) must be
+  // visible and retryable — but must NOT blow away the already-loaded items
+  // the way a page-1 (replace) failure does (that would turn one bad request
+  // mid-scroll into a total wipeout). Kept separate from `error` above, which
+  // stays page-1-only.
+  const [loadMoreError, setLoadMoreError] = useState<
+    ApiErrorResponse | string | null
+  >(null);
+  // #592: the in-flight guard for BOTH the "Cargar más" button and the mobile
+  // IntersectionObserver sentinel. A ref, not `loadingMore` state — state
+  // updates land a frame late, and the observer can re-fire inside that
+  // window (the "double-firing" failure mode: two fetches in flight at once,
+  // which can double-load a page or skip one under the keyset cursor).
+  const loadingMoreRef = useRef(false);
+  // Mirrors `loadMoreError` for the same reason: the sentinel effect's
+  // closure is keyed off `loadMore`'s identity (which changes with `cursor`,
+  // not with the error), so a plain state read there would be stale. This ref
+  // stops the sentinel from silently re-triggering a fetch that just failed —
+  // the failure must sit there until the user taps "Reintentar" here.
+  const loadMoreErrorRef = useRef(false);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  // #592 accessibility escape hatch (review #597): if `IntersectionObserver`
+  // is unavailable, the mobile-only sentinel effect below is a silent no-op —
+  // with the button ALSO hidden below 768px, that would leave no trigger at
+  // all. Falls back to showing the button even on mobile in that case.
+  const [observerUnsupported, setObserverUnsupported] = useState(false);
+  // #592 accessibility escape hatch: an `aria-live` region (visually hidden,
+  // `sr-only`) announces what the sentinel just did — a screen-reader user
+  // scrolling past the sentinel gets no other signal that anything happened,
+  // since the appended cards land below wherever their focus/reading
+  // position already is.
+  const [liveMessage, setLiveMessage] = useState("");
   const router = useRouter();
 
   // #465 (Feed UX F2): all feed filters live in ONE object, sourced from the
@@ -77,7 +109,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
     beachProximity,
     heritageZone,
     isVpo,
-    hasAlerts,
+    alerts,
     view,
   } = filters;
   // Derived from the segmented `view`: what the fetch layer / card rendering
@@ -138,10 +170,11 @@ export function CandidateList({ profileId }: { profileId: number }) {
     beachProximity !== "" ||
     heritageZone ||
     isVpo !== "" ||
-    // #466: "Con alertas" reads the same AI-assessment axes (redflags +
-    // occupancy caveats), so an empty result under it is the "needs assessment"
-    // case too — fold it in so the empty state explains that, not "broken".
-    hasAlerts;
+    // #466/#593: "Con alertas"/"Sin alertas" both read the same AI-assessment
+    // axes (redflags + occupancy caveats), so an empty result under EITHER is
+    // the "needs assessment" case too — fold it in so the empty state explains
+    // that, not "broken".
+    alerts !== "";
 
   const fetchPage = useCallback(
     async (afterCursor: string | null, replace: boolean) => {
@@ -176,31 +209,95 @@ export function CandidateList({ profileId }: { profileId: number }) {
       if (heritageZone) url.searchParams.set("heritageZone", "true");
       // #398 VPO (bidirectional): "true" only VPO, "false" exclude VPO.
       if (isVpo !== "") url.searchParams.set("isVpo", isVpo);
-      // #466 "Con alertas" UNION toggle → the API's hasAlerts=true.
-      if (hasAlerts) url.searchParams.set("hasAlerts", "true");
+      // #593 tri-state alerts filter → the API's hasAlerts=true/false. "" stays
+      // off (param omitted); the negative is a distinct API value, never
+      // inferred client-side from "not true" (that would be a second
+      // definition of the predicate — see lib/candidates.ts).
+      if (alerts === "1") url.searchParams.set("hasAlerts", "true");
+      else if (alerts === "0") url.searchParams.set("hasAlerts", "false");
       // #379: opt in to rejected candidates. Omitted (default) keeps them hidden.
       if (showRejected) url.searchParams.set("includeRejected", "true");
       // #422: "En seguimiento" preset — restrict to tracked (accepted) properties.
       if (trackedOnly) url.searchParams.set("state", "accept");
-      const res = await fetch(
-        url.toString().replace(window.location.origin, ""),
-      );
+      let res: Response;
+      try {
+        res = await fetch(url.toString().replace(window.location.origin, ""));
+      } catch {
+        // #592: a network failure (offline, DNS, aborted) must be as visible
+        // and retryable as an HTTP error response — never an unhandled
+        // rejection that leaves the sentinel/button silently stuck.
+        if (replace && seq !== pageOneSeq.current) return;
+        if (replace) {
+          setError("Error al cargar los candidatos.");
+        } else {
+          setLoadMoreError("Error al cargar más candidatos.");
+          loadMoreErrorRef.current = true;
+          setLiveMessage("No se pudieron cargar más candidatos.");
+        }
+        return;
+      }
       // #467: a newer page-1 fetch started while this one was in flight — drop
       // this stale response entirely (status, error, and body) so it can't
       // clobber the newer, correct result.
       if (replace && seq !== pageOneSeq.current) return;
       if (!res.ok) {
         const body = await res.json().catch(() => null);
-        setError(
-          isApiErrorResponse(body) ? body : "Error al cargar los candidatos.",
-        );
+        const apiError = isApiErrorResponse(body)
+          ? body
+          : "Error al cargar los candidatos.";
+        // #592: a page-1 (replace) failure keeps replacing the whole view with
+        // the error, as before. A page-2+ (append) failure — whether from the
+        // desktop button or the mobile sentinel — must leave the already-
+        // loaded items on screen and surface a scoped, retryable error instead
+        // of wiping the feed the user was already scrolled through.
+        if (replace) {
+          setError(apiError);
+        } else {
+          setLoadMoreError(apiError);
+          loadMoreErrorRef.current = true;
+          setLiveMessage("No se pudieron cargar más candidatos.");
+        }
         return;
       }
-      const page: {
+      // #592 follow-up (review #597): a 200 response with a malformed body
+      // (e.g. a proxy/edge case returning HTML with a 200 status) must be
+      // treated exactly like an HTTP-level failure — NOT let `res.json()`
+      // throw uncaught. `loadMore`'s try/finally always clears the in-flight
+      // ref, but with no `catch` here an uncaught throw skipped setting
+      // `loadMoreError`/its ref entirely: the sentinel would see "not
+      // in-flight, no error" on the very next intersection and silently
+      // retry forever, invisible to the user this PR otherwise promises a
+      // visible, retryable failure to.
+      let page: {
         items: CandidateRow[];
         nextCursor: string | null;
         coldStart?: boolean;
-      } = await res.json();
+      };
+      try {
+        page = await res.json();
+      } catch {
+        if (replace && seq !== pageOneSeq.current) return;
+        if (replace) {
+          setError("Respuesta inválida del servidor al cargar los candidatos.");
+        } else {
+          setLoadMoreError("Respuesta inválida del servidor al cargar más candidatos.");
+          loadMoreErrorRef.current = true;
+          setLiveMessage("No se pudieron cargar más candidatos.");
+        }
+        return;
+      }
+      if (!replace) {
+        setLoadMoreError(null);
+        loadMoreErrorRef.current = false;
+        // #592 accessibility escape hatch: announce what just landed (and
+        // whether that was the last page) for a screen-reader user who never
+        // "sees" the sentinel or the appended cards scroll into view.
+        setLiveMessage(
+          page.nextCursor === null
+            ? `${page.items.length} candidatos más cargados. No hay más candidatos.`
+            : `${page.items.length} candidatos más cargados.`,
+        );
+      }
       setItems((prev) => (replace ? page.items : [...prev, ...page.items]));
       setCursor(page.nextCursor);
       // #425: the novelty cold-start suppression decision is session-fixed
@@ -221,7 +318,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
       beachProximity,
       heritageZone,
       isVpo,
-      hasAlerts,
+      alerts,
       showRejected,
       trackedOnly,
     ],
@@ -278,18 +375,69 @@ export function CandidateList({ profileId }: { profileId: number }) {
     setItems([]);
     setCursor(null);
     setError(null);
+    // A filter/profile change restarts pagination from page 1 — any pending
+    // load-more failure from the PREVIOUS filter's cursor no longer applies.
+    setLoadMoreError(null);
+    loadMoreErrorRef.current = false;
     setLoading(true);
     fetchPage(null, true).finally(() => setLoading(false));
   }, [fetchPage, filtersReady]);
 
-  const loadMore = async () => {
+  // #592: shared by the desktop "Cargar más" button and the mobile
+  // IntersectionObserver sentinel below. `loadingMoreRef` (checked AND set
+  // synchronously, before the first `await`) is the double-fire guard a
+  // re-intersecting sentinel needs — `loadingMore` state alone would still
+  // read false for one render/microtask after a fetch starts, and the
+  // observer can re-fire inside that window.
+  const loadMore = useCallback(async () => {
+    if (loadingMoreRef.current || cursor === null) return;
+    loadingMoreRef.current = true;
     setLoadingMore(true);
     try {
       await fetchPage(cursor, false);
     } finally {
+      loadingMoreRef.current = false;
       setLoadingMore(false);
     }
-  };
+  }, [cursor, fetchPage]);
+
+  // #592 accessibility escape hatch (review #597): detected independently of
+  // whether the sentinel is even in the DOM (it may not be yet — cursor
+  // starts null before the first page-1 response lands), so the fallback is
+  // ready before the render below has to decide whether to show the button.
+  useEffect(() => {
+    if (typeof IntersectionObserver === "undefined") {
+      setObserverUnsupported(true);
+    }
+  }, []);
+
+  // #592: mobile-only infinite scroll. The sentinel div below is rendered
+  // with `md:hidden` (visible only under the 768px breakpoint, D-120) so on
+  // desktop it either isn't in the DOM (cursor === null) or has no layout box
+  // and never intersects — the explicit "Cargar más" button stays the only
+  // trigger there, unchanged. `rootMargin` starts the fetch a bit before the
+  // sentinel actually reaches the viewport so the next page is usually ready
+  // by the time the user scrolls that far. Not rendered at all when
+  // `observerUnsupported` — the button (shown on every viewport in that
+  // case) is the trigger instead.
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (
+          entries[0]?.isIntersecting &&
+          !loadingMoreRef.current &&
+          !loadMoreErrorRef.current
+        ) {
+          void loadMore();
+        }
+      },
+      { rootMargin: "600px 0px" },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [loadMore]);
 
   // The filter bar (#465) must render in EVERY state
   // (loading/error/empty/populated), not just alongside a full grid —
@@ -504,24 +652,106 @@ export function CandidateList({ profileId }: { profileId: number }) {
         ))}
       </div>
 
+      {/* #592 accessibility escape hatch: an aria-live region announcing what
+          the sentinel just did (candidates appended, load failed, or the end
+          reached) — visually hidden (`sr-only`) but read out by a screen
+          reader regardless of where the user's focus/reading position is,
+          since the appended cards land silently below it otherwise. Rendered
+          unconditionally (not gated on `cursor`) so it survives every state
+          transition, including reaching the end. */}
+      <div aria-live="polite" role="status" className="sr-only">
+        {liveMessage}
+      </div>
+
       {cursor !== null && (
-        <button
-          onClick={loadMore}
-          disabled={loadingMore}
+        <>
+          {/* Desktop: the explicit "Cargar más" control (#592 keeps it here —
+              a button is genuinely better with a mouse). Also the escape
+              hatch when `IntersectionObserver` is unsupported — shown on
+              EVERY viewport then, since the mobile sentinel is a no-op
+              without it. `className` is the ONLY display toggle in either
+              case (D-120: no inline `display` alongside a responsive display
+              class); every other style stays inline as elsewhere in this
+              component. */}
+          <button
+            data-testid="load-more-button"
+            onClick={loadMore}
+            disabled={loadingMore}
+            className={observerUnsupported ? "inline-block" : "hidden md:inline-block"}
+            style={{
+              marginTop: 16,
+              padding: "7px 14px",
+              background: "transparent",
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              fontSize: 13,
+              color: "var(--fg)",
+              cursor: loadingMore ? "default" : "pointer",
+              opacity: loadingMore ? 0.6 : 1,
+            }}
+          >
+            {loadingMore ? "Cargando…" : "Cargar más"}
+          </button>
+
+          {/* Mobile: an invisible sentinel the IntersectionObserver (above)
+              watches — scrolling it into view loads the next page with no
+              tap. `md:hidden` means it either isn't rendered (cursor is null)
+              or has no layout box on desktop and never intersects there, so
+              the button above stays the only trigger on desktop (unchanged
+              behaviour). Not rendered at all when the API is unsupported —
+              the always-visible button above is the only trigger then, so
+              there is no dead target left in the DOM. */}
+          {!observerUnsupported && (
+            <div
+              ref={sentinelRef}
+              data-testid="infinite-scroll-sentinel"
+              aria-hidden="true"
+              className="md:hidden"
+              style={{ marginTop: 16, height: 1 }}
+            />
+          )}
+          {loadingMore && (
+            <p
+              data-testid="infinite-scroll-loading"
+              className="md:hidden"
+              style={{ marginTop: 8, fontSize: 13, color: "var(--fg-muted)" }}
+            >
+              Cargando más candidatos…
+            </p>
+          )}
+        </>
+      )}
+
+      {/* #592: a failed page-2+ fetch (button OR sentinel) stays visible next
+          to where the next page would have appeared, with a "Reintentar" that
+          re-runs the SAME fetch (loadMore) — never a silent stall, and never
+          the whole-feed wipeout a page-1 failure produces (`error` above). */}
+      {loadMoreError && (
+        <ErrorDisplay
+          error={loadMoreError}
+          title="No se pudieron cargar más candidatos"
+          onRetry={loadMore}
+          className="mt-4"
+        />
+      )}
+
+      {/* #592: an honest end state — mobile's auto-loading feed must say when
+          it's done rather than silently stopping (which reads as broken).
+          Desktop already states this unambiguously by the button disappearing,
+          so this note is mobile-only (md:hidden). */}
+      {cursor === null && !loadMoreError && items.length > 0 && (
+        <p
+          data-testid="candidates-end-of-list"
+          className="md:hidden"
           style={{
             marginTop: 16,
-            padding: "7px 14px",
-            background: "transparent",
-            border: "1px solid var(--border)",
-            borderRadius: 6,
             fontSize: 13,
-            color: "var(--fg)",
-            cursor: loadingMore ? "default" : "pointer",
-            opacity: loadingMore ? 0.6 : 1,
+            color: "var(--fg-muted)",
+            textAlign: "center",
           }}
         >
-          {loadingMore ? "Cargando…" : "Cargar más"}
-        </button>
+          No hay más candidatos.
+        </p>
       )}
 
       {coldStart && (

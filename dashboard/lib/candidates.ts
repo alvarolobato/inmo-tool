@@ -572,16 +572,24 @@ export interface CandidateFilters {
    */
   isVpo?: boolean | null;
   /**
-   * #466 "Con alertas" UNION filter — the owner's "muéstrame las que tienen
-   * alertas" (2026-08-08): keep only candidates the operator sees a warn badge
-   * on. `true` keeps candidates with ≥1 red flag (of ANY type) OR ≥1 warn-tone
-   * occupancy caveat (the `WARN_CAVEAT_CODES` set); `false`/`null`/undefined =
-   * off. A UNION of the #386 `redflagType`/`caveat` axes rather than a single
-   * code, so it matches exactly the warn badges the card renders and the "N con
-   * alertas" glance. Reads the SAME `ranked.redflag_types` / `ranked.caveats`
-   * arrays those filters read (D-059, no new JOIN). A never-assessed property
-   * (both arrays NULL) is EXCLUDED — "unknown", never a false pass, matching the
-   * other assessment filters. Composes (AND) with `redflagType` and the rest.
+   * #593 tri-state "Con alertas" / "Sin alertas" UNION filter (started as
+   * #466's one-way toggle) — the owner's "muéstrame las que tienen alertas"
+   * (2026-08-08), extended to the negative "y también las que NO" (2026-08-18):
+   * `true` keeps candidates with ≥1 red flag (of ANY type) OR ≥1 warn-tone
+   * occupancy caveat (the `WARN_CAVEAT_CODES` set) — "con alertas". `false`
+   * keeps the TRUE COMPLEMENT of that SAME expression — "sin alertas" —
+   * derived by comparing the identical UNION expression against the param
+   * (mirrors `isVpo` below), never a second, independently-written predicate.
+   * `null`/undefined = off. A UNION of the #386 `redflagType`/`caveat` axes
+   * rather than a single code, so it matches exactly the warn badges the card
+   * renders and the "N con alertas" glance. Reads the SAME `ranked.redflag_types`
+   * / `ranked.caveats` arrays those filters read (D-059, no new JOIN). A
+   * never-assessed property is EXCLUDED from BOTH `true` and `false` —
+   * "unknown", never a false pass (same graceful degradation as the other
+   * assessment filters) — because the equality falls to SQL NULL whenever
+   * `caveats` is NULL (occupancy never assessed) and no redflag evidence
+   * exists either; see the SQL comment at the predicate itself for the exact
+   * truth table. Composes (AND) with `redflagType` and the rest.
    */
   hasAlerts?: boolean | null;
   /**
@@ -1879,10 +1887,12 @@ export async function listCandidates(
   // on; undefined collapses to null so the "all filters off" tail stays uniform.
   const isVpo: boolean | null =
     typeof opts.isVpo === "boolean" ? opts.isVpo : null;
-  // #466 "Con alertas" UNION toggle. Like heritageZone, only an explicit true
-  // turns it on; false/undefined collapse to null ("off") so the SQL `IS NOT
-  // TRUE` guard treats it as off and the param tail stays uniform.
-  const hasAlerts: true | null = opts.hasAlerts === true ? true : null;
+  // #593 tri-state "Con alertas"/"Sin alertas" filter — BIDIRECTIONAL, so
+  // (unlike the old #466 toggle) an explicit `false` is preserved rather than
+  // collapsed to null: only `undefined` (the param genuinely absent) means
+  // off. Mirrors isVpo's tri-state normalisation exactly.
+  const hasAlerts: boolean | null =
+    typeof opts.hasAlerts === "boolean" ? opts.hasAlerts : null;
   // #470 free-text search term. Trimmed; empty/whitespace collapses to null
   // ("off") so an untouched call is byte-identical to before and the SQL guard
   // ($25 IS NULL) skips the FTS EXISTS entirely. Length is bounded at the API
@@ -2230,21 +2240,41 @@ export async function listCandidates(
        -- never a false pass) — the same graceful degradation the other
        -- assessment filters give until the LLM populates the axis.
        AND ($17::boolean IS NULL OR ranked.is_vpo = $17::boolean)
-       -- #466 "Con alertas" UNION hard filter ($24). Keep only candidates the
-       -- operator sees a warn badge on: ≥1 red flag (of ANY type) OR ≥1 warn-tone
-       -- occupancy caveat. Reads the SAME per-axis arrays the #386 caveat/
-       -- redflagType filters read (D-059, no new JOIN); the warn-caveat set reuses
-       -- the $6 array the distress boost already reads, so the two can't drift.
-       -- IS NOT TRUE passes when the toggle is off (NULL). When on, a never-
-       -- assessed property (both arrays NULL) is EXCLUDED: cardinality(COALESCE(
-       -- redflag_types,'{}'))=0 is false and the NULL-array overlap is NULL, so
-       -- the OR is false/NULL and the row is excluded, never a false pass (same
-       -- graceful degradation as the other assessment filters, coherent with
-       -- #310/#386). Composes (AND) with redflagType and every other filter.
+       -- #593 tri-state "alertas" hard filter ($24), extending #466's one-way
+       -- UNION toggle. $24=NULL -> off. $24=true -> "con alertas": keep only
+       -- candidates the operator sees a warn badge on (≥1 red flag of ANY type
+       -- OR ≥1 warn-tone occupancy caveat). $24=false -> "sin alertas": the
+       -- TRUE COMPLEMENT of the SAME expression below, via equality — never a
+       -- second, independently-written predicate (the drift the #590
+       -- freshness bug taught us to avoid). Mirrors the isVpo ($17) equality
+       -- form exactly. Reads the SAME per-axis arrays the #386 caveat/
+       -- redflagType filters read (D-059, no new JOIN); the warn-caveat set
+       -- reuses the $6 array the distress boost already reads.
+       --
+       -- Truth table for the bracketed UNION expression itself — BOTH axes
+       -- must survive an unassessed row as SQL NULL, or the D-059/D-127
+       -- exclusion only holds for one of them (review #597 B1: the original
+       -- COALESCE(redflag_types,'{}') collapsed "redflags never assessed"
+       -- into "no flags", so a property with a checked-clean occupancy axis
+       -- but a never-run redflags axis was served under "sin alertas" as if
+       -- both axes had been checked). Neither side is COALESCE'd here: the
+       -- redflags side is a CASE that stays NULL when redflag_types IS NULL
+       -- (never assessed) and only evaluates cardinality once assessed;
+       -- "caveats && $6" is already NULL when caveats IS NULL (occupancy
+       -- never assessed) — unchanged from before. So the expression is: TRUE
+       -- if EITHER assessed axis has qualifying evidence; FALSE only once
+       -- BOTH axes were actually assessed and neither found anything; NULL
+       -- (excluded from BOTH $24 values via NULL = $24 -> NULL) whenever
+       -- EITHER axis was never assessed and the other found nothing either.
+       -- $24=true keeps TRUE rows; $24=false keeps FALSE rows. Composes (AND)
+       -- with redflagType and every other filter.
        AND (
-         $24::boolean IS NOT TRUE
-         OR cardinality(COALESCE(ranked.redflag_types, '{}')) > 0
-         OR ranked.caveats && $6::text[]
+         $24::boolean IS NULL
+         OR (
+              (CASE WHEN ranked.redflag_types IS NULL THEN NULL
+                    ELSE cardinality(ranked.redflag_types) > 0 END)
+              OR ranked.caveats && $6::text[]
+            ) = $24::boolean
        )
        -- #470 free-text search ($25). NULL = off (default feed, byte-identical to
        -- before). When set, keep only candidates whose materialized search

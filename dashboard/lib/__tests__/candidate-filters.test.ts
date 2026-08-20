@@ -39,24 +39,43 @@ describe("candidate-filters: state ↔ URL round-trip", () => {
       beachProximity: "frontline",
       heritageZone: true,
       isVpo: "false",
-      hasAlerts: true,
+      alerts: "1",
       view: "descartadas",
     };
     const search = candidateFiltersToSearch(full);
     expect(parseCandidateFilters(search)).toEqual(full);
   });
 
-  it("#466: the 'Con alertas' toggle maps to the alerts=1 URL param", () => {
-    const f: CandidateFilters = { ...DEFAULT_CANDIDATE_FILTERS, hasAlerts: true };
+  it("#466: the 'Con alertas' state maps to the alerts=1 URL param (old links/bookmarks keep working)", () => {
+    const f: CandidateFilters = { ...DEFAULT_CANDIDATE_FILTERS, alerts: "1" };
     const p = candidateFiltersToParams(f);
     expect(p.get("alerts")).toBe("1");
     // Round-trips, and a default (off) emits nothing.
-    expect(parseCandidateFilters("?alerts=1").hasAlerts).toBe(true);
+    expect(parseCandidateFilters("?alerts=1").alerts).toBe("1");
     expect(candidateFiltersToParams(DEFAULT_CANDIDATE_FILTERS).get("alerts")).toBeNull();
-    // hasActiveFilters picks up the primary-row toggle.
+    // hasActiveFilters picks up the primary-row control.
     expect(hasActiveFilters(f)).toBe(true);
     // …but it is NOT one of the "Más filtros" popover group (primary row).
     expect(moreFiltersActiveCount(f)).toBe(0);
+  });
+
+  it("#593: the negative 'Sin alertas' state maps to the DISTINCT alerts=0 URL param, and round-trips", () => {
+    const f: CandidateFilters = { ...DEFAULT_CANDIDATE_FILTERS, alerts: "0" };
+    const p = candidateFiltersToParams(f);
+    expect(p.get("alerts")).toBe("0");
+    expect(parseCandidateFilters("?alerts=0").alerts).toBe("0");
+    expect(hasActiveFilters(f)).toBe(true);
+    expect(moreFiltersActiveCount(f)).toBe(0);
+  });
+
+  it("#593: an absent alerts param still means 'no filter' — it did not gain a new meaning", () => {
+    expect(parseCandidateFilters("").alerts).toBe("");
+    expect(parseCandidateFilters("?alerts=").alerts).toBe("");
+  });
+
+  it("#593: a malformed alerts value (neither '1' nor '0') degrades to off, never a silent unintended filter", () => {
+    expect(parseCandidateFilters("?alerts=garbage").alerts).toBe("");
+    expect(parseCandidateFilters("?alerts=true").alerts).toBe("");
   });
 
   it("#470: the free-text search maps to the `q` URL param", () => {

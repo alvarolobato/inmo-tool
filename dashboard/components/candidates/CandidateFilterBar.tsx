@@ -313,11 +313,21 @@ export function CandidateFilterBar({
       label: `VPO: ${labelOf(VPO_OPTS, values.isVpo)}`,
       clear: () => set("isVpo", ""),
     });
-  if (values.hasAlerts)
+  // #593 tri-state — one chip for whichever of the two active states is on.
+  // "Sin alertas" is deliberately NOT worded "verificado limpio": it excludes
+  // properties the AI hasn't assessed yet (see the segmented control below),
+  // so the chip must not read as a completeness guarantee.
+  if (values.alerts === "1")
     chips.push({
       key: "alerts",
       label: "Con alertas",
-      clear: () => set("hasAlerts", false),
+      clear: () => set("alerts", ""),
+    });
+  if (values.alerts === "0")
+    chips.push({
+      key: "alerts",
+      label: "Sin alertas (evaluadas)",
+      clear: () => set("alerts", ""),
     });
 
   return (
@@ -504,32 +514,71 @@ export function CandidateFilterBar({
           ))}
         </select>
 
-        {/* #466 "⚠ Con alertas" UNION toggle — keep only candidates with ≥1 red
-            flag OR ≥1 warn occupancy caveat (the warn badges the card shows).
-            Toggles the `alerts=1` URL param (drives the API `hasAlerts=true`);
-            composes (AND) with every other filter. */}
-        <button
-          type="button"
-          data-testid="alerts-toggle"
-          aria-pressed={values.hasAlerts}
-          onClick={() => set("hasAlerts", !values.hasAlerts)}
-          title="Solo propiedades con alertas (alertas rojas u ocupación)"
+        {/* #593 tri-state alerts filter (was #466's single boolean toggle):
+            off → "⚠ Con alertas" → "✓ Sin alertas" → off. A segmented control
+            rather than a cycling chip — the issue's own concern was that a
+            2-of-3 cycling toggle isn't obvious at a glance ("not a checkbox
+            that is sometimes half-lit"); 3 buttons where exactly one is always
+            highlighted reads unambiguously in either state. "Sin alertas" is
+            the TRUE COMPLEMENT of "Con alertas" over the SAME predicate (see
+            lib/candidates.ts) — but a property the AI hasn't assessed yet has
+            neither an alert NOR evidence of being clean, so it is EXCLUDED
+            from both (consistent with D-059: an unassessed axis is excluded
+            from a hard filter, never a false "verified clean"). The title
+            attribute on the full label says so explicitly rather than letting
+            "sin alertas" imply a completeness guarantee it doesn't have.
+
+            Review #597: at 390px this control alone took the sticky primary
+            row from 5 wrapped rows to 6 (109px → 272px) with the full labels
+            always rendered. Below `md:` each button shows only the icon plus
+            a short word (`md:hidden`/`hidden md:inline`, D-120); the full
+            label returns at `md:` and up, where the row has room. */}
+        <div
+          role="group"
+          aria-label="Filtro de alertas"
           style={{
             display: "inline-flex",
-            alignItems: "center",
-            gap: 6,
-            padding: "5px 10px",
-            fontSize: 13,
-            fontWeight: values.hasAlerts ? 600 : 400,
-            color: values.hasAlerts ? "#fff" : "var(--fg)",
-            background: values.hasAlerts ? "var(--accent)" : "var(--bg-1)",
-            border: `1px solid ${values.hasAlerts ? "var(--accent)" : "var(--border)"}`,
-            borderRadius: 6,
-            cursor: "pointer",
+            gap: 2,
+            padding: 2,
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            background: "var(--bg-1)",
           }}
         >
-          ⚠ Con alertas
-        </button>
+          <SegmentButton
+            active={values.alerts === ""}
+            onClick={() => set("alerts", "")}
+            testId="alerts-segment-off"
+          >
+            Todas
+          </SegmentButton>
+          <SegmentButton
+            active={values.alerts === "1"}
+            onClick={() => set("alerts", "1")}
+            testId="alerts-segment-with"
+          >
+            <span className="md:hidden">⚠ Con</span>
+            <span
+              className="hidden md:inline"
+              title="Propiedades con ≥1 alerta roja o de ocupación detectada"
+            >
+              ⚠ Con alertas
+            </span>
+          </SegmentButton>
+          <SegmentButton
+            active={values.alerts === "0"}
+            onClick={() => set("alerts", "0")}
+            testId="alerts-segment-without"
+          >
+            <span className="md:hidden">✓ Sin</span>
+            <span
+              className="hidden md:inline"
+              title="Propiedades evaluadas sin alertas — no incluye las que aún no se han evaluado"
+            >
+              ✓ Sin alertas
+            </span>
+          </SegmentButton>
+        </div>
 
         {/* "Más filtros (n)" — the 7 AI-gated filters behind progressive
             disclosure. Headless UI Popover (already a dependency). */}

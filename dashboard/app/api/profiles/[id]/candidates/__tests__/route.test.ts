@@ -552,11 +552,23 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
       ctx("3"),
     );
     expect(res.status).toBe(200);
-    // $24 (index 23) is the new UNION toggle.
+    // $24 (index 23) is the tri-state toggle.
     expect(candidatesParams()[23]).toBe(true);
   });
 
-  it("leaves hasAlerts off ($24 = null) when absent, and rejects any value other than 'true' with 400 (#466)", async () => {
+  it("passes hasAlerts=false to listCandidates as $24 (the 'Sin alertas' true complement, #593)", async () => {
+    enqueue({ rows: [profileRow()] });
+    enqueue({ rows: [] });
+
+    const res = await GET(
+      makeRequest("http://localhost/api/profiles/3/candidates?hasAlerts=false"),
+      ctx("3"),
+    );
+    expect(res.status).toBe(200);
+    expect(candidatesParams()[23]).toBe(false);
+  });
+
+  it("leaves hasAlerts off ($24 = null) when absent, and rejects any value other than 'true'/'false' with 400 (#593)", async () => {
     // Absent → off (null), DB touched.
     enqueue({ rows: [profileRow()] });
     enqueue({ rows: [] });
@@ -567,8 +579,11 @@ describe("GET /api/profiles/[id]/candidates — #310 hard filters (D-059)", () =
     expect(off.status).toBe(200);
     expect(candidatesParams()[23]).toBeNull();
 
-    // Any non-empty value other than the exact "true" → 400 before the DB.
-    for (const raw of ["1", "false", "TRUE", "yes"]) {
+    // Any non-empty value other than the exact "true"/"false" → 400 before
+    // the DB — including "0"/"1" (the FRONTEND's `alerts` param vocabulary,
+    // never accepted at this API boundary, which stays "true"/"false" like
+    // isVpo).
+    for (const raw of ["1", "0", "TRUE", "yes"]) {
       mockQuery.mockClear();
       queue = [];
       const res = await GET(
