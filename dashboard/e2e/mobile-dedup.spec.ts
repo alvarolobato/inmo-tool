@@ -70,17 +70,18 @@ async function insertProperty(overrides: { address: string; m2_built?: number })
 
 async function insertListing(
   propertyId: number,
-  overrides: { source: string; current_price?: number; photo_urls?: string[] },
+  overrides: { source: string; current_price?: number; photo_urls?: string[]; url?: string },
 ): Promise<number> {
   const result = await pool.query<{ id: number }>(
-    `INSERT INTO listing (property_id, source, external_id, current_price, photo_urls)
-     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+    `INSERT INTO listing (property_id, source, external_id, current_price, photo_urls, url)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
     [
       propertyId,
       overrides.source,
       `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`,
       overrides.current_price ?? 200000,
       overrides.photo_urls ?? null,
+      overrides.url ?? null,
     ],
   );
   return result.rows[0].id;
@@ -436,6 +437,12 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
       source: "fotocasa",
       current_price: 220000,
       photo_urls: photosLo,
+      // A real `url` here (PR #631 review fix 1) — this side also has a
+      // matched active profile (markProfileMatch below), so BOTH the
+      // portal link and the internal link render stacked in the same
+      // panel, exactly the shape that measured as two adjacent
+      // 16.5px-tall, 2px-apart tap targets before the fix.
+      url: "https://www.fotocasa.es/es/comprar/vivienda/626-mobile-a",
     });
     const matchingB = await insertListing(propB, {
       source: "idealista",
@@ -585,12 +592,25 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
       await expect(loLink).toHaveAttribute("rel", /noopener/);
       // Distinct label from the portal link ("ficha interna" vs. "anuncio
       // original") — never relying on the "↗" icon alone to distinguish
-      // "our page" from "the portal's page". This fixture's listings carry
-      // no `url` (irrelevant to this test), so the portal link itself
-      // doesn't render here — dedup-review.spec.ts's existing coverage
-      // already proves "Ver anuncio original" renders when `url` is set.
+      // "our page" from "the portal's page".
       await expect(loLink).toHaveText(/ficha interna/i);
       await expect(loLink).not.toHaveText(/anuncio original/i);
+
+      // PR #631 review fix 1: propA also has a real `url`, so the portal
+      // link stacks directly above the internal link in this same panel —
+      // measured 16.5px tall, 2px apart before the fix, the exact shape
+      // WCAG 2.5.5 (and this card's own `.dedup-action-btn`/
+      // `.dedup-evidence-toggle` precedent) exists to catch. Both links
+      // must clear the 44px floor and not overlap/touch.
+      const loPortalLink = loPanel.getByText(/ver anuncio original/i);
+      await expect(loPortalLink).toBeVisible();
+      const portalBox = await loPortalLink.boundingBox();
+      const internalBox = await loLink.boundingBox();
+      expect(portalBox).not.toBeNull();
+      expect(internalBox).not.toBeNull();
+      expect(portalBox!.height).toBeGreaterThanOrEqual(44);
+      expect(internalBox!.height).toBeGreaterThanOrEqual(44);
+      expect(internalBox!.y).toBeGreaterThanOrEqual(portalBox!.y + portalBox!.height);
 
       await expect(hiPanel.getByTestId("dedup-internal-link")).toHaveCount(0);
       await expect(hiPanel.getByTestId("dedup-internal-link-unavailable")).toBeVisible();

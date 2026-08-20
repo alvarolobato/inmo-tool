@@ -219,6 +219,7 @@ export function ListingSidePanel({
             href={side.url}
             target="_blank"
             rel="noopener noreferrer"
+            className="dedup-side-link"
             style={{ fontSize: 11, color: "var(--accent)" }}
           >
             Ver anuncio original ↗
@@ -238,14 +239,31 @@ export function ListingSidePanel({
             tab is never unmounted. `null` (no matched active profile for
             this side) renders a muted note instead of a broken link — the
             route genuinely 404s without a real profile id
-            (isPropertyMatchedForProfile). */}
+            (isPropertyMatchedForProfile).
+
+            Review fix (PR #631): styled `color: var(--fg)`/no underline at
+            first, which read as a heading rather than a link — only the
+            "↗" hinted it was clickable. Now shares the portal link's
+            accent color + underline (real link affordance), kept bold to
+            stay visually distinct from the portal link's own (non-bold)
+            styling — the label text is still the primary distinguisher,
+            this is a secondary cue, not a replacement for it. Also shares
+            `.dedup-side-link` with the portal link above: at iPhone 13
+            width the two anchors measured 16.5px tall, 2px apart — two
+            adjacent mis-tappable targets on a phone, the same shape
+            `.dedup-action-btn`/`.dedup-evidence-toggle` were already fixed
+            for elsewhere on this card (the latter by #611 review,
+            specifically because it measured 18px) — a real WCAG 2.5.5
+            44px target below 768px, same as every other tappable control
+            on this card. */}
         {internalHref ? (
           <a
             href={internalHref}
             target="_blank"
             rel="noopener noreferrer"
             data-testid="dedup-internal-link"
-            style={{ fontSize: 11, color: "var(--fg)", fontWeight: 600 }}
+            className="dedup-side-link"
+            style={{ fontSize: 11, color: "var(--accent)", fontWeight: 600, textDecoration: "underline" }}
           >
             Ver ficha interna (inmo-tool) ↗
           </a>

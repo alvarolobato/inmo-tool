@@ -667,6 +667,20 @@ body {
   padding: 0;
 }
 
+/* Issue #626 review (PR #631 fix 1): the portal link ("Ver anuncio
+   original") and the new internal-property link ("Ver ficha interna")
+   sit stacked in the same 2px-gap column — at iPhone 13 width they
+   measured 16.5px tall each, 2px apart: two adjacent mis-tappable
+   targets, one opening the portal and one opening this app, the exact
+   confusion the distinct labelling exists to prevent. This repo has
+   already fixed this exact shape twice (`.dedup-action-btn`,
+   `.dedup-evidence-toggle` above — the latter specifically because #611's
+   review measured 18px) — same WCAG 2.5.5 44px floor, same ladder.
+   Desktop keeps the plain inline-link sizing both anchors always had. */
+.dedup-side-link {
+  padding: 0;
+}
+
 @media (max-width: 767px) {
   /* AdminChrome's own padding layer still applies (see the block comment
      above) — this just stops THIS page's layer from doubling it, which on
@@ -723,6 +737,19 @@ body {
     padding: 12px 0;
     display: inline-flex;
     align-items: center;
+  }
+
+  /* Same WCAG 2.5.5 44px minimum as .dedup-action-btn/.dedup-evidence-toggle
+     above — measured 16.5px tall, 2px apart before this fix (PR #631
+     review). `align-self: flex-start` keeps each link from stretching to
+     the panel's full width now that it's a flex row, matching how these
+     anchors already lay out today. */
+  .dedup-side-link {
+    min-height: 44px;
+    padding: 6px 0;
+    display: inline-flex;
+    align-items: center;
+    align-self: flex-start;
   }
 }
 

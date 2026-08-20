@@ -137,9 +137,10 @@ leaving the queue by hand.
 **See**: issue #626, issue #615 (parent of D-135), issue #625 (idealista
 photo-count measurement that hid the cap's real-world effect), issue #595
 (the still-open, unrelated candidate-feed queue-position problem),
-[D-135](D-135-dedup-card-photos-and-advert-counts.md) (this decision's
-point 2, on the cap/ordering mechanic, and point 4, on advert counts —
-unchanged and still binding), `dashboard/components/dedup/ListingSidePanel.tsx`,
+[D-135](D-135-dedup-card-photos-and-advert-counts.md) (this decision
+supersedes point 2's CAP; the matched-first ORDERING half of point 2, and
+point 4's advert-count copy, are unchanged and still binding),
+`dashboard/components/dedup/ListingSidePanel.tsx`,
 `dashboard/components/dedup/PropertyPairCard.tsx`,
 `dashboard/lib/dedup-shared.ts` (`internalPropertyHref`,
 `DedupPropertyPairSuggestion.property_lo_profile_id`/`property_hi_profile_id`),
