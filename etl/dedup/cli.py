@@ -44,8 +44,9 @@ def _cmd_run(conn) -> int:
     if result.photo_hash_auto_merged:
         # Issue #602, D-137: of `merged` above, how many were corroborated
         # photo_hash auto-merges (match_ratio == 1.0, m2_built exact, price
-        # within 2%) — surfaced separately so an operator can see this
-        # irreversible-in-practice merge path's volume without a SQL query.
+        # within PHOTO_MERGE_PRICE_RATIO — 5%) — surfaced separately so an
+        # operator can see this irreversible-in-practice merge path's
+        # volume without a SQL query.
         print(
             f"Of those, {result.photo_hash_auto_merged} were corroborated "
             f"photo_hash auto-merge(s) (issue #602/D-137 — exact photo "

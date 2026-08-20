@@ -527,14 +527,18 @@ def evaluate_pair(
         # exact signal. Still computed and surfaced in `detail` so a human
         # reviewing a `suggest` verdict sees the discriminating data point
         # rather than an unexplained near-perfect match — but issue #602/
-        # D-137 (2026-08-20) stopped this from gating the merge decision
-        # below: replaying candidate rules against 68 hand-reviewed
-        # photo_hash pairs found `m2_built` exact-equality alone already
-        # separates every one of the owner's 49 merges from his 19
-        # rejections (see photo_hash.PHOTO_MERGE_PRICE_RATIO's module
-        # comment for the full evidence table) — floor conflict was never
-        # exercised in that measurement and is no longer load-bearing once
-        # size must match exactly rather than within 5%.
+        # D-137 (2026-08-20, revised same day after a review caught the
+        # ORIGINAL "already separates every merge from every rejection"
+        # claim was a tautology — see photo_hash.PHOTO_MERGE_PRICE_RATIO's
+        # module comment for the corrected evidence) stopped this from
+        # gating the merge decision below. The narrower, correct basis:
+        # floor_conflict is present on a meaningful share of the owner's
+        # legitimate confirmed merges too (not a clean discriminator on its
+        # own), while m2_built exact-equality already accounts for every
+        # rejection in the replayed sample without it — so keeping
+        # floor_conflict as an additional required gate would cost real
+        # recall without preventing any false merge this sample
+        # demonstrates.
         floor_conflict = floors_conflict(a.floor, b.floor)
         if floor_conflict:
             detail["floor_conflict"] = True
@@ -578,9 +582,12 @@ def evaluate_pair(
         # first place), corroborated by an EXACT m2_built match and price
         # proximity, auto-merges rather than sitting in the review queue as
         # a suggestion. `sizes_equal` (exact equality), not `sizes_close`
-        # (a tolerance band) — D-137 measured m2_built as the real
-        # discriminator between the owner's real merge/reject decisions,
-        # and a 5% band is exactly what let a false merge through before.
+        # (a tolerance band): D-137's corrected replay found m2_built
+        # exact-equality never contradicted a rejection in the owner's
+        # sample (a narrower, specific claim — NOT that every real merge
+        # has identical m2_built, and NOT evidence the old 5% band caused
+        # a specific false merge; see the module comment for what the
+        # data actually supports).
         exact_match = Decimal(str(round(ratio, 3))) == Decimal("1.000")
         if (
             exact_match
@@ -866,6 +873,26 @@ def perform_merge(
         match_basis=result.basis,
         match_confidence=result.confidence,
     )
+
+    # Issue #602, D-137 (MAJOR review finding): property_merge_log could
+    # only distinguish an automatic merge from a human confirm_suggestion
+    # click by the IMPLICIT, undocumented confidence value (0.900 vs
+    # <=0.800, since a suggestion can never be filed above
+    # photo_hash._MAX_SUGGESTION_CONFIDENCE) -- no explicit record. Stamp
+    # it explicitly instead: confidence == PHOTO_MERGE_CONFIDENCE (0.900)
+    # on basis == "photo_hash" is reached ONLY by evaluate_pair's own
+    # merge branch (directly in `_run`, or via a fresh re-evaluation in
+    # `_reevaluate_pending_suggestion`) -- confirm_suggestion always
+    # preserves the ORIGINAL suggestion's confidence, which for photo_hash
+    # tops out at 0.800. This makes "was this specific merge auto-decided
+    # by the D-137 rule, or a human's explicit confirm" queryable from
+    # property_merge_log.detail alone, without relying on that implicit
+    # confidence-value convention.
+    if (
+        result.basis == "photo_hash"
+        and result.confidence == photo_hash.PHOTO_MERGE_CONFIDENCE
+    ):
+        snapshot = {**snapshot, "auto_merge_rule": "photo_hash_exact_d137"}
 
     with conn.cursor() as cur:
         cur.execute(

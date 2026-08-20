@@ -214,6 +214,36 @@ def _record(listing_id: int, property_id: int, **overrides) -> ListingRecord:
     )
 
 
+# Issue #602/D-137 review (MINOR): five different test classes each
+# defined their own byte-for-byte identical `_IDENTICAL_HEX` +
+# `_cache_with_identical_hashes` pair — consolidated into one module-level
+# constant/helper. #621 changed `_PhotoHashCache._cache` to hold `(url,
+# hash)` PAIRS, not bare `imagehash.ImageHash` values (`get()` unpacks
+# `for _url, h in self._cache[...]`) — this helper mirrors that shape with
+# synthetic URLs that are never asserted on, just structurally required so
+# `get()`/`get_pairs()` unpacking doesn't crash.
+_IDENTICAL_PHOTO_HEX = "ffff0000ffff0000"
+
+
+def _cache_with_identical_hashes(
+    listing_id_a: int, listing_id_b: int
+) -> _PhotoHashCache:
+    cache = _PhotoHashCache()
+    cache._cache[listing_id_a] = [
+        (
+            f"https://example.test/{listing_id_a}.jpg",
+            imagehash.hex_to_hash(_IDENTICAL_PHOTO_HEX),
+        )
+    ]
+    cache._cache[listing_id_b] = [
+        (
+            f"https://example.test/{listing_id_b}.jpg",
+            imagehash.hex_to_hash(_IDENTICAL_PHOTO_HEX),
+        )
+    ]
+    return cache
+
+
 class TestFetchListingRecordsExcludesRentals:
     """Issue #31: `fetch_listing_records` must never feed an
     `operation='rent'` row into the pairwise matcher — see that function's
@@ -610,29 +640,6 @@ class TestPhoneOrderingRescue:
     ever attempted.
     """
 
-    _IDENTICAL_HEX = "ffff0000ffff0000"
-
-    def _cache_with_identical_hashes(
-        self, listing_id_a: int, listing_id_b: int
-    ) -> _PhotoHashCache:
-        cache = _PhotoHashCache()
-        # Issue #615: _cache holds (url, hash) PAIRS now, not bare hashes —
-        # synthetic URLs here are never asserted on, just structurally
-        # required so `_PhotoHashCache.get()`'s unpacking doesn't crash.
-        cache._cache[listing_id_a] = [
-            (
-                f"https://example.test/{listing_id_a}.jpg",
-                imagehash.hex_to_hash(self._IDENTICAL_HEX),
-            )
-        ]
-        cache._cache[listing_id_b] = [
-            (
-                f"https://example.test/{listing_id_b}.jpg",
-                imagehash.hex_to_hash(self._IDENTICAL_HEX),
-            )
-        ]
-        return cache
-
     def test_ordering_lets_photo_hash_claim_a_pair_phone_would_otherwise_shadow(self):
         """Isolates the REORDER specifically (not the silencing): uses
         phone's SURVIVING corroborated-unconfirmed-kind tier (0.750
@@ -670,7 +677,7 @@ class TestPhoneOrderingRescue:
         assert phone_only.decision == "suggest"
         assert phone_only.confidence == Decimal("0.750")
 
-        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        evaluation = engine.evaluate_pair(a, b, _cache_with_identical_hashes(1, 2))
         assert evaluation is not None
         assert evaluation.basis == "photo_hash"
         assert evaluation.decision == "merge"
@@ -705,7 +712,7 @@ class TestPhoneOrderingRescue:
         )
         assert phone_extract.evaluate(a, b) is None  # silenced on its own
 
-        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        evaluation = engine.evaluate_pair(a, b, _cache_with_identical_hashes(1, 2))
         assert evaluation is not None
         assert evaluation.basis == "photo_hash"
         assert evaluation.decision == "merge"
@@ -892,28 +899,6 @@ class TestReferenceCodeConflictVeto:
 
     _LAT = Decimal("40.416775")
     _LON = Decimal("-3.703790")
-    _IDENTICAL_HEX = "ffff0000ffff0000"
-
-    def _cache_with_identical_hashes(
-        self, listing_id_a: int, listing_id_b: int
-    ) -> _PhotoHashCache:
-        cache = _PhotoHashCache()
-        # Issue #615: _cache holds (url, hash) PAIRS now, not bare hashes —
-        # synthetic URLs here are never asserted on, just structurally
-        # required so `_PhotoHashCache.get()`'s unpacking doesn't crash.
-        cache._cache[listing_id_a] = [
-            (
-                f"https://example.test/{listing_id_a}.jpg",
-                imagehash.hex_to_hash(self._IDENTICAL_HEX),
-            )
-        ]
-        cache._cache[listing_id_b] = [
-            (
-                f"https://example.test/{listing_id_b}.jpg",
-                imagehash.hex_to_hash(self._IDENTICAL_HEX),
-            )
-        ]
-        return cache
 
     def test_same_agency_different_codes_blocks_merge_despite_full_agreement(self):
         """The module docstring's own worst case: same building, same
@@ -945,7 +930,7 @@ class TestReferenceCodeConflictVeto:
             contact_raw="INMOBILIARIA SEVILLA 2000",
             reference_code="AB100",
         )
-        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        evaluation = engine.evaluate_pair(a, b, _cache_with_identical_hashes(1, 2))
         assert evaluation is None
 
     def test_cadastral_match_is_exempt_from_the_veto(self):
@@ -4631,20 +4616,32 @@ class TestStructuredFieldsNeverVetoesStrongerSignals:
 
 
 class TestPhotoHashAutoMerge:
-    """Issue #602/D-137 (2026-08-20, supersedes issue #188's original
-    5%-size/2%-price tolerances): auto-merge requires ALL THREE —
-    match_ratio == 1.0 (not >= 0.6), m2_built EXACTLY equal (not within
-    5%), and price within 2%. Anything short of that stays a suggestion.
+    """Issue #602/D-137 (2026-08-20, REVISED same day twice — first the
+    price band 2%->5%, then the evidence itself once a review caught the
+    original m2_built claim was a tautology): auto-merge requires ALL
+    THREE — match_ratio == 1.0 (not >= 0.6), m2_built EXACTLY equal (not
+    within 5%), and price within PHOTO_MERGE_PRICE_RATIO (5%). Anything
+    short of that stays a suggestion.
 
-    D-137 replaced the size tolerance after replaying candidate rules
+    D-137 replaced the old size tolerance after replaying candidate rules
     against 68 photo_hash pairs the owner hand-reviewed (49 merged, 19
     rejected): match_ratio does not discriminate his merges from his
-    rejections at all (both cluster near 1.0), but m2_built exact-equality
-    does (49/49 merges identical, 0/19 rejections identical). The
-    pre-existing issue #186 floor-conflict veto no longer gates this
-    decision either (see TestFloorConflictNoLongerGatesAutoMerge below) —
-    it's surfaced in `detail` for human review but is no longer
-    load-bearing once size must match exactly.
+    rejections at all (both cluster near 1.0). m2_built exact-equality is
+    a narrower guard than first claimed — NOT "identical on every merge"
+    (that claim measured a tautology: after a merge, both listings share
+    one property row, so a naive listing->property join for a CONFIRMED
+    pair returns the same m2_built twice by construction, not two
+    independent values — see D-137 for the corrected reconstruction via
+    property_merge_log.losing_property_id) — but it DOES hold cleanly on
+    the uncorrupted half of the comparison: zero of the owner's rejections
+    ever have identical m2_built (that side was never merged, so no
+    tautology applies to it). The pre-existing issue #186 floor-conflict
+    veto no longer gates this decision either (see
+    TestFloorConflictNoLongerGatesAutoMerge below) — it's surfaced in
+    `detail` for human review but is no longer a required gate, on the
+    narrower argument that it doesn't discriminate cleanly either (present
+    on a meaningful share of legitimate merges too) while m2_built-exact
+    already accounts for every rejection without it.
 
     Exercised via engine.evaluate_pair directly with a pre-populated
     _PhotoHashCache (real synthetic ImageHash values, distance controlled
@@ -4652,29 +4649,6 @@ class TestPhotoHashAutoMerge:
     is ever attempted — same no-network split
     test_dedup_signals_photo_hash.py's own tests use.
     """
-
-    _IDENTICAL_HEX = "ffff0000ffff0000"
-
-    def _cache_with_identical_hashes(
-        self, listing_id_a: int, listing_id_b: int
-    ) -> _PhotoHashCache:
-        cache = _PhotoHashCache()
-        # Issue #615: _cache holds (url, hash) PAIRS now, not bare hashes —
-        # synthetic URLs here are never asserted on, just structurally
-        # required so `_PhotoHashCache.get()`'s unpacking doesn't crash.
-        cache._cache[listing_id_a] = [
-            (
-                f"https://example.test/{listing_id_a}.jpg",
-                imagehash.hex_to_hash(self._IDENTICAL_HEX),
-            )
-        ]
-        cache._cache[listing_id_b] = [
-            (
-                f"https://example.test/{listing_id_b}.jpg",
-                imagehash.hex_to_hash(self._IDENTICAL_HEX),
-            )
-        ]
-        return cache
 
     def test_all_three_conditions_hold_auto_merges(self):
         """The clean case: ratio 1.0, m2_built exactly equal, price
@@ -4694,14 +4668,14 @@ class TestPhotoHashAutoMerge:
             m2_built=Decimal(74),
             current_price=Decimal(250000),
         )
-        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        evaluation = engine.evaluate_pair(a, b, _cache_with_identical_hashes(1, 2))
         assert evaluation.basis == "photo_hash"
         assert evaluation.decision == "merge"
         assert evaluation.confidence == Decimal("0.900")
 
-    def test_price_gap_within_2pct_auto_merges(self):
+    def test_price_gap_within_5pct_auto_merges(self):
         """58m² both sides (exact), 170.000€ vs 169.000€ — 0.59% price gap
-        (one portal a day stale). Inside the 2% price tolerance."""
+        (one portal a day stale). Comfortably inside the 5% price band."""
         a = _record(
             1,
             100,
@@ -4712,7 +4686,28 @@ class TestPhotoHashAutoMerge:
         b = _record(
             2, 200, source="solvia", m2_built=Decimal(58), current_price=Decimal(169000)
         )
-        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        evaluation = engine.evaluate_pair(a, b, _cache_with_identical_hashes(1, 2))
+        assert evaluation.decision == "merge"
+
+    def test_price_gap_just_inside_5pct_auto_merges(self):
+        """200.000€ vs 190.200€ — exactly 4.9% apart (9800/200000). Pins the
+        band from BELOW: a mutation that narrowed PHOTO_MERGE_PRICE_RATIO
+        below 4.9% would turn this red."""
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(70),
+            current_price=Decimal(200000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(70),
+            current_price=Decimal(190200),
+        )
+        evaluation = engine.evaluate_pair(a, b, _cache_with_identical_hashes(1, 2))
         assert evaluation.decision == "merge"
 
     # --- Guard 1: match_ratio must be exactly 1.0 -------------------------
@@ -4788,7 +4783,7 @@ class TestPhotoHashAutoMerge:
             m2_built=Decimal(77),
             current_price=Decimal(250000),
         )
-        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        evaluation = engine.evaluate_pair(a, b, _cache_with_identical_hashes(1, 2))
         assert evaluation.basis == "photo_hash"
         assert evaluation.decision == "suggest"
 
@@ -4807,7 +4802,7 @@ class TestPhotoHashAutoMerge:
             m2_built=Decimal(120),
             current_price=Decimal(200000),
         )  # 16.7% apart
-        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        evaluation = engine.evaluate_pair(a, b, _cache_with_identical_hashes(1, 2))
         assert evaluation.basis == "photo_hash"
         assert evaluation.decision == "suggest"
 
@@ -4829,13 +4824,13 @@ class TestPhotoHashAutoMerge:
             m2_built=Decimal(74),
             current_price=Decimal(250000),
         )
-        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        evaluation = engine.evaluate_pair(a, b, _cache_with_identical_hashes(1, 2))
         assert evaluation.basis == "photo_hash"
         assert evaluation.decision == "suggest"
 
     # --- Guard 3: price must be within 2% -----------------------------------
 
-    def test_price_gap_beyond_2pct_stays_a_suggestion(self):
+    def test_price_gap_well_beyond_5pct_stays_a_suggestion(self):
         a = _record(
             1,
             100,
@@ -4849,8 +4844,32 @@ class TestPhotoHashAutoMerge:
             source="fotocasa",
             m2_built=Decimal(70),
             current_price=Decimal(230000),
-        )  # 13% apart — well past the 2% price tolerance
-        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        )  # 13% apart — well past the 5% price band
+        evaluation = engine.evaluate_pair(a, b, _cache_with_identical_hashes(1, 2))
+        assert evaluation.decision == "suggest"
+
+    def test_price_gap_just_outside_5pct_stays_a_suggestion(self):
+        """200.000€ vs 189.000€ — exactly 5.5% apart (11000/200000). Review
+        finding: mutating PHOTO_MERGE_PRICE_RATIO from 5% up to 10% passed
+        every prior test here, because the only "beyond" case was 13% —
+        far enough past 5% to still read as "beyond" at 10% too. This pins
+        the band from ABOVE: a mutation that widened the ratio past 5.5%
+        would turn this red."""
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(70),
+            current_price=Decimal(200000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(70),
+            current_price=Decimal(189000),
+        )
+        evaluation = engine.evaluate_pair(a, b, _cache_with_identical_hashes(1, 2))
         assert evaluation.decision == "suggest"
 
     def test_missing_price_on_either_side_never_auto_merges(self):
@@ -4871,7 +4890,7 @@ class TestPhotoHashAutoMerge:
             m2_built=Decimal(74),
             current_price=Decimal(250000),
         )
-        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        evaluation = engine.evaluate_pair(a, b, _cache_with_identical_hashes(1, 2))
         assert evaluation.basis == "photo_hash"
         assert evaluation.decision == "suggest"
 
@@ -4879,23 +4898,20 @@ class TestPhotoHashAutoMerge:
 class TestFloorConflictNoLongerGatesAutoMerge:
     """Issue #602/D-137: the issue #186 floor-conflict veto used to gate
     the photo_hash exact-match auto-merge (`not floor_conflict` was a 4th
-    required condition). D-137 dropped it from the gate — replaying the
-    owner's 68 hand-reviewed pairs found m2_built exact-equality alone
-    already separates every merge from every rejection; floor was never
-    exercised in that measurement. `floor_conflict` is still computed and
-    surfaced in `detail` for a human reviewing a `suggest` verdict — this
-    just proves it no longer blocks the merge decision.
+    required condition). D-137 dropped it from the gate on a NARROWER
+    argument than first stated (the original "m2_built exact-equality
+    already separates every merge from every rejection" claim was a
+    measurement artifact — see TestPhotoHashAutoMerge's own docstring):
+    floor_conflict is present on a meaningful share of the owner's
+    legitimate confirmed merges too, so it is not a clean discriminator on
+    its own, while m2_built exact-equality already accounts for every
+    rejection in the replayed sample without it — keeping floor_conflict
+    as an additional required gate would cost real recall without
+    preventing any false merge this sample demonstrates. `floor_conflict`
+    is still computed and surfaced in `detail` for a human reviewing a
+    `suggest` verdict — this just proves it no longer blocks the merge
+    decision.
     """
-
-    _IDENTICAL_HEX = "ffff0000ffff0000"
-
-    def _cache_with_identical_hashes(
-        self, listing_id_a: int, listing_id_b: int
-    ) -> _PhotoHashCache:
-        cache = _PhotoHashCache()
-        cache._cache[listing_id_a] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
-        cache._cache[listing_id_b] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
-        return cache
 
     def test_conflicting_floor_still_auto_merges_when_all_three_conditions_hold(self):
         """Same structural shape as the old suggestion-197 floor test
@@ -4921,7 +4937,7 @@ class TestFloorConflictNoLongerGatesAutoMerge:
             current_price=Decimal(250000),
             floor="A partir de la 15ª planta",
         )
-        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        evaluation = engine.evaluate_pair(a, b, _cache_with_identical_hashes(1, 2))
         assert evaluation.basis == "photo_hash"
         assert evaluation.decision == "merge"
         assert evaluation.detail["floor_conflict"] is True
@@ -4943,7 +4959,7 @@ class TestFloorConflictNoLongerGatesAutoMerge:
             current_price=Decimal(250000),
             floor="3ª planta",
         )
-        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        evaluation = engine.evaluate_pair(a, b, _cache_with_identical_hashes(1, 2))
         assert evaluation.decision == "merge"
         assert "floor_conflict" not in evaluation.detail
 
@@ -4952,26 +4968,28 @@ class TestOwnerDecisionHistoryReplay:
     """Issue #602/D-137: the rule this class pins is the one derived from
     replaying candidate rules against 68 photo_hash pairs the owner
     hand-reviewed on 2026-08-19 (49 merged, 19 rejected) — see D-137 for
-    the full evidence table. This is the test that proves the RULE, not a
-    synthetic happy path: one fixture shaped like his merge pattern, one
-    shaped like his reject pattern (same match_ratio, differing m2_built —
-    the actual finding, since photo ratio alone did NOT discriminate his
-    real decisions), and the explicit 74-vs-77 m² near-miss the rule must
+    the full evidence table, INCLUDING the correction: an earlier version
+    of this evidence claimed "all 49 merges had identical m2_built", which
+    was a measurement artifact (a post-merge listing->property join
+    returns one property row's m2_built for both sides of an already-
+    confirmed pair, by construction — not two independent values). The
+    corrected reconstruction (via property_merge_log.losing_property_id)
+    found roughly half of his confirmed merges actually have identical
+    m2_built — what survives cleanly, with NO tautology, is that ZERO of
+    his 19 rejections ever do (that side of the comparison was never
+    merged, so no artifact applies to it). This is the test that proves
+    the RULE, not a synthetic happy path: one fixture shaped like the
+    identical-m2_built SUBSET of his merges (the shape the rule actually
+    requires), one shaped like his reject pattern (same match_ratio,
+    differing m2_built — ratio alone did NOT discriminate his real
+    decisions), and the explicit 74-vs-77 m² near-miss the rule must
     still refuse.
     """
 
-    _IDENTICAL_HEX = "ffff0000ffff0000"
-
-    def _cache_with_identical_hashes(
-        self, listing_id_a: int, listing_id_b: int
-    ) -> _PhotoHashCache:
-        cache = _PhotoHashCache()
-        cache._cache[listing_id_a] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
-        cache._cache[listing_id_b] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
-        return cache
-
     def test_shape_matching_owner_merge_pattern_auto_merges(self):
-        """His 49 merges: ratio ~1.0, m2_built identical on both sides."""
+        """The identical-m2_built subset of his 49 merges: ratio ~1.0,
+        m2_built identical on both sides — the shape this rule requires,
+        not a claim that every one of his 49 merges looked like this."""
         a = _record(
             1,
             100,
@@ -4986,7 +5004,7 @@ class TestOwnerDecisionHistoryReplay:
             m2_built=Decimal(90),
             current_price=Decimal(310000),
         )
-        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        evaluation = engine.evaluate_pair(a, b, _cache_with_identical_hashes(1, 2))
         assert evaluation.decision == "merge"
 
     def test_shape_matching_owner_reject_pattern_stays_a_suggestion(self):
@@ -5008,7 +5026,7 @@ class TestOwnerDecisionHistoryReplay:
             m2_built=Decimal(96),
             current_price=Decimal(310000),
         )
-        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        evaluation = engine.evaluate_pair(a, b, _cache_with_identical_hashes(1, 2))
         assert evaluation.decision == "suggest"
 
     def test_near_miss_74_vs_77_m2_matches_no_owner_merge(self):
@@ -5029,7 +5047,7 @@ class TestOwnerDecisionHistoryReplay:
             m2_built=Decimal(77),
             current_price=Decimal(250000),
         )
-        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        evaluation = engine.evaluate_pair(a, b, _cache_with_identical_hashes(1, 2))
         assert evaluation.decision == "suggest"
 
 
@@ -5079,10 +5097,101 @@ class TestPhotoHashAutoMergeVisibility:
         assert result.photo_hash_auto_merged == 1
         with dedup_db.cursor() as cur:
             cur.execute(
-                "SELECT match_basis FROM property_merge_log "
+                "SELECT match_basis, confidence, detail FROM property_merge_log "
                 "ORDER BY created_at DESC LIMIT 1"
             )
-            assert cur.fetchone()[0] == "photo_hash"
+            basis, confidence, detail = cur.fetchone()
+            assert basis == "photo_hash"
+            # MAJOR review finding: property_merge_log could previously
+            # only distinguish an auto-merge from a human confirm by the
+            # IMPLICIT confidence value (0.900 vs <=0.800) — now explicit.
+            assert confidence == Decimal("0.900")
+            assert detail["auto_merge_rule"] == "photo_hash_exact_d137"
+
+    def test_human_confirmed_photo_hash_merge_is_not_stamped_auto_merge_rule(
+        self, dedup_db
+    ):
+        """The other half of the MAJOR review finding: a human-confirmed
+        suggestion (confidence capped at 0.800 for photo_hash, since a
+        suggestion can never be filed at 0.900) must NOT carry the
+        `auto_merge_rule` flag — it was a person's decision, not the D-137
+        rule firing automatically, even though both paths call
+        `perform_merge`."""
+        photo_a = "https://cdn.milanuncios.com/visibility-human-a.jpg"
+        photo_b = "https://cdn.fotocasa.es/visibility-human-b.jpg"
+        self._seed_stored_hash(dedup_db, photo_a, self._IDENTICAL_HEX, "milanuncios")
+        self._seed_stored_hash(dedup_db, photo_b, self._IDENTICAL_HEX, "fotocasa")
+        # m2_built differs (91 vs 96) so the AUTO-merge gate does NOT fire
+        # on its own — this pair can only become 'confirmed' via a human
+        # explicitly calling confirm_suggestion.
+        listing_a, _pa, listing_b, _pb = _insert_pair(
+            dedup_db,
+            "milanuncios",
+            "fotocasa",
+            "photo-hash-visibility-human",
+            m2_built_a=Decimal(91),
+            m2_built_b=Decimal(96),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.photo_hash_auto_merged == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM suggested_merge WHERE listing_id_a = %s "
+                "AND listing_id_b = %s",
+                (*sorted((listing_a, listing_b)),),
+            )
+            suggestion_id = cur.fetchone()[0]
+
+        engine.confirm_suggestion(dedup_db, suggestion_id)
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT confidence, detail FROM property_merge_log "
+                "ORDER BY created_at DESC LIMIT 1"
+            )
+            confidence, detail = cur.fetchone()
+            assert confidence != Decimal("0.900")
+            assert "auto_merge_rule" not in detail
+
+    def test_production_path_persists_the_counter_to_dedup_runs(self, dedup_db):
+        """MAJOR review finding: `photo_hash_auto_merged` was only ever
+        printed by `ps dedup run` — production runs via
+        `orchestrator.run_dedup` (the scheduler/connector-sweep trigger),
+        whose `_finish_dedup_run` call didn't persist the counter anywhere,
+        so it was invisible outside a manual CLI invocation. This exercises
+        the actual production entry point, not `engine.run()` directly."""
+        photo_a = "https://cdn.milanuncios.com/visibility-orch-a.jpg"
+        photo_b = "https://cdn.fotocasa.es/visibility-orch-b.jpg"
+        self._seed_stored_hash(dedup_db, photo_a, self._IDENTICAL_HEX, "milanuncios")
+        self._seed_stored_hash(dedup_db, photo_b, self._IDENTICAL_HEX, "fotocasa")
+        _insert_pair(
+            dedup_db,
+            "milanuncios",
+            "fotocasa",
+            "photo-hash-visibility-orch",
+            m2_built_a=Decimal(74),
+            m2_built_b=Decimal(74),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+
+        result = orchestrator.run_dedup(dedup_db, trigger="test")
+
+        assert result is not None
+        assert result.photo_hash_auto_merged == 1
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT photo_hash_auto_merged FROM dedup_runs "
+                "ORDER BY started_at DESC LIMIT 1"
+            )
+            assert cur.fetchone()[0] == 1
 
 
 class TestPhotoHashMatchedPairsThreading:

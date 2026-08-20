@@ -177,10 +177,12 @@ _MAX_SUGGESTION_CONFIDENCE = Decimal("0.800")
 # 1.0 is a clean, non-borderline cut — no calibration needed between
 # "clearly a suggestion" and "clearly a merge".
 #
-# Issue #602/D-137 (2026-08-20) — supersedes #602's own original proposal
-# (partial ratio >= 0.6, m2 within 5%, price within 5%, a floor-from-text
-# veto, a photo-promiscuity guard) after replaying candidate rules against
-# 68 photo_hash pairs the owner reviewed by hand (49 merged, 19 rejected):
+# Issue #602/D-137 (2026-08-20, REVISED same day after a review caught the
+# original evidence was a tautology — see below) — supersedes #602's own
+# original proposal (partial ratio >= 0.6, m2 within 5%, price within 5%,
+# a floor-from-text veto, a photo-promiscuity guard) after replaying
+# candidate rules against 68 photo_hash pairs the owner reviewed by hand
+# (49 merged, 19 rejected):
 #
 #   - **match_ratio does not discriminate at all.** The 49 merges averaged
 #     ratio 1.000; the 19 rejections averaged 0.996 (range 0.929-1.000) —
@@ -189,38 +191,119 @@ _MAX_SUGGESTION_CONFIDENCE = Decimal("0.800")
 #     owner says are different: the promotion/same-development pattern he
 #     predicted from the start. So this signal keeps requiring the FULL
 #     ratio == 1.0 that issue #188 already required — never lowered to 0.6.
-#   - **m2_built is the actual discriminator, not a proximity band.** ALL
-#     49 merges had identical m2_built; NONE of the 19 rejections did. The
-#     previous 5% size band (see the now-superseded PHOTO_MERGE_SIZE_RATIO
-#     comment this replaces) is exactly what a same-building-different-unit
-#     false merge slips through on — a 6m² gap on a ~145m² flat is 4.14%,
-#     comfortably inside a 5% band. `etl.dedup.engine.evaluate_pair` now
-#     requires `address_coords.sizes_equal` (exact equality, no tolerance)
-#     instead of `sizes_close` — a strictly narrower gate. The pre-existing
-#     issue #186 floor-conflict veto no longer gates this merge decision
-#     either (still computed and surfaced in `detail` for a human reviewing
-#     a *suggestion*): it's no longer load-bearing once m2_built must be
-#     exact, and #602's own broader floor-from-text extractor was never
-#     built — this rule doesn't need it. `structured_fields_conflict`
-#     (D-117, property_type/rooms) and the D-116 reference-code veto are
-#     unaffected — see evaluate_pair's own docstring and D-117/D-116.
-#   - **Price band: 2%, not 5% (also measured clean).** Conditioned on
-#     ratio == 1.0 + m2_built identical, EVERY price band the owner's
-#     history was replayed against contradicted zero of the 19 rejections —
-#     exact price (29/29 merges matched), <=1% (31/31), <=2% (31/31), <=3%
-#     (35/35), <=5% (47/49). 2% is chosen deliberately over the also-clean
-#     3%/5% bands: 19 rejections is thin evidence for an irreversible
-#     operation (a wrong auto-merge fuses two real properties, corrupting
-#     their score/feedback history), and the owner named 1-2% himself when
-#     discussing this. `PHOTO_MERGE_PRICE_RATIO` stays a single named
-#     constant (this project's convention for every dedup threshold — none
-#     of MIN_MATCH_RATIO/address_coords._MAX_SIZE_RATIO/etc. are wired to
-#     config/schema.yaml) so widening it later, on more labeled evidence, is
-#     a one-line change to a documented constant — a data decision, not a
-#     rediscovery of this reasoning.
+#     NOTE: `match_ratio` is the fraction of the SMALLER photo set with a
+#     match in the larger one (see `match_ratio` below) — "== 1.0" means
+#     every photo on the smaller side matched, i.e. the smaller set is a
+#     SUBSET of the larger, not that the two sets are identical in size. A
+#     3-photo listing fully contained in a 30-photo listing's gallery
+#     clears this exactly as a 10-vs-10 exact match does.
+#   - **m2_built is a real but narrower discriminator than first measured.**
+#     The FIRST version of this decision claimed "ALL 49 merges had
+#     identical m2_built; NONE of the 19 rejections did" — that claim was
+#     WRONG, a measurement artifact caught in review: `m2_built` lives only
+#     on `property`, and after a merge both listings in a pair point at the
+#     SAME property row, so naively joining `listing -> property` for an
+#     already-confirmed pair returns one m2_built value twice by
+#     construction, not two independent measurements. Recovered correctly
+#     via `property_merge_log.losing_property_id` (that property row is
+#     never touched again once its listings are repointed, so its
+#     m2_built is the genuine PRE-merge value; the survivor side is
+#     approximated from its CURRENT m2_built, which `perform_merge` never
+#     rewrites but could in principle have drifted since — an upper-bound
+#     caveat, not a exact one): roughly half of confirmed pairs actually
+#     had identical m2_built, not all of them (see D-137 for the
+#     reconstructed counts, which vary by sample). What DOES survive
+#     cleanly: **zero of the owner's rejections had identical m2_built**
+#     (rejected pairs were never merged, so this side of the comparison
+#     has no tautology — it's a direct, uncorrupted listing->property
+#     join). So the rule is narrower than first claimed — specific
+#     (no rejection would slip through), not maximally sensitive (not
+#     every real merge has identical m2_built) — which is exactly the
+#     conservative trade an irreversible auto-merge should take: `m2_built`
+#     exact-equality (`address_coords.sizes_equal`, no tolerance, replacing
+#     the old `sizes_close(..., 5%)`) is kept as a required gate because it
+#     never contradicted a rejection, not because it captures every merge.
+#   - **The issue #186 floor-conflict veto is dropped from this gate on a
+#     NARROWER argument than first stated** (the first version claimed
+#     m2_built-exact "already separates every merge from every rejection"
+#     — also downstream of the same tautology bug above and not the actual
+#     basis for this call). The real basis: floor_conflict is present on a
+#     meaningful fraction of legitimate human-confirmed merges too (not
+#     just rejections) — i.e. it is not a clean discriminator on its own —
+#     while m2_built exact-equality ALREADY accounts for every rejection in
+#     the sample without it. Keeping floor_conflict as an additional
+#     required gate would cost real recall (blocking genuine merges) without
+#     preventing any false merge this sample demonstrates, since nothing
+#     m2_built-exact already lets through needed floor_conflict to catch
+#     it. `floor_conflict` is still computed and written into
+#     `PairEvaluation.detail` on every photo_hash verdict so a human
+#     reviewing a `suggest` row still sees it — it simply isn't a required
+#     gate. #602's own proposed enhancement (reading floor from *both* the
+#     structured field and the description text) was never built, since
+#     #602's whole rule is superseded by the simpler one here.
+#     `structured_fields_conflict` (D-117, property_type/rooms) and the
+#     D-116 reference-code veto are unaffected — see evaluate_pair's own
+#     docstring and D-117/D-116.
+#   - **Price band: 5%, revised from an initial 2% same-day (owner
+#     decision, 2026-08-20).** Conditioned on ratio == 1.0 + m2_built
+#     identical, EVERY price band tested against the owner's rejections
+#     produced zero contradictions in every replay of this sample (see
+#     D-137 for the exact reconstructed counts — subject to the same
+#     survivor-side-is-current-not-historical caveat as m2_built above,
+#     though price band matters less here: these are FIRST-shipped merges
+#     evaluated against fresh data, not the historical-auto-merge
+#     reconstruction problem described in D-137's "would still fire"
+#     analysis). A 2% band was shipped first (thinking 19 rejections was
+#     too thin a sample to spend past the owner's own named 1-2% figure),
+#     but measured against the LIVE pending queue (not just the 68-pair
+#     hand-labeled sample) it was effectively inert: of the pairs already
+#     clearing ratio==1.0 + m2_built identical, only a small fraction also
+#     cleared 2% price — most of the qualifying candidates sit precisely in
+#     the 2-5% band the 2% cut excluded. An inert irreversible-in-practice
+#     automation is worse than none: it creates false confidence in
+#     coverage the feature doesn't actually provide. 5% was then adopted
+#     instead, since it also measured zero contradictions on the same
+#     sample — this is not a loosening on a hunch, it is the smallest band
+#     that gives the rule actual reach.
 #
-# See D-137 for the full replay methodology and evidence table.
-PHOTO_MERGE_PRICE_RATIO = Decimal("0.02")
+#     **Why a 2-5% price gap with identical photos and identical
+#     m2_built is corroborating evidence, not counter-evidence**: it is
+#     the signature of one property with a stale price on one portal (a
+#     price change hasn't propagated to every listing yet), not two
+#     different units of a development — distinct units in a development
+#     differ in m2_built (already excluded by the exact-equality gate
+#     above) or otherwise share the developer's list price exactly.
+#
+#     The now-not-taken option is anything WIDER than 5% — not because a
+#     wider band measured unsafe (it wasn't tested past 5%), but because
+#     19 hand-labeled rejections is still a thin sample to spend further
+#     past what's been measured; 5% is the widest band this specific
+#     replay actually covers. `PHOTO_MERGE_PRICE_RATIO` stays a single
+#     named constant (this project's convention for every dedup threshold
+#     — none of MIN_MATCH_RATIO/address_coords._MAX_SIZE_RATIO/etc. are
+#     wired to config/schema.yaml) so widening it further later, on more
+#     labeled evidence, is a one-line change to a documented constant — a
+#     data decision, not a rediscovery of this reasoning.
+#
+#   - **This is not a net-new merge path — it TIGHTENS an existing,
+#     high-volume, already-irreversible one.** `property_merge_log` shows
+#     several hundred photo_hash auto-merges already performed under the
+#     pre-existing issue #188 rule (exact ratio + 5% size + 2% price)
+#     before this decision. Since the old rule's price band (2%) is a
+#     SUBSET of the new one (5%), and `m2_built` is far more stable
+#     post-merge than price (a surviving listing's price keeps getting
+#     re-fetched; m2_built does not), the overwhelming majority of those
+#     historical auto-merges have identical m2_built and would fire again
+#     unchanged under the new rule — the reduction is concentrated in the
+#     minority that differ on m2_built alone. See D-137 for the exact
+#     reconstructed count. Framing this as "how many pairs does this add"
+#     understates what actually matters: how much of an already-running,
+#     irreversible automation this tightens versus leaves as-is.
+#
+# See D-137 for the full replay methodology, the corrected evidence table,
+# the property-pair-level live-queue reach measurement, and the
+# would-this-historical-merge-still-fire breakdown.
+PHOTO_MERGE_PRICE_RATIO = Decimal("0.05")
 PHOTO_MERGE_CONFIDENCE = Decimal("0.900")
 
 
