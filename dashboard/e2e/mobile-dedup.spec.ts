@@ -13,9 +13,12 @@
  *
  * This spec seeds one profile-relevant, confidence-1.0 `suggested_merge`
  * row (sorts to the very top of the default queue — see lib/dedup.ts's
- * `ORDER BY profile_relevant DESC, confidence DESC, created_at DESC` — so
- * the assertions don't depend on queue contents at test time) and drives
- * the real page under `devices["iPhone 13"]` emulation, asserting against
+ * `ORDER BY profile_relevant DESC, top_confidence DESC, latest_created_at
+ * DESC` — so the assertions don't depend on queue contents at test time)
+ * and drives the real page under `devices["iPhone 13"]` emulation, keyed
+ * on `data-pair-key` since issue #605 Part 2 regrouped the queue by
+ * property pair (a card's identity is no longer one `suggestion-id`).
+ * Asserts against
  * `document.documentElement.clientWidth` — NOT `window.innerWidth`, which
  * reports 653 under this project's Chromium mobile emulation and would
  * silently hide every one of these failures (see card-detail-ux.spec.ts's
@@ -49,6 +52,13 @@ const NAME_PREFIX = "e2e-mobile-dedup-";
 
 let pool: Pool;
 let dbAvailable = false;
+
+/** The pair_key the grouped queue derives — canonical lower-id-first
+ * property order, matching lib/dedup.ts's `PENDING_PAIR_CTE`. */
+function pairKeyOf(propA: number, propB: number): string {
+  const [lo, hi] = [propA, propB].sort((a, b) => a - b);
+  return `${lo}-${hi}`;
+}
 
 async function insertProperty(overrides: { address: string; m2_built?: number }): Promise<number> {
   const result = await pool.query<{ id: number }>(
@@ -174,6 +184,7 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
     });
     await markProfileMatch(profileId, propA);
     const suggestionId = await insertSuggestion(listingA, listingB);
+    const pairKey = pairKeyOf(propA, propB);
 
     try {
       await page.goto("/admin/dedup");
@@ -185,7 +196,7 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
       const clientWidth = await page.evaluate(() => document.documentElement.clientWidth);
       expect(clientWidth).toBeLessThanOrEqual(400);
 
-      const card = page.locator(`[data-suggestion-id="${suggestionId}"]`);
+      const card = page.locator(`[data-pair-key="${pairKey}"]`);
       await expect(card).toBeVisible();
       await card.scrollIntoViewIfNeeded();
 
@@ -260,12 +271,13 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
     const listingB = await insertListing(propB, { source: "fotocasa", current_price: 150000 });
     await markProfileMatch(profileId, propA);
     const suggestionId = await insertSuggestion(listingA, listingB);
+    const pairKey = pairKeyOf(propA, propB);
 
     try {
       await page.goto("/admin/dedup");
       await assertNoErrorSurface(page);
 
-      const card = page.locator(`[data-suggestion-id="${suggestionId}"]`);
+      const card = page.locator(`[data-pair-key="${pairKey}"]`);
       await expect(card).toBeVisible();
       await card.scrollIntoViewIfNeeded();
 

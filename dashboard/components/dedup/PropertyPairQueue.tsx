@@ -4,35 +4,40 @@ import { useCallback, useEffect, useState } from "react";
 import { ErrorDisplay } from "@/components/ErrorDisplay";
 import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
-import { MATCH_BASIS_LABELS, MATCH_BASES, type DedupSuggestion, type DedupSuggestionCounts, type MatchBasis } from "@/lib/dedup-shared";
-import { SuggestionCard } from "./SuggestionCard";
+import {
+  MATCH_BASIS_LABELS,
+  MATCH_BASES,
+  type DedupPropertyPairCounts,
+  type DedupPropertyPairSuggestion,
+  type MatchBasis,
+} from "@/lib/dedup-shared";
+import { PropertyPairCard } from "./PropertyPairCard";
 
 interface ListResponse {
-  items: DedupSuggestion[];
-  counts: DedupSuggestionCounts;
+  items: DedupPropertyPairSuggestion[];
+  counts: DedupPropertyPairCounts;
   nextOffset: number | null;
 }
 
 /**
- * The dedup review queue (the "missing half" of the dedup workflow — see
- * lib/dedup.ts's module docstring). One card per pending `suggested_merge`
- * row, strongest evidence first.
+ * The dedup review queue, grouped by PROPERTY pair (issue #605 Part 2 —
+ * supersedes the old per-listing-pair `SuggestionQueue`). #600 measured 892
+ * pending listing-pair rows collapsing to 669 distinct property-pair
+ * questions; one property pair alone had 38 identical listing-pair rows,
+ * because property A with 6 listings and property B with 7 produce up to
+ * 42 listing-pair combinations all asking "is A the same property as B?".
+ * One card per group here, not one per listing-pair row.
  *
- * Filter chips (issue: 527 of 585 pending suggestions are `fuzzy` at ~0.585
- * average confidence — mostly noise; 52 are `photo_hash` at ~0.78, the
- * high-value ones) let an operator jump straight past the fuzzy tail rather
- * than clicking "siguiente" 500 times before reaching a photo match. The
- * default sort (confidence DESC, see lib/dedup.ts) already surfaces
- * photo_hash/reference_code/phone ahead of fuzzy even with no filter
- * applied — the chips are for deliberately narrowing, not for making the
- * strong evidence reachable at all.
+ * Filter chips and the "solo mis perfiles" toggle keep the same semantics
+ * as the old flat queue (see lib/dedup.ts's `listDedupPropertyPairSuggestions`
+ * docstring for the one difference: a basis filter narrows to GROUPS
+ * containing at least one row of that basis, but each group still shows
+ * its FULL evidence — nothing is hidden by narrowing).
  */
-export function SuggestionQueue() {
-  const [items, setItems] = useState<DedupSuggestion[]>([]);
-  const [counts, setCounts] = useState<DedupSuggestionCounts>({ total: 0, by_basis: {}, profile_relevant_total: 0 });
+export function PropertyPairQueue() {
+  const [items, setItems] = useState<DedupPropertyPairSuggestion[]>([]);
+  const [counts, setCounts] = useState<DedupPropertyPairCounts>({ total: 0, by_basis: {}, profile_relevant_total: 0 });
   const [basis, setBasis] = useState<MatchBasis | null>(null);
-  // "solo mis perfiles" toggle (issue #246). Default false = "ver todos": show
-  // the whole queue with profile-relevant pairs sorted first (nothing hidden).
   const [onlyProfileRelevant, setOnlyProfileRelevant] = useState(false);
   const [nextOffset, setNextOffset] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
@@ -41,7 +46,7 @@ export function SuggestionQueue() {
 
   const fetchPage = useCallback(
     async (offset: number, replace: boolean) => {
-      const url = new URL("/api/dedup/suggestions", window.location.origin);
+      const url = new URL("/api/dedup/property-pairs", window.location.origin);
       if (basis) url.searchParams.set("basis", basis);
       if (onlyProfileRelevant) url.searchParams.set("profile", "relevant");
       url.searchParams.set("offset", String(offset));
@@ -77,19 +82,26 @@ export function SuggestionQueue() {
     }
   };
 
-  // A resolved suggestion (confirmed or rejected) drops out of the queue
-  // immediately — no need to re-fetch the whole list for one row, and the
-  // per-chip counts decrement to match without a round trip.
-  const handleResolved = (suggestionId: number) => {
-    setItems((prev) => prev.filter((s) => s.id !== suggestionId));
+  // A resolved group drops out immediately — no full refetch for one card.
+  // Per-chip counts are harder to keep exact here (a group can carry
+  // several bases, see DedupPropertyPairCounts's docstring), so this
+  // decrements `total`/`profile_relevant_total` precisely and every basis
+  // the resolved group touched by 1 each — correct for the common case (a
+  // basis bucket never goes negative or double-counts a still-pending
+  // group), and a stale-by-a-little chip count self-heals on the next
+  // filter click anyway (fetchPage always refreshes `counts` from the
+  // server).
+  const handleResolved = (pairKey: string) => {
+    setItems((prev) => prev.filter((p) => p.pair_key !== pairKey));
     setCounts((prev) => {
-      const resolved = items.find((s) => s.id === suggestionId);
+      const resolved = items.find((p) => p.pair_key === pairKey);
       if (!resolved) return prev;
       const nextByBasis = { ...prev.by_basis };
-      const current = nextByBasis[resolved.match_basis] ?? 0;
-      if (current > 0) nextByBasis[resolved.match_basis] = current - 1;
-      // Keep profile_relevant_total in sync using the resolved row's own flag,
-      // so the "N relevantes" figure decrements without a refetch.
+      const bases = new Set(resolved.evidence.map((e) => e.match_basis));
+      for (const b of bases) {
+        const current = nextByBasis[b] ?? 0;
+        if (current > 0) nextByBasis[b] = current - 1;
+      }
       const nextRelevant = resolved.profile_relevant
         ? Math.max(0, prev.profile_relevant_total - 1)
         : prev.profile_relevant_total;
@@ -167,8 +179,8 @@ export function SuggestionQueue() {
         </p>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {items.map((s) => (
-            <SuggestionCard key={s.id} suggestion={s} onResolved={handleResolved} />
+          {items.map((p) => (
+            <PropertyPairCard key={p.pair_key} pair={p} onResolved={handleResolved} />
           ))}
         </div>
       )}

@@ -4,16 +4,23 @@
  * workflow" (see that file's module docstring).
  *
  * What's proven here (TypeScript-side, against a real DB):
- *   - listDedupSuggestions joins both sides' listing+property correctly and
- *     orders confidence DESC (the ordering the review queue UI depends on
- *     to put photo_hash/reference_code ahead of the much larger fuzzy tail).
- *   - the `basis` filter narrows correctly.
- *   - profile-relevance (issue #246): pairs touching an active search profile
- *     sort first by default (mutation-checked against the ORDER BY), the
- *     `onlyProfileRelevant` toggle hard-filters, the default view hides
- *     nothing, and archived/matched=false profiles never confer relevance.
- *   - getDedupSuggestionCounts aggregates per match_basis over the FULL
- *     pending set, not just one page, and adds profile_relevant_total.
+ *   - listDedupPropertyPairSuggestions groups every pending suggested_merge
+ *     row by PROPERTY pair (issue #605 Part 2), joins both sides'
+ *     listing+property data correctly, normalizes each evidence row to the
+ *     group's canonical (lo, hi) property order regardless of which side
+ *     `listing_id_a`/`listing_id_b` recorded, and leads with the strongest
+ *     evidence (confidence DESC).
+ *   - the `basis` filter narrows to GROUPS containing that basis while
+ *     keeping each group's FULL evidence; `onlyProfileRelevant` hard-filters
+ *     on a group-level bool_or; profile-relevant groups sort first by
+ *     default (issue #246, preserved from the pre-#605 flat view); the
+ *     default view hides nothing; an archived profile or matched=false
+ *     state never confers relevance.
+ *   - issue #605 Part 1's same-property exclusion holds in the grouped view
+ *     too — a pair whose two listings already share a property_id never
+ *     forms (or joins) a group.
+ *   - getDedupPropertyPairCounts counts distinct GROUPS, not underlying
+ *     rows, and `by_basis` is basis-membership (can sum above `total`).
  *   - enqueueDedupAction/getDedupAction round-trip a real
  *     suggested_merge_action row.
  *   - getSuggestionStatus reflects confirmed/rejected/pending correctly.
@@ -35,9 +42,9 @@ import { resetPool } from "@/lib/db-write";
 import {
   enqueueDedupAction,
   getDedupAction,
-  getDedupSuggestionCounts,
+  getDedupPropertyPairCounts,
   getSuggestionStatus,
-  listDedupSuggestions,
+  listDedupPropertyPairSuggestions,
 } from "../dedup";
 
 async function withRealDb(fn: (pool: Pool) => Promise<void>) {
@@ -191,264 +198,6 @@ describe.runIf(dbAvailable)("dedup review queue — real Postgres", () => {
     return id;
   }
 
-  it("joins both sides' listing + property data for a full comparison view", async () => {
-    await withRealDb(async (pool) => {
-      const propA = await insertProperty(pool, { address: "Calle A 1" });
-      const propB = await insertProperty(pool, { address: "Calle B 2" });
-      const listingA = await insertListing(pool, propA, { source: "milanuncios", current_price: 150000 });
-      const listingB = await insertListing(pool, propB, { source: "fotocasa", current_price: 160000 });
-      await insertSuggestion(pool, listingA, listingB, { match_basis: "photo_hash", confidence: 0.8 });
-
-      const items = await listDedupSuggestions({});
-      const found = items.find((s) => s.listing_a.listing_id === listingA || s.listing_b.listing_id === listingA);
-      expect(found).toBeDefined();
-      const [side1, side2] = [found!.listing_a, found!.listing_b].sort((a, b) => a.listing_id - b.listing_id);
-      const sortedListings = [listingA, listingB].sort((a, b) => a - b);
-      expect(side1.listing_id).toBe(sortedListings[0]);
-      expect(side2.listing_id).toBe(sortedListings[1]);
-      expect(found!.match_basis).toBe("photo_hash");
-      expect(found!.confidence).toBeCloseTo(0.8);
-      expect([side1.source, side2.source].sort()).toEqual(["fotocasa", "milanuncios"]);
-    });
-  });
-
-  it('excludes a pending pair whose two listings already share a property_id — the "ya se había fusionado" read-side filter (issue #605 Part 1)', async () => {
-    await withRealDb(async (pool) => {
-      // Stale pair: both listings already unified under the same property by
-      // some OTHER merge since this suggestion was filed. #600 measured 72
-      // of these live — the review query must never serve one.
-      const sharedProperty = await insertProperty(pool);
-      const lA = await insertListing(pool, sharedProperty, { source: "fotocasa" });
-      const lB = await insertListing(pool, sharedProperty, { source: "idealista" });
-      const staleId = await insertSuggestion(pool, lA, lB, { match_basis: "photo_hash", confidence: 0.95 });
-
-      // Genuine still-pending pair across two DIFFERENT properties, so the
-      // test can't pass by the filter accidentally hiding everything.
-      const propA = await insertProperty(pool);
-      const propB = await insertProperty(pool);
-      const lGenuineA = await insertListing(pool, propA);
-      const lGenuineB = await insertListing(pool, propB);
-      const genuineId = await insertSuggestion(pool, lGenuineA, lGenuineB, {
-        match_basis: "photo_hash",
-        confidence: 0.7,
-      });
-
-      const items = await listDedupSuggestions({ limit: 100 });
-      const ids = new Set(items.map((s) => s.id));
-      expect(ids.has(staleId)).toBe(false);
-      expect(ids.has(genuineId)).toBe(true);
-
-      // The count badge must agree with the list — not just the list itself.
-      const counts = await getDedupSuggestionCounts();
-      expect(counts.total).toBe(1);
-      expect(counts.by_basis.photo_hash).toBe(1);
-    });
-  });
-
-  it("same-property exclusion also applies to profile_relevant_total and the onlyProfileRelevant toggle (issue #605 Part 1)", async () => {
-    await withRealDb(async (pool) => {
-      const profile = await insertProfile(pool);
-      const sharedProperty = await insertProperty(pool);
-      const lA = await insertListing(pool, sharedProperty);
-      const lB = await insertListing(pool, sharedProperty);
-      await markProfileMatch(pool, profile, sharedProperty);
-      const staleId = await insertSuggestion(pool, lA, lB, { match_basis: "fuzzy", confidence: 0.6 });
-
-      const counts = await getDedupSuggestionCounts();
-      expect(counts.total).toBe(0);
-      expect(counts.profile_relevant_total).toBe(0);
-
-      const filtered = await listDedupSuggestions({ onlyProfileRelevant: true, limit: 100 });
-      expect(filtered.some((s) => s.id === staleId)).toBe(false);
-    });
-  });
-
-  it("orders strongest evidence first (confidence DESC) so photo_hash outranks fuzzy by default", async () => {
-    await withRealDb(async (pool) => {
-      const propA = await insertProperty(pool);
-      const propB = await insertProperty(pool);
-      const propC = await insertProperty(pool);
-      const propD = await insertProperty(pool);
-      const lFuzzyA = await insertListing(pool, propA);
-      const lFuzzyB = await insertListing(pool, propB);
-      const lPhotoA = await insertListing(pool, propC);
-      const lPhotoB = await insertListing(pool, propD);
-      const fuzzyId = await insertSuggestion(pool, lFuzzyA, lFuzzyB, { match_basis: "fuzzy", confidence: 0.58 });
-      const photoId = await insertSuggestion(pool, lPhotoA, lPhotoB, { match_basis: "photo_hash", confidence: 0.8 });
-
-      const items = await listDedupSuggestions({});
-      const ids = items.map((s) => s.id).filter((id) => id === fuzzyId || id === photoId);
-      expect(ids).toEqual([photoId, fuzzyId]);
-    });
-  });
-
-  it("filters by match_basis when requested", async () => {
-    await withRealDb(async (pool) => {
-      const propA = await insertProperty(pool);
-      const propB = await insertProperty(pool);
-      const propC = await insertProperty(pool);
-      const propD = await insertProperty(pool);
-      const lFuzzyA = await insertListing(pool, propA);
-      const lFuzzyB = await insertListing(pool, propB);
-      const lPhotoA = await insertListing(pool, propC);
-      const lPhotoB = await insertListing(pool, propD);
-      await insertSuggestion(pool, lFuzzyA, lFuzzyB, { match_basis: "fuzzy", confidence: 0.58 });
-      const photoId = await insertSuggestion(pool, lPhotoA, lPhotoB, { match_basis: "photo_hash", confidence: 0.8 });
-
-      const items = await listDedupSuggestions({ basis: "photo_hash" });
-      expect(items.every((s) => s.match_basis === "photo_hash")).toBe(true);
-      expect(items.some((s) => s.id === photoId)).toBe(true);
-    });
-  });
-
-  it("counts pending suggestions per match_basis over the full set, not just one page", async () => {
-    await withRealDb(async (pool) => {
-      const propA = await insertProperty(pool);
-      const propB = await insertProperty(pool);
-      const lA = await insertListing(pool, propA);
-      const lB = await insertListing(pool, propB);
-      await insertSuggestion(pool, lA, lB, { match_basis: "photo_hash", confidence: 0.8 });
-
-      const counts = await getDedupSuggestionCounts();
-      expect(counts.total).toBeGreaterThanOrEqual(1);
-      expect(counts.by_basis.photo_hash).toBeGreaterThanOrEqual(1);
-    });
-  });
-
-  it("sorts profile-relevant pairs first by default — even ahead of a higher-confidence non-relevant pair (issue #246)", async () => {
-    await withRealDb(async (pool) => {
-      const profile = await insertProfile(pool);
-
-      // Relevant pair: LOWER confidence, but one side matches an active profile.
-      const relA = await insertProperty(pool);
-      const relB = await insertProperty(pool);
-      const lRelA = await insertListing(pool, relA);
-      const lRelB = await insertListing(pool, relB);
-      await markProfileMatch(pool, profile, relA); // side A materialized as a match
-      const relevantId = await insertSuggestion(pool, lRelA, lRelB, { match_basis: "fuzzy", confidence: 0.55 });
-
-      // Non-relevant pair: HIGHER confidence, neither side matches any profile.
-      const irrA = await insertProperty(pool);
-      const irrB = await insertProperty(pool);
-      const lIrrA = await insertListing(pool, irrA);
-      const lIrrB = await insertListing(pool, irrB);
-      const irrelevantId = await insertSuggestion(pool, lIrrA, lIrrB, { match_basis: "photo_hash", confidence: 0.9 });
-
-      const items = await listDedupSuggestions({});
-      const ids = items.map((s) => s.id).filter((id) => id === relevantId || id === irrelevantId);
-      // Mutation check: drop `profile_relevant DESC` from the ORDER BY and this
-      // flips to [irrelevantId, relevantId] (pure confidence DESC), failing here.
-      expect(ids).toEqual([relevantId, irrelevantId]);
-
-      // The relevance flag is surfaced per row.
-      expect(items.find((s) => s.id === relevantId)!.profile_relevant).toBe(true);
-      expect(items.find((s) => s.id === irrelevantId)!.profile_relevant).toBe(false);
-    });
-  });
-
-  it("default (show-all) view HIDES NOTHING — the non-relevant pair is still reachable (issue #246)", async () => {
-    await withRealDb(async (pool) => {
-      const profile = await insertProfile(pool);
-      const relA = await insertProperty(pool);
-      const relB = await insertProperty(pool);
-      const lRelA = await insertListing(pool, relA);
-      const lRelB = await insertListing(pool, relB);
-      await markProfileMatch(pool, profile, relB);
-      const relevantId = await insertSuggestion(pool, lRelA, lRelB, { match_basis: "fuzzy", confidence: 0.6 });
-
-      const irrA = await insertProperty(pool);
-      const irrB = await insertProperty(pool);
-      const lIrrA = await insertListing(pool, irrA);
-      const lIrrB = await insertListing(pool, irrB);
-      const irrelevantId = await insertSuggestion(pool, lIrrA, lIrrB, { match_basis: "fuzzy", confidence: 0.61 });
-
-      const items = await listDedupSuggestions({ limit: 100 });
-      const ids = new Set(items.map((s) => s.id));
-      expect(ids.has(relevantId)).toBe(true);
-      expect(ids.has(irrelevantId)).toBe(true); // NOT hidden by the default view
-    });
-  });
-
-  it("onlyProfileRelevant toggle hard-filters to profile-relevant pairs (issue #246)", async () => {
-    await withRealDb(async (pool) => {
-      const profile = await insertProfile(pool);
-      const relA = await insertProperty(pool);
-      const relB = await insertProperty(pool);
-      const lRelA = await insertListing(pool, relA);
-      const lRelB = await insertListing(pool, relB);
-      await markProfileMatch(pool, profile, relA);
-      const relevantId = await insertSuggestion(pool, lRelA, lRelB, { match_basis: "fuzzy", confidence: 0.6 });
-
-      const irrA = await insertProperty(pool);
-      const irrB = await insertProperty(pool);
-      const lIrrA = await insertListing(pool, irrA);
-      const lIrrB = await insertListing(pool, irrB);
-      const irrelevantId = await insertSuggestion(pool, lIrrA, lIrrB, { match_basis: "photo_hash", confidence: 0.9 });
-
-      const filtered = await listDedupSuggestions({ onlyProfileRelevant: true, limit: 100 });
-      const ids = new Set(filtered.map((s) => s.id));
-      expect(ids.has(relevantId)).toBe(true);
-      expect(ids.has(irrelevantId)).toBe(false); // hard-filtered out
-      expect(filtered.every((s) => s.profile_relevant)).toBe(true);
-    });
-  });
-
-  it("an archived profile or a matched=false state does NOT confer relevance (issue #246)", async () => {
-    await withRealDb(async (pool) => {
-      const archived = await insertProfile(pool, { archived: true });
-      const active = await insertProfile(pool);
-
-      // Property tied only to an ARCHIVED profile → not relevant.
-      const archProp = await insertProperty(pool);
-      const archOther = await insertProperty(pool);
-      const lArchA = await insertListing(pool, archProp);
-      const lArchB = await insertListing(pool, archOther);
-      await markProfileMatch(pool, archived, archProp, true);
-      const archivedId = await insertSuggestion(pool, lArchA, lArchB, { match_basis: "fuzzy", confidence: 0.6 });
-
-      // Property tied to an active profile but matched=false → not relevant.
-      const unmatchedProp = await insertProperty(pool);
-      const unmatchedOther = await insertProperty(pool);
-      const lUnA = await insertListing(pool, unmatchedProp);
-      const lUnB = await insertListing(pool, unmatchedOther);
-      await markProfileMatch(pool, active, unmatchedProp, false);
-      const unmatchedId = await insertSuggestion(pool, lUnA, lUnB, { match_basis: "fuzzy", confidence: 0.6 });
-
-      const items = await listDedupSuggestions({ limit: 100 });
-      expect(items.find((s) => s.id === archivedId)!.profile_relevant).toBe(false);
-      expect(items.find((s) => s.id === unmatchedId)!.profile_relevant).toBe(false);
-
-      const filtered = await listDedupSuggestions({ onlyProfileRelevant: true, limit: 100 });
-      const ids = new Set(filtered.map((s) => s.id));
-      expect(ids.has(archivedId)).toBe(false);
-      expect(ids.has(unmatchedId)).toBe(false);
-    });
-  });
-
-  it("profile_relevant_total counts only relevant pairs, over the full pending queue (issue #246)", async () => {
-    await withRealDb(async (pool) => {
-      const profile = await insertProfile(pool);
-      const relA = await insertProperty(pool);
-      const relB = await insertProperty(pool);
-      const lRelA = await insertListing(pool, relA);
-      const lRelB = await insertListing(pool, relB);
-      await markProfileMatch(pool, profile, relA);
-      await insertSuggestion(pool, lRelA, lRelB, { match_basis: "fuzzy", confidence: 0.6 });
-
-      const irrA = await insertProperty(pool);
-      const irrB = await insertProperty(pool);
-      const lIrrA = await insertListing(pool, irrA);
-      const lIrrB = await insertListing(pool, irrB);
-      await insertSuggestion(pool, lIrrA, lIrrB, { match_basis: "fuzzy", confidence: 0.6 });
-
-      const counts = await getDedupSuggestionCounts();
-      // total spans the whole queue; profile_relevant_total is a strict subset.
-      expect(counts.total).toBeGreaterThanOrEqual(2);
-      expect(counts.profile_relevant_total).toBeGreaterThanOrEqual(1);
-      expect(counts.profile_relevant_total).toBeLessThan(counts.total);
-    });
-  });
-
   it("getSuggestionStatus reflects the real row status", async () => {
     await withRealDb(async (pool) => {
       const propA = await insertProperty(pool);
@@ -483,6 +232,285 @@ describe.runIf(dbAvailable)("dedup review queue — real Postgres", () => {
   it("getDedupAction returns null for an unknown id", async () => {
     await withRealDb(async () => {
       expect(await getDedupAction(999999999)).toBeNull();
+    });
+  });
+
+  describe("grouped by property pair (issue #605 Part 2)", () => {
+    it("collapses every pending listing-pair row for the same two properties into ONE group", async () => {
+      await withRealDb(async (pool) => {
+        // Property A has 2 listings, property B has 2 listings — up to 4
+        // listing-pair rows could exist for this one property pair. Insert
+        // 3 of them (the #600 pattern, at a small scale).
+        const propA = await insertProperty(pool, { address: "Calle A" });
+        const propB = await insertProperty(pool, { address: "Calle B" });
+        const a1 = await insertListing(pool, propA, { source: "fotocasa" });
+        const a2 = await insertListing(pool, propA, { source: "milanuncios" });
+        const b1 = await insertListing(pool, propB, { source: "idealista" });
+        const b2 = await insertListing(pool, propB, { source: "pisos" });
+        const s1 = await insertSuggestion(pool, a1, b1, { match_basis: "fuzzy", confidence: 0.6 });
+        const s2 = await insertSuggestion(pool, a2, b1, { match_basis: "photo_hash", confidence: 0.8 });
+        const s3 = await insertSuggestion(pool, a1, b2, { match_basis: "phone", confidence: 0.75 });
+
+        // An unrelated pair, so the test can't pass by collapsing everything.
+        const propC = await insertProperty(pool);
+        const propD = await insertProperty(pool);
+        const c1 = await insertListing(pool, propC);
+        const d1 = await insertListing(pool, propD);
+        const otherId = await insertSuggestion(pool, c1, d1, { match_basis: "phone", confidence: 0.75 });
+
+        const groups = await listDedupPropertyPairSuggestions({ limit: 100 });
+        const [lo, hi] = [propA, propB].sort((x, y) => x - y);
+        const group = groups.find((g) => g.property_lo_id === lo && g.property_hi_id === hi);
+        expect(group).toBeDefined();
+        expect(group!.pair_count).toBe(3);
+        expect(group!.pair_key).toBe(`${lo}-${hi}`);
+        const evidenceIds = new Set(group!.evidence.map((e) => e.suggestion_id));
+        expect(evidenceIds).toEqual(new Set([s1, s2, s3]));
+
+        const otherGroup = groups.find(
+          (g) => g.property_lo_id === Math.min(propC, propD) && g.property_hi_id === Math.max(propC, propD),
+        );
+        expect(otherGroup).toBeDefined();
+        expect(otherGroup!.pair_count).toBe(1);
+        expect(otherGroup!.evidence.map((e) => e.suggestion_id)).toEqual([otherId]);
+      });
+    });
+
+    it("leads with the strongest evidence (top_confidence/top_match_basis) and sorts evidence strongest-first", async () => {
+      await withRealDb(async (pool) => {
+        const propA = await insertProperty(pool);
+        const propB = await insertProperty(pool);
+        const lA1 = await insertListing(pool, propA);
+        const lA2 = await insertListing(pool, propA);
+        const lB1 = await insertListing(pool, propB);
+        const weak = await insertSuggestion(pool, lA1, lB1, { match_basis: "fuzzy", confidence: 0.6 });
+        const strong = await insertSuggestion(pool, lA2, lB1, { match_basis: "photo_hash", confidence: 0.9 });
+
+        const groups = await listDedupPropertyPairSuggestions({ limit: 100 });
+        const [lo, hi] = [propA, propB].sort((x, y) => x - y);
+        const group = groups.find((g) => g.property_lo_id === lo && g.property_hi_id === hi)!;
+        expect(group.top_confidence).toBeCloseTo(0.9);
+        expect(group.top_match_basis).toBe("photo_hash");
+        expect(group.evidence.map((e) => e.suggestion_id)).toEqual([strong, weak]);
+      });
+    });
+
+    it("normalizes every evidence row's sides to the group's canonical (lo, hi) property order regardless of listing_id_a/b order", async () => {
+      await withRealDb(async (pool) => {
+        // propLo is created first (so it gets the lower property id — the
+        // canonical "lo" side), but its LISTING is deliberately created
+        // SECOND, after propHi's listing — so insertSuggestion (which sorts
+        // (listing_id_a, listing_id_b) by ascending LISTING id, independent
+        // of property id) stores listing_id_a as the HI-property listing.
+        // This is the adversarial case: la.property_id === prop_hi, not
+        // prop_lo — a naive "a is always lo" assumption would fail here.
+        const propLo = await insertProperty(pool, { address: "Lo side" });
+        const propHi = await insertProperty(pool, { address: "Hi side" });
+        const lHi = await insertListing(pool, propHi);
+        const lLo = await insertListing(pool, propLo);
+        expect(propLo).toBeLessThan(propHi);
+        expect(lHi).toBeLessThan(lLo); // listing_id_a will be lHi, from the HI property
+
+        await insertSuggestion(pool, lLo, lHi, { match_basis: "photo_hash", confidence: 0.85 });
+
+        const groups = await listDedupPropertyPairSuggestions({ limit: 100 });
+        const group = groups.find((g) => g.property_lo_id === propLo && g.property_hi_id === propHi)!;
+        expect(group).toBeDefined();
+        const ev = group.evidence[0];
+        expect(ev.listing_lo.listing_id).toBe(lLo);
+        expect(ev.listing_lo.property_id).toBe(propLo);
+        expect(ev.listing_hi.listing_id).toBe(lHi);
+        expect(ev.listing_hi.property_id).toBe(propHi);
+      });
+    });
+
+    it("never groups a same-property pair — Part 1's exclusion holds in the grouped view too", async () => {
+      await withRealDb(async (pool) => {
+        const sharedProperty = await insertProperty(pool);
+        const lA = await insertListing(pool, sharedProperty);
+        const lB = await insertListing(pool, sharedProperty);
+        await insertSuggestion(pool, lA, lB, { match_basis: "photo_hash", confidence: 0.95 });
+
+        const groups = await listDedupPropertyPairSuggestions({ limit: 100 });
+        expect(groups.some((g) => g.property_lo_id === sharedProperty || g.property_hi_id === sharedProperty)).toBe(
+          false,
+        );
+      });
+    });
+
+    it("basis filter narrows to groups containing that basis, but keeps the group's FULL evidence (all bases)", async () => {
+      await withRealDb(async (pool) => {
+        const propA = await insertProperty(pool);
+        const propB = await insertProperty(pool);
+        const lA1 = await insertListing(pool, propA);
+        const lA2 = await insertListing(pool, propA);
+        const lB1 = await insertListing(pool, propB);
+        const fuzzyId = await insertSuggestion(pool, lA1, lB1, { match_basis: "fuzzy", confidence: 0.6 });
+        const photoId = await insertSuggestion(pool, lA2, lB1, { match_basis: "photo_hash", confidence: 0.9 });
+
+        // A fuzzy-only group, which the photo_hash filter must exclude.
+        const propC = await insertProperty(pool);
+        const propD = await insertProperty(pool);
+        const lC = await insertListing(pool, propC);
+        const lD = await insertListing(pool, propD);
+        await insertSuggestion(pool, lC, lD, { match_basis: "fuzzy", confidence: 0.55 });
+
+        const filtered = await listDedupPropertyPairSuggestions({ basis: "photo_hash", limit: 100 });
+        const [lo, hi] = [propA, propB].sort((x, y) => x - y);
+        const group = filtered.find((g) => g.property_lo_id === lo && g.property_hi_id === hi);
+        expect(group).toBeDefined();
+        // Full evidence — the fuzzy sibling row is NOT dropped by the filter.
+        expect(new Set(group!.evidence.map((e) => e.suggestion_id))).toEqual(new Set([fuzzyId, photoId]));
+
+        const fuzzyOnlyGroup = filtered.find(
+          (g) => g.property_lo_id === Math.min(propC, propD) && g.property_hi_id === Math.max(propC, propD),
+        );
+        expect(fuzzyOnlyGroup).toBeUndefined();
+      });
+    });
+
+    it("profile relevance is bool_or across the group's evidence, and the toggle hard-filters groups", async () => {
+      await withRealDb(async (pool) => {
+        const profile = await insertProfile(pool);
+        const propA = await insertProperty(pool);
+        const propB = await insertProperty(pool);
+        const lA1 = await insertListing(pool, propA);
+        const lA2 = await insertListing(pool, propA);
+        const lB1 = await insertListing(pool, propB);
+        await markProfileMatch(pool, profile, propA);
+        await insertSuggestion(pool, lA1, lB1, { match_basis: "fuzzy", confidence: 0.6 });
+        await insertSuggestion(pool, lA2, lB1, { match_basis: "photo_hash", confidence: 0.9 });
+
+        const propC = await insertProperty(pool);
+        const propD = await insertProperty(pool);
+        const lC = await insertListing(pool, propC);
+        const lD = await insertListing(pool, propD);
+        await insertSuggestion(pool, lC, lD, { match_basis: "fuzzy", confidence: 0.55 });
+
+        const [lo, hi] = [propA, propB].sort((x, y) => x - y);
+        const all = await listDedupPropertyPairSuggestions({ limit: 100 });
+        const group = all.find((g) => g.property_lo_id === lo && g.property_hi_id === hi)!;
+        expect(group.profile_relevant).toBe(true);
+
+        const filtered = await listDedupPropertyPairSuggestions({ onlyProfileRelevant: true, limit: 100 });
+        expect(filtered.some((g) => g.property_lo_id === lo && g.property_hi_id === hi)).toBe(true);
+        expect(
+          filtered.some(
+            (g) => g.property_lo_id === Math.min(propC, propD) && g.property_hi_id === Math.max(propC, propD),
+          ),
+        ).toBe(false);
+      });
+    });
+
+    it("getDedupPropertyPairCounts counts distinct GROUPS, not underlying rows", async () => {
+      await withRealDb(async (pool) => {
+        const propA = await insertProperty(pool);
+        const propB = await insertProperty(pool);
+        const lA1 = await insertListing(pool, propA);
+        const lA2 = await insertListing(pool, propA);
+        const lA3 = await insertListing(pool, propA);
+        const lB1 = await insertListing(pool, propB);
+        // 3 listing-pair rows for ONE property pair.
+        await insertSuggestion(pool, lA1, lB1, { match_basis: "photo_hash", confidence: 0.9 });
+        await insertSuggestion(pool, lA2, lB1, { match_basis: "photo_hash", confidence: 0.85 });
+        await insertSuggestion(pool, lA3, lB1, { match_basis: "fuzzy", confidence: 0.6 });
+
+        const propC = await insertProperty(pool);
+        const propD = await insertProperty(pool);
+        const lC = await insertListing(pool, propC);
+        const lD = await insertListing(pool, propD);
+        await insertSuggestion(pool, lC, lD, { match_basis: "phone", confidence: 0.75 });
+
+        const counts = await getDedupPropertyPairCounts();
+        // 2 groups total, not 4 underlying rows.
+        expect(counts.total).toBe(2);
+        // photo_hash and fuzzy both appear in the SAME group (A-B), so both
+        // buckets count that one group — by_basis is membership, not a
+        // mutually-exclusive partition, so this can (and does) sum above total.
+        expect(counts.by_basis.photo_hash).toBe(1);
+        expect(counts.by_basis.fuzzy).toBe(1);
+        expect(counts.by_basis.phone).toBe(1);
+      });
+    });
+
+    it("sorts profile-relevant groups first — even ahead of a higher-confidence non-relevant group (issue #246, preserved at the grouped level)", async () => {
+      await withRealDb(async (pool) => {
+        const profile = await insertProfile(pool);
+
+        const relA = await insertProperty(pool);
+        const relB = await insertProperty(pool);
+        const lRelA = await insertListing(pool, relA);
+        const lRelB = await insertListing(pool, relB);
+        await markProfileMatch(pool, profile, relA);
+        await insertSuggestion(pool, lRelA, lRelB, { match_basis: "fuzzy", confidence: 0.55 });
+
+        const irrA = await insertProperty(pool);
+        const irrB = await insertProperty(pool);
+        const lIrrA = await insertListing(pool, irrA);
+        const lIrrB = await insertListing(pool, irrB);
+        await insertSuggestion(pool, lIrrA, lIrrB, { match_basis: "photo_hash", confidence: 0.9 });
+
+        const groups = await listDedupPropertyPairSuggestions({ limit: 100 });
+        const [relLo, relHi] = [relA, relB].sort((x, y) => x - y);
+        const [irrLo, irrHi] = [irrA, irrB].sort((x, y) => x - y);
+        const keys = groups
+          .map((g) => g.pair_key)
+          .filter((k) => k === `${relLo}-${relHi}` || k === `${irrLo}-${irrHi}`);
+        expect(keys).toEqual([`${relLo}-${relHi}`, `${irrLo}-${irrHi}`]);
+      });
+    });
+
+    it("default (show-all) view hides no group — the non-relevant group is still reachable (issue #246, preserved at the grouped level)", async () => {
+      await withRealDb(async (pool) => {
+        const profile = await insertProfile(pool);
+        const relA = await insertProperty(pool);
+        const relB = await insertProperty(pool);
+        const lRelA = await insertListing(pool, relA);
+        const lRelB = await insertListing(pool, relB);
+        await markProfileMatch(pool, profile, relB);
+        await insertSuggestion(pool, lRelA, lRelB, { match_basis: "fuzzy", confidence: 0.6 });
+
+        const irrA = await insertProperty(pool);
+        const irrB = await insertProperty(pool);
+        const lIrrA = await insertListing(pool, irrA);
+        const lIrrB = await insertListing(pool, irrB);
+        await insertSuggestion(pool, lIrrA, lIrrB, { match_basis: "fuzzy", confidence: 0.61 });
+
+        const groups = await listDedupPropertyPairSuggestions({ limit: 100 });
+        const [irrLo, irrHi] = [irrA, irrB].sort((x, y) => x - y);
+        expect(groups.some((g) => g.property_lo_id === irrLo && g.property_hi_id === irrHi)).toBe(true);
+      });
+    });
+
+    it("an archived profile or a matched=false state does NOT confer group relevance (issue #246, preserved at the grouped level)", async () => {
+      await withRealDb(async (pool) => {
+        const archived = await insertProfile(pool, { archived: true });
+        const active = await insertProfile(pool);
+
+        const archProp = await insertProperty(pool);
+        const archOther = await insertProperty(pool);
+        const lArchA = await insertListing(pool, archProp);
+        const lArchB = await insertListing(pool, archOther);
+        await markProfileMatch(pool, archived, archProp, true);
+        await insertSuggestion(pool, lArchA, lArchB, { match_basis: "fuzzy", confidence: 0.6 });
+
+        const unmatchedProp = await insertProperty(pool);
+        const unmatchedOther = await insertProperty(pool);
+        const lUnA = await insertListing(pool, unmatchedProp);
+        const lUnB = await insertListing(pool, unmatchedOther);
+        await markProfileMatch(pool, active, unmatchedProp, false);
+        await insertSuggestion(pool, lUnA, lUnB, { match_basis: "fuzzy", confidence: 0.6 });
+
+        const groups = await listDedupPropertyPairSuggestions({ limit: 100 });
+        const [archLo, archHi] = [archProp, archOther].sort((x, y) => x - y);
+        const [unLo, unHi] = [unmatchedProp, unmatchedOther].sort((x, y) => x - y);
+        expect(
+          groups.find((g) => g.property_lo_id === archLo && g.property_hi_id === archHi)!.profile_relevant,
+        ).toBe(false);
+        expect(groups.find((g) => g.property_lo_id === unLo && g.property_hi_id === unHi)!.profile_relevant).toBe(
+          false,
+        );
+      });
     });
   });
 });

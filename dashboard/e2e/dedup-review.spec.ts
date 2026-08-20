@@ -2,27 +2,25 @@
  * E2E: the dedup review-queue UI (/admin/dedup) — the "missing half of the
  * dedup workflow". PR #187 wired the dedup engine into the pipeline; a real
  * run against the owner's live data produced 585 `suggested_merge` rows with
- * no UI anywhere that could act on one. This spec drives the real page
- * against a real Postgres and proves an operator can actually work the
- * queue: see both sides of a candidate pair, and confirm or reject.
+ * no UI anywhere that could act on one. Issue #605 Part 2 then regrouped
+ * the queue by PROPERTY pair (#600 measured 892 pending listing-pair rows
+ * collapsing to 669 distinct property-pair questions, one pair alone
+ * repeating the identical question 38 times) — this spec was rewritten
+ * accordingly: cards are keyed on `data-pair-key`, not a single
+ * `suggestion-id`, and a dedicated test proves the collapse itself.
  *
- * The confirm flow is the one test in this file that does NOT run against a
- * mocked or simulated backend for the merge itself. Confirming in the
- * browser only enqueues a `suggested_merge_action` row (see lib/dedup.ts's
- * module docstring) — the actual merge is performed by the ETL container's
- * `etl/dedup/actions.py` poll loop, which is Python and does not run as
- * part of `npm run dev` / this Playwright config's `webServer`. Rather than
- * mock that boundary away, this test invokes the REAL Python processor
- * once via `python -m etl.dedup.cli process-actions` (the exact code path
- * `ps dedup process-actions` and the container's background poll loop both
- * call — see `runDedupActionProcessorOnce` below) against the SAME
- * Postgres the dev server is pointed at, then asserts the real DB result:
- * one property with both listings, and a property_merge_log row. This is a
- * manually-triggered single tick of what the container's poll loop does
- * automatically every ~3s — documented here explicitly (per this project's
- * "don't claim a signal fires/converges without checking" discipline)
- * rather than silently waiting on a background process this test harness
- * doesn't start.
+ * The confirm/reject flows are the only tests here that do NOT run against
+ * a mocked or simulated backend for the merge itself. Confirming/rejecting
+ * in the browser only enqueues `suggested_merge_action` row(s) (see
+ * lib/dedup.ts's module docstring) — the actual merge/reject is performed
+ * by the ETL container's `etl/dedup/actions.py` poll loop, which is Python
+ * and does not run as part of `npm run dev` / this Playwright config's
+ * `webServer`. Rather than mock that boundary away, these tests invoke the
+ * REAL Python processor once via `python -m etl.dedup.cli process-actions`
+ * (the exact code path `ps dedup process-actions` and the container's
+ * background poll loop both call — see `runDedupActionProcessorOnce`
+ * below) against the SAME Postgres the dev server is pointed at, then
+ * assert the real DB result.
  *
  * Skips cleanly if no DB, or no Python venv with the etl package's
  * dependencies installed, is reachable — same pattern as candidates.spec.ts.
@@ -70,6 +68,13 @@ const NAME_PREFIX = "e2e-dedup-";
 
 let pool: Pool;
 let dbAvailable = false;
+
+/** The pair_key the grouped queue derives — canonical lower-id-first
+ * property order, matching lib/dedup.ts's `PENDING_PAIR_CTE`. */
+function pairKeyOf(propA: number, propB: number): string {
+  const [lo, hi] = [propA, propB].sort((a, b) => a - b);
+  return `${lo}-${hi}`;
+}
 
 async function insertProperty(overrides: { address: string; m2_built?: number }): Promise<number> {
   const result = await pool.query<{ id: number }>(
@@ -203,10 +208,10 @@ test("empty state — a fresh queue with no pending suggestions renders the empt
   await page.goto("/admin/dedup");
   await assertNoErrorSurface(page);
   await expect(page.getByTestId("dedup-empty-state")).toBeVisible();
-  await expect(page.getByTestId("dedup-suggestion-card")).toHaveCount(0);
+  await expect(page.getByTestId("dedup-pair-card")).toHaveCount(0);
 });
 
-test("renders both sides of a real photo_hash suggestion, ordered ahead of a weaker fuzzy one", async ({ page }) => {
+test("renders both sides of a real photo_hash pair, ordered ahead of a weaker fuzzy one", async ({ page }) => {
   skipIfNoDb(test);
 
   const propA = await insertProperty({ address: `${NAME_PREFIX}Calle Foto A` });
@@ -226,6 +231,7 @@ test("renders both sides of a real photo_hash suggestion, ordered ahead of a wea
     confidence: 0.8,
     detail: { match_ratio: 1.0 },
   });
+  const photoPairKey = pairKeyOf(propA, propB);
 
   const propC = await insertProperty({ address: `${NAME_PREFIX}Calle Difuso A` });
   const propD = await insertProperty({ address: `${NAME_PREFIX}Calle Difuso B` });
@@ -236,20 +242,21 @@ test("renders both sides of a real photo_hash suggestion, ordered ahead of a wea
     confidence: 0.58,
     detail: { address_similarity: 0.558 },
   });
+  const fuzzyPairKey = pairKeyOf(propC, propD);
 
   try {
     await page.goto("/admin/dedup");
     await assertNoErrorSurface(page);
 
-    const cards = page.getByTestId("dedup-suggestion-card");
-    await expect(cards.first()).toHaveAttribute("data-suggestion-id", String(photoSuggestionId));
+    const cards = page.getByTestId("dedup-pair-card");
+    await expect(cards.first()).toHaveAttribute("data-pair-key", photoPairKey);
 
-    const photoCard = page.locator(`[data-suggestion-id="${photoSuggestionId}"]`);
+    const photoCard = page.locator(`[data-pair-key="${photoPairKey}"]`);
     await expect(photoCard.getByTestId("dedup-match-basis")).toHaveText(/fotos/i);
     await expect(photoCard.getByTestId("dedup-side-source")).toHaveText(["milanuncios", "fotocasa"]);
     await expect(photoCard.getByTestId("dedup-side-price").first()).toHaveText(/218.500/);
 
-    const fuzzyCard = page.locator(`[data-suggestion-id="${fuzzySuggestionId}"]`);
+    const fuzzyCard = page.locator(`[data-pair-key="${fuzzyPairKey}"]`);
     await expect(fuzzyCard).toBeVisible();
     await expect(fuzzyCard.getByTestId("dedup-match-basis")).toHaveText(/difuso/i);
   } finally {
@@ -260,6 +267,45 @@ test("renders both sides of a real photo_hash suggestion, ordered ahead of a wea
       [listingA, listingB, listingC, listingD],
     ]);
     await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [[propA, propB, propC, propD]]);
+  }
+});
+
+test("collapses every pending listing-pair row for the same two properties into ONE card (issue #605 Part 2)", async ({
+  page,
+}) => {
+  skipIfNoDb(test);
+
+  // property A: 2 listings. property B: 1 listing. 2 listing-pair rows,
+  // same property pair — must render as ONE card, not two.
+  const propA = await insertProperty({ address: `${NAME_PREFIX}Grupo A` });
+  const propB = await insertProperty({ address: `${NAME_PREFIX}Grupo B` });
+  const listingA1 = await insertListing(propA, { source: "milanuncios", current_price: 180000 });
+  const listingA2 = await insertListing(propA, { source: "idealista", current_price: 180000 });
+  const listingB1 = await insertListing(propB, { source: "fotocasa", current_price: 180000 });
+  const weakId = await insertSuggestion(listingA1, listingB1, { match_basis: "fuzzy", confidence: 0.6 });
+  const strongId = await insertSuggestion(listingA2, listingB1, { match_basis: "photo_hash", confidence: 0.85 });
+  const pairKey = pairKeyOf(propA, propB);
+
+  try {
+    await page.goto("/admin/dedup");
+    await assertNoErrorSurface(page);
+
+    const card = page.locator(`[data-pair-key="${pairKey}"]`);
+    await expect(card).toHaveCount(1);
+    await expect(card).toHaveAttribute("data-pair-count", "2");
+    // Leads with the strongest evidence (photo_hash 85%).
+    await expect(card.getByTestId("dedup-match-basis")).toHaveText(/fotos/i);
+    await expect(card.getByTestId("dedup-pair-count-badge")).toHaveText(/2 anuncios corroborantes/i);
+
+    // The weaker corroborating row is not lost — it's reachable, collapsed.
+    await expect(card.getByTestId("dedup-evidence-row")).toHaveCount(0);
+    await card.getByTestId("dedup-evidence-toggle").click();
+    await expect(card.getByTestId("dedup-evidence-row")).toHaveCount(1);
+    await expect(card.getByTestId("dedup-evidence-row")).toContainText(/difuso/i);
+  } finally {
+    await pool.query("DELETE FROM suggested_merge WHERE id = ANY($1::bigint[])", [[weakId, strongId]]);
+    await pool.query("DELETE FROM listing WHERE id = ANY($1::bigint[])", [[listingA1, listingA2, listingB1]]);
+    await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [[propA, propB]]);
   }
 });
 
@@ -277,6 +323,7 @@ test("profile-relevant pairs sort first, and the 'solo mis perfiles' toggle filt
   const lRelB = await insertListing(relB, { source: "fotocasa", current_price: 210000 });
   await markProfileMatch(profileId, relA);
   const relevantId = await insertSuggestion(lRelA, lRelB, { match_basis: "fuzzy", confidence: 0.55 });
+  const relevantKey = pairKeyOf(relA, relB);
 
   // Non-relevant pair: HIGHER confidence, neither side matches any profile.
   const irrA = await insertProperty({ address: `${NAME_PREFIX}Sin Perfil A` });
@@ -284,13 +331,14 @@ test("profile-relevant pairs sort first, and the 'solo mis perfiles' toggle filt
   const lIrrA = await insertListing(irrA, { source: "idealista", current_price: 305000 });
   const lIrrB = await insertListing(irrB, { source: "fotocasa", current_price: 305000 });
   const irrelevantId = await insertSuggestion(lIrrA, lIrrB, { match_basis: "photo_hash", confidence: 0.9 });
+  const irrelevantKey = pairKeyOf(irrA, irrB);
 
   try {
     await page.goto("/admin/dedup");
     await assertNoErrorSurface(page);
 
-    const relCard = page.locator(`[data-suggestion-id="${relevantId}"]`);
-    const irrCard = page.locator(`[data-suggestion-id="${irrelevantId}"]`);
+    const relCard = page.locator(`[data-pair-key="${relevantKey}"]`);
+    const irrCard = page.locator(`[data-pair-key="${irrelevantKey}"]`);
     await expect(relCard).toBeVisible();
     await expect(irrCard).toBeVisible(); // default view hides NOTHING
 
@@ -298,10 +346,10 @@ test("profile-relevant pairs sort first, and the 'solo mis perfiles' toggle filt
     // higher-confidence non-relevant one. Without `profile_relevant DESC` in
     // the ORDER BY, pure confidence DESC would flip this.
     const order = await page
-      .getByTestId("dedup-suggestion-card")
-      .evaluateAll((els) => els.map((e) => e.getAttribute("data-suggestion-id")));
-    expect(order.indexOf(String(relevantId))).toBeGreaterThanOrEqual(0);
-    expect(order.indexOf(String(relevantId))).toBeLessThan(order.indexOf(String(irrelevantId)));
+      .getByTestId("dedup-pair-card")
+      .evaluateAll((els) => els.map((e) => e.getAttribute("data-pair-key")));
+    expect(order.indexOf(relevantKey)).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf(relevantKey)).toBeLessThan(order.indexOf(irrelevantKey));
 
     // The relevant card is badged; the non-relevant one is not.
     await expect(relCard.getByTestId("dedup-profile-relevant-badge")).toBeVisible();
@@ -329,7 +377,7 @@ test("profile-relevant pairs sort first, and the 'solo mis perfiles' toggle filt
   }
 });
 
-test("filter chip narrows the queue to one match_basis", async ({ page }) => {
+test("filter chip narrows the queue to groups whose strongest evidence is one match_basis", async ({ page }) => {
   skipIfNoDb(test);
 
   const propA = await insertProperty({ address: `${NAME_PREFIX}Filtro Foto A` });
@@ -341,6 +389,7 @@ test("filter chip narrows the queue to one match_basis", async ({ page }) => {
     confidence: 0.79,
     detail: { match_ratio: 0.95 },
   });
+  const photoKey = pairKeyOf(propA, propB);
 
   const propC = await insertProperty({ address: `${NAME_PREFIX}Filtro Difuso A` });
   const propD = await insertProperty({ address: `${NAME_PREFIX}Filtro Difuso B` });
@@ -350,6 +399,7 @@ test("filter chip narrows the queue to one match_basis", async ({ page }) => {
     match_basis: "fuzzy",
     confidence: 0.56,
   });
+  const fuzzyKey = pairKeyOf(propC, propD);
 
   try {
     await page.goto("/admin/dedup");
@@ -357,12 +407,12 @@ test("filter chip narrows the queue to one match_basis", async ({ page }) => {
     // toBeVisible auto-retries (unlike a bare .count(), which reads the DOM
     // once and can race the initial fetch) — waits for the async list fetch
     // to actually land before asserting anything about its contents.
-    await expect(page.locator(`[data-suggestion-id="${fuzzySuggestionId}"]`)).toBeVisible();
+    await expect(page.locator(`[data-pair-key="${fuzzyKey}"]`)).toBeVisible();
 
     await page.getByTestId("dedup-filter-photo_hash").click();
-    await expect(page.locator(`[data-suggestion-id="${photoSuggestionId}"]`)).toBeVisible();
-    await expect(page.locator(`[data-suggestion-id="${fuzzySuggestionId}"]`)).toHaveCount(0);
-    const visibleCards = page.getByTestId("dedup-suggestion-card");
+    await expect(page.locator(`[data-pair-key="${photoKey}"]`)).toBeVisible();
+    await expect(page.locator(`[data-pair-key="${fuzzyKey}"]`)).toHaveCount(0);
+    const visibleCards = page.getByTestId("dedup-pair-card");
     const count = await visibleCards.count();
     for (let i = 0; i < count; i++) {
       await expect(visibleCards.nth(i)).toHaveAttribute("data-match-basis", "photo_hash");
@@ -393,12 +443,13 @@ test("confirm — real DB round trip: one property with both listings, and a pro
     confidence: 0.8,
     detail: { match_ratio: 1.0 },
   });
+  const pairKey = pairKeyOf(propA, propB);
 
   try {
     await page.goto("/admin/dedup");
     await assertNoErrorSurface(page);
 
-    const card = page.locator(`[data-suggestion-id="${suggestionId}"]`);
+    const card = page.locator(`[data-pair-key="${pairKey}"]`);
     await expect(card).toBeVisible();
     await card.getByTestId("dedup-confirm").click();
 
@@ -453,58 +504,83 @@ test("confirm — real DB round trip: one property with both listings, and a pro
   }
 });
 
-test("reject — the pair disappears from the queue and is marked rejected, without merging", async ({ page }) => {
+test("reject requires a second, explicit tap — and real DB round trip rejects EVERY corroborating pair, without merging", async ({
+  page,
+}) => {
   skipIfNoDb(test);
   test.skip(!pythonAvailable, `no Python venv at ${VENV_PYTHON} — cannot exercise the real reject path`);
 
+  // A 2-row group: rejecting the CARD must reject BOTH underlying pairs
+  // (issue #605 Part 2's deliberate design — rejection is permanent, so a
+  // group reject is a bigger commitment than the old per-listing reject).
   const propA = await insertProperty({ address: `${NAME_PREFIX}Rechazar A` });
   const propB = await insertProperty({ address: `${NAME_PREFIX}Rechazar B` });
-  const listingA = await insertListing(propA, { source: "milanuncios" });
-  const listingB = await insertListing(propB, { source: "fotocasa" });
-  const suggestionId = await insertSuggestion(listingA, listingB, {
-    match_basis: "fuzzy",
-    confidence: 0.57,
-  });
+  const listingA1 = await insertListing(propA, { source: "milanuncios" });
+  const listingA2 = await insertListing(propA, { source: "idealista" });
+  const listingB1 = await insertListing(propB, { source: "fotocasa" });
+  const suggestion1 = await insertSuggestion(listingA1, listingB1, { match_basis: "fuzzy", confidence: 0.57 });
+  const suggestion2 = await insertSuggestion(listingA2, listingB1, { match_basis: "fuzzy", confidence: 0.55 });
+  const pairKey = pairKeyOf(propA, propB);
 
   try {
     await page.goto("/admin/dedup");
     await assertNoErrorSurface(page);
 
-    const card = page.locator(`[data-suggestion-id="${suggestionId}"]`);
+    const card = page.locator(`[data-pair-key="${pairKey}"]`);
     await expect(card).toBeVisible();
-    await card.getByTestId("dedup-reject").click();
 
+    // First tap: shows the "this is permanent, N pairs" warning — does NOT
+    // submit anything yet.
+    await card.getByTestId("dedup-reject").click();
+    await expect(card.getByTestId("dedup-reject-warning")).toBeVisible();
     await expect
       .poll(async () => {
         const rows = await pool.query<{ count: string }>(
-          "SELECT COUNT(*) FROM suggested_merge_action WHERE suggestion_id = $1",
-          [suggestionId],
+          "SELECT COUNT(*) FROM suggested_merge_action WHERE suggestion_id = ANY($1::bigint[])",
+          [[suggestion1, suggestion2]],
         );
         return Number(rows.rows[0].count);
       })
-      .toBeGreaterThan(0);
+      .toBe(0);
+
+    // Second tap: actually submits — one reject action per underlying row.
+    await card.getByTestId("dedup-reject").click();
+    await expect
+      .poll(async () => {
+        const rows = await pool.query<{ count: string }>(
+          "SELECT COUNT(*) FROM suggested_merge_action WHERE suggestion_id = ANY($1::bigint[])",
+          [[suggestion1, suggestion2]],
+        );
+        return Number(rows.rows[0].count);
+      })
+      .toBe(2);
 
     runDedupActionProcessorOnce();
 
     await expect(card).toHaveCount(0, { timeout: 20_000 });
     await assertNoErrorSurface(page);
 
-    const suggestionRows = await pool.query<{ status: string }>(
-      "SELECT status FROM suggested_merge WHERE id = $1",
-      [suggestionId],
+    const suggestionRows = await pool.query<{ id: number; status: string }>(
+      "SELECT id, status FROM suggested_merge WHERE id = ANY($1::bigint[])",
+      [[suggestion1, suggestion2]],
     );
-    expect(suggestionRows.rows[0].status).toBe("rejected");
+    expect(suggestionRows.rows).toHaveLength(2);
+    for (const row of suggestionRows.rows) {
+      expect(row.status).toBe("rejected");
+    }
 
-    // No merge happened — both properties still stand alone.
+    // No merge happened — the properties still stand alone.
     const listingRows = await pool.query<{ property_id: number }>(
       "SELECT DISTINCT property_id FROM listing WHERE id = ANY($1::bigint[])",
-      [[listingA, listingB]],
+      [[listingA1, listingA2, listingB1]],
     );
     expect(listingRows.rows).toHaveLength(2);
   } finally {
-    await pool.query("DELETE FROM suggested_merge_action WHERE suggestion_id = $1", [suggestionId]);
-    await pool.query("DELETE FROM suggested_merge WHERE id = $1", [suggestionId]);
-    await pool.query("DELETE FROM listing WHERE id = ANY($1::bigint[])", [[listingA, listingB]]);
+    await pool.query("DELETE FROM suggested_merge_action WHERE suggestion_id = ANY($1::bigint[])", [
+      [suggestion1, suggestion2],
+    ]);
+    await pool.query("DELETE FROM suggested_merge WHERE id = ANY($1::bigint[])", [[suggestion1, suggestion2]]);
+    await pool.query("DELETE FROM listing WHERE id = ANY($1::bigint[])", [[listingA1, listingA2, listingB1]]);
     await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [[propA, propB]]);
   }
 });
