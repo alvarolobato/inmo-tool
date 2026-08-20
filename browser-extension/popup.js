@@ -859,6 +859,21 @@ function formatElapsed(fromMs) {
   return `hace ${hours} h`;
 }
 
+// Spanish labels for the block-signature ids detect.js reports (issue #634).
+// Deliberately small and generic — new signature ids fall back to the raw id
+// rather than needing a code change to render at all.
+const BLOCK_SIGNATURE_LABELS_ES = {
+  cloudflare_challenge: 'reto Cloudflare',
+  captcha_wall: 'muro CAPTCHA',
+  geetest_challenge: 'reto GeeTest',
+  incapsula_challenge: 'reto Incapsula',
+  akamai_deny: 'bloqueo Akamai',
+};
+
+function blockSignatureLabelEs(signature) {
+  return BLOCK_SIGNATURE_LABELS_ES[signature] || signature || 'bloqueo';
+}
+
 /**
  * Render the armed/disarmed line (issue #587), scoped to the batch/auto panel
  * (#state-batch) like everything around it: "Auto: ON — próxima comprobación
@@ -868,10 +883,25 @@ function formatElapsed(fromMs) {
  * — without it, a scheduler silently killed by a browser restart (the bug
  * this issue fixes) is indistinguishable from one correctly idling until the
  * next due unit.
+ *
+ * issue #634: a BLOCKED episode takes priority over the ON/OFF line entirely,
+ * regardless of `auto.enabled` — saying "Auto: ON — próxima comprobación…"
+ * while a challenge has the run paused is exactly the truthful-state problem
+ * D-134 exists for (an "armed" line that lies about what's actually
+ * happening). The capture run itself is paused elsewhere (background.js); the
+ * durable Auto intent is untouched, so this line reverts to normal the
+ * instant the block clears.
  */
 function renderAutoArmedStatus(auto) {
   const el = $('#auto-armed-status');
   if (!el) return;
+  el.classList.remove('blocked');
+  if (auto && auto.blocked) {
+    const label = blockSignatureLabelEs(auto.blocked.signature);
+    el.textContent = `Auto: BLOQUEADO — ${auto.blocked.portal} (${label}) — resuélvelo y pulsa Reanudar`;
+    el.classList.add('blocked');
+    return;
+  }
   if (!auto || !auto.enabled) {
     el.textContent = 'Auto: OFF';
     return;
@@ -1212,5 +1242,6 @@ if (typeof module !== 'undefined' && module.exports) {
     renderAutoStatus,
     formatClockTime,
     formatElapsed,
+    blockSignatureLabelEs,
   };
 }

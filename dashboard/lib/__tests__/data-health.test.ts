@@ -8,6 +8,7 @@ import { describe, it, expect } from "vitest";
 import {
   captureSuccessRate,
   connectorHealthLevel,
+  extensionBlockNoticeEs,
   hasCleanNotice,
   hostToPortal,
   isLowPhotoCoverage,
@@ -129,5 +130,25 @@ describe("hostToPortal", () => {
 
   it("returns a placeholder for an empty host", () => {
     expect(hostToPortal("")).toBe("desconocido");
+  });
+});
+
+describe("extensionBlockNoticeEs (issue #634)", () => {
+  it("renders a D-047-style clean 'nota:' line with the Spanish signature label", () => {
+    const msg = extensionBlockNoticeEs({
+      portal: "idealista",
+      signature: "captcha_wall",
+      detected_at: "2026-08-20T10:00:00.000Z",
+    });
+    expect(msg).toBe("nota: captura de idealista pausada por bloqueo (muro CAPTCHA)");
+  });
+
+  it("falls back to the raw signature id when it isn't in the label map", () => {
+    const msg = extensionBlockNoticeEs({
+      portal: "aliseda",
+      signature: "some_future_signature",
+      detected_at: "2026-08-20T10:00:00.000Z",
+    });
+    expect(msg).toContain("some_future_signature");
   });
 });

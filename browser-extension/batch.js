@@ -947,6 +947,75 @@
     return discovered ? EMPTY_REASON.ALREADY_CAPTURED : EMPTY_REASON.NO_RESULTS;
   }
 
+  // ── Block/challenge episodes (issue #634) ──────────────────────────────────
+  //
+  // Pure state machine over a per-portal map, persisted by background.js in
+  // chrome.storage.session under a new BLOCK_STATE_KEY:
+  //   { <portal>: { active: true, signature: <id>, detectedAt: <ms> } }
+  // An absent key = never blocked / cleared. `recordBlock` is IDEMPOTENT while
+  // a portal's episode is active — a second (or twentieth) detection for the
+  // SAME still-active episode does not create a new one, which is what makes
+  // "one alert per episode, not per tab" provable from this function alone:
+  // background.js notifies iff `isNewEpisode` comes back true. An episode ends
+  // only via `clearBlock`, called by background.js after a REAL successful
+  // capture on that portal (a challenge marker's absence on one render is not
+  // proof of recovery; a genuine capture succeeding is).
+
+  /** True while `portal` has an active (unresolved) block episode. Pure. */
+  function isPortalBlocked(state, portal) {
+    if (!state || !portal) return false;
+    var entry = state[portal];
+    return !!(entry && entry.active === true);
+  }
+
+  /** The active episode for `portal`, or null. Pure. */
+  function blockEntry(state, portal) {
+    if (!state || !portal) return null;
+    var entry = state[portal];
+    return entry && entry.active === true ? entry : null;
+  }
+
+  /**
+   * Record a detected block for `portal`. Returns `{ state, isNewEpisode }`:
+   *   - already active for this portal → SAME episode, state unchanged
+   *     (detectedAt/signature are NOT overwritten — they describe when the
+   *     episode STARTED), `isNewEpisode: false` (no re-notify).
+   *   - not active (never seen, or previously cleared) → a NEW episode,
+   *     `isNewEpisode: true` (background.js notifies exactly once for this).
+   * Pure; `now` is injectable for deterministic tests.
+   */
+  function recordBlock(state, portal, signature, now) {
+    var base = state && typeof state === "object" ? state : {};
+    if (!portal || typeof portal !== "string") {
+      return { state: base, isNewEpisode: false };
+    }
+    if (isPortalBlocked(base, portal)) {
+      return { state: base, isNewEpisode: false };
+    }
+    var next = Object.assign({}, base);
+    next[portal] = {
+      active: true,
+      signature: typeof signature === "string" && signature ? signature : "unknown",
+      detectedAt: typeof now === "number" ? now : Date.now(),
+    };
+    return { state: next, isNewEpisode: true };
+  }
+
+  /**
+   * Resolve `portal`'s episode (a real capture succeeded there). Returns
+   * `{ state, wasActive }` — `wasActive` tells the caller whether there was
+   * anything to clear (so it can skip a needless storage write). Pure.
+   */
+  function clearBlock(state, portal) {
+    var base = state && typeof state === "object" ? state : {};
+    if (!portal || !isPortalBlocked(base, portal)) {
+      return { state: base, wasActive: false };
+    }
+    var next = Object.assign({}, base);
+    delete next[portal];
+    return { state: next, wasActive: true };
+  }
+
   var api = {
     STATUSES: STATUSES,
     AUTO_STATUS: AUTO_STATUS,
@@ -1011,6 +1080,11 @@
     shouldRecoverStrandedEnumeration: shouldRecoverStrandedEnumeration,
     EMPTY_REASON: EMPTY_REASON,
     classifyEmptyCapture: classifyEmptyCapture,
+    // Block/challenge episodes (issue #634)
+    isPortalBlocked: isPortalBlocked,
+    blockEntry: blockEntry,
+    recordBlock: recordBlock,
+    clearBlock: clearBlock,
   };
 
   if (typeof self !== "undefined") {

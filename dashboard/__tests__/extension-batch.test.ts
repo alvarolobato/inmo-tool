@@ -101,6 +101,11 @@ const {
   shouldRecoverStrandedEnumeration,
   EMPTY_REASON,
   classifyEmptyCapture,
+  // Block/challenge episodes (issue #634)
+  isPortalBlocked,
+  blockEntry,
+  recordBlock,
+  clearBlock,
 } = B as {
   STATUSES: { RUNNING: string; PAUSED: string; DONE: string };
   SLOT: { PENDING: string; INFLIGHT: string; CAPTURED: string; FAILED: string };
@@ -204,7 +209,27 @@ const {
     pendingCount: number,
     discoveredCount: unknown,
   ) => string | null;
+  // Block/challenge episodes (issue #634)
+  isPortalBlocked: (state: BlockState | null, portal: unknown) => boolean;
+  blockEntry: (state: BlockState | null, portal: unknown) => BlockEntry | null;
+  recordBlock: (
+    state: BlockState | null,
+    portal: unknown,
+    signature: unknown,
+    now?: number,
+  ) => { state: BlockState; isNewEpisode: boolean };
+  clearBlock: (
+    state: BlockState | null,
+    portal: unknown,
+  ) => { state: BlockState; wasActive: boolean };
 };
+
+interface BlockEntry {
+  active: boolean;
+  signature: string;
+  detectedAt: number;
+}
+type BlockState = Record<string, BlockEntry>;
 
 interface SearchQueueEntry {
   portal: string;
@@ -1426,5 +1451,72 @@ describe("same-portal drain end to end — the exit criterion (issue #554)", () 
     const reason = classifyEmptyCapture(0, 0);
     const state = makeBatchState([], 3, reason ?? undefined);
     expect(progress(state).emptyReason).toBe(EMPTY_REASON.NO_RESULTS);
+  });
+});
+
+describe("Block/challenge episodes (issue #634) — recordBlock/clearBlock/isPortalBlocked", () => {
+  it("recordBlock on a never-blocked portal creates a NEW episode", () => {
+    const { state, isNewEpisode } = recordBlock(null, "idealista", "captcha_wall", 1000);
+    expect(isNewEpisode).toBe(true);
+    expect(state.idealista).toEqual({
+      active: true,
+      signature: "captcha_wall",
+      detectedAt: 1000,
+    });
+    expect(isPortalBlocked(state, "idealista")).toBe(true);
+  });
+
+  it("a REPEAT detection while the episode is still active is NOT a new episode and leaves detectedAt untouched", () => {
+    const first = recordBlock(null, "idealista", "captcha_wall", 1000);
+    // A second detection much later, even with a DIFFERENT reported signature
+    // (a flaky/second marker on the same still-open episode) — the episode
+    // itself doesn't change; only clearBlock ends it.
+    const second = recordBlock(first.state, "idealista", "cloudflare_challenge", 5000);
+    expect(second.isNewEpisode).toBe(false);
+    expect(second.state).toEqual(first.state); // byte-for-byte unchanged
+    expect(second.state.idealista.detectedAt).toBe(1000);
+    expect(second.state.idealista.signature).toBe("captcha_wall");
+  });
+
+  it("two different portals track independent episodes", () => {
+    const a = recordBlock(null, "idealista", "captcha_wall", 1000);
+    const b = recordBlock(a.state, "aliseda", "geetest_challenge", 2000);
+    expect(b.isNewEpisode).toBe(true);
+    expect(isPortalBlocked(b.state, "idealista")).toBe(true);
+    expect(isPortalBlocked(b.state, "aliseda")).toBe(true);
+    expect(isPortalBlocked(b.state, "altamira")).toBe(false);
+  });
+
+  it("clearBlock resolves an active episode; a later detection for the SAME portal is a fresh (new) episode", () => {
+    const blocked = recordBlock(null, "idealista", "captcha_wall", 1000);
+    const cleared = clearBlock(blocked.state, "idealista");
+    expect(cleared.wasActive).toBe(true);
+    expect(isPortalBlocked(cleared.state, "idealista")).toBe(false);
+
+    const again = recordBlock(cleared.state, "idealista", "captcha_wall", 9000);
+    expect(again.isNewEpisode).toBe(true); // fails red if clearBlock left the old entry active
+  });
+
+  it("clearBlock on a portal with no active episode is a no-op (wasActive: false, same state)", () => {
+    const result = clearBlock(null, "idealista");
+    expect(result.wasActive).toBe(false);
+    expect(result.state).toEqual({});
+  });
+
+  it("isPortalBlocked / blockEntry are permissive against a missing state or portal", () => {
+    expect(isPortalBlocked(null, "idealista")).toBe(false);
+    expect(isPortalBlocked({}, "")).toBe(false);
+    expect(blockEntry(null, "idealista")).toBeNull();
+    expect(
+      blockEntry({ idealista: { active: false, signature: "x", detectedAt: 1 } }, "idealista"),
+    ).toBeNull();
+  });
+
+  it("recordBlock defaults `now` to Date.now() when omitted", () => {
+    const before = Date.now();
+    const { state } = recordBlock(null, "idealista", "captcha_wall");
+    const after = Date.now();
+    expect(state.idealista.detectedAt).toBeGreaterThanOrEqual(before);
+    expect(state.idealista.detectedAt).toBeLessThanOrEqual(after);
   });
 });

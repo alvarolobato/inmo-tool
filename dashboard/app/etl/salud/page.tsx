@@ -19,12 +19,14 @@ import { isApiErrorResponse, type ApiErrorResponse } from "@/lib/errors";
 import {
   captureSuccessRate,
   connectorHealthLevel,
+  extensionBlockNoticeEs,
   hasCleanNotice,
   isLowPhotoCoverage,
   isStuckPending,
   LOW_PHOTO_THRESHOLD,
   type ConnectorHealth,
   type DataHealthResponse,
+  type ExtensionBlockEpisode,
   type PortalCaptureHealth,
   type SourceDataQuality,
   type StaleProfile,
@@ -484,6 +486,64 @@ function ZeroResultRegressionSection({ rows }: { rows: ZeroResultRegression[] })
                 Antes devolvía{" "}
                 {z.last_nonzero_count !== null ? `${z.last_nonzero_count} anuncio(s)` : "resultados"}
                 ; ahora 0 desde {formatRelative(z.drift_started_at)}.
+              </p>
+            </Card>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Browser-extension block/challenge episodes (issue #634). Rendered the same
+ * D-047 way a connector's own soft-block clean-stop is: an "info" badge, a
+ * notice line, NEVER a red/failed one — the extension already stopped itself
+ * and paused whatever run was going, so this is "go take a look", not "it's
+ * broken". Only portal, signature, and when — see the table's own comment for
+ * why (public repo, no scraped page content).
+ */
+function ExtensionBlocksSection({ rows }: { rows: ExtensionBlockEpisode[] }) {
+  return (
+    <section className="space-y-3" data-testid="extension-blocks">
+      <div>
+        <SectionTitle>Extensión bloqueada por un portal</SectionTitle>
+        <p className="mt-1 text-sm text-tremor-content dark:text-dark-tremor-content">
+          Episodios recientes en los que la extensión detectó un reto/bloqueo
+          (CAPTCHA, WAF) mientras capturaba y pausó la ejecución en curso. La
+          cola pendiente se conserva — resuelve el reto en el navegador y
+          pulsa &quot;Reanudar&quot; en el popup de la extensión.
+        </p>
+      </div>
+      {rows.length === 0 ? (
+        <EmptyRow testId="extension-blocks-empty">
+          Sin episodios de bloqueo recientes.
+        </EmptyRow>
+      ) : (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {rows.map((b, i) => (
+            <Card
+              key={`${b.portal}::${b.detected_at}`}
+              className="p-4"
+              data-testid={`extension-block-${b.portal}-${i}`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <p className="font-semibold text-tremor-content-strong dark:text-dark-tremor-content-strong">
+                  {b.portal}
+                </p>
+                <Badge tone="info" testId={`extension-block-badge-${b.portal}-${i}`}>
+                  Parada limpia
+                </Badge>
+              </div>
+              <p
+                className="mt-2 text-xs"
+                style={{ color: "var(--accent)" }}
+                data-testid={`extension-block-notice-${b.portal}-${i}`}
+              >
+                {extensionBlockNoticeEs(b)}
+              </p>
+              <p className="mt-1 text-xs text-tremor-content-subtle dark:text-dark-tremor-content-subtle">
+                {formatRelative(b.detected_at)}
               </p>
             </Card>
           ))}
@@ -1106,6 +1166,7 @@ export default function DataHealthPage() {
       ) : data ? (
         <div className="space-y-8">
           <ConnectorHealthSection rows={data.connectors} />
+          <ExtensionBlocksSection rows={data.extension_blocks} />
           <ZeroResultRegressionSection rows={data.zero_result_regressions} />
           {drift && <PortalDriftSection reports={drift} onRefetch={fetchDrift} />}
           <PortalHealthSection rows={data.portals} />

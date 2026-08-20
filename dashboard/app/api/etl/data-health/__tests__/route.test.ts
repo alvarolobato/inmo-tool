@@ -49,6 +49,7 @@ const SAMPLE: DataHealthResponse = {
   stale_profiles: [],
   zero_result_regressions: [],
   sweep_in_progress: false,
+  extension_blocks: [],
   generated_at: "2026-08-05T00:00:00.000Z",
 };
 

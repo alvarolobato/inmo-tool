@@ -126,10 +126,32 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === 'EXTRACT') {
-    handleExtraction(msg).then(sendResponse).catch((err) => {
-      sendResponse({ success: false, error: { message: err.message } });
-    });
+    handleExtraction(msg)
+      .then((res) => {
+        // A real capture succeeding is the resolve signal for a block episode
+        // (issue #634) — see clearBlockIfActive's docstring for why this is
+        // preferred over "a render didn't show a marker".
+        if (res && res.success) {
+          const portal = self.InmoDetect && self.InmoDetect.detailPortalForUrl(msg.url);
+          if (portal) clearBlockIfActive(portal).catch(() => {});
+        }
+        sendResponse(res);
+      })
+      .catch((err) => {
+        sendResponse({ success: false, error: { message: err.message } });
+      });
     return true; // async response
+  }
+
+  // Block/challenge detection (issue #634) — see content-script.js's
+  // checkForBlock/the detail-page last-moment guard for what triggers this,
+  // and handleBlockDetected's docstring for the full stop/alert/report
+  // response. Fire-and-forget: no response needed.
+  if (msg.type === 'BLOCK_DETECTED') {
+    handleBlockDetected(msg.portal, msg.signature).catch(() => {
+      /* best-effort — a failure here must never surface to the page */
+    });
+    return false;
   }
 
   if (msg.type === 'CHECK_CAPTURE_STATUS') {
@@ -538,9 +560,145 @@ async function setEnumState(state) {
 async function clearEnumState() {
   await chrome.storage.session.remove(BATCH_ENUM_KEY);
 }
-/** True once the run was stopped mid-enumeration (enum state cleared). */
-async function enumerationStopped() {
-  return (await getEnumState()) == null;
+/**
+ * True once the run was stopped mid-enumeration (enum state cleared), OR a
+ * block episode is now active for `portal` (issue #634) — a challenge
+ * detected on the enumeration tab must break the results-page walk on its
+ * very next iteration, same as an operator STOP_BATCH. `portal` is optional
+ * so existing call sites that only care about the STOP_BATCH case keep
+ * working unchanged.
+ */
+async function enumerationStopped(portal) {
+  if ((await getEnumState()) == null) return true;
+  if (portal && (await isPortalBlocked(portal))) return true;
+  return false;
+}
+
+// ── Block/challenge episodes (issue #634) ──────────────────────────────────
+//
+// Persisted per-portal in chrome.storage.session (same lifetime as the rest
+// of the run state — a browser restart naturally clears a stale block, since
+// the owner would be starting fresh anyway). The pure state machine
+// (recordBlock/clearBlock/isPortalBlocked) lives in batch.js; this is the
+// storage + response wiring: pause whatever run is active, alert at most once
+// per episode, and report to the dashboard so /etl/salud shows it without the
+// browser open.
+const BLOCK_STATE_KEY = 'inmoBlockState';
+
+async function getBlockState() {
+  const o = await chrome.storage.session.get(BLOCK_STATE_KEY);
+  return o[BLOCK_STATE_KEY] || {};
+}
+async function setBlockState(state) {
+  await chrome.storage.session.set({ [BLOCK_STATE_KEY]: state || {} });
+}
+async function isPortalBlocked(portal) {
+  return InmoBatch.isPortalBlocked(await getBlockState(), portal);
+}
+/** The single active block episode, if any — for the popup's armed-status line. */
+async function activeBlockSummary() {
+  const state = await getBlockState();
+  for (const portal of Object.keys(state)) {
+    const entry = InmoBatch.blockEntry(state, portal);
+    if (entry) return { portal, signature: entry.signature, detectedAt: entry.detectedAt };
+  }
+  return null;
+}
+
+/**
+ * A challenge page was detected (content-script.js, on any of the
+ * extension's supported portals). Stop the run — do not grind on: pause the
+ * batch loop (never drain — D-043/D-112's
+ * pending queue and search queue must survive untouched so a resume picks up
+ * exactly where it left off) and let the in-flight enumeration walk see the
+ * block on its own next per-page check (enumerationStopped, above). Alerts +
+ * reports to the dashboard ONLY on a NEW episode (isNewEpisode) — a repeat
+ * detection for an already-active episode is silent, per the "one alert per
+ * episode, not per tab" rule.
+ */
+async function handleBlockDetected(portal, signature) {
+  if (typeof portal !== 'string' || !portal) return;
+  const now = Date.now();
+  const prev = await getBlockState();
+  const { state, isNewEpisode } = InmoBatch.recordBlock(prev, portal, signature, now);
+  await setBlockState(state);
+
+  // Stop the run — do not grind on. Only one search ever runs at a time
+  // (D-112), so any batch loop currently driving IS the one that hit this
+  // block; pausing (never stopping/draining) is what preserves the pending
+  // queue for a resume. The in-flight enumeration walk (if any) breaks out on
+  // its own next enumerationStopped() check — nothing further to do for it
+  // here.
+  if (batchLooping) {
+    await mutateBatch(InmoBatch.pause);
+  }
+
+  if (!isNewEpisode) return; // already alerted for this episode (D-047 "once")
+
+  notifyBlocked(portal, state[portal].signature);
+  try {
+    await reportBlockEpisode(portal, state[portal].signature, state[portal].detectedAt);
+  } catch {
+    /* best-effort — the block still paused the run and shows in the popup */
+  }
+}
+
+/**
+ * A real capture just succeeded for `portal` — the operator went and fixed
+ * whatever was challenging it (or it was transient). Resolve the episode so
+ * the NEXT challenge (if any) is treated as a fresh one and alerts again.
+ */
+async function clearBlockIfActive(portal) {
+  if (typeof portal !== 'string' || !portal) return;
+  const prev = await getBlockState();
+  const { state, wasActive } = InmoBatch.clearBlock(prev, portal);
+  if (wasActive) await setBlockState(state);
+}
+
+/**
+ * chrome.notifications (issue #634) — the one channel that reaches the owner
+ * when the browser is unattended on another desktop. Needs the `notifications`
+ * permission (manifest.json). A unique id per call means Chrome never
+ * silently coalesces/overwrites a still-visible notification, but the "one
+ * alert per episode" guarantee itself comes from the isNewEpisode gate in
+ * handleBlockDetected, not from this id.
+ */
+function notifyBlocked(portal, signature) {
+  try {
+    if (!chrome.notifications || typeof chrome.notifications.create !== 'function') return;
+    chrome.notifications.create(`inmo-block-${portal}-${Date.now()}`, {
+      type: 'basic',
+      iconUrl: 'icons/icon-128.png',
+      title: 'Inmo-Tool: captura bloqueada',
+      message:
+        `${portal} está mostrando un reto/bloqueo (${signature}). ` +
+        'La captura se ha pausado — resuélvelo en el navegador y pulsa Reanudar.',
+      priority: 2,
+    });
+  } catch {
+    /* notifications best-effort — the pause + dashboard report still happened */
+  }
+}
+
+/**
+ * Report a NEW block episode to the dashboard (issue #634) so /etl/salud
+ * shows it without the browser open — which portal, when, and a SIGNATURE of
+ * what was detected (the marker id, e.g. 'captcha_wall'), never page content.
+ * Fire-and-forget, mirrors sendHeartbeat's pattern exactly (best-effort,
+ * skipped when no API key is configured yet).
+ */
+async function reportBlockEpisode(portal, signature, detectedAt) {
+  const { apiUrl, apiKey } = await getApiConfig();
+  if (!apiKey) return; // not configured yet — nothing to report
+  await fetch(`${apiUrl}/api/extension/block-episode`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-admin-key': apiKey },
+    body: JSON.stringify({
+      portal,
+      signature,
+      detectedAt: new Date(detectedAt).toISOString(),
+    }),
+  });
 }
 
 // Serialize every get-modify-set of the shared batch state (BATCH_KEY). With
@@ -1098,6 +1256,25 @@ async function runEnumerationThenCapture(portal, searchUrl, page1Urls) {
       // capture whatever was seeded (page 1 at minimum), never leaving the
       // claim wedged in the enumerating phase.
     }
+    // Block detected during enumeration (issue #634): don't walk straight
+    // into opening detail tabs against a portal that's already challenging
+    // us. Represent whatever was already seeded into capture_worklist as a
+    // PAUSED batch (same shape STOP/PAUSE_BATCH already produce) rather than
+    // just dropping the claim — a bare cleared claim would read as "idle" to
+    // isBatchActive()/advanceQueueIfIdle and silently pop the NEXT queued
+    // search, which is exactly the "grind on" this issue exists to prevent.
+    // A PAUSED state keeps isBatchActive() true (nothing advances) and gives
+    // the popup a real "Reanudar" once the operator has gone and fixed it.
+    if (await isPortalBlocked(portal)) {
+      const pending = await fetchPendingUrls(portal).catch(() => []);
+      const { concurrency } = await getBatchConfig();
+      const paused = InmoBatch.pause(InmoBatch.makeBatchState(pending, concurrency));
+      await runBatchStateExclusive(async () => {
+        await clearEnumState();
+        await setBatchState(paused);
+      });
+      return;
+    }
     try {
       await runCaptureQueue(portal, discoveredCount);
     } catch {
@@ -1276,7 +1453,7 @@ async function enumerateResultsPages(portal, searchUrl, page1Urls) {
   let tabId = null;
   try {
     for (let page = 1; page <= D.RESULTS_PAGE_CAP; page++) {
-      if (await enumerationStopped()) break;
+      if (await enumerationStopped(portal)) break;
       const rendered = await renderAndHarvest(current, tabId);
       tabId = rendered.tabId;
       if (tabId != null && !batchTabIds.has(tabId)) {
@@ -2023,6 +2200,10 @@ async function getAutoProgress() {
   // from a genuinely idle one — surfaced whether or not Auto is on (an armed
   // alarm with Auto off would itself be a bug worth seeing).
   const nextCheckAt = await getNextAutoCheckAt();
+  // issue #634: the popup's armed-status line must never say "armed" while a
+  // block is active (D-134's truthful-state principle) — surfaced whether or
+  // not Auto is on, same reasoning as nextCheckAt above.
+  const blocked = await activeBlockSummary();
   if (!auto) {
     // No live auto state: surface the persisted "Forzar" preference so the
     // popup's checkbox reflects it even before Auto is turned on (issue #434).
@@ -2033,6 +2214,7 @@ async function getAutoProgress() {
       force,
       lastBatchAt: null,
       nextCheckAt,
+      blocked,
       batch,
       ...q,
     };
@@ -2055,6 +2237,7 @@ async function getAutoProgress() {
     // from a live one.
     lastBatchAt: auto.lastBatchAt,
     nextCheckAt,
+    blocked,
     ...q,
     batch,
   };
@@ -2496,5 +2679,12 @@ if (typeof module !== 'undefined' && module.exports) {
     recoverStrandedHarvest,
     getAutoProgress,
     getNextAutoCheckAt,
+    // Block/challenge episodes (issue #634)
+    handleBlockDetected,
+    clearBlockIfActive,
+    getBlockState,
+    isPortalBlocked,
+    activeBlockSummary,
+    enumerationStopped,
   };
 }

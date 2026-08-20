@@ -90,6 +90,15 @@ body {
   max-width: 260px;
 }
 
+/* Block/challenge episode (issue #634) — the armed-status line switches to
+   this when a run is paused on a detected CAPTCHA/WAF challenge; deliberately
+   the same red used for #313's error text elsewhere in this file. */
+.state-sub.blocked {
+  color: #ef4444;
+  font-weight: 600;
+  max-width: none;
+}
+
 /* ─── Spinner ──────────────────────────────────────────────────── */
 
 .spinner {

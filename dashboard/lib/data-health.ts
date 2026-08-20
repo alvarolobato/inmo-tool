@@ -99,6 +99,20 @@ export interface StaleProfile {
   newest_listing_at: string | null;
 }
 
+/**
+ * A browser-extension block/challenge episode (issue #634) — the extension
+ * detected a CAPTCHA/WAF challenge on a capture portal, paused its run, and
+ * reported it via POST /api/extension/block-episode. `signature` is a marker
+ * id only (e.g. 'captcha_wall'), never page content. Reported the same way a
+ * connector's own soft-block is (D-047): an informational notice, never a
+ * red/failed badge — see `extensionBlockNoticeEs`.
+ */
+export interface ExtensionBlockEpisode {
+  portal: string;
+  signature: string;
+  detected_at: string;
+}
+
 export interface DataHealthResponse {
   connectors: ConnectorHealth[];
   portals: PortalCaptureHealth[];
@@ -122,6 +136,11 @@ export interface DataHealthResponse {
    * section as "no evaluable durante sweep" rather than crying wolf.
    */
   sweep_in_progress: boolean;
+  /**
+   * Recent extension block/challenge episodes (issue #634, newest first,
+   * bounded — see getRecentBlockEpisodes). Empty is the healthy state.
+   */
+  extension_blocks: ExtensionBlockEpisode[];
   generated_at: string;
 }
 
@@ -205,4 +224,29 @@ export function hostToPortal(host: string): string {
     if (h === hostSuffix || h.endsWith("." + hostSuffix)) return portal;
   }
   return h;
+}
+
+/**
+ * Spanish labels for the block-signature ids browser-extension/detect.js's
+ * `detectBlockSignals` reports (issue #634) — mirrors the extension's own
+ * copy in popup.js (the two can't share a module across the extension/
+ * dashboard boundary; both fall back to the raw id for an id neither list
+ * knows yet, so a new signature always renders SOMETHING).
+ */
+const BLOCK_SIGNATURE_LABELS_ES: Record<string, string> = {
+  cloudflare_challenge: "reto Cloudflare",
+  captcha_wall: "muro CAPTCHA",
+  geetest_challenge: "reto GeeTest",
+  incapsula_challenge: "reto Incapsula",
+  akamai_deny: "bloqueo Akamai",
+};
+
+/**
+ * The informational notice line for one extension block episode — D-047
+ * vocabulary ("nota:", never an error): the extension detected a challenge,
+ * paused itself, and this is a clean stop the operator should go resolve.
+ */
+export function extensionBlockNoticeEs(episode: ExtensionBlockEpisode): string {
+  const label = BLOCK_SIGNATURE_LABELS_ES[episode.signature] || episode.signature;
+  return `nota: captura de ${episode.portal} pausada por bloqueo (${label})`;
 }

@@ -3138,6 +3138,31 @@ CREATE TABLE IF NOT EXISTS llm_quota_reading (
 CREATE INDEX IF NOT EXISTS idx_llm_quota_reading_read_at
     ON llm_quota_reading (read_at DESC);
 
+-- Browser-extension block/challenge episodes (issue #634). The extension
+-- (browser-extension/detect.js detectBlockSignals) detects a CAPTCHA/WAF
+-- challenge page on a capture portal, pauses whatever batch/auto run is
+-- active (D-043/D-112's pending queue survives untouched), and POSTs exactly
+-- one row here per NEW episode via POST /api/extension/block-episode — the
+-- same "server-mediated presence" pattern as extension_heartbeat, since the
+-- extension can't inject into the dashboard origin. `signature` is the marker
+-- id detect.js matched (e.g. 'captcha_wall', 'cloudflare_challenge') — NEVER
+-- page content or the captured URL (public repo, no scraped listing data).
+-- Read by /etl/salud (via getDataHealth) as an INFORMATIONAL notice, aligned
+-- with D-047's "a soft-block/challenge stop is a clean outcome, not an
+-- error" vocabulary — never rendered as a red/failed badge.
+CREATE TABLE IF NOT EXISTS extension_block_episode (
+    id           BIGSERIAL    PRIMARY KEY,
+    portal       TEXT         NOT NULL,
+    signature    TEXT         NOT NULL,
+    -- When the extension detected the challenge (client clock); may lag
+    -- reported_at slightly if the fire-and-forget POST was delayed/retried.
+    detected_at  TIMESTAMPTZ  NOT NULL,
+    reported_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_extension_block_episode_detected_at
+    ON extension_block_episode (detected_at DESC);
+
 -- ============================================================
 -- ANALYZE (update planner statistics after initial load)
 -- ============================================================
@@ -3174,3 +3199,4 @@ ANALYZE captured_search_urls;
 ANALYZE observed_search_urls;
 ANALYZE profile_connector_filter;
 ANALYZE property_search_doc;
+ANALYZE extension_block_episode;

@@ -1139,6 +1139,118 @@
   }
 
   /**
+   * Block/challenge detection (issue #634). A SMALL, portal-agnostic set of
+   * ROBUST signatures — a challenge-page marker library rots slower than a
+   * long brittle selector list, and this repo has already hit two of these
+   * for real: idealista's DataDome CAPTCHA wall (`captcha-delivery.com`, see
+   * docs/skills/connectors.md) and the GeeTest "Pardon Our Interruption" wall
+   * (#captcha-box, static.geetest.com — hit twice live during #628, see
+   * milanuncios_sample_soft_block_page.html). Cloudflare/Incapsula/Akamai are
+   * the documented WAFs behind D-026/D-027/D-081's "routes to browser-extension
+   * capture" batch — this extension is exactly where a human would now meet
+   * them. Every check is READ-ONLY DOM inspection: no solving, no retrying, no
+   * header/identity changes (issue #1 §15 / D-033 / D-075).
+   *
+   * Deliberately conservative: an unrecognised page (including a genuinely
+   * empty search or a 404/removed-listing page — neither carries any of these
+   * markers) returns { blocked: false, signature: null } — see the false-
+   * positive tests in extension-block-detect.test.ts. A bad/throwing selector
+   * on one signature must never crash detection or block the others.
+   */
+  var BLOCK_SIGNATURES = [
+    {
+      id: "cloudflare_challenge",
+      matches: function (doc) {
+        var title = ((doc.title || "") + "").toLowerCase();
+        if (title.indexOf("just a moment") !== -1) return true;
+        if (
+          safeQuery(
+            doc,
+            "#cf-chl-widget, #challenge-running, #challenge-form, .cf-browser-verification, [data-translate='checking_browser']",
+          )
+        ) {
+          return true;
+        }
+        return !!safeQuery(doc, "script[src*='challenges.cloudflare.com']");
+      },
+    },
+    {
+      id: "captcha_wall",
+      // DataDome's interstitial (confirmed live on idealista — every request
+      // gets a 403 CAPTCHA from captcha-delivery.com regardless of UA).
+      matches: function (doc) {
+        return !!safeQuery(
+          doc,
+          "script[src*='captcha-delivery.com'], iframe[src*='captcha-delivery.com'], #ddv1-captcha-container",
+        );
+      },
+    },
+    {
+      id: "geetest_challenge",
+      // Confirmed live on milanuncios (#179/#628): "Pardon Our Interruption",
+      // noindex/nofollow, #captcha-box. GeeTest is a third-party widget any of
+      // this extension's portals could equally sit behind.
+      matches: function (doc) {
+        if (safeQuery(doc, "#captcha-box, .geetest_holder, script[src*='static.geetest.com']")) {
+          return true;
+        }
+        var body = ((doc.body && doc.body.textContent) || "");
+        return body.indexOf("Pardon Our Interruption") !== -1;
+      },
+    },
+    {
+      id: "incapsula_challenge",
+      // Sareb's edge WAF (D-026) — a generic Incapsula/Imperva JS challenge.
+      matches: function (doc) {
+        return !!safeQuery(
+          doc,
+          "script[src*='_Incapsula_Resource'], iframe[src*='_Incapsula_Resource']",
+        );
+      },
+    },
+    {
+      id: "akamai_deny",
+      // Altamira's edge WAF (D-027) — Akamai's own static deny template:
+      // title "Access Denied" + a "Reference #..." id, no challenge to solve.
+      matches: function (doc) {
+        var title = ((doc.title || "") + "").trim();
+        if (title !== "Access Denied") return false;
+        var body = (doc.body && doc.body.textContent) || "";
+        return /Reference #[\w.]+/.test(body);
+      },
+    },
+  ];
+
+  function safeQuery(doc, selector) {
+    if (!doc || typeof doc.querySelector !== "function") return null;
+    try {
+      return doc.querySelector(selector);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * Run every signature against `doc`. Returns the FIRST match as
+   * `{ blocked: true, signature: <id> }`, or `{ blocked: false, signature: null }`
+   * when nothing matched — the safe default for any page this list doesn't
+   * recognise. Never throws.
+   */
+  function detectBlockSignals(doc) {
+    if (!doc) return { blocked: false, signature: null };
+    for (var i = 0; i < BLOCK_SIGNATURES.length; i++) {
+      var matched = false;
+      try {
+        matched = !!BLOCK_SIGNATURES[i].matches(doc);
+      } catch (e) {
+        matched = false;
+      }
+      if (matched) return { blocked: true, signature: BLOCK_SIGNATURES[i].id };
+    }
+    return { blocked: false, signature: null };
+  }
+
+  /**
    * Fire-once guard keyed by (normalised) URL. Lifecycle per key:
    *   claim(key)  → true exactly once while the key is neither done nor
    *                 in-flight; marks it in-flight.
@@ -1194,6 +1306,7 @@
     nextResultsUrlFromHrefs: nextResultsUrlFromHrefs,
     toListingUrl: toListingUrl,
     isRenderReady: isRenderReady,
+    detectBlockSignals: detectBlockSignals,
     createCaptureGuard: createCaptureGuard,
     CAPTURE_SIGNAL: CAPTURE_SIGNAL,
     DISCOVER_SIGNAL: DISCOVER_SIGNAL,
