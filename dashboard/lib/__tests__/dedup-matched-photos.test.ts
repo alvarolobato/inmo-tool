@@ -137,4 +137,34 @@ describe("orderPhotosMatchedFirst", () => {
       { url: "p1", matched: false },
     ]);
   });
+
+  it("PR #621 review B2: dedupes when the SAME larger-side photo is the best match for two different smaller-side photos", () => {
+    // photo_hash.py's matched_pairs deliberately does not dedupe the
+    // larger side (two near-identical shots of the same room can both
+    // legitimately best-match one photo on the other side) — so
+    // resolveMatchedPhotos's output for that side can repeat a URL.
+    // Un-deduped, this side would render 5 <img> elements for a 4-photo
+    // listing (a duplicate React key, an inflated "5 fotos" count, and a
+    // wasted default-view slot) — reproduces the live measured shape
+    // (27 of 447 pending photo_hash rows, 6%).
+    const allUrls = ["hi0", "hi1", "hi2", "hi3"];
+    // Strongest-first order already applied upstream (resolveMatchedPhotos
+    // sorts by distance) — hi2 appears twice, both times before hi0/hi1's
+    // singleton matches.
+    const matchedUrlsInOrder = ["hi2", "hi2", "hi0", "hi1"];
+
+    const ordered = orderPhotosMatchedFirst(allUrls, matchedUrlsInOrder);
+
+    // Exactly 4 entries for 4 photos — never 5.
+    expect(ordered).toHaveLength(4);
+    // Every URL is unique — no duplicate React key.
+    expect(new Set(ordered.map((o) => o.url)).size).toBe(4);
+    // hi2 kept once, first (its strongest/first occurrence), still matched.
+    expect(ordered[0]).toEqual({ url: "hi2", matched: true });
+    // hi0/hi1 follow as their own matched entries.
+    expect(ordered.slice(1, 3).map((o) => o.url).sort()).toEqual(["hi0", "hi1"]);
+    expect(ordered.slice(1, 3).every((o) => o.matched)).toBe(true);
+    // hi3 never matched anything — the sole unmatched entry, last.
+    expect(ordered[3]).toEqual({ url: "hi3", matched: false });
+  });
 });

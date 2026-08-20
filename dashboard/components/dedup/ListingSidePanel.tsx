@@ -114,6 +114,10 @@ export function ListingSidePanel({
                 {/* eslint-disable-next-line @next/next/no-img-element -- external, unpredictable-domain listing photos */}
                 <img
                   src={photo.url}
+                  // `i` indexes into `visible` (already matched-first,
+                  // capped) — the alt text's "Foto N" numbers by DISPLAY
+                  // position, never `side.photo_urls`' storage order, so
+                  // it stays consistent with what's actually on screen.
                   alt={
                     photo.matched
                       ? `Foto ${i + 1} de ${side.source} — coincide con una foto del otro anuncio`
@@ -160,15 +164,20 @@ export function ListingSidePanel({
               </div>
             ))}
           </div>
-          {hiddenCount > 0 && (
+          {photos.length > DEFAULT_VISIBLE_PHOTOS && (
             // Issue #615: "necesito ver el resto" — a cap of 4 is fine as
             // the DEFAULT view, but the rest must stay reachable and the
             // hidden count must be visible up front, not just implied.
+            // PR #621 review nit: a real TOGGLE, not a one-way expand —
+            // rendered whenever there's more than the default to show
+            // (not just `hiddenCount > 0`, which was only ever true while
+            // collapsed and made the button vanish the instant it was
+            // clicked, with no way back to the compact view).
             <button
               type="button"
               data-testid="dedup-photos-expand"
               className="dedup-action-btn"
-              onClick={() => setExpanded(true)}
+              onClick={() => setExpanded((v) => !v)}
               style={{
                 alignSelf: "flex-start",
                 borderRadius: 6,
@@ -179,7 +188,7 @@ export function ListingSidePanel({
                 color: "var(--accent)",
               }}
             >
-              +{hiddenCount} más
+              {expanded ? "Mostrar menos" : `+${hiddenCount} más`}
             </button>
           )}
         </>

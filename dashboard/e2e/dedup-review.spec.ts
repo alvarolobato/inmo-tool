@@ -255,10 +255,19 @@ test("renders both sides of a real photo_hash pair, ordered ahead of a weaker fu
     await expect(photoCard.getByTestId("dedup-match-basis")).toHaveText(/fotos/i);
     await expect(photoCard.getByTestId("dedup-side-source")).toHaveText(["milanuncios", "fotocasa"]);
     await expect(photoCard.getByTestId("dedup-side-price").first()).toHaveText(/218.500/);
+    // PR #621 review B1: this fixture's photo_hash suggestion carries no
+    // detail.matched_photos (pre-#615 shape, or a row the backfill hasn't
+    // reached yet) — the card must say so explicitly rather than quietly
+    // rendering photos in storage order with no indication anything is
+    // missing.
+    await expect(photoCard.getByTestId("dedup-photo-matches-pending")).toBeVisible();
 
     const fuzzyCard = page.locator(`[data-pair-key="${fuzzyPairKey}"]`);
     await expect(fuzzyCard).toBeVisible();
     await expect(fuzzyCard.getByTestId("dedup-match-basis")).toHaveText(/difuso/i);
+    // The empty state is photo_hash-specific — a fuzzy-basis card (which
+    // never has matched_photos evidence at all) must not show it.
+    await expect(fuzzyCard.getByTestId("dedup-photo-matches-pending")).toHaveCount(0);
   } finally {
     await pool.query("DELETE FROM suggested_merge WHERE id = ANY($1::bigint[])", [
       [photoSuggestionId, fuzzySuggestionId],

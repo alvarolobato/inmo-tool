@@ -1754,6 +1754,152 @@ def purge_pending_fuzzy(conn) -> tuple[int, int]:
     return deleted, len(rescue_ids)
 
 
+def _select_pending_photo_hash_rows_missing_matched_photos(conn) -> list[tuple]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT sm.id, la.photo_urls, lb.photo_urls
+              FROM suggested_merge sm
+              JOIN listing la ON la.id = sm.listing_id_a
+              JOIN listing lb ON lb.id = sm.listing_id_b
+             WHERE sm.status = 'pending' AND sm.match_basis = 'photo_hash'
+               AND NOT (sm.detail ? 'matched_photos')
+            """
+        )
+        return cur.fetchall()
+
+
+def _compute_backfill_matched_photos(
+    rows: list[tuple], store_conn
+) -> dict[int, list[dict]]:
+    """`suggestion_id -> matched_photos` payload for every row where the
+    PERSISTENT store already has enough hash coverage to identify at
+    least one matched pair. Read-only against `photo_hashes` (D-025) —
+    issue #615/#622's backfill NEVER performs a live fetch. A row whose
+    store coverage is incomplete on either side (a URL never hashed, or
+    hashed with `ok=False`) is simply left out of the returned dict — it
+    stays eligible for a future run of this same command, or for the
+    dedup engine's own next successful `evaluate_pair` pass, once
+    coverage improves.
+
+    Shared by `preview_backfill_matched_photos` and
+    `backfill_matched_photos` so a dry run can never disagree with what
+    the real run would do — same discipline as
+    `_compute_fuzzy_rescue_ids`.
+    """
+    result: dict[int, list[dict]] = {}
+    for suggestion_id, urls_a, urls_b in rows:
+        urls_a = tuple(urls_a or ())
+        urls_b = tuple(urls_b or ())
+        if not urls_a or not urls_b:
+            continue
+        known_a = photo_hash_store.load(store_conn, urls_a)
+        known_b = photo_hash_store.load(store_conn, urls_b)
+        pairs_a = [
+            (url, entry.phash)
+            for url, entry in known_a.items()
+            if entry.ok and entry.phash is not None
+        ]
+        pairs_b = [
+            (url, entry.phash)
+            for url, entry in known_b.items()
+            if entry.ok and entry.phash is not None
+        ]
+        matches = photo_hash.matched_pairs(pairs_a, pairs_b)
+        if not matches:
+            continue
+        result[suggestion_id] = [
+            {"url_a": m.url_a, "url_b": m.url_b, "distance": m.distance}
+            for m in matches
+        ]
+    return result
+
+
+def preview_backfill_matched_photos(conn) -> tuple[int, int]:
+    """Dry-run twin of `backfill_matched_photos` — returns
+    `(scanned, would_update)` without writing anything. Raises
+    `PhotoHashStoreUnavailableError` under the same condition the real
+    backfill aborts on (same discipline as `preview_purge_pending_fuzzy`)
+    — a dry run must fail exactly the way the real run would, not report
+    a false zero.
+    """
+    rows = _select_pending_photo_hash_rows_missing_matched_photos(conn)
+    store_conn = _photo_hash_store_or_raise()
+    try:
+        updates = _compute_backfill_matched_photos(rows, store_conn)
+    finally:
+        photo_hash_store.close_connection(store_conn)
+    return len(rows), len(updates)
+
+
+def backfill_matched_photos(conn) -> tuple[int, int]:
+    """One-off migration (issue #615, superseding the separately-filed
+    #622): populate `detail.matched_photos` on PENDING `photo_hash`
+    `suggested_merge` rows filed BEFORE #615's `matched_pairs` landed, so
+    `PropertyPairCard` can show the true matching photos immediately
+    instead of waiting for the next successful `ps dedup run` — which is
+    not imminent on production (`dedup_runs` 123-126 all failed to the
+    D-036 orphan guard, last success 02:49, #614) and, even once it
+    succeeds, `evaluate_pair` only re-derives `matched_photos` for a row
+    it actually re-evaluates.
+
+    Read-only against the persistent `photo_hashes` store (D-025) — NEVER
+    a live fetch, so this is cheap and safe to run at any time; the owner
+    verified all 447 production rows already have `ok` hashes on both
+    sides. A row whose store coverage is still incomplete is simply left
+    alone (see `_compute_backfill_matched_photos`) — `NOT (detail ?
+    'matched_photos')` keeps it eligible for a later run of this same
+    command, or the engine's own next pass, once coverage improves.
+
+    Deliberately narrow, on TWO axes:
+
+    1. Only ever ADDS the `matched_photos` key via `detail || jsonb`
+       (Postgres's jsonb concat operator) — every other key already in
+       `detail` (`match_ratio`, `floor_conflict`, ...) survives untouched.
+    2. Never touches `status`, `confidence`, or `match_basis`. A row the
+       owner has already confirmed/rejected must not be reopened or have
+       its verdict altered by a backfill — the UPDATE's own `WHERE`
+       clause re-checks `status = 'pending'` at WRITE time (not just the
+       initial SELECT), closing the race where a human decides a row
+       between this command's read and its write.
+
+    Raises `PhotoHashStoreUnavailableError` (same guard as
+    `purge_pending_fuzzy`) rather than silently writing nothing when the
+    store is unreachable — issue #607's exact prior failure mode, which a
+    destructive-adjacent bulk write must not repeat even though this
+    migration is additive-only.
+
+    Returns `(scanned, updated)`.
+    """
+    rows = _select_pending_photo_hash_rows_missing_matched_photos(conn)
+    store_conn = _photo_hash_store_or_raise()
+    try:
+        updates = _compute_backfill_matched_photos(rows, store_conn)
+    finally:
+        photo_hash_store.close_connection(store_conn)
+
+    # `actually_updated` counts real UPDATE rowcounts, not len(updates) —
+    # a row the WHERE guard refused (status changed to confirmed/rejected
+    # between the SELECT above and this write) computed a match but wrote
+    # nothing, and the returned count must say so honestly rather than
+    # claiming a write that didn't happen.
+    actually_updated = 0
+    if updates:
+        with conn.cursor() as cur:
+            for suggestion_id, matched_photos in updates.items():
+                cur.execute(
+                    """
+                    UPDATE suggested_merge
+                       SET detail = detail || %s::jsonb
+                     WHERE id = %s AND status = 'pending'
+                    """,
+                    (json.dumps({"matched_photos": matched_photos}), suggestion_id),
+                )
+                actually_updated += cur.rowcount
+        conn.commit()
+    return len(rows), actually_updated
+
+
 def _fetch_listing_record(conn, listing_id: int) -> ListingRecord | None:
     """Fetch one listing by id in the same shape `fetch_listing_records` yields."""
     for record in fetch_listing_records(conn):

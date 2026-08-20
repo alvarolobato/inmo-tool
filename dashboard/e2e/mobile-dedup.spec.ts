@@ -488,6 +488,9 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
       await expect(card.getByTestId("dedup-single-decision-note")).toBeVisible();
       await expect(card.getByTestId("dedup-pair-count-badge")).toHaveCount(0);
       await expect(card).not.toContainText(/pares/i);
+      // This fixture's suggestion DOES carry detail.matched_photos, so the
+      // "not computed yet" empty state (PR #621 review B1) must not show.
+      await expect(card.getByTestId("dedup-photo-matches-pending")).toHaveCount(0);
 
       const panels = card.locator(".dedup-side-panel");
       await expect(panels).toHaveCount(2);
@@ -524,12 +527,23 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
       expect(expandBox!.height).toBeGreaterThanOrEqual(44);
 
       // Expanding the 14-photo side reveals the rest — the matched photo
-      // stays marked, and the expand button disappears once nothing is
-      // hidden any more.
+      // stays marked, and the button stays as a real TOGGLE (PR #621
+      // review nit) rather than a one-way expand that vanishes.
       await hiPanel.getByTestId("dedup-photos-expand").click();
       await expect(hiPanel.locator(".dedup-photo-grid img")).toHaveCount(14);
       await expect(hiPanel.getByTestId("dedup-photo-matched")).toHaveCount(1);
-      await expect(hiPanel.getByTestId("dedup-photos-expand")).toHaveCount(0);
+      await expect(hiPanel.getByTestId("dedup-photos-expand")).toHaveText(/mostrar menos/i);
+
+      // Collapsing back returns to the capped, matched-first default view.
+      await hiPanel.getByTestId("dedup-photos-expand").click();
+      await expect(hiPanel.locator(".dedup-photo-grid img")).toHaveCount(4);
+      await expect(hiPanel.getByTestId("dedup-photo-matched")).toHaveCount(1);
+      await expect(hiPanel.getByTestId("dedup-photos-expand")).toHaveText(/\+10 más/i);
+
+      // Re-expand for the remaining assertions below (scroll/overflow
+      // checks against the full grid).
+      await hiPanel.getByTestId("dedup-photos-expand").click();
+      await expect(hiPanel.locator(".dedup-photo-grid img")).toHaveCount(14);
 
       // The expanded 14-photo grid overflows its own capped height and
       // scrolls internally rather than stretching the card to full-page
@@ -549,6 +563,18 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
         expect(box!.width).toBeGreaterThanOrEqual(130);
         expect(box!.height).toBeGreaterThanOrEqual(95);
       }
+
+      // PR #621 review (also-fix): the reject warning must disclose the
+      // real advert-level blast radius EVEN THOUGH pair_count is 1 here
+      // (one pending suggestion row) — D-133's veto always binds the
+      // WHOLE property pair regardless of pair_count, and the old
+      // `pair_count > 1` gate left exactly this shape (measured live: 32%
+      // of photo groups) showing only "Este rechazo es permanente.",
+      // silent about which adverts it covers.
+      await expect(card).toHaveAttribute("data-pair-count", "1");
+      await card.getByTestId("dedup-reject").click();
+      await expect(card.getByTestId("dedup-reject-warning")).toHaveText(/anuncios \(7 ↔ 13\)/i);
+      await card.getByTestId("dedup-reject-cancel").click();
 
       const hasHorizontalOverflow = await page.evaluate(() => {
         const main = document.querySelector("main.main-content");

@@ -3742,6 +3742,394 @@ class TestPurgePendingFuzzyPhotoStoreUnavailable:
             assert cur.fetchone()[0] == "pending"
 
 
+class TestBackfillMatchedPhotos:
+    """Issue #615's backfill (PR #621 review B1, supersedes the
+    separately-filed #622): `engine.backfill_matched_photos` populates
+    `detail.matched_photos` on PENDING `photo_hash` rows filed before
+    `matched_pairs` existed, read-only against the persistent
+    `photo_hashes` store (D-025) — never a live fetch, never touches
+    `status`/`confidence`/`match_basis`.
+    """
+
+    def _seed_photo_hash_pair(
+        self,
+        conn,
+        ext_prefix: str,
+        detail: dict | None = None,
+        status: str = "pending",
+        **kwargs,
+    ) -> tuple[int, int, int]:
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            conn, "fotocasa", "idealista", ext_prefix, **kwargs
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO suggested_merge
+                    (listing_id_a, listing_id_b, match_basis, confidence, status, detail)
+                VALUES (%s, %s, 'photo_hash', 0.800, %s, %s::jsonb)
+                RETURNING id
+                """,
+                (
+                    *sorted((listing_a, listing_b)),
+                    status,
+                    json.dumps(detail if detail is not None else {"match_ratio": 1.0}),
+                ),
+            )
+            suggestion_id = cur.fetchone()[0]
+        conn.commit()
+        return suggestion_id, listing_a, listing_b
+
+    def _seed_stored_hash(
+        self, conn, url: str, hex_digest: str, source: str, ok: bool = True
+    ) -> None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO photo_hashes (photo_url, phash, ok, source) "
+                "VALUES (%s, %s, %s, %s)",
+                (url, hex_digest, ok, source),
+            )
+        conn.commit()
+
+    # Two disjoint noise hashes + one shared ("the match") hash — same
+    # discipline as TestPhotoHashMatchedPairsThreading: distances verified
+    # far apart so nothing but the deliberate match can clear
+    # _HASH_HAMMING_THRESHOLD.
+    _SHARED_HEX = "ffff0000ffff0000"
+    _NOISE_A_HEX = "0000000000000000"
+    _NOISE_B_HEX = "8888888888888888"
+
+    def test_populates_matched_photos_from_the_store_alone_never_the_network(
+        self, dedup_db, monkeypatch
+    ):
+        """The core case, AND a no-network guard: if backfill ever DID
+        attempt a live fetch, `requests.get` would raise loudly here
+        instead of silently succeeding against a real CDN — the owner's
+        own reason for filing this as nearly-free (all 447 production
+        rows already have `ok` hashes on both sides)."""
+
+        def _boom(*_args, **_kwargs):
+            raise AssertionError(
+                "backfill_matched_photos must never fetch over the network"
+            )
+
+        monkeypatch.setattr(photo_hash_signal.requests, "get", _boom)
+
+        photo_a_noise = "https://cdn.fotocasa.es/backfill-a-noise.jpg"
+        photo_a_match = "https://cdn.fotocasa.es/backfill-a-match.jpg"
+        photo_b_noise = "https://cdn.idealista.com/backfill-b-noise.jpg"
+        photo_b_match = "https://cdn.idealista.com/backfill-b-match.jpg"
+        self._seed_stored_hash(dedup_db, photo_a_noise, self._NOISE_A_HEX, "fotocasa")
+        self._seed_stored_hash(dedup_db, photo_a_match, self._SHARED_HEX, "fotocasa")
+        self._seed_stored_hash(dedup_db, photo_b_noise, self._NOISE_B_HEX, "idealista")
+        self._seed_stored_hash(dedup_db, photo_b_match, self._SHARED_HEX, "idealista")
+
+        suggestion_id, _la, _lb = self._seed_photo_hash_pair(
+            dedup_db,
+            "backfill-basic",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(200000),
+            current_price_b=Decimal(200000),
+            # Deliberately NOT index 0 on either side.
+            photo_urls_a=[photo_a_noise, photo_a_match],
+            photo_urls_b=[photo_b_noise, photo_b_match],
+        )
+
+        scanned, updated = engine.backfill_matched_photos(dedup_db)
+
+        assert scanned == 1
+        assert updated == 1
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status, confidence, match_basis, detail "
+                "FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            status, confidence, match_basis, detail = cur.fetchone()
+        # Never touched — a row the owner may already be reviewing must
+        # keep its verdict exactly as filed.
+        assert status == "pending"
+        assert match_basis == "photo_hash"
+        assert float(confidence) == pytest.approx(0.800)
+        # Existing detail key preserved (jsonb concat, not overwrite).
+        assert detail["match_ratio"] == 1.0
+        matched = detail["matched_photos"]
+        assert len(matched) == 1
+        assert matched[0]["url_a"] == photo_a_match
+        assert matched[0]["url_b"] == photo_b_match
+        assert matched[0]["distance"] == 0
+
+    def test_preserves_every_other_detail_key(self, dedup_db):
+        photo_a = "https://cdn.fotocasa.es/backfill-preserve-a.jpg"
+        photo_b = "https://cdn.idealista.com/backfill-preserve-b.jpg"
+        self._seed_stored_hash(dedup_db, photo_a, self._SHARED_HEX, "fotocasa")
+        self._seed_stored_hash(dedup_db, photo_b, self._SHARED_HEX, "idealista")
+        suggestion_id, _la, _lb = self._seed_photo_hash_pair(
+            dedup_db,
+            "backfill-preserve",
+            detail={"match_ratio": 1.0, "floor_conflict": True},
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+
+        engine.backfill_matched_photos(dedup_db)
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT detail FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            detail = cur.fetchone()[0]
+        assert detail["match_ratio"] == 1.0
+        assert detail["floor_conflict"] is True
+        assert "matched_photos" in detail
+
+    def test_idempotent_never_rescans_a_row_that_already_has_matched_photos(
+        self, dedup_db
+    ):
+        photo_a = "https://cdn.fotocasa.es/backfill-idempotent-a.jpg"
+        photo_b = "https://cdn.idealista.com/backfill-idempotent-b.jpg"
+        self._seed_stored_hash(dedup_db, photo_a, self._SHARED_HEX, "fotocasa")
+        self._seed_stored_hash(dedup_db, photo_b, self._SHARED_HEX, "idealista")
+        # Already has matched_photos (e.g. a previous backfill run, or a
+        # fresh evaluate_pair) — a DIFFERENT payload than what a fresh
+        # computation would produce, so a re-scan would be detectable.
+        existing_payload = [
+            {
+                "url_a": "https://stale.example/x.jpg",
+                "url_b": "https://stale.example/y.jpg",
+                "distance": 3,
+            }
+        ]
+        suggestion_id, _la, _lb = self._seed_photo_hash_pair(
+            dedup_db,
+            "backfill-idempotent",
+            detail={"match_ratio": 1.0, "matched_photos": existing_payload},
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+
+        scanned, updated = engine.backfill_matched_photos(dedup_db)
+
+        assert scanned == 0
+        assert updated == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT detail FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            detail = cur.fetchone()[0]
+        assert detail["matched_photos"] == existing_payload
+
+    def test_leaves_a_row_alone_when_store_coverage_is_incomplete(self, dedup_db):
+        """One side's photo was never successfully hashed — the row stays
+        eligible for a LATER run (or the engine's own next pass) rather
+        than being marked done with an empty/wrong result."""
+        photo_a = "https://cdn.fotocasa.es/backfill-incomplete-a.jpg"
+        photo_b = "https://cdn.idealista.com/backfill-incomplete-b.jpg"
+        self._seed_stored_hash(dedup_db, photo_a, self._SHARED_HEX, "fotocasa")
+        # photo_b was never hashed at all — no row in photo_hashes.
+        suggestion_id, _la, _lb = self._seed_photo_hash_pair(
+            dedup_db,
+            "backfill-incomplete",
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+
+        scanned, updated = engine.backfill_matched_photos(dedup_db)
+
+        assert scanned == 1
+        assert updated == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status, detail FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            status, detail = cur.fetchone()
+        assert status == "pending"
+        assert "matched_photos" not in detail
+
+    def test_dry_run_reports_without_writing(self, dedup_db):
+        photo_a = "https://cdn.fotocasa.es/backfill-dryrun-a.jpg"
+        photo_b = "https://cdn.idealista.com/backfill-dryrun-b.jpg"
+        self._seed_stored_hash(dedup_db, photo_a, self._SHARED_HEX, "fotocasa")
+        self._seed_stored_hash(dedup_db, photo_b, self._SHARED_HEX, "idealista")
+        suggestion_id, _la, _lb = self._seed_photo_hash_pair(
+            dedup_db,
+            "backfill-dryrun",
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+
+        scanned, would_update = engine.preview_backfill_matched_photos(dedup_db)
+
+        assert scanned == 1
+        assert would_update == 1
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT detail FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            detail = cur.fetchone()[0]
+        assert "matched_photos" not in detail
+
+    def test_write_guard_refuses_a_row_that_changed_status_between_read_and_write(
+        self, dedup_db, monkeypatch
+    ):
+        """A concurrent human decision (confirm/reject) landing between
+        this command's SELECT and its UPDATE must not be reopened or have
+        its verdict's detail altered — the UPDATE's own
+        `WHERE status = 'pending'` guard, not just the initial SELECT's
+        filter, is what protects this."""
+        photo_a = "https://cdn.fotocasa.es/backfill-race-a.jpg"
+        photo_b = "https://cdn.idealista.com/backfill-race-b.jpg"
+        self._seed_stored_hash(dedup_db, photo_a, self._SHARED_HEX, "fotocasa")
+        self._seed_stored_hash(dedup_db, photo_b, self._SHARED_HEX, "idealista")
+        suggestion_id, _la, _lb = self._seed_photo_hash_pair(
+            dedup_db,
+            "backfill-race",
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+
+        real_select = engine._select_pending_photo_hash_rows_missing_matched_photos
+
+        def _select_then_simulate_concurrent_reject(conn):
+            rows = real_select(conn)
+            # Simulates another connection (a human's reject click,
+            # processed by etl/dedup/actions.py) committing between this
+            # read and backfill_matched_photos's own write.
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE suggested_merge SET status = 'rejected' WHERE id = %s",
+                    (suggestion_id,),
+                )
+            conn.commit()
+            return rows
+
+        monkeypatch.setattr(
+            engine,
+            "_select_pending_photo_hash_rows_missing_matched_photos",
+            _select_then_simulate_concurrent_reject,
+        )
+
+        scanned, updated = engine.backfill_matched_photos(dedup_db)
+
+        # A match WAS computable (scanned=1), but the WHERE guard refused
+        # the write once status was no longer 'pending' — updated must
+        # report the true (zero) rowcount, not the computed-but-unwritten
+        # count.
+        assert scanned == 1
+        assert updated == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status, detail FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            status, detail = cur.fetchone()
+        assert status == "rejected"
+        assert "matched_photos" not in detail
+
+    def test_backfill_raises_and_writes_nothing_when_store_unreachable(
+        self, dedup_db, monkeypatch
+    ):
+        from etl.dedup import photo_hash_store
+
+        photo_a = "https://cdn.fotocasa.es/backfill-store-down-a.jpg"
+        photo_b = "https://cdn.idealista.com/backfill-store-down-b.jpg"
+        suggestion_id, _la, _lb = self._seed_photo_hash_pair(
+            dedup_db,
+            "backfill-store-down",
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+        monkeypatch.setattr(photo_hash_store, "open_connection", lambda: None)
+
+        with pytest.raises(engine.PhotoHashStoreUnavailableError):
+            engine.backfill_matched_photos(dedup_db)
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT detail FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            detail = cur.fetchone()[0]
+        assert "matched_photos" not in detail
+
+    def test_preview_raises_the_same_way(self, dedup_db, monkeypatch):
+        from etl.dedup import photo_hash_store
+
+        self._seed_photo_hash_pair(dedup_db, "backfill-store-down-preview")
+        monkeypatch.setattr(photo_hash_store, "open_connection", lambda: None)
+
+        with pytest.raises(engine.PhotoHashStoreUnavailableError):
+            engine.preview_backfill_matched_photos(dedup_db)
+
+    def test_cli_reports_aborted_and_exits_nonzero_when_store_unreachable(
+        self, dedup_db, monkeypatch, capsys
+    ):
+        from etl.dedup import cli as dedup_cli
+        from etl.dedup import photo_hash_store
+
+        self._seed_photo_hash_pair(dedup_db, "backfill-store-down-cli")
+        monkeypatch.setattr(photo_hash_store, "open_connection", lambda: None)
+
+        class _NoCloseConnProxy:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
+        )
+        exit_code = dedup_cli.main(["backfill-matched-photos", "--yes"])
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "ABORTED" in captured.err
+
+    def test_cli_dry_run_reports_without_prompting_or_writing(
+        self, dedup_db, monkeypatch, capsys
+    ):
+        from etl.dedup import cli as dedup_cli
+
+        photo_a = "https://cdn.fotocasa.es/backfill-cli-dryrun-a.jpg"
+        photo_b = "https://cdn.idealista.com/backfill-cli-dryrun-b.jpg"
+        self._seed_stored_hash(dedup_db, photo_a, self._SHARED_HEX, "fotocasa")
+        self._seed_stored_hash(dedup_db, photo_b, self._SHARED_HEX, "idealista")
+        suggestion_id, _la, _lb = self._seed_photo_hash_pair(
+            dedup_db,
+            "backfill-cli-dryrun",
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+
+        class _NoCloseConnProxy:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
+        )
+        exit_code = dedup_cli.main(["backfill-matched-photos", "--dry-run"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "[dry-run]" in captured.out
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT detail FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            detail = cur.fetchone()[0]
+        assert "matched_photos" not in detail
+
+
 class TestFuzzyPurgeRescueSurvivesReevaluation:
     """Issue #607 (B1): a row `purge_pending_fuzzy` rescues must still be
     reviewable after the very next `engine.run()` — NOT flipped to

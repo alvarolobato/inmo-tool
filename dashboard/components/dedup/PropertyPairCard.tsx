@@ -302,6 +302,23 @@ export function PropertyPairCard({
         </span>
       </div>
 
+      {/* PR #621 review B1: an explicit empty state for a photo_hash pair
+          whose `detail.matched_photos` hasn't been computed yet (every
+          pending photo_hash row filed before this fix landed — 447 on
+          production, backfilled by `ps dedup backfill-matched-photos`,
+          but a genuinely new row can still land in this gap between a
+          fresh `suggested_merge` insert and the dedup engine's OWN next
+          successful `evaluate_pair` pass). Without this, an un-backfilled
+          row rendered BYTE-FOR-BYTE like the pre-#615 card — no ring, no
+          badge, nothing telling the owner the matching data is simply
+          absent rather than "these photos are it". The backfill handles
+          today's rows; this handles the next one that slips through. */}
+      {primary.match_basis === "photo_hash" && photoMatches.length === 0 && (
+        <p data-testid="dedup-photo-matches-pending" style={{ margin: 0, fontSize: 12, color: "var(--fg-subtle)" }}>
+          Coincidencias aún no calculadas — fotos mostradas sin ordenar.
+        </p>
+      )}
+
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
         <ListingSidePanel side={primary.listing_lo} photos={loPhotos} />
         <div
@@ -377,10 +394,21 @@ export function PropertyPairCard({
           // the owner misread as an advert count. It now names what he
           // actually needs to know before committing: which two grouped
           // adverts this permanently vetoes.
+          //
+          // PR #621 review (also-fix): UNCONDITIONAL, never gated on
+          // `pair.pair_count > 1`. D-133's veto always binds the WHOLE
+          // property pair, regardless of how many `suggested_merge` rows
+          // happened to be pending for it — a group can have exactly one
+          // pending row (pair_count === 1) while its two properties still
+          // carry many adverts each (measured live: 83 of 261 photo
+          // groups, 32%, are pair_count === 1 with more than 2 adverts
+          // combined). Gating the disclosure on an internal count that
+          // has no relationship to the veto's real blast radius left
+          // exactly those groups showing only "Este rechazo es
+          // permanente." — true, but silent about which adverts it
+          // covers, for an action that cannot be undone from the UI.
           <span data-testid="dedup-reject-warning" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
-            {pair.pair_count > 1
-              ? `Se rechazará que estos anuncios (${pair.listing_count_lo} ↔ ${pair.listing_count_hi}) sean la misma vivienda, para siempre.`
-              : "Este rechazo es permanente."}
+            {`Se rechazará que estos anuncios (${pair.listing_count_lo} ↔ ${pair.listing_count_hi}) sean la misma vivienda, para siempre.`}
           </span>
         )}
         {confirmingReject && (

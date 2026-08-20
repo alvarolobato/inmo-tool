@@ -266,12 +266,32 @@ export interface OrderedPhoto {
  * in `allUrls` (shouldn't happen — `resolveMatchedPhotos` only emits URLs
  * it found via membership in the first place — but defensive rather than
  * assumed) is skipped rather than fabricating a photo.
+ *
+ * DEDUPES `matchedUrlsInOrder` by URL, keeping only the FIRST (strongest,
+ * since the caller already sorted it that way) occurrence — PR #621
+ * review B2: `photo_hash.py`'s `matched_pairs` deliberately does NOT
+ * dedupe the LARGER side (one photo there can legitimately be the best
+ * match for more than one smaller-side photo, e.g. two near-identical
+ * shots of the same room), so `resolveMatchedPhotos`'s output for that
+ * side can repeat a URL. Left un-deduped here, a repeated URL rendered
+ * TWICE: an inflated photo count ("5 fotos" for a 4-photo listing), a
+ * duplicate React `key` (`ListingSidePanel`'s `key={photo.url}`), and one
+ * of the 4 precious default-view slots wasted on a repeat instead of a
+ * genuinely different photo. Measured live: 27 of 447 (6%) of pending
+ * photo_hash rows have a larger side with more matches than distinct
+ * matched URLs.
  */
 export function orderPhotosMatchedFirst(allUrls: string[], matchedUrlsInOrder: string[]): OrderedPhoto[] {
   const allSet = new Set(allUrls);
-  const matched = matchedUrlsInOrder.filter((url) => allSet.has(url));
-  const matchedSet = new Set(matched);
-  const unmatched = allUrls.filter((url) => !matchedSet.has(url));
+  const seen = new Set<string>();
+  const matched: string[] = [];
+  for (const url of matchedUrlsInOrder) {
+    if (allSet.has(url) && !seen.has(url)) {
+      seen.add(url);
+      matched.push(url);
+    }
+  }
+  const unmatched = allUrls.filter((url) => !seen.has(url));
   return [
     ...matched.map((url) => ({ url, matched: true })),
     ...unmatched.map((url) => ({ url, matched: false })),

@@ -3,7 +3,7 @@ id: D-135
 title: Dedup photo-match card shows the photos that matched, and advert counts, not pair counts
 date: 2026-08-20
 group: Data / connectors
-rule: 'A photo-hash dedup card shows the TRUE matching photos (from `photo_hash.matched_pairs`, never re-derived in the UI), matched-first, capped at 4 per side with the rest reachable. UI copy shows per-side advert counts ("7 anuncios ↔ 13 anuncios"), never the internal pair_count ("N pares").'
+rule: 'A dedup photo card shows only the photos matched_pairs actually matched (never re-derived in the UI), capped at 4 with rest reachable; copy shows advert counts, never pair_count.'
 ---
 
 # D-135: Dedup photo-match card shows the photos that matched, and advert counts, not pair counts
@@ -86,12 +86,16 @@ here).
    ratio calculation. `evaluate_pair` adds `detail["matched_photos"]`
    (a list of `{url_a, url_b, distance}`) whenever any pair matches,
    using the exact same cached pairs `hashes_a`/`hashes_b` above already
-   computed. A real regression caught here (not hypothetical): imagehash's
-   `-` operator returns `numpy.int64`, which crashed `json.dumps` at
-   `file_suggestion`'s write the moment a REAL (non-monkeypatched) hash
-   comparison's distance reached `detail` — caught by
-   `TestDedupRunResultPhotoHealth`'s real-Postgres test, fixed with an
-   explicit `int()` cast.
+   computed. `matched_pairs` itself introduces one new pitfall this PR's
+   own review caught before it shipped: imagehash's `-` operator returns
+   `numpy.int64`, not a plain Python `int`, and `detail["matched_photos"]`
+   is the first place this module ever persists a raw distance value
+   (`match_ratio`, the only prior consumer, only ever divides it into a
+   plain float) — an un-cast `numpy.int64` there crashes `json.dumps` at
+   `file_suggestion`'s write. Caught by `TestDedupRunResultPhotoHealth`'s
+   real-Postgres test before merge, fixed with an explicit `int()` cast —
+   a self-introduced papercut in new code, not a pre-existing production
+   bug (no signal wrote a hash distance into `detail` before this PR).
 
 2. **The dashboard shows matched-first, capped at 4, with the rest
    reachable — never all-at-once, never index-order.** Direct owner

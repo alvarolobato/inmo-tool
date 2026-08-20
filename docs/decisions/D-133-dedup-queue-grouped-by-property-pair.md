@@ -88,10 +88,16 @@ PROPERTY pair, not listing pair. Five linked design calls:
    > headline badge with per-side ADVERT counts
    > (`listing_count_lo`/`listing_count_hi`, "7 anuncios ↔ 13 anuncios")
    > and relabels the collapsed toggle to "señales" instead of "pares".
-   > `pair_count` itself is unchanged and still drives the reject
-   > blast-radius warning/bookkeeping — only its UI LABEL changed. The
-   > grouping/confirm/reject/veto mechanics in points 2–5 below are
-   > entirely untouched by D-135 and remain binding as written.
+   > `pair_count` itself is unchanged and still exists on the type as a
+   > `data-pair-count` debug/test attribute (reject blast-radius
+   > bookkeeping). It no longer GATES the reject warning either (PR #621
+   > review also-fix): that warning now unconditionally names the advert
+   > counts, since D-133's veto always binds the whole property pair
+   > regardless of how many `suggested_merge` rows happened to be
+   > pending — a group can be `pair_count === 1` while its two properties
+   > still carry many adverts each. The grouping/confirm/reject/veto
+   > mechanics in points 2–5 below are entirely untouched by D-135 and
+   > remain binding as written.
 
 2. **Confirm**: acts on exactly ONE representative row — the group's
    strongest evidence (`evidence[0].suggestion_id`) — via the existing
