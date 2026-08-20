@@ -282,14 +282,23 @@ test.describe("#584: property detail at phone width (iPhone 13 emulation)", () =
       expect(seenBox!.height).toBeLessThanOrEqual(20);
 
       // "Ver anuncio original →" is a fully visible, in-viewport tap
-      // target — not clipped off the right edge (the old bug).
+      // target — not clipped off the right edge (the old bug). Height alone
+      // is not enough here: with the media queries neutered during this
+      // PR's own red/green check, the link measured 44.98px TALL while its
+      // text was shredded into three narrow lines (~45px wide) — a broken,
+      // clipped link that still happened to satisfy a height-only floor.
+      // Pairing it with a width floor (mirroring the dedicated full-width
+      // test below) makes that failure mode actually fail here too.
+      const itemBox = await item.boundingBox();
       const link = item.getByText(/Ver anuncio original/);
       await expect(link).toBeVisible();
       const linkBox = await link.boundingBox();
+      expect(itemBox).not.toBeNull();
       expect(linkBox).not.toBeNull();
       expect(linkBox!.x).toBeGreaterThanOrEqual(0);
       expect(linkBox!.x + linkBox!.width).toBeLessThanOrEqual(clientWidth + 1);
       expect(linkBox!.height).toBeGreaterThanOrEqual(44);
+      expect(linkBox!.width).toBeGreaterThanOrEqual(itemBox!.width * 0.8);
     }
 
     // No horizontal overflow of the page content.
@@ -365,24 +374,106 @@ test.describe("#584: property detail at phone width (iPhone 13 emulation)", () =
 
     // #460's invariant this issue must not break: the price and its 🏷
     // rating chip are one unit, never separated onto different lines, even
-    // though the row around them now wraps.
+    // though the row around them now wraps. A geometry-only check here is
+    // decorative once the outer row wraps below 768px (PriceSignals then
+    // gets the whole ~302px column, and this fixture's "150.000 €" + chip
+    // is far too short to ever need a second line regardless of the CSS
+    // property) — reverting PriceSignals.tsx's `flexWrap: "nowrap"` to
+    // "wrap" still passed a geometry-only version of this test 5/5. Assert
+    // the actual CSS property directly so a revert of THAT declaration is
+    // what this test exists to catch, not incidental fixture width.
     const priceSignals = page.getByTestId("price-signals").first();
     const h1 = priceSignals.locator("h1");
     const rating = priceSignals.getByTestId("price-rating");
     await expect(h1).toBeVisible();
     await expect(rating).toBeVisible();
+
+    // The nowrap unit is the FIRST direct-child <span> of price-signals
+    // (PriceSignals.tsx's price-mode branch: [price][rating] wrapped in one
+    // `flexWrap: "nowrap"` span, with the optional direction chip as a
+    // second, separately-wrapping sibling).
+    const nowrapUnit = priceSignals.locator("> span").first();
+    const computedFlexWrap = await nowrapUnit.evaluate((el) => getComputedStyle(el).flexWrap);
+    expect(computedFlexWrap).toBe("nowrap");
+
+    // Geometry as a secondary, human-readable confirmation (kept alongside
+    // the computed-style assertion above, not instead of it): price and
+    // chip visually share one line.
     const h1Box = await h1.boundingBox();
     const ratingBox = await rating.boundingBox();
     expect(h1Box).not.toBeNull();
     expect(ratingBox).not.toBeNull();
-    // Same line: vertical centers are close together.
     const h1Center = h1Box!.y + h1Box!.height / 2;
     const ratingCenter = ratingBox!.y + ratingBox!.height / 2;
     expect(Math.abs(h1Center - ratingCenter)).toBeLessThanOrEqual(h1Box!.height);
   });
 });
 
-test.describe("#584: desktop layout unchanged (1280px)", () => {
+test.describe("#584: desktop breakpoint boundary (768px) and unchanged (1280px)", () => {
+  // 768px is the exact edge of both `.linked-listing-row` and
+  // `.property-header-top-row`'s `@media (max-width: 767px)` cutoff — the
+  // width most likely to catch a breakpoint-boundary regression, and the
+  // width that would have caught this PR's own B1 review finding (the
+  // outer per-item row correctly stays a single ROW here per D-121, but the
+  // left field group's plain, non-gated `flexWrap: "wrap"` still activates
+  // in the 768-950px band on this fixture — taller rows with every field
+  // whole, an improvement over main's mid-token shearing in that same band,
+  // not a regression). This test asserts the two properties that ARE
+  // breakpoint-gated and must NOT change at 768px; it deliberately does
+  // NOT assert pixel-for-pixel identity with main's un-gated inner wrap,
+  // since main and this PR genuinely differ there by design.
+  test("768px: outer row stays a single row, header stays non-wrapping, no mid-token shard", async ({
+    page,
+    baseURL,
+  }) => {
+    skipIfNoDb(test);
+    test.skip(!adminKey, "ADMIN_API_KEY not set for the server under test");
+    await page.setViewportSize({ width: 768, height: 900 });
+    await seedAdminSession(page, baseURL);
+
+    await page.goto(`/profiles/${profileId}/properties/${targetPropertyId}`);
+    await expect(page.getByTestId("property-detail-page")).toBeVisible();
+    await assertNoErrorSurface(page);
+
+    const clientWidth = await page.evaluate(() => document.documentElement.clientWidth);
+    expect(clientWidth).toBe(768);
+
+    // The two breakpoint-GATED properties (`.linked-listing-row`'s
+    // flex-direction, `.property-header-top-row`'s flex-wrap) read their
+    // desktop (>=768px) values here — computed style, not geometry, so this
+    // is exactly what would fail if the `max-width: 767px` cutoff drifted.
+    const row = page.locator('[data-testid="linked-listing-item"]').first();
+    const rowFlexDirection = await row.evaluate((el) => getComputedStyle(el).flexDirection);
+    expect(rowFlexDirection).toBe("row");
+
+    const headerRow = page.locator(".property-header-top-row");
+    const headerFlexWrap = await headerRow.evaluate((el) => getComputedStyle(el).flexWrap);
+    expect(headerFlexWrap).toBe("nowrap");
+
+    // The genuinely-improved, NOT breakpoint-gated invariant (left field
+    // group's plain `flexWrap: "wrap"`, B1): every field still renders
+    // whole on its own line-fragment — no internal text-shearing — even
+    // though the row itself is taller than main's in this band.
+    const seenSpan = row.getByText(/^Visto desde/);
+    await expect(seenSpan).toBeVisible();
+    const seenBox = await seenSpan.boundingBox();
+    expect(seenBox).not.toBeNull();
+    expect(seenBox!.height).toBeLessThanOrEqual(20);
+
+    // The link is still fully in-viewport and to the right of the field
+    // group (row layout, not stacked) — never clipped.
+    const link = row.getByText(/Ver anuncio original/);
+    await expect(link).toBeVisible();
+    const linkBox = await link.boundingBox();
+    expect(linkBox).not.toBeNull();
+    expect(linkBox!.x + linkBox!.width).toBeLessThanOrEqual(clientWidth + 1);
+
+    const hasHorizontalOverflow = await page.evaluate(
+      () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
+    );
+    expect(hasHorizontalOverflow).toBe(false);
+  });
+
   test("desktop layout unchanged", async ({ page, baseURL }) => {
     skipIfNoDb(test);
     test.skip(!adminKey, "ADMIN_API_KEY not set for the server under test");

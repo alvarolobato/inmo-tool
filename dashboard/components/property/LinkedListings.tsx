@@ -32,6 +32,15 @@ export function LinkedListings({ listings }: { listings: PropertyListingDetail[]
           className="linked-listing-row"
           style={{
             display: "flex",
+            // Pushes the link to the far right in desktop's ROW layout
+            // (>=768px, `.linked-listing-row`'s default) — load-bearing
+            // there, so it stays inline rather than being deleted: removing
+            // it would leave the link sitting immediately after the field
+            // group instead of at the row's far edge, a real desktop
+            // regression. It becomes a genuine no-op only once
+            // `.linked-listing-row`'s mobile override switches this to a
+            // COLUMN (<768px) — main-axis distribution over an
+            // intrinsic-height column has nothing to distribute.
             justifyContent: "space-between",
             gap: 12,
             padding: "8px 10px",
@@ -44,9 +53,16 @@ export function LinkedListings({ listings }: { listings: PropertyListingDetail[]
               phone width instead of every span shrinking internally into
               mid-token shards. Children keep their natural (content) flex
               basis — no `flex: 1` anywhere in this group — so D-124's
-              basis-0 wrap trap doesn't apply and this needs no media query:
-              it wraps only when it doesn't fit, which never happens at
-              >=768px with real content. */}
+              basis-0 wrap trap doesn't apply. Deliberately no media query:
+              it wraps whenever the row's available width can't fit every
+              field on one line, which is NOT phone-only — measured on this
+              fixture, the 768-950px band wraps too (taller rows, every
+              field whole) where main sheared the same fields across two
+              lines. That's strictly better than main in that band, not a
+              regression the "desktop pixel-identical" constraint (>=768px,
+              single-row geometry unchanged) is scoped to prevent — this
+              constraint is about not making desktop WORSE, and a taller,
+              legible row is an improvement main never had. */}
           <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
             <span
               style={{

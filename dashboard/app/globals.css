@@ -625,14 +625,21 @@ body {
    1. LinkedListings.tsx: each row's left group already gets `flexWrap:
       "wrap"` as a plain inline style (component file) — its spans have
       natural content bases, no `flex: 1` anywhere, so D-124's basis-0 wrap
-      trap doesn't apply and that property needs no breakpoint divergence
-      at all (it wraps only when content doesn't fit, which never happens
-      at >=768px). What DOES genuinely differ per breakpoint is the outer
-      row's direction (row at desktop so "Ver anuncio original" sits at the
-      far right; column below 768px so it becomes its own full-width tap
-      target) and its cross-axis alignment (center vs stretch) — both
-      static literals per D-121, so both are deleted from the row's inline
-      style and owned here instead.
+      trap doesn't apply. That property is deliberately NOT breakpoint-gated:
+      it wraps whenever the available row width can't fit every field on one
+      line, which happens below ~950px on this fixture, not just below
+      768px — the 768-950px band renders taller rows with every field whole,
+      where main sheared the same fields across two lines in that band. This
+      is an improvement over main in that band, not a regression; the
+      "desktop pixel-identical" constraint below is about the ONE breakpoint-
+      gated property in this file (the outer row's direction, below), not
+      about pinning every inline style to main's exact geometry at every
+      width down to 768px. What DOES need breakpoint divergence — because it
+      must NOT change above 768px — is the outer row's direction (row at
+      desktop so "Ver anuncio original" sits at the far right; column below
+      768px so it becomes its own full-width tap target) and its cross-axis
+      alignment (center vs stretch) — both static literals per D-121, so
+      both are deleted from the row's inline style and owned here instead.
 
    2. PropertyHeader.tsx's top row (price+chip vs the badge group) is
       nowrap at every width today: the price+chip unit's non-wrapping
