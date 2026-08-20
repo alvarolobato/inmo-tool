@@ -11,6 +11,7 @@ any other listing.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -141,6 +142,10 @@ class TestCapturePortalListsStayInSync:
         )
 
 
+_SIGHTING_ID_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "sighting_ids.json"
+_SIGHTING_ID_CASES = json.loads(_SIGHTING_ID_FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
 class TestSightingIdExtraction:
     """Issue #639 task 1's own acceptance criterion (unmet by the first pass,
     per the Opus review's C4 finding): a DB-free unit test on URL -> id
@@ -148,82 +153,65 @@ class TestSightingIdExtraction:
     the query-string / fragment / missing-trailing-slash variance a scraped
     `<a href>` can carry that the connectors' own `external_id_from_url`
     (calibrated for a real browser's `location.href`) does not tolerate on
-    its own -- `_sighting_ids_from_detail_urls` normalizes for exactly this
-    (`_normalize_detail_path`) before calling it."""
+    its own -- `_sighting_id_from_url` normalizes for exactly this
+    (`_normalize_detail_path`) before calling it.
 
-    def test_idealista_trailing_slash_query_and_fragment_all_resolve(self):
+    Issue #639 review's own follow-up (a second Opus pass, post-merge of the
+    C1-C4 fixes): this id-extraction RULE exists in TWO languages --
+    `etl.capture._sighting_id_from_url` here and
+    `dashboard/lib/capture-sightings.ts`'s `sightingIdFromUrl`, the one the
+    REAL production write (`dashboard/lib/db/worklist.ts` `addWorklistUrls`)
+    actually calls. A rule this important (it feeds #643/#645's expiry
+    signal) drifting silently between two hand-maintained case lists is
+    exactly the failure mode this project has already been bitten by twice
+    in one week -- so both languages' suites read the SAME
+    `etl/tests/fixtures/sighting_ids.json`, rather than each hard-coding its
+    own copy of the cases. A shape one language accepts and the other
+    rejects now fails a test instead of aging into a wrong expiry."""
+
+    @pytest.mark.parametrize(
+        "case",
+        _SIGHTING_ID_CASES,
+        ids=[c["case"] for c in _SIGHTING_ID_CASES],
+    )
+    def test_fixture_case(self, case):
+        assert (
+            capture._sighting_id_from_url(case["portal"], case["url"])
+            == case["expected"]
+        )
+
+    def test_fixture_is_nonempty_and_covers_every_capture_portal(self):
+        """A guard against the fixture itself silently losing coverage (e.g.
+        a bad merge truncating the file) -- every capture-supported portal
+        must have at least one case."""
+        portals = {c["portal"] for c in _SIGHTING_ID_CASES}
+        assert portals >= set(capture.EXTENSION_CAPTURE_PORTALS)
+        assert len(_SIGHTING_ID_CASES) >= len(capture.EXTENSION_CAPTURE_PORTALS)
+
+    def test_batch_extraction_dedupes_and_preserves_order(self):
+        """`_sighting_ids_from_detail_urls` (the batch/list form
+        `_record_sightings` actually calls) is a thin wrapper over
+        `_sighting_id_from_url` per URL -- this is the ONE thing the fixture
+        above can't cover (it's single-URL), so it gets its own small test:
+        de-dupe across two different URL forms resolving to the same id, a
+        dropped id doesn't break the ones around it, order is preserved."""
         urls = [
             "https://www.idealista.com/inmueble/11111/",
-            "https://www.idealista.com/inmueble/22222",
-            "https://www.idealista.com/inmueble/33333/?searchQueryId=x",
-            "https://www.idealista.com/inmueble/44444#foto",
+            # A different form of the SAME id -- must not double-count.
+            "https://www.idealista.com/inmueble/11111?searchQueryId=x",
+            # A hipoges 'gone' route mixed into an idealista list resolves to
+            # nothing for the wrong portal anyway (no connector match) --
+            # included to prove a dropped entry doesn't disturb order.
+            "https://realestate.hipoges.com/es/detail/1/unavailable",
+            "https://www.idealista.com/inmueble/22222/",
         ]
         assert capture._sighting_ids_from_detail_urls("idealista", urls) == [
             "11111",
             "22222",
-            "33333",
-            "44444",
         ]
-
-    def test_aliseda_alnum_id_with_query_and_fragment(self):
-        urls = [
-            "https://www.alisedainmobiliaria.com/inmueble/ANT1",
-            "https://www.alisedainmobiliaria.com/inmueble/ANT2?utm_source=x",
-            "https://www.alisedainmobiliaria.com/inmueble/ANT3#gallery",
-        ]
-        assert capture._sighting_ids_from_detail_urls("aliseda", urls) == [
-            "ANT1",
-            "ANT2",
-            "ANT3",
-        ]
-
-    def test_altamira_query_and_fragment_resolve_but_short_id_still_does_not(self):
-        base = "https://www.altamirainmuebles.com/venta-de-atico/pontevedra/sanxenxo/segunda-mano/9186_1001_PE0001"
-        urls = [
-            f"{base}/375859/1?utm_source=x",
-            f"{base}/375860#ficha",
-            # A 3-digit id is below altamira's own 4+-digit convention (its
-            # regex's real floor, not a normalization gap) -- silently
-            # dropped, not a crash.
-            f"{base}/123/",
-        ]
-        assert capture._sighting_ids_from_detail_urls("altamira", urls) == [
-            "375859",
-            "375860",
-        ]
-
-    def test_hipoges_query_and_fragment_resolve(self):
-        urls = [
-            "https://realestate.hipoges.com/es/detail/99001",
-            "https://realestate.hipoges.com/es/detail/99002?ref=x",
-            "https://realestate.hipoges.com/es/detail/99003#top",
-        ]
-        assert capture._sighting_ids_from_detail_urls("hipoges", urls) == [
-            "99001",
-            "99002",
-            "99003",
-        ]
-
-    def test_hipoges_gone_route_never_yields_a_sighting_id(self):
-        """Issue #639 review C3: the site's OWN 'this advert is gone' route
-        must never be recorded as a sighting of it still being live."""
-        urls = [
-            "https://realestate.hipoges.com/es/detail/99001/unavailable",
-            "https://realestate.hipoges.com/es/detail/99002/contact-received",
-            # A live detail id in the same batch is unaffected.
-            "https://realestate.hipoges.com/es/detail/99003",
-        ]
-        assert capture._sighting_ids_from_detail_urls("hipoges", urls) == ["99003"]
 
     def test_unknown_portal_yields_nothing(self):
         assert capture._sighting_ids_from_detail_urls("cimenta2", ["/whatever"]) == []
-
-    def test_duplicate_ids_across_url_forms_are_deduped(self):
-        urls = [
-            "https://www.idealista.com/inmueble/11111/",
-            "https://www.idealista.com/inmueble/11111?searchQueryId=x",
-        ]
-        assert capture._sighting_ids_from_detail_urls("idealista", urls) == ["11111"]
 
 
 class TestProcessPendingCaptures:

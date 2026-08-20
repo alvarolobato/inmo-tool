@@ -59,11 +59,39 @@ the full C1–C4/M1/M2 finding; this record documents the corrected design.
    `etl.orchestrator._update_last_seen_for_discovered` (also `GREATEST`-based
    now — see below).
 
-Both languages share the SAME id-extraction shape, each in its own file kept
-in lockstep by a mirrored test suite (`etl/tests/test_capture.py::
-TestSightingIdExtraction` / `dashboard/lib/__tests__/capture-sightings.test.ts`),
-matching this codebase's existing `listing_detect.py`/`detect.js` and
-`worklist_match_key`/`worklistMatchKey` mirroring convention:
+**Why a two-language mirror was unavoidable here, not a design shortcut**:
+the write has to happen where the enumeration actually arrives —
+dashboard-side, in TypeScript, inside `addWorklistUrls` — while
+`etl/capture.py`'s Python path stays alive for a real, if lower-volume, case
+(a manually-captured single results page). There is no shared runtime
+between the ETL container and the dashboard container (the same reason
+`extension_capture` is a polled queue table rather than a synchronous call —
+see that table's own schema comment), so one implementation in one language
+was never on the table; the only real choice was how tightly the two stay
+bound.
+
+Both languages share the SAME id-extraction shape (`_sighting_id_from_url` /
+`sightingIdFromUrl`), and — per a second Opus review's own follow-up finding
+— they are bound MECHANICALLY, not by convention: both suites
+(`etl/tests/test_capture.py::TestSightingIdExtraction` /
+`dashboard/lib/__tests__/capture-sightings.test.ts`) read the literal SAME
+fixture file, `etl/tests/fixtures/sighting_ids.json` (22 `{portal, url,
+expected}` cases), rather than each hard-coding its own copy. This is
+deliberately a STRICTER pattern than this codebase's existing
+`listing_detect.py`/`detect.js` and `worklist_match_key`/`worklistMatchKey`
+mirrors, which are each covered by two independently-authored case tables
+asserted to the same expected values — correct in intent, but a silent
+drift between the two tables (one language's list quietly missing a case
+the other added) would still pass both suites. That gap is real: as of this
+writing `listing_detect.py`/`detect.js` (D-069) has NO parity test at all
+between the two files, maintained by a docstring's "MUST stay byte-for-byte
+equivalent" alone. Not a reason to repeat it here — a rule this important
+(it is the presence signal #643/#645's expiry logic will trust) drifting
+silently between two hand-maintained lists is exactly the failure mode this
+project has been bitten by twice in one week, so this one sets the better
+pattern: a shape one language's regex accepts and the other rejects now
+fails a shared-fixture test in BOTH suites, rather than aging into a wrong
+expiry months later with nothing pointing back here.
 
 - **C4 (URL normalization)**: a harvested `<a href>` or enumerated URL can
   carry a query string, a fragment, or lack the trailing slash a connector's
@@ -165,11 +193,14 @@ URL before calling it) — rejected because that regex is also used UNRELAXED
 on a real captured URL in `_connector_for_url`; loosening it there risks a
 spurious id match on a URL that never went through the classifier at all.
 
-**See**: `etl/capture.py` (`_record_sightings`, `_sighting_ids_from_detail_urls`,
-`_normalize_detail_path`, `_GONE_URL_SUFFIXES`, `_CONNECTOR_CLASS_BY_PORTAL`),
-`etl/orchestrator.py` (`_update_last_seen_for_discovered`),
-`dashboard/lib/capture-sightings.ts`, `dashboard/lib/db/worklist.ts`
-(`addWorklistUrls`, `recordSightings`), `etl/tests/test_capture.py`
+**See**: `etl/capture.py` (`_record_sightings`, `_sighting_id_from_url`,
+`_sighting_ids_from_detail_urls`, `_normalize_detail_path`,
+`_GONE_URL_SUFFIXES`, `_CONNECTOR_CLASS_BY_PORTAL`), `etl/orchestrator.py`
+(`_update_last_seen_for_discovered` — see its own docstring and the inline
+comments at both its call sites in `run_connector` for the C2 clock-source
+regression), `dashboard/lib/capture-sightings.ts`, `dashboard/lib/db/worklist.ts`
+(`addWorklistUrls`, `recordSightings`), the shared fixture
+`etl/tests/fixtures/sighting_ids.json`, `etl/tests/test_capture.py`
 (`TestListingPageSightingsBumpLastSeen`, `TestSightingIdExtraction`),
 `dashboard/lib/__tests__/capture-sightings.test.ts`,
 `dashboard/lib/db/__tests__/worklist-sightings.integration.test.ts`, issue

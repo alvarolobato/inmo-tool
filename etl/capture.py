@@ -77,10 +77,9 @@ EXTENSION_CAPTURE_PORTALS: frozenset[str] = frozenset(
 # portal name (== each connector's own `.name`, e.g. "idealista") -> connector
 # class, derived from _CAPTURE_CONNECTORS so there's one list of "which
 # portals can be capture-processed", not a second hand-maintained one. Used by
-# `_sighting_ids_from_detail_urls` (issue #639) to turn a results-page's
-# harvested detail URLs back into external_ids via each connector's own
-# `external_id_from_url` — the same id extraction `_connector_for_url` uses
-# for a single detail capture.
+# `_sighting_id_from_url` (issue #639) to turn a harvested detail URL back
+# into an external_id via each connector's own `external_id_from_url` — the
+# same id extraction `_connector_for_url` uses for a single detail capture.
 _CONNECTOR_CLASS_BY_PORTAL: dict[str, type] = {
     cls.name: cls for _, cls in _CAPTURE_CONNECTORS.values()
 }
@@ -433,39 +432,53 @@ def _normalize_detail_path(href: str) -> str:
     return path
 
 
-def _sighting_ids_from_detail_urls(portal: str, urls: list[str]) -> list[str]:
-    """External ids for `portal`'s own `_update_last_seen_for_discovered` call
-    (issue #639), extracted from a results page's harvested detail URLs via
-    each connector's own `external_id_from_url`, applied to each URL's
+def _sighting_id_from_url(portal: str, url: str) -> str | None:
+    """External id for ONE harvested detail URL under `portal`, or None when
+    the portal is unknown, no id can be extracted, or the URL's normalized
+    path matches the portal's own "this advert is gone" route
+    (`_GONE_URL_SUFFIXES`, issue #639 review C3).
+
+    Applies each connector's own `external_id_from_url` to the URL's
     NORMALIZED path (`_normalize_detail_path`) -- the same id-extraction
     `_connector_for_url` uses for a single detail capture, made tolerant of
     the query-string / fragment / missing-trailing-slash variance a scraped
     `<a href>` can carry that a browser's own `location.href` never does
     (issue #639 review, C4).
 
-    A URL whose normalized path matches `portal`'s own "this advert is
-    gone" route shape (`_GONE_URL_SUFFIXES`, issue #639 review C3) is
-    excluded outright: the site SAYING an advert is gone must never be
-    recorded as a sighting of it still being live.
-
-    De-duped, order-preserving. Unknown portal contributes nothing. Any URL
-    `external_id_from_url` still can't extract an id from (e.g. altamira's
-    own regex requires 4+ digits -- a real limitation of that connector's id
-    convention, deliberately not loosened here, since it is also used
-    unrelaxed by `_connector_for_url`) is silently dropped from the RETURN
-    value; `_record_sightings` logs the drop count so a systematic
-    extraction gap is visible rather than a quietly wrong "N sighted"."""
+    This is the ONE function this codebase's Python side calls "the sighting
+    id-extraction rule" -- it MUST stay in lockstep with
+    `dashboard/lib/capture-sightings.ts`'s `sightingIdFromUrl`, the
+    TypeScript mirror the real production write
+    (`dashboard/lib/db/worklist.ts` `addWorklistUrls`) actually calls (issue
+    #639 review, C1). Both are asserted against the SAME shared fixture,
+    `etl/tests/fixtures/sighting_ids.json` (`TestSightingIdExtraction` /
+    `capture-sightings.test.ts`), so a divergence between the two languages
+    fails a test instead of aging into a wrong expiry months later once
+    #643/#645 key off this signal -- see D-143 for why a two-language mirror
+    was unavoidable here rather than one shared implementation."""
     connector_cls = _CONNECTOR_CLASS_BY_PORTAL.get(portal)
     if connector_cls is None:
-        return []
+        return None
+    path = _normalize_detail_path(url)
     gone_suffixes = _GONE_URL_SUFFIXES.get(portal, ())
+    if gone_suffixes and path.rstrip("/").endswith(gone_suffixes):
+        return None
+    return connector_cls.external_id_from_url(path)
+
+
+def _sighting_ids_from_detail_urls(portal: str, urls: list[str]) -> list[str]:
+    """External ids for `portal`'s own `_update_last_seen_for_discovered`
+    call (issue #639), extracted from a results page's harvested detail
+    URLs via `_sighting_id_from_url` (one per URL) -- de-duped,
+    order-preserving. Unknown portal contributes nothing. Any URL
+    `_sighting_id_from_url` returns None for (unextractable shape, or a
+    portal 'gone' route) is silently dropped from the RETURN value;
+    `_record_sightings` logs the drop count so a systematic extraction gap
+    is visible rather than a quietly wrong "N sighted"."""
     ids: list[str] = []
     seen: set[str] = set()
     for url in urls:
-        path = _normalize_detail_path(url)
-        if gone_suffixes and path.rstrip("/").endswith(gone_suffixes):
-            continue
-        external_id = connector_cls.external_id_from_url(path)
+        external_id = _sighting_id_from_url(portal, url)
         if external_id is None or external_id in seen:
             continue
         seen.add(external_id)

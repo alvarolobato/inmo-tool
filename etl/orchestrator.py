@@ -1241,6 +1241,16 @@ def _update_last_seen_for_discovered(
         return 0
     with conn.cursor() as cur:
         if seen_at is None:
+            # DO NOT "simplify" this to `seen_at or datetime.now(timezone.utc)`
+            # passed as a param on every call — that switch broke
+            # TestDiscoveryPriceHistory::
+            # test_discovery_does_not_clobber_a_same_run_authoritative_fetch
+            # by putting a Python-clock value where `run_started_at` (also
+            # Python-clock, captured a few lines above THIS function's own
+            # call site in run_connector) is compared against a
+            # Postgres-`NOW()`-stamped `last_fetched_at` a few lines below in
+            # the SAME run. Postgres's own NOW() here is deliberate — see
+            # the seen_at paragraph above and D-143.
             cur.execute(
                 "UPDATE listing SET last_seen_at = GREATEST(last_seen_at, NOW()) "
                 "WHERE source = %s AND external_id = ANY(%s)",
@@ -1739,6 +1749,16 @@ def run_connector(
     # current_price adopter can tell which listings this run's fetch loop
     # already re-fetched (last_fetched_at >= run_started_at) and must not be
     # clobbered by the less-authoritative search-payload price.
+    #
+    # Issue #639 review, C2 postscript: this is a Python-clock timestamp,
+    # compared later this run against `last_fetched_at`, which
+    # `_update_existing_listing` stamps with Postgres's own NOW(). Don't
+    # "fix" that cross-clock comparison by passing THIS value into
+    # `_update_last_seen_for_discovered` below (or by making that function
+    # default to a Python clock) — that exact change broke
+    # TestDiscoveryPriceHistory::
+    # test_discovery_does_not_clobber_a_same_run_authoritative_fetch. See
+    # that function's own docstring and D-143.
     run_started_at = datetime.now(timezone.utc)
     limiter.acquire()
     external_ids = connector.discover(scope, throttle=limiter.acquire)
@@ -1748,7 +1768,9 @@ def run_connector(
     # safe (see _update_last_seen_for_discovered's docstring), and skip-
     # if-seen means a listing can go a whole run without ever reaching
     # _upsert_canonical_listing, which is the only other place
-    # last_seen_at gets written.
+    # last_seen_at gets written. No seen_at passed — this call keeps
+    # Postgres's own NOW() (see that function's docstring / the comment
+    # above on run_started_at for why).
     _update_last_seen_for_discovered(conn, connector.name, external_ids)
 
     # Issue #143: whatever discovery-time price signal this connector can

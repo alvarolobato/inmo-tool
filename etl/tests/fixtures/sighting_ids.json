@@ -1,0 +1,134 @@
+[
+  {
+    "case": "idealista trailing slash",
+    "portal": "idealista",
+    "url": "https://www.idealista.com/inmueble/11111/",
+    "expected": "11111"
+  },
+  {
+    "case": "idealista missing trailing slash",
+    "portal": "idealista",
+    "url": "https://www.idealista.com/inmueble/22222",
+    "expected": "22222"
+  },
+  {
+    "case": "idealista query string",
+    "portal": "idealista",
+    "url": "https://www.idealista.com/inmueble/33333/?searchQueryId=x",
+    "expected": "33333"
+  },
+  {
+    "case": "idealista fragment",
+    "portal": "idealista",
+    "url": "https://www.idealista.com/inmueble/44444#foto",
+    "expected": "44444"
+  },
+  {
+    "case": "idealista query and fragment together",
+    "portal": "idealista",
+    "url": "https://www.idealista.com/inmueble/55555/?searchQueryId=x#foto",
+    "expected": "55555"
+  },
+  {
+    "case": "idealista missing slash, no query",
+    "portal": "idealista",
+    "url": "https://www.idealista.com/inmueble/66666",
+    "expected": "66666"
+  },
+  {
+    "case": "idealista unparseable URL",
+    "portal": "idealista",
+    "url": "not a url",
+    "expected": null
+  },
+  {
+    "case": "aliseda alphanumeric id",
+    "portal": "aliseda",
+    "url": "https://www.alisedainmobiliaria.com/inmueble/ANT1",
+    "expected": "ANT1"
+  },
+  {
+    "case": "aliseda id with query",
+    "portal": "aliseda",
+    "url": "https://www.alisedainmobiliaria.com/inmueble/ANT2?utm_source=x",
+    "expected": "ANT2"
+  },
+  {
+    "case": "aliseda id with fragment",
+    "portal": "aliseda",
+    "url": "https://www.alisedainmobiliaria.com/inmueble/ANT3#gallery",
+    "expected": "ANT3"
+  },
+  {
+    "case": "aliseda id with dots/hyphens/underscore",
+    "portal": "aliseda",
+    "url": "https://www.alisedainmobiliaria.com/inmueble/ant-lower-case_1.2",
+    "expected": "ant-lower-case_1.2"
+  },
+  {
+    "case": "altamira id with query and photo-index suffix",
+    "portal": "altamira",
+    "url": "https://www.altamirainmuebles.com/venta-de-atico/pontevedra/sanxenxo/segunda-mano/9186_1001_PE0001/375859/1?utm_source=x",
+    "expected": "375859"
+  },
+  {
+    "case": "altamira id with fragment",
+    "portal": "altamira",
+    "url": "https://www.altamirainmuebles.com/venta-de-atico/pontevedra/sanxenxo/segunda-mano/9186_1001_PE0001/375860#ficha",
+    "expected": "375860"
+  },
+  {
+    "case": "altamira id with trailing slash only",
+    "portal": "altamira",
+    "url": "https://www.altamirainmuebles.com/venta-de-atico/pontevedra/sanxenxo/segunda-mano/9186_1001_PE0001/375861/",
+    "expected": "375861"
+  },
+  {
+    "case": "altamira sub-4-digit id (below its own regex floor)",
+    "portal": "altamira",
+    "url": "https://www.altamirainmuebles.com/venta-de-atico/pontevedra/sanxenxo/segunda-mano/9186_1001_PE0001/123/",
+    "expected": null
+  },
+  {
+    "case": "hipoges id, no query/fragment",
+    "portal": "hipoges",
+    "url": "https://realestate.hipoges.com/es/detail/99001",
+    "expected": "99001"
+  },
+  {
+    "case": "hipoges id with query",
+    "portal": "hipoges",
+    "url": "https://realestate.hipoges.com/es/detail/99002?ref=x",
+    "expected": "99002"
+  },
+  {
+    "case": "hipoges id with fragment",
+    "portal": "hipoges",
+    "url": "https://realestate.hipoges.com/es/detail/99003#top",
+    "expected": "99003"
+  },
+  {
+    "case": "hipoges gone route (unavailable)",
+    "portal": "hipoges",
+    "url": "https://realestate.hipoges.com/es/detail/99001/unavailable",
+    "expected": null
+  },
+  {
+    "case": "hipoges gone route (contact-received)",
+    "portal": "hipoges",
+    "url": "https://realestate.hipoges.com/es/detail/99002/contact-received",
+    "expected": null
+  },
+  {
+    "case": "hipoges gone route with a query string too",
+    "portal": "hipoges",
+    "url": "https://realestate.hipoges.com/es/detail/99004/unavailable?x=1",
+    "expected": null
+  },
+  {
+    "case": "unknown/uncapturable portal",
+    "portal": "cimenta2",
+    "url": "https://example.com/whatever",
+    "expected": null
+  }
+]

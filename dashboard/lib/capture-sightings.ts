@@ -1,8 +1,7 @@
 /**
  * Sighting-id extraction for the guided-capture worklist path (issue #639
  * review, C1) — the TypeScript mirror of `etl/capture.py`'s
- * `_sighting_ids_from_detail_urls` / `_normalize_detail_path` /
- * `_GONE_URL_SUFFIXES`.
+ * `_sighting_id_from_url` / `_normalize_detail_path` / `_GONE_URL_SUFFIXES`.
  *
  * Why this exists in TWO languages: `etl/capture.py`'s sighting write only
  * runs for a manually-captured single results page whose HTML lands in
@@ -11,15 +10,26 @@
  * `POST /api/extension/capture` at all. It POSTs the harvested detail URLs
  * straight to `POST /api/etl/worklist { via: 'derived' }`
  * (`lib/db/worklist.ts` `addWorklistUrls`), which runs in THIS Node process
- * against the SAME `listing` table. This module is the id-extraction logic
- * that write needs, kept pure/client-safe (no `pg` import) so it stays
- * trivially unit-testable — mirroring the `lib.ts`/`lib/db` split this
- * codebase already uses elsewhere (`lib/worklist.ts` vs `lib/db/worklist.ts`).
+ * against the SAME `listing` table — so the write has to live dashboard-side
+ * in TypeScript, while `etl/capture.py`'s Python path stays (it still
+ * covers a manually-captured single results page for real). One shared
+ * implementation was not an option: the write and the write's caller live
+ * in different containers/languages, the same reason `extension_capture` is
+ * a queue table rather than a synchronous call (see that module's own
+ * docstring) — full reasoning in D-143.
  *
- * MUST stay in lockstep with `etl/capture.py`'s Python versions — both are
- * covered by a shared table of (portal, url) -> id cases asserted in each
- * language's own suite (`etl/tests/test_capture.py::TestSightingIdExtraction`
- * / `lib/__tests__/capture-sightings.test.ts`).
+ * MUST stay in lockstep with `etl/capture.py`'s Python version — a rule
+ * this important (it's the presence signal #643/#645's expiry logic will
+ * trust) drifting silently between two hand-maintained implementations is
+ * exactly the failure mode this project has already been bitten by twice in
+ * one week. So the two are NOT merely "covered by mirrored test suites"
+ * (that was D-069's `etl/listing_detect.py`/`detect.js` precedent, and it
+ * still has no parity test) — both languages' suites read the literal SAME
+ * fixture file, `etl/tests/fixtures/sighting_ids.json`
+ * (`etl/tests/test_capture.py::TestSightingIdExtraction` /
+ * `lib/__tests__/capture-sightings.test.ts`), so a URL shape one language
+ * accepts and the other rejects fails a test instead of aging into a wrong
+ * expiry months later.
  */
 
 // Mirrors etl/capture.py's per-connector `_EXTERNAL_ID_RE` / the regex each
