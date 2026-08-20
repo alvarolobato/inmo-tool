@@ -1,9 +1,15 @@
 """Direct unit tests for etl.dedup.signals.structured_fields's pure
-helpers (issue #566). End-to-end engine-level veto coverage lives in
-test_dedup_engine.py's TestStructuredFieldsConflictVeto — this file only
-covers the two conflict predicates in isolation, mirroring
-test_dedup_signals_reference_code.py's split between direct and
-engine-level tests.
+helpers (issue #566). This file covers the two conflict predicates in
+isolation, mirroring test_dedup_signals_reference_code.py's split between
+direct and engine-level tests.
+
+Issue #601 (D-130) retired the `fuzzy` signal — `structured_fields_conflict`
+had exactly one call site (`fuzzy.evaluate`, per D-117) and has none now.
+`structured_fields_conflict` itself is unchanged and still exercised
+directly here; TestStructuredFieldsNeverVetoesStrongerSignals in
+test_dedup_engine.py covers the still-load-bearing engine-level guarantee
+(the veto must never block address_coords/photo_hash), which is all that
+remains of the old end-to-end coverage.
 """
 
 from __future__ import annotations

@@ -40,6 +40,16 @@ def _cmd_run(conn) -> int:
         f"{result.merged} merged, {result.suggested} suggested for review, "
         f"{result.conflicts} merge-time conflict(s) flagged."
     )
+    if result.same_property_pending_resolved:
+        # Issue #604: same visibility precedent as same_source_skipped
+        # below — a pending row resolved this way never goes through
+        # evaluate_pair, so it's invisible in the "Compared ..." line above.
+        print(
+            f"Resolved {result.same_property_pending_resolved} pending "
+            f"suggestion(s) whose listings were already unified by a "
+            f"different merge (issue #604) — marked confirmed, no new "
+            f"merge performed."
+        )
     if result.same_source_skipped:
         # Issue #197: same-source pairs are skipped before ever reaching
         # evaluate_pair, so they're invisible in the "Compared ..." line
@@ -142,6 +152,88 @@ def _cmd_purge_same_source(conn) -> int:
     return 0
 
 
+def _confirm(prompt: str) -> bool:
+    """Interactive y/N confirmation for a destructive one-off migration
+    (issue #607/S1). Anything other than an explicit y/yes — including no
+    stdin at all (EOFError for a closed/exhausted stdin; OSError for a
+    non-interactive stream that refuses reads outright, e.g. pytest's
+    captured-output stdin substitute) — is a refusal, never a default-yes.
+    """
+    try:
+        answer = input(f"{prompt} [y/N] ")
+    except (EOFError, OSError):
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def _cmd_purge_phone(conn, dry_run: bool = False, yes: bool = False) -> int:
+    """One-off migration companion for issue #603 (`ps dedup purge-phone`):
+    delete remaining `pending` `match_basis='phone'` rows at confidence
+    0.500 — run once, after the reordered/silenced signal has had a chance
+    to reevaluate the existing backlog on its own (see
+    `engine.purge_pending_phone`'s docstring for why this should normally
+    find nothing left, and for why it's scoped to 0.500 — issue #607/B3:
+    an unscoped delete would also take any 0.750 corroborated-unconfirmed-
+    kind row filed since deploy, which D-131 deliberately keeps)."""
+    if dry_run:
+        would_delete, would_keep = engine.preview_purge_pending_phone(conn)
+        print(
+            f"[dry-run] Would purge {would_delete} pending phone "
+            f"suggestion(s) at confidence 0.500; would keep {would_keep} "
+            "corroborated (confidence != 0.500) row(s) untouched (issue "
+            "#603 one-off migration)."
+        )
+        return 0
+    if not yes and not _confirm(
+        "This will permanently DELETE pending phone suggestions at "
+        "confidence 0.500. Continue?"
+    ):
+        print("Aborted (no changes made). Pass --yes to skip this prompt.")
+        return 1
+    deleted = engine.purge_pending_phone(conn)
+    print(
+        f"Purged {deleted} pending phone suggestion(s) at confidence 0.500 "
+        "(issue #603 one-off migration)."
+    )
+    return 0
+
+
+def _cmd_purge_fuzzy(conn, dry_run: bool = False, yes: bool = False) -> int:
+    """One-off migration companion for issue #601 (`ps dedup purge-fuzzy`):
+    delete pending `match_basis='fuzzy'` rows EXCEPT the rescue set (exact
+    m2_built+current_price, corroborated by shared photo evidence or a
+    near-identical description) — see `engine.purge_pending_fuzzy`'s
+    docstring for exactly what qualifies.
+
+    Aborts (issue #607/B2) rather than purging when the persistent
+    photo-hash store is unreachable — see
+    `engine.PhotoHashStoreUnavailableError`."""
+    try:
+        if dry_run:
+            would_delete, would_rescue = engine.preview_purge_pending_fuzzy(conn)
+            print(
+                f"[dry-run] Would purge {would_delete} pending fuzzy "
+                f"suggestion(s), would rescue {would_rescue} corroborated "
+                "pair(s) (issue #601 one-off migration)."
+            )
+            return 0
+        if not yes and not _confirm(
+            "This will permanently DELETE pending fuzzy suggestions except "
+            "the corroborated rescue set. Continue?"
+        ):
+            print("Aborted (no changes made). Pass --yes to skip this prompt.")
+            return 1
+        deleted, rescued = engine.purge_pending_fuzzy(conn)
+    except engine.PhotoHashStoreUnavailableError as exc:
+        print(f"ABORTED: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"Purged {deleted} pending fuzzy suggestion(s), rescued {rescued} "
+        "corroborated pair(s) (issue #601 one-off migration)."
+    )
+    return 0
+
+
 def _cmd_resolve_conflict(conn, suggestion_id: int) -> int:
     try:
         engine.resolve_conflict(conn, suggestion_id)
@@ -181,6 +273,41 @@ def main(argv: list[str] | None = None) -> int:
             "rows whose two listings share a source"
         ),
     )
+    purge_phone_parser = subparsers.add_parser(
+        "purge-phone",
+        help=(
+            "One-off migration (issue #603): delete remaining pending "
+            "match_basis='phone' suggested_merge rows at confidence 0.500"
+        ),
+    )
+    purge_phone_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print (would_delete, would_keep) without deleting anything",
+    )
+    purge_phone_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the interactive confirmation prompt",
+    )
+    purge_fuzzy_parser = subparsers.add_parser(
+        "purge-fuzzy",
+        help=(
+            "One-off migration (issue #601): delete pending "
+            "match_basis='fuzzy' suggested_merge rows, except the "
+            "corroborated rescue set"
+        ),
+    )
+    purge_fuzzy_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print (would_delete, would_rescue) without deleting anything",
+    )
+    purge_fuzzy_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the interactive confirmation prompt",
+    )
 
     args = parser.parse_args(argv)
 
@@ -199,6 +326,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_process_actions(conn)
         if args.subcommand == "purge-same-source":
             return _cmd_purge_same_source(conn)
+        if args.subcommand == "purge-phone":
+            return _cmd_purge_phone(conn, dry_run=args.dry_run, yes=args.yes)
+        if args.subcommand == "purge-fuzzy":
+            return _cmd_purge_fuzzy(conn, dry_run=args.dry_run, yes=args.yes)
         return _cmd_resolve_conflict(conn, args.suggestion_id)
     finally:
         conn.close()

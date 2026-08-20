@@ -17,13 +17,14 @@ from pathlib import Path
 import imagehash
 import pytest
 from PIL import Image
+from rapidfuzz import fuzz
 
 from etl import orchestrator
 from etl.connectors import base
 from etl.connectors.base import CanonicalListingVersion
 from etl.dedup import engine
 from etl.dedup.engine import _PhotoHashCache
-from etl.dedup.signals import fuzzy, phone_extract, reference_code
+from etl.dedup.signals import phone_extract, reference_code
 from etl.dedup.signals import photo_hash as photo_hash_signal
 from etl.dedup.types import ListingRecord
 
@@ -107,6 +108,7 @@ def _insert_pair(
         "current_price",
         "contact_raw",
         "reference_code",
+        "photo_urls",
     }
     listing_kwargs_a = {
         k: prop_kwargs_a.pop(k) for k in list(prop_kwargs_a) if k in listing_keys
@@ -435,12 +437,20 @@ class TestCadastralExactMatch:
 
 
 class TestPhoneSignal:
-    def test_phone_match_with_size_mismatch_is_suggestion_not_merge(self, dedup_db):
+    def test_uncorroborated_phone_match_files_no_suggestion(self, dedup_db):
+        """Issue #603 (D-131): previously a 0.500 suggestion — #600
+        measured this exact tier as pure agency noise on the live corpus,
+        so it's silenced (returns None) rather than tuned. Dissimilar
+        addresses are belt-and-braces now that fuzzy is retired (issue
+        #601) too — this test is about phone alone.
+        """
         _insert_pair(
             dedup_db,
             "idealista",
             "fotocasa",
-            "phone-size-mismatch",
+            "phone-uncorroborated",
+            address_a="Calle Alcala 10, Madrid",
+            address_b="Avenida Diagonal 200, Barcelona",
             m2_built_a=Decimal(40),
             m2_built_b=Decimal(200),
             listing_kind_a="particular",
@@ -452,19 +462,24 @@ class TestPhoneSignal:
         )
         result = engine.run(dedup_db)
         assert result.merged == 0
-        assert result.suggested == 1
+        assert result.suggested == 0
         with dedup_db.cursor() as cur:
-            cur.execute("SELECT match_basis, status FROM suggested_merge")
-            basis, status = cur.fetchone()
-            assert basis == "phone"
-            assert status == "pending"
+            cur.execute("SELECT COUNT(*) FROM suggested_merge")
+            assert cur.fetchone()[0] == 0
 
-    def test_agency_phone_match_never_auto_merges(self, dedup_db):
+    def test_agency_phone_match_files_no_suggestion(self, dedup_db):
+        """Issue #603 (D-131): previously a 0.500 suggestion regardless of
+        corroboration. #600 measured 100% of the pending phone backlog as
+        agency-sided — this tier is now silenced outright, not just
+        blocked from auto-merging.
+        """
         _insert_pair(
             dedup_db,
             "idealista",
             "fotocasa",
             "agency-phone",
+            address_a="Calle Alcala 10, Madrid",
+            address_b="Avenida Diagonal 200, Barcelona",
             m2_built_a=Decimal(70),
             m2_built_b=Decimal(70),
             listing_kind_a="agency",
@@ -476,10 +491,13 @@ class TestPhoneSignal:
         )
         result = engine.run(dedup_db)
         assert result.merged == 0
-        assert result.suggested == 1
+        assert result.suggested == 0
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM suggested_merge")
+            assert cur.fetchone()[0] == 0
 
     def test_particular_phone_match_requires_corroboration_to_merge(self, dedup_db):
-        # Corroborated: matching size/price proximity -> auto-merge.
+        # Corroborated: matching size/price proximity -> auto-merge (unchanged).
         _insert_pair(
             dedup_db,
             "idealista",
@@ -506,12 +524,16 @@ class TestPhoneSignal:
             assert basis == "phone"
             assert confidence == Decimal("0.900")
 
-        # Not corroborated: same phone, wildly different price/size -> suggestion only.
+        # Not corroborated: same phone, wildly different price/size, and
+        # dissimilar addresses -> issue #603 silences phone entirely; no
+        # suggestion is filed for this pair by any basis.
         _insert_pair(
             dedup_db,
             "idealista",
             "milanuncios",
             "particular-uncorroborated",
+            address_a="Calle Serrano 50, Madrid",
+            address_b="Paseo de Gracia 12, Barcelona",
             m2_built_a=Decimal(30),
             m2_built_b=Decimal(300),
             listing_kind_a="particular",
@@ -523,14 +545,15 @@ class TestPhoneSignal:
         )
         result2 = engine.run(dedup_db)
         assert result2.merged == 0
-        assert result2.suggested == 1
+        assert result2.suggested == 0
         with dedup_db.cursor() as cur:
+            # Zero phone suggestion rows: the corroborated pair above went
+            # straight to property_merge_log (a merge, not a suggestion),
+            # and this uncorroborated pair is silenced outright.
             cur.execute(
-                "SELECT confidence FROM suggested_merge WHERE match_basis = 'phone' "
-                "ORDER BY created_at DESC LIMIT 1"
+                "SELECT COUNT(*) FROM suggested_merge WHERE match_basis = 'phone'"
             )
-            (confidence,) = cur.fetchone()
-            assert confidence == Decimal("0.500")
+            assert cur.fetchone()[0] == 0
 
     def test_corroborated_phone_with_unconfirmed_kind_is_suggestion_not_merge(
         self, dedup_db
@@ -566,6 +589,108 @@ class TestPhoneSignal:
             assert basis == "phone"
             assert confidence == Decimal("0.750")
             assert status == "pending"
+
+
+class TestPhoneOrderingRescue:
+    """Issue #603 (D-131): photo_hash now runs BEFORE phone in
+    `evaluate_pair`. #600 measured 19 of the 320 pending phone rows on the
+    live corpus as pairs that ALSO carried a photo-ratio >= 0.6 match
+    (mostly 1.0, identical price/m2/description) — with the old order,
+    phone's own tier claimed the pair first and shadowed that stronger
+    evidence, freezing it at a weak/silenced phone verdict forever.
+
+    Uses `engine.evaluate_pair` directly with a pre-populated
+    `_PhotoHashCache` (same no-network pattern as
+    `TestPhotoHashAutoMerge`), not `engine.run()` — no network fetch is
+    ever attempted.
+    """
+
+    _IDENTICAL_HEX = "ffff0000ffff0000"
+
+    def _cache_with_identical_hashes(
+        self, listing_id_a: int, listing_id_b: int
+    ) -> _PhotoHashCache:
+        cache = _PhotoHashCache()
+        cache._cache[listing_id_a] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
+        cache._cache[listing_id_b] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
+        return cache
+
+    def test_ordering_lets_photo_hash_claim_a_pair_phone_would_otherwise_shadow(self):
+        """Isolates the REORDER specifically (not the silencing): uses
+        phone's SURVIVING corroborated-unconfirmed-kind tier (0.750
+        suggest, untouched by issue #603's silencing) so this pair would
+        still generate a phone-basis verdict under the OLD evaluate_pair
+        order — reverting only the reorder (leaving the silencing intact)
+        must turn this test red, because phone's 0.750 tier alone would
+        then run first and shadow photo_hash's stronger 0.900 merge.
+        """
+        shared_description = "Piso reformado, tel 622334455"
+        a = _record(
+            1,
+            100,
+            source="idealista",
+            listing_kind="particular",
+            description=shared_description,
+            m2_built=Decimal(70),
+            current_price=Decimal(285000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            listing_kind=None,  # unconfirmed — phone's 0.750 tier applies
+            description=shared_description,
+            m2_built=Decimal(70),
+            current_price=Decimal(285000),
+        )
+
+        # Own the precondition: phone alone, evaluated in isolation, DOES
+        # fire for this pair (confirms the shadow risk is real, not
+        # incidental to this fixture).
+        phone_only = phone_extract.evaluate(a, b)
+        assert phone_only is not None
+        assert phone_only.decision == "suggest"
+        assert phone_only.confidence == Decimal("0.750")
+
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation is not None
+        assert evaluation.basis == "photo_hash"
+        assert evaluation.decision == "merge"
+        assert evaluation.confidence == Decimal("0.900")
+
+    def test_agency_sided_shadow_shape_from_600_now_resolves_via_photo_hash(self):
+        """The production shape #600 actually measured: an agency-sided
+        shared phone (which, per issue #603's silencing, contributes
+        nothing on its own — see TestPhoneSignal.
+        test_agency_phone_match_files_no_suggestion) alongside a full
+        photo match. photo_hash resolves it outright rather than the pair
+        going unmatched.
+        """
+        shared_description = "Piso reformado, tel 622334455"
+        a = _record(
+            1,
+            100,
+            source="idealista",
+            listing_kind="agency",
+            description=shared_description,
+            m2_built=Decimal(70),
+            current_price=Decimal(285000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            listing_kind="particular",
+            description=shared_description,
+            m2_built=Decimal(70),
+            current_price=Decimal(285000),
+        )
+        assert phone_extract.evaluate(a, b) is None  # silenced on its own
+
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation is not None
+        assert evaluation.basis == "photo_hash"
+        assert evaluation.decision == "merge"
 
 
 class TestReferenceCodeSignal:
@@ -1016,6 +1141,63 @@ class TestNoSignal:
         result = engine.run(dedup_db)
         assert result.merged == 0
         assert result.suggested == 0
+
+
+class TestFuzzyRetired:
+    """Issue #601 (D-130): the `fuzzy` fallback signal is retired —
+    `evaluate_pair` no longer calls it at all. A pair that would only ever
+    have matched on neighbourhood-text similarity + size + price
+    proximity (fuzzy's exact shape, and the percolation pattern #600
+    diagnosed as ~0.4-0.7% precision on the live corpus) must now produce
+    no suggestion whatsoever, not a weak 'fuzzy' one.
+    """
+
+    def test_neighbourhood_text_size_price_only_match_produces_no_suggestion(
+        self, dedup_db
+    ):
+        """Two listings sharing only a neighbourhood-level address string
+        (no street number — 99.2% of the real pending-fuzzy backlog had
+        none on either side), close size, close price: exactly what used
+        to clear fuzzy's 0.55 similarity bar and nothing else."""
+        _insert_pair(
+            dedup_db,
+            "fotocasa",
+            "idealista",
+            "fuzzy-retired-no-suggestion",
+            address_a="Chamberi, Madrid",
+            address_b="Chamberi, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(72),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(255000),
+        )
+        result = engine.run(dedup_db)
+        assert result.merged == 0
+        assert result.suggested == 0
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM suggested_merge")
+            assert cur.fetchone()[0] == 0
+
+    def test_evaluate_pair_returns_none_for_the_same_shape_directly(self):
+        """Pure evaluate_pair check, no DB: pins the exact contract change
+        — this shape used to return a 'fuzzy' PairEvaluation, now None."""
+        a = _record(
+            1,
+            100,
+            source="fotocasa",
+            address="Chamberi, Madrid",
+            m2_built=Decimal(70),
+            current_price=Decimal(250000),
+        )
+        b = _record(
+            2,
+            200,
+            source="idealista",
+            address="Chamberi, Madrid",
+            m2_built=Decimal(72),
+            current_price=Decimal(255000),
+        )
+        assert engine.evaluate_pair(a, b, _PhotoHashCache()) is None
 
 
 class TestRevert:
@@ -1607,18 +1789,19 @@ class TestPendingSuggestionReevaluation:
     """
 
     def test_pending_reevaluated_to_merged_when_a_veto_rule_is_lifted(self, dedup_db):
-        """Mirrors TestFloorCorroborationAcrossSignals's DB-backed fixture:
-        a phone match corroborated on price/size proximity, but blocked
-        from auto-merging by issue #186's floor veto — filed as a `pending`
-        suggestion (basis='phone', confidence=0.500).
+        """A phone match corroborated on price/size proximity, but with one
+        side's `listing_kind` unconfirmed (`None`) — phone_extract's
+        surviving 0.750 corroborated-unconfirmed-kind tier (issue #603/
+        D-131 silenced the uncorroborated and agency tiers, but left this
+        one alone), filed as a `pending` suggestion.
 
-        Simulates the exact shape of #214's real-world trigger (a rule
-        change making a previously-vetoed pair mergeable) by monkeypatching
-        `phone_extract.floors_conflict` to always return False — i.e. "the
-        floor-veto rule no longer blocks this pair" — then re-running.
-        Under the old code this pending row would never be looked at again;
-        under the fix it's re-scored, corroboration now succeeds, and the
-        pair auto-merges.
+        Simulates #214's real-world trigger (new information making a
+        previously-uncertain pair mergeable) with a real DB state change —
+        a later connector sweep confirming the second listing's kind as
+        'particular' — rather than a monkeypatch, then re-running. Under
+        the pre-#214 code this pending row would never be looked at again;
+        under the fix it's re-scored, both sides now read 'particular',
+        and the pair auto-merges.
         """
         listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
             dedup_db,
@@ -1628,13 +1811,11 @@ class TestPendingSuggestionReevaluation:
             m2_built_a=Decimal(70),
             m2_built_b=Decimal(70),
             listing_kind_a="particular",
-            listing_kind_b="particular",
+            listing_kind_b=None,
             description_a="Piso reformado, tel 622334455",
             description_b="Piso reformado, tel 622334455",
             current_price_a=Decimal(285000),
             current_price_b=Decimal(279000),
-            floor_a="10º",
-            floor_b="A partir de la 15ª planta",
         )
 
         first = engine.run(dedup_db)
@@ -1645,11 +1826,16 @@ class TestPendingSuggestionReevaluation:
                 "SELECT id, match_basis, confidence, status FROM suggested_merge"
             )
             suggestion_id, basis, confidence, status = cur.fetchone()
-            assert (basis, confidence, status) == ("phone", Decimal("0.500"), "pending")
+            assert (basis, confidence, status) == ("phone", Decimal("0.750"), "pending")
 
-        with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(phone_extract, "floors_conflict", lambda a, b: False)
-            second = engine.run(dedup_db)
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "UPDATE listing SET listing_kind = 'particular' WHERE id = %s",
+                (listing_b,),
+            )
+        dedup_db.commit()
+
+        second = engine.run(dedup_db)
 
         assert second.suggested == 0
         assert second.merged == 1
@@ -1685,7 +1871,7 @@ class TestPendingSuggestionReevaluation:
             assert resolved_at is not None
             # Auditable: what it used to say, and that the engine (not a
             # human) is what changed it.
-            assert detail["reevaluated_from"]["confidence"] == 0.5
+            assert detail["reevaluated_from"]["confidence"] == 0.75
             assert detail["reevaluated_from"]["status"] == "pending"
             assert "auto_confirmed_merge" in detail
             assert "confirmed_merge" not in detail  # that key is confirm_suggestion's
@@ -1695,25 +1881,31 @@ class TestPendingSuggestionReevaluation:
     ):
         """The other acceptance direction: re-evaluation must also be able
         to move a pair OUT of the queue, not just into a merge. Files a
-        `fuzzy`-basis suggestion (identical address text, price/size within
-        tolerance, nothing stronger available), then tightens
-        `fuzzy._MIN_TEXT_SIMILARITY` past what any two strings could ever
-        score — the direct analogue of the #186 floor-veto acceptance case:
-        a rule change makes the pair fail every signal, and a pending row
-        that fails every signal has nothing left supporting it, so it
-        becomes `rejected` rather than sitting in the queue forever.
+        `phone`-basis suggestion (corroborated-unconfirmed-kind tier, 0.750
+        — issue #603/D-131 left this tier alone), then monkeypatches
+        `phone_extract._corroborated` to always return False — i.e. "the
+        corroboration rule no longer accepts this pair's evidence" — the
+        direct analogue of the #186 floor-veto acceptance case: a rule
+        change makes the pair fail every signal (this tier is silenced
+        outright once uncorroborated, per D-131, and fuzzy is retired
+        entirely — issue #601 — so nothing downstream can catch it either),
+        and a pending row that fails every signal has nothing left
+        supporting it, so it becomes `rejected` rather than sitting in the
+        queue forever.
         """
         listing_a, prop_a, listing_b, prop_b = _insert_pair(
             dedup_db,
             "idealista",
             "fotocasa",
             "reeval-reject",
-            address_a="Calle Alcala 10, Madrid",
-            address_b="Calle Alcala 10, Madrid",
             m2_built_a=Decimal(70),
-            m2_built_b=Decimal(72),
-            current_price_a=Decimal(200000),
-            current_price_b=Decimal(205000),
+            m2_built_b=Decimal(70),
+            listing_kind_a="particular",
+            listing_kind_b=None,
+            description_a="Piso reformado, tel 622334455",
+            description_b="Piso reformado, tel 622334455",
+            current_price_a=Decimal(285000),
+            current_price_b=Decimal(279000),
         )
 
         first = engine.run(dedup_db)
@@ -1722,13 +1914,13 @@ class TestPendingSuggestionReevaluation:
         with dedup_db.cursor() as cur:
             cur.execute("SELECT id, match_basis, status FROM suggested_merge")
             suggestion_id, basis, status = cur.fetchone()
-            assert (basis, status) == ("fuzzy", "pending")
+            assert (basis, status) == ("phone", "pending")
 
         with pytest.MonkeyPatch.context() as mp:
-            # No real address-text similarity score can reach 1.5 — this is
-            # "the rule got strict enough that nothing clears it any more",
-            # not a data change.
-            mp.setattr(fuzzy, "_MIN_TEXT_SIMILARITY", 1.5)
+            # No real proximity check can ever satisfy this — this is "the
+            # rule got strict enough that nothing clears it any more," not
+            # a data change.
+            mp.setattr(phone_extract, "_corroborated", lambda a, b: False)
             second = engine.run(dedup_db)
 
         assert second.suggested == 0
@@ -1753,7 +1945,7 @@ class TestPendingSuggestionReevaluation:
             status, resolved_at, detail = cur.fetchone()
             assert status == "rejected"
             assert resolved_at is not None
-            assert detail["reevaluated_from"]["match_basis"] == "fuzzy"
+            assert detail["reevaluated_from"]["match_basis"] == "phone"
             assert "reevaluated_reason" in detail
 
     def test_pending_still_pending_when_nothing_about_it_changed(self, dedup_db):
@@ -1761,21 +1953,24 @@ class TestPendingSuggestionReevaluation:
         verdict — `TestSuggestionResolution.
         test_pending_suggestion_is_not_refiled_on_the_next_run` covers this
         through the reference_code fixture; this one pins the same
-        invariant through the fuzzy signal, which is the one every one of
-        this class's two acceptance tests above mutates a rule on, so it's
-        worth also seeing it do nothing when no rule moves.
+        invariant through the phone signal's corroborated-unconfirmed-kind
+        tier, which is the one every one of this class's two acceptance
+        tests above mutates a rule on, so it's worth also seeing it do
+        nothing when no rule moves.
         """
         _insert_pair(
             dedup_db,
             "idealista",
             "fotocasa",
             "reeval-noop",
-            address_a="Calle Alcala 10, Madrid",
-            address_b="Calle Alcala 10, Madrid",
             m2_built_a=Decimal(70),
-            m2_built_b=Decimal(72),
-            current_price_a=Decimal(200000),
-            current_price_b=Decimal(205000),
+            m2_built_b=Decimal(70),
+            listing_kind_a="particular",
+            listing_kind_b=None,
+            description_a="Piso reformado, tel 622334455",
+            description_b="Piso reformado, tel 622334455",
+            current_price_a=Decimal(285000),
+            current_price_b=Decimal(279000),
         )
         engine.run(dedup_db)
         second = engine.run(dedup_db)
@@ -1807,12 +2002,14 @@ class TestPendingSuggestionReevaluation:
             "idealista",
             "fotocasa",
             "reeval-inflight",
-            address_a="Calle Alcala 10, Madrid",
-            address_b="Calle Alcala 10, Madrid",
             m2_built_a=Decimal(70),
-            m2_built_b=Decimal(72),
-            current_price_a=Decimal(200000),
-            current_price_b=Decimal(205000),
+            m2_built_b=Decimal(70),
+            listing_kind_a="particular",
+            listing_kind_b=None,
+            description_a="Piso reformado, tel 622334455",
+            description_b="Piso reformado, tel 622334455",
+            current_price_a=Decimal(285000),
+            current_price_b=Decimal(279000),
         )
         engine.run(dedup_db)
         with dedup_db.cursor() as cur:
@@ -1832,7 +2029,7 @@ class TestPendingSuggestionReevaluation:
         with pytest.MonkeyPatch.context() as mp:
             # Even a rule change that would otherwise reject this pair must
             # not touch it while an action is in flight.
-            mp.setattr(fuzzy, "_MIN_TEXT_SIMILARITY", 1.5)
+            mp.setattr(phone_extract, "_corroborated", lambda a, b: False)
             result = engine.run(dedup_db)
 
         assert result.reevaluated_total == 0
@@ -1859,11 +2056,185 @@ class TestPendingSuggestionReevaluation:
         dedup_db.commit()
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(fuzzy, "_MIN_TEXT_SIMILARITY", 1.5)
+            mp.setattr(phone_extract, "_corroborated", lambda a, b: False)
             result = engine.run(dedup_db)
 
         assert result.reevaluated_total == 1
         assert result.reevaluated_rejected == 1
+
+
+class TestSamePropertyPendingResolution:
+    """Issue #604: a `pending` suggested_merge row whose two listings
+    already share a property_id — because a DIFFERENT pair's merge
+    unified them, not a merge of this pair itself — used to be
+    permanently invisible to reevaluation. `_run`'s
+    `a.property_id == b.property_id` skip ran BEFORE `pending_by_pair` was
+    ever consulted, so this exact shape of row could never leave `pending`
+    no matter how many runs happened (71 stale rows measured on the live
+    corpus — #600).
+
+    These tests seed that state directly (a pending suggestion for (A, B),
+    then a manual `UPDATE listing SET property_id` pointing B at A's
+    property — standing in for "a third listing's merge pulled B onto A's
+    property") rather than orchestrating a second real merge through
+    `evaluate_pair`. That keeps the fixture owning its exact precondition
+    (a `pending` row + two listings already on one property) instead of
+    hoping a chain of signals produces it — the shape this bug needs to
+    reproduce, made explicit rather than incidental.
+    """
+
+    def _seed_pending_pair(self, conn, source_a, source_b, ext_prefix, **kwargs):
+        listing_a, prop_a, listing_b, prop_b = _insert_pair(
+            conn, source_a, source_b, ext_prefix, **kwargs
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO suggested_merge
+                    (listing_id_a, listing_id_b, match_basis, confidence, status)
+                VALUES (%s, %s, 'photo_hash', 0.700, 'pending') RETURNING id
+                """,
+                sorted((listing_a, listing_b)),
+            )
+            suggestion_id = cur.fetchone()[0]
+        conn.commit()
+        return listing_a, prop_a, listing_b, prop_b, suggestion_id
+
+    def test_resolves_pending_suggestion_whose_listings_were_unified_by_a_different_merge(
+        self, dedup_db
+    ):
+        listing_a, prop_a, listing_b, _prop_b, suggestion_id = self._seed_pending_pair(
+            dedup_db, "idealista", "fotocasa", "same-prop-604"
+        )
+
+        # Simulate the bug's real trigger: a third listing's merge folded
+        # B's property onto A's — never a merge of THIS pair directly.
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "UPDATE listing SET property_id = %s WHERE id = %s",
+                (prop_a, listing_b),
+            )
+        dedup_db.commit()
+
+        # Own the precondition before asserting anything about what
+        # run() does with it: this row really is the exact stale shape
+        # #600 measured — pending, but its two listings already share a
+        # property.
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            assert cur.fetchone()[0] == "pending"
+            cur.execute(
+                "SELECT COUNT(DISTINCT property_id) FROM listing WHERE id IN (%s, %s)",
+                (listing_a, listing_b),
+            )
+            assert cur.fetchone()[0] == 1
+
+        result = engine.run(dedup_db)
+
+        assert result.same_property_pending_resolved == 1
+        assert result.merged == 0
+        assert result.pairs_compared == 0  # never reaches evaluate_pair
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status, resolved_at, detail FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            status, resolved_at, detail = cur.fetchone()
+            assert status == "confirmed"
+            assert resolved_at is not None
+            assert detail["resolved_reason"] == "listings already unified"
+            assert detail["reevaluated_from"]["status"] == "pending"
+            assert detail["reevaluated_from"]["match_basis"] == "photo_hash"
+
+            # No new merge was performed — nothing to log.
+            cur.execute("SELECT COUNT(*) FROM property_merge_log")
+            assert cur.fetchone()[0] == 0
+            # And no second row was created for the pair either.
+            cur.execute("SELECT COUNT(*) FROM suggested_merge")
+            assert cur.fetchone()[0] == 1
+
+    def test_second_run_is_a_no_op_once_resolved(self, dedup_db):
+        """Idempotency: once resolved to `confirmed`, `_load_recorded_pairs`
+        excludes the row entirely (its own `WHERE status <> 'confirmed'`),
+        so a second run must neither touch it again nor recount it.
+        """
+        _listing_a, prop_a, listing_b, _prop_b, suggestion_id = self._seed_pending_pair(
+            dedup_db, "idealista", "fotocasa", "same-prop-604-idem"
+        )
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "UPDATE listing SET property_id = %s WHERE id = %s",
+                (prop_a, listing_b),
+            )
+        dedup_db.commit()
+
+        first = engine.run(dedup_db)
+        assert first.same_property_pending_resolved == 1
+
+        second = engine.run(dedup_db)
+        assert second.same_property_pending_resolved == 0
+        assert second.pairs_compared == 0
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            assert cur.fetchone()[0] == "confirmed"
+
+    def test_different_property_pending_row_reevaluates_independently(self, dedup_db):
+        """Regression guard: the new same-property short-circuit must not
+        interfere with the pre-existing issue #214 reevaluation path for a
+        pending row whose two listings genuinely still sit on different
+        properties — both mechanisms must coexist across runs without
+        either swallowing the other.
+        """
+        _la, prop_a, lb, _pb, same_prop_suggestion_id = self._seed_pending_pair(
+            dedup_db, "idealista", "fotocasa", "same-prop-604-mixed-a"
+        )
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "UPDATE listing SET property_id = %s WHERE id = %s", (prop_a, lb)
+            )
+        dedup_db.commit()
+
+        _insert_pair(
+            dedup_db,
+            "idealista",
+            "fotocasa",
+            "same-prop-604-mixed-b",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            listing_kind_a="particular",
+            listing_kind_b=None,
+            description_a="Piso reformado, tel 622334455",
+            description_b="Piso reformado, tel 622334455",
+            current_price_a=Decimal(285000),
+            current_price_b=Decimal(279000),
+        )
+
+        first = engine.run(dedup_db)
+        assert first.same_property_pending_resolved == 1
+        assert first.suggested == 1  # the fresh phone pair, filed for the first time
+        assert first.reevaluated_total == 0  # nothing pre-existing to reevaluate yet
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = %s",
+                (same_prop_suggestion_id,),
+            )
+            assert cur.fetchone()[0] == "confirmed"
+
+        second = engine.run(dedup_db)
+        # Already confirmed and excluded by _load_recorded_pairs — nothing
+        # left for the #604 path to do.
+        assert second.same_property_pending_resolved == 0
+        # The phone pair, now pending from run 1, goes through the
+        # pre-existing #214 path unaffected.
+        assert second.reevaluated_total == 1
+        assert second.reevaluated_updated == 1
 
 
 class TestRecordedPairBatching:
@@ -2167,6 +2538,849 @@ class TestPurgeSameSourcePending:
         assert "Purged 1" in captured.out
 
 
+class TestPurgePendingPhone:
+    """Issue #603's one-off migration: `engine.purge_pending_phone` deletes
+    remaining `pending` `match_basis='phone'` suggested_merge rows, and
+    nothing else."""
+
+    def _seed_suggestion(
+        self,
+        conn,
+        ext_prefix: str,
+        status: str,
+        match_basis: str = "phone",
+        confidence: str = "0.500",
+    ) -> int:
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            conn, "idealista", "fotocasa", ext_prefix
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO suggested_merge
+                    (listing_id_a, listing_id_b, match_basis, confidence, status)
+                VALUES (%s, %s, %s, %s, %s) RETURNING id
+                """,
+                (*sorted((listing_a, listing_b)), match_basis, confidence, status),
+            )
+            suggestion_id = cur.fetchone()[0]
+        conn.commit()
+        return suggestion_id
+
+    def test_purges_only_pending_phone_rows(self, dedup_db):
+        phone_pending = self._seed_suggestion(
+            dedup_db, "purge-phone-pending", "pending"
+        )
+        phone_confirmed = self._seed_suggestion(
+            dedup_db, "purge-phone-confirmed", "confirmed"
+        )
+        phone_rejected = self._seed_suggestion(
+            dedup_db, "purge-phone-rejected", "rejected"
+        )
+        other_basis_pending = self._seed_suggestion(
+            dedup_db, "purge-phone-other-basis", "pending", match_basis="fuzzy"
+        )
+
+        deleted = engine.purge_pending_phone(dedup_db)
+
+        assert deleted == 1
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT id FROM suggested_merge ORDER BY id")
+            remaining = {row[0] for row in cur.fetchall()}
+        assert remaining == {phone_confirmed, phone_rejected, other_basis_pending}
+        assert phone_pending not in remaining
+
+    def test_idempotent_second_run_deletes_nothing(self, dedup_db):
+        self._seed_suggestion(dedup_db, "purge-phone-idempotent", "pending")
+        first = engine.purge_pending_phone(dedup_db)
+        second = engine.purge_pending_phone(dedup_db)
+        assert first == 1
+        assert second == 0
+
+    def test_keeps_corroborated_0_750_tier(self, dedup_db):
+        """Issue #607 (B3): D-131 deliberately kept phone's 0.750
+        corroborated-unconfirmed-kind tier filing suggestions. An
+        unconditional `match_basis = 'phone'` delete would take a 0.750
+        row filed since deploy along with the 0.500 noise it's meant to
+        clean up — this purge must be scoped to confidence = 0.500 only.
+        """
+        pending_0500 = self._seed_suggestion(
+            dedup_db, "purge-phone-0500", "pending", confidence="0.500"
+        )
+        pending_0750 = self._seed_suggestion(
+            dedup_db, "purge-phone-0750", "pending", confidence="0.750"
+        )
+
+        deleted = engine.purge_pending_phone(dedup_db)
+
+        assert deleted == 1
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT id FROM suggested_merge ORDER BY id")
+            remaining = {row[0] for row in cur.fetchall()}
+        assert remaining == {pending_0750}
+        assert pending_0500 not in remaining
+
+    def test_preview_reports_would_delete_and_would_keep(self, dedup_db):
+        self._seed_suggestion(
+            dedup_db, "purge-phone-preview-0500", "pending", confidence="0.500"
+        )
+        self._seed_suggestion(
+            dedup_db, "purge-phone-preview-0750", "pending", confidence="0.750"
+        )
+
+        would_delete, would_keep = engine.preview_purge_pending_phone(dedup_db)
+
+        assert would_delete == 1
+        assert would_keep == 1
+        # A dry run must never write anything.
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM suggested_merge WHERE status = 'pending' "
+                "AND match_basis = 'phone'"
+            )
+            assert cur.fetchone()[0] == 2
+
+    def test_cli_purge_phone_subcommand(self, dedup_db, monkeypatch, capsys):
+        from etl.dedup import cli as dedup_cli
+
+        self._seed_suggestion(dedup_db, "purge-phone-cli", "pending")
+
+        class _NoCloseConnProxy:
+            """Same reasoning as TestPurgeSameSourcePending's own copy."""
+
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
+        )
+        exit_code = dedup_cli.main(["purge-phone", "--yes"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Purged 1" in captured.out
+
+    def test_cli_purge_phone_dry_run_deletes_nothing(
+        self, dedup_db, monkeypatch, capsys
+    ):
+        from etl.dedup import cli as dedup_cli
+
+        self._seed_suggestion(dedup_db, "purge-phone-cli-dry", "pending")
+
+        class _NoCloseConnProxy:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
+        )
+        exit_code = dedup_cli.main(["purge-phone", "--dry-run"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Would purge 1" in captured.out
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM suggested_merge WHERE status = 'pending' "
+                "AND match_basis = 'phone'"
+            )
+            assert cur.fetchone()[0] == 1
+
+    def test_cli_purge_phone_aborts_without_yes_or_confirmation(
+        self, dedup_db, monkeypatch, capsys
+    ):
+        """Issue #607 (S1): no `--yes` and no stdin to answer the prompt
+        (pytest's captured stdin raises EOFError on `input()`) must abort
+        with no changes made, never default to proceeding."""
+        from etl.dedup import cli as dedup_cli
+
+        self._seed_suggestion(dedup_db, "purge-phone-cli-noconfirm", "pending")
+
+        class _NoCloseConnProxy:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
+        )
+        exit_code = dedup_cli.main(["purge-phone"])
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "Aborted" in captured.out
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM suggested_merge WHERE status = 'pending' "
+                "AND match_basis = 'phone'"
+            )
+            assert cur.fetchone()[0] == 1
+
+
+class TestPurgePendingFuzzy:
+    """Issue #601's one-off migration: `engine.purge_pending_fuzzy` deletes
+    pending `match_basis='fuzzy'` suggested_merge rows EXCEPT the rescue
+    set — exact m2_built+current_price, corroborated by shared photo
+    evidence or a near-identical description — and nothing else.
+    """
+
+    _IDENTICAL_HEX = "ffff0000ffff0000"
+    _DIFFERENT_HEX = "0000ffff0000ffff"
+
+    def _seed_fuzzy_pair(
+        self, conn, ext_prefix: str, status: str = "pending", **kwargs
+    ) -> tuple[int, int]:
+        """Insert a listing pair + a directly-inserted `fuzzy` suggested_merge
+        row (bypassing engine.run(), which no longer files fuzzy suggestions
+        at all post-#601) simulating a leftover row from before this change.
+        Returns (suggestion_id, listing pair unpacked by the caller via kwargs).
+        """
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            conn, "fotocasa", "idealista", ext_prefix, **kwargs
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO suggested_merge
+                    (listing_id_a, listing_id_b, match_basis, confidence, status)
+                VALUES (%s, %s, 'fuzzy', 0.590, %s) RETURNING id
+                """,
+                (*sorted((listing_a, listing_b)), status),
+            )
+            suggestion_id = cur.fetchone()[0]
+        conn.commit()
+        return suggestion_id, listing_a, listing_b
+
+    def _seed_stored_hash(self, conn, url: str, hex_digest: str, source: str) -> None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO photo_hashes (photo_url, phash, ok, source) "
+                "VALUES (%s, %s, TRUE, %s)",
+                (url, hex_digest, source),
+            )
+        conn.commit()
+
+    def test_rescues_exact_price_size_pair_with_shared_photo(self, dedup_db):
+        photo_a = "https://cdn.fotocasa.es/rescue-photo-a.jpg"
+        photo_b = "https://cdn.idealista.com/rescue-photo-b.jpg"
+        self._seed_stored_hash(dedup_db, photo_a, self._IDENTICAL_HEX, "fotocasa")
+        self._seed_stored_hash(dedup_db, photo_b, self._IDENTICAL_HEX, "idealista")
+        suggestion_id, _la, _lb = self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-rescue-photo",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+
+        deleted, rescued = engine.purge_pending_fuzzy(dedup_db)
+
+        assert deleted == 0
+        assert rescued == 1
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status, detail FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            status, detail = cur.fetchone()
+        assert status == "pending"
+        assert "rescued_reason" in detail
+
+    def test_rescues_exact_price_size_pair_with_near_identical_description(
+        self, dedup_db
+    ):
+        description = (
+            "Piso reformado en el centro, 3 habitaciones, 2 banos, "
+            "cocina equipada, terraza con vistas."
+        )
+        suggestion_id, _la, _lb = self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-rescue-description",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            description_a=description,
+            description_b=description,
+        )
+
+        deleted, rescued = engine.purge_pending_fuzzy(dedup_db)
+
+        assert deleted == 0
+        assert rescued == 1
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            assert cur.fetchone()[0] == "pending"
+
+    def test_purges_pair_with_boilerplate_description_just_under_threshold(
+        self, dedup_db
+    ):
+        """Issue #607's test-gap finding: the only pre-existing negative
+        fixture for `_FUZZY_RESCUE_DESCRIPTION_SIMILARITY` (see the
+        no-corroboration test below) pairs two SHORT, UNRELATED
+        descriptions — scoring far below even a much looser threshold, so
+        it stays green if the constant were mutated from 0.90 down to
+        0.40. This pins the actual 0.90 boundary: two same-agency
+        boilerplate descriptions sharing most of their sentence structure
+        but differing on room count/amenities score ~0.87 (measured,
+        rapidfuzz `token_sort_ratio`) — high enough to rescue at a loosened
+        0.40 threshold, but correctly below the real 0.90 bar. Must NOT
+        rescue.
+        """
+        description_a = (
+            "Se vende piso reformado, muy luminoso, cerca de todos los "
+            "servicios, con 3 habitaciones dobles, cocina independiente, "
+            "salon comedor y balcon."
+        )
+        description_b = (
+            "Se vende piso reformado, muy luminoso, cerca de todos los "
+            "servicios, con 2 habitaciones dobles, cocina americana, "
+            "salon comedor y terraza."
+        )
+        similarity = fuzz.token_sort_ratio(description_a, description_b) / 100
+        assert 0.40 < similarity < engine._FUZZY_RESCUE_DESCRIPTION_SIMILARITY, (
+            "fixture drifted outside the intended just-under-0.90 band "
+            f"(similarity={similarity})"
+        )
+        suggestion_id, _la, _lb = self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-boilerplate-just-under",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            description_a=description_a,
+            description_b=description_b,
+        )
+
+        deleted, rescued = engine.purge_pending_fuzzy(dedup_db)
+
+        assert deleted == 1
+        assert rescued == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            assert cur.fetchone()[0] == 0
+
+    def test_purges_exact_price_size_pair_with_no_corroboration(self, dedup_db):
+        """The 201-vs-43 gap #600 measured: exact m2+price alone (a dense
+        market coincidence) is not enough to rescue a fuzzy row."""
+        suggestion_id, _la, _lb = self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-no-corroboration",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            description_a="Piso luminoso",
+            description_b="Atico con terraza",
+        )
+
+        deleted, rescued = engine.purge_pending_fuzzy(dedup_db)
+
+        assert deleted == 1
+        assert rescued == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            assert cur.fetchone()[0] == 0
+
+    def test_purges_pair_with_mismatched_price_or_size_regardless_of_photos(
+        self, dedup_db
+    ):
+        """Photo/description corroboration alone, without EXACT price+size
+        agreement, is exactly the same-neighbourhood-different-unit shape
+        — must not rescue."""
+        photo_a = "https://cdn.fotocasa.es/mismatch-photo-a.jpg"
+        photo_b = "https://cdn.idealista.com/mismatch-photo-b.jpg"
+        self._seed_stored_hash(dedup_db, photo_a, self._IDENTICAL_HEX, "fotocasa")
+        self._seed_stored_hash(dedup_db, photo_b, self._IDENTICAL_HEX, "idealista")
+        suggestion_id, _la, _lb = self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-mismatched-price",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(260000),  # not exactly equal
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+
+        deleted, rescued = engine.purge_pending_fuzzy(dedup_db)
+
+        assert deleted == 1
+        assert rescued == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            assert cur.fetchone()[0] == 0
+
+    def test_different_photos_do_not_rescue(self, dedup_db):
+        photo_a = "https://cdn.fotocasa.es/different-photo-a.jpg"
+        photo_b = "https://cdn.idealista.com/different-photo-b.jpg"
+        self._seed_stored_hash(dedup_db, photo_a, self._IDENTICAL_HEX, "fotocasa")
+        self._seed_stored_hash(dedup_db, photo_b, self._DIFFERENT_HEX, "idealista")
+        suggestion_id, _la, _lb = self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-different-photos",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+
+        deleted, rescued = engine.purge_pending_fuzzy(dedup_db)
+
+        assert deleted == 1
+        assert rescued == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            assert cur.fetchone()[0] == 0
+
+    def test_leaves_non_pending_and_non_fuzzy_rows_untouched(self, dedup_db):
+        confirmed_id, _la, _lb = self._seed_fuzzy_pair(
+            dedup_db, "fuzzy-confirmed", status="confirmed"
+        )
+        rejected_id, _la, _lb = self._seed_fuzzy_pair(
+            dedup_db, "fuzzy-rejected", status="rejected"
+        )
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            dedup_db, "fotocasa", "idealista", "photo-hash-pending-untouched"
+        )
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO suggested_merge
+                    (listing_id_a, listing_id_b, match_basis, confidence, status)
+                VALUES (%s, %s, 'photo_hash', 0.700, 'pending') RETURNING id
+                """,
+                sorted((listing_a, listing_b)),
+            )
+            other_basis_id = cur.fetchone()[0]
+        dedup_db.commit()
+
+        deleted, rescued = engine.purge_pending_fuzzy(dedup_db)
+
+        assert deleted == 0
+        assert rescued == 0
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT id FROM suggested_merge ORDER BY id")
+            remaining = {row[0] for row in cur.fetchall()}
+        assert remaining == {confirmed_id, rejected_id, other_basis_id}
+
+    def test_idempotent_second_run(self, dedup_db):
+        self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-idempotent",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+        )
+        first_deleted, first_rescued = engine.purge_pending_fuzzy(dedup_db)
+        second_deleted, second_rescued = engine.purge_pending_fuzzy(dedup_db)
+        assert first_deleted == 1
+        assert first_rescued == 0
+        assert second_deleted == 0
+        assert second_rescued == 0
+
+    def test_cli_purge_fuzzy_subcommand(self, dedup_db, monkeypatch, capsys):
+        from etl.dedup import cli as dedup_cli
+
+        self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-cli",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+        )
+
+        class _NoCloseConnProxy:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
+        )
+        exit_code = dedup_cli.main(["purge-fuzzy", "--yes"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Purged 1" in captured.out
+        assert "rescued 0" in captured.out
+
+    def test_cli_purge_fuzzy_dry_run_deletes_nothing(
+        self, dedup_db, monkeypatch, capsys
+    ):
+        from etl.dedup import cli as dedup_cli
+
+        self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-cli-dry",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+        )
+
+        class _NoCloseConnProxy:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
+        )
+        exit_code = dedup_cli.main(["purge-fuzzy", "--dry-run"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Would purge 1" in captured.out
+        assert "would rescue 0" in captured.out
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM suggested_merge WHERE status = 'pending' "
+                "AND match_basis = 'fuzzy'"
+            )
+            assert cur.fetchone()[0] == 1
+
+    def test_cli_purge_fuzzy_aborts_without_yes_or_confirmation(
+        self, dedup_db, monkeypatch, capsys
+    ):
+        from etl.dedup import cli as dedup_cli
+
+        self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-cli-noconfirm",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+        )
+
+        class _NoCloseConnProxy:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
+        )
+        exit_code = dedup_cli.main(["purge-fuzzy"])
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "Aborted" in captured.out
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM suggested_merge WHERE status = 'pending' "
+                "AND match_basis = 'fuzzy'"
+            )
+            assert cur.fetchone()[0] == 1
+
+
+class TestPurgePendingFuzzyPhotoStoreUnavailable:
+    """Issue #607 (B2): `purge_pending_fuzzy`/`preview_purge_pending_fuzzy`
+    must ABORT (raise, delete/rescue nothing) rather than proceed when
+    `photo_hash_store.open_connection()` returns `None` — see
+    `engine.PhotoHashStoreUnavailableError`'s docstring for why silently
+    degrading here would widen the delete far past the intended rescue
+    set."""
+
+    def _seed_fuzzy_pair(self, conn, ext_prefix: str, **kwargs) -> int:
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            conn, "fotocasa", "idealista", ext_prefix, **kwargs
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO suggested_merge
+                    (listing_id_a, listing_id_b, match_basis, confidence, status)
+                VALUES (%s, %s, 'fuzzy', 0.590, 'pending') RETURNING id
+                """,
+                sorted((listing_a, listing_b)),
+            )
+            suggestion_id = cur.fetchone()[0]
+        conn.commit()
+        return suggestion_id
+
+    def test_purge_raises_and_deletes_nothing(self, dedup_db, monkeypatch):
+        from etl.dedup import photo_hash_store
+
+        suggestion_id = self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-store-down-purge",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+        )
+        monkeypatch.setattr(photo_hash_store, "open_connection", lambda: None)
+
+        with pytest.raises(engine.PhotoHashStoreUnavailableError):
+            engine.purge_pending_fuzzy(dedup_db)
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            assert cur.fetchone()[0] == "pending"
+
+    def test_preview_raises_the_same_way(self, dedup_db, monkeypatch):
+        from etl.dedup import photo_hash_store
+
+        self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-store-down-preview",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+        )
+        monkeypatch.setattr(photo_hash_store, "open_connection", lambda: None)
+
+        with pytest.raises(engine.PhotoHashStoreUnavailableError):
+            engine.preview_purge_pending_fuzzy(dedup_db)
+
+    def test_cli_purge_fuzzy_reports_aborted_and_exits_nonzero(
+        self, dedup_db, monkeypatch, capsys
+    ):
+        from etl.dedup import cli as dedup_cli
+        from etl.dedup import photo_hash_store
+
+        suggestion_id = self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-store-down-cli",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+        )
+        monkeypatch.setattr(photo_hash_store, "open_connection", lambda: None)
+
+        class _NoCloseConnProxy:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
+        )
+        exit_code = dedup_cli.main(["purge-fuzzy", "--yes"])
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "ABORTED" in captured.err
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            assert cur.fetchone()[0] == "pending"
+
+
+class TestFuzzyPurgeRescueSurvivesReevaluation:
+    """Issue #607 (B1): a row `purge_pending_fuzzy` rescues must still be
+    reviewable after the very next `engine.run()` — NOT flipped to
+    `rejected`, which is worse than deleted (`_load_recorded_pairs` freezes
+    `rejected` forever, so a rejected rescue can never come back). This is
+    the DB-backed regression test the original review flagged as missing:
+    reproduces both rescue paths (exact price+size corroborated by either
+    a near-identical description or a partial, sub-MIN_MATCH_RATIO photo
+    overlap) end to end — purge, then run(), then assert still pending.
+    """
+
+    def _seed_fuzzy_pair(self, conn, ext_prefix: str, **kwargs) -> tuple[int, int, int]:
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            conn, "fotocasa", "idealista", ext_prefix, **kwargs
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO suggested_merge
+                    (listing_id_a, listing_id_b, match_basis, confidence, status)
+                VALUES (%s, %s, 'fuzzy', 0.590, 'pending') RETURNING id
+                """,
+                sorted((listing_a, listing_b)),
+            )
+            suggestion_id = cur.fetchone()[0]
+        conn.commit()
+        return suggestion_id, listing_a, listing_b
+
+    def test_description_rescued_survivor_stays_pending_after_run(self, dedup_db):
+        description = (
+            "Piso reformado en el centro, 3 habitaciones, 2 banos, "
+            "cocina equipada, terraza con vistas."
+        )
+        suggestion_id, _la, _lb = self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-rescue-e2e-description",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            description_a=description,
+            description_b=description,
+        )
+
+        deleted, rescued = engine.purge_pending_fuzzy(dedup_db)
+        assert deleted == 0
+        assert rescued == 1
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status, detail FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            status, detail = cur.fetchone()
+        assert status == "pending"
+        assert "rescued_reason" in detail
+
+        # The reproduction from the review: one full engine.run() after the
+        # purge must NOT flip this row to 'rejected' — nothing else was ever
+        # going to fire for it (that's why it was fuzzy-only), and
+        # `evaluate_pair` no longer even calls fuzzy.
+        result = engine.run(dedup_db)
+        assert result.reevaluated_preserved_rescued == 1
+        assert result.reevaluated_rejected == 0
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status, detail FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            status, detail = cur.fetchone()
+        assert status == "pending"
+        # rescued_reason must still be there — a human reviewing this row
+        # needs to see WHY it survived, not just that it did.
+        assert "rescued_reason" in detail
+        assert "reevaluated_from" in detail
+
+        # A second run must be a no-op on this row too (idempotent forever,
+        # not just once).
+        result_2 = engine.run(dedup_db)
+        assert result_2.reevaluated_preserved_rescued == 1
+        assert result_2.reevaluated_rejected == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            assert cur.fetchone()[0] == "pending"
+
+    def test_photo_rescued_survivor_stays_pending_after_run(self, dedup_db):
+        """Reproduces the review's exact photo-rescue repro: 1 shared hash
+        of 5 per side, match_ratio 0.2 < MIN_MATCH_RATIO (0.6) — corroborates
+        the rescue (`hashes_share_any_match`'s looser bar) but is far below
+        what `photo_hash.evaluate` itself needs to fire in `evaluate_pair`.
+        """
+        photo_urls_a = [f"https://cdn.fotocasa.es/rescue2-{i}.jpg" for i in range(5)]
+        photo_urls_b = [f"https://cdn.idealista.com/rescue2-{i}.jpg" for i in range(5)]
+        # Hamming distances computed offline (imagehash, hash_size=8/64-bit):
+        # only (a[0], b[0]) is within the 10-bit match threshold (distance 3);
+        # every other cross pair is 16+ apart. matched=1/5 -> ratio exactly 0.2.
+        hashes_a = [
+            "0000000000000000",
+            "1111111111111111",
+            "2222222222222222",
+            "3333333333333333",
+            "4444444444444444",
+        ]
+        hashes_b = [
+            "0000000000000007",
+            "aaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbb",
+            "cccccccccccccccc",
+            "dddddddddddddddd",
+        ]
+        with dedup_db.cursor() as cur:
+            for url, hexval in zip(photo_urls_a, hashes_a):
+                cur.execute(
+                    "INSERT INTO photo_hashes (photo_url, phash, ok, source) "
+                    "VALUES (%s, %s, TRUE, 'fotocasa')",
+                    (url, hexval),
+                )
+            for url, hexval in zip(photo_urls_b, hashes_b):
+                cur.execute(
+                    "INSERT INTO photo_hashes (photo_url, phash, ok, source) "
+                    "VALUES (%s, %s, TRUE, 'idealista')",
+                    (url, hexval),
+                )
+        dedup_db.commit()
+
+        suggestion_id, _la, _lb = self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-rescue-e2e-photo",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            photo_urls_a=photo_urls_a,
+            photo_urls_b=photo_urls_b,
+        )
+
+        deleted, rescued = engine.purge_pending_fuzzy(dedup_db)
+        assert deleted == 0
+        assert rescued == 1
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            assert cur.fetchone()[0] == "pending"
+
+        result = engine.run(dedup_db)
+        assert result.reevaluated_preserved_rescued == 1
+        assert result.reevaluated_rejected == 0
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            assert cur.fetchone()[0] == "pending"
+
+
 class TestAddressCoordsSignal:
     """No dedicated coverage existed for address_coords.evaluate's
     coords+size+address merge path before issue #186 added the floor veto
@@ -2195,8 +3409,9 @@ class TestAddressCoordsSignal:
             m2_built_a=Decimal(70),
             m2_built_b=Decimal(71),
             # Deliberately far apart — address_coords doesn't gate on
-            # price at all, only fuzzy does, and this signal must fire
-            # before fuzzy is ever reached.
+            # price at all, unlike the (now-retired, issue #601) fuzzy
+            # fallback; this fixture pins that address_coords alone still
+            # merges regardless.
             current_price_a=Decimal(250000),
             current_price_b=Decimal(400000),
         )
@@ -2212,16 +3427,21 @@ class TestAddressCoordsSignal:
             assert basis == "address_coords"
             assert confidence == Decimal("0.900")
 
-    def test_conflicting_floor_vetoes_the_merge_and_demotes_to_a_weaker_suggestion(
+    def test_conflicting_floor_no_longer_demotes_to_a_suggestion_once_fuzzy_is_retired(
         self, dedup_db
     ):
         """Issue #186's illustration, structurally: same building
-        (coords+address match), different unit (floor disagrees). The
-        merge is vetoed; because the address text is identical here,
-        fuzzy's weaker bar still fires, so the pair isn't dropped outright
-        — a human sees it as a suggestion with the floor conflict flagged
-        in `detail`, exactly the "discriminating data... nothing read it"
-        gap issue #186 describes, now read.
+        (coords+address match), different unit (floor disagrees). Before
+        issue #601 retired the fuzzy fallback, an identical address let
+        fuzzy's weaker bar still fire here, surfacing the pair as a
+        suggestion with the floor conflict flagged in `detail`. With
+        fuzzy gone and no photos in this fixture, nothing downstream
+        catches it any more — the merge is vetoed and the pair produces
+        NO suggestion at all. `photo_hash` (issue #186's own worked
+        example, still present) remains the surviving
+        floor-veto-downgrades-to-a-suggestion path when photos are
+        actually available — see `TestPhotoHashAutoMerge.
+        test_conflicting_floor_vetoes_the_auto_merge`.
         """
         _insert_pair(
             dedup_db,
@@ -2243,13 +3463,10 @@ class TestAddressCoordsSignal:
         )
         result = engine.run(dedup_db)
         assert result.merged == 0
-        assert result.suggested == 1
+        assert result.suggested == 0
         with dedup_db.cursor() as cur:
-            cur.execute("SELECT match_basis, confidence, detail FROM suggested_merge")
-            basis, confidence, detail = cur.fetchone()
-            assert basis == "fuzzy"
-            assert confidence == Decimal("0.590")
-            assert detail["floor_conflict"] is True
+            cur.execute("SELECT COUNT(*) FROM suggested_merge")
+            assert cur.fetchone()[0] == 0
 
     def test_floors_agreeing_still_auto_merges(self, dedup_db):
         """Counterweight: the veto must fire on conflict, not on agreement."""
@@ -2370,16 +3587,29 @@ class TestFloorCorroborationAcrossSignals:
         """DB round-trip proof that engine.fetch_listing_records actually
         reads property.floor into ListingRecord.floor — the in-memory
         tests above exercise the corroboration helpers directly and can't
-        catch a wiring bug in the SELECT/row-unpacking itself."""
+        catch a wiring bug in the SELECT/row-unpacking itself.
+
+        Uses phone's surviving corroborated-unconfirmed-kind tier (0.750,
+        untouched by issue #603's silencing) rather than the retired
+        uncorroborated tier: if `property.floor` were NOT actually wired
+        through (floor reads back as None on both sides), the floor veto
+        would never fire, corroboration would succeed via the price/size
+        fallback, and this pair WOULD file a 0.750 suggestion. Dissimilar
+        addresses are just belt-and-braces now that fuzzy is retired
+        (issue #601) and can no longer pick up what the floor veto is
+        meant to block.
+        """
         _insert_pair(
             dedup_db,
             "idealista",
             "fotocasa",
             "phone-floor-veto-db",
+            address_a="Calle Alcala 10, Madrid",
+            address_b="Avenida Diagonal 200, Barcelona",
             m2_built_a=Decimal(70),
             m2_built_b=Decimal(70),
             listing_kind_a="particular",
-            listing_kind_b="particular",
+            listing_kind_b=None,
             description_a="Piso reformado, tel 622334455",
             description_b="Piso reformado, tel 622334455",
             current_price_a=Decimal(285000),
@@ -2389,262 +3619,33 @@ class TestFloorCorroborationAcrossSignals:
         )
         result = engine.run(dedup_db)
         assert result.merged == 0
-        assert result.suggested == 1
+        assert result.suggested == 0
         with dedup_db.cursor() as cur:
-            cur.execute("SELECT match_basis, confidence FROM suggested_merge")
-            basis, confidence = cur.fetchone()
-            assert basis == "phone"
-            assert confidence == Decimal("0.500")
+            cur.execute("SELECT COUNT(*) FROM suggested_merge")
+            assert cur.fetchone()[0] == 0
 
 
-class TestStructuredFieldsFuzzyVeto:
-    """Issue #566: a `property_type`/`rooms` contradiction vetoes a `fuzzy`
-    suggestion outright — scoped to that ONE signal, not wired into
-    evaluate_pair ahead of every signal, because the live-DB blast-radius
-    measurement (below) found those fields are noisy per-connector
-    metadata that regularly disagree even on definite, strongly-
-    corroborated duplicates matched by address_coords/reference_code/
-    photo_hash. See etl/dedup/signals/fuzzy.py and structured_fields.py's
-    module docstrings for the full reasoning."""
+class TestStructuredFieldsNeverVetoesStrongerSignals:
+    """Issue #566/D-117: a `property_type`/`rooms` contradiction was scoped
+    to veto ONLY the `fuzzy` signal's suggestion, never wired into
+    `evaluate_pair` ahead of address_coords/phone/reference_code/photo_hash
+    — the live-DB blast-radius measurement found those fields are noisy
+    per-connector metadata that regularly disagree even on definite,
+    strongly-corroborated duplicates matched by those stronger signals.
+
+    Issue #601 retired `fuzzy` entirely — `evaluate_pair` no longer calls
+    it at all, so D-117's veto (`structured_fields_conflict`, still tested
+    directly and purely in test_dedup_signals_structured_fields.py) has
+    lost its only call site and is currently inert (per the issue: "D-117
+    stays... its veto simply loses its only call site" — a forward-looking
+    guard, not a retired decision). What survives here and stays load-
+    bearing is the OTHER half of D-117: proof that a structured-field
+    disagreement must never block the stronger signals it was never meant
+    to touch, regardless of whether anything upstream still calls the veto.
+    """
 
     _LAT = Decimal("40.416775")
     _LON = Decimal("-3.703790")
-
-    def test_fuzzy_suggestion_vetoed_by_property_type_conflict(self, dedup_db):
-        """A weak, address-text-only match (no coordinates, so
-        address_coords never fires) that agrees on price/size but
-        genuinely disagrees on property_type must not be suggested."""
-        _insert_pair(
-            dedup_db,
-            "fotocasa",
-            "idealista",
-            "fuzzy-type-conflict-vetoed",
-            address_a="Calle Mayor 5, Madrid",
-            address_b="Calle Mayor 5, Madrid",
-            m2_built_a=Decimal(70),
-            m2_built_b=Decimal(71),
-            current_price_a=Decimal(250000),
-            current_price_b=Decimal(260000),
-            property_type_a="piso",
-            property_type_b="local",
-        )
-        result = engine.run(dedup_db)
-        assert result.merged == 0
-        assert result.suggested == 0
-
-    def test_fuzzy_suggestion_vetoed_by_rooms_diff_of_two(self, dedup_db):
-        _insert_pair(
-            dedup_db,
-            "fotocasa",
-            "idealista",
-            "fuzzy-rooms-conflict-vetoed",
-            address_a="Calle Mayor 5, Madrid",
-            address_b="Calle Mayor 5, Madrid",
-            m2_built_a=Decimal(70),
-            m2_built_b=Decimal(71),
-            current_price_a=Decimal(250000),
-            current_price_b=Decimal(260000),
-            rooms_a=2,
-            rooms_b=5,
-        )
-        result = engine.run(dedup_db)
-        assert result.merged == 0
-        assert result.suggested == 0
-
-    def test_fuzzy_suggestion_not_vetoed_by_rooms_diff_of_one(self, dedup_db):
-        """The deliberate tolerance: a 1-room difference must not block a
-        fuzzy suggestion from being filed."""
-        _insert_pair(
-            dedup_db,
-            "fotocasa",
-            "idealista",
-            "fuzzy-rooms-diff-one-unvetoed",
-            address_a="Calle Mayor 5, Madrid",
-            address_b="Calle Mayor 5, Madrid",
-            m2_built_a=Decimal(70),
-            m2_built_b=Decimal(71),
-            current_price_a=Decimal(250000),
-            current_price_b=Decimal(260000),
-            rooms_a=2,
-            rooms_b=3,
-        )
-        result = engine.run(dedup_db)
-        assert result.merged == 0
-        assert result.suggested == 1
-        with dedup_db.cursor() as cur:
-            cur.execute("SELECT match_basis FROM suggested_merge")
-            assert cur.fetchone()[0] == "fuzzy"
-
-    def test_fuzzy_suggestion_not_vetoed_by_piso_atico_synonym(self, dedup_db):
-        """The main risk this issue flagged: property_type is already
-        canonicalized at connector ingestion, but piso/atico is a genuine
-        floor-position synonym pair (verified against the live demo DB
-        backlog) and must not veto a fuzzy suggestion."""
-        _insert_pair(
-            dedup_db,
-            "fotocasa",
-            "idealista",
-            "fuzzy-piso-atico-synonym-unvetoed",
-            address_a="Calle Mayor 5, Madrid",
-            address_b="Calle Mayor 5, Madrid",
-            m2_built_a=Decimal(70),
-            m2_built_b=Decimal(71),
-            current_price_a=Decimal(250000),
-            current_price_b=Decimal(260000),
-            property_type_a="piso",
-            property_type_b="atico",
-        )
-        result = engine.run(dedup_db)
-        assert result.merged == 0
-        assert result.suggested == 1
-
-    def test_fuzzy_suggestion_not_vetoed_by_missing_type_or_rooms(self, dedup_db):
-        _insert_pair(
-            dedup_db,
-            "fotocasa",
-            "idealista",
-            "fuzzy-missing-fields-unvetoed",
-            address_a="Calle Mayor 5, Madrid",
-            address_b="Calle Mayor 5, Madrid",
-            m2_built_a=Decimal(70),
-            m2_built_b=Decimal(71),
-            current_price_a=Decimal(250000),
-            current_price_b=Decimal(260000),
-            property_type_a="piso",
-            property_type_b=None,
-            rooms_a=2,
-            rooms_b=None,
-        )
-        result = engine.run(dedup_db)
-        assert result.merged == 0
-        assert result.suggested == 1
-
-    def test_existing_pending_fuzzy_suggestion_is_demoted_to_rejected(self, dedup_db):
-        """D-024: pending suggestions are re-evaluated every run. A `fuzzy`
-        suggestion filed before this veto existed must be demoted to
-        'rejected' now that the type conflict makes fuzzy.evaluate (and so
-        evaluate_pair) return no match at all."""
-        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
-            dedup_db,
-            "fotocasa",
-            "idealista",
-            "fuzzy-veto-pending-demoted",
-            address_a="Calle Mayor 5, Madrid",
-            address_b="Calle Mayor 5, Madrid",
-            m2_built_a=Decimal(70),
-            m2_built_b=Decimal(71),
-            current_price_a=Decimal(250000),
-            current_price_b=Decimal(260000),
-            property_type_a="piso",
-            property_type_b="nave",
-        )
-        lo, hi = sorted((listing_a, listing_b))
-        with dedup_db.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO suggested_merge
-                    (listing_id_a, listing_id_b, match_basis, confidence, status, detail)
-                VALUES (%s, %s, 'fuzzy', 0.590, 'pending', %s)
-                """,
-                (lo, hi, json.dumps({})),
-            )
-        dedup_db.commit()
-
-        result = engine.run(dedup_db)
-
-        assert result.merged == 0
-        assert result.reevaluated_rejected == 1
-        with dedup_db.cursor() as cur:
-            cur.execute(
-                "SELECT status, detail FROM suggested_merge "
-                "WHERE listing_id_a = %s AND listing_id_b = %s",
-                (lo, hi),
-            )
-            status, detail = cur.fetchone()
-            assert status == "rejected"
-            assert "reevaluated_from" in detail
-
-    def test_fuzzy_suggestion_not_vetoed_when_size_and_price_are_identical(
-        self, dedup_db
-    ):
-        """B1 (PR #567 review): a genuinely-incompatible type pair
-        (chalet/piso — NOT the piso/atico family) must not veto a fuzzy
-        suggestion when m2_built AND current_price are BOTH exactly
-        identical on both sides — the live-DB pattern the review found in
-        97 of 97 type-conflicting currently-merged properties (a portal
-        type-mapping quirk, not two properties)."""
-        _insert_pair(
-            dedup_db,
-            "fotocasa",
-            "idealista",
-            "fuzzy-identical-size-price-type-conflict-unvetoed",
-            address_a="Calle Mayor 5, Madrid",
-            address_b="Calle Mayor 5, Madrid",
-            m2_built_a=Decimal(90),
-            m2_built_b=Decimal(90),
-            current_price_a=Decimal(260000),
-            current_price_b=Decimal(260000),
-            property_type_a="chalet",
-            property_type_b="piso",
-        )
-        result = engine.run(dedup_db)
-        assert result.merged == 0
-        assert result.suggested == 1
-        with dedup_db.cursor() as cur:
-            cur.execute("SELECT match_basis FROM suggested_merge")
-            assert cur.fetchone()[0] == "fuzzy"
-
-    def test_fuzzy_suggestion_not_vetoed_by_rooms_zero_treated_as_absent(
-        self, dedup_db
-    ):
-        """B3 (PR #567 review): rooms=0 is a scrape-artifact placeholder
-        for at least one connector (this issue's own property 121/128
-        example: the SAME fotocasa listing scraped once with rooms=0 and
-        once with rooms=4), not a genuine studio count — must not veto."""
-        _insert_pair(
-            dedup_db,
-            "fotocasa",
-            "idealista",
-            "fuzzy-rooms-zero-treated-as-absent-unvetoed",
-            address_a="Calle Mayor 5, Madrid",
-            address_b="Calle Mayor 5, Madrid",
-            m2_built_a=Decimal(70),
-            m2_built_b=Decimal(71),
-            current_price_a=Decimal(250000),
-            current_price_b=Decimal(260000),
-            rooms_a=0,
-            rooms_b=4,
-        )
-        result = engine.run(dedup_db)
-        assert result.merged == 0
-        assert result.suggested == 1
-
-    def test_veto_reverted_regression_check(self, dedup_db):
-        """Proves the veto is what blocks the suggestion, not some other
-        rule: monkeypatching structured_fields_conflict (as imported into
-        fuzzy.py) to always return False (reverting only the veto's
-        *behaviour*, keeping every other line of plumbing untouched) must
-        let the type-conflicting pair get suggested again via fuzzy."""
-        _insert_pair(
-            dedup_db,
-            "fotocasa",
-            "idealista",
-            "fuzzy-veto-regression-check",
-            address_a="Calle Mayor 5, Madrid",
-            address_b="Calle Mayor 5, Madrid",
-            m2_built_a=Decimal(70),
-            m2_built_b=Decimal(71),
-            current_price_a=Decimal(250000),
-            current_price_b=Decimal(260000),
-            property_type_a="piso",
-            property_type_b="local",
-        )
-        with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(fuzzy, "structured_fields_conflict", lambda a, b: False)
-            result = engine.run(dedup_db)
-
-        assert result.merged == 0
-        assert result.suggested == 1
 
     def test_property_type_conflict_does_not_block_address_coords_merge(self, dedup_db):
         """The blast-radius finding this design is built around: a pair

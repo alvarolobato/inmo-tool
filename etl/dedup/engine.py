@@ -1,9 +1,16 @@
 """The dedup matching pipeline (issue #16) — `ps dedup run` / `ps dedup revert`.
 
 Compares every pair of listings that don't already share a property_id,
-in the signal priority order from issue #1 §6 (cadastral -> address+coords
--> phone -> photo hash -> fuzzy fallback), auto-merging confident matches
-and filing the rest as suggestions for human review.
+in signal priority order: cadastral -> address+coords -> photo hash ->
+phone, auto-merging confident matches and filing the rest as suggestions
+for human review. Issue #1 §6's original order also listed a `fuzzy`
+text-similarity fallback last and phone ahead of photo hash — issue #603
+(D-131) reordered photo hash ahead of phone, and issue #601 (D-130)
+retired fuzzy entirely: see `evaluate_pair`'s docstring for the reasoning
+on both, and `purge_pending_fuzzy` for the one-off cleanup of fuzzy's
+pending backlog. `etl.dedup.signals.fuzzy` still exists — only for
+`normalize_address`, which `address_coords.py` imports — but no longer
+has an `evaluate` this module calls.
 
 Scale note: this is an O(n^2) pairwise comparison over every listing in the
 table, deliberately — the right scale-up (blocking by geography/price
@@ -12,8 +19,8 @@ real piece of engineering that isn't worth building against a database with
 a few dozen listings from two connectors. Revisit once real connector
 volume makes a full pairwise scan slow.
 
-Measured (issue #185, pure in-memory `evaluate_pair` cost across the first
-four signals + fuzzy, `photo_urls=()` so `photo_hash.fetch_hashes` never
+Measured (issue #185, pure in-memory `evaluate_pair` cost across every
+signal then active, `photo_urls=()` so `photo_hash.fetch_hashes` never
 does real network I/O — i.e. a lower bound, real runs with photos will be
 slower): ~13.3us/pair, consistent from n=419 (0.42M pairs -> ~1.1s) through
 n=5,000 (12.5M pairs -> ~168s). At n=10,000 (~50M pairs) that extrapolates
@@ -39,11 +46,12 @@ import logging
 from dataclasses import dataclass
 from decimal import Decimal
 
+from rapidfuzz import fuzz
+
 from etl.dedup import photo_hash_store, reconcile
 from etl.dedup.signals import (
     address_coords,
     cadastral,
-    fuzzy,
     phone_extract,
     photo_hash,
     reference_code,
@@ -52,6 +60,37 @@ from etl.dedup.signals.floor import floors_conflict
 from etl.dedup.types import ListingRecord, PairEvaluation
 
 logger = logging.getLogger("etl.dedup.engine")
+
+
+class PhotoHashStoreUnavailableError(RuntimeError):
+    """Issue #607 (B2): raised by `purge_pending_fuzzy` (and its
+    `preview_purge_pending_fuzzy` dry-run twin) when
+    `photo_hash_store.open_connection()` returns `None`.
+
+    `open_connection()` returning `None` is the correct, silent-by-design
+    behaviour for the dedup *scoring* path (`_PhotoHashCache`) — a run
+    without a reachable store just falls back to fetching every photo live,
+    exactly as it did before issue #221. It is NOT correct for this
+    destructive migration: `_fuzzy_rescue_shares_a_photo` degrades to
+    `False` for every pair when `store_conn is None`, so the rescue set
+    silently collapses to description-only corroboration (measured: 19 of
+    51 on production's numbers) and the `DELETE ... AND NOT (id = ANY(...))`
+    takes everything else — no error, no non-zero exit, just an oversized
+    delete. Refuse instead."""
+
+
+def _photo_hash_store_or_raise():
+    store_conn = photo_hash_store.open_connection()
+    if store_conn is None:
+        raise PhotoHashStoreUnavailableError(
+            "the persistent photo-hash store is unreachable "
+            "(photo_hash_store.open_connection() returned None) — refusing "
+            "to purge/preview. Every pair that should have been rescued via "
+            "a shared photo hash would silently look unrescued, widening "
+            "this destructive delete far beyond the intended rescue set. "
+            "Retry once the store is reachable."
+        )
+    return store_conn
 
 
 @dataclass
@@ -107,6 +146,29 @@ class DedupRunResult:
     reevaluated_merged: int = 0
     reevaluated_rejected: int = 0
     reevaluated_updated: int = 0
+    # Issue #607 (B1): a `pending` row `purge_pending_fuzzy` rescued (its
+    # `detail` carries a `rescued_reason`) is corroborated by evidence
+    # `evaluate_pair`'s live signals were never going to independently
+    # re-derive — that is precisely WHY it was `fuzzy`-only in the first
+    # place. Without this exemption, `_reevaluate_pending_suggestion`'s
+    # `evaluation is None` branch auto-rejects every one of them on their
+    # very first post-purge run, since nothing else has ever fired for
+    # them. Counted separately from `reevaluated_rejected` — this is a
+    # "not rejected, deliberately kept pending" outcome.
+    reevaluated_preserved_rescued: int = 0
+    # Issue #604: a `pending` suggested_merge row whose two listings
+    # already share a property_id — because a DIFFERENT pair's merge
+    # unified them, not because this exact pair was ever itself confirmed
+    # — used to be invisible to reevaluation forever: `_run`'s
+    # `a.property_id == b.property_id` skip ran BEFORE `pending_by_pair`
+    # was ever consulted, so D-024's reevaluation guarantee never actually
+    # reached these rows (71 stale rows measured on the live corpus: 56
+    # photo_hash + 15 fuzzy). Counts how many such rows this run resolved
+    # to `confirmed` via `_resolve_pending_same_property` — kept separate
+    # from `reevaluated_*` above, all of which assume a fresh
+    # `evaluate_pair` call happened; this path never calls it (there is
+    # nothing left to score, the listings are already unified).
+    same_property_pending_resolved: int = 0
 
 
 def fetch_listing_records(conn) -> list[ListingRecord]:
@@ -250,11 +312,30 @@ def evaluate_pair(
 ) -> PairEvaluation | None:
     """Run every signal in priority order; return the first that fires.
 
-    Photo-hash fetching only happens once every cheaper, non-network signal
-    has already come back empty — it's the one signal in this pipeline with
-    real network cost, so it's deliberately last even though issue #16 lists
-    it before fuzzy (signal 4 vs 5) rather than being evaluated eagerly for
-    every pair regardless of whether a cheaper signal would have resolved it.
+    Photo-hash fetching only happens once address_coords/reference_code
+    have already come back empty — those two are cheaper (no network) and
+    would resolve a pair without ever needing a photo fetch. Phone, by
+    contrast, now runs AFTER photo_hash (issue #603/D-131): its
+    corroborated-but-not-`particular` tiers turned out to actively SHADOW
+    stronger evidence, not just add weaker evidence ahead of it — see
+    below for the measurement.
+
+    Issue #603 (D-131): photo_hash was moved ahead of phone in this
+    priority order — a real reversal of issue #16's original listing
+    (cadastral -> address+coords -> phone -> photo hash -> fuzzy), not
+    just a cost optimization. #600 measured all 320 pending `phone`
+    suggestions as agency noise (19 distinct numbers, 9 of them shared
+    across 6-50 listings each, 100% with a confirmed-agency side), but
+    found a sharper problem than noise: because phone ran first, 19 of
+    those 320 pairs were actually photo-ratio >= 0.6 (mostly 1.0,
+    identical price/m2/description) true duplicates, permanently stuck at
+    phone's 0.500 uncorroborated-or-agency tier because `evaluate_pair`
+    returned on the phone match before photo_hash ever got a chance to
+    look. Reordering lets photo_hash claim those pairs on its own,
+    stronger evidence (see `etl.dedup.signals.phone_extract`'s module
+    docstring for the tier changes that go with this). The photo-hash
+    store (D-025) makes a warm re-fetch here ~free — see the PR for the
+    measured cost delta.
 
     Issue #564 (D-116): a same-agency reference-code conflict is checked
     right after `cadastral` and before every other signal — see the inline
@@ -262,19 +343,18 @@ def evaluate_pair(
     not cadastral.
 
     Issue #566: `property_type`/`rooms` contradiction is NOT checked here.
-    See `etl.dedup.signals.fuzzy`'s module docstring and
-    `structured_fields_conflict`'s use inside `fuzzy.evaluate` for why it's
-    scoped to that one signal rather than placed here ahead of every
-    signal the way the reference-code veto (D-116) is — the live-DB blast
-    radius measurement found `property_type`/`rooms` are noisy per-connector
-    metadata that regularly disagree even on definite, strongly-corroborated
-    duplicates (identical photos, price, and size) matched by
-    address_coords/reference_code/photo_hash; vetoing at this level would
-    have broken ~80 already-correct merges (13.6% of 590 — PR #567's review). Fuzzy is the one signal where
-    the issue's own measurement holds (price/size are already gated there,
-    so a structured-field contradiction is real signal, not noise) and the
-    one signal that's actually 97% of the pending-suggestion backlog this
-    issue targets.
+    `structured_fields_conflict` (D-117) was scoped to veto ONLY the now-
+    retired `fuzzy` signal's suggestion (issue #601), never placed here
+    ahead of every signal the way the reference-code veto (D-116) is — the
+    live-DB blast radius measurement found `property_type`/`rooms` are
+    noisy per-connector metadata that regularly disagree even on definite,
+    strongly-corroborated duplicates (identical photos, price, and size)
+    matched by address_coords/reference_code/photo_hash; vetoing at this
+    level would have broken ~80 already-correct merges (13.6% of 590 —
+    PR #567's review). With `fuzzy` retired, D-117's veto has lost its only
+    call site (still deliberately kept, not retired — see D-117's own
+    file) and `structured_fields_conflict` is currently unreferenced from
+    `evaluate_pair`'s pipeline entirely.
     """
     cadastral_result = cadastral.evaluate(a, b)
     if cadastral_result is not None:
@@ -299,7 +379,6 @@ def evaluate_pair(
 
     for evaluate_fn in (
         address_coords.evaluate,
-        phone_extract.evaluate,
         reference_code.evaluate,
     ):
         result = evaluate_fn(a, b)
@@ -358,7 +437,12 @@ def evaluate_pair(
             detail=detail,
         )
 
-    return fuzzy.evaluate(a, b)
+    # Issue #603 (D-131): phone is now evaluated AFTER photo_hash — see
+    # this function's docstring for the shadowed-duplicate measurement
+    # that motivated the reorder. Issue #601 (D-130) retired the `fuzzy`
+    # fallback that used to run after phone — nothing replaces it; a pair
+    # that clears none of the signals above is simply not a match.
+    return phone_extract.evaluate(a, b)
 
 
 @dataclass
@@ -580,6 +664,23 @@ def _reevaluate_pending_suggestion(
       and finds nothing to catch it — under the old code this pair would
       sit at `pending` forever with a `match_ratio`/basis nobody currently
       stands behind; now it explicitly leaves the queue.
+
+      EXCEPT a row `purge_pending_fuzzy` rescued (`detail` carries a
+      `rescued_reason` — issue #607/B1): that row is corroborated by
+      evidence (exact m2_built+current_price AND a shared photo hash or a
+      near-identical description) that no *live* signal in `evaluate_pair`
+      was ever going to independently re-derive — `photo_hash`'s own
+      `MIN_MATCH_RATIO` gate is stricter than the rescue's permissive
+      `hashes_share_any_match`, and a description match isn't corroboration
+      any live signal even looks at. `evaluation is None` for one of these
+      rows is not new information the pair is bad; it is the exact,
+      expected, permanent shape of "this is fuzzy's rescue set" restated.
+      Auto-rejecting it here would have made the rescue self-defeating —
+      the 51 survivors of a 24,981-row purge would have all flipped to
+      `rejected` (worse than deleted: `_load_recorded_pairs` freezes
+      `rejected` forever) on the very first post-deploy run. These rows
+      stay `pending` instead, so a human still decides; see
+      `reevaluated_preserved_rescued`.
     - `decision == "suggest"`: still not confident enough to auto-merge,
       but under current rules, not the rules that were live when this row
       was filed — refresh `match_basis`/`confidence`/`detail` in place and
@@ -616,6 +717,40 @@ def _reevaluate_pending_suggestion(
     result.reevaluated_total += 1
 
     if evaluation is None:
+        # Issue #607 (B1): a rescued row must never fall into the
+        # auto-reject branch below — see this function's own docstring for
+        # why "nothing else fires" is expected, permanent, and not new
+        # information for these rows.
+        is_rescued = (
+            isinstance(pending.detail, dict) and "rescued_reason" in pending.detail
+        )
+        if is_rescued:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE suggested_merge
+                       SET detail = detail || %s::jsonb
+                     WHERE id = %s
+                    """,
+                    (
+                        json.dumps(
+                            {
+                                "reevaluated_from": previous,
+                                "reevaluated_reason": (
+                                    "no live signal matched this pair, but it "
+                                    "carries a rescued_reason (issue #601's "
+                                    "fuzzy-purge rescue set) — exempt from "
+                                    "auto-reject, stays pending for a human"
+                                ),
+                            }
+                        ),
+                        pending.suggestion_id,
+                    ),
+                )
+            conn.commit()
+            result.reevaluated_preserved_rescued += 1
+            return None
+
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -702,6 +837,58 @@ def _reevaluate_pending_suggestion(
     return survivor_id, losing_id
 
 
+def _resolve_pending_same_property(
+    conn, pending: _PendingSuggestion, result: DedupRunResult
+) -> None:
+    """Resolve a `pending` suggested_merge row whose two listings already
+    share a property_id — issue #604.
+
+    Mirrors `confirm_suggestion`'s own "already unified by another pair"
+    branch (see that function's docstring): the intent behind this
+    suggestion — these are the same property — is already satisfied by
+    whatever merge unified them, so this marks the row `confirmed` without
+    calling `perform_merge` again. There is nothing left to merge: both
+    listings already point at the same property, and re-running the merge
+    machinery would try to move listings off a losing property that no
+    longer has anything on it.
+
+    Every branch of `_reevaluate_pending_suggestion` preserves the row's
+    pre-resolution state under `reevaluated_from` in `detail` for the same
+    auditability reason — this does too, plus a `resolved_reason` so a
+    human (or a future debugging session) can tell this apart from a fresh
+    `evaluate_pair` verdict.
+    """
+    previous = {
+        "status": "pending",
+        "match_basis": pending.match_basis,
+        "confidence": (
+            float(pending.confidence) if pending.confidence is not None else None
+        ),
+        "detail": pending.detail,
+    }
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE suggested_merge
+               SET status = 'confirmed',
+                   resolved_at = NOW(),
+                   detail = detail || %s::jsonb
+             WHERE id = %s
+            """,
+            (
+                json.dumps(
+                    {
+                        "reevaluated_from": previous,
+                        "resolved_reason": "listings already unified",
+                    }
+                ),
+                pending.suggestion_id,
+            ),
+        )
+    conn.commit()
+    result.same_property_pending_resolved += 1
+
+
 def run(conn) -> DedupRunResult:
     """Compare every not-yet-merged listing pair and act on the result.
 
@@ -780,6 +967,18 @@ def _run(conn, hash_cache: _PhotoHashCache) -> DedupRunResult:
             for j in range(i + 1, len(listings)):
                 a, b = listings[i], listings[j]
                 if a.property_id == b.property_id:
+                    # Issue #604: don't skip silently — a pending
+                    # suggestion for THIS pair may still be sitting in the
+                    # queue because a DIFFERENT pair's merge is what
+                    # unified them, not a confirm of this one. Checked
+                    # before the `continue` (not after, which is exactly
+                    # the bug) so it's never bypassed.
+                    same_property_pair_key = tuple(sorted((a.listing_id, b.listing_id)))
+                    pending_same_property = pending_by_pair.get(same_property_pair_key)
+                    if pending_same_property is not None:
+                        _resolve_pending_same_property(
+                            conn, pending_same_property, result
+                        )
                     continue
                 if a.source == b.source:
                     result.same_source_skipped += 1
@@ -844,11 +1043,21 @@ def _run(conn, hash_cache: _PhotoHashCache) -> DedupRunResult:
         logger.info(
             "dedup: re-evaluated %d pending suggestion(s) against current "
             "rules (issue #214) — %d merged, %d rejected, %d still pending "
-            "(refreshed in place)",
+            "(refreshed in place), %d preserved as fuzzy-purge rescues "
+            "(issue #607)",
             result.reevaluated_total,
             result.reevaluated_merged,
             result.reevaluated_rejected,
             result.reevaluated_updated,
+            result.reevaluated_preserved_rescued,
+        )
+
+    if result.same_property_pending_resolved:
+        logger.info(
+            "dedup: resolved %d pending suggestion(s) whose listings were "
+            "already unified by a different merge (issue #604) — marked "
+            "confirmed, no new merge performed",
+            result.same_property_pending_resolved,
         )
 
     if result.same_source_skipped:
@@ -913,6 +1122,275 @@ def purge_same_source_pending(conn) -> int:
         deleted = cur.rowcount
     conn.commit()
     return deleted
+
+
+def preview_purge_pending_phone(conn) -> tuple[int, int]:
+    """Dry-run twin of `purge_pending_phone` (issue #607/S1): returns
+    `(would_delete, would_keep)` without deleting anything. `would_keep` is
+    the pending `phone` rows this purge deliberately never touches — the
+    0.750 corroborated-unconfirmed-kind tier D-131 kept filing suggestions
+    on."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT "
+            "  COUNT(*) FILTER (WHERE confidence = 0.500), "
+            "  COUNT(*) FILTER (WHERE confidence <> 0.500) "
+            "FROM suggested_merge WHERE status = 'pending' AND match_basis = 'phone'"
+        )
+        would_delete, would_keep = cur.fetchone()
+    return would_delete, would_keep
+
+
+def purge_pending_phone(conn) -> int:
+    """One-off migration companion (issue #603): delete remaining
+    `pending` `suggested_merge` rows with `match_basis = 'phone'` AND
+    `confidence = 0.500` — the uncorroborated/agency tier D-131 silenced.
+
+    Meant to run AFTER at least one full `ps dedup run` since #603's
+    `evaluate_pair` reorder + `phone_extract` silencing deployed — that
+    run's normal D-024 reevaluation pass already resolves every
+    pre-existing `phone`-pending row on its own (every pair is
+    reevaluated every run, not just a sampled subset): a pair with real
+    corroborating evidence either merges outright (photo_hash's exact
+    match, or phone's own surviving 0.900 particular/particular tier),
+    gets refreshed onto whatever basis now explains it (photo_hash's
+    partial-overlap suggestion, or phone's surviving 0.750
+    unconfirmed-kind tier), or — the measured common case, #600's 320
+    pending phone rows were 100% agency-sided, which both silenced tiers
+    (uncorroborated, corroborated-with-an-agency-side) now return `None`
+    for — gets auto-rejected by `_reevaluate_pending_suggestion`'s
+    `evaluation is None` branch. In the ideal case this purge finds
+    nothing left to delete; it exists as the same explicit, reviewable,
+    idempotent cleanup step as `purge_same_source_pending` (issue #197)
+    for whatever a still-in-flight reevaluation sweep hasn't caught up to
+    yet, not as a substitute for letting that reevaluation run.
+
+    Issue #607 (B3): scoped to `confidence = 0.500` — NOT every pending
+    `phone` row. D-131 deliberately kept phone's 0.750
+    corroborated-unconfirmed-kind tier filing suggestions (see
+    `phone_extract.evaluate`); an unconditional `match_basis = 'phone'`
+    delete would take any 0.750 row filed between deploy and this command
+    running along with the 0.500 noise it's meant to clean up. And by the
+    time an operator runs this (after a reevaluation pass, per the
+    docstring above), every remaining 0.500 row has typically already been
+    auto-rejected on its own — so an unscoped delete's only REMAINING
+    effect in practice would be deleting rows it should keep, not rows it
+    should purge.
+
+    Scoped to `status = 'pending'` only, same reasoning as
+    `purge_same_source_pending`: a `confirmed` phone suggestion already
+    went through a real merge (or a human's confirm) and is a
+    `property_merge_log` row now; `rejected`/`conflict` rows are already
+    resolved history. Only a `pending` phone row is the shape #600 found
+    to be pure noise.
+
+    Returns the number of rows deleted.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM suggested_merge "
+            "WHERE status = 'pending' AND match_basis = 'phone' "
+            "AND confidence = 0.500"
+        )
+        deleted = cur.rowcount
+    conn.commit()
+    return deleted
+
+
+# Issue #601's rescue set, second half of the "exact m2+price" gate: how
+# similar two descriptions must read to count as "near-identical" —
+# rapidfuzz's token_sort_ratio is 0-100, compared here as a 0-1 ratio, same
+# convention as fuzzy.py used before its retirement. 0.90 is deliberately
+# stricter than fuzzy's old 0.55 address-similarity bar — this is a
+# same-listing-republished check (the whole description essentially
+# copy-pasted across portals), not a same-neighbourhood check.
+_FUZZY_RESCUE_DESCRIPTION_SIMILARITY = 0.90
+
+
+def _fuzzy_rescue_exact_price_and_size(
+    price_a: Decimal | None,
+    price_b: Decimal | None,
+    m2_a: Decimal | None,
+    m2_b: Decimal | None,
+) -> bool:
+    if price_a is None or price_b is None or m2_a is None or m2_b is None:
+        return False
+    return price_a == price_b and m2_a == m2_b
+
+
+def _fuzzy_rescue_shares_a_photo(
+    store_conn, urls_a: tuple[str, ...], urls_b: tuple[str, ...]
+) -> bool:
+    """Read-only against the persistent photo_hashes store (D-025) — never
+    a live fetch. A URL this store has no opinion on (never hashed, or
+    hashed by a run predating this migration) is simply unknown, not
+    evidence either way, matching this codebase's usual permissive
+    handling of missing photo evidence elsewhere in the engine.
+    """
+    if store_conn is None or not urls_a or not urls_b:
+        return False
+    known_a = photo_hash_store.load(store_conn, urls_a)
+    known_b = photo_hash_store.load(store_conn, urls_b)
+    hashes_a = [h.phash for h in known_a.values() if h.ok and h.phash is not None]
+    hashes_b = [h.phash for h in known_b.values() if h.ok and h.phash is not None]
+    return photo_hash.hashes_share_any_match(hashes_a, hashes_b)
+
+
+def _fuzzy_rescue_descriptions_near_identical(
+    desc_a: str | None, desc_b: str | None
+) -> bool:
+    if not desc_a or not desc_b:
+        return False
+    similarity = fuzz.token_sort_ratio(desc_a, desc_b) / 100
+    return similarity >= _FUZZY_RESCUE_DESCRIPTION_SIMILARITY
+
+
+def _select_pending_fuzzy_rows(conn) -> list[tuple]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT sm.id,
+                   la.current_price, lb.current_price,
+                   pa.m2_built, pb.m2_built,
+                   la.description, lb.description,
+                   la.photo_urls, lb.photo_urls
+              FROM suggested_merge sm
+              JOIN listing la ON la.id = sm.listing_id_a
+              JOIN listing lb ON lb.id = sm.listing_id_b
+              JOIN property pa ON pa.id = la.property_id
+              JOIN property pb ON pb.id = lb.property_id
+             WHERE sm.status = 'pending' AND sm.match_basis = 'fuzzy'
+            """
+        )
+        return cur.fetchall()
+
+
+def _compute_fuzzy_rescue_ids(rows: list[tuple]) -> list[int]:
+    """Shared by `purge_pending_fuzzy` and `preview_purge_pending_fuzzy` so
+    a dry-run and the real purge can never disagree about which rows
+    qualify. Raises `PhotoHashStoreUnavailableError` (issue #607/B2) rather
+    than silently degrading — see that class's docstring — for BOTH
+    callers: a dry run that silently under-counted rescues would give an
+    operator false confidence right before the real, destructive run.
+    """
+    store_conn = _photo_hash_store_or_raise()
+    try:
+        rescue_ids: list[int] = []
+        for (
+            suggestion_id,
+            price_a,
+            price_b,
+            m2_a,
+            m2_b,
+            desc_a,
+            desc_b,
+            photos_a,
+            photos_b,
+        ) in rows:
+            if not _fuzzy_rescue_exact_price_and_size(price_a, price_b, m2_a, m2_b):
+                continue
+            has_photo_match = _fuzzy_rescue_shares_a_photo(
+                store_conn, tuple(photos_a or ()), tuple(photos_b or ())
+            )
+            has_description_match = _fuzzy_rescue_descriptions_near_identical(
+                desc_a, desc_b
+            )
+            if has_photo_match or has_description_match:
+                rescue_ids.append(suggestion_id)
+        return rescue_ids
+    finally:
+        photo_hash_store.close_connection(store_conn)
+
+
+def preview_purge_pending_fuzzy(conn) -> tuple[int, int]:
+    """Dry-run twin of `purge_pending_fuzzy` (issue #607/S1): returns
+    `(would_delete, would_rescue)` without writing anything. Raises
+    `PhotoHashStoreUnavailableError` under the same condition the real
+    purge aborts on (issue #607/B2) — a dry run must fail exactly the same
+    way the real run would, or it's lying about what a real run will do.
+    """
+    rows = _select_pending_fuzzy_rows(conn)
+    rescue_ids = _compute_fuzzy_rescue_ids(rows)
+    return len(rows) - len(rescue_ids), len(rescue_ids)
+
+
+def purge_pending_fuzzy(conn) -> tuple[int, int]:
+    """One-off migration (issue #601): delete `pending` `match_basis='fuzzy'`
+    suggested_merge rows, EXCEPT a rescue set corroborated well enough to
+    still be real duplicates despite fuzzy's near-zero measured precision
+    (~0.4-0.7% on a stratified hand check — see D-130 and issue #600).
+
+    Rescue set: a pending fuzzy pair whose two listings have EXACTLY equal
+    `m2_built` AND `current_price` cross-listing, AND EITHER share at
+    least one photo (`photo_hash.hashes_share_any_match`, read from the
+    persistent store — never a live fetch) OR have near-identical
+    descriptions (`_fuzzy_rescue_descriptions_near_identical`). Both
+    conjuncts matter: exact price+size alone is common in a dense market
+    (many similar flats coincidentally share a price/size band — the
+    percolation issue #600 diagnosed) and is not corroboration by itself;
+    photo/description agreement alone (without exact price+size) is
+    exactly what a same-neighbourhood, different-unit pair could also
+    show.
+
+    Rescued rows are kept `pending` with `match_basis` left at 'fuzzy' —
+    no other signal fired for them, that is WHY they were only ever fuzzy
+    — and their `detail` stamped with a `rescued_reason` so a human
+    reviewing the queue understands why this one fuzzy row survived when
+    the rest were purged. This does not reactivate fuzzy as a live signal:
+    `evaluate_pair` no longer calls it at all (see this module's own
+    change); it only decides which of fuzzy's PAST suggestions still
+    deserve a human's attention. See `_reevaluate_pending_suggestion` for
+    the companion fix (issue #607/B1) that stops the very next `run()`
+    from immediately auto-rejecting every rescued row.
+
+    Issue #607 (B2): raises `PhotoHashStoreUnavailableError` instead of
+    proceeding when `photo_hash_store.open_connection()` returns `None`.
+    Without this guard, `_fuzzy_rescue_shares_a_photo` degrades to `False`
+    for every pair (an unreachable store looks identical to "no photo
+    evidence"), the rescue set silently collapses to description-only
+    matches (measured: 19 of 51 on production's numbers — the other 32
+    would have been deleted), and the DELETE below takes the rest with no
+    error and no non-zero exit. A destructive migration must fail loudly
+    on a degraded optimisation it depends on, not fail open.
+
+    Returns (deleted_count, rescued_count).
+    """
+    rows = _select_pending_fuzzy_rows(conn)
+    rescue_ids = _compute_fuzzy_rescue_ids(rows)
+
+    with conn.cursor() as cur:
+        if rescue_ids:
+            cur.execute(
+                """
+                UPDATE suggested_merge
+                   SET detail = detail || %s::jsonb
+                 WHERE id = ANY(%s)
+                """,
+                (
+                    json.dumps(
+                        {
+                            "rescued_reason": (
+                                "issue #601 fuzzy purge: exact m2_built+"
+                                "current_price, corroborated by shared "
+                                "photo evidence and/or a near-identical "
+                                "description"
+                            )
+                        }
+                    ),
+                    rescue_ids,
+                ),
+            )
+        cur.execute(
+            """
+            DELETE FROM suggested_merge
+             WHERE status = 'pending' AND match_basis = 'fuzzy'
+               AND NOT (id = ANY(%s))
+            """,
+            (rescue_ids,),
+        )
+        deleted = cur.rowcount
+    conn.commit()
+    return deleted, len(rescue_ids)
 
 
 def _fetch_listing_record(conn, listing_id: int) -> ListingRecord | None:

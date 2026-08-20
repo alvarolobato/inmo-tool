@@ -27,6 +27,23 @@ Subcommands:
                           requests once (the long-running container drains
                           these automatically on a 3s poll — this is the
                           manual/one-shot equivalent)
+  purge-same-source       One-off migration (issue #197): delete pending
+                          same-source suggested_merge rows
+  purge-phone [--dry-run] [--yes]
+                          One-off migration (issue #603/D-131): delete
+                          remaining pending match_basis='phone' rows at
+                          confidence 0.500 (the 0.750 corroborated tier is
+                          kept). --dry-run prints (would_delete, would_keep)
+                          without deleting; otherwise prompts for
+                          confirmation unless --yes is passed.
+  purge-fuzzy [--dry-run] [--yes]
+                          One-off migration (issue #601/D-130): delete
+                          pending match_basis='fuzzy' rows except the
+                          corroborated rescue set. Aborts (no changes) if
+                          the photo-hash store is unreachable. --dry-run
+                          prints (would_delete, would_rescue) without
+                          deleting; otherwise prompts for confirmation
+                          unless --yes is passed.
 
   Review workflow: 'suggestions' lists what needs a human decision, then
   'confirm' or 'reject' each by its id. A row listed with status 'conflict'
@@ -100,6 +117,23 @@ cmd_process_actions() {
     _run_in_etl python -m etl.dedup.cli process-actions
 }
 
+cmd_purge_same_source() {
+    _run_in_etl python -m etl.dedup.cli purge-same-source
+}
+
+# purge-phone/purge-fuzzy both just forward their flags (--dry-run/--yes)
+# straight through to the Python subcommand, which does the real argparse
+# validation — this wrapper's only job is to exist so `ps dedup purge-*`
+# is a real, wired-up command (issue #607/S2) instead of only reachable via
+# `python -m etl.dedup.cli` inside the container.
+cmd_purge_phone() {
+    _run_in_etl python -m etl.dedup.cli purge-phone "$@"
+}
+
+cmd_purge_fuzzy() {
+    _run_in_etl python -m etl.dedup.cli purge-fuzzy "$@"
+}
+
 SUBCMD="${1:-}"
 if [ -z "$SUBCMD" ] || [ "$SUBCMD" = "-h" ] || [ "$SUBCMD" = "--help" ]; then
     usage
@@ -116,6 +150,9 @@ case "$SUBCMD" in
     reject)           _cmd_with_suggestion_id reject "$@" ;;
     resolve-conflict) _cmd_with_suggestion_id resolve-conflict "$@" ;;
     process-actions)  cmd_process_actions ;;
+    purge-same-source) cmd_purge_same_source ;;
+    purge-phone)      cmd_purge_phone "$@" ;;
+    purge-fuzzy)      cmd_purge_fuzzy "$@" ;;
     *)
         echo -e "${RED}ps dedup: unknown subcommand '${SUBCMD}'${NC}" >&2
         usage >&2

@@ -378,6 +378,27 @@ def match_ratio(
     return matched / len(smaller)
 
 
+def hashes_share_any_match(
+    hashes_a: list[imagehash.ImageHash], hashes_b: list[imagehash.ImageHash]
+) -> bool:
+    """True when at least one hash in *hashes_a* is within the same
+    matching Hamming distance `match_ratio` uses of at least one hash in
+    *hashes_b*.
+
+    A looser bar than `match_ratio`'s MIN_MATCH_RATIO fraction-of-the-
+    smaller-set threshold — "at least one shared photo", not "most of
+    them match". Used by issue #601's fuzzy-purge rescue set: a pending
+    `fuzzy` pair whose two listings have exactly equal m2_built and
+    current_price, corroborated by even partial photo overlap, is worth
+    keeping even though its overall `match_ratio` never cleared
+    `MIN_MATCH_RATIO` (that's WHY it only ever reached `fuzzy` in the
+    first place — see `etl.dedup.engine.evaluate_pair`'s priority order).
+    """
+    return any(
+        (h_a - h_b) <= _HASH_HAMMING_THRESHOLD for h_a in hashes_a for h_b in hashes_b
+    )
+
+
 def confidence_for_ratio(ratio: float) -> Decimal:
     """Scale a match ratio in [MIN_MATCH_RATIO, 1.0] to a confidence in
     [MIN_MATCH_RATIO, _MAX_SUGGESTION_CONFIDENCE] per issue #16's 0.6-0.8 range.

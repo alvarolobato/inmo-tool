@@ -3,10 +3,31 @@
 Phone-number match alone is never sufficient for auto-merge — the same
 number (an agency's front-desk line especially) commonly appears across many
 unrelated, similarly-sized listings. This module never returns a 'merge'
-decision on its own; the confidence/decision split (uncorroborated
-suggestion vs. corroborated auto-merge vs. corroborated-but-not-confirmed-
+decision on its own; the confidence/decision split (silenced uncorroborated
+match vs. corroborated auto-merge vs. corroborated-but-not-confirmed-
 particular suggestion) all lives in `evaluate()` below, driven by the rules
-in issue #16.
+in issue #16 as revised by issue #603 (D-131) — see that revision below.
+
+Issue #603 (D-131): the uncorroborated tier AND the corroborated-but-
+either-side-agency tier now return **None** (no suggestion filed at all)
+instead of a 0.500 suggestion. #600 measured all 320 pending `phone`
+suggestions on the live corpus as exactly this shape: **19 distinct phone
+numbers** account for every one of them (9 of those numbers alone appear
+in 6-50 listings each), and **100%** have at least one confirmed-agency
+side — an agency's front-desk line reused across unrelated listings by
+construction, not evidence of anything. 280 of the 320 additionally share
+zero photos. Silencing these two tiers is a decision, not a threshold
+retune (see `docs/decisions/D-131-phone-photo-order-and-silence.md`):
+`evaluate_pair` now runs `photo_hash` before this module (see
+`etl.dedup.engine`'s module/`evaluate_pair` docstrings), so a pair that
+*does* carry real corroborating evidence — an exact or partial photo
+match — is caught there first and never reaches this weaker tier at all.
+What's left once `photo_hash` has already had its look is, by
+construction, evidence-free noise. The two corroborated, non-agency tiers
+(0.900 auto-merge for `particular`/`particular`, 0.750 suggestion for an
+unconfirmed `listing_kind`) are unchanged — coordinates/price/size
+proximity plus a *non*-agency signal is still real evidence this module
+alone can offer.
 
 Corroboration and the listing_kind gate
 ----------------------------------------
@@ -23,7 +44,8 @@ for a coordinate check, not the coordinate check itself) whenever
 coordinates aren't available on both sides.
 
 Issue #16 also only gives two `listing_kind` outcomes explicitly: both
-`'particular'` -> auto-merge; either `'agency'` -> always suggestion. It
+`'particular'` -> auto-merge; either `'agency'` -> always suggestion
+(revised by issue #603/D-131 to no suggestion at all — see above). It
 doesn't say what to do when a side's kind is unconfirmed (`None`) — Fotocasa's
 `infer_listing_kind` (etl/connectors/fotocasa_mapping.py) deliberately never
 guesses `'particular'`, only ever returns a confirmed `'agency'` or `None`.
@@ -60,7 +82,6 @@ _PHONE_RE = re.compile(
     r"(?<!\d)(?:\+34[\s.-]?)?[6789]\d{2}[\s.-]?\d{3}[\s.-]?\d{3}(?!\d)"
 )
 
-_UNCORROBORATED_CONFIDENCE = Decimal("0.500")
 _CORROBORATED_UNCONFIRMED_KIND_CONFIDENCE = Decimal("0.750")
 _CORROBORATED_PARTICULAR_CONFIDENCE = Decimal("0.900")
 
@@ -118,12 +139,12 @@ def evaluate(a: ListingRecord, b: ListingRecord) -> PairEvaluation | None:
     detail = {"shared_phone_digits": sorted(shared)}
 
     if not _corroborated(a, b):
-        return PairEvaluation(
-            basis="phone",
-            confidence=_UNCORROBORATED_CONFIDENCE,
-            decision="suggest",
-            detail=detail,
-        )
+        # Issue #603 (D-131): previously a 0.500 suggestion. Measured 100%
+        # noise on the live corpus (see module docstring) — silenced
+        # rather than tuned, since photo_hash (now evaluated first, see
+        # etl.dedup.engine.evaluate_pair) already claims any pair that
+        # carries real evidence.
+        return None
 
     if a.listing_kind == "particular" and b.listing_kind == "particular":
         return PairEvaluation(
@@ -134,15 +155,12 @@ def evaluate(a: ListingRecord, b: ListingRecord) -> PairEvaluation | None:
         )
 
     if a.listing_kind == "agency" or b.listing_kind == "agency":
-        # Explicit agency signal on either side: never auto-merge on phone,
-        # regardless of corroboration (an agency number is reused across
-        # unrelated listings by construction).
-        return PairEvaluation(
-            basis="phone",
-            confidence=_UNCORROBORATED_CONFIDENCE,
-            decision="suggest",
-            detail=detail,
-        )
+        # Issue #603 (D-131): previously a 0.500 suggestion. Explicit
+        # agency signal on either side means this is exactly the
+        # front-desk-line-reused-across-listings pattern #600 measured at
+        # 100% of the pending phone backlog — never worth a merge OR a
+        # suggestion, regardless of corroboration.
+        return None
 
     # Corroborated, but at least one side's listing_kind is unconfirmed
     # (None) rather than a positively-identified 'agency' — see module
