@@ -682,9 +682,36 @@ class TestEvaluatePairEquivalence:
     def test_randomized_fuzz_corpus(self):
         """Broad, unstructured coverage: many pairs with varied photo-hash
         counts (0-15, some overlapping, some not) and phones (shared or
-        not), run through both paths."""
+        not), run through both paths.
+
+        Price draw (review M4): prices used to be drawn INDEPENDENTLY per
+        side from U[80k, 400k] — most pairs then differed by >=15% on
+        price alone, so most of the 300 cases exited at `price_gap`
+        before ever reaching the packed-hash/photo_hash code this harness
+        exists to guard (measured: 230/300 hit price_gap, only 25/300
+        reached photo_hash, vs. 112/300 with the rule neutralised — a
+        4.5x drop in the coverage this class is actually FOR). Most
+        pairs now get a price within a tight ~5% band of each other
+        (`_close_price`) so they clear price_gap and exercise photo_hash/
+        phone as before `price_gap` existed; a minority keep the old
+        fully-independent draw so the corpus still exercises the
+        price_gap-preempts-what-would-otherwise-match interaction
+        (covered more precisely by TestPriceGapRule, but worth a fuzz
+        pass here too since this file's whole job is catching drift no
+        single hand-written case would)."""
         rng = random.Random(618618)
         phone_pool = ["611222333", "622333444", "633444555", "644555666"]
+
+        def _close_price(base: Decimal) -> Decimal:
+            # Comfortably inside price_gap's 15% soft-reject floor, so a
+            # pair drawn this way never exits at price_gap regardless of
+            # how far apart its independently-drawn m2_built happens to
+            # land (rule 2 never even looks at size until price clears
+            # 15%).
+            return (base * Decimal(str(round(rng.uniform(0.95, 1.05), 4)))).quantize(
+                Decimal(1)
+            )
+
         for i in range(300):
             size_a = rng.randint(0, 15)
             size_b = rng.randint(0, 15)
@@ -709,13 +736,23 @@ class TestEvaluatePairEquivalence:
 
             kind_choices = [None, "particular", "agency"]
             listing_id_a, listing_id_b = 1000 + i * 2, 1000 + i * 2 + 1
+            price_a = Decimal(rng.randint(80000, 400000))
+            # 85% close (clears price_gap, reaches photo_hash/phone as
+            # before that rule existed), 15% fully independent (keeps
+            # some price_gap-interaction coverage) — see this method's
+            # own docstring, review M4.
+            price_b = (
+                _close_price(price_a)
+                if rng.random() < 0.85
+                else Decimal(rng.randint(80000, 400000))
+            )
             a = _record(
                 listing_id_a,
                 listing_id_a,
                 description=desc_a,
                 listing_kind=rng.choice(kind_choices),
                 m2_built=Decimal(rng.randint(40, 200)),
-                current_price=Decimal(rng.randint(80000, 400000)),
+                current_price=price_a,
             )
             b = _record(
                 listing_id_b,
@@ -723,7 +760,7 @@ class TestEvaluatePairEquivalence:
                 description=desc_b,
                 listing_kind=rng.choice(kind_choices),
                 m2_built=Decimal(rng.randint(40, 200)),
-                current_price=Decimal(rng.randint(80000, 400000)),
+                current_price=price_b,
             )
             raw_hashes_by_id = {listing_id_a: hashes_a, listing_id_b: hashes_b}
             self._run_both(a, b, raw_hashes_by_id, case=f"fuzz #{i}")

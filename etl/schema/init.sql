@@ -1237,6 +1237,15 @@ CREATE INDEX IF NOT EXISTS idx_dedup_runs_connector_run_id ON dedup_runs (connec
 -- against an already-migrated database.
 ALTER TABLE dedup_runs ADD COLUMN IF NOT EXISTS photo_hash_auto_merged INTEGER;
 
+-- Issue #627, D-138 (review M2): same gap as photo_hash_auto_merged
+-- immediately above, not repeated — DedupRunResult.price_gap_rejected
+-- reached `ps dedup run`'s print and the orchestrator log line from the
+-- start, but a log line is still invisible to anything that isn't
+-- tailing it at the right moment. ALTER, not a column in the CREATE
+-- TABLE above, for the same re-run-safety reason as
+-- photo_hash_auto_merged.
+ALTER TABLE dedup_runs ADD COLUMN IF NOT EXISTS price_gap_rejected INTEGER;
+
 -- Issue #99: an explicit, operator-visible override on top of issue #71's
 -- union-of-active-profiles scope derivation. A connector with no row here
 -- (the common case — this table starts empty) keeps #71's default

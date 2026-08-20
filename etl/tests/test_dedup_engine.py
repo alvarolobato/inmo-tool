@@ -5892,17 +5892,22 @@ class TestPriceGapRule:
             cur.execute("SELECT COUNT(*) FROM property_merge_veto")
             assert cur.fetchone()[0] == 0
 
-    def test_existing_pending_suggestion_is_rejected_with_a_distinguishing_reason(
+    def test_existing_pending_suggestion_is_deleted_not_frozen_as_rejected(
         self, dedup_db
     ):
-        """A row filed by an earlier rule/run (here inserted directly, as
-        if `phone` had suggested it before this issue's rule existed) that
-        the CURRENT price-gap rule would reject on reevaluation: moved to
-        `rejected` with `resolved_reason='price_gap_rule'` — distinct from
-        the generic "no signal matched" auto-reject — and still never
-        creates a `property_merge_veto` (that table is written only by
-        the human-only `reject_property_pair`, never from this
-        reevaluation path)."""
+        """Review M1: issue #627 requires this be "reversible without a DB
+        console". Moving the row to `status='rejected'` is NOT reversible
+        in practice — D-024's `_load_recorded_pairs` puts a `rejected`
+        listing pair in `skip_pairs` forever, the dashboard only ever
+        lists `status='pending'`, and there is no `ps dedup unreject`. So
+        a row filed by an earlier rule/run (here inserted directly, as if
+        `phone` had suggested it before this issue's rule existed) that
+        the CURRENT price-gap rule would reject on reevaluation is instead
+        DELETED outright — same behaviour as a brand-new pair the rule
+        rejects, never a frozen 'rejected' row. Never creates a
+        `property_merge_veto` (that table is written only by the
+        human-only `reject_property_pair`, never from this reevaluation
+        path)."""
         listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
             dedup_db,
             "milanuncios",
@@ -5927,23 +5932,104 @@ class TestPriceGapRule:
 
         assert result.merged == 0
         assert result.price_gap_rejected == 1
+        assert result.reevaluated_price_gap_removed == 1
         with dedup_db.cursor() as cur:
             cur.execute(
-                "SELECT status, detail FROM suggested_merge WHERE id = %s",
+                "SELECT COUNT(*) FROM suggested_merge WHERE id = %s",
                 (suggestion_id,),
             )
-            status, detail = cur.fetchone()
-            assert status == "rejected"
-            assert detail["resolved_reason"] == "price_gap_rule"
-            assert detail["rule"] == "price_gap_over_30pct"
-            assert "reevaluated_from" in detail
+            assert cur.fetchone()[0] == 0
+            cur.execute("SELECT COUNT(*) FROM suggested_merge")
+            assert cur.fetchone()[0] == 0
             cur.execute("SELECT COUNT(*) FROM property_merge_veto")
             assert cur.fetchone()[0] == 0
+
+    def test_deleted_pair_is_reversible_without_a_db_console(self, dedup_db):
+        """M1's actual point, proven end to end: once the underlying data
+        changes so the rule no longer applies, the pair is freely
+        re-suggestible on the very next run — nothing permanently closed
+        the door. A `rejected` row could never do this (D-024 skip_pairs);
+        a deleted one just isn't there to skip. A shared phone number is
+        seeded so a real (weaker) signal is available to pick the pair
+        back up once price closes to within phone's own 10% corroboration
+        band — otherwise "nothing rejects it any more" and "nothing
+        currently supports it either" would be indistinguishable."""
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            dedup_db,
+            "milanuncios",
+            "fotocasa",
+            "price-gap-reversible",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(100000),
+            current_price_b=Decimal(50000),
+            description_a="Piso en venta, tel 611222333",
+            description_b="Se vende, contacto 611222333",
+        )
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO suggested_merge "
+                "(listing_id_a, listing_id_b, match_basis, confidence, status) "
+                "VALUES (%s, %s, 'phone', 0.500, 'pending') RETURNING id",
+                sorted((listing_a, listing_b)),
+            )
+        dedup_db.commit()
+
+        first = engine.run(dedup_db)
+        assert first.reevaluated_price_gap_removed == 1
+
+        # The price correction that would make this a genuine near-match —
+        # no DB console reject/veto ever stood in the way.
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "UPDATE listing SET current_price = %s WHERE id = %s",
+                (Decimal(99000), listing_b),
+            )
+        dedup_db.commit()
+
+        second = engine.run(dedup_db)
+        assert second.price_gap_rejected == 0
+        assert second.suggested + second.merged >= 1
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM suggested_merge")
+            assert cur.fetchone()[0] >= 1
+
+    def test_production_path_persists_the_counter_to_dedup_runs(self, dedup_db):
+        """Review M2: `photo_hash_auto_merged` was log/CLI-only until
+        #624's own review caught that a log line is invisible in
+        production and required a persisted `dedup_runs` column instead.
+        `price_gap_rejected` must not repeat that gap — it goes through
+        `orchestrator.run_dedup` (the actual production entry point, not
+        `engine.run()` directly) and is read back from the table."""
+        _insert_pair(
+            dedup_db,
+            "milanuncios",
+            "fotocasa",
+            "price-gap-visibility-orch",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(100000),
+            current_price_b=Decimal(50000),
+        )
+
+        result = orchestrator.run_dedup(dedup_db, trigger="test")
+
+        assert result is not None
+        assert result.price_gap_rejected == 1
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT price_gap_rejected FROM dedup_runs "
+                "ORDER BY started_at DESC LIMIT 1"
+            )
+            assert cur.fetchone()[0] == 1
 
     def test_cli_run_reports_the_price_gap_count(self, dedup_db, capsys):
         """`ps dedup run` (etl.dedup.cli._cmd_run) must print the count —
         the design's own "countable in both `ps dedup run` and the
-        orchestrator log line" requirement."""
+        orchestrator log line" requirement. Wording (review L3): a
+        per-pass count of pairs the rule suppressed THIS pass, not "N new
+        rejections" — a brand-new pair still in the DB unmodified gets
+        re-suppressed (and re-counted) every run."""
         from etl.dedup.cli import _cmd_run
 
         _insert_pair(
@@ -5964,4 +6050,58 @@ class TestPriceGapRule:
             exit_code = _cmd_run(dedup_db)
         assert exit_code == 0
         captured = capsys.readouterr()
-        assert "1 rejected by the price-gap rule" in captured.out
+        assert "1 pair(s) suppressed by the price-gap rule this pass" in captured.out
+
+    def test_phone_coords_corroborated_particular_merge_is_the_one_preemptable_path(
+        self,
+    ):
+        """Review M3: D-117's own placement rule keeps a structured-field
+        veto from ever running ahead of `address_coords`/`phone`/
+        `reference_code`/`photo_hash`'s auto-merges, because a hard veto
+        there was MEASURED to break ~80 correct merges (13.6% of 590).
+        price_gap is placed ahead of `photo_hash`/`phone` anyway — the
+        difference is that `photo_hash`'s auto-merge requires price within
+        `PHOTO_MERGE_PRICE_RATIO` (5%, structurally immune to a >=15%
+        rule) and `address_coords`/`reference_code` are checked earlier in
+        the loop and return first. The one real exception:
+        `phone_extract`'s coords-corroborated `particular`/`particular`
+        merge tier (`_corroborated`'s coords+size path) has NO price
+        constraint at all — shared phone, coords close, size within 5%,
+        both `particular`, ANY price gap still merges at 0.900 today. A
+        >30% price gap here is exactly the case price_gap now intercepts,
+        pre-empting a real (if small — this population was never part of
+        the 88-merge measurement, which counted human confirms only, not
+        every technically-reachable auto-merge path) phone-only path."""
+        lat = Decimal("40.416775")
+        lon = Decimal("-3.703790")
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            description="Se vende, tel 611222333",
+            listing_kind="particular",
+            lat=lat,
+            lon=lon,
+            m2_built=Decimal(70),
+            current_price=Decimal(100000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            description="Contacto 611222333",
+            listing_kind="particular",
+            lat=lat,
+            lon=lon,
+            m2_built=Decimal(70),
+            current_price=Decimal(50000),
+        )
+        # Sanity: without the price-gap rule, this pair WOULD auto-merge
+        # via phone's coords-corroborated particular tier.
+        without_price_gap = phone_extract.evaluate(a, b)
+        assert without_price_gap is not None
+        assert without_price_gap.decision == "merge"
+
+        evaluation = engine.evaluate_pair(a, b, _PhotoHashCache())
+        assert evaluation.decision == "reject"
+        assert evaluation.basis == "price_gap"

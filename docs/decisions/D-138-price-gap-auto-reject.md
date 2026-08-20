@@ -3,7 +3,7 @@ id: D-138
 title: Auto-reject a dedup pair on a large price gap, corroborated by size/rooms
 date: 2026-08-20
 group: Data / connectors
-rule: "`evaluate_pair` rejects a pair outright when price differs by more than 30%, or by 15%+ AND (m2_built differs by >=5% OR rooms differ by >=2 — owner-confirmed, not exactly 1: reuses `structured_fields.rooms_conflict`) — checked after cadastral/D-116, before address_coords's positive match falls through to it in practice, before photo_hash/phone. A rule-based rejection is NEVER filed as a `suggested_merge` row for a brand-new pair and NEVER creates a `property_merge_veto`; an already-`pending` row the rule now rejects on reevaluation moves to `rejected` with `resolved_reason='price_gap_rule'`. Counted in both `ps dedup run` and the orchestrator log line (`DedupRunResult.price_gap_rejected`, issue #627)."
+rule: "`evaluate_pair` rejects a pair outright when price differs by more than 30%, or by 15%+ AND (m2_built differs by >=5% OR rooms differ by >=2 — owner-confirmed, not exactly 1: reuses `structured_fields.rooms_conflict`) — checked after cadastral/D-116 AND after address_coords/reference_code's own positive-match loop, before photo_hash/phone (the one auto-merge tier this genuinely preempts is phone's coords-corroborated particular tier — photo_hash's own 5% price band makes it structurally immune). A rule-based rejection is NEVER filed as a `suggested_merge` row for a brand-new pair, is DELETED (never frozen as `rejected`) for an already-`pending` row on reevaluation — reversible without a DB console, per the issue's own requirement — and NEVER creates a `property_merge_veto`. Counted in `ps dedup run`, the orchestrator log line, AND a persisted `dedup_runs.price_gap_rejected` column (`DedupRunResult.price_gap_rejected`, issue #627)."
 ---
 
 # D-138: Auto-reject a dedup pair on a large price gap, corroborated by size/rooms
@@ -120,24 +120,36 @@ implying a discriminating test that was never run.
    `suggested_merge_action`, nothing. The pair never enters the review
    queue, nothing is recorded as a decision, and a later data change
    (price correction, a merge upstream) re-opens it naturally on the next
-   run — the preferred option from the issue, taken as-is rather than the
-   fallback (file it with a distinguishing `resolved_reason`).
+   run — the issue's own preferred option, taken as-is. Point 4 below
+   describes the one other case (an already-`pending` row), which after
+   review M1 lands on this SAME behaviour rather than the fallback the
+   issue offered as an alternative — see point 4 for why.
 
 4. **An existing `pending` row the rule now rejects on reevaluation** (a
    row an earlier, weaker signal filed before this rule existed, or
-   before a later price/size update) is the one case that DOES get
-   written: `_reevaluate_pending_suggestion` moves it to `status =
-   'rejected'` with `detail.resolved_reason = 'price_gap_rule'` —
-   distinct from the pre-existing generic "no signal matched this pair
-   under current rules" auto-reject, so an operator (or a human looking
-   at a `rejected` row later) can tell "the numeric rule said no" apart
-   from "nothing currently supports this" apart from "a human said no".
-   This is the one deliberate deviation from "don't record it": an
-   existing row has to land somewhere once reevaluated (the alternative —
-   leaving it `pending` forever — is worse, and the codebase's own
-   `_reevaluate_pending_suggestion` contract already requires every
-   branch to resolve to something), so it's recorded with a reason
-   instead of silently vanishing.
+   before a later price/size update) is **DELETED**, not moved to
+   `status='rejected'`. This is a correction (review M1): the first
+   version of this record had `_reevaluate_pending_suggestion` move the
+   row to `rejected` with a distinguishing `resolved_reason`, and that
+   was wrong against the issue's own explicit requirement — *"it must be
+   reversible without a DB console."* A `rejected` row is NOT reversible
+   in practice: D-024's `_load_recorded_pairs` puts a `rejected` listing
+   pair in `skip_pairs` forever, the dashboard's review queue only ever
+   lists `status='pending'` rows, and `ps dedup` has `unveto` but no
+   `unreject`. A heuristic with a measured ~3.4% contradiction rate
+   against the owner's own merges must not get to permanently close a
+   door with no handle on the other side. Deleting instead gives an
+   already-`pending` pair the SAME behaviour as a brand-new pair the rule
+   rejects (point 3 above): simply absent from `suggested_merge`, free to
+   be re-suggested the moment the underlying data changes — one
+   behaviour, not two, and genuinely reversible (proven by a DB-backed
+   test that deletes, corrects the price, re-runs, and confirms the pair
+   is suggestible again — no DB console involved at any step). This does
+   NOT go through the `purge_pending_fuzzy` rescue exemption
+   (`_reevaluate_pending_suggestion`'s `is_rescued` branch) — a rescue row
+   is corroborated by evidence no live signal was ever going to
+   re-derive; `price_gap`'s evidence is a genuine, fresh contradiction on
+   the SAME fields the rescue never looked at.
 
 5. **Neither path ever creates a `property_merge_veto`.** That table is
    written by exactly one function in this codebase,
@@ -154,13 +166,15 @@ implying a discriminating test that was never run.
    rejection and a pending-row reevaluation rejection.
 
 6. **Placement in `evaluate_pair`**: checked immediately after `cadastral`
-   and the D-116 reference-code conflict veto, and after the
-   `address_coords`/`reference_code` positive-match loop — before
-   `photo_hash` ever fetches a hash, and before `phone`. It is never
-   placed ahead of cadastral or reference_code (the issue's explicit
-   constraint: a government registry ID or an agency's own bookkeeping
-   outranks a price/size/rooms heuristic) — proven by two PRE-EXISTING
-   tests that needed no change for this issue:
+   and the D-116 reference-code conflict veto, and AFTER (not before —
+   the first version of this record garbled this and read as though
+   price_gap preceded `address_coords`) the `address_coords`/
+   `reference_code` positive-match loop — before `photo_hash` ever
+   fetches a hash, and before `phone`. It is never placed ahead of
+   cadastral or reference_code (the issue's explicit constraint: a
+   government registry ID or an agency's own bookkeeping outranks a
+   price/size/rooms heuristic) — proven by two PRE-EXISTING tests that
+   needed no change for this issue:
    `TestAddressCoordsSignal.test_matching_coords_size_address_and_no_floor_data_auto_merges`
    (250000 vs 400000, a 60% price gap, still auto-merges via
    `address_coords`) and
@@ -174,13 +188,70 @@ implying a discriminating test that was never run.
    and checking price/size/rooms first also means a rejected pair never
    triggers `photo_hash`'s real network fetch.
 
+   **Reconciling this with D-117's placement rule (review M3).** D-117's
+   binding rule is explicit that a `rooms`/`property_type` conflict is
+   *"never wired into `evaluate_pair` ahead of
+   address_coords/phone/reference_code/photo_hash, whose auto-merges must
+   NOT be vetoed on these fields"* — measured, on that record, to break
+   ~80 correct merges (13.6% of 590) if it had been. This decision DOES
+   wire a rooms-based condition (as part of price_gap's rule 2) ahead of
+   `photo_hash`/`phone`, which reads as a direct contradiction unless the
+   difference in *exposure* is made explicit, so here it is:
+
+   - **`address_coords`/`reference_code` are unaffected** — checked
+     earlier in the very same loop, they return before price_gap is ever
+     reached (the two pre-existing tests above prove this, not an
+     assertion).
+   - **`photo_hash`'s auto-merge is structurally immune to price_gap's
+     rule 2** (the >=15%-plus-corroboration leg, the one carrying a rooms
+     condition): it requires price within `PHOTO_MERGE_PRICE_RATIO` (5%
+     on `main` — D-137). A price gap that clears photo_hash's own 5% band
+     can never also clear price_gap's >=15% floor, so the rooms condition
+     is never even reached for a pair on that path. Rule 1 (price >30%)
+     is equally moot there for the same reason.
+   - **`phone`'s corroborated-agency and uncorroborated tiers are also
+     immune**: D-131 already returns `None` for both (no suggestion, no
+     merge), so price_gap never gets a chance to preempt anything there
+     either way.
+   - **The one path this decision genuinely CAN preempt: `phone`'s
+     coords-corroborated `particular`/`particular` merge tier**
+     (`phone_extract._corroborated`'s coords+size branch,
+     `phone_extract.evaluate`'s `particular`/`particular` branch). Unlike
+     every other auto-merge path in this pipeline, that specific tier has
+     **no price constraint at all** — shared phone + coords within ~15m +
+     size within 5% + both sides `particular` merges at 0.900 regardless
+     of price. A >30% (or >=15%-plus-rooms) price gap on such a pair now
+     gets rejected by price_gap instead. This population is real but
+     small, and — importantly — it was **never part of the 88-merge/
+     62-rejection measurement this decision otherwise leans on**, which
+     counted the owner's genuine human confirms/rejects from the review
+     queue, not every technically-reachable auto-merge path. Pinned by a
+     DB-backed test
+     (`TestPriceGapRule.test_phone_coords_corroborated_particular_merge_is_the_one_preemptable_path`)
+     that first confirms `phone_extract.evaluate` alone WOULD merge the
+     constructed pair, then confirms `evaluate_pair` rejects it via
+     price_gap instead — so the claim is demonstrated, not just asserted.
+
+   D-117's own rule stands as written and is unaffected — it still
+   applies to its one call site (the retired `fuzzy` signal, kept as a
+   forward-looking guard per that record) and this decision does not
+   change or relax it. What changes here is that price_gap is a
+   DIFFERENT rule, on different (if overlapping) evidence, accepting a
+   narrower, explicitly measured/documented exposure on one specific
+   auto-merge tier — not a reversal of D-117's placement reasoning.
+
 **Alternatives rejected**:
 - Filing every rule-rejection as a `suggested_merge` row with a
-  distinguishing `resolved_reason`, always. Rejected as the *default* per
-  the issue's own stated preference (don't manufacture a decision record
-  for a pair nothing ever really evaluated) — kept only for the
-  already-`pending` case, where a row already exists and has to resolve
-  to something.
+  distinguishing `resolved_reason`, always. Rejected per the issue's own
+  stated preference (don't manufacture a decision record for a pair
+  nothing ever really evaluated).
+- (Review M1 correction) Moving an already-`pending` row the rule rejects
+  to `status='rejected'` with a `resolved_reason`, instead of deleting
+  it. This was this record's OWN first choice and it was wrong: the
+  issue requires reversibility "without a DB console", and a `rejected`
+  row is frozen forever by D-024's `skip_pairs` with no `unreject`
+  command to undo it — see point 4 above for the corrected behaviour
+  (delete, not reject-with-reason).
 - A `rooms` difference of exactly 1 counting as "differ" — the literal
   reading of the owner's unqualified "habitaciones diferentes". This was
   the one point in the issue genuinely left open by his wording, so it
@@ -199,6 +270,8 @@ small) measured error rate.
 
 **See**: issue #627, `etl/dedup/signals/price_gap.py`,
 `etl/dedup/engine.py`'s `evaluate_pair`/`_run`/`_reevaluate_pending_suggestion`,
-`etl/tests/test_dedup_signal_price_gap.py`,
+`etl/orchestrator.py`'s `_finish_dedup_run`/`run_dedup` (the persisted
+`dedup_runs.price_gap_rejected` column, `etl/schema/init.sql`, mirroring
+#624's own `photo_hash_auto_merged` fix), `etl/tests/test_dedup_signal_price_gap.py`,
 `etl/tests/test_dedup_engine.py::TestPriceGapRule`, D-116, D-117, D-132,
 D-133, D-137.

@@ -167,6 +167,19 @@ class DedupRunResult:
     # them. Counted separately from `reevaluated_rejected` — this is a
     # "not rejected, deliberately kept pending" outcome.
     reevaluated_preserved_rescued: int = 0
+    # Issue #627 (D-138): a `pending` row the price-gap rule rejects on
+    # reevaluation, DELETED rather than moved to `rejected` (see
+    # `_reevaluate_pending_suggestion`'s own docstring for why —
+    # reversibility, per the issue's own requirement). Counted separately
+    # from `reevaluated_rejected` (the generic "no signal matched" bucket)
+    # so `merged + rejected + updated + preserved_rescued +
+    # price_gap_removed == reevaluated_total` still holds; also folded
+    # into `price_gap_rejected` below for the run-wide total the CLI/
+    # orchestrator surface (issue #627's own "counted" requirement) —
+    # this field isolates the reevaluation-triggered subset for the
+    # `reevaluated_total` reconciliation, same split as
+    # `reevaluated_merged` above.
+    reevaluated_price_gap_removed: int = 0
     # Issue #604: a `pending` suggested_merge row whose two listings
     # already share a property_id — because a DIFFERENT pair's merge
     # unified them, not because this exact pair was ever itself confirmed
@@ -212,16 +225,18 @@ class DedupRunResult:
     # (the "don't file the suggestion" design, D-138), so without this
     # counter the rejection would be completely invisible: not in
     # `suggested`, not in `merged`, not in any table. Also incremented for
-    # an existing `pending` row the rule now rejects on reevaluation (see
-    # `_reevaluate_pending_suggestion`) — that branch DOES write a
-    # `resolved_reason` to `suggested_merge.detail`, distinguishing it
-    # from the generic "no signal matched" auto-reject, but still never
+    # an existing `pending` row the rule now DELETES on reevaluation (see
+    # `_reevaluate_pending_suggestion`'s `decision == "reject"` branch,
+    # revised after review — "reversible without a DB console" per the
+    # issue meant deleting, not moving to `rejected`, which
+    # `_load_recorded_pairs`/D-024 would have frozen forever). Never
     # creates a `property_merge_veto` (that only ever happens via the
-    # human-only `reject_property_pair`). Surfaced in both `ps dedup run`
-    # and the `etl.orchestrator.run_dedup` log line — production
-    # visibility was missing for the #624 auto-merge counter precisely
-    # because only the CLI printed it; this one ships in both from the
-    # start.
+    # human-only `reject_property_pair`). Surfaced in `ps dedup run`, the
+    # `etl.orchestrator.run_dedup` log line, AND persisted as its own
+    # `dedup_runs.price_gap_rejected` column (see `_finish_dedup_run`) —
+    # production visibility was missing for the #624 auto-merge counter
+    # precisely because it was log/CLI-only at first; this one ships with
+    # the same persisted-column fix #624 landed, not a repeat of the gap.
     price_gap_rejected: int = 0
 
 
@@ -1018,14 +1033,30 @@ def _reevaluate_pending_suggestion(
       path a brand-new pair takes) and resolve the *existing* row as
       `confirmed` rather than leaving a suggestion dangling at `pending`
       for a pair whose listings are already unified.
+    - `decision == "reject"` (issue #627, D-138): the price-gap rule
+      fired on reevaluation. DELETES the row outright — does NOT move it
+      to `rejected`. Issue #627 required this be "reversible without a
+      DB console"; a `rejected` row is not (D-024's `_load_recorded_pairs`
+      puts it in `skip_pairs` forever, the dashboard only lists
+      `status='pending'`, and there is no `unreject`). Deleting gives a
+      pending pair the rule now rejects the SAME behaviour as a brand-new
+      pair it rejects (`_run`, above): simply absent from
+      `suggested_merge`, free to be re-suggested the moment the
+      underlying data changes. This module already treats "deleted" as
+      strictly better than "rejected forever" for exactly this reason —
+      see `purge_pending_fuzzy`'s own rescue-set reasoning a few
+      paragraphs up ("worse than deleted: `_load_recorded_pairs` freezes
+      `rejected` forever").
 
-    Every branch preserves the row's pre-reevaluation state under a
-    `reevaluated_from` key in `detail` — an operator (or a human reviewing
-    a `rejected` row wondering why) can see exactly what this row used to
-    say and why it changed, rather than the history being silently
-    overwritten. `reevaluated_from` never appears on a row a human touched
-    via `confirm_suggestion`/`reject_suggestion`, so its presence alone
-    distinguishes "the engine changed its mind" from "a human decided".
+    Every branch except the last preserves the row's pre-reevaluation
+    state under a `reevaluated_from` key in `detail` — an operator (or a
+    human reviewing a `rejected` row wondering why) can see exactly what
+    this row used to say and why it changed, rather than the history
+    being silently overwritten. `reevaluated_from` never appears on a row
+    a human touched via `confirm_suggestion`/`reject_suggestion`, so its
+    presence alone distinguishes "the engine changed its mind" from "a
+    human decided". The `reject` branch has nothing to preserve it into —
+    the row it would go on no longer exists, by design.
 
     Returns `(survivor_property_id, losing_property_id)` when this call
     performed a merge, so `run()`'s caller can fix up its in-memory
@@ -1103,44 +1134,49 @@ def _reevaluate_pending_suggestion(
         return None
 
     if evaluation.decision == "reject":
-        # Issue #627 (D-138): the price-gap rule now rejects a pair that
-        # was already sitting `pending` under an older `evaluate_pair`
-        # verdict (e.g. photo_hash filed it before this rule existed, or
-        # a later fetch changed the price/size on one side). Unlike a
-        # brand-new pair (never filed at all, see `_run`), an EXISTING
-        # row can't just be silently dropped — it has to land somewhere,
-        # so it's moved to `rejected` with a `resolved_reason` that
-        # distinguishes "the rule said no" from the generic "no signal
-        # matched this pair under current rules" a few lines up. This
-        # does NOT go through the `is_rescued` exemption above:
-        # `price_gap`'s evidence (a real price/size/rooms contradiction)
-        # is new counter-evidence the fuzzy-purge rescue heuristic never
-        # considered, not "nothing fired" restated. Never creates a
-        # `property_merge_veto` — that table is written only by the
-        # human-only `reject_property_pair`, never from this reevaluation
-        # path, rule-based or otherwise (D-138).
+        # Issue #627 (D-138), revised after review (M1): the price-gap
+        # rule now rejects a pair that was already sitting `pending`
+        # under an older `evaluate_pair` verdict (e.g. photo_hash filed
+        # it before this rule existed, or a later fetch changed the
+        # price/size on one side).
+        #
+        # DELETES the row rather than moving it to `rejected` — the
+        # first version of this branch did the latter and it was wrong:
+        # issue #627 requires this be "reversible without a DB console",
+        # and a `rejected` row is not (D-024's `_load_recorded_pairs`
+        # puts the listing pair in `skip_pairs` forever, the dashboard
+        # only lists `status='pending'`, and there is no `unreject` CLI
+        # command). A heuristic with a measured ~3.4% contradiction rate
+        # against the owner's own merges must not get to permanently
+        # close a door with no handle on the other side. Deleting instead
+        # gives an already-`pending` pair the SAME behaviour as a
+        # brand-new pair the rule rejects (`_run`, above): simply absent
+        # from `suggested_merge`, free to be re-suggested the moment the
+        # underlying data changes — one behaviour, not two. This does NOT
+        # go through the `is_rescued` exemption above: `price_gap`'s
+        # evidence (a real price/size/rooms contradiction) is new
+        # counter-evidence the fuzzy-purge rescue heuristic never
+        # considered, not "nothing fired" restated.
+        #
+        # Safe against `suggested_merge_action`'s `ON DELETE CASCADE`: a
+        # row with an in-flight (`status='pending'`) action never reaches
+        # this function at all — `_load_recorded_pairs` routes it to
+        # `skip_pairs`, not `pending_by_pair` (see that function's own
+        # docstring). Only a resolved (`done`/`failed`) action's audit
+        # row is lost, same as every other trace of a row that stops
+        # existing.
+        #
+        # Never creates a `property_merge_veto` — that table is written
+        # only by the human-only `reject_property_pair`, never from this
+        # reevaluation path, rule-based or otherwise (D-138).
         with conn.cursor() as cur:
             cur.execute(
-                """
-                UPDATE suggested_merge
-                   SET status = 'rejected',
-                       resolved_at = NOW(),
-                       detail = detail || %s::jsonb
-                 WHERE id = %s
-                """,
-                (
-                    json.dumps(
-                        {
-                            "reevaluated_from": previous,
-                            "resolved_reason": "price_gap_rule",
-                            **(evaluation.detail or {}),
-                        }
-                    ),
-                    pending.suggestion_id,
-                ),
+                "DELETE FROM suggested_merge WHERE id = %s",
+                (pending.suggestion_id,),
             )
         conn.commit()
         result.price_gap_rejected += 1
+        result.reevaluated_price_gap_removed += 1
         return None
 
     if evaluation.decision == "suggest":
@@ -1559,12 +1595,13 @@ def _run(conn, hash_cache: _PhotoHashCache) -> DedupRunResult:
             "dedup: re-evaluated %d pending suggestion(s) against current "
             "rules (issue #214) — %d merged, %d rejected, %d still pending "
             "(refreshed in place), %d preserved as fuzzy-purge rescues "
-            "(issue #607)",
+            "(issue #607), %d removed by the price-gap rule (issue #627)",
             result.reevaluated_total,
             result.reevaluated_merged,
             result.reevaluated_rejected,
             result.reevaluated_updated,
             result.reevaluated_preserved_rescued,
+            result.reevaluated_price_gap_removed,
         )
 
     if result.same_property_pending_resolved:
