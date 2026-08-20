@@ -37,19 +37,37 @@ async function clientWidth(page: Page): Promise<number> {
   return page.evaluate(() => document.documentElement.clientWidth);
 }
 
+async function elementPadding(
+  page: Page,
+  selector: string,
+): Promise<{ top: string; right: string; bottom: string; left: string }> {
+  return page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    if (!el) throw new Error(`${sel} not found`);
+    const cs = getComputedStyle(el);
+    return { top: cs.paddingTop, right: cs.paddingRight, bottom: cs.paddingBottom, left: cs.paddingLeft };
+  }, selector);
+}
+
 async function mainContentPadding(
   page: Page,
 ): Promise<{ top: string; right: string; bottom: string; left: string }> {
-  return page.evaluate(() => {
-    const main = document.querySelector("main.main-content");
-    if (!main) throw new Error("main.main-content not found");
-    const cs = getComputedStyle(main);
-    return { top: cs.paddingTop, right: cs.paddingRight, bottom: cs.paddingBottom, left: cs.paddingLeft };
-  });
+  return elementPadding(page, "main.main-content");
 }
 
-/** Every element on the page must fit inside the viewport horizontally. */
-async function assertNoHorizontalOverflow(page: Page): Promise<void> {
+/**
+ * Every element on the page must fit inside the viewport horizontally.
+ *
+ * #599 review (S2): the first version of this helper measured right after
+ * `page.goto` with no settle, which inspected client-rendered pages BEFORE
+ * their content existed — a padding *reduction* structurally cannot
+ * introduce overflow, so those assertions were green both before and after
+ * the fix (decorative). `waitUntil: "networkidle"` + a fixed settle makes
+ * this measure the real, fully-rendered DOM.
+ */
+async function assertNoHorizontalOverflow(page: Page, route: string): Promise<void> {
+  await page.goto(route, { waitUntil: "networkidle" });
+  await page.waitForTimeout(2000);
   const width = await clientWidth(page);
   const offenders = await page.evaluate((clientW) => {
     const bad: { tag: string; testid: string | null; right: number }[] = [];
@@ -67,7 +85,16 @@ async function assertNoHorizontalOverflow(page: Page): Promise<void> {
 // The app's main navigable routes (issue #596: "en todas las pantallas" —
 // this must not be a captura-only fix). Each renders 200 with no seed data
 // (verified against a live dev server before writing this list).
-const MAIN_ROUTES = ["/", "/profiles", "/captura", "/etl", "/admin", "/glossary", "/inicio", "/conversations"];
+//
+// `/etl` is deliberately excluded here (#599 review S2): once measured with
+// a real settle (see `assertNoHorizontalOverflow`'s header) it overflows
+// with an 812px-wide `<table>` inside a scroll container at 390px — a
+// PRE-EXISTING bug (reproduces identically on unmodified `main`, and a
+// padding *reduction* cannot have introduced it), not something this PR's
+// change touches. Filed as issue #606, along with the same finding on
+// `/etl/captura` and `/admin/clasificacion`, rather than silently absorbed
+// into this net.
+const MAIN_ROUTES = ["/", "/profiles", "/captura", "/admin", "/glossary", "/inicio", "/conversations"];
 
 test.describe("phone width (iPhone 13 emulation)", () => {
   const { defaultBrowserType: _defaultBrowserType, ...iPhone13 } = devices["iPhone 13"];
@@ -91,10 +118,35 @@ test.describe("phone width (iPhone 13 emulation)", () => {
 
   for (const route of MAIN_ROUTES) {
     test(`no horizontal overflow on ${route}`, async ({ page }) => {
-      await page.goto(route);
-      await assertNoHorizontalOverflow(page);
+      await assertNoHorizontalOverflow(page, route);
     });
   }
+
+  // #599 review (S1): `.main-content` was only the smallest of three
+  // horizontal-padding layers on the pages the owner complained about.
+  // These two pin the other two shared layers this PR's follow-up fixes:
+  // `AdminChrome.tsx`'s content div (every `/admin/*` and `/etl/*` page)
+  // and `.route-shell` (the repeated per-route `<main style={{padding:
+  // 24}}>` shape, 8 call sites across 6 files).
+  test("AdminChrome content div horizontal padding shrinks on phone (every /admin/* and /etl/* page)", async ({
+    page,
+  }) => {
+    await page.goto("/etl/connectors");
+    const padding = await elementPadding(page, ".admin-chrome-content");
+    expect(padding.left, "left padding shrinks on phone").toBe("12px");
+    expect(padding.right, "right padding shrinks on phone").toBe("12px");
+    expect(padding.top, "top padding is untouched (vertical rhythm)").toBe("20px");
+    expect(padding.bottom, "bottom padding is untouched (vertical rhythm)").toBe("20px");
+  });
+
+  test("route-shell horizontal padding shrinks on phone, desktop's 24px vertical stays", async ({ page }) => {
+    await page.goto("/captura");
+    const padding = await elementPadding(page, ".route-shell");
+    expect(padding.left, "left padding shrinks on phone").toBe("12px");
+    expect(padding.right, "right padding shrinks on phone").toBe("12px");
+    expect(padding.top, "top padding is untouched (vertical rhythm)").toBe("24px");
+    expect(padding.bottom, "bottom padding is untouched (vertical rhythm)").toBe("24px");
+  });
 });
 
 test.describe("desktop (default project)", () => {
@@ -108,5 +160,17 @@ test.describe("desktop (default project)", () => {
     expect(padding.right).toBe("20px");
     expect(padding.top).toBe("20px");
     expect(padding.bottom).toBe("20px");
+  });
+
+  test("AdminChrome content div and route-shell padding are untouched at desktop width", async ({ page }) => {
+    await page.goto("/etl/connectors");
+    const adminPadding = await elementPadding(page, ".admin-chrome-content");
+    expect(adminPadding.left).toBe("20px");
+    expect(adminPadding.right).toBe("20px");
+
+    await page.goto("/captura");
+    const shellPadding = await elementPadding(page, ".route-shell");
+    expect(shellPadding.left).toBe("24px");
+    expect(shellPadding.right).toBe("24px");
   });
 });

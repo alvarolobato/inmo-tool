@@ -50,7 +50,11 @@ export default function AdminChrome({ children }: { children: ReactNode }) {
         })}
       </nav>
       {/* Page content */}
-      <div style={{ flex: 1, overflow: "auto", padding: "var(--pad, 20px)" }}>
+      {/* #599 review (S1): padding moved to `.admin-chrome-content`
+          (globals.css) — a static literal with no prop/state dependency,
+          so it can shrink horizontally on phone (D-129's `--pad-x`
+          token) without an inline declaration to out-specificity. */}
+      <div className="admin-chrome-content" style={{ flex: 1, overflow: "auto" }}>
         {children}
       </div>
     </div>

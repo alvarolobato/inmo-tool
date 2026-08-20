@@ -133,7 +133,7 @@ export default async function ValidarFiltrosPage({
   }
 
   return (
-    <main style={{ padding: 24, maxWidth: 860, margin: "0 auto" }} data-testid="validar-filtros-page">
+    <main className="route-shell" style={{ maxWidth: 860, margin: "0 auto" }} data-testid="validar-filtros-page">
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <h1 style={{ fontSize: 22, fontWeight: 700, color: "var(--fg)", margin: 0 }}>Validar filtros</h1>
         {/* Profile switcher — stays on this page for the newly selected profile. */}

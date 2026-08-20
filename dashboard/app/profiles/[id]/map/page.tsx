@@ -54,14 +54,14 @@ export default function ProfileMapPage() {
 
   if (id === null) {
     return (
-      <main style={{ maxWidth: 960, margin: "0 auto", padding: 24 }}>
+      <main className="route-shell" style={{ maxWidth: 960, margin: "0 auto" }}>
         <ErrorDisplay error="Id de perfil no válido." />
       </main>
     );
   }
 
   return (
-    <main style={{ maxWidth: 960, margin: "0 auto", padding: 24 }}>
+    <main className="route-shell" style={{ maxWidth: 960, margin: "0 auto" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <div>
           <Link href={`/profiles/${id}`} style={{ fontSize: 12, color: "var(--fg-muted)" }}>
