@@ -85,6 +85,12 @@
     <!-- Auto mode (issue #424): drain the WHOLE worklist unattended, in capped
          batches with a cooldown between them. Alarm-driven so it survives the
          MV3 service worker being evicted. -->
+    <!-- Armed/disarmed status line (issue #587): unlike #batch-auto-status
+         below (which only shows batch-progress detail while Auto is ON), this
+         one is ALWAYS visible — a silently-dead scheduler (e.g. a browser
+         restart that failed to re-arm it) must look different from a
+         genuinely-off one, not both render as "nothing here". -->
+    <p id="auto-armed-status" class="state-sub batch-auto-armed">Auto: OFF</p>
     <div class="actions batch-auto">
       <button id="batch-auto-btn" class="btn btn-primary">Auto: capturar toda la lista</button>
     </div>

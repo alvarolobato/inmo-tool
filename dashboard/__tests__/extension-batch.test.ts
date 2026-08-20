@@ -87,6 +87,8 @@ const {
   shouldContinueAuto,
   selectNextPending,
   nextAutoAction,
+  composeAutoState,
+  autoIntentFromState,
   // Pending-search queue (issue #554)
   makeSearchQueue,
   enqueueSearch,
@@ -169,6 +171,13 @@ const {
     s: AutoState | null,
     opts: { batchActive?: boolean; now?: number },
   ) => string;
+  // Durable auto intent (issue #587)
+  composeAutoState: (
+    intent: AutoIntent | null,
+    session: Partial<AutoState> | null,
+    config?: { batchSize?: number; timeoutSec?: number } | null,
+  ) => AutoState | null;
+  autoIntentFromState: (s: AutoState | null) => AutoIntent;
   // Pending-search queue (issue #554)
   makeSearchQueue: () => SearchQueueEntry[];
   enqueueSearch: (
@@ -212,6 +221,11 @@ interface AutoState {
   batchesDone: number;
   lastBatchAt: number | null;
   totalPending: number | null;
+  force: boolean;
+}
+interface AutoIntent {
+  enabled: boolean;
+  portal: string | null;
   force: boolean;
 }
 interface PendingItem {
@@ -1005,6 +1019,118 @@ describe("makeAutoState — harvestTask (issue #516)", () => {
   it("exposes the PLANNING and HARVESTING status constants", () => {
     expect(AUTO_STATUS.PLANNING).toBe("planning");
     expect(AUTO_STATUS.HARVESTING).toBe("harvesting");
+  });
+});
+
+// ═══ Durable auto intent — restart survival (issue #587) ═══════════════════
+//
+// Before this, the WHOLE auto record (including `enabled`) lived in
+// chrome.storage.session, which Chrome wipes on every browser close. On
+// relaunch, background.js's getAutoState() read null, nextAutoAction never
+// saw a state to evaluate, and the alarm was disarmed — Auto silently died on
+// every restart. The fix splits the record: the operator's INTENT
+// {enabled, portal, force} persists in chrome.storage.local (survives a
+// restart); the in-flight RUN state stays in chrome.storage.session (fine to
+// lose — the tabs/enumeration it describes are gone on a real restart too).
+// `composeAutoState`/`autoIntentFromState` are the pure recombination the
+// background.js wiring (getAutoState/setAutoState) is built on; this is the
+// "rehydration decision table" pinned at the pure-state level (EC-2), the
+// piece unit-testable outside a browser — the real Chrome-restart path
+// (EC-1) is human-only.
+describe("composeAutoState — durable-intent rehydration (issue #587)", () => {
+  it("no intent (never started) → null, same as 'no auto'", () => {
+    expect(composeAutoState(null, null, null)).toBeNull();
+    expect(composeAutoState({ enabled: false, portal: null, force: false }, null, null)).toBeNull();
+  });
+
+  it("intent present, disabled (stopAuto persisted OFF) → null even with leftover session state", () => {
+    const staleSession = { status: AUTO_STATUS.HARVESTING, batchesDone: 3 };
+    expect(
+      composeAutoState({ enabled: false, portal: "idealista", force: false }, staleSession, null),
+    ).toBeNull();
+  });
+
+  it("intent enabled + EMPTY session (a restart wiped chrome.storage.session) → an enabled state whose nextAutoAction is 'start'", () => {
+    const state = composeAutoState({ enabled: true, portal: "idealista", force: false }, null, null);
+    expect(state).not.toBeNull();
+    expect(state!.enabled).toBe(true);
+    expect(state!.portal).toBe("idealista");
+    expect(state!.status).toBe(AUTO_STATUS.IDLE);
+    expect(state!.lastBatchAt).toBeNull();
+    // The actual proof this fixes the restart bug: the alarm-tick decision
+    // for this composed state is 'start' (re-plan), never 'idle' (disarm).
+    expect(nextAutoAction(state, { batchActive: false })).toBe("start");
+  });
+
+  it("intent enabled + a live session (worker eviction, not a restart) → the persisted run state wins, so a stranded HARVEST is still visible as HARVESTING", () => {
+    const session = {
+      status: AUTO_STATUS.HARVESTING,
+      harvestTask: { profileId: 1, taskId: "t1", portal: "idealista", url: "https://x/" },
+      batchesDone: 2,
+      lastBatchAt: 1000,
+      totalPending: 5,
+      batchSize: 50,
+      timeoutSec: 60,
+    };
+    const state = composeAutoState({ enabled: true, portal: "idealista", force: false }, session, null);
+    expect(state!.status).toBe(AUTO_STATUS.HARVESTING);
+    expect(state!.harvestTask).toEqual(session.harvestTask);
+    expect(state!.batchesDone).toBe(2);
+    // 'complete', not 'start' — the existing recoverStrandedHarvest/
+    // onAutoBatchComplete path (unchanged by this issue) owns finishing it.
+    expect(nextAutoAction(state, { batchActive: false })).toBe("complete");
+  });
+
+  it("falls back to the live config's batchSize/timeoutSec only when the session has no cached copy of its own", () => {
+    const fresh = composeAutoState(
+      { enabled: true, portal: null, force: false },
+      null,
+      { batchSize: 42, timeoutSec: 90 },
+    );
+    expect(fresh!.batchSize).toBe(42);
+    expect(fresh!.timeoutSec).toBe(90);
+
+    const cached = composeAutoState(
+      { enabled: true, portal: null, force: false },
+      { batchSize: 7, timeoutSec: 45 },
+      { batchSize: 999, timeoutSec: 999 },
+    );
+    expect(cached!.batchSize).toBe(7);
+    expect(cached!.timeoutSec).toBe(45);
+  });
+
+  it("portal null (drain every portal) survives rehydration, not just a truthy portal", () => {
+    const state = composeAutoState({ enabled: true, portal: null, force: true }, null, null);
+    expect(state!.portal).toBeNull();
+    expect(state!.force).toBe(true);
+  });
+});
+
+describe("autoIntentFromState — the durable half persisted by setAutoState (issue #587)", () => {
+  it("null / disabled state → the default disabled intent (stopAuto durably clears it — EC-5)", () => {
+    expect(autoIntentFromState(null)).toEqual({ enabled: false, portal: null, force: false });
+    const stopped = { ...makeAutoState({ enabled: true, portal: "idealista" }), enabled: false };
+    expect(autoIntentFromState(stopped)).toEqual({ enabled: false, portal: null, force: false });
+  });
+
+  it("enabled state → just {enabled, portal, force}, dropping every run-state field", () => {
+    const state = makeAutoState({
+      enabled: true,
+      portal: "idealista",
+      force: true,
+      status: AUTO_STATUS.HARVESTING,
+      batchesDone: 9,
+    });
+    expect(autoIntentFromState(state)).toEqual({ enabled: true, portal: "idealista", force: true });
+  });
+
+  it("round-trips through composeAutoState with an empty session — the exact restart scenario", () => {
+    const original = makeAutoState({ enabled: true, portal: "milanuncios", force: false, timeoutSec: 120 });
+    const intent = autoIntentFromState(original);
+    const rehydrated = composeAutoState(intent, null, { batchSize: original.batchSize, timeoutSec: original.timeoutSec });
+    expect(rehydrated!.enabled).toBe(true);
+    expect(rehydrated!.portal).toBe("milanuncios");
+    expect(nextAutoAction(rehydrated, { batchActive: false })).toBe("start");
   });
 });
 

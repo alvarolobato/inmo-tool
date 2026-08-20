@@ -843,12 +843,52 @@ const AUTO_STATUS_LABELS = {
   idle: 'iniciando…',
 };
 
+/** "HH:MM" in the browser's local time, for the next-check / last-run status line. */
+function formatClockTime(ms) {
+  if (typeof ms !== 'number' || !isFinite(ms)) return null;
+  return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+/** "hace Xm" / "hace Xh" — coarse elapsed-time label, never more precise than a minute. */
+function formatElapsed(fromMs) {
+  if (typeof fromMs !== 'number' || !isFinite(fromMs)) return null;
+  const mins = Math.max(0, Math.round((Date.now() - fromMs) / 60000));
+  if (mins < 1) return 'hace un momento';
+  if (mins < 60) return `hace ${mins} min`;
+  const hours = Math.round(mins / 60);
+  return `hace ${hours} h`;
+}
+
+/**
+ * Render the always-visible armed/disarmed line (issue #587): "Auto: ON —
+ * próxima comprobación HH:MM · última tanda hace X" or "Auto: OFF". This is
+ * the ONLY signal the operator has that the alarm-driven loop is actually
+ * still ticking — without it, a scheduler silently killed by a browser
+ * restart (the bug this issue fixes) is indistinguishable from one correctly
+ * idling until the next due unit.
+ */
+function renderAutoArmedStatus(auto) {
+  const el = $('#auto-armed-status');
+  if (!el) return;
+  if (!auto || !auto.enabled) {
+    el.textContent = 'Auto: OFF';
+    return;
+  }
+  const parts = ['Auto: ON'];
+  const nextCheck = formatClockTime(auto.nextCheckAt);
+  parts.push(nextCheck ? `próxima comprobación ${nextCheck}` : 'próxima comprobación pendiente');
+  const lastRun = formatElapsed(auto.lastBatchAt);
+  if (lastRun) parts.push(`última tanda ${lastRun}`);
+  el.textContent = parts.join(' — ');
+}
+
 /**
  * Render the Auto toggle + status line from a GET_AUTO_STATE response. When Auto
  * is ON the button offers to stop and the line shows the counters (batches done,
  * total pending, phase); when OFF it offers to start and the line hides.
  */
 function renderAutoStatus(auto) {
+  renderAutoArmedStatus(auto);
   const btn = $('#batch-auto-btn');
   const line = $('#batch-auto-status');
   if (!btn || !line) return;

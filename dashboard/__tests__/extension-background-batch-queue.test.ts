@@ -59,6 +59,7 @@ function resetRequireCache() {
 
 interface ChromeMock {
   storage: {
+    local: StorageArea;
     session: StorageArea;
     sync: StorageArea;
   };
@@ -99,11 +100,17 @@ function makeStorageArea(store: Record<string, unknown>): StorageArea {
 
 /** A minimal-but-real chrome mock: async storage areas, no-op everything else. */
 function makeChromeMock(): ChromeMock {
+  const local: Record<string, unknown> = {};
   const session: Record<string, unknown> = {};
   const sync: Record<string, unknown> = {};
   let nextTabId = 1;
   return {
     storage: {
+      // issue #587: the durable auto intent lives in chrome.storage.local
+      // (survives a browser restart, unlike .session) — getAutoState() reads
+      // it on every call now, so every chrome mock in this file needs it,
+      // even tests that never touch Auto at all.
+      local: makeStorageArea(local),
       session: makeStorageArea(session),
       sync: makeStorageArea(sync),
     },
