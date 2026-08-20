@@ -54,6 +54,7 @@ from etl.dedup.signals import (
     cadastral,
     phone_extract,
     photo_hash,
+    price_gap,
     reference_code,
 )
 from etl.dedup.signals.floor import floors_conflict
@@ -205,6 +206,23 @@ class DedupRunResult:
     # outcome, not a run-killer — contrast `confirm_suggestion`, where the
     # SAME raise correctly becomes one `failed` action row).
     vetoed_merge_refused: int = 0
+    # Issue #627 (D-138): a pair `evaluate_pair` rejected outright on the
+    # price/size/rooms heuristic (`price_gap.price_gap_conflict`) — for a
+    # brand-new pair this is never filed as a `suggested_merge` row at all
+    # (the "don't file the suggestion" design, D-138), so without this
+    # counter the rejection would be completely invisible: not in
+    # `suggested`, not in `merged`, not in any table. Also incremented for
+    # an existing `pending` row the rule now rejects on reevaluation (see
+    # `_reevaluate_pending_suggestion`) — that branch DOES write a
+    # `resolved_reason` to `suggested_merge.detail`, distinguishing it
+    # from the generic "no signal matched" auto-reject, but still never
+    # creates a `property_merge_veto` (that only ever happens via the
+    # human-only `reject_property_pair`). Surfaced in both `ps dedup run`
+    # and the `etl.orchestrator.run_dedup` log line — production
+    # visibility was missing for the #624 auto-merge counter precisely
+    # because only the CLI printed it; this one ships in both from the
+    # start.
+    price_gap_rejected: int = 0
 
 
 def fetch_listing_records(conn) -> list[ListingRecord]:
@@ -485,6 +503,22 @@ def evaluate_pair(
     above (unconditionally, before photo_hash is ever reached), D-117 was
     never wired in here to begin with, and `_run`'s pairwise loop still
     skips a vetoed property pair before `evaluate_pair` is ever called.
+    Issue #627 (D-138): a price-gap veto runs right after the
+    address_coords/reference_code loop below, before photo_hash ever
+    fetches a single hash. It is NOT placed ahead of cadastral or the
+    D-116 reference-code veto/positive-match (those are checked first,
+    unconditionally, above) — a government registry ID or an agency's own
+    bookkeeping outranks a price/size/rooms heuristic. It DOES run ahead
+    of photo_hash and phone, on purpose: those are exactly the signals a
+    same-development "promotion" (many nearly-identical flats, near-
+    identical photos, genuinely different prices/sizes/room counts) fools,
+    and letting it run first also saves the one signal with real network
+    cost from ever fetching hashes for a pair it's about to reject anyway.
+    Returns a `decision='reject'` verdict (never `None` directly) so
+    `_run`/`_reevaluate_pending_suggestion` can count it distinctly from
+    "no signal matched" — see `price_gap.py`'s module docstring for the
+    rule itself and its measured impact, and this repo's D-138 for why a
+    rule-based rejection here never creates a `property_merge_veto`.
     """
     cadastral_result = cadastral.evaluate(a, b)
     if cadastral_result is not None:
@@ -514,6 +548,23 @@ def evaluate_pair(
         result = evaluate_fn(a, b)
         if result is not None:
             return result
+
+    # Issue #627 (D-138): price/size/rooms gap too large to plausibly be
+    # the same unit — see price_gap.py's module docstring for the rule and
+    # its measured contradiction rate against the owner's own decision
+    # history. A `decision='reject'` verdict, not `None` directly: the
+    # caller (`_run`/`_reevaluate_pending_suggestion`) needs to tell "the
+    # rule said no" apart from "nothing matched" so it can count it
+    # separately (`DedupRunResult.price_gap_rejected`) without ever filing
+    # a `suggested_merge` row or a `property_merge_veto` for it.
+    price_gap_reason = price_gap.price_gap_conflict(a, b)
+    if price_gap_reason is not None:
+        return PairEvaluation(
+            basis="price_gap",
+            confidence=Decimal("0.000"),
+            decision="reject",
+            detail=price_gap_reason,
+        )
 
     hashes_a = hash_cache.get_packed(a)
     hashes_b = hash_cache.get_packed(b)
@@ -1051,6 +1102,47 @@ def _reevaluate_pending_suggestion(
         result.reevaluated_rejected += 1
         return None
 
+    if evaluation.decision == "reject":
+        # Issue #627 (D-138): the price-gap rule now rejects a pair that
+        # was already sitting `pending` under an older `evaluate_pair`
+        # verdict (e.g. photo_hash filed it before this rule existed, or
+        # a later fetch changed the price/size on one side). Unlike a
+        # brand-new pair (never filed at all, see `_run`), an EXISTING
+        # row can't just be silently dropped — it has to land somewhere,
+        # so it's moved to `rejected` with a `resolved_reason` that
+        # distinguishes "the rule said no" from the generic "no signal
+        # matched this pair under current rules" a few lines up. This
+        # does NOT go through the `is_rescued` exemption above:
+        # `price_gap`'s evidence (a real price/size/rooms contradiction)
+        # is new counter-evidence the fuzzy-purge rescue heuristic never
+        # considered, not "nothing fired" restated. Never creates a
+        # `property_merge_veto` — that table is written only by the
+        # human-only `reject_property_pair`, never from this reevaluation
+        # path, rule-based or otherwise (D-138).
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE suggested_merge
+                   SET status = 'rejected',
+                       resolved_at = NOW(),
+                       detail = detail || %s::jsonb
+                 WHERE id = %s
+                """,
+                (
+                    json.dumps(
+                        {
+                            "reevaluated_from": previous,
+                            "resolved_reason": "price_gap_rule",
+                            **(evaluation.detail or {}),
+                        }
+                    ),
+                    pending.suggestion_id,
+                ),
+            )
+        conn.commit()
+        result.price_gap_rejected += 1
+        return None
+
     if evaluation.decision == "suggest":
         with conn.cursor() as cur:
             cur.execute(
@@ -1398,6 +1490,17 @@ def _run(conn, hash_cache: _PhotoHashCache) -> DedupRunResult:
                     continue
 
                 if evaluation is None:
+                    continue
+
+                if evaluation.decision == "reject":
+                    # Issue #627 (D-138): the price-gap rule fired for a
+                    # brand-new pair — per the design, never file a
+                    # suggested_merge row for it (the pair never enters
+                    # the review queue, nothing is recorded as a
+                    # decision, and a later data change re-opens it
+                    # naturally next run). Counted so the rejection is
+                    # still visible — see DedupRunResult.price_gap_rejected.
+                    result.price_gap_rejected += 1
                     continue
 
                 if evaluation.decision == "merge":

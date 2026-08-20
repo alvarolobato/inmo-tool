@@ -61,5 +61,12 @@ class PairEvaluation:
 
     basis: str  # matches suggested_merge/property_merge_log match_basis CHECK
     confidence: Decimal
-    decision: str  # 'merge' | 'suggest'
+    decision: str  # 'merge' | 'suggest' | 'reject'
+    # 'reject' (issue #627, D-138): a rule-based rejection, never written
+    # to `suggested_merge`/`property_merge_log` at all for a brand-new
+    # pair — see etl.dedup.engine._run and price_gap.py. `basis` for this
+    # decision is NOT one of suggested_merge.match_basis's CHECK values
+    # (it's never persisted there for a new pair); the one place it IS
+    # persisted is inside an existing pending row's `detail` JSON during
+    # reevaluation, which has no CHECK constraint on its contents.
     detail: dict | None = None

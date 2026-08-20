@@ -755,13 +755,14 @@ def run_dedup(
         )
         logger.info(
             "Dedup run %s: compared=%d merged=%d suggested=%d conflicts=%d "
-            "photo_hash_auto_merged=%d",
+            "photo_hash_auto_merged=%d price_gap_rejected=%d",
             run_id,
             result.pairs_compared,
             result.merged,
             result.suggested,
             result.conflicts,
             result.photo_hash_auto_merged,
+            result.price_gap_rejected,
         )
         return result
     finally:

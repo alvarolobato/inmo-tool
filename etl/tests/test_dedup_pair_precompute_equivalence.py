@@ -54,7 +54,13 @@ import pytest
 
 from etl.dedup import engine
 from etl.dedup.engine import _PhoneCache, _PhotoHashCache
-from etl.dedup.signals import address_coords, cadastral, phone_extract, reference_code
+from etl.dedup.signals import (
+    address_coords,
+    cadastral,
+    phone_extract,
+    price_gap,
+    reference_code,
+)
 from etl.dedup.signals import photo_hash as photo_hash_signal
 from etl.dedup.signals.floor import floors_conflict
 from etl.dedup.types import ListingRecord, PairEvaluation
@@ -150,6 +156,21 @@ def _frozen_evaluate_pair(
         result = evaluate_fn(a, b)
         if result is not None:
             return result
+
+    # Issue #627 (D-138): mirrors evaluate_pair's price-gap veto exactly —
+    # this issue never touched price_gap.py either, so it's called for
+    # real here too, same as cadastral/reference_code/address_coords
+    # above. Without this, the fuzz corpus below (which randomizes
+    # m2_built/current_price per pair) would diverge the moment a
+    # randomly-generated pair happened to clear the rule.
+    price_gap_reason = price_gap.price_gap_conflict(a, b)
+    if price_gap_reason is not None:
+        return PairEvaluation(
+            basis="price_gap",
+            confidence=Decimal("0.000"),
+            decision="reject",
+            detail=price_gap_reason,
+        )
 
     hashes_a = raw_hashes_by_id.get(a.listing_id, [])
     hashes_b = raw_hashes_by_id.get(b.listing_id, [])
