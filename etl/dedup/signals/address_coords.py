@@ -96,11 +96,17 @@ def sizes_equal(a_m2: Decimal | None, b_m2: Decimal | None) -> bool:
 
     Issue #602/D-137: the photo_hash exact-photo-match auto-merge path used
     to corroborate with `sizes_close(..., 5%)`. Replaying candidate rules
-    against 68 hand-reviewed photo_hash pairs (49 merged, 19 rejected) found
-    m2_built is the actual discriminator, not a proximity band — all 49
-    merges had identical m2_built; none of the 19 rejections did. A 5% band
-    is exactly what let a same-building-different-unit false merge through.
-    See D-137 for the full measurement.
+    against photo_hash pairs the owner hand-reviewed found m2_built is a
+    real discriminator, though narrower than an earlier draft of this
+    decision claimed (that draft's "100% of merges had identical m2_built"
+    was a measurement artifact of a post-merge listing->property join
+    returning one property row's value twice — see D-137's corrected
+    reconstruction via `property_merge_log.losing_property_id`). What
+    survives cleanly: zero of the owner's rejections ever had identical
+    m2_built (that side was never merged, so no artifact applies) — kept
+    as a required gate because it never contradicts a rejection, not
+    because it captures every real merge. See D-137 for the full
+    measurement and the correction.
 
     Same missing-value discipline as `sizes_close`/`prices_close`: absence
     or a non-positive value on either side is never a match, never a
