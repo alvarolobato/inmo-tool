@@ -3,12 +3,21 @@ id: D-138
 title: Auto-reject a dedup pair on a large price gap, corroborated by size/rooms
 date: 2026-08-20
 group: Data / connectors
-rule: "`evaluate_pair` rejects a pair outright when price differs by more than 30%, or by 15%+ AND (m2_built differs by >=5% OR rooms differ by >=2, reusing `structured_fields.rooms_conflict`) — checked after cadastral/D-116, before address_coords's positive match falls through to it in practice, before photo_hash/phone. A rule-based rejection is NEVER filed as a `suggested_merge` row for a brand-new pair and NEVER creates a `property_merge_veto`; an already-`pending` row the rule now rejects on reevaluation moves to `rejected` with `resolved_reason='price_gap_rule'`. Counted in both `ps dedup run` and the orchestrator log line (`DedupRunResult.price_gap_rejected`, issue #627)."
+rule: "`evaluate_pair` rejects a pair outright when price differs by more than 30%, or by 15%+ AND (m2_built differs by >=5% OR rooms differ by >=2 — owner-confirmed, not exactly 1: reuses `structured_fields.rooms_conflict`) — checked after cadastral/D-116, before address_coords's positive match falls through to it in practice, before photo_hash/phone. A rule-based rejection is NEVER filed as a `suggested_merge` row for a brand-new pair and NEVER creates a `property_merge_veto`; an already-`pending` row the rule now rejects on reevaluation moves to `rejected` with `resolved_reason='price_gap_rule'`. Counted in both `ps dedup run` and the orchestrator log line (`DedupRunResult.price_gap_rejected`, issue #627)."
 ---
 
 # D-138: Auto-reject a dedup pair on a large price gap, corroborated by size/rooms
 
 *Decided: 2026-08-20*
+
+**Status note on the rooms threshold**: the owner's phrasing
+("habitaciones diferentes") is unqualified — it does not say by how much.
+That gap was not overlooked: it was surfaced to him explicitly as a
+choice, with D-117's measurement and the portal-miscounting reasoning
+behind it (see Decision point 2 below), and **he confirmed keeping the
+existing >=2 threshold** ("dejamos las habitaciones en 2"), not exactly
+1. Read the rooms leg below as a confirmed decision, not an unresolved
+deviation.
 
 **Context**: Issue #627. The owner's rule, in his words: *"cuando la
 diferencia en el precio es de más de un 30% hay que rechazar directamente
@@ -62,17 +71,27 @@ implying a discriminating test that was never run.
    pipeline.
 
 2. **Rooms leg reuses `structured_fields.rooms_conflict` directly, not a
-   second implementation.** That predicate already treats `rooms=0` as
-   unknown (D-117's "B3": a scrape artifact affecting 20.7% of
-   properties, not a genuine studio count) and already requires a
-   difference of at least 2, never exactly 1 — on a real, large-sample
-   measurement (issue #566: 6,728 pending pairs at exactly a 1-room
-   difference vs. only 1,966 at >=2; portals genuinely disagree on
-   whether a study/interior room counts, and vetoing on a 1-room
-   tolerance would cost real recall at scale). The owner's own phrasing
-   here ("habitaciones diferentes también afectan") does not qualify by
-   how much, so this decision reuses D-117's threshold rather than
-   introducing a second, un-reconciled one for the same field.
+   second implementation** — and its threshold (difference of at least 2,
+   never exactly 1) is a considered, owner-confirmed choice, not a gap
+   the literal instruction left open. The owner's own phrasing
+   ("habitaciones diferentes también afectan") is unqualified — read
+   literally it would veto on ANY difference, including exactly 1. That
+   literal reading was surfaced to him explicitly, with the numbers
+   below, rather than silently resolved either way: **he confirmed
+   keeping the threshold at 2** ("dejamos las habitaciones en 2").
+
+   The evidence behind that call: `rooms=0` is already treated as unknown
+   (D-117's "B3": a scrape artifact affecting 20.7% of properties, not a
+   genuine studio count), and D-117 measured this exact field at scale —
+   issue #566 found 6,728 pending pairs differing by exactly 1 room
+   against only 1,966 differing by >=2. Taking "diferentes" literally
+   would more than triple this rule's reach on the rooms leg alone. The
+   reason a 1-room difference is weak evidence, not just a smaller
+   number: portals count rooms differently — one includes the living
+   room, another counts a box room or a study that another doesn't — so
+   a 1-room gap is routinely portal noise about the SAME flat, not
+   evidence of two different ones. Vetoing on that tolerance would cost
+   real recall without buying real precision.
 
    **Supplementary check, this session**: production's own decision
    history (read-only, via `ps prod psql`; nothing written to production
@@ -87,12 +106,12 @@ implying a discriminating test that was never run.
    the price band where the rooms leg would matter. The 1 genuine reject
    had rooms unknown on at least one side. **This sample is too small to
    independently discriminate between the two thresholds — it neither
-   confirms nor contradicts D-117's own larger-sample finding.** Reusing
-   D-117's threshold is therefore a consistency choice backed by that
-   larger prior measurement, not a re-decision from this thin one; this
-   record says so rather than presenting the small sample as if it had
-   settled anything (the same discipline the 5%-vs-10% note above
-   applies).
+   confirms nor contradicts D-117's own larger-sample finding**, and was
+   presented to the owner as exactly that: not evidence for >=2, just
+   evidence that couldn't argue against it. The >=2 choice rests on
+   D-117's larger prior plus the owner's explicit confirmation, not on
+   this thin sample — if better data arrives, that prior (not this
+   session's 59/1) is what to re-measure against.
 
 3. **A rule-based rejection is never filed as a `suggested_merge` row for
    a brand-new pair.** `evaluate_pair` returns a `PairEvaluation` with
@@ -162,11 +181,15 @@ implying a discriminating test that was never run.
   for a pair nothing ever really evaluated) — kept only for the
   already-`pending` case, where a row already exists and has to resolve
   to something.
-- A `rooms` difference of exactly 1 counting as "differ", per a literal
-  reading of the owner's unqualified "habitaciones diferentes". Rejected
-  for consistency with D-117's own larger-sample measurement on the
-  identical field, and because this session's own supplementary check
-  found no evidence either way to override that prior.
+- A `rooms` difference of exactly 1 counting as "differ" — the literal
+  reading of the owner's unqualified "habitaciones diferentes". This was
+  the one point in the issue genuinely left open by his wording, so it
+  was surfaced to him explicitly (D-117's 6,728-vs-1,966 measurement, the
+  portal-miscounting explanation for why a 1-room gap is weak evidence,
+  and this session's own inconclusive 59/1 supplementary sample) rather
+  than resolved unilaterally either way. **He confirmed keeping the
+  threshold at 2** ("dejamos las habitaciones en 2") — not overlooked,
+  considered and rejected on the evidence above.
 
 **Rationale**: Mirrors D-116's placement discipline (strong, unambiguous
 signals go first) and D-132/D-133's separation of "human decision, binding
