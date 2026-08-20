@@ -155,6 +155,11 @@ interface PairRow {
   hi_rooms: number | null;
   hi_bathrooms: number | null;
   hi_type: string | null;
+  /** Total `operation = 'sale'` (D-016) listings on each side, across
+   * every source — issue #615's "7 anuncios ↔ 13 anuncios", distinct from
+   * `pair_count` (the internal evidence-row count) below. */
+  lo_listing_count: number;
+  hi_listing_count: number;
   pair_count: number;
   top_confidence: string;
   top_match_basis: MatchBasis;
@@ -211,6 +216,8 @@ function mapPairRow(row: PairRow): DedupPropertyPairSuggestion {
     property_lo_id: row.prop_lo,
     property_hi_id: row.prop_hi,
     pair_count: row.pair_count,
+    listing_count_lo: row.lo_listing_count,
+    listing_count_hi: row.hi_listing_count,
     top_confidence: Number(row.top_confidence),
     top_match_basis: row.top_match_basis,
     latest_created_at: row.latest_created_at.toISOString(),
@@ -263,6 +270,8 @@ export async function listDedupPropertyPairSuggestions(opts: {
         plo.rooms AS lo_rooms, plo.bathrooms AS lo_bathrooms, plo.property_type AS lo_type,
         phi.address AS hi_address, phi.city AS hi_city, phi.m2_built AS hi_m2,
         phi.rooms AS hi_rooms, phi.bathrooms AS hi_bathrooms, phi.property_type AS hi_type,
+        (SELECT COUNT(*)::int FROM listing l WHERE l.property_id = p.prop_lo AND l.operation = 'sale') AS lo_listing_count,
+        (SELECT COUNT(*)::int FROM listing l WHERE l.property_id = p.prop_hi AND l.operation = 'sale') AS hi_listing_count,
         COUNT(*)::int AS pair_count,
         MAX(p.confidence) AS top_confidence,
         (array_agg(p.match_basis ORDER BY p.confidence DESC, p.created_at DESC))[1] AS top_match_basis,

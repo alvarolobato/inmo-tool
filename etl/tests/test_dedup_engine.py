@@ -13,6 +13,7 @@ import json
 import zlib
 from decimal import Decimal
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
 import imagehash
@@ -615,8 +616,21 @@ class TestPhoneOrderingRescue:
         self, listing_id_a: int, listing_id_b: int
     ) -> _PhotoHashCache:
         cache = _PhotoHashCache()
-        cache._cache[listing_id_a] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
-        cache._cache[listing_id_b] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
+        # Issue #615: _cache holds (url, hash) PAIRS now, not bare hashes —
+        # synthetic URLs here are never asserted on, just structurally
+        # required so `_PhotoHashCache.get()`'s unpacking doesn't crash.
+        cache._cache[listing_id_a] = [
+            (
+                f"https://example.test/{listing_id_a}.jpg",
+                imagehash.hex_to_hash(self._IDENTICAL_HEX),
+            )
+        ]
+        cache._cache[listing_id_b] = [
+            (
+                f"https://example.test/{listing_id_b}.jpg",
+                imagehash.hex_to_hash(self._IDENTICAL_HEX),
+            )
+        ]
         return cache
 
     def test_ordering_lets_photo_hash_claim_a_pair_phone_would_otherwise_shadow(self):
@@ -884,8 +898,21 @@ class TestReferenceCodeConflictVeto:
         self, listing_id_a: int, listing_id_b: int
     ) -> _PhotoHashCache:
         cache = _PhotoHashCache()
-        cache._cache[listing_id_a] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
-        cache._cache[listing_id_b] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
+        # Issue #615: _cache holds (url, hash) PAIRS now, not bare hashes —
+        # synthetic URLs here are never asserted on, just structurally
+        # required so `_PhotoHashCache.get()`'s unpacking doesn't crash.
+        cache._cache[listing_id_a] = [
+            (
+                f"https://example.test/{listing_id_a}.jpg",
+                imagehash.hex_to_hash(self._IDENTICAL_HEX),
+            )
+        ]
+        cache._cache[listing_id_b] = [
+            (
+                f"https://example.test/{listing_id_b}.jpg",
+                imagehash.hex_to_hash(self._IDENTICAL_HEX),
+            )
+        ]
         return cache
 
     def test_same_agency_different_codes_blocks_merge_despite_full_agreement(self):
@@ -3715,6 +3742,394 @@ class TestPurgePendingFuzzyPhotoStoreUnavailable:
             assert cur.fetchone()[0] == "pending"
 
 
+class TestBackfillMatchedPhotos:
+    """Issue #615's backfill (PR #621 review B1, supersedes the
+    separately-filed #622): `engine.backfill_matched_photos` populates
+    `detail.matched_photos` on PENDING `photo_hash` rows filed before
+    `matched_pairs` existed, read-only against the persistent
+    `photo_hashes` store (D-025) — never a live fetch, never touches
+    `status`/`confidence`/`match_basis`.
+    """
+
+    def _seed_photo_hash_pair(
+        self,
+        conn,
+        ext_prefix: str,
+        detail: dict | None = None,
+        status: str = "pending",
+        **kwargs,
+    ) -> tuple[int, int, int]:
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            conn, "fotocasa", "idealista", ext_prefix, **kwargs
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO suggested_merge
+                    (listing_id_a, listing_id_b, match_basis, confidence, status, detail)
+                VALUES (%s, %s, 'photo_hash', 0.800, %s, %s::jsonb)
+                RETURNING id
+                """,
+                (
+                    *sorted((listing_a, listing_b)),
+                    status,
+                    json.dumps(detail if detail is not None else {"match_ratio": 1.0}),
+                ),
+            )
+            suggestion_id = cur.fetchone()[0]
+        conn.commit()
+        return suggestion_id, listing_a, listing_b
+
+    def _seed_stored_hash(
+        self, conn, url: str, hex_digest: str, source: str, ok: bool = True
+    ) -> None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO photo_hashes (photo_url, phash, ok, source) "
+                "VALUES (%s, %s, %s, %s)",
+                (url, hex_digest, ok, source),
+            )
+        conn.commit()
+
+    # Two disjoint noise hashes + one shared ("the match") hash — same
+    # discipline as TestPhotoHashMatchedPairsThreading: distances verified
+    # far apart so nothing but the deliberate match can clear
+    # _HASH_HAMMING_THRESHOLD.
+    _SHARED_HEX = "ffff0000ffff0000"
+    _NOISE_A_HEX = "0000000000000000"
+    _NOISE_B_HEX = "8888888888888888"
+
+    def test_populates_matched_photos_from_the_store_alone_never_the_network(
+        self, dedup_db, monkeypatch
+    ):
+        """The core case, AND a no-network guard: if backfill ever DID
+        attempt a live fetch, `requests.get` would raise loudly here
+        instead of silently succeeding against a real CDN — the owner's
+        own reason for filing this as nearly-free (all 447 production
+        rows already have `ok` hashes on both sides)."""
+
+        def _boom(*_args, **_kwargs):
+            raise AssertionError(
+                "backfill_matched_photos must never fetch over the network"
+            )
+
+        monkeypatch.setattr(photo_hash_signal.requests, "get", _boom)
+
+        photo_a_noise = "https://cdn.fotocasa.es/backfill-a-noise.jpg"
+        photo_a_match = "https://cdn.fotocasa.es/backfill-a-match.jpg"
+        photo_b_noise = "https://cdn.idealista.com/backfill-b-noise.jpg"
+        photo_b_match = "https://cdn.idealista.com/backfill-b-match.jpg"
+        self._seed_stored_hash(dedup_db, photo_a_noise, self._NOISE_A_HEX, "fotocasa")
+        self._seed_stored_hash(dedup_db, photo_a_match, self._SHARED_HEX, "fotocasa")
+        self._seed_stored_hash(dedup_db, photo_b_noise, self._NOISE_B_HEX, "idealista")
+        self._seed_stored_hash(dedup_db, photo_b_match, self._SHARED_HEX, "idealista")
+
+        suggestion_id, _la, _lb = self._seed_photo_hash_pair(
+            dedup_db,
+            "backfill-basic",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(200000),
+            current_price_b=Decimal(200000),
+            # Deliberately NOT index 0 on either side.
+            photo_urls_a=[photo_a_noise, photo_a_match],
+            photo_urls_b=[photo_b_noise, photo_b_match],
+        )
+
+        scanned, updated = engine.backfill_matched_photos(dedup_db)
+
+        assert scanned == 1
+        assert updated == 1
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status, confidence, match_basis, detail "
+                "FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            status, confidence, match_basis, detail = cur.fetchone()
+        # Never touched — a row the owner may already be reviewing must
+        # keep its verdict exactly as filed.
+        assert status == "pending"
+        assert match_basis == "photo_hash"
+        assert float(confidence) == pytest.approx(0.800)
+        # Existing detail key preserved (jsonb concat, not overwrite).
+        assert detail["match_ratio"] == 1.0
+        matched = detail["matched_photos"]
+        assert len(matched) == 1
+        assert matched[0]["url_a"] == photo_a_match
+        assert matched[0]["url_b"] == photo_b_match
+        assert matched[0]["distance"] == 0
+
+    def test_preserves_every_other_detail_key(self, dedup_db):
+        photo_a = "https://cdn.fotocasa.es/backfill-preserve-a.jpg"
+        photo_b = "https://cdn.idealista.com/backfill-preserve-b.jpg"
+        self._seed_stored_hash(dedup_db, photo_a, self._SHARED_HEX, "fotocasa")
+        self._seed_stored_hash(dedup_db, photo_b, self._SHARED_HEX, "idealista")
+        suggestion_id, _la, _lb = self._seed_photo_hash_pair(
+            dedup_db,
+            "backfill-preserve",
+            detail={"match_ratio": 1.0, "floor_conflict": True},
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+
+        engine.backfill_matched_photos(dedup_db)
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT detail FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            detail = cur.fetchone()[0]
+        assert detail["match_ratio"] == 1.0
+        assert detail["floor_conflict"] is True
+        assert "matched_photos" in detail
+
+    def test_idempotent_never_rescans_a_row_that_already_has_matched_photos(
+        self, dedup_db
+    ):
+        photo_a = "https://cdn.fotocasa.es/backfill-idempotent-a.jpg"
+        photo_b = "https://cdn.idealista.com/backfill-idempotent-b.jpg"
+        self._seed_stored_hash(dedup_db, photo_a, self._SHARED_HEX, "fotocasa")
+        self._seed_stored_hash(dedup_db, photo_b, self._SHARED_HEX, "idealista")
+        # Already has matched_photos (e.g. a previous backfill run, or a
+        # fresh evaluate_pair) — a DIFFERENT payload than what a fresh
+        # computation would produce, so a re-scan would be detectable.
+        existing_payload = [
+            {
+                "url_a": "https://stale.example/x.jpg",
+                "url_b": "https://stale.example/y.jpg",
+                "distance": 3,
+            }
+        ]
+        suggestion_id, _la, _lb = self._seed_photo_hash_pair(
+            dedup_db,
+            "backfill-idempotent",
+            detail={"match_ratio": 1.0, "matched_photos": existing_payload},
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+
+        scanned, updated = engine.backfill_matched_photos(dedup_db)
+
+        assert scanned == 0
+        assert updated == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT detail FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            detail = cur.fetchone()[0]
+        assert detail["matched_photos"] == existing_payload
+
+    def test_leaves_a_row_alone_when_store_coverage_is_incomplete(self, dedup_db):
+        """One side's photo was never successfully hashed — the row stays
+        eligible for a LATER run (or the engine's own next pass) rather
+        than being marked done with an empty/wrong result."""
+        photo_a = "https://cdn.fotocasa.es/backfill-incomplete-a.jpg"
+        photo_b = "https://cdn.idealista.com/backfill-incomplete-b.jpg"
+        self._seed_stored_hash(dedup_db, photo_a, self._SHARED_HEX, "fotocasa")
+        # photo_b was never hashed at all — no row in photo_hashes.
+        suggestion_id, _la, _lb = self._seed_photo_hash_pair(
+            dedup_db,
+            "backfill-incomplete",
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+
+        scanned, updated = engine.backfill_matched_photos(dedup_db)
+
+        assert scanned == 1
+        assert updated == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status, detail FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            status, detail = cur.fetchone()
+        assert status == "pending"
+        assert "matched_photos" not in detail
+
+    def test_dry_run_reports_without_writing(self, dedup_db):
+        photo_a = "https://cdn.fotocasa.es/backfill-dryrun-a.jpg"
+        photo_b = "https://cdn.idealista.com/backfill-dryrun-b.jpg"
+        self._seed_stored_hash(dedup_db, photo_a, self._SHARED_HEX, "fotocasa")
+        self._seed_stored_hash(dedup_db, photo_b, self._SHARED_HEX, "idealista")
+        suggestion_id, _la, _lb = self._seed_photo_hash_pair(
+            dedup_db,
+            "backfill-dryrun",
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+
+        scanned, would_update = engine.preview_backfill_matched_photos(dedup_db)
+
+        assert scanned == 1
+        assert would_update == 1
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT detail FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            detail = cur.fetchone()[0]
+        assert "matched_photos" not in detail
+
+    def test_write_guard_refuses_a_row_that_changed_status_between_read_and_write(
+        self, dedup_db, monkeypatch
+    ):
+        """A concurrent human decision (confirm/reject) landing between
+        this command's SELECT and its UPDATE must not be reopened or have
+        its verdict's detail altered — the UPDATE's own
+        `WHERE status = 'pending'` guard, not just the initial SELECT's
+        filter, is what protects this."""
+        photo_a = "https://cdn.fotocasa.es/backfill-race-a.jpg"
+        photo_b = "https://cdn.idealista.com/backfill-race-b.jpg"
+        self._seed_stored_hash(dedup_db, photo_a, self._SHARED_HEX, "fotocasa")
+        self._seed_stored_hash(dedup_db, photo_b, self._SHARED_HEX, "idealista")
+        suggestion_id, _la, _lb = self._seed_photo_hash_pair(
+            dedup_db,
+            "backfill-race",
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+
+        real_select = engine._select_pending_photo_hash_rows_missing_matched_photos
+
+        def _select_then_simulate_concurrent_reject(conn):
+            rows = real_select(conn)
+            # Simulates another connection (a human's reject click,
+            # processed by etl/dedup/actions.py) committing between this
+            # read and backfill_matched_photos's own write.
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE suggested_merge SET status = 'rejected' WHERE id = %s",
+                    (suggestion_id,),
+                )
+            conn.commit()
+            return rows
+
+        monkeypatch.setattr(
+            engine,
+            "_select_pending_photo_hash_rows_missing_matched_photos",
+            _select_then_simulate_concurrent_reject,
+        )
+
+        scanned, updated = engine.backfill_matched_photos(dedup_db)
+
+        # A match WAS computable (scanned=1), but the WHERE guard refused
+        # the write once status was no longer 'pending' — updated must
+        # report the true (zero) rowcount, not the computed-but-unwritten
+        # count.
+        assert scanned == 1
+        assert updated == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status, detail FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            status, detail = cur.fetchone()
+        assert status == "rejected"
+        assert "matched_photos" not in detail
+
+    def test_backfill_raises_and_writes_nothing_when_store_unreachable(
+        self, dedup_db, monkeypatch
+    ):
+        from etl.dedup import photo_hash_store
+
+        photo_a = "https://cdn.fotocasa.es/backfill-store-down-a.jpg"
+        photo_b = "https://cdn.idealista.com/backfill-store-down-b.jpg"
+        suggestion_id, _la, _lb = self._seed_photo_hash_pair(
+            dedup_db,
+            "backfill-store-down",
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+        monkeypatch.setattr(photo_hash_store, "open_connection", lambda: None)
+
+        with pytest.raises(engine.PhotoHashStoreUnavailableError):
+            engine.backfill_matched_photos(dedup_db)
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT detail FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            detail = cur.fetchone()[0]
+        assert "matched_photos" not in detail
+
+    def test_preview_raises_the_same_way(self, dedup_db, monkeypatch):
+        from etl.dedup import photo_hash_store
+
+        self._seed_photo_hash_pair(dedup_db, "backfill-store-down-preview")
+        monkeypatch.setattr(photo_hash_store, "open_connection", lambda: None)
+
+        with pytest.raises(engine.PhotoHashStoreUnavailableError):
+            engine.preview_backfill_matched_photos(dedup_db)
+
+    def test_cli_reports_aborted_and_exits_nonzero_when_store_unreachable(
+        self, dedup_db, monkeypatch, capsys
+    ):
+        from etl.dedup import cli as dedup_cli
+        from etl.dedup import photo_hash_store
+
+        self._seed_photo_hash_pair(dedup_db, "backfill-store-down-cli")
+        monkeypatch.setattr(photo_hash_store, "open_connection", lambda: None)
+
+        class _NoCloseConnProxy:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
+        )
+        exit_code = dedup_cli.main(["backfill-matched-photos", "--yes"])
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "ABORTED" in captured.err
+
+    def test_cli_dry_run_reports_without_prompting_or_writing(
+        self, dedup_db, monkeypatch, capsys
+    ):
+        from etl.dedup import cli as dedup_cli
+
+        photo_a = "https://cdn.fotocasa.es/backfill-cli-dryrun-a.jpg"
+        photo_b = "https://cdn.idealista.com/backfill-cli-dryrun-b.jpg"
+        self._seed_stored_hash(dedup_db, photo_a, self._SHARED_HEX, "fotocasa")
+        self._seed_stored_hash(dedup_db, photo_b, self._SHARED_HEX, "idealista")
+        suggestion_id, _la, _lb = self._seed_photo_hash_pair(
+            dedup_db,
+            "backfill-cli-dryrun",
+            photo_urls_a=[photo_a],
+            photo_urls_b=[photo_b],
+        )
+
+        class _NoCloseConnProxy:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
+        )
+        exit_code = dedup_cli.main(["backfill-matched-photos", "--dry-run"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "[dry-run]" in captured.out
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT detail FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            detail = cur.fetchone()[0]
+        assert "matched_photos" not in detail
+
+
 class TestFuzzyPurgeRescueSurvivesReevaluation:
     """Issue #607 (B1): a row `purge_pending_fuzzy` rescues must still be
     reviewable after the very next `engine.run()` — NOT flipped to
@@ -4195,8 +4610,19 @@ class TestStructuredFieldsNeverVetoesStrongerSignals:
             rooms_b=6,
         )
         identical_hex = "ffff0000ffff0000"
-        cache._cache[listing_a] = [imagehash.hex_to_hash(identical_hex)]
-        cache._cache[listing_b] = [imagehash.hex_to_hash(identical_hex)]
+        # Issue #615: _cache holds (url, hash) PAIRS now, not bare hashes.
+        cache._cache[listing_a] = [
+            (
+                f"https://example.test/{listing_a}.jpg",
+                imagehash.hex_to_hash(identical_hex),
+            )
+        ]
+        cache._cache[listing_b] = [
+            (
+                f"https://example.test/{listing_b}.jpg",
+                imagehash.hex_to_hash(identical_hex),
+            )
+        ]
         records = {r.listing_id: r for r in engine.fetch_listing_records(dedup_db)}
         evaluation = engine.evaluate_pair(records[listing_a], records[listing_b], cache)
         assert evaluation is not None
@@ -4221,8 +4647,21 @@ class TestPhotoHashAutoMerge:
         self, listing_id_a: int, listing_id_b: int
     ) -> _PhotoHashCache:
         cache = _PhotoHashCache()
-        cache._cache[listing_id_a] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
-        cache._cache[listing_id_b] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
+        # Issue #615: _cache holds (url, hash) PAIRS now, not bare hashes —
+        # synthetic URLs here are never asserted on, just structurally
+        # required so `_PhotoHashCache.get()`'s unpacking doesn't crash.
+        cache._cache[listing_id_a] = [
+            (
+                f"https://example.test/{listing_id_a}.jpg",
+                imagehash.hex_to_hash(self._IDENTICAL_HEX),
+            )
+        ]
+        cache._cache[listing_id_b] = [
+            (
+                f"https://example.test/{listing_id_b}.jpg",
+                imagehash.hex_to_hash(self._IDENTICAL_HEX),
+            )
+        ]
         return cache
 
     def test_suggestion_197_shape_auto_merges(self):
@@ -4363,8 +4802,17 @@ class TestPhotoHashAutoMerge:
         h3 = imagehash.hex_to_hash("ffffffffffffffff")
         h4 = imagehash.hex_to_hash("5555555555555555")
         cache = _PhotoHashCache()
-        cache._cache[1] = [h1, h2, h3]
-        cache._cache[2] = [h1, h2, h4]
+        # Issue #615: _cache holds (url, hash) PAIRS now, not bare hashes.
+        cache._cache[1] = [
+            ("https://example.test/1-0.jpg", h1),
+            ("https://example.test/1-1.jpg", h2),
+            ("https://example.test/1-2.jpg", h3),
+        ]
+        cache._cache[2] = [
+            ("https://example.test/2-0.jpg", h1),
+            ("https://example.test/2-1.jpg", h2),
+            ("https://example.test/2-2.jpg", h4),
+        ]
 
         a = _record(
             1,
@@ -4386,14 +4834,131 @@ class TestPhotoHashAutoMerge:
         assert evaluation.decision == "suggest"
 
 
+class TestPhotoHashMatchedPairsThreading:
+    """Issue #615: `evaluate_pair`'s `detail["matched_photos"]` must carry
+    the TRUE matching photo URLs from `photo_hash.matched_pairs`, threaded
+    through `_PhotoHashCache.get_pairs` — never re-derived, never an
+    index-aligned guess. Deliberately NOT `_cache_with_identical_hashes`'s
+    single-hash-per-listing shape (every other photo_hash test class in
+    this file uses that) — a fixture where the one hash on each side is
+    automatically "the match" at index 0 would pass even if
+    `evaluate_pair` never called `matched_pairs`/`get_pairs` at all. Here,
+    listing A has 6 photos and listing B has 4; the real match sits at
+    index 4 on A and index 1 on B — nowhere near each other, let alone
+    index 0.
+    """
+
+    # Two shared hashes (the true matches) plus two disjoint hex "families"
+    # (per-side noise) — verified independently (not just "looks
+    # different", see scratch check in this PR's description): every
+    # cross-side noise pair AND every noise-vs-shared pair sits at Hamming
+    # distance >=16 (comfortably above `_HASH_HAMMING_THRESHOLD`=10); the
+    # two shared hashes sit at distance 64 from EACH OTHER too, so neither
+    # can accidentally stand in for the other. Two shared photos (not one)
+    # are needed to clear `MIN_MATCH_RATIO` (0.6) against a 3-photo smaller
+    # side without making every photo a match, which would defeat the
+    # "not index 0" point.
+    _SHARED_HEX_1 = "ffff0000ffff0000"
+    _SHARED_HEX_2 = "0000ffff0000ffff"
+    _A_NOISE_HEXES: ClassVar[list[str]] = [
+        "0000000000000000",
+        "1111111111111111",
+        "2222222222222222",
+    ]
+    _B_NOISE_HEXES: ClassVar[list[str]] = ["8888888888888888"]
+
+    def test_matched_photos_names_the_true_matching_urls_not_index_0(self):
+        cache = _PhotoHashCache()
+        shared1 = imagehash.hex_to_hash(self._SHARED_HEX_1)
+        shared2 = imagehash.hex_to_hash(self._SHARED_HEX_2)
+        a_noise = [imagehash.hex_to_hash(h) for h in self._A_NOISE_HEXES]
+        b_noise = [imagehash.hex_to_hash(h) for h in self._B_NOISE_HEXES]
+
+        # Listing 1 (a): 5 photos. Matches at index 1 (shared1) and index 3
+        # (shared2) — neither at index 0, and in the OPPOSITE order from
+        # how listing b (below) lists them.
+        cache._cache[1] = [
+            ("https://a.example/0.jpg", a_noise[0]),
+            ("https://a.example/1.jpg", shared1),
+            ("https://a.example/2.jpg", a_noise[1]),
+            ("https://a.example/3.jpg", shared2),
+            ("https://a.example/4.jpg", a_noise[2]),
+        ]
+        # Listing 2 (b, the smaller side): 3 photos, 2 matches -> ratio
+        # 2/3 = 0.667, clears MIN_MATCH_RATIO (0.6). shared2 sits at index
+        # 0 here (still not index 0 on the a side above) and shared1 at
+        # index 2 — a naive "photo N of a vs photo N of b" pairing would
+        # show noise against shared2, and shared1 against nothing.
+        cache._cache[2] = [
+            ("https://b.example/0.jpg", shared2),
+            ("https://b.example/1.jpg", b_noise[0]),
+            ("https://b.example/2.jpg", shared1),
+        ]
+
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(70),
+            current_price=Decimal(200000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(70),
+            current_price=Decimal(200000),
+        )
+
+        evaluation = engine.evaluate_pair(a, b, cache)
+        assert evaluation is not None
+        assert evaluation.basis == "photo_hash"
+        matched = evaluation.detail["matched_photos"]
+        assert len(matched) == 2
+        pairs_by_url_a = {m["url_a"]: m for m in matched}
+        assert (
+            pairs_by_url_a["https://a.example/1.jpg"]["url_b"]
+            == "https://b.example/2.jpg"
+        )
+        assert (
+            pairs_by_url_a["https://a.example/3.jpg"]["url_b"]
+            == "https://b.example/0.jpg"
+        )
+        for m in matched:
+            assert m["distance"] == 0
+
+    def test_no_matched_photos_key_when_nothing_matches_below_the_suggestion_floor(
+        self,
+    ):
+        """`matched_photos` should simply be absent (not an empty list
+        littering every non-photo-basis pair's detail) when photo_hash
+        never fires at all."""
+        cache = _PhotoHashCache()
+        cache._cache[1] = [
+            ("https://a.example/0.jpg", imagehash.hex_to_hash("0000000000000000"))
+        ]
+        cache._cache[2] = [
+            ("https://b.example/0.jpg", imagehash.hex_to_hash("ffffffffffffffff"))
+        ]
+        a = _record(1, 100, source="milanuncios")
+        b = _record(2, 200, source="fotocasa")
+        evaluation = engine.evaluate_pair(a, b, cache)
+        assert evaluation is None
+
+
 def _stub_fetch(hashes_for, *, cached_hashed_for=None):
-    """A `photo_hash.fetch_hashes_with_stats` stand-in for the health tests.
+    """A `photo_hash.fetch_hash_pairs_with_stats` stand-in for the health
+    tests (issue #615: `_PhotoHashCache` calls that function now, not
+    `fetch_hashes_with_stats` — see `_PhotoHashCache._ensure_fetched`).
 
     `hashes_for(source)` gives the hashes a live fetch produced;
     `cached_hashed_for(source)` (optional) how many came out of the #221 store
     instead. Live attempts are derived from the URLs the real function would
     have requested, so a video-only `photo_urls` still counts as zero attempts
-    here exactly as it does in production.
+    here exactly as it does in production. Each hash is paired with a
+    synthetic URL — the health tests below never assert on those URLs, only
+    the stats, but `_PhotoHashCache.get()`'s (url, hash) unpacking needs a
+    2-tuple regardless.
     """
 
     def _fetch(urls, source="unknown", store_conn=None):
@@ -4401,12 +4966,15 @@ def _stub_fetch(hashes_for, *, cached_hashed_for=None):
         live_urls = [u for u in urls if photo_hash_signal._looks_like_photo_url(u)]
         live_attempted = max(len(live_urls) - cached, 0)
         hashes = hashes_for(source)
+        pairs = [
+            (f"https://example.test/{source}-{i}.jpg", h) for i, h in enumerate(hashes)
+        ]
         stats = photo_hash_signal.PhotoFetchStats(
             live_attempted=live_attempted,
             live_hashed=max(len(hashes) - cached, 0),
             cached_hashed=cached,
         )
-        return hashes, stats
+        return pairs, stats
 
     return _fetch
 
@@ -4424,7 +4992,7 @@ class TestPhotoHashCacheSourceHealth:
     def test_a_source_with_every_photo_failing_is_reported(self, monkeypatch):
         monkeypatch.setattr(
             photo_hash_signal,
-            "fetch_hashes_with_stats",
+            "fetch_hash_pairs_with_stats",
             _stub_fetch(lambda source: []),
         )
         cache = _PhotoHashCache()
@@ -4437,7 +5005,7 @@ class TestPhotoHashCacheSourceHealth:
     def test_a_source_with_at_least_one_success_is_not_reported(self, monkeypatch):
         monkeypatch.setattr(
             photo_hash_signal,
-            "fetch_hashes_with_stats",
+            "fetch_hash_pairs_with_stats",
             _stub_fetch(lambda source: [imagehash.hex_to_hash("0" * 16)]),
         )
         cache = _PhotoHashCache()
@@ -4456,7 +5024,7 @@ class TestPhotoHashCacheSourceHealth:
         across every listing counts as degraded)."""
         monkeypatch.setattr(
             photo_hash_signal,
-            "fetch_hashes_with_stats",
+            "fetch_hash_pairs_with_stats",
             _stub_fetch(lambda source: []),
         )
         cache = _PhotoHashCache()
@@ -4482,7 +5050,7 @@ class TestPhotoHashCacheSourceHealth:
         degraded — there was nothing to attempt in the first place."""
         monkeypatch.setattr(
             photo_hash_signal,
-            "fetch_hashes_with_stats",
+            "fetch_hash_pairs_with_stats",
             _stub_fetch(lambda source: []),
         )
         cache = _PhotoHashCache()
@@ -4502,7 +5070,7 @@ class TestPhotoHashCacheSourceHealth:
         """
         monkeypatch.setattr(
             photo_hash_signal,
-            "fetch_hashes_with_stats",
+            "fetch_hash_pairs_with_stats",
             _stub_fetch(
                 lambda source: [imagehash.hex_to_hash("0" * 16)] * 2,
                 cached_hashed_for=lambda source: 2,
@@ -4532,7 +5100,7 @@ class TestPhotoHashCacheSourceHealth:
         """
         monkeypatch.setattr(
             photo_hash_signal,
-            "fetch_hashes_with_stats",
+            "fetch_hash_pairs_with_stats",
             # 8 hashes returned, every one of them from the store; the 4 URLs
             # actually requested over the network all failed.
             _stub_fetch(
@@ -4554,7 +5122,7 @@ class TestPhotoHashCacheSourceHealth:
     def test_mixed_sources_only_the_failing_one_is_reported(self, monkeypatch):
         monkeypatch.setattr(
             photo_hash_signal,
-            "fetch_hashes_with_stats",
+            "fetch_hash_pairs_with_stats",
             _stub_fetch(
                 lambda source: (
                     [] if source == "milanuncios" else [imagehash.hex_to_hash("0" * 16)]

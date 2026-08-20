@@ -300,21 +300,40 @@ class _PhotoHashCache:
         # fetch-everything behaviour for tests that don't want a database.
         self._store_conn = store_conn
 
-    def get(self, listing: ListingRecord) -> list:
-        if listing.listing_id not in self._cache:
-            hashes, stats = photo_hash.fetch_hashes_with_stats(
-                listing.photo_urls, source=listing.source, store_conn=self._store_conn
+    def _ensure_fetched(self, listing: ListingRecord) -> None:
+        if listing.listing_id in self._cache:
+            return
+        # Issue #615: fetches (url, hash) PAIRS now, not bare hashes — the
+        # one fetch this cache already made per listing is also the one
+        # place a photo's URL and its hash exist together, so `get_pairs`
+        # below can report exactly which photo matched which without a
+        # second, re-derived fetch. `get()`'s own return shape is
+        # unchanged (still `list[ImageHash]`, backward compatible with
+        # every existing `match_ratio`/health-stats caller) — it's simply
+        # derived from the same cached pairs.
+        pairs, stats = photo_hash.fetch_hash_pairs_with_stats(
+            listing.photo_urls, source=listing.source, store_conn=self._store_conn
+        )
+        self._cache[listing.listing_id] = pairs
+        if stats.live_attempted:
+            self._live_attempted_by_source[listing.source] = (
+                self._live_attempted_by_source.get(listing.source, 0)
+                + stats.live_attempted
             )
-            self._cache[listing.listing_id] = hashes
-            if stats.live_attempted:
-                self._live_attempted_by_source[listing.source] = (
-                    self._live_attempted_by_source.get(listing.source, 0)
-                    + stats.live_attempted
-                )
-                self._live_hashed_by_source[listing.source] = (
-                    self._live_hashed_by_source.get(listing.source, 0)
-                    + stats.live_hashed
-                )
+            self._live_hashed_by_source[listing.source] = (
+                self._live_hashed_by_source.get(listing.source, 0) + stats.live_hashed
+            )
+
+    def get(self, listing: ListingRecord) -> list:
+        self._ensure_fetched(listing)
+        return [h for _url, h in self._cache[listing.listing_id]]
+
+    def get_pairs(self, listing: ListingRecord) -> list:
+        """Same fetch as `get()` (memoized together — never a second fetch),
+        but with each hash's source URL attached. Issue #615: lets
+        `evaluate_pair` report WHICH photos matched, not just the aggregate
+        ratio `get()`'s plain hashes already fed `match_ratio`."""
+        self._ensure_fetched(listing)
         return self._cache[listing.listing_id]
 
     def get_packed(self, listing: ListingRecord) -> list[int]:
@@ -495,6 +514,37 @@ def evaluate_pair(
         floor_conflict = floors_conflict(a.floor, b.floor)
         if floor_conflict:
             detail["floor_conflict"] = True
+
+        # Issue #615: WHICH specific photo on each side matched, not just
+        # the aggregate ratio above — the owner could not evaluate a
+        # photo-hash suggestion at all when the card only showed a
+        # percentage and (before this) the wrong photos (the first N in
+        # storage order, frequently unrelated rooms). `hashes_a`/`hashes_b`
+        # above are `get_packed`'s PACKED-int form (issue #618/#623) —
+        # `matched_pairs` needs real `imagehash.ImageHash` objects (its own
+        # `-` subtraction is what stores a per-pair Hamming distance), so
+        # it calls `get_pairs` instead. That's still not a second network
+        # round trip: `get_packed`/`get`/`get_pairs` all key off the SAME
+        # `_ensure_fetched` memo (one fetch per listing per run) — `get_pairs`
+        # just returns a different projection (url, hash) of the identical
+        # cached fetch `get_packed` already triggered. `photo_hash.matched_pairs`
+        # is the ONLY place this pairing is computed — the dashboard must
+        # render it, never re-derive a match from raw photo_urls itself.
+        # Ratio can legitimately clear the threshold with only 1 of the
+        # smaller side's photos not producing a match record here (a fetch
+        # failure between the packed and pairs projections is not possible
+        # since both come from the same cached fetch — this can only be
+        # empty when the underlying fetch found zero usable photos on one
+        # side, which `match_ratio` already guards against returning a
+        # ratio for).
+        matches = photo_hash.matched_pairs(
+            hash_cache.get_pairs(a), hash_cache.get_pairs(b)
+        )
+        if matches:
+            detail["matched_photos"] = [
+                {"url_a": m.url_a, "url_b": m.url_b, "distance": m.distance}
+                for m in matches
+            ]
 
         # Issue #188 (approved once #197 removed same-source pairing — see
         # photo_hash.PHOTO_MERGE_SIZE_RATIO's module-level comment for the
@@ -1708,6 +1758,152 @@ def purge_pending_fuzzy(conn) -> tuple[int, int]:
         deleted = cur.rowcount
     conn.commit()
     return deleted, len(rescue_ids)
+
+
+def _select_pending_photo_hash_rows_missing_matched_photos(conn) -> list[tuple]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT sm.id, la.photo_urls, lb.photo_urls
+              FROM suggested_merge sm
+              JOIN listing la ON la.id = sm.listing_id_a
+              JOIN listing lb ON lb.id = sm.listing_id_b
+             WHERE sm.status = 'pending' AND sm.match_basis = 'photo_hash'
+               AND NOT (sm.detail ? 'matched_photos')
+            """
+        )
+        return cur.fetchall()
+
+
+def _compute_backfill_matched_photos(
+    rows: list[tuple], store_conn
+) -> dict[int, list[dict]]:
+    """`suggestion_id -> matched_photos` payload for every row where the
+    PERSISTENT store already has enough hash coverage to identify at
+    least one matched pair. Read-only against `photo_hashes` (D-025) —
+    issue #615/#622's backfill NEVER performs a live fetch. A row whose
+    store coverage is incomplete on either side (a URL never hashed, or
+    hashed with `ok=False`) is simply left out of the returned dict — it
+    stays eligible for a future run of this same command, or for the
+    dedup engine's own next successful `evaluate_pair` pass, once
+    coverage improves.
+
+    Shared by `preview_backfill_matched_photos` and
+    `backfill_matched_photos` so a dry run can never disagree with what
+    the real run would do — same discipline as
+    `_compute_fuzzy_rescue_ids`.
+    """
+    result: dict[int, list[dict]] = {}
+    for suggestion_id, urls_a, urls_b in rows:
+        urls_a = tuple(urls_a or ())
+        urls_b = tuple(urls_b or ())
+        if not urls_a or not urls_b:
+            continue
+        known_a = photo_hash_store.load(store_conn, urls_a)
+        known_b = photo_hash_store.load(store_conn, urls_b)
+        pairs_a = [
+            (url, entry.phash)
+            for url, entry in known_a.items()
+            if entry.ok and entry.phash is not None
+        ]
+        pairs_b = [
+            (url, entry.phash)
+            for url, entry in known_b.items()
+            if entry.ok and entry.phash is not None
+        ]
+        matches = photo_hash.matched_pairs(pairs_a, pairs_b)
+        if not matches:
+            continue
+        result[suggestion_id] = [
+            {"url_a": m.url_a, "url_b": m.url_b, "distance": m.distance}
+            for m in matches
+        ]
+    return result
+
+
+def preview_backfill_matched_photos(conn) -> tuple[int, int]:
+    """Dry-run twin of `backfill_matched_photos` — returns
+    `(scanned, would_update)` without writing anything. Raises
+    `PhotoHashStoreUnavailableError` under the same condition the real
+    backfill aborts on (same discipline as `preview_purge_pending_fuzzy`)
+    — a dry run must fail exactly the way the real run would, not report
+    a false zero.
+    """
+    rows = _select_pending_photo_hash_rows_missing_matched_photos(conn)
+    store_conn = _photo_hash_store_or_raise()
+    try:
+        updates = _compute_backfill_matched_photos(rows, store_conn)
+    finally:
+        photo_hash_store.close_connection(store_conn)
+    return len(rows), len(updates)
+
+
+def backfill_matched_photos(conn) -> tuple[int, int]:
+    """One-off migration (issue #615, superseding the separately-filed
+    #622): populate `detail.matched_photos` on PENDING `photo_hash`
+    `suggested_merge` rows filed BEFORE #615's `matched_pairs` landed, so
+    `PropertyPairCard` can show the true matching photos immediately
+    instead of waiting for the next successful `ps dedup run` — which is
+    not imminent on production (`dedup_runs` 123-126 all failed to the
+    D-036 orphan guard, last success 02:49, #614) and, even once it
+    succeeds, `evaluate_pair` only re-derives `matched_photos` for a row
+    it actually re-evaluates.
+
+    Read-only against the persistent `photo_hashes` store (D-025) — NEVER
+    a live fetch, so this is cheap and safe to run at any time; the owner
+    verified all 447 production rows already have `ok` hashes on both
+    sides. A row whose store coverage is still incomplete is simply left
+    alone (see `_compute_backfill_matched_photos`) — `NOT (detail ?
+    'matched_photos')` keeps it eligible for a later run of this same
+    command, or the engine's own next pass, once coverage improves.
+
+    Deliberately narrow, on TWO axes:
+
+    1. Only ever ADDS the `matched_photos` key via `detail || jsonb`
+       (Postgres's jsonb concat operator) — every other key already in
+       `detail` (`match_ratio`, `floor_conflict`, ...) survives untouched.
+    2. Never touches `status`, `confidence`, or `match_basis`. A row the
+       owner has already confirmed/rejected must not be reopened or have
+       its verdict altered by a backfill — the UPDATE's own `WHERE`
+       clause re-checks `status = 'pending'` at WRITE time (not just the
+       initial SELECT), closing the race where a human decides a row
+       between this command's read and its write.
+
+    Raises `PhotoHashStoreUnavailableError` (same guard as
+    `purge_pending_fuzzy`) rather than silently writing nothing when the
+    store is unreachable — issue #607's exact prior failure mode, which a
+    destructive-adjacent bulk write must not repeat even though this
+    migration is additive-only.
+
+    Returns `(scanned, updated)`.
+    """
+    rows = _select_pending_photo_hash_rows_missing_matched_photos(conn)
+    store_conn = _photo_hash_store_or_raise()
+    try:
+        updates = _compute_backfill_matched_photos(rows, store_conn)
+    finally:
+        photo_hash_store.close_connection(store_conn)
+
+    # `actually_updated` counts real UPDATE rowcounts, not len(updates) —
+    # a row the WHERE guard refused (status changed to confirmed/rejected
+    # between the SELECT above and this write) computed a match but wrote
+    # nothing, and the returned count must say so honestly rather than
+    # claiming a write that didn't happen.
+    actually_updated = 0
+    if updates:
+        with conn.cursor() as cur:
+            for suggestion_id, matched_photos in updates.items():
+                cur.execute(
+                    """
+                    UPDATE suggested_merge
+                       SET detail = detail || %s::jsonb
+                     WHERE id = %s AND status = 'pending'
+                    """,
+                    (json.dumps({"matched_photos": matched_photos}), suggestion_id),
+                )
+                actually_updated += cur.rowcount
+        conn.commit()
+    return len(rows), actually_updated
 
 
 def _fetch_listing_record(conn, listing_id: int) -> ListingRecord | None:

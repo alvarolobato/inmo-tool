@@ -102,6 +102,30 @@ def _reference_hashes_share_any_match(
     )
 
 
+def _synthetic_photo_url(listing_id: int, index: int) -> str:
+    """Deterministic placeholder URL for a synthetic hash at
+    (listing_id, index) — issue #615's `matched_photos` needs a
+    (url, hash) pairing, not bare hashes, and this equivalence suite's
+    fixtures only ever carry bare `imagehash.ImageHash` values (built by
+    `_random_hash`/`_flip_bits`, no URLs). Shared by `_seeded_caches`
+    (which pre-populates the REAL `_PhotoHashCache._cache`) and
+    `_frozen_evaluate_pair` (which calls the real, unmodified
+    `photo_hash.matched_pairs` directly) — as long as both sides build
+    the IDENTICAL (url, hash) pairing from the same `raw_hashes_by_id`,
+    in the same order, `matched_pairs` (a pure function, untouched by
+    issue #618/#623's optimization) is guaranteed to return byte-identical
+    output from both call sites. The URL text itself is never asserted
+    on anywhere in this file — only that both sides agree.
+    """
+    return f"https://frozen.example/{listing_id}-{index}.jpg"
+
+
+def _synthetic_photo_pairs(
+    listing_id: int, hashes: list[imagehash.ImageHash]
+) -> list[tuple[str, imagehash.ImageHash]]:
+    return [(_synthetic_photo_url(listing_id, i), h) for i, h in enumerate(hashes)]
+
+
 def _frozen_evaluate_pair(
     a: ListingRecord,
     b: ListingRecord,
@@ -135,6 +159,23 @@ def _frozen_evaluate_pair(
         floor_conflict = floors_conflict(a.floor, b.floor)
         if floor_conflict:
             detail["floor_conflict"] = True
+
+        # Issue #615's matched_photos key — mirrors the REAL evaluate_pair
+        # exactly (same control-flow position: right after floor_conflict,
+        # before the exact-match auto-merge check), calling the real,
+        # unmodified `photo_hash.matched_pairs` (issue #618/#623 never
+        # touched it) against the SAME synthetic (url, hash) pairing
+        # `_seeded_caches` pre-populated `_PhotoHashCache._cache` with, so
+        # this can never silently drift from what the real path computes.
+        matches = photo_hash_signal.matched_pairs(
+            _synthetic_photo_pairs(a.listing_id, hashes_a),
+            _synthetic_photo_pairs(b.listing_id, hashes_b),
+        )
+        if matches:
+            detail["matched_photos"] = [
+                {"url_a": m.url_a, "url_b": m.url_b, "distance": m.distance}
+                for m in matches
+            ]
 
         exact_match = Decimal(str(round(ratio, 3))) == Decimal("1.000")
         if (
@@ -236,7 +277,11 @@ def _seeded_caches(
     docstring)."""
     hash_cache = _PhotoHashCache()
     for listing_id, hashes in raw_hashes_by_id.items():
-        hash_cache._cache[listing_id] = hashes
+        # Issue #615: _cache holds (url, hash) PAIRS now, not bare hashes
+        # — `_synthetic_photo_pairs` is the SAME helper `_frozen_evaluate_pair`
+        # uses to build its own matched_pairs input, so both sides compute
+        # matched_photos from an identical (url, hash) correspondence.
+        hash_cache._cache[listing_id] = _synthetic_photo_pairs(listing_id, hashes)
     return hash_cache, _PhoneCache()
 
 

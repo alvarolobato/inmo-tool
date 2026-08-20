@@ -226,6 +226,166 @@ class TestMatchRatioSemantics:
         assert photo_hash.match_ratio(hashes_a, hashes_b) == 0.5
 
 
+class TestMatchedPairs:
+    """Issue #615: the owner could not evaluate a photo-hash suggestion at
+    all when the card showed the FIRST N photos of each listing rather
+    than the ones that actually matched — "no las primeras que te salen".
+    `matched_pairs` is the one place that pairing gets computed; these
+    tests pin that it reports the TRUE matching photos (by URL), not an
+    index-aligned guess, and orders them strongest-match-first.
+    """
+
+    def test_the_matching_photos_are_NOT_at_the_same_index_on_either_side(self):
+        """The exact failure mode a naive index-0-vs-index-0 (or any
+        same-index) UI would produce: side A's photo at index 5 matches
+        side B's photo at index 9 — every other photo on both sides is
+        unrelated. A fixture where the match happens to sit at index 0 on
+        both sides would pass even with no real pairing logic at all
+        (docs/decisions/D-135's coordinator note on this exact class of
+        decorative test)."""
+        shared = _synthetic_room(101)
+        pairs_a = [
+            (f"https://a.example/{i}.jpg", _hash(_synthetic_room(200 + i)))
+            for i in range(8)
+        ]
+        pairs_b = [
+            (f"https://b.example/{i}.jpg", _hash(_synthetic_room(300 + i)))
+            for i in range(12)
+        ]
+        # Overwrite ONLY index 5 on side A and index 9 on side B with the
+        # shared room — everywhere else stays a distinct, unrelated photo.
+        pairs_a[5] = ("https://a.example/5.jpg", _hash(shared))
+        pairs_b[9] = ("https://b.example/9.jpg", _hash(shared))
+
+        matches = photo_hash.matched_pairs(pairs_a, pairs_b)
+
+        assert len(matches) == 1
+        assert matches[0].url_a == "https://a.example/5.jpg"
+        assert matches[0].url_b == "https://b.example/9.jpg"
+        assert matches[0].distance == 0
+
+    def test_watermarked_duplicate_still_matches_but_is_not_pixel_identical(self):
+        """Two portals stamp their own watermark on the same photo — a
+        genuine cross-posted duplicate, but NOT byte/pixel-identical.
+        matched_pairs must still pair them (distance > 0, within
+        threshold) rather than requiring an exact hash collision. A small
+        bar (TestWatermarkLimitation's own "small watermark" size) —
+        empirically distance 4 at this seed, comfortably inside
+        `_HASH_HAMMING_THRESHOLD` (10); that module's own tests document
+        that a LARGE bar can push a true duplicate out of range entirely,
+        which is a separate, already-pinned limitation, not what this test
+        is about."""
+        shared = _synthetic_room(1)
+        pairs_a = [("https://a.example/0.jpg", _hash(_watermarked(shared, 80, 20)))]
+        pairs_b = [("https://b.example/0.jpg", _hash(shared))]
+
+        matches = photo_hash.matched_pairs(pairs_a, pairs_b)
+
+        assert len(matches) == 1
+        assert matches[0].url_a == "https://a.example/0.jpg"
+        assert matches[0].url_b == "https://b.example/0.jpg"
+        assert matches[0].distance > 0
+
+    def test_strongest_matches_come_first(self):
+        """Two matching pairs, one a near-perfect duplicate (light JPEG
+        re-encode) and one only borderline within threshold (heavier
+        transform) — the near-perfect one must sort first regardless of
+        input order."""
+        room_x = _synthetic_room(70)
+        room_y = _synthetic_room(71)
+        pairs_a = [
+            ("https://a.example/x.jpg", _hash(room_x)),
+            ("https://a.example/y.jpg", _hash(room_y)),
+        ]
+        pairs_b = [
+            # Heavier transform first in the list — order alone must not
+            # decide which match is reported "strongest".
+            ("https://b.example/y.jpg", _hash(_jpeg(room_y, 45))),
+            ("https://b.example/x.jpg", _hash(_jpeg(room_x, 95))),
+        ]
+
+        matches = photo_hash.matched_pairs(pairs_a, pairs_b)
+
+        assert [m.url_a for m in matches] == [
+            "https://a.example/x.jpg",
+            "https://a.example/y.jpg",
+        ]
+        assert matches[0].distance <= matches[1].distance
+
+    def test_unrelated_photo_sets_produce_no_matches(self):
+        pairs_a = [
+            (f"https://a.example/{i}.jpg", _hash(_synthetic_room(i))) for i in range(3)
+        ]
+        pairs_b = [
+            (f"https://b.example/{i}.jpg", _hash(_synthetic_room(500 + i)))
+            for i in range(3)
+        ]
+        assert photo_hash.matched_pairs(pairs_a, pairs_b) == []
+
+    def test_empty_side_produces_no_matches(self):
+        some = [("https://a.example/0.jpg", _hash(_synthetic_room(1)))]
+        assert photo_hash.matched_pairs([], some) == []
+        assert photo_hash.matched_pairs(some, []) == []
+
+    def test_distance_is_a_plain_int_not_numpy(self):
+        """imagehash's `-` returns numpy.int64 — left un-cast this crashes
+        json.dumps the moment a caller persists `distance` (a papercut
+        introduced by matched_pairs itself, caught in the same PR's own
+        review against a live Postgres run — no prior signal ever wrote a
+        hash distance into `detail`)."""
+        shared = _synthetic_room(9)
+        pairs_a = [("https://a.example/0.jpg", _hash(shared))]
+        pairs_b = [("https://b.example/0.jpg", _hash(shared))]
+        matches = photo_hash.matched_pairs(pairs_a, pairs_b)
+        assert type(matches[0].distance) is int
+
+    def test_asymmetric_subset_shape(self):
+        """Issue #624 review: `match_ratio` is the fraction of the SMALLER
+        set, so ratio == 1.0 means the smaller set is a SUBSET of the
+        larger one, not that the two sets are equal — the one
+        currently-qualifying live pair is a 3-photo idealista listing
+        fully contained inside a 30-photo fotocasa one. `matched_pairs`
+        must handle this real shape correctly: every one of the smaller
+        side's 3 photos finds its match among the larger side's 30 (never
+        assuming `len(pairs_a) == len(pairs_b)`), and the 27 unmatched
+        larger-side photos simply never appear in the output."""
+        shared = [_synthetic_room(700 + i) for i in range(3)]
+        # The smaller (idealista) side: exactly the 3 shared photos.
+        pairs_small = [
+            (f"https://idealista.example/{i}.jpg", _hash(shared[i])) for i in range(3)
+        ]
+        # The larger (fotocasa) side: the same 3 shared photos, interleaved
+        # at NON-trivial positions (not index 0-2) among 27 unrelated ones.
+        noise = [_synthetic_room(800 + i) for i in range(27)]
+        pairs_large = [
+            (f"https://fotocasa.example/{i}.jpg", _hash(noise[i])) for i in range(10)
+        ]
+        pairs_large += [
+            (f"https://fotocasa.example/shared-{i}.jpg", _hash(shared[i]))
+            for i in range(3)
+        ]
+        pairs_large += [
+            (f"https://fotocasa.example/{i + 10}.jpg", _hash(noise[i + 10]))
+            for i in range(17)
+        ]
+        assert len(pairs_large) == 30
+
+        matches = photo_hash.matched_pairs(pairs_small, pairs_large)
+
+        assert len(matches) == 3
+        matched_urls_small = {m.url_a for m in matches}
+        assert matched_urls_small == {url for url, _h in pairs_small}
+        matched_urls_large = {m.url_b for m in matches}
+        assert matched_urls_large == {
+            f"https://fotocasa.example/shared-{i}.jpg" for i in range(3)
+        }
+        # Confirms the ratio itself really is 1.0 (subset), not partial —
+        # the exact shape the #624 review flagged as the live case.
+        packed_small = [photo_hash.pack_hash(h) for _url, h in pairs_small]
+        packed_large = [photo_hash.pack_hash(h) for _url, h in pairs_large]
+        assert photo_hash.match_ratio(packed_small, packed_large) == 1.0
+
+
 class TestNonImageUrlFiltering:
     """Issue: a live run fed video/virtual-tour URLs from `photo_urls` into
     `fetch_hashes`, wasting a fetch on every one and diluting `match_ratio`

@@ -255,10 +255,19 @@ test("renders both sides of a real photo_hash pair, ordered ahead of a weaker fu
     await expect(photoCard.getByTestId("dedup-match-basis")).toHaveText(/fotos/i);
     await expect(photoCard.getByTestId("dedup-side-source")).toHaveText(["milanuncios", "fotocasa"]);
     await expect(photoCard.getByTestId("dedup-side-price").first()).toHaveText(/218.500/);
+    // PR #621 review B1: this fixture's photo_hash suggestion carries no
+    // detail.matched_photos (pre-#615 shape, or a row the backfill hasn't
+    // reached yet) — the card must say so explicitly rather than quietly
+    // rendering photos in storage order with no indication anything is
+    // missing.
+    await expect(photoCard.getByTestId("dedup-photo-matches-pending")).toBeVisible();
 
     const fuzzyCard = page.locator(`[data-pair-key="${fuzzyPairKey}"]`);
     await expect(fuzzyCard).toBeVisible();
     await expect(fuzzyCard.getByTestId("dedup-match-basis")).toHaveText(/difuso/i);
+    // The empty state is photo_hash-specific — a fuzzy-basis card (which
+    // never has matched_photos evidence at all) must not show it.
+    await expect(fuzzyCard.getByTestId("dedup-photo-matches-pending")).toHaveCount(0);
   } finally {
     await pool.query("DELETE FROM suggested_merge WHERE id = ANY($1::bigint[])", [
       [photoSuggestionId, fuzzySuggestionId],
@@ -299,20 +308,31 @@ test("collapses every pending listing-pair row for the same two properties into 
 
     const card = page.locator(`[data-pair-key="${pairKey}"]`);
     await expect(card).toHaveCount(1);
+    // pair_count (3) stays on the card only as a debug/test attribute —
+    // issue #615/D-135: it is never rendered as its own "N pares" number.
     await expect(card).toHaveAttribute("data-pair-count", "3");
     // Leads with the strongest evidence (photo_hash 85%).
     await expect(card.getByTestId("dedup-match-basis")).toHaveText(/fotos/i);
-    // Badge: the TOTAL (3), consistent noun ("pares", never "anuncios").
-    await expect(card.getByTestId("dedup-pair-count-badge")).toHaveText(/3 pares corroborantes/i);
+    // Advert counts per side (3 ↔ 1), NOT the internal pair count (3) —
+    // issue #615: "38 pares" read as "38 adverts of the same property"
+    // and was actually 7 adverts on one side, 13 on the other.
+    await expect(card.getByTestId("dedup-advert-counts")).toHaveText(/3 anuncios ↔ 1 anuncio/i);
+    // States plainly that this is ONE decision, not per-pair questions —
+    // closes the owner's second follow-up ("¿por qué se identifican
+    // juntos y no como decisiones separadas?").
+    await expect(card.getByTestId("dedup-single-decision-note")).toHaveText(/una decisión/i);
+    // The old badge is gone outright.
+    await expect(card.getByTestId("dedup-pair-count-badge")).toHaveCount(0);
+    // No user-facing "N pares" copy anywhere on the card (issue #615 exit
+    // criterion) — the internal pair count (3) must never read as an
+    // advert count.
+    await expect(card).not.toContainText(/pares/i);
 
-    // Toggle: the OTHER count (2, = 3 - 1, excluding the primary shown
-    // above) AND the total (3) both appear together in the SAME string —
-    // PR #611 second review M-4: if the total/others relationship ever
-    // breaks (e.g. both start reading the same field), this single
-    // assertion catches it instead of two independently-plausible
-    // numbers that happen not to collide.
+    // Toggle: still names how much MORE corroborating evidence exists
+    // (2, = 3 - 1, excluding the primary shown above), with an honest
+    // noun ("señales") instead of "pares".
     const toggle = card.getByTestId("dedup-evidence-toggle");
-    await expect(toggle).toHaveText(/otros 2 pares \(de 3 en total\)/i);
+    await expect(toggle).toHaveText(/2 señales más/i);
 
     // The weaker corroborating rows are not lost — reachable, collapsed.
     await expect(card.getByTestId("dedup-evidence-row")).toHaveCount(0);

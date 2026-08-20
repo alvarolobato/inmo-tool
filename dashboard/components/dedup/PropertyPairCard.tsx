@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { DedupActionRow, DedupEvidenceItem, DedupPropertyPairSuggestion } from "@/lib/dedup-shared";
-import { MATCH_BASIS_LABELS } from "@/lib/dedup-shared";
+import { MATCH_BASIS_LABELS, orderPhotosMatchedFirst, resolveMatchedPhotos } from "@/lib/dedup-shared";
 import { dedupDetailSummary } from "./dedupDetailSummary";
 import { ListingSidePanel } from "./ListingSidePanel";
 
@@ -149,6 +149,22 @@ export function PropertyPairCard({
   const primary = pair.evidence[0];
   const corroborating = pair.evidence.slice(1);
 
+  // Issue #615: which photos ACTUALLY matched, resolved from the
+  // evaluate_pair-persisted evidence — never re-derived here (the matching
+  // itself lives exactly once, in etl/dedup/signals/photo_hash.py). Empty
+  // for every non-photo_hash basis (`detail` carries no `matched_photos`
+  // key), in which case both sides just render in original order, all
+  // unmatched.
+  const photoMatches = resolveMatchedPhotos(primary.detail, primary.listing_lo, primary.listing_hi);
+  const loPhotos = orderPhotosMatchedFirst(
+    primary.listing_lo.photo_urls,
+    photoMatches.map((m) => m.urlLo),
+  );
+  const hiPhotos = orderPhotosMatchedFirst(
+    primary.listing_hi.photo_urls,
+    photoMatches.map((m) => m.urlHi),
+  );
+
   const runConfirm = async () => {
     setError(null);
     setConfirmingReject(false);
@@ -256,37 +272,62 @@ export function PropertyPairCard({
               En tus perfiles
             </span>
           )}
-          {pair.pair_count > 1 && (
-            <span
-              data-testid="dedup-pair-count-badge"
-              title="Cuántos pares corroboran esta misma pareja de propiedades"
-              style={{
-                fontSize: 11,
-                fontWeight: 600,
-                padding: "2px 8px",
-                borderRadius: 999,
-                background: "var(--bg-2)",
-                color: "var(--fg-muted)",
-              }}
-            >
-              {pair.pair_count} pares corroborantes
-            </span>
-          )}
         </div>
         <span style={{ fontSize: 12, color: "var(--fg-subtle)" }}>
           {dedupDetailSummary(primary.match_basis, primary.detail)}
         </span>
       </div>
 
+      {/* Issue #615: the owner read the old "38 pares corroborantes" badge
+          as "38 adverts of the same property" and correctly concluded that
+          was impossible — it was actually 7 sale listings on one side and
+          13 on the other (7×13 combinations, 38 still pending). The pair
+          count is an internal implementation detail (how many
+          `suggested_merge` rows the engine queued) and is never rendered
+          as its own number any more (D-135, revising D-133) — this line
+          shows what a human actually needs: how many adverts are on each
+          side, and that reviewing them is ONE decision, not per-pair
+          questions (his second follow-up, "¿por qué se identifican juntos
+          y no como decisiones separadas?"). */}
+      <div
+        data-testid="dedup-advert-counts"
+        style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", fontSize: 13 }}
+      >
+        <strong style={{ color: "var(--fg)" }}>
+          {pair.listing_count_lo} {pair.listing_count_lo === 1 ? "anuncio" : "anuncios"} ↔{" "}
+          {pair.listing_count_hi} {pair.listing_count_hi === 1 ? "anuncio" : "anuncios"}
+        </strong>
+        <span data-testid="dedup-single-decision-note" style={{ color: "var(--fg-subtle)" }}>
+          Una decisión: ¿son la misma vivienda?
+        </span>
+      </div>
+
+      {/* PR #621 review B1: an explicit empty state for a photo_hash pair
+          whose `detail.matched_photos` hasn't been computed yet (every
+          pending photo_hash row filed before this fix landed — 447 on
+          production, backfilled by `ps dedup backfill-matched-photos`,
+          but a genuinely new row can still land in this gap between a
+          fresh `suggested_merge` insert and the dedup engine's OWN next
+          successful `evaluate_pair` pass). Without this, an un-backfilled
+          row rendered BYTE-FOR-BYTE like the pre-#615 card — no ring, no
+          badge, nothing telling the owner the matching data is simply
+          absent rather than "these photos are it". The backfill handles
+          today's rows; this handles the next one that slips through. */}
+      {primary.match_basis === "photo_hash" && photoMatches.length === 0 && (
+        <p data-testid="dedup-photo-matches-pending" style={{ margin: 0, fontSize: 12, color: "var(--fg-subtle)" }}>
+          Coincidencias aún no calculadas — fotos mostradas sin ordenar.
+        </p>
+      )}
+
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <ListingSidePanel side={primary.listing_lo} />
+        <ListingSidePanel side={primary.listing_lo} photos={loPhotos} />
         <div
           className="dedup-vs-icon"
           style={{ display: "flex", alignItems: "center", justifyContent: "center", color: "var(--fg-subtle)", fontSize: 18 }}
         >
           ≟
         </div>
-        <ListingSidePanel side={primary.listing_hi} />
+        <ListingSidePanel side={primary.listing_hi} photos={hiPhotos} />
       </div>
 
       {corroborating.length > 0 && (
@@ -303,7 +344,16 @@ export function PropertyPairCard({
               adds the same 44px min-height + centering `.dedup-action-btn`
               already gets. Every other inline property here (color,
               fontSize, cursor, layout) is identical at every width, so it
-              stays inline. */}
+              stays inline.
+
+              Issue #615/D-135: the label no longer says "N pares" — that
+              is exactly the copy the owner misread as advert count. This
+              collapsed, secondary toggle is the "debug affordance" #615
+              allows the internal pair count to hide behind; it still
+              names a number (how much MORE evidence exists) but with an
+              honest noun ("señales", signals/matches — never "pares" or
+              "anuncios", which this group already uses for the header's
+              real advert counts above). */}
           <button
             type="button"
             data-testid="dedup-evidence-toggle"
@@ -318,7 +368,8 @@ export function PropertyPairCard({
               textAlign: "left",
             }}
           >
-            {expanded ? "Ocultar" : "Ver"} los otros {corroborating.length} pares (de {pair.pair_count} en total) que corroboran esta pareja de propiedades
+            {expanded ? "Ocultar" : "Ver"} {corroborating.length}{" "}
+            {corroborating.length === 1 ? "señal más" : "señales más"} que corroboran esta pareja
           </button>
           {expanded && (
             <ul data-testid="dedup-evidence-list" style={{ listStyle: "none", margin: "6px 0 0", padding: 0 }}>
@@ -338,10 +389,26 @@ export function PropertyPairCard({
 
       <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap", alignItems: "center" }}>
         {confirmingReject && (
+          // Issue #615/D-135: the warning used to name the raw internal
+          // pair count ("se rechazarán los 38 pares..."), the same number
+          // the owner misread as an advert count. It now names what he
+          // actually needs to know before committing: which two grouped
+          // adverts this permanently vetoes.
+          //
+          // PR #621 review (also-fix): UNCONDITIONAL, never gated on
+          // `pair.pair_count > 1`. D-133's veto always binds the WHOLE
+          // property pair, regardless of how many `suggested_merge` rows
+          // happened to be pending for it — a group can have exactly one
+          // pending row (pair_count === 1) while its two properties still
+          // carry many adverts each (measured live: 83 of 261 photo
+          // groups, 32%, are pair_count === 1 with more than 2 adverts
+          // combined). Gating the disclosure on an internal count that
+          // has no relationship to the veto's real blast radius left
+          // exactly those groups showing only "Este rechazo es
+          // permanente." — true, but silent about which adverts it
+          // covers, for an action that cannot be undone from the UI.
           <span data-testid="dedup-reject-warning" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
-            {pair.pair_count > 1
-              ? `Se rechazarán los ${pair.pair_count} pares de esta pareja de propiedades, para siempre.`
-              : "Este rechazo es permanente."}
+            {`Se rechazará que estos anuncios (${pair.listing_count_lo} ↔ ${pair.listing_count_hi}) sean la misma vivienda, para siempre.`}
           </span>
         )}
         {confirmingReject && (
@@ -379,13 +446,12 @@ export function PropertyPairCard({
             opacity: busy !== null ? 0.6 : 1,
           }}
         >
-          {busy === "reject_pair"
-            ? "Rechazando…"
-            : confirmingReject
-              ? "Sí, rechazar"
-              : pair.pair_count > 1
-                ? `Rechazar (${pair.pair_count} pares)`
-                : "Rechazar"}
+          {/* Issue #615/D-135: no "(N pares)" suffix any more — the
+              second-tap warning above already spells out the blast
+              radius in advert counts; repeating the raw internal pair
+              count on the button itself was the same misreading risk
+              (D-133's original "Rechazar (38 pares)"). */}
+          {busy === "reject_pair" ? "Rechazando…" : confirmingReject ? "Sí, rechazar" : "Rechazar"}
         </button>
         <button
           type="button"

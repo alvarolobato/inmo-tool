@@ -308,6 +308,44 @@ def _cmd_purge_fuzzy(conn, dry_run: bool = False, yes: bool = False) -> int:
     return 0
 
 
+def _cmd_backfill_matched_photos(conn, dry_run: bool = False, yes: bool = False) -> int:
+    """One-off migration (issue #615, supersedes the separately-filed #622):
+    populate `detail.matched_photos` on pending `photo_hash`
+    suggested_merge rows filed before #615's `matched_pairs` landed —
+    read-only against the persistent photo_hashes store, never a live
+    fetch. See `engine.backfill_matched_photos`'s docstring for exactly
+    what it does and does not touch (status/confidence/match_basis are
+    never modified).
+
+    Aborts rather than writing anything when the persistent photo-hash
+    store is unreachable — see `engine.PhotoHashStoreUnavailableError`."""
+    try:
+        if dry_run:
+            scanned, would_update = engine.preview_backfill_matched_photos(conn)
+            print(
+                f"[dry-run] Would add detail.matched_photos to {would_update} "
+                f"of {scanned} pending photo_hash suggestion(s) (issue #615 "
+                "backfill, read-only against the photo_hashes store)."
+            )
+            return 0
+        if not yes and not _confirm(
+            "This will add detail.matched_photos to pending photo_hash "
+            "suggestions (status, confidence and match_basis are never "
+            "changed). Continue?"
+        ):
+            print("Aborted (no changes made). Pass --yes to skip this prompt.")
+            return 1
+        scanned, updated = engine.backfill_matched_photos(conn)
+    except engine.PhotoHashStoreUnavailableError as exc:
+        print(f"ABORTED: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"Added detail.matched_photos to {updated} of {scanned} pending "
+        "photo_hash suggestion(s) (issue #615 backfill)."
+    )
+    return 0
+
+
 def _cmd_resolve_conflict(conn, suggestion_id: int) -> int:
     try:
         engine.resolve_conflict(conn, suggestion_id)
@@ -401,6 +439,24 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Skip the interactive confirmation prompt",
     )
+    backfill_matched_photos_parser = subparsers.add_parser(
+        "backfill-matched-photos",
+        help=(
+            "One-off migration (issue #615): add detail.matched_photos to "
+            "pending photo_hash suggested_merge rows filed before #615, "
+            "read-only against the photo_hashes store"
+        ),
+    )
+    backfill_matched_photos_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print (scanned, would_update) without writing anything",
+    )
+    backfill_matched_photos_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the interactive confirmation prompt",
+    )
 
     args = parser.parse_args(argv)
 
@@ -427,6 +483,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_purge_phone(conn, dry_run=args.dry_run, yes=args.yes)
         if args.subcommand == "purge-fuzzy":
             return _cmd_purge_fuzzy(conn, dry_run=args.dry_run, yes=args.yes)
+        if args.subcommand == "backfill-matched-photos":
+            return _cmd_backfill_matched_photos(
+                conn, dry_run=args.dry_run, yes=args.yes
+            )
         return _cmd_resolve_conflict(conn, args.suggestion_id)
     finally:
         conn.close()

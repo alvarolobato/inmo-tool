@@ -249,7 +249,34 @@ def fetch_hashes_with_stats(
 ) -> tuple[list[imagehash.ImageHash], PhotoFetchStats]:
     """Fetch and hash each URL; skip (don't raise on) any that fail.
 
-    Returns the hashes plus a `PhotoFetchStats` describing how they were
+    Thin wrapper over `fetch_hash_pairs_with_stats` (issue #615) that drops
+    the URL each hash came from — every existing caller/test here only ever
+    wanted the hash values, so this function's own return shape and every
+    log line/side effect it produces are UNCHANGED by that split. Use
+    `fetch_hash_pairs_with_stats` instead when the caller needs to know
+    which specific photo a hash belongs to (e.g. to report which images a
+    photo_hash match actually matched, not just the aggregate ratio).
+    """
+    pairs, stats = fetch_hash_pairs_with_stats(
+        photo_urls, source=source, store_conn=store_conn
+    )
+    return [h for _url, h in pairs], stats
+
+
+def fetch_hash_pairs_with_stats(
+    photo_urls: tuple[str, ...], *, source: str = "unknown", store_conn=None
+) -> tuple[list[tuple[str, imagehash.ImageHash]], PhotoFetchStats]:
+    """Fetch and hash each URL; skip (don't raise on) any that fail.
+
+    Same fetch loop as `fetch_hashes_with_stats` (that function is now a
+    thin wrapper over this one — issue #615), but returns each hash PAIRED
+    with the URL it came from, so a caller can report which specific photo
+    matched another listing's specific photo, not just an aggregate ratio.
+    Never re-derive this pairing elsewhere (e.g. by re-hashing in the
+    dashboard) — this is the one place a photo URL and its hash are
+    produced together.
+
+    Returns the pairs plus a `PhotoFetchStats` describing how they were
     obtained — see that class for why the live/cached split is load-bearing.
 
     Issue #221: when *store_conn* is given, per-URL results are read from and
@@ -278,7 +305,7 @@ def fetch_hashes_with_stats(
     `source` (the connector name, e.g. "milanuncios") is just for that one
     line's context — it does not change fetch/hash behaviour.
     """
-    hashes: list[imagehash.ImageHash] = []
+    pairs: list[tuple[str, imagehash.ImageHash]] = []
     stats = PhotoFetchStats()
     # Seeded from the store, then kept current as this call's own fetches land
     # so a URL repeated inside one `photo_urls` tuple is fetched once rather
@@ -299,7 +326,7 @@ def fetch_hashes_with_stats(
         if url in known:
             entry = known[url]
             if entry.ok and entry.phash is not None:
-                hashes.append(entry.phash)
+                pairs.append((url, entry.phash))
                 stats.cached_hashed += 1
             else:
                 stats.cached_failed += 1
@@ -329,7 +356,7 @@ def fetch_hashes_with_stats(
             continue
         # Success bookkeeping deliberately sits outside the try: a failure
         # while *recording* a hash must not also count it as a failed fetch.
-        hashes.append(digest)
+        pairs.append((url, digest))
         stats.live_hashed += 1
         known[url] = photo_hash_store.StoredHash(photo_url=url, phash=digest, ok=True)
         if store_conn and not photo_hash_store.save(
@@ -341,7 +368,7 @@ def fetch_hashes_with_stats(
             "photo_hash: %d/%d photo(s) failed to fetch/hash (source=%s) — "
             "see DEBUG logs for the individual URLs/errors",
             stats.failed,
-            stats.failed + len(hashes),
+            stats.failed + len(pairs),
             source,
         )
     if stats.store_write_failures:
@@ -352,7 +379,7 @@ def fetch_hashes_with_stats(
             stats.store_write_failures,
             source,
         )
-    return hashes, stats
+    return pairs, stats
 
 
 def pack_hash(h: imagehash.ImageHash) -> int:
@@ -418,6 +445,120 @@ def match_ratio(hashes_a: list[int], hashes_b: list[int]) -> float | None:
         )
     )
     return matched / len(smaller)
+
+
+@dataclass(frozen=True)
+class MatchedPhotoPair:
+    """One photo on each side that `matched_pairs` judged a match, plus how
+    strong that match was. `distance` is the raw Hamming distance (lower =
+    stronger; 0 = pixel-identical hash) — the same metric `match_ratio`
+    thresholds against, exposed here per-pair instead of collapsed into one
+    aggregate ratio."""
+
+    url_a: str
+    url_b: str
+    distance: int
+
+
+def matched_pairs(
+    pairs_a: list[tuple[str, imagehash.ImageHash]],
+    pairs_b: list[tuple[str, imagehash.ImageHash]],
+) -> list[MatchedPhotoPair]:
+    """Which specific photo on side A matched which specific photo on side
+    B, strongest match first (issue #615).
+
+    Before this, `match_ratio` only ever reported an aggregate fraction —
+    "92% of the smaller set matched" — with no record of WHICH photos
+    produced that number. That made a photo_hash suggestion's evidence
+    fundamentally unviewable: a card could only show "photo #1 of listing A
+    next to photo #1 of listing B", which is frequently two unrelated rooms
+    when the actual match was, say, photo #5 against photo #9. This
+    function is the one place that pairing is computed — callers (the
+    dashboard included) must consume its output, never re-derive matches
+    themselves from raw hashes (that would be a second, driftable
+    implementation of the exact same threshold logic `match_ratio` already
+    owns).
+
+    Mirrors `match_ratio`'s own matching rule exactly (iterate the SMALLER
+    side, each hash's best candidate in the LARGER side within
+    `_HASH_HAMMING_THRESHOLD`) so a card's "N photos matched" count is
+    never inconsistent with `match_ratio`'s own denominator — but reports
+    each pairing's actual URLs and distance instead of collapsing to one
+    fraction. "Best candidate" is the closest (lowest-distance) match, not
+    just the first one found within threshold, so a listing with several
+    near-duplicate photos pairs each small-side photo with its truest
+    match rather than an arbitrary "good enough" one. A larger-side photo
+    CAN be the best match for more than one smaller-side photo (e.g. two
+    near-identical shots of the same room) — not deduplicated, since that
+    is itself useful signal for a human judging "is this really the same
+    unit", not a bug to hide.
+
+    NOTE (issue #624 review): `match_ratio` is the fraction of the
+    SMALLER set, so a ratio of 1.0 means the smaller set is a SUBSET of
+    the larger one, not that the two sets are equal — a 3-photo listing
+    fully contained inside a 30-photo one is a real, currently-live shape.
+    `matched_pairs` mirrors that asymmetry deliberately: it never assumes
+    `len(pairs_a) == len(pairs_b)`, iterates only the smaller side, and
+    the larger side's un-matched photos simply never appear in the
+    output — there is no requirement that every larger-side photo find a
+    partner. See `TestMatchedPairs::test_asymmetric_subset_shape` for the
+    exact 3-vs-30 case pinned as a fixture.
+
+    Always returns url_a from *pairs_a* and url_b from *pairs_b*,
+    regardless of which side happens to be smaller internally — the
+    caller never has to know or care.
+    """
+    if not pairs_a or not pairs_b:
+        return []
+
+    a_is_smaller = len(pairs_a) <= len(pairs_b)
+    smaller, larger = (pairs_a, pairs_b) if a_is_smaller else (pairs_b, pairs_a)
+
+    # PR #621 review perf note: this is an O(|smaller| x |larger|) scan on
+    # raw ImageHash.__sub__ (numpy subtraction under the hood) — after
+    # issue #623's packed-hash rewrite of the rest of the photo_hash path
+    # (get_packed / match_ratio), this loop is the only remaining
+    # numpy-subtraction hot path in the signal. Left as-is deliberately:
+    # matched_pairs only ever runs on pairs that ALREADY cleared
+    # MIN_MATCH_RATIO (evaluate_pair calls it after match_ratio, not
+    # instead of it) — a few hundred pairs per dedup pass, not the full
+    # O(n^2) corpus — so the cost is negligible in practice. Worth a
+    # packed-array rewrite if that ever stops being true, not before.
+    found: list[MatchedPhotoPair] = []
+    for url_small, h_small in smaller:
+        best: tuple[str, int] | None = None
+        for url_large, h_large in larger:
+            # int(): imagehash's `-` returns numpy.int64, not a plain
+            # Python int. match_ratio (elsewhere in this module) only ever
+            # divides that value into a plain float, so this never
+            # mattered before — but matched_pairs stores the raw distance
+            # itself, and an un-cast numpy.int64 inside `detail` crashes
+            # `json.dumps` at `file_suggestion`'s write (caught by
+            # TestDedupRunResultPhotoHealth's real-Postgres test, the one
+            # test in this suite that hashes real in-memory images rather
+            # than building an ImageHash straight from a hex string).
+            distance = int(h_small - h_large)
+            if distance <= _HASH_HAMMING_THRESHOLD and (
+                best is None or distance < best[1]
+            ):
+                best = (url_large, distance)
+        if best is not None:
+            url_large, distance = best
+            if a_is_smaller:
+                found.append(
+                    MatchedPhotoPair(
+                        url_a=url_small, url_b=url_large, distance=distance
+                    )
+                )
+            else:
+                found.append(
+                    MatchedPhotoPair(
+                        url_a=url_large, url_b=url_small, distance=distance
+                    )
+                )
+
+    found.sort(key=lambda p: p.distance)
+    return found
 
 
 def hashes_share_any_match(hashes_a: list[int], hashes_b: list[int]) -> bool:

@@ -72,21 +72,32 @@ PROPERTY pair, not listing pair. Five linked design calls:
    `NOT_ALREADY_MERGED` filter verbatim inside the same `PENDING_PAIR_CTE`.
    One card (`PropertyPairCard`) renders per group, leading with the
    strongest evidence (`confidence DESC`) and listing the rest as
-   collapsed, expandable "pares corroborantes" rows — never hidden, since
+   collapsed, expandable corroborating-evidence rows — never hidden, since
    a bulk reject decision should be informed by ALL the evidence, not just
    the headline pair. A `basis` filter narrows to GROUPS containing at
    least one row of that basis but still returns the group's FULL
-   evidence. Every count/label the UI shows for a group (badge, toggle,
-   warning, button) uses the SAME number — `pair.pair_count`, the count of
-   corroborating listing-PAIR rows — and the same noun, "pares"; it is
-   never labeled "anuncios" (adverts/listings), which can genuinely differ
-   from the pair count when one listing appears in more than one pair. The
-   toggle shows BOTH the "others" count (`pair_count - 1`, excluding the
-   primary pair already on screen) and the total together in one string
-   ("otros N pares (de M en total)"), not two separately-labeled numbers a
-   reader has to reconcile — PR #611's second review (M-4) flagged the
-   split presentation as confusing and the two prior e2e fixtures (both
-   N=2) as never actually exercising the "N-1, not N" relationship.
+   evidence.
+
+   > **UI-copy paragraph SUPERSEDED by [D-135](D-135-dedup-card-photos-and-advert-counts.md)
+   > (2026-08-20, issue #615)** — this paragraph originally required every
+   > count/label to use `pair_count` and the noun "pares" ("N pares
+   > corroborantes" badge, "otros N pares (de M en total)" toggle text).
+   > That labeling is exactly what read to the owner as "N adverts of the
+   > same property" (a 7-listing property vs. a 13-listing property
+   > produced "38 pares", misread as 38 adverts). D-135 replaces the
+   > headline badge with per-side ADVERT counts
+   > (`listing_count_lo`/`listing_count_hi`, "7 anuncios ↔ 13 anuncios")
+   > and relabels the collapsed toggle to "señales" instead of "pares".
+   > `pair_count` itself is unchanged and still exists on the type as a
+   > `data-pair-count` debug/test attribute (reject blast-radius
+   > bookkeeping). It no longer GATES the reject warning either (PR #621
+   > review also-fix): that warning now unconditionally names the advert
+   > counts, since D-133's veto always binds the whole property pair
+   > regardless of how many `suggested_merge` rows happened to be
+   > pending — a group can be `pair_count === 1` while its two properties
+   > still carry many adverts each. The grouping/confirm/reject/veto
+   > mechanics in points 2–5 below are entirely untouched by D-135 and
+   > remain binding as written.
 
 2. **Confirm**: acts on exactly ONE representative row — the group's
    strongest evidence (`evidence[0].suggestion_id`) — via the existing
