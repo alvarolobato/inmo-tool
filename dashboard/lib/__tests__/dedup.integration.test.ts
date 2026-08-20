@@ -559,5 +559,73 @@ describe.runIf(dbAvailable)("dedup review queue — real Postgres", () => {
         );
       });
     });
+
+    describe("issue #626: per-side internal-link profile id", () => {
+      it("resolves the lowest-id ACTIVE matched profile per side, independently", async () => {
+        await withRealDb(async (pool) => {
+          // Two profiles both match propA — the LOWER id must win
+          // (deterministic), and propB — matching a DIFFERENT profile —
+          // must resolve independently, not fall back to propA's.
+          const profileLow = await insertProfile(pool);
+          const profileHigh = await insertProfile(pool);
+          const profileForB = await insertProfile(pool);
+          expect(profileLow).toBeLessThan(profileHigh);
+
+          const propA = await insertProperty(pool, { address: "Calle Enlace A" });
+          const propB = await insertProperty(pool, { address: "Calle Enlace B" });
+          const lA = await insertListing(pool, propA);
+          const lB = await insertListing(pool, propB);
+          await markProfileMatch(pool, profileHigh, propA);
+          await markProfileMatch(pool, profileLow, propA);
+          await markProfileMatch(pool, profileForB, propB);
+          await insertSuggestion(pool, lA, lB, { match_basis: "fuzzy", confidence: 0.6 });
+
+          const groups = await listDedupPropertyPairSuggestions({ limit: 100 });
+          const [lo, hi] = [propA, propB].sort((x, y) => x - y);
+          const group = groups.find((g) => g.property_lo_id === lo && g.property_hi_id === hi)!;
+          expect(group).toBeDefined();
+          const propAProfileId = lo === propA ? group.property_lo_profile_id : group.property_hi_profile_id;
+          const propBProfileId = lo === propA ? group.property_hi_profile_id : group.property_lo_profile_id;
+          expect(propAProfileId).toBe(profileLow);
+          expect(propBProfileId).toBe(profileForB);
+        });
+      });
+
+      it("resolves null for a side that matches no active profile", async () => {
+        await withRealDb(async (pool) => {
+          const propA = await insertProperty(pool, { address: "Calle Sin Perfil A" });
+          const propB = await insertProperty(pool, { address: "Calle Sin Perfil B" });
+          const lA = await insertListing(pool, propA);
+          const lB = await insertListing(pool, propB);
+          await insertSuggestion(pool, lA, lB, { match_basis: "fuzzy", confidence: 0.6 });
+
+          const groups = await listDedupPropertyPairSuggestions({ limit: 100 });
+          const [lo, hi] = [propA, propB].sort((x, y) => x - y);
+          const group = groups.find((g) => g.property_lo_id === lo && g.property_hi_id === hi)!;
+          expect(group).toBeDefined();
+          expect(group.property_lo_profile_id).toBeNull();
+          expect(group.property_hi_profile_id).toBeNull();
+        });
+      });
+
+      it("an archived profile's match does not resolve to a link (mirrors profile_relevant's own exclusion)", async () => {
+        await withRealDb(async (pool) => {
+          const archived = await insertProfile(pool, { archived: true });
+          const propA = await insertProperty(pool, { address: "Calle Perfil Archivado A" });
+          const propB = await insertProperty(pool, { address: "Calle Perfil Archivado B" });
+          const lA = await insertListing(pool, propA);
+          const lB = await insertListing(pool, propB);
+          await markProfileMatch(pool, archived, propA);
+          await insertSuggestion(pool, lA, lB, { match_basis: "fuzzy", confidence: 0.6 });
+
+          const groups = await listDedupPropertyPairSuggestions({ limit: 100 });
+          const [lo, hi] = [propA, propB].sort((x, y) => x - y);
+          const group = groups.find((g) => g.property_lo_id === lo && g.property_hi_id === hi)!;
+          expect(group).toBeDefined();
+          expect(group.property_lo_profile_id).toBeNull();
+          expect(group.property_hi_profile_id).toBeNull();
+        });
+      });
+    });
   });
 });

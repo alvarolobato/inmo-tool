@@ -145,11 +145,36 @@ export interface DedupPropertyPairSuggestion {
    * from `pair_count` above. */
   listing_count_lo: number;
   listing_count_hi: number;
+  /** The lowest-id ACTIVE search profile the LO/HI property currently
+   * matches (`profile_listing_state.matched = true`, joined against a
+   * non-archived `search_profile` — same predicate as
+   * `PROFILE_RELEVANT_EXISTS`), or `null` when it matches none. Issue
+   * #626: `/profiles/[id]/properties/[propertyId]` 404s unless the
+   * property is a matched candidate for THAT profile id
+   * (`isPropertyMatchedForProfile`), so linking to the internal detail
+   * page needs a real profile id, not just the pair's `profile_relevant`
+   * boolean (which only says "at least one side matches SOME profile" —
+   * not which one, and not which side). `null` means there is currently
+   * no internal page to link to for that side; the UI must not render a
+   * broken link in that case. See `internalPropertyHref` below — the
+   * ONE place this resolves to a URL. */
+  property_lo_profile_id: number | null;
+  property_hi_profile_id: number | null;
   top_confidence: number;
   top_match_basis: MatchBasis;
   latest_created_at: string;
   profile_relevant: boolean;
   evidence: DedupEvidenceItem[];
+}
+
+/** The one place `{profileId, propertyId}` becomes the internal detail-page
+ * URL (issue #626) — `null` when the side has no matched active profile to
+ * link through (`property_lo_profile_id`/`property_hi_profile_id` above),
+ * in which case the caller must render no link rather than a route that
+ * 404s. Never re-templated inline at each call site. */
+export function internalPropertyHref(profileId: number | null, propertyId: number): string | null {
+  if (profileId === null) return null;
+  return `/profiles/${profileId}/properties/${propertyId}`;
 }
 
 export interface DedupPropertyPairCounts {

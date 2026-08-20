@@ -86,17 +86,18 @@ async function insertProperty(overrides: { address: string; m2_built?: number })
 
 async function insertListing(
   propertyId: number,
-  overrides: { source: string; current_price?: number; photo_urls?: string[] },
+  overrides: { source: string; current_price?: number; photo_urls?: string[]; url?: string },
 ): Promise<number> {
   const result = await pool.query<{ id: number }>(
-    `INSERT INTO listing (property_id, source, external_id, current_price, photo_urls)
-     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+    `INSERT INTO listing (property_id, source, external_id, current_price, photo_urls, url)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
     [
       propertyId,
       overrides.source,
       `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`,
       overrides.current_price ?? 200000,
       overrides.photo_urls ?? null,
+      overrides.url ?? null,
     ],
   );
   return result.rows[0].id;
@@ -276,6 +277,74 @@ test("renders both sides of a real photo_hash pair, ordered ahead of a weaker fu
       [listingA, listingB, listingC, listingD],
     ]);
     await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [[propA, propB, propC, propD]]);
+  }
+});
+
+test("issue #626: every stored photo renders (no cap), and the internal property-page link is distinct from the portal link, at desktop width", async ({
+  page,
+}) => {
+  skipIfNoDb(test);
+
+  // More than 4 photos per side on BOTH sides — issue #626's own bar: a
+  // <=4-photo fixture would pass whether or not the cap was removed.
+  const photosA = Array.from({ length: 5 }, (_, i) => `https://img.example.com/626-desktop-a-${i}.jpg`);
+  const photosB = Array.from({ length: 7 }, (_, i) => `https://img.example.com/626-desktop-b-${i}.jpg`);
+  const profileId = await insertProfile();
+  const propA = await insertProperty({ address: `${NAME_PREFIX}Calle Escritorio A` });
+  const propB = await insertProperty({ address: `${NAME_PREFIX}Calle Escritorio B` });
+  const listingA = await insertListing(propA, {
+    source: "fotocasa",
+    current_price: 230000,
+    photo_urls: photosA,
+    url: "https://www.fotocasa.es/es/comprar/vivienda/626-desktop-a",
+  });
+  const listingB = await insertListing(propB, {
+    source: "idealista",
+    current_price: 230000,
+    photo_urls: photosB,
+  });
+  await markProfileMatch(profileId, propA);
+  const suggestionId = await insertSuggestion(listingA, listingB, {
+    match_basis: "photo_hash",
+    confidence: 0.9,
+    detail: { match_ratio: 1.0 },
+  });
+  const pairKey = pairKeyOf(propA, propB);
+
+  try {
+    await page.goto("/admin/dedup");
+    await assertNoErrorSurface(page);
+
+    const card = page.locator(`[data-pair-key="${pairKey}"]`);
+    await expect(card).toBeVisible();
+
+    const panels = card.locator(".dedup-side-panel");
+    const loPanel = panels.nth(0);
+    const hiPanel = panels.nth(1);
+
+    // No cap, no expand affordance — every stored photo renders.
+    await expect(loPanel.locator(".dedup-photo-grid img")).toHaveCount(5);
+    await expect(hiPanel.locator(".dedup-photo-grid img")).toHaveCount(7);
+    await expect(card.getByTestId("dedup-photos-expand")).toHaveCount(0);
+
+    // propA matches the seeded active profile -> a real internal link,
+    // visually distinct from (and alongside) the portal link. propB
+    // matches no active profile -> the explicit "unavailable" note.
+    const loInternalLink = loPanel.getByTestId("dedup-internal-link");
+    await expect(loInternalLink).toBeVisible();
+    await expect(loInternalLink).toHaveAttribute("href", `/profiles/${profileId}/properties/${propA}`);
+    await expect(loInternalLink).toHaveAttribute("target", "_blank");
+    await expect(loInternalLink).toHaveText(/ficha interna/i);
+    const loPortalLink = loPanel.getByText(/ver anuncio original/i);
+    await expect(loPortalLink).toBeVisible();
+    await expect(hiPanel.getByTestId("dedup-internal-link")).toHaveCount(0);
+    await expect(hiPanel.getByTestId("dedup-internal-link-unavailable")).toBeVisible();
+  } finally {
+    await pool.query("DELETE FROM suggested_merge WHERE id = $1", [suggestionId]);
+    await pool.query("DELETE FROM profile_listing_state WHERE profile_id = $1", [profileId]);
+    await pool.query("DELETE FROM search_profile WHERE id = $1", [profileId]);
+    await pool.query("DELETE FROM listing WHERE id = ANY($1::bigint[])", [[listingA, listingB]]);
+    await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [[propA, propB]]);
   }
 });
 

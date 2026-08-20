@@ -633,18 +633,18 @@ body {
 }
 
 /* Desktop: 4 photos across. Matches the shape this always rendered at.
-   Issue #615: ListingSidePanel shows the matched-first photos capped at 4
-   by DEFAULT (direct owner instruction — a 4-photo default view is fine
-   as long as those 4 are the ones that actually matched, not the first 4
-   in storage order), with a "+N más" button revealing the rest. Once
-   expanded, a many-photo listing (the live case: up to 13 sale listings
-   on one side of a pair, each with its own gallery) could still stretch
-   the card to full-page height — `max-height` + `overflow-y: auto` caps
-   the EXPANDED grid at roughly 3 rows and scrolls internally instead.
-   Inert at the default (unexpanded) 4-photo view, since 4 thumbnails
-   never reach this height in the first place. Desktop value here; mobile
-   override below per D-121's ladder (a static literal differing only by
-   breakpoint). */
+   Issue #626: ListingSidePanel renders EVERY photo, matched-first (issue
+   #615) — #615 shipped a 4-photo default cap with a "+N más" expander,
+   which the owner then clarified was a misreading of his original ask
+   ("todas las fotos", not "4 con un botón"); the cap is gone. A many-photo
+   listing (fotocasa averages 27, #625) would otherwise stretch the card to
+   full-page height and push the confirm/reject buttons off screen —
+   `max-height` + `overflow-y: auto` caps the grid at roughly 3 rows and
+   scrolls INTERNALLY instead, independent of photo count (inert on a
+   3-or-4-photo listing, which never reaches this height in the first
+   place — a fixture with more than 4 photos per side is required to
+   actually exercise this). Desktop value here; mobile override below per
+   D-121's ladder (a static literal differing only by breakpoint). */
 .dedup-photo-grid {
   grid-template-columns: repeat(4, 1fr);
   max-height: 240px;
@@ -694,9 +694,11 @@ body {
   /* 4 thumbnails across a stacked mobile panel are too small to compare
      visually (#576's root complaint) — 2 columns roughly doubles each
      thumbnail's width and height. Desktop keeps the 4-column base rule
-     above, untouched. Issue #615: mobile's own max-height is taller than
-     desktop's (320px vs 240px) — 2 columns of larger thumbnails need more
-     vertical room per row to still show ~2 rows before scrolling. */
+     above, untouched. Mobile's own max-height is taller than desktop's
+     (320px vs 240px) — 2 columns of larger thumbnails need more vertical
+     room per row to still show ~2 rows before scrolling (issue #626: this
+     is what keeps the confirm/reject buttons reachable without scrolling
+     past a long gallery at 390px). */
   .dedup-photo-grid {
     grid-template-columns: repeat(2, 1fr);
     max-height: 320px;

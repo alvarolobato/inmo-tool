@@ -3,14 +3,25 @@ id: D-135
 title: Dedup photo-match card shows the photos that matched, and advert counts, not pair counts
 date: 2026-08-20
 group: Data / connectors
-rule: 'A dedup photo card shows only the photos matched_pairs actually matched (never re-derived in the UI), capped at 4 with rest reachable; copy shows advert counts, never pair_count.'
+rule: 'A dedup photo card renders EVERY stored photo per side, matched_pairs-ordered matched-first (never re-derived in the UI, never capped — D-139); copy shows advert counts, never pair_count.'
 ---
 
 # D-135: Dedup photo-match card shows the photos that matched, and advert counts, not pair counts
 
 *Decided: 2026-08-20 — revised same day, mid-implementation, on a direct
 owner instruction relayed by the coordinating agent (see "Revision"
-below).*
+below). **Point 2's "capped at 4, expandable" mechanic was itself
+superseded the same week by [D-139](D-139-dedup-card-uncapped-photos-internal-link.md)
+(issue #626)** — the owner's #615 wording ("me muestras 4 fotos como
+máximo... necesito ver el resto") was read here as "4 by default is fine
+as long as they're the right 4"; his #626 follow-up ("solo me muestras 4
+fotos como máximo" — the SAME complaint, again) clarified he meant "stop
+capping it, full stop." The matched-FIRST ordering this point establishes
+is unchanged and still binding — D-139 removes the cap, not the ordering.
+The frontmatter `rule:` above reflects the current (post-D-139) behavior;
+point 2's prose below is left as originally written, for the historical
+record of what actually shipped and why, per this project's "retire,
+don't rewrite" convention applied at paragraph grain.*
 
 **Context**: Issue #615, filed mid-review by the owner on his phone, one
 card after #611 (D-133) shipped:
@@ -97,8 +108,10 @@ here).
    a self-introduced papercut in new code, not a pre-existing production
    bug (no signal wrote a hash distance into `detail` before this PR).
 
-2. **The dashboard shows matched-first, capped at 4, with the rest
-   reachable — never all-at-once, never index-order.** Direct owner
+2. **[SUPERSEDED by D-139/issue #626 — the cap itself is gone; the
+   matched-first ORDERING this point establishes is still binding.]**
+   The dashboard shows matched-first, capped at 4, with the rest
+   reachable — never all-at-once, never index-order. Direct owner
    instruction, in priority order: (a) show the photos that ACTUALLY
    matched, never the first N in storage order; (b) the rest must stay
    reachable, with the hidden count visible. `dashboard/lib/dedup-shared.ts`
