@@ -82,7 +82,10 @@ evidence, so the next mobile-aware screen in this batch (#572, #574, #575)
 recognizes the exact shape rather than just "flex wrap sometimes doesn't
 work."
 
-**See**: issue #576, `dashboard/components/dedup/SuggestionCard.tsx`,
+**See**: issue #576, `dashboard/components/dedup/SuggestionCard.tsx` (the
+file this decision was written against — renamed/split into
+`ListingSidePanel.tsx`/`PropertyPairCard.tsx` by issue #605 Part 2, which
+reused the same layout rules this decision covers),
 `dashboard/app/admin/dedup/page.tsx`, `dashboard/app/globals.css`,
 `dashboard/e2e/mobile-dedup.spec.ts`. Issue #572 / its PR #580 records the
 sibling decision for where a mobile-only value divergence should live in an

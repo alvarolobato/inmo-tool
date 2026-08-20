@@ -50,6 +50,15 @@ def _cmd_run(conn) -> int:
             f"different merge (issue #604) — marked confirmed, no new "
             f"merge performed."
         )
+    if result.vetoed_pending_resolved:
+        # Issue #605 Part 2 revision (PR #611 review B1): same visibility
+        # precedent — a pending row resolved this way never goes through
+        # evaluate_pair either, so it's invisible in "Compared ..." above.
+        print(
+            f"Resolved {result.vetoed_pending_resolved} pending "
+            f"suggestion(s) whose PROPERTY pair was vetoed by an earlier "
+            f"rejection — marked rejected, no new merge performed."
+        )
     if result.same_source_skipped:
         # Issue #197: same-source pairs are skipped before ever reaching
         # evaluate_pair, so they're invisible in the "Compared ..." line
@@ -122,6 +131,24 @@ def _cmd_reject(conn, suggestion_id: int) -> int:
         print(f"reject failed: {exc}", file=sys.stderr)
         return 1
     print(f"Rejected suggestion {suggestion_id}; it won't be suggested again.")
+    return 0
+
+
+def _cmd_reject_pair(conn, suggestion_id: int) -> int:
+    """`ps dedup reject-pair <id>` — issue #605 Part 2 revision (PR #611
+    review B1). Rejects the whole PROPERTY pair behind `suggestion_id`,
+    not just that one listing pair — see `engine.reject_property_pair`'s
+    docstring for why the plain per-listing reject above isn't enough."""
+    try:
+        count = engine.reject_property_pair(conn, suggestion_id)
+    except ValueError as exc:
+        print(f"reject-pair failed: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"Rejected the property pair behind suggestion {suggestion_id} "
+        f"({count} pending suggestion(s) marked rejected) — permanently "
+        "vetoed from future merge/suggestion."
+    )
     return 0
 
 
@@ -258,6 +285,15 @@ def main(argv: list[str] | None = None) -> int:
         "reject", help="Mark a suggestion as not-the-same-property"
     )
     reject_parser.add_argument("suggestion_id", type=int)
+    reject_pair_parser = subparsers.add_parser(
+        "reject-pair",
+        help=(
+            "Reject the whole PROPERTY pair behind a suggested_merge row "
+            "(issue #605 Part 2 revision, PR #611 review B1) — permanent, "
+            "vetoes every listing combination between the two properties"
+        ),
+    )
+    reject_pair_parser.add_argument("suggestion_id", type=int)
     resolve_parser = subparsers.add_parser(
         "resolve-conflict", help="Clear a merge-time state conflict flag"
     )
@@ -322,6 +358,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_confirm(conn, args.suggestion_id)
         if args.subcommand == "reject":
             return _cmd_reject(conn, args.suggestion_id)
+        if args.subcommand == "reject-pair":
+            return _cmd_reject_pair(conn, args.suggestion_id)
         if args.subcommand == "process-actions":
             return _cmd_process_actions(conn)
         if args.subcommand == "purge-same-source":

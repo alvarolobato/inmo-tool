@@ -22,6 +22,10 @@ Subcommands:
   suggestions             List pending suggested_merge rows for human review
   confirm <id>            Merge the pair behind a suggested_merge row
   reject <id>             Mark a suggestion as not-the-same-property
+  reject-pair <id>        Reject the whole PROPERTY pair behind a suggestion
+                          (issue #605 Part 2 revision) — permanently vetoes
+                          every listing combination between the two
+                          properties, not just this one suggested_merge row
   resolve-conflict <id>   Clear a merge-time state conflict flag
   process-actions         Drain pending dashboard review-queue confirm/reject
                           requests once (the long-running container drains
@@ -148,6 +152,7 @@ case "$SUBCMD" in
     suggestions)      cmd_suggestions ;;
     confirm)          _cmd_with_suggestion_id confirm "$@" ;;
     reject)           _cmd_with_suggestion_id reject "$@" ;;
+    reject-pair)      _cmd_with_suggestion_id reject-pair "$@" ;;
     resolve-conflict) _cmd_with_suggestion_id resolve-conflict "$@" ;;
     process-actions)  cmd_process_actions ;;
     purge-same-source) cmd_purge_same_source ;;

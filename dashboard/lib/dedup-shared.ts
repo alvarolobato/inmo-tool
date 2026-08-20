@@ -58,7 +58,22 @@ export interface DedupListingSide {
 // added one, so the flat shape isn't kept around as a second option.
 
 export type DedupActionStatus = "pending" | "done" | "failed";
-export type DedupActionKind = "confirm" | "reject";
+/**
+ * `reject_pair` (issue #605 Part 2 revision — PR #611 review B1) rejects
+ * the whole PROPERTY pair behind one representative `suggestion_id`, not
+ * just that one listing pair — the engine derives the property pair from
+ * the suggestion's listings, marks every currently-pending suggested_merge
+ * row between the two properties as rejected, and persists a permanent
+ * `property_merge_veto` so no future listing combination between them can
+ * be suggested or auto-merged either. See `etl.dedup.engine.
+ * reject_property_pair`'s docstring for why the plain `reject` above isn't
+ * enough for a grouped card: it only ever bound the exact listing pair it
+ * was filed against, leaving every OTHER combination between two
+ * multi-listing properties free to resurface — reproduced live, including
+ * a case where the very next dedup run auto-merged the two properties a
+ * human had just rejected.
+ */
+export type DedupActionKind = "confirm" | "reject" | "reject_pair";
 
 export interface DedupActionRow {
   id: number;

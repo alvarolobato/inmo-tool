@@ -1017,6 +1017,63 @@ CREATE INDEX IF NOT EXISTS idx_suggested_merge_action_pending
 CREATE INDEX IF NOT EXISTS idx_suggested_merge_action_suggestion_id
     ON suggested_merge_action (suggestion_id);
 
+-- 'reject_pair' (issue #605 Part 2 revision, PR #611 review B1) was added
+-- after this table's original CREATE TABLE — same idempotent-migration
+-- reasoning as property_merge_log.match_basis above: inert on an
+-- already-migrated database, but a live constraint needs its own ALTER or
+-- a pre-existing database would reject every real 'reject_pair' insert.
+ALTER TABLE suggested_merge_action DROP CONSTRAINT IF EXISTS suggested_merge_action_action_check;
+ALTER TABLE suggested_merge_action ADD CONSTRAINT suggested_merge_action_action_check
+    CHECK (action IN ('confirm','reject','reject_pair'));
+
+-- ============================================================
+-- Property-pair merge veto (issue #605 Part 2 revision — PR #611 review B1)
+-- ============================================================
+--
+-- A permanent, PROPERTY-level "these are not the same property" record —
+-- distinct from suggested_merge.status='rejected', which only binds the
+-- exact LISTING pair it was filed against. The grouped review queue
+-- (#605 Part 2) asks the human "is property A the same as property B?",
+-- but the underlying comparisons are per-listing: property A with 2
+-- listings and property B with 2 listings can produce up to 4 distinct
+-- listing-pair rows, and a human rejecting only the ones the UI happened
+-- to show left the untouched combinations free to be freshly suggested —
+-- or auto-merged outright — on the very next run, reopening the identical
+-- question the human just answered (reproduced live in PR #611's review,
+-- including a case where the next run auto-merged the exact two
+-- properties the human had just rejected).
+--
+-- `etl.dedup.engine.reject_property_pair` inserts one row here (canonical
+-- lower-id-first order) whenever a human rejects a property-pair group in
+-- the dashboard, and ALSO marks every currently-pending suggested_merge
+-- row between the two properties as rejected. This table is what makes
+-- the rejection bind for listing combinations that don't exist yet — a
+-- new listing ingested later, or a combination the engine simply hadn't
+-- compared. `engine._run`'s pairwise loop consults it BEFORE
+-- evaluate_pair for every candidate pair, so a vetoed property pair is
+-- skipped for both auto-merge and suggestion-filing, never just
+-- re-suggestion; `engine.perform_merge` refuses outright (raises) if ever
+-- asked to merge an exact vetoed pair, as a last-line defense.
+--
+-- Repointed, never orphaned, when either property loses a merge for an
+-- unrelated reason: see `perform_merge`'s veto-repoint step, the same
+-- reassignment discipline reconcile.reconcile_merge already applies to
+-- listing/profile_listing_state/feedback_event.
+CREATE TABLE IF NOT EXISTS property_merge_veto (
+    id                     BIGSERIAL    PRIMARY KEY,
+    property_lo_id         BIGINT       NOT NULL REFERENCES property(id) ON DELETE CASCADE,
+    property_hi_id         BIGINT       NOT NULL REFERENCES property(id) ON DELETE CASCADE,
+    created_at             TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    -- Audit trail only (which suggested_merge row(s) this veto was raised
+    -- from) — never read by engine logic, never assumed exhaustive.
+    source_suggestion_ids  BIGINT[]     NOT NULL DEFAULT '{}',
+    CONSTRAINT property_merge_veto_order CHECK (property_lo_id < property_hi_id),
+    CONSTRAINT property_merge_veto_unique UNIQUE (property_lo_id, property_hi_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_property_merge_veto_lo ON property_merge_veto (property_lo_id);
+CREATE INDEX IF NOT EXISTS idx_property_merge_veto_hi ON property_merge_veto (property_hi_id);
+
 -- ============================================================
 -- Connector observability (Phase 1.3, issue #11)
 -- ============================================================

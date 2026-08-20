@@ -45,7 +45,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const { searchParams } = new URL(request.url);
   const basis = parseBasis(searchParams.get("basis"));
   const onlyProfileRelevant = searchParams.get("profile") === "relevant";
-  const limit = Math.min(parsePositiveInt(searchParams.get("limit"), 20), 100);
+  const limit = Math.min(parsePositiveInt(searchParams.get("limit"), 30), 100);
   const offset = parsePositiveInt(searchParams.get("offset"), 0);
 
   try {

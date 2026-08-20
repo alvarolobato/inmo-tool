@@ -295,7 +295,7 @@ test("collapses every pending listing-pair row for the same two properties into 
     await expect(card).toHaveAttribute("data-pair-count", "2");
     // Leads with the strongest evidence (photo_hash 85%).
     await expect(card.getByTestId("dedup-match-basis")).toHaveText(/fotos/i);
-    await expect(card.getByTestId("dedup-pair-count-badge")).toHaveText(/2 anuncios corroborantes/i);
+    await expect(card.getByTestId("dedup-pair-count-badge")).toHaveText(/2 pares corroborantes/i);
 
     // The weaker corroborating row is not lost — it's reachable, collapsed.
     await expect(card.getByTestId("dedup-evidence-row")).toHaveCount(0);
@@ -504,15 +504,114 @@ test("confirm — real DB round trip: one property with both listings, and a pro
   }
 });
 
-test("reject requires a second, explicit tap — and real DB round trip rejects EVERY corroborating pair, without merging", async ({
+test("confirm on a MULTI-ROW group merges via the representative row only, and the sibling clears from the queue immediately (issue #605 Part 2, D-133 point 2 — PR #611 review M4)", async ({
+  page,
+}) => {
+  skipIfNoDb(test);
+  test.skip(!pythonAvailable, `no Python venv at ${VENV_PYTHON} — cannot exercise the real confirm path`);
+
+  // property A has 2 listings, property B has 1 — 2 pending listing-pair
+  // rows for the same property pair. Confirming the CARD only submits the
+  // strongest-evidence (photo_hash) row; the fuzzy sibling is never
+  // itself confirmed — it clears because BOTH its listings end up sharing
+  // a property once the representative's merge moves every listing off
+  // the losing property (issue #605 Part 1's same-property filter),
+  // before the dedup engine's next scheduled pass ever formally flips its
+  // DB status.
+  const propA = await insertProperty({ address: `${NAME_PREFIX}Confirmar Multi A` });
+  const propB = await insertProperty({ address: `${NAME_PREFIX}Confirmar Multi B` });
+  const listingA1 = await insertListing(propA, { source: "milanuncios", current_price: 210000 });
+  const listingA2 = await insertListing(propA, { source: "idealista", current_price: 210000 });
+  const listingB1 = await insertListing(propB, { source: "fotocasa", current_price: 210000 });
+  const weakSuggestion = await insertSuggestion(listingA1, listingB1, { match_basis: "fuzzy", confidence: 0.6 });
+  const strongSuggestion = await insertSuggestion(listingA2, listingB1, {
+    match_basis: "photo_hash",
+    confidence: 0.85,
+    detail: { match_ratio: 1.0 },
+  });
+  const pairKey = pairKeyOf(propA, propB);
+
+  try {
+    await page.goto("/admin/dedup");
+    await assertNoErrorSurface(page);
+
+    const card = page.locator(`[data-pair-key="${pairKey}"]`);
+    await expect(card).toBeVisible();
+    await expect(card).toHaveAttribute("data-pair-count", "2");
+    await card.getByTestId("dedup-confirm").click();
+
+    // ONE action, against the strongest-evidence row — never one per
+    // underlying suggestion.
+    await expect
+      .poll(async () => {
+        const rows = await pool.query<{ count: string }>(
+          "SELECT COUNT(*) FROM suggested_merge_action WHERE suggestion_id = $1 AND action = 'confirm'",
+          [strongSuggestion],
+        );
+        return Number(rows.rows[0].count);
+      })
+      .toBe(1);
+    const weakActionRows = await pool.query<{ count: string }>(
+      "SELECT COUNT(*) FROM suggested_merge_action WHERE suggestion_id = $1",
+      [weakSuggestion],
+    );
+    expect(Number(weakActionRows.rows[0].count)).toBe(0);
+
+    runDedupActionProcessorOnce();
+
+    // The whole card clears — not just the representative row's half.
+    await expect(card).toHaveCount(0, { timeout: 20_000 });
+    await assertNoErrorSurface(page);
+
+    // Real DB effect: all three listings end up on one surviving property.
+    const listingRows = await pool.query<{ property_id: number }>(
+      "SELECT DISTINCT property_id FROM listing WHERE id = ANY($1::bigint[])",
+      [[listingA1, listingA2, listingB1]],
+    );
+    expect(listingRows.rows).toHaveLength(1);
+
+    const strongStatus = await pool.query<{ status: string }>(
+      "SELECT status FROM suggested_merge WHERE id = $1",
+      [strongSuggestion],
+    );
+    expect(strongStatus.rows[0].status).toBe("confirmed");
+
+    // The sibling was NEVER itself confirmed by an action — its DB status
+    // may still genuinely read 'pending' at this instant (it formally
+    // resolves on the dedup engine's own next scheduled pass, D-133 point
+    // 2) — the point of this assertion is that the QUEUE already hid it,
+    // proven above by the whole card disappearing in one poll cycle.
+    const weakStatus = await pool.query<{ status: string }>(
+      "SELECT status FROM suggested_merge WHERE id = $1",
+      [weakSuggestion],
+    );
+    expect(["pending", "confirmed"]).toContain(weakStatus.rows[0].status);
+  } finally {
+    await pool.query("DELETE FROM property_merge_log WHERE property_id = ANY($1::bigint[]) " +
+      "OR losing_property_id = ANY($1::bigint[])", [[propA, propB]]);
+    await pool.query("DELETE FROM suggested_merge_action WHERE suggestion_id = ANY($1::bigint[])", [
+      [weakSuggestion, strongSuggestion],
+    ]);
+    await pool.query("DELETE FROM suggested_merge WHERE id = ANY($1::bigint[])", [
+      [weakSuggestion, strongSuggestion],
+    ]);
+    await pool.query("DELETE FROM listing WHERE id = ANY($1::bigint[])", [[listingA1, listingA2, listingB1]]);
+    await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [[propA, propB]]);
+  }
+});
+
+test("reject requires a second, explicit tap — and the real DB round trip vetoes the WHOLE property pair, atomically, without merging", async ({
   page,
 }) => {
   skipIfNoDb(test);
   test.skip(!pythonAvailable, `no Python venv at ${VENV_PYTHON} — cannot exercise the real reject path`);
 
   // A 2-row group: rejecting the CARD must reject BOTH underlying pairs
-  // (issue #605 Part 2's deliberate design — rejection is permanent, so a
-  // group reject is a bigger commitment than the old per-listing reject).
+  // AND persist a property_merge_veto (issue #605 Part 2 revision, PR #611
+  // review B1) — rejection is permanent, and a per-listing-pair-only
+  // reject left OTHER listing combinations between the same two
+  // properties free to resurface, which is exactly the bug the review
+  // caught live.
   const propA = await insertProperty({ address: `${NAME_PREFIX}Rechazar A` });
   const propB = await insertProperty({ address: `${NAME_PREFIX}Rechazar B` });
   const listingA1 = await insertListing(propA, { source: "milanuncios" });
@@ -529,7 +628,7 @@ test("reject requires a second, explicit tap — and real DB round trip rejects 
     const card = page.locator(`[data-pair-key="${pairKey}"]`);
     await expect(card).toBeVisible();
 
-    // First tap: shows the "this is permanent, N pairs" warning — does NOT
+    // First tap: shows the "this is permanent, N pares" warning — does NOT
     // submit anything yet.
     await card.getByTestId("dedup-reject").click();
     await expect(card.getByTestId("dedup-reject-warning")).toBeVisible();
@@ -543,31 +642,50 @@ test("reject requires a second, explicit tap — and real DB round trip rejects 
       })
       .toBe(0);
 
-    // Second tap: actually submits — one reject action per underlying row.
+    // Second tap: submits ONE atomic action against the representative
+    // (strongest-evidence) suggestion — never a fan-out — so no
+    // partial-failure state to strand the card in (PR #611 review M3).
     await card.getByTestId("dedup-reject").click();
     await expect
       .poll(async () => {
         const rows = await pool.query<{ count: string }>(
-          "SELECT COUNT(*) FROM suggested_merge_action WHERE suggestion_id = ANY($1::bigint[])",
-          [[suggestion1, suggestion2]],
+          "SELECT COUNT(*) FROM suggested_merge_action WHERE suggestion_id = $1 AND action = 'reject_pair'",
+          [suggestion1],
         );
         return Number(rows.rows[0].count);
       })
-      .toBe(2);
+      .toBe(1);
+    // And never one for the sibling — the engine derives the whole group
+    // server-side from the ONE action it receives.
+    const siblingActionRows = await pool.query<{ count: string }>(
+      "SELECT COUNT(*) FROM suggested_merge_action WHERE suggestion_id = $1",
+      [suggestion2],
+    );
+    expect(Number(siblingActionRows.rows[0].count)).toBe(0);
 
     runDedupActionProcessorOnce();
 
     await expect(card).toHaveCount(0, { timeout: 20_000 });
     await assertNoErrorSurface(page);
 
+    // BOTH underlying rows rejected, though only one was named in the
+    // action — engine.reject_property_pair resolves the whole pair.
     const suggestionRows = await pool.query<{ id: number; status: string }>(
-      "SELECT id, status FROM suggested_merge WHERE id = ANY($1::bigint[])",
+      "SELECT id, status FROM suggested_merge WHERE id = ANY($1::bigint[]) ORDER BY id",
       [[suggestion1, suggestion2]],
     );
     expect(suggestionRows.rows).toHaveLength(2);
     for (const row of suggestionRows.rows) {
       expect(row.status).toBe("rejected");
     }
+
+    // The permanent property-level veto now exists.
+    const [vetoLo, vetoHi] = [propA, propB].sort((a, b) => a - b);
+    const vetoRows = await pool.query<{ count: string }>(
+      "SELECT COUNT(*) FROM property_merge_veto WHERE property_lo_id = $1 AND property_hi_id = $2",
+      [vetoLo, vetoHi],
+    );
+    expect(Number(vetoRows.rows[0].count)).toBe(1);
 
     // No merge happened — the properties still stand alone.
     const listingRows = await pool.query<{ property_id: number }>(
@@ -576,6 +694,8 @@ test("reject requires a second, explicit tap — and real DB round trip rejects 
     );
     expect(listingRows.rows).toHaveLength(2);
   } finally {
+    await pool.query("DELETE FROM property_merge_veto WHERE property_lo_id = ANY($1::bigint[]) " +
+      "OR property_hi_id = ANY($1::bigint[])", [[propA, propB]]);
     await pool.query("DELETE FROM suggested_merge_action WHERE suggestion_id = ANY($1::bigint[])", [
       [suggestion1, suggestion2],
     ]);

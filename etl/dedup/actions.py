@@ -72,6 +72,9 @@ def _process_one(conn, action_id: int, suggestion_id: int, action: str) -> None:
     elif action == "reject":
         engine.reject_suggestion(conn, suggestion_id)
         _mark_done(conn, action_id, {})
+    elif action == "reject_pair":
+        rejected_count = engine.reject_property_pair(conn, suggestion_id)
+        _mark_done(conn, action_id, {"rejected_count": rejected_count})
     else:  # pragma: no cover — the action CHECK constraint already excludes this
         raise ValueError(
             f"Unknown action {action!r} for suggested_merge_action id={action_id}"

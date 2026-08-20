@@ -164,6 +164,7 @@ def _cleanup(conn) -> None:
         # this shared, per-session database starting from a clean queue.
         cur.execute("DELETE FROM suggested_merge_action")
         cur.execute("DELETE FROM suggested_merge")
+        cur.execute("DELETE FROM property_merge_veto")
         cur.execute("DELETE FROM property_merge_log")
         cur.execute("DELETE FROM feedback_event")
         cur.execute("DELETE FROM profile_listing_state")
@@ -2235,6 +2236,266 @@ class TestSamePropertyPendingResolution:
         # pre-existing #214 path unaffected.
         assert second.reevaluated_total == 1
         assert second.reevaluated_updated == 1
+
+
+class TestPropertyPairVeto:
+    """Issue #605 Part 2 revision (PR #611 review, B1): the grouped review
+    queue's reject only bound the exact LISTING pair(s) shown, via the
+    pre-existing listing-keyed skip_pairs. Two multi-listing properties can
+    have listing combinations the queue never showed (or that don't exist
+    yet), so a human's rejection left those free to be freshly suggested —
+    or auto-merged outright — on the very next run, reopening the identical
+    question or worse. Reproduced live in the review. `property_merge_veto`
+    + `engine.reject_property_pair` fix this at the PROPERTY level.
+    """
+
+    def _seed_two_pending_pairs_same_property_pair(self, conn, ext_prefix):
+        """Property A (2 listings) x property B (1 listing) — 2 pending
+        listing-pair rows for the SAME property pair, the #600 shape at a
+        small scale."""
+        prop_a = _insert_property(conn, address=f"{ext_prefix} Calle A")
+        prop_b = _insert_property(conn, address=f"{ext_prefix} Calle B")
+        listing_a1 = _insert_listing(conn, prop_a, "idealista", f"{ext_prefix}-a1")
+        listing_a2 = _insert_listing(conn, prop_a, "milanuncios", f"{ext_prefix}-a2")
+        listing_b1 = _insert_listing(conn, prop_b, "fotocasa", f"{ext_prefix}-b1")
+        suggestion_ids = []
+        with conn.cursor() as cur:
+            for la in (listing_a1, listing_a2):
+                cur.execute(
+                    "INSERT INTO suggested_merge "
+                    "(listing_id_a, listing_id_b, match_basis, confidence, status) "
+                    "VALUES (%s, %s, 'fuzzy', 0.600, 'pending') RETURNING id",
+                    sorted((la, listing_b1)),
+                )
+                suggestion_ids.append(cur.fetchone()[0])
+        conn.commit()
+        return prop_a, prop_b, listing_a1, listing_a2, listing_b1, suggestion_ids
+
+    def test_reject_property_pair_rejects_every_pending_row_for_the_pair(
+        self, dedup_db
+    ):
+        (
+            prop_a,
+            prop_b,
+            _la1,
+            _la2,
+            _lb1,
+            suggestion_ids,
+        ) = self._seed_two_pending_pairs_same_property_pair(dedup_db, "veto-reject-all")
+
+        rejected_count = engine.reject_property_pair(dedup_db, suggestion_ids[0])
+
+        assert rejected_count == 2
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = ANY(%s) ORDER BY id",
+                (suggestion_ids,),
+            )
+            assert [r[0] for r in cur.fetchall()] == ["rejected", "rejected"]
+
+            lo, hi = sorted((prop_a, prop_b))
+            cur.execute(
+                "SELECT source_suggestion_ids FROM property_merge_veto "
+                "WHERE property_lo_id = %s AND property_hi_id = %s",
+                (lo, hi),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            assert set(row[0]) == set(suggestion_ids)
+
+    def test_a_brand_new_listing_combination_between_vetoed_properties_never_auto_merges(
+        self, dedup_db
+    ):
+        """The core live bug, pinned at maximum strength: give the two
+        properties a MATCHING cadastral_ref (engine.evaluate_pair's
+        strongest, always-`merge` signal — see TestCadastralExactMatch)
+        AFTER the veto, so a passing test here is unambiguous proof the
+        veto check runs before evaluate_pair, not incidental proof the
+        listings just didn't happen to match."""
+        (
+            prop_a,
+            prop_b,
+            listing_a1,
+            _la2,
+            listing_b1,
+            suggestion_ids,
+        ) = self._seed_two_pending_pairs_same_property_pair(
+            dedup_db, "veto-no-resuggest"
+        )
+        engine.reject_property_pair(dedup_db, suggestion_ids[0])
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "UPDATE property SET cadastral_ref = %s WHERE id IN (%s, %s)",
+                ("9999999ZZ9999Z0009ZZ", prop_a, prop_b),
+            )
+        dedup_db.commit()
+
+        # A brand-new listing on property A's side, ingested AFTER the veto
+        # — a listing combination (a3, b1) never previously compared.
+        listing_a3 = _insert_listing(dedup_db, prop_a, "pisos", "veto-no-resuggest-a3")
+        dedup_db.commit()
+
+        result = engine.run(dedup_db)
+
+        assert result.merged == 0
+        assert result.suggested == 0
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM suggested_merge WHERE status = 'pending'")
+            assert cur.fetchone()[0] == 0
+            cur.execute(
+                "SELECT DISTINCT property_id FROM listing WHERE id IN (%s, %s, %s)",
+                (listing_a1, listing_a3, listing_b1),
+            )
+            assert {r[0] for r in cur.fetchall()} == {prop_a, prop_b}
+
+    def test_confirm_suggestion_refuses_to_merge_an_exactly_vetoed_pair(self, dedup_db):
+        """Defense in depth: a stale `pending` row from before the veto
+        existed (a race window `_run` hasn't swept yet) must not be
+        mergeable via a direct confirm_suggestion call either — the
+        listing-keyed suggested_merge status check alone wouldn't catch
+        this, since the row is still genuinely 'pending'."""
+        (
+            prop_a,
+            prop_b,
+            _la1,
+            _la2,
+            _lb1,
+            suggestion_ids,
+        ) = self._seed_two_pending_pairs_same_property_pair(
+            dedup_db, "veto-confirm-refuse"
+        )
+        # Persist the veto directly (bypassing reject_property_pair, which
+        # would itself reject both rows) to isolate the race: a veto exists,
+        # but suggestion_ids[1] is still 'pending'.
+        lo, hi = sorted((prop_a, prop_b))
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO property_merge_veto (property_lo_id, property_hi_id) "
+                "VALUES (%s, %s)",
+                (lo, hi),
+            )
+        dedup_db.commit()
+
+        with pytest.raises(ValueError, match="already.*vetoed"):
+            engine.confirm_suggestion(dedup_db, suggestion_ids[1])
+
+        # Refused before any mutation — still pending, no merge log.
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = %s",
+                (suggestion_ids[1],),
+            )
+            assert cur.fetchone()[0] == "pending"
+            cur.execute("SELECT COUNT(*) FROM property_merge_log")
+            assert cur.fetchone()[0] == 0
+
+    def test_a_pending_row_predating_the_veto_is_swept_to_rejected_on_the_next_run(
+        self, dedup_db
+    ):
+        """The other half of the race window above: rather than staying
+        stuck 'pending' forever (unreachable by _load_recorded_pairs'
+        listing-keyed skip set, same shape of bug issue #604 fixed for
+        same-property), a leftover pending row for a now-vetoed property
+        pair is swept to 'rejected' the next time `_run` iterates it."""
+        (
+            prop_a,
+            prop_b,
+            _la1,
+            _la2,
+            _lb1,
+            suggestion_ids,
+        ) = self._seed_two_pending_pairs_same_property_pair(
+            dedup_db, "veto-sweep-pending"
+        )
+        lo, hi = sorted((prop_a, prop_b))
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO property_merge_veto (property_lo_id, property_hi_id) "
+                "VALUES (%s, %s)",
+                (lo, hi),
+            )
+        dedup_db.commit()
+
+        result = engine.run(dedup_db)
+
+        assert result.vetoed_pending_resolved == 2
+        assert result.merged == 0
+        assert result.suggested == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status, detail FROM suggested_merge WHERE id = ANY(%s)",
+                (suggestion_ids,),
+            )
+            rows = cur.fetchall()
+        for status, detail in rows:
+            assert status == "rejected"
+            assert detail["resolved_reason"] == "property pair vetoed"
+
+    def test_veto_is_repointed_not_orphaned_when_the_vetoed_property_later_merges(
+        self, dedup_db
+    ):
+        """Property A is vetoed against property C (a human decision).
+        Property A separately merges into property B for an unrelated
+        reason (matching cadastral_ref) — the merged identity (survivor)
+        must still carry the veto against C: the properties being merged
+        are, by definition, the same real-world unit (reconcile.py's own
+        reasoning for combining `matched` on merge), so a veto against A
+        must still apply to whatever A becomes."""
+        prop_a = _insert_property(dedup_db, address="Veto Repoint A")
+        prop_c = _insert_property(dedup_db, address="Veto Repoint C")
+        lo, hi = sorted((prop_a, prop_c))
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO property_merge_veto (property_lo_id, property_hi_id) "
+                "VALUES (%s, %s)",
+                (lo, hi),
+            )
+        dedup_db.commit()
+
+        # A merges into a NEW property B via the strongest signal
+        # (cadastral) — nothing to do with the veto against C.
+        _insert_pair(
+            dedup_db,
+            "solvia",
+            "servihabitat",
+            "veto-repoint-merge",
+            cadastral_ref_a="1112223AB1112C0001AB",
+            cadastral_ref_b="1112223AB1112C0001AB",
+            address_a="Veto Repoint A",
+            address_b="Veto Repoint A bis",
+        )
+        # Reuse property A's row for one side of the merge by re-pointing
+        # a listing onto it, standing in for "A itself already had a
+        # listing and now merges" without fighting _insert_pair's own
+        # property-creation shape.
+        listing_on_a = _insert_listing(
+            dedup_db, prop_a, "idealista", "veto-repoint-a-listing"
+        )
+        dedup_db.commit()
+
+        result = engine.run(dedup_db)
+        assert result.merged >= 1
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT property_id FROM listing WHERE id = %s", (listing_on_a,)
+            )
+            (current_prop_a,) = cur.fetchone()
+
+        # A's identity may have moved (it could be the survivor OR the
+        # loser of whatever merge(s) happened) — read where it landed and
+        # assert the veto against C now names THAT id, never lost.
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT property_lo_id, property_hi_id FROM property_merge_veto"
+            )
+            veto_rows = cur.fetchall()
+        assert len(veto_rows) == 1
+        veto_lo, veto_hi = veto_rows[0]
+        assert prop_c in (veto_lo, veto_hi)
+        other_side = veto_hi if veto_lo == prop_c else veto_lo
+        assert other_side == current_prop_a
 
 
 class TestRecordedPairBatching:

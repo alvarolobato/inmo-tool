@@ -15,7 +15,12 @@ from __future__ import annotations
 from decimal import Decimal
 
 from etl.dedup import actions, engine
-from etl.tests.test_dedup_engine import _insert_pair, dedup_db
+from etl.tests.test_dedup_engine import (
+    _insert_listing,
+    _insert_pair,
+    _insert_property,
+    dedup_db,
+)
 
 __all__ = ["dedup_db"]  # re-exported fixture, keep the linter quiet
 
@@ -190,6 +195,87 @@ class TestProcessPendingActionsReject:
             cur.execute("SELECT COUNT(*) FROM suggested_merge")
             # Still exactly the one (rejected) row — no duplicate refiled.
             assert cur.fetchone()[0] == 1
+
+
+class TestProcessPendingActionsRejectPair:
+    """The dashboard's grouped-queue reject (issue #605 Part 2 revision,
+    PR #611 review B1) enqueues ONE `reject_pair` action against the
+    group's representative suggestion — this is the real end-to-end round
+    trip: dashboard action row -> process_pending_actions ->
+    engine.reject_property_pair -> every pending row for the property pair
+    rejected + a permanent property_merge_veto, atomically (no N-request
+    fan-out, so no partial-failure state to strand a card in)."""
+
+    def _seed_two_pending_pairs_same_property_pair(self, conn, ext_prefix):
+        prop_a = _insert_property(conn, address=f"{ext_prefix} Calle A")
+        prop_b = _insert_property(conn, address=f"{ext_prefix} Calle B")
+        listing_a1 = _insert_listing(conn, prop_a, "idealista", f"{ext_prefix}-a1")
+        listing_a2 = _insert_listing(conn, prop_a, "milanuncios", f"{ext_prefix}-a2")
+        listing_b1 = _insert_listing(conn, prop_b, "fotocasa", f"{ext_prefix}-b1")
+        suggestion_ids = []
+        with conn.cursor() as cur:
+            for la in (listing_a1, listing_a2):
+                cur.execute(
+                    "INSERT INTO suggested_merge "
+                    "(listing_id_a, listing_id_b, match_basis, confidence, status) "
+                    "VALUES (%s, %s, 'fuzzy', 0.600, 'pending') RETURNING id",
+                    sorted((la, listing_b1)),
+                )
+                suggestion_ids.append(cur.fetchone()[0])
+        conn.commit()
+        return prop_a, prop_b, suggestion_ids
+
+    def test_reject_pair_action_rejects_every_row_and_persists_a_veto(self, dedup_db):
+        prop_a, prop_b, suggestion_ids = (
+            self._seed_two_pending_pairs_same_property_pair(
+                dedup_db, "action-reject-pair"
+            )
+        )
+        # The dashboard only ever enqueues against ONE representative
+        # suggestion_id (the group's strongest evidence) — never one
+        # action per underlying row.
+        action_id = _enqueue(dedup_db, suggestion_ids[0], "reject_pair")
+
+        processed = actions.process_pending_actions(dedup_db)
+        assert processed == 1
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge_action WHERE id = %s", (action_id,)
+            )
+            assert cur.fetchone()[0] == "done"
+
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = ANY(%s) ORDER BY id",
+                (suggestion_ids,),
+            )
+            # BOTH rows rejected, though the action only named one of them.
+            assert [r[0] for r in cur.fetchall()] == ["rejected", "rejected"]
+
+            lo, hi = sorted((prop_a, prop_b))
+            cur.execute(
+                "SELECT COUNT(*) FROM property_merge_veto "
+                "WHERE property_lo_id = %s AND property_hi_id = %s",
+                (lo, hi),
+            )
+            assert cur.fetchone()[0] == 1
+
+    def test_vetoed_pair_is_not_refiled_by_a_subsequent_run(self, dedup_db):
+        _prop_a, _prop_b, suggestion_ids = (
+            self._seed_two_pending_pairs_same_property_pair(
+                dedup_db, "action-reject-pair-no-refile"
+            )
+        )
+        _enqueue(dedup_db, suggestion_ids[0], "reject_pair")
+        actions.process_pending_actions(dedup_db)
+
+        result = engine.run(dedup_db)
+        assert result.suggested == 0
+        assert result.merged == 0
+
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM suggested_merge WHERE status = 'pending'")
+            assert cur.fetchone()[0] == 0
 
 
 class TestProcessPendingActionsErrorIsolation:

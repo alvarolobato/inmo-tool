@@ -86,12 +86,16 @@ async function insertListing(
   return result.rows[0].id;
 }
 
-async function insertSuggestion(listingA: number, listingB: number): Promise<number> {
+async function insertSuggestion(
+  listingA: number,
+  listingB: number,
+  overrides: { match_basis?: string; confidence?: number } = {},
+): Promise<number> {
   const [lo, hi] = [listingA, listingB].sort((a, b) => a - b);
   const result = await pool.query<{ id: number }>(
     `INSERT INTO suggested_merge (listing_id_a, listing_id_b, match_basis, confidence, detail)
-     VALUES ($1, $2, 'photo_hash', 1.0, '{"match_ratio": 1.0}'::jsonb) RETURNING id`,
-    [lo, hi],
+     VALUES ($1, $2, $3, $4, '{"match_ratio": 1.0}'::jsonb) RETURNING id`,
+    [lo, hi, overrides.match_basis ?? "photo_hash", overrides.confidence ?? 1.0],
   );
   return result.rows[0].id;
 }
@@ -297,6 +301,77 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
       await pool.query("DELETE FROM profile_listing_state WHERE profile_id = $1", [profileId]);
       await pool.query("DELETE FROM search_profile WHERE id = $1", [profileId]);
       await pool.query("DELETE FROM listing WHERE id = ANY($1::bigint[])", [[listingA, listingB]]);
+      await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [[propA, propB]]);
+    }
+  });
+
+  test("a multi-row group's badge, evidence toggle, evidence list and reject warning are all usable at phone width (issue #605 Part 2 revision, PR #611 review M2)", async ({
+    page,
+  }) => {
+    skipIfNoDb(test);
+
+    // property A has 2 listings, property B has 1 — 2 pending listing-pair
+    // rows for the SAME property pair, the exact multi-row-group shape
+    // nothing at phone width exercised before this test (M2: both prior
+    // mobile tests seeded exactly one listing pair per property pair).
+    const propA = await insertProperty({ address: `${NAME_PREFIX}Grupo Movil A` });
+    const propB = await insertProperty({ address: `${NAME_PREFIX}Grupo Movil B` });
+    const listingA1 = await insertListing(propA, { source: "milanuncios", current_price: 175000 });
+    const listingA2 = await insertListing(propA, { source: "idealista", current_price: 175000 });
+    const listingB1 = await insertListing(propB, { source: "fotocasa", current_price: 175000 });
+    const weakSuggestion = await insertSuggestion(listingA1, listingB1, { match_basis: "fuzzy", confidence: 0.6 });
+    const strongSuggestion = await insertSuggestion(listingA2, listingB1, {
+      match_basis: "photo_hash",
+      confidence: 0.9,
+    });
+    const pairKey = pairKeyOf(propA, propB);
+
+    try {
+      await page.goto("/admin/dedup");
+      await assertNoErrorSurface(page);
+
+      const card = page.locator(`[data-pair-key="${pairKey}"]`);
+      await expect(card).toBeVisible();
+      await card.scrollIntoViewIfNeeded();
+      await expect(card).toHaveAttribute("data-pair-count", "2");
+
+      // Badge: correct count, consistent noun ("pares", never "anuncios" —
+      // PR #611 review B3).
+      await expect(card.getByTestId("dedup-pair-count-badge")).toHaveText(/2 pares corroborantes/i);
+
+      // Evidence toggle: a real 44px tap target (measured 18px before this
+      // fix, PR #611 review M1) — it's the ONLY route to the corroborating
+      // evidence a bulk decision should be informed by.
+      const toggle = card.getByTestId("dedup-evidence-toggle");
+      const toggleBox = await toggle.boundingBox();
+      expect(toggleBox).not.toBeNull();
+      expect(toggleBox!.height).toBeGreaterThanOrEqual(44);
+
+      await expect(card.getByTestId("dedup-evidence-row")).toHaveCount(0);
+      await toggle.click();
+      await expect(card.getByTestId("dedup-evidence-row")).toHaveCount(1);
+      await expect(card.getByTestId("dedup-evidence-row")).toContainText(/difuso/i);
+
+      // Reject warning: names the true pair count with the same noun as
+      // the badge/button.
+      await card.getByTestId("dedup-reject").click();
+      await expect(card.getByTestId("dedup-reject-warning")).toHaveText(/2 pares/i);
+      await expect(card.getByTestId("dedup-reject")).toHaveText(/sí, rechazar/i);
+      // Cancel — this test only proves the UI is usable at phone width,
+      // not the real reject round trip (dedup-review.spec.ts's desktop
+      // test already covers that, including the Python subprocess call).
+      await card.getByTestId("dedup-reject-cancel").click();
+
+      const hasHorizontalOverflow = await page.evaluate(() => {
+        const main = document.querySelector("main.main-content");
+        return main !== null && main.scrollWidth > main.clientWidth;
+      });
+      expect(hasHorizontalOverflow).toBe(false);
+    } finally {
+      await pool.query("DELETE FROM suggested_merge WHERE id = ANY($1::bigint[])", [
+        [weakSuggestion, strongSuggestion],
+      ]);
+      await pool.query("DELETE FROM listing WHERE id = ANY($1::bigint[])", [[listingA1, listingA2, listingB1]]);
       await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [[propA, propB]]);
     }
   });

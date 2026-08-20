@@ -39,10 +39,11 @@ function EvidenceRow({ evidence }: { evidence: DedupEvidenceItem }) {
   );
 }
 
-/** Polls one enqueued confirm/reject action to completion. Shared by both
- * the single confirm call and the N reject calls a group reject fans out
- * into — each call gets its OWN poll loop so a slow one never blocks the
- * others from resolving. */
+/** Polls one enqueued confirm/reject-pair action to completion. Both group
+ * actions are a single `suggested_merge_action` row (issue #605 Part 2
+ * revision, PR #611 review — the engine derives the whole property pair
+ * from one representative suggestion_id), so there is exactly one poll
+ * loop per action, never a fan-out to babysit. */
 function pollDedupAction(
   actionId: number,
   cancelledRef: React.RefObject<boolean>,
@@ -87,12 +88,24 @@ function pollDedupAction(
   });
 }
 
+// The route segment differs from the action kind only for reject-pair
+// (`reject-pair`, hyphenated, vs. the `reject_pair` DedupActionKind) —
+// mapped explicitly rather than string-munged so a future action kind
+// can't silently produce the wrong URL.
+const ACTION_ROUTE_SEGMENT: Record<"confirm" | "reject_pair", string> = {
+  confirm: "confirm",
+  reject_pair: "reject-pair",
+};
+
 async function submitAction(
   suggestionId: number,
-  action: "confirm" | "reject",
+  action: "confirm" | "reject_pair",
 ): Promise<{ ok: true; actionId: number } | { ok: false; error: string }> {
   try {
-    const res = await fetch(`/api/dedup/suggestions/${suggestionId}/${action}`, { method: "POST" });
+    const res = await fetch(
+      `/api/dedup/suggestions/${suggestionId}/${ACTION_ROUTE_SEGMENT[action]}`,
+      { method: "POST" },
+    );
     if (!res.ok) {
       const body = await res.json().catch(() => null);
       return { ok: false, error: body?.error ?? "No se pudo enviar la solicitud." };
@@ -113,14 +126,14 @@ export function PropertyPairCard({
    * the parent removes this card from the queue. */
   onResolved: (pairKey: string) => void;
 }) {
-  const [busy, setBusy] = useState<"confirm" | "reject" | null>(null);
+  const [busy, setBusy] = useState<"confirm" | "reject_pair" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   // Rejecting a whole property pair on the strength of ONE listing
   // comparison is a bigger commitment than the old per-listing reject
   // (it permanently freezes every pending row in the group — D-024/#605).
   // A second, explicit tap makes that blast radius visible before it fires,
-  // instead of one click silently rejecting up to 38 rows.
+  // instead of one click silently rejecting up to 38 pairs.
   const [confirmingReject, setConfirmingReject] = useState(false);
   const cancelledRef = useRef(false);
 
@@ -164,26 +177,26 @@ export function PropertyPairCard({
   const runReject = async () => {
     setError(null);
     setConfirmingReject(false);
-    setBusy("reject");
-    const submissions = await Promise.all(
-      pair.evidence.map((e) => submitAction(e.suggestion_id, "reject")),
-    );
-    const failedSubmission = submissions.find((s) => !s.ok);
-    if (failedSubmission && !failedSubmission.ok) {
-      setError(
-        `${failedSubmission.error} (algunos de los ${pair.evidence.length} pares pueden haberse enviado igualmente — revisa la cola en unos segundos)`,
-      );
+    setBusy("reject_pair");
+    // ONE atomic action against the representative suggestion — the
+    // engine (etl.dedup.engine.reject_property_pair) derives the whole
+    // property pair from its listings and rejects every currently-pending
+    // row between the two properties itself. Not a per-evidence-row
+    // fan-out: issue #605 Part 2 revision (PR #611 review B1/M3) — a
+    // fan-out of N independent HTTP requests has no atomicity, so a
+    // partial failure could strand the card (some pairs rejected, some
+    // not, no clean retry). A single action either resolves or fails as
+    // one unit.
+    const submitted = await submitAction(primary.suggestion_id, "reject_pair");
+    if (!submitted.ok) {
+      setError(submitted.error);
       setBusy(null);
       return;
     }
-    const actionIds = submissions.filter((s): s is { ok: true; actionId: number } => s.ok).map((s) => s.actionId);
-    const results = await Promise.all(actionIds.map((id) => pollDedupAction(id, cancelledRef)));
+    const result = await pollDedupAction(submitted.actionId, cancelledRef);
     if (cancelledRef.current) return;
-    const failed = results.filter((r) => !r.ok);
-    if (failed.length > 0) {
-      setError(
-        `${failed.length} de ${results.length} rechazos no se completaron — revisa la cola, puede que algunos pares queden pendientes.`,
-      );
+    if (!result.ok) {
+      setError(result.error);
       setBusy(null);
       return;
     }
@@ -246,7 +259,7 @@ export function PropertyPairCard({
           {pair.pair_count > 1 && (
             <span
               data-testid="dedup-pair-count-badge"
-              title="Cuántos anuncios distintos corroboran esta misma pregunta"
+              title="Cuántas comparaciones de anuncios corroboran esta misma pregunta — puede haber menos anuncios distintos que pares, si un anuncio aparece en más de uno"
               style={{
                 fontSize: 11,
                 fontWeight: 600,
@@ -256,7 +269,7 @@ export function PropertyPairCard({
                 color: "var(--fg-muted)",
               }}
             >
-              {pair.pair_count} anuncios corroborantes
+              {pair.pair_count} pares corroborantes
             </span>
           )}
         </div>
@@ -278,21 +291,34 @@ export function PropertyPairCard({
 
       {corroborating.length > 0 && (
         <div data-testid="dedup-evidence-section">
+          {/* dedup-evidence-toggle: this is the ONLY route to the
+              corroborating evidence D-133 leans on for an informed bulk
+              decision, so it needs a real tap target on a phone, not just
+              confirm/reject/cancel (PR #611 review M1 — measured 18px
+              tall with no class, `padding: 0`, before this fix). `padding`
+              is the only value that differs by breakpoint, so — per
+              D-121's ladder for a static (no prop/state-dependent) value
+              — it's deleted from the inline style below and owned
+              entirely by this class; the mobile override in globals.css
+              adds the same 44px min-height + centering `.dedup-action-btn`
+              already gets. Every other inline property here (color,
+              fontSize, cursor, layout) is identical at every width, so it
+              stays inline. */}
           <button
             type="button"
             data-testid="dedup-evidence-toggle"
+            className="dedup-evidence-toggle"
             onClick={() => setExpanded((v) => !v)}
             style={{
               background: "none",
               border: "none",
-              padding: 0,
               fontSize: 12,
               color: "var(--accent)",
               cursor: "pointer",
               textAlign: "left",
             }}
           >
-            {expanded ? "Ocultar" : "Ver"} los otros {corroborating.length} anuncios que corroboran esta pareja
+            {expanded ? "Ocultar" : "Ver"} los otros {corroborating.length} pares que corroboran esta pareja de propiedades
           </button>
           {expanded && (
             <ul data-testid="dedup-evidence-list" style={{ listStyle: "none", margin: "6px 0 0", padding: 0 }}>
@@ -314,7 +340,7 @@ export function PropertyPairCard({
         {confirmingReject && (
           <span data-testid="dedup-reject-warning" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
             {pair.pair_count > 1
-              ? `Se rechazarán los ${pair.pair_count} anuncios de esta pareja de propiedades, para siempre.`
+              ? `Se rechazarán los ${pair.pair_count} pares de esta pareja de propiedades, para siempre.`
               : "Este rechazo es permanente."}
           </span>
         )}
@@ -353,7 +379,7 @@ export function PropertyPairCard({
             opacity: busy !== null ? 0.6 : 1,
           }}
         >
-          {busy === "reject"
+          {busy === "reject_pair"
             ? "Rechazando…"
             : confirmingReject
               ? "Sí, rechazar"

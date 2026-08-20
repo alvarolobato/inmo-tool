@@ -158,7 +158,13 @@ interface PairRow {
   pair_count: number;
   top_confidence: string;
   top_match_basis: MatchBasis;
-  latest_created_at: string;
+  // `MAX(p.created_at)` is a top-level TIMESTAMPTZ column, not embedded in
+  // a jsonb blob — the `pg` driver's default type parsers return that as a
+  // real JS `Date`, unlike the SAME field read back out of `evidence`'s
+  // jsonb_build_object below (Postgres's own `to_json` cast serializes a
+  // timestamp as a string, so `RawEvidenceJson.created_at` genuinely is a
+  // string). Typed accurately here and converted once in mapPairRow.
+  latest_created_at: Date;
   profile_relevant: boolean;
   evidence: RawEvidenceJson[];
 }
@@ -207,7 +213,7 @@ function mapPairRow(row: PairRow): DedupPropertyPairSuggestion {
     pair_count: row.pair_count,
     top_confidence: Number(row.top_confidence),
     top_match_basis: row.top_match_basis,
-    latest_created_at: row.latest_created_at,
+    latest_created_at: row.latest_created_at.toISOString(),
     profile_relevant: row.profile_relevant,
     evidence,
   };
@@ -239,7 +245,7 @@ export async function listDedupPropertyPairSuggestions(opts: {
   limit?: number;
   offset?: number;
 }): Promise<DedupPropertyPairSuggestion[]> {
-  const limit = opts.limit ?? 20;
+  const limit = opts.limit ?? 30;
   const offset = opts.offset ?? 0;
   const params: unknown[] = [];
   let havingBasis = "";

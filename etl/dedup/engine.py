@@ -169,6 +169,14 @@ class DedupRunResult:
     # `evaluate_pair` call happened; this path never calls it (there is
     # nothing left to score, the listings are already unified).
     same_property_pending_resolved: int = 0
+    # Issue #605 Part 2 revision (PR #611 review, B1): a `pending`
+    # suggested_merge row whose two PROPERTIES are covered by a
+    # `property_merge_veto` (a human rejected the property pair through
+    # the grouped review queue) — resolved to `rejected` via
+    # `_resolve_pending_vetoed_property` without ever calling
+    # evaluate_pair, same "nothing left to score" reasoning as
+    # same_property_pending_resolved above, opposite verdict.
+    vetoed_pending_resolved: int = 0
 
 
 def fetch_listing_records(conn) -> list[ListingRecord]:
@@ -555,6 +563,25 @@ def _load_recorded_pairs(
     return skip_pairs, pending_by_pair
 
 
+def _load_vetoed_property_pairs(cur) -> set[tuple[int, int]]:
+    """Preload every persisted property-pair veto once per run — same
+    one-query-per-run discipline as `_load_recorded_pairs` (issue #605
+    Part 2 revision, PR #611 review B1).
+
+    A veto is PROPERTY-level (`property_merge_veto`), not listing-level
+    like `skip_pairs` above: a human rejecting a property-pair group in
+    the grouped review queue must block every current AND future listing
+    combination between those two properties, not just the specific
+    listing pair(s) the UI happened to show. See that table's schema
+    comment in etl/schema/init.sql for the full incident this fixes
+    (reproduced live in PR #611's review — a rejected property pair came
+    right back, and in one case the very next run auto-merged the two
+    properties a human had just rejected).
+    """
+    cur.execute("SELECT property_lo_id, property_hi_id FROM property_merge_veto")
+    return {(lo, hi) for lo, hi in cur.fetchall()}
+
+
 def file_suggestion(
     conn, a: ListingRecord, b: ListingRecord, result: PairEvaluation
 ) -> None:
@@ -585,6 +612,28 @@ def perform_merge(
     survivor_id, losing_id = sorted((a.property_id, b.property_id))
 
     with conn.cursor() as cur:
+        # Last-line defense (issue #605 Part 2 revision, PR #611 review
+        # B1): every merge path funnels through this function, so this is
+        # the one place that can refuse outright regardless of which
+        # caller reached it. `_run`'s pairwise loop already skips a
+        # vetoed property pair before evaluate_pair is ever called (the
+        # normal path), but confirm_suggestion calls this directly against
+        # a specific suggestion_id a human clicked — a stale row from
+        # before the veto existed, still 'pending' in a race window before
+        # the next `_run` sweeps it, must not be allowed to merge the
+        # exact two properties a human already said are not the same.
+        cur.execute(
+            "SELECT 1 FROM property_merge_veto "
+            "WHERE property_lo_id = %s AND property_hi_id = %s",
+            (survivor_id, losing_id),
+        )
+        if cur.fetchone() is not None:
+            raise ValueError(
+                f"Properties {survivor_id} and {losing_id} were already "
+                "vetoed by an earlier property-pair rejection — refusing "
+                "to merge them."
+            )
+
         # Every listing currently on the losing side moves, not just a/b —
         # losing_id may already carry more than one listing from an earlier
         # merge in this same run (e.g. a third source's listing already
@@ -597,6 +646,38 @@ def perform_merge(
             "UPDATE listing SET property_id = %s WHERE property_id = %s",
             (survivor_id, losing_id),
         )
+
+        # Repoint (never orphan) any veto involving the LOSING property
+        # onto the survivor (issue #605 Part 2 revision, PR #611 review
+        # B1) — mirrors the reassignment discipline reconcile.reconcile_merge
+        # already applies to profile_listing_state/feedback_event below.
+        # If the losing property was itself vetoed against a THIRD
+        # property, that veto must keep applying to the merged identity
+        # (the two properties being merged are, by definition, the same
+        # real-world unit — reconcile.py's own reasoning for combining
+        # `matched` on merge). ON CONFLICT DO NOTHING naturally dedupes a
+        # repoint that collides with a veto the survivor already had.
+        cur.execute(
+            "SELECT id, property_lo_id, property_hi_id FROM property_merge_veto "
+            "WHERE property_lo_id = %s OR property_hi_id = %s",
+            (losing_id, losing_id),
+        )
+        for veto_id, veto_lo, veto_hi in cur.fetchall():
+            new_lo = survivor_id if veto_lo == losing_id else veto_lo
+            new_hi = survivor_id if veto_hi == losing_id else veto_hi
+            if new_lo == new_hi:
+                # The vetoed counterpart IS the survivor — i.e. a veto
+                # existed for exactly (survivor_id, losing_id). The guard
+                # above already refuses this merge before reaching here;
+                # this branch is unreachable defense, not a real path.
+                continue
+            new_lo, new_hi = sorted((new_lo, new_hi))
+            cur.execute("DELETE FROM property_merge_veto WHERE id = %s", (veto_id,))
+            cur.execute(
+                "INSERT INTO property_merge_veto (property_lo_id, property_hi_id) "
+                "VALUES (%s, %s) ON CONFLICT (property_lo_id, property_hi_id) DO NOTHING",
+                (new_lo, new_hi),
+            )
         # Deliberately not copying the loser's cadastral_ref onto the
         # survivor here. If the merge fired on `cadastral` the two already
         # match, so there is nothing to copy; if it fired on another signal
@@ -889,6 +970,54 @@ def _resolve_pending_same_property(
     result.same_property_pending_resolved += 1
 
 
+def _resolve_pending_vetoed_property(
+    conn, pending: _PendingSuggestion, result: DedupRunResult
+) -> None:
+    """Resolve a `pending` suggested_merge row whose two PROPERTIES are
+    now covered by a `property_merge_veto` — issue #605 Part 2 revision
+    (PR #611 review, B1).
+
+    Mirrors `_resolve_pending_same_property`'s shape but the OPPOSITE
+    verdict: marks the row 'rejected', not 'confirmed' — a human said
+    these two properties are NOT the same, so a row that predates the
+    veto (a different listing combination between the same two
+    properties, filed before the veto existed) must land on the same
+    answer, not sit there confirmable via a stale open tab. There is
+    nothing left to score: the property pair is permanently vetoed
+    regardless of what evaluate_pair would say about these two specific
+    listings.
+    """
+    previous = {
+        "status": "pending",
+        "match_basis": pending.match_basis,
+        "confidence": (
+            float(pending.confidence) if pending.confidence is not None else None
+        ),
+        "detail": pending.detail,
+    }
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE suggested_merge
+               SET status = 'rejected',
+                   resolved_at = NOW(),
+                   detail = detail || %s::jsonb
+             WHERE id = %s
+            """,
+            (
+                json.dumps(
+                    {
+                        "reevaluated_from": previous,
+                        "resolved_reason": "property pair vetoed",
+                    }
+                ),
+                pending.suggestion_id,
+            ),
+        )
+    conn.commit()
+    result.vetoed_pending_resolved += 1
+
+
 def run(conn) -> DedupRunResult:
     """Compare every not-yet-merged listing pair and act on the result.
 
@@ -963,6 +1092,7 @@ def _run(conn, hash_cache: _PhotoHashCache) -> DedupRunResult:
 
     with conn.cursor() as cur:
         skip_pairs, pending_by_pair = _load_recorded_pairs(cur)
+        vetoed_property_pairs = _load_vetoed_property_pairs(cur)
         for i in range(len(listings)):
             for j in range(i + 1, len(listings)):
                 a, b = listings[i], listings[j]
@@ -980,6 +1110,30 @@ def _run(conn, hash_cache: _PhotoHashCache) -> DedupRunResult:
                             conn, pending_same_property, result
                         )
                     continue
+
+                property_pair_key = tuple(sorted((a.property_id, b.property_id)))
+                if property_pair_key in vetoed_property_pairs:
+                    # Issue #605 Part 2 revision (PR #611 review, B1): a
+                    # human rejected this PROPERTY pair — never evaluate,
+                    # suggest, or auto-merge ANY listing combination
+                    # between them again, not just the exact listing
+                    # pair(s) that were rejected. Checked BEFORE
+                    # evaluate_pair (unlike the old listing-keyed
+                    # skip_pairs check below, which only ever stopped
+                    # re-suggestion of the one pair it recorded) — this is
+                    # what stops a fresh listing combination between the
+                    # same two properties from auto-merging outright, the
+                    # failure mode the review reproduced live twice. A
+                    # pending row that predates the veto (a different
+                    # listing combination, not yet resolved) is swept to
+                    # 'rejected' here too, so it can't be confirmed later
+                    # via a stale open tab.
+                    pair_key = tuple(sorted((a.listing_id, b.listing_id)))
+                    pending_vetoed = pending_by_pair.get(pair_key)
+                    if pending_vetoed is not None:
+                        _resolve_pending_vetoed_property(conn, pending_vetoed, result)
+                    continue
+
                 if a.source == b.source:
                     result.same_source_skipped += 1
                     if a.cadastral_ref and a.cadastral_ref == b.cadastral_ref:
@@ -1017,6 +1171,13 @@ def _run(conn, hash_cache: _PhotoHashCache) -> DedupRunResult:
                             else rec
                             for rec in listings
                         ]
+                        # Re-read (issue #605 Part 2 revision, PR #611
+                        # review B1): perform_merge may have repointed a
+                        # veto involving the losing property onto the
+                        # survivor — reloading keeps THIS run's in-memory
+                        # set consistent with what a fresh run would see,
+                        # for every pair compared after this one.
+                        vetoed_property_pairs = _load_vetoed_property_pairs(cur)
                     continue
 
                 if evaluation is None:
@@ -1035,6 +1196,7 @@ def _run(conn, hash_cache: _PhotoHashCache) -> DedupRunResult:
                         else rec
                         for rec in listings
                     ]
+                    vetoed_property_pairs = _load_vetoed_property_pairs(cur)
                 else:
                     file_suggestion(conn, a, b, evaluation)
                     result.suggested += 1
@@ -1527,6 +1689,116 @@ def reject_suggestion(conn, suggestion_id: int) -> None:
             (suggestion_id,),
         )
     conn.commit()
+
+
+def reject_property_pair(conn, suggestion_id: int) -> int:
+    """Reject an entire PROPERTY pair (issue #605 Part 2 revision — PR
+    #611 review, B1) — not just the one listing pair `suggestion_id`
+    names.
+
+    The grouped review queue asks "is property A the same as property
+    B?", but `reject_suggestion` above only ever bound the exact LISTING
+    pair it was filed against, via `suggested_merge`'s listing-keyed skip
+    set. Two multi-listing properties can have several listing-pair
+    combinations the queue never showed (or that don't exist yet), so a
+    human's rejection left those free to be freshly suggested — or
+    auto-merged outright — moments later. Reproduced live in PR #611's
+    review: rejecting a 2-row property-pair card through the dashboard,
+    then running `ps dedup run`, brought the identical question straight
+    back; in a second case the very next run auto-merged the two
+    properties the human had just rejected.
+
+    Derives the property pair from `suggestion_id`'s own listings (the
+    dashboard's representative row — the same one `confirm_suggestion`
+    acts on), then, in one transaction:
+      1. Marks EVERY currently-pending suggested_merge row between the two
+         properties as 'rejected' — not just the ones the dashboard's
+         snapshot showed, so a concurrently-filed or stale-relative-to-
+         the-UI row is caught too.
+      2. Persists a `property_merge_veto` row so `_run`'s pairwise loop
+         never evaluates, suggests, or auto-merges ANY listing
+         combination between these two properties again — including ones
+         that don't exist yet.
+
+    Returns how many suggested_merge rows were marked rejected (the
+    dashboard/CLI caller doesn't need this for correctness — the veto is
+    what actually binds — but it's useful confirmation that something
+    concrete happened). Raises ValueError if `suggestion_id` doesn't
+    exist, was already confirmed (use `ps dedup revert` instead), or its
+    listings already share a property (nothing to veto).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT listing_id_a, listing_id_b, status FROM suggested_merge WHERE id = %s",
+            (suggestion_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise ValueError(f"No suggested_merge row with id={suggestion_id}")
+        listing_id_a, listing_id_b, status = row
+        if status == "confirmed":
+            raise ValueError(
+                f"Suggestion {suggestion_id} was already confirmed and merged — "
+                "use `ps dedup revert <merge_log_id>` to undo that merge instead"
+            )
+
+    a = _fetch_listing_record(conn, listing_id_a)
+    b = _fetch_listing_record(conn, listing_id_b)
+    if a is None or b is None:
+        raise ValueError(
+            f"Suggestion {suggestion_id} references a listing that no longer "
+            f"exists (a={listing_id_a}, b={listing_id_b})"
+        )
+    if a.property_id == b.property_id:
+        raise ValueError(
+            f"Suggestion {suggestion_id}'s listings already share property "
+            f"{a.property_id} — nothing to veto"
+        )
+
+    property_lo_id, property_hi_id = sorted((a.property_id, b.property_id))
+
+    with conn.cursor() as cur:
+        # Every still-pending suggested_merge row between these two
+        # properties, resolved live against CURRENT listing.property_id —
+        # not from the dashboard's possibly-stale snapshot. Same
+        # normalization as the grouped queue's own query
+        # (dashboard/lib/dedup.ts's PENDING_PAIR_CTE).
+        cur.execute(
+            """
+            SELECT sm.id
+              FROM suggested_merge sm
+              JOIN listing la ON la.id = sm.listing_id_a
+              JOIN listing lb ON lb.id = sm.listing_id_b
+             WHERE sm.status = 'pending'
+               AND LEAST(la.property_id, lb.property_id) = %s
+               AND GREATEST(la.property_id, lb.property_id) = %s
+            """,
+            (property_lo_id, property_hi_id),
+        )
+        rejected_ids = [r[0] for r in cur.fetchall()]
+
+        if rejected_ids:
+            cur.execute(
+                "UPDATE suggested_merge SET status = 'rejected', resolved_at = NOW() "
+                "WHERE id = ANY(%s)",
+                (rejected_ids,),
+            )
+
+        cur.execute(
+            """
+            INSERT INTO property_merge_veto (property_lo_id, property_hi_id, source_suggestion_ids)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (property_lo_id, property_hi_id)
+            DO UPDATE SET source_suggestion_ids = (
+                SELECT ARRAY(SELECT DISTINCT unnest(
+                    property_merge_veto.source_suggestion_ids || EXCLUDED.source_suggestion_ids
+                ))
+            )
+            """,
+            (property_lo_id, property_hi_id, rejected_ids or [suggestion_id]),
+        )
+    conn.commit()
+    return len(rejected_ids)
 
 
 def resolve_conflict(conn, suggestion_id: int) -> None:
