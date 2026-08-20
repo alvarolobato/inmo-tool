@@ -445,7 +445,7 @@ test("no error surface on property detail page", async ({ page }) => {
   await expect(page.getByTestId("property-detail-page")).toBeVisible();
 });
 
-test("#448 H: the 'Tu valoración' seguir/descartar buttons are visible WITHOUT a click", async ({
+test("#448 H (relocated into the #585 triage bar): the seguir/descartar buttons are visible WITHOUT a click", async ({
   page,
 }) => {
   skipIfNoDb(test);
@@ -457,6 +457,8 @@ test("#448 H: the 'Tu valoración' seguir/descartar buttons are visible WITHOUT 
   // The controls block renders, and BOTH toggles are actually visible from the
   // start — the bug was an empty block whose buttons only appeared once a click
   // set an active state (opacity:0 with no `.candidate-card` hover ancestor).
+  // #585 moved this block from the mid-page "Tu valoración" box into the
+  // sticky triage bar — same testid, same visibility guarantee.
   const controls = page.getByTestId("detail-feedback-controls");
   await expect(controls).toBeVisible();
   const accept = controls.getByTestId("feedback-accept");

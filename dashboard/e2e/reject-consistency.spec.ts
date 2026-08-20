@@ -59,10 +59,18 @@ async function insertProperty(coords: [number, number], m2: number): Promise<num
   return Number(result.rows[0].id);
 }
 
+// Source is "idealista", not "fotocasa" (#585 fix — D-055 /
+// lib/db/source-active.ts): a source whose connector is currently OFF is
+// hidden from the candidate feed entirely, and this repo's shared dev DB can
+// have `fotocasa.enabled = false` at any given moment (another worktree's
+// connector-ops task) — which silently zeroes this whole spec's candidate
+// pool. `idealista` is capture-only so the feed keys off `capture_enabled`
+// instead; see e2e/mobile-property-detail.spec.ts (#584) for the same
+// workaround, first documented there.
 async function insertListing(propertyId: number, price: number): Promise<void> {
   await pool.query(
     `INSERT INTO listing (property_id, source, external_id, status, current_price, first_seen_at)
-     VALUES ($1, 'fotocasa', $2, 'active', $3, NOW())`,
+     VALUES ($1, 'idealista', $2, 'active', $3, NOW())`,
     [propertyId, `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`, price],
   );
 }
@@ -154,13 +162,13 @@ async function rejectFromDb(propertyId: number): Promise<void> {
   );
 }
 
-test("reject from the property detail page, and the map drops that property's pin (#417 gaps 1+2)", async ({
+test("reject from the property detail page advances to the next candidate, and the map drops that property's pin (#417 gaps 1+2, #585)", async ({
   page,
 }) => {
   skipIfNoDb(test);
 
-  // Gap 2: the detail page now mounts FeedbackControls, so you can reject the
-  // property you're reading.
+  // Gap 2: the detail page mounts FeedbackControls (now in the #585 triage
+  // bar), so you can reject the property you're reading.
   await page.goto(`/profiles/${profileId}/properties/${middleId}`);
   await expect(page.getByTestId("property-detail-page")).toBeVisible();
   await assertNoErrorSurface(page);
@@ -177,7 +185,15 @@ test("reject from the property detail page, and the map drops that property's pi
     rejectButton.click(),
   ]);
   expect(feedbackResponse.ok()).toBe(true);
-  await expect(rejectButton).toHaveAttribute("aria-pressed", "true");
+
+  // #585: a server-confirmed reject advances to the next candidate. `adjacent`
+  // was fetched on mount, BEFORE this vote (D-094) — middle's own next is
+  // still bottom (no rejections existed yet when it was fetched); the
+  // rejected middle only drops out of the NEXT page's own prev/next chain,
+  // not this navigation.
+  await expect(page).toHaveURL(new RegExp(`/profiles/${profileId}/properties/${bottomId}$`));
+  await expect(page.getByTestId("property-detail-page")).toBeVisible();
+  await assertNoErrorSurface(page);
 
   // Gap 1: the map is the same candidate feed, so the rejected property drops
   // no pin by default — only top and bottom remain.

@@ -378,7 +378,16 @@ body {
    property's current state (data-active="true") — see the section comment
    above for why this moved from the wrapper down to each button.
    pointer-events is intentionally NOT toggled here — see the section
-   comment above for the reproduced regression that decision avoids. */
+   comment above for the reproduced regression that decision avoids.
+
+   NOTE: `.feedback-toggle` has a SECOND rule block, further down this file
+   in the "Property detail — triage bar (#585)" section (search
+   `.feedback-toggle {` again) — that one owns sizing (width/height/padding/
+   font-size), this one owns visibility (opacity/transform). Both apply to
+   the same elements; there's no conflict (disjoint properties), just two
+   blocks because they were added by different features at different times.
+   Not merged into one, so each stays next to the feature section it
+   belongs to. */
 .feedback-toggle {
   opacity: 0;
   transform: translateY(-2px);
@@ -428,9 +437,10 @@ body {
   }
 }
 
-/* #448 H: the same FeedbackControls are reused on the property DETAIL page
-   ("Tu valoración:"), where there is NO `.candidate-card` ancestor to trigger
-   the hover/focus visibility rules above — so the toggles stayed at opacity:0
+/* #448 H (relocated by #585 into the triage bar's vote group, same class,
+   same reasoning): the same FeedbackControls are reused on the property
+   DETAIL page, where there is NO `.candidate-card` ancestor to trigger the
+   hover/focus visibility rules above — so the toggles stayed at opacity:0
    and only appeared once a click set data-active="true" (the "empty block that
    needs a click" bug). This detail-page row wants them visible from the start,
    so force full opacity for every toggle inside it regardless of hover/focus. */
@@ -693,4 +703,289 @@ body {
   .property-header-top-row {
     flex-wrap: wrap;
   }
+}
+/* ============================================================
+   Property detail — triage bar (#585)
+   ============================================================
+   The owner's own framing: "lo que busco es una forma fácil de categorizar
+   todo" — triaging a long queue on a phone, with a thumb. This is the ONE
+   sticky control surface (TriageBar.tsx) that replaced both the old 12px
+   non-sticky prev/next row AND the mid-page "Tu valoración" box: prev/next,
+   a compact price+score summary, and the vote toggles all live in ONE row
+   (review of the first version: two stacked rows cost 99px of a 664px
+   phone viewport — 23% — permanently, on a page whose job is photos and a
+   score breakdown; the price+chip row also just duplicated the `<h1>`
+   ~100px below it). Nav sits at one end, votes at the other, the price/score
+   summary between them with a real divider on each side — the control that
+   writes training signal (✓/✗) must not read as interchangeable with the
+   one that just pages (←/→).
+
+   `top: calc(-1 * var(--pad, 20px))`, NOT `top: 0` and NOT `top: 56px` — two
+   values that both look more obviously "right" at a glance, so worth
+   explaining in full: the app shell's real scrolling container is
+   `main.main-content` (`app/layout.tsx`), a FLEX SIBLING of the 56px TopBar,
+   not a descendant of it — `.main-content`'s own scrollport already begins
+   at viewport y=56, right where TopBar ends, so `top: 56px` double-counts
+   the offset (measured stuck position: y≈132-136). `top: 0` looks like the
+   fix and reads as "flush under the scrollport" — but a sticky element's
+   `top` offset is measured against the SCROLLING ANCESTOR'S PADDING BOX, and
+   `.main-content` has its own `padding: var(--pad, 20px)` (this file, "Main
+   content area" section) that does NOT scroll away the way content padding
+   normally would for a sticky child's offset math — empirically measured
+   stuck position with `top: 0` was y=76 (56 + 20), confirmed via
+   `getBoundingClientRect()` + `getComputedStyle(.main-content).paddingTop`
+   on a live server, not inferred. `calc(-1 * var(--pad, 20px))` cancels
+   exactly that padding, landing the bar flush at y=56 regardless of which
+   density's `--pad` value is active (20px comfort / 14px compact / others —
+   this file's dark/light theme + density blocks). `dashboard/e2e/triage-
+   loop.spec.ts`'s stickiness assertion is tightened to `< 100` specifically
+   because it passed at both y=132 (the `top: 56px` bug) and y=76 (the
+   `top: 0` bug) against the original `< 200` threshold — neither past
+   version of this rule was actually caught by that test; `< 100` is the
+   first threshold that rejects both.
+
+   z-index 15 is deliberately BELOW TopBar's z-20 (`TopBar.tsx:112`) and its
+   fixed mobile-menu panels (z-index 29/30, `TopBar.tsx:338-354`) — the bar
+   must scroll under both, never over them.
+
+   No `@media (max-width: 767px)` divergence anywhere in this block: per
+   #585's own instruction the bar ships identically on desktop (review speed
+   matters there too), so every value here is a single static literal, not a
+   breakpoint pair — D-121's ladder doesn't apply because there is no
+   phone-vs-desktop split to encode. The row layout is `flexWrap: "wrap"`
+   with every child at its own intrinsic (non-zero, non-flex-1) size — D-124's
+   basis-0 trap doesn't apply either: nothing here is `flex: 1`, so wrapping
+   at a narrow viewport falls out of ordinary flex-wrap, not a `flexBasis`
+   workaround. The vote group's `margin-left: auto` pushes it to the row's
+   far end without a flex-grow/basis-0 child anywhere else in the row — a
+   plain margin push, not the D-124 trap (that requires `flex: 1` with
+   `flexWrap: "wrap"` on the WRAPPING children themselves).
+   ============================================================ */
+
+.triage-bar {
+  position: sticky;
+  top: calc(-1 * var(--pad, 20px));
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+}
+
+.triage-bar-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Prev/next: ≥44px tap targets (owner: near-destructive decisions taken with
+   a thumb — a mis-tap on the wrong neighbour costs a wrong verdict just like
+   a mis-tap on reject does). Up from the old 12px text link. */
+.triage-bar-nav-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1;
+  text-decoration: none;
+  color: var(--fg);
+}
+
+.triage-bar-nav-link[aria-disabled="true"] {
+  color: var(--fg-subtle);
+  opacity: 0.5;
+}
+
+/* #585 review N4: this replaces ONLY the "next" slot inside `.triage-bar-nav`
+   — "← Anterior" stays rendered and functional even on the last candidate
+   (the last card is exactly where you want to step back from), where the
+   first version of this swapped the WHOLE nav row and lost it. */
+.triage-bar-end {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.triage-bar-end-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+
+/* #585 review N7: this bar's own rule is every control ≥44px — a 13px text
+   link was the one exception. Sized identically to `.triage-bar-nav-link`
+   rather than merely bumped, so it reads as part of the same control family
+   (it occupies the same "next" slot the nav link normally does). Deliberately
+   short label ("Volver", not "Volver al perfil") — the page also carries its
+   own always-present, non-sticky "← Volver al perfil" link in-flow above the
+   bar; an identical second copy of that exact phrase inside the sticky bar
+   read as an accidental duplicate rather than a second, deliberately-
+   reachable path back. */
+.triage-bar-back-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  color: var(--accent);
+}
+
+/* Real dividers (#585 review ergonomics: "at minimum a real separator")
+   between the three groups — nav, price/score summary, vote. `align-self:
+   stretch` in a `flex-wrap: wrap` row sizes each divider to its own line's
+   cross-axis extent, not the whole bar's; acceptable here since the bar is
+   effectively single-line at every width this ships at. */
+.triage-bar-divider {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border);
+}
+
+.triage-bar-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+
+.triage-bar-price {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--fg);
+  white-space: nowrap;
+}
+
+/* #585 review N8: matches `PropertyHeader.tsx`'s own historical-price note
+   (`Último precio conocido…`), compacted — a withdrawn property's bar price
+   must read as "last known", never as a live current asking price. */
+.triage-bar-historical {
+  font-size: 11px;
+  font-style: italic;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+
+/* Score suffix colour is set inline (`style={{ color: band.color }}`) —
+   genuinely state-dependent (which grade band), the D-121 rung-2 case a
+   static class can't own. */
+.triage-bar-score {
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.triage-bar-vote {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+/* #585 (D-121 rung 1): FeedbackControls' toggle buttons used to size
+   themselves entirely via an inline `style` object (width/height/padding/
+   border-radius/font-size/cursor, all static literals with no prop/state
+   dependency beyond which of the two fixed contexts is in play) — moved here
+   so the component can pick between two sizes with a class instead of an
+   inline value. `.feedback-toggle` keeps the original 26px candidate-feed
+   card size as its base/default; `.feedback-toggle--detail` (the triage bar,
+   `size="detail"`) overrides to the WCAG 2.5.5 44px minimum.
+
+   See the OTHER `.feedback-toggle { ... }` block earlier in this file (the
+   "Candidate card action overlay" section) for the opacity/visibility rules
+   — that one and this one apply to the same elements with disjoint
+   properties, kept as two blocks so each stays next to the feature section
+   it belongs to. */
+.feedback-toggle {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 5px;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.feedback-toggle.feedback-toggle--detail {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  font-size: 20px;
+}
+
+/* #585 review (ergonomics): demotes the note toggle out of the accept/
+   reject pair in the detail-bar context ONLY (combined selector — the
+   candidate-feed/compact layout is untouched). It is the one control here
+   that writes no training signal and never advances the triage loop, so it
+   must not look like a third, equally-weighted member of that pair. Smaller
+   than the 44px triad deliberately (owner/reviewer call, #585 review) —
+   it's the rarest action of the three, and shrinking + separating it is
+   what buys the accept/reject pair real visual distance from anything else
+   in the bar. */
+.feedback-toggle.feedback-toggle--detail.feedback-toggle--note {
+  width: 34px;
+  height: 34px;
+  margin-left: 10px;
+  font-size: 15px;
+}
+
+/* ============================================================
+   Leaflet map containment (#585 review B1)
+   ============================================================
+   `PropertyLocationMap`'s `MapContainer` (react-leaflet) renders
+   `.leaflet-container`, which ships with `position: relative; z-index:
+   auto` — no stacking context of its own. Leaflet's internal panes
+   (`.leaflet-pane`) are `z-index: 400`, and with no stacking context to
+   contain that number, it competed DIRECTLY against `.triage-bar`'s
+   `z-index: 15` in the ROOT stacking context — the map painted over the
+   sticky bar. Measured on a live server, both viewports:
+   `document.elementFromPoint` over the → button resolved to a Leaflet
+   `path` (the approximate-location circle, which takes pointer events) at
+   a real mid-scroll position on every property — the owner scrolling past
+   the map would find ←, → and ✓ gone, replaced by a map he can't even see
+   (the gallery tile crops it) and can't pan (dragging is disabled on this
+   preview instance, `PropertyLocationMap.tsx`).
+
+   Raising `.triage-bar`'s z-index is not the fix — it must stay below
+   TopBar's z-20, and Leaflet's panes go up to 400+, so there is no
+   z-index this bar could take that both stays under TopBar and beats
+   every Leaflet pane. `isolation: isolate` on `.leaflet-container` instead
+   gives it its OWN stacking context — its internal 400+ pane z-indices now
+   only compete against each other, never against `.triage-bar` (or
+   anything else) in the root context. The map keeps painting itself
+   correctly (still `isolation: isolate` doesn't change how a stacking
+   context renders internally, only how it composites against siblings);
+   it's the sticky bar that now correctly stays on top, since it comes
+   later in paint order and holds an explicit z-index in the same root
+   context the now-isolated map no longer reaches into.
+
+   Deliberately unscoped (targets every `.leaflet-container` on the site,
+   including the full interactive `/profiles/[id]/map` page) — isolation
+   changes only cross-element stacking, never a map's own internal
+   rendering or interaction, so it's inert everywhere nothing is
+   deliberately stacked on top of a map, and correct everywhere something
+   is (today, only this bar).
+   ============================================================ */
+
+.leaflet-container {
+  isolation: isolate;
 }

@@ -6,6 +6,7 @@ import { ExtractionQualityBadge } from "@/components/property/ExtractionQualityB
 import { PriceSignals } from "@/components/property/PriceSignals";
 import { freshestActiveLastSeen } from "@/lib/staleness";
 import { bestExtractionQuality } from "@/lib/extraction-quality";
+import { summarizePropertyPrice } from "@/lib/property-price";
 
 // A spread this small between two portals' listed prices is routine rounding
 // (e.g. 249.000€ vs 250.000€), not a genuine disagreement worth flagging.
@@ -21,6 +22,14 @@ const PRICE_DISAGREEMENT_THRESHOLD = 0.025;
  * "Disagreement" is a relative-spread threshold, not exact equality, so
  * routine portal-to-portal rounding doesn't flag on every multi-listing
  * property.
+ *
+ * The min/max/historical figures themselves come from
+ * `lib/property-price.ts` (#585 review N8) — shared with the detail page's
+ * `TriageBar`, which needs the identical number for its compact price
+ * summary. This used to be computed inline here and re-duplicated (partially
+ * — the `isHistorical` fallback flag was dropped) in `TriageBar`; sharing one
+ * function is what keeps the two views in agreement instead of merely
+ * "agrees today."
  */
 export function PropertyHeader({ property }: { property: PropertyDetail }) {
   const typeLabel =
@@ -28,17 +37,7 @@ export function PropertyHeader({ property }: { property: PropertyDetail }) {
       ? PROPERTY_TYPE_LABELS[property.property_type as (typeof PROPERTY_TYPES)[number]]
       : property.property_type;
 
-  const activePrices = property.listings
-    .filter((l) => l.status === "active" && l.current_price !== null)
-    .map((l) => l.current_price as number);
-  const allPrices = property.listings
-    .filter((l) => l.current_price !== null)
-    .map((l) => l.current_price as number);
-
-  const isHistorical = activePrices.length === 0 && allPrices.length > 0;
-  const pricesUsed = activePrices.length > 0 ? activePrices : allPrices;
-  const minPrice = pricesUsed.length > 0 ? Math.min(...pricesUsed) : null;
-  const maxPrice = pricesUsed.length > 0 ? Math.max(...pricesUsed) : null;
+  const { minPrice, maxPrice, isHistorical } = summarizePropertyPrice(property.listings);
   const pricesDisagree =
     minPrice !== null && maxPrice !== null && minPrice > 0
       ? (maxPrice - minPrice) / minPrice > PRICE_DISAGREEMENT_THRESHOLD

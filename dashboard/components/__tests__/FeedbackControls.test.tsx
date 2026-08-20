@@ -291,4 +291,186 @@ describe("FeedbackControls", () => {
       }
     });
   });
+
+  describe("#585: onVoted — the triage bar's advance-on-confirm signal", () => {
+    it("fires onVoted with the target state only after the server confirms an accept", async () => {
+      const onVoted = vi.fn();
+      mockGetThenFetch(async () => ({ ok: true, json: async () => ({ currentState: "accept" }) }));
+      render(<FeedbackControls profileId={1} propertyId={2} onVoted={onVoted} />);
+      await waitFor(() => expect(screen.getByTestId("feedback-accept")).toBeInTheDocument());
+
+      // Not called on the optimistic write — only after the awaited POST
+      // resolves. Assert it hasn't fired synchronously on click, then that it
+      // has once the response settles.
+      fireEvent.click(screen.getByTestId("feedback-accept"));
+      expect(onVoted).not.toHaveBeenCalled();
+
+      await waitFor(() => expect(onVoted).toHaveBeenCalledTimes(1));
+      expect(onVoted).toHaveBeenCalledWith("accept");
+    });
+
+    it("fires onVoted with 'reject' after a confirmed reject", async () => {
+      const onVoted = vi.fn();
+      mockGetThenFetch(async () => ({ ok: true, json: async () => ({ currentState: "reject" }) }));
+      render(<FeedbackControls profileId={1} propertyId={2} onVoted={onVoted} />);
+      await waitFor(() => expect(screen.getByTestId("feedback-reject")).toBeInTheDocument());
+
+      fireEvent.click(screen.getByTestId("feedback-reject"));
+
+      await waitFor(() => expect(onVoted).toHaveBeenCalledTimes(1));
+      expect(onVoted).toHaveBeenCalledWith("reject");
+    });
+
+    it("never fires onVoted for a clear (re-tapping the already-active toggle)", async () => {
+      const onVoted = vi.fn();
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ currentState: null }) });
+      vi.stubGlobal("fetch", fetchMock);
+
+      render(
+        <FeedbackControls profileId={1} propertyId={2} initialState="reject" onVoted={onVoted} />,
+      );
+
+      fireEvent.click(screen.getByTestId("feedback-reject"));
+
+      await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+      const [, init] = fetchMock.mock.calls[0];
+      expect(JSON.parse(init.body as string)).toEqual({ feedbackType: "clear" });
+      await waitFor(() =>
+        expect(screen.getByTestId("feedback-reject")).toHaveAttribute("aria-pressed", "false"),
+      );
+
+      expect(onVoted).not.toHaveBeenCalled();
+    });
+
+    it("never fires onVoted for a note submit", async () => {
+      const onVoted = vi.fn();
+      const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true, json: async () => ({}) });
+      vi.stubGlobal("fetch", fetchMock);
+
+      render(<FeedbackControls profileId={1} propertyId={2} initialState={null} onVoted={onVoted} />);
+
+      fireEvent.click(screen.getByTestId("feedback-note-toggle"));
+      fireEvent.change(screen.getByTestId("feedback-note-input"), { target: { value: "ojo con esto" } });
+      fireEvent.click(screen.getByTestId("feedback-note-submit"));
+
+      await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+      expect(onVoted).not.toHaveBeenCalled();
+    });
+
+    it("does NOT fire onVoted when the POST fails — a lost verdict must never advance the triage loop", async () => {
+      const onVoted = vi.fn();
+      mockGetThenFetch(async () => ({ ok: false }));
+      render(<FeedbackControls profileId={1} propertyId={2} onVoted={onVoted} />);
+      await waitFor(() => expect(screen.getByTestId("feedback-accept")).toBeInTheDocument());
+
+      fireEvent.click(screen.getByTestId("feedback-accept"));
+
+      await screen.findByRole("alert");
+      expect(onVoted).not.toHaveBeenCalled();
+    });
+
+    it("switching from one active state to the other still counts as a vote (target is non-null)", async () => {
+      const onVoted = vi.fn();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValueOnce({ ok: true, json: async () => ({ currentState: "reject" }) }),
+      );
+      render(
+        <FeedbackControls profileId={1} propertyId={2} initialState="accept" onVoted={onVoted} />,
+      );
+
+      fireEvent.click(screen.getByTestId("feedback-reject"));
+
+      await waitFor(() => expect(onVoted).toHaveBeenCalledTimes(1));
+      expect(onVoted).toHaveBeenCalledWith("reject");
+    });
+
+    // #585 review N5: the server's derived `currentState` is the authority
+    // for both WHETHER onVoted fires and WHAT it reports — not the client's
+    // optimistic `target`. These two tests contrive a server response that
+    // disagrees with the click to prove that, since in ordinary operation
+    // they always agree and a bug reverting to `target` would pass every
+    // OTHER test in this file unnoticed.
+    it("reports the SERVER's derived state, not the clicked target, when they disagree", async () => {
+      const onVoted = vi.fn();
+      // Click accept (target would be "accept"), but the server's response
+      // disagrees (e.g. a concurrent write elsewhere resolved differently).
+      mockGetThenFetch(async () => ({ ok: true, json: async () => ({ currentState: "reject" }) }));
+      render(<FeedbackControls profileId={1} propertyId={2} onVoted={onVoted} />);
+      await waitFor(() => expect(screen.getByTestId("feedback-accept")).toBeInTheDocument());
+
+      fireEvent.click(screen.getByTestId("feedback-accept"));
+
+      await waitFor(() => expect(onVoted).toHaveBeenCalledTimes(1));
+      // Not "accept" (the click's own target) — "reject" (what the server
+      // actually derived).
+      expect(onVoted).toHaveBeenCalledWith("reject");
+    });
+
+    it("does NOT fire onVoted when the server's derived state is null, even though the clicked target was non-null", async () => {
+      const onVoted = vi.fn();
+      // Click accept (target="accept"), but the server reports neutral —
+      // e.g. a `clear` landed from another tab between this request firing
+      // and resolving. Trusting `target` here would fire onVoted for a vote
+      // the server no longer agrees happened.
+      mockGetThenFetch(async () => ({ ok: true, json: async () => ({ currentState: null }) }));
+      render(<FeedbackControls profileId={1} propertyId={2} onVoted={onVoted} />);
+      await waitFor(() => expect(screen.getByTestId("feedback-accept")).toBeInTheDocument());
+
+      fireEvent.click(screen.getByTestId("feedback-accept"));
+
+      await waitFor(() =>
+        expect(screen.getByTestId("feedback-accept")).toHaveAttribute("aria-pressed", "false"),
+      );
+      expect(onVoted).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("#585: size prop — compact (feed) vs detail (triage bar) tap targets", () => {
+    it("defaults to the compact class (feed-card 26px context) when size is omitted", async () => {
+      mockGetThenFetch(async () => ({ ok: true, json: async () => ({ currentState: null }) }));
+      render(<FeedbackControls profileId={1} propertyId={2} />);
+      await waitFor(() => expect(screen.getByTestId("feedback-accept")).toBeInTheDocument());
+
+      for (const testId of ["feedback-accept", "feedback-reject", "feedback-note-toggle"]) {
+        expect(screen.getByTestId(testId)).toHaveClass("feedback-toggle");
+        expect(screen.getByTestId(testId)).not.toHaveClass("feedback-toggle--detail");
+      }
+    });
+
+    it('adds the "detail" modifier class (44px triage-bar context) to every toggle when size="detail"', async () => {
+      mockGetThenFetch(async () => ({ ok: true, json: async () => ({ currentState: null }) }));
+      render(<FeedbackControls profileId={1} propertyId={2} size="detail" />);
+      await waitFor(() => expect(screen.getByTestId("feedback-accept")).toBeInTheDocument());
+
+      for (const testId of ["feedback-accept", "feedback-reject", "feedback-note-toggle"]) {
+        expect(screen.getByTestId(testId)).toHaveClass("feedback-toggle");
+        expect(screen.getByTestId(testId)).toHaveClass("feedback-toggle--detail");
+      }
+    });
+
+    // #585 review (ergonomics): the note toggle is demoted out of the
+    // accept/reject pair in the detail-bar context — it writes no training
+    // signal and never advances the triage loop, so it must not read as a
+    // third, equally-weighted member of that pair.
+    it("gives ONLY the note toggle the extra demotion class in detail context — accept/reject stay in their tight pair", async () => {
+      mockGetThenFetch(async () => ({ ok: true, json: async () => ({ currentState: null }) }));
+      render(<FeedbackControls profileId={1} propertyId={2} size="detail" />);
+      await waitFor(() => expect(screen.getByTestId("feedback-accept")).toBeInTheDocument());
+
+      expect(screen.getByTestId("feedback-note-toggle")).toHaveClass("feedback-toggle--note");
+      expect(screen.getByTestId("feedback-accept")).not.toHaveClass("feedback-toggle--note");
+      expect(screen.getByTestId("feedback-reject")).not.toHaveClass("feedback-toggle--note");
+    });
+
+    it("does not add the note demotion class in the compact (feed-card) context", async () => {
+      mockGetThenFetch(async () => ({ ok: true, json: async () => ({ currentState: null }) }));
+      render(<FeedbackControls profileId={1} propertyId={2} />);
+      await waitFor(() => expect(screen.getByTestId("feedback-accept")).toBeInTheDocument());
+
+      expect(screen.getByTestId("feedback-note-toggle")).not.toHaveClass("feedback-toggle--note");
+    });
+  });
 });
