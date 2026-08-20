@@ -278,3 +278,22 @@ export function compareSourceRows<T extends { status: SourceStatus; ageHours: nu
   if (aAge !== bAge) return bAge - aAge;
   return a.source.localeCompare(b.source);
 }
+
+/**
+ * Format an age in hours as a compact Spanish "hace …" string — the ONE
+ * definition shared by the Estado board (`app/admin/page.tsx`) and the
+ * TopBar pill (`components/FreshnessContext.tsx`). Issue #638 review: each
+ * surface previously carried its own copy, and they disagreed at real
+ * scale — altamira read "hace 12d" on the board and "hace 279h" on the pill
+ * for the exact same underlying age. D-144's whole argument is that these
+ * two surfaces read the same rollup and therefore cannot disagree; a
+ * duplicated formatter defeats that even when the underlying number is
+ * identical. `null` (never any activity) reads as "nunca" — a fact, not an
+ * invented "0m"/"0h".
+ */
+export function formatSourceAge(ageHours: number | null): string {
+  if (ageHours === null) return "nunca";
+  if (ageHours < 1) return `hace ${Math.max(1, Math.round(ageHours * 60))}m`;
+  if (ageHours < 48) return `hace ${Math.round(ageHours)}h`;
+  return `hace ${Math.round(ageHours / 24)}d`;
+}

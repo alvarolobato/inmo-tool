@@ -27,7 +27,11 @@ import {
   type ReactNode,
 } from "react";
 import type { SourceHealthResponse } from "@/app/api/etl/source-health/route";
-import { SOURCE_STATUS_RANK, type SourceStatus } from "@/lib/source-health";
+import {
+  SOURCE_STATUS_RANK,
+  formatSourceAge,
+  type SourceStatus,
+} from "@/lib/source-health";
 
 interface FreshnessState {
   /** Short label rendered in the TopBar live-status pill. */
@@ -83,11 +87,6 @@ function formatDate(iso: string): string {
     minute: "2-digit",
   });
   return `${date} a las ${time}`;
-}
-
-function formatAge(ageHours: number): string {
-  const minutesAgo = Math.max(0, Math.round(ageHours * 60));
-  return minutesAgo < 60 ? `hace ${minutesAgo}m` : `hace ${Math.round(minutesAgo / 60)}h`;
 }
 
 export function FreshnessProvider({ children }: { children: ReactNode }) {
@@ -173,7 +172,7 @@ export function FreshnessProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    const age = formatAge(named.ageHours);
+    const age = formatSourceAge(named.ageHours);
     const stale = health.rollupStatus === "atascado" || health.rollupStatus === "fallando";
     const pending = health.rollupStatus === "pendiente";
 

@@ -1,10 +1,28 @@
 /**
- * Real-Postgres integration test for issue #586 review finding B1: the
- * TopBar dot (`getConnectorFreshness()`, `lib/db/freshness.ts`) and the
+ * Real-Postgres integration test for issue #586 review finding B1:
+ * `getConnectorFreshness()` (`lib/db/freshness.ts`) and the
  * `/etl/connectors` per-connector pill (`listConnectors()`, `lib/db/
  * connectors.ts`) must never structurally disagree on a capture-only
  * portal's freshness state (D-125).
  *
+ * AMENDMENT (issue #638, D-144) — this title is no longer literally "the
+ * TopBar dot": `components/FreshnessContext.tsx` was repointed away from
+ * `getConnectorFreshness()`/`/api/data-health` to the new listing-derived
+ * source-health model (`/api/etl/source-health`) — a DIFFERENT question
+ * ("has this connector had real DATA activity") than the one this file's
+ * two functions still answer ("has this connector's discovery CYCLE
+ * completed", D-050). `getConnectorFreshness()` itself is UNCHANGED and
+ * still backs `/api/data-health`, `/api/ready`, and `/etl/salud`, so THIS
+ * test's own invariant (those two functions agree with each other) still
+ * holds and is still worth guarding. What no longer holds, BY DESIGN, is
+ * "the TopBar dot agrees with `/etl/connectors`' pill" — they can now
+ * legitimately show different things for the same connector (e.g. a
+ * cycle-incomplete-but-actually-fresh source), and that divergence is not a
+ * bug to chase; #590's original lesson (two surfaces silently answering
+ * different questions from different inputs) is still respected here
+ * because this file is honest about which two surfaces it covers.
+ *
+
  * Why this needed its own test: before this fix, `listConnectors()` derived
  * a capture-only portal's freshness from `connector_freshness_state` alone —
  * a table that has NO rows at all for a connector whose crawl never runs

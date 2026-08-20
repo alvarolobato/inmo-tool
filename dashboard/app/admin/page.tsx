@@ -22,16 +22,21 @@ import Link from "next/link";
 import type { SourceHealthResponse } from "@/app/api/etl/source-health/route";
 import {
   SOURCE_STATUS_LABEL,
+  formatSourceAge,
   type SourceStatus,
 } from "@/lib/source-health";
 
 const POLL_INTERVAL_MS = 60 * 1000;
 
+// Issue #638 review: pendiente (amber-600) and atascado (orange-600) were
+// near-indistinguishable at the 10px dot size on a phone. atascado moves to
+// a darker, more saturated amber-800 — the chip text still carries the
+// distinction, this just keeps the dot itself from degrading further.
 const STATUS_COLOR: Record<SourceStatus, string> = {
-  fresco: "#16a34a", // green
-  pendiente: "#d97706", // amber
-  atascado: "#ea580c", // orange
-  fallando: "#dc2626", // red
+  fresco: "#16a34a", // green-600
+  pendiente: "#d97706", // amber-600
+  atascado: "#92400e", // amber-800 — deliberately far from pendiente's amber-600
+  fallando: "#dc2626", // red-600
 };
 
 const REASON_CHIP: Record<string, string> = {
@@ -46,13 +51,6 @@ const REASON_CHIP: Record<string, string> = {
   capture_partial_failures: "algunas capturas fallan",
   heartbeat_stale: "extensión sin actividad",
 };
-
-function formatAge(ageHours: number | null): string {
-  if (ageHours === null) return "nunca";
-  if (ageHours < 1) return `hace ${Math.max(1, Math.round(ageHours * 60))}m`;
-  if (ageHours < 48) return `hace ${Math.round(ageHours)}h`;
-  return `hace ${Math.round(ageHours / 24)}d`;
-}
 
 function Dot({ status }: { status: SourceStatus }) {
   return (
@@ -150,7 +148,7 @@ function SourceRow({ row }: { row: SourceHealthResponse["sources"][number] }) {
           data-testid={`source-new24h-${row.source}`}
           style={{ fontSize: 12, color: "var(--fg-muted)", whiteSpace: "nowrap" }}
         >
-          +{row.new24h} en 24h · {formatAge(row.ageHours)}
+          +{row.new24h} en 24h · {formatSourceAge(row.ageHours)}
         </span>
         <Sparkline values={row.sparkline7d} />
       </div>
@@ -186,8 +184,24 @@ export default function AdminIndexPage() {
   const active = health?.sources.filter((s) => !s.disabled) ?? [];
   const disabled = health?.sources.filter((s) => s.disabled) ?? [];
 
+  // Issue #638 review: `sources: []` alone can't tell "genuinely nothing
+  // registered" apart from "the query failed" — `health.ok` (set false only
+  // by the API route's catch branch) resolves that. `isUnknown` covers BOTH
+  // a network/HTTP-level failure (loadFailed) and a degraded-but-200 server
+  // response (`health.ok === false`) — either way the state is unknown, not
+  // "zero sources", and the two headline messages below must never render
+  // together (they did before this fix: a DB error produced `sources: []`,
+  // which read as "no hay fuentes activas registradas" — a specific, false
+  // claim about a state that was actually unknown).
+  const isUnknown = loadFailed || (health !== null && !health.ok);
+  const genuinelyNoSources = health !== null && health.ok && health.sources.length === 0;
+
   return (
-    <div style={{ padding: "var(--pad)", maxWidth: 720 }} data-testid="estado-board">
+    <div
+      className="route-shell"
+      style={{ maxWidth: 720 }}
+      data-testid="estado-board"
+    >
       <h1
         style={{
           fontSize: 20,
@@ -199,14 +213,18 @@ export default function AdminIndexPage() {
         Estado
       </h1>
       <p style={{ fontSize: 12, color: "var(--fg-muted)", marginBottom: 16 }}>
-        {health?.rollupStatus
-          ? `Estado general: ${SOURCE_STATUS_LABEL[health.rollupStatus]}`
-          : loadFailed || health?.rollupStatus === null
-            ? "Estado desconocido"
-            : "Cargando…"}
+        {isUnknown
+          ? "Estado desconocido"
+          : health === null
+            ? "Cargando…"
+            : health.rollupStatus
+              ? `Estado general: ${SOURCE_STATUS_LABEL[health.rollupStatus]}`
+              : health.sources.length > 0
+                ? "Sin fuentes activas (todas desactivadas)"
+                : "Sin fuentes registradas"}
       </p>
 
-      {active.length === 0 && !loadFailed && health !== null && (
+      {genuinelyNoSources && (
         <p style={{ fontSize: 13, color: "var(--fg-muted)" }}>
           No hay fuentes activas registradas.
         </p>

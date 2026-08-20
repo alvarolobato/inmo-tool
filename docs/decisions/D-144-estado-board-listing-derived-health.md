@@ -60,7 +60,53 @@ portal failure, not a real problem.
    none of which are in #638's scope. The TopBar dot (`FreshnessContext`) is
    the one thing repointed: it now polls `/api/etl/source-health` and derives
    its pill copy from the worst-of `SourceStatus` rollup instead of the old
-   cycle-based `DataHealthResponse`.
+   cycle-based `DataHealthResponse`. **This is now a deliberate divergence**:
+   the dot and `/etl/connectors`' own pill can legitimately disagree on the
+   same connector (e.g. a cycle-incomplete-but-actually-fresh crawl source) —
+   see `connectors-freshness-agreement.integration.test.ts`'s amendment note.
+6. **Volumen's "nuevos 24h" is `first_seen_at`-only, never a re-sighting
+   count.** An earlier cut of the aggregation counted
+   `GREATEST(last_seen_at, last_fetched_at, first_seen_at) > NOW() - 24h` —
+   which, on a full-catalogue-resweep connector like cimenta2, read
+   "+3886 en 24h" on a day it ingested ZERO new listings, because a resweep
+   touches `last_seen_at`/`last_fetched_at` on its whole existing catalogue.
+   `new24h` counts `first_seen_at` only; the 7-day sparkline stays the looser
+   GREATEST-based "tocados" signal, per #636's own metric table (which
+   reserves nuevos/tocados specifically for the sparkline) — never rendered
+   with a "nuevos" caption.
+7. **The capture Errores signal requires `extension_capture.connector_name`
+   to actually be set on failed rows.** It wasn't: `etl/capture.py`'s success
+   paths set it, `_mark_failed` never did — every historical failure
+   (including the exact hipoges pair the owner cited in #636's addendum) was
+   unattributed, making `captureFailed7d`/`captureFailureRate7d`
+   permanently 0 in production. `_mark_failed` now takes an optional
+   `connector_name`, passed at every call site that already knows it
+   (`normalize()` raising `ConnectorError`; the outer per-iteration
+   catch-all in `process_pending_captures`, reset per-loop-iteration so it
+   can never leak a prior URL's connector onto this one's failure record).
+   The aggregation query ALSO falls back to a URL-hostname match
+   (`dashboard/lib/db/source-health.ts`, kept in lockstep with
+   `dashboard/lib/worklist.ts`'s `CAPTURE_PORTALS`) for any row that still
+   ends up NULL, so historical rows aren't permanently invisible either.
+
+**Known forward risk (flagged, not yet mitigated)**: issue #639 (in flight)
+makes a captured RESULTS PAGE bump `last_seen_at` for every already-known
+listing it lists — correctly fixing #639's own, narrower problem (staleness
+badges reading pessimistic for captured portals). But Frescura here (point 1
+above) folds `last_seen_at` into its "last data activity" signal. Once #639
+lands, ONE idealista results-page capture will make Frescura read `fresco`
+for the WHOLE source (e.g. "idealista · fresco · +0 en 24h", since `new24h`
+is `first_seen_at`-only per point 6 and a sighting never touches it) even
+though nothing NEW was actually captured that day — a milder, narrower
+version of the exact "green but nothing happened" lie this design exists to
+kill, just scoped to Frescura instead of Volumen. Point 6's fix already
+prevents the sighting from inflating the headline NEW count; it does not
+prevent it from prematurely clearing Frescura's `pendiente` state. Whether
+that's acceptable (a sighting IS *some* real signal the portal was checked,
+even if nothing new arrived) or needs its own guard (e.g. requiring an
+actual `first_seen_at` OR a captured/fetched detail page, not a bare
+sighting, to count toward Frescura for capture sources) is an open question
+for whoever picks this up once #639 ships — not decided here.
 
 **Alternatives rejected**:
 - *A single composite health score.* Rejected by the #636 design judgement

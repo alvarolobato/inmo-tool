@@ -152,6 +152,7 @@ async function mockSourceHealth(page: Page): Promise<void> {
         sources: FIXTURE_SOURCES,
         rollupStatus: "fallando",
         generatedAt: new Date().toISOString(),
+        ok: true,
       }),
     });
   });

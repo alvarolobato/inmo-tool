@@ -1,18 +1,21 @@
 /**
- * E2E: TopBar freshness indicator (issue #241).
+ * E2E: TopBar freshness indicator (issue #241; repointed to the Estado
+ * board's listing-derived model by #638 — see FreshnessContext.tsx's
+ * header).
  *
  * The indicator (dashboard/components/FreshnessContext.tsx → TopBar) used to
  * read the PowerShop-era `etl_watermarks` table the connector pipeline never
  * writes, so it degraded to the bare default "Datos al día" (no age) on every
- * page — a silent false-negative that never looked broken. It now derives
- * from `connector_run_results` / `connector_config`.
+ * page — a silent false-negative that never looked broken.
  *
- * The load-bearing assertion is exactly the mutation guard: with a real
- * successful connector run seeded, the pill must render a real
- * connector-derived state (an age "hace Xh", or "desactualizados", or "sin
- * sincronizar") — NOT the empty "Datos al día" fallback the dead
- * etl_watermarks version produced. A regression back to the watermark table
- * would return an empty payload and fail this test.
+ * Issue #638 review finding: this test originally seeded a `connector_runs`/
+ * `connector_run_results` row but NO `listing` row. Under the CURRENT
+ * (listing-derived) model that made the assertion decorative — the pill
+ * reads "sin sincronizar" for ANY crawl connector with zero listings
+ * regardless of what its run history says, so the test passed whether or
+ * not the run→freshness wiring worked at all. It now seeds one real listing
+ * too, so the pill's "Datos al día · hace Xm" is actually driven by the
+ * seeded data and can fail if that wiring breaks.
  *
  * Requires a reachable Postgres and ADMIN_API_KEY (middleware.ts gates every
  * UI page). Skips cleanly otherwise, matching the other specs here.
@@ -38,6 +41,7 @@ const TRIGGER = "e2e-freshness";
 
 let pool: Pool;
 let dbAvailable = false;
+let seededPropertyId: number | null = null;
 
 test.beforeAll(async () => {
   pool = buildPool();
@@ -87,10 +91,29 @@ test.beforeAll(async () => {
              'ok', 12, 10, 0)`,
     [run.rows[0].id, CONNECTOR],
   );
+
+  // Issue #638 review: freshness is now derived from `listing` activity, not
+  // run outcomes alone — without a real listing row here, the pill reads
+  // "sin sincronizar" regardless of the run seeded above, making the
+  // assertion below pass vacuously. One recent listing (~20 min old, same
+  // age as the run) makes "Datos al día · hace Xm" the actual, checkable
+  // outcome of this connector's seeded data.
+  const prop = await pool.query<{ id: number }>("INSERT INTO property DEFAULT VALUES RETURNING id");
+  seededPropertyId = prop.rows[0].id;
+  await pool.query(
+    `INSERT INTO listing (property_id, source, external_id, status, first_seen_at, last_seen_at, last_fetched_at)
+     VALUES ($1, $2, $2 || '-1', 'active',
+             NOW() - INTERVAL '20 minutes', NOW() - INTERVAL '20 minutes', NOW() - INTERVAL '20 minutes')`,
+    [seededPropertyId, CONNECTOR],
+  );
 });
 
 test.afterAll(async () => {
   if (dbAvailable) {
+    await pool.query("DELETE FROM listing WHERE source = $1", [CONNECTOR]);
+    if (seededPropertyId !== null) {
+      await pool.query("DELETE FROM property WHERE id = $1", [seededPropertyId]);
+    }
     await pool.query("DELETE FROM connector_runs WHERE trigger = $1", [TRIGGER]);
     await pool.query("DELETE FROM connector_config WHERE connector_name = $1", [CONNECTOR]);
     await pool.query("DELETE FROM connector_registry WHERE connector_name = $1", [CONNECTOR]);
@@ -119,10 +142,37 @@ test("freshness pill renders real connector-derived freshness, not the empty fal
   const pill = page.getByTestId("freshness-indicator");
   await expect(pill).toBeVisible();
 
-  // Real connector state: an age, a "desactualizados", or "sin sincronizar".
-  // The dead etl_watermarks version rendered exactly "Datos al día" with no
-  // age — this regex fails against that empty fallback, which is the point.
-  await expect(pill).toHaveText(/hace \d+|desactualizados|sin sincronizar/);
+  // The pill itself reflects the WORST-of rollup across every source in the
+  // shared e2e Postgres (this spec doesn't get per-run isolation — see the
+  // EC-2/EC-3 mocked tests' own note below) — some other real connector
+  // already sitting stale there can legitimately make it read anything from
+  // "Datos al día" to "Fallo de sincronización", so asserting an exact
+  // global copy here would be flaky for reasons unrelated to this test.
+  // What must NOT happen, regardless of the rest of the DB: the dead
+  // etl_watermarks version rendered exactly "Datos al día" with NO age at
+  // all — this regex fails against that empty fallback, which is the point.
+  // "sincroniza" (stem) covers "sin sincronizar", "Sincronización
+  // pendiente" and "Fallo de sincronización" alike — the shared e2e
+  // Postgres can legitimately have some OTHER source that's never had
+  // activity at all, which takes priority in the pill copy (see file
+  // header) and renders "Datos sin sincronizar" ahead of any age-based text.
+  await expect(pill).toHaveText(/hace \d+|desactualizados|sincroniza/);
+
+  // The load-bearing, non-flaky part: query the SAME API the pill reads and
+  // assert THIS connector's own row (issue #638 review — a bare run seed
+  // with no listing row made the prior version of this test vacuous, since
+  // freshness is now derived from listing activity, not run outcomes).
+  // Recently-seen data with a clean run must read fresco with a real age.
+  const res = await page.request.get("/api/etl/source-health");
+  expect(res.ok()).toBe(true);
+  const body = (await res.json()) as {
+    sources: { source: string; status: string; ageHours: number | null }[];
+  };
+  const row = body.sources.find((s) => s.source === CONNECTOR);
+  expect(row).toBeDefined();
+  expect(row?.status).toBe("fresco");
+  expect(row?.ageHours).not.toBeNull();
+  expect(row!.ageHours as number).toBeLessThan(1);
 
   // No error surface anywhere on the page.
   await expect(page.getByTestId("error-display")).toHaveCount(0);
@@ -183,6 +233,7 @@ test("all fresh stays green (EC-2)", async ({ page }) => {
         ],
         rollupStatus: "fresco",
         generatedAt: now,
+        ok: true,
       }),
     });
   });
@@ -206,6 +257,7 @@ test("API failure shows unknown, not green (EC-3)", async ({ page }) => {
         sources: [],
         rollupStatus: null,
         generatedAt: new Date(0).toISOString(),
+        ok: false,
       }),
     });
   });
@@ -250,6 +302,7 @@ test("a due-but-clean source reads as pending, not stale (owner's #636-addendum 
         ],
         rollupStatus: "pendiente",
         generatedAt: new Date().toISOString(),
+        ok: true,
       }),
     });
   });

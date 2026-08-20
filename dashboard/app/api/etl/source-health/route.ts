@@ -30,6 +30,10 @@ const UNKNOWN_RESPONSE: SourceHealthResponse = {
   sources: [],
   rollupStatus: null,
   generatedAt: new Date(0).toISOString(),
+  // false: this is a DEGRADED response after a query failure, not a
+  // successful read of a genuinely empty registry — a client must never
+  // read `sources: []` here as "no sources registered" (issue #638 review).
+  ok: false,
 };
 
 export async function GET(): Promise<NextResponse> {

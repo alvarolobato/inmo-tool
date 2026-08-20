@@ -12,17 +12,27 @@
  *      `pendiente`, never `atascado`/`fallando` from time alone.
  *
  * Uses `aliseda` (a real #454 CAPTURE_PORTALS name — required, see
- * freshness.integration.test.ts's own note on this) for fixture 2, which
- * means this file runs against the SAME shared database aliseda's real
- * capture data lives in. Two guards keep it from touching that real data:
- *   - `connector_config`/`connector_registry` for aliseda are SNAPSHOT
- *     before the test and RESTORED after (never blind-written), mirroring
- *     e2e/freshness-indicator.spec.ts's established pattern for the same
- *     table/connector shape.
+ * freshness.integration.test.ts's own note on this) for fixture 2.
+ * WHICH database that connects to depends on how this file is invoked, not
+ * on anything this file controls: `npm test` (`scripts/test-with-isolated-
+ * db.ts`) points POSTGRES_DSN at a throwaway, schema-only, per-run database
+ * with NO real aliseda rows at all; running vitest directly (or any other
+ * POSTGRES_DSN/POSTGRES_HOST override) can point it at the shared local demo
+ * Postgres, which DOES carry aliseda's real capture data (110 real listings
+ * measured when this was written). Since which case applies isn't knowable
+ * from inside the test, it defends against the worse one unconditionally:
+ *   - `connector_config`/`connector_registry`/`extension_heartbeat` for
+ *     aliseda are SNAPSHOT before the test and RESTORED after — an UPDATE
+ *     back to the prior row when one existed, a DELETE of the row THIS
+ *     test's own seed created when one didn't (mirroring
+ *     e2e/freshness-indicator.spec.ts's hadConfigRow/hadRegistryRow pattern
+ *     for the same table/connector shape — a plain unconditional UPDATE
+ *     would leave a synthetic row behind forever on the isolated-DB path,
+ *     where no prior row exists to restore).
  *   - The listing this test seeds is inserted, its OWN row id captured, and
  *     cleanup deletes by that exact id — never `WHERE source = 'aliseda'`,
- *     which would also catch every real aliseda listing (measured: 110 real
- *     rows in the local demo DB when this was written).
+ *     which would also catch every real aliseda listing when run against
+ *     the shared demo DB.
  *
  * Skips cleanly when no database is reachable; REQUIRE_DB=1 makes that a
  * hard failure (AGENTS.md / etl/tests/conftest.py's contract).
@@ -271,6 +281,16 @@ describe.skipIf(!dbAvailable)("getSourceHealth — real Postgres", () => {
     // (elapsed time + zero capture failures) rather than accidentally
     // depending on whichever heartbeat state the DB happens to be in.
     let priorHeartbeat: { last_seen_at: string; version: string | null } | null = null;
+    // Issue #638 review: the ORIGINAL restore here only ever UPDATEd —
+    // correct when a row already existed (aliseda always does in a real
+    // deployment), silently WRONG on a fresh isolated test DB (scripts/
+    // test-with-isolated-db.ts, what `npm test` actually runs against) with
+    // no pre-existing connector_config/connector_registry rows at all: the
+    // row this test's own seedConfig/seedRegistry INSERTs would then never
+    // be removed. Mirrors e2e/freshness-indicator.spec.ts's
+    // hadConfigRow/hadRegistryRow pattern (lines ~311-336 there) exactly.
+    let hadConfigRow = false;
+    let hadRegistryRow = false;
 
     beforeEach(async () => {
       if (!dbAvailable) return;
@@ -279,12 +299,14 @@ describe.skipIf(!dbAvailable)("getSourceHealth — real Postgres", () => {
           `SELECT registered, supports_discovery FROM connector_registry WHERE connector_name = $1`,
           [CAPTURE_PENDING],
         );
+        hadRegistryRow = reg.rows.length > 0;
         priorRegistry = reg.rows[0] ?? null;
         const cfg = await pool.query(
           `SELECT enabled, capture_enabled, freshness_interval_hours
              FROM connector_config WHERE connector_name = $1`,
           [CAPTURE_PENDING],
         );
+        hadConfigRow = cfg.rows.length > 0;
         priorConfig = cfg.rows[0] ?? null;
         const hb = await pool.query(`SELECT last_seen_at, version FROM extension_heartbeat WHERE id = 1`);
         priorHeartbeat = hb.rows[0] ?? null;
@@ -303,7 +325,7 @@ describe.skipIf(!dbAvailable)("getSourceHealth — real Postgres", () => {
           await deleteListingsByIds(pool, [seededListingId]);
           seededListingId = null;
         }
-        if (priorConfig) {
+        if (hadConfigRow && priorConfig) {
           await pool.query(
             `UPDATE connector_config
                 SET enabled = $2, capture_enabled = $3, freshness_interval_hours = $4
@@ -315,13 +337,21 @@ describe.skipIf(!dbAvailable)("getSourceHealth — real Postgres", () => {
               priorConfig.freshness_interval_hours,
             ],
           );
+        } else if (!hadConfigRow) {
+          await pool.query(`DELETE FROM connector_config WHERE connector_name = $1`, [
+            CAPTURE_PENDING,
+          ]);
         }
-        if (priorRegistry) {
+        if (hadRegistryRow && priorRegistry) {
           await pool.query(
             `UPDATE connector_registry SET registered = $2, supports_discovery = $3
               WHERE connector_name = $1`,
             [CAPTURE_PENDING, priorRegistry.registered, priorRegistry.supports_discovery],
           );
+        } else if (!hadRegistryRow) {
+          await pool.query(`DELETE FROM connector_registry WHERE connector_name = $1`, [
+            CAPTURE_PENDING,
+          ]);
         }
         if (priorHeartbeat) {
           await pool.query(

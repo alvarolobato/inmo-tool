@@ -55,9 +55,19 @@ export interface SourceHealthRow extends SourceHealthDerivation {
   disabled: boolean;
   freshnessIntervalHours: number;
   lastActivityAt: string | null;
+  /** Genuinely NEW listings (first_seen_at) in the trailing 24h — never
+   * re-sightings (issue #638 review S2: a GREATEST-based count here read
+   * "+3886" for cimenta2 on a day it ingested zero new listings, because a
+   * full re-sweep touches last_seen_at/last_fetched_at on its whole
+   * existing catalogue). This is Volumen's headline number; keep it
+   * first_seen_at-only if this ever changes again. */
   new24h: number;
   /** 7 daily buckets, OLDEST first (6 days ago) .. newest last (today) —
-   * "nuevos/tocados" (new + re-seen) per day, the sparkline data. */
+   * "tocados" (GREATEST(last_seen_at, last_fetched_at, first_seen_at)) per
+   * day, deliberately NOT the same "nuevos" definition as new24h above —
+   * this is the sparkline's own, looser signal (#636's metric table
+   * reserves nuevos/tocados for the sparkline specifically). Never caption
+   * this as "nuevos" in the UI. */
   sparkline7d: number[];
   latestRunStatus: string | null;
   latestRunFailureClassification: string | null;
@@ -76,6 +86,18 @@ export interface SourceHealthResponse {
    * are no in-scope sources at all (fail dark, never silently "fresco"). */
   rollupStatus: SourceStatus | null;
   generatedAt: string;
+  /**
+   * Issue #638 review: `sources: []` alone is AMBIGUOUS — it's the shape of
+   * BOTH a genuinely empty registry AND a degraded response after a query
+   * failure (`GET /api/etl/source-health`'s catch branch), and the two are
+   * not the same claim. `ok: true` here means this really is a successful
+   * read of `connector_registry` (possibly, honestly, of zero rows); the
+   * route sets `false` only in its catch branch. A client must check this
+   * BEFORE reading anything into an empty `sources` array — e.g. never
+   * render "no sources registered" when `ok` is false, that would assert a
+   * specific fact about a state that is actually unknown.
+   */
+  ok: boolean;
 }
 
 interface MetaRow {
@@ -131,25 +153,55 @@ const META_QUERY = `
       COUNT(*) FILTER (WHERE ec.status = 'failed')              AS failed_7d,
       COUNT(*) FILTER (WHERE ec.status IN ('failed', 'done'))    AS total_7d
       FROM extension_capture ec
-     WHERE ec.connector_name = g.connector_name
-       AND ec.created_at > NOW() - INTERVAL '7 days'
+     WHERE ec.created_at > NOW() - INTERVAL '7 days'
+       AND (
+             ec.connector_name = g.connector_name
+             -- Issue #638 review (S1): every capture FAILURE written before
+             -- the etl/capture.py _mark_failed fix left connector_name NULL
+             -- (only the success paths set it) -- e.g. production ids
+             -- 3576/3577 (hipoges, 2026-08-19), the exact "50% failure rate"
+             -- rows the owner cited in #636's addendum. Fall back to the
+             -- URL's host for those so historical failures are still
+             -- attributed instead of permanently invisible. Kept in
+             -- lockstep with dashboard/lib/worklist.ts CAPTURE_PORTALS --
+             -- the same four portals D-069/capture_worklist's cleanup
+             -- already has to keep in step; add a portal there, add its
+             -- host suffix here too.
+             OR (
+               ec.connector_name IS NULL
+               AND (
+                 (g.connector_name = 'idealista' AND ec.url ILIKE '%idealista.com%')
+                 OR (g.connector_name = 'aliseda' AND ec.url ILIKE '%alisedainmobiliaria.com%')
+                 OR (g.connector_name = 'altamira' AND ec.url ILIKE '%altamirainmuebles.com%')
+                 OR (g.connector_name = 'hipoges' AND ec.url ILIKE '%realestate.hipoges.com%')
+               )
+             )
+           )
   ) cap ON true
   WHERE g.registered = true
   ORDER BY g.connector_name
 `;
 
-// One row per distinct `listing.source`, with today's + the prior 6 days'
-// "touched" counts (GREATEST(last_seen_at, last_fetched_at, first_seen_at)
-// truncated to its calendar day) as 7 discrete FILTER counts — cheaper and
-// more transparent than a generate_series join for a fixed 7-day window, and
-// mirrors the plain conditional-aggregation style lib/db/data-health.ts
-// already uses for this table.
+// One row per distinct `listing.source`. `new_24h` is Volumen's headline
+// number and MUST mean "nuevos" literally -- first_seen_at only. Issue #638
+// review (S2): the first cut filtered on GREATEST(last_seen_at,
+// last_fetched_at, first_seen_at) here too, which counts every RE-SIGHTED
+// listing as "new" -- measured live, cimenta2 (a full-sweep connector that
+// re-touches its whole catalogue every run) read "+3886 en 24h" with ZERO
+// actual new listings that day. The 7-day sparkline (d0..d6) stays
+// GREATEST-based -- it is deliberately "touched", not "nuevos" (#636's own
+// metric table reserves nuevos/tocados for the sparkline; the UI must not
+// caption it as new-listings-per-day) -- truncated to its calendar day as 7
+// discrete FILTER counts, cheaper and more transparent than a
+// generate_series join for a fixed 7-day window, mirroring the plain
+// conditional-aggregation style lib/db/data-health.ts already uses for this
+// table.
 const LISTING_ACTIVITY_QUERY = `
   SELECT
     source,
     MAX(GREATEST(last_seen_at, last_fetched_at, first_seen_at)) AS last_activity_at,
     COUNT(*) FILTER (
-      WHERE GREATEST(last_seen_at, last_fetched_at, first_seen_at) > NOW() - INTERVAL '24 hours'
+      WHERE first_seen_at > NOW() - INTERVAL '24 hours'
     ) AS new_24h,
     COUNT(*) FILTER (WHERE date_trunc('day', GREATEST(last_seen_at, last_fetched_at, first_seen_at))
       = date_trunc('day', NOW()) - INTERVAL '6 days') AS d6,
@@ -288,5 +340,6 @@ export async function getSourceHealth(opts?: {
     sources: [...active, ...disabledSources],
     rollupStatus,
     generatedAt: new Date(nowMs).toISOString(),
+    ok: true,
   };
 }
