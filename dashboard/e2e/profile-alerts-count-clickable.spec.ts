@@ -192,7 +192,7 @@ test("clicking 'N con alertas' on /profiles lands on the profile feed filtered b
 
   // The F2 URL-state activates the filter on first fetch: toggle pressed, chip
   // shown, feed narrowed to exactly the 2 flagged properties.
-  await expect(page.getByTestId("alerts-toggle")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByTestId("alerts-segment-with")).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByTestId("filter-chip-alerts")).toBeVisible();
 
   const cards = page.locator('[data-testid="candidate-card"]');

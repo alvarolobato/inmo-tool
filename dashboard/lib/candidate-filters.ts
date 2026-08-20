@@ -18,6 +18,15 @@
  * Invariant: an absent param always maps to the filter's default, and a default
  * value never emits a param — so the URL stays minimal and
  * `parse(toSearch(f)) === f`.
+ *
+ * #593: the alerts filter is TRI-STATE — off / "con alertas" / "sin
+ * alertas" — not the #466 boolean toggle it started as. `alerts=1` keeps its
+ * original meaning ("con alertas", so old links/bookmarks still work);
+ * `alerts=0` is the new negative; an absent param still means "no filter" (an
+ * absent param never gained a new meaning). See `lib/candidates.ts` for how
+ * the negative is derived from the SAME predicate as the positive, and
+ * `CandidateFilterBar.tsx` for the unassessed-candidates decision (excluded
+ * from BOTH values, consistent with D-059).
  */
 
 /** The 3 reachable states of the (formerly two mutually-exclusive) presets. */
@@ -53,11 +62,14 @@ export interface CandidateFilters {
   /** #398 VPO bidirectional ("" | "true" | "false"). Param: `vpo`. */
   isVpo: string;
   /**
-   * #466 "Con alertas" UNION toggle — keep only candidates with ≥1 red flag OR
-   * ≥1 warn occupancy caveat (the warn badges the card shows). Param: `alerts`
-   * ("1"); drives the API's `hasAlerts=true`.
+   * #593 tri-state alerts filter (was #466's boolean "Con alertas" toggle):
+   * `""` = off, `"1"` = "con alertas" (≥1 red flag OR ≥1 warn occupancy
+   * caveat — the warn badges the card shows), `"0"` = "sin alertas", the true
+   * complement of `"1"` (see lib/candidates.ts — same predicate, negated, not
+   * a second one). Param: `alerts` (`"1"` | `"0"`); drives the API's
+   * `hasAlerts=true`/`hasAlerts=false`.
    */
-  hasAlerts: boolean;
+  alerts: "" | "1" | "0";
   /** #422/#379 preset. Param: `view` (`seguimiento`/`descartadas`; absent = Todas). */
   view: CandidateView;
 }
@@ -73,7 +85,7 @@ export const DEFAULT_CANDIDATE_FILTERS: CandidateFilters = {
   beachProximity: "",
   heritageZone: false,
   isVpo: "",
-  hasAlerts: false,
+  alerts: "",
   view: "all",
 };
 
@@ -113,7 +125,7 @@ export function hasActiveFilters(f: CandidateFilters): boolean {
     f.q !== "" ||
     f.source !== null ||
     f.minDiscount !== "" ||
-    f.hasAlerts ||
+    f.alerts !== "" ||
     f.view !== "all" ||
     moreFiltersActiveCount(f) > 0
   );
@@ -134,7 +146,10 @@ export function parseCandidateFilters(search: string): CandidateFilters {
     beachProximity: p.get("beach") ?? "",
     heritageZone: p.get("heritage") === "true",
     isVpo: p.get("vpo") ?? "",
-    hasAlerts: p.get("alerts") === "1",
+    // #593: only the two recognised tokens turn the filter on; anything else
+    // (a typo'd param, a stray value) degrades to "off" rather than silently
+    // narrowing the feed in an unintended direction.
+    alerts: p.get("alerts") === "1" || p.get("alerts") === "0" ? (p.get("alerts") as "1" | "0") : "",
     view: view === "seguimiento" || view === "descartadas" ? view : "all",
   };
 }
@@ -155,7 +170,7 @@ export function candidateFiltersToParams(f: CandidateFilters): URLSearchParams {
   if (f.beachProximity !== "") p.set("beach", f.beachProximity);
   if (f.heritageZone) p.set("heritage", "true");
   if (f.isVpo !== "") p.set("vpo", f.isVpo);
-  if (f.hasAlerts) p.set("alerts", "1");
+  if (f.alerts !== "") p.set("alerts", f.alerts);
   if (f.view !== "all") p.set("view", f.view);
   return p;
 }

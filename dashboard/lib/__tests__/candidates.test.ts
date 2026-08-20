@@ -585,22 +585,34 @@ describe("listCandidates", () => {
     expect(mainParams()[16]).toBeNull();
   });
 
-  it("passes hasAlerts=true as $24 and gates on the UNION of redflag_types + warn caveats (#466)", async () => {
+  it("passes hasAlerts=true as $24 and gates on the UNION of redflag_types + warn caveats (#466/#593)", async () => {
     await listCandidates(7, { hasAlerts: true });
     const [sql, params] = mainCall();
-    // $24 is the new toggle; the warn-caveat array reuses the $6 param (D-059,
+    // $24 is the toggle; the warn-caveat array reuses the $6 param (D-059,
     // same array the distress boost reads), so only the boolean is new.
     expect(params[23]).toBe(true);
     expect(sql).toContain(
       "cardinality(COALESCE(ranked.redflag_types, '{}')) > 0",
     );
     expect(sql).toContain("ranked.caveats && $6::text[]");
-    expect(sql).toContain("$24::boolean IS NOT TRUE");
+    expect(sql).toContain("$24::boolean IS NULL");
   });
 
-  it("normalises a falsy/omitted hasAlerts to null so the off-tail stays uniform (#466)", async () => {
+  it("passes hasAlerts=false as $24 — 'sin alertas' is NOT normalised to null, it's a real filter value now (#593)", async () => {
     await listCandidates(7, { hasAlerts: false });
-    expect(mainParams()[23]).toBeNull();
+    const [sql, params] = mainCall();
+    expect(params[23]).toBe(false);
+    // The negative reuses the EXACT SAME bracketed expression as the positive
+    // (compared via `= $24::boolean`), never a second, independently-written
+    // predicate — the one assertion that would catch the #590-style drift.
+    expect(sql).toContain(
+      "cardinality(COALESCE(ranked.redflag_types, '{}')) > 0",
+    );
+    expect(sql).toContain("ranked.caveats && $6::text[]");
+    expect(sql).toContain(") = $24::boolean");
+  });
+
+  it("normalises an omitted hasAlerts to null so the off-tail stays uniform (#593)", async () => {
     await listCandidates(7);
     expect(mainParams()[23]).toBeNull();
   });

@@ -201,7 +201,7 @@ test('"Limpiar todo" is always visible and never shifts the bar', async ({ page 
 
   // Toggle a primary-row filter ON (⚠ Con alertas) — this used to make
   // "Limpiar todo" appear from nothing and jump the layout.
-  await page.getByTestId("alerts-toggle").click();
+  await page.getByTestId("alerts-segment-with").click();
   await assertNoErrorSurface(page);
 
   // (b2) Still present + visible, now enabled/clickable.

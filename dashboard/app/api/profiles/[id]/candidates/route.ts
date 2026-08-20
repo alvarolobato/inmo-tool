@@ -28,10 +28,16 @@
  *                 vivienda protegida candidates; `false` keeps only non-VPO
  *                 candidates; absent/empty = off. Any other value → 400. Reads
  *                 the `opportunity` AI-assessment axis.
- *   hasAlerts   — #466 UNION hard filter: `true` keeps only candidates with ≥1
- *                 red flag (any type) OR ≥1 warn-tone occupancy caveat — the warn
- *                 badges the card shows. Absent/empty = off; any other value →
- *                 400. Reads the `redflags` + `occupancy` AI-assessment axes.
+ *   hasAlerts   — #593 tri-state UNION hard filter: `true` ("con alertas") keeps
+ *                 only candidates with ≥1 red flag (any type) OR ≥1 warn-tone
+ *                 occupancy caveat — the warn badges the card shows. `false`
+ *                 ("sin alertas") keeps the TRUE COMPLEMENT of that SAME
+ *                 predicate (never a second, independently-written one — see
+ *                 lib/candidates.ts). Absent/empty = off (default). Any other
+ *                 value → 400. A never-assessed property is EXCLUDED from
+ *                 BOTH `true` and `false` (D-059: an unassessed axis is
+ *                 excluded from a hard filter, never a false "verified
+ *                 clean"). Reads the `redflags` + `occupancy` AI-assessment axes.
  *   minDiscount — #310 hard filter: keep only candidates priced at least this
  *                 PERCENT (0–100) below the pool median price/m². Sent as a
  *                 percent (e.g. `15`); converted to a fraction for the query.
@@ -225,21 +231,21 @@ export async function GET(
     isVpo = rawIsVpo === "true";
   }
 
-  // #466 "Con alertas" UNION toggle. Only the exact string "true" turns it on
-  // (keep only candidates with a red flag or a warn occupancy caveat); absent/
-  // empty = off. Any other non-empty value is a malformed request (400), never
+  // #593 tri-state "alertas" filter — BIDIRECTIONAL, like isVpo above: "true"
+  // = only "con alertas", "false" = only "sin alertas" (the true complement),
+  // absent/empty = off. Any other value is a malformed request (400), never
   // silently ignored — mirrors the isVpo/state strict parse above, so a typo'd
   // param can't quietly show an unfiltered feed the user didn't ask for.
   const rawHasAlerts = searchParams.get("hasAlerts");
-  let hasAlerts = false;
+  let hasAlerts: boolean | null = null;
   if (rawHasAlerts !== null && rawHasAlerts !== "") {
-    if (rawHasAlerts !== "true") {
+    if (rawHasAlerts !== "true" && rawHasAlerts !== "false") {
       return NextResponse.json(
         formatApiError("Filtro de alertas no válido.", "VALIDATION", undefined, requestId),
         { status: 400 },
       );
     }
-    hasAlerts = true;
+    hasAlerts = rawHasAlerts === "true";
   }
 
   // #379: show-rejected toggle. Absent/anything-but-"true" keeps today's

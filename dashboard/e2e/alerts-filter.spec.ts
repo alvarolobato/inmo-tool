@@ -1,24 +1,29 @@
 /**
- * E2E: candidate list "⚠ Con alertas" UNION filter (#466, Feed UX F3).
+ * E2E: candidate list tri-state "alertas" filter (#593, extending #466's
+ * one-way "⚠ Con alertas" UNION toggle).
  *
  * D-041 gate for a user-facing surface change: drives a real Next.js server
- * against a real (seeded, synthetic) Postgres and proves the new toggle
- * (a) renders on the primary filter row, (b) actually narrows the feed to the
+ * against a real (seeded, synthetic) Postgres and proves the segmented
+ * control (a) renders on the primary filter row with exactly one of its 3
+ * states highlighted at all times, (b) "Con alertas" narrows the feed to the
  * UNION of candidates with ≥1 red flag OR ≥1 warn occupancy caveat — reading
- * the SAME per-axis arrays the ranking CTE derives (D-059), (c) deep-loads from
- * `?alerts=1` already active (toggle pressed + active chip shown), and (d) never
- * surfaces an error surface. Same DB-availability + admin-session pattern as
- * e2e/caveat-redflag-filters.spec.ts.
+ * the SAME per-axis arrays the ranking CTE derives (D-059), (c) "Sin alertas"
+ * is the TRUE COMPLEMENT of that same set (never-assessed EXCLUDED from
+ * both, per the issue's D-059-consistent judgement call), (d) both states
+ * deep-load from the URL (`?alerts=1` / `?alerts=0`) already active, and
+ * (e) never surfaces an error surface. Same DB-availability + admin-session
+ * pattern as e2e/caveat-redflag-filters.spec.ts.
  *
- * The seed builds ONE profile with three deduplicated properties, each carrying
- * a seeded ai_assessment (or none):
- *   - P1  occupancy caveat `venta_deuda`   → an alert (warn caveat)
- *   - P2  redflag `embargo`                → an alert (red flag)
- *   - P3  no assessment at all             → NOT an alert (excluded)
+ * The seed builds ONE profile with four deduplicated properties, each
+ * carrying a seeded ai_assessment (or none):
+ *   - P1  occupancy caveat `venta_deuda`         → an alert (warn caveat)
+ *   - P2  redflag `embargo`                      → an alert (red flag)
+ *   - P3  assessed on BOTH axes, nothing found    → "sin alertas" (clean)
+ *   - P4  no assessment at all                    → excluded from BOTH states
  *
- * So the ⚠ toggle narrows 3 → 2 (P1 + P2), proving the UNION reads the derived
- * caveats[]/redflag_types[] the ranking uses, and that a never-assessed property
- * is excluded (unknown, never a false pass).
+ * So "Con alertas" narrows 4 → 2 (P1 + P2); "Sin alertas" narrows 4 → 1 (P3);
+ * P4 never appears under either — proving the negative excludes an
+ * unassessed property rather than treating it as a false "verified clean".
  */
 import { test, expect, type Page } from "@playwright/test";
 import { Pool } from "pg";
@@ -47,7 +52,8 @@ let dbAvailable = false;
 let profileId: number;
 let pDebt: number; // caveat venta_deuda → alert
 let pEmbargo: number; // redflag embargo → alert
-let pClean: number; // no assessment → not an alert
+let pClean: number; // assessed both axes, nothing found → "sin alertas"
+let pUnassessed: number; // no assessment → excluded from BOTH states
 
 test.beforeAll(async () => {
   pool = buildPool();
@@ -119,7 +125,7 @@ test.beforeAll(async () => {
   });
 
   // Same price on every property so the below-market signal is uniform and the
-  // only thing distinguishing the feed is the alerts toggle under test.
+  // only thing distinguishing the feed is the alerts filter under test.
   pDebt = await insertProperty(`${NAME_PREFIX}Calle Venta Deuda, Madrid`);
   await insertListing(pDebt, 300000);
   await markMatched(pDebt);
@@ -135,10 +141,22 @@ test.beforeAll(async () => {
   await markMatched(pEmbargo);
   await insertAssessment(pEmbargo, "redflags", redflag("embargo"), "redflags/v3");
 
-  // Never assessed → not an alert.
+  // Assessed on BOTH axes, nothing found — the genuine "sin alertas" case.
   pClean = await insertProperty(`${NAME_PREFIX}Calle Limpia, Madrid`);
   await insertListing(pClean, 300000);
   await markMatched(pClean);
+  await insertAssessment(
+    pClean,
+    "occupancy",
+    { occupancy: { value: "vacant" }, caveats: [] },
+    "occupancy/v2",
+  );
+  await insertAssessment(pClean, "redflags", { flags: [] }, "redflags/v3");
+
+  // Never assessed → excluded from BOTH "con alertas" and "sin alertas".
+  pUnassessed = await insertProperty(`${NAME_PREFIX}Calle Sin Evaluar, Madrid`);
+  await insertListing(pUnassessed, 300000);
+  await markMatched(pUnassessed);
 });
 
 test.afterAll(async () => {
@@ -178,51 +196,88 @@ async function assertNoErrorSurface(page: Page) {
 
 const card = (id: number) => `[data-testid="candidate-card"][data-property-id="${id}"]`;
 
-test("⚠ toggle narrows the feed to the flagged properties, and resets", async ({ page }) => {
+test("the segmented control cycles off → con alertas → sin alertas → off, exactly one state highlighted at a time", async ({
+  page,
+}) => {
   skipIfNoDb(test);
 
   await page.goto(`/profiles/${profileId}`);
   await assertNoErrorSurface(page);
 
   const cards = page.locator('[data-testid="candidate-card"]');
-  await expect(cards).toHaveCount(3);
+  await expect(cards).toHaveCount(4);
 
-  // The toggle lives on the primary row (not the popover).
-  const toggle = page.getByTestId("alerts-toggle");
-  await expect(toggle).toBeVisible();
-  await expect(toggle).toHaveAttribute("aria-pressed", "false");
+  const off = page.getByTestId("alerts-segment-off");
+  const withAlerts = page.getByTestId("alerts-segment-with");
+  const withoutAlerts = page.getByTestId("alerts-segment-without");
+  await expect(off).toHaveAttribute("aria-pressed", "true");
+  await expect(withAlerts).toHaveAttribute("aria-pressed", "false");
+  await expect(withoutAlerts).toHaveAttribute("aria-pressed", "false");
 
-  // Turn it on → narrows to the UNION of caveat + redflag properties (2), never
-  // the assessed-clean/never-assessed one.
-  await toggle.click();
+  // "Con alertas" → narrows to the UNION of caveat + redflag properties (2),
+  // never the clean or never-assessed ones.
+  await withAlerts.click();
   await assertNoErrorSurface(page);
-  await expect(toggle).toHaveAttribute("aria-pressed", "true");
+  await expect(withAlerts).toHaveAttribute("aria-pressed", "true");
+  await expect(off).toHaveAttribute("aria-pressed", "false");
   await expect(cards).toHaveCount(2);
   await expect(page.locator(card(pDebt))).toBeVisible();
   await expect(page.locator(card(pEmbargo))).toBeVisible();
   await expect(page.locator(card(pClean))).toHaveCount(0);
-
-  // An active chip appears for it.
+  await expect(page.locator(card(pUnassessed))).toHaveCount(0);
   await expect(page.getByTestId("filter-chip-alerts")).toBeVisible();
 
-  // Turn it off → the full list is restored, still no error surface.
-  await toggle.click();
+  // "Sin alertas" → the TRUE COMPLEMENT: only the assessed-clean property,
+  // NOT the never-assessed one (D-059: unassessed excluded from a hard
+  // filter, never a false "verified clean").
+  await withoutAlerts.click();
   await assertNoErrorSurface(page);
-  await expect(toggle).toHaveAttribute("aria-pressed", "false");
-  await expect(cards).toHaveCount(3);
+  await expect(withoutAlerts).toHaveAttribute("aria-pressed", "true");
+  await expect(withAlerts).toHaveAttribute("aria-pressed", "false");
+  await expect(cards).toHaveCount(1);
+  await expect(page.locator(card(pClean))).toBeVisible();
+  await expect(page.locator(card(pUnassessed))).toHaveCount(0);
+  await expect(page.locator(card(pDebt))).toHaveCount(0);
+  await expect(page.locator(card(pEmbargo))).toHaveCount(0);
+  await expect(page.getByTestId("filter-chip-alerts")).toBeVisible();
+
+  // Back to "Todas" → the full list is restored, still no error surface.
+  await off.click();
+  await assertNoErrorSurface(page);
+  await expect(off).toHaveAttribute("aria-pressed", "true");
+  await expect(cards).toHaveCount(4);
+  await expect(page.getByTestId("filter-chip-alerts")).toHaveCount(0);
 });
 
-test("deep-loading ?alerts=1 activates the filter and shows the chip", async ({ page }) => {
+test("deep-loading ?alerts=1 activates 'con alertas' and shows the chip", async ({ page }) => {
   skipIfNoDb(test);
 
   await page.goto(`/profiles/${profileId}?alerts=1`);
   await assertNoErrorSurface(page);
 
-  // The toggle reflects the URL state, the chip is shown, and the feed is
-  // already narrowed to the two flagged properties.
-  await expect(page.getByTestId("alerts-toggle")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByTestId("alerts-segment-with")).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByTestId("filter-chip-alerts")).toBeVisible();
   const cards = page.locator('[data-testid="candidate-card"]');
   await expect(cards).toHaveCount(2);
   await expect(page.locator(card(pClean))).toHaveCount(0);
+  await expect(page.locator(card(pUnassessed))).toHaveCount(0);
+});
+
+test("deep-loading ?alerts=0 activates 'sin alertas' — the complement, not the never-assessed property", async ({
+  page,
+}) => {
+  skipIfNoDb(test);
+
+  await page.goto(`/profiles/${profileId}?alerts=0`);
+  await assertNoErrorSurface(page);
+
+  await expect(page.getByTestId("alerts-segment-without")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.getByTestId("filter-chip-alerts")).toBeVisible();
+  const cards = page.locator('[data-testid="candidate-card"]');
+  await expect(cards).toHaveCount(1);
+  await expect(page.locator(card(pClean))).toBeVisible();
+  await expect(page.locator(card(pUnassessed))).toHaveCount(0);
 });
