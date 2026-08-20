@@ -1,4 +1,11 @@
+#!/usr/bin/env python3
 """Issue #618 microbenchmark — NOT CI-gated, run by hand.
+
+Lives in scripts/, not etl/dedup/: the ETL Docker image is built with
+`COPY . etl/` (etl/Dockerfile) over the `./etl` build context, so anything
+under etl/ ships into the running container. This is a dev-only
+benchmarking tool, never imported at runtime — scripts/ is outside that
+build context and never gets copied in.
 
 Measures `photo_hash.match_ratio`'s per-pair cost before vs. after the
 packed-int change, on the worst case the issue's own profile called out:
@@ -6,59 +13,44 @@ a 15x15 NON-matching pair (both sides have photos, nothing matches — the
 case that can't short-circuit, since `match_ratio` must scan every
 combination to conclude "no match").
 
-Usage::
+Imports its frozen pre-#618 reference algorithm (`_reference_match_ratio`),
+synthetic-hash builders (`_random_hash`/`_flip_bits`), and the pinned
+`_HASH_HAMMING_THRESHOLD` (10) from
+`etl/tests/test_dedup_pair_precompute_equivalence.py` rather than carrying
+a second, independently-typed copy of any of them — that module is the
+ONE place this codebase pins the pre-#618 algorithm, proven-correct by its
+own equivalence suite. A second copy here could silently drift from it and
+this benchmark would never notice.
 
-    python -m etl.dedup.microbench_pair_precompute
+Usage (from the repo root)::
+
+    python scripts/dedup-microbench-pair-precompute.py
 
 Acceptance criterion (issue #618, task 1): shows >= 3x on match_ratio
 15x15. Fable's profile measured 155us -> 42us packed-int (~4x) locally,
 9.5us numpy-vectorized (~16x) — either is acceptable; this repo took the
-simpler packed-int diff.
+simpler packed-int diff. Actually measured here: 142.66us -> 8.36us,
+17.1x (see D-136).
 """
 
 from __future__ import annotations
 
 import random
+import sys
 import time
+from pathlib import Path
 
-import imagehash
-import numpy
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from etl.dedup.signals import photo_hash
-
-_HASH_HAMMING_THRESHOLD = 10  # pinned independently — see the equivalence
-# test module's identical comment for why.
+from etl.tests.test_dedup_pair_precompute_equivalence import (
+    _HASH_HAMMING_THRESHOLD,
+    _flip_bits,
+    _random_hash,
+    _reference_match_ratio,
+)
 
 _ITERATIONS = 20_000
-
-
-def _random_hash(rng: random.Random) -> imagehash.ImageHash:
-    bits = numpy.array([rng.random() < 0.5 for _ in range(64)], dtype=bool)
-    return imagehash.ImageHash(bits.reshape(8, 8))
-
-
-def _flip_bits(
-    h: imagehash.ImageHash, distance: int, rng: random.Random
-) -> imagehash.ImageHash:
-    flat = h.hash.flatten().copy()
-    for pos in rng.sample(range(64), distance):
-        flat[pos] = not flat[pos]
-    return imagehash.ImageHash(flat.reshape(8, 8))
-
-
-def _reference_match_ratio(hashes_a, hashes_b):
-    """Frozen pre-#618 algorithm — see test_dedup_pair_precompute_equivalence.py."""
-    if not hashes_a or not hashes_b:
-        return None
-    smaller, larger = (
-        (hashes_a, hashes_b) if len(hashes_a) <= len(hashes_b) else (hashes_b, hashes_a)
-    )
-    matched = sum(
-        1
-        for h_small in smaller
-        if any((h_small - h_large) <= _HASH_HAMMING_THRESHOLD for h_large in larger)
-    )
-    return matched / len(smaller)
 
 
 def main() -> None:

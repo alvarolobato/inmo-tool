@@ -7,8 +7,9 @@ behaviour from anywhere (that code was changed in place, so no live
 "old" implementation exists to import). Instead it pins a FROZEN,
 independently-written copy of the pre-#618 `match_ratio`/
 `hashes_share_any_match` (operating on raw `imagehash.ImageHash` objects,
-exactly as they read before this issue's patch — see the module docstring
-in `etl/dedup/microbench_pair_precompute.py` for the same pattern) plus a
+exactly as they read before this issue's patch) — the ONE place this
+codebase pins that reference; `scripts/dedup-microbench-pair-precompute.py`
+imports it from here rather than carrying a second, driftable copy — plus a
 hand-assembled `_frozen_evaluate_pair` that mirrors the CURRENT
 `etl.dedup.engine.evaluate_pair`'s control flow step for step, substituting
 only the photo-hash/phone internals for their frozen/uncached equivalents.
@@ -58,13 +59,14 @@ from etl.dedup.signals import photo_hash as photo_hash_signal
 from etl.dedup.signals.floor import floors_conflict
 from etl.dedup.types import ListingRecord, PairEvaluation
 
-# Pinned independently of `etl.dedup.signals.photo_hash._HASH_HAMMING_THRESHOLD`
-# — same reasoning as `etl/dedup/microbench_pair_precompute.py`'s identical
-# constant: if a future change to the real module's threshold isn't
-# mirrored here, this test starts failing rather than silently comparing
-# against a threshold that no longer matches production, which is the
-# point of a FROZEN reference (a copy that tracks the real value would
-# stop being independent proof).
+# Pinned independently of `etl.dedup.signals.photo_hash._HASH_HAMMING_THRESHOLD`:
+# if a future change to the real module's threshold isn't mirrored here,
+# this test starts failing rather than silently comparing against a
+# threshold that no longer matches production, which is the point of a
+# FROZEN reference (a copy that tracks the real value would stop being
+# independent proof). This is the ONE place that independent pin lives —
+# `scripts/dedup-microbench-pair-precompute.py` imports this constant
+# rather than carrying its own second copy.
 _HASH_HAMMING_THRESHOLD = 10
 
 

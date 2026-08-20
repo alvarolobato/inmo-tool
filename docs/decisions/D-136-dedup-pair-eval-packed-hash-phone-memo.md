@@ -47,7 +47,7 @@ the precomputed sets into `evaluate_pair`'s only real hot-loop call site.
   spike measured it faster still (~9.5us vs ~42us for packed ints on a
   15×15 pair), but it's a bigger diff for the same correctness property;
   packed ints already clear the ≥3x acceptance bar by a wide margin
-  (measured 17.3x on the same 15×15 worst case, see below).
+  (measured 17.1x on the same 15×15 worst case, see below).
 - A module-level `functools.lru_cache` on `extract_phones` — rejected
   because the ETL scheduler runs dedup hourly in one long-lived process
   (`etl.orchestrator.run_dedup`); an unbounded process-lifetime cache would
@@ -64,18 +64,42 @@ including hand-crafted pairs at exact Hamming distances straddling
 `_HASH_HAMMING_THRESHOLD` (10) and match ratios straddling `MIN_MATCH_RATIO`
 (0.60) and the #188 exact-match auto-merge boundary (1.000) — the specific
 rounding-drift failure mode that would otherwise move pairs across a
-decision line unnoticed. Measured on a synthetic 3,000-listing corpus (same
-seed, same corpus, two codebases): 111.98us/pair → 5.02us/pair (22.3x),
-extrapolating to production's measured 56.1M pairs: ~105 min → ~4.7 min —
-in the same ballpark as issue #617's independent profile (110 min
-extrapolated, 126 min measured) and comfortably inside the issue's
-"well under 30 min" exit criterion. Isolated microbenchmark on the
-worst-case 15×15 non-matching pair (`etl/dedup/microbench_pair_precompute.py`,
-not CI-gated): 148us → 8.5us, 17.3x.
+decision line unnoticed, plus a 300-pair randomized fuzz corpus and the
+full `evaluate_pair` pipeline end to end (not just the two changed
+functions in isolation). A PR-review mutation test confirmed the harness
+actually bites: a one-bit `pack_hash` loss produces 4 failures, a
+±0.001 `match_ratio` drift produces 14 (including the near-threshold
+cases and the full `detail` comparison) — and it does NOT false-positive
+on two distance-preserving bit permutations.
+
+Measured (not estimated): a full `etl.dedup.engine._run` pass — real DB
+writes, real merge/suggestion commits, the exact path `ps dedup run`
+exercises — over an identical 3,000-listing synthetic corpus (production-
+shaped photo-hash-count and phone-number-density distributions) on two
+throwaway Postgres databases, old algorithm vs. new: 139.5s (46.5us/pair)
+→ 14.6s (4.9us/pair), 9.6x, with IDENTICAL `pairs_compared` (2,999,991)
+and `merged` (42) counts on both runs — recall parity confirmed at pass
+scale, not just per-pair. Isolated worst-case microbenchmark (15×15
+non-matching pair, `scripts/dedup-microbench-pair-precompute.py`, not
+CI-gated): 142.66us → 8.36us, 17.1x.
+
+The synthetic corpus's own absolute numbers understate production: its
+average photo-hash density, while matching issue #617's stated shape
+(67.3% of listings with ≥1 hash, ~15 conditional mean), doesn't reproduce
+the full p90=32 tail or real description lengths, so its per-pair cost
+(46.5us old) is well under production run 122's own measured baseline
+(~134us/pair over 56.1M pairs, from the reported 126 min). Anchoring the
+measured 9.6x-17.1x speedup range to THAT baseline instead —
+134us/pair / 9.6 to 17.1 × 56.1M pairs — gives the honest production
+expectation: **roughly 8-15 minutes**, not the ~4.7 min the synthetic
+corpus's own extrapolation would suggest. Either end is comfortably
+inside the issue's "well under 30 min" exit criterion; the next
+optimization (#619) should argue from the 8-15 min range, not the
+synthetic corpus's absolute numbers.
 
 **See**: `etl/dedup/engine.py` (`_PhotoHashCache.get_packed`, `_PhoneCache`,
 `evaluate_pair`), `etl/dedup/signals/photo_hash.py` (`pack_hash`,
 `match_ratio`, `hashes_share_any_match`), `etl/dedup/signals/phone_extract.py`
 (`evaluate`'s `phones_a`/`phones_b`), `etl/tests/test_dedup_pair_precompute_equivalence.py`,
-`etl/dedup/microbench_pair_precompute.py`, issues #617/#618,
+`scripts/dedup-microbench-pair-precompute.py`, issues #617/#618,
 [D-025](D-025-photo-hash-store.md), [D-024](D-024-dedup-pending-reevaluation.md).
