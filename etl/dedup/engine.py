@@ -107,6 +107,19 @@ class DedupRunResult:
     reevaluated_merged: int = 0
     reevaluated_rejected: int = 0
     reevaluated_updated: int = 0
+    # Issue #604: a `pending` suggested_merge row whose two listings
+    # already share a property_id — because a DIFFERENT pair's merge
+    # unified them, not because this exact pair was ever itself confirmed
+    # — used to be invisible to reevaluation forever: `_run`'s
+    # `a.property_id == b.property_id` skip ran BEFORE `pending_by_pair`
+    # was ever consulted, so D-024's reevaluation guarantee never actually
+    # reached these rows (71 stale rows measured on the live corpus: 56
+    # photo_hash + 15 fuzzy). Counts how many such rows this run resolved
+    # to `confirmed` via `_resolve_pending_same_property` — kept separate
+    # from `reevaluated_*` above, all of which assume a fresh
+    # `evaluate_pair` call happened; this path never calls it (there is
+    # nothing left to score, the listings are already unified).
+    same_property_pending_resolved: int = 0
 
 
 def fetch_listing_records(conn) -> list[ListingRecord]:
@@ -702,6 +715,58 @@ def _reevaluate_pending_suggestion(
     return survivor_id, losing_id
 
 
+def _resolve_pending_same_property(
+    conn, pending: _PendingSuggestion, result: DedupRunResult
+) -> None:
+    """Resolve a `pending` suggested_merge row whose two listings already
+    share a property_id — issue #604.
+
+    Mirrors `confirm_suggestion`'s own "already unified by another pair"
+    branch (see that function's docstring): the intent behind this
+    suggestion — these are the same property — is already satisfied by
+    whatever merge unified them, so this marks the row `confirmed` without
+    calling `perform_merge` again. There is nothing left to merge: both
+    listings already point at the same property, and re-running the merge
+    machinery would try to move listings off a losing property that no
+    longer has anything on it.
+
+    Every branch of `_reevaluate_pending_suggestion` preserves the row's
+    pre-resolution state under `reevaluated_from` in `detail` for the same
+    auditability reason — this does too, plus a `resolved_reason` so a
+    human (or a future debugging session) can tell this apart from a fresh
+    `evaluate_pair` verdict.
+    """
+    previous = {
+        "status": "pending",
+        "match_basis": pending.match_basis,
+        "confidence": (
+            float(pending.confidence) if pending.confidence is not None else None
+        ),
+        "detail": pending.detail,
+    }
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE suggested_merge
+               SET status = 'confirmed',
+                   resolved_at = NOW(),
+                   detail = detail || %s::jsonb
+             WHERE id = %s
+            """,
+            (
+                json.dumps(
+                    {
+                        "reevaluated_from": previous,
+                        "resolved_reason": "listings already unified",
+                    }
+                ),
+                pending.suggestion_id,
+            ),
+        )
+    conn.commit()
+    result.same_property_pending_resolved += 1
+
+
 def run(conn) -> DedupRunResult:
     """Compare every not-yet-merged listing pair and act on the result.
 
@@ -780,6 +845,18 @@ def _run(conn, hash_cache: _PhotoHashCache) -> DedupRunResult:
             for j in range(i + 1, len(listings)):
                 a, b = listings[i], listings[j]
                 if a.property_id == b.property_id:
+                    # Issue #604: don't skip silently — a pending
+                    # suggestion for THIS pair may still be sitting in the
+                    # queue because a DIFFERENT pair's merge is what
+                    # unified them, not a confirm of this one. Checked
+                    # before the `continue` (not after, which is exactly
+                    # the bug) so it's never bypassed.
+                    same_property_pair_key = tuple(sorted((a.listing_id, b.listing_id)))
+                    pending_same_property = pending_by_pair.get(same_property_pair_key)
+                    if pending_same_property is not None:
+                        _resolve_pending_same_property(
+                            conn, pending_same_property, result
+                        )
                     continue
                 if a.source == b.source:
                     result.same_source_skipped += 1
@@ -849,6 +926,14 @@ def _run(conn, hash_cache: _PhotoHashCache) -> DedupRunResult:
             result.reevaluated_merged,
             result.reevaluated_rejected,
             result.reevaluated_updated,
+        )
+
+    if result.same_property_pending_resolved:
+        logger.info(
+            "dedup: resolved %d pending suggestion(s) whose listings were "
+            "already unified by a different merge (issue #604) — marked "
+            "confirmed, no new merge performed",
+            result.same_property_pending_resolved,
         )
 
     if result.same_source_skipped:

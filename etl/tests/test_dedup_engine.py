@@ -1866,6 +1866,178 @@ class TestPendingSuggestionReevaluation:
         assert result.reevaluated_rejected == 1
 
 
+class TestSamePropertyPendingResolution:
+    """Issue #604: a `pending` suggested_merge row whose two listings
+    already share a property_id — because a DIFFERENT pair's merge
+    unified them, not a merge of this pair itself — used to be
+    permanently invisible to reevaluation. `_run`'s
+    `a.property_id == b.property_id` skip ran BEFORE `pending_by_pair` was
+    ever consulted, so this exact shape of row could never leave `pending`
+    no matter how many runs happened (71 stale rows measured on the live
+    corpus — #600).
+
+    These tests seed that state directly (a pending suggestion for (A, B),
+    then a manual `UPDATE listing SET property_id` pointing B at A's
+    property — standing in for "a third listing's merge pulled B onto A's
+    property") rather than orchestrating a second real merge through
+    `evaluate_pair`. That keeps the fixture owning its exact precondition
+    (a `pending` row + two listings already on one property) instead of
+    hoping a chain of signals produces it — the shape this bug needs to
+    reproduce, made explicit rather than incidental.
+    """
+
+    def _seed_pending_pair(self, conn, source_a, source_b, ext_prefix, **kwargs):
+        listing_a, prop_a, listing_b, prop_b = _insert_pair(
+            conn, source_a, source_b, ext_prefix, **kwargs
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO suggested_merge
+                    (listing_id_a, listing_id_b, match_basis, confidence, status)
+                VALUES (%s, %s, 'photo_hash', 0.700, 'pending') RETURNING id
+                """,
+                sorted((listing_a, listing_b)),
+            )
+            suggestion_id = cur.fetchone()[0]
+        conn.commit()
+        return listing_a, prop_a, listing_b, prop_b, suggestion_id
+
+    def test_resolves_pending_suggestion_whose_listings_were_unified_by_a_different_merge(
+        self, dedup_db
+    ):
+        listing_a, prop_a, listing_b, _prop_b, suggestion_id = self._seed_pending_pair(
+            dedup_db, "idealista", "fotocasa", "same-prop-604"
+        )
+
+        # Simulate the bug's real trigger: a third listing's merge folded
+        # B's property onto A's — never a merge of THIS pair directly.
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "UPDATE listing SET property_id = %s WHERE id = %s",
+                (prop_a, listing_b),
+            )
+        dedup_db.commit()
+
+        # Own the precondition before asserting anything about what
+        # run() does with it: this row really is the exact stale shape
+        # #600 measured — pending, but its two listings already share a
+        # property.
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            assert cur.fetchone()[0] == "pending"
+            cur.execute(
+                "SELECT COUNT(DISTINCT property_id) FROM listing WHERE id IN (%s, %s)",
+                (listing_a, listing_b),
+            )
+            assert cur.fetchone()[0] == 1
+
+        result = engine.run(dedup_db)
+
+        assert result.same_property_pending_resolved == 1
+        assert result.merged == 0
+        assert result.pairs_compared == 0  # never reaches evaluate_pair
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status, resolved_at, detail FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            status, resolved_at, detail = cur.fetchone()
+            assert status == "confirmed"
+            assert resolved_at is not None
+            assert detail["resolved_reason"] == "listings already unified"
+            assert detail["reevaluated_from"]["status"] == "pending"
+            assert detail["reevaluated_from"]["match_basis"] == "photo_hash"
+
+            # No new merge was performed — nothing to log.
+            cur.execute("SELECT COUNT(*) FROM property_merge_log")
+            assert cur.fetchone()[0] == 0
+            # And no second row was created for the pair either.
+            cur.execute("SELECT COUNT(*) FROM suggested_merge")
+            assert cur.fetchone()[0] == 1
+
+    def test_second_run_is_a_no_op_once_resolved(self, dedup_db):
+        """Idempotency: once resolved to `confirmed`, `_load_recorded_pairs`
+        excludes the row entirely (its own `WHERE status <> 'confirmed'`),
+        so a second run must neither touch it again nor recount it.
+        """
+        _listing_a, prop_a, listing_b, _prop_b, suggestion_id = self._seed_pending_pair(
+            dedup_db, "idealista", "fotocasa", "same-prop-604-idem"
+        )
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "UPDATE listing SET property_id = %s WHERE id = %s",
+                (prop_a, listing_b),
+            )
+        dedup_db.commit()
+
+        first = engine.run(dedup_db)
+        assert first.same_property_pending_resolved == 1
+
+        second = engine.run(dedup_db)
+        assert second.same_property_pending_resolved == 0
+        assert second.pairs_compared == 0
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            assert cur.fetchone()[0] == "confirmed"
+
+    def test_different_property_pending_row_reevaluates_independently(self, dedup_db):
+        """Regression guard: the new same-property short-circuit must not
+        interfere with the pre-existing issue #214 reevaluation path for a
+        pending row whose two listings genuinely still sit on different
+        properties — both mechanisms must coexist across runs without
+        either swallowing the other.
+        """
+        _la, prop_a, lb, _pb, same_prop_suggestion_id = self._seed_pending_pair(
+            dedup_db, "idealista", "fotocasa", "same-prop-604-mixed-a"
+        )
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "UPDATE listing SET property_id = %s WHERE id = %s", (prop_a, lb)
+            )
+        dedup_db.commit()
+
+        _insert_pair(
+            dedup_db,
+            "idealista",
+            "fotocasa",
+            "same-prop-604-mixed-b",
+            address_a="Calle Alcala 10, Madrid",
+            address_b="Calle Alcala 10, Madrid",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(72),
+            current_price_a=Decimal(200000),
+            current_price_b=Decimal(205000),
+        )
+
+        first = engine.run(dedup_db)
+        assert first.same_property_pending_resolved == 1
+        assert first.suggested == 1  # the fresh fuzzy pair, filed for the first time
+        assert first.reevaluated_total == 0  # nothing pre-existing to reevaluate yet
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = %s",
+                (same_prop_suggestion_id,),
+            )
+            assert cur.fetchone()[0] == "confirmed"
+
+        second = engine.run(dedup_db)
+        # Already confirmed and excluded by _load_recorded_pairs — nothing
+        # left for the #604 path to do.
+        assert second.same_property_pending_resolved == 0
+        # The fuzzy pair, now pending from run 1, goes through the
+        # pre-existing #214 path unaffected.
+        assert second.reevaluated_total == 1
+        assert second.reevaluated_updated == 1
+
+
 class TestRecordedPairBatching:
     """Issue #61b: the skip check was one query per candidate pair."""
 

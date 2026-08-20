@@ -40,6 +40,16 @@ def _cmd_run(conn) -> int:
         f"{result.merged} merged, {result.suggested} suggested for review, "
         f"{result.conflicts} merge-time conflict(s) flagged."
     )
+    if result.same_property_pending_resolved:
+        # Issue #604: same visibility precedent as same_source_skipped
+        # below — a pending row resolved this way never goes through
+        # evaluate_pair, so it's invisible in the "Compared ..." line above.
+        print(
+            f"Resolved {result.same_property_pending_resolved} pending "
+            f"suggestion(s) whose listings were already unified by a "
+            f"different merge (issue #604) — marked confirmed, no new "
+            f"merge performed."
+        )
     if result.same_source_skipped:
         # Issue #197: same-source pairs are skipped before ever reaching
         # evaluate_pair, so they're invisible in the "Compared ..." line
