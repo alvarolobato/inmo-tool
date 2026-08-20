@@ -2263,9 +2263,9 @@ export async function listCandidates(
        --   $24=true keeps TRUE rows; $24=false keeps FALSE rows (occupancy-
        --   assessed-clean, whether or not redflags were ever checked); NULL
        --   rows are excluded from BOTH $24 values via NULL = $24 -> NULL
-       --   (D-059: unassessed excluded from a hard filter, never a false
-       --   "verified clean" pass). Composes (AND) with redflagType and every
-       --   other filter.
+       --   (D-059/D-127: unassessed excluded from a hard filter, never a
+       --   false "verified clean" pass). Composes (AND) with redflagType and
+       --   every other filter.
        AND (
          $24::boolean IS NULL
          OR (
