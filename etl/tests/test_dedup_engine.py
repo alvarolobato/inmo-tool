@@ -13,6 +13,7 @@ import json
 import zlib
 from decimal import Decimal
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
 import imagehash
@@ -615,8 +616,21 @@ class TestPhoneOrderingRescue:
         self, listing_id_a: int, listing_id_b: int
     ) -> _PhotoHashCache:
         cache = _PhotoHashCache()
-        cache._cache[listing_id_a] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
-        cache._cache[listing_id_b] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
+        # Issue #615: _cache holds (url, hash) PAIRS now, not bare hashes —
+        # synthetic URLs here are never asserted on, just structurally
+        # required so `_PhotoHashCache.get()`'s unpacking doesn't crash.
+        cache._cache[listing_id_a] = [
+            (
+                f"https://example.test/{listing_id_a}.jpg",
+                imagehash.hex_to_hash(self._IDENTICAL_HEX),
+            )
+        ]
+        cache._cache[listing_id_b] = [
+            (
+                f"https://example.test/{listing_id_b}.jpg",
+                imagehash.hex_to_hash(self._IDENTICAL_HEX),
+            )
+        ]
         return cache
 
     def test_ordering_lets_photo_hash_claim_a_pair_phone_would_otherwise_shadow(self):
@@ -884,8 +898,21 @@ class TestReferenceCodeConflictVeto:
         self, listing_id_a: int, listing_id_b: int
     ) -> _PhotoHashCache:
         cache = _PhotoHashCache()
-        cache._cache[listing_id_a] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
-        cache._cache[listing_id_b] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
+        # Issue #615: _cache holds (url, hash) PAIRS now, not bare hashes —
+        # synthetic URLs here are never asserted on, just structurally
+        # required so `_PhotoHashCache.get()`'s unpacking doesn't crash.
+        cache._cache[listing_id_a] = [
+            (
+                f"https://example.test/{listing_id_a}.jpg",
+                imagehash.hex_to_hash(self._IDENTICAL_HEX),
+            )
+        ]
+        cache._cache[listing_id_b] = [
+            (
+                f"https://example.test/{listing_id_b}.jpg",
+                imagehash.hex_to_hash(self._IDENTICAL_HEX),
+            )
+        ]
         return cache
 
     def test_same_agency_different_codes_blocks_merge_despite_full_agreement(self):
@@ -4195,8 +4222,19 @@ class TestStructuredFieldsNeverVetoesStrongerSignals:
             rooms_b=6,
         )
         identical_hex = "ffff0000ffff0000"
-        cache._cache[listing_a] = [imagehash.hex_to_hash(identical_hex)]
-        cache._cache[listing_b] = [imagehash.hex_to_hash(identical_hex)]
+        # Issue #615: _cache holds (url, hash) PAIRS now, not bare hashes.
+        cache._cache[listing_a] = [
+            (
+                f"https://example.test/{listing_a}.jpg",
+                imagehash.hex_to_hash(identical_hex),
+            )
+        ]
+        cache._cache[listing_b] = [
+            (
+                f"https://example.test/{listing_b}.jpg",
+                imagehash.hex_to_hash(identical_hex),
+            )
+        ]
         records = {r.listing_id: r for r in engine.fetch_listing_records(dedup_db)}
         evaluation = engine.evaluate_pair(records[listing_a], records[listing_b], cache)
         assert evaluation is not None
@@ -4221,8 +4259,21 @@ class TestPhotoHashAutoMerge:
         self, listing_id_a: int, listing_id_b: int
     ) -> _PhotoHashCache:
         cache = _PhotoHashCache()
-        cache._cache[listing_id_a] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
-        cache._cache[listing_id_b] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
+        # Issue #615: _cache holds (url, hash) PAIRS now, not bare hashes —
+        # synthetic URLs here are never asserted on, just structurally
+        # required so `_PhotoHashCache.get()`'s unpacking doesn't crash.
+        cache._cache[listing_id_a] = [
+            (
+                f"https://example.test/{listing_id_a}.jpg",
+                imagehash.hex_to_hash(self._IDENTICAL_HEX),
+            )
+        ]
+        cache._cache[listing_id_b] = [
+            (
+                f"https://example.test/{listing_id_b}.jpg",
+                imagehash.hex_to_hash(self._IDENTICAL_HEX),
+            )
+        ]
         return cache
 
     def test_suggestion_197_shape_auto_merges(self):
@@ -4363,8 +4414,17 @@ class TestPhotoHashAutoMerge:
         h3 = imagehash.hex_to_hash("ffffffffffffffff")
         h4 = imagehash.hex_to_hash("5555555555555555")
         cache = _PhotoHashCache()
-        cache._cache[1] = [h1, h2, h3]
-        cache._cache[2] = [h1, h2, h4]
+        # Issue #615: _cache holds (url, hash) PAIRS now, not bare hashes.
+        cache._cache[1] = [
+            ("https://example.test/1-0.jpg", h1),
+            ("https://example.test/1-1.jpg", h2),
+            ("https://example.test/1-2.jpg", h3),
+        ]
+        cache._cache[2] = [
+            ("https://example.test/2-0.jpg", h1),
+            ("https://example.test/2-1.jpg", h2),
+            ("https://example.test/2-2.jpg", h4),
+        ]
 
         a = _record(
             1,
@@ -4386,14 +4446,131 @@ class TestPhotoHashAutoMerge:
         assert evaluation.decision == "suggest"
 
 
+class TestPhotoHashMatchedPairsThreading:
+    """Issue #615: `evaluate_pair`'s `detail["matched_photos"]` must carry
+    the TRUE matching photo URLs from `photo_hash.matched_pairs`, threaded
+    through `_PhotoHashCache.get_pairs` — never re-derived, never an
+    index-aligned guess. Deliberately NOT `_cache_with_identical_hashes`'s
+    single-hash-per-listing shape (every other photo_hash test class in
+    this file uses that) — a fixture where the one hash on each side is
+    automatically "the match" at index 0 would pass even if
+    `evaluate_pair` never called `matched_pairs`/`get_pairs` at all. Here,
+    listing A has 6 photos and listing B has 4; the real match sits at
+    index 4 on A and index 1 on B — nowhere near each other, let alone
+    index 0.
+    """
+
+    # Two shared hashes (the true matches) plus two disjoint hex "families"
+    # (per-side noise) — verified independently (not just "looks
+    # different", see scratch check in this PR's description): every
+    # cross-side noise pair AND every noise-vs-shared pair sits at Hamming
+    # distance >=16 (comfortably above `_HASH_HAMMING_THRESHOLD`=10); the
+    # two shared hashes sit at distance 64 from EACH OTHER too, so neither
+    # can accidentally stand in for the other. Two shared photos (not one)
+    # are needed to clear `MIN_MATCH_RATIO` (0.6) against a 3-photo smaller
+    # side without making every photo a match, which would defeat the
+    # "not index 0" point.
+    _SHARED_HEX_1 = "ffff0000ffff0000"
+    _SHARED_HEX_2 = "0000ffff0000ffff"
+    _A_NOISE_HEXES: ClassVar[list[str]] = [
+        "0000000000000000",
+        "1111111111111111",
+        "2222222222222222",
+    ]
+    _B_NOISE_HEXES: ClassVar[list[str]] = ["8888888888888888"]
+
+    def test_matched_photos_names_the_true_matching_urls_not_index_0(self):
+        cache = _PhotoHashCache()
+        shared1 = imagehash.hex_to_hash(self._SHARED_HEX_1)
+        shared2 = imagehash.hex_to_hash(self._SHARED_HEX_2)
+        a_noise = [imagehash.hex_to_hash(h) for h in self._A_NOISE_HEXES]
+        b_noise = [imagehash.hex_to_hash(h) for h in self._B_NOISE_HEXES]
+
+        # Listing 1 (a): 5 photos. Matches at index 1 (shared1) and index 3
+        # (shared2) — neither at index 0, and in the OPPOSITE order from
+        # how listing b (below) lists them.
+        cache._cache[1] = [
+            ("https://a.example/0.jpg", a_noise[0]),
+            ("https://a.example/1.jpg", shared1),
+            ("https://a.example/2.jpg", a_noise[1]),
+            ("https://a.example/3.jpg", shared2),
+            ("https://a.example/4.jpg", a_noise[2]),
+        ]
+        # Listing 2 (b, the smaller side): 3 photos, 2 matches -> ratio
+        # 2/3 = 0.667, clears MIN_MATCH_RATIO (0.6). shared2 sits at index
+        # 0 here (still not index 0 on the a side above) and shared1 at
+        # index 2 — a naive "photo N of a vs photo N of b" pairing would
+        # show noise against shared2, and shared1 against nothing.
+        cache._cache[2] = [
+            ("https://b.example/0.jpg", shared2),
+            ("https://b.example/1.jpg", b_noise[0]),
+            ("https://b.example/2.jpg", shared1),
+        ]
+
+        a = _record(
+            1,
+            100,
+            source="milanuncios",
+            m2_built=Decimal(70),
+            current_price=Decimal(200000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            m2_built=Decimal(70),
+            current_price=Decimal(200000),
+        )
+
+        evaluation = engine.evaluate_pair(a, b, cache)
+        assert evaluation is not None
+        assert evaluation.basis == "photo_hash"
+        matched = evaluation.detail["matched_photos"]
+        assert len(matched) == 2
+        pairs_by_url_a = {m["url_a"]: m for m in matched}
+        assert (
+            pairs_by_url_a["https://a.example/1.jpg"]["url_b"]
+            == "https://b.example/2.jpg"
+        )
+        assert (
+            pairs_by_url_a["https://a.example/3.jpg"]["url_b"]
+            == "https://b.example/0.jpg"
+        )
+        for m in matched:
+            assert m["distance"] == 0
+
+    def test_no_matched_photos_key_when_nothing_matches_below_the_suggestion_floor(
+        self,
+    ):
+        """`matched_photos` should simply be absent (not an empty list
+        littering every non-photo-basis pair's detail) when photo_hash
+        never fires at all."""
+        cache = _PhotoHashCache()
+        cache._cache[1] = [
+            ("https://a.example/0.jpg", imagehash.hex_to_hash("0000000000000000"))
+        ]
+        cache._cache[2] = [
+            ("https://b.example/0.jpg", imagehash.hex_to_hash("ffffffffffffffff"))
+        ]
+        a = _record(1, 100, source="milanuncios")
+        b = _record(2, 200, source="fotocasa")
+        evaluation = engine.evaluate_pair(a, b, cache)
+        assert evaluation is None
+
+
 def _stub_fetch(hashes_for, *, cached_hashed_for=None):
-    """A `photo_hash.fetch_hashes_with_stats` stand-in for the health tests.
+    """A `photo_hash.fetch_hash_pairs_with_stats` stand-in for the health
+    tests (issue #615: `_PhotoHashCache` calls that function now, not
+    `fetch_hashes_with_stats` — see `_PhotoHashCache._ensure_fetched`).
 
     `hashes_for(source)` gives the hashes a live fetch produced;
     `cached_hashed_for(source)` (optional) how many came out of the #221 store
     instead. Live attempts are derived from the URLs the real function would
     have requested, so a video-only `photo_urls` still counts as zero attempts
-    here exactly as it does in production.
+    here exactly as it does in production. Each hash is paired with a
+    synthetic URL — the health tests below never assert on those URLs, only
+    the stats, but `_PhotoHashCache.get()`'s (url, hash) unpacking needs a
+    2-tuple regardless.
     """
 
     def _fetch(urls, source="unknown", store_conn=None):
@@ -4401,12 +4578,15 @@ def _stub_fetch(hashes_for, *, cached_hashed_for=None):
         live_urls = [u for u in urls if photo_hash_signal._looks_like_photo_url(u)]
         live_attempted = max(len(live_urls) - cached, 0)
         hashes = hashes_for(source)
+        pairs = [
+            (f"https://example.test/{source}-{i}.jpg", h) for i, h in enumerate(hashes)
+        ]
         stats = photo_hash_signal.PhotoFetchStats(
             live_attempted=live_attempted,
             live_hashed=max(len(hashes) - cached, 0),
             cached_hashed=cached,
         )
-        return hashes, stats
+        return pairs, stats
 
     return _fetch
 
@@ -4424,7 +4604,7 @@ class TestPhotoHashCacheSourceHealth:
     def test_a_source_with_every_photo_failing_is_reported(self, monkeypatch):
         monkeypatch.setattr(
             photo_hash_signal,
-            "fetch_hashes_with_stats",
+            "fetch_hash_pairs_with_stats",
             _stub_fetch(lambda source: []),
         )
         cache = _PhotoHashCache()
@@ -4437,7 +4617,7 @@ class TestPhotoHashCacheSourceHealth:
     def test_a_source_with_at_least_one_success_is_not_reported(self, monkeypatch):
         monkeypatch.setattr(
             photo_hash_signal,
-            "fetch_hashes_with_stats",
+            "fetch_hash_pairs_with_stats",
             _stub_fetch(lambda source: [imagehash.hex_to_hash("0" * 16)]),
         )
         cache = _PhotoHashCache()
@@ -4456,7 +4636,7 @@ class TestPhotoHashCacheSourceHealth:
         across every listing counts as degraded)."""
         monkeypatch.setattr(
             photo_hash_signal,
-            "fetch_hashes_with_stats",
+            "fetch_hash_pairs_with_stats",
             _stub_fetch(lambda source: []),
         )
         cache = _PhotoHashCache()
@@ -4482,7 +4662,7 @@ class TestPhotoHashCacheSourceHealth:
         degraded — there was nothing to attempt in the first place."""
         monkeypatch.setattr(
             photo_hash_signal,
-            "fetch_hashes_with_stats",
+            "fetch_hash_pairs_with_stats",
             _stub_fetch(lambda source: []),
         )
         cache = _PhotoHashCache()
@@ -4502,7 +4682,7 @@ class TestPhotoHashCacheSourceHealth:
         """
         monkeypatch.setattr(
             photo_hash_signal,
-            "fetch_hashes_with_stats",
+            "fetch_hash_pairs_with_stats",
             _stub_fetch(
                 lambda source: [imagehash.hex_to_hash("0" * 16)] * 2,
                 cached_hashed_for=lambda source: 2,
@@ -4532,7 +4712,7 @@ class TestPhotoHashCacheSourceHealth:
         """
         monkeypatch.setattr(
             photo_hash_signal,
-            "fetch_hashes_with_stats",
+            "fetch_hash_pairs_with_stats",
             # 8 hashes returned, every one of them from the store; the 4 URLs
             # actually requested over the network all failed.
             _stub_fetch(
@@ -4554,7 +4734,7 @@ class TestPhotoHashCacheSourceHealth:
     def test_mixed_sources_only_the_failing_one_is_reported(self, monkeypatch):
         monkeypatch.setattr(
             photo_hash_signal,
-            "fetch_hashes_with_stats",
+            "fetch_hash_pairs_with_stats",
             _stub_fetch(
                 lambda source: (
                     [] if source == "milanuncios" else [imagehash.hex_to_hash("0" * 16)]

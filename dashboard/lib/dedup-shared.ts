@@ -126,8 +126,25 @@ export interface DedupPropertyPairSuggestion {
   pair_key: string;
   property_lo_id: number;
   property_hi_id: number;
-  /** How many pending listing-pair rows collapsed into this one question. */
+  /** How many pending listing-pair rows collapsed into this one question.
+   * Issue #615: this is an internal implementation detail — the count of
+   * `suggested_merge` rows the engine happens to have queued for this
+   * pair, NOT a count of adverts. It reads to a human as "N adverts of
+   * the same property" (which is what it did on the live case that
+   * motivated this fix — a 7-listing property vs. a 13-listing property
+   * produced "38 pares", read as "38 adverts", which is what a human
+   * correctly flagged as nonsense). Kept on the type only for the reject
+   * blast-radius count and the `data-pair-count` debug/test attribute —
+   * MUST NOT be rendered as its own "N pares" copy. See
+   * `listing_count_lo`/`listing_count_hi` for what the UI actually shows,
+   * and D-135 (which revises D-133's UI-copy paragraph). */
   pair_count: number;
+  /** Total SALE listings (`listing.operation = 'sale'`, D-016) on the
+   * LO/HI property respectively, across every source — the number the
+   * card leads with ("7 anuncios ↔ 13 anuncios", issue #615), distinct
+   * from `pair_count` above. */
+  listing_count_lo: number;
+  listing_count_hi: number;
   top_confidence: number;
   top_match_basis: MatchBasis;
   latest_created_at: string;
@@ -145,4 +162,118 @@ export interface DedupPropertyPairCounts {
    * per-row counts). */
   by_basis: Partial<Record<MatchBasis, number>>;
   profile_relevant_total: number;
+}
+
+// ============================================================
+// Matched-photo resolution (issue #615)
+// ============================================================
+//
+// The owner, mid-review: "cuando esté comparando duplicados me muestras 4
+// fotos como máximo. necesito ver el resto, o por lo menos que me muestres
+// las que coinciden, no las primeras que te salen." A photo_hash card that
+// shows photo #1 of each listing is frequently showing two unrelated
+// rooms — the actual evidence that produced the suggestion might be photo
+// #5 against photo #9. `etl/dedup/signals/photo_hash.py::matched_pairs`
+// is the ONE place that pairing is computed (issue #615, D-135) and
+// persisted into `suggested_merge.detail.matched_photos` as
+// `{url_a, url_b, distance}[]`, strongest match first. This module NEVER
+// re-derives the matching itself (that would be a second, driftable
+// implementation of the exact same perceptual-hash threshold logic) — it
+// only resolves which of url_a/url_b belongs to the "lo" vs "hi" property
+// side (a plain URL-membership lookup, not a re-match) and orders each
+// side's photo list matched-first.
+
+/** One `{url_a, url_b, distance}` entry exactly as `photo_hash.py`
+ * persists it — url_a/url_b are NOT guaranteed to correspond to
+ * lo/hi (they follow whichever of the two listings `evaluate_pair` happened
+ * to receive as "a"/"b"); use `resolveMatchedPhotos` to pin that down. */
+export interface RawMatchedPhotoPair {
+  url_a: string;
+  url_b: string;
+  distance: number;
+}
+
+/** A matched pair resolved to this group's canonical lo/hi property order. */
+export interface ResolvedPhotoMatch {
+  urlLo: string;
+  urlHi: string;
+  distance: number;
+}
+
+/** Defensive parse of `detail.matched_photos` — absent/malformed shapes
+ * (a stale pre-#615 `suggested_merge` row never had this key at all)
+ * degrade to no matches, never a crash. */
+export function parseMatchedPhotos(detail: Record<string, unknown>): RawMatchedPhotoPair[] {
+  const raw = detail.matched_photos;
+  if (!Array.isArray(raw)) return [];
+  const result: RawMatchedPhotoPair[] = [];
+  for (const entry of raw) {
+    if (
+      entry &&
+      typeof entry === "object" &&
+      typeof (entry as Record<string, unknown>).url_a === "string" &&
+      typeof (entry as Record<string, unknown>).url_b === "string" &&
+      typeof (entry as Record<string, unknown>).distance === "number"
+    ) {
+      const e = entry as { url_a: string; url_b: string; distance: number };
+      result.push({ url_a: e.url_a, url_b: e.url_b, distance: e.distance });
+    }
+  }
+  return result;
+}
+
+/** Resolves `detail.matched_photos` against this evidence row's two sides,
+ * pinning each pair's URLs to lo/hi (never guessed — a plain membership
+ * test against each side's OWN `photo_urls`). A pair whose URLs match
+ * neither side as expected (a listing's `photo_urls` changed on a later
+ * fetch since the suggestion was filed — stale evidence) is silently
+ * dropped rather than mis-assigned. Sorted strongest-match-first
+ * (ascending distance) — `matched_pairs` already returns it that way, but
+ * this re-sorts defensively rather than trusting persisted order.
+ */
+export function resolveMatchedPhotos(
+  detail: Record<string, unknown>,
+  listingLo: Pick<DedupListingSide, "photo_urls">,
+  listingHi: Pick<DedupListingSide, "photo_urls">,
+): ResolvedPhotoMatch[] {
+  const loSet = new Set(listingLo.photo_urls);
+  const hiSet = new Set(listingHi.photo_urls);
+  const resolved: ResolvedPhotoMatch[] = [];
+  for (const m of parseMatchedPhotos(detail)) {
+    if (loSet.has(m.url_a) && hiSet.has(m.url_b)) {
+      resolved.push({ urlLo: m.url_a, urlHi: m.url_b, distance: m.distance });
+    } else if (loSet.has(m.url_b) && hiSet.has(m.url_a)) {
+      resolved.push({ urlLo: m.url_b, urlHi: m.url_a, distance: m.distance });
+    }
+  }
+  resolved.sort((a, b) => a.distance - b.distance);
+  return resolved;
+}
+
+export interface OrderedPhoto {
+  url: string;
+  /** True when this photo is one side of a matched pair — the evidence
+   * that actually produced the suggestion, not just "one of the photos
+   * this listing happens to have". */
+  matched: boolean;
+}
+
+/** Orders one side's photos MATCHED FIRST (in match-strength order), then
+ * every remaining unmatched photo in its original order — never
+ * interleaved by index. `matchedUrlsInOrder` is that side's half of
+ * `resolveMatchedPhotos`'s output (`.map(m => m.urlLo)` or `.map(m =>
+ * m.urlHi)`), already strongest-first. A matched URL not actually present
+ * in `allUrls` (shouldn't happen — `resolveMatchedPhotos` only emits URLs
+ * it found via membership in the first place — but defensive rather than
+ * assumed) is skipped rather than fabricating a photo.
+ */
+export function orderPhotosMatchedFirst(allUrls: string[], matchedUrlsInOrder: string[]): OrderedPhoto[] {
+  const allSet = new Set(allUrls);
+  const matched = matchedUrlsInOrder.filter((url) => allSet.has(url));
+  const matchedSet = new Set(matched);
+  const unmatched = allUrls.filter((url) => !matchedSet.has(url));
+  return [
+    ...matched.map((url) => ({ url, matched: true })),
+    ...unmatched.map((url) => ({ url, matched: false })),
+  ];
 }

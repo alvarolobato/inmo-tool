@@ -300,21 +300,40 @@ class _PhotoHashCache:
         # fetch-everything behaviour for tests that don't want a database.
         self._store_conn = store_conn
 
-    def get(self, listing: ListingRecord) -> list:
-        if listing.listing_id not in self._cache:
-            hashes, stats = photo_hash.fetch_hashes_with_stats(
-                listing.photo_urls, source=listing.source, store_conn=self._store_conn
+    def _ensure_fetched(self, listing: ListingRecord) -> None:
+        if listing.listing_id in self._cache:
+            return
+        # Issue #615: fetches (url, hash) PAIRS now, not bare hashes — the
+        # one fetch this cache already made per listing is also the one
+        # place a photo's URL and its hash exist together, so `get_pairs`
+        # below can report exactly which photo matched which without a
+        # second, re-derived fetch. `get()`'s own return shape is
+        # unchanged (still `list[ImageHash]`, backward compatible with
+        # every existing `match_ratio`/health-stats caller) — it's simply
+        # derived from the same cached pairs.
+        pairs, stats = photo_hash.fetch_hash_pairs_with_stats(
+            listing.photo_urls, source=listing.source, store_conn=self._store_conn
+        )
+        self._cache[listing.listing_id] = pairs
+        if stats.live_attempted:
+            self._live_attempted_by_source[listing.source] = (
+                self._live_attempted_by_source.get(listing.source, 0)
+                + stats.live_attempted
             )
-            self._cache[listing.listing_id] = hashes
-            if stats.live_attempted:
-                self._live_attempted_by_source[listing.source] = (
-                    self._live_attempted_by_source.get(listing.source, 0)
-                    + stats.live_attempted
-                )
-                self._live_hashed_by_source[listing.source] = (
-                    self._live_hashed_by_source.get(listing.source, 0)
-                    + stats.live_hashed
-                )
+            self._live_hashed_by_source[listing.source] = (
+                self._live_hashed_by_source.get(listing.source, 0) + stats.live_hashed
+            )
+
+    def get(self, listing: ListingRecord) -> list:
+        self._ensure_fetched(listing)
+        return [h for _url, h in self._cache[listing.listing_id]]
+
+    def get_pairs(self, listing: ListingRecord) -> list:
+        """Same fetch as `get()` (memoized together — never a second fetch),
+        but with each hash's source URL attached. Issue #615: lets
+        `evaluate_pair` report WHICH photos matched, not just the aggregate
+        ratio `get()`'s plain hashes already fed `match_ratio`."""
+        self._ensure_fetched(listing)
         return self._cache[listing.listing_id]
 
     def get_packed(self, listing: ListingRecord) -> list[int]:
@@ -495,6 +514,31 @@ def evaluate_pair(
         floor_conflict = floors_conflict(a.floor, b.floor)
         if floor_conflict:
             detail["floor_conflict"] = True
+
+        # Issue #615: WHICH specific photo on each side matched, not just
+        # the aggregate ratio above — the owner could not evaluate a
+        # photo-hash suggestion at all when the card only showed a
+        # percentage and (before this) the wrong photos (the first N in
+        # storage order, frequently unrelated rooms). `get_pairs` reuses
+        # the exact fetch `hashes_a`/`hashes_b` above already made (no
+        # second network round trip), and `photo_hash.matched_pairs` is the
+        # ONLY place this pairing is computed — the dashboard must render
+        # it, never re-derive a match from raw photo_urls itself. Ratio can
+        # legitimately clear the threshold with only 1 of the smaller
+        # side's photos not producing a match record here (a fetch failure
+        # after `hashes_a`/`hashes_b` were already computed is not possible
+        # since both come from the same cached pairs — this can only be
+        # empty when the underlying fetch found zero usable photos on one
+        # side, which `match_ratio` already guards against returning a
+        # ratio for).
+        matches = photo_hash.matched_pairs(
+            hash_cache.get_pairs(a), hash_cache.get_pairs(b)
+        )
+        if matches:
+            detail["matched_photos"] = [
+                {"url_a": m.url_a, "url_b": m.url_b, "distance": m.distance}
+                for m in matches
+            ]
 
         # Issue #188 (approved once #197 removed same-source pairing — see
         # photo_hash.PHOTO_MERGE_SIZE_RATIO's module-level comment for the

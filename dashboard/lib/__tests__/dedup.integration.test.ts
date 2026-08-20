@@ -276,6 +276,53 @@ describe.runIf(dbAvailable)("dedup review queue — real Postgres", () => {
       });
     });
 
+    it("listing_count_lo/hi count every SALE listing on each property, independent of pair_count (issue #615)", async () => {
+      await withRealDb(async (pool) => {
+        // Deliberately asymmetric — 7 vs 13, the exact shape of the live
+        // case that motivated #615 (property 1729: 7 sale listings;
+        // property 1732: 13). A 1×1 or symmetric fixture cannot catch a
+        // count that reads the wrong field: both listing_count_lo/hi and
+        // pair_count would coincidentally agree on a small symmetric
+        // fixture the way #611's own N=2 fixtures did (see D-133's
+        // "Alternatives rejected" note on that exact failure mode).
+        const propA = await insertProperty(pool, { address: "Calle 615 A" });
+        const propB = await insertProperty(pool, { address: "Calle 615 B" });
+        const aListings: number[] = [];
+        for (let i = 0; i < 7; i++) {
+          aListings.push(await insertListing(pool, propA, { source: i % 2 === 0 ? "fotocasa" : "idealista" }));
+        }
+        const bListings: number[] = [];
+        for (let i = 0; i < 13; i++) {
+          bListings.push(await insertListing(pool, propB, { source: i % 2 === 0 ? "fotocasa" : "idealista" }));
+        }
+        // One pending suggestion is enough to form the group — the
+        // OTHER 6×12 combinations don't need suggestion rows for this
+        // test (pair_count would just be 1), the point is that
+        // listing_count_lo/hi still report the true per-side totals.
+        await insertSuggestion(pool, aListings[0], bListings[0], {
+          match_basis: "photo_hash",
+          confidence: 0.8,
+        });
+        // A rental listing on propB must NOT count (D-016: sale-candidate
+        // queries filter operation='sale' explicitly).
+        const rentListing = await pool.query<{ id: number }>(
+          `INSERT INTO listing (property_id, source, external_id, current_price, operation)
+           VALUES ($1, 'fotocasa', $2, 900, 'rent') RETURNING id`,
+          [propB, `dedup-int-test-rent-${Math.random().toString(36).slice(2)}`],
+        );
+        createdListingIds.push(Number(rentListing.rows[0].id));
+
+        const groups = await listDedupPropertyPairSuggestions({ limit: 100 });
+        const [lo, hi] = [propA, propB].sort((x, y) => x - y);
+        const group = groups.find((g) => g.property_lo_id === lo && g.property_hi_id === hi);
+        expect(group).toBeDefined();
+        expect(group!.pair_count).toBe(1);
+        const [loCount, hiCount] = lo === propA ? [7, 13] : [13, 7];
+        expect(group!.listing_count_lo).toBe(loCount);
+        expect(group!.listing_count_hi).toBe(hiCount);
+      });
+    });
+
     it("leads with the strongest evidence (top_confidence/top_match_basis) and sorts evidence strongest-first", async () => {
       await withRealDb(async (pool) => {
         const propA = await insertProperty(pool);

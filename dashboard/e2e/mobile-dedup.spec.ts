@@ -89,13 +89,19 @@ async function insertListing(
 async function insertSuggestion(
   listingA: number,
   listingB: number,
-  overrides: { match_basis?: string; confidence?: number } = {},
+  overrides: { match_basis?: string; confidence?: number; detail?: Record<string, unknown> } = {},
 ): Promise<number> {
   const [lo, hi] = [listingA, listingB].sort((a, b) => a - b);
   const result = await pool.query<{ id: number }>(
     `INSERT INTO suggested_merge (listing_id_a, listing_id_b, match_basis, confidence, detail)
-     VALUES ($1, $2, $3, $4, '{"match_ratio": 1.0}'::jsonb) RETURNING id`,
-    [lo, hi, overrides.match_basis ?? "photo_hash", overrides.confidence ?? 1.0],
+     VALUES ($1, $2, $3, $4, $5::jsonb) RETURNING id`,
+    [
+      lo,
+      hi,
+      overrides.match_basis ?? "photo_hash",
+      overrides.confidence ?? 1.0,
+      JSON.stringify(overrides.detail ?? { match_ratio: 1.0 }),
+    ],
   );
   return result.rows[0].id;
 }
@@ -345,11 +351,14 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
       const card = page.locator(`[data-pair-key="${pairKey}"]`);
       await expect(card).toBeVisible();
       await card.scrollIntoViewIfNeeded();
+      // pair_count (2) stays on the card only as a debug/test attribute —
+      // issue #615/D-135: never rendered as its own "N pares" number.
       await expect(card).toHaveAttribute("data-pair-count", "2");
 
-      // Badge: correct count, consistent noun ("pares", never "anuncios" —
-      // PR #611 review B3).
-      await expect(card.getByTestId("dedup-pair-count-badge")).toHaveText(/2 pares corroborantes/i);
+      // Advert counts per side (2 ↔ 1), not the internal pair count.
+      await expect(card.getByTestId("dedup-advert-counts")).toHaveText(/2 anuncios ↔ 1 anuncio/i);
+      await expect(card.getByTestId("dedup-pair-count-badge")).toHaveCount(0);
+      await expect(card).not.toContainText(/pares/i);
 
       // Evidence toggle: a real 44px tap target (measured 18px before this
       // fix, PR #611 review M1) — it's the ONLY route to the corroborating
@@ -364,10 +373,10 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
       await expect(card.getByTestId("dedup-evidence-row")).toHaveCount(1);
       await expect(card.getByTestId("dedup-evidence-row")).toContainText(/difuso/i);
 
-      // Reject warning: names the true pair count with the same noun as
-      // the badge/button.
+      // Reject warning: names the two sides' advert counts, not the raw
+      // internal pair count (issue #615/D-135).
       await card.getByTestId("dedup-reject").click();
-      await expect(card.getByTestId("dedup-reject-warning")).toHaveText(/2 pares/i);
+      await expect(card.getByTestId("dedup-reject-warning")).toHaveText(/anuncios \(2 ↔ 1\)/i);
       await expect(card.getByTestId("dedup-reject")).toHaveText(/sí, rechazar/i);
       // Cancel — this test only proves the UI is usable at phone width,
       // not the real reject round trip (dedup-review.spec.ts's desktop
@@ -379,7 +388,7 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
       await card.getByTestId("dedup-reject-cancel").click();
       await expect(card.getByTestId("dedup-reject-warning")).toHaveCount(0);
       await expect(card.getByTestId("dedup-reject-cancel")).toHaveCount(0);
-      await expect(card.getByTestId("dedup-reject")).toHaveText(/^rechazar \(2 pares\)$/i);
+      await expect(card.getByTestId("dedup-reject")).toHaveText(/^rechazar$/i);
 
       const hasHorizontalOverflow = await page.evaluate(() => {
         const main = document.querySelector("main.main-content");
@@ -393,6 +402,164 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
       await pool.query("DELETE FROM profile_listing_state WHERE profile_id = $1", [profileId]);
       await pool.query("DELETE FROM search_profile WHERE id = $1", [profileId]);
       await pool.query("DELETE FROM listing WHERE id = ANY($1::bigint[])", [[listingA1, listingA2, listingB1]]);
+      await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [[propA, propB]]);
+    }
+  });
+
+  test("issue #615: photo-match card shows the photos that ACTUALLY matched (not index 0), capped at 4 with the rest reachable, plus asymmetric advert counts, at phone width", async ({
+    page,
+  }) => {
+    skipIfNoDb(test);
+
+    // Deliberately asymmetric — 7 vs 13, the live case that motivated
+    // #615 (property 1729: 7 sale listings, 4 fotocasa + 3 idealista;
+    // property 1732: 13, 11 fotocasa + 2 idealista). A symmetric fixture
+    // (#611 shipped N=2 on both sides) cannot catch a count that reads
+    // the wrong field — 7 and 1 (or 2 and 2) can coincidentally agree
+    // with the internal pair count on a small enough fixture.
+    const profileId = await insertProfile();
+    const propA = await insertProperty({ address: `${NAME_PREFIX}Foto Asimetrica A` });
+    const propB = await insertProperty({ address: `${NAME_PREFIX}Foto Asimetrica B` });
+
+    // The photo_hash-matching pair itself: 6 photos on one side, 14 on
+    // the other. Direct owner instruction (mid-review, on THIS issue):
+    // the true match must NOT sit at the same index on both sides — here
+    // it's index 5 of the 6-photo side against index 9 of the 14-photo
+    // side, exactly the "side A's photo 5 matches side B's photo 9"
+    // shape the coordinator's follow-up named. A fixture where the match
+    // happens to land at index 0 on both sides would pass even with no
+    // real matched-pairs threading at all.
+    const photosLo = Array.from({ length: 6 }, (_, i) => `https://img.example.com/615-lo-${i}.jpg`);
+    const photosHi = Array.from({ length: 14 }, (_, i) => `https://img.example.com/615-hi-${i}.jpg`);
+    const matchedUrlLo = photosLo[5];
+    const matchedUrlHi = photosHi[9];
+    const matchingA = await insertListing(propA, {
+      source: "fotocasa",
+      current_price: 220000,
+      photo_urls: photosLo,
+    });
+    const matchingB = await insertListing(propB, {
+      source: "idealista",
+      current_price: 220000,
+      photo_urls: photosHi,
+    });
+
+    // The rest of each side's adverts — no photos needed, they only exist
+    // to make listing_count_lo/hi genuinely 7 and 13 (not just pair_count
+    // coincidentally matching).
+    const restA = await Promise.all(
+      Array.from({ length: 6 }, () => insertListing(propA, { source: "idealista", current_price: 220000 })),
+    );
+    const restB = await Promise.all(
+      Array.from({ length: 12 }, () => insertListing(propB, { source: "fotocasa", current_price: 220000 })),
+    );
+
+    await markProfileMatch(profileId, propA);
+    // detail.matched_photos mirrors exactly what etl/dedup/signals/
+    // photo_hash.py::matched_pairs persists — this e2e proves the
+    // DASHBOARD'S consumption of that shape (resolveMatchedPhotos /
+    // orderPhotosMatchedFirst / ListingSidePanel), not the perceptual
+    // hashing itself (already unit-tested in
+    // etl/tests/test_dedup_signals_photo_hash.py::TestMatchedPairs).
+    const suggestionId = await insertSuggestion(matchingA, matchingB, {
+      match_basis: "photo_hash",
+      confidence: 1.0,
+      detail: { match_ratio: 1.0, matched_photos: [{ url_a: matchedUrlLo, url_b: matchedUrlHi, distance: 0 }] },
+    });
+    const pairKey = pairKeyOf(propA, propB);
+    const allListingIds = [matchingA, matchingB, ...restA, ...restB];
+
+    try {
+      await page.goto("/admin/dedup");
+      await assertNoErrorSurface(page);
+
+      const clientWidth = await page.evaluate(() => document.documentElement.clientWidth);
+      expect(clientWidth).toBeLessThanOrEqual(400);
+
+      const card = page.locator(`[data-pair-key="${pairKey}"]`);
+      await expect(card).toBeVisible();
+      await card.scrollIntoViewIfNeeded();
+
+      // The advert counts, not the internal pair count (which happens to
+      // be 1 here — one suggestion row — precisely to prove the header
+      // reads listing_count_lo/hi, not pair_count).
+      await expect(card).toHaveAttribute("data-pair-count", "1");
+      await expect(card.getByTestId("dedup-advert-counts")).toHaveText(/7 anuncios ↔ 13 anuncios/i);
+      await expect(card.getByTestId("dedup-single-decision-note")).toBeVisible();
+      await expect(card.getByTestId("dedup-pair-count-badge")).toHaveCount(0);
+      await expect(card).not.toContainText(/pares/i);
+
+      const panels = card.locator(".dedup-side-panel");
+      await expect(panels).toHaveCount(2);
+      const loPanel = panels.nth(0);
+      const hiPanel = panels.nth(1);
+      await expect(loPanel.getByTestId("dedup-side-photo-count")).toHaveText(/6 fotos/i);
+      await expect(hiPanel.getByTestId("dedup-side-photo-count")).toHaveText(/14 fotos/i);
+
+      // DEFAULT view: capped at 4 per side (owner's own stated bar —
+      // "me muestras 4 fotos como máximo... está bien"), and the ONE
+      // photo that actually matched is among those 4 AND visibly marked,
+      // on BOTH sides, even though it sits at index 5/9 respectively —
+      // never a naive first-4-in-storage-order slice (which would show
+      // index 0-3 on each side and never include the real match at all).
+      await expect(loPanel.locator(".dedup-photo-grid img")).toHaveCount(4);
+      await expect(hiPanel.locator(".dedup-photo-grid img")).toHaveCount(4);
+      await expect(loPanel.getByTestId("dedup-photo-matched")).toHaveCount(1);
+      await expect(hiPanel.getByTestId("dedup-photo-matched")).toHaveCount(1);
+      await expect(loPanel.getByTestId("dedup-photo-matched")).toHaveAttribute("src", matchedUrlLo);
+      await expect(hiPanel.getByTestId("dedup-photo-matched")).toHaveAttribute("src", matchedUrlHi);
+      // Every other visible thumbnail is explicitly marked unmatched —
+      // never ambiguous, never silently omitted.
+      await expect(loPanel.getByTestId("dedup-photo-unmatched")).toHaveCount(3);
+      await expect(hiPanel.getByTestId("dedup-photo-unmatched")).toHaveCount(3);
+
+      // "the rest need to be reachable" — a visible count of what's
+      // hidden, not a silent truncation.
+      await expect(loPanel.getByTestId("dedup-photos-expand")).toHaveText(/\+2 más/i);
+      await expect(hiPanel.getByTestId("dedup-photos-expand")).toHaveText(/\+10 más/i);
+
+      // Expand target size (WCAG 2.5.5, same bar as confirm/reject).
+      const expandBox = await hiPanel.getByTestId("dedup-photos-expand").boundingBox();
+      expect(expandBox).not.toBeNull();
+      expect(expandBox!.height).toBeGreaterThanOrEqual(44);
+
+      // Expanding the 14-photo side reveals the rest — the matched photo
+      // stays marked, and the expand button disappears once nothing is
+      // hidden any more.
+      await hiPanel.getByTestId("dedup-photos-expand").click();
+      await expect(hiPanel.locator(".dedup-photo-grid img")).toHaveCount(14);
+      await expect(hiPanel.getByTestId("dedup-photo-matched")).toHaveCount(1);
+      await expect(hiPanel.getByTestId("dedup-photos-expand")).toHaveCount(0);
+
+      // The expanded 14-photo grid overflows its own capped height and
+      // scrolls internally rather than stretching the card to full-page
+      // height (globals.css .dedup-photo-grid max-height + overflow-y).
+      const manyPhotoGrid = hiPanel.locator(".dedup-photo-grid");
+      const [scrollHeight, clientHeight] = await manyPhotoGrid.evaluate((el) => [el.scrollHeight, el.clientHeight]);
+      expect(scrollHeight).toBeGreaterThan(clientHeight);
+
+      // Thumbnails stay legibly sized at phone width — same bar #576 set
+      // (>=130x95). Only the first 4 need to be on-screen to measure —
+      // Playwright's boundingBox is null for anything scrolled fully out
+      // of view inside the now-expanded, internally-scrolling grid.
+      const photos = loPanel.locator(".dedup-photo-grid img");
+      for (let i = 0; i < 4; i++) {
+        const box = await photos.nth(i).boundingBox();
+        expect(box).not.toBeNull();
+        expect(box!.width).toBeGreaterThanOrEqual(130);
+        expect(box!.height).toBeGreaterThanOrEqual(95);
+      }
+
+      const hasHorizontalOverflow = await page.evaluate(() => {
+        const main = document.querySelector("main.main-content");
+        return main !== null && main.scrollWidth > main.clientWidth;
+      });
+      expect(hasHorizontalOverflow).toBe(false);
+    } finally {
+      await pool.query("DELETE FROM suggested_merge WHERE id = $1", [suggestionId]);
+      await pool.query("DELETE FROM profile_listing_state WHERE profile_id = $1", [profileId]);
+      await pool.query("DELETE FROM search_profile WHERE id = $1", [profileId]);
+      await pool.query("DELETE FROM listing WHERE id = ANY($1::bigint[])", [allListingIds]);
       await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [[propA, propB]]);
     }
   });
