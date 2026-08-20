@@ -42,7 +42,17 @@ start. `match_ratio == 1.0` stays required, never lowered to 0.6. Note:
 larger one — `== 1.0` means the smaller set is fully contained in the
 larger, not that the two galleries are the same size. A 3-photo listing
 whose every photo matches inside a 30-photo listing's gallery clears this
-exactly as a 10-vs-10 exact match does.
+exactly as a 10-vs-10 exact match does. **This is not a hypothetical
+skew**: #625 found idealista stores only ~2.8 photos per listing on
+average (all 3,263 idealista listings measured sit at ≤3), against
+fotocasa's ~27 — so a "perfect" `match_ratio == 1.0` against an idealista
+side is routinely 3 photos landing inside a 30-photo fotocasa gallery, not
+two comparably-sized sets agreeing completely. The rule is not changed for
+this — `== 1.0` on the smaller set is still the intended, correct
+semantics — but the record should be honest that today's live population
+already exercises the subset case more than the equal-size case, and that
+the rule's measured reach (see "Measured impact" below) will shift once
+#625 fills idealista's photo sets out.
 
 ## The m2_built evidence — corrected
 
