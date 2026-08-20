@@ -355,14 +355,53 @@ def fetch_hashes_with_stats(
     return hashes, stats
 
 
-def match_ratio(
-    hashes_a: list[imagehash.ImageHash], hashes_b: list[imagehash.ImageHash]
-) -> float | None:
+def pack_hash(h: imagehash.ImageHash) -> int:
+    """Pack a 64-bit `ImageHash` into a plain Python int for cheap
+    XOR+popcount comparison (issue #618) instead of `ImageHash.__sub__`'s
+    per-comparison numpy `flatten()` + `count_nonzero` — measured ~0.9us
+    vs ~0.02us as a Python int op, and the O(|A|x|B|) `match_ratio` call is
+    71% of the whole dedup pass at production scale (#617's profile).
+
+    `int(str(h), 16)` rather than reaching into `h.hash` and re-deriving a
+    bit order by hand: `ImageHash.__str__` (`_binary_array_to_hex`) is the
+    one place this codebase — and `photo_hash_store`'s persisted hex
+    column — already trusts to turn the flattened bit array into a number.
+    Reusing it means this function is *provably* the same bit pattern
+    `ImageHash.__sub__` compares (same flatten order feeding both the hex
+    string and the subtraction), not a second, possibly-diverging
+    reimplementation of the packing. XOR-popcount of two such ints is then
+    exactly `count_nonzero(a.flatten() != b.flatten())`: same bit-index
+    correspondence on both operands, so it's just a reordering that cancels
+    out in the comparison.
+
+    Every phash in this codebase is `imagehash.phash(image)` at imagehash's
+    default `hash_size=8` (see `_HASH_HAMMING_THRESHOLD`'s comment below) —
+    always a 64-bit (8x8) hash; no call site anywhere overrides
+    `hash_size`/`highfreq_factor`. Raises `ValueError` instead of silently
+    packing a different bit width: an unnoticed size mismatch would XOR
+    bits that don't correspond to the same DCT coefficient on each side,
+    corrupting every ratio it touches without ever raising.
+    """
+    if h.hash.size != 64:
+        raise ValueError(
+            f"pack_hash: expected a 64-bit (hash_size=8) ImageHash, got "
+            f"{h.hash.size} bits — packed-int comparison assumes 64-bit "
+            f"throughout this codebase (see this function's docstring)"
+        )
+    return int(str(h), 16)
+
+
+def match_ratio(hashes_a: list[int], hashes_b: list[int]) -> float | None:
     """Fraction of the smaller hash set with a close match in the other set.
 
     Returns None when there isn't enough data to compare (either side has
     zero successfully-hashed photos) rather than 0.0, so the engine can
     distinguish "we checked and they don't match" from "we couldn't check".
+
+    *hashes_a*/*hashes_b* are packed 64-bit ints (`pack_hash`), not
+    `imagehash.ImageHash` objects — see that function's docstring for why
+    `(h_small ^ h_large).bit_count()` is exactly the Hamming distance
+    `ImageHash.__sub__` would have computed for the same pair.
     """
     if not hashes_a or not hashes_b:
         return None
@@ -373,14 +412,15 @@ def match_ratio(
     matched = sum(
         1
         for h_small in smaller
-        if any((h_small - h_large) <= _HASH_HAMMING_THRESHOLD for h_large in larger)
+        if any(
+            (h_small ^ h_large).bit_count() <= _HASH_HAMMING_THRESHOLD
+            for h_large in larger
+        )
     )
     return matched / len(smaller)
 
 
-def hashes_share_any_match(
-    hashes_a: list[imagehash.ImageHash], hashes_b: list[imagehash.ImageHash]
-) -> bool:
+def hashes_share_any_match(hashes_a: list[int], hashes_b: list[int]) -> bool:
     """True when at least one hash in *hashes_a* is within the same
     matching Hamming distance `match_ratio` uses of at least one hash in
     *hashes_b*.
@@ -393,9 +433,14 @@ def hashes_share_any_match(
     keeping even though its overall `match_ratio` never cleared
     `MIN_MATCH_RATIO` (that's WHY it only ever reached `fuzzy` in the
     first place — see `etl.dedup.engine.evaluate_pair`'s priority order).
+
+    *hashes_a*/*hashes_b* are packed 64-bit ints (`pack_hash`) — see
+    `match_ratio`'s docstring.
     """
     return any(
-        (h_a - h_b) <= _HASH_HAMMING_THRESHOLD for h_a in hashes_a for h_b in hashes_b
+        (h_a ^ h_b).bit_count() <= _HASH_HAMMING_THRESHOLD
+        for h_a in hashes_a
+        for h_b in hashes_b
     )
 
 
