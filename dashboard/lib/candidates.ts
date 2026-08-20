@@ -2251,25 +2251,28 @@ export async function listCandidates(
        -- redflagType filters read (D-059, no new JOIN); the warn-caveat set
        -- reuses the $6 array the distress boost already reads.
        --
-       -- Truth table for the bracketed UNION expression itself:
-       --   cardinality(COALESCE(redflag_types,'{}'))>0 is FALSE (not NULL)
-       --   whether redflags were never assessed OR assessed-and-clean —
-       --   COALESCE absorbs the NULL case. "caveats && $6" is NULL when
-       --   occupancy was never assessed (caveats IS NULL, no COALESCE — an
-       --   actual "unknown" survives here) and FALSE only once occupancy WAS
-       --   assessed and carries no warn caveat. So the expression is: TRUE if
-       --   EITHER axis has qualifying evidence; FALSE only once "no redflag
-       --   evidence" holds AND occupancy was actually checked; otherwise NULL.
-       --   $24=true keeps TRUE rows; $24=false keeps FALSE rows (occupancy-
-       --   assessed-clean, whether or not redflags were ever checked); NULL
-       --   rows are excluded from BOTH $24 values via NULL = $24 -> NULL
-       --   (D-059/D-127: unassessed excluded from a hard filter, never a
-       --   false "verified clean" pass). Composes (AND) with redflagType and
-       --   every other filter.
+       -- Truth table for the bracketed UNION expression itself — BOTH axes
+       -- must survive an unassessed row as SQL NULL, or the D-059/D-127
+       -- exclusion only holds for one of them (review #597 B1: the original
+       -- COALESCE(redflag_types,'{}') collapsed "redflags never assessed"
+       -- into "no flags", so a property with a checked-clean occupancy axis
+       -- but a never-run redflags axis was served under "sin alertas" as if
+       -- both axes had been checked). Neither side is COALESCE'd here: the
+       -- redflags side is a CASE that stays NULL when redflag_types IS NULL
+       -- (never assessed) and only evaluates cardinality once assessed;
+       -- "caveats && $6" is already NULL when caveats IS NULL (occupancy
+       -- never assessed) — unchanged from before. So the expression is: TRUE
+       -- if EITHER assessed axis has qualifying evidence; FALSE only once
+       -- BOTH axes were actually assessed and neither found anything; NULL
+       -- (excluded from BOTH $24 values via NULL = $24 -> NULL) whenever
+       -- EITHER axis was never assessed and the other found nothing either.
+       -- $24=true keeps TRUE rows; $24=false keeps FALSE rows. Composes (AND)
+       -- with redflagType and every other filter.
        AND (
          $24::boolean IS NULL
          OR (
-              cardinality(COALESCE(ranked.redflag_types, '{}')) > 0
+              (CASE WHEN ranked.redflag_types IS NULL THEN NULL
+                    ELSE cardinality(ranked.redflag_types) > 0 END)
               OR ranked.caveats && $6::text[]
             ) = $24::boolean
        )

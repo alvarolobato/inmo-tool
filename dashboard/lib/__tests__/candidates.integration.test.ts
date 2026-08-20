@@ -1807,6 +1807,22 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
         // from BOTH partitions, never counted as "sin alertas" just because
         // no evidence exists yet.
         const neverAssessed = await seedTagged(pool, profileId, {});
+        // Review #597 B1: the two MIXED shapes — one axis assessed-clean, the
+        // OTHER never run at all. The first cut of this predicate COALESCE'd
+        // away the redflags axis's NULL, so occCleanRfNever leaked into "sin
+        // alertas" even though its redflags axis was never checked. Both
+        // mixed shapes must land in NEITHER partition, symmetrically — this
+        // is the fixture the reviewer noted was missing (the partition-sum
+        // assertion below passed even while this asymmetry was live, because
+        // nothing in this fixture exercised it).
+        const occCleanRfNever = await seedTagged(pool, profileId, {
+          caveats: [], // occupancy assessed, no warn caveat
+          // redflagTypes omitted → redflags axis never assessed
+        });
+        const rfCleanOccNever = await seedTagged(pool, profileId, {
+          redflagTypes: [], // redflags assessed, no flags
+          // caveats omitted → occupancy axis never assessed
+        });
 
         const withAlerts = await listCandidates(profileId, {
           hasAlerts: true,
@@ -1837,12 +1853,20 @@ describe.runIf(dbAvailable)("listCandidates — real Postgres", () => {
         // ...never-assessed excluded from BOTH (the D-059 judgement call)...
         expect(withIds).not.toContain(neverAssessed);
         expect(withoutIds).not.toContain(neverAssessed);
+        // ...and the two MIXED shapes (B1) are excluded from BOTH,
+        // SYMMETRICALLY — this is the exact regression #597 B1 fixed:
+        // occCleanRfNever used to leak into "sin alertas" because only the
+        // caveats axis's NULL was ever preserved.
+        expect(withIds).not.toContain(occCleanRfNever);
+        expect(withoutIds).not.toContain(occCleanRfNever);
+        expect(withIds).not.toContain(rfCleanOccNever);
+        expect(withoutIds).not.toContain(rfCleanOccNever);
         // ...and — the assertion that actually proves "true complement" —
-        // the two partitions sum to the unfiltered total MINUS the one
-        // never-assessed candidate the tri-state deliberately excludes from
-        // both. If the negative were a second, drifted predicate, this sum
-        // would silently stop matching.
-        expect(unfiltered.items).toHaveLength(6);
+        // the two partitions sum to the unfiltered total MINUS the three
+        // candidates the tri-state deliberately excludes from both
+        // (neverAssessed + the 2 mixed shapes). If the negative were a
+        // second, drifted predicate, this sum would silently stop matching.
+        expect(unfiltered.items).toHaveLength(8);
         expect(withIds.length + withoutIds.length).toBe(5);
       });
     });

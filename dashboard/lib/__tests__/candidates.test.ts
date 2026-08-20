@@ -591,9 +591,8 @@ describe("listCandidates", () => {
     // $24 is the toggle; the warn-caveat array reuses the $6 param (D-059,
     // same array the distress boost reads), so only the boolean is new.
     expect(params[23]).toBe(true);
-    expect(sql).toContain(
-      "cardinality(COALESCE(ranked.redflag_types, '{}')) > 0",
-    );
+    expect(sql).toContain("WHEN ranked.redflag_types IS NULL THEN NULL");
+    expect(sql).toContain("cardinality(ranked.redflag_types) > 0");
     expect(sql).toContain("ranked.caveats && $6::text[]");
     expect(sql).toContain("$24::boolean IS NULL");
   });
@@ -605,9 +604,8 @@ describe("listCandidates", () => {
     // The negative reuses the EXACT SAME bracketed expression as the positive
     // (compared via `= $24::boolean`), never a second, independently-written
     // predicate — the one assertion that would catch the #590-style drift.
-    expect(sql).toContain(
-      "cardinality(COALESCE(ranked.redflag_types, '{}')) > 0",
-    );
+    expect(sql).toContain("WHEN ranked.redflag_types IS NULL THEN NULL");
+    expect(sql).toContain("cardinality(ranked.redflag_types) > 0");
     expect(sql).toContain("ranked.caveats && $6::text[]");
     expect(sql).toContain(") = $24::boolean");
   });

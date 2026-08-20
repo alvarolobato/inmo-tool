@@ -525,8 +525,14 @@ export function CandidateFilterBar({
             neither an alert NOR evidence of being clean, so it is EXCLUDED
             from both (consistent with D-059: an unassessed axis is excluded
             from a hard filter, never a false "verified clean"). The title
-            attributes below say so explicitly rather than letting "sin
-            alertas" imply a completeness guarantee it doesn't have. */}
+            attribute on the full label says so explicitly rather than letting
+            "sin alertas" imply a completeness guarantee it doesn't have.
+
+            Review #597: at 390px this control alone took the sticky primary
+            row from 5 wrapped rows to 6 (109px → 272px) with the full labels
+            always rendered. Below `md:` each button shows only the icon plus
+            a short word (`md:hidden`/`hidden md:inline`, D-120); the full
+            label returns at `md:` and up, where the row has room. */}
         <div
           role="group"
           aria-label="Filtro de alertas"
@@ -551,7 +557,9 @@ export function CandidateFilterBar({
             onClick={() => set("alerts", "1")}
             testId="alerts-segment-with"
           >
+            <span className="md:hidden">⚠ Con</span>
             <span
+              className="hidden md:inline"
               title="Propiedades con ≥1 alerta roja o de ocupación detectada"
             >
               ⚠ Con alertas
@@ -562,7 +570,11 @@ export function CandidateFilterBar({
             onClick={() => set("alerts", "0")}
             testId="alerts-segment-without"
           >
-            <span title="Propiedades evaluadas sin alertas — no incluye las que aún no se han evaluado">
+            <span className="md:hidden">✓ Sin</span>
+            <span
+              className="hidden md:inline"
+              title="Propiedades evaluadas sin alertas — no incluye las que aún no se han evaluado"
+            >
               ✓ Sin alertas
             </span>
           </SegmentButton>

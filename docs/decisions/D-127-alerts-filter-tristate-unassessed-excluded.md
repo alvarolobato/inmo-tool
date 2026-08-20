@@ -23,25 +23,47 @@ Should "sin alertas" include it?
 
 **Decision**: No. `hasAlerts: false` ("sin alertas") is implemented as the
 literal negation of the SAME bracketed UNION expression the positive value
-reads — `(cardinality(COALESCE(redflag_types,'{}'))>0 OR caveats && $6) =
-$24::boolean` — never a second, independently-written predicate (mirrors the
-`isVpo` equality form exactly). Because `redflag_types` is `COALESCE`d but
-`caveats` is not, the expression's truth table is:
+reads — never a second, independently-written predicate (mirrors the `isVpo`
+equality form exactly). **Both axes must survive an unassessed row as SQL
+NULL for that exclusion to actually hold on both sides of the filter**:
 
-- **TRUE** ("con alertas") whenever either axis has qualifying evidence.
-- **FALSE** ("sin alertas") only once occupancy was actually assessed and
-  carries no warn caveat (redflags may or may not have been checked).
-- **NULL** (excluded from BOTH `true` and `false`) whenever occupancy was
-  never assessed and no redflag evidence exists either — SQL's three-valued
-  logic does this automatically via `NULL = $24::boolean -> NULL`, with no
+```sql
+(
+  (CASE WHEN ranked.redflag_types IS NULL THEN NULL
+        ELSE cardinality(ranked.redflag_types) > 0 END)
+  OR ranked.caveats && $6::text[]
+) = $24::boolean
+```
+
+- **TRUE** ("con alertas") whenever either ASSESSED axis has qualifying
+  evidence.
+- **FALSE** ("sin alertas") only once BOTH axes were actually assessed and
+  neither found anything.
+- **NULL** (excluded from BOTH `true` and `false`) whenever EITHER axis was
+  never assessed and the other found no evidence — SQL's three-valued logic
+  does this automatically via `NULL = $24::boolean -> NULL`, with no
   special-cased branch needed.
 
-A never-assessed property is therefore excluded from both partitions, exactly
-as every other D-059 hard filter treats an unassessed axis: "unknown, never a
-false pass." The UI label says so — "Sin alertas (evaluadas)" on the active
-chip, and a tooltip on the segmented control ("Propiedades evaluadas sin
-alertas — no incluye las que aún no se han evaluado") — so the state never
-reads as a "verified clean" guarantee it doesn't have.
+A never-(fully-)assessed property is therefore excluded from both partitions,
+exactly as every other D-059 hard filter treats an unassessed axis: "unknown,
+never a false pass." The UI label says so — "Sin alertas (evaluadas)" on the
+active chip, and a tooltip on the segmented control ("Propiedades evaluadas
+sin alertas — no incluye las que aún no se han evaluado") — so the state
+never reads as a "verified clean" guarantee it doesn't have.
+
+**Incident (PR #597 review, B1)**: the first cut of this predicate reused
+`cardinality(COALESCE(ranked.redflag_types, '{}')) > 0` — `COALESCE`d, so a
+never-assessed redflags axis silently read as "0 flags" (an assessed,
+factual zero) rather than NULL (unknown). `caveats` was never `COALESCE`d, so
+only THAT axis got the D-059 exclusion; a property whose occupancy axis was
+checked-clean but whose redflags axis had never run was served under "sin
+alertas" while its label claimed otherwise. Verified live: 6 of 1576 rows
+under `hasAlerts=false` on the demo DB had no redflags assessment. Fixed by
+dropping the `COALESCE` and gating the redflags side on an explicit `CASE ...
+IS NULL THEN NULL` instead — the two axes are now symmetric. The integration
+fixture (`lib/__tests__/candidates.integration.test.ts`) now seeds both
+mixed shapes (occupancy-assessed/redflags-never, and its mirror) so this
+asymmetry cannot regress silently again.
 
 **Alternatives rejected**:
 - *Treat "sin alertas" as the literal complement over ALL candidates*

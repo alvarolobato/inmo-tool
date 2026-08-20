@@ -69,6 +69,11 @@ test.beforeAll(async () => {
     return;
   }
 
+  // Review #597: every test in this file also skips without ADMIN_API_KEY
+  // (checked in beforeEach) — don't pay for seeding when nothing downstream
+  // will use it.
+  if (!adminKey) return;
+
   const profileResult = await pool.query<{ id: number }>(
     `INSERT INTO search_profile (name, scope, thesis_params)
      VALUES ($1, $2::jsonb, '{}'::jsonb) RETURNING id`,

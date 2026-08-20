@@ -219,3 +219,90 @@ describe("CandidateFilterBar more-filters popover + clear all", () => {
     expect(panel).toHaveTextContent(/datos de evaluación IA/i);
   });
 });
+
+// #593 tri-state alerts filter — review #597 flagged this as riding entirely
+// on one e2e spec (alerts-filter.spec.ts) with zero unit coverage, even
+// though CandidateFilterBar already has 15 unit tests for everything else.
+describe("CandidateFilterBar tri-state alerts filter (#593)", () => {
+  it("off/con alertas/sin alertas are the only three states, emitted exclusively", () => {
+    const { onChange } = renderBar({ alerts: "" });
+
+    fireEvent.click(screen.getByTestId("alerts-segment-with"));
+    expect(onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ alerts: "1" }),
+    );
+
+    fireEvent.click(screen.getByTestId("alerts-segment-without"));
+    expect(onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ alerts: "0" }),
+    );
+
+    fireEvent.click(screen.getByTestId("alerts-segment-off"));
+    expect(onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ alerts: "" }),
+    );
+  });
+
+  it("marks exactly the active segment via aria-pressed, for each of the 3 states", () => {
+    const cases: Array<[CandidateFilters["alerts"], string]> = [
+      ["", "alerts-segment-off"],
+      ["1", "alerts-segment-with"],
+      ["0", "alerts-segment-without"],
+    ];
+    for (const [alerts, activeTestId] of cases) {
+      const { unmount } = render(
+        <CandidateFilterBar
+          values={{ ...DEFAULT_CANDIDATE_FILTERS, alerts }}
+          onChange={vi.fn()}
+          availableSources={[]}
+          seguimientoAlertCount={0}
+        />,
+      );
+      for (const testId of [
+        "alerts-segment-off",
+        "alerts-segment-with",
+        "alerts-segment-without",
+      ]) {
+        expect(screen.getByTestId(testId)).toHaveAttribute(
+          "aria-pressed",
+          testId === activeTestId ? "true" : "false",
+        );
+      }
+      unmount();
+    }
+  });
+
+  it("chip label distinguishes 'con alertas' from 'sin alertas' — never the same text for both", () => {
+    const { unmount: unmountWith } = render(
+      <CandidateFilterBar
+        values={{ ...DEFAULT_CANDIDATE_FILTERS, alerts: "1" }}
+        onChange={vi.fn()}
+        availableSources={[]}
+        seguimientoAlertCount={0}
+      />,
+    );
+    expect(screen.getByTestId("filter-chip-alerts")).toHaveTextContent(
+      "Con alertas",
+    );
+    unmountWith();
+
+    render(
+      <CandidateFilterBar
+        values={{ ...DEFAULT_CANDIDATE_FILTERS, alerts: "0" }}
+        onChange={vi.fn()}
+        availableSources={[]}
+        seguimientoAlertCount={0}
+      />,
+    );
+    const chip = screen.getByTestId("filter-chip-alerts");
+    // The label must not read as a bare "verified clean" guarantee — D-127
+    // excludes unassessed candidates from this state, so the chip qualifies
+    // it with "(evaluadas)" rather than just "Sin alertas".
+    expect(chip).toHaveTextContent("Sin alertas (evaluadas)");
+  });
+
+  it("off (default) shows no alerts chip at all", () => {
+    renderBar({ alerts: "" });
+    expect(screen.queryByTestId("filter-chip-alerts")).toBeNull();
+  });
+});

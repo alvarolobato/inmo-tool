@@ -58,6 +58,17 @@ export function CandidateList({ profileId }: { profileId: number }) {
   // the failure must sit there until the user taps "Reintentar" here.
   const loadMoreErrorRef = useRef(false);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+  // #592 accessibility escape hatch (review #597): if `IntersectionObserver`
+  // is unavailable, the mobile-only sentinel effect below is a silent no-op —
+  // with the button ALSO hidden below 768px, that would leave no trigger at
+  // all. Falls back to showing the button even on mobile in that case.
+  const [observerUnsupported, setObserverUnsupported] = useState(false);
+  // #592 accessibility escape hatch: an `aria-live` region (visually hidden,
+  // `sr-only`) announces what the sentinel just did — a screen-reader user
+  // scrolling past the sentinel gets no other signal that anything happened,
+  // since the appended cards land below wherever their focus/reading
+  // position already is.
+  const [liveMessage, setLiveMessage] = useState("");
   const router = useRouter();
 
   // #465 (Feed UX F2): all feed filters live in ONE object, sourced from the
@@ -221,6 +232,7 @@ export function CandidateList({ profileId }: { profileId: number }) {
         } else {
           setLoadMoreError("Error al cargar más candidatos.");
           loadMoreErrorRef.current = true;
+          setLiveMessage("No se pudieron cargar más candidatos.");
         }
         return;
       }
@@ -243,17 +255,48 @@ export function CandidateList({ profileId }: { profileId: number }) {
         } else {
           setLoadMoreError(apiError);
           loadMoreErrorRef.current = true;
+          setLiveMessage("No se pudieron cargar más candidatos.");
         }
         return;
       }
-      const page: {
+      // #592 follow-up (review #597): a 200 response with a malformed body
+      // (e.g. a proxy/edge case returning HTML with a 200 status) must be
+      // treated exactly like an HTTP-level failure — NOT let `res.json()`
+      // throw uncaught. `loadMore`'s try/finally always clears the in-flight
+      // ref, but with no `catch` here an uncaught throw skipped setting
+      // `loadMoreError`/its ref entirely: the sentinel would see "not
+      // in-flight, no error" on the very next intersection and silently
+      // retry forever, invisible to the user this PR otherwise promises a
+      // visible, retryable failure to.
+      let page: {
         items: CandidateRow[];
         nextCursor: string | null;
         coldStart?: boolean;
-      } = await res.json();
+      };
+      try {
+        page = await res.json();
+      } catch {
+        if (replace && seq !== pageOneSeq.current) return;
+        if (replace) {
+          setError("Respuesta inválida del servidor al cargar los candidatos.");
+        } else {
+          setLoadMoreError("Respuesta inválida del servidor al cargar más candidatos.");
+          loadMoreErrorRef.current = true;
+          setLiveMessage("No se pudieron cargar más candidatos.");
+        }
+        return;
+      }
       if (!replace) {
         setLoadMoreError(null);
         loadMoreErrorRef.current = false;
+        // #592 accessibility escape hatch: announce what just landed (and
+        // whether that was the last page) for a screen-reader user who never
+        // "sees" the sentinel or the appended cards scroll into view.
+        setLiveMessage(
+          page.nextCursor === null
+            ? `${page.items.length} candidatos más cargados. No hay más candidatos.`
+            : `${page.items.length} candidatos más cargados.`,
+        );
       }
       setItems((prev) => (replace ? page.items : [...prev, ...page.items]));
       setCursor(page.nextCursor);
@@ -358,13 +401,25 @@ export function CandidateList({ profileId }: { profileId: number }) {
     }
   }, [cursor, fetchPage]);
 
+  // #592 accessibility escape hatch (review #597): detected independently of
+  // whether the sentinel is even in the DOM (it may not be yet — cursor
+  // starts null before the first page-1 response lands), so the fallback is
+  // ready before the render below has to decide whether to show the button.
+  useEffect(() => {
+    if (typeof IntersectionObserver === "undefined") {
+      setObserverUnsupported(true);
+    }
+  }, []);
+
   // #592: mobile-only infinite scroll. The sentinel div below is rendered
   // with `md:hidden` (visible only under the 768px breakpoint, D-120) so on
   // desktop it either isn't in the DOM (cursor === null) or has no layout box
   // and never intersects — the explicit "Cargar más" button stays the only
   // trigger there, unchanged. `rootMargin` starts the fetch a bit before the
   // sentinel actually reaches the viewport so the next page is usually ready
-  // by the time the user scrolls that far.
+  // by the time the user scrolls that far. Not rendered at all when
+  // `observerUnsupported` — the button (shown on every viewport in that
+  // case) is the trigger instead.
   useEffect(() => {
     const el = sentinelRef.current;
     if (!el || typeof IntersectionObserver === "undefined") return;
@@ -597,18 +652,32 @@ export function CandidateList({ profileId }: { profileId: number }) {
         ))}
       </div>
 
+      {/* #592 accessibility escape hatch: an aria-live region announcing what
+          the sentinel just did (candidates appended, load failed, or the end
+          reached) — visually hidden (`sr-only`) but read out by a screen
+          reader regardless of where the user's focus/reading position is,
+          since the appended cards land silently below it otherwise. Rendered
+          unconditionally (not gated on `cursor`) so it survives every state
+          transition, including reaching the end. */}
+      <div aria-live="polite" role="status" className="sr-only">
+        {liveMessage}
+      </div>
+
       {cursor !== null && (
         <>
           {/* Desktop: the explicit "Cargar más" control (#592 keeps it here —
-              a button is genuinely better with a mouse). `hidden md:inline-block`
-              is the ONLY display toggle (D-120: no inline `display` alongside a
-              responsive display class); every other style stays inline as
-              elsewhere in this component. */}
+              a button is genuinely better with a mouse). Also the escape
+              hatch when `IntersectionObserver` is unsupported — shown on
+              EVERY viewport then, since the mobile sentinel is a no-op
+              without it. `className` is the ONLY display toggle in either
+              case (D-120: no inline `display` alongside a responsive display
+              class); every other style stays inline as elsewhere in this
+              component. */}
           <button
             data-testid="load-more-button"
             onClick={loadMore}
             disabled={loadingMore}
-            className="hidden md:inline-block"
+            className={observerUnsupported ? "inline-block" : "hidden md:inline-block"}
             style={{
               marginTop: 16,
               padding: "7px 14px",
@@ -629,14 +698,18 @@ export function CandidateList({ profileId }: { profileId: number }) {
               tap. `md:hidden` means it either isn't rendered (cursor is null)
               or has no layout box on desktop and never intersects there, so
               the button above stays the only trigger on desktop (unchanged
-              behaviour). */}
-          <div
-            ref={sentinelRef}
-            data-testid="infinite-scroll-sentinel"
-            aria-hidden="true"
-            className="md:hidden"
-            style={{ marginTop: 16, height: 1 }}
-          />
+              behaviour). Not rendered at all when the API is unsupported —
+              the always-visible button above is the only trigger then, so
+              there is no dead target left in the DOM. */}
+          {!observerUnsupported && (
+            <div
+              ref={sentinelRef}
+              data-testid="infinite-scroll-sentinel"
+              aria-hidden="true"
+              className="md:hidden"
+              style={{ marginTop: 16, height: 1 }}
+            />
+          )}
           {loadingMore && (
             <p
               data-testid="infinite-scroll-loading"

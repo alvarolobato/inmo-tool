@@ -65,6 +65,11 @@ test.beforeAll(async () => {
     return;
   }
 
+  // Review #597: every test in this file also skips without ADMIN_API_KEY
+  // (checked in each describe's beforeEach) — don't pay for seeding 61
+  // properties (TOTAL) when nothing downstream will use them.
+  if (!adminKey) return;
+
   const profileResult = await pool.query<{ id: number }>(
     `INSERT INTO search_profile (name, scope, thesis_params)
      VALUES ($1, $2::jsonb, '{}'::jsonb) RETURNING id`,
@@ -277,8 +282,28 @@ test.describe("desktop (default project viewport)", () => {
 
     // The sentinel either isn't rendered as an active target or has no
     // layout box on desktop (`md:hidden`) — scrolling all the way to the
-    // bottom of the document must not auto-load anything.
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    // bottom of the REAL scroll container must not auto-load anything.
+    //
+    // MEASUREMENT TRAP (review #597 B2 — the sibling of the innerWidth trap
+    // this file's header already warns about): the page body does not
+    // scroll here. `app/layout.tsx` puts `overflow: auto` on `<main
+    // class="main-content">`, not on `document`/`window` — measured,
+    // `document.body.scrollHeight` equals `document.documentElement.
+    // clientHeight` (nothing to scroll) while `main.scrollHeight` is the
+    // real, much taller value. `window.scrollTo(0, document.body.
+    // scrollHeight)` is therefore a silent no-op: this exact assertion still
+    // passed with the sentinel's `md:hidden` removed entirely (i.e. with
+    // desktop auto-load actually wired up), which means it was never
+    // exercising the thing it claims to prove. `e2e/triage-loop.spec.ts`
+    // already documents this same trap for this codebase (`window.scrollY`
+    // stays 0 after `page.mouse.wheel`) and works around it by driving the
+    // scrollable element directly — grepped the rest of e2e/ for
+    // `window.scrollTo`/`document.body.scrollHeight` and this was the only
+    // other place it appeared.
+    await page.evaluate(() => {
+      const main = document.querySelector("main");
+      if (main) main.scrollTop = main.scrollHeight;
+    });
     await page.waitForTimeout(500);
     await expect(cards).toHaveCount(30);
     await assertNoErrorSurface(page);
