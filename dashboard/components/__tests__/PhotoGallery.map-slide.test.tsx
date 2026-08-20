@@ -137,4 +137,30 @@ describe("PhotoGallery map-as-lightbox-slide (#594)", () => {
     expect(screen.queryByTestId("photo-gallery-next")).not.toBeInTheDocument();
     expect(screen.queryByTestId("photo-gallery-prev")).not.toBeInTheDocument();
   });
+
+  it("#594 review (L2): a map + exactly one photo shows prev/next (2 slides) but never a meaningless 1 / 1 counter", () => {
+    render(<PhotoGallery photoUrls={[PHOTOS[0]]} lat={LAT} lon={LON} />);
+    openMapSlide();
+    // Two slides (map + the one photo) — prev/next must reach the photo.
+    expect(screen.getByTestId("photo-gallery-next")).toBeInTheDocument();
+    expect(screen.getByTestId("photo-gallery-prev")).toBeInTheDocument();
+    expect(screen.queryByTestId("photo-gallery-counter")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("photo-gallery-next"));
+    expect(screen.getByTestId("photo-gallery-lightbox-image")).toHaveAttribute("src", PHOTOS[0]);
+    // A real assertion the fix could fail: before gating the counter on
+    // `photoUrls.length > 1` separately from the nav buttons' `totalSlides >
+    // 1`, this rendered "1 / 1" here.
+    expect(screen.queryByTestId("photo-gallery-counter")).not.toBeInTheDocument();
+  });
+
+  it("#594 review (L4): landing on the map slide still announces something to a screen reader", () => {
+    render(<PhotoGallery photoUrls={PHOTOS} lat={LAT} lon={LON} />);
+    openMapSlide();
+    const liveRegions = screen.getAllByText(/./, { selector: '[aria-live="polite"]' });
+    expect(liveRegions.some((el) => el.textContent === "Mapa de ubicación")).toBe(true);
+    // The photo counter's own aria-live region is the one that must NOT be
+    // present here — only the map's own announcement.
+    expect(screen.queryByTestId("photo-gallery-counter")).not.toBeInTheDocument();
+  });
 });

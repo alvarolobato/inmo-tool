@@ -16,7 +16,7 @@
  * every navigation 307s to the login page and the assertions below would fail
  * on a page that is actually healthy.
  */
-import { test, expect, devices, type Page } from "@playwright/test";
+import { test, expect, devices, type Page, type Locator } from "@playwright/test";
 import { Pool } from "pg";
 import { adminKey, seedAdminSession } from "./helpers/admin-session";
 
@@ -186,6 +186,38 @@ function card(page: Page, propertyId: number) {
   return page.locator(
     `[data-testid="candidate-card"][data-property-id="${propertyId}"]`,
   );
+}
+
+/**
+ * #594 review (B1): `toHaveCSS("opacity", "1")` alone proved nothing about
+ * whether an element is actually reachable at its own position — the photo
+ * counter shipped at `opacity: 1` for its entire life while
+ * `.candidate-card-actions` (equal z-index, later in DOM order) painted
+ * over it completely.
+ *
+ * NOT implemented via `elementFromPoint`: the counter is deliberately
+ * `pointer-events: none` (it's informational, not an affordance — clicks
+ * pass through to the photo underneath by design), and `elementFromPoint`
+ * skips `pointer-events: none` elements entirely by definition — it would
+ * report the element BELOW the counter as "topmost" even when the counter is
+ * correctly painted on top and simply not a valid click target. That isn't
+ * the bug this guards against, so it isn't a usable signal here. A plain
+ * bounding-box intersection with the ONE known real occluder from B1
+ * (`.candidate-card-actions`) is what actually catches "some other overlay
+ * visually paints over the counter", without being confused by the
+ * counter's own intentional pointer-events choice.
+ */
+async function assertNoOverlap(page: Page, a: Locator, b: Locator, labelA: string, labelB: string) {
+  const boxA = await a.boundingBox();
+  const boxB = await b.boundingBox();
+  if (!boxA) throw new Error(`${labelA} has no bounding box (not rendered?)`);
+  if (!boxB) throw new Error(`${labelB} has no bounding box (not rendered?)`);
+  const overlaps =
+    boxA.x < boxB.x + boxB.width &&
+    boxA.x + boxA.width > boxB.x &&
+    boxA.y < boxB.y + boxB.height &&
+    boxA.y + boxA.height > boxB.y;
+  expect(overlaps, `${labelA} should not overlap ${labelB}`).toBe(false);
 }
 
 test("cards render photo-first with price, facts and no per-card cold-start noise", async ({
@@ -381,15 +413,25 @@ test("#167: the list-card photo ticker cycles the property's photos in place, wr
   // #594: unlike prev/next, the counter is always visible — it's
   // informational, not an affordance, so it gets no hover-gating.
   const counter = ticker.getByTestId("candidate-photo-counter");
+  const actions = target.getByTestId("candidate-card-actions");
 
   await expect(img).toHaveAttribute("src", /1\.jpg$/);
   await expect(counter).toHaveText("1 / 3");
-  await expect(counter).toHaveCSS("opacity", "1");
+  // #594 review (B1): opacity alone doesn't prove reachability — confirm the
+  // counter's box doesn't overlap the feedback overlay, the ONE known real
+  // occluder (it shipped top-right, same corner as `.candidate-card-actions`).
+  await assertNoOverlap(page, counter, actions, "candidate-photo-counter", "candidate-card-actions");
   // Hidden until hover, same three-path rule as the action bar.
   await expect(next).toHaveCSS("opacity", "0");
 
   await target.hover();
   await expect(next).toHaveCSS("opacity", "1");
+  // #594 review (B1): confirm the OTHER direction too — top-left is free of
+  // the prev button, not just the actions bar. The prev button sits
+  // vertically CENTRED in the ticker's flex row (`.candidate-photo-ticker`
+  // is `align-items: center`), not pinned to a top corner, so it shouldn't
+  // reach the counter — checked now that hover has made it actually visible.
+  await assertNoOverlap(page, counter, prev, "candidate-photo-counter", "candidate-photo-prev");
 
   await next.click();
   await expect(img).toHaveAttribute("src", /2\.jpg$/);
@@ -547,6 +589,18 @@ test.describe("#167: touch/coarse-pointer behaviour (iPhone 13 emulation)", () =
     const ticker = target.getByTestId("candidate-photo-ticker");
     const tickerNext = ticker.getByTestId("candidate-photo-next");
     await expect(tickerNext).toHaveCSS("opacity", "1");
+
+    // #594 review (B1): this is the exact device/CSS state (`hover: none`,
+    // `.candidate-card-actions`'s background pill forced permanently
+    // visible) that made the counter unreachable — the shipped bug was
+    // invisible to a desktop-only `toHaveCSS("opacity", "1")` check because
+    // that assertion never emulates `hover: none` at all, and under
+    // `hover: none` the actions bar's background is forced permanently
+    // visible too (unlike the desktop baseline, hover-gated). Confirm the
+    // counter's box doesn't overlap it HERE, under real iPhone-13 emulation,
+    // not just that the counter itself renders with opacity: 1.
+    const counter = ticker.getByTestId("candidate-photo-counter");
+    await assertNoOverlap(page, counter, actions, "candidate-photo-counter", "candidate-card-actions");
 
     const img = target.getByTestId("candidate-photo-img");
     await expect(img).toHaveAttribute("src", /1\.jpg$/);

@@ -339,7 +339,16 @@ export function PhotoGallery({
   };
 
   const handleZoomPointerEnd = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (mapSlideActive) return;
+    // #594 review (L1): deliberately NOT gated on `mapSlideActive` like
+    // Down/Move above — this is the cleanup half of the same gesture those
+    // two start tracking. If Down/Move guard out a gesture that began while
+    // `mapSlideActive` was true, `pointersRef`/`swipeRef`/`panRef` were never
+    // populated in the first place, so this runs its cleanup against empty
+    // state and is a no-op either way. But if `openIndex` changes mid-gesture
+    // (e.g. a nav-button tap lands while a pinch is still in flight) and End
+    // bailed here too, a real tracked pointer id would never get deleted —
+    // a stale entry that survives into the NEXT gesture and gets misread as
+    // an already-in-progress pinch. End must always run.
     if (e.pointerType !== "touch") return;
     pointersRef.current.delete(e.pointerId);
 
@@ -579,11 +588,16 @@ export function PhotoGallery({
               >
                 ›
               </button>
-              {/* #594: never counts the map as a photo — hidden outright
-                  while the map slide is open rather than showing a
-                  meaningless "0 / N" or "N+1 / N". Denominator is always
-                  `photoUrls.length`, never `totalSlides`. */}
-              {!mapSlideActive && (
+              {/* #594 review (L2): gated on `photoUrls.length > 1`,
+                  separately from the nav buttons' `totalSlides > 1` above —
+                  a property with exactly one photo (plus a map, so
+                  `totalSlides` is 2) must show prev/next to reach the map,
+                  but never a meaningless "1 / 1". Also never counts the map
+                  as a photo — hidden outright while the map slide is open
+                  rather than showing a bogus "0 / N" or "N+1 / N".
+                  Denominator is always `photoUrls.length`, never
+                  `totalSlides`. */}
+              {!mapSlideActive && photoUrls.length > 1 && (
                 <p
                   data-testid="photo-gallery-counter"
                   aria-live="polite"
@@ -604,6 +618,33 @@ export function PhotoGallery({
                 </p>
               )}
             </>
+          )}
+
+          {/* #594 review (L4): the photo counter above is the ONLY aria-live
+              region in this lightbox — landing on the map slide hid it
+              (mapSlideActive excludes it, correctly, from ever announcing a
+              photo position) with nothing announced in its place, so a
+              screen-reader user got silence where a photo would have
+              announced "N / M". Visually hidden (the map is its own visual
+              cue) but present in the accessibility tree with the same
+              aria-live="polite" pattern as the counter. */}
+          {mapSlideActive && (
+            <p
+              aria-live="polite"
+              style={{
+                position: "absolute",
+                width: 1,
+                height: 1,
+                padding: 0,
+                margin: -1,
+                overflow: "hidden",
+                clip: "rect(0, 0, 0, 0)",
+                whiteSpace: "nowrap",
+                border: 0,
+              }}
+            >
+              Mapa de ubicación
+            </p>
           )}
 
           {/* #575 review fix (B1): this div is a flex item of the outer
@@ -654,19 +695,21 @@ export function PhotoGallery({
               alignItems: "center",
               justifyContent: "center",
               overflow: "hidden",
-              // #594: the map slide needs native touch handling for
-              // Leaflet's own drag/pinch (this file's pointer handlers
-              // already no-op on it via `mapSlideActive`, above) — "none"
-              // would fight Leaflet for the same gesture stream. Every
-              // photo slide is unchanged.
-              touchAction: mapSlideActive ? "auto" : "none",
+              touchAction: "none",
             }}
           >
             {mapSlideActive ? (
               // #594: interactive — panning is the whole point of enlarging
-              // it. `key` forces a fresh MapContainer per open (Leaflet
-              // doesn't tolerate being fed a new center/props on an
-              // existing instance the way a plain React re-render implies).
+              // it. The fresh MapContainer instance per open (Leaflet
+              // doesn't tolerate being fed a new center/props on an existing
+              // instance the way a plain React re-render implies) comes from
+              // this WHOLE branch mounting/unmounting on `mapSlideActive`,
+              // not from `key` — `lat`/`lon` don't change within one
+              // property's viewing, so this key is constant across opens.
+              // Kept anyway as a defensive pin: if `lat`/`lon` ever DID
+              // change while this branch stayed mounted, React would reuse
+              // the same MapContainer instance and hand it a new `center`
+              // prop it (per react-leaflet's own docs) ignores after mount.
               <div
                 key={`map-slide-${lat}-${lon}`}
                 data-testid="photo-gallery-map-slide"

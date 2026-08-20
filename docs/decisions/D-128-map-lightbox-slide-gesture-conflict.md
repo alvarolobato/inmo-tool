@@ -8,7 +8,30 @@ rule: "PhotoGallery's lightbox extends its open-slide index to an offset range (
 
 # D-128: property detail map opens as an interactive lightbox slide; swipe/pinch suspend, arrow keys don't
 
-*Decided: 2026-08-20*
+*Decided: 2026-08-20, revised 2026-08-20 (Opus review of PR #598 caught a
+factual error in the original §4 — see Correction below)*
+
+**Correction (2026-08-20)**: the original version of this record claimed the
+zoom area's `touchAction` needed to flip `"none" → "auto"` for the map slide
+because an ancestor `touch-action: none` would "silently override Leaflet's
+more specific declaration and block its touch dragging." **That is
+backwards.** Leaflet 1.9.4's own bundled CSS deliberately sets
+`.leaflet-container { touch-action: none }` (`leaflet.css`) precisely
+BECAUSE it implements dragging and pinch entirely in JS and wants the
+browser's native compositor-driven panning/zooming kept out of the way — an
+ancestor also declaring `"none"` is what Leaflet is asking for, not
+something that defeats it. The reviewer reverted the conditional to
+unconditional `"none"` and all three #594 e2e tests (including the CDP
+real-touch-drag test) still passed, confirming that line was never actually
+load-bearing in either direction — the original record even said so itself
+("a CDP-synthesized touch test... did not actually distinguish the two
+values") without drawing the conclusion that the claimed mechanism was
+wrong, not just untestable. `document.body.style.touchAction` is also
+forced to `"none"` for the whole lightbox's lifetime regardless (see
+`PhotoGallery.tsx`'s existing touch-suppression effect), so even the
+original claim's own reasoning would have left the "fix" incomplete. `touch-
+action` on the zoom area is unconditional `"none"` for every slide, map
+included; see the (corrected) point 4 below.
 
 **Context**: Issue #594 (owner, on mobile): the detail-page location map
 (`PropertyLocationMap.tsx`, first tile of `PhotoGallery.tsx`'s grid) was
@@ -52,18 +75,25 @@ this record's concern, only the map/lightbox interaction is.
    the map; ceding keyboard to Leaflet would fight that.
 4. **Swipe/pinch are suspended on the map slide, arrow-key stepping is not.**
    `mapSlideActive = hasCoords && openIndex === 0`, checked as the FIRST line
-   of `handleZoomPointerDown`/`Move`/`End` (early-return, no-op) — Leaflet's
-   own touch/mouse handling owns the drag outright instead of this file's
+   of `handleZoomPointerDown`/`Move` (early-return, no-op) — Leaflet's own
+   touch/mouse handling owns the drag outright instead of this file's
    pointer tracking also reacting to the same stream (which would otherwise
-   misread a map pan as a photo swipe, or vice versa). The zoom area's
-   `touchAction` also flips `"none" → "auto"` for the map slide: Leaflet's
-   OWN bundled CSS sets `touch-action: none` on `.leaflet-container` itself
-   when dragging is enabled, but CSS touch-action is the INTERSECTION of an
-   element's own value and its ancestors' — an ancestor still at `"none"`
-   would silently override Leaflet's more specific declaration and block its
-   touch dragging. Arrow keys are UNCHANGED (the lightbox's existing
-   `document`-level keydown effect, keyed on `totalSlides`) — they always
-   move you off the map slide, never pan it, because of (3).
+   misread a map pan as a photo swipe, or vice versa). `handleZoomPointerEnd`
+   is deliberately NOT guarded the same way (review B1/L1 on PR #598): it is
+   the cleanup half of a gesture Down/Move already declined to start
+   tracking, so gating it too would let a pointer id that DID get tracked
+   (a gesture that started on a photo, mid-tracked, before the slide changed
+   under it) survive uncleaned into the next gesture as a stale entry — see
+   the `handleZoomPointerEnd` comment in `PhotoGallery.tsx`. The zoom area's
+   `touchAction` stays `"none"` unconditionally, including on the map slide
+   — Leaflet's own bundled CSS deliberately sets `touch-action: none` on
+   `.leaflet-container` BECAUSE it implements drag/pinch entirely in JS and
+   wants the browser's native compositor kept out; an ancestor also at
+   `"none"` is what Leaflet asks for, not something that fights it (an
+   earlier draft of this record had this backwards — see Correction below).
+   Arrow keys are UNCHANGED (the lightbox's existing `document`-level
+   keydown effect, keyed on `totalSlides`) — they always move you off the
+   map slide, never pan it, because of (3).
 5. **The `N / M` counter never counts the map.** `M` is always
    `photoUrls.length`; `N` is `openIndex - offset + 1`; the counter element
    is omitted outright (not shown as "0 / N") while `mapSlideActive`.
@@ -80,22 +110,6 @@ this record's concern, only the map/lightbox interaction is.
   doesn't own" reason `CandidatePhotoTicker.tsx` already established; a
   sibling overlay button is simpler and keeps `PropertyLocationMap` itself
   free of button-content-model concerns.
-- *Leaving the zoom area's `touchAction` at `"none"` for the map slide too*
-  — this was the ORIGINAL implementation and passed every test written
-  against jsdom/mocked Leaflet; only a real-browser e2e test driving genuine
-  CDP touch input against real Leaflet would have caught that Leaflet's own
-  `touch-action: none` (bundled `leaflet.css`, stamped on `.leaflet-container`
-  when `dragging`/`touchZoom` are enabled) is not enough on its own — the
-  ancestor value still wins per the CSS touch-action intersection rule.
-  Kept as `"auto"` for the map slide specifically for this reason, even
-  though a CDP-synthesized touch test in this repo's Chromium build did not
-  actually distinguish the two values (JS-dispatched pointer/touch events
-  reach Leaflet's listeners regardless of `touch-action`; the property
-  mainly arbitrates against the BROWSER's own native compositor-driven pan,
-  which a synthetic CDP touch stream doesn't reliably exercise) — real
-  hardware is where `touch-action` divergence would show up as jank, so the
-  correct value is kept on documented first-principles despite the
-  synthetic-touch test being unable to prove it directly.
 
 **Rationale**: An enlarged map that can't be panned is a worse experience
 than the static grid tile it came from — the owner's ask was explicit

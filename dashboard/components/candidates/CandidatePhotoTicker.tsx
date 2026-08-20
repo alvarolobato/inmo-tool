@@ -63,6 +63,19 @@ import { wrapIndex } from "@/lib/photo-cycle";
  * Unlike the buttons it is not hover/touch-gated — it's informational, not
  * an affordance, the same always-visible treatment the price line gets.
  *
+ * Corner is `top: 6, left: 6` — NOT top-right (review B1, PR #598). The
+ * counter first shipped top-right and was 100% occluded on a phone: the
+ * feedback overlay (`FeedbackControls.tsx`, `.candidate-card-actions` in
+ * globals.css) sits at the SAME `top: 6px; right: 6px; z-index: 2` on the
+ * same card, renders LATER in DOM order (a sibling below this one in
+ * `CandidateCard.tsx`), and under `@media (hover: none)` its background pill
+ * is forced permanently visible — so on touch this counter was never
+ * reachable, not merely hover-clashing. Bottom is the full-width price
+ * gradient (above); top-left is the only free corner (the prev button sits
+ * vertically centered in the ticker's flex row, not in a top corner, so it
+ * doesn't reach up here either). If a future control wants this corner,
+ * check for a collision the same way — don't assume a corner is free.
+ *
  * Explicitly OUT of scope for this pass (owner scope cut after the initial
  * #594 plan): swipe-to-step and dot indicators on this ticker. Prev/next
  * buttons remain the only way to cycle a card's photos; do not reintroduce
@@ -233,7 +246,7 @@ export function CandidatePhotoTicker({
             style={{
               position: "absolute",
               top: 6,
-              right: 6,
+              left: 6,
               margin: 0,
               padding: "2px 8px",
               borderRadius: 10,
