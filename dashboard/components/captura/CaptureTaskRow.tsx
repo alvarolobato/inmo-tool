@@ -27,6 +27,24 @@ import { loosenedPrefixLabel } from "@/lib/search-url/labels";
  * fuera" (the checkboxes are inside the collapsible — put them outside). This
  * row is rendered only when its connector is expanded, so it can never be the
  * sole place a task is tickable.
+ *
+ * **Stacked layout (issue #596)**: this row used to be a side-by-side flex
+ * pair — a `flex: 1` text column next to a `flexShrink: 0` button ~160px
+ * wide. The button couldn't shrink, so the label column (and the "sin
+ * confirmar"-style loosened-flag list beside it) collapsed to roughly a
+ * third of the card — long task labels ("Hipoges — pisos, chalets, áticos en
+ * Dos Hermanas ≤210.000 €") wrapped one word per line. The owner's fix
+ * ("ponlo debajo o arriba para tener todo el ancho") applies at EVERY width,
+ * not just phone — he called out desktop explicitly — so this is a plain
+ * `flex-direction: column` stack with no `@media` divergence at all: every
+ * value that changed here is a static literal with no prop/state dependency
+ * (D-121's rung 1), so it lives in `.capture-task-row`/`.capture-task-row-
+ * button` (globals.css) rather than the inline `style` object; only the
+ * genuinely state-dependent bits (`opacity`, `cursor`) stay inline. The text
+ * block now gets the row's full width (container `align-items: stretch`,
+ * the default for a column flex container); the button sits below it,
+ * sized to its own content (`align-self: flex-start`) but with a 44px
+ * `min-height` for the tap target — the old button was only ~34px tall.
  */
 export function CaptureTaskRow({
   task,
@@ -67,20 +85,18 @@ export function CaptureTaskRow({
       data-testid={`captura-task-${task.id}`}
       data-portal={task.portal}
       data-muted={muted ? "true" : "false"}
+      className="capture-task-row"
       style={{
-        display: "flex",
-        alignItems: "flex-start",
-        gap: 12,
-        padding: "12px 14px",
-        borderRadius: 10,
-        border: "1px solid var(--border)",
-        background: "var(--bg-1)",
         // Graying: a visual due/not-due cue only — never disables the button.
+        // The only prop/state-dependent value left inline (D-121 rung 1) —
+        // everything else moved to the class in globals.css.
         opacity: muted ? 0.55 : 1,
-        transition: "opacity 0.2s",
       }}
     >
-      <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0, flex: 1 }}>
+      <div
+        data-testid={`captura-task-text-${task.id}`}
+        style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}
+      >
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <strong style={{ fontSize: 14, color: "var(--fg)" }}>{task.label}</strong>
           {muted && (
@@ -137,18 +153,8 @@ export function CaptureTaskRow({
         onClick={handleClick}
         disabled={busy}
         title={task.url}
-        style={{
-          flexShrink: 0,
-          padding: "7px 16px",
-          fontSize: 13,
-          fontWeight: 600,
-          borderRadius: 8,
-          border: "none",
-          background: "var(--accent)",
-          color: "#fff",
-          cursor: busy ? "wait" : "pointer",
-          whiteSpace: "nowrap",
-        }}
+        className="capture-task-row-button"
+        style={{ cursor: busy ? "wait" : "pointer" }}
       >
         {busy ? "Abriendo…" : muted ? "Repetir ↗" : "Abrir búsqueda ↗"}
       </button>

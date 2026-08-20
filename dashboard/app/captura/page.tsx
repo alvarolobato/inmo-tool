@@ -71,7 +71,7 @@ export default async function CapturaPage() {
   }
 
   return (
-    <main style={{ padding: 24, maxWidth: 900, margin: "0 auto" }} data-testid="captura-page">
+    <main className="route-shell" style={{ maxWidth: 900, margin: "0 auto" }} data-testid="captura-page">
       {/* Header */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <h1 style={{ fontSize: 22, fontWeight: 700, color: "var(--fg)", margin: 0 }}>Captura</h1>

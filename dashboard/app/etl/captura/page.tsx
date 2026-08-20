@@ -217,7 +217,7 @@ export default function CapturaWorklistPage() {
   );
 
   return (
-    <main style={{ padding: 24, maxWidth: 980 }} data-testid="worklist-page">
+    <main className="route-shell" style={{ maxWidth: 980 }} data-testid="worklist-page">
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <h1 style={{ fontSize: 20, fontWeight: 600, color: "var(--fg)", margin: 0 }}>
           Captura (admin)

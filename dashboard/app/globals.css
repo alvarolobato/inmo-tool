@@ -132,6 +132,57 @@ body {
   padding: 0;
 }
 
+/* Horizontal padding token (issue #596, hardened per #599 review — see
+   D-129). The owner has now reported side margins on phone more than
+   once — #572/#576 each trimmed padding on ONE page/card and explicitly
+   left the SHARED layers (this file's `.main-content`, `AdminChrome.tsx`'s
+   content div, `.dedup-page`, and the repeated per-route `<main
+   style={{padding: 24}}>` shell) alone: "touching either would affect far
+   more than this one page." This block, plus the consumer sites further
+   down this file (`.admin-chrome-content`, `.dedup-page`, `.route-shell`)
+   and in `AdminChrome.tsx`, is that follow-up, applied once per shared
+   layer instead of per page — see D-129 for the full rationale (why this
+   is a binding token contract, not a one-off application of D-121).
+
+   `--pad-x` ALWAYS resolves (this bare `:root` rule carries no attribute
+   selector, so it applies at every width): it defaults to whatever
+   `--pad` already is for the current density (20/14/28 comfort/compact/
+   spacious), which makes desktop pixel-identical by construction — a
+   consumer that reads `var(--pad-x)` unconditionally, not gated by its
+   own breakpoint media query, still gets the correct desktop value. That
+   closes the "next component copies the phone-only idiom and silently
+   gets 12px on desktop" gap a prior review caught. Below 768px it
+   shrinks, compressed but keeping each density's original ordering
+   (compact < comfort < spacious: 14 < 20 < 28 → 10 < 12 < 16) rather than
+   flattening to one phone-wide number, per "keep comfort/compact
+   coherent". */
+:root {
+  --pad-x: var(--pad);
+}
+
+@media (max-width: 767px) {
+  :root[data-density="compact"] {
+    --pad-x: 10px;
+  }
+  :root[data-density="comfort"],
+  :root:not([data-density]) {
+    --pad-x: 12px;
+  }
+  :root[data-density="spacious"] {
+    --pad-x: 16px;
+  }
+
+  /* `.main-content` itself: top/bottom stay on `--pad` (vertical rhythm,
+     and the sticky triage-bar's `calc(-1 * var(--pad, 20px))`
+     cancellation trick elsewhere in this file — that calc only ever
+     reads the vertical value, which this rule never redefines); only
+     left/right move. */
+  .main-content {
+    padding-left: var(--pad-x, 12px);
+    padding-right: var(--pad-x, 12px);
+  }
+}
+
 /* ============================================================
    Profile row phone-width tuning (issue #572, revised per D-121)
    ============================================================
@@ -560,9 +611,19 @@ body {
    (app/admin/AdminChrome.tsx) already wraps every /admin/* page's children
    in its own `padding: var(--pad)` div — this class is what used to be
    this page's OWN matching (and redundant) inline padding, now here
-   instead so the mobile override below can zero it. */
+   instead so the mobile override below can zero it.
+
+   #599 review (S1): horizontal now reads `--pad-x` instead of `--pad`
+   directly — at desktop `--pad-x` equals `--pad` (see the `:root` default
+   above `.main-content`), so this is a no-op today given the phone
+   override two rules down still fully zeroes this class's OWN padding
+   (AdminChrome's div layer is the one actually carrying the phone
+   number). Kept for consistency/symmetry with every other consumer of the
+   token, and so a future change to the phone override here (e.g. if
+   AdminChrome's own padding ever needs to stop covering this page) picks
+   up the right value instead of `--pad`'s larger one by accident. */
 .dedup-page {
-  padding: var(--pad);
+  padding: var(--pad) var(--pad-x, var(--pad, 20px));
 }
 
 /* The comparison-card shell. Desktop value matches what shipped before
@@ -988,4 +1049,109 @@ body {
 
 .leaflet-container {
   isolation: isolate;
+}
+
+/* ============================================================
+   Captura task row — stacked layout (issue #596)
+   ============================================================
+   CaptureTaskRow.tsx was a side-by-side flex pair: a `flex: 1` text
+   column next to a `flexShrink: 0` button ~160px wide that could not
+   shrink. On a phone that squeezed the label (and the loosened-flag
+   warning list beside it) into roughly a third of the card — long task
+   labels wrapped one word per line ("Hipoges — pisos, chalets, áticos en
+   Dos Hermanas ≤210.000 €" across seven lines) — and the owner reported
+   the SAME problem on desktop ("esto afecta tanto al móvil como
+   escritorio"), so this is a plain column stack with NO `@media` split:
+   every value below is a static literal with no prop/state dependency
+   (D-121 rung 1 — the ladder's default applies even without a breakpoint
+   divergence to manage), so it was deleted from CaptureTaskRow.tsx's
+   inline `style` objects and lives here instead. Only `opacity` (muted)
+   and `cursor` (busy) stayed inline — genuinely state-dependent.
+
+   `.capture-task-row` sets no `align-items`, so the column flex
+   container's default (`stretch`) gives the text block (and the
+   "sin confirmar"-style loosened-flag list inside it) the row's full
+   width automatically — that's the fix. The button comes after it in
+   document order, so it renders below without any explicit ordering;
+   `.capture-task-row-button` gives it `align-self: flex-start` (sized to
+   its own label, not a full-width bar) and a 44px `min-height` — the old
+   button was only ~34px tall, under the WCAG 2.5.5 tap-target minimum. */
+.capture-task-row {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  transition: opacity 0.2s;
+}
+
+.capture-task-row-button {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 10px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 8px;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+}
+
+/* ============================================================
+   AdminChrome content div — horizontal padding token (#599 review S1)
+   ============================================================
+   `AdminChrome.tsx` wraps every `/admin/*` AND `/etl/*` page's children
+   (both route groups share this one layout component, `app/etl/
+   layout.tsx` → `AdminChrome`) in a div that used a static, unconditional
+   `padding: var(--pad, 20px)` on all four sides — the SECOND horizontal
+   layer `.main-content`'s own #596 fix didn't touch (flagged in review:
+   "two layers already consume var(--pad) horizontally and you left them
+   alone"). Same shape as `.main-content` itself: desktop stays exactly
+   `var(--pad, 20px)` on every side (unchanged), only the phone media
+   query below narrows left/right to `--pad-x`. Fixing this one class
+   halves the leftover horizontal chrome on EVERY `/admin/*` and `/etl/*`
+   route at once — it's the layer every one of those pages shares. */
+.admin-chrome-content {
+  padding: var(--pad, 20px);
+}
+
+@media (max-width: 767px) {
+  .admin-chrome-content {
+    padding-left: var(--pad-x, 12px);
+    padding-right: var(--pad-x, 12px);
+  }
+}
+
+/* ============================================================
+   Route content shell — horizontal padding token (#599 review S1)
+   ============================================================
+   Eight routes wrap their content in an inline `<main style={{ padding:
+   24, maxWidth: NNN, margin: "0 auto" }}>` (each with its own maxWidth —
+   `app/captura/page.tsx`, `app/etl/connectors/page.tsx`, `app/etl/
+   captura/page.tsx`, `app/profiles/[id]/filtros/page.tsx`, `app/profiles/
+   [id]/map/page.tsx` ×2, `app/profiles/[id]/properties/[propertyId]/
+   page.tsx` ×2) — a THIRD horizontal-padding layer on top of
+   `.main-content` (and, for the `/etl/*` two, `.admin-chrome-content`
+   too) that the #596 fix never reached, since it only trimmed the ONE
+   shared shell every page always goes through. `padding: 24` is a static
+   literal with no prop/state dependency (D-121 rung 1), so it moves out
+   of each page's inline `style` object into this one shared class;
+   `maxWidth`/`margin` stay inline per page (they genuinely differ:
+   860/900/960/980). Desktop stays exactly `24px` on every side —
+   unchanged, matching every page's prior value — only the phone media
+   query narrows left/right to `--pad-x`. */
+.route-shell {
+  padding: 24px;
+}
+
+@media (max-width: 767px) {
+  .route-shell {
+    padding-left: var(--pad-x, 12px);
+    padding-right: var(--pad-x, 12px);
+  }
 }

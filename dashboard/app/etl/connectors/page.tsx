@@ -73,7 +73,7 @@ export default function ConnectorsPage() {
   );
 
   return (
-    <main style={{ padding: 24, maxWidth: 900 }} data-testid="connectors-page">
+    <main className="route-shell" style={{ maxWidth: 900 }} data-testid="connectors-page">
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <h1 style={{ fontSize: 20, fontWeight: 600, color: "var(--fg)", margin: 0 }}>Conectores</h1>
         <Link

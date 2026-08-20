@@ -211,7 +211,7 @@ export default function PropertyDetailPage() {
 
   if (profileId === null || propertyId === null) {
     return (
-      <main style={{ maxWidth: 900, margin: "0 auto", padding: 24 }}>
+      <main className="route-shell" style={{ maxWidth: 900, margin: "0 auto" }}>
         <ErrorDisplay error="Id de perfil o de propiedad no válido." />
       </main>
     );
@@ -294,7 +294,7 @@ export default function PropertyDetailPage() {
     : [];
 
   return (
-    <main style={{ maxWidth: 900, margin: "0 auto", padding: 24 }} data-testid="property-detail-page">
+    <main className="route-shell" style={{ maxWidth: 900, margin: "0 auto" }} data-testid="property-detail-page">
       <Link
         href={`/profiles/${profileId}`}
         style={{ fontSize: 12, color: "var(--fg-muted)", display: "inline-block" }}
