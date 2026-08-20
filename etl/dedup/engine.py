@@ -1,9 +1,11 @@
 """The dedup matching pipeline (issue #16) — `ps dedup run` / `ps dedup revert`.
 
 Compares every pair of listings that don't already share a property_id,
-in the signal priority order from issue #1 §6 (cadastral -> address+coords
--> phone -> photo hash -> fuzzy fallback), auto-merging confident matches
-and filing the rest as suggestions for human review.
+in signal priority order: cadastral -> address+coords -> photo hash ->
+phone -> fuzzy fallback, auto-merging confident matches and filing the
+rest as suggestions for human review. Issue #1 §6's original order listed
+phone ahead of photo hash; issue #603 (D-129) swapped them — see
+`evaluate_pair`'s docstring for why.
 
 Scale note: this is an O(n^2) pairwise comparison over every listing in the
 table, deliberately — the right scale-up (blocking by geography/price
@@ -263,11 +265,30 @@ def evaluate_pair(
 ) -> PairEvaluation | None:
     """Run every signal in priority order; return the first that fires.
 
-    Photo-hash fetching only happens once every cheaper, non-network signal
-    has already come back empty — it's the one signal in this pipeline with
-    real network cost, so it's deliberately last even though issue #16 lists
-    it before fuzzy (signal 4 vs 5) rather than being evaluated eagerly for
-    every pair regardless of whether a cheaper signal would have resolved it.
+    Photo-hash fetching only happens once address_coords/reference_code
+    have already come back empty — those two are cheaper (no network) and
+    would resolve a pair without ever needing a photo fetch. Phone, by
+    contrast, now runs AFTER photo_hash (issue #603/D-129): its
+    corroborated-but-not-`particular` tiers turned out to actively SHADOW
+    stronger evidence, not just add weaker evidence ahead of it — see
+    below for the measurement.
+
+    Issue #603 (D-129): photo_hash was moved ahead of phone in this
+    priority order — a real reversal of issue #16's original listing
+    (cadastral -> address+coords -> phone -> photo hash -> fuzzy), not
+    just a cost optimization. #600 measured all 320 pending `phone`
+    suggestions as agency noise (19 distinct numbers, 9 of them shared
+    across 6-50 listings each, 100% with a confirmed-agency side), but
+    found a sharper problem than noise: because phone ran first, 19 of
+    those 320 pairs were actually photo-ratio >= 0.6 (mostly 1.0,
+    identical price/m2/description) true duplicates, permanently stuck at
+    phone's 0.500 uncorroborated-or-agency tier because `evaluate_pair`
+    returned on the phone match before photo_hash ever got a chance to
+    look. Reordering lets photo_hash claim those pairs on its own,
+    stronger evidence (see `etl.dedup.signals.phone_extract`'s module
+    docstring for the tier changes that go with this). The photo-hash
+    store (D-025) makes a warm re-fetch here ~free — see the PR for the
+    measured cost delta.
 
     Issue #564 (D-116): a same-agency reference-code conflict is checked
     right after `cadastral` and before every other signal — see the inline
@@ -312,7 +333,6 @@ def evaluate_pair(
 
     for evaluate_fn in (
         address_coords.evaluate,
-        phone_extract.evaluate,
         reference_code.evaluate,
     ):
         result = evaluate_fn(a, b)
@@ -370,6 +390,13 @@ def evaluate_pair(
             decision="suggest",
             detail=detail,
         )
+
+    # Issue #603 (D-129): phone is now evaluated AFTER photo_hash — see
+    # this function's docstring for the shadowed-duplicate measurement
+    # that motivated the reorder.
+    phone_result = phone_extract.evaluate(a, b)
+    if phone_result is not None:
+        return phone_result
 
     return fuzzy.evaluate(a, b)
 
@@ -994,6 +1021,47 @@ def purge_same_source_pending(conn) -> int:
                     AND la.source = lb.source
                     AND sm.status = 'pending'
             """
+        )
+        deleted = cur.rowcount
+    conn.commit()
+    return deleted
+
+
+def purge_pending_phone(conn) -> int:
+    """One-off migration companion (issue #603): delete remaining
+    `pending` `suggested_merge` rows with `match_basis = 'phone'`.
+
+    Meant to run AFTER at least one full `ps dedup run` since #603's
+    `evaluate_pair` reorder + `phone_extract` silencing deployed — that
+    run's normal D-024 reevaluation pass already resolves every
+    pre-existing `phone`-pending row on its own (every pair is
+    reevaluated every run, not just a sampled subset): a pair with real
+    corroborating evidence either merges outright (photo_hash's exact
+    match, or phone's own surviving 0.900 particular/particular tier),
+    gets refreshed onto whatever basis now explains it (photo_hash's
+    partial-overlap suggestion, or phone's surviving 0.750
+    unconfirmed-kind tier), or — the measured common case, #600's 320
+    pending phone rows were 100% agency-sided, which both silenced tiers
+    (uncorroborated, corroborated-with-an-agency-side) now return `None`
+    for — gets auto-rejected by `_reevaluate_pending_suggestion`'s
+    `evaluation is None` branch. In the ideal case this purge finds
+    nothing left to delete; it exists as the same explicit, reviewable,
+    idempotent cleanup step as `purge_same_source_pending` (issue #197)
+    for whatever a still-in-flight reevaluation sweep hasn't caught up to
+    yet, not as a substitute for letting that reevaluation run.
+
+    Scoped to `status = 'pending'` only, same reasoning as
+    `purge_same_source_pending`: a `confirmed` phone suggestion already
+    went through a real merge (or a human's confirm) and is a
+    `property_merge_log` row now; `rejected`/`conflict` rows are already
+    resolved history. Only a `pending` phone row is the shape #600 found
+    to be pure noise.
+
+    Returns the number of rows deleted.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM suggested_merge WHERE status = 'pending' AND match_basis = 'phone'"
         )
         deleted = cur.rowcount
     conn.commit()

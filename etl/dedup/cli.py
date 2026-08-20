@@ -152,6 +152,19 @@ def _cmd_purge_same_source(conn) -> int:
     return 0
 
 
+def _cmd_purge_phone(conn) -> int:
+    """One-off migration companion for issue #603 (`ps dedup purge-phone`):
+    delete remaining `pending` `match_basis='phone'` rows — run once,
+    after the reordered/silenced signal has had a chance to reevaluate
+    the existing backlog on its own (see `engine.purge_pending_phone`'s
+    docstring for why this should normally find nothing left)."""
+    deleted = engine.purge_pending_phone(conn)
+    print(
+        f"Purged {deleted} pending phone suggestion(s) (issue #603 one-off migration)."
+    )
+    return 0
+
+
 def _cmd_resolve_conflict(conn, suggestion_id: int) -> int:
     try:
         engine.resolve_conflict(conn, suggestion_id)
@@ -191,6 +204,13 @@ def main(argv: list[str] | None = None) -> int:
             "rows whose two listings share a source"
         ),
     )
+    subparsers.add_parser(
+        "purge-phone",
+        help=(
+            "One-off migration (issue #603): delete remaining pending "
+            "match_basis='phone' suggested_merge rows"
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -209,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_process_actions(conn)
         if args.subcommand == "purge-same-source":
             return _cmd_purge_same_source(conn)
+        if args.subcommand == "purge-phone":
+            return _cmd_purge_phone(conn)
         return _cmd_resolve_conflict(conn, args.suggestion_id)
     finally:
         conn.close()

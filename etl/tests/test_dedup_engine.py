@@ -435,12 +435,20 @@ class TestCadastralExactMatch:
 
 
 class TestPhoneSignal:
-    def test_phone_match_with_size_mismatch_is_suggestion_not_merge(self, dedup_db):
+    def test_uncorroborated_phone_match_files_no_suggestion(self, dedup_db):
+        """Issue #603 (D-129): previously a 0.500 suggestion — #600
+        measured this exact tier as pure agency noise on the live corpus,
+        so it's silenced (returns None) rather than tuned. Dissimilar
+        addresses so fuzzy (still active pending issue #601) doesn't pick
+        up what phone deliberately drops — this test is about phone alone.
+        """
         _insert_pair(
             dedup_db,
             "idealista",
             "fotocasa",
-            "phone-size-mismatch",
+            "phone-uncorroborated",
+            address_a="Calle Alcala 10, Madrid",
+            address_b="Avenida Diagonal 200, Barcelona",
             m2_built_a=Decimal(40),
             m2_built_b=Decimal(200),
             listing_kind_a="particular",
@@ -452,19 +460,24 @@ class TestPhoneSignal:
         )
         result = engine.run(dedup_db)
         assert result.merged == 0
-        assert result.suggested == 1
+        assert result.suggested == 0
         with dedup_db.cursor() as cur:
-            cur.execute("SELECT match_basis, status FROM suggested_merge")
-            basis, status = cur.fetchone()
-            assert basis == "phone"
-            assert status == "pending"
+            cur.execute("SELECT COUNT(*) FROM suggested_merge")
+            assert cur.fetchone()[0] == 0
 
-    def test_agency_phone_match_never_auto_merges(self, dedup_db):
+    def test_agency_phone_match_files_no_suggestion(self, dedup_db):
+        """Issue #603 (D-129): previously a 0.500 suggestion regardless of
+        corroboration. #600 measured 100% of the pending phone backlog as
+        agency-sided — this tier is now silenced outright, not just
+        blocked from auto-merging.
+        """
         _insert_pair(
             dedup_db,
             "idealista",
             "fotocasa",
             "agency-phone",
+            address_a="Calle Alcala 10, Madrid",
+            address_b="Avenida Diagonal 200, Barcelona",
             m2_built_a=Decimal(70),
             m2_built_b=Decimal(70),
             listing_kind_a="agency",
@@ -476,10 +489,13 @@ class TestPhoneSignal:
         )
         result = engine.run(dedup_db)
         assert result.merged == 0
-        assert result.suggested == 1
+        assert result.suggested == 0
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM suggested_merge")
+            assert cur.fetchone()[0] == 0
 
     def test_particular_phone_match_requires_corroboration_to_merge(self, dedup_db):
-        # Corroborated: matching size/price proximity -> auto-merge.
+        # Corroborated: matching size/price proximity -> auto-merge (unchanged).
         _insert_pair(
             dedup_db,
             "idealista",
@@ -506,12 +522,16 @@ class TestPhoneSignal:
             assert basis == "phone"
             assert confidence == Decimal("0.900")
 
-        # Not corroborated: same phone, wildly different price/size -> suggestion only.
+        # Not corroborated: same phone, wildly different price/size, and
+        # dissimilar addresses -> issue #603 silences phone entirely; no
+        # suggestion is filed for this pair by any basis.
         _insert_pair(
             dedup_db,
             "idealista",
             "milanuncios",
             "particular-uncorroborated",
+            address_a="Calle Serrano 50, Madrid",
+            address_b="Paseo de Gracia 12, Barcelona",
             m2_built_a=Decimal(30),
             m2_built_b=Decimal(300),
             listing_kind_a="particular",
@@ -523,14 +543,15 @@ class TestPhoneSignal:
         )
         result2 = engine.run(dedup_db)
         assert result2.merged == 0
-        assert result2.suggested == 1
+        assert result2.suggested == 0
         with dedup_db.cursor() as cur:
+            # Zero phone suggestion rows: the corroborated pair above went
+            # straight to property_merge_log (a merge, not a suggestion),
+            # and this uncorroborated pair is silenced outright.
             cur.execute(
-                "SELECT confidence FROM suggested_merge WHERE match_basis = 'phone' "
-                "ORDER BY created_at DESC LIMIT 1"
+                "SELECT COUNT(*) FROM suggested_merge WHERE match_basis = 'phone'"
             )
-            (confidence,) = cur.fetchone()
-            assert confidence == Decimal("0.500")
+            assert cur.fetchone()[0] == 0
 
     def test_corroborated_phone_with_unconfirmed_kind_is_suggestion_not_merge(
         self, dedup_db
@@ -566,6 +587,108 @@ class TestPhoneSignal:
             assert basis == "phone"
             assert confidence == Decimal("0.750")
             assert status == "pending"
+
+
+class TestPhoneOrderingRescue:
+    """Issue #603 (D-129): photo_hash now runs BEFORE phone in
+    `evaluate_pair`. #600 measured 19 of the 320 pending phone rows on the
+    live corpus as pairs that ALSO carried a photo-ratio >= 0.6 match
+    (mostly 1.0, identical price/m2/description) — with the old order,
+    phone's own tier claimed the pair first and shadowed that stronger
+    evidence, freezing it at a weak/silenced phone verdict forever.
+
+    Uses `engine.evaluate_pair` directly with a pre-populated
+    `_PhotoHashCache` (same no-network pattern as
+    `TestPhotoHashAutoMerge`), not `engine.run()` — no network fetch is
+    ever attempted.
+    """
+
+    _IDENTICAL_HEX = "ffff0000ffff0000"
+
+    def _cache_with_identical_hashes(
+        self, listing_id_a: int, listing_id_b: int
+    ) -> _PhotoHashCache:
+        cache = _PhotoHashCache()
+        cache._cache[listing_id_a] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
+        cache._cache[listing_id_b] = [imagehash.hex_to_hash(self._IDENTICAL_HEX)]
+        return cache
+
+    def test_ordering_lets_photo_hash_claim_a_pair_phone_would_otherwise_shadow(self):
+        """Isolates the REORDER specifically (not the silencing): uses
+        phone's SURVIVING corroborated-unconfirmed-kind tier (0.750
+        suggest, untouched by issue #603's silencing) so this pair would
+        still generate a phone-basis verdict under the OLD evaluate_pair
+        order — reverting only the reorder (leaving the silencing intact)
+        must turn this test red, because phone's 0.750 tier alone would
+        then run first and shadow photo_hash's stronger 0.900 merge.
+        """
+        shared_description = "Piso reformado, tel 622334455"
+        a = _record(
+            1,
+            100,
+            source="idealista",
+            listing_kind="particular",
+            description=shared_description,
+            m2_built=Decimal(70),
+            current_price=Decimal(285000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            listing_kind=None,  # unconfirmed — phone's 0.750 tier applies
+            description=shared_description,
+            m2_built=Decimal(70),
+            current_price=Decimal(285000),
+        )
+
+        # Own the precondition: phone alone, evaluated in isolation, DOES
+        # fire for this pair (confirms the shadow risk is real, not
+        # incidental to this fixture).
+        phone_only = phone_extract.evaluate(a, b)
+        assert phone_only is not None
+        assert phone_only.decision == "suggest"
+        assert phone_only.confidence == Decimal("0.750")
+
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation is not None
+        assert evaluation.basis == "photo_hash"
+        assert evaluation.decision == "merge"
+        assert evaluation.confidence == Decimal("0.900")
+
+    def test_agency_sided_shadow_shape_from_600_now_resolves_via_photo_hash(self):
+        """The production shape #600 actually measured: an agency-sided
+        shared phone (which, per issue #603's silencing, contributes
+        nothing on its own — see TestPhoneSignal.
+        test_agency_phone_match_files_no_suggestion) alongside a full
+        photo match. photo_hash resolves it outright rather than the pair
+        going unmatched.
+        """
+        shared_description = "Piso reformado, tel 622334455"
+        a = _record(
+            1,
+            100,
+            source="idealista",
+            listing_kind="agency",
+            description=shared_description,
+            m2_built=Decimal(70),
+            current_price=Decimal(285000),
+        )
+        b = _record(
+            2,
+            200,
+            source="fotocasa",
+            listing_kind="particular",
+            description=shared_description,
+            m2_built=Decimal(70),
+            current_price=Decimal(285000),
+        )
+        assert phone_extract.evaluate(a, b) is None  # silenced on its own
+
+        evaluation = engine.evaluate_pair(a, b, self._cache_with_identical_hashes(1, 2))
+        assert evaluation is not None
+        assert evaluation.basis == "photo_hash"
+        assert evaluation.decision == "merge"
 
 
 class TestReferenceCodeSignal:
@@ -1607,18 +1730,19 @@ class TestPendingSuggestionReevaluation:
     """
 
     def test_pending_reevaluated_to_merged_when_a_veto_rule_is_lifted(self, dedup_db):
-        """Mirrors TestFloorCorroborationAcrossSignals's DB-backed fixture:
-        a phone match corroborated on price/size proximity, but blocked
-        from auto-merging by issue #186's floor veto — filed as a `pending`
-        suggestion (basis='phone', confidence=0.500).
+        """A phone match corroborated on price/size proximity, but with one
+        side's `listing_kind` unconfirmed (`None`) — phone_extract's
+        surviving 0.750 corroborated-unconfirmed-kind tier (issue #603/
+        D-129 silenced the uncorroborated and agency tiers, but left this
+        one alone), filed as a `pending` suggestion.
 
-        Simulates the exact shape of #214's real-world trigger (a rule
-        change making a previously-vetoed pair mergeable) by monkeypatching
-        `phone_extract.floors_conflict` to always return False — i.e. "the
-        floor-veto rule no longer blocks this pair" — then re-running.
-        Under the old code this pending row would never be looked at again;
-        under the fix it's re-scored, corroboration now succeeds, and the
-        pair auto-merges.
+        Simulates #214's real-world trigger (new information making a
+        previously-uncertain pair mergeable) with a real DB state change —
+        a later connector sweep confirming the second listing's kind as
+        'particular' — rather than a monkeypatch, then re-running. Under
+        the pre-#214 code this pending row would never be looked at again;
+        under the fix it's re-scored, both sides now read 'particular',
+        and the pair auto-merges.
         """
         listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
             dedup_db,
@@ -1628,13 +1752,11 @@ class TestPendingSuggestionReevaluation:
             m2_built_a=Decimal(70),
             m2_built_b=Decimal(70),
             listing_kind_a="particular",
-            listing_kind_b="particular",
+            listing_kind_b=None,
             description_a="Piso reformado, tel 622334455",
             description_b="Piso reformado, tel 622334455",
             current_price_a=Decimal(285000),
             current_price_b=Decimal(279000),
-            floor_a="10º",
-            floor_b="A partir de la 15ª planta",
         )
 
         first = engine.run(dedup_db)
@@ -1645,11 +1767,16 @@ class TestPendingSuggestionReevaluation:
                 "SELECT id, match_basis, confidence, status FROM suggested_merge"
             )
             suggestion_id, basis, confidence, status = cur.fetchone()
-            assert (basis, confidence, status) == ("phone", Decimal("0.500"), "pending")
+            assert (basis, confidence, status) == ("phone", Decimal("0.750"), "pending")
 
-        with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(phone_extract, "floors_conflict", lambda a, b: False)
-            second = engine.run(dedup_db)
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "UPDATE listing SET listing_kind = 'particular' WHERE id = %s",
+                (listing_b,),
+            )
+        dedup_db.commit()
+
+        second = engine.run(dedup_db)
 
         assert second.suggested == 0
         assert second.merged == 1
@@ -1685,7 +1812,7 @@ class TestPendingSuggestionReevaluation:
             assert resolved_at is not None
             # Auditable: what it used to say, and that the engine (not a
             # human) is what changed it.
-            assert detail["reevaluated_from"]["confidence"] == 0.5
+            assert detail["reevaluated_from"]["confidence"] == 0.75
             assert detail["reevaluated_from"]["status"] == "pending"
             assert "auto_confirmed_merge" in detail
             assert "confirmed_merge" not in detail  # that key is confirm_suggestion's
@@ -2339,6 +2466,86 @@ class TestPurgeSameSourcePending:
         assert "Purged 1" in captured.out
 
 
+class TestPurgePendingPhone:
+    """Issue #603's one-off migration: `engine.purge_pending_phone` deletes
+    remaining `pending` `match_basis='phone'` suggested_merge rows, and
+    nothing else."""
+
+    def _seed_suggestion(
+        self, conn, ext_prefix: str, status: str, match_basis: str = "phone"
+    ) -> int:
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            conn, "idealista", "fotocasa", ext_prefix
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO suggested_merge
+                    (listing_id_a, listing_id_b, match_basis, confidence, status)
+                VALUES (%s, %s, %s, 0.500, %s) RETURNING id
+                """,
+                (*sorted((listing_a, listing_b)), match_basis, status),
+            )
+            suggestion_id = cur.fetchone()[0]
+        conn.commit()
+        return suggestion_id
+
+    def test_purges_only_pending_phone_rows(self, dedup_db):
+        phone_pending = self._seed_suggestion(
+            dedup_db, "purge-phone-pending", "pending"
+        )
+        phone_confirmed = self._seed_suggestion(
+            dedup_db, "purge-phone-confirmed", "confirmed"
+        )
+        phone_rejected = self._seed_suggestion(
+            dedup_db, "purge-phone-rejected", "rejected"
+        )
+        other_basis_pending = self._seed_suggestion(
+            dedup_db, "purge-phone-other-basis", "pending", match_basis="fuzzy"
+        )
+
+        deleted = engine.purge_pending_phone(dedup_db)
+
+        assert deleted == 1
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT id FROM suggested_merge ORDER BY id")
+            remaining = {row[0] for row in cur.fetchall()}
+        assert remaining == {phone_confirmed, phone_rejected, other_basis_pending}
+        assert phone_pending not in remaining
+
+    def test_idempotent_second_run_deletes_nothing(self, dedup_db):
+        self._seed_suggestion(dedup_db, "purge-phone-idempotent", "pending")
+        first = engine.purge_pending_phone(dedup_db)
+        second = engine.purge_pending_phone(dedup_db)
+        assert first == 1
+        assert second == 0
+
+    def test_cli_purge_phone_subcommand(self, dedup_db, monkeypatch, capsys):
+        from etl.dedup import cli as dedup_cli
+
+        self._seed_suggestion(dedup_db, "purge-phone-cli", "pending")
+
+        class _NoCloseConnProxy:
+            """Same reasoning as TestPurgeSameSourcePending's own copy."""
+
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
+        )
+        exit_code = dedup_cli.main(["purge-phone"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Purged 1" in captured.out
+
+
 class TestAddressCoordsSignal:
     """No dedicated coverage existed for address_coords.evaluate's
     coords+size+address merge path before issue #186 added the floor veto
@@ -2542,16 +2749,28 @@ class TestFloorCorroborationAcrossSignals:
         """DB round-trip proof that engine.fetch_listing_records actually
         reads property.floor into ListingRecord.floor — the in-memory
         tests above exercise the corroboration helpers directly and can't
-        catch a wiring bug in the SELECT/row-unpacking itself."""
+        catch a wiring bug in the SELECT/row-unpacking itself.
+
+        Uses phone's surviving corroborated-unconfirmed-kind tier (0.750,
+        untouched by issue #603's silencing) rather than the retired
+        uncorroborated tier: if `property.floor` were NOT actually wired
+        through (floor reads back as None on both sides), the floor veto
+        would never fire, corroboration would succeed via the price/size
+        fallback, and this pair WOULD file a 0.750 suggestion. Dissimilar
+        addresses keep fuzzy (still active pending issue #601) from
+        picking up what the floor veto is meant to block.
+        """
         _insert_pair(
             dedup_db,
             "idealista",
             "fotocasa",
             "phone-floor-veto-db",
+            address_a="Calle Alcala 10, Madrid",
+            address_b="Avenida Diagonal 200, Barcelona",
             m2_built_a=Decimal(70),
             m2_built_b=Decimal(70),
             listing_kind_a="particular",
-            listing_kind_b="particular",
+            listing_kind_b=None,
             description_a="Piso reformado, tel 622334455",
             description_b="Piso reformado, tel 622334455",
             current_price_a=Decimal(285000),
@@ -2561,12 +2780,10 @@ class TestFloorCorroborationAcrossSignals:
         )
         result = engine.run(dedup_db)
         assert result.merged == 0
-        assert result.suggested == 1
+        assert result.suggested == 0
         with dedup_db.cursor() as cur:
-            cur.execute("SELECT match_basis, confidence FROM suggested_merge")
-            basis, confidence = cur.fetchone()
-            assert basis == "phone"
-            assert confidence == Decimal("0.500")
+            cur.execute("SELECT COUNT(*) FROM suggested_merge")
+            assert cur.fetchone()[0] == 0
 
 
 class TestStructuredFieldsFuzzyVeto:
