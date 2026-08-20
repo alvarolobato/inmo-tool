@@ -666,6 +666,83 @@
     return "wait";
   }
 
+  // ═══ Durable auto intent (issue #587) ══════════════════════════════════════
+  //
+  // `chrome.storage.session` — where the WHOLE auto record lived through issue
+  // #516 — is wiped by Chrome on every browser close. That's fine for run
+  // state (status/harvestTask/batchesDone/…: nothing meaningful survives a
+  // restart there anyway, the in-flight tabs are gone too) but wrong for the
+  // OPERATOR'S INTENT ("Auto is ON for portal X"): the owner turns Auto on,
+  // closes the browser, and it comes back silently OFF — `getAutoState()` read
+  // null, `nextAutoAction` never got a state to evaluate, `autoTick()` disarmed
+  // the alarm. The fix is a split, not a new scheduler: the durable intent
+  // `{enabled, portal, force}` persists in `chrome.storage.local` (survives a
+  // restart); the volatile run state stays in `chrome.storage.session` (safe
+  // to lose — a fresh IDLE state after a restart just means "re-plan", which
+  // `nextAutoAction` already turns into 'start'). `composeAutoState` recombines
+  // the two into the SAME full shape `makeAutoState` has always produced, so
+  // every existing consumer (`nextAutoAction`, `recoverStrandedHarvest`, the
+  // popup) is unchanged — background.js's `getAutoState()`/`setAutoState()`
+  // are the only callers that need to know about the split.
+  var DEFAULT_AUTO_INTENT = { enabled: false, portal: null, force: false };
+
+  /**
+   * Recompose the full auto state from the durable intent (chrome.storage.local)
+   * and the volatile run state (chrome.storage.session). Pure.
+   *
+   *   - intent null/disabled           → null (no auto — mirrors "never
+   *     started" / "turned off"; background.js disarms the alarm on this).
+   *   - intent enabled, session absent → a state whose run-state fields fall
+   *     back to makeAutoState's own defaults (status IDLE, lastBatchAt null,
+   *     batchesDone 0, harvestTask null) — a browser restart, or the very
+   *     first tick after `startAuto`. `nextAutoAction` reads that as 'start',
+   *     which is exactly "re-plan" rather than "stay off".
+   *   - intent enabled, session present → the persisted run state wins, so a
+   *     worker EVICTION (session survives that — only a full browser close
+   *     wipes it) still resumes mid-HARVEST/RUNNING through the existing
+   *     `recoverStrandedHarvest`/`reattachIfStranded` paths, unchanged.
+   *
+   * `config` ({batchSize, timeoutSec}, the live chrome.storage.sync knobs) is
+   * the fallback for those two fields when the session doesn't already have
+   * its own cached copy — same values `startAuto` would have used.
+   */
+  function composeAutoState(intent, session, config) {
+    if (!intent || intent.enabled !== true) return null;
+    var sess = session || {};
+    var cfg = config || {};
+    return makeAutoState({
+      enabled: true,
+      portal: intent.portal,
+      force: intent.force === true,
+      batchSize:
+        typeof sess.batchSize === "number" ? sess.batchSize : cfg.batchSize,
+      timeoutSec:
+        typeof sess.timeoutSec === "number" ? sess.timeoutSec : cfg.timeoutSec,
+      status: sess.status,
+      batchesDone: sess.batchesDone,
+      lastBatchAt: sess.lastBatchAt,
+      totalPending: sess.totalPending,
+      harvestTask: sess.harvestTask,
+    });
+  }
+
+  /**
+   * The durable half of a full auto state — what `setAutoState` writes to
+   * `chrome.storage.local`. Pure. A null/disabled state (e.g. `stopAuto`)
+   * yields `{enabled:false, portal:null, force:false}`, so a subsequent
+   * `composeAutoState` reads it as "no auto" (durably OFF across a restart —
+   * issue #587 EC-5).
+   */
+  function autoIntentFromState(state) {
+    if (!state || state.enabled !== true) return DEFAULT_AUTO_INTENT;
+    return {
+      enabled: true,
+      portal:
+        typeof state.portal === "string" && state.portal ? state.portal : null,
+      force: state.force === true,
+    };
+  }
+
   // ═══ Pending-search queue (issue #554) ═════════════════════════════════════
   //
   // The owner fires off several searches (different zones/portals) back to
@@ -919,6 +996,9 @@
     shouldContinueAuto: shouldContinueAuto,
     selectNextPending: selectNextPending,
     nextAutoAction: nextAutoAction,
+    // Durable auto intent (issue #587)
+    composeAutoState: composeAutoState,
+    autoIntentFromState: autoIntentFromState,
     // Pending-search queue (issue #554)
     makeSearchQueue: makeSearchQueue,
     enqueueSearch: enqueueSearch,
