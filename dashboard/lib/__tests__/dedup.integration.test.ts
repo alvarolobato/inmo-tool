@@ -212,6 +212,57 @@ describe.runIf(dbAvailable)("dedup review queue — real Postgres", () => {
     });
   });
 
+  it('excludes a pending pair whose two listings already share a property_id — the "ya se había fusionado" read-side filter (issue #605 Part 1)', async () => {
+    await withRealDb(async (pool) => {
+      // Stale pair: both listings already unified under the same property by
+      // some OTHER merge since this suggestion was filed. #600 measured 72
+      // of these live — the review query must never serve one.
+      const sharedProperty = await insertProperty(pool);
+      const lA = await insertListing(pool, sharedProperty, { source: "fotocasa" });
+      const lB = await insertListing(pool, sharedProperty, { source: "idealista" });
+      const staleId = await insertSuggestion(pool, lA, lB, { match_basis: "photo_hash", confidence: 0.95 });
+
+      // Genuine still-pending pair across two DIFFERENT properties, so the
+      // test can't pass by the filter accidentally hiding everything.
+      const propA = await insertProperty(pool);
+      const propB = await insertProperty(pool);
+      const lGenuineA = await insertListing(pool, propA);
+      const lGenuineB = await insertListing(pool, propB);
+      const genuineId = await insertSuggestion(pool, lGenuineA, lGenuineB, {
+        match_basis: "photo_hash",
+        confidence: 0.7,
+      });
+
+      const items = await listDedupSuggestions({ limit: 100 });
+      const ids = new Set(items.map((s) => s.id));
+      expect(ids.has(staleId)).toBe(false);
+      expect(ids.has(genuineId)).toBe(true);
+
+      // The count badge must agree with the list — not just the list itself.
+      const counts = await getDedupSuggestionCounts();
+      expect(counts.total).toBe(1);
+      expect(counts.by_basis.photo_hash).toBe(1);
+    });
+  });
+
+  it("same-property exclusion also applies to profile_relevant_total and the onlyProfileRelevant toggle (issue #605 Part 1)", async () => {
+    await withRealDb(async (pool) => {
+      const profile = await insertProfile(pool);
+      const sharedProperty = await insertProperty(pool);
+      const lA = await insertListing(pool, sharedProperty);
+      const lB = await insertListing(pool, sharedProperty);
+      await markProfileMatch(pool, profile, sharedProperty);
+      const staleId = await insertSuggestion(pool, lA, lB, { match_basis: "fuzzy", confidence: 0.6 });
+
+      const counts = await getDedupSuggestionCounts();
+      expect(counts.total).toBe(0);
+      expect(counts.profile_relevant_total).toBe(0);
+
+      const filtered = await listDedupSuggestions({ onlyProfileRelevant: true, limit: 100 });
+      expect(filtered.some((s) => s.id === staleId)).toBe(false);
+    });
+  });
+
   it("orders strongest evidence first (confidence DESC) so photo_hash outranks fuzzy by default", async () => {
     await withRealDb(async (pool) => {
       const propA = await insertProperty(pool);
