@@ -1,5 +1,24 @@
 "use client";
 
+/**
+ * TopBar freshness pill state — repointed at the Estado board's source-health
+ * model (issue #638, part of #636).
+ *
+ * Before this change, the pill derived from `/api/data-health`
+ * (`getConnectorFreshness`), which reads `connector_freshness_state`'s crawl
+ * CYCLE completion — a run-outcome-shaped signal that can read green while a
+ * source is actually starving (the fotocasa case: four consecutive `ok` runs,
+ * zero listings ingested for ~40h). It now reads `/api/etl/source-health`,
+ * whose per-source status is derived from the `listing` table itself
+ * (lib/db/source-health.ts) — the same ground truth and the same worst-of
+ * rollup the `/admin` Estado board renders, so the TopBar dot and the board
+ * can never structurally disagree.
+ *
+ * `/api/data-health` and `getConnectorFreshness()` are UNCHANGED by this —
+ * they still back `/api/ready`, `/etl/salud` and `/etl/connectors`'
+ * per-connector cycle pill, none of which are in #638's scope.
+ */
+
 import {
   createContext,
   useContext,
@@ -7,27 +26,32 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { DataHealthResponse } from "@/app/api/data-health/route";
+import type { SourceHealthResponse } from "@/app/api/etl/source-health/route";
+import { SOURCE_STATUS_RANK, type SourceStatus } from "@/lib/source-health";
 
 interface FreshnessState {
   /** Short label rendered in the TopBar live-status pill. */
   freshnessText: string;
-  /** True when any in-scope source is past its staleness threshold. */
+  /** True when the worst-of source status is atascado/fallando — a real
+   * problem, not merely a capture source awaiting its owner-paced turn. */
   freshnessStale: boolean;
   /**
-   * True when a connector is actively refreshing (mid-cycle, not stuck) and
-   * nothing is stale — a distinct pill state from stale (issue #295, D-050). */
+   * True when the worst-of status is `pendiente` — due, but no error signal
+   * (includes a capture source merely awaiting capture, per the owner's
+   * #636-addendum safety constraint: never red from time alone). A distinct,
+   * non-alarming pill state from stale. */
   freshnessRefreshing: boolean;
   /**
-   * Issue #586 — true when the freshness surface can't make an honest
-   * "nothing due" claim (a DB error, or an empty in-scope set): the dot must
-   * render grey/unknown, NEVER green. Takes priority over freshnessStale
-   * (both false at once means "nothing to assert", not "all fine"). */
+   * True when the source-health surface can't make an honest claim (a DB
+   * error, or no in-scope sources at all — `rollupStatus: null`): the dot
+   * must render grey/unknown, NEVER green. Takes priority over
+   * freshnessStale (both false at once means "nothing to assert"). */
   freshnessUnknown: boolean;
-  /** Hover tooltip with the precise last-sync timestamp. */
+  /** Hover tooltip naming the worst-ranked source and its age. */
   freshnessTooltip: string | null;
-  /** Raw `/api/data-health` payload, for components that need the table list. */
-  health: DataHealthResponse | null;
+  /** Raw `/api/etl/source-health` payload, for components that need the
+   * per-source list. */
+  health: SourceHealthResponse | null;
   setFreshnessText: (text: string) => void;
   setFreshnessStale: (stale: boolean) => void;
   setFreshnessTooltip: (tooltip: string | null) => void;
@@ -61,13 +85,18 @@ function formatDate(iso: string): string {
   return `${date} a las ${time}`;
 }
 
+function formatAge(ageHours: number): string {
+  const minutesAgo = Math.max(0, Math.round(ageHours * 60));
+  return minutesAgo < 60 ? `hace ${minutesAgo}m` : `hace ${Math.round(minutesAgo / 60)}h`;
+}
+
 export function FreshnessProvider({ children }: { children: ReactNode }) {
   const [freshnessText, setFreshnessText] = useState("Datos al día");
   const [freshnessStale, setFreshnessStale] = useState(false);
   const [freshnessRefreshing, setFreshnessRefreshing] = useState(false);
   const [freshnessUnknown, setFreshnessUnknown] = useState(false);
   const [freshnessTooltip, setFreshnessTooltip] = useState<string | null>(null);
-  const [health, setHealth] = useState<DataHealthResponse | null>(null);
+  const [health, setHealth] = useState<SourceHealthResponse | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -75,9 +104,9 @@ export function FreshnessProvider({ children }: { children: ReactNode }) {
 
     const load = async () => {
       try {
-        const res = await fetch("/api/data-health");
+        const res = await fetch("/api/etl/source-health");
         if (!res.ok) return;
-        const data = (await res.json()) as DataHealthResponse;
+        const data = (await res.json()) as SourceHealthResponse;
         if (!cancelled) setHealth(data);
       } catch {
         // graceful degradation
@@ -96,60 +125,73 @@ export function FreshnessProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!health) return; // no response yet (still loading) — keep prior state.
 
-    // Issue #586 — fail dark, never green: a DB error or an empty in-scope
-    // set (no stalest connector to report — the two are the same condition,
-    // see getConnectorFreshness) is UNKNOWN, never "Datos al día". This check
-    // comes FIRST, ahead of every other branch below.
-    if (health.overallUnknown || !health.stalestConnector) {
+    // Fail dark, never green: no in-scope sources (empty registry) or a
+    // server-side aggregation error both report rollupStatus: null. This
+    // check comes FIRST, ahead of every other branch below.
+    if (health.rollupStatus === null) {
       setFreshnessText("Estado desconocido");
       setFreshnessStale(false);
       setFreshnessRefreshing(false);
       setFreshnessUnknown(true);
-      setFreshnessTooltip(
-        "No se pudo determinar el estado de los conectores — revisa /etl/connectors",
-      );
+      setFreshnessTooltip("No se pudo determinar el estado de las fuentes — revisa /admin");
       return;
     }
     setFreshnessUnknown(false);
-    const stalest = health.stalestConnector;
 
-    // An in-scope connector/portal that has never completed a fresh cycle (or
-    // never had a successful capture): there is no freshness age to show —
-    // say so plainly rather than inventing "0m".
-    if (!stalest.lastSuccessAt) {
-      setFreshnessText("Datos sin sincronizar");
-      setFreshnessStale(true);
+    const active = health.sources.filter((s) => !s.disabled);
+    // The row(s) driving the rollup: the worst-ranked status, oldest age
+    // first (a measurable regression named ahead of a "never activity" row
+    // with no age, mirroring the prior implementation's B2 fix).
+    const worstRank = SOURCE_STATUS_RANK[health.rollupStatus as SourceStatus];
+    const worstRows = active.filter((s) => SOURCE_STATUS_RANK[s.status] === worstRank);
+    let named = worstRows[0] ?? null;
+    for (const row of worstRows) {
+      if (named === null) {
+        named = row;
+        continue;
+      }
+      const rowAge = row.ageHours ?? Number.POSITIVE_INFINITY;
+      const namedAge = named.ageHours ?? Number.POSITIVE_INFINITY;
+      if (rowAge > namedAge) named = row;
+    }
+
+    if (named === null) {
+      // Defensive — rollupStatus non-null implies at least one active row.
+      setFreshnessText("Estado desconocido");
+      setFreshnessStale(false);
       setFreshnessRefreshing(false);
-      setFreshnessTooltip(
-        `${stalest.connector}: sin ejecución correcta todavía`,
-      );
+      setFreshnessUnknown(true);
+      setFreshnessTooltip(null);
       return;
     }
 
-    const lastSuccess = new Date(stalest.lastSuccessAt);
-    const minutesAgo = Math.max(
-      0,
-      Math.round((Date.now() - lastSuccess.getTime()) / 60000),
-    );
-    const age =
-      minutesAgo < 60
-        ? `hace ${minutesAgo}m`
-        : `hace ${Math.round(minutesAgo / 60)}h`;
+    if (named.ageHours === null) {
+      setFreshnessText("Datos sin sincronizar");
+      setFreshnessStale(health.rollupStatus === "atascado" || health.rollupStatus === "fallando");
+      setFreshnessRefreshing(health.rollupStatus === "pendiente");
+      setFreshnessTooltip(`${named.source}: sin actividad de datos todavía`);
+      return;
+    }
 
-    // A connector actively mid-cycle (and nothing stale) reads as "refreshing"
-    // — a distinct, non-alarming state from stale (issue #295, D-050).
-    const refreshing = health.overallRefreshing === true && !health.overallStale;
+    const age = formatAge(named.ageHours);
+    const stale = health.rollupStatus === "atascado" || health.rollupStatus === "fallando";
+    const pending = health.rollupStatus === "pendiente";
+
     setFreshnessText(
-      health.overallStale
-        ? `Datos desactualizados · ${age}`
-        : refreshing
-          ? `Refrescando datos · ${age}`
-          : `Datos al día · ${age}`,
+      health.rollupStatus === "fallando"
+        ? `Fallo de sincronización · ${age}`
+        : stale
+          ? `Datos desactualizados · ${age}`
+          : pending
+            ? `Sincronización pendiente · ${age}`
+            : `Datos al día · ${age}`,
     );
-    setFreshnessStale(health.overallStale);
-    setFreshnessRefreshing(refreshing);
+    setFreshnessStale(stale);
+    setFreshnessRefreshing(pending);
     setFreshnessTooltip(
-      `Última ejecución correcta (${stalest.connector}): ${formatDate(stalest.lastSuccessAt)}`,
+      named.lastActivityAt
+        ? `Última actividad (${named.source}): ${formatDate(named.lastActivityAt)}`
+        : `${named.source}: ${age}`,
     );
   }, [health]);
 

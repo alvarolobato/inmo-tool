@@ -129,7 +129,7 @@ test("freshness pill renders real connector-derived freshness, not the empty fal
   await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
 });
 
-// ── Issue #586 (review findings B1/B2, PR #590) ────────────────────────────
+// ── Issue #586 (review findings B1/B2, PR #590), repointed by #638 ─────────
 //
 // These three cover the exact scenarios the issue's Exit Criteria named
 // (EC-1/2/3) but the original PR left unautomated. Two are mocked
@@ -144,31 +144,45 @@ test("freshness pill renders real connector-derived freshness, not the empty fal
 // (seed → query → render), so it stays DB-backed, scoped to one real capture
 // portal's own state rather than the global dot (which any other stale
 // connector in the shared DB could already be driving amber).
+//
+// Issue #638 repointed the pill from `/api/data-health` (connector-cycle
+// freshness) to `/api/etl/source-health` (the Estado board's worst-of
+// rollup, derived from the `listing` table) — see FreshnessContext.tsx's
+// header. These two mocks were updated to the new payload shape; their
+// assertions are otherwise unchanged (same pill copy for the same class of
+// state).
 
 test("all fresh stays green (EC-2)", async ({ page }) => {
   const now = new Date().toISOString();
-  await page.route("**/api/data-health", async (route) => {
+  await page.route("**/api/etl/source-health", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        connectors: [
+        sources: [
           {
-            connector: "e2e-mock-fresh",
-            enabled: true,
-            inScope: true,
-            lastSuccessAt: now,
-            lastRunAt: now,
-            lastRunStatus: "ok",
-            state: "fresh",
-            isStale: false,
+            source: "e2e-mock-fresh",
+            kind: "crawl",
+            status: "fresco",
+            disabled: false,
+            freshnessIntervalHours: 24,
+            lastActivityAt: now,
+            ageHours: 0,
+            due: false,
+            pastDoubleWindow: false,
+            captureFailureRate7d: null,
+            reason: "fresh",
+            new24h: 3,
+            sparkline7d: [0, 0, 0, 0, 0, 1, 2],
+            latestRunStatus: "ok",
+            latestRunFailureClassification: null,
+            captureFailed7d: 0,
+            captureTotal7d: 0,
+            ultimaPasadaCompletaAt: now,
           },
         ],
-        overallStale: false,
-        overallRefreshing: false,
-        overallUnknown: false,
-        stalestConnector: { connector: "e2e-mock-fresh", lastSuccessAt: now, lastRunStatus: "ok" },
-        freshestSuccessAt: now,
+        rollupStatus: "fresco",
+        generatedAt: now,
       }),
     });
   });
@@ -183,18 +197,15 @@ test("all fresh stays green (EC-2)", async ({ page }) => {
 });
 
 test("API failure shows unknown, not green (EC-3)", async ({ page }) => {
-  await page.route("**/api/data-health", async (route) => {
+  await page.route("**/api/etl/source-health", async (route) => {
     await route.fulfill({
-      status: 200, // the route itself always returns 200 (issue #241) — the
-      // failure is INSIDE getConnectorFreshness(), degraded server-side.
+      status: 200, // the route itself always returns 200 — the failure is
+      // INSIDE getSourceHealth(), degraded server-side (rollupStatus: null).
       contentType: "application/json",
       body: JSON.stringify({
-        connectors: [],
-        overallStale: false,
-        overallRefreshing: false,
-        overallUnknown: true,
-        stalestConnector: null,
-        freshestSuccessAt: null,
+        sources: [],
+        rollupStatus: null,
+        generatedAt: new Date(0).toISOString(),
       }),
     });
   });
@@ -203,6 +214,49 @@ test("API failure shows unknown, not green (EC-3)", async ({ page }) => {
   const pill = page.getByTestId("freshness-indicator");
   await expect(pill).toHaveText("Estado desconocido");
   await expect(pill).not.toHaveText(/Datos al día/);
+});
+
+test("a due-but-clean source reads as pending, not stale (owner's #636-addendum safety constraint)", async ({
+  page,
+}) => {
+  // idealista-shaped: well past its window, zero capture failures — the
+  // pill must show a neutral "pendiente" state, never "desactualizados".
+  await page.route("**/api/etl/source-health", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sources: [
+          {
+            source: "e2e-mock-pending-capture",
+            kind: "capture",
+            status: "pendiente",
+            disabled: false,
+            freshnessIntervalHours: 24,
+            lastActivityAt: new Date(Date.now() - 96 * 60 * 60 * 1000).toISOString(),
+            ageHours: 96,
+            due: true,
+            pastDoubleWindow: true,
+            captureFailureRate7d: null,
+            reason: "pendiente_de_captura",
+            new24h: 0,
+            sparkline7d: [0, 0, 0, 0, 0, 0, 0],
+            latestRunStatus: null,
+            latestRunFailureClassification: null,
+            captureFailed7d: 0,
+            captureTotal7d: 0,
+            ultimaPasadaCompletaAt: null,
+          },
+        ],
+        rollupStatus: "pendiente",
+        generatedAt: new Date().toISOString(),
+      }),
+    });
+  });
+
+  await page.goto("/");
+  const pill = page.getByTestId("freshness-indicator");
+  await expect(pill).toHaveText(/Sincronización pendiente · hace/);
 });
 
 test.describe("capture-portal staleness (EC-1) — real DB, scoped to one real portal", () => {
