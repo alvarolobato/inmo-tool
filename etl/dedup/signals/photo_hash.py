@@ -514,6 +514,16 @@ def matched_pairs(
     a_is_smaller = len(pairs_a) <= len(pairs_b)
     smaller, larger = (pairs_a, pairs_b) if a_is_smaller else (pairs_b, pairs_a)
 
+    # PR #621 review perf note: this is an O(|smaller| x |larger|) scan on
+    # raw ImageHash.__sub__ (numpy subtraction under the hood) — after
+    # issue #623's packed-hash rewrite of the rest of the photo_hash path
+    # (get_packed / match_ratio), this loop is the only remaining
+    # numpy-subtraction hot path in the signal. Left as-is deliberately:
+    # matched_pairs only ever runs on pairs that ALREADY cleared
+    # MIN_MATCH_RATIO (evaluate_pair calls it after match_ratio, not
+    # instead of it) — a few hundred pairs per dedup pass, not the full
+    # O(n^2) corpus — so the cost is negligible in practice. Worth a
+    # packed-array rewrite if that ever stops being true, not before.
     found: list[MatchedPhotoPair] = []
     for url_small, h_small in smaller:
         best: tuple[str, int] | None = None
