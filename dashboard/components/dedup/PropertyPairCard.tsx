@@ -2,7 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { DedupActionRow, DedupEvidenceItem, DedupPropertyPairSuggestion } from "@/lib/dedup-shared";
-import { MATCH_BASIS_LABELS, orderPhotosMatchedFirst, resolveMatchedPhotos } from "@/lib/dedup-shared";
+import {
+  internalPropertyHref,
+  MATCH_BASIS_LABELS,
+  orderPhotosMatchedFirst,
+  resolveMatchedPhotos,
+} from "@/lib/dedup-shared";
 import { dedupDetailSummary } from "./dedupDetailSummary";
 import { ListingSidePanel } from "./ListingSidePanel";
 
@@ -165,6 +170,14 @@ export function PropertyPairCard({
     photoMatches.map((m) => m.urlHi),
   );
 
+  // Issue #626: internal `/profiles/[id]/properties/[propertyId]` links,
+  // one per side — `null` when that property matches no active search
+  // profile (see `property_lo_profile_id`/`property_hi_profile_id`'s
+  // docstring, lib/dedup-shared.ts, for why the pair-level `profile_id`
+  // and not just `pair.profile_relevant` is needed here).
+  const loInternalHref = internalPropertyHref(pair.property_lo_profile_id, pair.property_lo_id);
+  const hiInternalHref = internalPropertyHref(pair.property_hi_profile_id, pair.property_hi_id);
+
   const runConfirm = async () => {
     setError(null);
     setConfirmingReject(false);
@@ -320,14 +333,14 @@ export function PropertyPairCard({
       )}
 
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <ListingSidePanel side={primary.listing_lo} photos={loPhotos} />
+        <ListingSidePanel side={primary.listing_lo} photos={loPhotos} internalHref={loInternalHref} />
         <div
           className="dedup-vs-icon"
           style={{ display: "flex", alignItems: "center", justifyContent: "center", color: "var(--fg-subtle)", fontSize: 18 }}
         >
           ≟
         </div>
-        <ListingSidePanel side={primary.listing_hi} photos={hiPhotos} />
+        <ListingSidePanel side={primary.listing_hi} photos={hiPhotos} internalHref={hiInternalHref} />
       </div>
 
       {corroborating.length > 0 && (

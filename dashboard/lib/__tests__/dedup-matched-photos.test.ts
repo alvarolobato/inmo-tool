@@ -5,9 +5,10 @@
  * REQUIRE_DB=1 needed. Complements:
  *   - etl/tests/test_dedup_signals_photo_hash.py::TestMatchedPairs — proves
  *     the perceptual-hash matching itself picks the true pair, not index 0.
- *   - dashboard/e2e/mobile-dedup.spec.ts's dedicated #615 test — proves the
- *     full rendering pipeline (ListingSidePanel's cap/expand/badges) against
- *     a real page.
+ *   - dashboard/e2e/mobile-dedup.spec.ts's dedicated #615/#626 tests — prove
+ *     the full rendering pipeline (ListingSidePanel's ordering/badges, and
+ *     since #626, the uncapped photo count + internal property link)
+ *     against a real page.
  * This file is the middle layer: given a `detail.matched_photos` payload
  * (as etl persists it) and two sides' `photo_urls`, does the dashboard
  * resolve/order them correctly? Deliberately uses fixtures where the

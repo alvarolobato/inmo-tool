@@ -70,17 +70,18 @@ async function insertProperty(overrides: { address: string; m2_built?: number })
 
 async function insertListing(
   propertyId: number,
-  overrides: { source: string; current_price?: number; photo_urls?: string[] },
+  overrides: { source: string; current_price?: number; photo_urls?: string[]; url?: string },
 ): Promise<number> {
   const result = await pool.query<{ id: number }>(
-    `INSERT INTO listing (property_id, source, external_id, current_price, photo_urls)
-     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+    `INSERT INTO listing (property_id, source, external_id, current_price, photo_urls, url)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
     [
       propertyId,
       overrides.source,
       `${NAME_PREFIX}${Math.random().toString(36).slice(2)}`,
       overrides.current_price ?? 200000,
       overrides.photo_urls ?? null,
+      overrides.url ?? null,
     ],
   );
   return result.rows[0].id;
@@ -406,7 +407,7 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
     }
   });
 
-  test("issue #615: photo-match card shows the photos that ACTUALLY matched (not index 0), capped at 4 with the rest reachable, plus asymmetric advert counts, at phone width", async ({
+  test("issue #626: photo-match card shows EVERY photo (no cap), matched-first, buttons stay reachable, plus asymmetric advert counts, at phone width", async ({
     page,
   }) => {
     skipIfNoDb(test);
@@ -422,21 +423,26 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
     const propB = await insertProperty({ address: `${NAME_PREFIX}Foto Asimetrica B` });
 
     // The photo_hash-matching pair itself: 6 photos on one side, 14 on
-    // the other. Direct owner instruction (mid-review, on THIS issue):
-    // the true match must NOT sit at the same index on both sides — here
-    // it's index 5 of the 6-photo side against index 9 of the 14-photo
-    // side, exactly the "side A's photo 5 matches side B's photo 9"
-    // shape the coordinator's follow-up named. A fixture where the match
-    // happens to land at index 0 on both sides would pass even with no
-    // real matched-pairs threading at all.
-    const photosLo = Array.from({ length: 6 }, (_, i) => `https://img.example.com/615-lo-${i}.jpg`);
-    const photosHi = Array.from({ length: 14 }, (_, i) => `https://img.example.com/615-hi-${i}.jpg`);
+    // the other — BOTH well above 4, issue #626's own bar: a <=4-photo
+    // fixture would pass whether or not the cap was actually removed,
+    // exactly the decorative-test shape the brief warns against. Direct
+    // owner instruction (mid-#615): the true match must NOT sit at the
+    // same index on both sides — here it's index 5 of the 6-photo side
+    // against index 9 of the 14-photo side.
+    const photosLo = Array.from({ length: 6 }, (_, i) => `https://img.example.com/626-lo-${i}.jpg`);
+    const photosHi = Array.from({ length: 14 }, (_, i) => `https://img.example.com/626-hi-${i}.jpg`);
     const matchedUrlLo = photosLo[5];
     const matchedUrlHi = photosHi[9];
     const matchingA = await insertListing(propA, {
       source: "fotocasa",
       current_price: 220000,
       photo_urls: photosLo,
+      // A real `url` here (PR #631 review fix 1) — this side also has a
+      // matched active profile (markProfileMatch below), so BOTH the
+      // portal link and the internal link render stacked in the same
+      // panel, exactly the shape that measured as two adjacent
+      // 16.5px-tall, 2px-apart tap targets before the fix.
+      url: "https://www.fotocasa.es/es/comprar/vivienda/626-mobile-a",
     });
     const matchingB = await insertListing(propB, {
       source: "idealista",
@@ -454,6 +460,9 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
       Array.from({ length: 12 }, () => insertListing(propB, { source: "fotocasa", current_price: 220000 })),
     );
 
+    // Only propA matches an active profile — this also exercises the
+    // #626 internal-link "unavailable" state on propB's side (no active
+    // profile match -> no internal link, never a broken 404 route).
     await markProfileMatch(profileId, propA);
     // detail.matched_photos mirrors exactly what etl/dedup/signals/
     // photo_hash.py::matched_pairs persists — this e2e proves the
@@ -499,63 +508,47 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
       await expect(loPanel.getByTestId("dedup-side-photo-count")).toHaveText(/6 fotos/i);
       await expect(hiPanel.getByTestId("dedup-side-photo-count")).toHaveText(/14 fotos/i);
 
-      // DEFAULT view: capped at 4 per side (owner's own stated bar —
-      // "me muestras 4 fotos como máximo... está bien"), and the ONE
-      // photo that actually matched is among those 4 AND visibly marked,
-      // on BOTH sides, even though it sits at index 5/9 respectively —
-      // never a naive first-4-in-storage-order slice (which would show
-      // index 0-3 on each side and never include the real match at all).
-      await expect(loPanel.locator(".dedup-photo-grid img")).toHaveCount(4);
-      await expect(hiPanel.locator(".dedup-photo-grid img")).toHaveCount(4);
+      // Issue #626: EVERY stored photo renders — the stated count
+      // ("6 fotos"/"14 fotos" above) equals the number of thumbnails
+      // actually in the grid, on BOTH sides, no cap and no "+N más". The
+      // photo that actually matched is still visibly marked on both
+      // sides even though it sits at index 5/9 (not 0) — matched-first
+      // ordering (issue #615) is preserved even though nothing is capped
+      // any more.
+      await expect(loPanel.locator(".dedup-photo-grid img")).toHaveCount(6);
+      await expect(hiPanel.locator(".dedup-photo-grid img")).toHaveCount(14);
       await expect(loPanel.getByTestId("dedup-photo-matched")).toHaveCount(1);
       await expect(hiPanel.getByTestId("dedup-photo-matched")).toHaveCount(1);
       await expect(loPanel.getByTestId("dedup-photo-matched")).toHaveAttribute("src", matchedUrlLo);
       await expect(hiPanel.getByTestId("dedup-photo-matched")).toHaveAttribute("src", matchedUrlHi);
-      // Every other visible thumbnail is explicitly marked unmatched —
-      // never ambiguous, never silently omitted.
-      await expect(loPanel.getByTestId("dedup-photo-unmatched")).toHaveCount(3);
-      await expect(hiPanel.getByTestId("dedup-photo-unmatched")).toHaveCount(3);
+      // The matched photo is the FIRST thumbnail in DOM order on both
+      // sides (matched-first ordering, not just "somewhere in the grid").
+      await expect(loPanel.locator(".dedup-photo-grid img").first()).toHaveAttribute("src", matchedUrlLo);
+      await expect(hiPanel.locator(".dedup-photo-grid img").first()).toHaveAttribute("src", matchedUrlHi);
+      // Every other rendered thumbnail is explicitly marked unmatched —
+      // never ambiguous, never silently omitted, and now that nothing is
+      // capped, ALL of the remaining photos are accounted for (5 and 13,
+      // not just "3 of the visible 4").
+      await expect(loPanel.getByTestId("dedup-photo-unmatched")).toHaveCount(5);
+      await expect(hiPanel.getByTestId("dedup-photo-unmatched")).toHaveCount(13);
 
-      // "the rest need to be reachable" — a visible count of what's
-      // hidden, not a silent truncation.
-      await expect(loPanel.getByTestId("dedup-photos-expand")).toHaveText(/\+2 más/i);
-      await expect(hiPanel.getByTestId("dedup-photos-expand")).toHaveText(/\+10 más/i);
+      // The old #615 cap/expand affordance is gone entirely — its own
+      // testid must not exist anywhere on the card.
+      await expect(card.getByTestId("dedup-photos-expand")).toHaveCount(0);
 
-      // Expand target size (WCAG 2.5.5, same bar as confirm/reject).
-      const expandBox = await hiPanel.getByTestId("dedup-photos-expand").boundingBox();
-      expect(expandBox).not.toBeNull();
-      expect(expandBox!.height).toBeGreaterThanOrEqual(44);
-
-      // Expanding the 14-photo side reveals the rest — the matched photo
-      // stays marked, and the button stays as a real TOGGLE (PR #621
-      // review nit) rather than a one-way expand that vanishes.
-      await hiPanel.getByTestId("dedup-photos-expand").click();
-      await expect(hiPanel.locator(".dedup-photo-grid img")).toHaveCount(14);
-      await expect(hiPanel.getByTestId("dedup-photo-matched")).toHaveCount(1);
-      await expect(hiPanel.getByTestId("dedup-photos-expand")).toHaveText(/mostrar menos/i);
-
-      // Collapsing back returns to the capped, matched-first default view.
-      await hiPanel.getByTestId("dedup-photos-expand").click();
-      await expect(hiPanel.locator(".dedup-photo-grid img")).toHaveCount(4);
-      await expect(hiPanel.getByTestId("dedup-photo-matched")).toHaveCount(1);
-      await expect(hiPanel.getByTestId("dedup-photos-expand")).toHaveText(/\+10 más/i);
-
-      // Re-expand for the remaining assertions below (scroll/overflow
-      // checks against the full grid).
-      await hiPanel.getByTestId("dedup-photos-expand").click();
-      await expect(hiPanel.locator(".dedup-photo-grid img")).toHaveCount(14);
-
-      // The expanded 14-photo grid overflows its own capped height and
-      // scrolls internally rather than stretching the card to full-page
-      // height (globals.css .dedup-photo-grid max-height + overflow-y).
+      // The 14-photo grid overflows its own capped height and scrolls
+      // INTERNALLY rather than stretching the card to full-page height
+      // (globals.css .dedup-photo-grid max-height + overflow-y) — this is
+      // what keeps the requirement below (decision buttons reachable
+      // without scrolling past the gallery) true regardless of how many
+      // photos a fotocasa listing carries (#625: up to 27).
       const manyPhotoGrid = hiPanel.locator(".dedup-photo-grid");
       const [scrollHeight, clientHeight] = await manyPhotoGrid.evaluate((el) => [el.scrollHeight, el.clientHeight]);
       expect(scrollHeight).toBeGreaterThan(clientHeight);
 
       // Thumbnails stay legibly sized at phone width — same bar #576 set
-      // (>=130x95). Only the first 4 need to be on-screen to measure —
-      // Playwright's boundingBox is null for anything scrolled fully out
-      // of view inside the now-expanded, internally-scrolling grid.
+      // (>=130x95) — checked on the first 4 rendered (matched-first, so
+      // this includes the one photo that actually matters most).
       const photos = loPanel.locator(".dedup-photo-grid img");
       for (let i = 0; i < 4; i++) {
         const box = await photos.nth(i).boundingBox();
@@ -563,6 +556,64 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
         expect(box!.width).toBeGreaterThanOrEqual(130);
         expect(box!.height).toBeGreaterThanOrEqual(95);
       }
+
+      // Issue #626: "the decision buttons must stay reachable without
+      // scrolling past the gallery" — proven by measuring the actual
+      // vertical distance from the top of the card to the confirm
+      // button. Each side's photo grid is capped to ~320px (mobile) by
+      // globals.css regardless of photo count, so the total card height
+      // stays bounded even with 6+14=20 photos across both sides — an
+      // UNCAPPED grid (no max-height/overflow) would need roughly
+      // 3 rows x ~155px for the 6-photo side and 7 rows x ~155px for the
+      // 14-photo side, well over 1500px on the hi side ALONE. 2200px is
+      // comfortably above what the capped layout needs (two ~320px
+      // grids + labels/price/address/facts/links per side + header) and
+      // comfortably below what an uncapped 14-photo grid would add on
+      // its own.
+      const cardBox = await card.boundingBox();
+      const confirmBox = await card.getByTestId("dedup-confirm").boundingBox();
+      expect(cardBox).not.toBeNull();
+      expect(confirmBox).not.toBeNull();
+      expect(confirmBox!.y - cardBox!.y).toBeLessThan(2200);
+      // And the buttons are still a real, tappable 44px target (WCAG
+      // 2.5.5), same bar as every other action on this card.
+      expect(confirmBox!.height).toBeGreaterThanOrEqual(44);
+
+      // Issue #626: internal property-page links, one per side. propA
+      // matches the seeded active profile -> a real link, target=_blank
+      // (owner decision: opens NEXT TO the card, keeps /admin/dedup's
+      // queue state untouched — never a same-tab navigation). propB
+      // matches no active profile -> an explicit "unavailable" note,
+      // never a link that would 404.
+      const loLink = loPanel.getByTestId("dedup-internal-link");
+      await expect(loLink).toBeVisible();
+      await expect(loLink).toHaveAttribute("href", `/profiles/${profileId}/properties/${propA}`);
+      await expect(loLink).toHaveAttribute("target", "_blank");
+      await expect(loLink).toHaveAttribute("rel", /noopener/);
+      // Distinct label from the portal link ("ficha interna" vs. "anuncio
+      // original") — never relying on the "↗" icon alone to distinguish
+      // "our page" from "the portal's page".
+      await expect(loLink).toHaveText(/ficha interna/i);
+      await expect(loLink).not.toHaveText(/anuncio original/i);
+
+      // PR #631 review fix 1: propA also has a real `url`, so the portal
+      // link stacks directly above the internal link in this same panel —
+      // measured 16.5px tall, 2px apart before the fix, the exact shape
+      // WCAG 2.5.5 (and this card's own `.dedup-action-btn`/
+      // `.dedup-evidence-toggle` precedent) exists to catch. Both links
+      // must clear the 44px floor and not overlap/touch.
+      const loPortalLink = loPanel.getByText(/ver anuncio original/i);
+      await expect(loPortalLink).toBeVisible();
+      const portalBox = await loPortalLink.boundingBox();
+      const internalBox = await loLink.boundingBox();
+      expect(portalBox).not.toBeNull();
+      expect(internalBox).not.toBeNull();
+      expect(portalBox!.height).toBeGreaterThanOrEqual(44);
+      expect(internalBox!.height).toBeGreaterThanOrEqual(44);
+      expect(internalBox!.y).toBeGreaterThanOrEqual(portalBox!.y + portalBox!.height);
+
+      await expect(hiPanel.getByTestId("dedup-internal-link")).toHaveCount(0);
+      await expect(hiPanel.getByTestId("dedup-internal-link-unavailable")).toBeVisible();
 
       // PR #621 review (also-fix): the reject warning must disclose the
       // real advert-level blast radius EVEN THOUGH pair_count is 1 here
@@ -586,6 +637,58 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
       await pool.query("DELETE FROM profile_listing_state WHERE profile_id = $1", [profileId]);
       await pool.query("DELETE FROM search_profile WHERE id = $1", [profileId]);
       await pool.query("DELETE FROM listing WHERE id = ANY($1::bigint[])", [allListingIds]);
+      await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [[propA, propB]]);
+    }
+  });
+
+  test("issue #626: both sides link to their own internal property page when both match an active profile", async ({
+    page,
+  }) => {
+    skipIfNoDb(test);
+
+    // Two DISTINCT profiles, one per side — proves the link is resolved
+    // per-property (property_lo_profile_id/property_hi_profile_id), not
+    // a single pair-wide profile id reused on both sides.
+    const profileLo = await insertProfile();
+    const profileHi = await insertProfile();
+    const propA = await insertProperty({ address: `${NAME_PREFIX}Enlace Interno A` });
+    const propB = await insertProperty({ address: `${NAME_PREFIX}Enlace Interno B` });
+    const listingA = await insertListing(propA, { source: "fotocasa", current_price: 180000 });
+    const listingB = await insertListing(propB, { source: "idealista", current_price: 180000 });
+    await markProfileMatch(profileLo, propA);
+    await markProfileMatch(profileHi, propB);
+    const suggestionId = await insertSuggestion(listingA, listingB);
+    const pairKey = pairKeyOf(propA, propB);
+
+    try {
+      await page.goto("/admin/dedup");
+      await assertNoErrorSurface(page);
+
+      const card = page.locator(`[data-pair-key="${pairKey}"]`);
+      await expect(card).toBeVisible();
+      await card.scrollIntoViewIfNeeded();
+
+      const panels = card.locator(".dedup-side-panel");
+      const loPanel = panels.nth(0);
+      const hiPanel = panels.nth(1);
+
+      await expect(loPanel.getByTestId("dedup-internal-link")).toHaveAttribute(
+        "href",
+        `/profiles/${profileLo}/properties/${propA}`,
+      );
+      await expect(hiPanel.getByTestId("dedup-internal-link")).toHaveAttribute(
+        "href",
+        `/profiles/${profileHi}/properties/${propB}`,
+      );
+      await expect(loPanel.getByTestId("dedup-internal-link")).toHaveAttribute("target", "_blank");
+      await expect(hiPanel.getByTestId("dedup-internal-link")).toHaveAttribute("target", "_blank");
+    } finally {
+      await pool.query("DELETE FROM suggested_merge WHERE id = $1", [suggestionId]);
+      await pool.query("DELETE FROM profile_listing_state WHERE profile_id = ANY($1::bigint[])", [
+        [profileLo, profileHi],
+      ]);
+      await pool.query("DELETE FROM search_profile WHERE id = ANY($1::bigint[])", [[profileLo, profileHi]]);
+      await pool.query("DELETE FROM listing WHERE id = ANY($1::bigint[])", [[listingA, listingB]]);
       await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [[propA, propB]]);
     }
   });

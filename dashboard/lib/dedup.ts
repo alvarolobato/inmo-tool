@@ -160,6 +160,12 @@ interface PairRow {
    * `pair_count` (the internal evidence-row count) below. */
   lo_listing_count: number;
   hi_listing_count: number;
+  /** Issue #626: the lowest-id active profile each property currently
+   * matches, or `null` — see `DedupPropertyPairSuggestion.property_lo_profile_id`'s
+   * docstring (lib/dedup-shared.ts) for why this can't be derived from the
+   * pair-level `profile_relevant` boolean alone. */
+  lo_profile_id: number | null;
+  hi_profile_id: number | null;
   pair_count: number;
   top_confidence: string;
   top_match_basis: MatchBasis;
@@ -218,6 +224,8 @@ function mapPairRow(row: PairRow): DedupPropertyPairSuggestion {
     pair_count: row.pair_count,
     listing_count_lo: row.lo_listing_count,
     listing_count_hi: row.hi_listing_count,
+    property_lo_profile_id: row.lo_profile_id,
+    property_hi_profile_id: row.hi_profile_id,
     top_confidence: Number(row.top_confidence),
     top_match_basis: row.top_match_basis,
     latest_created_at: row.latest_created_at.toISOString(),
@@ -272,6 +280,24 @@ export async function listDedupPropertyPairSuggestions(opts: {
         phi.rooms AS hi_rooms, phi.bathrooms AS hi_bathrooms, phi.property_type AS hi_type,
         (SELECT COUNT(*)::int FROM listing l WHERE l.property_id = p.prop_lo AND l.operation = 'sale') AS lo_listing_count,
         (SELECT COUNT(*)::int FROM listing l WHERE l.property_id = p.prop_hi AND l.operation = 'sale') AS hi_listing_count,
+        -- Issue #626: the lowest-id ACTIVE profile each property currently
+        -- matches — mirrors PROFILE_RELEVANT_EXISTS's own predicate
+        -- (non-archived search_profile, profile_listing_state.matched =
+        -- true) but resolved to a real profile_id per SIDE, not a pair-wide
+        -- boolean, because the internal detail page 404s unless the
+        -- property is a matched candidate for the EXACT profile id in its
+        -- URL (isPropertyMatchedForProfile). Deterministic (lowest id) so
+        -- the same property always links to the same profile across
+        -- reloads. NULL when the property matches no active profile —
+        -- the dashboard must not render a link in that case.
+        (SELECT pls.profile_id FROM profile_listing_state pls
+           JOIN search_profile sp ON sp.id = pls.profile_id
+           WHERE sp.archived_at IS NULL AND pls.matched = true AND pls.property_id = p.prop_lo
+           ORDER BY pls.profile_id ASC LIMIT 1) AS lo_profile_id,
+        (SELECT pls.profile_id FROM profile_listing_state pls
+           JOIN search_profile sp ON sp.id = pls.profile_id
+           WHERE sp.archived_at IS NULL AND pls.matched = true AND pls.property_id = p.prop_hi
+           ORDER BY pls.profile_id ASC LIMIT 1) AS hi_profile_id,
         COUNT(*)::int AS pair_count,
         MAX(p.confidence) AS top_confidence,
         (array_agg(p.match_basis ORDER BY p.confidence DESC, p.created_at DESC))[1] AS top_match_basis,
