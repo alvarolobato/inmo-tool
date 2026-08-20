@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 import localFont from "next/font/local";
 import ThemeProvider from "@/components/ThemeProvider";
@@ -15,6 +15,28 @@ export const dynamic = "force-dynamic";
 export const metadata: Metadata = {
   title: "Inmo-Tool",
   description: "Plataforma de búsqueda de inversión inmobiliaria con IA",
+};
+
+// #575 review correction: an earlier version of this export and D-122
+// claimed a missing `<meta name="viewport">` tag explained the lightbox's
+// mobile fit bug ("confirmed via curl") — WRONG. Next's App Router injects
+// a default `{width:"device-width", initialScale:1, ...}` viewport tag
+// unconditionally regardless of whether this file exports anything
+// (`node_modules/next/dist/lib/metadata/default-metadata.js`'s
+// `createDefaultViewport()`, merged key-by-key over whatever this export
+// provides in `resolve-metadata.js`'s `mergeViewport()` — verified by
+// reading both, not by curling a rendered page, which can't distinguish
+// "Next's default" from "this export" when they're identical). `width`/
+// `initialScale` below are therefore redundant with what Next already
+// emits — kept explicit only so a reader doesn't have to go read Next's
+// source to know what the tag says. The one substantive line is
+// `viewportFit: "cover"`: without it the page never extends under a
+// notch/home-indicator, so `env(safe-area-inset-*)` (used by the photo
+// lightbox, PhotoGallery.tsx) always resolves to 0 — see D-123.
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
 };
 
 // Fonts are self-hosted under public/fonts/ to avoid network fetches at Docker
