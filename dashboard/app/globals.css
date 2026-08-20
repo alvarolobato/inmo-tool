@@ -428,9 +428,10 @@ body {
   }
 }
 
-/* #448 H: the same FeedbackControls are reused on the property DETAIL page
-   ("Tu valoración:"), where there is NO `.candidate-card` ancestor to trigger
-   the hover/focus visibility rules above — so the toggles stayed at opacity:0
+/* #448 H (relocated by #585 into the triage bar's vote group, same class,
+   same reasoning): the same FeedbackControls are reused on the property
+   DETAIL page, where there is NO `.candidate-card` ancestor to trigger the
+   hover/focus visibility rules above — so the toggles stayed at opacity:0
    and only appeared once a click set data-active="true" (the "empty block that
    needs a click" bug). This detail-page row wants them visible from the start,
    so force full opacity for every toggle inside it regardless of hover/focus. */
@@ -694,3 +695,150 @@ body {
     flex-wrap: wrap;
   }
 }
+
+/* ============================================================
+   Property detail — triage bar (#585)
+   ============================================================
+   The owner's own framing: "lo que busco es una forma fácil de categorizar
+   todo" — triaging a long queue on a phone, with a thumb. This is the ONE
+   sticky control surface (TriageBar.tsx) that replaced both the old 12px
+   non-sticky prev/next row AND the mid-page "Tu valoración" box: prev/next,
+   the vote toggles and a compact price+score chip all live here, staying in
+   view while scrolling photos/sections.
+
+   `top: 0`, NOT `top: 56px` — a value that looks obviously wrong at a
+   glance, so worth explaining: the app shell's real scrolling container is
+   `main.main-content` (`app/layout.tsx`), a FLEX SIBLING of the 56px TopBar,
+   not a descendant of it — `.main-content`'s own scrollport already begins
+   at viewport y=56, right where TopBar ends. A sticky child's `top` offset
+   is measured from ITS OWN scrolling ancestor's scrollport, so `top: 56px`
+   here would double the offset (56 + 56 = 112px down, empirically measured
+   at first pass). `top: 0` is what actually pins the bar flush under
+   TopBar. Confirmed by `dashboard/e2e/triage-loop.spec.ts`'s stickiness
+   assertions, which caught the `top: 56px` version failing outright.
+
+   z-index 15 is deliberately BELOW TopBar's z-20 (`TopBar.tsx:112`) and its
+   fixed mobile-menu panels (z-index 29/30, `TopBar.tsx:338-354`) — the bar
+   must scroll under both, never over them.
+
+   No `@media (max-width: 767px)` divergence anywhere in this block: per
+   #585's own instruction the bar ships identically on desktop (review speed
+   matters there too), so every value here is a single static literal, not a
+   breakpoint pair — D-121's ladder doesn't apply because there is no
+   phone-vs-desktop split to encode. The row layout is `flexWrap: "wrap"`
+   with every child at its own intrinsic (non-zero, non-flex-1) size — D-124's
+   basis-0 trap doesn't apply either: nothing here is `flex: 1`, so wrapping
+   at a narrow viewport falls out of ordinary flex-wrap, not a `flexBasis`
+   workaround.
+   ============================================================ */
+
+.triage-bar {
+  position: sticky;
+  top: 0;
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+}
+
+.triage-bar-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Prev/next: ≥44px tap targets (owner: near-destructive decisions taken with
+   a thumb — a mis-tap on the wrong neighbour costs a wrong verdict just like
+   a mis-tap on reject does). Up from the old 12px text link. */
+.triage-bar-nav-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1;
+  text-decoration: none;
+  color: var(--fg);
+}
+
+.triage-bar-nav-link[aria-disabled="true"] {
+  color: var(--fg-subtle);
+  opacity: 0.5;
+}
+
+.triage-bar-end {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.triage-bar-end-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+
+.triage-bar-back-link {
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.triage-bar-vote {
+  display: flex;
+  align-items: center;
+}
+
+.triage-bar-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.triage-bar-price {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--fg);
+  white-space: nowrap;
+}
+
+/* #585 (D-121 rung 1): FeedbackControls' toggle buttons used to size
+   themselves entirely via an inline `style` object (width/height/padding/
+   border-radius/font-size/cursor, all static literals with no prop/state
+   dependency beyond which of the two fixed contexts is in play) — moved here
+   so the component can pick between two sizes with a class instead of an
+   inline value. `.feedback-toggle` keeps the original 26px candidate-feed
+   card size as its base/default; `.feedback-toggle--detail` (the triage bar,
+   `size="detail"`) overrides to the WCAG 2.5.5 44px minimum. */
+.feedback-toggle {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 5px;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.feedback-toggle.feedback-toggle--detail {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  font-size: 20px;
+}
+

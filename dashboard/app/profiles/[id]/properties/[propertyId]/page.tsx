@@ -1,13 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { ErrorDisplay } from "@/components/ErrorDisplay";
 import { isApiErrorResponse } from "@/lib/errors";
 import type { ApiErrorResponse } from "@/lib/errors";
 import type { PropertyDetail } from "@/lib/property-detail";
 import type { InvestmentMetrics } from "@/lib/investment-metrics";
+import type { StateFeedbackType } from "@/lib/db/feedback";
 import { PropertyHeader } from "@/components/property/PropertyHeader";
 import { PropertyProblemFlags } from "@/components/property/PropertyProblemFlags";
 import { PhotoGallery } from "@/components/property/PhotoGallery";
@@ -18,7 +19,7 @@ import { YieldSection } from "@/components/property/sections/YieldSection";
 import { FlipSection } from "@/components/property/sections/FlipSection";
 import { InvestorScoreSection } from "@/components/property/sections/InvestorScoreSection";
 import { DetailSections, type DetailSection } from "@/components/property/DetailSections";
-import { FeedbackControls } from "@/components/candidates/FeedbackControls";
+import { TriageBar } from "@/components/property/TriageBar";
 
 interface Adjacent {
   prevPropertyId: number | null;
@@ -32,57 +33,9 @@ function parseId(raw: string | string[] | undefined): number | null {
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
-const adjacentStyle: React.CSSProperties = {
-  padding: "4px 10px",
-  borderRadius: 6,
-  border: "1px solid var(--border)",
-  fontSize: 12,
-  textDecoration: "none",
-};
-
-function AdjacentLink({
-  profileId,
-  propertyId,
-  testId,
-  label,
-  includeRejected,
-}: {
-  profileId: number;
-  propertyId: number | null;
-  testId: string;
-  label: string;
-  // #417: carry the show-rejected flag into the neighbour link so the flag
-  // survives the whole prev/next chain — otherwise the second hop would drop
-  // it and revert to the default (rejected-excluded) ordering, desyncing from
-  // the list the user is paging through.
-  includeRejected: boolean;
-}) {
-  if (propertyId === null) {
-    return (
-      <span
-        data-testid={testId}
-        aria-disabled="true"
-        style={{ ...adjacentStyle, color: "var(--fg-subtle)", opacity: 0.5 }}
-      >
-        {label}
-      </span>
-    );
-  }
-  return (
-    <Link
-      data-testid={testId}
-      href={`/profiles/${profileId}/properties/${propertyId}${
-        includeRejected ? "?includeRejected=true" : ""
-      }`}
-      style={{ ...adjacentStyle, color: "var(--fg)" }}
-    >
-      {label}
-    </Link>
-  );
-}
-
 export default function PropertyDetailPage() {
   const params = useParams<{ id: string; propertyId: string }>();
+  const router = useRouter();
   const profileId = parseId(params.id);
   const propertyId = parseId(params.propertyId);
 
@@ -90,7 +43,27 @@ export default function PropertyDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<ApiErrorResponse | string | null>(null);
   const [adjacent, setAdjacent] = useState<Adjacent>({ prevPropertyId: null, nextPropertyId: null });
+  // #585: mirrors `adjacent`, but as a promise `handleVoted` can safely
+  // `await` — see that function's doc comment for why reading `adjacent`
+  // state directly at vote time is unsafe. Always holds the in-flight (or
+  // settled) fetch for the CURRENT (profileId, propertyId, includeRejected),
+  // kept in lockstep by the fetch effect below. Never null after the first
+  // render since it starts pre-resolved to the initial `{ null, null }`
+  // state — a vote fired before profileId/propertyId are even known can't
+  // happen (the page returns early below without registering any voteable
+  // controls).
+  const adjacentPromiseRef = useRef<Promise<Adjacent>>(Promise.resolve(adjacent));
   const [investmentMetrics, setInvestmentMetrics] = useState<InvestmentMetrics | null>(null);
+  // #585: set when a confirmed vote landed with no next candidate (the last
+  // property in the queue) — the triage bar shows "Fin de la lista" instead
+  // of navigating. Reset on every propertyId change (a navigation, whether
+  // via the bar or any other link, always lands on a fresh, non-final state
+  // until proven otherwise by a vote on THAT page).
+  const [endOfQueue, setEndOfQueue] = useState(false);
+  useEffect(() => {
+    setEndOfQueue(false);
+  }, [propertyId]);
+
   // #417: the feed's "Mostrar descartadas" flag, carried in this page's URL
   // when the user arrived from the show-rejected list. Read from window in a
   // mount effect (SSR-safe — starts false, corrected on the client) rather
@@ -102,6 +75,37 @@ export default function PropertyDetailPage() {
   useEffect(() => {
     setIncludeRejected(new URLSearchParams(window.location.search).get("includeRejected") === "true");
   }, []);
+
+  // #585: the triage loop's one navigation decision. Called by TriageBar
+  // only from FeedbackControls' onVoted — i.e. only after the vote's POST
+  // resolved ok (see FeedbackControls.tsx's submitState) — so a flaky
+  // network never silently drops a verdict by navigating on the optimistic
+  // write. `adjacent` was fetched on mount, before this vote (D-094), so a
+  // just-rejected property's OWN nextPropertyId is still the pre-reject
+  // value — correct: the rejected card only drops out of the NEXT page's
+  // prev/next chain, not this one's. `voteState` (accept/reject) isn't
+  // branched on: both verdicts categorise the property and both advance
+  // (D-096 — two states, accept IS seguimiento).
+  //
+  // Awaits `adjacentPromiseRef` rather than reading `adjacent` state
+  // directly: a vote confirmed fast enough (a quick, deliberate double-tap;
+  // this is exactly what the triage-loop e2e's own immediate-vote tests do)
+  // can resolve BEFORE the mount-time GET /adjacent request settles, and
+  // `adjacent` state starts at `{ nextPropertyId: null, ... }` — reading it
+  // directly at that moment would misread "not loaded yet" as "confirmed no
+  // next candidate" and wrongly show "Fin de la lista" on a property that
+  // has a real next one. The ref always holds the in-flight (or already
+  // resolved) promise for the CURRENT propertyId (see the fetch effect
+  // below), so awaiting it here is always correct regardless of timing.
+  const handleVoted = async (_voteState: StateFeedbackType) => {
+    const resolvedAdjacent = await adjacentPromiseRef.current;
+    if (resolvedAdjacent.nextPropertyId === null) {
+      setEndOfQueue(true);
+      return;
+    }
+    const qs = includeRejected ? "?includeRejected=true" : "";
+    router.push(`/profiles/${profileId}/properties/${resolvedAdjacent.nextPropertyId}${qs}`);
+  };
 
   useEffect(() => {
     if (profileId === null || propertyId === null) return;
@@ -143,14 +147,22 @@ export default function PropertyDetailPage() {
     const adjacentUrl = `/api/profiles/${profileId}/properties/${propertyId}/adjacent${
       includeRejected ? "?includeRejected=true" : ""
     }`;
-    fetch(adjacentUrl)
+    // #585: the promise itself (not just its resolved value, via setAdjacent
+    // below) is published to `adjacentPromiseRef` so `handleVoted` can await
+    // the CURRENT property's real result even if a vote lands before this
+    // fetch settles — see that function's doc comment.
+    const promise = fetch(adjacentUrl)
       .then((res) => (res.ok ? (res.json() as Promise<Adjacent>) : null))
       .then((data) => {
-        if (!cancelled && data) setAdjacent(data);
+        const resolved = data ?? { prevPropertyId: null, nextPropertyId: null };
+        if (!cancelled) setAdjacent(resolved);
+        return resolved;
       })
       .catch(() => {
         /* best-effort — leave the controls disabled */
+        return { prevPropertyId: null, nextPropertyId: null };
       });
+    adjacentPromiseRef.current = promise;
     return () => {
       cancelled = true;
     };
@@ -265,42 +277,32 @@ export default function PropertyDetailPage() {
 
   return (
     <main style={{ maxWidth: 900, margin: "0 auto", padding: 24 }} data-testid="property-detail-page">
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 12,
-          flexWrap: "wrap",
-        }}
+      <Link
+        href={`/profiles/${profileId}`}
+        style={{ fontSize: 12, color: "var(--fg-muted)", display: "inline-block" }}
       >
-        <Link href={`/profiles/${profileId}`} style={{ fontSize: 12, color: "var(--fg-muted)" }}>
-          ← Volver al perfil
-        </Link>
+        ← Volver al perfil
+      </Link>
 
-        {/*
-          Prev/next through the profile's ranking (#152) so a review session
-          doesn't bounce back to the list between every property. Rendered as
-          disabled <span>s at the ends rather than hidden, so the controls
-          don't jump position as you move through the queue.
-        */}
-        <nav aria-label="Navegación entre candidatos" style={{ display: "flex", gap: 8 }}>
-          <AdjacentLink
-            profileId={profileId}
-            propertyId={adjacent.prevPropertyId}
-            testId="candidate-prev"
-            label="← Anterior"
-            includeRejected={includeRejected}
-          />
-          <AdjacentLink
-            profileId={profileId}
-            propertyId={adjacent.nextPropertyId}
-            testId="candidate-next"
-            label="Siguiente →"
-            includeRejected={includeRejected}
-          />
-        </nav>
-      </div>
+      {/*
+        #585: the triage bar replaces both the old non-sticky prev/next row
+        AND the mid-page "Tu valoración" box with ONE sticky control surface
+        — see TriageBar.tsx's doc comment for the full rationale. It mounts
+        unconditionally (not gated behind `loading`/`property`) since
+        prev/next and the vote controls only need profileId/propertyId,
+        already known from the route; the price/score chip is simply absent
+        until `property` arrives, the page's existing best-effort convention.
+      */}
+      <TriageBar
+        profileId={profileId}
+        propertyId={propertyId}
+        property={property}
+        prevPropertyId={adjacent.prevPropertyId}
+        nextPropertyId={adjacent.nextPropertyId}
+        includeRejected={includeRejected}
+        endOfQueue={endOfQueue}
+        onVoted={handleVoted}
+      />
 
       {loading && (
         <p style={{ marginTop: 16, fontSize: 13, color: "var(--fg-muted)" }}>Cargando propiedad…</p>
@@ -311,40 +313,6 @@ export default function PropertyDetailPage() {
       {!loading && !error && property && (
         <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 20 }}>
           <PropertyHeader property={property} />
-          {/*
-            #417: the same seguir(accept)/descartar(reject) controls the feed
-            card carries (#422 retired the star toggle),
-            mounted here so you can reject/track from the page you're reading —
-            reusing FeedbackControls (no new feedback logic). initialState is
-            omitted, so it self-fetches this property's current verdict on mount
-            (its original behaviour). Deferred-removal semantics are unchanged:
-            a reject writes the event and the card drops out of the feed on the
-            NEXT fetch, not here. Wrapped so the overlay-styled buttons read as
-            an intentional control row on the detail page.
-          */}
-          <div
-            data-testid="detail-feedback-controls"
-            // #448 H: the feedback toggles default to opacity:0 (revealed by
-            // `.candidate-card:hover` on the feed). This detail-page row has no
-            // such card ancestor, so without this class the buttons stayed
-            // invisible until a click set an active state — the "empty block
-            // until you click" bug. `.detail-feedback-controls` (globals.css)
-            // forces them visible from the start.
-            className="detail-feedback-controls"
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              padding: "6px 8px",
-              borderRadius: 8,
-              background: "var(--bg-1)",
-              border: "1px solid var(--border)",
-              alignSelf: "flex-start",
-            }}
-          >
-            <span style={{ fontSize: 13, color: "var(--fg-muted)" }}>Tu valoración:</span>
-            <FeedbackControls profileId={profileId} propertyId={propertyId} />
-          </div>
           {/* #361 problem flags — own component/section, kept separate from
               where #360 adds the advert description, to minimize conflict. */}
           <PropertyProblemFlags flags={property.problem_flags} />

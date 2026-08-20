@@ -76,6 +76,8 @@ export function FeedbackControls({
   propertyId,
   initialState,
   onStateChange,
+  onVoted,
+  size = "compact",
 }: {
   profileId: number;
   propertyId: number;
@@ -94,6 +96,30 @@ export function FeedbackControls({
    * the next fetch rather than removing it.
    */
   onStateChange?: (state: StateFeedbackType | null) => void;
+  /**
+   * #585 (triage bar): fired exactly once per SERVER-CONFIRMED accept/reject
+   * — never for a clear (re-tapping the active toggle) or a note. Advance-
+   * on-confirm, not on the optimistic write: `submitState` below calls this
+   * only after the POST resolves ok, from the same branch that reconciles
+   * `state` against the server's response, so a failed request (rolled back
+   * a few lines up) never fires it and the triage loop's page-level
+   * navigation can never fire on a vote that didn't actually save. The
+   * candidate feed card omits this prop entirely, so feed-card voting is
+   * unaffected (D-094/D-096 reject/accept write semantics are unchanged —
+   * this only adds a notification after the same write).
+   */
+  onVoted?: (state: StateFeedbackType) => void;
+  /**
+   * #585: `"compact"` (default, 26px) is the candidate-feed card's photo-
+   * overlay context, unchanged. `"detail"` is the property-detail triage
+   * bar's context — WCAG 2.5.5's 44px minimum, since these are near-
+   * destructive decisions taken with a thumb. Both sizes are static
+   * literals owned by a CSS class (`.feedback-toggle` / `.feedback-toggle--
+   * detail` in globals.css, D-121 rung 1) — nothing about them depends on
+   * viewport width, so there is no breakpoint divergence here, just two
+   * fixed contexts.
+   */
+  size?: "compact" | "detail";
 }) {
   const [state, setState] = useState<StateFeedbackType | null>(initialState ?? null);
   const [noteOpen, setNoteOpen] = useState(false);
@@ -160,6 +186,12 @@ export function FeedbackControls({
       }
       const body: FeedbackResponse = await res.json();
       applyState(body.currentState);
+      // #585: server-confirmed accept/reject only — `target` is null exactly
+      // when this submit was a clear (clicking the already-active toggle),
+      // which must never advance the triage loop.
+      if (target !== null) {
+        onVoted?.(target);
+      }
     } catch {
       applyState(previous);
       setError("No se pudo guardar el feedback.");
@@ -196,17 +228,13 @@ export function FeedbackControls({
     reject: "var(--down)",
   };
 
+  // #585 (D-121 rung 1): width/height/padding/border-radius/font-size/cursor
+  // are static per `size` — no prop/state dependency beyond which of the two
+  // fixed variants is in play — so they live in `.feedback-toggle` /
+  // `.feedback-toggle--detail` (globals.css), not here. Only border/
+  // background/color stay inline: they genuinely depend on `active`/
+  // `activeColor`, the rung-2 case D-121 carves out.
   const toggleButtonStyle = (active: boolean, activeColor = "var(--accent)"): React.CSSProperties => ({
-    width: 26,
-    height: 26,
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 0,
-    borderRadius: 5,
-    fontSize: 13,
-    lineHeight: 1,
-    cursor: "pointer",
     border: active ? `1px solid ${activeColor}` : "1px solid rgba(255,255,255,0.25)",
     background: active ? activeColor : "rgba(0,0,0,0.35)",
     // `--bg` (not a fixed hex) deliberately: dark theme's --up/--down/--warn
@@ -217,6 +245,8 @@ export function FeedbackControls({
     // without a second colour decision per token.
     color: active ? "var(--bg)" : "#fff",
   });
+
+  const toggleClassName = size === "detail" ? "feedback-toggle feedback-toggle--detail" : "feedback-toggle";
 
   return (
     <div
@@ -230,7 +260,7 @@ export function FeedbackControls({
         <button
           type="button"
           data-testid="feedback-accept"
-          className="feedback-toggle"
+          className={toggleClassName}
           data-active={state === "accept"}
           aria-pressed={state === "accept"}
           aria-label="Seguir"
@@ -243,7 +273,7 @@ export function FeedbackControls({
         <button
           type="button"
           data-testid="feedback-reject"
-          className="feedback-toggle"
+          className={toggleClassName}
           data-active={state === "reject"}
           aria-pressed={state === "reject"}
           aria-label="Descartar"
@@ -256,7 +286,7 @@ export function FeedbackControls({
         <button
           type="button"
           data-testid="feedback-note-toggle"
-          className="feedback-toggle"
+          className={toggleClassName}
           aria-label={noteOpen ? "Cerrar nota" : "Añadir nota"}
           aria-expanded={noteOpen}
           title={noteOpen ? "Cerrar nota" : "Añadir nota"}
