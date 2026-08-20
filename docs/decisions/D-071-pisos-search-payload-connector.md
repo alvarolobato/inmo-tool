@@ -3,7 +3,7 @@ id: D-071
 title: pisos.com is a search-payload-primary connector (no detail fetch)
 date: 2026-08-06
 group: Data / connectors
-rule: 'pisos.com IS buildable: `PisosConnector` is search-payload-primary (no detail fetch) — each `.ad-preview` search card carries price+rooms+baths+m²+floor+type-via-URL and a per-card JSON-LD block with lat/lon+locality. `operation="sale"`, guarded discover() raises on 0 cards, page-1-only (`discovers_full_inventory=False`), born disabled. Reject `es_pisos.json` (0.45, no coords) as a source of truth. REVISED by D-141: fetch_detail() now makes ONE real request per listing, ONLY to recover reference_code/contact_raw (not published on the search card) — every other field is unchanged, still search-payload-only.'
+rule: 'pisos.com IS buildable: `PisosConnector` is search-payload-primary for price+rooms+baths+m²+floor+type-via-URL and a per-card JSON-LD block with lat/lon+locality. `operation="sale"`, guarded discover() raises on 0 cards, page-1-only (`discovers_full_inventory=False`). Reject `es_pisos.json` (0.45, no coords) as a source of truth. REVISED by D-141: fetch_detail() now makes ONE real request per listing, ONLY to recover reference_code/contact_raw (not published on the search card) — every other field is unchanged, still search-payload-only. The connector is LIVE in production (checked 2026-08-21) — do not trust an "is it enabled" claim on this page without checking `connector_config` fresh.'
 order: 27
 ---
 
@@ -22,6 +22,11 @@ order: 27
 > requests. The "Alternatives rejected" section below, which dismissed a
 > per-listing detail fetch as "zero field gain," was correct for the
 > fields it was evaluating and is superseded only for these two.
+>
+> Also correcting this page's own "born disabled" claim below (Opus
+> review of PR #632): a live production check on 2026-08-21 found the
+> connector `enabled = true`, not disabled — see D-141's own revision
+> log for what that meant for the fetch-skip logic.
 
 > Note: originally drafted as D-069, but D-068/D-069/D-070 were concurrently
 > claimed by parallel connector-batch PRs (#344/#343/#345); renumbered to D-071

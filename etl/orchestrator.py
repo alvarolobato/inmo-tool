@@ -1358,7 +1358,14 @@ def _fetch_freshness_map(
     conn, source: str, external_ids: list[str]
 ) -> dict[
     str,
-    tuple[datetime | None, Decimal | None, str | None, datetime | None, int | None],
+    tuple[
+        datetime | None,
+        Decimal | None,
+        str | None,
+        datetime | None,
+        int | None,
+        str | None,
+    ],
 ]:
     """Batched (last_fetched_at, current_price, status, latest_observed_at,
     property_id) lookup.
@@ -1386,6 +1393,13 @@ def _fetch_freshness_map(
     property is in the run's accepted set, so the loop needs each discovered
     external_id's property_id to consult that set. Carried in this same batched
     lookup rather than a second per-listing query.
+
+    `reference_code` (issue #628/#629, Opus review B4) is what
+    `Connector.backfills_missing_reference_code`'s exemption is keyed on —
+    a connector that can backfill a NULL reference_code (pisos, D-141)
+    needs each listing's stored value to know whether to bypass the #435
+    unchanged-list-price skip. Inert (never read) for every other
+    connector, same shape as `property_id` above.
     """
     if not external_ids:
         return {}
@@ -1396,14 +1410,15 @@ def _fetch_freshness_map(
                    (SELECT max(h.observed_at)
                       FROM listing_price_history h
                      WHERE h.listing_id = l.id) AS latest_observed_at,
-                   l.property_id
+                   l.property_id, l.reference_code
               FROM listing l
              WHERE l.source = %s AND l.external_id = ANY(%s)
             """,
             (source, external_ids),
         )
         return {
-            row[0]: (row[1], row[2], row[3], row[4], row[5]) for row in cur.fetchall()
+            row[0]: (row[1], row[2], row[3], row[4], row[5], row[6])
+            for row in cur.fetchall()
         }
 
 
@@ -1459,6 +1474,8 @@ def _should_skip_fetch(
     now: datetime,
     discovered_price: Decimal | None = None,
     is_accepted: bool = False,
+    stored_reference_code: str | None = None,
+    connector_backfills_reference_code: bool = False,
 ) -> tuple[bool, str]:
     """Skip-if-seen policy (issue #143) + list-price capture optimization
     (issue #435) + accepted-always-full-read exemption (issue #436): should
@@ -1470,6 +1487,22 @@ def _should_skip_fetch(
     resort, not the primary signal, because the things skip-if-seen must
     never silently break (price-drop detection, #34; withdrawal
     detection, EC-5) are both driven by data this function can see:
+
+    0a. **Reference-code backfill (issue #628/#629, Opus review B4) ->
+       always fetch.** When `connector_backfills_reference_code` is True
+       (the connector's `fetch_detail()` can populate a NULL
+       `reference_code` with a real request — pisos, D-141) AND
+       `stored_reference_code` is falsy, this forces a real fetch
+       regardless of every other check below, INCLUDING the #435
+       unchanged-list-price skip. Without this, a connector whose
+       `discovered_prices()` also feeds #435 would skip every already-
+       known listing forever on unchanged price — precisely the gap a
+       live production check found: existing pisos listings, all
+       already-fetched with a stable price, would otherwise never be
+       re-fetched and would keep a permanently NULL reference_code
+       despite fetch_detail() now being able to populate one. Checked
+       first, alongside reason 0, so it overrides everything else
+       unconditionally.
 
     0. **Accepted / 'en seguimiento' (issue #436, D-099) -> always fetch.**
        An accepted property is the working set — it must be re-read in FULL on
@@ -1565,6 +1598,16 @@ def _should_skip_fetch(
     categorise a skip as "unchanged (#435)" vs "skip-if-seen (staleness)"
     purely from whether `discovered_price` was set, with no extra return field.
     """
+    if connector_backfills_reference_code and not stored_reference_code:
+        return (
+            False,
+            (
+                "stored reference_code is missing and this connector can "
+                "backfill it via a real detail request — forcing a fetch "
+                "ahead of the #435 unchanged-list-price skip (issue "
+                "#628/#629)"
+            ),
+        )
     if is_accepted:
         return (
             False,
@@ -1858,7 +1901,8 @@ def run_connector(
             stored_status,
             latest_observed_at,
             property_id,
-        ) = freshness.get(external_id, (None, None, None, None, None))
+            stored_reference_code,
+        ) = freshness.get(external_id, (None, None, None, None, None, None))
         # Issue #435: the list-page price for this listing, if the connector
         # surfaced one this run (None otherwise → the #435 branch is inert).
         discovered_price = discovery_prices.get(external_id)
@@ -1875,6 +1919,8 @@ def run_connector(
             now=datetime.now(timezone.utc),
             discovered_price=discovered_price,
             is_accepted=is_accepted,
+            stored_reference_code=stored_reference_code,
+            connector_backfills_reference_code=connector.backfills_missing_reference_code,
         )
         if skip:
             # Categorise the skip for the #435 counters without an extra return

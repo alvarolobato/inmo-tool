@@ -94,8 +94,12 @@ class TestNormalize:
         assert canonical.city == "Madrid"
         assert canonical.address == "Goya, Madrid"
         assert canonical.reference_code == "106387165"
-        # Issue #628: the primary contact box — synthetic value, see the
-        # fixture's own header comment.
+        # Issue #628: the primary contact box. Opus review (B3): the
+        # fixture ALSO carries the competing "about advertiser" widget
+        # ("Other Office Branch") right alongside it — this assertion is
+        # what proves _advertiser_name selects the right one when BOTH
+        # are present, not just that the wrong selector's class name
+        # happens to be absent from a narrower fixture.
         assert canonical.contact_raw == "Inmobiliaria Ejemplo"
         # Full gallery from config.multimediaCarrousel.multimedias (issue
         # #282) — all 10 PICTUREs, in page order, NOT just the single

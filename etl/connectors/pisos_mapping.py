@@ -104,15 +104,17 @@ def _clean(text: str | None) -> str | None:
 def extract_reference_code(html: str) -> str | None:
     """The seller's reference code from a pisos.com DETAIL page (issue #628).
 
-    Real markup (2026-08 live capture, transcribed structure — see
-    `etl/tests/fixtures/pisos_sample_detail.html` for the synthetic test
-    fixture built from this shape):
+    Markup SHAPE confirmed against a real page during the issue #628
+    spike (2026-08) — the value below is a placeholder, not the real
+    capture (see AGENTS.md's no-scraped-content rule; the actual test
+    fixture, `etl/tests/fixtures/pisos_sample_detail.html`, is fully
+    synthetic and exercises this exact selector):
 
         <div class="features__feature">
           <span class="features__icon icon-reference"></span>
           <div>
             <span class="features__label">Referencia: </span>
-            <span class="features__value">PH-0010116/14101</span>
+            <span class="features__value">EXAMPLE-1234/AB</span>
           </div>
         </div>
 
@@ -138,13 +140,15 @@ def extract_reference_code(html: str) -> str | None:
 def extract_agency_name(html: str) -> str | None:
     """The advertiser/agency name from a pisos.com DETAIL page (issue #628).
 
-    Real markup (2026-08 live capture):
+    Markup SHAPE confirmed against a real page during the issue #628
+    spike (2026-08) — the agency name below is a placeholder, not the
+    real capture (same no-scraped-content rule as above):
 
         <div class="owner-info">
           <div class="owner-info__header">
             <div>
               <p class="owner-info__name">
-                <a href="/inmobiliaria-<slug>/" rel="nofollow">Princess Homes</a>
+                <a href="/inmobiliaria-<slug>/" rel="nofollow">Example Realty</a>
               </p>
 
     `.owner-info__name` is unique on the page (one contact box per

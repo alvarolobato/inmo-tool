@@ -279,24 +279,40 @@ def test_fetch_detail_unknown_id_raises_listing_unavailable_without_a_request():
     mock_get.assert_not_called()
 
 
-def test_fetch_detail_degrades_to_search_fields_on_detail_request_failure():
-    """A failed detail request (timeout, 5xx, ...) must not fail the whole
-    listing — reference/agency are an enrichment on an otherwise-complete
-    search-card record, not load-bearing for it."""
+def test_fetch_detail_raises_connector_error_on_detail_request_failure():
+    """Opus review (B5): a failed detail request (timeout, 5xx, a WAF
+    block, ...) must NOT be swallowed into a quiet search-card-only
+    success — that reported as a clean run (fetched += 1,
+    breaker.record_success()) with reference_code/contact_raw
+    permanently None, defeating D-047/D-069's whole point that a broken
+    run must not read as green. Matches every other connector's
+    fetch_detail failure handling (e.g. milanuncios.py's own
+    ConnectorError on a non-404 request failure)."""
     connector = PisosConnector()
     _discover(connector)
-    with patch(
-        "etl.connectors.pisos.requests.get",
-        side_effect=requests.ConnectionError("boom"),
+    with (
+        patch(
+            "etl.connectors.pisos.requests.get",
+            side_effect=requests.ConnectionError("boom"),
+        ),
+        pytest.raises(ConnectorError),
     ):
-        raw = connector.fetch_detail("65098413759.100500", throttle=lambda: None)
-    assert raw.raw["reference_code"] is None
-    assert raw.raw["contact_raw"] is None
-    canonical = connector.normalize(raw)
-    # Search-card fields still fully populated.
-    assert canonical.current_price == Decimal(1600000)
-    assert canonical.reference_code is None
-    assert canonical.contact_raw is None
+        connector.fetch_detail("65098413759.100500", throttle=lambda: None)
+
+
+def test_fetch_detail_404_still_raises_listing_unavailable_not_connector_error():
+    """A 404/410 is real churn (the listing was withdrawn between discovery
+    and fetch, D-049) — a clean skip, not the run-error path B5 fixed."""
+    connector = PisosConnector()
+    _discover(connector)
+    with (
+        patch(
+            "etl.connectors.pisos.requests.get",
+            return_value=_http_error_response(404),
+        ),
+        pytest.raises(ListingUnavailableError),
+    ):
+        connector.fetch_detail("65098413759.100500", throttle=lambda: None)
 
 
 # ── normalize: canonical field coverage ───────────────────────────────

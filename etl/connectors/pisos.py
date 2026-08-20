@@ -221,11 +221,12 @@ def _parse_m2(chars: list[str]) -> Decimal | None:
 
 class PisosConnector(Connector):
     name = "pisos"
-    # Single search request per scope per run (fetch_detail makes no network
-    # call — see the module docstring), so this only ever gates that one
-    # request. Kept conservative; pisos.com served a clean HTTP 200 to the
-    # honest UA during the spike, but a new site gets a gentle default until
-    # a real rate is measured in production.
+    # One search request per scope per run PLUS one detail request per
+    # listing (issue #628, D-141 — fetch_detail() now makes a real
+    # request, unlike the original search-payload-only design; see the
+    # module docstring). Kept conservative; pisos.com served a clean
+    # HTTP 200 to the honest UA during the spike, but a new site gets a
+    # gentle default until a real rate is measured in production.
     rate_limit_per_minute = 6
 
     # Page-1-only search → this connector never sees pisos.com's full
@@ -233,6 +234,12 @@ class PisosConnector(Connector):
     # in etl.orchestrator._reconcile_missed_discoveries): a listing absent
     # from a partial sweep proves nothing about withdrawal.
     discovers_full_inventory = False
+
+    # Issue #628/#629 (Opus review, B4): fetch_detail() can backfill a
+    # NULL reference_code with a real request — see
+    # Connector.backfills_missing_reference_code's own docstring for what
+    # this actually changes in etl.orchestrator._should_skip_fetch.
+    backfills_missing_reference_code = True
 
     # No native site-filter is live-verified for this connector yet, so none
     # are advertised (an unverified filter that silently no-ops is worse than
@@ -251,10 +258,12 @@ class PisosConnector(Connector):
 
     def __init__(self) -> None:
         # Populated by discover() as a side effect of the single search
-        # request it makes; read back by fetch_detail() (no network) and by
-        # discovered_prices(). Reset at the start of every discover() call so
-        # a scope that fails partway through never leaves a prior scope's
-        # data behind for the orchestrator to misread.
+        # request it makes; read back by fetch_detail() (which, per D-141,
+        # ALSO makes its own real detail request per listing for
+        # reference_code/contact_raw only) and by discovered_prices().
+        # Reset at the start of every discover() call so a scope that
+        # fails partway through never leaves a prior scope's data behind
+        # for the orchestrator to misread.
         self._search_records: dict[str, dict[str, Any]] = {}
         self._last_discovery_prices: dict[str, Decimal] = {}
 
@@ -427,7 +436,9 @@ class PisosConnector(Connector):
 
         logger.info(
             "pisos discover: geography=%s found %d listings on page 1 "
-            "(search-payload extraction, no detail fetch; %d with a price)",
+            "(search-payload extraction; reference_code/contact_raw come "
+            "from a per-listing detail fetch instead, see D-141; %d with "
+            "a price)",
             geography,
             len(records),
             len(self._last_discovery_prices),
@@ -529,19 +540,19 @@ class PisosConnector(Connector):
 
     def fetch_detail(self, external_id: str, throttle: Throttle) -> RawListing:
         # Issue #628 (D-141): the per-listing record from discover()'s
-        # search-page parse still supplies price/rooms/baths/m²/floor/
+        # search-page parse still supplies price/rooms/baths/m2/floor/
         # coordinates/photos with no extra request, but reference_code and
         # contact_raw (agency) are ONLY on the detail page (see module
-        # docstring) — so this now makes ONE real request per listing,
+        # docstring) -- so this now makes ONE real request per listing,
         # unlike the original search-payload-only design.
         record = self._search_records.get(external_id)
         if record is None:
             # The id was in a prior discover() but isn't in the current stash
-            # — it reordered/withdrew off page 1 between discovery and this
+            # -- it reordered/withdrew off page 1 between discovery and this
             # fetch. A clean skip (issue #291), not a run error.
             raise ListingUnavailableError(
                 f"pisos fetch_detail: external_id={external_id} not present in "
-                "the last discover() payload — reordered/withdrawn off page 1 "
+                "the last discover() payload -- reordered/withdrawn off page 1 "
                 "between discovery and fetch"
             )
         url = record.get("url")
@@ -563,22 +574,25 @@ class PisosConnector(Connector):
                 if gone_status in LISTING_GONE_HTTP_STATUSES:
                     raise ListingUnavailableError(
                         f"pisos fetch_detail: external_id={external_id} returned "
-                        f"HTTP {gone_status} — listing removed at source between "
+                        f"HTTP {gone_status} -- listing removed at source between "
                         "discovery and fetch"
                     ) from exc
-                # Any other failure (timeout, 5xx, connection error) degrades
-                # to the search-card fields only, rather than failing the
-                # whole listing — reference/agency are an enrichment on top
-                # of an otherwise-complete record, not load-bearing for it.
-                logger.warning(
-                    "pisos fetch_detail: detail request failed for "
-                    "external_id=%s, continuing with search-card fields only: %s",
-                    external_id,
-                    exc,
-                )
-            else:
-                reference_code = extract_reference_code(response.text)
-                agency_name = extract_agency_name(response.text)
+                # Opus review of #628/#629 (B5): any OTHER failure (a WAF
+                # block, a timeout, a 5xx) must NOT be swallowed into a
+                # quiet search-card-only success -- that reported as a
+                # clean run (fetched += 1, breaker.record_success()) with
+                # reference_code/contact_raw permanently None, defeating
+                # D-047/D-069's whole point (a broken run must not read as
+                # green). Raising ConnectorError here matches every other
+                # connector's fetch_detail failure handling (e.g.
+                # milanuncios.py) -- it counts as a run error and can trip
+                # the circuit breaker like any other fetch failure.
+                raise ConnectorError(
+                    f"pisos fetch_detail: detail request failed for "
+                    f"external_id={external_id}: {exc}"
+                ) from exc
+            reference_code = extract_reference_code(response.text)
+            agency_name = extract_agency_name(response.text)
         return RawListing(
             external_id=external_id,
             source=self.name,

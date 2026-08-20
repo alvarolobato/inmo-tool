@@ -456,6 +456,87 @@ class TestShouldSkipFetch:
         assert "not 'active'" in reason
 
 
+class TestReferenceCodeBackfillExemption:
+    """Issue #628/#629 (Opus review, B4): a connector that can backfill a
+    NULL reference_code via a real fetch_detail() request (pisos, D-141)
+    must bypass the #435 unchanged-list-price skip for exactly the
+    listings that still need it — otherwise an already-known, stable-
+    price listing would never be re-fetched and would keep a permanently
+    NULL reference_code, the gap a live production check found."""
+
+    _NOW = datetime(2026, 8, 3, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _ago(self, seconds: int) -> datetime:
+        return self._NOW - timedelta(seconds=seconds)
+
+    def test_missing_reference_code_bypasses_the_435_unchanged_price_skip(self):
+        skip, reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(1),
+            stored_price=Decimal(200000),
+            stored_status="active",
+            latest_observed_at=None,
+            min_refetch_interval_seconds=86400,
+            now=self._NOW,
+            discovered_price=Decimal(200000),  # unchanged -- 2b would skip
+            stored_reference_code=None,
+            connector_backfills_reference_code=True,
+        )
+        assert skip is False
+        assert "reference_code" in reason
+
+    def test_present_reference_code_lets_the_435_skip_apply_normally(self):
+        skip, _reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(1),
+            stored_price=Decimal(200000),
+            stored_status="active",
+            latest_observed_at=None,
+            min_refetch_interval_seconds=86400,
+            now=self._NOW,
+            discovered_price=Decimal(200000),  # unchanged
+            stored_reference_code="ns603",
+            connector_backfills_reference_code=True,
+        )
+        assert skip is True
+
+    def test_flag_off_does_not_exempt_a_connector_that_cannot_backfill(self):
+        """A connector that never sets `backfills_missing_reference_code`
+        must see the EXACT same #435 skip behaviour as before this issue
+        — a missing reference_code alone is not a blanket exemption."""
+        skip, _reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(1),
+            stored_price=Decimal(200000),
+            stored_status="active",
+            latest_observed_at=None,
+            min_refetch_interval_seconds=86400,
+            now=self._NOW,
+            discovered_price=Decimal(200000),  # unchanged
+            stored_reference_code=None,
+            connector_backfills_reference_code=False,
+        )
+        assert skip is True
+
+    def test_backfill_exemption_wins_even_over_the_accepted_property_path(self):
+        """Both are unconditional "always fetch" reasons; the backfill
+        check simply runs first — pinned so a future reordering can't
+        silently make one shadow the other in a way that matters (it
+        currently doesn't, since both return False, but the reason string
+        should be the backfill one when both would apply)."""
+        skip, reason = orchestrator._should_skip_fetch(
+            last_fetched_at=self._ago(1),
+            stored_price=Decimal(200000),
+            stored_status="active",
+            latest_observed_at=None,
+            min_refetch_interval_seconds=86400,
+            now=self._NOW,
+            discovered_price=Decimal(200000),
+            is_accepted=True,
+            stored_reference_code=None,
+            connector_backfills_reference_code=True,
+        )
+        assert skip is False
+        assert "reference_code" in reason
+
+
 class TestPriceSanityBand:
     """Issue #432 / D-098: the phase-2 sanity band that gates whether a raw
     observation becomes `listing.current_price` (adoptable) and whether it is

@@ -106,6 +106,21 @@ _UNCORROBORATED_CONFIDENCE = Decimal("0.500")
 _SAME_AGENCY_ONLY_CONFIDENCE = Decimal("0.750")
 _CORROBORATED_CONFIDENCE = Decimal("0.900")
 
+# Issue #629/#628 Opus review (B1): a SUFFIX-TOLERANT match (one side
+# carries a trailing unit/variant suffix the other lacks -- never an exact
+# match) gets its OWN fixed, low confidence and NEVER reaches "merge",
+# regardless of proximity corroboration or same-agency -- unlike an exact
+# match, whose confidence/decision both scale with corroboration below.
+# Measured against the live sale corpus: 56 same-agency, same-source pairs
+# where a bare code and its "-N" sibling are held by DIFFERENT
+# `property_id`s (i.e. genuinely different real properties, not one
+# re-rendered) -- proximity (coords/size/price) does NOT discriminate this
+# case, since adjacent units in the same building routinely satisfy it
+# too. A suffix relation is real, corroboration-worthy evidence that lifts
+# D-116's veto (the actually-reported bug), but it is measurably weaker
+# than an exact code match and must never auto-merge on its own strength.
+_SUFFIX_TOLERANT_CONFIDENCE = Decimal("0.400")
+
 # Same tolerances phone_extract._corroborated uses for its price/size
 # fallback path — a looser stand-in for a coordinate check when connectors
 # don't happen to publish precise lat/lon on both sides.
@@ -135,14 +150,22 @@ _PLACEHOLDER_CODES = frozenset(
 )
 _HAS_DIGIT_RE = re.compile(r"\d")
 
-# Issue #629 (D-140): a leading "Ref.", "Ref:", or "Referencia:" label some
-# portals bake straight into the captured field value (as opposed to
-# rendering it as a separate <label>), stripped before the rest of
-# normalization runs. Scoped to the label word itself plus the punctuation/
-# whitespace that separates it from the code — never touches punctuation
-# inside the code (a comma or extra space *inside* "09502,1" stays exactly
-# as it was, see TestPlainComparisonNoPrefixTolerance).
-_LEADING_LABEL_RE = re.compile(r"^(referencia|ref\.?)\s*[:\-]?\s*")
+# Issue #629 (D-140), tightened after Opus review (B2): a leading "Ref.",
+# "Ref:", or "Referencia:" label some portals bake straight into the
+# captured field value (as opposed to rendering it as a separate <label>),
+# stripped before the rest of normalization runs. The label must be
+# followed by whitespace, ":", "-", or end-of-string — a lookahead, not
+# just an optional separator — so it can NEVER eat into a real code that
+# merely happens to start with "ref": "REFORMA-12" stays "reforma-12"
+# (not corrupted to "orma-12"), "REF1234" stays "ref1234" (not "1234",
+# silently dropping a real prefix), and "REF100"/"REF1005" stay usable,
+# distinguishable codes (not collapsed to "100"/"1005", which would have
+# nullified D-116's own textbook example of the collision this veto
+# exists to catch — see reference_codes_conflict's docstring). Measured
+# against the live corpus: only 3 of 11,475 usable codes start with
+# "ref" at all, and 2 of those already carry a real separator — this
+# regex strips exactly those 2, nothing else.
+_LEADING_LABEL_RE = re.compile(r"^(referencia|ref\.?)(?=$|[\s:\-])[\s:\-]*")
 
 # Issue #629 (D-140): a trailing unit/variant suffix — a short separator
 # (hyphen/underscore/slash) plus 1-3 alphanumeric characters at the very
@@ -327,10 +350,27 @@ def _proximity_corroborated(a: ListingRecord, b: ListingRecord) -> bool:
 def evaluate(a: ListingRecord, b: ListingRecord) -> PairEvaluation | None:
     code_a = _normalize(a.reference_code)
     code_b = _normalize(b.reference_code)
-    if code_a is None or code_b is None or not codes_equivalent(code_a, code_b):
+    if code_a is None or code_b is None:
+        return None
+    exact = code_a == code_b
+    if not exact and not codes_equivalent(code_a, code_b):
         return None
 
     detail = {"shared_reference_code": a.reference_code}
+
+    if not exact:
+        # Issue #629/#628 Opus review (B1): a suffix-tolerant (non-exact)
+        # match is capped here, before either corroboration check below
+        # ever runs -- see _SUFFIX_TOLERANT_CONFIDENCE's own comment for
+        # why proximity/agency corroboration must NOT be allowed to
+        # promote this to "merge".
+        detail["suffix_tolerant"] = True
+        return PairEvaluation(
+            basis="reference_code",
+            confidence=_SUFFIX_TOLERANT_CONFIDENCE,
+            decision="suggest",
+            detail=detail,
+        )
 
     if _proximity_corroborated(a, b):
         return PairEvaluation(

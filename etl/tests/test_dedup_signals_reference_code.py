@@ -8,9 +8,12 @@ engine-level tests.
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from etl.dedup.signals.reference_code import (
+    _SUFFIX_TOLERANT_CONFIDENCE,
     _normalize,
     _same_agency,
     codes_equivalent,
@@ -51,6 +54,14 @@ class TestNormalize:
         assert _normalize(None) is None
         assert _normalize("") is None
         assert _normalize("   ") is None
+
+    def test_short_non_placeholder_code_with_a_digit_is_still_rejected(self):
+        # Independent of the leading-label logic: a genuinely short code
+        # (below _MIN_CODE_LENGTH) that isn't a known placeholder must
+        # still be rejected as unusable noise -- "ab1" is 3 chars, has a
+        # digit, and isn't in _PLACEHOLDER_CODES.
+        assert _normalize("ab1") is None
+        assert _normalize("ab12") == "ab12"  # 4 chars: the boundary itself
 
 
 class TestNormalizeLeadingLabel:
@@ -144,19 +155,121 @@ class TestEvaluate:
     def test_both_missing_code_returns_none(self):
         assert evaluate(_record(), _record()) is None
 
-    def test_trailing_variant_suffix_still_matches(self):
+    def test_trailing_variant_suffix_matches_at_the_suffix_tolerant_tier(self):
         # Issue #629 (D-140): the owner's own example — one portal renders
         # the bare code, the other appends a "-1" unit/variant suffix.
+        # Opus review (B1): this must land at the FIXED, capped
+        # suffix-tolerant tier, never the exact-match tiers — pinning the
+        # tier is the whole point, not just "some result came back".
         a = _record(reference_code="LCSE42305")
         b = _record(reference_code="LCSE42305-1")
         result = evaluate(a, b)
         assert result is not None
         assert result.basis == "reference_code"
+        assert result.decision == "suggest"
+        assert result.confidence == _SUFFIX_TOLERANT_CONFIDENCE
+        assert result.detail["suffix_tolerant"] is True
+
+    def test_suffix_tolerant_match_never_reaches_merge_even_with_full_corroboration(
+        self,
+    ):
+        # Opus review (B1), the lead finding: same-agency base-vs-suffix
+        # with matching coords+size satisfies _proximity_corroborated
+        # exactly like two adjacent identical units in one building would
+        # (the live corpus measured 56 such same-agency, different-
+        # property pairs) — corroboration must NOT be allowed to promote
+        # this to "merge". This is the test that would have caught the
+        # 180-degree flip (hard veto -> automatic 0.900 merge) the review
+        # found.
+        a = _record(
+            reference_code="LCSE42305",
+            contact_raw="Inmobiliaria Uno",
+            lat=Decimal("40.0"),
+            lon=Decimal("-3.0"),
+            m2_built=Decimal(70),
+        )
+        b = _record(
+            reference_code="LCSE42305-1",
+            contact_raw="Inmobiliaria Uno",
+            lat=Decimal("40.0"),
+            lon=Decimal("-3.0"),
+            m2_built=Decimal(70),
+        )
+        result = evaluate(a, b)
+        assert result is not None
+        assert result.decision == "suggest"
+        assert result.confidence == _SUFFIX_TOLERANT_CONFIDENCE
+
+    def test_exact_match_still_reaches_merge_with_corroboration(self):
+        # Contrast case for the test above: an EXACT code match with the
+        # same corroboration must still merge at the full 0.900 tier —
+        # the cap is specific to the non-exact, suffix-tolerant path.
+        a = _record(
+            reference_code="LCSE42305",
+            lat=Decimal("40.0"),
+            lon=Decimal("-3.0"),
+            m2_built=Decimal(70),
+        )
+        b = _record(
+            reference_code="LCSE42305",
+            lat=Decimal("40.0"),
+            lon=Decimal("-3.0"),
+            m2_built=Decimal(70),
+        )
+        result = evaluate(a, b)
+        assert result is not None
+        assert result.decision == "merge"
+        assert result.confidence == Decimal("0.900")
 
     def test_middle_digit_change_still_does_not_match(self):
         a = _record(reference_code="LCSE42305")
         b = _record(reference_code="LCSE42315")
         assert evaluate(a, b) is None
+
+
+class TestLeadingLabelBoundary:
+    """Issue #628/#629 Opus review (B2): the label strip must never eat
+    into a real code that merely starts with "ref" -- it needs a real
+    separator (whitespace/colon/hyphen) or end-of-string right after the
+    label, not just an OPTIONAL one."""
+
+    def test_reforma_is_not_treated_as_a_labelled_code(self):
+        # The reported corruption: "REFORMA-12" -> "orma-12".
+        assert _normalize("REFORMA-12") == "reforma-12"
+
+    def test_ref_immediately_followed_by_digits_is_not_stripped(self):
+        # The reported silent-prefix-drop: "REF1234" -> "1234".
+        assert _normalize("REF1234") == "ref1234"
+
+    def test_ref100_stays_usable_not_collapsed_to_a_too_short_code(self):
+        # The reported disarming of D-116's own textbook example: "REF100"
+        # must stay a real, usable, DISTINGUISHABLE code -- not collapse
+        # to "100" (3 chars, below _MIN_CODE_LENGTH) and disappear.
+        assert _normalize("REF100") == "ref100"
+        assert _normalize("REF1005") == "ref1005"
+        assert _normalize("REF100") != _normalize("REF1005")
+
+    def test_ref100_vs_ref1005_same_agency_still_conflicts(self):
+        # End-to-end: D-116's own motivating collision shape must still
+        # veto once contact_raw is populated on both sides.
+        a = _record(contact_raw="Inmobiliaria Uno", reference_code="REF100")
+        b = _record(contact_raw="Inmobiliaria Uno", reference_code="REF1005")
+        assert reference_codes_conflict(a, b) is True
+
+    def test_reforma_vs_orma_never_matches_or_merges_across_agencies(self):
+        # The reported cross-agency false merge: "REFORMA1234" vs
+        # "ORMA1234" must NOT be treated as the same code just because an
+        # unguarded label strip would have turned the first into the
+        # second.
+        a = _record(reference_code="REFORMA1234")
+        b = _record(reference_code="ORMA1234")
+        assert evaluate(a, b) is None
+
+    def test_ref_prefix_with_a_real_separator_still_strips(self):
+        # The 2/11,475 real shape this strip exists for: a label the
+        # connector captured inline WITH its own separator.
+        assert _normalize("Ref: LCSE42305") == _normalize("LCSE42305")
+        assert _normalize("Referencia: LCSE42305") == _normalize("LCSE42305")
 
 
 class TestReferenceCodesConflict:
