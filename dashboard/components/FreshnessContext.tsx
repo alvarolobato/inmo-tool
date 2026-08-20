@@ -12,12 +12,18 @@ import type { DataHealthResponse } from "@/app/api/data-health/route";
 interface FreshnessState {
   /** Short label rendered in the TopBar live-status pill. */
   freshnessText: string;
-  /** True when any table is past the staleness threshold. */
+  /** True when any in-scope source is past its staleness threshold. */
   freshnessStale: boolean;
   /**
    * True when a connector is actively refreshing (mid-cycle, not stuck) and
    * nothing is stale — a distinct pill state from stale (issue #295, D-050). */
   freshnessRefreshing: boolean;
+  /**
+   * Issue #586 — true when the freshness surface can't make an honest
+   * "nothing due" claim (a DB error, or an empty in-scope set): the dot must
+   * render grey/unknown, NEVER green. Takes priority over freshnessStale
+   * (both false at once means "nothing to assert", not "all fine"). */
+  freshnessUnknown: boolean;
   /** Hover tooltip with the precise last-sync timestamp. */
   freshnessTooltip: string | null;
   /** Raw `/api/data-health` payload, for components that need the table list. */
@@ -31,6 +37,7 @@ const FreshnessContext = createContext<FreshnessState>({
   freshnessText: "Datos al día",
   freshnessStale: false,
   freshnessRefreshing: false,
+  freshnessUnknown: false,
   freshnessTooltip: null,
   health: null,
   setFreshnessText: () => {},
@@ -58,6 +65,7 @@ export function FreshnessProvider({ children }: { children: ReactNode }) {
   const [freshnessText, setFreshnessText] = useState("Datos al día");
   const [freshnessStale, setFreshnessStale] = useState(false);
   const [freshnessRefreshing, setFreshnessRefreshing] = useState(false);
+  const [freshnessUnknown, setFreshnessUnknown] = useState(false);
   const [freshnessTooltip, setFreshnessTooltip] = useState<string | null>(null);
   const [health, setHealth] = useState<DataHealthResponse | null>(null);
 
@@ -86,20 +94,28 @@ export function FreshnessProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (!health) return;
-    const stalest = health.stalestConnector;
-    // No enabled connectors reporting at all — nothing to be fresh or stale
-    // about (e.g. a fresh install before any connector is turned on).
-    if (!stalest) {
-      setFreshnessText("Datos al día");
+    if (!health) return; // no response yet (still loading) — keep prior state.
+
+    // Issue #586 — fail dark, never green: a DB error or an empty in-scope
+    // set (no stalest connector to report — the two are the same condition,
+    // see getConnectorFreshness) is UNKNOWN, never "Datos al día". This check
+    // comes FIRST, ahead of every other branch below.
+    if (health.overallUnknown || !health.stalestConnector) {
+      setFreshnessText("Estado desconocido");
       setFreshnessStale(false);
       setFreshnessRefreshing(false);
-      setFreshnessTooltip(null);
+      setFreshnessUnknown(true);
+      setFreshnessTooltip(
+        "No se pudo determinar el estado de los conectores — revisa /etl/connectors",
+      );
       return;
     }
+    setFreshnessUnknown(false);
+    const stalest = health.stalestConnector;
 
-    // An enabled connector that has never completed a fresh cycle: there is no
-    // freshness age to show — say so plainly rather than inventing "0m".
+    // An in-scope connector/portal that has never completed a fresh cycle (or
+    // never had a successful capture): there is no freshness age to show —
+    // say so plainly rather than inventing "0m".
     if (!stalest.lastSuccessAt) {
       setFreshnessText("Datos sin sincronizar");
       setFreshnessStale(true);
@@ -143,6 +159,7 @@ export function FreshnessProvider({ children }: { children: ReactNode }) {
         freshnessText,
         freshnessStale,
         freshnessRefreshing,
+        freshnessUnknown,
         freshnessTooltip,
         health,
         setFreshnessText,

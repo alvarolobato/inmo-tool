@@ -30,6 +30,14 @@ const C_NEVER = `${PREFIX}never`;
 const C_DISABLED = `${PREFIX}disabled`;
 const C_REFRESHING = `${PREFIX}refreshing`;
 const C_STUCK = `${PREFIX}stuck`;
+// Issue #586 — capture-only portals (Idealista-shaped: enabled=false BY
+// DESIGN, capture_enabled=true, supports_discovery=false).
+const C_CAPTURE_STALE = `${PREFIX}capture_stale`;
+const C_CAPTURE_FRESH = `${PREFIX}capture_fresh`;
+const C_CAPTURE_NEVER = `${PREFIX}capture_never`;
+const C_CAPTURE_FAILED_ONLY = `${PREFIX}capture_failed_only`;
+const C_CAPTURE_OFF = `${PREFIX}capture_off`;
+const C_CRAWL_OFF_ONLY = `${PREFIX}crawl_off_only`;
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -91,12 +99,18 @@ async function seedRun(
   return runId;
 }
 
-async function seedRegistry(pool: Pool, connector: string): Promise<void> {
+async function seedRegistry(
+  pool: Pool,
+  connector: string,
+  opts: { supportsDiscovery?: boolean } = {},
+): Promise<void> {
+  const { supportsDiscovery = true } = opts;
   await pool.query(
     `INSERT INTO connector_registry (connector_name, registered, supports_discovery)
-     VALUES ($1, true, true)
-     ON CONFLICT (connector_name) DO UPDATE SET registered = true`,
-    [connector],
+     VALUES ($1, true, $2)
+     ON CONFLICT (connector_name) DO UPDATE
+        SET registered = true, supports_discovery = EXCLUDED.supports_discovery`,
+    [connector, supportsDiscovery],
   );
 }
 
@@ -104,12 +118,36 @@ async function seedConfig(
   pool: Pool,
   connector: string,
   enabled: boolean,
+  opts: { captureEnabled?: boolean; freshnessIntervalHours?: number | null } = {},
+): Promise<void> {
+  const { captureEnabled = true, freshnessIntervalHours = null } = opts;
+  await pool.query(
+    `INSERT INTO connector_config (connector_name, enabled, capture_enabled, freshness_interval_hours)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (connector_name) DO UPDATE
+        SET enabled = EXCLUDED.enabled,
+            capture_enabled = EXCLUDED.capture_enabled,
+            freshness_interval_hours = EXCLUDED.freshness_interval_hours`,
+    [connector, enabled, captureEnabled, freshnessIntervalHours],
+  );
+}
+
+/**
+ * Seed an `extension_capture` row (issue #586) — the capture-only portals'
+ * equivalent of a connector run. `status` mirrors the real CHECK constraint
+ * ('pending'/'done'/'failed'/'listing'); only 'done' ever counts as a
+ * success in `getConnectorFreshness`.
+ */
+async function seedCapture(
+  pool: Pool,
+  connector: string,
+  status: "done" | "failed" | "pending",
+  createdAgoMs: number,
 ): Promise<void> {
   await pool.query(
-    `INSERT INTO connector_config (connector_name, enabled)
-     VALUES ($1, $2)
-     ON CONFLICT (connector_name) DO UPDATE SET enabled = EXCLUDED.enabled`,
-    [connector, enabled],
+    `INSERT INTO extension_capture (url, connector_name, status, created_at)
+     VALUES ($1, $2, $3, NOW() - ($4::double precision * interval '1 millisecond'))`,
+    [`https://example.com/${connector}/${createdAgoMs}`, connector, status, createdAgoMs],
   );
 }
 
@@ -162,6 +200,10 @@ describe.runIf(dbAvailable)("issue #241 — connector freshness (real Postgres)"
         [`${PREFIX}%`],
       );
       await pool.query("DELETE FROM connector_run_results WHERE connector_name LIKE $1", [
+        `${PREFIX}%`,
+      ]);
+      // Issue #586 — extension_capture rows seeded for capture-only portals.
+      await pool.query("DELETE FROM extension_capture WHERE connector_name LIKE $1", [
         `${PREFIX}%`,
       ]);
       await pool.query("DELETE FROM connector_freshness_state WHERE connector_name LIKE $1", [
@@ -304,5 +346,156 @@ describe.runIf(dbAvailable)("issue #241 — connector freshness (real Postgres)"
     // separately from stale.
     expect(health.overallRefreshing).toBe(true);
     expect(health.overallStale).toBe(true);
+  });
+
+  // ── Issue #586 — capture-only portals must count ──────────────────────
+  //
+  // Idealista-shaped: enabled=false BY DESIGN (its automated crawl is
+  // WAF-blocked, D-019-class), supports_discovery=false, capture_enabled
+  // =true. Before this fix these connectors were filtered out before the
+  // staleness check even ran, so the dot could never reflect capture
+  // silence. These tests seed real `extension_capture` rows and assert the
+  // corrected in-scope predicate + `deriveFreshnessState` reuse.
+
+  it("a stale capture-only portal makes the whole surface stale even though every crawl connector is fresh (issue #586)", async () => {
+    await withRealDb(async (pool) => {
+      // Every crawl connector fresh.
+      await seedRegistry(pool, C_FRESH);
+      await seedConfig(pool, C_FRESH, true);
+      await seedFreshness(pool, C_FRESH, { lastFreshAgoMs: 0.5 * HOUR_MS });
+
+      // Idealista-shaped capture-only portal: crawl disabled BY DESIGN,
+      // capture processing on, 24h window, last successful capture 48h ago
+      // (2x past the window — mirrors the owner's real "hace dos días").
+      await seedRegistry(pool, C_CAPTURE_STALE, { supportsDiscovery: false });
+      await seedConfig(pool, C_CAPTURE_STALE, false, {
+        captureEnabled: true,
+        freshnessIntervalHours: 24,
+      });
+      await seedCapture(pool, C_CAPTURE_STALE, "done", 48 * HOUR_MS);
+    });
+
+    const health = await getConnectorFreshness();
+    const byName = new Map(health.connectors.map((c) => [c.connector, c]));
+    const capture = byName.get(C_CAPTURE_STALE)!;
+
+    // The old bug: `enabled` stays false for a capture-only portal BY
+    // DESIGN, but it must still be in scope.
+    expect(capture.enabled).toBe(false);
+    expect(capture.inScope).toBe(true);
+    expect(capture.state).toBe("due");
+    expect(capture.isStale).toBe(true);
+    expect(capture.lastSuccessAt).not.toBeNull();
+    // No crawl cycle ever ran for a capture-only portal.
+    expect(capture.lastRunAt).toBeNull();
+    expect(capture.lastRunStatus).toBeNull();
+
+    // The dot: green must mean "nothing due" over crawl+capture, so one
+    // stale capture-only portal must flip the whole surface, even with
+    // every crawl connector fresh.
+    expect(health.overallStale).toBe(true);
+    expect(health.overallUnknown).toBe(false);
+    expect(health.stalestConnector).not.toBeNull();
+    expect(health.stalestConnector!.connector).toBe(C_CAPTURE_STALE);
+  });
+
+  it("a capture-only portal inside its window is fresh — no crawl cycle needed", async () => {
+    await withRealDb(async (pool) => {
+      await seedRegistry(pool, C_CAPTURE_FRESH, { supportsDiscovery: false });
+      await seedConfig(pool, C_CAPTURE_FRESH, false, {
+        captureEnabled: true,
+        freshnessIntervalHours: 24,
+      });
+      await seedCapture(pool, C_CAPTURE_FRESH, "done", 2 * HOUR_MS);
+    });
+
+    const health = await getConnectorFreshness();
+    const capture = health.connectors.find((c) => c.connector === C_CAPTURE_FRESH)!;
+
+    expect(capture.inScope).toBe(true);
+    expect(capture.state).toBe("fresh");
+    expect(capture.isStale).toBe(false);
+    expect(health.overallStale).toBe(false);
+  });
+
+  it("a launched-but-failed capture never counts as fresh — only status='done' does (issue #586)", async () => {
+    await withRealDb(async (pool) => {
+      await seedRegistry(pool, C_CAPTURE_FAILED_ONLY, { supportsDiscovery: false });
+      await seedConfig(pool, C_CAPTURE_FAILED_ONLY, false, {
+        captureEnabled: true,
+        freshnessIntervalHours: 24,
+      });
+      // A real 'done' capture, 48h ago (past the 24h window) …
+      await seedCapture(pool, C_CAPTURE_FAILED_ONLY, "done", 48 * HOUR_MS);
+      // … and a MORE RECENT 'failed' capture, 1h ago. A launched-but-failed
+      // capture must never make the portal read as freshly refreshed.
+      await seedCapture(pool, C_CAPTURE_FAILED_ONLY, "failed", 1 * HOUR_MS);
+    });
+
+    const health = await getConnectorFreshness();
+    const capture = health.connectors.find((c) => c.connector === C_CAPTURE_FAILED_ONLY)!;
+
+    // lastSuccessAt must come from the 'done' row (48h ago), not be pulled
+    // forward by the newer 'failed' attempt.
+    expect(capture.lastSuccessAt).not.toBeNull();
+    const ageMs = Date.now() - new Date(capture.lastSuccessAt!).getTime();
+    expect(ageMs).toBeGreaterThan(40 * HOUR_MS);
+    expect(capture.state).toBe("due");
+    expect(capture.isStale).toBe(true);
+  });
+
+  it("a capture-only portal never captured at all reads as due/stale, not silently fresh", async () => {
+    await withRealDb(async (pool) => {
+      await seedRegistry(pool, C_CAPTURE_NEVER, { supportsDiscovery: false });
+      await seedConfig(pool, C_CAPTURE_NEVER, false, {
+        captureEnabled: true,
+        freshnessIntervalHours: 24,
+      });
+      // No extension_capture rows at all.
+    });
+
+    const health = await getConnectorFreshness();
+    const capture = health.connectors.find((c) => c.connector === C_CAPTURE_NEVER)!;
+
+    expect(capture.lastSuccessAt).toBeNull();
+    expect(capture.state).toBe("due");
+    expect(capture.isStale).toBe(true);
+    expect(health.overallStale).toBe(true);
+  });
+
+  it("capture_enabled=false takes a capture-only portal out of scope, same posture as a deliberately-off connector", async () => {
+    await withRealDb(async (pool) => {
+      await seedRegistry(pool, C_CAPTURE_OFF, { supportsDiscovery: false });
+      await seedConfig(pool, C_CAPTURE_OFF, false, {
+        captureEnabled: false,
+        freshnessIntervalHours: 24,
+      });
+      // Never captured — would be stale if in scope, but it isn't.
+    });
+
+    const health = await getConnectorFreshness();
+    const capture = health.connectors.find((c) => c.connector === C_CAPTURE_OFF)!;
+
+    expect(capture.inScope).toBe(false);
+    expect(capture.isStale).toBe(false);
+    expect(health.overallStale).toBe(false);
+  });
+
+  it("an empty in-scope set is UNKNOWN, never silently 'nothing due' (issue #586 fail-dark)", async () => {
+    await withRealDb(async (pool) => {
+      // A crawl connector, deliberately turned off, with no capture
+      // fallback (supports_discovery stays true) — same shape the old
+      // "zero enabled connectors hard-codes green" bug hit.
+      await seedRegistry(pool, C_CRAWL_OFF_ONLY, { supportsDiscovery: true });
+      await seedConfig(pool, C_CRAWL_OFF_ONLY, false);
+    });
+
+    const health = await getConnectorFreshness();
+
+    expect(health.overallUnknown).toBe(true);
+    // Nothing to assert either way — never read as "fine".
+    expect(health.overallStale).toBe(false);
+    expect(health.overallRefreshing).toBe(false);
+    expect(health.stalestConnector).toBeNull();
   });
 });
