@@ -208,13 +208,25 @@ test("API failure shows unknown, not green (EC-3)", async ({ page }) => {
 test.describe("capture-portal staleness (EC-1) — real DB, scoped to one real portal", () => {
   // MUST be a real CAPTURE_PORTALS name: isCaptureOnlyForFreshness() gates on
   // isCapturePortal(), so a synthetic e2e-only name would never enter the
-  // capture-only branch this test is covering. `aliseda` genuinely carries
-  // production-shaped data on the shared e2e DB already — this test saves
-  // and restores its `connector_config` row and only deletes the ONE
-  // extension_capture row it inserts (a distinctive marker URL), never
-  // touching aliseda's real capture history.
+  // capture-only branch this test is covering.
+  //
+  // Bug (caught by CI, #590): the first version of this test assumed
+  // `aliseda` already existed in `connector_registry` — true on the local
+  // demo DB (which has accumulated real ETL runs), FALSE on CI's Postgres
+  // service (nothing there ever ran `sync_connector_registry()`, so
+  // `connector_registry` starts empty). `listConnectors()` iterates
+  // `connector_registry`, not `connector_config` — with no registry row,
+  // `/etl/connectors` never rendered `expand-aliseda` at all, and the test
+  // timed out waiting for it (the 1.0m runtime was the click's 60s test
+  // timeout, not a slow assertion). The fixture now seeds — and restores —
+  // ALL THREE tables itself (`connector_registry`, `connector_config`,
+  // `extension_capture`), so it owns its preconditions instead of inheriting
+  // whatever the ambient DB happens to already hold, and passes identically
+  // whether run against an empty CI DB or the rich local demo DB.
   const PORTAL = "aliseda";
   const MARKER_URL = "https://e2e-freshness-586.invalid/marker";
+  let priorRegistry: { registered: boolean; supports_discovery: boolean } | null = null;
+  let hadRegistryRow = false;
   let priorConfig: {
     enabled: boolean;
     capture_enabled: boolean | null;
@@ -224,13 +236,21 @@ test.describe("capture-portal staleness (EC-1) — real DB, scoped to one real p
 
   test.beforeEach(async () => {
     test.skip(!dbAvailable, "no reachable Postgres");
-    const { rows } = await pool.query(
+    const reg = await pool.query(
+      `SELECT registered, supports_discovery
+         FROM connector_registry WHERE connector_name = $1`,
+      [PORTAL],
+    );
+    hadRegistryRow = reg.rows.length > 0;
+    priorRegistry = reg.rows[0] ?? null;
+
+    const cfg = await pool.query(
       `SELECT enabled, capture_enabled, freshness_interval_hours
          FROM connector_config WHERE connector_name = $1`,
       [PORTAL],
     );
-    hadConfigRow = rows.length > 0;
-    priorConfig = rows[0] ?? null;
+    hadConfigRow = cfg.rows.length > 0;
+    priorConfig = cfg.rows[0] ?? null;
   });
 
   test.afterEach(async () => {
@@ -249,13 +269,35 @@ test.describe("capture-portal staleness (EC-1) — real DB, scoped to one real p
     } else if (!hadConfigRow) {
       await pool.query("DELETE FROM connector_config WHERE connector_name = $1", [PORTAL]);
     }
+    if (hadRegistryRow && priorRegistry) {
+      await pool.query(
+        `UPDATE connector_registry SET registered = $2, supports_discovery = $3
+          WHERE connector_name = $1`,
+        [PORTAL, priorRegistry.registered, priorRegistry.supports_discovery],
+      );
+    } else if (!hadRegistryRow) {
+      // Not present before this test (e.g. CI's empty registry) — remove the
+      // row this test created rather than leaving a synthetic connector
+      // behind for every other spec/page to trip over.
+      await pool.query("DELETE FROM connector_registry WHERE connector_name = $1", [PORTAL]);
+    }
   });
 
   test("a stale capture-only portal reads due/stale on its own /etl/connectors pill", async ({
     page,
   }) => {
+    // Own every precondition `listConnectors()` needs to render this row at
+    // all — registered + capture-only — not just the freshness inputs.
+    await pool.query(
+      `INSERT INTO connector_registry (connector_name, registered, supports_discovery)
+       VALUES ($1, true, false)
+       ON CONFLICT (connector_name) DO UPDATE
+          SET registered = true, supports_discovery = false`,
+      [PORTAL],
+    );
     // Force a deterministic 24h window and a 'done' capture 11 days ago —
-    // unambiguously past it, mirroring the owner's real "hace dos días".
+    // unambiguously past it (relative to NOW(), not a hard-coded date),
+    // mirroring the owner's real "hace dos días".
     await pool.query(
       `INSERT INTO connector_config (connector_name, enabled, capture_enabled, freshness_interval_hours)
        VALUES ($1, false, true, 24)
