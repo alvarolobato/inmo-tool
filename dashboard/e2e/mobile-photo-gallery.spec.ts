@@ -418,6 +418,44 @@ test("swipe steps to the next photo only at 1x", async ({ page, context }) => {
   expect(afterSwipe.scale).toBe(1); // swipe navigates, never leaves a zoom behind
 });
 
+// #594: the same horizontal-drag gesture that steps photos (tested just
+// above) must NOT step the lightbox while the map slide is active — Leaflet
+// owns that gesture there instead. Every fixture property in this file
+// carries MADRID_SOL coords, so the map is always slide 0.
+test("#594: touch-dragging the enlarged map pans it instead of stepping the lightbox off it", async ({
+  page,
+  context,
+}) => {
+  skipIfNoDb(test);
+  const cdp = await context.newCDPSession(page);
+  await page.goto(`/profiles/${profileId}/properties/${propertyId}`);
+  await expect(page.getByTestId("property-detail-page")).toBeVisible();
+  await tapLocator(cdp, page.getByTestId("photo-gallery-map-tile-open"));
+
+  const slide = page.getByTestId("photo-gallery-map-slide");
+  await expect(slide).toBeVisible();
+  const pane = slide.locator(".leaflet-map-pane");
+  const transformBefore = await pane.evaluate((el) => (el as HTMLElement).style.transform);
+
+  const center = await boundingCenter(slide);
+  const start = { x: center.x + 60, y: center.y };
+  const end = { x: center.x - 60, y: center.y };
+  await dispatchTouch(cdp, "touchStart", [start]);
+  await dispatchTouch(cdp, "touchMove", [{ x: center.x, y: center.y }]);
+  await dispatchTouch(cdp, "touchMove", [end]);
+  await dispatchTouch(cdp, "touchEnd", []);
+
+  // Still on the map slide — the lightbox's own swipe tracking is suspended
+  // here, unlike the identical-shape drag on a photo (tested above), which
+  // steps.
+  await expect(page.getByTestId("photo-gallery-map-slide")).toBeVisible();
+  await expect(page.getByTestId("photo-gallery-counter")).toHaveCount(0);
+  // And Leaflet itself received and acted on the drag — this is a real pan,
+  // not just "nothing broke".
+  const transformAfter = await pane.evaluate((el) => (el as HTMLElement).style.transform);
+  expect(transformAfter).not.toBe(transformBefore);
+});
+
 test("prev/next/close buttons still work on the phone, and meet the 44px touch-target minimum", async ({
   page,
   context,

@@ -184,6 +184,49 @@ describe("CandidateCard", () => {
     expect(screen.getByTestId("candidate-photo-next")).toHaveAttribute("aria-label", "Foto siguiente");
   });
 
+  it("#594: the ticker shows a numeric N / M counter overlaid on the photo, in step with prev/next", () => {
+    render(
+      <CandidateCard
+        candidate={candidate({
+          photos: ["https://img.example/1.jpg", "https://img.example/2.jpg", "https://img.example/3.jpg"],
+        })}
+        profileId={5}
+      />,
+    );
+    // A real assertion the fix could fail: without the counter this testid
+    // simply wouldn't exist, and without wiring it to `index` it would be
+    // stuck reading "1 / 3" forever regardless of navigation.
+    expect(screen.getByTestId("candidate-photo-counter")).toHaveTextContent("1 / 3");
+
+    fireEvent.click(screen.getByTestId("candidate-photo-next"));
+    expect(screen.getByTestId("candidate-photo-counter")).toHaveTextContent("2 / 3");
+
+    fireEvent.click(screen.getByTestId("candidate-photo-prev"));
+    fireEvent.click(screen.getByTestId("candidate-photo-prev"));
+    // Wraps backward past the first photo to the last.
+    expect(screen.getByTestId("candidate-photo-counter")).toHaveTextContent("3 / 3");
+  });
+
+  it("#594: no counter for zero or one photo, same gating as the ticker itself", () => {
+    const { rerender } = render(<CandidateCard candidate={candidate({ photos: [] })} profileId={5} />);
+    expect(screen.queryByTestId("candidate-photo-counter")).not.toBeInTheDocument();
+
+    rerender(<CandidateCard candidate={candidate({ photos: ["https://img.example/1.jpg"] })} profileId={5} />);
+    expect(screen.queryByTestId("candidate-photo-counter")).not.toBeInTheDocument();
+  });
+
+  it("#594: the counter sits outside the detail <Link>, same sibling-not-child layout as the prev/next buttons", () => {
+    render(
+      <CandidateCard
+        candidate={candidate({ photos: ["https://img.example/1.jpg", "https://img.example/2.jpg"] })}
+        profileId={5}
+      />,
+    );
+    const link = screen.getByRole("link");
+    const counter = screen.getByTestId("candidate-photo-counter");
+    expect(link.contains(counter)).toBe(false);
+  });
+
   it("renders one badge per AI flag, colouring only the ones that change what you're buying", () => {
     render(
       <CandidateCard

@@ -74,6 +74,33 @@ const PropertyLocationMap = dynamic(
  * `none` for the lifetime of the lightbox, gated to touch-capable devices,
  * so the browser's own native pinch-zoom can't fight this file's pointer
  * handling on the photo itself.
+ *
+ * #594: the location-map tile is now a SLIDE of this same lightbox, not just
+ * a static grid cell — tapping it enlarges it exactly like a photo. The
+ * lightbox's open-slide index is over an extended range: slide 0 is the map
+ * (only when `hasCoords`), and every slide after it is a photo — `offset`
+ * (1 when there's a map, else 0) is the one conversion point between "slide
+ * index" and "photo index" (`photoUrls[openIndex - offset]`). This keeps the
+ * SAME `openIndex`/`step()`/wrap machinery for both kinds of slide instead of
+ * inventing a parallel one, at the cost of that one offset subtraction
+ * wherever a photo index is needed. The `N / M` counter (`data-testid=
+ * "photo-gallery-counter"`, kept as plain text — the owner explicitly asked
+ * for numbers over dots in the #594 scope cut) is DERIVED from
+ * `photoUrls.length` alone and hidden entirely while the map slide is open —
+ * "1 / 12" must never include the map as one of the 12.
+ *
+ * Gesture-conflict decision (#594): the map slide is INTERACTIVE
+ * (`PropertyLocationMap interactive`) — panning is the entire point of
+ * enlarging it — but the lightbox's own swipe-to-step and pinch/double-tap
+ * zoom (`handleZoomPointer*` below) are SUSPENDED while it's active, each
+ * gated by a `mapSlideActive` early-return, so Leaflet's own touch/mouse
+ * handling owns the gesture outright instead of fighting this file's pointer
+ * tracking for the same drag. Arrow-key stepping is NOT suspended — it stays
+ * the lightbox's exclusive keyboard channel (`PropertyLocationMap`'s
+ * `keyboard` prop is hard-`false` even when `interactive`), so ArrowLeft/
+ * ArrowRight always move you OFF the map slide rather than panning it. A
+ * second static image tile was considered and rejected: it would add nothing
+ * over the grid tile the user already tapped past to get here.
  */
 const navButtonStyle: React.CSSProperties = {
   position: "absolute",
@@ -128,12 +155,18 @@ export function PhotoGallery({
   lon?: number | null;
 }) {
   const hasCoords = lat !== null && lon !== null;
+  // #594: slide 0 is the map (only when hasCoords); every slide from
+  // `offset` on is a photo. See the class docstring's "extended range" note.
+  const offset = hasCoords ? 1 : 0;
+  const totalSlides = offset + photoUrls.length;
   const [openIndex, setOpenIndex] = useState<number | null>(null);
   const thumbRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const mapTileButtonRef = useRef<HTMLButtonElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const openIndexRef = useRef<number | null>(null);
   openIndexRef.current = openIndex;
   const isOpen = openIndex !== null;
+  const mapSlideActive = isOpen && hasCoords && openIndex === 0;
 
   // #575: pinch/double-tap zoom state for the lightbox image. Reset whenever
   // the open photo changes (including on open) so navigating never carries a
@@ -182,14 +215,21 @@ export function PhotoGallery({
 
   const step = (delta: number) => {
     setOpenIndex((current) =>
-      current === null ? null : (current + delta + photoUrls.length) % photoUrls.length,
+      current === null ? null : (current + delta + totalSlides) % totalSlides,
     );
   };
 
   const closeLightbox = () => {
     const returnTo = openIndexRef.current;
     setOpenIndex(null);
-    if (returnTo !== null) thumbRefs.current[returnTo]?.focus();
+    if (returnTo === null) return;
+    // #594: the map slide has no entry in `thumbRefs` (it isn't one of the
+    // grid's photo thumbnails) — return focus to its own tile button instead.
+    if (hasCoords && returnTo === 0) {
+      mapTileButtonRef.current?.focus();
+    } else {
+      thumbRefs.current[returnTo - offset]?.focus();
+    }
   };
 
   // #575 pinch/double-tap zoom. Pointer Events (not Touch Events) so pinch
@@ -198,6 +238,10 @@ export function PhotoGallery({
   // total no-op here — desktop keeps exactly today's click-to-close /
   // stopPropagation behaviour.
   const handleZoomPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    // #594: the map slide is interactive (Leaflet owns drag/pinch); this
+    // file's own zoom/pan/swipe tracking must not also react to the same
+    // pointer stream, or a map drag would get misread as a photo swipe.
+    if (mapSlideActive) return;
     if (e.pointerType !== "touch") return;
     const el = zoomAreaRef.current;
     if (!el) return;
@@ -263,6 +307,7 @@ export function PhotoGallery({
   };
 
   const handleZoomPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (mapSlideActive) return;
     if (e.pointerType !== "touch") return;
     if (!pointersRef.current.has(e.pointerId)) return;
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -294,6 +339,16 @@ export function PhotoGallery({
   };
 
   const handleZoomPointerEnd = (e: React.PointerEvent<HTMLDivElement>) => {
+    // #594 review (L1): deliberately NOT gated on `mapSlideActive` like
+    // Down/Move above — this is the cleanup half of the same gesture those
+    // two start tracking. If Down/Move guard out a gesture that began while
+    // `mapSlideActive` was true, `pointersRef`/`swipeRef`/`panRef` were never
+    // populated in the first place, so this runs its cleanup against empty
+    // state and is a no-op either way. But if `openIndex` changes mid-gesture
+    // (e.g. a nav-button tap lands while a pinch is still in flight) and End
+    // bailed here too, a real tracked pointer id would never get deleted —
+    // a stale entry that survives into the NEXT gesture and gets misread as
+    // an already-in-progress pinch. End must always run.
     if (e.pointerType !== "touch") return;
     pointersRef.current.delete(e.pointerId);
 
@@ -309,7 +364,7 @@ export function PhotoGallery({
         const dy = e.clientY - swipeRef.current.y;
         // Only at 1x, and only once nothing is actively pinching/panning —
         // otherwise a drag-to-pan on a zoomed photo would also step photos.
-        if (Math.abs(dx) > SWIPE_THRESHOLD_PX && Math.abs(dx) > Math.abs(dy) && photoUrls.length > 1) {
+        if (Math.abs(dx) > SWIPE_THRESHOLD_PX && Math.abs(dx) > Math.abs(dy) && totalSlides > 1) {
           step(dx < 0 ? 1 : -1);
         }
       }
@@ -342,7 +397,7 @@ export function PhotoGallery({
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- closeLightbox/step read the live index through openIndexRef and the functional setter; adding them would reintroduce the per-index re-run this effect exists to avoid.
-  }, [isOpen, photoUrls.length]);
+  }, [isOpen, totalSlides]);
 
   // With neither photos nor coordinates there is nothing to show — the map
   // tile is omitted cleanly (#448 I) rather than rendered as a broken cell.
@@ -366,9 +421,16 @@ export function PhotoGallery({
       >
         {hasCoords && (
           // #448 I: the map is the FIRST tile of the gallery — a "where is
-          // this" glance before the photos. Not a <button> (it opens no
-          // lightbox) and outside `thumbRefs`, so photo indices/lightbox
-          // navigation are unaffected.
+          // this" glance before the photos. #594: it now opens IN the
+          // lightbox too (slide 0), same as any photo thumb. The click
+          // target is a transparent overlay `<button>` SIBLING of the map,
+          // not a button wrapping it — mirrors this codebase's established
+          // "interactive control as a sibling, never a descendant of
+          // content it doesn't own" rule (CandidatePhotoTicker.tsx's
+          // docstring) rather than nesting a whole Leaflet instance inside
+          // a `<button>`'s content model. `mapTileButtonRef` (not
+          // `thumbRefs`, which is photo-indexed only) gets focus back on
+          // close.
           <div
             data-testid="photo-gallery-map-tile"
             style={{
@@ -380,6 +442,24 @@ export function PhotoGallery({
             }}
           >
             <PropertyLocationMap lat={lat as number} lon={lon as number} />
+            <button
+              ref={mapTileButtonRef}
+              type="button"
+              data-testid="photo-gallery-map-tile-open"
+              onClick={() => setOpenIndex(0)}
+              aria-label="Ampliar mapa de ubicación"
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                padding: 0,
+                margin: 0,
+                border: "none",
+                background: "transparent",
+                cursor: "pointer",
+              }}
+            />
           </div>
         )}
         {photoUrls.map((url, i) => (
@@ -390,7 +470,7 @@ export function PhotoGallery({
             }}
             type="button"
             data-testid="photo-gallery-thumb"
-            onClick={() => setOpenIndex(i)}
+            onClick={() => setOpenIndex(i + offset)}
             aria-label={`Ampliar foto ${i + 1} de la propiedad`}
             style={{
               padding: 0,
@@ -478,7 +558,11 @@ export function PhotoGallery({
             ×
           </button>
 
-          {photoUrls.length > 1 && (
+          {/* #594: gated on `totalSlides`, not `photoUrls.length` — prev/next
+              must also reach a 1-photo property that also has a map (2
+              slides total), and must stay hidden for a coord-less property
+              with exactly 1 photo (unchanged from before this feature). */}
+          {totalSlides > 1 && (
             <>
               <button
                 type="button"
@@ -504,25 +588,63 @@ export function PhotoGallery({
               >
                 ›
               </button>
-              <p
-                data-testid="photo-gallery-counter"
-                aria-live="polite"
-                style={{
-                  position: "absolute",
-                  bottom: 16,
-                  left: "50%",
-                  transform: "translateX(-50%)",
-                  margin: 0,
-                  padding: "4px 10px",
-                  borderRadius: 12,
-                  background: "rgba(255,255,255,0.15)",
-                  color: "#fff",
-                  fontSize: 13,
-                }}
-              >
-                {openIndex + 1} / {photoUrls.length}
-              </p>
+              {/* #594 review (L2): gated on `photoUrls.length > 1`,
+                  separately from the nav buttons' `totalSlides > 1` above —
+                  a property with exactly one photo (plus a map, so
+                  `totalSlides` is 2) must show prev/next to reach the map,
+                  but never a meaningless "1 / 1". Also never counts the map
+                  as a photo — hidden outright while the map slide is open
+                  rather than showing a bogus "0 / N" or "N+1 / N".
+                  Denominator is always `photoUrls.length`, never
+                  `totalSlides`. */}
+              {!mapSlideActive && photoUrls.length > 1 && (
+                <p
+                  data-testid="photo-gallery-counter"
+                  aria-live="polite"
+                  style={{
+                    position: "absolute",
+                    bottom: 16,
+                    left: "50%",
+                    transform: "translateX(-50%)",
+                    margin: 0,
+                    padding: "4px 10px",
+                    borderRadius: 12,
+                    background: "rgba(255,255,255,0.15)",
+                    color: "#fff",
+                    fontSize: 13,
+                  }}
+                >
+                  {openIndex - offset + 1} / {photoUrls.length}
+                </p>
+              )}
             </>
+          )}
+
+          {/* #594 review (L4): the photo counter above is the ONLY aria-live
+              region in this lightbox — landing on the map slide hid it
+              (mapSlideActive excludes it, correctly, from ever announcing a
+              photo position) with nothing announced in its place, so a
+              screen-reader user got silence where a photo would have
+              announced "N / M". Visually hidden (the map is its own visual
+              cue) but present in the accessibility tree with the same
+              aria-live="polite" pattern as the counter. */}
+          {mapSlideActive && (
+            <p
+              aria-live="polite"
+              style={{
+                position: "absolute",
+                width: 1,
+                height: 1,
+                padding: 0,
+                margin: -1,
+                overflow: "hidden",
+                clip: "rect(0, 0, 0, 0)",
+                whiteSpace: "nowrap",
+                border: 0,
+              }}
+            >
+              Mapa de ubicación
+            </p>
           )}
 
           {/* #575 review fix (B1): this div is a flex item of the outer
@@ -576,20 +698,41 @@ export function PhotoGallery({
               touchAction: "none",
             }}
           >
-            {/* eslint-disable-next-line @next/next/no-img-element -- see thumbnail note above */}
-            <img
-              data-testid="photo-gallery-lightbox-image"
-              src={photoUrls[openIndex]}
-              alt={`Foto ${openIndex + 1} ampliada`}
-              style={{
-                maxWidth: "100%",
-                maxHeight: "100%",
-                objectFit: "contain",
-                transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`,
-                transition: gesturingRef.current ? "none" : "transform 150ms ease-out",
-                touchAction: "none",
-              }}
-            />
+            {mapSlideActive ? (
+              // #594: interactive — panning is the whole point of enlarging
+              // it. The fresh MapContainer instance per open (Leaflet
+              // doesn't tolerate being fed a new center/props on an existing
+              // instance the way a plain React re-render implies) comes from
+              // this WHOLE branch mounting/unmounting on `mapSlideActive`,
+              // not from `key` — `lat`/`lon` don't change within one
+              // property's viewing, so this key is constant across opens.
+              // Kept anyway as a defensive pin: if `lat`/`lon` ever DID
+              // change while this branch stayed mounted, React would reuse
+              // the same MapContainer instance and hand it a new `center`
+              // prop it (per react-leaflet's own docs) ignores after mount.
+              <div
+                key={`map-slide-${lat}-${lon}`}
+                data-testid="photo-gallery-map-slide"
+                style={{ width: "100%", height: "100%" }}
+              >
+                <PropertyLocationMap lat={lat as number} lon={lon as number} interactive />
+              </div>
+            ) : (
+              // eslint-disable-next-line @next/next/no-img-element -- see thumbnail note above
+              <img
+                data-testid="photo-gallery-lightbox-image"
+                src={photoUrls[openIndex - offset]}
+                alt={`Foto ${openIndex - offset + 1} ampliada`}
+                style={{
+                  maxWidth: "100%",
+                  maxHeight: "100%",
+                  objectFit: "contain",
+                  transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`,
+                  transition: gesturingRef.current ? "none" : "transform 150ms ease-out",
+                  touchAction: "none",
+                }}
+              />
+            )}
           </div>
         </div>
       )}

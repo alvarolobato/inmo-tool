@@ -1,0 +1,130 @@
+---
+id: D-128
+title: Property detail map opens as an interactive lightbox slide; swipe/pinch suspend, arrow keys don't
+date: 2026-08-20
+group: Frontend / UI
+rule: "PhotoGallery's lightbox extends its open-slide index to an offset range (slide 0 = map when present, offset..N = photos); the map slide is Leaflet-interactive (dragging/zoom on, keyboard off) while the lightbox's own swipe/pinch pointer handlers early-return on it (arrow-key/button stepping stays the lightbox's, unaffected); the N / M counter always excludes the map from both N and M."
+---
+
+# D-128: property detail map opens as an interactive lightbox slide; swipe/pinch suspend, arrow keys don't
+
+*Decided: 2026-08-20, revised 2026-08-20 (Opus review of PR #598 caught a
+factual error in the original §4 — see Correction below)*
+
+**Correction (2026-08-20)**: the original version of this record claimed the
+zoom area's `touchAction` needed to flip `"none" → "auto"` for the map slide
+because an ancestor `touch-action: none` would "silently override Leaflet's
+more specific declaration and block its touch dragging." **That is
+backwards.** Leaflet 1.9.4's own bundled CSS deliberately sets
+`.leaflet-container { touch-action: none }` (`leaflet.css`) precisely
+BECAUSE it implements dragging and pinch entirely in JS and wants the
+browser's native compositor-driven panning/zooming kept out of the way — an
+ancestor also declaring `"none"` is what Leaflet is asking for, not
+something that defeats it. The reviewer reverted the conditional to
+unconditional `"none"` and all three #594 e2e tests (including the CDP
+real-touch-drag test) still passed, confirming that line was never actually
+load-bearing in either direction — the original record even said so itself
+("a CDP-synthesized touch test... did not actually distinguish the two
+values") without drawing the conclusion that the claimed mechanism was
+wrong, not just untestable. `document.body.style.touchAction` is also
+forced to `"none"` for the whole lightbox's lifetime regardless (see
+`PhotoGallery.tsx`'s existing touch-suppression effect), so even the
+original claim's own reasoning would have left the "fix" incomplete. `touch-
+action` on the zoom area is unconditional `"none"` for every slide, map
+included; see the (corrected) point 4 below.
+
+**Context**: Issue #594 (owner, on mobile): the detail-page location map
+(`PropertyLocationMap.tsx`, first tile of `PhotoGallery.tsx`'s grid) was
+deliberately static — `dragging`/`scrollWheelZoom`/`keyboard`/etc. all off —
+so it can't steal scroll from the surrounding gallery grid (see that file's
+own docstring). The owner wanted it reachable in the enlarged lightbox view
+like any photo, but enlarging it makes panning the entire point, which
+collides with the SAME lightbox already owning swipe-to-step and pinch/
+double-tap zoom (`PhotoGallery.tsx`'s `handleZoomPointer{Down,Move,End}`,
+#575) on the exact same touch/pointer gesture. Mid-task the owner also cut
+the issue's dots/card-swipe scope (numbers over dots; card ticker keeps
+prev/next only, gains a numeric overlay counter instead) — that part is not
+this record's concern, only the map/lightbox interaction is.
+
+**Decision**:
+
+1. **Slide indexing.** `PhotoGallery`'s `openIndex` state is redefined as an
+   index into an EXTENDED slide range, not `photoUrls` directly: `offset =
+   hasCoords ? 1 : 0`; slide `0` (only when `hasCoords`) is the map; slides
+   `[offset, offset + photoUrls.length)` are photos at `photoUrls[openIndex -
+   offset]`. `step()`/the wrap arithmetic/the keyboard effect's dependency
+   all move to `totalSlides = offset + photoUrls.length` instead of
+   `photoUrls.length`. This keeps ONE state machine and ONE wrap formula for
+   both slide kinds rather than a parallel one — the cost is remembering the
+   one `- offset` subtraction everywhere a photo index is read.
+2. **The map tile's click target is a sibling `<button>`, not a wrapper.**
+   The grid tile keeps rendering `<PropertyLocationMap>` (non-interactive)
+   plus a transparent, absolutely-positioned overlay `<button
+   data-testid="photo-gallery-map-tile-open">` on top of it — never a
+   `<button>` WRAPPING the Leaflet instance. Same "interactive control as a
+   sibling, never a descendant of content it doesn't own" rule
+   `CandidatePhotoTicker.tsx`'s docstring already establishes for the card
+   ticker, applied here to avoid nesting a whole Leaflet DOM tree inside a
+   `<button>`'s content model. `mapTileButtonRef` (separate from the
+   photo-indexed `thumbRefs`) gets focus back on close.
+3. **`PropertyLocationMap` gains an `interactive` prop** (default `false`,
+   grid tile unchanged): when true, `dragging`/`scrollWheelZoom`/
+   `doubleClickZoom`/`boxZoom`/`touchZoom`/`zoomControl`/`attributionControl`
+   all flip on. **`keyboard` stays hard-`false` even when `interactive`** —
+   the lightbox's own ArrowLeft/ArrowRight must always step slides, never pan
+   the map; ceding keyboard to Leaflet would fight that.
+4. **Swipe/pinch are suspended on the map slide, arrow-key stepping is not.**
+   `mapSlideActive = hasCoords && openIndex === 0`, checked as the FIRST line
+   of `handleZoomPointerDown`/`Move` (early-return, no-op) — Leaflet's own
+   touch/mouse handling owns the drag outright instead of this file's
+   pointer tracking also reacting to the same stream (which would otherwise
+   misread a map pan as a photo swipe, or vice versa). `handleZoomPointerEnd`
+   is deliberately NOT guarded the same way (review B1/L1 on PR #598): it is
+   the cleanup half of a gesture Down/Move already declined to start
+   tracking, so gating it too would let a pointer id that DID get tracked
+   (a gesture that started on a photo, mid-tracked, before the slide changed
+   under it) survive uncleaned into the next gesture as a stale entry — see
+   the `handleZoomPointerEnd` comment in `PhotoGallery.tsx`. The zoom area's
+   `touchAction` stays `"none"` unconditionally, including on the map slide
+   — Leaflet's own bundled CSS deliberately sets `touch-action: none` on
+   `.leaflet-container` BECAUSE it implements drag/pinch entirely in JS and
+   wants the browser's native compositor kept out; an ancestor also at
+   `"none"` is what Leaflet asks for, not something that fights it (an
+   earlier draft of this record had this backwards — see Correction below).
+   Arrow keys are UNCHANGED (the lightbox's existing `document`-level
+   keydown effect, keyed on `totalSlides`) — they always move you off the
+   map slide, never pan it, because of (3).
+5. **The `N / M` counter never counts the map.** `M` is always
+   `photoUrls.length`; `N` is `openIndex - offset + 1`; the counter element
+   is omitted outright (not shown as "0 / N") while `mapSlideActive`.
+6. **A second static image tile was considered and rejected** — it adds
+   nothing over the grid tile the user already tapped past to get here.
+
+**Alternatives rejected**:
+- *A parallel state machine for "which slide kind is open"* (e.g. a
+  `{kind: "map"} | {kind: "photo", index}` union) — rejected in favor of the
+  single offset-adjusted `openIndex`, which reuses `step()`'s wrap arithmetic
+  and the existing keyboard effect verbatim.
+- *Wrapping `<PropertyLocationMap>` in the grid tile's own `<button>`* —
+  rejected for the same "no interactive content nested inside a control it
+  doesn't own" reason `CandidatePhotoTicker.tsx` already established; a
+  sibling overlay button is simpler and keeps `PropertyLocationMap` itself
+  free of button-content-model concerns.
+
+**Rationale**: An enlarged map that can't be panned is a worse experience
+than the static grid tile it came from — the owner's ask was explicit
+("debería mostrarse también en la vista ampliada"). Reusing the lightbox's
+existing slide/step/keyboard machinery (rather than a bespoke map lightbox)
+keeps the two adjacent lightbox behaviors (map panning, photo swipe/pinch)
+consistent with each other in every other respect (close, Escape, arrow
+keys, focus-return) while cleanly separating the ONE genuinely conflicting
+gesture (drag).
+
+**See**: `dashboard/components/property/PhotoGallery.tsx`,
+`dashboard/components/property/PropertyLocationMap.tsx`,
+`dashboard/components/candidates/CandidatePhotoTicker.tsx` (the sibling-not-
+descendant precedent), `dashboard/e2e/property-detail.spec.ts`,
+`dashboard/e2e/mobile-photo-gallery.spec.ts`, issue #594, D-123 (fixed
+overlay/lightbox sizing, the other #594-adjacent gotcha), the `.leaflet-
+container { isolation: isolate }` rule in `globals.css` (#591, unscoped —
+already covers the map slide with no new CSS needed).
