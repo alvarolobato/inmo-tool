@@ -165,6 +165,20 @@ def _cmd_purge_phone(conn) -> int:
     return 0
 
 
+def _cmd_purge_fuzzy(conn) -> int:
+    """One-off migration companion for issue #601 (`ps dedup purge-fuzzy`):
+    delete pending `match_basis='fuzzy'` rows EXCEPT the rescue set (exact
+    m2_built+current_price, corroborated by shared photo evidence or a
+    near-identical description) — see `engine.purge_pending_fuzzy`'s
+    docstring for exactly what qualifies."""
+    deleted, rescued = engine.purge_pending_fuzzy(conn)
+    print(
+        f"Purged {deleted} pending fuzzy suggestion(s), rescued {rescued} "
+        "corroborated pair(s) (issue #601 one-off migration)."
+    )
+    return 0
+
+
 def _cmd_resolve_conflict(conn, suggestion_id: int) -> int:
     try:
         engine.resolve_conflict(conn, suggestion_id)
@@ -211,6 +225,14 @@ def main(argv: list[str] | None = None) -> int:
             "match_basis='phone' suggested_merge rows"
         ),
     )
+    subparsers.add_parser(
+        "purge-fuzzy",
+        help=(
+            "One-off migration (issue #601): delete pending "
+            "match_basis='fuzzy' suggested_merge rows, except the "
+            "corroborated rescue set"
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -231,6 +253,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_purge_same_source(conn)
         if args.subcommand == "purge-phone":
             return _cmd_purge_phone(conn)
+        if args.subcommand == "purge-fuzzy":
+            return _cmd_purge_fuzzy(conn)
         return _cmd_resolve_conflict(conn, args.suggestion_id)
     finally:
         conn.close()

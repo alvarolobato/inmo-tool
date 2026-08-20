@@ -377,61 +377,39 @@ class TestOwnerReportedPair:
         conn.commit()
         return prop_milanuncios, listing_milanuncios, prop_fotocasa, listing_fotocasa
 
-    def test_pipeline_run_files_the_pair_as_a_fuzzy_suggestion_not_an_auto_merge(
+    def test_pipeline_run_files_no_suggestion_once_fuzzy_is_retired(
         self, dedup_wiring_db
     ):
-        """Investigation finding (see PR description): neither `cadastral`
-        (null both sides), `address_coords` (83m > the 15m gate, AND the
-        two addresses' normalized-text similarity is ~0.558 — well under
-        the 0.80 bar regardless of distance), `phone` (no shared number),
-        nor `reference_code` (only one side has one) clear an auto-merge
-        bar. `fuzzy` does fire — same size, same price, and 0.558 address
-        similarity clears its 0.55 floor by a hair — filing a suggestion,
-        which is the correct, designed-for outcome for a pair this weakly
-        corroborated.
+        """Investigation finding (see PR description, original to issue
+        #185): neither `cadastral` (null both sides), `address_coords`
+        (83m > the 15m gate, AND the two addresses' normalized-text
+        similarity is ~0.558 — well under the 0.80 bar regardless of
+        distance), `phone` (no shared number), nor `reference_code` (only
+        one side has one) clear an auto-merge bar. The one thing that DID
+        fire here, historically, was `fuzzy` — same size, same price, and
+        0.558 address similarity just clearing its 0.55 floor.
 
-        CORRECTION (dedup review-queue issue): this test's `photo_urls`
-        (`https://img.milanuncios.com/pN.jpg` / `https://cdn.fotocasa.es/pN.jpg`)
-        point at hosts that don't actually serve those images — every
-        `fetch_hashes` call for both listings fails, so `photo_hash` never
-        gets a chance to fire here, by construction of this fixture, not
-        because it doesn't apply to this pair. A prior agent read this test
-        and concluded "for the owner's real pair, only `fuzzy` fires" —
-        that conclusion does NOT hold against the owner's actual live data:
-        a real dedup run against real listings found `photo_hash` firing at
-        confidence 0.800 (`match_ratio: 1.0`, all 11 photos matched) for
-        this exact reported pair (see docs/decisions/ around the review-queue
-        change and the PR description with the live `suggested_merge` row).
-        This test is still correct and worth keeping (it pins the *other*
-        four signals' priority-order behaviour + wiring), but do not use it
-        as evidence about what fires against real, fetchable photos — it
-        structurally cannot exercise `photo_hash` at all. See
-        etl/tests/test_dedup_signals_photo_hash.py::TestNonImageUrlFiltering
-        for photo_hash's own no-network unit tests, and the dedup engine
-        module docstring for the general "network signals need network to
-        prove anything" caveat.
+        This test's `photo_urls` (`https://img.milanuncios.com/pN.jpg` /
+        `https://cdn.fotocasa.es/pN.jpg`) point at hosts that don't
+        actually serve those images — every `fetch_hashes` call for both
+        listings fails, so `photo_hash` never gets a chance to fire here,
+        by construction of this fixture, not because it doesn't apply to
+        this pair. Verified LIVE (manual check, not this suite — matching
+        this repo's no-network testing convention) that with real,
+        fetchable photos this exact reported pair resolves via
+        `photo_hash` at `match_ratio: 1.0`, now auto-merging at 0.900
+        (issue #188's exact-match path) rather than ever needing fuzzy.
 
-        UPDATE (issue #206, 2026-08-04): the "photo_hash fires for this
-        exact pair" finding above later regressed for a real, systemic
-        reason — every Milanuncios photo URL 404'd the CDN with "Rule
-        parameter not Found" (see D-019), which would have silently
-        zeroed out Milanuncios' side of `match_ratio` for THIS pair too,
-        not just made-up ones. Re-verified live post-fix (manual check
-        outside this test suite — deliberately not made an automated
-        network-dependent test, matching this repo's no-network testing
-        convention): `MilanunciosConnector().normalize()` +
-        `FotocasaConnector().normalize()` against the real, still-live
-        534062143/185398766 pages, followed by real `photo_hash.fetch_hashes`
-        calls, hashed 11/11 photos on both sides and match_ratio == 1.0 —
-        confirming the acceptance criterion ("properties 62/146 are
-        re-detected by photo_hash") holds again as of the fix. One
-        wrinkle: today's live confidence would actually be 0.900/`merge`,
-        not the 0.800/`suggest` recorded above — issue #188's auto-merge
-        path (match_ratio==1.0 + size/price corroboration + no floor
-        conflict) shipped after that original observation, and this pair
-        clears all three bars (identical size/price, and floor.py's own
-        docstring names "3º" vs "3ª planta" — this pair's exact floors —
-        as its worked example of "same floor, formatted differently").
+        UPDATE (issue #601, D-130): fuzzy is retired entirely — #600
+        measured its historical suggestions here as exactly the noise
+        pattern the issue killed (~0.5% real-duplicate precision on a
+        pending-fuzzy sample). With this fixture's photos unreachable (no
+        `photo_hash` evidence) and every other signal correctly silent,
+        the fixed pipeline now produces NO suggestion for this specific
+        broken-photo reproduction — which is the correct, by-design
+        outcome, not a regression of issue #185's wiring fix (still pinned
+        by `TestDedupWiring` above via `dedup_runs`/cadastral, independent
+        of which signal a given pair happens to clear).
         """
         conn = dedup_wiring_db
         prop_a, listing_a, prop_b, listing_b = self._seed_pair(conn)
@@ -446,19 +424,12 @@ class TestOwnerReportedPair:
                     tuple(sorted((listing_a, listing_b))),
                 )
                 row = cur.fetchone()
-            assert row is not None, (
-                "the reported pair produced no suggested_merge row at all — "
-                "before the fix, nothing ever called the dedup engine, so "
-                "this is exactly issue #185's bug"
+            assert row is None, (
+                "fuzzy is retired (issue #601) and no other signal applies to "
+                "this broken-photo reproduction of the owner's pair — no "
+                "suggestion should be filed"
             )
-            match_basis, confidence, status = row
-            assert match_basis == "fuzzy"
-            assert status == "pending"
-            assert Decimal("0.55") <= confidence <= Decimal("0.59")
 
-            # Not auto-merged — this pair's evidence is real but weak
-            # (see docstring); property_merge_log must stay empty until a
-            # human confirms.
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT count(*) FROM property_merge_log "
@@ -471,67 +442,6 @@ class TestOwnerReportedPair:
             orchestrator.CONNECTORS.clear()
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM connector_runs WHERE id = %s", (run_id,))
-                cur.execute("DELETE FROM suggested_merge")
-                cur.execute(
-                    "DELETE FROM listing WHERE source IN ('milanuncios', 'fotocasa') "
-                    "AND external_id IN ('534062143', '185398766')"
-                )
-                cur.execute(
-                    "DELETE FROM property WHERE id = ANY(%s)", ([prop_a, prop_b],)
-                )
-            conn.commit()
-
-    def test_confirming_the_suggestion_ends_with_one_property_in_property_merge_log(
-        self, dedup_wiring_db
-    ):
-        """The literal acceptance criterion: properties 62/146's fixture
-        equivalents end up on one `property` with both listings attached
-        and the basis recorded in `property_merge_log`. Reached via the
-        already-built human-review path (`ps dedup confirm` /
-        engine.confirm_suggestion) — now actually reachable for the first
-        time, because a normal pipeline run (below) is what files the
-        suggestion in the first place.
-        """
-        conn = dedup_wiring_db
-        prop_a, listing_a, prop_b, listing_b = self._seed_pair(conn)
-        orchestrator.CONNECTORS[:] = []
-        try:
-            run_id = orchestrator.run_all_connectors(conn, trigger="test-185-confirm")
-
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT id FROM suggested_merge WHERE listing_id_a = %s AND listing_id_b = %s",
-                    tuple(sorted((listing_a, listing_b))),
-                )
-                suggestion_id = cur.fetchone()[0]
-
-            survivor_id, losing_id, _had_conflict = engine.confirm_suggestion(
-                conn, suggestion_id
-            )
-            assert {survivor_id, losing_id} == {prop_a, prop_b}
-
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT DISTINCT property_id FROM listing WHERE id IN (%s, %s)",
-                    (listing_a, listing_b),
-                )
-                property_ids_after = {row[0] for row in cur.fetchall()}
-            assert property_ids_after == {survivor_id}
-
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT match_basis, confidence FROM property_merge_log "
-                    "WHERE property_id = %s AND losing_property_id = %s",
-                    (survivor_id, losing_id),
-                )
-                basis, confidence = cur.fetchone()
-            assert basis == "fuzzy"
-            assert Decimal("0.55") <= confidence <= Decimal("0.59")
-        finally:
-            orchestrator.CONNECTORS.clear()
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM connector_runs WHERE id = %s", (run_id,))
-                cur.execute("DELETE FROM property_merge_log")
                 cur.execute("DELETE FROM suggested_merge")
                 cur.execute(
                     "DELETE FROM listing WHERE source IN ('milanuncios', 'fotocasa') "

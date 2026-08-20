@@ -2,10 +2,15 @@
 
 Compares every pair of listings that don't already share a property_id,
 in signal priority order: cadastral -> address+coords -> photo hash ->
-phone -> fuzzy fallback, auto-merging confident matches and filing the
-rest as suggestions for human review. Issue #1 §6's original order listed
-phone ahead of photo hash; issue #603 (D-129) swapped them — see
-`evaluate_pair`'s docstring for why.
+phone, auto-merging confident matches and filing the rest as suggestions
+for human review. Issue #1 §6's original order also listed a `fuzzy`
+text-similarity fallback last and phone ahead of photo hash — issue #603
+(D-129) reordered photo hash ahead of phone, and issue #601 (D-130)
+retired fuzzy entirely: see `evaluate_pair`'s docstring for the reasoning
+on both, and `purge_pending_fuzzy` for the one-off cleanup of fuzzy's
+pending backlog. `etl.dedup.signals.fuzzy` still exists — only for
+`normalize_address`, which `address_coords.py` imports — but no longer
+has an `evaluate` this module calls.
 
 Scale note: this is an O(n^2) pairwise comparison over every listing in the
 table, deliberately — the right scale-up (blocking by geography/price
@@ -14,8 +19,8 @@ real piece of engineering that isn't worth building against a database with
 a few dozen listings from two connectors. Revisit once real connector
 volume makes a full pairwise scan slow.
 
-Measured (issue #185, pure in-memory `evaluate_pair` cost across the first
-four signals + fuzzy, `photo_urls=()` so `photo_hash.fetch_hashes` never
+Measured (issue #185, pure in-memory `evaluate_pair` cost across every
+signal then active, `photo_urls=()` so `photo_hash.fetch_hashes` never
 does real network I/O — i.e. a lower bound, real runs with photos will be
 slower): ~13.3us/pair, consistent from n=419 (0.42M pairs -> ~1.1s) through
 n=5,000 (12.5M pairs -> ~168s). At n=10,000 (~50M pairs) that extrapolates
@@ -41,11 +46,12 @@ import logging
 from dataclasses import dataclass
 from decimal import Decimal
 
+from rapidfuzz import fuzz
+
 from etl.dedup import photo_hash_store, reconcile
 from etl.dedup.signals import (
     address_coords,
     cadastral,
-    fuzzy,
     phone_extract,
     photo_hash,
     reference_code,
@@ -296,19 +302,18 @@ def evaluate_pair(
     not cadastral.
 
     Issue #566: `property_type`/`rooms` contradiction is NOT checked here.
-    See `etl.dedup.signals.fuzzy`'s module docstring and
-    `structured_fields_conflict`'s use inside `fuzzy.evaluate` for why it's
-    scoped to that one signal rather than placed here ahead of every
-    signal the way the reference-code veto (D-116) is — the live-DB blast
-    radius measurement found `property_type`/`rooms` are noisy per-connector
-    metadata that regularly disagree even on definite, strongly-corroborated
-    duplicates (identical photos, price, and size) matched by
-    address_coords/reference_code/photo_hash; vetoing at this level would
-    have broken ~80 already-correct merges (13.6% of 590 — PR #567's review). Fuzzy is the one signal where
-    the issue's own measurement holds (price/size are already gated there,
-    so a structured-field contradiction is real signal, not noise) and the
-    one signal that's actually 97% of the pending-suggestion backlog this
-    issue targets.
+    `structured_fields_conflict` (D-117) was scoped to veto ONLY the now-
+    retired `fuzzy` signal's suggestion (issue #601), never placed here
+    ahead of every signal the way the reference-code veto (D-116) is — the
+    live-DB blast radius measurement found `property_type`/`rooms` are
+    noisy per-connector metadata that regularly disagree even on definite,
+    strongly-corroborated duplicates (identical photos, price, and size)
+    matched by address_coords/reference_code/photo_hash; vetoing at this
+    level would have broken ~80 already-correct merges (13.6% of 590 —
+    PR #567's review). With `fuzzy` retired, D-117's veto has lost its only
+    call site (still deliberately kept, not retired — see D-117's own
+    file) and `structured_fields_conflict` is currently unreferenced from
+    `evaluate_pair`'s pipeline entirely.
     """
     cadastral_result = cadastral.evaluate(a, b)
     if cadastral_result is not None:
@@ -393,12 +398,10 @@ def evaluate_pair(
 
     # Issue #603 (D-129): phone is now evaluated AFTER photo_hash — see
     # this function's docstring for the shadowed-duplicate measurement
-    # that motivated the reorder.
-    phone_result = phone_extract.evaluate(a, b)
-    if phone_result is not None:
-        return phone_result
-
-    return fuzzy.evaluate(a, b)
+    # that motivated the reorder. Issue #601 (D-130) retired the `fuzzy`
+    # fallback that used to run after phone — nothing replaces it; a pair
+    # that clears none of the signals above is simply not a match.
+    return phone_extract.evaluate(a, b)
 
 
 @dataclass
@@ -1066,6 +1069,163 @@ def purge_pending_phone(conn) -> int:
         deleted = cur.rowcount
     conn.commit()
     return deleted
+
+
+# Issue #601's rescue set, second half of the "exact m2+price" gate: how
+# similar two descriptions must read to count as "near-identical" —
+# rapidfuzz's token_sort_ratio is 0-100, compared here as a 0-1 ratio, same
+# convention as fuzzy.py used before its retirement. 0.90 is deliberately
+# stricter than fuzzy's old 0.55 address-similarity bar — this is a
+# same-listing-republished check (the whole description essentially
+# copy-pasted across portals), not a same-neighbourhood check.
+_FUZZY_RESCUE_DESCRIPTION_SIMILARITY = 0.90
+
+
+def _fuzzy_rescue_exact_price_and_size(
+    price_a: Decimal | None,
+    price_b: Decimal | None,
+    m2_a: Decimal | None,
+    m2_b: Decimal | None,
+) -> bool:
+    if price_a is None or price_b is None or m2_a is None or m2_b is None:
+        return False
+    return price_a == price_b and m2_a == m2_b
+
+
+def _fuzzy_rescue_shares_a_photo(
+    store_conn, urls_a: tuple[str, ...], urls_b: tuple[str, ...]
+) -> bool:
+    """Read-only against the persistent photo_hashes store (D-025) — never
+    a live fetch. A URL this store has no opinion on (never hashed, or
+    hashed by a run predating this migration) is simply unknown, not
+    evidence either way, matching this codebase's usual permissive
+    handling of missing photo evidence elsewhere in the engine.
+    """
+    if store_conn is None or not urls_a or not urls_b:
+        return False
+    known_a = photo_hash_store.load(store_conn, urls_a)
+    known_b = photo_hash_store.load(store_conn, urls_b)
+    hashes_a = [h.phash for h in known_a.values() if h.ok and h.phash is not None]
+    hashes_b = [h.phash for h in known_b.values() if h.ok and h.phash is not None]
+    return photo_hash.hashes_share_any_match(hashes_a, hashes_b)
+
+
+def _fuzzy_rescue_descriptions_near_identical(
+    desc_a: str | None, desc_b: str | None
+) -> bool:
+    if not desc_a or not desc_b:
+        return False
+    similarity = fuzz.token_sort_ratio(desc_a, desc_b) / 100
+    return similarity >= _FUZZY_RESCUE_DESCRIPTION_SIMILARITY
+
+
+def purge_pending_fuzzy(conn) -> tuple[int, int]:
+    """One-off migration (issue #601): delete `pending` `match_basis='fuzzy'`
+    suggested_merge rows, EXCEPT a rescue set corroborated well enough to
+    still be real duplicates despite fuzzy's near-zero measured precision
+    (~0.4-0.7% on a stratified hand check — see D-130 and issue #600).
+
+    Rescue set: a pending fuzzy pair whose two listings have EXACTLY equal
+    `m2_built` AND `current_price` cross-listing, AND EITHER share at
+    least one photo (`photo_hash.hashes_share_any_match`, read from the
+    persistent store — never a live fetch) OR have near-identical
+    descriptions (`_fuzzy_rescue_descriptions_near_identical`). Both
+    conjuncts matter: exact price+size alone is common in a dense market
+    (many similar flats coincidentally share a price/size band — the
+    percolation issue #600 diagnosed) and is not corroboration by itself;
+    photo/description agreement alone (without exact price+size) is
+    exactly what a same-neighbourhood, different-unit pair could also
+    show.
+
+    Rescued rows are kept `pending` with `match_basis` left at 'fuzzy' —
+    no other signal fired for them, that is WHY they were only ever fuzzy
+    — and their `detail` stamped with a `rescued_reason` so a human
+    reviewing the queue understands why this one fuzzy row survived when
+    the rest were purged. This does not reactivate fuzzy as a live signal:
+    `evaluate_pair` no longer calls it at all (see this module's own
+    change); it only decides which of fuzzy's PAST suggestions still
+    deserve a human's attention.
+
+    Returns (deleted_count, rescued_count).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT sm.id,
+                   la.current_price, lb.current_price,
+                   pa.m2_built, pb.m2_built,
+                   la.description, lb.description,
+                   la.photo_urls, lb.photo_urls
+              FROM suggested_merge sm
+              JOIN listing la ON la.id = sm.listing_id_a
+              JOIN listing lb ON lb.id = sm.listing_id_b
+              JOIN property pa ON pa.id = la.property_id
+              JOIN property pb ON pb.id = lb.property_id
+             WHERE sm.status = 'pending' AND sm.match_basis = 'fuzzy'
+            """
+        )
+        rows = cur.fetchall()
+
+    store_conn = photo_hash_store.open_connection()
+    try:
+        rescue_ids: list[int] = []
+        for (
+            suggestion_id,
+            price_a,
+            price_b,
+            m2_a,
+            m2_b,
+            desc_a,
+            desc_b,
+            photos_a,
+            photos_b,
+        ) in rows:
+            if not _fuzzy_rescue_exact_price_and_size(price_a, price_b, m2_a, m2_b):
+                continue
+            has_photo_match = _fuzzy_rescue_shares_a_photo(
+                store_conn, tuple(photos_a or ()), tuple(photos_b or ())
+            )
+            has_description_match = _fuzzy_rescue_descriptions_near_identical(
+                desc_a, desc_b
+            )
+            if has_photo_match or has_description_match:
+                rescue_ids.append(suggestion_id)
+    finally:
+        photo_hash_store.close_connection(store_conn)
+
+    with conn.cursor() as cur:
+        if rescue_ids:
+            cur.execute(
+                """
+                UPDATE suggested_merge
+                   SET detail = detail || %s::jsonb
+                 WHERE id = ANY(%s)
+                """,
+                (
+                    json.dumps(
+                        {
+                            "rescued_reason": (
+                                "issue #601 fuzzy purge: exact m2_built+"
+                                "current_price, corroborated by shared "
+                                "photo evidence and/or a near-identical "
+                                "description"
+                            )
+                        }
+                    ),
+                    rescue_ids,
+                ),
+            )
+        cur.execute(
+            """
+            DELETE FROM suggested_merge
+             WHERE status = 'pending' AND match_basis = 'fuzzy'
+               AND NOT (id = ANY(%s))
+            """,
+            (rescue_ids,),
+        )
+        deleted = cur.rowcount
+    conn.commit()
+    return deleted, len(rescue_ids)
 
 
 def _fetch_listing_record(conn, listing_id: int) -> ListingRecord | None:

@@ -12,8 +12,11 @@ either side is "we don't know", never "they differ".
 
 Unlike the reference-code veto (issue #564/D-116), this is deliberately
 **NOT** wired into `etl.dedup.engine.evaluate_pair` ahead of every signal.
-It is called from exactly one place: `etl.dedup.signals.fuzzy.evaluate` —
-see that module's docstring for the full reasoning, but in short: a live-DB
+It WAS called from exactly one place, `etl.dedup.signals.fuzzy.evaluate` —
+issue #601 (D-130) retired that signal entirely, so this module currently
+has no live call site at all (kept as a forward-looking guard per D-117,
+not retired — see that decision's file). See fuzzy.py's docstring for the
+retirement; the reasoning below is preserved for history. In short: a live-DB
 blast-radius measurement (required by issue #566 before merge) found
 `property_type`/`rooms` are noisy per-connector metadata that regularly
 disagree even on definite, strongly-corroborated duplicates matched by
