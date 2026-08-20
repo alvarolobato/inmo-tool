@@ -13,6 +13,7 @@ import json
 import zlib
 from decimal import Decimal
 from pathlib import Path
+from unittest import mock
 
 import imagehash
 import pytest
@@ -20,8 +21,10 @@ from PIL import Image
 from rapidfuzz import fuzz
 
 from etl import orchestrator
+from etl.config import Config
 from etl.connectors import base
 from etl.connectors.base import CanonicalListingVersion
+from etl.db import postgres
 from etl.dedup import engine
 from etl.dedup.engine import _PhotoHashCache
 from etl.dedup.signals import phone_extract, reference_code
@@ -2432,18 +2435,42 @@ class TestPropertyPairVeto:
             assert status == "rejected"
             assert detail["resolved_reason"] == "property pair vetoed"
 
-    def test_veto_is_repointed_not_orphaned_when_the_vetoed_property_later_merges(
+    def test_veto_is_repointed_not_orphaned_when_the_vetoed_property_actually_loses_a_merge(
         self, dedup_db
     ):
         """Property A is vetoed against property C (a human decision).
-        Property A separately merges into property B for an unrelated
-        reason (matching cadastral_ref) — the merged identity (survivor)
-        must still carry the veto against C: the properties being merged
-        are, by definition, the same real-world unit (reconcile.py's own
-        reasoning for combining `matched` on merge), so a veto against A
-        must still apply to whatever A becomes."""
-        prop_a = _insert_property(dedup_db, address="Veto Repoint A")
+        Property A separately, genuinely LOSES a merge into property B for
+        an unrelated reason (matching cadastral_ref) — the merged identity
+        (survivor B) must still carry the veto against C: the properties
+        being merged are, by definition, the same real-world unit
+        (reconcile.py's own reasoning for combining `matched` on merge), so
+        a veto against A must still apply to whatever A becomes.
+
+        PR #611's second review caught the first version of this test as
+        decorative: it never gave A any matching signal, so A never
+        actually merged — an unrelated pair (created independently by
+        `_insert_pair`) supplied the `result.merged >= 1` the test checked,
+        and the final assertions passed by observing an untouched row.
+        Deleting the whole repoint step (`engine.py`'s
+        `for veto_id, veto_lo, veto_hi in cur.fetchall():` swapped for
+        `in []:`) left this test green. This version gives A itself the
+        matching cadastral_ref and asserts A is specifically the LOSING
+        side (`perform_merge` always survives the lower property_id, and B
+        is created first here specifically so B < A), so the repoint code
+        is unambiguously exercised.
+        """
+        # B created FIRST (lower id) so it — not A — is the survivor once
+        # they merge; A is deliberately the id that must lose and get
+        # repointed.
+        prop_b = _insert_property(
+            dedup_db, address="Veto Repoint B", cadastral_ref="1112223AB1112C0001AB"
+        )
+        prop_a = _insert_property(
+            dedup_db, address="Veto Repoint A", cadastral_ref="1112223AB1112C0001AB"
+        )
         prop_c = _insert_property(dedup_db, address="Veto Repoint C")
+        assert prop_b < prop_a
+
         lo, hi = sorted((prop_a, prop_c))
         with dedup_db.cursor() as cur:
             cur.execute(
@@ -2453,39 +2480,28 @@ class TestPropertyPairVeto:
             )
         dedup_db.commit()
 
-        # A merges into a NEW property B via the strongest signal
-        # (cadastral) — nothing to do with the veto against C.
-        _insert_pair(
-            dedup_db,
-            "solvia",
-            "servihabitat",
-            "veto-repoint-merge",
-            cadastral_ref_a="1112223AB1112C0001AB",
-            cadastral_ref_b="1112223AB1112C0001AB",
-            address_a="Veto Repoint A",
-            address_b="Veto Repoint A bis",
-        )
-        # Reuse property A's row for one side of the merge by re-pointing
-        # a listing onto it, standing in for "A itself already had a
-        # listing and now merges" without fighting _insert_pair's own
-        # property-creation shape.
-        listing_on_a = _insert_listing(
-            dedup_db, prop_a, "idealista", "veto-repoint-a-listing"
+        # Cross-source (issue #197 same-source skip) + matching
+        # cadastral_ref — the strongest, always-`merge` signal — so A and B
+        # merge for real, nothing to do with the veto against C.
+        listing_on_a = _insert_listing(dedup_db, prop_a, "solvia", "veto-repoint-a")
+        listing_on_b = _insert_listing(
+            dedup_db, prop_b, "servihabitat", "veto-repoint-b"
         )
         dedup_db.commit()
 
         result = engine.run(dedup_db)
-        assert result.merged >= 1
+        assert result.merged == 1
 
         with dedup_db.cursor() as cur:
             cur.execute(
-                "SELECT property_id FROM listing WHERE id = %s", (listing_on_a,)
+                "SELECT property_id FROM listing WHERE id = ANY(%s)",
+                ([listing_on_a, listing_on_b],),
             )
-            (current_prop_a,) = cur.fetchone()
+            landed = {r[0] for r in cur.fetchall()}
+        # Genuinely unified, and specifically onto B (the lower id) — A
+        # really did lose, the precondition this test exists to prove.
+        assert landed == {prop_b}
 
-        # A's identity may have moved (it could be the survivor OR the
-        # loser of whatever merge(s) happened) — read where it landed and
-        # assert the veto against C now names THAT id, never lost.
         with dedup_db.cursor() as cur:
             cur.execute(
                 "SELECT property_lo_id, property_hi_id FROM property_merge_veto"
@@ -2493,9 +2509,224 @@ class TestPropertyPairVeto:
             veto_rows = cur.fetchall()
         assert len(veto_rows) == 1
         veto_lo, veto_hi = veto_rows[0]
-        assert prop_c in (veto_lo, veto_hi)
-        other_side = veto_hi if veto_lo == prop_c else veto_lo
-        assert other_side == current_prop_a
+        assert {veto_lo, veto_hi} == {prop_b, prop_c}
+
+    def test_veto_repoint_collision_is_absorbed_without_orphan_or_conflict(
+        self, dedup_db
+    ):
+        """Two INDEPENDENT vetoes exist against the same third property C —
+        one against A, one against B. When A and B later merge for an
+        unrelated reason, repointing both vetoes lands on the IDENTICAL
+        (survivor, C) pair — the collision `ON CONFLICT (property_lo_id,
+        property_hi_id) DO NOTHING` exists to absorb. Assert it actually
+        does: exactly one surviving veto row, no UNIQUE violation, no
+        orphaned row still naming a property_id nothing points to any
+        more."""
+        prop_b = _insert_property(
+            dedup_db, address="Collision B", cadastral_ref="2223334BC2223D0002BC"
+        )
+        prop_a = _insert_property(
+            dedup_db, address="Collision A", cadastral_ref="2223334BC2223D0002BC"
+        )
+        prop_c = _insert_property(dedup_db, address="Collision C")
+
+        with dedup_db.cursor() as cur:
+            for prop in (prop_a, prop_b):
+                lo, hi = sorted((prop, prop_c))
+                cur.execute(
+                    "INSERT INTO property_merge_veto (property_lo_id, property_hi_id) "
+                    "VALUES (%s, %s)",
+                    (lo, hi),
+                )
+        dedup_db.commit()
+
+        listing_on_a = _insert_listing(dedup_db, prop_a, "solvia", "collision-a")
+        listing_on_b = _insert_listing(dedup_db, prop_b, "servihabitat", "collision-b")
+        dedup_db.commit()
+
+        result = engine.run(dedup_db)
+        assert result.merged == 1
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT property_id FROM listing WHERE id = ANY(%s)",
+                ([listing_on_a, listing_on_b],),
+            )
+            survivors = [r[0] for r in cur.fetchall()]
+        assert len(survivors) == 1
+        survivor = survivors[0]
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT property_lo_id, property_hi_id FROM property_merge_veto"
+            )
+            veto_rows = cur.fetchall()
+        # The collision was absorbed — exactly one row survives, not two,
+        # and it isn't orphaned on a losing property_id.
+        assert len(veto_rows) == 1
+        veto_lo, veto_hi = veto_rows[0]
+        assert {veto_lo, veto_hi} == {survivor, prop_c}
+
+    def test_veto_committed_mid_run_by_a_concurrent_action_is_refused_but_does_not_crash_the_pass(
+        self, dedup_db
+    ):
+        """PR #611's second review, M-1 (promoted to blocker): a human
+        tapping "Rechazar" through the dashboard enqueues a `reject_pair`
+        action that a SEPARATE process (the ETL container's action poll
+        loop) drains and commits WHILE an ~84-minute `ps dedup run` pass
+        is already in flight. `_run` loads `vetoed_property_pairs` ONCE at
+        the top, so a veto committed after that load, for a pair not yet
+        reached, is invisible to the cheap in-memory check —
+        `perform_merge`'s own fresh, transactional check is what actually
+        catches it. Before this fix that raised a bare `ValueError` out of
+        `_run`, `engine.run()`, and `run_dedup`, killing the whole pass —
+        reproduced live: every pair after the point in the run where the
+        owner's tap landed went uncompared.
+
+        Reproduced here deterministically (no thread-scheduling luck
+        needed) by monkeypatching `evaluate_pair` to commit the
+        concurrent veto — via a genuinely SEPARATE connection, so it's a
+        real concurrent commit, not a same-transaction shortcut — at the
+        exact moment `_run` reaches the target pair. A second, unrelated
+        pair proves the pass genuinely continues afterward rather than
+        merely not raising.
+        """
+        prop_b = _insert_property(
+            dedup_db, address="Race B", cadastral_ref="3334445CD3334E0003CD"
+        )
+        prop_a = _insert_property(
+            dedup_db, address="Race A", cadastral_ref="3334445CD3334E0003CD"
+        )
+        assert prop_b < prop_a
+        listing_a = _insert_listing(dedup_db, prop_a, "solvia", "race-a")
+        listing_b = _insert_listing(dedup_db, prop_b, "servihabitat", "race-b")
+
+        # A second, INDEPENDENT pair the run must still reach and merge
+        # after the refused one — proof the pass continues, not just that
+        # it doesn't raise.
+        _insert_pair(
+            dedup_db,
+            "idealista",
+            "fotocasa",
+            "race-unrelated",
+            cadastral_ref_a="4445556DE4445F0004DE",
+            cadastral_ref_b="4445556DE4445F0004DE",
+        )
+        dedup_db.commit()
+
+        target_pair = {listing_a, listing_b}
+        veto_committed = False
+        real_evaluate_pair = engine.evaluate_pair
+
+        def racing_evaluate_pair(a, b, hash_cache):
+            nonlocal veto_committed
+            if {a.listing_id, b.listing_id} == target_pair and not veto_committed:
+                veto_committed = True
+                lo, hi = sorted((prop_a, prop_b))
+                other_conn = postgres.get_connection(Config())
+                try:
+                    with other_conn.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO property_merge_veto "
+                            "(property_lo_id, property_hi_id) VALUES (%s, %s)",
+                            (lo, hi),
+                        )
+                    other_conn.commit()
+                finally:
+                    other_conn.close()
+            return real_evaluate_pair(a, b, hash_cache)
+
+        with mock.patch.object(
+            engine, "evaluate_pair", side_effect=racing_evaluate_pair
+        ):
+            result = engine.run(dedup_db)
+
+        assert veto_committed, "fixture didn't reach the target pair — test is vacuous"
+        # Refused, counted — not silently dropped, not crashed.
+        assert result.vetoed_merge_refused == 1
+        # The pass genuinely continued: the unrelated pair still merged.
+        assert result.merged == 1
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT property_id FROM listing WHERE id IN (%s, %s)",
+                (listing_a, listing_b),
+            )
+            landed = {r[0] for r in cur.fetchall()}
+        # The refused pair genuinely was NOT merged.
+        assert landed == {prop_a, prop_b}
+
+    def test_remove_property_veto_deletes_the_row_and_accepts_either_id_order(
+        self, dedup_db
+    ):
+        """Issue #605 Part 2 revision (PR #611 second review, M-2): a veto
+        has no other undo path — this is the only one. Ids in either
+        order (a human running `ps dedup unveto` shouldn't have to know
+        or guess which id is `LEAST`)."""
+        prop_x = _insert_property(dedup_db, address="Unveto X")
+        prop_y = _insert_property(dedup_db, address="Unveto Y")
+        lo, hi = sorted((prop_x, prop_y))
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO property_merge_veto (property_lo_id, property_hi_id) "
+                "VALUES (%s, %s)",
+                (lo, hi),
+            )
+        dedup_db.commit()
+
+        # Reversed order on purpose — must still find and delete it.
+        deleted = engine.remove_property_veto(dedup_db, hi, lo)
+        assert deleted is True
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM property_merge_veto "
+                "WHERE property_lo_id = %s AND property_hi_id = %s",
+                (lo, hi),
+            )
+            assert cur.fetchone()[0] == 0
+
+    def test_remove_property_veto_returns_false_when_nothing_to_remove(self, dedup_db):
+        prop_x = _insert_property(dedup_db, address="Unveto None X")
+        prop_y = _insert_property(dedup_db, address="Unveto None Y")
+        assert engine.remove_property_veto(dedup_db, prop_x, prop_y) is False
+
+    def test_unveto_lifts_the_block_on_a_subsequent_run(self, dedup_db):
+        """The point of the undo path: after `remove_property_veto`, the
+        SAME pair can be freshly evaluated (and, here, auto-merged) again
+        — not just "the row is gone from the table" in isolation."""
+        prop_b = _insert_property(
+            dedup_db, address="Unveto Lift B", cadastral_ref="5556667EF5556G0005EF"
+        )
+        prop_a = _insert_property(
+            dedup_db, address="Unveto Lift A", cadastral_ref="5556667EF5556G0005EF"
+        )
+        lo, hi = sorted((prop_a, prop_b))
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO property_merge_veto (property_lo_id, property_hi_id) "
+                "VALUES (%s, %s)",
+                (lo, hi),
+            )
+        dedup_db.commit()
+        listing_a = _insert_listing(dedup_db, prop_a, "solvia", "unveto-lift-a")
+        listing_b = _insert_listing(dedup_db, prop_b, "servihabitat", "unveto-lift-b")
+        dedup_db.commit()
+
+        blocked = engine.run(dedup_db)
+        assert blocked.merged == 0
+        assert blocked.vetoed_pairs_skipped >= 1
+
+        assert engine.remove_property_veto(dedup_db, prop_a, prop_b) is True
+
+        lifted = engine.run(dedup_db)
+        assert lifted.merged == 1
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT property_id FROM listing WHERE id IN (%s, %s)",
+                (listing_a, listing_b),
+            )
+            assert len({r[0] for r in cur.fetchall()}) == 1
 
 
 class TestRecordedPairBatching:

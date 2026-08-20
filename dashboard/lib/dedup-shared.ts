@@ -64,14 +64,17 @@ export type DedupActionStatus = "pending" | "done" | "failed";
  * just that one listing pair — the engine derives the property pair from
  * the suggestion's listings, marks every currently-pending suggested_merge
  * row between the two properties as rejected, and persists a permanent
- * `property_merge_veto` so no future listing combination between them can
- * be suggested or auto-merged either. See `etl.dedup.engine.
- * reject_property_pair`'s docstring for why the plain `reject` above isn't
- * enough for a grouped card: it only ever bound the exact listing pair it
- * was filed against, leaving every OTHER combination between two
- * multi-listing properties free to resurface — reproduced live, including
- * a case where the very next dedup run auto-merged the two properties a
- * human had just rejected.
+ * `property_merge_veto` so no listing combination between those two
+ * PROPERTY IDS — including ones not yet compared — can be suggested or
+ * auto-merged either. See `etl.dedup.engine.reject_property_pair`'s
+ * docstring for why the plain `reject` above isn't enough for a grouped
+ * card: it only ever bound the exact listing pair it was filed against,
+ * leaving every OTHER combination between two multi-listing properties
+ * free to resurface — reproduced live, including a case where the very
+ * next dedup run auto-merged the two properties a human had just
+ * rejected. NOT covered: a brand-new listing ingested after the veto,
+ * which starts life as its own new property row and isn't guaranteed to
+ * merge onto the correct (vetoed) side — see issue #612.
  */
 export type DedupActionKind = "confirm" | "reject" | "reject_pair";
 

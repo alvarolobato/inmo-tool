@@ -314,11 +314,23 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
     // rows for the SAME property pair, the exact multi-row-group shape
     // nothing at phone width exercised before this test (M2: both prior
     // mobile tests seeded exactly one listing pair per property pair).
+    //
+    // Profile-matched (PR #611 second review M-5): the queue's default
+    // order is `profile_relevant DESC, top_confidence DESC, ...` with a
+    // page size of 30 — without a profile match, this fixture's 0.9
+    // confidence is no guarantee of landing on page 1 against a REAL
+    // backlog (unlike a fresh isolated test DB, which this test also
+    // runs against, but the other two tests in this file already made a
+    // profile match a habit, and a real dev-server run against a live
+    // DB is exactly the scenario this would otherwise be silently
+    // flaky under).
+    const profileId = await insertProfile();
     const propA = await insertProperty({ address: `${NAME_PREFIX}Grupo Movil A` });
     const propB = await insertProperty({ address: `${NAME_PREFIX}Grupo Movil B` });
     const listingA1 = await insertListing(propA, { source: "milanuncios", current_price: 175000 });
     const listingA2 = await insertListing(propA, { source: "idealista", current_price: 175000 });
     const listingB1 = await insertListing(propB, { source: "fotocasa", current_price: 175000 });
+    await markProfileMatch(profileId, propA);
     const weakSuggestion = await insertSuggestion(listingA1, listingB1, { match_basis: "fuzzy", confidence: 0.6 });
     const strongSuggestion = await insertSuggestion(listingA2, listingB1, {
       match_basis: "photo_hash",
@@ -360,7 +372,14 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
       // Cancel — this test only proves the UI is usable at phone width,
       // not the real reject round trip (dedup-review.spec.ts's desktop
       // test already covers that, including the Python subprocess call).
+      // PR #611 second review M-5: assert the cancel actually did
+      // something, not just that clicking it didn't throw — the warning
+      // disappears and the button reverts to its normal (non-committing)
+      // label, so a regression that makes cancel a no-op is caught here.
       await card.getByTestId("dedup-reject-cancel").click();
+      await expect(card.getByTestId("dedup-reject-warning")).toHaveCount(0);
+      await expect(card.getByTestId("dedup-reject-cancel")).toHaveCount(0);
+      await expect(card.getByTestId("dedup-reject")).toHaveText(/^rechazar \(2 pares\)$/i);
 
       const hasHorizontalOverflow = await page.evaluate(() => {
         const main = document.querySelector("main.main-content");
@@ -371,6 +390,8 @@ test.describe("#576: /admin/dedup at phone width (iPhone 13 emulation)", () => {
       await pool.query("DELETE FROM suggested_merge WHERE id = ANY($1::bigint[])", [
         [weakSuggestion, strongSuggestion],
       ]);
+      await pool.query("DELETE FROM profile_listing_state WHERE profile_id = $1", [profileId]);
+      await pool.query("DELETE FROM search_profile WHERE id = $1", [profileId]);
       await pool.query("DELETE FROM listing WHERE id = ANY($1::bigint[])", [[listingA1, listingA2, listingB1]]);
       await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [[propA, propB]]);
     }

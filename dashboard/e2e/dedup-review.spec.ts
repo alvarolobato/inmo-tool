@@ -275,14 +275,21 @@ test("collapses every pending listing-pair row for the same two properties into 
 }) => {
   skipIfNoDb(test);
 
-  // property A: 2 listings. property B: 1 listing. 2 listing-pair rows,
-  // same property pair — must render as ONE card, not two.
+  // property A: 3 listings. property B: 1 listing. 3 listing-pair rows,
+  // same property pair — must render as ONE card, not three. N=3 (not
+  // N=2, PR #611 second review M-4) deliberately, so the badge's total
+  // (pair_count) and the toggle's "others" count (pair_count - 1) are
+  // distinctly different numbers (3 vs 2), and this fixture's own
+  // assertion cross-checks both in the SAME string rather than baking a
+  // discrepancy in without catching it, as every prior N=2 version did.
   const propA = await insertProperty({ address: `${NAME_PREFIX}Grupo A` });
   const propB = await insertProperty({ address: `${NAME_PREFIX}Grupo B` });
   const listingA1 = await insertListing(propA, { source: "milanuncios", current_price: 180000 });
   const listingA2 = await insertListing(propA, { source: "idealista", current_price: 180000 });
+  const listingA3 = await insertListing(propA, { source: "pisos", current_price: 180000 });
   const listingB1 = await insertListing(propB, { source: "fotocasa", current_price: 180000 });
-  const weakId = await insertSuggestion(listingA1, listingB1, { match_basis: "fuzzy", confidence: 0.6 });
+  const weakId1 = await insertSuggestion(listingA1, listingB1, { match_basis: "fuzzy", confidence: 0.55 });
+  const weakId2 = await insertSuggestion(listingA3, listingB1, { match_basis: "fuzzy", confidence: 0.6 });
   const strongId = await insertSuggestion(listingA2, listingB1, { match_basis: "photo_hash", confidence: 0.85 });
   const pairKey = pairKeyOf(propA, propB);
 
@@ -292,19 +299,33 @@ test("collapses every pending listing-pair row for the same two properties into 
 
     const card = page.locator(`[data-pair-key="${pairKey}"]`);
     await expect(card).toHaveCount(1);
-    await expect(card).toHaveAttribute("data-pair-count", "2");
+    await expect(card).toHaveAttribute("data-pair-count", "3");
     // Leads with the strongest evidence (photo_hash 85%).
     await expect(card.getByTestId("dedup-match-basis")).toHaveText(/fotos/i);
-    await expect(card.getByTestId("dedup-pair-count-badge")).toHaveText(/2 pares corroborantes/i);
+    // Badge: the TOTAL (3), consistent noun ("pares", never "anuncios").
+    await expect(card.getByTestId("dedup-pair-count-badge")).toHaveText(/3 pares corroborantes/i);
 
-    // The weaker corroborating row is not lost — it's reachable, collapsed.
+    // Toggle: the OTHER count (2, = 3 - 1, excluding the primary shown
+    // above) AND the total (3) both appear together in the SAME string —
+    // PR #611 second review M-4: if the total/others relationship ever
+    // breaks (e.g. both start reading the same field), this single
+    // assertion catches it instead of two independently-plausible
+    // numbers that happen not to collide.
+    const toggle = card.getByTestId("dedup-evidence-toggle");
+    await expect(toggle).toHaveText(/otros 2 pares \(de 3 en total\)/i);
+
+    // The weaker corroborating rows are not lost — reachable, collapsed.
     await expect(card.getByTestId("dedup-evidence-row")).toHaveCount(0);
-    await card.getByTestId("dedup-evidence-toggle").click();
-    await expect(card.getByTestId("dedup-evidence-row")).toHaveCount(1);
-    await expect(card.getByTestId("dedup-evidence-row")).toContainText(/difuso/i);
+    await toggle.click();
+    await expect(card.getByTestId("dedup-evidence-row")).toHaveCount(2);
+    await expect(card.getByTestId("dedup-evidence-row").first()).toContainText(/difuso/i);
   } finally {
-    await pool.query("DELETE FROM suggested_merge WHERE id = ANY($1::bigint[])", [[weakId, strongId]]);
-    await pool.query("DELETE FROM listing WHERE id = ANY($1::bigint[])", [[listingA1, listingA2, listingB1]]);
+    await pool.query("DELETE FROM suggested_merge WHERE id = ANY($1::bigint[])", [
+      [weakId1, weakId2, strongId],
+    ]);
+    await pool.query("DELETE FROM listing WHERE id = ANY($1::bigint[])", [
+      [listingA1, listingA2, listingA3, listingB1],
+    ]);
     await pool.query("DELETE FROM property WHERE id = ANY($1::bigint[])", [[propA, propB]]);
   }
 });

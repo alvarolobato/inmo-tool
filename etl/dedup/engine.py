@@ -177,6 +177,24 @@ class DedupRunResult:
     # evaluate_pair, same "nothing left to score" reasoning as
     # same_property_pending_resolved above, opposite verdict.
     vetoed_pending_resolved: int = 0
+    # Issue #605 Part 2 revision (PR #611 second review, M-3): every
+    # listing pair `_run` skips outright because its two properties are
+    # covered by a `property_merge_veto` — the ordinary case (no pending
+    # row for this exact listing combination, nothing to resolve, just a
+    # silent `continue` before this counter existed). Without this, veto
+    # suppression was completely invisible: no counter, no log line, and
+    # nothing in the CLI or dashboard reads `property_merge_veto` at all.
+    vetoed_pairs_skipped: int = 0
+    # Issue #605 Part 2 revision (PR #611 second review, M-1 — promoted to
+    # blocker): `perform_merge`'s veto guard (see that function) refusing
+    # a merge MID-RUN — a genuine race where a concurrent `reject_pair`
+    # action commits a veto for this exact pair between when
+    # `vetoed_property_pairs` was loaded and this comparison. `_run`
+    # catches the `ValueError` here and keeps going rather than letting it
+    # kill the whole ~84-minute pass (a correct refusal is a business
+    # outcome, not a run-killer — contrast `confirm_suggestion`, where the
+    # SAME raise correctly becomes one `failed` action row).
+    vetoed_merge_refused: int = 0
 
 
 def fetch_listing_records(conn) -> list[ListingRecord]:
@@ -1132,6 +1150,7 @@ def _run(conn, hash_cache: _PhotoHashCache) -> DedupRunResult:
                     pending_vetoed = pending_by_pair.get(pair_key)
                     if pending_vetoed is not None:
                         _resolve_pending_vetoed_property(conn, pending_vetoed, result)
+                    result.vetoed_pairs_skipped += 1
                     continue
 
                 if a.source == b.source:
@@ -1160,9 +1179,26 @@ def _run(conn, hash_cache: _PhotoHashCache) -> DedupRunResult:
                 evaluation = evaluate_pair(a, b, hash_cache)
 
                 if pending is not None:
-                    merge_ids = _reevaluate_pending_suggestion(
-                        conn, a, b, pending, evaluation, result
-                    )
+                    try:
+                        merge_ids = _reevaluate_pending_suggestion(
+                            conn, a, b, pending, evaluation, result
+                        )
+                    except ValueError as exc:
+                        # Issue #605 Part 2 revision (PR #611 second
+                        # review, M-1 — promoted to blocker): the SAME
+                        # race `perform_merge`'s veto guard exists for
+                        # (see below) can fire here too, inside a
+                        # reevaluation's own merge branch. A correct
+                        # refusal must not kill the whole run.
+                        result.vetoed_merge_refused += 1
+                        logger.warning(
+                            "dedup: reevaluation merge refused mid-run by "
+                            "property_merge_veto (listings %s/%s) — %s",
+                            a.listing_id,
+                            b.listing_id,
+                            exc,
+                        )
+                        continue
                     if merge_ids is not None:
                         survivor_id, losing_id = merge_ids
                         listings = [
@@ -1184,9 +1220,40 @@ def _run(conn, hash_cache: _PhotoHashCache) -> DedupRunResult:
                     continue
 
                 if evaluation.decision == "merge":
-                    survivor_id, losing_id, had_conflict = perform_merge(
-                        conn, a, b, evaluation
-                    )
+                    try:
+                        survivor_id, losing_id, had_conflict = perform_merge(
+                            conn, a, b, evaluation
+                        )
+                    except ValueError as exc:
+                        # Issue #605 Part 2 revision (PR #611 second
+                        # review, M-1 — promoted to blocker): a correct
+                        # veto refusal is a business outcome, not a
+                        # run-killer. `_run`'s own pairwise loop already
+                        # skips a vetoed pair before ever reaching
+                        # evaluate_pair (the normal path) — this only
+                        # fires on the genuine race where a concurrent
+                        # `reject_pair` action commits a veto for this
+                        # EXACT pair between when `vetoed_property_pairs`
+                        # was loaded and this comparison. Without this
+                        # catch the ValueError propagated out of
+                        # `engine.run()`, `run_dedup` recorded the whole
+                        # `dedup_runs` row as failed, and every pair after
+                        # this point in an ~84-minute pass went
+                        # uncompared — reproduced live: the owner tapping
+                        # "Rechazar" on his phone mid-run killed the pass.
+                        # Contrast `confirm_suggestion`, where the SAME
+                        # raise correctly becomes one `failed` action row
+                        # for one human's one click — that raise is left
+                        # alone.
+                        result.vetoed_merge_refused += 1
+                        logger.warning(
+                            "dedup: merge refused mid-run by "
+                            "property_merge_veto (listings %s/%s) — %s",
+                            a.listing_id,
+                            b.listing_id,
+                            exc,
+                        )
+                        continue
                     result.merged += 1
                     if had_conflict:
                         result.conflicts += 1
@@ -1700,13 +1767,13 @@ def reject_property_pair(conn, suggestion_id: int) -> int:
     B?", but `reject_suggestion` above only ever bound the exact LISTING
     pair it was filed against, via `suggested_merge`'s listing-keyed skip
     set. Two multi-listing properties can have several listing-pair
-    combinations the queue never showed (or that don't exist yet), so a
-    human's rejection left those free to be freshly suggested — or
-    auto-merged outright — moments later. Reproduced live in PR #611's
-    review: rejecting a 2-row property-pair card through the dashboard,
-    then running `ps dedup run`, brought the identical question straight
-    back; in a second case the very next run auto-merged the two
-    properties the human had just rejected.
+    combinations the queue never showed, so a human's rejection left
+    those free to be freshly suggested — or auto-merged outright —
+    moments later. Reproduced live in PR #611's review: rejecting a 2-row
+    property-pair card through the dashboard, then running `ps dedup
+    run`, brought the identical question straight back; in a second case
+    the very next run auto-merged the two properties the human had just
+    rejected.
 
     Derives the property pair from `suggestion_id`'s own listings (the
     dashboard's representative row — the same one `confirm_suggestion`
@@ -1717,8 +1784,11 @@ def reject_property_pair(conn, suggestion_id: int) -> int:
          the-UI row is caught too.
       2. Persists a `property_merge_veto` row so `_run`'s pairwise loop
          never evaluates, suggests, or auto-merges ANY listing
-         combination between these two properties again — including ones
-         that don't exist yet.
+         combination between these two PROPERTY IDS again — including
+         combinations not yet compared. This does NOT extend to a
+         brand-new listing ingested later as its own new property row
+         until/unless it later merges onto one of these two ids, which
+         isn't guaranteed to land on the correct side — see issue #612.
 
     Returns how many suggested_merge rows were marked rejected (the
     dashboard/CLI caller doesn't need this for correctness — the veto is
@@ -1799,6 +1869,42 @@ def reject_property_pair(conn, suggestion_id: int) -> int:
         )
     conn.commit()
     return len(rejected_ids)
+
+
+def remove_property_veto(conn, property_id_a: int, property_id_b: int) -> bool:
+    """Undo a `property_merge_veto` (issue #605 Part 2 revision — PR #611
+    second review, M-2).
+
+    Nothing else can clear one: `ps dedup revert` undoes a MERGE by its
+    `property_merge_log` id, and `ps db query` is SELECT-only (see
+    `cli/lib/sql_guard.py`). Sticky-by-default is the right call for a
+    human's explicit "these are not the same property" — same permanence
+    D-024 already established for a plain listing-pair reject — but a
+    veto that widens onto property ids a human never actually looked at
+    (via `perform_merge`'s repoint step, when one of the two vetoed
+    properties later loses an unrelated merge) needs a real undo path,
+    not just a theoretical "it's sticky, ask the owner to file a bug."
+
+    Accepts the two ids in EITHER order — normalizes to
+    (property_lo_id, property_hi_id) itself, mirroring every other
+    property-pair function in this module, so a caller never has to know
+    or guess which one is `LEAST`.
+
+    Returns whether a row was actually deleted (False if no veto existed
+    for this pair — not an error, since a human double-running `ps dedup
+    unveto` on an already-cleared pair should get a clear "already gone"
+    answer, not a crash).
+    """
+    property_lo_id, property_hi_id = sorted((property_id_a, property_id_b))
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM property_merge_veto "
+            "WHERE property_lo_id = %s AND property_hi_id = %s",
+            (property_lo_id, property_hi_id),
+        )
+        deleted = cur.rowcount > 0
+    conn.commit()
+    return deleted
 
 
 def resolve_conflict(conn, suggestion_id: int) -> None:

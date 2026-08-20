@@ -59,6 +59,33 @@ def _cmd_run(conn) -> int:
             f"suggestion(s) whose PROPERTY pair was vetoed by an earlier "
             f"rejection — marked rejected, no new merge performed."
         )
+    if result.vetoed_pairs_skipped:
+        # Issue #605 Part 2 revision (PR #611 second review, M-3): before
+        # this counter existed, veto suppression was completely silent —
+        # no counter, no log line, and nothing in the CLI or dashboard
+        # ever read property_merge_veto. Skipped before evaluate_pair, so
+        # invisible in "Compared ..." above by construction (same
+        # same_source_skipped precedent below).
+        print(
+            f"Skipped {result.vetoed_pairs_skipped} pair(s) covered by a "
+            f"property_merge_veto (issue #605 Part 2 — a human rejected "
+            f"that property pair). Use `ps dedup unveto <id> <id>` to "
+            f"undo one."
+        )
+    if result.vetoed_merge_refused:
+        # Issue #605 Part 2 revision (PR #611 second review, M-1): the
+        # rare race — a veto committed by a concurrent action after this
+        # pair's evaluation had already started. Refused correctly, run
+        # continued; surfaced here so an operator can tell "the pass
+        # skipped some vetoed work" (expected, silent-by-design in
+        # vetoed_pairs_skipped above) apart from "the pass hit a live
+        # race" (worth a glance, not an error).
+        print(
+            f"WARNING: {result.vetoed_merge_refused} merge attempt(s) "
+            f"refused mid-run by a property_merge_veto committed by a "
+            f"concurrent action (race, not an error) — those pairs will "
+            f"be swept to 'rejected' on the next run."
+        )
     if result.same_source_skipped:
         # Issue #197: same-source pairs are skipped before ever reaching
         # evaluate_pair, so they're invisible in the "Compared ..." line
@@ -149,6 +176,26 @@ def _cmd_reject_pair(conn, suggestion_id: int) -> int:
         f"({count} pending suggestion(s) marked rejected) — permanently "
         "vetoed from future merge/suggestion."
     )
+    return 0
+
+
+def _cmd_unveto(conn, property_id_a: int, property_id_b: int) -> int:
+    """`ps dedup unveto <id> <id>` — issue #605 Part 2 revision (PR #611
+    second review, M-2). Undoes a `property_merge_veto` — the only way to
+    clear one, since it never expires on its own. Ids in either order —
+    see `engine.remove_property_veto`'s docstring for why."""
+    deleted = engine.remove_property_veto(conn, property_id_a, property_id_b)
+    if deleted:
+        print(
+            f"Removed the veto between properties {property_id_a} and "
+            f"{property_id_b} — they can be suggested/auto-merged again "
+            "on a future dedup run."
+        )
+    else:
+        print(
+            f"No veto existed between properties {property_id_a} and "
+            f"{property_id_b} — nothing to remove."
+        )
     return 0
 
 
@@ -294,6 +341,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     reject_pair_parser.add_argument("suggestion_id", type=int)
+    unveto_parser = subparsers.add_parser(
+        "unveto",
+        help=(
+            "Undo a property_merge_veto between two property ids "
+            "(issue #605 Part 2 revision, PR #611 second review, M-2) — "
+            "the only way to clear one, since it never expires on its own"
+        ),
+    )
+    unveto_parser.add_argument("property_id_a", type=int)
+    unveto_parser.add_argument("property_id_b", type=int)
     resolve_parser = subparsers.add_parser(
         "resolve-conflict", help="Clear a merge-time state conflict flag"
     )
@@ -360,6 +417,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_reject(conn, args.suggestion_id)
         if args.subcommand == "reject-pair":
             return _cmd_reject_pair(conn, args.suggestion_id)
+        if args.subcommand == "unveto":
+            return _cmd_unveto(conn, args.property_id_a, args.property_id_b)
         if args.subcommand == "process-actions":
             return _cmd_process_actions(conn)
         if args.subcommand == "purge-same-source":

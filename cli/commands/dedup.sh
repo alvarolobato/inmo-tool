@@ -26,6 +26,10 @@ Subcommands:
                           (issue #605 Part 2 revision) — permanently vetoes
                           every listing combination between the two
                           properties, not just this one suggested_merge row
+  unveto <id> <id>        Undo a property_merge_veto between two property
+                          ids (issue #605 Part 2 revision, PR #611 second
+                          review M-2) — the only way to clear one, since
+                          it never expires on its own
   resolve-conflict <id>   Clear a merge-time state conflict flag
   process-actions         Drain pending dashboard review-queue confirm/reject
                           requests once (the long-running container drains
@@ -117,6 +121,19 @@ _cmd_with_suggestion_id() {
     _run_in_etl python -m etl.dedup.cli "$subcmd" "$id"
 }
 
+# unveto takes TWO property ids (not a suggested_merge id) — issue #605
+# Part 2 revision, PR #611 second review M-2.
+_cmd_unveto() {
+    local a="${1:-}"
+    local b="${2:-}"
+    if [ -z "$a" ] || [ -z "$b" ]; then
+        echo -e "${RED}ps dedup unveto: missing <property_id_a> <property_id_b>${NC}" >&2
+        usage >&2
+        exit 1
+    fi
+    _run_in_etl python -m etl.dedup.cli unveto "$a" "$b"
+}
+
 cmd_process_actions() {
     _run_in_etl python -m etl.dedup.cli process-actions
 }
@@ -153,6 +170,7 @@ case "$SUBCMD" in
     confirm)          _cmd_with_suggestion_id confirm "$@" ;;
     reject)           _cmd_with_suggestion_id reject "$@" ;;
     reject-pair)      _cmd_with_suggestion_id reject-pair "$@" ;;
+    unveto)           _cmd_unveto "$@" ;;
     resolve-conflict) _cmd_with_suggestion_id resolve-conflict "$@" ;;
     process-actions)  cmd_process_actions ;;
     purge-same-source) cmd_purge_same_source ;;

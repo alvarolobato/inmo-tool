@@ -22,7 +22,7 @@ export default function DedupReviewPage() {
       <p style={{ fontSize: 13, color: "var(--fg-muted)" }}>
         El motor de deduplicación compara cada par de anuncios y fusiona automáticamente los que
         tienen evidencia concluyente. Los pares con evidencia media quedan aquí, agrupados por
-        pareja de propiedades — una tarjeta es una decisión, aunque varios anuncios la corroboren:
+        pareja de propiedades — una tarjeta es una decisión, aunque varios pares la corroboren:
         confirma la fusión o rechaza la pareja si en realidad son propiedades distintas.
       </p>
       <PropertyPairQueue />

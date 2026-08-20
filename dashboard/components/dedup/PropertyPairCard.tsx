@@ -259,7 +259,7 @@ export function PropertyPairCard({
           {pair.pair_count > 1 && (
             <span
               data-testid="dedup-pair-count-badge"
-              title="Cuántas comparaciones de anuncios corroboran esta misma pregunta — puede haber menos anuncios distintos que pares, si un anuncio aparece en más de uno"
+              title="Cuántos pares corroboran esta misma pareja de propiedades"
               style={{
                 fontSize: 11,
                 fontWeight: 600,
@@ -318,7 +318,7 @@ export function PropertyPairCard({
               textAlign: "left",
             }}
           >
-            {expanded ? "Ocultar" : "Ver"} los otros {corroborating.length} pares que corroboran esta pareja de propiedades
+            {expanded ? "Ocultar" : "Ver"} los otros {corroborating.length} pares (de {pair.pair_count} en total) que corroboran esta pareja de propiedades
           </button>
           {expanded && (
             <ul data-testid="dedup-evidence-list" style={{ listStyle: "none", margin: "6px 0 0", padding: 0 }}>
