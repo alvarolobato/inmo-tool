@@ -69,12 +69,12 @@
 import { sql } from "@/lib/db-write";
 import {
   defaultFreshnessIntervalHours,
-  deriveFreshnessState,
   freshnessCycleStuckAfterHours,
+  isCaptureOnlyForFreshness,
+  resolveConnectorFreshnessState,
 } from "@/lib/db/connectors";
 import type { ConnectorFreshnessKind } from "@/lib/connectors-schema";
 import { getStalenessConfig } from "@/lib/captura-staleness-config";
-import { resolveStalenessDays } from "@/lib/captura-tasks";
 
 export const DEFAULT_STALE_THRESHOLD_HOURS = 24;
 
@@ -156,10 +156,14 @@ export interface DataHealthResponse {
    */
   overallUnknown: boolean;
   /**
-   * The in-scope connector/portal whose last success is oldest (one that
-   * never succeeded sorts oldest). Drives the TopBar headline age and names
-   * the most-overdue source in the tooltip. null when nothing is in scope
-   * (see `overallUnknown`).
+   * Drives the TopBar headline age and names the most-overdue source in the
+   * tooltip. null when nothing is in scope (see `overallUnknown`). Among
+   * STALE connectors, a measurable regression (was fresh, went stale) is
+   * always named ahead of one that has literally never succeeded — a
+   * never-succeeded entry that permanently owns the headline is the
+   * alarm-fatigue mirror of #586's original bug (issue #586, review finding
+   * B2 on PR #590). When nothing is stale, this is simply the oldest
+   * still-fresh success (for the "al día · hace Xh" age display).
    */
   stalestConnector: {
     connector: string;
@@ -296,37 +300,34 @@ export async function getConnectorFreshness(opts?: {
   const connectors: ConnectorFreshness[] = rows.map((row) => {
     const enabled = row.enabled === true;
     const captureEnabled = row.capture_enabled === true;
-    const captureOnly = row.supports_discovery === false;
-    // Issue #586: in-scope predicate — a crawl connector counts when
-    // enabled; a capture-only portal counts when capture processing is
-    // enabled, REGARDLESS of its (by-design-false) crawl `enabled` flag.
+    // Issue #586/D-125: SAME predicate `listConnectors()` uses (`lib/db/
+    // connectors.ts`) — not raw `supports_discovery=false`, which would also
+    // catch a hypothetical future non-discovery connector that isn't
+    // extension-capturable and permanently strand it "due" (Opus review, PR
+    // #590).
+    const captureOnly = isCaptureOnlyForFreshness(row.connector, row.supports_discovery);
+    // In-scope predicate — a crawl connector counts when enabled; a
+    // capture-only portal counts when capture processing is enabled,
+    // REGARDLESS of its (by-design-false) crawl `enabled` flag.
     const inScope = enabled || (captureOnly && captureEnabled);
 
-    const f = captureOnly
-      ? // Capture-only portal: no crawl cycle exists (discover() never runs
-        // for it), so feed the SAME state machine a discrete "last done
-        // capture" instead of a cycle — cycleStartedAt/scope counts are
-        // always null, so this can only ever resolve to "fresh" or "due".
-        deriveFreshnessState({
-          intervalHoursOverrideRaw: row.freshness_interval_hours,
-          lastFreshAt: row.last_capture_done_at,
-          cycleStartedAt: null,
-          targetScopeCount: null,
-          coveredScopeCount: null,
-          defaultIntervalHours: resolveStalenessDays(row.connector, stalenessConfig) * 24,
-          stuckAfterHours,
-          nowMs,
-        })
-      : deriveFreshnessState({
-          intervalHoursOverrideRaw: row.freshness_interval_hours,
-          lastFreshAt: row.last_fresh_at,
-          cycleStartedAt: row.cycle_started_at,
-          targetScopeCount: numOrNull(row.cycle_target_scope_count),
-          coveredScopeCount: numOrNull(row.covered_scope_count),
-          defaultIntervalHours,
-          stuckAfterHours,
-          nowMs,
-        });
+    // Issue #586/D-125: the SAME helper `listConnectors()` calls for the
+    // /etl/connectors pill — one definition, so the two surfaces cannot
+    // structurally diverge on what "due" means.
+    const f = resolveConnectorFreshnessState({
+      connectorName: row.connector,
+      supportsDiscovery: row.supports_discovery,
+      freshnessIntervalHoursRaw: row.freshness_interval_hours,
+      lastFreshAt: row.last_fresh_at,
+      cycleStartedAt: row.cycle_started_at,
+      targetScopeCount: numOrNull(row.cycle_target_scope_count),
+      coveredScopeCount: numOrNull(row.covered_scope_count),
+      lastCaptureDoneAt: row.last_capture_done_at,
+      defaultIntervalHours,
+      stalenessConfig,
+      stuckAfterHours,
+      nowMs,
+    });
     // Stale = in scope AND (due or stuck). "refreshing" is a live cycle, not
     // stale; "fresh" is obviously not stale. An out-of-scope connector is
     // never counted as stale — its silence is intentional (issue #241
@@ -354,21 +355,49 @@ export async function getConnectorFreshness(opts?: {
   const overallRefreshing =
     !overallUnknown && inScopeConnectors.some((c) => c.state === "refreshing");
 
-  // Stalest = oldest last-success among IN-SCOPE connectors/portals; one
-  // that never succeeded (null) sorts as the oldest of all.
+  // Stalest = the connector/portal the headline names (issue #586, review
+  // finding B2 on PR #590). Two passes, deliberately NOT "null sorts oldest
+  // of all" (the pre-B2 rule): a "never succeeded/captured" entry (hipoges,
+  // say — capture_enabled but the owner has simply never used the extension
+  // on it) is real due-ness for `overallStale`/`isStale`, but naming it as
+  // THE headline permanently buries a genuine regression that DOES have a
+  // measurable age (altamira going stale 11 days in) behind an entry that
+  // will never clear on its own — the exact alarm-fatigue mirror of #586's
+  // original "always green" bug, just inverted to "always the wrong name".
+  //   1. Prefer the oldest MEASURABLE age among STALE connectors — an entry
+  //      that regressed from a working state is the actionable one.
+  //   2. Only when no stale connector has a measurable age (every stale one
+  //      has literally never succeeded) fall back to naming one of those —
+  //      still real, still worth surfacing, just lowest priority.
+  //   3. Nothing stale at all → show the oldest still-FRESH success, for the
+  //      "Datos al día · hace Xh" age display (unchanged from before B2).
   let stalest: ConnectorFreshness | null = null;
-  for (const c of inScopeConnectors) {
-    if (stalest === null) {
-      stalest = c;
-      continue;
+  const staleWithAge = inScopeConnectors.filter((c) => c.isStale && c.lastSuccessAt !== null);
+  const staleNeverSucceeded = inScopeConnectors.filter(
+    (c) => c.isStale && c.lastSuccessAt === null,
+  );
+  if (staleWithAge.length > 0) {
+    for (const c of staleWithAge) {
+      if (
+        stalest === null ||
+        new Date(c.lastSuccessAt!).getTime() < new Date(stalest.lastSuccessAt!).getTime()
+      ) {
+        stalest = c;
+      }
     }
-    const a = c.lastSuccessAt;
-    const b = stalest.lastSuccessAt;
-    if (a === null) {
-      // null is the most stale; keep the first null we saw.
-      if (b !== null) stalest = c;
-    } else if (b !== null && new Date(a).getTime() < new Date(b).getTime()) {
-      stalest = c;
+  } else if (staleNeverSucceeded.length > 0) {
+    // Deterministic: FRESHNESS_QUERY orders by connector_name, so this is
+    // always the same connector for a given data set, not query-plan luck.
+    stalest = staleNeverSucceeded[0];
+  } else {
+    for (const c of inScopeConnectors) {
+      if (c.lastSuccessAt === null) continue; // can't happen — null is always stale.
+      if (
+        stalest === null ||
+        new Date(c.lastSuccessAt).getTime() < new Date(stalest.lastSuccessAt!).getTime()
+      ) {
+        stalest = c;
+      }
     }
   }
 

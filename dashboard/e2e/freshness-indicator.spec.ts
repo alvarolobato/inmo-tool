@@ -128,3 +128,154 @@ test("freshness pill renders real connector-derived freshness, not the empty fal
   await expect(page.getByTestId("error-display")).toHaveCount(0);
   await expect(page.getByText("Detalles técnicos")).toHaveCount(0);
 });
+
+// ── Issue #586 (review findings B1/B2, PR #590) ────────────────────────────
+//
+// These three cover the exact scenarios the issue's Exit Criteria named
+// (EC-1/2/3) but the original PR left unautomated. Two are mocked
+// (`page.route`) rather than DB-seeded: this spec file runs against the
+// SHARED e2e Postgres, not a per-run isolated database (AGENTS.md — pytest/
+// vitest get isolation, `jobs.dashboard-e2e` talks to the shared service DB
+// directly), so a real connector already sitting stale there could make an
+// "everything fresh" assertion flaky for reasons that have nothing to do
+// with this code. Mocking the API response tests exactly what these two
+// scenarios are actually about — the FRONTEND's response to a given
+// payload — deterministically. The third genuinely needs the real pipeline
+// (seed → query → render), so it stays DB-backed, scoped to one real capture
+// portal's own state rather than the global dot (which any other stale
+// connector in the shared DB could already be driving amber).
+
+test("all fresh stays green (EC-2)", async ({ page }) => {
+  const now = new Date().toISOString();
+  await page.route("**/api/data-health", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        connectors: [
+          {
+            connector: "e2e-mock-fresh",
+            enabled: true,
+            inScope: true,
+            lastSuccessAt: now,
+            lastRunAt: now,
+            lastRunStatus: "ok",
+            state: "fresh",
+            isStale: false,
+          },
+        ],
+        overallStale: false,
+        overallRefreshing: false,
+        overallUnknown: false,
+        stalestConnector: { connector: "e2e-mock-fresh", lastSuccessAt: now, lastRunStatus: "ok" },
+        freshestSuccessAt: now,
+      }),
+    });
+  });
+
+  await page.goto("/");
+  const pill = page.getByTestId("freshness-indicator");
+  // The "hace Xm" age suffix only appears once the mocked payload was
+  // actually consumed — plain "Datos al día" alone is also the UNFETCHED
+  // initial default, so asserting the suffix rules out a false pass where
+  // the mock never actually intercepted anything.
+  await expect(pill).toHaveText(/Datos al día · hace \d+m/);
+});
+
+test("API failure shows unknown, not green (EC-3)", async ({ page }) => {
+  await page.route("**/api/data-health", async (route) => {
+    await route.fulfill({
+      status: 200, // the route itself always returns 200 (issue #241) — the
+      // failure is INSIDE getConnectorFreshness(), degraded server-side.
+      contentType: "application/json",
+      body: JSON.stringify({
+        connectors: [],
+        overallStale: false,
+        overallRefreshing: false,
+        overallUnknown: true,
+        stalestConnector: null,
+        freshestSuccessAt: null,
+      }),
+    });
+  });
+
+  await page.goto("/");
+  const pill = page.getByTestId("freshness-indicator");
+  await expect(pill).toHaveText("Estado desconocido");
+  await expect(pill).not.toHaveText(/Datos al día/);
+});
+
+test.describe("capture-portal staleness (EC-1) — real DB, scoped to one real portal", () => {
+  // MUST be a real CAPTURE_PORTALS name: isCaptureOnlyForFreshness() gates on
+  // isCapturePortal(), so a synthetic e2e-only name would never enter the
+  // capture-only branch this test is covering. `aliseda` genuinely carries
+  // production-shaped data on the shared e2e DB already — this test saves
+  // and restores its `connector_config` row and only deletes the ONE
+  // extension_capture row it inserts (a distinctive marker URL), never
+  // touching aliseda's real capture history.
+  const PORTAL = "aliseda";
+  const MARKER_URL = "https://e2e-freshness-586.invalid/marker";
+  let priorConfig: {
+    enabled: boolean;
+    capture_enabled: boolean | null;
+    freshness_interval_hours: number | null;
+  } | null = null;
+  let hadConfigRow = false;
+
+  test.beforeEach(async () => {
+    test.skip(!dbAvailable, "no reachable Postgres");
+    const { rows } = await pool.query(
+      `SELECT enabled, capture_enabled, freshness_interval_hours
+         FROM connector_config WHERE connector_name = $1`,
+      [PORTAL],
+    );
+    hadConfigRow = rows.length > 0;
+    priorConfig = rows[0] ?? null;
+  });
+
+  test.afterEach(async () => {
+    if (!dbAvailable) return;
+    await pool.query("DELETE FROM extension_capture WHERE connector_name = $1 AND url = $2", [
+      PORTAL,
+      MARKER_URL,
+    ]);
+    if (hadConfigRow && priorConfig) {
+      await pool.query(
+        `UPDATE connector_config
+            SET enabled = $2, capture_enabled = $3, freshness_interval_hours = $4
+          WHERE connector_name = $1`,
+        [PORTAL, priorConfig.enabled, priorConfig.capture_enabled, priorConfig.freshness_interval_hours],
+      );
+    } else if (!hadConfigRow) {
+      await pool.query("DELETE FROM connector_config WHERE connector_name = $1", [PORTAL]);
+    }
+  });
+
+  test("a stale capture-only portal reads due/stale on its own /etl/connectors pill", async ({
+    page,
+  }) => {
+    // Force a deterministic 24h window and a 'done' capture 11 days ago —
+    // unambiguously past it, mirroring the owner's real "hace dos días".
+    await pool.query(
+      `INSERT INTO connector_config (connector_name, enabled, capture_enabled, freshness_interval_hours)
+       VALUES ($1, false, true, 24)
+       ON CONFLICT (connector_name) DO UPDATE
+          SET enabled = false, capture_enabled = true, freshness_interval_hours = 24`,
+      [PORTAL],
+    );
+    await pool.query(
+      `INSERT INTO extension_capture (url, connector_name, status, created_at)
+       VALUES ($1, $2, 'done', NOW() - interval '11 days')`,
+      [MARKER_URL, PORTAL],
+    );
+
+    await page.goto("/etl/connectors");
+    await page.getByTestId(`expand-${PORTAL}`).click();
+    const stateBadge = page.getByTestId(`freshness-state-${PORTAL}`);
+    await expect(stateBadge).toBeVisible();
+    // "obsoleto, sin ciclo iniciado" (due) — never "fresco" — proving the
+    // pill reads this portal's real extension_capture staleness, not a
+    // permanently-empty connector_freshness_state row (issue #586 review B1).
+    await expect(stateBadge).toContainText("obsoleto");
+  });
+});

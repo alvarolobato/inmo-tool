@@ -16,6 +16,9 @@ import {
   type DerivedScopeSource,
   type GeographyOverride,
 } from "@/lib/connectors-schema";
+import { isCapturePortal } from "@/lib/worklist";
+import { resolveStalenessDays, type StalenessConfig } from "@/lib/captura-tasks";
+import { getStalenessConfig } from "@/lib/captura-staleness-config";
 
 /**
  * Global freshness-cadence knobs, resolved dashboard-side (issue #295, D-050).
@@ -115,6 +118,87 @@ export function deriveFreshnessState(params: {
   };
 }
 
+/**
+ * Issue #586/D-125 — is `connectorName` a CAPTURE-ONLY portal for freshness
+ * purposes: `supportsDiscovery=false` (discover() never runs for it) AND it
+ * is on the #454 extension-capturable allow-list (`isCapturePortal`). The
+ * second half matters: a hypothetical future non-discovery connector that
+ * ISN'T extension-capturable would otherwise be pulled into the capture
+ * branch below with no `extension_capture` rows ever possible for it —
+ * permanently "due" with no way to ever clear (Opus review, PR #590).
+ */
+export function isCaptureOnlyForFreshness(
+  connectorName: string,
+  supportsDiscovery: boolean,
+): boolean {
+  // Strict `=== false`, not `!supportsDiscovery`: the column is NOT NULL
+  // DEFAULT true in the schema, so a real row is always a real boolean, but
+  // a test double / partial row that omits the field must NOT silently read
+  // as capture-only (that inverted default was caught by review on PR #590 —
+  // it happened to be masked in existing mocks by capture_enabled also being
+  // absent, not actually correct).
+  return supportsDiscovery === false && isCapturePortal(connectorName);
+}
+
+/**
+ * Resolve one connector's freshness STATE — the ONE definition shared by
+ * `getConnectorFreshness()` (dashboard/lib/db/freshness.ts, drives the
+ * TopBar dot) and `listConnectors()` below (drives the /etl/connectors
+ * pill), so the two surfaces cannot structurally diverge on what "due"
+ * means (issue #586, D-125). Before this extraction, `listConnectors()`
+ * read `connector_freshness_state` alone for every connector including
+ * capture-only ones — a table with NO rows at all for a portal whose crawl
+ * never runs — so the pill read "obsoleto, sin ciclo iniciado" forever for
+ * every capture-only portal while the TopBar dot correctly read some of
+ * them fresh (Opus review, PR #590). Both call sites now call this.
+ *
+ * A crawl connector is fed its freshness CYCLE (`connector_freshness_state`,
+ * issue #295/D-050). A capture-only portal (see `isCaptureOnlyForFreshness`)
+ * has no cycle — discover() never runs for it — so it is instead fed its
+ * latest 'done' `extension_capture` timestamp as `lastFreshAt`, no cycle
+ * (`cycleStartedAt` always null, so it can only ever resolve to "fresh" or
+ * "due"), and a different default window: the Captura staleness config
+ * (issue #289, `resolveStalenessDays`) rather than the crawl default.
+ */
+export function resolveConnectorFreshnessState(params: {
+  connectorName: string;
+  supportsDiscovery: boolean;
+  freshnessIntervalHoursRaw: unknown;
+  lastFreshAt: Date | string | null;
+  cycleStartedAt: Date | string | null;
+  targetScopeCount: number | null;
+  coveredScopeCount: number | null;
+  lastCaptureDoneAt: Date | string | null;
+  defaultIntervalHours: number;
+  stalenessConfig: StalenessConfig;
+  stuckAfterHours: number;
+  nowMs: number;
+}): ConnectorFreshnessState {
+  if (isCaptureOnlyForFreshness(params.connectorName, params.supportsDiscovery)) {
+    return deriveFreshnessState({
+      intervalHoursOverrideRaw: params.freshnessIntervalHoursRaw,
+      lastFreshAt: params.lastCaptureDoneAt,
+      cycleStartedAt: null,
+      targetScopeCount: null,
+      coveredScopeCount: null,
+      defaultIntervalHours:
+        resolveStalenessDays(params.connectorName, params.stalenessConfig) * 24,
+      stuckAfterHours: params.stuckAfterHours,
+      nowMs: params.nowMs,
+    });
+  }
+  return deriveFreshnessState({
+    intervalHoursOverrideRaw: params.freshnessIntervalHoursRaw,
+    lastFreshAt: params.lastFreshAt,
+    cycleStartedAt: params.cycleStartedAt,
+    targetScopeCount: params.targetScopeCount,
+    coveredScopeCount: params.coveredScopeCount,
+    defaultIntervalHours: params.defaultIntervalHours,
+    stuckAfterHours: params.stuckAfterHours,
+    nowMs: params.nowMs,
+  });
+}
+
 interface RegistryRow {
   connector_name: string;
   registered: boolean;
@@ -138,6 +222,9 @@ interface RegistryRow {
   // How many target scopes have been (re)discovered since the current cycle
   // started — 0 when no cycle is in progress. See the LATERAL below.
   covered_scope_count: number | string | null;
+  // Issue #586: latest 'done' extension_capture for this connector — the
+  // capture-only portals' equivalent of a successful crawl cycle.
+  last_capture_done_at: Date | string | null;
 }
 
 interface LastRunRow {
@@ -383,7 +470,12 @@ export async function listConnectors(): Promise<ConnectorView[]> {
               -- in "refrescando N/M". 0 when no cycle is in progress (the AND
               -- short-circuits on a NULL cycle_started_at). Read live from
               -- connector_scope_state (D-030), exactly as the ETL computes it.
-              COALESCE(cov.covered_count, 0) AS covered_scope_count
+              COALESCE(cov.covered_count, 0) AS covered_scope_count,
+              -- Issue #586: same 'done' extension_capture aggregate freshness.ts
+              -- reads for the TopBar dot — SAME join, so this page's pill and
+              -- the dot can never structurally disagree on a capture-only
+              -- portal's freshness (D-125).
+              cap.last_capture_done_at
          FROM connector_registry g
          LEFT JOIN connector_config c ON c.connector_name = g.connector_name
          LEFT JOIN connector_freshness_state f ON f.connector_name = g.connector_name
@@ -394,6 +486,12 @@ export async function listConnectors(): Promise<ConnectorView[]> {
               AND f.cycle_started_at IS NOT NULL
               AND s.last_discovered_at >= f.cycle_started_at
          ) cov ON true
+         LEFT JOIN (
+           SELECT connector_name, MAX(created_at) AS last_capture_done_at
+             FROM extension_capture
+            WHERE status = 'done'
+            GROUP BY connector_name
+         ) cap ON cap.connector_name = g.connector_name
         ORDER BY g.registered DESC, g.connector_name`,
     ),
     fetchLastRuns(),
@@ -403,6 +501,10 @@ export async function listConnectors(): Promise<ConnectorView[]> {
   const defaultIntervalHours = defaultFreshnessIntervalHours();
   const stuckAfterHours = freshnessCycleStuckAfterHours();
   const nowMs = Date.now();
+  // Issue #586 — read once per call, not once per row (its own loader
+  // already degrades to hardcoded defaults on failure, so this never throws;
+  // see captura-staleness-config.ts).
+  const stalenessConfig = getStalenessConfig();
 
   return registryRows.map((row) => {
     const override = parseGeographyOverride(row.geography_override);
@@ -446,8 +548,14 @@ export async function listConnectors(): Promise<ConnectorView[]> {
       scopeSource,
       // Only meaningful when the scope actually comes from profiles.
       derivedFrom: scopeSource === "profiles" ? derivedFrom : [],
-      freshness: deriveFreshnessState({
-        intervalHoursOverrideRaw: row.freshness_interval_hours,
+      // Issue #586/D-125: SAME helper `getConnectorFreshness()` calls for the
+      // TopBar dot — a capture-only portal reads its freshness from
+      // extension_capture here too, not `connector_freshness_state` alone
+      // (which has no rows at all for a connector whose crawl never runs).
+      freshness: resolveConnectorFreshnessState({
+        connectorName: row.connector_name,
+        supportsDiscovery: supportsDiscovery,
+        freshnessIntervalHoursRaw: row.freshness_interval_hours,
         lastFreshAt: row.last_fresh_at ?? null,
         cycleStartedAt: row.cycle_started_at ?? null,
         targetScopeCount:
@@ -458,7 +566,9 @@ export async function listConnectors(): Promise<ConnectorView[]> {
           row.covered_scope_count === null || row.covered_scope_count === undefined
             ? null
             : num(row.covered_scope_count),
+        lastCaptureDoneAt: row.last_capture_done_at ?? null,
         defaultIntervalHours,
+        stalenessConfig,
         stuckAfterHours,
         nowMs,
       }),

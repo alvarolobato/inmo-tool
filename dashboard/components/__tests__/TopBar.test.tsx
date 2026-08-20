@@ -123,4 +123,21 @@ describe("TopBar", () => {
     render(<TopBar freshnessStale={true} freshnessUnknown={true} />);
     expect(dotElement()).toHaveStyle({ background: "var(--fg-muted)" });
   });
+
+  it("the dot carries its own accessible name (aria-label) — it is the only thing rendered below md, issue #586 review", () => {
+    render(
+      <TopBar
+        freshnessText="Estado desconocido"
+        freshnessStale={false}
+        freshnessUnknown={true}
+      />,
+    );
+    const dot = dotElement();
+    expect(dot).toHaveAttribute("role", "status");
+    expect(dot).toHaveAttribute("aria-label", "Estado desconocido");
+    // Doesn't rely on the (mobile-hidden, `display:none`) text span, which
+    // is also dropped from the accessibility tree there.
+    const pill = screen.getByTestId("freshness-indicator");
+    expect(pill).toHaveAttribute("aria-hidden", "true");
+  });
 });
