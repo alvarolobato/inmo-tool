@@ -22,13 +22,26 @@
  * mid-pass stop now has under flow-major ordering (see batch.ts's loop-body
  * comment for the full explanation).
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// `isFlowCurrent` (#542) reads real `ai_assessment` rows via `cache.ts`'s
+// `getLatestAssessment`, which goes through `@/lib/db-write`'s `sql()`. Every
+// OTHER test in this file bypasses the DB entirely via `runAssessmentBatch`'s
+// injected `isCurrent`/`selectPropertyIds` seams, so mocking it here is
+// harmless to them.
+const mockSql = vi.fn();
+vi.mock("@/lib/db-write", () => ({
+  sql: (...a: unknown[]) => mockSql(...a),
+  getPool: () => ({ connect: vi.fn() }),
+}));
+
 import { BudgetExceededError, CircuitBreakerOpenError } from "@/lib/llm";
 import { NoListingsError } from "../shared";
 import { AssessmentParkedError } from "../cache";
 import { LlmQuotaExceededError } from "@/lib/llm-enabled";
 import {
   runAssessmentBatch,
+  isFlowCurrent,
   type BatchFlow,
 } from "../batch";
 
@@ -37,11 +50,69 @@ function makeFlows(): { flows: BatchFlow[]; a: ReturnType<typeof vi.fn>; b: Retu
   const a = vi.fn(async () => undefined);
   const b = vi.fn(async () => undefined);
   const flows: BatchFlow[] = [
-    { type: "occupancy", promptVersion: "occupancy/v2", assess: a },
-    { type: "condition", promptVersion: "condition/v1", assess: b },
+    { types: [{ type: "occupancy", promptVersion: "occupancy/v2" }], assess: a },
+    { types: [{ type: "condition", promptVersion: "condition/v1" }], assess: b },
   ];
   return { flows, a, b };
 }
+
+describe("isFlowCurrent (#542 — multi-type flows, e.g. triage)", () => {
+  beforeEach(() => mockSql.mockReset());
+
+  function row(promptVersion: string) {
+    return {
+      result: {},
+      model: "m",
+      generated_at: "2026-01-01T00:00:00Z",
+      prompt_version: promptVersion,
+      content_hash: "h",
+    };
+  }
+
+  const TRIAGE_FLOW: BatchFlow = {
+    types: [
+      { type: "condition", promptVersion: "condition/v3" },
+      { type: "location", promptVersion: "location/v2" },
+      { type: "opportunity", promptVersion: "opportunity/v2" },
+    ],
+    assess: vi.fn(),
+  };
+
+  it("is current only when EVERY type in flow.types has a current-version verdict", async () => {
+    // condition current, location current, opportunity STALE (v1 on file vs current v2).
+    mockSql
+      .mockResolvedValueOnce([row("condition/v3")])
+      .mockResolvedValueOnce([row("location/v2")])
+      .mockResolvedValueOnce([row("opportunity/v1")]);
+
+    expect(await isFlowCurrent(1, TRIAGE_FLOW)).toBe(false);
+  });
+
+  it("is current when every type has a matching current-version verdict", async () => {
+    mockSql
+      .mockResolvedValueOnce([row("condition/v3")])
+      .mockResolvedValueOnce([row("location/v2")])
+      .mockResolvedValueOnce([row("opportunity/v2")]);
+
+    expect(await isFlowCurrent(1, TRIAGE_FLOW)).toBe(true);
+  });
+
+  it("short-circuits on the FIRST stale/missing type without checking the rest", async () => {
+    mockSql.mockResolvedValueOnce([]); // condition: no row at all -> not current
+
+    expect(await isFlowCurrent(1, TRIAGE_FLOW)).toBe(false);
+    expect(mockSql).toHaveBeenCalledTimes(1); // location/opportunity never queried
+  });
+
+  it("a single-type flow (occupancy/redflags/extract) is current iff its one type is", async () => {
+    const singleType: BatchFlow = {
+      types: [{ type: "occupancy", promptVersion: "occupancy/v3" }],
+      assess: vi.fn(),
+    };
+    mockSql.mockResolvedValueOnce([row("occupancy/v3")]);
+    expect(await isFlowCurrent(1, singleType)).toBe(true);
+  });
+});
 
 describe("runAssessmentBatch", () => {
   it("runs every flow for an unassessed property", async () => {
@@ -67,7 +138,7 @@ describe("runAssessmentBatch", () => {
   it("EC-2: skips a flow whose verdict already matches the current prompt version", async () => {
     const { flows, a, b } = makeFlows();
     // occupancy is current (stale:false), condition is not.
-    const isCurrent = vi.fn(async (_id: number, flow: BatchFlow) => flow.type === "occupancy");
+    const isCurrent = vi.fn(async (_id: number, flow: BatchFlow) => flow.types[0].type === "occupancy");
 
     const result = await runAssessmentBatch({
       flows,
@@ -177,8 +248,8 @@ describe("runAssessmentBatch", () => {
     const a = vi.fn(async () => undefined);
     const b = vi.fn(async () => undefined);
     const flows: BatchFlow[] = [
-      { type: "redflags", promptVersion: "redflags/v6", assess: a },
-      { type: "condition", promptVersion: "condition/v1", assess: b },
+      { types: [{ type: "redflags", promptVersion: "redflags/v6" }], assess: a },
+      { types: [{ type: "condition", promptVersion: "condition/v1" }], assess: b },
     ];
     const trending = [{ candidateType: "servidumbre_paso", count: 4 }];
     const fetchTrendingCandidates = vi.fn(async () => trending);
@@ -204,8 +275,8 @@ describe("runAssessmentBatch", () => {
     const a = vi.fn(async () => undefined);
     const b = vi.fn(async () => undefined);
     const flows: BatchFlow[] = [
-      { type: "redflags", promptVersion: "redflags/v7", assess: a },
-      { type: "condition", promptVersion: "condition/v1", assess: b },
+      { types: [{ type: "redflags", promptVersion: "redflags/v7" }], assess: a },
+      { types: [{ type: "condition", promptVersion: "condition/v1" }], assess: b },
     ];
     const dismissed = [{ slug: "sin_posesion", reason: "duplicado de occupancy" }];
     const fetchDismissedCandidates = vi.fn(async () => dismissed);
@@ -336,13 +407,13 @@ describe("runAssessmentBatch", () => {
       const b = assessFor("condition");
       const c = assessFor("redflags");
       const flows: BatchFlow[] = [
-        { type: "occupancy", promptVersion: "occupancy/v2", assess: a },
-        { type: "condition", promptVersion: "condition/v1", assess: b },
-        { type: "redflags", promptVersion: "redflags/v6", assess: c },
+        { types: [{ type: "occupancy", promptVersion: "occupancy/v2" }], assess: a },
+        { types: [{ type: "condition", promptVersion: "condition/v1" }], assess: b },
+        { types: [{ type: "redflags", promptVersion: "redflags/v6" }], assess: c },
       ];
       const isCurrent = async (propertyId: number, flow: BatchFlow) => {
-        attempted.add(`${propertyId}:${flow.type}`);
-        return outcomeFor[`${propertyId}:${flow.type}`] === "skip";
+        attempted.add(`${propertyId}:${flow.types[0].type}`);
+        return outcomeFor[`${propertyId}:${flow.types[0].type}`] === "skip";
       };
       return { flows, isCurrent };
     }
@@ -408,7 +479,7 @@ describe("runAssessmentBatch", () => {
       // axes and not others, rather than a clean assessed-prefix/pending-
       // suffix split of properties.
       const isCurrent = vi.fn(async (propertyId: number, flow: BatchFlow) =>
-        propertyId === 1 && flow.type === "occupancy",
+        propertyId === 1 && flow.types[0].type === "occupancy",
       );
       const a = vi.fn(async (propertyId: number) => {
         if (propertyId === 2) throw new NoListingsError(propertyId);
@@ -419,9 +490,9 @@ describe("runAssessmentBatch", () => {
       const b = vi.fn(async () => undefined); // condition — must never be reached
       const c = vi.fn(async () => undefined); // redflags — must never be reached
       const flows: BatchFlow[] = [
-        { type: "occupancy", promptVersion: "occupancy/v2", assess: a },
-        { type: "condition", promptVersion: "condition/v1", assess: b },
-        { type: "redflags", promptVersion: "redflags/v6", assess: c },
+        { types: [{ type: "occupancy", promptVersion: "occupancy/v2" }], assess: a },
+        { types: [{ type: "condition", promptVersion: "condition/v1" }], assess: b },
+        { types: [{ type: "redflags", promptVersion: "redflags/v6" }], assess: c },
       ];
 
       const result = await runAssessmentBatch({
@@ -459,8 +530,8 @@ describe("runAssessmentBatch", () => {
       const err = new LlmQuotaExceededError(91, "session", 80);
       const failing = vi.fn().mockRejectedValue(err);
       const flows: BatchFlow[] = [
-        { type: "occupancy", promptVersion: "occupancy/v2", assess: failing },
-        { type: "condition", promptVersion: "condition/v2", assess: failing },
+        { types: [{ type: "occupancy", promptVersion: "occupancy/v2" }], assess: failing },
+        { types: [{ type: "condition", promptVersion: "condition/v2" }], assess: failing },
       ];
 
       const result = await runAssessmentBatch({
@@ -484,10 +555,10 @@ describe("runAssessmentBatch", () => {
       const c = vi.fn(async () => undefined);
       const d = vi.fn(async () => undefined);
       const flows: BatchFlow[] = [
-        { type: "occupancy", promptVersion: "occupancy/v2", assess: a },
-        { type: "condition", promptVersion: "condition/v1", assess: b },
-        { type: "redflags", promptVersion: "redflags/v6", assess: c },
-        { type: "location", promptVersion: "location/v1", assess: d },
+        { types: [{ type: "occupancy", promptVersion: "occupancy/v2" }], assess: a },
+        { types: [{ type: "condition", promptVersion: "condition/v1" }], assess: b },
+        { types: [{ type: "redflags", promptVersion: "redflags/v6" }], assess: c },
+        { types: [{ type: "location", promptVersion: "location/v1" }], assess: d },
       ];
       const fetchTrendingCandidates = vi.fn(async () => []);
       const fetchDismissedCandidates = vi.fn(async () => []);

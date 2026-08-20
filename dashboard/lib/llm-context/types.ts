@@ -25,10 +25,8 @@
 /** Every named flow assembleRequest() understands. */
 export const LLM_FLOWS = [
   "occupancy",
-  "condition",
+  "triage",
   "redflags",
-  "location",
-  "opportunity",
   "extract",
   "compare",
   "chat",
@@ -43,10 +41,8 @@ export type LlmFlow = (typeof LLM_FLOWS)[number];
  */
 export const SINGLE_SHOT_FLOWS: ReadonlySet<string> = new Set<string>([
   "occupancy",
-  "condition",
+  "triage",
   "redflags",
-  "location",
-  "opportunity",
   "extract",
   "compare",
 ]);
@@ -128,12 +124,37 @@ export interface ListingSnapshot {
 }
 
 /**
+ * #542 — one of the three axes `triage` merges into a single LLM call.
+ * `condition` applies to every property type; `location`/`opportunity` are
+ * excluded from a `terreno` (D-095/#398 — unchanged by the merge).
+ */
+export type TriageAxis = "condition" | "location" | "opportunity";
+
+/**
+ * One property's input to the `triage` flow (#542 — condition + location +
+ * opportunity merged into one call, replacing three). N-property-capable from
+ * day one — `buildTriagePrompt` accepts an ARRAY of these and echoes each
+ * `propertyId` back in its output — even though every caller in this PR sends
+ * exactly one (Phase 3 of docs/roadmap/llm-batching-plan.md is what packs
+ * several properties into one call; the shape is ready for it now so that
+ * turning batching on later needs no second prompt-version bump).
+ */
+export interface TriagePropertyInput {
+  /** Echoed back by the model so a response entry can be matched to this property. */
+  propertyId: number;
+  /** Every live listing of this property, newest-first — same payload the merged flows always read. */
+  listings: ListingSnapshot[];
+  /** Which of the three axes to answer for this property (a `terreno` requests `["condition"]` only). */
+  axes: readonly TriageAxis[];
+}
+
+/**
  * FlowVars — per-flow inputs for buildSystemPrompt() / assembleRequest().
  *
  * All fields are optional; each flow reads only the subset relevant to it.
  */
 export interface FlowVars {
-  // ── occupancy | condition | redflags | extract ────────────────────────────
+  // ── occupancy | redflags | extract ─────────────────────────────────────────
   /** The listing under assessment. */
   listing?: ListingSnapshot;
   /**
@@ -196,6 +217,15 @@ export interface FlowVars {
    * `DismissedCandidate`.
    */
   dismissedCandidates?: DismissedCandidate[];
+
+  // ── triage ────────────────────────────────────────────────────────────────
+  /**
+   * #542 — one or more properties for the merged `triage` flow (condition +
+   * location + opportunity). Every caller in this PR passes exactly one
+   * entry; see `TriagePropertyInput`'s doc for why the shape is an array
+   * regardless.
+   */
+  triageProperties?: TriagePropertyInput[];
 
   // ── compare ───────────────────────────────────────────────────────────────
   /** Two or more candidates to compare side by side. */

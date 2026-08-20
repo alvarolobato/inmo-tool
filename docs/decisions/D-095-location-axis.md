@@ -34,7 +34,8 @@ carrying two sub-signals:
 Binding rules:
 
 1. **LLM-only, never runtime regex.** The product path that assigns a value is
-   the `buildLocationPrompt` assessment — the model reads the text and
+   the merged `triage` assessment (`buildTriagePrompt`, D-109/#542 — merged
+   the standalone `buildLocationPrompt`) — the model reads the text and
    classifies with a literal cited quote at `temperature: 0`. There is no
    ILIKE/regex classifier anywhere in the runtime path. Mining prevalence with
    SQL/ILIKE in dev is fine; it is not how a property gets a verdict.
@@ -72,8 +73,9 @@ with no new detection risk.
 **See**: `dashboard/lib/ai-assessment/location.ts` (`BEACH_PROXIMITIES`,
 `BEACH_PROXIMITY_LABELS`, `HERITAGE_ZONE_LABEL`, `LOCATION_PROMPT_VERSION`,
 `parseLocationResult`, `locationApplies`, `assessPropertyLocation`),
-`dashboard/lib/llm-context/system-prompt.ts` (`buildLocationPrompt`),
-`dashboard/lib/llm.ts` (`assessLocation`),
+`dashboard/lib/llm-context/system-prompt.ts` (`buildTriagePrompt`, D-109/#542
+merged the standalone `buildLocationPrompt`),
+`dashboard/lib/ai-assessment/triage.ts` (`assessTriage`, D-109),
 `dashboard/lib/ai-assessment/batch.ts` (`DEFAULT_BATCH_FLOWS`),
 `dashboard/lib/candidates.ts` (`flagsFromAssessments`, `loadFlags`),
 `etl/schema/init.sql` (`ai_assessment_assessment_type_check`),

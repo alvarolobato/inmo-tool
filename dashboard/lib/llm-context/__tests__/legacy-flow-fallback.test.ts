@@ -44,7 +44,7 @@ describe("legacy conversation.mode fallback", () => {
   });
 
   it("real flows are untouched by the narrowing", () => {
-    for (const flow of ["chat", "occupancy", "condition", "redflags", "extract", "compare"]) {
+    for (const flow of ["chat", "occupancy", "triage", "redflags", "extract", "compare"]) {
       expect(isLlmFlow(flow)).toBe(true);
       const { stable } = buildSystemPrompt(flow as never, {});
       expect(stable.length).toBeGreaterThan(100);

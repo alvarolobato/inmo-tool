@@ -351,7 +351,7 @@
   sensitive: false
   default: null
   section: "Dashboard LLM"
-  description: "Modelo OpenRouter por defecto del dashboard. Cualquier ajuste por flujo (occupancy / condition / redflags / extract / compare / chat) tiene prioridad sobre este valor."
+  description: "Modelo OpenRouter por defecto del dashboard. Cualquier ajuste por flujo (occupancy / triage / redflags / extract / compare / chat) tiene prioridad sobre este valor."
   requires_restart: []
   components: [dashboard]
 
@@ -369,13 +369,13 @@
   requires_restart: []
   components: [dashboard]
 
-- key: dashboard.llm_model_openrouter_condition
-  env: DASHBOARD_LLM_MODEL_OPENROUTER_CONDITION
+- key: dashboard.llm_model_openrouter_triage
+  env: DASHBOARD_LLM_MODEL_OPENROUTER_TRIAGE
   type: string
   sensitive: false
   default: null
   section: "Dashboard LLM"
-  description: "Modelo OpenRouter para la evaluación del estado de conservación. Si está vacío, cae en dashboard.llm_model_openrouter."
+  description: "Modelo OpenRouter para el triage combinado (estado de conservación + ubicación + oportunidad). Si está vacío, cae en dashboard.llm_model_openrouter."
   requires_restart: []
   components: [dashboard]
 
@@ -386,26 +386,6 @@
   default: null
   section: "Dashboard LLM"
   description: "Modelo OpenRouter para la extracción de señales de alerta legales/red flags. Si está vacío, cae en dashboard.llm_model_openrouter."
-  requires_restart: []
-  components: [dashboard]
-
-- key: dashboard.llm_model_openrouter_location
-  env: DASHBOARD_LLM_MODEL_OPENROUTER_LOCATION
-  type: string
-  sensitive: false
-  default: null
-  section: "Dashboard LLM"
-  description: "Modelo OpenRouter para la evaluación de ubicación (primera línea de playa / vistas al mar / casco histórico). Si está vacío, cae en dashboard.llm_model_openrouter."
-  requires_restart: []
-  components: [dashboard]
-
-- key: dashboard.llm_model_openrouter_opportunity
-  env: DASHBOARD_LLM_MODEL_OPENROUTER_OPPORTUNITY
-  type: string
-  sensitive: false
-  default: null
-  section: "Dashboard LLM"
-  description: "Modelo OpenRouter para la evaluación de oportunidad (VPO / vivienda protegida y licencia turística). Si está vacío, cae en dashboard.llm_model_openrouter."
   requires_restart: []
   components: [dashboard]
 

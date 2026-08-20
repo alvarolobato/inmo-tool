@@ -270,6 +270,51 @@ function propertyVolatile(vars: FlowVars): string | undefined {
 }
 
 /**
+ * Volatile payload for `triage` (#542): one block PER property in
+ * `vars.triageProperties`, each headed by its `property_id` and the axes
+ * requested for it — the model needs both to (a) echo the right id back and
+ * (b) answer only the axes it was asked about (a `terreno` gets `["condition"]`
+ * only; `lib/ai-assessment/triage.ts` also narrows the list to genuine cache
+ * misses). Every listing is rendered with `hashCoveredOnly: true`, same as
+ * every other cached property-level flow — see `formatListing`'s doc.
+ *
+ * Returns `undefined` when there is nothing to assess (empty/absent array) so
+ * a malformed call degrades the same way `propertyVolatile` does for an empty
+ * `listings` array, rather than emitting an empty-but-present volatile block.
+ */
+function triageVolatile(vars: FlowVars): string | undefined {
+  const properties = vars.triageProperties ?? [];
+  if (properties.length === 0) return undefined;
+
+  return properties
+    .map((p) => {
+      const header =
+        p.listings.length > 1
+          ? `Los ${p.listings.length} anuncios siguientes son del MISMO inmueble físico, ` +
+            `publicados en portales distintos. Sus descripciones se contradicen a veces ` +
+            `y se complementan casi siempre.`
+          : `Anuncio único de este inmueble.`;
+
+      return (
+        [
+          `### INMUEBLE property_id=${p.propertyId}`,
+          `Ejes solicitados: ${p.axes.length > 0 ? p.axes.join(", ") : "(ninguno)"}`,
+          header,
+          "",
+          ...p.listings.map((l, i) =>
+            formatListing(
+              l,
+              `ANUNCIO ${i + 1} DE ${p.listings.length} — portal: ${l.source ?? "desconocido"}`,
+              { hashCoveredOnly: true },
+            ),
+          ),
+        ].join("\n\n") + HASH_SCOPE_NOTE
+      );
+    })
+    .join("\n\n---\n\n");
+}
+
+/**
  * Renders `vars.areaPriceSignal` (#184) as its own labelled block, appended
  * to the volatile payload of the flows that use it. Returns "" when absent —
  * concatenation-safe, and matches the "say nothing" contract
@@ -547,64 +592,56 @@ defecto — nunca omitas una clave):
 }
 
 /**
- * #26 — condition: renovation state, per deduplicated property.
+ * #542 (docs/roadmap/llm-batching-plan.md, D-A) — `triage`: condition +
+ * location + opportunity merged into ONE LLM call, replacing three
+ * (`condition`, `location`, `opportunity` — #26/#388/#398). One
+ * `DOMAIN_PREAMBLE`, one `ASSESSMENT_RULES`, deduplicated "varios anuncios"
+ * instructions; the three axes' own vocabularies/evidence rules are kept
+ * verbatim (nothing about WHAT counts as `a_reformar`, `frontline` or `is_vpo`
+ * changed — only how many calls it takes to ask about all three).
  *
- * Same property-level pattern as occupancy (#25): every live listing of the
- * property is read together, because the flat's actual condition doesn't
- * change per portal, and one advert saying "a reformar" while a sibling stays
- * silent must not be missed (#156-review carryover, see occupancy.ts).
+ * **N-property-capable from day one.** The input is an ARRAY
+ * (`vars.triageProperties`, `TriagePropertyInput[]`) and the output is a JSON
+ * array keyed by an ECHOED `property_id` per entry — valid at N=1 (every
+ * caller in this PR) and unchanged in shape when Phase 3 of the batching plan
+ * starts sending N>1: turning batching on later changes no prompt text, so it
+ * never reopens this version's backlog a second time.
  *
- * Unlike occupancy's ejes 2/3, condition has NO silence-implies-default rule:
- * there is no market convention under which a seller who doesn't mention
- * condition therefore has a renovated flat. Silence stays `unclear` — the
- * same rule as occupancy's eje 1.
+ * **Per-property axis selection.** Each property's block states which of the
+ * three axes to answer for it (`ejes_solicitados`) — normally all three, but
+ * exactly one (`condition`) for a `terreno` (D-095/#398: location/opportunity
+ * don't apply to a bare plot) or fewer when `lib/ai-assessment/triage.ts`
+ * already has a fresh cached/parked verdict for an axis and only asks about
+ * the genuine misses. The model must answer ONLY the requested axes for a
+ * given property and omit the others' keys entirely — never `null`-fill an
+ * axis nobody asked about.
  *
- * ## `reformado`'s boundary, tightened (#168 review, judgement call)
- *
- * The reviewer found the original wording ("reformado recientemente…listo
- * para entrar sin obra") didn't partition the real cases: a habitable,
- * unremarkable, not-recently-renovated flat ("piso en buen estado, listo
- * para entrar") satisfies the second half and fails the first — and that's
- * arguably the single most common state in the Spanish market. Under the old
- * wording the model had to guess between `reformado` and `unclear`
- * non-deterministically for that population.
- *
- * Decision: keep the 4-value enum (the issue specifies exactly these four —
- * not something to change unilaterally in a review-fix pass), but redefine
- * `reformado`'s boundary so it partitions cleanly: the axis that matters for
- * an investor is "does this need money spent on it before it can be used or
- * rented", not "when was it last renovated". So `reformado` now means "no
- * reform needed", covering BOTH an explicit recent renovation AND a merely
- * well-kept older flat with no reform pending. That collapses two states an
- * investor treats identically (zero capex) into one category, and leaves
- * `unclear` meaning what it should: "the text doesn't say enough to tell
- * whether it needs work or not" — not "it's fine but I can't prove when it
- * was fixed up". A finer split (recently-renovated-with-premium-finishes vs.
- * generic-move-in-ready) would need a 5th value; noted on issue #26 for the
- * owner if that granularity turns out to matter for scoring later.
- *
- * ## `renovation_severity` sub-axis on `a_reformar` (#313, D-056)
- *
- * The base 4-value enum stays flat, but `a_reformar` now also carries a
- * `renovation_severity` grading the DEPTH of work — `leve` (cosmetic) vs
- * `integral` (structural/whole-systems) vs `unknown` (needs work, text can't
- * grade it). This is what unblocks #45's refurb cost bands: light and heavy
- * reform sit in the same category but map to very different money. It is a
- * prompt/parsing split off the SAME evidence the base verdict already
- * requires — NOT a second speculative pass — so the same "cite it or don't
- * assert it" discipline applies (see `parseRenovationSeverity` in
- * `lib/ai-assessment/condition.ts`, which degrades an ungradeable
- * `a_reformar` to `unknown` rather than guessing). The field is only
- * meaningful for `a_reformar`; the parser forces it to `null` for every other
- * verdict, so `reformado`/`obra_nueva`/`unclear` are unchanged.
+ * **Per-axis parsers are unchanged.** `parseConditionResult` /
+ * `parseLocationResult` / `parseOpportunityResult` still own their own
+ * vocabularies, evidence-or-fallback backstops and `renovation_severity`
+ * sub-axis — `triage.ts` hoists the JSON.parse/fence-strip up to the whole
+ * array response and hands each axis's ALREADY-PARSED sub-object to that same
+ * per-axis logic (see `parseConditionObject`/`parseLocationObject`/
+ * `parseOpportunityObject`, the object-taking cores those functions now
+ * delegate to). D-056's renovation-severity grading and D-095's
+ * evidence-or-`none`/`false` degrade rules apply exactly as before — merging
+ * the call changed nothing about what counts as a citable finding.
  */
-export function buildConditionPrompt(vars: FlowVars): {
+export function buildTriagePrompt(vars: FlowVars): {
   stable: string;
   volatile?: string;
 } {
   const stable = `${DOMAIN_PREAMBLE}
 
-## Tarea: estado de conservación
+## Tarea: triage combinado (estado de conservación + ubicación + oportunidad)
+
+Vas a evaluar, para uno o más inmuebles, hasta TRES ejes independientes.
+Cada inmueble del payload indica en su encabezado qué ejes debes rellenar
+para él (\`Ejes solicitados\`). Rellena SOLO esos ejes para ese inmueble —
+si un eje no está en la lista, OMITE su clave por completo en tu respuesta
+para ese inmueble (nunca la rellenes con \`null\` ni con un objeto vacío).
+
+### 1) Estado de conservación (\`condition\`)
 
 Clasifica el estado del inmueble para estimar si necesita reforma. Un inversor
 de "comprar y reformar" busca precisamente los que están mal; uno de "comprar
@@ -629,7 +666,7 @@ reformó por última vez?":
 - \`unclear\` — el anuncio no da información suficiente para decidir si
   necesita obra o no (ni lo dice ni da pistas indirectas de un lado u otro).
 
-### Calibre de la reforma (\`renovation_severity\`) — SOLO si \`condition\` es \`a_reformar\`
+#### Calibre de la reforma (\`renovation_severity\`) — SOLO si \`condition\` es \`a_reformar\`
 
 Cuando —y solo cuando— la categoría es \`a_reformar\`, gradúa la PROFUNDIDAD de
 la obra en \`renovation_severity\`. Esto alimenta la estimación de coste de
@@ -661,28 +698,9 @@ por la que el silencio implique que el inmueble no necesita obra. Sin señal,
 
 Ojo con el lenguaje comercial: "con encanto", "para actualizar", "con
 posibilidades", "ideal inversores" suelen indicar que hay obra por hacer.
-Anota esa tensión en \`reasoning\` si la detectas.
+Anota esa tensión en el \`reasoning\` de este eje si la detectas.
 
-### Varios anuncios del mismo inmueble
-
-Puede que te dé varios anuncios del mismo inmueble físico en portales
-distintos. No los evalúes por separado: emite UN solo veredicto para el
-inmueble. Una mención concreta de un problema (humedad, instalación antigua)
-gana al silencio de los demás anuncios — que otro portal no lo mencione no es
-prueba de que no exista, es lo habitual cuando un vendedor prefiere no
-destacarlo. \`evidence\` debe citar UN anuncio concreto y \`evidence_source\`
-debe decir de qué portal salió esa cita, para que el inversor pueda ir a
-comprobarlo.
-
-${ASSESSMENT_RULES}
-
-**Nota sobre la regla 2 anterior:** en esta tarea, "no lo sé" se expresa con
-\`unclear\`, no con \`unknown\` — \`unknown\` no es un valor válido de
-\`condition\` y rompería el formato de salida. Usa \`unclear\` con una
-\`confidence\` baja cuando el anuncio no dé información suficiente, tal y como
-se explicó arriba.
-
-Formato de salida:
+Formato del eje \`condition\`:
 {
   "condition": "obra_nueva" | "reformado" | "a_reformar" | "unclear",
   "renovation_severity": "leve" | "integral" | "unknown" | null,
@@ -693,9 +711,142 @@ Formato de salida:
   "reasoning": "una o dos frases en español"
 }
 (\`renovation_severity\` solo tiene sentido si \`condition\` es \`a_reformar\`;
-en el resto de casos, \`null\`.)`;
+en el resto de casos, \`null\`.)
 
-  return { stable, volatile: propertyVolatile(vars) };
+### 2) Ubicación (\`location\`) — proximidad a la playa y casco histórico
+
+No inventes geografía: básate ÚNICAMENTE en lo que el anuncio dice; NO uses tu
+conocimiento de la ciudad ni del código postal para adivinar. No hay datos de
+costa ni de coordenadas: si el texto no lo dice, la señal es \`none\`/\`false\`.
+
+**Proximidad a la playa (\`beach_proximity\`) — enum GRADUADO.** Distingue TRES
+grados, no un booleano. Elige el MÁS ALTO que el texto sostenga con una cita
+literal:
+- \`frontline\` — **primera línea de playa**: "primera línea", "a pie de playa",
+  "acceso directo a la playa/al mar", "en la misma playa", "frente al mar" con
+  acceso directo. Es la señal más fuerte y más escasa: exígela solo si el texto
+  afirma que el inmueble está pegado a la playa o el paseo, no solo cerca.
+- \`sea_view\` — **vistas al mar/playa** sin ser primera línea: "vistas al mar",
+  "vistas a la playa", "con vistas frontales al mar". Ver el mar NO implica
+  estar a pie de playa: si dice vistas pero no primera línea, es \`sea_view\`.
+- \`near_beach\` — **cerca de la playa, andando**: "a 5 min de la playa", "playa
+  a 300 m", "junto al paseo marítimo", "zona de playa". Cerca, pero ni primera
+  línea ni con vistas declaradas.
+- \`none\` — el anuncio no menciona la playa, el mar ni el paseo marítimo. Es el
+  caso más habitual; no lo fuerces.
+
+**No confundas los grados.** "Vistas al mar" NO es \`frontline\`. "Cerca de la
+playa" NO es \`sea_view\`. Ante la duda entre dos grados, elige el MÁS BAJO (el
+más conservador) y cita la frase exacta en \`beach_evidence\`.
+
+**Casco histórico (\`heritage_zone\`) — booleano.** \`true\` solo si el texto
+sitúa el inmueble en el **casco/centro histórico** de la ciudad (o zona
+catalogada/protegida): "casco histórico", "casco antiguo", "centro histórico",
+"ciudad vieja", "casco viejo", "zona histórica protegida". Es a la vez
+prestigio de ubicación y una posible complicación de licencias de reforma, por
+eso lo marcamos. Un "centro" o "zona céntrica" a secas NO es casco histórico:
+exige la referencia explícita a lo histórico/antiguo/protegido. En cualquier
+otro caso, \`false\`.
+
+Por CADA señal que no sea el valor por defecto DEBES aportar una cita literal
+del anuncio: \`beach_evidence\` sostiene \`beach_proximity\` (obligatoria salvo
+\`none\`); \`heritage_evidence\` sostiene \`heritage_zone\` (obligatoria si es
+\`true\`). Si no puedes citar nada para una señal, esa señal es \`none\`/\`false\`.
+Nunca afirmes primera línea, vistas o casco histórico sin una frase del texto
+que lo diga.
+
+Formato del eje \`location\`:
+{
+  "beach_proximity": "frontline" | "sea_view" | "near_beach" | "none",
+  "beach_evidence": "cita literal del anuncio, o \\"\\" si es none",
+  "beach_evidence_source": "portal del que sale la cita (p. ej. \\"fotocasa\\"), o null",
+  "heritage_zone": true | false,
+  "heritage_evidence": "cita literal del anuncio, o \\"\\" si es false",
+  "heritage_evidence_source": "portal del que sale la cita, o null",
+  "confidence": 0.0-1.0,
+  "reasoning": "una o dos frases en español"
+}
+
+### 3) Oportunidad (\`opportunity\`) — VPO y licencia turística
+
+No inventes: básate ÚNICAMENTE en lo que el anuncio dice. Si el texto no lo
+dice, la señal es \`false\`.
+
+**VPO / vivienda protegida (\`is_vpo\`) — booleano.** \`true\` solo si el texto
+afirma que la vivienda es de **Protección Oficial** o **protegida**: "VPO",
+"V.P.O.", "vivienda de protección oficial", "vivienda protegida", "VPP",
+"vivienda con protección pública", "precio tasado/máximo de venta por ser
+protegida", "sujeta a régimen de protección". Es una restricción material
+(tope de precio de reventa y/o restricción del comprador), por eso el inversor
+filtra por ella. En cualquier otro caso, \`false\`. Un anuncio que solo diga
+"buen precio" o "protegido de miradas/del sol" NO es VPO.
+
+**Licencia turística / VUT (\`tourist_license\`) — booleano.** \`true\` solo si
+el texto afirma que la vivienda **ya tiene concedida** una licencia turística o
+de vivienda de uso turístico: "licencia turística", "licencia VUT", "vivienda
+de uso turístico con licencia", "apto turístico con licencia", "número de
+registro turístico". Marca \`true\` únicamente cuando la licencia YA
+existe/está concedida. Un anuncio que diga "ideal para alquiler turístico",
+"posibilidad de licencia turística" o "apto para uso turístico" SIN afirmar que
+la licencia está concedida NO cuenta como \`true\` — eso es un potencial, no una
+licencia. Ante la duda, \`false\`.
+
+Por CADA booleano que marques \`true\` DEBES aportar una cita literal del
+anuncio: \`vpo_evidence\` sostiene \`is_vpo\`; \`tourist_license_evidence\`
+sostiene \`tourist_license\`. Si no puedes citar nada para una señal, esa señal
+es \`false\`. Nunca afirmes VPO ni licencia turística sin una frase del texto
+que lo diga.
+
+Formato del eje \`opportunity\`:
+{
+  "is_vpo": true | false,
+  "vpo_evidence": "cita literal del anuncio, o \\"\\" si es false",
+  "vpo_evidence_source": "portal del que sale la cita (p. ej. \\"fotocasa\\"), o null",
+  "tourist_license": true | false,
+  "tourist_license_evidence": "cita literal del anuncio, o \\"\\" si es false",
+  "tourist_license_evidence_source": "portal del que sale la cita, o null",
+  "confidence": 0.0-1.0,
+  "reasoning": "una o dos frases en español"
+}
+
+### Varios anuncios del mismo inmueble
+
+Puede que un inmueble traiga varios anuncios del mismo inmueble físico en
+portales distintos. No los evalúes por separado: emite UN solo veredicto por
+eje para el inmueble. Una mención concreta (de un problema de conservación,
+de playa, de casco histórico, de VPO o de licencia turística) gana al silencio
+de los demás anuncios — que otro portal no lo mencione no es prueba de que no
+exista, es lo habitual cuando un vendedor prefiere no destacarlo. Cada
+\`evidence\` debe citar UN anuncio concreto y su \`evidence_source\` debe decir
+de qué portal salió esa cita, para que el inversor pueda ir a comprobarlo.
+
+${ASSESSMENT_RULES}
+
+**Nota sobre la regla 2 anterior, por eje:** "no lo sé / no se menciona" NUNCA
+se expresa con la cadena \`"unknown"\` en este triage — cada eje tiene su propio
+valor de silencio, y \`"unknown"\` no es válido en ninguno de los tres y
+rompería el formato de salida.
+- \`condition\`: usa \`unclear\` con una \`confidence\` baja.
+- \`location\`: usa \`none\` (proximidad a la playa) y \`false\` (casco histórico).
+- \`opportunity\`: usa \`false\` en ambos campos.
+
+Formato de salida GLOBAL: un ARRAY JSON, un objeto por inmueble solicitado.
+Cada objeto DEBE devolver \`property_id\` como el MISMO entero que se te dio
+para ese inmueble — no lo inventes ni lo modifiques — y solo las claves de eje
+que ese inmueble solicitó (ver \`Ejes solicitados\` en su encabezado):
+[
+  {
+    "property_id": <int, EXACTAMENTE el id_propiedad recibido>,
+    "condition": { ... } (solo si se solicitó este eje para este inmueble),
+    "location": { ... } (solo si se solicitó),
+    "opportunity": { ... } (solo si se solicitó)
+  },
+  ...
+]
+No devuelvas texto fuera del array, ni un objeto por inmueble que no se te
+haya pedido.`;
+
+  return { stable, volatile: triageVolatile(vars) };
 }
 
 /**
@@ -939,207 +1090,6 @@ Una lista vacía es un resultado correcto y frecuente — NO fuerces hallazgos.`
 }
 
 /**
- * #388 (Fase 3 de #385) — location: beach proximity (graded) + heritage zone,
- * per deduplicated property.
- *
- * Same property-level, single-shot, temperature-0 pattern as
- * condition/redflags (see their doc comments). This is the owner's headline
- * ask — "primera línea de playa / vistas al mar" — derived from the advert
- * text because no portal exposes it as a filter.
- *
- * ## LLM-only, never regex (owner decision, 2026-08-06)
- *
- * The owner explicitly does not trust keyword/regex matching for this signal.
- * This prompt IS the detector: the model reads the text and classifies with a
- * cited literal quote per verdict. There is no ILIKE/regex classifier anywhere
- * in the runtime path (see `lib/ai-assessment/location.ts` and
- * docs/decisions/D-095-location-axis.md). Text-only for now (no coastline/geo
- * dataset exists).
- *
- * `beach_proximity` is GRADED, not boolean, because primera línea and vistas al
- * mar are different facts an investor weighs differently. Each of the two
- * sub-signals (beach, heritage) demands its OWN literal evidence quote or
- * degrades to the safe default in `parseLocationResult`.
- */
-export function buildLocationPrompt(vars: FlowVars): {
-  stable: string;
-  volatile?: string;
-} {
-  const stable = `${DOMAIN_PREAMBLE}
-
-## Tarea: ubicación (proximidad a la playa y casco histórico)
-
-Clasifica DOS señales de ubicación que ningún portal expone como filtro y que
-solo se pueden deducir del texto del anuncio. No inventes geografía: básate
-ÚNICAMENTE en lo que el anuncio dice; NO uses tu conocimiento de la ciudad ni
-del código postal para adivinar. No hay datos de costa ni de coordenadas: si el
-texto no lo dice, la señal es \`none\`/\`false\`.
-
-### 1) Proximidad a la playa (\`beach_proximity\`) — enum GRADUADO
-
-Distingue TRES grados, no un booleano. Elige el MÁS ALTO que el texto sostenga
-con una cita literal:
-- \`frontline\` — **primera línea de playa**: "primera línea", "a pie de playa",
-  "acceso directo a la playa/al mar", "en la misma playa", "frente al mar" con
-  acceso directo. Es la señal más fuerte y más escasa: exígela solo si el texto
-  afirma que el inmueble está pegado a la playa o el paseo, no solo cerca.
-- \`sea_view\` — **vistas al mar/playa** sin ser primera línea: "vistas al mar",
-  "vistas a la playa", "con vistas frontales al mar". Ver el mar NO implica
-  estar a pie de playa: si dice vistas pero no primera línea, es \`sea_view\`.
-- \`near_beach\` — **cerca de la playa, andando**: "a 5 min de la playa", "playa
-  a 300 m", "junto al paseo marítimo", "zona de playa". Cerca, pero ni primera
-  línea ni con vistas declaradas.
-- \`none\` — el anuncio no menciona la playa, el mar ni el paseo marítimo. Es el
-  caso más habitual; no lo fuerces.
-
-**No confundas los grados.** "Vistas al mar" NO es \`frontline\`. "Cerca de la
-playa" NO es \`sea_view\`. Ante la duda entre dos grados, elige el MÁS BAJO (el
-más conservador) y cita la frase exacta en \`beach_evidence\`.
-
-### 2) Casco histórico (\`heritage_zone\`) — booleano
-
-\`true\` solo si el texto sitúa el inmueble en el **casco/centro histórico** de
-la ciudad (o zona catalogada/protegida): "casco histórico", "casco antiguo",
-"centro histórico", "ciudad vieja", "casco viejo", "zona histórica protegida".
-Es a la vez prestigio de ubicación y una posible complicación de licencias de
-reforma, por eso lo marcamos. Un "centro" o "zona céntrica" a secas NO es casco
-histórico: exige la referencia explícita a lo histórico/antiguo/protegido. En
-cualquier otro caso, \`false\`.
-
-### Evidencia obligatoria por cada señal
-
-Por CADA veredicto que no sea el valor por defecto DEBES aportar una cita
-literal del anuncio:
-- \`beach_evidence\` sostiene \`beach_proximity\` (obligatoria salvo \`none\`).
-- \`heritage_evidence\` sostiene \`heritage_zone\` (obligatoria si es \`true\`).
-Si no puedes citar nada para una señal, esa señal es \`none\`/\`false\`. Nunca
-afirmes primera línea, vistas o casco histórico sin una frase del texto que lo
-diga. \`evidence_source\` (\`beach_evidence_source\` / \`heritage_evidence_source\`)
-indica de qué portal sale la cita.
-
-### Varios anuncios del mismo inmueble
-
-Puede que te dé varios anuncios del mismo inmueble físico en portales distintos.
-Emite UN solo veredicto por señal para el inmueble: basta que UN anuncio afirme
-"primera línea" o "casco histórico" para marcarlo, citando ese anuncio concreto
-en la evidencia y su portal en el source.
-
-${ASSESSMENT_RULES}
-
-**Nota sobre la regla 2 anterior:** aquí "no lo sé / no se menciona" se expresa
-con \`none\` (proximidad a la playa) y \`false\` (casco histórico), NO con la
-cadena \`"unknown"\` — \`"unknown"\` no es un valor válido de estos campos y
-rompería el formato de salida.
-
-Formato de salida:
-{
-  "beach_proximity": "frontline" | "sea_view" | "near_beach" | "none",
-  "beach_evidence": "cita literal del anuncio, o \\"\\" si es none",
-  "beach_evidence_source": "portal del que sale la cita (p. ej. \\"fotocasa\\"), o null",
-  "heritage_zone": true | false,
-  "heritage_evidence": "cita literal del anuncio, o \\"\\" si es false",
-  "heritage_evidence_source": "portal del que sale la cita, o null",
-  "confidence": 0.0-1.0,
-  "reasoning": "una o dos frases en español"
-}`;
-
-  return { stable, volatile: propertyVolatile(vars) };
-}
-
-/**
- * #398 (Fase 5 de #385) — opportunity: is_vpo (hard filter downstream) +
- * tourist_license (soft ranking boost), per deduplicated property.
- *
- * Same property-level, single-shot, temperature-0 pattern as
- * condition/redflags/location (see their doc comments). Mining the descriptions
- * showed both signals are under-exposed by the portals: VPO shows up in the
- * text 3.6× more than the portal checkbox, and a granted licencia turística is
- * text-only. So both are derived from the advert text.
- *
- * ## LLM-only, never regex (owner decision, 2026-08-06)
- *
- * The owner explicitly does not trust keyword/regex matching for text-derived
- * signals. This prompt IS the detector: the model reads the text and answers
- * with a cited literal quote per boolean. There is no ILIKE/regex classifier
- * anywhere in the runtime path (see `lib/ai-assessment/opportunity.ts` and
- * docs/decisions/D-095-location-axis.md — the same LLM-not-regex principle).
- *
- * Each of the two booleans demands its OWN literal evidence quote or degrades
- * to `false` in `parseOpportunityResult`.
- */
-export function buildOpportunityPrompt(vars: FlowVars): {
-  stable: string;
-  volatile?: string;
-} {
-  const stable = `${DOMAIN_PREAMBLE}
-
-## Tarea: oportunidad (VPO y licencia turística)
-
-Clasifica DOS señales de oportunidad para el inversor que muchas veces no
-aparecen en los campos estructurados del portal y que se deducen del texto del
-anuncio. No inventes: básate ÚNICAMENTE en lo que el anuncio dice. Si el texto
-no lo dice, la señal es \`false\`.
-
-### 1) VPO / vivienda protegida (\`is_vpo\`) — booleano
-
-\`true\` solo si el texto afirma que la vivienda es de **Protección Oficial** o
-**protegida**: "VPO", "V.P.O.", "vivienda de protección oficial", "vivienda
-protegida", "VPP", "vivienda con protección pública", "precio tasado/máximo de
-venta por ser protegida", "sujeta a régimen de protección". Es una restricción
-material (tope de precio de reventa y/o restricción del comprador), por eso el
-inversor filtra por ella. En cualquier otro caso, \`false\`. Un anuncio que solo
-diga "buen precio" o "protegido de miradas/del sol" NO es VPO.
-
-### 2) Licencia turística / VUT (\`tourist_license\`) — booleano
-
-\`true\` solo si el texto afirma que la vivienda **ya tiene concedida** una
-licencia turística o de vivienda de uso turístico: "licencia turística",
-"licencia VUT", "vivienda de uso turístico con licencia", "apto turístico con
-licencia", "número de registro turístico". Marca \`true\` únicamente cuando la
-licencia YA existe/está concedida. Un anuncio que diga "ideal para alquiler
-turístico", "posibilidad de licencia turística" o "apto para uso turístico" SIN
-afirmar que la licencia está concedida NO cuenta como \`true\` — eso es un
-potencial, no una licencia. Ante la duda, \`false\`.
-
-### Evidencia obligatoria por cada señal
-
-Por CADA booleano que marques \`true\` DEBES aportar una cita literal del anuncio:
-- \`vpo_evidence\` sostiene \`is_vpo\` (obligatoria si es \`true\`).
-- \`tourist_license_evidence\` sostiene \`tourist_license\` (obligatoria si es \`true\`).
-Si no puedes citar nada para una señal, esa señal es \`false\`. Nunca afirmes VPO
-ni licencia turística sin una frase del texto que lo diga. \`evidence_source\`
-(\`vpo_evidence_source\` / \`tourist_license_evidence_source\`) indica de qué portal
-sale la cita.
-
-### Varios anuncios del mismo inmueble
-
-Puede que te dé varios anuncios del mismo inmueble físico en portales distintos.
-Emite UN solo veredicto por señal para el inmueble: basta que UN anuncio afirme
-"VPO" o "licencia turística concedida" para marcarlo, citando ese anuncio
-concreto en la evidencia y su portal en el source.
-
-${ASSESSMENT_RULES}
-
-**Nota sobre la regla 2 anterior:** aquí "no lo sé / no se menciona" se expresa
-con \`false\` en ambos campos, NO con la cadena \`"unknown"\` — \`"unknown"\` no es un
-valor válido de estos campos booleanos y rompería el formato de salida.
-
-Formato de salida:
-{
-  "is_vpo": true | false,
-  "vpo_evidence": "cita literal del anuncio, o \\"\\" si es false",
-  "vpo_evidence_source": "portal del que sale la cita (p. ej. \\"fotocasa\\"), o null",
-  "tourist_license": true | false,
-  "tourist_license_evidence": "cita literal del anuncio, o \\"\\" si es false",
-  "tourist_license_evidence_source": "portal del que sale la cita, o null",
-  "confidence": 0.0-1.0,
-  "reasoning": "una o dos frases en español"
-}`;
-
-  return { stable, volatile: propertyVolatile(vars) };
-}
-
-/**
  * #28 — extract: unstructured description → structured fields, per
  * deduplicated property.
  *
@@ -1362,14 +1312,10 @@ export function buildSystemPrompt(
   switch (flow) {
     case "occupancy":
       return buildOccupancyPrompt(vars);
-    case "condition":
-      return buildConditionPrompt(vars);
+    case "triage":
+      return buildTriagePrompt(vars);
     case "redflags":
       return buildRedflagsPrompt(vars);
-    case "location":
-      return buildLocationPrompt(vars);
-    case "opportunity":
-      return buildOpportunityPrompt(vars);
     case "extract":
       return buildExtractPrompt(vars);
     case "compare":

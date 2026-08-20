@@ -25,13 +25,17 @@ import {
 import { OCCUPANCY_PROMPT_VERSION } from "../occupancy";
 import { CONDITION_PROMPT_VERSION } from "../condition";
 import { REDFLAGS_PROMPT_VERSION } from "../redflags";
+import { LOCATION_PROMPT_VERSION } from "../location";
+import { OPPORTUNITY_PROMPT_VERSION } from "../opportunity";
 
 describe("ASSESSMENT_SELECTION_FLOWS", () => {
-  it("is occupancy/condition/redflags at their current prompt versions (extract excluded)", () => {
+  it("is occupancy/condition/redflags/location/opportunity at their current prompt versions (extract excluded, F-9/#542)", () => {
     expect(ASSESSMENT_SELECTION_FLOWS).toEqual([
       { type: "occupancy", version: OCCUPANCY_PROMPT_VERSION },
       { type: "condition", version: CONDITION_PROMPT_VERSION },
       { type: "redflags", version: REDFLAGS_PROMPT_VERSION },
+      { type: "location", version: LOCATION_PROMPT_VERSION },
+      { type: "opportunity", version: OPPORTUNITY_PROMPT_VERSION },
     ]);
     expect(ASSESSMENT_SELECTION_FLOWS.map((f) => f.type)).not.toContain("extract");
   });
@@ -62,7 +66,7 @@ describe("assessmentEligibleClause", () => {
 describe("selectionFlowValues", () => {
   it("numbers placeholders from the base index and returns flat [type, version, ...] params", () => {
     const { valuesSql, params } = selectionFlowValues(1);
-    expect(valuesSql).toBe("($1, $2), ($3, $4), ($5, $6)");
+    expect(valuesSql).toBe("($1, $2), ($3, $4), ($5, $6), ($7, $8), ($9, $10)");
     expect(params).toEqual([
       "occupancy",
       OCCUPANCY_PROMPT_VERSION,
@@ -70,11 +74,17 @@ describe("selectionFlowValues", () => {
       CONDITION_PROMPT_VERSION,
       "redflags",
       REDFLAGS_PROMPT_VERSION,
+      "location",
+      LOCATION_PROMPT_VERSION,
+      "opportunity",
+      OPPORTUNITY_PROMPT_VERSION,
     ]);
   });
 
   it("respects a non-1 start index", () => {
-    expect(selectionFlowValues(3).valuesSql).toBe("($3, $4), ($5, $6), ($7, $8)");
+    expect(selectionFlowValues(3).valuesSql).toBe(
+      "($3, $4), ($5, $6), ($7, $8), ($9, $10), ($11, $12)",
+    );
   });
 });
 
@@ -86,5 +96,12 @@ describe("missingCurrentVerdictClause", () => {
     expect(sql).toContain("a.property_id = e.id");
     expect(sql).toContain("a.assessment_type = f.atype");
     expect(sql).toContain("a.prompt_version = f.ver");
+  });
+
+  it("#542: never counts location/opportunity as missing for a terreno (D-095/#398 — no row is ever written for them)", () => {
+    const { valuesSql } = selectionFlowValues(1);
+    const sql = missingCurrentVerdictClause("p", valuesSql);
+    expect(sql).toContain("f.atype NOT IN ('location', 'opportunity')");
+    expect(sql).toContain("p.property_type IS DISTINCT FROM 'terreno'");
   });
 });

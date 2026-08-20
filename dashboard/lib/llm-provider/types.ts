@@ -12,10 +12,8 @@ export type DashboardCliDriverId = "claude_code";
  *  flat-rate Claude subscription makes per-flow tuning pointless). */
 export type DashboardLlmFlow =
   | "occupancy"
-  | "condition"
+  | "triage"
   | "redflags"
-  | "location"
-  | "opportunity"
   | "extract"
   | "compare"
   | "chat";

@@ -21,12 +21,14 @@ export {
   type ListingSnapshot,
   type RedflagTrendingCandidate,
   type DismissedCandidate,
+  type TriageAxis,
+  type TriagePropertyInput,
 } from "./types";
 
 export {
   buildSystemPrompt,
   buildOccupancyPrompt,
-  buildConditionPrompt,
+  buildTriagePrompt,
   buildRedflagsPrompt,
   buildExtractPrompt,
   buildComparePrompt,

@@ -67,16 +67,25 @@ import {
   type DismissedCandidate,
 } from "@/lib/db/redflag-candidates";
 import { assessPropertyOccupancy, OCCUPANCY_PROMPT_VERSION } from "./occupancy";
-import { assessPropertyCondition, CONDITION_PROMPT_VERSION } from "./condition";
+import { CONDITION_PROMPT_VERSION } from "./condition";
 import { assessPropertyRedFlags, REDFLAGS_PROMPT_VERSION } from "./redflags";
-import { assessPropertyLocation, LOCATION_PROMPT_VERSION } from "./location";
-import { assessPropertyOpportunity, OPPORTUNITY_PROMPT_VERSION } from "./opportunity";
+import { LOCATION_PROMPT_VERSION } from "./location";
+import { OPPORTUNITY_PROMPT_VERSION } from "./opportunity";
 import { assessPropertyExtract, EXTRACT_PROMPT_VERSION } from "./extract";
+import { assessPropertyTriageForBatch } from "./triage";
 
 /** One flow the batch runs, in a uniform shape so the loop is flow-agnostic. */
 export interface BatchFlow {
-  type: AssessmentType;
-  promptVersion: string;
+  /**
+   * `assessment_type`/`prompt_version` pairs this flow WRITES to
+   * `ai_assessment`. Most flows write exactly one; `triage` (#542) writes up
+   * to three (condition/location/opportunity) from ONE LLM call. `isFlowCurrent`
+   * (below) skips calling `assess` only when EVERY pair here already has a
+   * current-prompt-version verdict — `assess` itself decides which of them
+   * actually need recomputing (its own #30/#542 cache check), so a partially
+   * stale flow still runs, but only spends on the axes that are genuine misses.
+   */
+  types: ReadonlyArray<{ type: AssessmentType; promptVersion: string }>;
   /** The existing `assessProperty*` entry point — return value is ignored. */
   assess: (
     propertyId: number,
@@ -102,19 +111,34 @@ export interface BatchFlow {
 }
 
 /**
- * The six flows, in run order. Occupancy first because it is the highest-
- * value signal (issue #1 §9). `location` (#388) and `opportunity` (#398) each
- * self-gate a `terreno` plot (`locationApplies` / `opportunityApplies`) — the
- * axis doesn't apply — and are cheap in that case. `extract` is included but is
+ * The four flows, in run order. Occupancy first because it is the highest-
+ * value signal (issue #1 §9). `triage` (#542) merges condition + location +
+ * opportunity into ONE call — `location`/`opportunity` self-gate a `terreno`
+ * plot inside `assessPropertyTriage` (the axis doesn't apply) and are cheap
+ * in that case, same as before the merge. `extract` is included but is
  * self-gating (`needsExtraction`) and cheap when there is nothing to fill.
  */
 export const DEFAULT_BATCH_FLOWS: BatchFlow[] = [
-  { type: "occupancy", promptVersion: OCCUPANCY_PROMPT_VERSION, assess: assessPropertyOccupancy },
-  { type: "condition", promptVersion: CONDITION_PROMPT_VERSION, assess: assessPropertyCondition },
-  { type: "redflags", promptVersion: REDFLAGS_PROMPT_VERSION, assess: assessPropertyRedFlags },
-  { type: "location", promptVersion: LOCATION_PROMPT_VERSION, assess: assessPropertyLocation },
-  { type: "opportunity", promptVersion: OPPORTUNITY_PROMPT_VERSION, assess: assessPropertyOpportunity },
-  { type: "extract", promptVersion: EXTRACT_PROMPT_VERSION, assess: assessPropertyExtract },
+  {
+    types: [{ type: "occupancy", promptVersion: OCCUPANCY_PROMPT_VERSION }],
+    assess: assessPropertyOccupancy,
+  },
+  {
+    types: [
+      { type: "condition", promptVersion: CONDITION_PROMPT_VERSION },
+      { type: "location", promptVersion: LOCATION_PROMPT_VERSION },
+      { type: "opportunity", promptVersion: OPPORTUNITY_PROMPT_VERSION },
+    ],
+    assess: assessPropertyTriageForBatch,
+  },
+  {
+    types: [{ type: "redflags", promptVersion: REDFLAGS_PROMPT_VERSION }],
+    assess: assessPropertyRedFlags,
+  },
+  {
+    types: [{ type: "extract", promptVersion: EXTRACT_PROMPT_VERSION }],
+    assess: assessPropertyExtract,
+  },
 ];
 
 /** Why a batch stopped early — a clean, budget-driven halt, not a crash. */
@@ -195,18 +219,36 @@ export async function selectPropertiesNeedingAssessment(
 }
 
 /**
- * True when the property already has a verdict for this flow under the CURRENT
- * prompt version — the EC-2 skip seam. Reuses `cache.ts`'s `getLatestAssessment`
- * (its `stale` flag is exactly "the latest row's prompt_version isn't current"),
- * so "skip an already-current property" is decided by the same staleness logic
- * the flows and the card UI already share, never a parallel check.
+ * True when the property already has a CURRENT-prompt-version verdict for
+ * EVERY `(type, promptVersion)` pair `flow.types` lists — the EC-2 skip seam.
+ * Reuses `cache.ts`'s `getLatestAssessment` (its `stale` flag is exactly "the
+ * latest row's prompt_version isn't current"), so "skip an already-current
+ * property" is decided by the same staleness logic the flows and the card UI
+ * already share, never a parallel check.
+ *
+ * For `triage` (#542, three types) this means: if ANY of condition/location/
+ * opportunity is stale, `assess` still runs — but `assessPropertyTriage`'s
+ * own #30/#542 cache check (`getOrComputeMulti`) only spends on the axes that
+ * are genuine misses, so a partially-current triage flow never re-buys the
+ * axes that were already fresh. One known, pre-existing, harmless
+ * inefficiency this inherits rather than introduces: a `terreno` NEVER gets a
+ * `location`/`opportunity` row (D-095/#398), so this check never returns
+ * `true` for a terreno's `triage` flow — it re-checks (cheap DB reads, no LLM
+ * spend, since `condition` itself hits its own cache) every tick, exactly as
+ * the pre-merge separate `location`/`opportunity` BatchFlow entries already
+ * did for every terreno property.
  */
-export async function isFlowCurrent(
-  propertyId: number,
-  flow: { type: AssessmentType; promptVersion: string },
-): Promise<boolean> {
-  const cached = await getLatestAssessment(propertyId, flow.type, flow.promptVersion);
-  return cached !== null && !cached.stale;
+export async function isFlowCurrent(propertyId: number, flow: BatchFlow): Promise<boolean> {
+  for (const t of flow.types) {
+    const cached = await getLatestAssessment(propertyId, t.type, t.promptVersion);
+    if (cached === null || cached.stale) return false;
+  }
+  return true;
+}
+
+/** Log-friendly label for a flow's `assessment_type`(s) — `"condition+location+opportunity"` for triage, the bare type otherwise. */
+function flowLabel(flow: BatchFlow): string {
+  return flow.types.map((t) => t.type).join("+");
 }
 
 export interface RunAssessmentBatchOptions {
@@ -323,24 +365,18 @@ export async function runAssessmentBatch(
   // *some* axes and not others, rather than some properties being fully done
   // and others fully pending.
   //
-  // That recovers cleanly for the three SELECTION flows and ONLY those three.
-  // `missingCurrentVerdictClause` (eligibility.ts) is per-axis, but over
-  // `ASSESSMENT_SELECTION_FLOWS` — occupancy, condition, redflags — not over
-  // all six in `DEFAULT_BATCH_FLOWS`. Those three run first here, so once a
-  // property holds current verdicts for them it is never selected again, and
-  // a stop landing at or after `location` leaves `location`/`opportunity`/
-  // `extract` permanently unwritten for EVERY property in the page — not just
-  // the one in flight, as under the old property-major order. The blast radius
-  // of that pre-existing gap therefore scales with the page size (measured:
-  // 1 property -> 5 at the default batch size).
-  //
-  // Shipping it knowingly, because the exposure is bounded and closing:
-  // stops only fire on a budget/quota/circuit halt (none configured today),
-  // and Phase 2's `triage` merge makes `location`/`opportunity` ride the same
-  // call as `condition` — a selection flow — which removes the orphaning by
-  // construction. `extract` stays out of selection deliberately (it self-gates
-  // via `needsExtraction`; selecting on its absence would re-select fully
-  // structured properties forever). Tracked as F-9 / issue #542.
+  // That recovers cleanly for every SELECTION flow (`ASSESSMENT_SELECTION_FLOWS`
+  // in eligibility.ts — occupancy, condition, redflags, location, opportunity)
+  // as of the #542 `triage` merge (F-9): `location`/`opportunity` now ride the
+  // SAME call (and the same `DEFAULT_BATCH_FLOWS` entry) as `condition`, so a
+  // stop landing anywhere in `occupancy`/`triage`/`redflags` no longer orphans
+  // any selection flow — closing the gap this comment used to describe (a stop
+  // after `condition`, before the old separate `location`/`opportunity`
+  // entries, left them permanently unwritten for the whole selected page).
+  // `extract` stays out of selection deliberately (it self-gates via
+  // `needsExtraction`; selecting on its absence would re-select fully
+  // structured properties forever) — a stop before `extract` simply defers it
+  // one tick, same as always.
   //
   // Pinned by the "budget stop mid-flow" test in batch.test.ts, which is also
   // the ONLY test that fails if this loop is reverted to property-major.
@@ -370,7 +406,7 @@ export async function runAssessmentBatch(
           result.stopped = "budget";
           console.warn(
             `[ai-assessment:batch] daily LLM budget exhausted at property=${propertyId} ` +
-              `flow=${flow.type} — stopping this pass cleanly (assessed=${result.assessed}).`,
+              `flow=${flowLabel(flow)} — stopping this pass cleanly (assessed=${result.assessed}).`,
           );
           return result;
         }
@@ -381,7 +417,7 @@ export async function runAssessmentBatch(
           result.stopped = "quota";
           console.warn(
             `[ai-assessment:batch] subscription quota cap reached at property=${propertyId} ` +
-              `flow=${flow.type} (${err.pctUsed}% of the "${err.window}" window, ` +
+              `flow=${flowLabel(flow)} (${err.pctUsed}% of the "${err.window}" window, ` +
               `limit ${err.threshold}%) — stopping this pass cleanly ` +
               `(assessed=${result.assessed}).`,
           );
@@ -391,7 +427,7 @@ export async function runAssessmentBatch(
           result.stopped = "circuit";
           console.warn(
             `[ai-assessment:batch] LLM circuit breaker open at property=${propertyId} ` +
-              `flow=${flow.type} — stopping this pass cleanly (assessed=${result.assessed}).`,
+              `flow=${flowLabel(flow)} — stopping this pass cleanly (assessed=${result.assessed}).`,
           );
           return result;
         }
@@ -413,7 +449,7 @@ export async function runAssessmentBatch(
         // transient DB blip): log and carry on with the next flow/property.
         result.errors += 1;
         console.error(
-          `[ai-assessment:batch] property=${propertyId} flow=${flow.type} failed:`,
+          `[ai-assessment:batch] property=${propertyId} flow=${flowLabel(flow)} failed:`,
           err,
         );
       }

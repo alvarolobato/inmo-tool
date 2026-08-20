@@ -61,6 +61,7 @@ stable, gives #45 a direct `leve`/`integral` handle for cost bands (treating
 
 **See**: `dashboard/lib/ai-assessment/condition.ts` (`RENOVATION_SEVERITIES`,
 `parseRenovationSeverity`, `CONDITION_PROMPT_VERSION`),
-`dashboard/lib/llm-context/system-prompt.ts` (`buildConditionPrompt`),
+`dashboard/lib/llm-context/system-prompt.ts` (`buildTriagePrompt`, merged the
+standalone `buildConditionPrompt` in D-109/#542),
 `dashboard/lib/candidates.ts` (`flagsFromAssessments`), issues #313 / #45 / #307,
 D-052, D-006.

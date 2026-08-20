@@ -40,7 +40,6 @@
  */
 
 import { sql } from "@/lib/db-write";
-import { assessLocation } from "@/lib/llm";
 import type { LlmAgenticContext } from "@/lib/llm-tools/types";
 import {
   NoListingsError,
@@ -49,7 +48,12 @@ import {
   clamp01,
   stripCodeFence,
 } from "./shared";
-import { getOrCompute, getLatestAssessment, logCacheOutcome, type CachedAssessment } from "./cache";
+import { getLatestAssessment, logCacheOutcome, AssessmentParkedError, type CachedAssessment } from "./cache";
+// #542 — location is now assessed as one axis of the merged `triage` flow.
+// See condition.ts's matching import for why this circular import (triage.ts
+// imports back from this file) is safe: only read inside a function body here
+// (never at this module's top level).
+import { assessPropertyTriage } from "./triage";
 
 export { NoListingsError, loadPropertyListings };
 
@@ -58,8 +62,12 @@ export { NoListingsError, loadPropertyListings };
  * change a verdict, so `ai_assessment`'s unique key treats the new output as a
  * distinct row and #308's batch scheduler re-assesses (same convention as
  * `CONDITION_PROMPT_VERSION`). `v1` is the initial axis (#388).
+ *
+ * `v2` (#542): answered from the merged `triage` prompt now, not a standalone
+ * `location` prompt — same vocabulary/evidence rules, different surrounding
+ * text. See `CONDITION_PROMPT_VERSION`'s `v3` note for the full rationale.
  */
-export const LOCATION_PROMPT_VERSION = "location/v1";
+export const LOCATION_PROMPT_VERSION = "location/v2";
 
 // The beach-proximity vocabulary + badge labels live in the leaf module
 // `location-vocabulary.ts` (no `pg`/LLM imports) so the redflags prompt builder
@@ -130,9 +138,17 @@ export function parseLocationResult(raw: string): LocationResult {
   if (typeof parsed !== "object" || parsed === null) {
     throw new Error("Location flow returned a non-object JSON value.");
   }
+  return parseLocationObject(parsed as Record<string, unknown>);
+}
 
-  const o = parsed as Record<string, unknown>;
-
+/**
+ * The object-taking core of `parseLocationResult` (#542, triage) — see
+ * condition.ts's `parseConditionObject` doc for why this split exists.
+ * `parseLocationResult` above is now a thin `JSON.parse` + fence-strip
+ * wrapper; every validation and degrade rule below is UNCHANGED from before
+ * the merge.
+ */
+export function parseLocationObject(o: Record<string, unknown>): LocationResult {
   // Beach axis via the shared verdict parser. `parseVerdict` reads `evidence`/
   // `evidence_source`/`confidence`, so hand it a node whose keys map from this
   // flow's beach_* fields — one axis's evidence must not leak into the other's.
@@ -222,42 +238,35 @@ export type LocationOutcome =
   | { skipped: false; result: LocationResult };
 
 /**
- * Assess one property end-to-end: load its merged listings, skip a `terreno`
- * plot (owner decision — the axis doesn't apply), else ask the model (unless an
- * unchanged verdict is already cached — #30), validate, persist.
+ * Assess one property end-to-end (#542): delegates to the merged `triage`
+ * flow (`lib/ai-assessment/triage.ts`) and returns just the `location` slice
+ * — every existing caller keeps this exact signature/return type. The
+ * terreno exclusion (#388, owner decision — the axis doesn't apply to a bare
+ * plot) is now decided inside `assessPropertyTriage` (same `locationApplies`
+ * rule), surfaced here as the `not_applicable` outcome.
  *
  * Throws `NoListingsError` when the property has no live listings, OR when every
  * live listing has no description (see `loadPropertyListings`) — same 404 signal
- * the other flows use.
+ * the other flows use. Throws `AssessmentParkedError` when specifically the
+ * `location` axis is parked (D-104).
  */
 export async function assessPropertyLocation(
   propertyId: number,
   opts?: { requestId?: string | null; ctx?: LlmAgenticContext },
 ): Promise<LocationOutcome> {
-  const listings = await loadPropertyListings(propertyId);
-  if (listings.length === 0) throw new NoListingsError(propertyId);
-
-  // Terreno exclusion (#388, owner decision) — a plot has no beach/heritage
-  // reading in the same sense; skip before any LLM spend. property_type is a
-  // property-level fact, identical across a deduplicated property's listings.
-  if (!locationApplies(listings[0].propertyType)) {
-    return {
-      skipped: true,
-      reason: "El eje 'location' no aplica a un terreno/solar.",
-    };
+  const triage = await assessPropertyTriage(propertyId, opts);
+  const axis = triage.location;
+  switch (axis.status) {
+    case "ok":
+      logCacheOutcome("location", propertyId, axis.fromCache);
+      return { skipped: false, result: axis.result };
+    case "not_applicable":
+      // Terreno exclusion (#388, owner decision) — a plot has no beach/
+      // heritage reading in the same sense.
+      return { skipped: true, reason: "El eje 'location' no aplica a un terreno/solar." };
+    case "parked":
+      throw new AssessmentParkedError(propertyId, "location", axis.failCount, axis.lastError);
+    case "error":
+      throw axis.error;
   }
-
-  const { result, fromCache } = await getOrCompute<LocationResult>(
-    propertyId,
-    "location",
-    LOCATION_PROMPT_VERSION,
-    listings,
-    async () => {
-      const { text, model } = await assessLocation(listings, opts);
-      return { result: parseLocationResult(text), model };
-    },
-    saveLocationAssessment,
-  );
-  logCacheOutcome("location", propertyId, fromCache);
-  return { skipped: false, result };
 }

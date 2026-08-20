@@ -29,20 +29,30 @@ import { DISABLED_SOURCES_CTE, activeSourceClause } from "@/lib/db/source-active
 import { OCCUPANCY_PROMPT_VERSION } from "./occupancy";
 import { CONDITION_PROMPT_VERSION } from "./condition";
 import { REDFLAGS_PROMPT_VERSION } from "./redflags";
+import { LOCATION_PROMPT_VERSION } from "./location";
+import { OPPORTUNITY_PROMPT_VERSION } from "./opportunity";
 
 export { DISABLED_SOURCES_CTE };
 
 /**
  * The flows whose ABSENCE makes a property "pending" (part of the backlog).
  *
- * Deliberately occupancy/condition/redflags only — `extract` is excluded
+ * occupancy/condition/redflags/location/opportunity — `extract` is excluded
  * because it self-gates (`needsExtraction`): a fully-structured property never
  * gets an `extract` row, so keying selection on a missing `extract` row would
  * re-select the same properties forever. This mirrors `SELECTION_FLOWS` in
- * `batch.ts` (which derives the same three by filtering `extract` out of the
- * run list) and the panel's own copy in `llm-health.ts`; defining it once here
- * keeps the scheduler's selection and the panel's backlog counting the SAME
- * population.
+ * `batch.ts` and the panel's own copy in `llm-health.ts`; defining it once
+ * here keeps the scheduler's selection and the panel's backlog counting the
+ * SAME population.
+ *
+ * `location`/`opportunity` (F-9, #542) rode in with the `triage` merge: before
+ * it, a mid-pass budget/circuit/quota stop landing after `condition` could
+ * leave those two permanently unwritten for every property on the page (see
+ * `batch.ts`'s old flow-major-order comment) — now they run in the SAME call
+ * as `condition`, a selection flow, so that gap closes by construction. A
+ * `terreno` never gets a `location`/`opportunity` row BY DESIGN (D-095/#398)
+ * — `missingCurrentVerdictClause` below carries the matching exclusion so a
+ * terreno is never counted as perpetually "pending" for those two axes.
  */
 export const ASSESSMENT_SELECTION_FLOWS: ReadonlyArray<{
   type: string;
@@ -51,6 +61,8 @@ export const ASSESSMENT_SELECTION_FLOWS: ReadonlyArray<{
   { type: "occupancy", version: OCCUPANCY_PROMPT_VERSION },
   { type: "condition", version: CONDITION_PROMPT_VERSION },
   { type: "redflags", version: REDFLAGS_PROMPT_VERSION },
+  { type: "location", version: LOCATION_PROMPT_VERSION },
+  { type: "opportunity", version: OPPORTUNITY_PROMPT_VERSION },
 ];
 
 /**
@@ -106,12 +118,25 @@ export function selectionFlowValues(startIndex = 1): {
  * verdict for at least one selection flow? (The "pending"/backlog condition,
  * on top of eligibility.) `valuesSql` is the fragment from
  * {@link selectionFlowValues}.
+ *
+ * `location`/`opportunity` NEVER get an `ai_assessment` row for a `terreno`
+ * property — that is BY DESIGN (D-095/#398: the axis doesn't apply to a bare
+ * plot), not a gap to fill. Without the guard below, a terreno would satisfy
+ * this predicate FOREVER for those two flows and — since selection orders
+ * `p.created_at ASC` (`batch.ts::selectPropertiesNeedingAssessment`) — the
+ * oldest such properties would permanently occupy the head of the backlog
+ * queue, starving every other property. So a `(location|opportunity, *)` pair
+ * is treated as already-satisfied (never "missing") for a terreno `alias`;
+ * every other pair is unaffected by this guard (`f.atype NOT IN (...)` is
+ * true for them, short-circuiting the whole `OR` to true regardless of
+ * `property_type`).
  */
 export function missingCurrentVerdictClause(alias: string, valuesSql: string): string {
   return `EXISTS (
         SELECT 1
           FROM (VALUES ${valuesSql}) AS f(atype, ver)
-         WHERE NOT EXISTS (
+         WHERE (f.atype NOT IN ('location', 'opportunity') OR ${alias}.property_type IS DISTINCT FROM 'terreno')
+           AND NOT EXISTS (
                  SELECT 1 FROM ai_assessment a
                   WHERE a.property_id = ${alias}.id
                     AND a.assessment_type = f.atype

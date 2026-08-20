@@ -30,7 +30,6 @@
  */
 
 import { sql } from "@/lib/db-write";
-import { assessCondition } from "@/lib/llm";
 import type { LlmAgenticContext } from "@/lib/llm-tools/types";
 import {
   NoListingsError,
@@ -38,7 +37,16 @@ import {
   parseVerdict,
   stripCodeFence,
 } from "./shared";
-import { getOrCompute, getLatestAssessment, logCacheOutcome, type CachedAssessment } from "./cache";
+import { getLatestAssessment, logCacheOutcome, AssessmentParkedError, type CachedAssessment } from "./cache";
+// #542 — condition is now assessed as one axis of the merged `triage` flow.
+// Imported here only for use INSIDE `assessPropertyCondition`'s body (never at
+// this module's top level) — triage.ts imports back from this file
+// (`CONDITION_PROMPT_VERSION`, `parseConditionObject`, `saveConditionAssessment`),
+// and reading a circularly-imported binding only inside a function body (not
+// in a top-level `const`) is what makes that cycle safe under ESM's live
+// bindings. See triage.ts's own top-level `axisSpec()` for the matching half
+// of this discipline.
+import { assessPropertyTriage } from "./triage";
 
 export { NoListingsError, loadPropertyListings };
 
@@ -54,8 +62,16 @@ export { NoListingsError, loadPropertyListings };
  * the *current* prompt_version) to re-assess every property so pre-severity
  * `a_reformar` verdicts get a severity, rather than being read back stale as
  * if they had always carried the field (D-056).
+ *
+ * `v3` (#542): the prompt this axis is answered from is now the MERGED
+ * `triage` prompt (`buildTriagePrompt`), not a standalone `condition` prompt
+ * — same vocabulary, same evidence rules, same output shape for this axis,
+ * but different surrounding text (shared preamble/rules, a different task
+ * heading, per-property axis-selection instructions). Bumped for the same
+ * reason `v2` was: the population needs one re-assessment pass under the new
+ * prompt rather than being read back as if it always came from `triage`.
  */
-export const CONDITION_PROMPT_VERSION = "condition/v2";
+export const CONDITION_PROMPT_VERSION = "condition/v3";
 
 // The renovation-state vocabulary lives in the leaf module
 // `condition-vocabulary.ts` (no `pg`/LLM imports) so the redflags prompt builder
@@ -144,9 +160,18 @@ export function parseConditionResult(raw: string): ConditionResult {
   if (typeof parsed !== "object" || parsed === null) {
     throw new Error("Condition flow returned a non-object JSON value.");
   }
+  return parseConditionObject(parsed as Record<string, unknown>);
+}
 
-  const o = parsed as Record<string, unknown>;
-
+/**
+ * The object-taking core of `parseConditionResult` (#542, triage) — hoisted
+ * out so `lib/ai-assessment/triage.ts` can hand it an ALREADY-PARSED
+ * sub-object straight out of the merged triage array response, without
+ * re-stringifying it just to re-parse it. `parseConditionResult` above is now
+ * a thin `JSON.parse` + fence-strip wrapper around this; every validation and
+ * degrade rule below is UNCHANGED from before the merge.
+ */
+export function parseConditionObject(o: Record<string, unknown>): ConditionResult {
   // No silenceDefault: unlike occupancy's ejes 2/3, there is no market
   // convention that silence about condition means "reformado" — silence
   // degrades straight to `unclear` with zero confidence via `known === false`.
@@ -250,33 +275,38 @@ export async function getConditionAssessment(
 }
 
 /**
- * Assess one property end-to-end: load its merged listings, ask the model
- * (unless an unchanged verdict is already cached — #30), validate, persist.
+ * Assess one property end-to-end (#542): delegates to the merged `triage`
+ * flow (`lib/ai-assessment/triage.ts`, condition + location + opportunity in
+ * one LLM call) and returns just the `condition` slice — every existing
+ * caller (the scheduler, `POST /assessments/condition`) keeps this exact
+ * signature and return type, so it needs no changes of its own. A POST here
+ * ALSO refreshes location/opportunity when they are stale, as a side effect
+ * — see triage.ts's module doc for why that is the intended behavior, not a
+ * leak.
  *
  * Throws `NoListingsError` when the property has no live listings, OR when
  * every live listing has no description (see `loadPropertyListings`) — in
  * both cases there is nothing to read, and writing a verdict (even
  * `unclear`) would misrepresent "we never looked" as "we looked and could
- * not tell".
+ * not tell". Throws `AssessmentParkedError` when specifically the
+ * `condition` axis (not necessarily location/opportunity) is parked (D-104).
  */
 export async function assessPropertyCondition(
   propertyId: number,
   opts?: { requestId?: string | null; ctx?: LlmAgenticContext },
 ): Promise<ConditionResult> {
-  const listings = await loadPropertyListings(propertyId);
-  if (listings.length === 0) throw new NoListingsError(propertyId);
-
-  const { result, fromCache } = await getOrCompute<ConditionResult>(
-    propertyId,
-    "condition",
-    CONDITION_PROMPT_VERSION,
-    listings,
-    async () => {
-      const { text, model } = await assessCondition(listings, opts);
-      return { result: parseConditionResult(text), model };
-    },
-    saveConditionAssessment,
-  );
-  logCacheOutcome("condition", propertyId, fromCache);
-  return result;
+  const triage = await assessPropertyTriage(propertyId, opts);
+  const axis = triage.condition;
+  switch (axis.status) {
+    case "ok":
+      logCacheOutcome("condition", propertyId, axis.fromCache);
+      return axis.result;
+    case "parked":
+      throw new AssessmentParkedError(propertyId, "condition", axis.failCount, axis.lastError);
+    case "error":
+      throw axis.error;
+    case "not_applicable":
+      // `condition` is applicable to every property type — defensive only.
+      throw new Error(`Unexpected: condition axis not_applicable for property ${propertyId}.`);
+  }
 }
