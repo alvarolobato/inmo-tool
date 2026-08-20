@@ -1,4 +1,4 @@
-import { SuggestionQueue } from "@/components/dedup/SuggestionQueue";
+import { PropertyPairQueue } from "@/components/dedup/PropertyPairQueue";
 
 export const metadata = {
   title: "Revisión de duplicados — inmo-tool",
@@ -21,10 +21,11 @@ export default function DedupReviewPage() {
       </h1>
       <p style={{ fontSize: 13, color: "var(--fg-muted)" }}>
         El motor de deduplicación compara cada par de anuncios y fusiona automáticamente los que
-        tienen evidencia concluyente. Los pares con evidencia media quedan aquí, pendientes de tu
-        decisión: confirma la fusión o rechaza el par si en realidad son propiedades distintas.
+        tienen evidencia concluyente. Los pares con evidencia media quedan aquí, agrupados por
+        pareja de propiedades — una tarjeta es una decisión, aunque varios pares la corroboren:
+        confirma la fusión o rechaza la pareja si en realidad son propiedades distintas.
       </p>
-      <SuggestionQueue />
+      <PropertyPairQueue />
     </div>
   );
 }

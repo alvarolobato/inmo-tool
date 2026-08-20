@@ -1017,6 +1017,84 @@ CREATE INDEX IF NOT EXISTS idx_suggested_merge_action_pending
 CREATE INDEX IF NOT EXISTS idx_suggested_merge_action_suggestion_id
     ON suggested_merge_action (suggestion_id);
 
+-- 'reject_pair' (issue #605 Part 2 revision, PR #611 review B1) was added
+-- after this table's original CREATE TABLE — same idempotent-migration
+-- reasoning as property_merge_log.match_basis above: inert on an
+-- already-migrated database, but a live constraint needs its own ALTER or
+-- a pre-existing database would reject every real 'reject_pair' insert.
+ALTER TABLE suggested_merge_action DROP CONSTRAINT IF EXISTS suggested_merge_action_action_check;
+ALTER TABLE suggested_merge_action ADD CONSTRAINT suggested_merge_action_action_check
+    CHECK (action IN ('confirm','reject','reject_pair'));
+
+-- ============================================================
+-- Property-pair merge veto (issue #605 Part 2 revision — PR #611 review B1)
+-- ============================================================
+--
+-- A permanent, PROPERTY-level "these are not the same property" record —
+-- distinct from suggested_merge.status='rejected', which only binds the
+-- exact LISTING pair it was filed against. The grouped review queue
+-- (#605 Part 2) asks the human "is property A the same as property B?",
+-- but the underlying comparisons are per-listing: property A with 2
+-- listings and property B with 2 listings can produce up to 4 distinct
+-- listing-pair rows, and a human rejecting only the ones the UI happened
+-- to show left the untouched combinations free to be freshly suggested —
+-- or auto-merged outright — on the very next run, reopening the identical
+-- question the human just answered (reproduced live in PR #611's review,
+-- including a case where the next run auto-merged the exact two
+-- properties the human had just rejected).
+--
+-- `etl.dedup.engine.reject_property_pair` inserts one row here (canonical
+-- lower-id-first order) whenever a human rejects a property-pair group in
+-- the dashboard, and ALSO marks every currently-pending suggested_merge
+-- row between the two properties as rejected. `engine._run`'s pairwise
+-- loop consults this table BEFORE evaluate_pair for every candidate pair
+-- whose two listings currently resolve to the two vetoed property ids —
+-- so the veto binds every listing COMBINATION between those two ids,
+-- including ones the engine hadn't compared yet, for both auto-merge and
+-- suggestion-filing (never just re-suggestion); `engine.perform_merge`
+-- refuses outright (raises) if ever asked to merge an exact vetoed pair,
+-- as a last-line defense.
+--
+-- What this does NOT cover (PR #611's second review, issue #612): a
+-- BRAND-NEW listing ingested after the veto starts life as its OWN new
+-- property row (etl/orchestrator.py), not attached to either vetoed id.
+-- It only becomes subject to the veto once it merges onto one of the two
+-- vetoed ids, and nothing guarantees it picks the correct side —
+-- `fetch_listing_records` has no ORDER BY, so that's insertion-order
+-- dependent, and the #197 same-source skip can make the wrong side the
+-- ONLY reachable partner. Closing that gap needs evidence-level keying,
+-- not id-level keying — tracked in #612, deliberately not this table's
+-- job.
+--
+-- Repointed, never orphaned, when either property loses a merge for an
+-- unrelated reason: see `perform_merge`'s veto-repoint step, the same
+-- reassignment discipline reconcile.reconcile_merge already applies to
+-- listing/profile_listing_state/feedback_event.
+CREATE TABLE IF NOT EXISTS property_merge_veto (
+    id                     BIGSERIAL    PRIMARY KEY,
+    -- RESTRICT (issue #605 Part 2 revision, PR #611 second review — low
+    -- priority item), not CASCADE: matches the rest of this schema's
+    -- intent (property_merge_log.property_id has no ON DELETE CASCADE
+    -- either). A property is never actually deleted by this codebase
+    -- (perform_merge only reassigns listing.property_id away from the
+    -- losing side, see property_merge_log's own comment below) — CASCADE
+    -- here would only ever fire on a FUTURE property-purge feature no one
+    -- has written yet, and silently deleting a human's explicit veto
+    -- alongside whatever it purged is exactly the kind of loss that goes
+    -- unnoticed until it matters.
+    property_lo_id         BIGINT       NOT NULL REFERENCES property(id) ON DELETE RESTRICT,
+    property_hi_id         BIGINT       NOT NULL REFERENCES property(id) ON DELETE RESTRICT,
+    created_at             TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    -- Audit trail only (which suggested_merge row(s) this veto was raised
+    -- from) — never read by engine logic, never assumed exhaustive.
+    source_suggestion_ids  BIGINT[]     NOT NULL DEFAULT '{}',
+    CONSTRAINT property_merge_veto_order CHECK (property_lo_id < property_hi_id),
+    CONSTRAINT property_merge_veto_unique UNIQUE (property_lo_id, property_hi_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_property_merge_veto_lo ON property_merge_veto (property_lo_id);
+CREATE INDEX IF NOT EXISTS idx_property_merge_veto_hi ON property_merge_veto (property_hi_id);
+
 -- ============================================================
 -- Connector observability (Phase 1.3, issue #11)
 -- ============================================================

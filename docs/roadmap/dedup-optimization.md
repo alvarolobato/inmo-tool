@@ -129,7 +129,7 @@ Dedup's job is "these two listing rows represent the same real property," which 
 
 ### Should the *review queue* be scoped or prioritized? Yes — this is a UX/attention question, and attention is genuinely the scarce resource here
 
-This is a different question from the one above, and the task frames it correctly: the owner's time reviewing 200+ pending suggestions in markets they don't operate in is real, wasted cost, even though every one of those suggestions is a legitimate, correctly-computed duplicate. The fix belongs entirely on the read side (`dashboard/lib/dedup.ts` + `SuggestionQueue.tsx`), never on the write side (`engine.py`).
+This is a different question from the one above, and the task frames it correctly: the owner's time reviewing 200+ pending suggestions in markets they don't operate in is real, wasted cost, even though every one of those suggestions is a legitimate, correctly-computed duplicate. The fix belongs entirely on the read side (`dashboard/lib/dedup.ts` + `PropertyPairQueue.tsx`), never on the write side (`engine.py`).
 
 **One correction to `connector-etl-ops.md` §7, point 3, while proposing this**: that doc flags "worth confirming whether... suggestions are surfaced ahead of low-confidence fuzzy suggestions" as an open question. Checked directly: `listDedupSuggestions`'s query already does `ORDER BY sm.confidence DESC, sm.created_at DESC` — confidence-first ordering is **already implemented**, not a gap. The real remaining gap is the profile dimension, not the confidence dimension.
 
@@ -137,7 +137,7 @@ This is a different question from the one above, and the task frames it correctl
 
 1. Add a profile-relevance signal to the suggestion query: `EXISTS (SELECT 1 FROM profile_listing_state pls JOIN search_profile sp ON sp.id = pls.profile_id WHERE sp.archived_at IS NULL AND pls.matched = true AND pls.property_id IN (la.property_id, lb.property_id))` — cheap (both tables already indexed on `property_id`: `idx_profile_listing_state_property`), no schema change.
 2. **Sort by it, don't hard-filter by it as the default.** `ORDER BY profile_relevant DESC, sm.confidence DESC, sm.created_at DESC` — profile-relevant pairs surface first, everything else still reachable by scrolling/paging, so a real duplicate is never *hidden*, only deprioritized. This matters because of an edge case a hard filter would get wrong: a brand-new listing that hasn't been through `materializeProfile` yet has no `profile_listing_state` row at all, `matched` or otherwise — a hard "only show profile-matched pairs" filter would silently exclude it from the queue entirely until the next materialize pass, which is a worse failure mode (a real duplicate the owner never sees at all) than the one this proposal is trying to fix (a real duplicate seen later than ideal).
-3. **Add an explicit toggle** ("Ver todos" / "Solo mis perfiles") on `SuggestionQueue.tsx`, defaulting to the sorted-but-unfiltered view above, that switches to a hard `WHERE profile_relevant` filter for an owner who genuinely wants to see nothing else right now. This gives the owner the choice explicitly rather than the system making a permanent, silent judgment call about what counts as relevant.
+3. **Add an explicit toggle** ("Ver todos" / "Solo mis perfiles") on `PropertyPairQueue.tsx`, defaulting to the sorted-but-unfiltered view above, that switches to a hard `WHERE profile_relevant` filter for an owner who genuinely wants to see nothing else right now. This gives the owner the choice explicitly rather than the system making a permanent, silent judgment call about what counts as relevant.
 4. `getDedupSuggestionCounts()` (`dashboard/lib/dedup.ts` ~L166) should gain a `profile_relevant_total` alongside its existing `total`/`by_basis`, so the UI can show "12 relevantes a tus perfiles, 200 en total" rather than just a single undifferentiated count.
 
 This is small — one additional `EXISTS` clause, one `ORDER BY` change, one UI toggle, one additional count — and ships independently of everything else in this doc.
@@ -150,7 +150,7 @@ This is small — one additional `EXISTS` clause, one `ORDER BY` change, one UI 
 |---|---|---|---|---|
 | 0 | Instrument `dedup_runs` with `photo_fetch_ms`/`pair_eval_ms`/`db_commit_ms` | `engine.py` `DedupRunResult`/`_run`, `etl/schema/init.sql` `dedup_runs` | **Now** | Near-zero cost, resolves §1's estimate into a real measurement; should land at the same time as deploying #226 so the very next run confirms or corrects this doc's hypothesis. |
 | 1 | Deploy #226 to the owner's instance | `photo_hash_store.py` (already merged, not yet deployed per this task's context) | **Now** (ops action, not code) | Per §1, this alone plausibly collapses the 84-minute number to low minutes/seconds on the second and later runs. Nothing else in this doc should be prioritized ahead of confirming this. |
-| 2 | Profile-relevance sort + toggle on the review queue | `dashboard/lib/dedup.ts`, `dashboard/components/dedup/SuggestionQueue.tsx`, `profile_listing_state` | **Now** | Small, independent, directly answers the owner's own question (§5), no correctness trade-off (sort not filter by default). |
+| 2 | Profile-relevance sort + toggle on the review queue | `dashboard/lib/dedup.ts`, `dashboard/components/dedup/PropertyPairQueue.tsx`, `profile_listing_state` | **Now** | Small, independent, directly answers the owner's own question (§5), no correctness trade-off (sort not filter by default). |
 | 3 | Blocking/bucketing by geography + price band | `engine.py fetch_listing_records`/`_run` | **Later** — trigger ~15-20k listings, or `pair_eval_ms` from #0 empirically dominating a run | Recall-risk surface not worth carrying against a corpus this small once #226 lands; confirms rather than overturns the engine's own docstring and `connector-etl-ops.md` §7's existing call. |
 | 4 | Incremental dedup (Δ×S hourly, full S×S rescan on a slower cadence) | `engine.py fetch_listing_records`, `listing.last_fetched_at`, D-024 | **Later** — same corpus-size trigger as #3, OR dedup invocation frequency exceeding ~once/10-15min (relevant if `connector-etl-ops.md` §3/§5 ship) | Opens a real, D-024-shaped correctness gap (S×S pairs stop auto-resurfacing on rule changes) that must be mitigated with a slower full-rescan path, not skipped outright — genuinely more design risk than #3, not less. |
 | — | Signal short-circuit ordering | `engine.py evaluate_pair` | **No change** | Already correctly ordered — cheapest/deterministic signals before the one network-cost signal, confirmed by direct reading, not just the docstring's own claim. |
@@ -159,6 +159,11 @@ This is small — one additional `EXISTS` clause, one `ORDER BY` change, one UI 
 
 ## Cross-references
 
+*File-name note: §5's `SuggestionQueue.tsx` proposal shipped (issue #246, the
+profile-relevance sort/toggle) and the file itself was later renamed to
+`PropertyPairQueue.tsx` by issue #605 Part 2, which grouped the queue by
+property pair — references below use the current name.*
+
 - `etl/dedup/engine.py` — the pipeline, `DedupRunResult`, `evaluate_pair`, `_run`, `fetch_listing_records`.
 - `etl/dedup/photo_hash_store.py`, `etl/dedup/signals/photo_hash.py` — #226/D-025, per-URL persistence.
 - `etl/dedup/signals/{cadastral,address_coords,phone_extract,reference_code,fuzzy,floor}.py` — the six signals and their ordering.
@@ -166,5 +171,5 @@ This is small — one additional `EXISTS` clause, one `ORDER BY` change, one UI 
 - `docs/decisions/D-024-dedup-pending-reevaluation.md` — pending-suggestion re-evaluation; the direct precedent for §3's correctness gap.
 - `docs/decisions/D-025-photo-hash-store.md` — the photo-hash persistence decision this whole doc's §1 depends on.
 - `docs/roadmap/connector-etl-ops.md` (PR #235, open) §7 "Better duplicate evaluation" and §4.4 "pipeline health" strip — the sibling roadmap doc this one cross-links rather than duplicates.
-- `dashboard/lib/dedup.ts`, `dashboard/components/dedup/SuggestionQueue.tsx` — the review queue, §5's proposed change.
+- `dashboard/lib/dedup.ts`, `dashboard/components/dedup/PropertyPairQueue.tsx` — the review queue, §5's proposed change.
 - `etl/schema/init.sql` — `dedup_runs`, `suggested_merge`, `profile_listing_state`, `search_profile`.

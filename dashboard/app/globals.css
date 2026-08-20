@@ -643,6 +643,16 @@ body {
   padding: 6px 14px;
 }
 
+/* Issue #605 Part 2 revision (PR #611 review M1): the "ver los otros N
+   pares" toggle is the ONLY route to a group's corroborating evidence —
+   the mechanism D-133 leans on for an informed bulk confirm/reject
+   decision — so it needs a real tap target on a phone too, not just
+   confirm/reject/cancel. Desktop keeps the plain inline-link padding it
+   always had. */
+.dedup-evidence-toggle {
+  padding: 0;
+}
+
 @media (max-width: 767px) {
   /* AdminChrome's own padding layer still applies (see the block comment
      above) — this just stops THIS page's layer from doubling it, which on
@@ -684,6 +694,16 @@ body {
     display: inline-flex;
     align-items: center;
     justify-content: center;
+  }
+
+  /* Same WCAG 2.5.5 44px minimum as .dedup-action-btn above — measured
+     18px tall before this fix (no class, `padding: 0` inline, the only
+     way to reach a group's collapsed corroborating evidence). */
+  .dedup-evidence-toggle {
+    min-height: 44px;
+    padding: 12px 0;
+    display: inline-flex;
+    align-items: center;
   }
 }
 

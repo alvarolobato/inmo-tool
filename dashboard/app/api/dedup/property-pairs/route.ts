@@ -1,29 +1,32 @@
 /**
- * GET /api/dedup/suggestions — the dedup review queue (pending `suggested_merge`
- * rows, joined with both sides' listing + property data for a side-by-side
- * comparison view).
+ * GET /api/dedup/property-pairs — the dedup review queue, grouped by
+ * PROPERTY pair (issue #605 Part 2 — supersedes the old
+ * `/api/dedup/suggestions`, which served one row per LISTING pair and let
+ * property A × 6 listings vs. property B × 7 listings ask the same
+ * question up to 42 times; #600 measured 892 pending rows collapsing to
+ * 669 distinct property-pair questions, one property pair alone had 38
+ * identical rows).
  *
+ * Same query params as the old route:
  * `?basis=photo_hash|fuzzy|phone|reference_code|address_coords|cadastral`
- * narrows to one match_basis (the queue's filter chips) — see
- * lib/dedup.ts's `listDedupSuggestions` docstring for why the default order
- * (confidence DESC) already surfaces the high-value photo_hash/reference_code
- * rows ahead of the much larger, much weaker fuzzy tail.
+ * narrows to GROUPS containing at least one row of that basis (see
+ * lib/dedup.ts's `listDedupPropertyPairSuggestions` docstring for why a
+ * matched group's FULL evidence still comes back, not just the matching
+ * rows).
  *
- * `?profile=relevant` — the "solo mis perfiles" toggle: hard-filters to pairs
- * touching an active search profile (issue #246). Any other value (or absent)
- * is the default "ver todos" view, which shows everything but sorts
- * profile-relevant pairs first — nothing is hidden by default.
+ * `?profile=relevant` — the "solo mis perfiles" toggle: hard-filters to
+ * groups where at least one evidence row touches an active search profile.
  *
- * `?limit`/`?offset` — simple offset pagination (the queue is expected to be
- * worked through, not deep-linked to a specific page).
- *
- * `cadastral`/`address_coords` never actually appear here in practice (both
- * signals always auto-merge, never `suggest` — see etl/dedup/signals/) but
- * are accepted as valid filter values for forward-compatibility.
+ * `?limit`/`?offset` — simple offset pagination over GROUPS, not rows.
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getDedupSuggestionCounts, listDedupSuggestions, MATCH_BASES, type MatchBasis } from "@/lib/dedup";
+import {
+  getDedupPropertyPairCounts,
+  listDedupPropertyPairSuggestions,
+  MATCH_BASES,
+  type MatchBasis,
+} from "@/lib/dedup";
 import { formatApiError, generateRequestId, sanitizeErrorMessage } from "@/lib/errors";
 
 function parseBasis(raw: string | null): MatchBasis | undefined {
@@ -47,12 +50,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   try {
     const [items, counts] = await Promise.all([
-      listDedupSuggestions({ basis, onlyProfileRelevant, limit, offset }),
-      getDedupSuggestionCounts(),
+      listDedupPropertyPairSuggestions({ basis, onlyProfileRelevant, limit, offset }),
+      getDedupPropertyPairCounts(),
     ]);
     return NextResponse.json({ items, counts, nextOffset: items.length === limit ? offset + limit : null });
   } catch (err) {
-    console.error(`[${requestId}] Error al listar sugerencias de duplicados:`, err);
+    console.error(`[${requestId}] Error al listar sugerencias de duplicados agrupadas:`, err);
     return NextResponse.json(
       formatApiError(
         "No se pudieron cargar las sugerencias de duplicados.",
