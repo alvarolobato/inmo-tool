@@ -584,6 +584,13 @@ async function enumerationStopped(portal) {
 // per episode, and report to the dashboard so /etl/salud shows it without the
 // browser open.
 const BLOCK_STATE_KEY = 'inmoBlockState';
+// In-memory (NOT persisted — a worker respawn just means a claim is
+// forgotten, which self-heals on the next detection): which portals
+// currently have a report POST in flight, so a burst of concurrent
+// detections (review B2) can't all decide to retry the SAME dropped report
+// at once. Claimed atomically inside handleBlockDetected's exclusive
+// section; released by tryReportBlockEpisode's `finally`.
+const reportInFlight = new Set();
 
 async function getBlockState() {
   const o = await chrome.storage.session.get(BLOCK_STATE_KEY);
@@ -608,38 +615,100 @@ async function activeBlockSummary() {
 /**
  * A challenge page was detected (content-script.js, on any of the
  * extension's supported portals). Stop the run — do not grind on: pause the
- * batch loop (never drain — D-043/D-112's
- * pending queue and search queue must survive untouched so a resume picks up
- * exactly where it left off) and let the in-flight enumeration walk see the
- * block on its own next per-page check (enumerationStopped, above). Alerts +
- * reports to the dashboard ONLY on a NEW episode (isNewEpisode) — a repeat
- * detection for an already-active episode is silent, per the "one alert per
- * episode, not per tab" rule.
+ * batch loop (never drain — D-043/D-112's pending queue and search queue
+ * must survive untouched so a resume picks up exactly where it left off)
+ * and let the in-flight enumeration walk see the block on its own next
+ * per-page check (enumerationStopped, above). Alerts + reports to the
+ * dashboard ONLY on a NEW episode (isNewEpisode) — a repeat detection for an
+ * already-active episode never re-notifies, per the "one alert per episode,
+ * not per tab" rule, but DOES retry the dashboard report if the first
+ * attempt never landed (review "a dropped report is lost permanently").
  */
 async function handleBlockDetected(portal, signature) {
   if (typeof portal !== 'string' || !portal) return;
   const now = Date.now();
-  const prev = await getBlockState();
-  const { state, isNewEpisode } = InmoBatch.recordBlock(prev, portal, signature, now);
-  await setBlockState(state);
 
-  // Stop the run — do not grind on. Only one search ever runs at a time
-  // (D-112), so any batch loop currently driving IS the one that hit this
-  // block; pausing (never stopping/draining) is what preserves the pending
-  // queue for a resume. The in-flight enumeration walk (if any) breaks out on
-  // its own next enumerationStopped() check — nothing further to do for it
-  // here.
+  // Atomic read-modify-write (issue #634 review B2). D-043's concurrency cap
+  // means up to N (default 3, hard cap 8) capture tabs can be open at once,
+  // and a WAF flip is per-egress-IP, not per-tab — every in-flight tab can
+  // render the SAME challenge within milliseconds of each other. Without
+  // this serializer, N concurrent BLOCK_DETECTED messages would all read the
+  // same "not active yet" snapshot and all decide isNewEpisode:true, firing
+  // N notifications/reports for one episode. Every other shared-state
+  // mutation in this file (batch state, the enumeration claim, the search
+  // queue) already goes through this same serializer for exactly this
+  // reason — this closes the same class of race for block state.
+  // `shouldReport` is decided ATOMICALLY in the SAME exclusive section as the
+  // record itself — deciding it afterward (a separate in-memory
+  // check-then-add) would reopen the exact concurrency race this whole
+  // function exists to close: N concurrent repeat-detections could all read
+  // `reported: false` before any of them finishes reporting and all attempt
+  // it. Claiming the attempt (adding to reportInFlight) here, inside the
+  // lock, makes "who gets to report right now" as race-free as "who gets to
+  // record the episode".
+  const { entry, isNewEpisode, shouldReport } = await runBatchStateExclusive(async () => {
+    const prev = await getBlockState();
+    const recorded = InmoBatch.recordBlock(prev, portal, signature, now);
+    await setBlockState(recorded.state);
+    const ent = recorded.state[portal];
+    const claim = !!ent && ent.reported !== true && !reportInFlight.has(portal);
+    if (claim) reportInFlight.add(portal);
+    return { entry: ent, isNewEpisode: recorded.isNewEpisode, shouldReport: claim };
+  });
+
+  // Stop the run — do not grind on. SCOPED to this portal (issue #634 review
+  // B4 "cross-portal collateral"): checkForBlock runs on every render,
+  // including a manual tab on a DIFFERENT portal than whatever batch/auto
+  // happens to be looping right now — an idealista challenge must never
+  // pause an aliseda run. `batchState.portal` is null only for a
+  // mixed/unrestricted Auto drain (no single portal to attribute a run to),
+  // where pausing conservatively on ANY block remains the safer default.
   if (batchLooping) {
-    await mutateBatch(InmoBatch.pause);
+    const current = await getBatchState();
+    if (!current || !current.portal || current.portal === portal) {
+      await mutateBatch(InmoBatch.pause);
+    }
   }
 
-  if (!isNewEpisode) return; // already alerted for this episode (D-047 "once")
+  if (!isNewEpisode) {
+    // Already alerted for this episode (D-047 "once") — but if the very
+    // first report attempt failed (network hiccup, dashboard down), retry it
+    // here on every later detection while it's still active/unreported AND
+    // no other concurrent detection already claimed the retry (shouldReport).
+    // Never a second local notification.
+    if (shouldReport) {
+      await tryReportBlockEpisode(portal, entry.signature, entry.detectedAt);
+    }
+    return;
+  }
 
-  notifyBlocked(portal, state[portal].signature);
+  notifyBlocked(portal, entry.signature);
+  if (shouldReport) {
+    await tryReportBlockEpisode(portal, entry.signature, entry.detectedAt);
+  }
+}
+
+/**
+ * POST the episode to the dashboard and, only on success, mark it reported
+ * (InmoBatch.markBlockReported) so a later retry doesn't resend a delivered
+ * report. Best-effort — a failure here must never surface to the caller; the
+ * pause + local notification already happened regardless.
+ */
+async function tryReportBlockEpisode(portal, signature, detectedAt) {
   try {
-    await reportBlockEpisode(portal, state[portal].signature, state[portal].detectedAt);
+    await reportBlockEpisode(portal, signature, detectedAt);
+    await runBatchStateExclusive(async () => {
+      const state = await getBlockState();
+      await setBlockState(InmoBatch.markBlockReported(state, portal));
+    });
   } catch {
-    /* best-effort — the block still paused the run and shows in the popup */
+    /* best-effort — the next detection (while this episode is still
+       active) retries the report */
+  } finally {
+    // Release the claim regardless of outcome — a failure must be retryable
+    // by the NEXT detection, and a success already flipped `reported` above
+    // so no later caller will even attempt to claim it again.
+    reportInFlight.delete(portal);
   }
 }
 
@@ -681,6 +750,32 @@ function notifyBlocked(portal, signature) {
 }
 
 /**
+ * Clicking a block-episode notification opens /etl/salud (issue #634 review
+ * "no onClicked handler — clicking the alert does nothing") so the operator
+ * lands straight on the "resuelve el reto" section instead of a dead end.
+ * Guarded like every other chrome.notifications use — a stub/test
+ * environment without the API is a silent no-op, not a crash.
+ */
+if (typeof chrome !== 'undefined' && chrome.notifications && chrome.notifications.onClicked) {
+  chrome.notifications.onClicked.addListener((notificationId) => {
+    if (typeof notificationId !== 'string' || !notificationId.startsWith('inmo-block-')) return;
+    (async () => {
+      try {
+        const { apiUrl } = await getApiConfig();
+        await chrome.tabs.create({ url: `${apiUrl}/etl/salud` });
+      } catch {
+        /* best-effort — the notification itself already delivered the alert */
+      }
+      try {
+        chrome.notifications.clear(notificationId);
+      } catch {
+        /* best-effort */
+      }
+    })();
+  });
+}
+
+/**
  * Report a NEW block episode to the dashboard (issue #634) so /etl/salud
  * shows it without the browser open — which portal, when, and a SIGNATURE of
  * what was detected (the marker id, e.g. 'captcha_wall'), never page content.
@@ -690,7 +785,7 @@ function notifyBlocked(portal, signature) {
 async function reportBlockEpisode(portal, signature, detectedAt) {
   const { apiUrl, apiKey } = await getApiConfig();
   if (!apiKey) return; // not configured yet — nothing to report
-  await fetch(`${apiUrl}/api/extension/block-episode`, {
+  const response = await fetch(`${apiUrl}/api/extension/block-episode`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-admin-key': apiKey },
     body: JSON.stringify({
@@ -699,6 +794,10 @@ async function reportBlockEpisode(portal, signature, detectedAt) {
       detectedAt: new Date(detectedAt).toISOString(),
     }),
   });
+  // Without this check tryReportBlockEpisode's retry-on-failure never fires:
+  // a non-2xx response (dashboard down, 401, 500) would still be treated as
+  // "delivered" and markBlockReported would silence every future retry.
+  if (!response.ok) throw new Error(`block-episode report: ${response.status}`);
 }
 
 // Serialize every get-modify-set of the shared batch state (BATCH_KEY). With
@@ -1268,7 +1367,9 @@ async function runEnumerationThenCapture(portal, searchUrl, page1Urls) {
     if (await isPortalBlocked(portal)) {
       const pending = await fetchPendingUrls(portal).catch(() => []);
       const { concurrency } = await getBatchConfig();
-      const paused = InmoBatch.pause(InmoBatch.makeBatchState(pending, concurrency));
+      const paused = InmoBatch.pause(
+        InmoBatch.makeBatchState(pending, concurrency, undefined, portal),
+      );
       await runBatchStateExclusive(async () => {
         await clearEnumState();
         await setBatchState(paused);
@@ -1325,7 +1426,7 @@ async function runCaptureQueue(portal, discoveredCount) {
     pending.length,
     discoveredCount,
   );
-  const state = InmoBatch.makeBatchState(pending, concurrency, emptyReason);
+  const state = InmoBatch.makeBatchState(pending, concurrency, emptyReason, portal);
   let loopPromise;
   await runBatchStateExclusive(async () => {
     await clearEnumState();
@@ -2406,7 +2507,11 @@ async function runAutoBatch() {
   if (plan && plan.kind === 'drain' && Array.isArray(plan.urls) && plan.urls.length > 0) {
     const urls = plan.urls.filter((u) => typeof u === 'string');
     const { concurrency } = await getBatchConfig();
-    const state = InmoBatch.makeBatchState(urls, concurrency);
+    // auto.portal is null when Auto is unrestricted ("drain every portal") —
+    // makeBatchState correctly stores portal:null for that case, and
+    // handleBlockDetected's cross-portal guard (issue #634 review B4) falls
+    // back to pausing on any block for a run it can't attribute to one portal.
+    const state = InmoBatch.makeBatchState(urls, concurrency, undefined, auto.portal);
     // Same atomic re-check-and-claim as the harvest branch above (issue #554
     // review N7) — the persisted RUNNING batch state itself is what signals
     // "active" to any concurrent claimant from here on.
@@ -2681,10 +2786,14 @@ if (typeof module !== 'undefined' && module.exports) {
     getNextAutoCheckAt,
     // Block/challenge episodes (issue #634)
     handleBlockDetected,
+    tryReportBlockEpisode,
     clearBlockIfActive,
     getBlockState,
+    setBlockState,
     isPortalBlocked,
     activeBlockSummary,
     enumerationStopped,
+    runEnumerationThenCapture,
+    runBatchStateExclusive,
   };
 }

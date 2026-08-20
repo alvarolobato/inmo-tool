@@ -1139,30 +1139,52 @@
   }
 
   /**
-   * Block/challenge detection (issue #634). A SMALL, portal-agnostic set of
-   * ROBUST signatures — a challenge-page marker library rots slower than a
-   * long brittle selector list, and this repo has already hit two of these
-   * for real: idealista's DataDome CAPTCHA wall (`captcha-delivery.com`, see
-   * docs/skills/connectors.md) and the GeeTest "Pardon Our Interruption" wall
-   * (#captcha-box, static.geetest.com — hit twice live during #628, see
-   * milanuncios_sample_soft_block_page.html). Cloudflare/Incapsula/Akamai are
-   * the documented WAFs behind D-026/D-027/D-081's "routes to browser-extension
-   * capture" batch — this extension is exactly where a human would now meet
-   * them. Every check is READ-ONLY DOM inspection: no solving, no retrying, no
-   * header/identity changes (issue #1 §15 / D-033 / D-075).
+   * Block/challenge detection (issue #634, hardened per fresh-context review
+   * B1). A SMALL, portal-agnostic set of ROBUST signatures — a challenge-page
+   * marker library rots slower than a long brittle selector list, and this
+   * repo has already hit two of these for real: idealista's DataDome CAPTCHA
+   * wall (`captcha-delivery.com`, see docs/skills/connectors.md) and the
+   * GeeTest "Pardon Our Interruption" wall (#captcha-box, static.geetest.com
+   * — hit twice live during #628, see milanuncios_sample_soft_block_page.html).
+   * Cloudflare/Incapsula/Akamai are the documented WAFs behind
+   * D-026/D-027/D-081's "routes to browser-extension capture" batch — this
+   * extension is exactly where a human would now meet them. Every check is
+   * READ-ONLY DOM inspection: no solving, no retrying, no header/identity
+   * changes (issue #1 §15 / D-033 / D-075).
+   *
+   * A MARKER ALONE IS NOT ENOUGH (review B1). Several of these hosts/ids are
+   * NOT exclusive to a full-page interstitial: `challenges.cloudflare.com`
+   * also serves the Turnstile WIDGET a portal can embed in an ordinary
+   * contact form; `_Incapsula_Resource` is injected by Imperva into
+   * perfectly ordinary 200 responses as a defensive anti-bot tag; GeeTest's
+   * `#captcha-box` id or the "Pardon Our Interruption" phrase can appear on
+   * an ordinary rendered page (a contact widget, or listing copy that merely
+   * quotes it). `detectBlockSignals` therefore requires CORROBORATION: a
+   * candidate marker only counts once `!isRenderReady(doc, portal)` — the
+   * SAME render-readiness heuristic auto-capture already trusts to know a
+   * page painted its real content. A genuine full-page interstitial (or a
+   * WAF/login wall) never renders the portal's real listing/search content,
+   * so this costs no true positives while killing the false-positive class
+   * above at the source.
    *
    * Deliberately conservative: an unrecognised page (including a genuinely
    * empty search or a 404/removed-listing page — neither carries any of these
-   * markers) returns { blocked: false, signature: null } — see the false-
-   * positive tests in extension-block-detect.test.ts. A bad/throwing selector
-   * on one signature must never crash detection or block the others.
+   * markers, corroborated or not) returns { blocked: false, signature: null }
+   * — see the false-positive tests in extension-block-detect.test.ts,
+   * including the "healthy page that happens to contain a plausible marker"
+   * cases review B1 called out. A bad/throwing selector on one signature must
+   * never crash detection or block the others.
    */
   var BLOCK_SIGNATURES = [
     {
       id: "cloudflare_challenge",
       matches: function (doc) {
-        var title = ((doc.title || "") + "").toLowerCase();
-        if (title.indexOf("just a moment") !== -1) return true;
+        // The actual JS-challenge ORCHESTRATION script — language-independent,
+        // and (review B1) a DIFFERENT PATH than the Turnstile WIDGET script
+        // (`/turnstile/v0/api.js`) a portal can embed in an ordinary contact
+        // form on the SAME `challenges.cloudflare.com` host. Matching the
+        // path, not just the host, is what tells the two apart.
+        if (safeQuery(doc, "script[src*='/cdn-cgi/challenge-platform/']")) return true;
         if (
           safeQuery(
             doc,
@@ -1171,7 +1193,12 @@
         ) {
           return true;
         }
-        return !!safeQuery(doc, "script[src*='challenges.cloudflare.com']");
+        // Weak fallback only: Cloudflare's system page title is commonly
+        // English even on Spanish sites, but a localised deployment won't
+        // match this — the two checks above are the primary,
+        // language-independent signal (review B1's Spanish-title gap).
+        var title = ((doc.title || "") + "").toLowerCase();
+        return title.indexOf("just a moment") !== -1;
       },
     },
     {
@@ -1219,6 +1246,45 @@
         return /Reference #[\w.]+/.test(body);
       },
     },
+    {
+      id: "waf_denied",
+      // A generic "the edge/app rejected this request" page (review B1 — the
+      // issue's own "WAF 403" example, which akamai_deny's narrow
+      // Reference-# requirement doesn't cover). Deliberately broad text
+      // matching is SAFE here only because it is always corroborated by
+      // !isRenderReady below — a real listing page that happens to mention
+      // "acceso denegado" in passing still renders real content elsewhere
+      // and is excluded.
+      matches: function (doc) {
+        var title = ((doc.title || "") + "").trim();
+        var h1 = safeQuery(doc, "h1");
+        var heading = ((h1 && h1.textContent) || "").trim();
+        var text = (title + " " + heading).toLowerCase();
+        if (text.indexOf("acceso denegado") !== -1) return true;
+        if (text.indexOf("access denied") !== -1) return true;
+        return /\b403\b/.test(text) && text.indexOf("forbidden") !== -1;
+      },
+    },
+    {
+      id: "session_wall",
+      // A redirect to a login/session-verification wall — the issue's own
+      // third "blocked" example. A password field with no real listing
+      // content nearby; corroborated the same as every other signature.
+      matches: function (doc) {
+        if (!safeQuery(doc, "input[type='password']")) return false;
+        var body = ((doc.body && doc.body.textContent) || "").toLowerCase();
+        return (
+          body.indexOf("iniciar sesión") !== -1 ||
+          body.indexOf("inicia sesión") !== -1 ||
+          body.indexOf("verifica tu cuenta") !== -1 ||
+          body.indexOf("sesión ha caducado") !== -1 ||
+          body.indexOf("sesión caducada") !== -1 ||
+          body.indexOf("session expired") !== -1 ||
+          body.indexOf("sign in") !== -1 ||
+          body.indexOf("log in") !== -1
+        );
+      },
+    },
   ];
 
   function safeQuery(doc, selector) {
@@ -1231,13 +1297,21 @@
   }
 
   /**
-   * Run every signature against `doc`. Returns the FIRST match as
-   * `{ blocked: true, signature: <id> }`, or `{ blocked: false, signature: null }`
-   * when nothing matched — the safe default for any page this list doesn't
-   * recognise. Never throws.
+   * Run every signature against `doc`, requiring CORROBORATION (see the
+   * module comment above): a marker only counts once the page has NOT
+   * actually rendered its real content (`!isRenderReady(doc, portal)`).
+   * `portal` is passed straight through to isRenderReady's per-portal
+   * readySelectors — pass null/omit for a page with no known portal (falls
+   * back to the generic h1/main heuristic). Returns the FIRST corroborated
+   * match as `{ blocked: true, signature: <id> }`, or
+   * `{ blocked: false, signature: null }` when nothing matched (or every
+   * candidate match was on a page that genuinely rendered) — the safe
+   * default for any page this list doesn't recognise. Never throws.
    */
-  function detectBlockSignals(doc) {
-    if (!doc) return { blocked: false, signature: null };
+  function detectBlockSignals(doc, portal) {
+    if (!doc || typeof doc.querySelector !== "function") {
+      return { blocked: false, signature: null };
+    }
     for (var i = 0; i < BLOCK_SIGNATURES.length; i++) {
       var matched = false;
       try {
@@ -1245,7 +1319,18 @@
       } catch (e) {
         matched = false;
       }
-      if (matched) return { blocked: true, signature: BLOCK_SIGNATURES[i].id };
+      if (!matched) continue;
+      try {
+        // A page that actually rendered its real content is NOT a block,
+        // regardless of which marker matched (review B1) — a Turnstile
+        // widget, an Incapsula anti-bot tag, or a mere mention of a phrase
+        // can all coexist with a genuine listing/search page.
+        if (isRenderReady(doc, portal)) continue;
+      } catch (e) {
+        /* corroboration itself failed — treat as "can't confirm healthy",
+           fall through to the conservative "blocked" verdict below */
+      }
+      return { blocked: true, signature: BLOCK_SIGNATURES[i].id };
     }
     return { blocked: false, signature: null };
   }

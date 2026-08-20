@@ -173,7 +173,7 @@
       lastBlockCheckHref = url;
       const portal = D.supportedPortalForUrl(url);
       if (!portal) return; // not one of our portals — nothing to report
-      const verdict = D.detectBlockSignals(document);
+      const verdict = D.detectBlockSignals(document, portal);
       if (verdict.blocked) {
         chrome.runtime.sendMessage({
           type: "BLOCK_DETECTED",
@@ -279,7 +279,7 @@
       // report it and leave the guard key un-claimed instead of firing — a
       // challenge page must never be ingested as listing data, and a later
       // retry (once the block clears) can still claim this key.
-      const blockVerdict = D.detectBlockSignals(document);
+      const blockVerdict = D.detectBlockSignals(document, info.portal);
       if (blockVerdict.blocked) {
         try {
           chrome.runtime.sendMessage({
