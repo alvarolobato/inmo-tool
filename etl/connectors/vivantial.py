@@ -365,6 +365,15 @@ class VivantialConnector(Connector):
             # contracts), which issue #25's occupancy assessment reads.
             description=extract_description(page),
             photo_urls=extract_photo_urls(page),
+            # Issue #628 considered a constant selling-entity name here
+            # (the pattern solvia.py/servihabitat.py now use) and rejected
+            # it: unlike Solvia/Servihabitat, this connector's own module
+            # docstring is explicit that "the public-facing pages never
+            # name a legal entity" — the operator identity was only
+            # recoverable from the site's privacy policy, not anything a
+            # listing page itself displays, and the trading name (OKUANT)
+            # doesn't match the public brand ("vivantial") either. No
+            # honest single string to assert here. Left None.
             contact_raw=None,
             address=extract_address(page),
             # Real per-listing coordinates, from hidden spans in the map

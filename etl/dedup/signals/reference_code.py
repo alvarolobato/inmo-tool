@@ -53,24 +53,27 @@ Placeholder/unusable codes never veto — an unusable code is "absent", not
 path, so a CRM template left unedited across an agency's whole inventory
 can't silently block every legitimate merge for that agency.
 
-**Current reach, measured against the live demo DB (D-116): ZERO.**
-`engine._run` never calls `evaluate_pair` at all on a same-source pair
-(issue #197) or on a pair already sharing a `property_id` — so this veto
-can only ever fire on a cross-source pair that ISN'T already merged. As
-populated today, only `fotocasa` and `milanuncios` capture `contact_raw`
-at all (every other connector leaves it null, so `_same_agency` is False
-for any pair involving them); `milanuncios` captures no `reference_code`
-at all. A reachable, eligible pair therefore does not exist in the
-current corpus — this is a forward-looking guard against a shape
-(`contact_raw` AND `reference_code` both populated by two DIFFERENT
-connectors) that no connector combination produces yet. It is real
-protection the moment a second connector starts capturing agency name
-alongside reference code (e.g. an Idealista connector), not dead code —
-but don't read D-116's blast-radius numbers as evidence it is doing
-anything today, because it is not. See D-116 for the corrected
-measurement and for why an earlier draft of this module briefly carried
-a prefix-based exemption from this veto, motivated by a since-corrected
-blast-radius bug, and was reverted.
+**Reach (issues #628/#629, D-140 — supersedes the old "ZERO" note below).**
+`contact_raw`/`reference_code` capture was widened (idealista's agency,
+solvia/servihabitat's constant selling-entity name) so the veto now has
+eligible pairs to run against — see D-140 for the measured before/after
+counts. `engine._run` still never calls `evaluate_pair` at all on a
+same-source pair (issue #197) or on a pair already sharing a `property_id`,
+so the veto only ever fires on a cross-source pair that isn't already
+merged.
+
+**The comparison both `evaluate` and `reference_codes_conflict` use is
+`codes_equivalent`, not a bare `==` (issue #629, D-140) — one normalizer,
+used by both the match path and the veto, never two implementations.**
+`_normalize` now also strips a leading "ref"/"ref."/"referencia" label
+before the existing case/whitespace/placeholder handling, and
+`codes_equivalent` additionally tolerates a trailing unit/variant suffix
+(`-1`, `/2`, `_A`) on exactly one side — the owner's own flagged example
+(`LCSE42305` vs `LCSE42305-1`) — never an arbitrary edit distance and
+never two suffixed codes with DIFFERING suffixes (that is two units, not
+one property re-rendered). See `codes_equivalent`'s own docstring for the
+exact rule and D-140 for why this specific, narrow relaxation and nothing
+wider.
 
 1. Address/coordinates/size proximity, mirroring phone_extract._corroborated
    exactly (coords+size when both sides publish coordinates, falling back
@@ -132,6 +135,25 @@ _PLACEHOLDER_CODES = frozenset(
 )
 _HAS_DIGIT_RE = re.compile(r"\d")
 
+# Issue #629 (D-140): a leading "Ref.", "Ref:", or "Referencia:" label some
+# portals bake straight into the captured field value (as opposed to
+# rendering it as a separate <label>), stripped before the rest of
+# normalization runs. Scoped to the label word itself plus the punctuation/
+# whitespace that separates it from the code — never touches punctuation
+# inside the code (a comma or extra space *inside* "09502,1" stays exactly
+# as it was, see TestPlainComparisonNoPrefixTolerance).
+_LEADING_LABEL_RE = re.compile(r"^(referencia|ref\.?)\s*[:\-]?\s*")
+
+# Issue #629 (D-140): a trailing unit/variant suffix — a short separator
+# (hyphen/underscore/slash) plus 1-3 alphanumeric characters at the very
+# end — is the one thing `codes_equivalent` tolerates beyond exact
+# equality. `-1`, `/2`, `_A` are the owner's own examples. Deliberately
+# narrow: a *space* or *comma* before the trailing token (see
+# TestPlainComparisonNoPrefixTolerance's two pinned real pairs, "8385 11"
+# vs "8385 11 1" and "09502,1" vs "09502") does NOT match this pattern, so
+# those stay plain-inequality conflicts exactly as before.
+_SUFFIX_RE = re.compile(r"^(.+)[-_/]([0-9a-z]{1,3})$")
+
 
 def _normalize(code: str | None) -> str | None:
     """Case/whitespace-insensitive comparison key, rejecting placeholders.
@@ -141,7 +163,9 @@ def _normalize(code: str | None) -> str | None:
     away whitespace/case differences catches the same code rendered
     slightly differently by two portals' own display logic, without
     attempting anything more aggressive (stripping punctuation, say) that
-    could start conflating genuinely different codes.
+    could start conflating genuinely different codes. Issue #629 (D-140)
+    added one more purely-cosmetic step: stripping a leading "ref"/"ref."/
+    "referencia" label some connectors capture inline with the code.
 
     Values that are too short, digit-free, or a known placeholder string
     (default/unset markers a listing tool might leave behind) are rejected
@@ -152,6 +176,7 @@ def _normalize(code: str | None) -> str | None:
     if not code:
         return None
     normalized = code.strip().casefold()
+    normalized = _LEADING_LABEL_RE.sub("", normalized).strip()
     if not normalized:
         return None
     if normalized in _PLACEHOLDER_CODES:
@@ -161,6 +186,63 @@ def _normalize(code: str | None) -> str | None:
     if not _HAS_DIGIT_RE.search(normalized):
         return None
     return normalized
+
+
+def _strip_variant_suffix(normalized: str) -> str:
+    """Return `normalized` with one trailing unit/variant suffix removed.
+
+    Returns `normalized` unchanged when there is no such suffix, or when
+    removing it would leave a base shorter than `_MIN_CODE_LENGTH` (a
+    short base is more likely a coincidental separator inside a compact
+    code than a real prefix+suffix pair).
+    """
+    match = _SUFFIX_RE.match(normalized)
+    if not match:
+        return normalized
+    base = match.group(1)
+    if len(base) < _MIN_CODE_LENGTH:
+        return normalized
+    return base
+
+
+def codes_equivalent(code_a: str | None, code_b: str | None) -> bool:
+    """The ONE normalizer + equality check reference-code matching uses —
+    both the positive match (`evaluate`, below) and D-116's conflict veto
+    (`reference_codes_conflict`) call this, never a second implementation
+    (issue #629, D-140: this repo has had parallel definitions of the same
+    thing drift apart twice already).
+
+    Two codes are equivalent when, after `_normalize`:
+    - they are exactly equal, or
+    - exactly ONE of them carries a trailing unit/variant suffix
+      (`_strip_variant_suffix`) whose base equals the other side's full
+      code — e.g. "lcse42305" vs "lcse42305-1".
+
+    Deliberately NOT equivalent when BOTH sides carry a suffix (even the
+    same-shaped one) unless the full normalized strings already match:
+    "lcse42305-1" vs "lcse42305-2" is two different units, not one
+    property rendered two ways, so it is compared literally (unequal, not
+    tolerated) — this only relaxes the presence/absence case the owner
+    flagged, never a suffix-vs-different-suffix case. Also never tolerates
+    a changed digit/letter in the middle of the code (no edit-distance
+    fuzziness) — that is `TestPlainComparisonNoPrefixTolerance`'s territory
+    and stays a plain, unrelaxed inequality.
+    """
+    if code_a is None or code_b is None:
+        return False
+    if code_a == code_b:
+        return True
+    base_a = _strip_variant_suffix(code_a)
+    base_b = _strip_variant_suffix(code_b)
+    a_has_suffix = base_a != code_a
+    b_has_suffix = base_b != code_b
+    if a_has_suffix and b_has_suffix:
+        return False
+    if a_has_suffix:
+        return base_a == code_b
+    if b_has_suffix:
+        return base_b == code_a
+    return False
 
 
 def _same_agency(a: ListingRecord, b: ListingRecord) -> bool:
@@ -180,18 +262,22 @@ def reference_codes_conflict(a: ListingRecord, b: ListingRecord) -> bool:
     template default from vetoing every legitimate merge for an agency
     that never bothered to fill it in.
 
-    Deliberately a PLAIN inequality once both codes clear `_normalize` —
-    no prefix/edit-distance/fuzzy tolerance on top. A prefix exemption was
-    tried and reverted (see D-116's amendment history): the two pairs that
-    motivated it turned out to be same-source, hence structurally
-    unreachable through `evaluate_pair` in the first place (issue #197's
-    same-source skip), so it carved a real hole — it would also exempt
-    e.g. "REF100" vs "REF1005", exactly the sequential-CRM-id shape this
-    veto exists to catch — on the strength of zero corpus evidence that
-    survives that filter. Don't reintroduce fuzziness here without a
-    blast-radius measurement taken through `run()`'s own pair generator
-    (property_id inequality AND source inequality), not a raw listing
-    query — see D-116 for why that distinction matters.
+    Uses `codes_equivalent` (issue #629, D-140) once both codes clear
+    `_normalize` — NOT a bare `==`. `codes_equivalent` tolerates only a
+    trailing unit/variant suffix on exactly one side (the owner's own
+    `LCSE42305` vs `LCSE42305-1` example); it is still a plain inequality
+    for everything else — no edit-distance/arbitrary-fuzzy tolerance. A
+    *prefix* exemption (matching on a shared leading substring, unbounded)
+    was tried and reverted earlier (see D-116's amendment history): the two
+    pairs that motivated it turned out to be same-source, hence
+    structurally unreachable through `evaluate_pair` in the first place
+    (issue #197's same-source skip), and it would also have exempted e.g.
+    "REF100" vs "REF1005", exactly the sequential-CRM-id shape this veto
+    exists to catch. `codes_equivalent`'s suffix tolerance is narrower and
+    evidenced by a real owner-flagged pair — see its own docstring and
+    D-140 for the measured blast radius through `run()`'s own pair
+    generator (property_id inequality AND source inequality), not a raw
+    listing query.
 
     Different agencies are never eligible: `_same_agency` gates first,
     since an unrelated agency's differing code means nothing (codes are
@@ -212,7 +298,7 @@ def reference_codes_conflict(a: ListingRecord, b: ListingRecord) -> bool:
     code_b = _normalize(b.reference_code)
     if code_a is None or code_b is None:
         return False
-    return code_a != code_b
+    return not codes_equivalent(code_a, code_b)
 
 
 def _proximity_corroborated(a: ListingRecord, b: ListingRecord) -> bool:
@@ -241,7 +327,7 @@ def _proximity_corroborated(a: ListingRecord, b: ListingRecord) -> bool:
 def evaluate(a: ListingRecord, b: ListingRecord) -> PairEvaluation | None:
     code_a = _normalize(a.reference_code)
     code_b = _normalize(b.reference_code)
-    if code_a is None or code_a != code_b:
+    if code_a is None or code_b is None or not codes_equivalent(code_a, code_b):
         return None
 
     detail = {"shared_reference_code": a.reference_code}

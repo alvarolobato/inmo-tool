@@ -94,6 +94,9 @@ class TestNormalize:
         assert canonical.city == "Madrid"
         assert canonical.address == "Goya, Madrid"
         assert canonical.reference_code == "106387165"
+        # Issue #628: the primary contact box — synthetic value, see the
+        # fixture's own header comment.
+        assert canonical.contact_raw == "Inmobiliaria Ejemplo"
         # Full gallery from config.multimediaCarrousel.multimedias (issue
         # #282) — all 10 PICTUREs, in page order, NOT just the single
         # og:image thumbnail; the PLAN group is excluded.
@@ -190,9 +193,34 @@ class TestNormalize:
         assert canonical.current_price is None
         assert canonical.rooms is None
         assert canonical.reference_code is None
+        assert canonical.contact_raw is None
         assert canonical.photo_urls == ()
         assert canonical.lat is None
         assert canonical.lon is None
+
+    def test_normalize_does_not_pick_up_the_about_advertiser_widget(self):
+        """A real Idealista page also carries a SECOND, differently-classed
+        "about the professional" widget (`.about-advertiser-name`, inside
+        `.about-advertiser`) that can name a different office/branch of the
+        same firm — see `_advertiser_name`'s docstring. Only the PRIMARY
+        contact box's `.advertiser-info .advertiser-name` must be read."""
+        html = """
+        <html><body>
+        <input type="hidden" name="adId" value="1">
+        <div class="about-advertiser">
+          <div class="advertiser-name-container">
+            <a class="about-advertiser-name">Other Branch Office</a>
+          </div>
+        </div>
+        </body></html>
+        """
+        raw = RawListing(
+            external_id="1",
+            source="idealista",
+            raw={"url": "https://www.idealista.com/inmueble/1/", "html": html},
+        )
+        canonical = IdealistaConnector().normalize(raw)
+        assert canonical.contact_raw is None
 
     def test_normalize_extracts_full_photo_gallery_not_just_thumbnail(self):
         """Issue #282: the connector stored only 1 of ~95 photos because it

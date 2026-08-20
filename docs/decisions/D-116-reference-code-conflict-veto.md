@@ -3,12 +3,27 @@ id: D-116
 title: Same-agency differing reference codes veto a merge outright
 date: 2026-08-19
 group: Data / connectors
-rule: 'A same-agency (`contact_raw`, portal-agnostic) pair whose reference codes both normalize to real, DIFFERING values (plain inequality, no prefix/fuzzy tolerance) is never a duplicate — `evaluate_pair` returns no match at all (no merge, no suggestion) for every signal except `cadastral`. Measured reach against the live corpus today is ZERO (no connector combination populates both `contact_raw` and `reference_code` on both sides of a reachable pair yet) — a forward-looking guard, not yet an active rule.'
+rule: 'A same-agency (`contact_raw`, portal-agnostic) pair whose reference codes both normalize to real, DIFFERING values (plain inequality, no prefix/fuzzy tolerance) is never a duplicate — `evaluate_pair` returns no match at all (no merge, no suggestion) for every signal except `cadastral`. Measured reach against the live corpus today is ZERO (no connector combination populates both `contact_raw` and `reference_code` on both sides of a reachable pair yet) — a forward-looking guard, not yet an active rule. REVISED by D-140: the inequality now goes through `codes_equivalent` (tolerates one side carrying a trailing unit/variant suffix), not a bare `!=` — still no prefix/edit-distance tolerance beyond that one narrow case. Re-measured 2026-08-20 (issues #628/#629): still ZERO, for a different and now fully explained reason — see D-140.'
 ---
 
 # D-116: Same-agency differing reference codes veto a merge outright
 
 *Decided: 2026-08-19*
+
+> ## REVISED (2026-08-20) — see [D-140](D-140-reference-code-relaxed-normalizer.md)
+>
+> The "plain inequality, no prefix/fuzzy tolerance" claim in point 7 below
+> is no longer exactly true: `reference_codes_conflict` now compares
+> through `codes_equivalent`, which tolerates a trailing unit/variant
+> suffix (`-1`, `/2`, `_A`) on exactly one side — the owner's own flagged
+> example (issue #629). Every other claim on this page — the veto's
+> placement, cadastral exemption, pending-row re-evaluation, and the
+> "measured reach: ZERO" section 6 below — was independently re-measured
+> 2026-08-20 and is still accurate (reach is still zero, but D-140
+> explains the mechanism in more detail: `contact_raw` capture was
+> widened by issue #628, and that specific widening still doesn't produce
+> a reachable eligible pair in today's corpus). Read section 6 below
+> alongside D-140's own measurement table, not instead of it.
 
 **Context**: Issue #564, raised by the owner: *"en la gestión de
 duplicados si hay una referencia, de la misma inmobiliaria y es

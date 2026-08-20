@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<!--
+  SYNTHETIC fixture for pisos.com's DETAIL page (issue #628, D-141) — a
+  listing whose features list carries no "Referencia" row and whose
+  contact block is absent, proving extract_reference_code/
+  extract_agency_name degrade to None rather than guessing or raising.
+-->
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Piso en venta — pisos.com (fixture, no reference)</title>
+</head>
+<body>
+
+<div class="details-property">
+  <div class="details-property_features">
+    <div class="features__feature">
+      <span class="features__icon icon-estadoconservacion"></span>
+      <div>
+        <span class="features__label">Conservación: </span>
+        <span class="features__value">A reformar</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

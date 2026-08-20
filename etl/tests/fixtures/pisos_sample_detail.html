@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<!--
+  SYNTHETIC fixture for pisos.com's DETAIL page (issue #628, D-141) — every
+  value below is fabricated for this test, never a real listing. The MARKUP
+  SHAPE (class names, element nesting) mirrors a real pisos.com detail page
+  live-checked 2026-08, so the selectors this fixture exercises
+  (`extract_reference_code`/`extract_agency_name` in pisos_mapping.py) are
+  the real ones — only the content is invented. `features__feature` also
+  includes an unrelated label ("Conservación") ahead of "Referencia" to
+  prove the selector matches on label text, not just being first in the
+  list.
+-->
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Piso en venta — pisos.com (fixture)</title>
+</head>
+<body>
+
+<div class="details-property">
+  <div class="details-property_features">
+    <div class="features__feature">
+      <span class="features__icon icon-estadoconservacion"></span>
+      <div>
+        <span class="features__label">Conservación: </span>
+        <span class="features__value">Buen estado</span>
+      </div>
+    </div>
+    <div class="features__feature">
+      <span class="features__icon icon-reference"></span>
+      <div>
+        <span class="features__label">Referencia: </span>
+        <span class="features__value">TEST-1234/AB</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="owner-info">
+  <div class="owner-info__header">
+    <div>
+      <p class="owner-info__name">
+        <a href="/inmobiliaria-ejemplo-test/" rel="nofollow">Inmobiliaria Ejemplo Test</a>
+      </p>
+      <p class="owner-info__address">Calle Ficticia 1, Ciudad Ejemplo</p>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

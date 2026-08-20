@@ -1,11 +1,15 @@
-"""Fixture-based tests for PisosConnector (issue #79).
+"""Fixture-based tests for PisosConnector (issue #79, #628/D-141).
 
 No live network: discover() is exercised by monkeypatching requests.get to
-return the saved search fixture, and fetch_detail()/normalize() run purely
-off the record discover() stashes (no network at all — the search-payload
-path this connector shares with FotocasaRentalConnector). The fixture is a
-trimmed/synthetic reconstruction of a real pisos.com search page (see its
-header comment).
+return the saved search fixture, and fetch_detail() is exercised the same
+way against a saved DETAIL fixture (issue #628/D-141: unlike the original
+search-payload-only design, fetch_detail now makes one real request per
+listing to recover reference_code/contact_raw, which the search page never
+carries — see pisos.py's module docstring). normalize() runs purely off
+the RawListing fetch_detail hands it (no network of its own). The search
+fixture is a trimmed/synthetic reconstruction of a real pisos.com search
+page (see its header comment); the detail fixtures are fully synthetic
+(see their own header comments).
 """
 
 from __future__ import annotations
@@ -19,7 +23,12 @@ import requests
 
 from etl.connectors.base import ConnectorError, ConnectorScope, ListingUnavailableError
 from etl.connectors.pisos import PisosConnector
-from etl.connectors.pisos_mapping import map_property_type, type_token_from_url
+from etl.connectors.pisos_mapping import (
+    extract_agency_name,
+    extract_reference_code,
+    map_property_type,
+    type_token_from_url,
+)
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 _MADRID_IDS = {"65098413759.100500", "61748204239.106400", "64250319294.280500"}
@@ -65,9 +74,26 @@ def _discover(connector: PisosConnector, geography: str = "madrid"):
     return ids, mock_get
 
 
-def _normalize_one(connector: PisosConnector, external_id: str):
+def _fetch_detail_with_page(
+    connector: PisosConnector, external_id: str, detail_fixture: str
+):
+    """fetch_detail() against a mocked detail-page response (issue #628,
+    D-141 — fetch_detail now makes a real request for reference/agency)."""
+    html = _read_fixture(detail_fixture)
+    with patch(
+        "etl.connectors.pisos.requests.get", return_value=_mock_response(html)
+    ) as mock_get:
+        raw = connector.fetch_detail(external_id, throttle=lambda: None)
+    return raw, mock_get
+
+
+def _normalize_one(
+    connector: PisosConnector,
+    external_id: str,
+    detail_fixture: str = "pisos_sample_detail.html",
+):
     _discover(connector)
-    raw = connector.fetch_detail(external_id, throttle=lambda: None)
+    raw, _ = _fetch_detail_with_page(connector, external_id, detail_fixture)
     return connector.normalize(raw)
 
 
@@ -224,23 +250,53 @@ def test_discovered_prices_populated_from_search_cards():
     assert prices["61748204239.106400"] == Decimal(460000)
 
 
-# ── fetch_detail: no network, served from the discover() stash ─────────
+# ── fetch_detail: search-card fields free, reference/agency need a
+# real request (issue #628, D-141) ──────────────────────────────────
 
 
-def test_fetch_detail_makes_no_network_call():
+def test_fetch_detail_makes_one_network_call_for_reference_and_agency():
     connector = PisosConnector()
     _discover(connector)
-    with patch("etl.connectors.pisos.requests.get") as mock_get:
-        raw = connector.fetch_detail("65098413759.100500", throttle=lambda: None)
-    mock_get.assert_not_called()
+    raw, mock_get = _fetch_detail_with_page(
+        connector, "65098413759.100500", "pisos_sample_detail.html"
+    )
+    mock_get.assert_called_once()
     assert raw.external_id == "65098413759.100500"
+    assert raw.raw["reference_code"] == "TEST-1234/AB"
+    assert raw.raw["contact_raw"] == "Inmobiliaria Ejemplo Test"
 
 
-def test_fetch_detail_unknown_id_raises_listing_unavailable():
+def test_fetch_detail_unknown_id_raises_listing_unavailable_without_a_request():
     connector = PisosConnector()
     _discover(connector)
-    with pytest.raises(ListingUnavailableError):
+    with (
+        patch("etl.connectors.pisos.requests.get") as mock_get,
+        pytest.raises(ListingUnavailableError),
+    ):
         connector.fetch_detail("999.999", throttle=lambda: None)
+    # An id absent from the discover() stash is a clean "reordered/withdrew
+    # off page 1" skip — there is no known detail URL to even request.
+    mock_get.assert_not_called()
+
+
+def test_fetch_detail_degrades_to_search_fields_on_detail_request_failure():
+    """A failed detail request (timeout, 5xx, ...) must not fail the whole
+    listing — reference/agency are an enrichment on an otherwise-complete
+    search-card record, not load-bearing for it."""
+    connector = PisosConnector()
+    _discover(connector)
+    with patch(
+        "etl.connectors.pisos.requests.get",
+        side_effect=requests.ConnectionError("boom"),
+    ):
+        raw = connector.fetch_detail("65098413759.100500", throttle=lambda: None)
+    assert raw.raw["reference_code"] is None
+    assert raw.raw["contact_raw"] is None
+    canonical = connector.normalize(raw)
+    # Search-card fields still fully populated.
+    assert canonical.current_price == Decimal(1600000)
+    assert canonical.reference_code is None
+    assert canonical.contact_raw is None
 
 
 # ── normalize: canonical field coverage ───────────────────────────────
@@ -266,6 +322,19 @@ def test_normalize_full_field_coverage_including_latlon():
         "https://www.pisos.com/comprar/piso-gaztambide-65098413759_100500/"
     )
     assert canonical.photo_urls  # at least one photo
+    # Issue #628 (D-141): from the detail page, not the search card.
+    assert canonical.reference_code == "TEST-1234/AB"
+    assert canonical.contact_raw == "Inmobiliaria Ejemplo Test"
+
+
+def test_normalize_reference_and_agency_absent_on_detail_page_stay_none():
+    canonical = _normalize_one(
+        PisosConnector(),
+        "65098413759.100500",
+        detail_fixture="pisos_sample_detail_no_reference.html",
+    )
+    assert canonical.reference_code is None
+    assert canonical.contact_raw is None
 
 
 def test_normalize_maps_type_from_url_slug_token():
@@ -312,6 +381,36 @@ def test_map_property_type_from_url(url, expected):
 
 def test_type_token_from_url_handles_absolute_url():
     assert type_token_from_url("https://www.pisos.com/comprar/atico-x-1_2/") == "atico"
+
+
+# ── extract_reference_code / extract_agency_name (issue #628, D-141) ──
+
+
+def test_extract_reference_code_reads_the_labelled_features_row():
+    html = _read_fixture("pisos_sample_detail.html")
+    assert extract_reference_code(html) == "TEST-1234/AB"
+
+
+def test_extract_reference_code_ignores_other_labelled_rows():
+    # The fixture's first features__feature row is "Conservación", not
+    # "Referencia" — proves the match is on label text, not position.
+    html = _read_fixture("pisos_sample_detail.html")
+    assert extract_reference_code(html) != "Buen estado"
+
+
+def test_extract_reference_code_absent_returns_none():
+    html = _read_fixture("pisos_sample_detail_no_reference.html")
+    assert extract_reference_code(html) is None
+
+
+def test_extract_agency_name_reads_the_owner_info_block():
+    html = _read_fixture("pisos_sample_detail.html")
+    assert extract_agency_name(html) == "Inmobiliaria Ejemplo Test"
+
+
+def test_extract_agency_name_absent_returns_none():
+    html = _read_fixture("pisos_sample_detail_no_reference.html")
+    assert extract_agency_name(html) is None
 
 
 # ── search URL grammar (issue #491) ───────────────────────────────────

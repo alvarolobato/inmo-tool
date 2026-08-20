@@ -103,6 +103,8 @@ class TestNormalize:
         # load-bearing for issue #16's phone-corroboration rule, which never
         # auto-merges when either side is an agency.
         assert n.listing_kind == "agency"
+        # Issue #628 (D-141): constant selling-entity name, not per-listing.
+        assert n.contact_raw == "Servihabitat"
 
     def test_equipamiento_becomes_feature_slugs(self):
         """features must be short tokens for the GIN/containment convention

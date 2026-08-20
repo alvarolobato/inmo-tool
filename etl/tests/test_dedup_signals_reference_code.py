@@ -13,6 +13,7 @@ import pytest
 from etl.dedup.signals.reference_code import (
     _normalize,
     _same_agency,
+    codes_equivalent,
     evaluate,
     reference_codes_conflict,
 )
@@ -52,6 +53,70 @@ class TestNormalize:
         assert _normalize("   ") is None
 
 
+class TestNormalizeLeadingLabel:
+    """Issue #629 (D-140): a leading "ref"/"ref."/"referencia" label some
+    connectors capture inline with the code is stripped before comparison."""
+
+    def test_ref_prefix_stripped(self):
+        assert _normalize("Ref: LCSE42305") == _normalize("LCSE42305")
+
+    def test_ref_dot_prefix_stripped(self):
+        assert _normalize("Ref. LCSE42305") == _normalize("LCSE42305")
+
+    def test_referencia_prefix_stripped(self):
+        assert _normalize("Referencia: LCSE42305") == _normalize("LCSE42305")
+
+    def test_label_stripping_does_not_touch_internal_punctuation(self):
+        # The label regex is anchored to the start of the string — it must
+        # never eat characters from inside an already-label-free code.
+        assert _normalize("09502,1") == "09502,1"
+
+
+class TestCodesEquivalent:
+    """Issue #629 (D-140): the ONE normalizer+equality both `evaluate` and
+    `reference_codes_conflict` share. Every case here is expressed on
+    already-`_normalize`d inputs, matching how both call sites use it."""
+
+    def test_exact_match_is_equivalent(self):
+        assert codes_equivalent("lcse42305", "lcse42305") is True
+
+    def test_trailing_suffix_on_one_side_is_equivalent(self):
+        # The owner's own flagged example: one portal renders the bare
+        # code, the other appends a "-1" unit/variant suffix.
+        assert codes_equivalent("lcse42305", "lcse42305-1") is True
+        assert codes_equivalent("lcse42305-1", "lcse42305") is True
+
+    def test_slash_and_underscore_suffixes_also_tolerated(self):
+        assert codes_equivalent("lcse42305", "lcse42305/2") is True
+        assert codes_equivalent("lcse42305", "lcse42305_a") is True
+
+    def test_differing_suffixes_on_both_sides_are_not_equivalent(self):
+        # Two different unit suffixes is two different units, not one
+        # property rendered two ways — never tolerated.
+        assert codes_equivalent("lcse42305-1", "lcse42305-2") is False
+
+    def test_middle_digit_change_is_not_equivalent(self):
+        # No edit-distance/fuzzy tolerance — a changed digit mid-code is a
+        # different property.
+        assert codes_equivalent("lcse42305", "lcse42315") is False
+
+    def test_none_on_either_side_is_not_equivalent(self):
+        assert codes_equivalent(None, "lcse42305") is False
+        assert codes_equivalent("lcse42305", None) is False
+        assert codes_equivalent(None, None) is False
+
+    def test_space_separated_trailing_token_is_not_equivalent(self):
+        # Pinned real pair (property 37, TestPlainComparisonNoPrefixTolerance):
+        # a space, not a hyphen/underscore/slash, so this stays a plain
+        # inequality.
+        assert codes_equivalent("8385 11", "8385 11 1") is False
+
+    def test_comma_separated_trailing_token_is_not_equivalent(self):
+        # Pinned real pair (property 71434): a comma, not a tolerated
+        # separator.
+        assert codes_equivalent("09502,1", "09502") is False
+
+
 class TestSameAgency:
     def test_matching_names_case_insensitive(self):
         a = _record(contact_raw="Inmobiliaria Sevilla 2000")
@@ -78,6 +143,20 @@ class TestEvaluate:
 
     def test_both_missing_code_returns_none(self):
         assert evaluate(_record(), _record()) is None
+
+    def test_trailing_variant_suffix_still_matches(self):
+        # Issue #629 (D-140): the owner's own example — one portal renders
+        # the bare code, the other appends a "-1" unit/variant suffix.
+        a = _record(reference_code="LCSE42305")
+        b = _record(reference_code="LCSE42305-1")
+        result = evaluate(a, b)
+        assert result is not None
+        assert result.basis == "reference_code"
+
+    def test_middle_digit_change_still_does_not_match(self):
+        a = _record(reference_code="LCSE42305")
+        b = _record(reference_code="LCSE42315")
+        assert evaluate(a, b) is None
 
 
 class TestReferenceCodesConflict:
@@ -131,6 +210,16 @@ class TestReferenceCodesConflict:
         # False by construction — never eligible for the veto.
         a = _record(reference_code="NS603")
         b = _record(reference_code="AB100")
+        assert reference_codes_conflict(a, b) is False
+
+    def test_same_agency_trailing_variant_suffix_does_not_conflict(self):
+        # Issue #629 (D-140): this is the exact bug the issue reports —
+        # once the agency is captured on both sides, a same-agency pair
+        # whose codes differ ONLY by a trailing unit/variant suffix must
+        # NOT be vetoed as "definitely not a duplicate". Before D-140 this
+        # asserted True (plain inequality); the fix is exactly this flip.
+        a = _record(contact_raw="Inmobiliaria Uno", reference_code="LCSE42305")
+        b = _record(contact_raw="Inmobiliaria Uno", reference_code="LCSE42305-1")
         assert reference_codes_conflict(a, b) is False
 
 

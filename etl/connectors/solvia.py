@@ -880,7 +880,14 @@ class SolviaConnector(Connector):
             current_price=current_price,
             description=description,
             photo_urls=extract_photo_urls(detail),
-            contact_raw=None,
+            # Issue #628 (D-141): a constant, not extracted from any
+            # per-listing field — every Solvia listing is the same selling
+            # entity (see the listing_kind comment above), so "Solvia" is
+            # as honest a `contact_raw` as any other connector's per-
+            # listing agency name. This is what lets D-116's veto and the
+            # reference_code same-agency-suggestion tier reach a Solvia
+            # listing at all, since both gate on `contact_raw` being set.
+            contact_raw="Solvia",
             address=extract_address(detail),
             # Not published anywhere in the payload or markup — verified
             # across five live listings. The address_coords dedup signal

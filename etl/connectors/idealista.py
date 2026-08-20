@@ -278,8 +278,10 @@ class IdealistaConnector(Connector):
             current_price=current_price,
             description=description,
             photo_urls=photo_urls,
-            contact_raw=None,  # No agency/contact name found in the sample
-            # page structure this connector was built against.
+            contact_raw=_advertiser_name(soup),  # Issue #628: the primary
+            # contact box's `.advertiser-info .advertiser-name` — None if
+            # this capture's page lacks the block (a future markup change,
+            # or the owner captured a page where it never rendered).
             reference_code=reference_code,
             address=address,
             lat=lat,  # From the embedded Google Static Maps `center` param
@@ -334,6 +336,35 @@ class IdealistaConnector(Connector):
                 "title": title,
             },
         )
+
+
+def _advertiser_name(soup: BeautifulSoup) -> str | None:
+    """The agency/advertiser name from the primary contact box (issue #628).
+
+    Real markup (verified against a full real Idealista listing page fetched
+    from the MIT-licensed `RealEstateWebTools/property_web_scraper` fixture
+    repo this connector's original fixture was itself trimmed from — see
+    `idealista_sample_detail.html`'s header comment; only the class-name
+    shape below is taken from that page, the fixture's own test value is
+    synthetic):
+
+        <div id="module-contact-container">
+          <section class="module-contact">
+            <div class="advertiser-info">
+              <p class="advertiser-name">Inmobiliaria Ejemplo</p>
+
+    Scoped to `.advertiser-info .advertiser-name` (the primary per-listing
+    contact box), not the page's OTHER `.advertiser-name`-shaped elements —
+    a real captured page also carries an "about the professional" widget
+    (`.about-advertiser-name`, a *different* class) that can name a
+    different office/branch of the same firm; that one is deliberately not
+    read here.
+    """
+    el = soup.select_one(".advertiser-info .advertiser-name")
+    if el is None:
+        return None
+    text = el.get_text(" ", strip=True)
+    return text or None
 
 
 def _og_meta(soup: BeautifulSoup, property_name: str) -> str | None:

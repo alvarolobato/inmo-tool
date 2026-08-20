@@ -13,13 +13,19 @@ challenge, no CAPTCHA interstitial. The bare-city slug convention
 (`/venta/pisos-<city>/`) was live-verified for madrid, malaga, barcelona
 and sevilla (all HTTP 200, ~280 KB).
 
-## Why search-payload-primary (no detail fetch), like fotocasa_rental
+## Search-payload-primary, PLUS one detail fetch for reference/agency (D-141)
 
-The pisos.com SEARCH page is far richer than its detail page, so this
-connector reads everything off the search results and never fetches a
-detail page (minimising site load, and sidestepping any anti-bot surface a
-per-listing crawl would create). Each `<div class="ad-preview" id="{id}">`
-card on the search page carries, live-verified 2026-08 (30/30 cards on the
+The pisos.com SEARCH page is far richer than its detail page for every
+field except two, so this connector still reads price/rooms/baths/m²/
+floor/coordinates/photos off the search results, but — since issue #628
+(D-141, revising the original "no detail fetch" framing of D-071) —
+additionally makes ONE real request per listing to the detail page to
+recover `reference_code` and `contact_raw` (agency name), which a live
+2026-08 spike confirmed are NOT published anywhere in the search card or
+its JSON-LD (0/30 cards on a real madrid search page carried either). See
+D-141 for the full rationale, including why this is safe given the
+connector's born-disabled default. Each `<div class="ad-preview"
+id="{id}">` search card carries, live-verified 2026-08 (30/30 cards on the
 madrid page):
 
 - `contact-box[data-ad-price]`     — raw numeric price (e.g. `1600000`)
@@ -34,11 +40,11 @@ madrid page):
 
 plus ONE `<script type="application/ld+json">` block per card (keyed by the
 same `@id` as the card's `id`) carrying `geo.latitude`/`geo.longitude`
-(30/30) and `address.addressLocality`/`addressRegion`. Coordinates are the
-one field NOT in the card markup, and the reason the JSON-LD is parsed at
-all. The DETAIL page, by contrast, carries NO JSON-LD at all (live-checked)
-— it is bespoke HTML, strictly poorer than the search card for this
-connector's purposes, so there is no reason to fetch it.
+(30/30) and `address.addressLocality`/`addressRegion`. The DETAIL page
+carries NO JSON-LD at all (live-checked) and is strictly poorer than the
+search card for every OTHER field — but it is the only place
+`features__feature` (labelled "Referencia:") and `owner-info__name` live;
+see `pisos_mapping.extract_reference_code`/`extract_agency_name`.
 
 ## Coverage: page-1 only, hence discovers_full_inventory = False
 
@@ -70,6 +76,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from etl.connectors.base import (
+    LISTING_GONE_HTTP_STATUSES,
     CanonicalListingVersion,
     Connector,
     ConnectorError,
@@ -87,7 +94,11 @@ from etl.connectors.geography import (
     resolve_place,
     unresolvable_scope_key,
 )
-from etl.connectors.pisos_mapping import map_property_type
+from etl.connectors.pisos_mapping import (
+    extract_agency_name,
+    extract_reference_code,
+    map_property_type,
+)
 
 logger = logging.getLogger("etl.connectors.pisos")
 
@@ -517,10 +528,12 @@ class PisosConnector(Connector):
         return records
 
     def fetch_detail(self, external_id: str, throttle: Throttle) -> RawListing:
-        # No network request: the full per-listing record was captured by
-        # discover() in this same run (see module docstring). Deliberately
-        # does NOT call throttle() — there is no live request to pace, and
-        # the orchestrator does not itself rate-limit fetch_detail.
+        # Issue #628 (D-141): the per-listing record from discover()'s
+        # search-page parse still supplies price/rooms/baths/m²/floor/
+        # coordinates/photos with no extra request, but reference_code and
+        # contact_raw (agency) are ONLY on the detail page (see module
+        # docstring) — so this now makes ONE real request per listing,
+        # unlike the original search-payload-only design.
         record = self._search_records.get(external_id)
         if record is None:
             # The id was in a prior discover() but isn't in the current stash
@@ -531,10 +544,50 @@ class PisosConnector(Connector):
                 "the last discover() payload — reordered/withdrawn off page 1 "
                 "between discovery and fetch"
             )
+        url = record.get("url")
+        reference_code: str | None = None
+        agency_name: str | None = None
+        if url:
+            throttle()
+            try:
+                response = requests.get(
+                    url,
+                    headers={"User-Agent": _USER_AGENT},
+                    timeout=_REQUEST_TIMEOUT_SECONDS,
+                )
+                response.raise_for_status()
+            except requests.RequestException as exc:
+                gone_status = getattr(
+                    getattr(exc, "response", None), "status_code", None
+                )
+                if gone_status in LISTING_GONE_HTTP_STATUSES:
+                    raise ListingUnavailableError(
+                        f"pisos fetch_detail: external_id={external_id} returned "
+                        f"HTTP {gone_status} — listing removed at source between "
+                        "discovery and fetch"
+                    ) from exc
+                # Any other failure (timeout, 5xx, connection error) degrades
+                # to the search-card fields only, rather than failing the
+                # whole listing — reference/agency are an enrichment on top
+                # of an otherwise-complete record, not load-bearing for it.
+                logger.warning(
+                    "pisos fetch_detail: detail request failed for "
+                    "external_id=%s, continuing with search-card fields only: %s",
+                    external_id,
+                    exc,
+                )
+            else:
+                reference_code = extract_reference_code(response.text)
+                agency_name = extract_agency_name(response.text)
         return RawListing(
             external_id=external_id,
             source=self.name,
-            raw={"url": record.get("url"), "search_record": record},
+            raw={
+                "url": url,
+                "search_record": record,
+                "reference_code": reference_code,
+                "contact_raw": agency_name,
+            },
         )
 
     def normalize(self, raw: RawListing) -> CanonicalListingVersion:
@@ -552,7 +605,9 @@ class PisosConnector(Connector):
             current_price=record.get("price"),
             description=record.get("description"),
             photo_urls=record.get("photos") or (),
-            contact_raw=None,
+            contact_raw=raw.raw.get("contact_raw"),  # Issue #628 (D-141): from
+            # the detail page's `owner-info__name` block, fetch_detail() above
+            # — None if the detail request failed or the block was absent.
             address=record.get("subtitle"),
             lat=record.get("lat"),
             lon=record.get("lon"),
@@ -572,9 +627,10 @@ class PisosConnector(Connector):
             m2_plot=None,
             features=(),
             operation="sale",  # discover() only ever requests /venta/ URLs.
-            reference_code=None,  # pisos.com's search card exposes no
-            # seller-assigned reference; the numeric id is the ad id, not a
-            # "Referencia" code — left None rather than storing a non-reference.
+            reference_code=raw.raw.get("reference_code"),  # Issue #628
+            # (D-141): from the detail page's "Referencia:" features block,
+            # fetch_detail() above — the search card's own numeric id is the
+            # ad id, not a seller reference, so it was never a substitute.
             raw_extra={
                 "type_token_raw": (record.get("url") or "").split("/comprar/")[-1][:40]
                 or None,
