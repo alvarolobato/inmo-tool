@@ -277,6 +277,18 @@ class _PhotoHashCache:
 
     def __init__(self, store_conn=None) -> None:
         self._cache: dict[int, list] = {}
+        # Issue #618: packed-int (see `photo_hash.pack_hash`) form of
+        # `_cache`'s `imagehash.ImageHash` lists, memoized SEPARATELY rather
+        # than replacing `_cache`'s contents in place — several tests
+        # (`TestPhotoHashAutoMerge`, `TestPhoneOrderingRescue`, et al.)
+        # construct a cache and poke `imagehash.ImageHash` values directly
+        # into `_cache[listing_id]` to avoid a network fetch, and
+        # `get_packed` below packs whatever it finds there lazily, so those
+        # tests keep working unchanged. The packing itself still only
+        # happens once per listing per run (memoized here), which is the
+        # whole point: `evaluate_pair` calls `get_packed`, never `get`,
+        # for the actual `match_ratio`/`hashes_share_any_match` comparison.
+        self._packed_cache: dict[int, list[int]] = {}
         self._live_attempted_by_source: dict[str, int] = {}
         self._live_hashed_by_source: dict[str, int] = {}
         # Issue #221: the per-listing memo above still earns its keep (one
@@ -304,6 +316,20 @@ class _PhotoHashCache:
                     + stats.live_hashed
                 )
         return self._cache[listing.listing_id]
+
+    def get_packed(self, listing: ListingRecord) -> list[int]:
+        """Packed-int form of `get(listing)`'s hashes (issue #618),
+        memoized once per listing per run so the O(1) `pack_hash` cost is
+        paid once no matter how many pairs this listing appears in — the
+        comparison cost itself (`photo_hash.match_ratio`/
+        `hashes_share_any_match`) drops from numpy `ImageHash.__sub__` to a
+        plain int XOR+`bit_count()`, which is the actual per-pair win.
+        """
+        if listing.listing_id not in self._packed_cache:
+            self._packed_cache[listing.listing_id] = [
+                photo_hash.pack_hash(h) for h in self.get(listing)
+            ]
+        return self._packed_cache[listing.listing_id]
 
     def zero_success_sources(self) -> dict[str, int]:
         """`{source: live_attempted}` for every source that made at least one
@@ -333,10 +359,50 @@ class _PhotoHashCache:
         }
 
 
+class _PhoneCache:
+    """Memoizes `phone_extract.extract_phones(listing.description)` once per
+    listing per run (issue #618).
+
+    `extract_phones` re-scans a listing's whole description (avg ~1.5KB)
+    with a regex every time it's called; before this cache, `evaluate_pair`
+    called it on BOTH sides of nearly every pair that reached the phone
+    signal — since D-131 put phone last and photo_hash rarely fires, that
+    was ~112M scans/pass for facts derivable in one scan per listing
+    (~12.4k). A plain per-run dict, not `functools.lru_cache` on the
+    module-level function: this class is instantiated fresh inside `_run`
+    for each dedup pass and discarded at the end of it, so it never
+    accumulates descriptions across runs the way a process-lifetime
+    `lru_cache` would in the long-running scheduler process (`etl.
+    orchestrator.run_dedup`, hourly) — see issue #618's PR description for
+    why an unbounded process-lifetime cache was rejected.
+    """
+
+    def __init__(self) -> None:
+        self._cache: dict[int, set[str]] = {}
+
+    def get(self, listing: ListingRecord) -> set[str]:
+        if listing.listing_id not in self._cache:
+            self._cache[listing.listing_id] = phone_extract.extract_phones(
+                listing.description
+            )
+        return self._cache[listing.listing_id]
+
+
 def evaluate_pair(
-    a: ListingRecord, b: ListingRecord, hash_cache: _PhotoHashCache
+    a: ListingRecord,
+    b: ListingRecord,
+    hash_cache: _PhotoHashCache,
+    phone_cache: _PhoneCache | None = None,
 ) -> PairEvaluation | None:
     """Run every signal in priority order; return the first that fires.
+
+    *phone_cache* is optional (defaults to None, which makes the phone
+    signal fall back to extracting phones fresh from the description on
+    every call — the pre-#618 behaviour) so every existing direct
+    `evaluate_pair(a, b, hash_cache)` call site — mostly tests exercising a
+    single pair, where memoization buys nothing — keeps working unchanged.
+    The one caller that actually runs the O(n^2) sweep (`_run`, below)
+    passes a real `_PhoneCache` shared across the whole pass.
 
     Photo-hash fetching only happens once address_coords/reference_code
     have already come back empty — those two are cheaper (no network) and
@@ -411,8 +477,8 @@ def evaluate_pair(
         if result is not None:
             return result
 
-    hashes_a = hash_cache.get(a)
-    hashes_b = hash_cache.get(b)
+    hashes_a = hash_cache.get_packed(a)
+    hashes_b = hash_cache.get_packed(b)
     ratio = photo_hash.match_ratio(hashes_a, hashes_b)
     if ratio is not None and Decimal(str(ratio)) >= photo_hash.MIN_MATCH_RATIO:
         detail: dict = {"match_ratio": round(ratio, 3)}
@@ -468,7 +534,16 @@ def evaluate_pair(
     # that motivated the reorder. Issue #601 (D-130) retired the `fuzzy`
     # fallback that used to run after phone — nothing replaces it; a pair
     # that clears none of the signals above is simply not a match.
-    return phone_extract.evaluate(a, b)
+    #
+    # Issue #618: phone sets come from *phone_cache* (memoized once per
+    # listing per run) when the caller passed one, else `evaluate` falls
+    # back to extracting them fresh — see `_PhoneCache`'s docstring.
+    return phone_extract.evaluate(
+        a,
+        b,
+        phones_a=phone_cache.get(a) if phone_cache is not None else None,
+        phones_b=phone_cache.get(b) if phone_cache is not None else None,
+    )
 
 
 @dataclass
@@ -1107,6 +1182,9 @@ def _run(conn, hash_cache: _PhotoHashCache) -> DedupRunResult:
     """
     listings = fetch_listing_records(conn)
     result = DedupRunResult()
+    # Issue #618: per-run only (see _PhoneCache's docstring) — created fresh
+    # for this pass and discarded when `_run` returns.
+    phone_cache = _PhoneCache()
 
     with conn.cursor() as cur:
         skip_pairs, pending_by_pair = _load_recorded_pairs(cur)
@@ -1176,7 +1254,7 @@ def _run(conn, hash_cache: _PhotoHashCache) -> DedupRunResult:
                 pending = pending_by_pair.get(pair_key)
 
                 result.pairs_compared += 1
-                evaluation = evaluate_pair(a, b, hash_cache)
+                evaluation = evaluate_pair(a, b, hash_cache, phone_cache)
 
                 if pending is not None:
                     try:
@@ -1460,8 +1538,18 @@ def _fuzzy_rescue_shares_a_photo(
         return False
     known_a = photo_hash_store.load(store_conn, urls_a)
     known_b = photo_hash_store.load(store_conn, urls_b)
-    hashes_a = [h.phash for h in known_a.values() if h.ok and h.phash is not None]
-    hashes_b = [h.phash for h in known_b.values() if h.ok and h.phash is not None]
+    # Issue #618: hashes_share_any_match takes packed ints, not
+    # imagehash.ImageHash — see photo_hash.pack_hash's docstring.
+    hashes_a = [
+        photo_hash.pack_hash(h.phash)
+        for h in known_a.values()
+        if h.ok and h.phash is not None
+    ]
+    hashes_b = [
+        photo_hash.pack_hash(h.phash)
+        for h in known_b.values()
+        if h.ok and h.phash is not None
+    ]
     return photo_hash.hashes_share_any_match(hashes_a, hashes_b)
 
 

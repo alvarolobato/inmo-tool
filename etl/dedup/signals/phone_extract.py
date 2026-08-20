@@ -131,8 +131,26 @@ def _corroborated(a: ListingRecord, b: ListingRecord) -> bool:
     ) and prices_close(a.current_price, b.current_price, _CORROBORATION_PRICE_RATIO)
 
 
-def evaluate(a: ListingRecord, b: ListingRecord) -> PairEvaluation | None:
-    shared = extract_phones(a.description) & extract_phones(b.description)
+def evaluate(
+    a: ListingRecord,
+    b: ListingRecord,
+    *,
+    phones_a: set[str] | None = None,
+    phones_b: set[str] | None = None,
+) -> PairEvaluation | None:
+    """*phones_a*/*phones_b* let a caller pass already-extracted phone sets
+    (issue #618: `etl.dedup.engine._PhoneCache` memoizes
+    `extract_phones(listing.description)` once per listing per run, instead
+    of this function re-running the regex over both descriptions on every
+    pair — ~112M redundant scans/pass at production scale, see #617's
+    profile). `None` (the default) falls back to extracting fresh from
+    *a*/*b*'s own descriptions, so every existing direct call to this
+    function — mostly tests exercising a single pair — keeps working
+    unchanged.
+    """
+    phones_a = extract_phones(a.description) if phones_a is None else phones_a
+    phones_b = extract_phones(b.description) if phones_b is None else phones_b
+    shared = phones_a & phones_b
     if not shared:
         return None
 

@@ -75,6 +75,15 @@ def _distance(a: Image.Image, b: Image.Image) -> int:
     return int(_hash(a) - _hash(b))
 
 
+def _packed(image: Image.Image) -> int:
+    """`match_ratio`/`hashes_share_any_match` now take packed 64-bit ints
+    (issue #618), not `imagehash.ImageHash` objects — see
+    `photo_hash.pack_hash`. `_distance` above stays on the raw ImageHash
+    subtraction; only the tests that feed hashes into those two
+    comparison functions need this."""
+    return photo_hash.pack_hash(_hash(image))
+
+
 class TestRealDuplicatesStillMatch:
     """The threshold change must not break the case the signal exists for."""
 
@@ -115,8 +124,8 @@ class TestRealDuplicatesStillMatch:
 
     def test_match_ratio_reports_full_overlap_for_a_re_encoded_photo_set(self):
         base = [_synthetic_room(s) for s in (1, 2, 3)]
-        hashes_a = [_hash(im) for im in base]
-        hashes_b = [_hash(_jpeg(im, 60)) for im in base]
+        hashes_a = [_packed(im) for im in base]
+        hashes_b = [_packed(_jpeg(im, 60)) for im in base]
         assert photo_hash.match_ratio(hashes_a, hashes_b) == 1.0
 
 
@@ -184,8 +193,8 @@ class TestFlatPhotosNoLongerCollide:
         assert not collisions, f"unrelated flat photos matched: {collisions}"
 
     def test_match_ratio_stays_below_the_suggestion_floor_for_flat_photos(self):
-        hashes_a = [_hash(_synthetic_room(700 + i, flat=True)) for i in range(4)]
-        hashes_b = [_hash(_synthetic_room(800 + i, flat=True)) for i in range(4)]
+        hashes_a = [_packed(_synthetic_room(700 + i, flat=True)) for i in range(4)]
+        hashes_b = [_packed(_synthetic_room(800 + i, flat=True)) for i in range(4)]
         ratio = photo_hash.match_ratio(hashes_a, hashes_b)
         assert ratio is not None
         assert ratio < float(photo_hash.MIN_MATCH_RATIO)
@@ -195,21 +204,25 @@ class TestMatchRatioSemantics:
     def test_returns_none_when_either_side_has_no_hashes(self):
         """None means "couldn't check", 0.0 would mean "checked, no match" —
         the engine needs to tell those apart."""
-        some = [_hash(_synthetic_room(9))]
+        some = [_packed(_synthetic_room(9))]
         assert photo_hash.match_ratio([], some) is None
         assert photo_hash.match_ratio(some, []) is None
         assert photo_hash.match_ratio([], []) is None
 
     def test_ratio_is_over_the_smaller_set(self):
         shared = _synthetic_room(11)
-        smaller = [_hash(shared)]
-        larger = [_hash(shared), _hash(_synthetic_room(12)), _hash(_synthetic_room(13))]
+        smaller = [_packed(shared)]
+        larger = [
+            _packed(shared),
+            _packed(_synthetic_room(12)),
+            _packed(_synthetic_room(13)),
+        ]
         assert photo_hash.match_ratio(smaller, larger) == 1.0
 
     def test_partial_overlap_is_reported_proportionally(self):
         shared = _synthetic_room(21)
-        hashes_a = [_hash(shared), _hash(_synthetic_room(22))]
-        hashes_b = [_hash(_jpeg(shared, 70)), _hash(_synthetic_room(23))]
+        hashes_a = [_packed(shared), _packed(_synthetic_room(22))]
+        hashes_b = [_packed(_jpeg(shared, 70)), _packed(_synthetic_room(23))]
         assert photo_hash.match_ratio(hashes_a, hashes_b) == 0.5
 
 

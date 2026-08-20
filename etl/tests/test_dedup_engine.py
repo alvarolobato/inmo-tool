@@ -2618,7 +2618,7 @@ class TestPropertyPairVeto:
         veto_committed = False
         real_evaluate_pair = engine.evaluate_pair
 
-        def racing_evaluate_pair(a, b, hash_cache):
+        def racing_evaluate_pair(a, b, hash_cache, phone_cache=None):
             nonlocal veto_committed
             if {a.listing_id, b.listing_id} == target_pair and not veto_committed:
                 veto_committed = True
@@ -2634,7 +2634,7 @@ class TestPropertyPairVeto:
                     other_conn.commit()
                 finally:
                     other_conn.close()
-            return real_evaluate_pair(a, b, hash_cache)
+            return real_evaluate_pair(a, b, hash_cache, phone_cache)
 
         with mock.patch.object(
             engine, "evaluate_pair", side_effect=racing_evaluate_pair
