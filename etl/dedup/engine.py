@@ -62,6 +62,37 @@ from etl.dedup.types import ListingRecord, PairEvaluation
 logger = logging.getLogger("etl.dedup.engine")
 
 
+class PhotoHashStoreUnavailableError(RuntimeError):
+    """Issue #607 (B2): raised by `purge_pending_fuzzy` (and its
+    `preview_purge_pending_fuzzy` dry-run twin) when
+    `photo_hash_store.open_connection()` returns `None`.
+
+    `open_connection()` returning `None` is the correct, silent-by-design
+    behaviour for the dedup *scoring* path (`_PhotoHashCache`) — a run
+    without a reachable store just falls back to fetching every photo live,
+    exactly as it did before issue #221. It is NOT correct for this
+    destructive migration: `_fuzzy_rescue_shares_a_photo` degrades to
+    `False` for every pair when `store_conn is None`, so the rescue set
+    silently collapses to description-only corroboration (measured: 19 of
+    51 on production's numbers) and the `DELETE ... AND NOT (id = ANY(...))`
+    takes everything else — no error, no non-zero exit, just an oversized
+    delete. Refuse instead."""
+
+
+def _photo_hash_store_or_raise():
+    store_conn = photo_hash_store.open_connection()
+    if store_conn is None:
+        raise PhotoHashStoreUnavailableError(
+            "the persistent photo-hash store is unreachable "
+            "(photo_hash_store.open_connection() returned None) — refusing "
+            "to purge/preview. Every pair that should have been rescued via "
+            "a shared photo hash would silently look unrescued, widening "
+            "this destructive delete far beyond the intended rescue set. "
+            "Retry once the store is reachable."
+        )
+    return store_conn
+
+
 @dataclass
 class DedupRunResult:
     pairs_compared: int = 0
@@ -115,6 +146,16 @@ class DedupRunResult:
     reevaluated_merged: int = 0
     reevaluated_rejected: int = 0
     reevaluated_updated: int = 0
+    # Issue #607 (B1): a `pending` row `purge_pending_fuzzy` rescued (its
+    # `detail` carries a `rescued_reason`) is corroborated by evidence
+    # `evaluate_pair`'s live signals were never going to independently
+    # re-derive — that is precisely WHY it was `fuzzy`-only in the first
+    # place. Without this exemption, `_reevaluate_pending_suggestion`'s
+    # `evaluation is None` branch auto-rejects every one of them on their
+    # very first post-purge run, since nothing else has ever fired for
+    # them. Counted separately from `reevaluated_rejected` — this is a
+    # "not rejected, deliberately kept pending" outcome.
+    reevaluated_preserved_rescued: int = 0
     # Issue #604: a `pending` suggested_merge row whose two listings
     # already share a property_id — because a DIFFERENT pair's merge
     # unified them, not because this exact pair was ever itself confirmed
@@ -623,6 +664,23 @@ def _reevaluate_pending_suggestion(
       and finds nothing to catch it — under the old code this pair would
       sit at `pending` forever with a `match_ratio`/basis nobody currently
       stands behind; now it explicitly leaves the queue.
+
+      EXCEPT a row `purge_pending_fuzzy` rescued (`detail` carries a
+      `rescued_reason` — issue #607/B1): that row is corroborated by
+      evidence (exact m2_built+current_price AND a shared photo hash or a
+      near-identical description) that no *live* signal in `evaluate_pair`
+      was ever going to independently re-derive — `photo_hash`'s own
+      `MIN_MATCH_RATIO` gate is stricter than the rescue's permissive
+      `hashes_share_any_match`, and a description match isn't corroboration
+      any live signal even looks at. `evaluation is None` for one of these
+      rows is not new information the pair is bad; it is the exact,
+      expected, permanent shape of "this is fuzzy's rescue set" restated.
+      Auto-rejecting it here would have made the rescue self-defeating —
+      the 51 survivors of a 24,981-row purge would have all flipped to
+      `rejected` (worse than deleted: `_load_recorded_pairs` freezes
+      `rejected` forever) on the very first post-deploy run. These rows
+      stay `pending` instead, so a human still decides; see
+      `reevaluated_preserved_rescued`.
     - `decision == "suggest"`: still not confident enough to auto-merge,
       but under current rules, not the rules that were live when this row
       was filed — refresh `match_basis`/`confidence`/`detail` in place and
@@ -659,6 +717,40 @@ def _reevaluate_pending_suggestion(
     result.reevaluated_total += 1
 
     if evaluation is None:
+        # Issue #607 (B1): a rescued row must never fall into the
+        # auto-reject branch below — see this function's own docstring for
+        # why "nothing else fires" is expected, permanent, and not new
+        # information for these rows.
+        is_rescued = (
+            isinstance(pending.detail, dict) and "rescued_reason" in pending.detail
+        )
+        if is_rescued:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE suggested_merge
+                       SET detail = detail || %s::jsonb
+                     WHERE id = %s
+                    """,
+                    (
+                        json.dumps(
+                            {
+                                "reevaluated_from": previous,
+                                "reevaluated_reason": (
+                                    "no live signal matched this pair, but it "
+                                    "carries a rescued_reason (issue #601's "
+                                    "fuzzy-purge rescue set) — exempt from "
+                                    "auto-reject, stays pending for a human"
+                                ),
+                            }
+                        ),
+                        pending.suggestion_id,
+                    ),
+                )
+            conn.commit()
+            result.reevaluated_preserved_rescued += 1
+            return None
+
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -951,11 +1043,13 @@ def _run(conn, hash_cache: _PhotoHashCache) -> DedupRunResult:
         logger.info(
             "dedup: re-evaluated %d pending suggestion(s) against current "
             "rules (issue #214) — %d merged, %d rejected, %d still pending "
-            "(refreshed in place)",
+            "(refreshed in place), %d preserved as fuzzy-purge rescues "
+            "(issue #607)",
             result.reevaluated_total,
             result.reevaluated_merged,
             result.reevaluated_rejected,
             result.reevaluated_updated,
+            result.reevaluated_preserved_rescued,
         )
 
     if result.same_property_pending_resolved:
@@ -1030,9 +1124,27 @@ def purge_same_source_pending(conn) -> int:
     return deleted
 
 
+def preview_purge_pending_phone(conn) -> tuple[int, int]:
+    """Dry-run twin of `purge_pending_phone` (issue #607/S1): returns
+    `(would_delete, would_keep)` without deleting anything. `would_keep` is
+    the pending `phone` rows this purge deliberately never touches — the
+    0.750 corroborated-unconfirmed-kind tier D-131 kept filing suggestions
+    on."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT "
+            "  COUNT(*) FILTER (WHERE confidence = 0.500), "
+            "  COUNT(*) FILTER (WHERE confidence <> 0.500) "
+            "FROM suggested_merge WHERE status = 'pending' AND match_basis = 'phone'"
+        )
+        would_delete, would_keep = cur.fetchone()
+    return would_delete, would_keep
+
+
 def purge_pending_phone(conn) -> int:
     """One-off migration companion (issue #603): delete remaining
-    `pending` `suggested_merge` rows with `match_basis = 'phone'`.
+    `pending` `suggested_merge` rows with `match_basis = 'phone'` AND
+    `confidence = 0.500` — the uncorroborated/agency tier D-131 silenced.
 
     Meant to run AFTER at least one full `ps dedup run` since #603's
     `evaluate_pair` reorder + `phone_extract` silencing deployed — that
@@ -1053,6 +1165,18 @@ def purge_pending_phone(conn) -> int:
     for whatever a still-in-flight reevaluation sweep hasn't caught up to
     yet, not as a substitute for letting that reevaluation run.
 
+    Issue #607 (B3): scoped to `confidence = 0.500` — NOT every pending
+    `phone` row. D-131 deliberately kept phone's 0.750
+    corroborated-unconfirmed-kind tier filing suggestions (see
+    `phone_extract.evaluate`); an unconditional `match_basis = 'phone'`
+    delete would take any 0.750 row filed between deploy and this command
+    running along with the 0.500 noise it's meant to clean up. And by the
+    time an operator runs this (after a reevaluation pass, per the
+    docstring above), every remaining 0.500 row has typically already been
+    auto-rejected on its own — so an unscoped delete's only REMAINING
+    effect in practice would be deleting rows it should keep, not rows it
+    should purge.
+
     Scoped to `status = 'pending'` only, same reasoning as
     `purge_same_source_pending`: a `confirmed` phone suggestion already
     went through a real merge (or a human's confirm) and is a
@@ -1064,7 +1188,9 @@ def purge_pending_phone(conn) -> int:
     """
     with conn.cursor() as cur:
         cur.execute(
-            "DELETE FROM suggested_merge WHERE status = 'pending' AND match_basis = 'phone'"
+            "DELETE FROM suggested_merge "
+            "WHERE status = 'pending' AND match_basis = 'phone' "
+            "AND confidence = 0.500"
         )
         deleted = cur.rowcount
     conn.commit()
@@ -1119,6 +1245,75 @@ def _fuzzy_rescue_descriptions_near_identical(
     return similarity >= _FUZZY_RESCUE_DESCRIPTION_SIMILARITY
 
 
+def _select_pending_fuzzy_rows(conn) -> list[tuple]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT sm.id,
+                   la.current_price, lb.current_price,
+                   pa.m2_built, pb.m2_built,
+                   la.description, lb.description,
+                   la.photo_urls, lb.photo_urls
+              FROM suggested_merge sm
+              JOIN listing la ON la.id = sm.listing_id_a
+              JOIN listing lb ON lb.id = sm.listing_id_b
+              JOIN property pa ON pa.id = la.property_id
+              JOIN property pb ON pb.id = lb.property_id
+             WHERE sm.status = 'pending' AND sm.match_basis = 'fuzzy'
+            """
+        )
+        return cur.fetchall()
+
+
+def _compute_fuzzy_rescue_ids(rows: list[tuple]) -> list[int]:
+    """Shared by `purge_pending_fuzzy` and `preview_purge_pending_fuzzy` so
+    a dry-run and the real purge can never disagree about which rows
+    qualify. Raises `PhotoHashStoreUnavailableError` (issue #607/B2) rather
+    than silently degrading — see that class's docstring — for BOTH
+    callers: a dry run that silently under-counted rescues would give an
+    operator false confidence right before the real, destructive run.
+    """
+    store_conn = _photo_hash_store_or_raise()
+    try:
+        rescue_ids: list[int] = []
+        for (
+            suggestion_id,
+            price_a,
+            price_b,
+            m2_a,
+            m2_b,
+            desc_a,
+            desc_b,
+            photos_a,
+            photos_b,
+        ) in rows:
+            if not _fuzzy_rescue_exact_price_and_size(price_a, price_b, m2_a, m2_b):
+                continue
+            has_photo_match = _fuzzy_rescue_shares_a_photo(
+                store_conn, tuple(photos_a or ()), tuple(photos_b or ())
+            )
+            has_description_match = _fuzzy_rescue_descriptions_near_identical(
+                desc_a, desc_b
+            )
+            if has_photo_match or has_description_match:
+                rescue_ids.append(suggestion_id)
+        return rescue_ids
+    finally:
+        photo_hash_store.close_connection(store_conn)
+
+
+def preview_purge_pending_fuzzy(conn) -> tuple[int, int]:
+    """Dry-run twin of `purge_pending_fuzzy` (issue #607/S1): returns
+    `(would_delete, would_rescue)` without writing anything. Raises
+    `PhotoHashStoreUnavailableError` under the same condition the real
+    purge aborts on (issue #607/B2) — a dry run must fail exactly the same
+    way the real run would, or it's lying about what a real run will do.
+    """
+    rows = _select_pending_fuzzy_rows(conn)
+    rescue_ids = _compute_fuzzy_rescue_ids(rows)
+    return len(rows) - len(rescue_ids), len(rescue_ids)
+
+
 def purge_pending_fuzzy(conn) -> tuple[int, int]:
     """One-off migration (issue #601): delete `pending` `match_basis='fuzzy'`
     suggested_merge rows, EXCEPT a rescue set corroborated well enough to
@@ -1144,54 +1339,24 @@ def purge_pending_fuzzy(conn) -> tuple[int, int]:
     the rest were purged. This does not reactivate fuzzy as a live signal:
     `evaluate_pair` no longer calls it at all (see this module's own
     change); it only decides which of fuzzy's PAST suggestions still
-    deserve a human's attention.
+    deserve a human's attention. See `_reevaluate_pending_suggestion` for
+    the companion fix (issue #607/B1) that stops the very next `run()`
+    from immediately auto-rejecting every rescued row.
+
+    Issue #607 (B2): raises `PhotoHashStoreUnavailableError` instead of
+    proceeding when `photo_hash_store.open_connection()` returns `None`.
+    Without this guard, `_fuzzy_rescue_shares_a_photo` degrades to `False`
+    for every pair (an unreachable store looks identical to "no photo
+    evidence"), the rescue set silently collapses to description-only
+    matches (measured: 19 of 51 on production's numbers — the other 32
+    would have been deleted), and the DELETE below takes the rest with no
+    error and no non-zero exit. A destructive migration must fail loudly
+    on a degraded optimisation it depends on, not fail open.
 
     Returns (deleted_count, rescued_count).
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT sm.id,
-                   la.current_price, lb.current_price,
-                   pa.m2_built, pb.m2_built,
-                   la.description, lb.description,
-                   la.photo_urls, lb.photo_urls
-              FROM suggested_merge sm
-              JOIN listing la ON la.id = sm.listing_id_a
-              JOIN listing lb ON lb.id = sm.listing_id_b
-              JOIN property pa ON pa.id = la.property_id
-              JOIN property pb ON pb.id = lb.property_id
-             WHERE sm.status = 'pending' AND sm.match_basis = 'fuzzy'
-            """
-        )
-        rows = cur.fetchall()
-
-    store_conn = photo_hash_store.open_connection()
-    try:
-        rescue_ids: list[int] = []
-        for (
-            suggestion_id,
-            price_a,
-            price_b,
-            m2_a,
-            m2_b,
-            desc_a,
-            desc_b,
-            photos_a,
-            photos_b,
-        ) in rows:
-            if not _fuzzy_rescue_exact_price_and_size(price_a, price_b, m2_a, m2_b):
-                continue
-            has_photo_match = _fuzzy_rescue_shares_a_photo(
-                store_conn, tuple(photos_a or ()), tuple(photos_b or ())
-            )
-            has_description_match = _fuzzy_rescue_descriptions_near_identical(
-                desc_a, desc_b
-            )
-            if has_photo_match or has_description_match:
-                rescue_ids.append(suggestion_id)
-    finally:
-        photo_hash_store.close_connection(store_conn)
+    rows = _select_pending_fuzzy_rows(conn)
+    rescue_ids = _compute_fuzzy_rescue_ids(rows)
 
     with conn.cursor() as cur:
         if rescue_ids:

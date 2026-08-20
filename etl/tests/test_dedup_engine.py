@@ -17,6 +17,7 @@ from pathlib import Path
 import imagehash
 import pytest
 from PIL import Image
+from rapidfuzz import fuzz
 
 from etl import orchestrator
 from etl.connectors import base
@@ -2543,7 +2544,12 @@ class TestPurgePendingPhone:
     nothing else."""
 
     def _seed_suggestion(
-        self, conn, ext_prefix: str, status: str, match_basis: str = "phone"
+        self,
+        conn,
+        ext_prefix: str,
+        status: str,
+        match_basis: str = "phone",
+        confidence: str = "0.500",
     ) -> int:
         listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
             conn, "idealista", "fotocasa", ext_prefix
@@ -2553,9 +2559,9 @@ class TestPurgePendingPhone:
                 """
                 INSERT INTO suggested_merge
                     (listing_id_a, listing_id_b, match_basis, confidence, status)
-                VALUES (%s, %s, %s, 0.500, %s) RETURNING id
+                VALUES (%s, %s, %s, %s, %s) RETURNING id
                 """,
-                (*sorted((listing_a, listing_b)), match_basis, status),
+                (*sorted((listing_a, listing_b)), match_basis, confidence, status),
             )
             suggestion_id = cur.fetchone()[0]
         conn.commit()
@@ -2591,6 +2597,49 @@ class TestPurgePendingPhone:
         assert first == 1
         assert second == 0
 
+    def test_keeps_corroborated_0_750_tier(self, dedup_db):
+        """Issue #607 (B3): D-131 deliberately kept phone's 0.750
+        corroborated-unconfirmed-kind tier filing suggestions. An
+        unconditional `match_basis = 'phone'` delete would take a 0.750
+        row filed since deploy along with the 0.500 noise it's meant to
+        clean up — this purge must be scoped to confidence = 0.500 only.
+        """
+        pending_0500 = self._seed_suggestion(
+            dedup_db, "purge-phone-0500", "pending", confidence="0.500"
+        )
+        pending_0750 = self._seed_suggestion(
+            dedup_db, "purge-phone-0750", "pending", confidence="0.750"
+        )
+
+        deleted = engine.purge_pending_phone(dedup_db)
+
+        assert deleted == 1
+        with dedup_db.cursor() as cur:
+            cur.execute("SELECT id FROM suggested_merge ORDER BY id")
+            remaining = {row[0] for row in cur.fetchall()}
+        assert remaining == {pending_0750}
+        assert pending_0500 not in remaining
+
+    def test_preview_reports_would_delete_and_would_keep(self, dedup_db):
+        self._seed_suggestion(
+            dedup_db, "purge-phone-preview-0500", "pending", confidence="0.500"
+        )
+        self._seed_suggestion(
+            dedup_db, "purge-phone-preview-0750", "pending", confidence="0.750"
+        )
+
+        would_delete, would_keep = engine.preview_purge_pending_phone(dedup_db)
+
+        assert would_delete == 1
+        assert would_keep == 1
+        # A dry run must never write anything.
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM suggested_merge WHERE status = 'pending' "
+                "AND match_basis = 'phone'"
+            )
+            assert cur.fetchone()[0] == 2
+
     def test_cli_purge_phone_subcommand(self, dedup_db, monkeypatch, capsys):
         from etl.dedup import cli as dedup_cli
 
@@ -2611,10 +2660,75 @@ class TestPurgePendingPhone:
         monkeypatch.setattr(
             dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
         )
-        exit_code = dedup_cli.main(["purge-phone"])
+        exit_code = dedup_cli.main(["purge-phone", "--yes"])
         assert exit_code == 0
         captured = capsys.readouterr()
         assert "Purged 1" in captured.out
+
+    def test_cli_purge_phone_dry_run_deletes_nothing(
+        self, dedup_db, monkeypatch, capsys
+    ):
+        from etl.dedup import cli as dedup_cli
+
+        self._seed_suggestion(dedup_db, "purge-phone-cli-dry", "pending")
+
+        class _NoCloseConnProxy:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
+        )
+        exit_code = dedup_cli.main(["purge-phone", "--dry-run"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Would purge 1" in captured.out
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM suggested_merge WHERE status = 'pending' "
+                "AND match_basis = 'phone'"
+            )
+            assert cur.fetchone()[0] == 1
+
+    def test_cli_purge_phone_aborts_without_yes_or_confirmation(
+        self, dedup_db, monkeypatch, capsys
+    ):
+        """Issue #607 (S1): no `--yes` and no stdin to answer the prompt
+        (pytest's captured stdin raises EOFError on `input()`) must abort
+        with no changes made, never default to proceeding."""
+        from etl.dedup import cli as dedup_cli
+
+        self._seed_suggestion(dedup_db, "purge-phone-cli-noconfirm", "pending")
+
+        class _NoCloseConnProxy:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
+        )
+        exit_code = dedup_cli.main(["purge-phone"])
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "Aborted" in captured.out
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM suggested_merge WHERE status = 'pending' "
+                "AND match_basis = 'phone'"
+            )
+            assert cur.fetchone()[0] == 1
 
 
 class TestPurgePendingFuzzy:
@@ -2716,6 +2830,58 @@ class TestPurgePendingFuzzy:
                 "SELECT status FROM suggested_merge WHERE id = %s", (suggestion_id,)
             )
             assert cur.fetchone()[0] == "pending"
+
+    def test_purges_pair_with_boilerplate_description_just_under_threshold(
+        self, dedup_db
+    ):
+        """Issue #607's test-gap finding: the only pre-existing negative
+        fixture for `_FUZZY_RESCUE_DESCRIPTION_SIMILARITY` (see the
+        no-corroboration test below) pairs two SHORT, UNRELATED
+        descriptions — scoring far below even a much looser threshold, so
+        it stays green if the constant were mutated from 0.90 down to
+        0.40. This pins the actual 0.90 boundary: two same-agency
+        boilerplate descriptions sharing most of their sentence structure
+        but differing on room count/amenities score ~0.87 (measured,
+        rapidfuzz `token_sort_ratio`) — high enough to rescue at a loosened
+        0.40 threshold, but correctly below the real 0.90 bar. Must NOT
+        rescue.
+        """
+        description_a = (
+            "Se vende piso reformado, muy luminoso, cerca de todos los "
+            "servicios, con 3 habitaciones dobles, cocina independiente, "
+            "salon comedor y balcon."
+        )
+        description_b = (
+            "Se vende piso reformado, muy luminoso, cerca de todos los "
+            "servicios, con 2 habitaciones dobles, cocina americana, "
+            "salon comedor y terraza."
+        )
+        similarity = fuzz.token_sort_ratio(description_a, description_b) / 100
+        assert 0.40 < similarity < engine._FUZZY_RESCUE_DESCRIPTION_SIMILARITY, (
+            "fixture drifted outside the intended just-under-0.90 band "
+            f"(similarity={similarity})"
+        )
+        suggestion_id, _la, _lb = self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-boilerplate-just-under",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            description_a=description_a,
+            description_b=description_b,
+        )
+
+        deleted, rescued = engine.purge_pending_fuzzy(dedup_db)
+
+        assert deleted == 1
+        assert rescued == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            assert cur.fetchone()[0] == 0
 
     def test_purges_exact_price_size_pair_with_no_corroboration(self, dedup_db):
         """The 201-vs-43 gap #600 measured: exact m2+price alone (a dense
@@ -2870,11 +3036,349 @@ class TestPurgePendingFuzzy:
         monkeypatch.setattr(
             dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
         )
-        exit_code = dedup_cli.main(["purge-fuzzy"])
+        exit_code = dedup_cli.main(["purge-fuzzy", "--yes"])
         assert exit_code == 0
         captured = capsys.readouterr()
         assert "Purged 1" in captured.out
         assert "rescued 0" in captured.out
+
+    def test_cli_purge_fuzzy_dry_run_deletes_nothing(
+        self, dedup_db, monkeypatch, capsys
+    ):
+        from etl.dedup import cli as dedup_cli
+
+        self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-cli-dry",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+        )
+
+        class _NoCloseConnProxy:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
+        )
+        exit_code = dedup_cli.main(["purge-fuzzy", "--dry-run"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Would purge 1" in captured.out
+        assert "would rescue 0" in captured.out
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM suggested_merge WHERE status = 'pending' "
+                "AND match_basis = 'fuzzy'"
+            )
+            assert cur.fetchone()[0] == 1
+
+    def test_cli_purge_fuzzy_aborts_without_yes_or_confirmation(
+        self, dedup_db, monkeypatch, capsys
+    ):
+        from etl.dedup import cli as dedup_cli
+
+        self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-cli-noconfirm",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+        )
+
+        class _NoCloseConnProxy:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
+        )
+        exit_code = dedup_cli.main(["purge-fuzzy"])
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "Aborted" in captured.out
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM suggested_merge WHERE status = 'pending' "
+                "AND match_basis = 'fuzzy'"
+            )
+            assert cur.fetchone()[0] == 1
+
+
+class TestPurgePendingFuzzyPhotoStoreUnavailable:
+    """Issue #607 (B2): `purge_pending_fuzzy`/`preview_purge_pending_fuzzy`
+    must ABORT (raise, delete/rescue nothing) rather than proceed when
+    `photo_hash_store.open_connection()` returns `None` — see
+    `engine.PhotoHashStoreUnavailableError`'s docstring for why silently
+    degrading here would widen the delete far past the intended rescue
+    set."""
+
+    def _seed_fuzzy_pair(self, conn, ext_prefix: str, **kwargs) -> int:
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            conn, "fotocasa", "idealista", ext_prefix, **kwargs
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO suggested_merge
+                    (listing_id_a, listing_id_b, match_basis, confidence, status)
+                VALUES (%s, %s, 'fuzzy', 0.590, 'pending') RETURNING id
+                """,
+                sorted((listing_a, listing_b)),
+            )
+            suggestion_id = cur.fetchone()[0]
+        conn.commit()
+        return suggestion_id
+
+    def test_purge_raises_and_deletes_nothing(self, dedup_db, monkeypatch):
+        from etl.dedup import photo_hash_store
+
+        suggestion_id = self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-store-down-purge",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+        )
+        monkeypatch.setattr(photo_hash_store, "open_connection", lambda: None)
+
+        with pytest.raises(engine.PhotoHashStoreUnavailableError):
+            engine.purge_pending_fuzzy(dedup_db)
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            assert cur.fetchone()[0] == "pending"
+
+    def test_preview_raises_the_same_way(self, dedup_db, monkeypatch):
+        from etl.dedup import photo_hash_store
+
+        self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-store-down-preview",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+        )
+        monkeypatch.setattr(photo_hash_store, "open_connection", lambda: None)
+
+        with pytest.raises(engine.PhotoHashStoreUnavailableError):
+            engine.preview_purge_pending_fuzzy(dedup_db)
+
+    def test_cli_purge_fuzzy_reports_aborted_and_exits_nonzero(
+        self, dedup_db, monkeypatch, capsys
+    ):
+        from etl.dedup import cli as dedup_cli
+        from etl.dedup import photo_hash_store
+
+        suggestion_id = self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-store-down-cli",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+        )
+        monkeypatch.setattr(photo_hash_store, "open_connection", lambda: None)
+
+        class _NoCloseConnProxy:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            dedup_cli, "get_connection", lambda config: _NoCloseConnProxy(dedup_db)
+        )
+        exit_code = dedup_cli.main(["purge-fuzzy", "--yes"])
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "ABORTED" in captured.err
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            assert cur.fetchone()[0] == "pending"
+
+
+class TestFuzzyPurgeRescueSurvivesReevaluation:
+    """Issue #607 (B1): a row `purge_pending_fuzzy` rescues must still be
+    reviewable after the very next `engine.run()` — NOT flipped to
+    `rejected`, which is worse than deleted (`_load_recorded_pairs` freezes
+    `rejected` forever, so a rejected rescue can never come back). This is
+    the DB-backed regression test the original review flagged as missing:
+    reproduces both rescue paths (exact price+size corroborated by either
+    a near-identical description or a partial, sub-MIN_MATCH_RATIO photo
+    overlap) end to end — purge, then run(), then assert still pending.
+    """
+
+    def _seed_fuzzy_pair(self, conn, ext_prefix: str, **kwargs) -> tuple[int, int, int]:
+        listing_a, _prop_a, listing_b, _prop_b = _insert_pair(
+            conn, "fotocasa", "idealista", ext_prefix, **kwargs
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO suggested_merge
+                    (listing_id_a, listing_id_b, match_basis, confidence, status)
+                VALUES (%s, %s, 'fuzzy', 0.590, 'pending') RETURNING id
+                """,
+                sorted((listing_a, listing_b)),
+            )
+            suggestion_id = cur.fetchone()[0]
+        conn.commit()
+        return suggestion_id, listing_a, listing_b
+
+    def test_description_rescued_survivor_stays_pending_after_run(self, dedup_db):
+        description = (
+            "Piso reformado en el centro, 3 habitaciones, 2 banos, "
+            "cocina equipada, terraza con vistas."
+        )
+        suggestion_id, _la, _lb = self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-rescue-e2e-description",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            description_a=description,
+            description_b=description,
+        )
+
+        deleted, rescued = engine.purge_pending_fuzzy(dedup_db)
+        assert deleted == 0
+        assert rescued == 1
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status, detail FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            status, detail = cur.fetchone()
+        assert status == "pending"
+        assert "rescued_reason" in detail
+
+        # The reproduction from the review: one full engine.run() after the
+        # purge must NOT flip this row to 'rejected' — nothing else was ever
+        # going to fire for it (that's why it was fuzzy-only), and
+        # `evaluate_pair` no longer even calls fuzzy.
+        result = engine.run(dedup_db)
+        assert result.reevaluated_preserved_rescued == 1
+        assert result.reevaluated_rejected == 0
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status, detail FROM suggested_merge WHERE id = %s",
+                (suggestion_id,),
+            )
+            status, detail = cur.fetchone()
+        assert status == "pending"
+        # rescued_reason must still be there — a human reviewing this row
+        # needs to see WHY it survived, not just that it did.
+        assert "rescued_reason" in detail
+        assert "reevaluated_from" in detail
+
+        # A second run must be a no-op on this row too (idempotent forever,
+        # not just once).
+        result_2 = engine.run(dedup_db)
+        assert result_2.reevaluated_preserved_rescued == 1
+        assert result_2.reevaluated_rejected == 0
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            assert cur.fetchone()[0] == "pending"
+
+    def test_photo_rescued_survivor_stays_pending_after_run(self, dedup_db):
+        """Reproduces the review's exact photo-rescue repro: 1 shared hash
+        of 5 per side, match_ratio 0.2 < MIN_MATCH_RATIO (0.6) — corroborates
+        the rescue (`hashes_share_any_match`'s looser bar) but is far below
+        what `photo_hash.evaluate` itself needs to fire in `evaluate_pair`.
+        """
+        photo_urls_a = [f"https://cdn.fotocasa.es/rescue2-{i}.jpg" for i in range(5)]
+        photo_urls_b = [f"https://cdn.idealista.com/rescue2-{i}.jpg" for i in range(5)]
+        # Hamming distances computed offline (imagehash, hash_size=8/64-bit):
+        # only (a[0], b[0]) is within the 10-bit match threshold (distance 3);
+        # every other cross pair is 16+ apart. matched=1/5 -> ratio exactly 0.2.
+        hashes_a = [
+            "0000000000000000",
+            "1111111111111111",
+            "2222222222222222",
+            "3333333333333333",
+            "4444444444444444",
+        ]
+        hashes_b = [
+            "0000000000000007",
+            "aaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbb",
+            "cccccccccccccccc",
+            "dddddddddddddddd",
+        ]
+        with dedup_db.cursor() as cur:
+            for url, hexval in zip(photo_urls_a, hashes_a):
+                cur.execute(
+                    "INSERT INTO photo_hashes (photo_url, phash, ok, source) "
+                    "VALUES (%s, %s, TRUE, 'fotocasa')",
+                    (url, hexval),
+                )
+            for url, hexval in zip(photo_urls_b, hashes_b):
+                cur.execute(
+                    "INSERT INTO photo_hashes (photo_url, phash, ok, source) "
+                    "VALUES (%s, %s, TRUE, 'idealista')",
+                    (url, hexval),
+                )
+        dedup_db.commit()
+
+        suggestion_id, _la, _lb = self._seed_fuzzy_pair(
+            dedup_db,
+            "fuzzy-rescue-e2e-photo",
+            m2_built_a=Decimal(70),
+            m2_built_b=Decimal(70),
+            current_price_a=Decimal(250000),
+            current_price_b=Decimal(250000),
+            photo_urls_a=photo_urls_a,
+            photo_urls_b=photo_urls_b,
+        )
+
+        deleted, rescued = engine.purge_pending_fuzzy(dedup_db)
+        assert deleted == 0
+        assert rescued == 1
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            assert cur.fetchone()[0] == "pending"
+
+        result = engine.run(dedup_db)
+        assert result.reevaluated_preserved_rescued == 1
+        assert result.reevaluated_rejected == 0
+
+        with dedup_db.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM suggested_merge WHERE id = %s", (suggestion_id,)
+            )
+            assert cur.fetchone()[0] == "pending"
 
 
 class TestAddressCoordsSignal:

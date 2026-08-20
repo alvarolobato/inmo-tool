@@ -10,6 +10,22 @@ rule: 'A `property_type` mismatch across genuinely incompatible families (piso/a
 
 *Decided: 2026-08-19. Amended same day after PR #567's independent review (B1/B3 below).*
 
+**Status note (2026-08-20, issue #607/S3, requested by #601):** D-130
+deleted `etl.dedup.signals.fuzzy.evaluate` outright (issue #601, PR #607)
+— the ONLY call site this decision's point 4 names. `structured_fields_conflict`
+is therefore currently **DORMANT**: reachable from nothing in
+`evaluate_pair`'s pipeline, exactly as D-130 itself already documents
+("D-117's veto stays (loses its only call site, not retired)"). This is not
+a bug and this decision is not being retired — the live-DB blast-radius
+finding it encodes (`property_type`/`rooms` are noisy per-connector
+metadata that must never veto the stronger signals: address_coords,
+reference_code, photo_hash, phone) remains true and worth keeping as a
+forward-looking guard for any future signal shaped like `fuzzy` (address-
+text-similarity-driven, no independent corroboration). Every "vetoes
+`etl.dedup.signals.fuzzy.evaluate` ONLY" reference below should be read as
+"vetoed fuzzy.evaluate while that function existed; the veto itself is
+unchanged code, just currently unreachable."
+
 **Context**: Issue #566, raised by the owner after asking whether any rule
 could be extracted from the pending-suggestion backlog rather than
 reviewing it by hand. Measured against the live demo DB: 27,145 pending

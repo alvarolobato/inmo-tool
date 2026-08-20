@@ -35,9 +35,13 @@ phone's uncorroborated-or-agency 0.500 tier.
 its keep once the first has happened:
 
 1. `evaluate_pair` (`etl/dedup/engine.py`) now runs `photo_hash` before
-   `phone` — `address_coords` → `reference_code` → `photo_hash` → `phone`
-   → `fuzzy`. Only phone's position moved; nothing else in the priority
-   order changed. The photo-hash store (D-025) makes a warm re-fetch here
+   `phone` — `address_coords` → `reference_code` → `photo_hash` → `phone`.
+   Only phone's position moved; nothing else in the priority order
+   changed. (Corrected 2026-08-20, issue #607/S4: the order this record
+   originally documented still ended `→ fuzzy` — accurate the moment this
+   decision landed, but D-130 retired `fuzzy` outright in the same PR, so
+   the shipped `evaluate_pair` order ends at `phone`. There is no fifth
+   step any more.) The photo-hash store (D-025) makes a warm re-fetch here
    effectively free — no meaningful cost delta measured for reordering
    ahead of phone specifically.
 2. `phone_extract.evaluate` (`etl/dedup/signals/phone_extract.py`) returns
